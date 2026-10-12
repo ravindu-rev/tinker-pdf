@@ -357,59 +357,116 @@ ends, a left-to-right slice inside right-to-left text and a slice holding
 such a character keep a text object at each change: written whole, each
 drew a line up to its neighbour that ruling 14 read worse
 (`a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whole`).
-It costs one shape the review's probes hold: a table with no `dir` whose
-cell `abc (x).` touches an Arabic cell (`border-spacing: 0; padding: 0`)
-at `word-spacing: 1em`, or `0.5em` with a letter-spacing of `0.1em`, read
-whole at 9297d2d and since only because the Arabic cell was cut in two;
-whole, the row draws exactly what a right-to-left paragraph draws for
-`أصبحنا نعرف.abc (x)`, and reads so (2 books in a default build, which
-conserve at none of those trees).
+So does a right-to-left slice of a left-to-right paragraph on a line that
+holds another paragraph's text too — table cells set touching
+(`border-spacing: 0; padding: 0`), which a reader reads as one line
+(`paint::sharing_a_line`; second review of CD-19's fix): whole, the Arabic
+or Hebrew cell of a table with no `dir` touching a cell `abc (x).` at
+`word-spacing: 1em`, or `0.5em` with a letter-spacing of `0.1em`, drew the
+row exactly what a right-to-left paragraph draws for
+`أصبحنا نعرف.abc (x)` and read so, where in pieces it read whole, as it
+did at 9297d2d and 56dfd93 (2 books in a default build and 4 with
+`bundled-fonts`;
+`a_right_to_left_cell_touching_a_left_to_right_one_is_left_in_pieces`).
+It gives back what that join had given a few other tables with no `dir`,
+a right-to-left cell touching a Latin, Greek, Cyrillic, CJK or another
+right-to-left one: 26 books in a default build and 25 with `bundled-fonts`
+lose their structure tree's order, and 10 (11) their reading whole too,
+that only the joined cell gave them; none of them conserved at 9297d2d, at
+56dfd93 or since, and none reads worse than at either.
+**Each line is read back** (`paint::Fonts::set_readings`; second review
+of CD-19's fix). Every rule above models what `TextDevice` and ruling 14
+will do with a line — where the reader cuts it, where it carries its pen,
+which pieces it rejoins and which way it reads each — and every review of
+the overflow font at `0 Tw` found books the model read otherwise than the
+reader: a styled `?!` glued to an Arabic word at `word-spacing: 0.6em`,
+drawn as typed for a reader the model said read it alone, was read with
+the word and backwards, `!?ابا`; `25٪ <b>W</b>` in Arabic at
+`word-spacing: 1em` was cut at the word space a right-to-left word's slice
+leaves as a text object of its own, and its number read as a European one;
+a Greek word's stretched space at a run's end cut `αλφα | βήτα (ספר) בית`,
+whose second piece, more Hebrew than Greek, read from the right. So the
+painter draws each line of a page that holds a right-to-left character
+into the reader itself — the text objects it would write, each glyph where
+the page has it and as wide as its font says, the stand-in's as its `/W`
+rounds it, fed to a `TextDevice` and read in logical order — and holds what
+it reads to the line's own text, white space aside. Where they differ it
+draws each run another way in turn, then two at a time, up to 128
+readings a line (`paint::READINGS_PER_LINE`): a run's neutrals in the other
+order, or its spaced slice whole, in a text object at each change of
+resource, whole with the white space at its right end drawn at the end of
+its stretch, against what is drawn next, or — a word space styled apart,
+a run of its own — at the middle of its stretch, so that the gap either
+side of it is half the stretch (`paint::Cut`); the first that reads the
+line right is drawn. A line the rules read right, or that nothing tried
+reads right, is drawn by the rules, byte for byte as before; a line with a
+run in a face of the book's own is not read back, since that face is
+shaped (`neutrals_a_reader_reads_with_the_word_beside_them_are_drawn_for_that_reading`,
+`a_line_a_reader_cuts_where_it_is_spaced_apart_is_drawn_to_read_whole`).
 **Measured, and what is left.** Over the synthetic probes of ROADMAP K-11
 and its reviews (the kit's 30 230 books a build, the hunt's 6 298, its 954
 sweeps and 12 minimised books, the code review's 2 688, the fix-verify
 probes' 6 192 and 864 and ruling 14's price probe's 15 523) and of the
-review of CD-19's fix (8 539 books a build across every overflow script,
-tables, glosses, marks and inline spacing, and 2 700 of word spacing and
-code 32; no corpus was fetched), neither build draws a glyph over another
+reviews of CD-19's fix (of the first, 8 539 books a build across every
+overflow script, tables, glosses, marks and inline spacing, 2 700 of word
+spacing and code 32 and 21 152 more that count overlaps; of the second,
+15 176 of styled neutrals, glosses, inline blocks, tables and nested
+levels; no corpus was fetched), neither build draws a glyph over another
 under `word-spacing` or justification, where 56dfd93 drew one so in 975
 books in a default build and 620 with `bundled-fonts` on the first six of
 those (3 of the kit's books on its probes that count overlaps and 296 on
 its others, 179 of the hunt's, 12 of its sweeps, both minimised books, 19 of
 the code review's and 464 of the fix-verify probe's; 660 (400) were counted
 at first, on the probes that counted overlaps, and the review of CD-19's
-fix counted the rest), 574 (286) on the price probe and 563 (101) on the
-review's. Every overlap left is a negative `letter-spacing`'s, which layout
-itself sets, or, with `bundled-fonts`, a `U+200E`, `U+202A`, `U+202C` or
-`U+202D` that the stand-in draws as a glyph of no advance whose
-thousandth-of-an-em box lies on the glyph after it (8 hunt books under word
-spacing and one with none, as at 9297d2d). Measured against the tree just
-before it, the font at `0 Tw` made 66 of the kit's books conserve that did
-not (57 with `bundled-fonts`), 70 (57) of the hunt's, 18 (8) of the code
-review's and 233 (134) of the fix-verify probe's, and search finds 534
-(464) more of the kit's books, 77 (62) more of the code review's — all
-2 688 — and 836 (532) more of the fix-verify probe's; and the inside of a
-spaced slice, one text object, makes 1 471 (1 580) more of the kit's books
-conserve, 207 (232) of the hunt's, 190 (215) of the code review's, 145
-(240) of the fix-verify probe's, 200 (325) of the price probe's and
-415 (449) of the review's. What the move had done for some books is undone
-with it, each read right only because a moved glyph closed or widened a
-gap, and ROADMAP CD-19 keeps them with their counts: a Hebrew paragraph
-with no `dir` that ends a number and a stop, `בראשית. אור ٦٠.` at
-`word-spacing: 0.5em` (a default build's), whose stop, alone at 9297d2d,
-now abuts the right-to-left run and is read first, since the comma
-tie-break asks for a right-to-left letter at the line's left end; italic
-or styled neutrals the writer draws for a reader that reads them alone
-where the reader resumes a line drawn backwards within three ems, among
-them `… <b>يوم</b> <i>?!</i> عوامل …` justified at `letter-spacing:
-0.45em`, which conserved and read whole at 9297d2d too and reads
-`يوم !?`, and `?!` before styled braces opening a Hebrew line, whose word
-after the closing brace, drawn after it and ending 47pt left of it, reads
-as a line of its own; a Greek word before a Hebrew one at `word-spacing:
-0.5001em` (a default build's), whose gap the moved λφα had closed and
-which K-11's carry does not cross after left-to-right text; and a sign
-after European digits, or (with `bundled-fonts`) an ARABIC COMMA after a
-number in justified Hebrew, whose slice of neutrals, one text object for a
-reader to undo, reads with the wrong neighbour.
+fix counted the rest), 574 (286) on the price probe, 563 (101) on the first
+review's and 2 042 (1 261) on the second's. Every overlap left is a
+negative `letter-spacing`'s, which layout itself sets (108 of the second
+review's books in each build among them), or, with `bundled-fonts`, a
+`U+200E`, `U+202A`, `U+202C` or `U+202D` that the stand-in draws as a glyph
+of no advance whose thousandth-of-an-em box lies on the glyph after it (8
+hunt books under word spacing and one with none, as at 9297d2d). Measured
+against the tree just before it, the font at `0 Tw` made 66 of the kit's
+books conserve that did not (57 with `bundled-fonts`), 70 (57) of the
+hunt's, 18 (8) of the code review's and 233 (134) of the fix-verify
+probe's, and search finds 534 (464) more of the kit's books, 77 (62) more
+of the code review's — all 2 688 — and 836 (532) more of the fix-verify
+probe's; the inside of a spaced slice, one text object, made 1 471 (1 580)
+more of the kit's books conserve, 207 (232) of the hunt's, 190 (215) of the
+code review's, 145 (240) of the fix-verify probe's, 200 (325) of the price
+probe's and 415 (449) of the first review's; and reading each line back
+makes 306 (320) more of the kit's books conserve, 175 (204) of the hunt's,
+19 (24) of the code review's, 211 (220) of the fix-verify probe's, 310
+(343) of the price probe's, 187 (208) of the first review's hunt, 63
+(70) of its word-spacing probe and 191 (224) of its overlap probes,
+and 638 (666) of the second review's, where none that conserved before
+fails to; what it costs is the tables' above. What the move had done for some
+books is undone with it, each read right only because a moved glyph
+closed or widened a gap, and what no drawing tried reads right ROADMAP
+CD-19 counts, shape by shape: a Hebrew paragraph with no `dir` that ends a
+number and a stop, `בראשית. אור ٦٠.` at `word-spacing: 0.5em` (56 books in
+a default build), whose stop, alone at 9297d2d, now abuts the right-to-left
+run and is read first, since the comma tie-break asks for a right-to-left
+letter at the line's left end; a word of an overflow script that an
+inline block cuts, `αλφα<span style="display: inline-block; width: 1em">
+</span>βήτα` at `word-spacing: 0.6em` (93 (30), found by search at 9297d2d
+and 56dfd93 and 69 (22) of them read whole there, only because the moved
+glyphs closed the block's gap), read now as a Latin word so cut is at every
+tree, in two; a word space
+styled apart across a stretch of two ems, `αλφα <b>βήτα</b> ספר בית xyz.`
+at `word-spacing: 2em` (12 (4) that conserved at 56dfd93), whose stretch no
+placement of a space parts into halves a reader resumes a line across; and
+a run of `.!` or `!…` opening a right-to-left line before a styled pair
+(ruling 14 counts it with the price); and two of the hunt's in each build,
+a paragraph of Arabic with no `dir` whose inline `word-spacing: 1em` span
+cuts a word (it conserved at 56dfd93) and a `;` glued to an Arabic word,
+letter-spaced by `0.25em` and justified, which conserves now and no longer
+reads whole. Lines K-11's reader reads from the
+right whatever the writer draws — a Latin gloss before a bracketed
+right-to-left word, table cells, an ARABIC COMMA or QUESTION MARK after
+Latin text — lost what they lost at 56dfd93, before this row, but one
+table in a default build, whose cell `(ספר) בית` the moved glyphs of the
+Greek cell before it had joined to that cell's line and which, alone on
+its line, reads from the right now.
 A slice that ends on a mark ends its text object a spacing less a millionth
 of an em from the next run, so a run that ends on a mark is not cut from
 what follows up to half an em of spacing, half an em included, and is cut

@@ -953,6 +953,12 @@ pub struct Fonts<'a> {
     /// logical neighbours on the line where they are set in the same face.
     /// See [`Fonts::set_contexts`].
     contexts: RefCell<BTreeMap<RunKey, (String, String)>>,
+    /// The page being drawn's runs on a line that holds another paragraph's
+    /// text too ([`holds_two_paragraphs`]). See [`Fonts::set_contexts`].
+    shared: RefCell<std::collections::BTreeSet<RunKey>>,
+    /// The page being drawn's runs drawn otherwise than by the rules, where a
+    /// reader read their line back otherwise. See [`Fonts::set_readings`].
+    drawings: RefCell<BTreeMap<RunKey, Drawing>>,
     /// Characters drawn in a face that has no glyph for them.
     uncovered: usize,
 }
@@ -970,6 +976,8 @@ impl<'a> Fonts<'a> {
             unrepresented: 0,
             uncovered: 0,
             contexts: RefCell::new(BTreeMap::new()),
+            shared: RefCell::new(std::collections::BTreeSet::new()),
+            drawings: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -1083,6 +1091,259 @@ impl<'a> Fonts<'a> {
             }
         }
         *self.contexts.borrow_mut() = map;
+        *self.shared.borrow_mut() = sharing_a_line(&painted);
+    }
+
+    /// Whether `run` is on a line that holds another paragraph's text too,
+    /// as [`Fonts::set_contexts`] found the page ([`holds_two_paragraphs`]).
+    fn shares_its_line(&self, run: &TextRun) -> bool {
+        self.shared.borrow().contains(&run_key(run))
+    }
+
+    /// How [`Fonts::set_readings`] has `run` drawn: by the rules, or
+    /// otherwise where its line read back otherwise.
+    fn drawing_of(&self, run: &TextRun) -> Drawing {
+        self.drawings
+            .borrow()
+            .get(&run_key(run))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// **Reads every line of a page that holds a right-to-left character back
+    /// as a reader of the page reads it, and draws it otherwise where that
+    /// reads it right and the rules' drawing does not.**
+    ///
+    /// The rules above — which neutrals [`coded_order`] draws in their
+    /// level's order ([`neutrals_drawn_as_typed`]), which slices are one text
+    /// object ([`draw_coded`]) — each model what `tinker-pdf-content`'s
+    /// `TextDevice` and ruling 14's reading (`text_order.rs`) will do with the
+    /// line, and each was measured to model it on the books it was found on.
+    /// But the reader cuts a line where its text objects leave a gap and
+    /// resumes one it went back over within three ems, carries its pen across
+    /// a stretch only into a right-to-left letter, rejoins pieces that meet,
+    /// and reads each piece's direction off its ends and its majority — and a
+    /// model of all of that drifts from it, as every review of the overflow
+    /// font at `0 Tw` found (ROADMAP CD-19): `<p dir="rtl"><i>?!</i> عوامل</p>`
+    /// letter-spaced and justified, its `?!` drawn as typed for a reader the
+    /// model said read it alone, was read with the word before it, `!?`.
+    ///
+    /// So the line is drawn into the reader itself — the text objects
+    /// [`plan_coded`] would write, each glyph where it would stand, fed to a
+    /// `TextDevice` and read in logical order — and the text it reads is
+    /// held to the line's own, its runs' text in the order written, white
+    /// space aside. Where they differ, each run is drawn another way in turn:
+    /// its neutrals in the other order ([`Drawing::level_order`]), or its
+    /// slice cut otherwise into text objects ([`Cut`]); then two runs at a
+    /// time, within [`READINGS_PER_LINE`]. The first drawing that reads the
+    /// line right is the one drawn. A line the rules' drawing reads right, or
+    /// that no drawing tried reads right, is drawn by the rules, byte for
+    /// byte as before; and a line with no right-to-left character, or a run
+    /// of a face of the book's own, which [`plan_coded`] does not draw, is
+    /// not read.
+    ///
+    /// The work is linear in the line, once a reading, and a line is read at
+    /// most [`READINGS_PER_LINE`] times.
+    pub fn set_readings(&self, runs: &[TextRun], frame: &Frame) {
+        let painted: Vec<&TextRun> = runs
+            .iter()
+            .filter(|run| run.painted && !run.generated)
+            .collect();
+        let order: BTreeMap<RunKey, usize> = painted
+            .iter()
+            .enumerate()
+            .map(|(at, run)| (run_key(run), at))
+            .collect();
+        let mut drawings: BTreeMap<RunKey, Drawing> = BTreeMap::new();
+        for mut line in page_lines(&painted) {
+            if !line
+                .iter()
+                .any(|run| run.text.chars().any(undoes_its_levels))
+            {
+                continue;
+            }
+            // In the order drawn, which is the order written.
+            line.sort_by_key(|run| order.get(&run_key(run)).copied().unwrap_or(usize::MAX));
+            let options: Vec<(RunKey, Drawing)> =
+                line.iter().flat_map(|run| drawings_of(run)).collect();
+            if options.is_empty() {
+                continue;
+            }
+            let written: String = line
+                .iter()
+                .flat_map(|run| run.text.chars())
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            let tried = std::cell::Cell::new(0usize);
+            let reads_right = |chosen: &BTreeMap<RunKey, Drawing>| {
+                tried.set(tried.get() + 1);
+                self.read_back(&line, frame, chosen).map(|read| {
+                    read.chars()
+                        .filter(|c| !c.is_whitespace())
+                        .eq(written.chars())
+                })
+            };
+            match reads_right(&BTreeMap::new()) {
+                Some(false) => {}
+                None | Some(true) => continue,
+            }
+            let mut found: Option<BTreeMap<RunKey, Drawing>> = None;
+            for &(key, drawing) in &options {
+                if tried.get() >= READINGS_PER_LINE {
+                    break;
+                }
+                let one = BTreeMap::from([(key, drawing)]);
+                if reads_right(&one) == Some(true) {
+                    found = Some(one);
+                    break;
+                }
+            }
+            if found.is_none() {
+                'pairs: for (at, &(first, one)) in options.iter().enumerate() {
+                    for &(second, other) in options.get(at + 1..).unwrap_or_default() {
+                        if second == first {
+                            continue;
+                        }
+                        if tried.get() >= READINGS_PER_LINE {
+                            break 'pairs;
+                        }
+                        let two = BTreeMap::from([(first, one), (second, other)]);
+                        if reads_right(&two) == Some(true) {
+                            found = Some(two);
+                            break 'pairs;
+                        }
+                    }
+                }
+            }
+            if let Some(found) = found {
+                drawings.extend(found);
+            }
+        }
+        *self.drawings.borrow_mut() = drawings;
+    }
+
+    /// What a reader of the page reads off `line`, one line's runs in the
+    /// order they are drawn, drawn as `drawings` say and the rest by the rules
+    /// ([`Fonts::set_readings`]): the text objects [`plan_coded`] writes, each
+    /// glyph where the page has it and as wide as its font says, fed to a
+    /// `TextDevice` and read in logical order (ruling 14). `None` for a line
+    /// with a run in a face of the book's own, which [`draw_shaped`] draws.
+    fn read_back(
+        &self,
+        line: &[&TextRun],
+        frame: &Frame,
+        drawings: &BTreeMap<RunKey, Drawing>,
+    ) -> Option<String> {
+        let metrics = BookMetrics::with(self.faces);
+        let mut device = tinker_pdf_content::TextDevice::new();
+        let identity = tinker_pdf_content::Matrix {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        for run in line {
+            let font = request(run);
+            let mut segments = face_runs(self.faces, &font, &run.text);
+            if segments
+                .iter()
+                .any(|(_, chosen)| matches!(chosen, Chosen::Embedded(_)))
+            {
+                return None;
+            }
+            if reads_right_to_left(run) {
+                segments.reverse();
+            }
+            let drawing = drawings.get(&run_key(run)).copied().unwrap_or_default();
+            let size = run.font_size * PX_TO_PT;
+            let y = frame.y(run.y);
+            let letters = run.letter_spacing * PX_TO_PT;
+            let words = run.word_spacing * PX_TO_PT;
+            let mut x = run.x;
+            for (range, _) in segments {
+                let slice = run.text.get(range).unwrap_or("");
+                let (objects, end) = plan_coded(run, self, slice, x, drawing);
+                x = end;
+                for object in objects {
+                    for segment in &object {
+                        // As [`flush`] writes it: the overflow font and the
+                        // stand-in at no word spacing.
+                        let spacing = if segment.composite || (segment.unspaced && words != 0.0) {
+                            0.0
+                        } else {
+                            words
+                        };
+                        let mut state = tinker_pdf_content::GraphicsState::new(identity);
+                        state.text.size = size;
+                        state.text.char_spacing = letters;
+                        state.text.word_spacing = spacing;
+                        let font_id = segment
+                            .resource
+                            .iter()
+                            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                                (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+                            });
+                        let mut pen = frame.x(segment.x);
+                        for (at, ch) in segment.characters.chars().enumerate() {
+                            let code = if segment.composite {
+                                segment.glyphs.get(at).map_or(0, |(id, _)| u32::from(*id))
+                            } else {
+                                segment.codes.get(at).map_or(0, |code| u32::from(*code))
+                            };
+                            // As wide as its font says: a simple font's
+                            // `/Widths` are the widths layout measured with,
+                            // and the stand-in's `/W` that width rounded to a
+                            // thousandth of an em ([`EXACT_MARK_INSET`]).
+                            let measured = metrics.advance(ch, &font);
+                            let advance = if segment.composite && run.font_size > 0.0 {
+                                (measured / run.font_size * 1000.0).round() / 1000.0 * run.font_size
+                            } else {
+                                measured
+                            } * PX_TO_PT;
+                            let glyph = tinker_pdf_content::Glyph {
+                                code,
+                                text: ch.to_string(),
+                                transform: tinker_pdf_content::Matrix {
+                                    a: size,
+                                    b: 0.0,
+                                    c: 0.0,
+                                    d: size,
+                                    e: pen,
+                                    f: y,
+                                },
+                                baseline: None,
+                                advance,
+                                size,
+                                vertical: false,
+                                font_id,
+                                font_name: None,
+                            };
+                            tinker_pdf_content::Device::show_glyph(&mut device, &glyph, &state);
+                            pen += advance
+                                + letters
+                                + if code == 32 && !segment.composite {
+                                    spacing
+                                } else {
+                                    0.0
+                                };
+                        }
+                    }
+                    tinker_pdf_content::Device::end_text(&mut device);
+                }
+            }
+        }
+        let mut page = device.finish();
+        crate::text_order::into_logical_order(&mut page);
+        Some(
+            page.blocks
+                .iter()
+                .flat_map(|block| &block.lines)
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
     }
 
     /// The context [`Fonts::set_contexts`] recorded for `run`.
@@ -2950,8 +3211,10 @@ pub(crate) fn draw_page_tagged(
     effects: &OnPage<'_>,
 ) -> usize {
     let mut refused = 0usize;
-    // What each run is shaped against, from its neighbours on the page.
+    // What each run is shaped against, from its neighbours on the page, and
+    // how each line holding a right-to-left character reads back.
     fonts.set_contexts(&laid.runs);
+    fonts.set_readings(&laid.runs, frame);
     for (index, fragment) in laid.boxes.iter().enumerate() {
         let opened = effects.open(page, fragment.anchor, false);
         draw_box(page, fragment, frame, effects.background(index), effects);
@@ -3016,10 +3279,18 @@ pub(crate) fn draw_page_tagged(
                 }
                 effects.shadow_alpha(page, run.anchor, *colour);
             }
-            // Shaped against the run's own neighbours, not the shadow's
-            // place: the same glyphs again ([`draw_run_against`]).
-            refused +=
-                draw_run_against(builder, page, &shadow, frame, fonts, fonts.context_of(run));
+            // Shaped against the run's own neighbours and drawn as the run
+            // is, not as the shadow's place would have it: the same glyphs
+            // again, in the same order ([`draw_run_against`]).
+            refused += draw_run_against(
+                builder,
+                page,
+                &shadow,
+                frame,
+                fonts,
+                fonts.context_of(run),
+                fonts.drawing_of(run),
+            );
             if colour.a < u8::MAX && !opened {
                 page.raw(b"Q");
             }
@@ -3617,6 +3888,45 @@ struct Segment {
     x: f64,
 }
 
+/// How [`plan_coded`] draws a run whose line, as the rules draw it, a reader
+/// of the page reads back otherwise ([`Fonts::set_readings`]); the default
+/// is the rules' drawing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Drawing {
+    /// Whether a slice of neutrals at a right-to-left level is drawn in its
+    /// level's order ([`coded_order`]) — `None`, as the line decided
+    /// ([`TextRun::bidi_line_rtl`]).
+    level_order: Option<bool>,
+    /// How a spaced slice is cut into text objects — `None`, by
+    /// [`draw_coded`]'s rules.
+    cut: Option<Cut>,
+}
+
+/// A cut of a spaced slice into text objects other than the rules'
+/// ([`Drawing::cut`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cut {
+    /// The whole slice one text object, the white space at its ends too.
+    Whole,
+    /// A text object at every change of resource, as every slice was cut
+    /// before the inside of a spaced slice was one object and before the
+    /// neutrals a reader undoes were.
+    Pieces,
+    /// [`Cut::Whole`], and the white space at the slice's right end drawn at
+    /// the end of its stretch rather than its start: a word space's `Tw` is
+    /// part of its advance (9.3.3), and drawn where that advance ends the
+    /// space stands against what is drawn next, so a reader's pen stands
+    /// where the next run starts — no further than the slice's
+    /// `letter-spacing` — and does not cut the line there.
+    Carried,
+    /// A slice of white space alone — a word space styled apart from the
+    /// words either side of it, a run of its own — drawn at the middle of
+    /// its stretch: a space draws nothing, and drawn there the gaps either
+    /// side of it are half the stretch each, which a reader resumes a line
+    /// across where the whole of it, on one side, is a cut.
+    Centered,
+}
+
 /// One embedded face's shaped slice: where every glyph goes, and how wide the
 /// whole of it is.
 struct Shaped {
@@ -3652,6 +3962,119 @@ fn one_embedded_face(
         (Chosen::Embedded(x), Chosen::Embedded(y)) => x == y,
         _ => false,
     }
+}
+
+/// The runs of `painted`, a page's, on a line that holds the text of more
+/// than one paragraph ([`holds_two_paragraphs`]), a line as [`page_lines`]
+/// finds it.
+fn sharing_a_line(painted: &[&TextRun]) -> std::collections::BTreeSet<RunKey> {
+    page_lines(painted)
+        .into_iter()
+        .filter(|line| holds_two_paragraphs(line.iter().copied()))
+        .flatten()
+        .map(run_key)
+        .collect()
+}
+
+/// The lines of `painted`, a page's runs, as a reader of the page finds them:
+/// the runs on one baseline, within half the larger font size, each starting
+/// no more than half an em past where the ones left of it end — as
+/// `TextDevice` asks of a glyph that continues a line after a text object's
+/// end, so that two table cells half a point apart are one line, as they are
+/// to it — each line left to right. Found by sorting, so that a page of many
+/// runs costs its sort.
+fn page_lines<'r>(painted: &[&'r TextRun]) -> Vec<Vec<&'r TextRun>> {
+    let mut order: Vec<&TextRun> = painted.to_vec();
+    order.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+    // Rows of one baseline, then each row by `x`.
+    let mut rows: Vec<Vec<&TextRun>> = Vec::new();
+    for run in order {
+        match rows.last_mut() {
+            Some(row)
+                if row.first().is_some_and(|first| {
+                    (first.y - run.y).abs() <= first.font_size.max(run.font_size) * 0.5
+                }) =>
+            {
+                row.push(run);
+            }
+            _ => rows.push(vec![run]),
+        }
+    }
+    let mut lines: Vec<Vec<&TextRun>> = Vec::new();
+    for mut row in rows {
+        row.sort_by(|a, b| a.x.total_cmp(&b.x));
+        let mut line: Vec<&TextRun> = Vec::new();
+        let mut end = f64::NEG_INFINITY;
+        let mut size = 0.0f64;
+        for run in row {
+            if !line.is_empty() && run.x > end + size.max(run.font_size) * RESUMED_WITHIN {
+                lines.push(std::mem::take(&mut line));
+                end = f64::NEG_INFINITY;
+                size = 0.0;
+            }
+            end = end.max(run.x + run.width);
+            size = size.max(run.font_size);
+            line.push(run);
+        }
+        if !line.is_empty() {
+            lines.push(line);
+        }
+    }
+    lines
+}
+
+/// How many drawings [`Fonts::set_readings`] reads one line back in before
+/// it keeps the rules' drawing: the rules' own, each run drawn otherwise in
+/// turn, then two runs at a time. A bound on the work per line, which
+/// reading back is linear in.
+const READINGS_PER_LINE: usize = 128;
+
+/// The drawings [`Fonts::set_readings`] tries `run` in other than the rules':
+/// its neutrals in the other order where it is at a right-to-left level, and
+/// where it is spaced so that a reader may part its text objects
+/// ([`PARTED_FROM`]) its slice cut each way [`Cut`] names — centred
+/// ([`Cut::Centered`]) only where it is white space alone — by itself and
+/// with its neutrals turned.
+fn drawings_of(run: &TextRun) -> Vec<(RunKey, Drawing)> {
+    let key = run_key(run);
+    let odd = run.bidi_level.is_some_and(|level| level % 2 == 1);
+    let turns = odd && run.text.chars().any(|c| !opens_right_to_left(c));
+    let spaced = run
+        .letter_spacing
+        .max(run.letter_spacing + run.word_spacing)
+        > run.font_size * PARTED_FROM;
+    let mut out = Vec::new();
+    let level_orders: &[Option<bool>] = if turns {
+        &[None, Some(!run.bidi_line_rtl)]
+    } else {
+        &[None]
+    };
+    // A run of white space alone is centred in its stretch too.
+    let alone = !run.text.is_empty() && run.text.chars().all(char::is_whitespace);
+    for &level_order in level_orders {
+        let cuts: &[Option<Cut>] = match (spaced, alone) {
+            (true, true) => &[
+                None,
+                Some(Cut::Whole),
+                Some(Cut::Pieces),
+                Some(Cut::Carried),
+                Some(Cut::Centered),
+            ],
+            (true, false) => &[
+                None,
+                Some(Cut::Whole),
+                Some(Cut::Pieces),
+                Some(Cut::Carried),
+            ],
+            (false, _) => &[None],
+        };
+        for &cut in cuts {
+            if level_order.is_some() || cut.is_some() {
+                out.push((key, Drawing { level_order, cut }));
+            }
+        }
+    }
+    out
 }
 
 /// Which run a context belongs to: its document order and where it is drawn,
@@ -3904,12 +4327,21 @@ fn draw_run(
     frame: &Frame,
     fonts: &Fonts<'_>,
 ) -> usize {
-    draw_run_against(builder, page, run, frame, fonts, fonts.context_of(run))
+    draw_run_against(
+        builder,
+        page,
+        run,
+        frame,
+        fonts,
+        fonts.context_of(run),
+        fonts.drawing_of(run),
+    )
 }
 
 /// [`draw_run`], shaped against `context` — the text of a run's neighbours
-/// ([`Fonts::set_contexts`]) — rather than against the context recorded for
-/// the place `run` is drawn at.
+/// ([`Fonts::set_contexts`]) — and drawn as `drawing` says
+/// ([`Fonts::set_readings`]), rather than as recorded for the place `run` is
+/// drawn at.
 ///
 /// **For a text shadow**, which is its run drawn again somewhere else: the
 /// context is found by where a run is drawn, so the shadow, a copy moved by
@@ -3924,6 +4356,7 @@ fn draw_run_against(
     frame: &Frame,
     fonts: &Fonts<'_>,
     (before, after): (String, String),
+    drawing: Drawing,
 ) -> usize {
     let font = request(run);
     let size = run.font_size * PX_TO_PT;
@@ -3968,7 +4401,7 @@ fn draw_run_against(
                 refused += drawn.1;
             }
             Chosen::Standard(_) => {
-                x = draw_coded(page, run, frame, fonts, slice, size, baseline, x);
+                x = draw_coded(page, run, frame, fonts, slice, size, baseline, x, drawing);
             }
         }
     }
@@ -4712,6 +5145,22 @@ impl Gaps {
         let apart = |side: Option<f64>| side.is_none_or(|gap| gap >= half);
         (left.is_some() || right.is_some()) && apart(left) && apart(right)
     }
+}
+
+/// Whether `runs`, the runs of one line, hold the text of more than one
+/// paragraph ([`TextRun::paragraph`]): table cells set touching on one
+/// baseline, `border-spacing: 0` and no padding, which a reader of the page
+/// reads as one line. Generated runs and runs nobody paints are no one's.
+fn holds_two_paragraphs<'r>(runs: impl Iterator<Item = &'r TextRun>) -> bool {
+    let mut first: Option<usize> = None;
+    for run in runs.filter(|run| run.painted && !run.generated) {
+        match first {
+            None => first = Some(run.paragraph),
+            Some(paragraph) if paragraph != run.paragraph => return true,
+            Some(_) => {}
+        }
+    }
+    false
 }
 
 /// A unit of a line as a reader of the page finds it ([`line_units`]): a
@@ -5775,11 +6224,13 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// spacing parts no two text objects: written whole under any spacing, as
 /// first fixed, a book with none was other bytes and read the same (16
 /// books of the hunt's; review of CD-19's fix). Two shapes read worse for it
-/// than at 56dfd93, and ROADMAP CD-19 keeps them: a sign after European
-/// digits before a bold word in Arabic at `word-spacing: 1em`, `25٪ <b>W</b>`,
-/// read before its number; and with `bundled-fonts` an ARABIC COMMA after a
-/// number in justified Hebrew, `N، <b>W</b>`, whose space starts at the bold
-/// word's end and draws the comma's line up to it.
+/// than at 56dfd93 until their lines were read back
+/// ([`Fonts::set_readings`]): a sign after European digits before a bold
+/// word in Arabic at `word-spacing: 1em`, `25٪ <b>W</b>`, read before its
+/// number, and is drawn with the word before it whole now; and with
+/// `bundled-fonts` an ARABIC COMMA after a number in justified Hebrew,
+/// `N، <b>W</b>`, whose space started at the bold word's end and drew the
+/// comma's line up to it, and is drawn in pieces now.
 ///
 /// # One text object for the inside of a spaced slice
 ///
@@ -5810,13 +6261,12 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// ruling 14 read the two as one line whose Latin letters were the more
 /// (`a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whole`).
 /// A run whose spacing opens no gap a reader parts two objects at
-/// ([`PARTED_FROM`]) is written as before. It costs one shape the review's
-/// probes hold: a table with no `dir` whose cell `abc (x).` touches a
-/// right-to-left cell (`border-spacing: 0; padding: 0`) read whole only
-/// because that cell was cut in two; whole, the row draws what a
-/// right-to-left paragraph draws for `أصبحنا نعرف.abc (x)`, and reads so
-/// (2 books in a default build and 4 with `bundled-fonts`, none of which
-/// conserved before; ROADMAP CD-19).
+/// ([`PARTED_FROM`]) is written as before. A right-to-left slice of a
+/// left-to-right paragraph on a line that holds another paragraph's text,
+/// a table cell touching the next, is left in pieces too: whole, a table
+/// with no `dir` whose cell `abc (x).` touches a right-to-left cell
+/// (`border-spacing: 0; padding: 0`) drew what a right-to-left paragraph
+/// draws for `أصبحنا نعرف.abc (x)`, and read so ([`joins_its_inside`]).
 ///
 /// # Where the letter a mark rides on is drawn
 ///
@@ -5874,8 +6324,12 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// `tinker-pdf-content`'s `TextDevice` bridges since a gap no spacing
 /// accounts for ends the word before it. Written at `0 Tw`, the probes of
 /// ROADMAP K-11's reviews draw no glyph over another under `word-spacing` or
-/// justification; a few books that read right only because a moved glyph
-/// closed or opened a gap read otherwise now, which `epub.md` names.
+/// justification. Not a few books read right only because a moved glyph
+/// closed or opened a gap — hundreds on the reviews' probes, of a dozen
+/// shapes — and each line of them is read back as a reader of the page
+/// reads it and drawn for that reading where some drawing of its runs reads
+/// it right ([`Fonts::set_readings`]); the books no drawing tried reads
+/// right ROADMAP CD-19 counts, shape by shape.
 ///
 /// # Where a slice ends on a mark
 ///
@@ -5922,10 +6376,34 @@ fn draw_coded(
     slice: &str,
     size: f64,
     baseline: f64,
-    mut x: f64,
+    x: f64,
+    drawing: Drawing,
 ) -> f64 {
+    let (objects, x) = plan_coded(run, fonts, slice, x, drawing);
+    for object in objects {
+        flush(page, object, size, baseline, run, frame);
+    }
+    x
+}
+
+/// The text objects [`draw_coded`] writes for `slice` of `run` from `x`,
+/// each its pieces in the order written, and where the pen ends — drawn as
+/// `drawing` says where a reader read the line back otherwise
+/// ([`Fonts::set_readings`]), and by the rules above where it says nothing.
+fn plan_coded(
+    run: &TextRun,
+    fonts: &Fonts<'_>,
+    slice: &str,
+    mut x: f64,
+    drawing: Drawing,
+) -> (Vec<Vec<Segment>>, f64) {
+    let mut objects: Vec<Vec<Segment>> = Vec::new();
     let font = request(run);
     let metrics = BookMetrics::with(fonts.faces());
+    // Whether a slice of neutrals at a right-to-left level is drawn in its
+    // level's order ([`coded_order`]): as its line decided
+    // ([`TextRun::bidi_line_rtl`]), or as its reading back asked.
+    let level_order = drawing.level_order.unwrap_or(run.bidi_line_rtl);
     // The text object being written: its pieces, each a stretch of one font
     // resource from one position. A PDF string is bytes in **one** font, so
     // a stretch that spills into the overflow font is a piece of its own,
@@ -5962,20 +6440,56 @@ fn draw_coded(
     // own. Only a spaced run's: under less spacing no reader parts its
     // objects, and the slice is written as it always was.
     let undone = spaced
-        && run.bidi_line_rtl
+        && level_order
+        && drawing.cut != Some(Cut::Pieces)
         && run.bidi_level.is_some_and(|level| level % 2 == 1)
         && !slice.chars().any(opens_right_to_left);
     // Whether the slice is one text object, each stretch of a resource a
     // piece of it (see above): one that holds a mark, or neutrals a reader
-    // undoes. Any other starts an object at a new resource, but inside a
-    // spaced slice (below).
-    let one_object = whole || undone;
+    // undoes, or a spaced slice a reading back drew whole. Any other starts
+    // an object at a new resource, but inside a spaced slice (below).
+    let one_object = whole
+        || undone
+        || (spaced && matches!(drawing.cut, Some(Cut::Whole | Cut::Carried | Cut::Centered)));
     let start = x;
-    let order = coded_order(run, slice);
+    let order = coded_order(run, slice, level_order);
+    // Where a reading back asked for it ([`Cut::Carried`], [`Cut::Centered`]),
+    // the white space at the slice's right end, from its first unit, and how
+    // far right of where the pen stands it is drawn: by the word spacing of
+    // its spaces, so that its last box ends a letter-spacing short of where
+    // the pen ends, or by half of it.
+    let tail = (spaced && matches!(drawing.cut, Some(Cut::Carried | Cut::Centered)))
+        .then(|| {
+            order
+                .iter()
+                .rposition(|(c, _)| !c.is_whitespace())
+                .map_or(0, |last| last + 1)
+        })
+        .filter(|tail| *tail < order.len());
+    let shift = tail.map_or(0.0, |tail| {
+        let spaces = order
+            .get(tail..)
+            .unwrap_or_default()
+            .iter()
+            .filter(|(c, _)| *c == ' ')
+            .count();
+        // A count of characters, far below 2^52.
+        #[allow(clippy::cast_precision_loss)]
+        let spaces = spaces as f64;
+        let share = if drawing.cut == Some(Cut::Centered) {
+            0.5
+        } else {
+            1.0
+        };
+        spaces * run.word_spacing * share
+    });
     // The inside of a spaced slice, from its first unit that is not white
     // space to its last, is one text object where [`joins_its_inside`]; the
     // white space at either end stays a text object of its own (see above).
-    let inside = if spaced && joins_its_inside(run, slice) {
+    let inside = if spaced
+        && drawing.cut.is_none()
+        && joins_its_inside(run, slice, fonts.shares_its_line(run))
+    {
         order
             .iter()
             .position(|(c, _)| !c.is_whitespace())
@@ -6022,18 +6536,11 @@ fn draw_coded(
         let same = object
             .last()
             .is_some_and(|open| open.resource == coded.resource());
-        let continues = !mark && !after_mark && !alone && same;
+        let continues = !mark && !after_mark && !alone && same && Some(at) != tail;
         if !continues {
             let joined = one_object || inside.is_some_and(|(lo, hi)| lo < at && at <= hi);
-            if !joined {
-                flush(
-                    page,
-                    std::mem::take(&mut object),
-                    size,
-                    baseline,
-                    run,
-                    frame,
-                );
+            if !joined && !object.is_empty() {
+                objects.push(std::mem::take(&mut object));
             }
             object.push(Segment {
                 resource: coded.resource().to_vec(),
@@ -6049,7 +6556,7 @@ fn draw_coded(
                 codes: Vec::new(),
                 glyphs: Vec::new(),
                 characters: String::new(),
-                x: placed.unwrap_or(x),
+                x: placed.unwrap_or(if Some(at) == tail { x + shift } else { x }),
             });
         }
         if !mark {
@@ -6080,8 +6587,10 @@ fn draw_coded(
             x += run.word_spacing;
         }
     }
-    flush(page, object, size, baseline, run, frame);
-    x
+    if !object.is_empty() {
+        objects.push(object);
+    }
+    (objects, x)
 }
 
 /// Whether the inside of a spaced `slice` of `run` is written as one text
@@ -6101,23 +6610,44 @@ fn draw_coded(
 /// \u{202E}cd\u{202C} מלחמה.` at `word-spacing: 1em` or letter-spaced and
 /// justified read its Hebrew words backwards and `ab` and `cd` were found
 /// no more, where in its pieces it read whole (4 books of the hunt).
-fn joins_its_inside(run: &TextRun, slice: &str) -> bool {
-    run.bidi_level
-        .is_none_or(|level| level == 0 || level % 2 == 1)
-        && !slice.chars().any(|c| {
-            matches!(
-                bidi_class(c),
-                BidiClass::LRE
-                    | BidiClass::RLE
-                    | BidiClass::LRO
-                    | BidiClass::RLO
-                    | BidiClass::PDF
-                    | BidiClass::LRI
-                    | BidiClass::RLI
-                    | BidiClass::FSI
-                    | BidiClass::PDI
-            )
-        })
+///
+/// Nor, where its paragraph is left to right, a right-to-left slice of a
+/// run on a line that holds another paragraph's text too (`shared`,
+/// [`sharing_a_line`]): table cells set touching, which a reader reads as
+/// one line. Whole, the Arabic or Hebrew cell of a table with no `dir`
+/// touching a cell `abc (x).` at `word-spacing: 1em` drew the row what a
+/// right-to-left paragraph draws for `أصبحنا نعرف.abc (x)`, and read so; in
+/// its pieces the row reads whole, as it did before the inside of a spaced
+/// slice was one object (2 books in a default build and 4 with
+/// `bundled-fonts` of the review of b73550b;
+/// `a_right_to_left_cell_touching_a_left_to_right_one_is_left_in_pieces`).
+/// A right-to-left paragraph's slice on such a line is still one object,
+/// since there the row reads whole either way and a right-to-left table at
+/// `word-spacing: 1em` reads whole only so.
+fn joins_its_inside(run: &TextRun, slice: &str, shared: bool) -> bool {
+    inside_joins(run.bidi_level, run.paragraph_rtl, shared, slice)
+}
+
+/// [`joins_its_inside`] for a slice at `level` of a paragraph whose base
+/// direction is `paragraph_rtl` ([`TextRun::paragraph_rtl`]), on a line that
+/// holds another paragraph's text where `shared`.
+fn inside_joins(level: Option<u8>, paragraph_rtl: Option<bool>, shared: bool, slice: &str) -> bool {
+    level.is_none_or(|level| {
+        level == 0 || (level % 2 == 1 && !(shared && paragraph_rtl == Some(false)))
+    }) && !slice.chars().any(|c| {
+        matches!(
+            bidi_class(c),
+            BidiClass::LRE
+                | BidiClass::RLE
+                | BidiClass::LRO
+                | BidiClass::RLO
+                | BidiClass::PDF
+                | BidiClass::LRI
+                | BidiClass::RLI
+                | BidiClass::FSI
+                | BidiClass::PDI
+        )
+    })
 }
 
 /// The characters of a standard-14 `slice` of `run` in the order they are
@@ -6244,11 +6774,11 @@ fn joins_its_inside(run: &TextRun, slice: &str) -> bool {
 /// bracket pair at a right-to-left level is drawn with each bracket's hollow
 /// turned away from what it encloses — the middle of `חו (וח) חו.` is drawn,
 /// left to right, `)` `ח` `ו` `(` — and extracts as written.
-fn coded_order(run: &TextRun, slice: &str) -> Vec<(char, bool)> {
+fn coded_order(run: &TextRun, slice: &str, level_order: bool) -> Vec<(char, bool)> {
     let units = mark_clusters(slice);
     let as_written = || units.iter().flat_map(|unit| riding(unit)).collect();
     let neutrals_on_a_right_to_left_line =
-        run.bidi_line_rtl && run.bidi_level.is_some_and(|level| level % 2 == 1);
+        level_order && run.bidi_level.is_some_and(|level| level % 2 == 1);
     let neutrals = !slice.chars().any(opens_right_to_left);
     if neutrals && (!neutrals_on_a_right_to_left_line || opens_with_its_word_space(run, &units)) {
         return as_written();

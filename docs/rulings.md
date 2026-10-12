@@ -669,60 +669,63 @@ living in one feature's head.
     the line above that gave it its level is not on the line (with the
     brackets styled apart, a book's structure tree still holds their order).
     Measured again on the tree that carries this text, the fix of the
-    review of CD-19's fix, against 56dfd93, in a default build and (in
-    brackets) with `bundled-fonts`: of the K-11 review's 144 such books (Arabic, Hebrew and
-    pointed Hebrew, up to five kinds of bracket, twelve styles), 96 (83)
-    that conserved at 56dfd93 do not now, none of which conserved at
-    9297d2d. A probe of the price — 342 books for each opening, in each
-    build: Arabic, Hebrew and pointed Hebrew, three kinds of bracket, styled
-    and not, nineteen styles — counts the books that read worse than at
-    56dfd93, opening after a `<br/>` with `…` 291 (241), U+2024 297 (273),
-    U+2025 297 (270), U+FE19 270 (195), `..` 288 (270) and `...` 277 (236);
-    with `!!` 267 (212), `!?` 291 (231), `?!` 274 (231) and `??` 267 (192);
-    and with a closing quotation mark before stops, `".` 297 (256), `'.`
-    300 (285), `».` 305 (239), `”.` 297 (237), `"...` 295 (257) and `”…` 315
-    (300) — 4 628 (3 925) in all, 4 613 (3 916) of which conserved there:
-    1 093 (866) of the runs of `!` and `?`, 1 800 (1 565) of the closing
-    quotation marks before stops and 1 720 (1 485) of the ellipses. `.`,
-    `?`, the ARABIC COMMA, `"` and `”` alone, which pay nothing more, are its
-    controls. (Measured with the rule alone on 56dfd93, `!!` was 273 and
-    `?!` 270 in a default build, 4 630 in all and 4 618 conserving there:
-    the font at `0 Tw` reads six `!!` books right that the rule alone did
-    not, and four more `?!` books worse, below.) None of those books but one
-    conserved at 9297d2d, and none that read whole or was found by search
-    there fails to now; the one is CD-19's, not the rule's — `?!` before
-    styled braces opening a Hebrew line letter-spaced by half an em and
-    justified, in a default build, which conserved at 9297d2d, at 56dfd93
-    and with the rule alone and does not with the font at `0 Tw`, with or
-    without the rule (ROADMAP CD-19 keeps it). With styled brackets 667 of
-    the closing quotation marks' (543), whose structure tree read in order
-    at 9297d2d and at 56dfd93 where their page did not, lose that too: the
-    line's `".` comes back `."`. Opening after a space, where a soft wrap
-    may put `"`, `'`, `”…` or an ellipsis first on a line, 22 of the probe's
-    1 197 books pay it (20): 16 (18) with a closing quotation mark and 6 (2)
-    with an ellipsis; the ARABIC COMMA's control there, letter-spaced by
-    half an em and justified, which read worse with the font at `0 Tw` until
-    that fix, reads as at 56dfd93 again. All of it is the price the owner
-    accepted.
+    second review of CD-19's fix, against 56dfd93, in a default build and
+    (in brackets) with `bundled-fonts`: of the K-11 review's 144 such books
+    (Arabic, Hebrew and pointed Hebrew, up to five kinds of bracket, twelve
+    styles), 96 (83) that conserved at 56dfd93 do not now, none of which
+    conserved at 9297d2d. A probe of the price — 342 books for each
+    opening, in each build: Arabic, Hebrew and pointed Hebrew, three kinds
+    of bracket, styled and not, nineteen styles — counts the books that
+    read worse than at 56dfd93, opening after a `<br/>` with `…` 291 (241),
+    U+2024 297 (273), U+2025 297 (267), U+FE19 270 (195), `..` 288 (270)
+    and `...` 277 (236); with `!!` 267 (212), `!?` 255 (195), `?!` 240
+    (195) and `??` 267 (192); and with a closing quotation mark before
+    stops, `".` 261 (214), `'.` 264 (249), `».` 269 (203), `”.` 261 (195),
+    `"...` 259 (221) and `”…` 279 (264) — 4 342 (3 622) in all, every one of
+    which conserved there: 1 029 (794) of the runs of `!` and `?`, 1 593
+    (1 346) of the closing quotation marks before stops and 1 720 (1 482) of
+    the ellipses. `.`, `?`, the ARABIC COMMA, `"` and `”` alone, which pay
+    nothing more, are its controls. Measured with the rule alone on
+    56dfd93 it was 4 630 (3 925) in all, 4 618 (3 916) conserving there —
+    1 101 (866) of the runs of `!` and `?`, 1 809 (1 574) of the closing
+    quotation marks and 1 720 (1 485) of the ellipses: the EPUB writer, which
+    reads each line that holds a right-to-left character back as a reader
+    of the page reads it and draws it otherwise where that reads it right
+    (ROADMAP CD-19), draws 288 (303) of them so that they read as at
+    56dfd93, and none of the probe's books reads worse than with the rule
+    alone but the three `'.` books below. None of those books conserved at
+    9297d2d, and none that read whole or was found by search there fails to
+    now. With styled brackets 667 of the closing quotation marks' (543),
+    whose structure tree read in order at 9297d2d and at 56dfd93 where
+    their page did not, lose that too: the line's `".` comes back `."`.
+    Opening after a space, where a soft wrap may put `"`, `'`, `”…` or an
+    ellipsis first on a line, 22 of the probe's 1 197 books pay it (20): 16
+    (18) with a closing quotation mark and 6 (2) with an ellipsis; the
+    ARABIC COMMA's control there, letter-spaced by half an em and
+    justified, which read worse with the font at `0 Tw` until the first fix
+    of CD-19's review, reads as at 56dfd93 again. All of it is the price the
+    owner accepted.
 
     *What the owner's decision does not cover.* The rule as built takes
     any run of the eleven stops, so a run that mixes them, `.!` or `!…`,
     opening a right-to-left line before a styled pair after a `<br/>`, pays
     the same: of the review's probe of them (H6 of the review of CD-19's
-    fix), 4 (4) books with `.!` and 4 (4) with `!…` that conserved at
-    56dfd93 do not now, none of which conserved at 9297d2d, and at
-    `word-spacing: 0.6em` two of each in each build lose their structure
-    tree's order as well, as `?!` does there (below). The decision
-    names none of them, and whether they are of its price is the owner's to
-    say (ROADMAP CD-19 keeps them). Nor is a book the price that loses more
-    than the rule costs where the overflow font at `0 Tw` meets it: three
-    `'.` books in each build at `word-spacing: 0.5em`, whose structure tree
-    read in order at 9297d2d and with the rule alone but not at 56dfd93, nor
-    under both now; and nine of the price's books in a default build and six
-    with `bundled-fonts` — `!?` and `?!` before styled brackets at
-    `word-spacing: 0.6em` and `1em` — that lose their structure tree's order,
-    which neither the rule alone nor the font at `0 Tw` alone loses. ROADMAP
-    CD-19 keeps them as findings.
+    fix), 2 (2) books with `.!` and 2 (2) with `!…`, with no spacing, that
+    conserved at 56dfd93 do not now, none of which conserved at 9297d2d, and
+    as many again of that review's minimised books; at `word-spacing:
+    0.6em`, where as many more lost conservation and two of each their
+    structure tree's order until the fix of the second review, each
+    conserves again, as at 56dfd93. The decision names none of them,
+    and whether they are of its price is the owner's to say (ROADMAP CD-19
+    keeps them). Nor is a book the price that loses more than the rule
+    costs where the overflow font at `0 Tw` meets it: three `'.` books in
+    each build at `word-spacing: 0.5em`, whose structure tree read in order
+    at 9297d2d and with the rule alone but not at 56dfd93, nor under both
+    now — ROADMAP CD-19 keeps them as findings. The nine (six) `!?` and
+    `?!` books before styled brackets at `word-spacing: 0.6em` and `1em`
+    that lost their structure tree's order where the font met the rule, as
+    neither alone loses it, conserve since the second review's fix, as
+    they did at 56dfd93.
 
     *The tests that hold it.* `tinker-pdf-shape`'s `bidi.rs`:
     `a_pair_drawn_facing_outward_reads_in_the_direction_that_pairs_it`,

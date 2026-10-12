@@ -2387,6 +2387,375 @@ fn a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whole() {
     }
 }
 
+/// **A right-to-left cell set touching a left-to-right one is left in
+/// pieces** (R1 of the second review of CD-19's fix, ROADMAP CD-19).
+///
+/// With `border-spacing: 0` and no padding a table's cells touch on one
+/// baseline, and a reader of the page reads the row as one line. The inside
+/// of a spaced slice, written as one text object since the first review of
+/// CD-19's fix, drew the Arabic or Hebrew cell's line up to the `abc (x).`
+/// cell beside it, and ruling 14 read the two as one line whose right-to-left
+/// letters are the more — `أصبحنا نعرف.abc (x)` — where in pieces, as before,
+/// the Latin cell read whole (2 books in a default build and 4 with
+/// `bundled-fonts`, read whole at 9297d2d and 56dfd93 and not after). A
+/// right-to-left slice of a left-to-right paragraph on a line that holds
+/// another paragraph's text is left in pieces, as a left-to-right slice
+/// inside right-to-left text is; with `bundled-fonts` the Hebrew cell is set
+/// a point and a half from the Latin one, which the reader joins as it does
+/// a touching one, and so does the writer's line.
+#[test]
+fn a_right_to_left_cell_touching_a_left_to_right_one_is_left_in_pieces() {
+    for style in [
+        "table { border-spacing: 0 } td { padding: 0; word-spacing: 1em }",
+        "table { border-spacing: 0 } td { padding: 0; letter-spacing: 0.1em; word-spacing: 0.5em }",
+    ] {
+        for (language, cell) in [
+            (
+                "ar",
+                "\u{623}\u{635}\u{628}\u{62D}\u{646}\u{627} \u{646}\u{639}\u{631}\u{641}",
+            ),
+            ("he", "\u{5E1}\u{5E4}\u{5E8} \u{5D1}\u{5D9}\u{5EA}"),
+        ] {
+            let body = format!(
+                "<table><tr><td>abc (x).</td><td>{cell}</td></tr>\
+                 <tr><td>{cell}</td><td>abc (x).</td></tr></table>"
+            );
+            let bytes = styled_book(language, style, &body);
+            let doc = Document::open(bytes).expect("the book opens");
+            let text = doc.page(0).expect("a page").text().plain_text();
+            let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            for whole in ["abc (x).", cell] {
+                assert!(
+                    words.contains(whole),
+                    "`{style}`, {body}: {whole:?} is not read whole in {text:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Conservation in content and logical order, and no glyph drawn over
+/// another, for one book.
+fn conserves_drawn_apart(language: &str, style: &str, body: &str) {
+    let bytes = styled_book(language, style, body);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let text = doc.page(0).expect("a page").text().plain_text();
+    for verdict in [
+        conservation(&bytes, &doc),
+        conservation_in_logical_order(&bytes, &doc),
+    ] {
+        assert!(verdict.holds(), "`{style}`, {body}: {text:?} {verdict:?}");
+    }
+    let over = overprinted(&doc);
+    assert!(
+        over.is_empty(),
+        "`{style}`, {body}: a glyph is drawn over another: {over:?}"
+    );
+}
+
+/// **Neutrals a reader reads with the word beside them are drawn for that
+/// reading** (the second review of CD-19's fix: H2-1, F1, F2, and the price
+/// probe's books that lost their structure tree's order through the
+/// overflow font at `0 Tw`; ROADMAP CD-19).
+///
+/// The rules draw a run of neutrals as typed where they model a reader that
+/// reads it alone, or reads it in a stretch it reads left to right: a styled
+/// `?!` glued to an Arabic word, a word space at `0.6em` after it, was drawn
+/// `?!` for a reader that would read the word and the `?!` by themselves —
+/// and the reader, the slice after the `?!` one text object, read the whole
+/// line from the right, `!?ابا اما.`; an italic `?!` letter-spaced by `0.45em`
+/// and justified, half an em from the words either side, was drawn for a
+/// reader reading it alone and was read with the bold word before it, which
+/// it resumes within three ems. Each line is read back as the page draws it
+/// now (`paint::Fonts::set_readings`), and drawn the other way where that
+/// reads it right.
+#[test]
+fn neutrals_a_reader_reads_with_the_word_beside_them_are_drawn_for_that_reading() {
+    const AR: [&str; 12] = [
+        "\u{643}\u{62A}\u{627}\u{628}",
+        "\u{645}\u{62F}\u{631}\u{633}\u{629}",
+        "\u{627}\u{644}\u{637}\u{627}\u{644}\u{628}",
+        "\u{62C}\u{645}\u{64A}\u{644}",
+        "\u{628}\u{64A}\u{62A}",
+        "\u{643}\u{628}\u{64A}\u{631}",
+        "\u{646}\u{648}\u{631}",
+        "\u{64A}\u{648}\u{645}",
+        "\u{639}\u{648}\u{627}\u{645}\u{644}",
+        "\u{648}\u{642}\u{62F}",
+        "\u{623}\u{635}\u{628}\u{62D}\u{646}\u{627}",
+        "\u{646}\u{639}\u{631}\u{641}",
+    ];
+    let s = |i: usize| AR[i % AR.len()];
+    let styled = (0..6)
+        .map(|k| {
+            let i = k * 3;
+            format!(
+                "{} <b>{}</b> <i>?!</i> {} <b>(</b>{}<b>)</b> {}.",
+                s(i),
+                s(i + 1),
+                s(i + 2),
+                s(i + 3),
+                s(i + 4)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut books: Vec<(&str, &str, String)> = vec![
+        (
+            "ar",
+            "p { word-spacing: 0.6em }",
+            "<p dir=\"rtl\"><b>?!</b>\u{627}\u{628}\u{627} \u{627}\u{645}\u{627}.</p>".to_owned(),
+        ),
+        (
+            "ar",
+            "p { word-spacing: 0.6em }",
+            "<p dir=\"rtl\"><b>?!</b>\u{627}\u{628}\u{648} \u{627}\u{645}\u{627}.</p>".to_owned(),
+        ),
+        (
+            "he",
+            "p { word-spacing: 0.6em }",
+            "<p dir=\"rtl\"><b>?!</b>\u{5D0}\u{5D1}\u{5D0} \u{5D0}\u{5DE}\u{5D0}.</p>".to_owned(),
+        ),
+        (
+            "syr",
+            "p, li, figcaption { word-spacing: 0.6em }",
+            "<div dir=\"rtl\"><figure><figcaption><i>?!</i>\u{710}\u{720}\u{717}\u{710} \
+             \u{710}\u{72A}\u{725}\u{710} \u{72B}\u{721}\u{71D}\u{710} \u{721}\u{720}\u{72C}\u{710} \
+             \u{72A}\u{712}\u{710}.</figcaption></figure></div>"
+                .to_owned(),
+        ),
+        (
+            "ar",
+            "p { letter-spacing: 0.45em; text-align: justify; margin: 0 32% }",
+            format!("<p dir=\"rtl\">{styled}</p>"),
+        ),
+        // The price probe's `!?` and `?!` before styled brackets after a
+        // `<br/>`, which lost their structure tree's order.
+        (
+            "ar",
+            "p { word-spacing: 0.6em; margin: 0 20% }",
+            format!(
+                "<p dir=\"rtl\">{} {}<br/>!?<b>(</b>{}<b>)</b> {} {}</p>",
+                s(8),
+                s(9),
+                s(10),
+                s(11),
+                s(12)
+            ),
+        ),
+        (
+            "he",
+            "p { word-spacing: 1em; margin: 0 20% }",
+            "<p dir=\"rtl\">\u{5D0}\u{5D5}\u{5E8} \u{5D9}\u{5D5}\u{5DD}<br/>?!<b>(</b>\
+             \u{5D1}\u{5E8}\u{5D0}\u{5E9}\u{5D9}\u{5EA}<b>)</b> \u{5D1}\u{5E8}\u{5D0} \
+             \u{5D0}\u{5DC}\u{5D4}\u{5D9}\u{5DD}</p>"
+                .to_owned(),
+        ),
+        // A run that mixes the stops, `.!`, opening the line after a `<br/>`.
+        (
+            "ar",
+            "p { word-spacing: 0.6em; margin: 0 20% }",
+            format!(
+                "<p dir=\"rtl\">{} {}<br/>.!<b>(</b>{}<b>)</b> {} {}</p>",
+                s(0),
+                s(8),
+                s(3),
+                s(4),
+                s(11)
+            ),
+        ),
+        // Read right only drawn two runs otherwise at once: the word before
+        // the glued `?!` drawn whole and the `?!` in its level's order, with
+        // no `dir` at `word-spacing: 2em` (H2-1; both conserved at 9297d2d).
+        (
+            "ar",
+            "p { word-spacing: 2em }",
+            "<p>\u{627}\u{645}\u{627} <b>?!</b>\u{627}\u{628}\u{648} \u{627}\u{645}\u{627}.</p>".to_owned(),
+        ),
+        (
+            "he",
+            "p { word-spacing: 2em }",
+            "<p>\u{5D0}\u{5DE}\u{5D0} <b>?!</b>\u{5D0}\u{5D1}\u{5D0} \u{5D0}\u{5DE}\u{5D0}.</p>".to_owned(),
+        ),
+        // Read right only with a word's slice drawn whole, its word spaces
+        // inside its own text object: `!!` italic and bold between Arabic
+        // words at `word-spacing: 1em`.
+        (
+            "ar",
+            "p { word-spacing: 1em; margin: 0 20% }",
+            format!(
+                "<p dir=\"rtl\">{}</p>",
+                (0..3)
+                    .map(|k| {
+                        let i = k * 3;
+                        format!(
+                            "{} <i>!!</i> {} <b>!!</b>{} {}.",
+                            s(i + 1),
+                            s(i + 2),
+                            s(i + 3),
+                            s(i + 4)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        ),
+    ];
+    // F2, `?!` before styled braces opening a Hebrew line letter-spaced by
+    // half an em and justified. With `bundled-fonts` the rules' drawing reads
+    // it right, as it did before; read back with the stand-in's widths as
+    // layout measured them rather than as its `/W` rounds them, it read
+    // wrong, and the drawing chosen for it read worse on the page.
+    books.push((
+        "he",
+        "p { letter-spacing: 0.5em; text-align: justify; margin: 0 25% }",
+        "<p dir=\"rtl\">\u{5D0}\u{5D5}\u{5E8} \u{5D9}\u{5D5}\u{5DD}<br/>?!<b>{</b>\
+         \u{5D1}\u{5E8}\u{5D0}\u{5E9}\u{5D9}\u{5EA}<b>}</b> \u{5D1}\u{5E8}\u{5D0} \
+         \u{5D0}\u{5DC}\u{5D4}\u{5D9}\u{5DD}</p>"
+            .to_owned(),
+    ));
+    for (language, style, body) in &books {
+        conserves_drawn_apart(language, style, body);
+    }
+}
+
+/// **A line a reader cuts where it is spaced apart is drawn so that it
+/// reads whole where cut it reads otherwise** (the second review of CD-19's
+/// fix: H3, H2-4, H2-5 and the classes since 56dfd93 it named; ROADMAP
+/// CD-19).
+///
+/// - A right-to-left word's word space, the white space at its slice's end,
+///   is a text object of its own drawn left of the word, its stretch between
+///   them: a reader cut `نور أصبحنا | ٪25 نعرف` at it, and read the number,
+///   with no Arabic letter before it on its line, as a European one, which
+///   W5 joins its sign to — `٪25`, not `25٪`. Drawn whole, its space the
+///   word's, the line reads `نور أصبحنا 25٪ نعرف`.
+/// - The space and the ORNATE RIGHT PARENTHESIS of `﴾٢٥﴿ <b>W</b>`, one text
+///   object for a reader to undo with its line, drew `﴾٢٥﴿ مدرسة` whole, a
+///   line the comma tie-break reads left to right by its closing `﴾`: in
+///   pieces, as at 56dfd93, each reads as typed.
+/// - A word space after a Greek or Latin word at a run's end is stretched
+///   after it, and a reader cut `αλφα | βήτα (ספר) בית` there and read the
+///   second piece, with more Hebrew letters than Greek, from the right. Drawn
+///   at the end of its stretch, against the word after it, the space parts
+///   nothing, and the line reads left to right, as it did while the overflow
+///   font's moved letters covered the stretch.
+/// - A word space styled apart from the words either side of it, a run of its
+///   own after a bold Greek word, stood at the start of its stretch, and a
+///   reader cut `αλφα βήτα | ספר בית xyz.` after it and read the second piece
+///   from the right, `.xyz ספר בית`. Drawn at the middle of its stretch, the
+///   gap either side of it is half the stretch, which the reader resumes the
+///   line across (it conserved at 56dfd93).
+#[test]
+fn a_line_a_reader_cuts_where_it_is_spaced_apart_is_drawn_to_read_whole() {
+    let books: [(&str, &str, &str); 12] = [
+        (
+            "ar",
+            "p, td { word-spacing: 1em }",
+            "<p dir=\"rtl\">\u{62C}\u{645}\u{64A}\u{644} \u{628}\u{64A}\u{62A} 25\u{66A} \
+             <b>\u{643}\u{628}\u{64A}\u{631}</b> \u{646}\u{648}\u{631}.</p>",
+        ),
+        (
+            "ar",
+            "p, td { word-spacing: 1em }",
+            "<p dir=\"rtl\">\u{646}\u{648}\u{631} \u{623}\u{635}\u{628}\u{62D}\u{646}\u{627} 25\u{66A} \
+             <b>\u{646}\u{639}\u{631}\u{641}</b> \u{643}\u{62A}\u{627}\u{628}.</p>",
+        ),
+        (
+            "ar",
+            "p, li, td { text-align: justify; letter-spacing: 0.1em; word-spacing: 0.25em; margin: 0 30% }",
+            "<div dir=\"rtl\"><ol><li>\u{643}\u{62A}\u{627}\u{628} \u{639}\u{648}\u{627}\u{645}\u{644} \
+             25\u{20AA} <b>\u{645}\u{62F}\u{631}\u{633}\u{629}</b> \
+             \u{627}\u{644}\u{637}\u{627}\u{644}\u{628}.</li></ol></div>",
+        ),
+        (
+            "ar",
+            "p { word-spacing: 0.75em }",
+            "<p dir=\"rtl\">\u{FD3E}\u{662}\u{665}\u{FD3F} <b>\u{645}\u{62F}\u{631}\u{633}\u{629}</b> \
+             \u{627}\u{644}\u{637}\u{627}\u{644}\u{628}.</p>",
+        ),
+        (
+            "he",
+            "p, li, td { word-spacing: 0.75em }",
+            "<p dir=\"rtl\">\u{5E9}\u{5DC}\u{5D5}\u{5DD} \u{5D1}\u{5E8}\u{5D0}\u{5E9}\u{5D9}\u{5EA} \
+             25\u{60C} <b><i>\u{5E2}\u{5D5}\u{5DC}\u{5DD}</i></b> \u{5DE}\u{5DC}\u{5D7}\u{5DE}\u{5D4}, \
+             \u{5E1}\u{5E4}\u{5E8} 25\u{60C}.</p>",
+        ),
+        (
+            "ar",
+            "p, li, td { word-spacing: 16px; letter-spacing: 1px }",
+            "<div dir=\"rtl\"><table><tr><td>\u{643}\u{62A}\u{627}\u{628} 25\u{66A} \
+             <b>\u{645}\u{62F}\u{631}\u{633}\u{629}</b></td><td>25\u{66A} \
+             \u{627}\u{644}\u{637}\u{627}\u{644}\u{628}</td></tr></table></div>",
+        ),
+        (
+            "he",
+            "p { word-spacing: 12px }",
+            "<p>\u{3B1}\u{3BB}\u{3C6}\u{3B1} <b>\u{3B2}\u{3AE}\u{3C4}\u{3B1}</b> \
+             (\u{5E1}\u{5E4}\u{5E8}) \u{5D1}\u{5D9}\u{5EA}</p>",
+        ),
+        (
+            "he",
+            "p { word-spacing: 12px }",
+            "<p>\u{563}\u{56B}\u{580}\u{584} <b>\u{57F}\u{578}\u{582}\u{576}</b> \
+             (\u{5E1}\u{5E4}\u{5E8}) \u{5D1}\u{5D9}\u{5EA}</p>",
+        ),
+        (
+            "he",
+            "p { word-spacing: 12px }",
+            "<p>abc <b>def</b> (\u{5E1}\u{5E4}\u{5E8}) \u{5D1}\u{5D9}\u{5EA}</p>",
+        ),
+        (
+            "he",
+            "p { word-spacing: 0.5001em }",
+            "<p>x \u{3B1}\u{3BB}\u{3C6}\u{3B1} \u{5E9}\u{5DC}\u{5D5}\u{5DD} \
+             \u{5E2}\u{5D5}\u{5DC}\u{5DD} y.</p>",
+        ),
+        (
+            "he",
+            "p { word-spacing: 0.75em }",
+            "<p dir=\"rtl\">\u{5E9}\u{5DC}\u{5D5}\u{5DD} \u{5D1}\u{5E8}\u{5D0}\u{5E9}\u{5D9}\u{5EA}<br/>\
+             \u{FD3E}\u{662}\u{665}\u{FD3F} <b>\u{5E2}\u{5D5}\u{5DC}\u{5DD}</b> \
+             \u{5DE}\u{5DC}\u{5D7}\u{5DE}\u{5D4} \u{5D1}\u{5E8}\u{5D0}.</p>",
+        ),
+        (
+            "he",
+            "p { word-spacing: 12px }",
+            "<p>\u{3B1}\u{3BB}\u{3C6}\u{3B1} <b>\u{3B2}\u{3AE}\u{3C4}\u{3B1}</b> \
+             \u{5E1}\u{5E4}\u{5E8} \u{5D1}\u{5D9}\u{5EA} xyz.</p>",
+        ),
+    ];
+    for (language, style, body) in books {
+        conserves_drawn_apart(language, style, body);
+    }
+    // With `bundled-fonts` the stand-in's widths cut two more lines where the
+    // overflow font's do not, each read whole only in pieces: an ARABIC COMMA
+    // after a number in a justified Hebrew paragraph with no `dir`, whose
+    // space and comma, one text object, were read with the bold word (it
+    // conserved at 56dfd93), and Cyrillic words letter-spaced by half an em in
+    // an Arabic paragraph with no `dir`, read from the right whole (it
+    // conserved at 9297d2d and 56dfd93).
+    if cfg!(feature = "bundled-fonts") {
+        for (language, style, body) in [
+            (
+                "he",
+                "p { letter-spacing: 0.1em; word-spacing: 0.25em; text-align: justify; margin: 0 35% }",
+                "<p>\u{5E9}\u{5DC}\u{5D5}\u{5DD} \u{5D1}\u{5E8}\u{5D0}\u{5E9}\u{5D9}\u{5EA} 25\u{60C} \
+                 <b>\u{5E2}\u{5D5}\u{5DC}\u{5DD}</b> \u{5DE}\u{5DC}\u{5D7}\u{5DE}\u{5D4}.</p>",
+            ),
+            (
+                "ar",
+                "p { letter-spacing: 0.5em }",
+                "<p>\u{643}\u{62A}\u{627}\u{628} \u{43A}\u{43D}\u{438}\u{433}\u{430} \u{434}\u{43E}\u{43C} \
+                 \u{441}\u{432}\u{435}\u{442} \u{434}\u{435}\u{43D}\u{44C}, \
+                 \u{645}\u{62F}\u{631}\u{633}\u{629}.</p>",
+            ),
+        ] {
+            conserves_drawn_apart(language, style, body);
+        }
+    }
+}
+
 /// **A letter-spaced Arabic line reads its full stop with its word** (review
 /// of the K-11 fix).
 ///
