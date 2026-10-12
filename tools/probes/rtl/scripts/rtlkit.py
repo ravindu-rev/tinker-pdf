@@ -9,9 +9,11 @@ A run directory and a baseline directory have the same shape:
     <dir>/bundled/<family>.txt      the same with --features bundled-fonts
     <dir>/lines/<family>.txt        a line probe's normalised output
     <dir>/lines/<name>.tsv          the per-line TSVs the line probes write
+    <dir>/<build>/<family>.tsv      the td probe's TSV (zz_code1_tdprobe)
 
-A baseline holds the same files compressed (`.txt.xz`, `.tsv.xz`); every
-reader here takes either.
+A baseline holds the same files compressed (`.txt.xz`, `.tsv.xz`), each `.txt`
+with a `# ` line on top saying what it is; the TSVs are as the probes wrote
+them. Every reader here takes either.
 """
 import collections
 import csv

@@ -5,7 +5,8 @@ usage: python3 -I cmp.py A B [--builds LIST] [--families REGEX] [--show N]
 
 A and B are each a run or baseline directory (or a baseline's name, such as
 935b077), or a single family's output file. Per family and build it prints the
-rows on each side, the books A has and B lacks, and the books that lost or
+rows on each side, the number of books A has and B lacks (counted, not named;
+books only B has show only in B's row count), and the books that lost or
 gained a metric (content, logical, cons, text, search, holds); with --show N,
 up to N of each with the metrics that moved. It also reports overprint that
 rose (the rr3m lines' overlap, TWROW's vov, VOVX), probe_paren's failing keys,

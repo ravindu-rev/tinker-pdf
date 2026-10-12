@@ -10,7 +10,8 @@ OUTDIR. Without NEW the table reads B -> M -> T, and "now" below means T.
 LIST is a comma-separated subset of default,bundled,lines (default: all three).
 
 Columns, per family and build:
-  rows       books now (missing: books T has that now lacks, a truncated run)
+  rows       books now (missing: with NEW, books T has that NEW lacks, a
+             truncated run; without NEW, books B has that T lacks)
   conserving books whose content, logical order and cons (every one the line
              carries) all hold, at B/M/T[/NEW]
   >B         books worse now than at B in the strict sense the round reports

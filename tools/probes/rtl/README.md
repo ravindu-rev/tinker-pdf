@@ -155,9 +155,12 @@ itself. The output directory holds, per build (`default`, `bundled`, and
 `lines` for the line probes, which have no `bundled-fonts` build):
 
 - `raw/<family>.txt`, cargo's output and its exit status;
-- `<family>.txt`, the same normalised: the data lines sorted, test results
-  without their times, failing tests, panics, compiler errors and the exit
-  status, and nothing else;
+- `<family>.txt`, the same normalised: the `Running tests/<family>.rs`
+  header, the data lines sorted, test results without their times, failing
+  tests, panics, compiler errors and the exit status, and nothing else;
+- the TSVs the probes write, exactly as they write them: the line probes'
+  `lines/bct-auto.tsv`, `wrapped.tsv`, `sent.tsv` and `laneR.tsv`, and the td
+  probe's `<build>/zz_code1_tdprobe.tsv`;
 - `<family>.exit`, and `done` once every family of that build has run, naming
   the ones whose exit was not 0;
 - `tree.txt` with the checkout's HEAD and status before and after, and `done`
@@ -178,8 +181,9 @@ python3 -I tools/probes/rtl/scripts/table.py
 python3 -I tools/probes/rtl/scripts/table.py /tmp/rtl/now --by group --show 5
 ```
 
-Per family (or group) and build it prints the books now, those missing
-against 935b077, the books conserving at each tree, and:
+Per family (or group) and build it prints the books now, those missing (with
+a run, 935b077's books the run lacks, the sign of a truncated run; without
+one, 9297d2d's books 935b077 lacks), the books conserving at each tree, and:
 
 - `>B`, books worse than at 9297d2d in the strict sense the round reports use:
   conserving lost, or read whole, found by search or `holds` lost;
@@ -200,10 +204,19 @@ sorts into ROADMAP CD-19's classes.
 The other comparators:
 
 - `cmp.py A B` compares two outputs book by book, A to B: two run or baseline
-  directories (or a baseline's name), or two family files. It prints the books
-  each side lacks, those that lost or gained a metric, and overprint that rose.
-- `tsvdiff.py A B` compares the line probes' TSVs (and the td probe's): the
-  lines `OK` in A and `NO` in B, and the reverse.
+  directories (or a baseline's name), or two family files. Per family and
+  build it prints the rows on each side, how many books A has and B lacks
+  (`missing`), the books that lost or gained a metric, and overprint that
+  rose; `--show N` lists up to N of the books that lost, gained or rose. The
+  missing books are counted, never named, and a book only B has shows only in
+  B's row count: A with 99 rows against B with 213 prints `rows 99/213
+  missing 0`. Run it both ways round to count each side's.
+- `tsvdiff.py A B` compares the line probes' TSVs: the lines `OK` in A and not
+  in B (`worse`), and the reverse (`better`), listing up to `--show N` of each
+  (20 by default). The td probe's TSV carries no verdict, so its rows are
+  compared whole and the ones that differ are counted and listed as `changed`.
+  As in `cmp.py`, `missing` counts the rows A has and B lacks without naming
+  them.
 - `price.py [RUN]` states ruling 14's price per opening of lane R's `price/`
   and `soft/` books against 56dfd93 and 9297d2d, as the round reports state it.
 
@@ -232,9 +245,10 @@ git worktree remove ../rtl-at-56dfd93
 ```
 
 `pack.py` refuses a run without its `done` marker and writes every normalised
-output and TSV with `xz -9` in the layout of `baselines/`. Compare the packed
-directory with the committed one (`cmp.py`, `tsvdiff.py`) before replacing
-anything: a baseline that moves when nothing under it changed is a finding,
+output and TSV with `xz -9` in the layout of `baselines/`. `--note` puts a `#`
+line at the top of each normalised output; the TSVs are copied as the probes
+wrote them, with no note. Compare the packed directory with the committed one
+(`cmp.py`, `tsvdiff.py`) before replacing anything: a baseline that moves when nothing under it changed is a finding,
 not a refresh. A family that calls an API the commit does not have fails to
 compile there, and its output says so (`zz_fv_shape` and `zz_code1_time` at
 9297d2d, which has no `bidi::drawn_reading`).
@@ -266,9 +280,14 @@ and 0 in the default build, the counts recorded.
 
 ## Where the baselines came from
 
-`baselines/<commit>/<build>/<family>.txt.xz`, and the TSVs beside them, are the
-rounds' own outputs, normalised by `rtlkit.normalise` and compressed. Each file
-opens with a `#` line saying what it is.
+`baselines/<commit>/<build>/<family>.txt.xz` are the rounds' own outputs,
+normalised by `rtlkit.normalise` and compressed, and each opens with a `#` line
+saying what it is. The 17 TSVs beside them are not: they carry no `#` line
+and are not normalised. Each `.tsv.xz` is a probe's TSV as the probe wrote it,
+compressed and nothing else: `lines/bct-auto`, `wrapped`, `sent` and `laneR`
+at each tree, and `zz_code1_tdprobe` in both builds at 9297d2d and 935b077 and
+in the default build at 56dfd93. Rerun at 935b077 with `run.sh`, the line
+probes and the td probe, in both builds, write theirs byte for byte.
 
 - **935b077**: the second CD-19 fix's last full run of every family, both
   builds, on 7f1b3f8, whose code is 935b077's: `paint.rs` differs in doc

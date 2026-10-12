@@ -22,6 +22,8 @@
 #   OUTDIR/progress                    one line per family as it finishes
 #   OUTDIR/<build>/raw/<family>.txt    cargo's output, then "exit N"
 #   OUTDIR/<build>/<family>.txt        the normalised output (norm.py)
+#   OUTDIR/lines/<name>.tsv            the line probes' TSVs, as they write them
+#   OUTDIR/<build>/<family>.tsv        the td probe's TSV ($ZZ_OUT), as it writes it
 #   OUTDIR/<build>/<family>.exit       cargo's exit status
 #   OUTDIR/<build>/done                written last: families run, and those whose exit was not 0
 #   OUTDIR/done                        written when every requested build is done
