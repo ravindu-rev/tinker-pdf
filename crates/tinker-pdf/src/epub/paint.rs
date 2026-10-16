@@ -1152,21 +1152,32 @@ impl<'a> Fonts<'a> {
     /// model said read it alone, was read with the word before it, `!?`.
     ///
     /// So the line is drawn into the reader itself — the text objects
-    /// [`plan_coded`] would write, each glyph where it would stand, fed to a
+    /// [`plan_coded`] would write, each glyph where the page has it, under
+    /// the matrix the page draws its run under ([`OnPage::matrix`]), and read
+    /// back as the page's font gives it back ([`Segment::read_as`]), fed to a
     /// `TextDevice` and read in logical order — and the text it reads is
-    /// held to the line's own, its runs' text in the order written, white
-    /// space aside. Where they differ, each run is drawn another way in turn:
-    /// its neutrals in the other order ([`Drawing::level_order`]), or its
-    /// slice cut otherwise into text objects ([`Cut`]); then two runs at a
-    /// time, within [`READINGS_PER_LINE`]. The first drawing that reads the
-    /// line right is the one drawn. A line the rules' drawing reads right, or
-    /// that no drawing tried reads right, is drawn by the rules, byte for
-    /// byte as before; and a line with no right-to-left character, or a run
-    /// of a face of the book's own, which [`plan_coded`] does not draw, is
-    /// not read.
+    /// held to the line's own so read, its runs' text in the order written:
+    /// its words ([`Words`]). Where they differ, each run is drawn another
+    /// way in turn: its neutrals in the other order ([`Drawing::level_order`]),
+    /// or its slice cut otherwise into text objects ([`Cut`]); then two runs
+    /// at a time, within [`READINGS_PER_LINE`] ([`Fonts::search`]). The first
+    /// drawing that reads the line's words right is the one drawn; where none
+    /// does, the first that reads its letters in order, unless the rules'
+    /// drawing reads them so itself; and none that sets more glyphs over
+    /// others than the rules' ([`drawn_over`]). Under a transform, a line
+    /// nothing tried reads right on the page is searched again in its runs'
+    /// own space, and what that finds is drawn only where it reads closer to
+    /// the line on the page than the rules' drawing ([`Fonts::reads_closer`]).
+    /// A line the rules' drawing reads right, or that no drawing tried reads
+    /// right, is drawn by the rules; and a line with no right-to-left
+    /// character, or a run of a face of the book's own, which [`plan_coded`]
+    /// does not draw, is not read.
     ///
     /// The work is linear in the line, once a reading, and a line is read at
-    /// most [`READINGS_PER_LINE`] times.
+    /// most [`READINGS_PER_LINE`] times, twice that and twice more under a
+    /// transform. It is not free: a line that no drawing reads right spends
+    /// the whole budget, and opening a book of such lines takes up to some
+    /// eighty times as long as with no read-back (ROADMAP CD-19).
     pub fn set_readings(&self, runs: &[TextRun], frame: &Frame, effects: &OnPage<'_>) {
         let painted: Vec<&TextRun> = runs
             .iter()
@@ -1213,8 +1224,12 @@ impl<'a> Fonts<'a> {
                 Search::Nothing if matrices.iter().any(|matrix| *matrix != IDENTITY) => {
                     let own = vec![IDENTITY; line.len()];
                     match self.search(&line, &own, frame, &written, &options) {
-                        Search::Found(found) => Some(found),
-                        Search::Rules | Search::Nothing => None,
+                        Search::Found(found)
+                            if self.reads_closer(&line, &matrices, frame, &written, &found) =>
+                        {
+                            Some(found)
+                        }
+                        Search::Found(_) | Search::Rules | Search::Nothing => None,
                     }
                 }
                 Search::Nothing => None,
@@ -1230,7 +1245,8 @@ impl<'a> Fonts<'a> {
     /// rules' drawing where it reads the line's words right; else the first
     /// drawing of one run, then of two, within [`READINGS_PER_LINE`]
     /// readings, that does; else, where the rules' drawing does not read the
-    /// line's letters right, the first that does; else nothing.
+    /// line's letters right, the first that does; else nothing. A drawing
+    /// that sets more glyphs over others than the rules' is never taken.
     fn search(
         &self,
         line: &[&TextRun],
@@ -1302,6 +1318,33 @@ impl<'a> Fonts<'a> {
         }
         let first = letters_only.borrow_mut().take();
         first.map_or(Search::Nothing, Search::Found)
+    }
+
+    /// Whether `found`, a drawing [`Fonts::search`] found reading `line` right
+    /// in its runs' own space where nothing it tried reads it right on the
+    /// page, reads the line's letters closer to the order written on the page
+    /// than the rules' drawing does there — more of the text's pairs of
+    /// letters in order ([`Words::pairs_in`]) — and sets no more glyphs over
+    /// others there. A drawing found right in a space that is not the page's
+    /// is no better than a guess on the page: a styled `?!` turned for a
+    /// reading in which it joined its word read `!?` alone on the page under
+    /// `scaleX(2)`, where the rules' drawing read it right.
+    fn reads_closer(
+        &self,
+        line: &[&TextRun],
+        matrices: &[[f64; 6]],
+        frame: &Frame,
+        written: &Words,
+        found: &BTreeMap<RunKey, Drawing>,
+    ) -> bool {
+        let Some((rules, over_by_rules)) = self.read_back(line, matrices, frame, &BTreeMap::new())
+        else {
+            return false;
+        };
+        let Some((read, over)) = self.read_back(line, matrices, frame, found) else {
+            return false;
+        };
+        over <= over_by_rules && written.pairs_in(&read) > written.pairs_in(&rules)
     }
 
     /// The text objects [`plan_coded`] writes for the whole of `run` drawn as
@@ -4264,6 +4307,33 @@ impl Words {
             letters: text.chars().filter(|c| !c.is_whitespace()).collect(),
             words: text.split_whitespace().collect::<Vec<_>>().join(" "),
         }
+    }
+
+    /// How many of the line's pairs of letters, each letter and the one
+    /// written after it, `read` reads in that order, each pair counted as
+    /// often as the text has it: how near a reading that is not the text's
+    /// comes to it, in time linear in the two, near enough.
+    fn pairs_in(&self, read: &str) -> usize {
+        let mut wanted: BTreeMap<(char, char), usize> = BTreeMap::new();
+        let mut before: Option<char> = None;
+        for ch in self.letters.chars() {
+            if let Some(first) = before {
+                *wanted.entry((first, ch)).or_default() += 1;
+            }
+            before = Some(ch);
+        }
+        let mut found = 0;
+        let mut before: Option<char> = None;
+        for ch in read.chars().filter(|c| !c.is_whitespace()) {
+            if let Some(left) = before.and_then(|first| wanted.get_mut(&(first, ch))) {
+                if *left > 0 {
+                    *left -= 1;
+                    found += 1;
+                }
+            }
+            before = Some(ch);
+        }
+        found
     }
 
     /// How `read`, a reading of the line (its lines joined by a line feed),

@@ -3650,7 +3650,13 @@ fn signs_and_numbers(sentences: usize) -> String {
 /// `word-spacing: 1em` three such sentences conserved at 56dfd93 only because
 /// the overflow font's moved glyphs drew the bold word apart around its sign;
 /// at `0 Tw` no drawing the read-back tries reads the line right (ROADMAP
-/// CD-19, Left (6)), pinned. The controls read as they did: no transform,
+/// CD-19, Left (6)), pinned. A line nothing tried reads right on the page is
+/// searched again in its runs' own space, and what that finds is drawn only
+/// where it reads closer to the line on the page than the rules' drawing
+/// (`paint::Fonts::reads_closer`): taken as found, it turned the third `?!`
+/// of the sweep's punctuation shape, with no `dir`, under `scaleX(2)` for a
+/// reading only that space has, and the book, which conserved at 56dfd93,
+/// did not. The controls read as they did: no transform,
 /// `scale(2)`, whose gaps keep their size against the glyphs, `scaleY(2)` and
 /// a Latin paragraph, which is not read back.
 #[test]
@@ -3733,6 +3739,26 @@ fn a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on() {
             style,
             format!("<p dir=\"rtl\">{}</p>", styled_marks(&words)),
             expect,
+        ));
+    }
+    // With no `dir`, where nothing the read-back tries reads a line right on
+    // the page: what a search in the runs' own space finds turned the third
+    // `?!` for a reading in which it joined its word, and on the page it read
+    // `!?` alone, where the rules' drawing reads it right. They conserved at
+    // 56dfd93, and not at 935b077.
+    for style in [
+        "p { margin: 0 30%; transform: scaleX(2); word-spacing: 0.6em } .w { transform: none }",
+        "p { margin: 0 30%; transform: scaleX(3); word-spacing: 0.6em } .w { transform: none }",
+        "p { margin: 0 30%; transform: scaleY(0.5); word-spacing: 0.6em } .w { transform: none }",
+        "p { margin: 0 30%; transform: matrix(1.6, 0, 0, 0.8, 0, 0); word-spacing: 0.6em } .w { transform: none }",
+        "p { margin: 0 30%; transform: none; word-spacing: 0.6em } .w { transform: scaleX(2) }",
+    ] {
+        cases.push(Case::both(
+            "the punctuation shape with no dir under a transform at 0.6em (f6 sweep)",
+            "he",
+            style,
+            format!("<div class=\"w\"><p>{}</p></div>", styled_marks(&HE)),
+            Expect::Holds("cons logical found"),
         ));
     }
     check(&cases);

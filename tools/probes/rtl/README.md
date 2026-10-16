@@ -106,6 +106,11 @@ group, test threads and kind. Books a build at 935b077:
 | `td` | `zz_code1_tdprobe` | 12 084 cases | content streams built by hand | the round-5 review |
 | `lines` | `zz_k11rv_bidi`, `zz_k11rv2_sent`, `zz_laneR_lines`, `zz_fv_shape` | lines: 91 616 of the conformance file, 2 235 + 13 300 of sentences, 36 724 of lane R's, and 8 | ruling 14 over the conformance file and over wrapped sentences | the K-11 reviews, lane R |
 | `timing` | `zz_code1_scale`, `zz_h2scale`, `zz_code1_time` | | linear time | the round-5 review and the CD-19 fix review |
+| `v6` | eight `zz_v6_*` | 8 472 | nested inline styles, lists and generated content, spacing units and the `0.45em` and `0.5em` thresholds, supplementary-plane scripts, numbers with every separator, table cells, measures, `dir=auto` and `<bdi>` | round 6's hunt (lane V) |
+| `v6t` | `zz_v6_transform` | 1 120 | CSS transforms and tight line heights under spacing | round 6's hunt (lane V) |
+| `f6` | `zz_f6_transform` | 3 654 | the class of the hunt's V1: a scale of one axis or both, turns, skews, a matrix and a shift, on the paragraph, its block, both and an inline block, under spacing and none | round 6's fix (lane F) |
+| `v6pdf` | `zz_v6_pdf` | 540 | plain synthetic PDFs drawn as producers draw right-to-left lines, read by ruling 14 (no EPUB) | round 6's hunt (lane V) |
+| `v6time` | `zz_v6_time` | | what reading each line back costs `Document::open`, at doubling sizes | round 6's hunt (lane V) |
 
 Each `zz_vx_*` family is an earlier family with a shim around
 `styled_book` that prints a `VOVX` line a book: `zz_vx_k11rv_ext` is
