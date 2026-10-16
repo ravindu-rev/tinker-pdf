@@ -1741,7 +1741,7 @@ fix was to sharpen the injection rather than to shrug at the number.
   cargo test -p tinker-pdf-shape --test rtl_lines -- --ignored --nocapture
   ```
 
-  A whole run prints 63, 63 and 4 `RAN` lines (`grep -c '^RAN'`); fewer is a
+  A whole run prints 75, 75 and 4 `RAN` lines (`grep -c '^RAN'`); fewer is a
   family that did not run, and a run is read by its banners, its `test
   result` and its exit status together. They take 13 and 15 minutes and 10
   seconds in debug on four cores, and run on demand: no workflow runs them

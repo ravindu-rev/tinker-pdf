@@ -108,7 +108,7 @@ group, test threads and kind. Books a build at 935b077:
 | `timing` | `zz_code1_scale`, `zz_h2scale`, `zz_code1_time` | | linear time | the round-5 review and the CD-19 fix review |
 | `v6` | eight `zz_v6_*` | 8 472 | nested inline styles, lists and generated content, spacing units and the `0.45em` and `0.5em` thresholds, supplementary-plane scripts, numbers with every separator, table cells, measures, `dir=auto` and `<bdi>` | round 6's hunt (lane V) |
 | `v6t` | `zz_v6_transform` | 1 120 | CSS transforms and tight line heights under spacing | round 6's hunt (lane V) |
-| `f6` | `zz_f6_transform` | 3 654 | the class of the hunt's V1: a scale of one axis or both, turns, skews, a matrix and a shift, on the paragraph, its block, both and an inline block, under spacing and none | round 6's fix (lane F) |
+| `f6` | `zz_f6_transform`, `zz_f6_ems` | 3 654 + 264 | the class of the hunt's V1: a scale of one axis or both, turns, skews, a matrix and a shift, on the paragraph, its block, both and an inline block, under spacing and none; and the edges of its fix: two cells whose gap is near half an em, inline blocks of about half an em, marks of no advance opening a styled run, under no transform, a scale of one axis and a skew | round 6's fix (lane F) |
 | `v6pdf` | `zz_v6_pdf` | 540 | plain synthetic PDFs drawn as producers draw right-to-left lines, read by ruling 14 (no EPUB) | round 6's hunt (lane V) |
 | `v6time` | `zz_v6_time` | | what reading each line back costs `Document::open`, at doubling sizes | round 6's hunt (lane V) |
 
@@ -151,7 +151,7 @@ Every family a ratchet reads is also a committed test, in two `#[ignore]`d
 integration-test binaries, so that CI compiles two binaries and not seventy:
 
 - `crates/tinker-pdf/tests/rtl_probes.rs`: one test a `rows` or `tsv` family
-  of [families.tsv](families.tsv), 63 in all, each its module under
+  of [families.tsv](families.tsv), 75 in all, each its module under
   `rtl_probes/`; the harness the rr3m families share is
   `rtl_probes/common.rs`, the overprint shim of the `zz_vx_*` families
   `rtl_probes/vov.rs`, and the comparison `rtl_probes/ratchet.rs`;
@@ -177,7 +177,7 @@ RAN rtl_lines zz_k11rv_bidi against 935b077: 93851 rows, 2 printed lines; 0 wors
 
 then a `WORSE`, `GAIN` or `CHANGED` line for each book that moved (up to 40 of
 each), and fails if any book reads worse than at 935b077 in that build. A run
-of the three commands prints 63, 63 and 4 `RAN` lines; fewer means a family
+of the three commands prints 75, 75 and 4 `RAN` lines; fewer means a family
 did not run. Worse is any of:
 
 - a book the baseline has and the run lacks, or fewer rows;

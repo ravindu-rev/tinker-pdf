@@ -1760,8 +1760,14 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
 /// e7ca679 (held); the paragraph alone, its own first letter at code 32,
 /// reads as at every tree (a guard). And with them, H4(2) of the same review:
 /// a right-to-left paragraph of the same words letter-spaced and justified
-/// reads `٢٠١٠ .۴۵` where 9297d2d read it whole (Left (4)), pinned in a
-/// default build.
+/// read `٢٠١٠ .۴۵` at 935b077 in a default build, where 9297d2d read it
+/// whole; read back as the page's fonts give its characters back since round
+/// 6 (`paint::Segment::read_as`), it reads whole again (held). V2 of round
+/// 6's hunt is the same tie-break at a closing bracket, which it refuses as
+/// it does a number: `<p>שלום.<br/>בראשית (אלהים).</p>` letter-spaced, a
+/// number at spacings the review did not name, and with `bundled-fonts`
+/// Arabic, each conserving at 9297d2d and 56dfd93 and lost since e7ca679
+/// wrote the overflow font at `0 Tw` (pinned).
 #[test]
 fn a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop() {
     let worded = "p { word-spacing: 0.5em }";
@@ -1905,7 +1911,13 @@ fn a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop() {
 /// `12px` by 935b077's read-back, which centres the word space styled apart
 /// in its stretch (held); before a bare gloss and a Latin tail at `2em`, no
 /// placement of the space parts the stretch into halves a reader resumes a
-/// line across (Left (3)), pinned in a default build.
+/// line across (Left (3)), pinned in a default build. And V3 of round 6's
+/// hunt: two right-to-left cells of a table with no `dir`, touching, at
+/// `word-spacing: 1em`, which K-11's reader joins into one line that holds
+/// nothing left to right and whose left end is the second cell's `)`, so the
+/// comma tie-break does not take it and the stop is read first: they
+/// conserved at 9297d2d, and since 56dfd93, whose content stream is 9297d2d's
+/// byte for byte, they read from the right (Left (4)), pinned.
 #[test]
 fn a_dirless_line_with_a_right_to_left_gloss() {
     let px12 = "p { word-spacing: 12px }";
