@@ -2578,8 +2578,8 @@ fn readings_to_open(book: Vec<u8>) -> usize {
 /// together, is kept now, as 935b077 kept it: the line is read back once;
 /// what searching on finds is the owner's to price (ROADMAP CD-19). Held by
 /// count, as `paint::step` holds `cut_run`, not by a clock. A line whose
-/// rules' drawing a reader reads the letters of out of order is still
-/// searched, and read right (a guard).
+/// rules' drawing a reader reads the letters of out of order, a styled `?!`
+/// glued to an Arabic word, is still searched, in either build (a guard).
 #[test]
 fn a_line_whose_rules_drawing_reads_its_letters_in_order_is_read_back_once() {
     let he = [
@@ -2611,9 +2611,9 @@ fn a_line_whose_rules_drawing_reads_its_letters_in_order_is_read_back_once() {
         "a line whose rules' drawing runs two words together was read back {joined} times"
     );
     let turned = readings_to_open(stored_book(
-        "he",
+        "ar",
         "p { word-spacing: 0.6em }",
-        "<p dir=\"rtl\">שלום <b>?!</b> עולם.</p>",
+        "<p dir=\"rtl\">كتاب <b>?!</b> مدرسة.</p>",
     ));
     assert!(
         turned > 1,

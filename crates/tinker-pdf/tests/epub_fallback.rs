@@ -3821,33 +3821,48 @@ fn a_line_is_read_back_as_the_pages_fonts_give_its_characters_back() {
     ]);
 }
 
-/// **A reading that cuts a word or runs two together is not the line's
-/// text** (round 6's lane F, the sweep of V1's class).
+/// **A reading that cuts a word or runs two together is taken for the line's
+/// text, as 935b077 took it** (round 6's lane F, the sweep of V1's class),
+/// pinned.
 ///
-/// The read-back held a reading to the line's letters, white space aside, so
-/// a drawing that a reader reads with a word run into the next, or cut, was
-/// taken as right, and search and reading the block whole lost it: a styled
-/// `?!` glued to a Hebrew word at `word-spacing: 0.6em` conserved and read
-/// `שלום?! עולם.`, its word space gone. A drawing the read-back tries is
-/// taken now where its words are the line's, each run of white space one
-/// space (`paint::Words`); where none tried reads the words right, the
-/// first that reads the letters right is drawn, as before. The rules'
-/// drawing is kept where it reads the letters in order itself, as 935b077
-/// kept it (`paint::Read::Letters`): a sign after European digits before a
-/// bold word at `word-spacing: 1em`, which a reader runs into the word
-/// before it on that drawing, `كتاب25٪`, reads so, as at 935b077, and
-/// searching on finds a drawing that reads it whole, at a cost in time that
-/// is the owner's to price (ROADMAP CD-19; pinned).
+/// The read-back holds a reading to the line's letters, white space aside,
+/// as 935b077 held it: a drawing that a reader reads with a word run into
+/// the next, or cut, is taken for the line's text (`paint::Read::Letters`).
+/// A styled `?!` glued to a Hebrew word at `word-spacing: 0.6em` conserves
+/// and reads `שלום?! עולם.`, its word space gone, in a default build, as at
+/// 935b077; a sign after European digits before a bold word at
+/// `word-spacing: 1em`, which a reader runs into the word before it on the
+/// rules' drawing, reads `كتاب25٪`; and so does an Arabic paragraph of styled
+/// stops and brackets at `line-height: 0.6`. Holding each drawing tried to
+/// the line's words reads the first and the last whole, and searching on
+/// past the rules' drawing where it runs two words together reads the
+/// second whole; each costs a justified paragraph of such lines some times
+/// its time to open, the owner's to price (ROADMAP CD-19). Under
+/// `scaleY(2)`, letter-spaced and justified, three such number sentences
+/// read whole (a guard).
 #[test]
-fn a_reading_that_cuts_or_joins_a_word_is_not_taken_for_the_lines_text() {
-    let right = Expect::Holds("cons logical whole found apart");
+fn a_reading_that_cuts_or_joins_a_word_is_taken_as_935b077_took_it() {
     let joined = Expect::Pinned("cons logical found apart");
     check(&[
-        Case::both("a styled ?! glued to a Hebrew word at 0.6em", "he", "p { word-spacing: 0.6em }", "<p dir=\"rtl\">שלום <b>?!</b> עולם.</p>", right),
-        Case::both("the same under scale(2)", "he", "p { transform: scale(2); word-spacing: 0.6em }", "<p dir=\"rtl\">שלום <b>?!</b> עולם.</p>", right),
+        Case::each(
+            "a styled ?! glued to a Hebrew word at 0.6em",
+            "he",
+            "p { word-spacing: 0.6em }",
+            "<p dir=\"rtl\">שלום <b>?!</b> עולם.</p>",
+            joined,
+            Expect::Holds("cons logical whole found apart"),
+        ),
+        Case::each(
+            "the same under scale(2)",
+            "he",
+            "p { transform: scale(2); word-spacing: 0.6em }",
+            "<p dir=\"rtl\">שלום <b>?!</b> עולם.</p>",
+            joined,
+            Expect::Holds("cons logical whole found apart"),
+        ),
         Case::both("a sign after European digits before a bold word at 1em", "ar", "p { margin: 0 30%; word-spacing: 1em }", format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(1)), joined),
         Case::both("two such sentences at 1em", "ar", "p { margin: 0 30%; word-spacing: 1em }", format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(2)), joined),
-        Case::both("the punctuation shape at line-height 0.6", "ar", "p { margin: 0 30%; line-height: 0.6; word-spacing: 0.6em }", format!("<p dir=\"rtl\">{}</p>", styled_marks(&AR)), right),
+        Case::both("the punctuation shape at line-height 0.6", "ar", "p { margin: 0 30%; line-height: 0.6; word-spacing: 0.6em }", format!("<p dir=\"rtl\">{}</p>", styled_marks(&AR)), joined),
         Case::both(
             "three number sentences under scaleY(2), letter-spaced and justified (guard)",
             "ar",
