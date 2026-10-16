@@ -3596,3 +3596,111 @@ fn a_word_of_an_overflow_script_an_inline_block_cuts_reads_as_a_latin_word_does(
         Case::both("Adlam (hunt, as at every tree)", "ff", "", "<p>𞤀𞤣𞤤𞤢𞤥 𞤆𞤵𞤤𞤢𞤪.</p>", Expect::Pinned("apart")),
     ]);
 }
+
+/// **A line drawn under a CSS transform is read back on the page it is drawn
+/// on** (lane V of round 6, V1; ROADMAP CD-19).
+///
+/// The writer reads each line that holds a right-to-left character back as a
+/// reader of the page reads it (`paint::Fonts::set_readings`), and decides
+/// which runs a reader may part (`paint::parted`, `paint::page_lines`). A
+/// transform puts a `cm` before the text (`paint::OnPage::open`), and on the
+/// page a scale of one axis widens or narrows every gap against the glyphs'
+/// size, which is what a reader's thresholds are in. Read back with no
+/// matrix, a styled `?!` glued to a Hebrew word at `word-spacing: 0.6em`
+/// under `scaleX(2)` was read with the word and drawn turned for that
+/// reading, and on the page, where the gap is wider, it was read alone and
+/// turned: `שלום!? עולם.`, where 9297d2d, 56dfd93 and the tree before the
+/// read-back read `שלום?! עולם.`. The writer's rules model the same reader:
+/// `25٪ <b>W</b>` in Arabic under `scaleX(1.4)`, conserving at 56dfd93, read
+/// its sign before its number since round 5, and a half turn at
+/// `word-spacing: 1em` lost the same book's content order. Each line is read
+/// back under the matrix the page draws it under now (`paint::OnPage::matrix`)
+/// and every rule that asks whether a reader parts two text objects asks it
+/// in the page's ems (`paint::along_the_line`): under `scaleX(3)` a letter
+/// spacing of `0.3em` parts the line on the page, and the line reads right
+/// only drawn for that.
+///
+/// The controls read as they did before: no transform, `scale(2)` (both axes
+/// alike, so no gap moves against the glyphs) and `scaleY(2)`.
+#[test]
+fn a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on() {
+    let right = Expect::Holds("cons logical whole found apart");
+    let he = "<p dir=\"rtl\">שלום <b>?!</b> עולם.</p>";
+    let ar = "<p dir=\"rtl\">كتاب <b>?!</b> مدرسة.</p>";
+    let s = |i: usize| word(&AR, i);
+    let num = |sentences: usize| {
+        rep(sentences, |i| {
+            format!(
+                "{} 25\u{66A} <b>{}</b> \u{661}\u{662}\u{663} {} 2010\u{60C} {}.",
+                s(i),
+                s(i + 1),
+                s(i + 2),
+                s(i + 3)
+            )
+        })
+    };
+    let prose = |w: &[&'static str; 12]| {
+        rep(3, |i| {
+            format!(
+                "{} {} {}\u{60C} {} {} {}.",
+                word(w, i),
+                word(w, i + 1),
+                word(w, i + 2),
+                word(w, i + 3),
+                word(w, i + 4),
+                word(w, i + 5)
+            )
+        })
+    };
+    check(&[
+        Case::both("a styled ?! glued to a Hebrew word under scaleX(2) at 0.6em (V1)", "he", "p { transform: scaleX(2); word-spacing: 0.6em }", he, right),
+        Case::both("the same at 1em (V1)", "he", "p { transform: scaleX(2); word-spacing: 1em }", he, right),
+        Case::both("the same under scaleX(1.4) at 1em (V1)", "he", "p { transform: scaleX(1.4); word-spacing: 1em }", he, right),
+        Case::both(
+            "the same with no dir (V1)",
+            "he",
+            "p { transform: scaleX(2); word-spacing: 0.6em }",
+            "<p>שלום <b>?!</b> עולם.</p>",
+            Expect::Holds("cons logical found apart"),
+        ),
+        Case::both("a styled ?! glued to an Arabic word under scaleX(2) (V1)", "ar", "p { transform: scaleX(2); word-spacing: 0.6em }", ar, right),
+        Case::both(
+            "a sign after European digits before a bold word under scaleX(1.4) (V1, since round 5)",
+            "ar",
+            "p { margin: 0 30%; transform: scaleX(1.4); word-spacing: 0.6em }",
+            format!("<p dir=\"rtl\">{}</p>", num(1)),
+            Expect::Holds("cons logical found apart"),
+        ),
+        Case::both(
+            "the same under a half turn at 1em (V1, since round 5)",
+            "ar",
+            "p { margin: 0 30%; transform: rotate(180deg); word-spacing: 1em }",
+            format!("<p dir=\"rtl\">{}</p>", num(3)),
+            Expect::Holds("cons logical found apart"),
+        ),
+        Case::both(
+            "Hebrew prose under scaleX(3), letter-spaced by 0.3em (the gates, f6 sweep)",
+            "he",
+            "p { margin: 0 30%; transform: scaleX(3); letter-spacing: 0.3em }",
+            format!("<p dir=\"rtl\">{}</p>", prose(&HE)),
+            Expect::Holds("cons logical found"),
+        ),
+        Case::both(
+            "Arabic prose under scaleX(3), letter-spaced by 0.3em (the gates, f6 sweep)",
+            "ar",
+            "p { margin: 0 30%; transform: scaleX(3); letter-spacing: 0.3em }",
+            format!("<p dir=\"rtl\">{}</p>", prose(&AR)),
+            Expect::Holds("cons logical found"),
+        ),
+        Case::both("no transform (control)", "he", "p { word-spacing: 0.6em }", he, Expect::Holds("cons logical found apart")),
+        Case::both("scale(2), both axes alike (control)", "he", "p { transform: scale(2); word-spacing: 0.6em }", he, Expect::Holds("cons logical found apart")),
+        Case::both("scaleY(2) (control)", "he", "p { transform: scaleY(2); word-spacing: 0.6em }", he, right),
+        Case::both(
+            "a Latin paragraph under scaleX(2) at 1em, no right-to-left character (guard)",
+            "en",
+            "p { transform: scaleX(2); word-spacing: 1em }",
+            "<p>The word <b>?!</b> means <i>peace</i>, (here) 25%.</p>",
+            right,
+        ),
+    ]);
+}
