@@ -11,7 +11,10 @@ delete it in the same commit that moves the work on.
 - On 12 October 2026 the owner paused the work on a side branch,
   `rtl-probe-kit`.
 - On 16 October the owner had it brought back. It was fast-forwarded into
-  `develop` (`b9b6970`, signed hashes kept) and then deleted.
+  `develop` (`b9b6970`, signed hashes kept), and its local copy was deleted.
+- The remote `rtl-probe-kit` still has to be deleted by the owner on GitHub,
+  with the stale `wave8/8A-impl` and `wave8/8B-impl`: this session's proxy
+  refuses branch deletion. All three are fully contained in `develop`.
 - Round 6 picks up from "Next, in this order" below.
 
 ## State
