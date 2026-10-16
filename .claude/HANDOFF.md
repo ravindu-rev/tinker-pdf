@@ -75,32 +75,24 @@ item below, with the counts measured on `935b077`.
     ever conserved);
   - `5°<i>W</i>.`: 2 (2) books.
 
-## Known issues in the probe kit
+## Known issues in the probe kit: fixed
 
 The kit's own verification, run from its README on a fresh checkout,
-reproduced the `935b077` baselines byte for byte. It also found these, left
-for the next session:
+reproduced the `935b077` baselines byte for byte, and found six issues in the
+kit. Round 6's lane K fixed all six on 16 October 2026, in the commit that
+changed this paragraph; its message has the measurements:
 
-1. **Ctrl-C does not stop a run.** `run.sh`'s INT trap never fires while
-   cargo runs, so Ctrl-C skips one family and still writes the done markers.
-2. **`RV4C_FILTER` is not unset.** `run.sh` leaves it set, and
-   `zz_vx_rv4code` reads it. The README's list of filters omits it.
-3. **A false provenance line.** The README, the baseline note lines and
-   `c4c456e`'s message say the `935b077` baseline ran on `7f1b3f8`, whose
-   "paint.rs differs in doc comments only". In fact the two commits' `crates/`
-   trees are identical; they differ only in `.claude/`, `.gitignore`,
-   `AGENTS.md` and `CLAUDE.md`.
-4. **Partial runs are misreported.** `table.py --by group` on a partial run
-   reports the families it did not run as changed (fixtures, `LINE`). Use
-   `--families` until this is fixed.
-5. **The README's data-line table is incomplete.** It omits `VOV`, `TALLY`
-   and the td probe's `ZZ` lines, and `rtlkit.Output` does not parse them,
-   so the comparators would miss a change in them.
-6. **Nits:**
-   - `--help` is broken in `price.py` and `classes.py`;
-   - the README leaves the `progress` file out of its output list;
-   - `run.sh` creates an empty `lines/` directory;
-   - nothing outside the kit's README mentions the kit.
+1. an interrupt now stops the whole run and writes no done marker, however
+   it arrives (Ctrl-C, a signal to the runner, or one to cargo or the test
+   binary alone, which used to cost one family and still write the markers);
+2. the runner unsets every variable a probe reads, `RV4C_FILTER` included,
+   read off the probes;
+3. the `935b077` baseline's provenance says what is true: `7f1b3f8`'s
+   `crates/` tree is `935b077`'s;
+4. `table.py` and `cmp.py` leave out a family a partial run did not run;
+5. `VOV`, `TALLY`, `ZZ` and `PANIC` lines are parsed and compared;
+6. every script answers `--help`, the README names `progress`, `lines/` is
+   made only for a line probe, and `docs/verification.md` points at the kit.
 
 The 77 tests in `probes/regressions/` are the verifiers' repro tests. Each
 asserts what its finding said a book did at the tree its verifier used, so
@@ -109,10 +101,10 @@ is expected. Read them finding by finding before turning any into a guard.
 
 ## Next, in this order
 
-1. **Fix the kit's known issues above.** Then turn the probe kit into
-   `#[ignore]`d suites, per AGENTS.md, so every family runs with
-   `cargo test -- --ignored` and prints a `RAN` banner. Commit a test for
-   every case the families found, even the small ones.
+1. **Turn the probe kit into `#[ignore]`d suites,** per AGENTS.md, so every
+   family runs with `cargo test -- --ignored` and prints a `RAN` banner.
+   Commit a test for every case the families found, even the small ones.
+   (The kit's known issues, the first half of this step, are fixed.)
 2. **Run the round-2 verification that was skipped,** and a fresh hunt, on
    `develop`. Both baselines apply: `9297d2d` and `56dfd93`.
 3. **Put the three owner decisions above to the owner:** H1, H2-3 and H6.

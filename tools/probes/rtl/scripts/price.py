@@ -44,6 +44,7 @@ GROUPS = {
 
 def main():
     args = sys.argv[1:]
+    K.help_requested(args, __doc__)
     opts = {'--base': '9297d2d', '--mid': '56dfd93', '--tip': '935b077', '--builds': 'default,bundled'}
     for flag in list(opts):
         if flag in args:

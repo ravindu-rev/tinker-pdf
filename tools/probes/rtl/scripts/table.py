@@ -22,8 +22,15 @@ Columns, per family and build:
   +T         (with NEW) books conserving now and not at T
   over-ws    books drawing a glyph over another under word spacing or
              justification (the rr3m lines' overlap, TWROW's vov), B/M/T[/NEW]
-  notes      VOVX books with overprint, probe_paren's failing keys, fixtures
-             changed, ZZN overprint, exit status when not 0
+  notes      VOVX books with overprint, VOV books (the rr3m books drawing a glyph
+             over another, any spacing), probe_paren's failing keys, fixtures
+             changed, ZZN overprint, the td probe's ZZ row count,
+             zz_vx_k11rv_dirless's TALLY of lines misread, books whose probe
+             panicked (PANIC), exit status when not 0
+With NEW, a family NEW has no output for is absent from the table, not a
+family that lost every book: the families of the baselines a partial run did
+not run are named in one line under the build's table, and the groups of
+--by group add up only the families NEW ran.
 --show N lists up to N books of each of >B, >M, >T with their metrics at each
 tree: c conserving, t read whole, s found by search, h holds; 1 true, 0 false.
 Under each build's table, the verifiers' repro tests (group regressions) show
@@ -101,6 +108,17 @@ def compare(fam, outs, new):
             f', vs T {sum(1 for k in T.fix if now.fix.get(k) != T.fix[k])}' if new else ''))
     if any(o.zzn for o in outs):
         notes.append('ZZN overprinted ' + '/'.join(str(sum(1 for x in o.zzn.values() if x)) if o.path else '-' for o in outs))
+    if any(o.vov for o in outs):
+        notes.append('VOV books ' + '/'.join(str(len(o.vov)) if o.path else '-' for o in outs) + (
+            f', rose vs T {sum(1 for k, (n, _) in now.vov.items() if k in T.rows and n > T.vov.get(k, (0, ""))[0])}'
+            if new else ''))
+    if any(o.zz for o in outs):
+        notes.append('ZZ rows ' + '/'.join(str(o.zz.get('rows', '-')) if o.path else '-' for o in outs))
+    if any(o.tally for o in outs):
+        notes.append('TALLY misread ' + '/'.join(
+            f'{K.tally_misread(o)} of {K.tally_lines(o)}' if o.tally else '-' for o in outs))
+    if any(o.panics for o in outs):
+        notes.append('PANIC ' + '/'.join(str(len(o.panics)) if o.path else '-' for o in outs))
     if any(o.lines for o in outs):
         ref_lines = T.lines if new else M.lines
         notes.append(f"LINE lines {'/'.join(str(sum(o.lines.values())) if o.path else '-' for o in outs)}, "
@@ -134,6 +152,7 @@ def summary_lines(o):
 
 def main():
     args = sys.argv[1:]
+    K.help_requested(args, __doc__)
     opts = {'--base': '9297d2d', '--mid': '56dfd93', '--tip': '935b077', '--builds': 'default,bundled,lines',
             '--families': '', '--by': 'family', '--show': '0', '--json': None}
     for flag in list(opts):
@@ -160,7 +179,14 @@ def main():
             fams.update(K.families_in(d, build))
         fams = [f for f in order if f in fams] + sorted(f for f in fams if f not in order)
         fams = [f for f in fams if (not pat or pat.search(f)) and kind_of.get(f) not in ('timing', 'tests')]
+        not_run = []
+        if new:
+            ran = set(K.families_in(dirs[-1], build))
+            not_run = [f for f in fams if f not in ran]
+            fams = [f for f in fams if f in ran]
         if not fams:
+            if not_run:
+                print(f'## {build}: the run has none of these families; not run: {len(not_run)}\n')
             continue
         print(f'## {build}: conserving and overprint are {labels}' + ('' if new else '; now is T'))
         if build == 'lines':
@@ -172,6 +198,8 @@ def main():
                     for s in summary_lines(o):
                         print(f'    {tag} {s}')
             print('    (per line: tsvdiff.py on lines/*.tsv)')
+            if not_run:
+                print(f'not run, so not compared: {len(not_run)} families: {" ".join(not_run)}')
             continue
         head = f"{'family':32} {'rows':>6} {'miss':>4}  {'conserving':24} {'>B':>4} {'>M':>4}"
         if new:
@@ -225,16 +253,21 @@ def main():
         print(line)
         for s in shown:
             print(s)
-        regressions(dirs, build, order, kind_of, pat, show)
+        if not_run:
+            print(f'not run, so not compared: {len(not_run)} families: {" ".join(not_run)}')
+        regressions(dirs, build, order, kind_of, pat, show, new)
         print()
     if opts['--json']:
         with open(opts['--json'], 'w', encoding='utf-8') as f:
             json.dump(jout, f)
 
 
-def regressions(dirs, build, order, kind_of, pat, show):
-    """The verifiers' repro tests: passed and failed at each tree that ran them."""
+def regressions(dirs, build, order, kind_of, pat, show, new=False):
+    """The verifiers' repro tests: passed and failed at each tree that ran them;
+    with NEW, only those NEW ran."""
     fams = [f for f in order if kind_of.get(f) == 'tests' and (not pat or pat.search(f))]
+    if new:
+        fams = [f for f in fams if K.family_file(dirs[-1], build, f)]
     rows = []
     for fam in fams:
         outs = [K.load(K.family_file(d, build, fam)) for d in dirs]

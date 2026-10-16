@@ -161,6 +161,14 @@ class Output:
     zzn    ZZN lines, (spacing, lang) -> glyphs drawn over another
     lines  LINE lines, as a multiset of whole lines: zz_fv_shape's readings, and
            the misread lines zz_vx_k11rv_dirless prints beside its BOOK lines
+    vov    VOV lines, the rr3m families' book key -> (glyphs drawn over another
+           on one baseline, where the first one is): printed only for a book
+           that has some, so a book missing here has none
+    tally  TALLY lines, zz_vx_k11rv_dirless's (gloss, kind of line) -> lines of
+           that kind; the kind `right` is the lines read right
+    zz     ZZ lines, the td probe's `ZZ <what> <n>`, what -> n (`rows`: the TSV
+           rows it wrote)
+    panics PANIC lines, the books whose probe panicked
     """
 
     def __init__(self, path):
@@ -173,6 +181,10 @@ class Output:
         self.fix = {}
         self.zzn = {}
         self.lines = collections.Counter()
+        self.vov = {}
+        self.tally = {}
+        self.zz = {}
+        self.panics = set()
         self.status = []
         self.failed = []
         self.notes = []
@@ -266,6 +278,19 @@ class Output:
             self.zzn[(p[0], p[1])] = int(m.group(1)) if m else 0
         elif tag == 'LINE':
             self.lines[line] += 1
+        elif tag == 'VOV':
+            k = p[1] + '\t' + p[2] if len(p) > 2 else line
+            n = int(p[3]) if len(p) > 3 and p[3].isdigit() else 0
+            self.vov[k] = (n, p[4] if len(p) > 4 else '')
+        elif tag == 'TALLY':
+            if len(p) >= 4 and p[-1].isdigit():
+                self.tally['\t'.join(p[1:-1])] = int(p[-1])
+        elif tag == 'ZZ':
+            w = line.split()
+            if len(w) >= 3 and w[-1].isdigit():
+                self.zz[' '.join(w[1:-1])] = int(w[-1])
+        elif tag == 'PANIC':
+            self.panics.add('\t'.join(p[1:]))
 
     def complete(self):
         """Whether the run that wrote this finished: exit 0 and every test binary passed."""
@@ -274,6 +299,29 @@ class Output:
 
 def load(path):
     return Output(path)
+
+
+def help_requested(args, doc):
+    """`-h` or `--help` anywhere among a script's arguments: print its usage and exit 0."""
+    if '-h' in args or '--help' in args:
+        print(doc.strip())
+        raise SystemExit(0)
+
+
+def tally_misread(o):
+    """zz_vx_k11rv_dirless's lines read wrong, every gloss and kind together (None
+    without TALLY lines). The lines read right are no measure on their own: a
+    change to line breaking changes how many lines there are."""
+    if not o.tally:
+        return None
+    return sum(n for k, n in o.tally.items() if k.split('\t')[-1] != 'right')
+
+
+def tally_lines(o):
+    """zz_vx_k11rv_dirless's lines, every kind (None without TALLY lines)."""
+    if not o.tally:
+        return None
+    return sum(o.tally.values())
 
 
 def conserve(v):

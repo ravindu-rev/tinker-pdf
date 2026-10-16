@@ -86,6 +86,9 @@ def run_suites(tree, suites, build, log):
 
 def main():
     args = sys.argv[1:]
+    if '-h' in args or '--help' in args:
+        print(__doc__.strip())
+        return
     cat_path = None
     if '--catalogue' in args:
         i = args.index('--catalogue')

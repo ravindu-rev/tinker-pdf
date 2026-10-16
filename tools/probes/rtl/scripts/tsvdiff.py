@@ -83,6 +83,7 @@ def tsvs(root):
 
 def main():
     args = sys.argv[1:]
+    K.help_requested(args, __doc__)
     show = 20
     if '--show' in args:
         i = args.index('--show')

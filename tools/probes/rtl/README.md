@@ -48,16 +48,24 @@ A book **conserves** when every one of `content`, `logical` and `cons` its line
 carries is true.
 
 The older K-11 probes print `ROW <key fields> content=true|false
-logical=true|false [search=...]`. Beside `ROW` the families print:
+logical=true|false [search=...]`. Beside `ROW` the families print the lines
+below, and `rtlkit.Output` reads every one of them, so `cmp.py` and `table.py`
+see a change in any:
 
 | Line | Family | Says |
 | --- | --- | --- |
+| `VOV` | the rr3m families | per book that has any: how many visible glyphs are drawn over another on one baseline (the `b` of its `overlap=a/b`) and where the first one is; a book with no `VOV` line has none |
 | `VOVX` | `zz_vx_*` | per book (style, language, hash of the body): visible glyphs drawn over another |
 | `BOOK` | `zz_vx_k11rv_dirless` | whether each dir-less book's lines hold (`holds=`), with a `LINE` per misread line |
+| `TALLY` | `zz_vx_k11rv_dirless` | per gloss and kind of line (`right`, or which way it was misread), how many lines; the comparators count the lines misread, since a change of line breaking changes how many lines there are |
 | `FAIL`, `rows=` | `zz_vx_probe_paren` | the books whose bracketed run and full stop do not conserve, and the total |
 | `FIX` | `zz_k11rv_fixtures` | every local fixture's text in both orders and its content streams, hashed |
 | `TWROW` | `zz_c1_tw` | strings the overflow font shows, those holding code 32 (`bx32`), those shown at a word spacing other than zero (`twbad`), overprint (`vov`), `cons`, `logical` |
 | `ZZN` | `zz_code1_neg` | glyphs drawn over another under a negative word spacing |
+| `ZZ rows` | `zz_code1_tdprobe` | how many rows it wrote to its TSV |
+| `PANIC` | the rr3m families | a book whose probe panicked, beside a `ROW` of zeros for it |
+| `LINE` | `zz_fv_shape` | one line's text and its reading |
+| `SENT`, `WRAPPED`, `BCT-AUTO`, `LANER` | the line probes | their own totals; the lines themselves are in their TSVs |
 
 The `tinker-pdf-shape` line probes read lines rather than books, through the
 crate's `bidi` module: ruling 14's reading of the whole of
@@ -144,10 +152,21 @@ tools/probes/rtl/scripts/run.sh . both /tmp/rtl/now
 The filter is an extended regular expression matched against `group/family`.
 The first argument is any tinker-pdf checkout, so the same command probes
 another worktree. The runner exports `CARGO_INCREMENTAL=0` and turns debug
-information off, unsets the probes' own filters (`RV_FILTER` and the rest),
-and deletes each probe's test binary after its run (`KEEP_BINARIES=1` keeps
-them). The run that produced the 935b077 baseline took about an hour a
-build.
+information off, and deletes each probe's test binary after its run
+(`KEEP_BINARIES=1` keeps them). It unsets every variable a probe reads with
+`env::var` (`RV_FILTER`, `RV3_FILTER`, `RV4C_FILTER`, `RV_FULL` and the
+diagnostic probe's `DBG_` knobs), finding them by reading the probes rather
+than from a list, except the two it sets itself, `K11RV_OUT` and `ZZ_OUT`. The
+run that produced the 935b077 baseline took about an hour a build.
+
+An interrupt stops the whole run and writes no done marker: Ctrl-C, `SIGINT`,
+`SIGTERM` or `SIGHUP` sent to the runner, and a family whose cargo or test
+binary was killed from outside (by one of those or `SIGKILL`). Each cargo runs
+as a job in its own process group, so a signal reaches the runner first and
+the runner passes it on to the whole job; `progress` says where the run
+stopped. A shell that starts the runner in the background with `SIGINT`
+ignored cannot hand it back, and the runner says so when it starts: stop such
+a run with `kill -TERM`.
 
 Each family runs on its own: one `cargo test -p <crate> --test <family> --
 --nocapture`, so a family that does not compile at an old commit costs only
@@ -163,8 +182,14 @@ itself. The output directory holds, per build (`default`, `bundled`, and
   probe's `<build>/zz_code1_tdprobe.tsv`;
 - `<family>.exit`, and `done` once every family of that build has run, naming
   the ones whose exit was not 0;
+- `progress`, one line a family as it finishes (build, family, exit status,
+  data lines, seconds), and a line saying where an interrupted run stopped;
 - `tree.txt` with the checkout's HEAD and status before and after, and `done`
   at the top once everything asked for is finished.
+
+`lines/` is made only when a line probe runs. A run into a directory that
+already holds one removes the done markers it could write before it starts,
+so an earlier run's markers never vouch for this one.
 
 A run without its `done` marker did not finish, and a family whose rows fall
 short of the baseline's was cut off; neither is a measurement (`table.py`'s
@@ -192,9 +217,16 @@ one, 9297d2d's books 935b077 lacks), the books conserving at each tree, and:
   conserving, and `+T` as books conserving now and not at 935b077;
 - `over-ws`, books drawing a glyph over another under word spacing or
   justification, at each tree;
-- notes: books with a `VOVX` overprint, `probe_paren`'s failing books,
-  fixtures whose hashes changed, `ZZN` overprint, `LINE` lines gone, and any
-  exit status that was not 0.
+- notes: books with a `VOVX` overprint, books with a `VOV` line (and, with a
+  run, those whose overprint rose), `probe_paren`'s failing books, fixtures
+  whose hashes changed, `ZZN` overprint, the td probe's `ZZ` row count, the
+  dir-less lines `TALLY` counts misread, books whose probe panicked, `LINE`
+  lines gone, and any exit status that was not 0.
+
+With a run, a family the run has no output for is left out, not read as a
+family that lost every book: a run of one group compared `--by group` shows
+that group, and one line under each build's table names the families not run.
+`cmp.py` does the same, naming the families only one side has.
 
 `--show N` lists up to N books of each of `>B`, `>M` and `>T` with their
 metrics at each tree (`c` conserving, `t` read whole, `s` found, `h` holds; 1
@@ -221,9 +253,10 @@ The other comparators:
   and `soft/` books against 56dfd93 and 9297d2d, as the round reports state it.
 
 A probe reruns one book or a few with `RV_FILTER` (the rr3m families, a
-substring of `<style>|<name>`) or `RV3_FILTER` (the `k11rv3` ones), and prints
-long texts in full with `RV_FULL=1`; run it with cargo directly, since the
-runner unsets them. To look at a book's drawn lines and content stream,
+substring of `<style>|<name>`), `RV3_FILTER` (the `k11rv3` ones) or
+`RV4C_FILTER` (`zz_vx_rv4code`, a substring of `s<style>\t<name>\t<label>`),
+and prints long texts in full with `RV_FULL=1`; run it with cargo directly,
+since the runner unsets them. To look at a book's drawn lines and content stream,
 `scripts/diag.sh` runs `probes/diag/zz_fx2dbg.rs` over a TSV of books
 (`name`, `lang`, `style`, `body`); `probes/diag/open-cases.tsv` holds a few the
 second CD-19 fix left open:
@@ -290,9 +323,11 @@ in the default build at 56dfd93. Rerun at 935b077 with `run.sh`, the line
 probes and the td probe, in both builds, write theirs byte for byte.
 
 - **935b077**: the second CD-19 fix's last full run of every family, both
-  builds, on 7f1b3f8, whose code is 935b077's: `paint.rs` differs in doc
-  comments only, and `bidi.rs`, `text.rs`, `text_order.rs` and `build.rs` are
-  byte for byte the same.
+  builds, on 7f1b3f8, whose `crates/` tree is 935b077's: the two commits
+  differ only in `.claude/`, `.gitignore`, `AGENTS.md` and `CLAUDE.md`
+  (`git diff --stat 7f1b3f8 935b077`). This file and the baselines' note lines
+  said until 16 October 2026 that `paint.rs` differed in doc comments, which
+  was never true.
 - **9297d2d** and **56dfd93**: the rounds' runs of the same probe files at
   those trees. For every family the books at both are the books at 935b077.
 - The `zz_vx_*` families at 9297d2d and 56dfd93 are the lines of the families

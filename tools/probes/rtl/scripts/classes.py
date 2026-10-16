@@ -54,6 +54,9 @@ CLASSES = [
 
 def main():
     args = sys.argv[1:]
+    if '-h' in args or '--help' in args:
+        print(__doc__.strip())
+        return
     builds = 'default,bundled'
     if '--builds' in args:
         i = args.index('--builds')

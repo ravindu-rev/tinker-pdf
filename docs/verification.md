@@ -1721,6 +1721,16 @@ fix was to sharpen the injection rather than to shrug at the number.
   through `tinker-pdf-filters`' decoder, which `xtask`'s `TOOLS` table keeps
   out of a tool's reach; a PNG carrying alpha is compared as it looks over
   white, and one whose raster stops short is refused rather than scored.
+- **The right-to-left probe kit** (`tools/probes/rtl`,
+  [its README](../tools/probes/rtl/README.md)): the probes the K-11 and CD-19
+  rounds wrote to measure right-to-left text in synthetic EPUB books, 89 291
+  distinct books a build, 12 084 content streams built by hand, and the whole
+  of `BidiCharacterTest.txt` read back under ruling 14, with their runner,
+  comparators and outputs at `9297d2d`,
+  `56dfd93` and `935b077`. A change to right-to-left text is measured against
+  those three trees in both builds before it is reported: no book that
+  conserved, read whole or was found by search at any of them may read worse,
+  beyond ruling 14's accepted price.
 - **`cargo xtask`**: `dag` (crate-graph enforcement), `libm`
   (transcendental ban on pixel paths), `oracles` (ruling 13's boundary:
   no test may spawn a program the workspace did not build), `vendor`

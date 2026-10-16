@@ -25,6 +25,7 @@ def load_kit():
 def main():
     kit = load_kit()
     args = sys.argv[1:]
+    kit.help_requested(args, __doc__)
     opts = {}
     for flag in ('--binary', '--note', '--exit'):
         if flag in args:

@@ -17,6 +17,9 @@ import sys
 
 def main():
     args = sys.argv[1:]
+    if '-h' in args or '--help' in args:
+        print(__doc__.strip())
+        return
     note = None
     if '--note' in args:
         i = args.index('--note')

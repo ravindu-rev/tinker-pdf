@@ -14,6 +14,7 @@
 # prints `V <name> c<cons>l<logical>w<whole>s<search> ov=<adjacent>/<visible>
 # miss=[words search did not find] plain=<text read> log=<logical text>`.
 set -u
+case ${1:-} in -h|--help) sed -n '2,/^set -u$/{/^set -u$/!p}' "$0"; exit 0 ;; esac
 if [ $# -lt 4 ]; then
   sed -n '2,/^set -u$/{/^set -u$/!p}' "$0" >&2
   exit 2
