@@ -8,8 +8,10 @@ build: the books (unique), those worse than 9297d2d, those conserving at
 56dfd93 and not now, and both. Every book no class claims is listed under
 "others": a book there is a class nobody has named yet.
 
-The classes are the ones the second CD-19 fix (935b077) reported, matched by
-family and book name; a new round adds its own here.
+The classes are the ones the second CD-19 fix (935b077) reported, and round
+6's (its hunt's and sweep's families), matched by family and book name (and,
+for a class one style of a family has, the style too); a new round adds its own
+here.
 """
 import collections
 import json
@@ -49,6 +51,17 @@ CLASSES = [
     ('since 56dfd93: pointed Hebrew, two pairs and an ARABIC COMMA', lambda p, n: p == 'fv_extra' and '/m6/' in n),
     # A dir-less Arabic paragraph with an inline word-spacing span cutting a word.
     ('hunt mid-ws', lambda p, n: p == 'hunt_punct' and n == 'ar/mid-ws/none'),
+    # Round 6, V2 (Left (1)): a dir-less line of styled words whose left end is
+    # a closing bracket, `W <b>W</b> W <i>W</i>, (W).`, its stop read first.
+    ('V2 closing bracket at the left end', lambda p, n, s='': p in ('zz_v6_units', 'zz_v6_transform', 'zz_f6_transform')
+        and n in ('he/styled/none', 'ar/styled/none')),
+    # Round 6, V3 (Left (4)): two touching right-to-left cells with no dir,
+    # read as one line from the right.
+    ('V3 touching right-to-left cells', lambda p, n, s='': p == 'zz_v6_cells' and n in ('he/styled/none', 'ar/styled/none')),
+    # Round 6, Left (6): `25٪ <b>W</b> ١٢٣ … 2010،` under a half turn at
+    # word-spacing 1em, which conserved at 56dfd93 only.
+    ('Left (6) half turn', lambda p, n, s='': p in ('zz_v6_transform', 'zz_f6_transform')
+        and n in ('ar/num/none', 'ar/num/rtl') and 'rotate(180deg)' in s),
 ]
 
 
@@ -81,7 +94,8 @@ def main():
         for (fam, key), v in sorted(books.items()):
             p = fam.replace('zz_rr3m_', '')
             name = key.split('\t')[-1]
-            cname = next((c for c, f in CLASSES if f(p, name)), 'others')
+            style = key.split('\t')[0]
+            cname = next((c for c, f in CLASSES if (f(p, name, style) if f.__code__.co_argcount == 3 else f(p, name))), 'others')
             c = per[cname]
             c['books'] += 1
             c['worse than 9297d2d'] += 'b' in v

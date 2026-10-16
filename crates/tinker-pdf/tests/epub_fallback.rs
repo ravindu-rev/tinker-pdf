@@ -3630,9 +3630,9 @@ fn signs_and_numbers(sentences: usize) -> String {
 /// on** (V1 of round 6's lane V; ROADMAP CD-19).
 ///
 /// The writer reads each line that holds a right-to-left character back as a
-/// reader reads it (`paint::Fonts::set_readings`), and its rules ask whether
-/// a reader parts two text objects of a run (`paint::parted`,
-/// `paint::page_lines`, `paint::leading_mark_at`). A transform writes a `cm`
+/// reader reads it (`paint::Fonts::set_readings`), and two of its rules ask
+/// whether a reader parts two text objects of a run, or two runs
+/// (`paint::parted`, `paint::page_lines`). A transform writes a `cm`
 /// before the text (`paint::OnPage::open`), and a scale of one axis widens or
 /// narrows every gap on the page against the glyphs' size, which is what a
 /// reader's thresholds are in. Read back under no matrix, a styled `?!` glued
@@ -3640,10 +3640,11 @@ fn signs_and_numbers(sentences: usize) -> String {
 /// the word and drawn turned for that reading; on the page, where the gap is
 /// twice as wide, it was read alone, and turned: `שלום!? עולם.`, where
 /// 9297d2d and 56dfd93 read `שלום?! עולם.`. Each line is read back under the
-/// matrix the page draws it under now (`paint::OnPage::matrix`), and every
-/// rule that asks whether a reader parts two objects asks it in the page's
-/// ems (`paint::along_the_line`): under `scaleX(3)` a `letter-spacing` of
-/// `0.3em` parts the line on the page and not in the run.
+/// matrix the page draws it under now (`paint::OnPage::matrix`), and both
+/// rules ask their question in the page's ems (`paint::along_the_line`):
+/// under `scaleX(3)` a `letter-spacing` of `0.3em` parts the line on the page
+/// and not in the run. Under `scaleY(2)` the gaps narrow against the glyphs
+/// instead, and with `bundled-fonts` the Hebrew book read `!?` at 05cea0b.
 ///
 /// `25٪ <b>W</b>` in Arabic under `scaleX(1.4)`, which conserved at 56dfd93
 /// and not since round 5, reads right again. Under a half turn at
@@ -3656,9 +3657,9 @@ fn signs_and_numbers(sentences: usize) -> String {
 /// (`paint::Fonts::reads_closer`): taken as found, it turned the third `?!`
 /// of the sweep's punctuation shape, with no `dir`, under `scaleX(2)` for a
 /// reading only that space has, and the book, which conserved at 56dfd93,
-/// did not. The controls read as they did: no transform,
-/// `scale(2)`, whose gaps keep their size against the glyphs, `scaleY(2)` and
-/// a Latin paragraph, which is not read back.
+/// did not. The controls read as they did: no transform, `scale(2)`, whose
+/// gaps keep their size against the glyphs, and a Latin paragraph, which is
+/// not read back.
 #[test]
 fn a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on() {
     let right = Expect::Holds("cons logical whole found apart");
@@ -3703,7 +3704,7 @@ fn a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on() {
         Case::both("Arabic prose under scaleX(3), letter-spaced by 0.3em (the rules, f6 sweep)", "ar", "p { margin: 0 30%; transform: scaleX(3); letter-spacing: 0.3em }", prose(&AR), Expect::Holds("cons logical found")),
         Case::both("no transform (control)", "he", "p { word-spacing: 0.6em }", he, Expect::Holds("cons logical found apart")),
         Case::both("scale(2), both axes alike (control)", "he", "p { transform: scale(2); word-spacing: 0.6em }", he, Expect::Holds("cons logical found apart")),
-        Case::both("scaleY(2) (control)", "he", "p { transform: scaleY(2); word-spacing: 0.6em }", he, right),
+        Case::both("scaleY(2), the gaps narrower against the glyphs (V1 with bundled-fonts)", "he", "p { transform: scaleY(2); word-spacing: 0.6em }", he, right),
         Case::both("a Latin paragraph under scaleX(2) at 1em, nothing right to left (guard)", "en", "p { transform: scaleX(2); word-spacing: 1em }", "<p>The word <b>?!</b> means <i>peace</i>, (here) 25%.</p>", right),
     ];
     for (style, language, words, expect) in [
