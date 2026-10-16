@@ -1168,10 +1168,13 @@ impl<'a> Fonts<'a> {
     /// nothing tried reads right on the page is searched again in its runs'
     /// own space, and what that finds is drawn only where it reads closer to
     /// the line on the page than the rules' drawing ([`Fonts::reads_closer`]).
-    /// A line the rules' drawing reads right, or that no drawing tried reads
-    /// right, is drawn by the rules; and a line with no right-to-left
-    /// character, or a run of a face of the book's own, which [`plan_coded`]
-    /// does not draw, is not read.
+    /// A line the rules' drawing reads right — its words, or its letters in
+    /// order with a word cut where a reader parts the spacing and none run
+    /// together ([`Read::Cut`]), which is searched no further, as 935b077
+    /// searched it no further — or that no drawing tried reads right, is
+    /// drawn by the rules; and a line with no right-to-left character, or a
+    /// run of a face of the book's own, which [`plan_coded`] does not draw, is
+    /// not read.
     ///
     /// The work is linear in the line, once a reading, and a line is read at
     /// most [`READINGS_PER_LINE`] times, twice that and twice more under a

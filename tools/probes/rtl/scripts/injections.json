@@ -3125,8 +3125,8 @@
    "edits": [
     {
      "file": "crates/tinker-pdf/src/epub/paint.rs",
-     "old": "                        Read::Words => true,",
-     "new": "                        Read::Words => true,\n                        Read::Letters if true => true,",
+     "old": "        if read.split_whitespace().eq(self.words.split_whitespace()) {\n            return Read::Words;",
+     "new": "        if true || read.split_whitespace().eq(self.words.split_whitespace()) {\n            return Read::Words;",
      "count": 1
     }
    ],
@@ -3141,6 +3141,74 @@
      "epub_conservation",
      "--test",
      "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/cut-searched",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "            None | Some((Read::Words | Read::Cut, _)) => return Search::Rules,",
+     "new": "            None | Some((Read::Words, _)) => return Search::Rules,",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ],
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--lib",
+     "epub::tests"
+    ]
+   ]
+  },
+  {
+   "name": "page/joins-are-cuts",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "            .all(|end| read_ends.binary_search(end).is_ok())",
+     "new": "            .all(|end| true || read_ends.binary_search(end).is_ok())",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ],
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--lib",
+     "epub::tests"
     ]
    ]
   },
