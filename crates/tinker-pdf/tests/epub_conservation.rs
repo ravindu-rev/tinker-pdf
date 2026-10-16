@@ -1861,9 +1861,33 @@ fn a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop() {
         "he",
         "p { letter-spacing: 0.1em; word-spacing: 0.5em; text-align: justify; margin: 0 25% }",
         format!("<p>ף</p><p dir=\"rtl\">{prose}</p>"),
-        Expect::Pinned("cons logical found apart"),
+        Expect::Holds("cons logical whole found apart"),
         Expect::Holds("cons logical found apart"),
     ));
+    // V2 of round 6's lane V: the same class at a closing bracket and at
+    // spacings Left (1) did not name, and with `bundled-fonts`.
+    for (what, language, style, body) in [
+        (
+            "a dir-less line ending a bracketed word and a stop, letter-spaced (V2)",
+            "he",
+            "p { letter-spacing: 0.3em; word-spacing: -0.2em }",
+            "<p>שלום.<br/>בראשית (אלהים).</p>",
+        ),
+        (
+            "a dir-less line ending ٦٠., letter-spaced 0.15em, word-spaced 0.3em (V2)",
+            "he",
+            "p { letter-spacing: 0.15em; word-spacing: 0.3em }",
+            "<p>שלום.<br/>בראשית ٦٠.</p>",
+        ),
+        (
+            "a dir-less Arabic paragraph of styled words and (W)., letter-spaced (V2)",
+            "ar",
+            "p { letter-spacing: 0.15em; word-spacing: 0.3em }",
+            "<p>كتاب <b>مدرسة</b> الطالب <i>جميل</i>, (بيت). جميل <b>بيت</b> كبير <i>نور</i>, (يوم). نور <b>يوم</b> عوامل <i>وقد</i>, (أصبحنا).</p>",
+        ),
+    ] {
+        cases.push(Case::both(what, language, style, body, Expect::Pinned("found apart")));
+    }
     check(&cases);
 }
 
@@ -1913,5 +1937,19 @@ fn a_dirless_line_with_a_right_to_left_gloss() {
             "p { word-spacing: 2em }",
             "<p>αλφα <b>βήτα</b> ספר בית xyz.</p>", Expect::Pinned("found apart"), Expect::Holds("found apart")),
         Case::both("a bold Armenian word before a bare gloss and a Latin tail (H2-2)", "he", px12, "<p>գիրք <b>տուն</b> ספר בית xyz.</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both(
+            "two touching right-to-left cells, no dir (V3)",
+            "he",
+            "table { border-spacing: 0 } td, th { padding: 0 } td, th { word-spacing: 1em }",
+            "<table><tr><td><b>שלום</b> <i>עולם</i>،</td><td>מלחמה <i>(</i>ספר<i>)</i>.</td></tr></table>",
+            Expect::Pinned("logical found apart"),
+        ),
+        Case::both(
+            "two touching right-to-left cells, no dir, Arabic (V3)",
+            "ar",
+            "table { border-spacing: 0 } td, th { padding: 0 } td, th { word-spacing: 1em }",
+            "<table><tr><td><b>كتاب</b> <i>مدرسة</i>،</td><td>الطالب <i>(</i>جميل<i>)</i>.</td></tr></table>",
+            Expect::Pinned("logical found apart"),
+        ),
     ]);
 }

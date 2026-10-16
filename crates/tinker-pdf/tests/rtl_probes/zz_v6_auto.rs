@@ -1,7 +1,7 @@
 //! `zz_v6_auto` (v6, round 6 lane V (hunt)): the books of
 //! `tools/probes/rtl/probes/pdf/zz_v6_auto.rs`, which is the probe as it ran.
 
-use super::common::{AR, Case, HE, HEP, run_book};
+use super::common::{run_book, Case, AR, HE, HEP};
 
 fn probe() {
     let mut n = 0usize;
@@ -35,22 +35,67 @@ fn cases() -> Vec<Case> {
     for (sc, lang, w) in [("ar", "ar", AR), ("he", "he", HE), ("hep", "he", HEP)] {
         let s = |i: usize| w[i % w.len()];
         let openings: Vec<(&str, String)> = vec![
-            ("rtl-first", format!("{} {} abc {} {}.", s(0), s(1), s(2), s(3))),
-            ("latin-first", format!("abc {} {} <b>{}</b> {}، {}.", s(0), s(1), s(2), s(3), s(4))),
-            ("num-first", format!("2010 {} {} {}؟ {}.", s(0), s(1), s(2), s(3))),
-            ("an-first", format!("\u{661}\u{662} {} <i>{}</i> {}.", s(0), s(1), s(2))),
-            ("bracket-first", format!("({}) {} {} {}!", s(0), s(1), s(2), s(3))),
-            ("quote-first", format!("\u{ab}{} {}\u{bb} {} {}.", s(0), s(1), s(2), s(3))),
+            (
+                "rtl-first",
+                format!("{} {} abc {} {}.", s(0), s(1), s(2), s(3)),
+            ),
+            (
+                "latin-first",
+                format!("abc {} {} <b>{}</b> {}، {}.", s(0), s(1), s(2), s(3), s(4)),
+            ),
+            (
+                "num-first",
+                format!("2010 {} {} {}؟ {}.", s(0), s(1), s(2), s(3)),
+            ),
+            (
+                "an-first",
+                format!("\u{661}\u{662} {} <i>{}</i> {}.", s(0), s(1), s(2)),
+            ),
+            (
+                "bracket-first",
+                format!("({}) {} {} {}!", s(0), s(1), s(2), s(3)),
+            ),
+            (
+                "quote-first",
+                format!("\u{ab}{} {}\u{bb} {} {}.", s(0), s(1), s(2), s(3)),
+            ),
             ("punct-first", format!("?! {} {} {}.", s(0), s(1), s(2))),
-            ("latin-mostly", format!("The word {} means {} in <i>{}</i>.", s(0), s(1), s(2))),
+            (
+                "latin-mostly",
+                format!("The word {} means {} in <i>{}</i>.", s(0), s(1), s(2)),
+            ),
         ];
         for (name, text) in &openings {
             let text = format!("{text} {text}");
-            out.push((format!("{sc}/{name}/auto"), lang, format!("<p dir=\"auto\">{text}</p>")));
-            out.push((format!("{sc}/{name}/plaintext"), lang, format!("<p style=\"unicode-bidi: plaintext\">{text}</p>")));
-            out.push((format!("{sc}/{name}/span-auto-in-ltr"), lang, format!("<p dir=\"ltr\">abc <span dir=\"auto\">{text}</span> def.</p>")));
-            out.push((format!("{sc}/{name}/span-auto-in-rtl"), lang, format!("<p dir=\"rtl\">{} <span dir=\"auto\">{text}</span> {}.</p>", s(5), s(6))));
-            out.push((format!("{sc}/{name}/bdi-in-rtl"), lang, format!("<p dir=\"rtl\">{} <bdi>{text}</bdi> {}.</p>", s(7), s(8))));
+            out.push((
+                format!("{sc}/{name}/auto"),
+                lang,
+                format!("<p dir=\"auto\">{text}</p>"),
+            ));
+            out.push((
+                format!("{sc}/{name}/plaintext"),
+                lang,
+                format!("<p style=\"unicode-bidi: plaintext\">{text}</p>"),
+            ));
+            out.push((
+                format!("{sc}/{name}/span-auto-in-ltr"),
+                lang,
+                format!("<p dir=\"ltr\">abc <span dir=\"auto\">{text}</span> def.</p>"),
+            ));
+            out.push((
+                format!("{sc}/{name}/span-auto-in-rtl"),
+                lang,
+                format!(
+                    "<p dir=\"rtl\">{} <span dir=\"auto\">{text}</span> {}.</p>",
+                    s(5),
+                    s(6)
+                ),
+            ));
+            out.push((
+                format!("{sc}/{name}/bdi-in-rtl"),
+                lang,
+                format!("<p dir=\"rtl\">{} <bdi>{text}</bdi> {}.</p>", s(7), s(8)),
+            ));
         }
     }
     out

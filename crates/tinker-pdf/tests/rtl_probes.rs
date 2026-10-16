@@ -36,6 +36,7 @@ mod rtl_probes {
     pub(crate) mod zz_c1_tw;
     pub(crate) mod zz_code1_neg;
     pub(crate) mod zz_code1_tdprobe;
+    pub(crate) mod zz_f6_transform;
     pub(crate) mod zz_k11rv_fixtures;
     pub(crate) mod zz_rr3m_extra;
     pub(crate) mod zz_rr3m_fv_extra;
@@ -87,6 +88,16 @@ mod rtl_probes {
     pub(crate) mod zz_rr3m_lane_r;
     pub(crate) mod zz_rr3m_probe;
     pub(crate) mod zz_rr3m_tie;
+    pub(crate) mod zz_v6_auto;
+    pub(crate) mod zz_v6_cells;
+    pub(crate) mod zz_v6_inline;
+    pub(crate) mod zz_v6_lists;
+    pub(crate) mod zz_v6_measure;
+    pub(crate) mod zz_v6_numsep;
+    pub(crate) mod zz_v6_pdf;
+    pub(crate) mod zz_v6_scripts2;
+    pub(crate) mod zz_v6_transform;
+    pub(crate) mod zz_v6_units;
     pub(crate) mod zz_vx_k11r2_extra;
     pub(crate) mod zz_vx_k11rv2_epub;
     pub(crate) mod zz_vx_k11rv3_just;
@@ -177,4 +188,15 @@ families! {
     zz_rr3m_h2_r3rtlgloss = "zz_rr3m_h2_r3rtlgloss": "h2: CD-19 fix review (hunt)",
     zz_code1_neg = "zz_code1_neg": "neg: round-5 review (code); ZZN: negative word spacing, glyphs drawn over another",
     zz_code1_tdprobe = "zz_code1_tdprobe": "td: round-5 review (code); content streams built by hand, read by TextDevice and ruling 14; writes <build>/zz_code1_tdprobe.tsv",
+    zz_v6_inline = "zz_v6_inline": "v6: round 6 lane V (hunt); nested inline styles, sup/sub, sizes, code, shadows, colour-only spans, links, spacing spans",
+    zz_v6_lists = "zz_v6_lists": "v6: round 6 lane V (hunt); lists, figures and captions, generated content, q, blockquote, heading",
+    zz_v6_units = "zz_v6_units": "v6: round 6 lane V (hunt); spacing units, the 0.45em and 0.5em thresholds, sums, alignments and indents",
+    zz_v6_scripts2 = "zz_v6_scripts2": "v6: round 6 lane V (hunt); supplementary-plane right-to-left scripts, presentation forms, Urdu, ZWNJ, kashida, Yiddish",
+    zz_v6_numsep = "zz_v6_numsep": "v6: round 6 lane V (hunt); numbers with every separator",
+    zz_v6_cells = "zz_v6_cells": "v6: round 6 lane V (hunt); word and letter spacing around table cells, wrapping cells",
+    zz_v6_measure = "zz_v6_measure": "v6: round 6 lane V (hunt); narrow and wide measures, type sizes, preserved white space, page breaks",
+    zz_v6_auto = "zz_v6_auto": "v6: round 6 lane V (hunt); dir=auto, unicode-bidi: plaintext, bdi",
+    zz_v6_transform = "zz_v6_transform": "v6t: round 6 lane V (hunt); CSS transforms and tight line heights under spacing",
+    zz_v6_pdf = "zz_v6_pdf": "v6pdf: round 6 lane V (hunt); plain synthetic PDFs drawn as producers draw right-to-left lines",
+    zz_f6_transform = "zz_f6_transform": "f6: round 6 lane F (sweep); the class of V1: CSS transforms of one axis or both, turns, skews, a matrix, shifts, on the paragraph, its block, both, an inline block",
 }

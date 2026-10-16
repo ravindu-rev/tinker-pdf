@@ -1,7 +1,7 @@
 //! `zz_v6_transform` (v6t, round 6 lane V (hunt)): the books of
 //! `tools/probes/rtl/probes/pdf/zz_v6_transform.rs`, which is the probe as it ran.
 
-use super::common::{AR, Case, HE, rep, run_book};
+use super::common::{rep, run_book, Case, AR, HE};
 
 fn probe() {
     let mut n = 0usize;
@@ -40,16 +40,79 @@ fn cases() -> Vec<Case> {
     for (sc, lang, w) in [("ar", "ar", AR), ("he", "he", HE)] {
         let s = |i: usize| w[i % w.len()];
         let shapes: Vec<(&str, Box<dyn Fn(usize) -> String>)> = vec![
-            ("prose", Box::new(move |i| format!("{} {} {}، {} {} {}.", s(i), s(i + 1), s(i + 2), s(i + 3), s(i + 4), s(i + 5)))),
-            ("styled", Box::new(move |i| format!("{} <b>{}</b> {} <i>{}</i>, ({}).", s(i), s(i + 1), s(i + 2), s(i + 3), s(i + 4)))),
-            ("punct", Box::new(move |i| format!("{} <b>?!</b> {} {}. <i>(</i>{}<i>)</i> {}!", s(i), s(i + 1), s(i + 2), s(i + 3), s(i + 4)))),
-            ("num", Box::new(move |i| format!("{} 25\u{66A} <b>{}</b> \u{661}\u{662}\u{663} {} 2010، {}.", s(i), s(i + 1), s(i + 2), s(i + 3)))),
-            ("gloss", Box::new(move |i| format!("{} {} (lingua franca) {} <i>sic</i> {}.", s(i), s(i + 1), s(i + 2), s(i + 3)))),
+            (
+                "prose",
+                Box::new(move |i| {
+                    format!(
+                        "{} {} {}، {} {} {}.",
+                        s(i),
+                        s(i + 1),
+                        s(i + 2),
+                        s(i + 3),
+                        s(i + 4),
+                        s(i + 5)
+                    )
+                }),
+            ),
+            (
+                "styled",
+                Box::new(move |i| {
+                    format!(
+                        "{} <b>{}</b> {} <i>{}</i>, ({}).",
+                        s(i),
+                        s(i + 1),
+                        s(i + 2),
+                        s(i + 3),
+                        s(i + 4)
+                    )
+                }),
+            ),
+            (
+                "punct",
+                Box::new(move |i| {
+                    format!(
+                        "{} <b>?!</b> {} {}. <i>(</i>{}<i>)</i> {}!",
+                        s(i),
+                        s(i + 1),
+                        s(i + 2),
+                        s(i + 3),
+                        s(i + 4)
+                    )
+                }),
+            ),
+            (
+                "num",
+                Box::new(move |i| {
+                    format!(
+                        "{} 25\u{66A} <b>{}</b> \u{661}\u{662}\u{663} {} 2010، {}.",
+                        s(i),
+                        s(i + 1),
+                        s(i + 2),
+                        s(i + 3)
+                    )
+                }),
+            ),
+            (
+                "gloss",
+                Box::new(move |i| {
+                    format!(
+                        "{} {} (lingua franca) {} <i>sic</i> {}.",
+                        s(i),
+                        s(i + 1),
+                        s(i + 2),
+                        s(i + 3)
+                    )
+                }),
+            ),
         ];
         for (name, shape) in &shapes {
             let text = rep(3, |k| shape(k));
             for (d, attr) in [("rtl", " dir=\"rtl\""), ("none", "")] {
-                out.push((format!("{sc}/{name}/{d}"), lang, format!("<p{attr}>{text}</p>")));
+                out.push((
+                    format!("{sc}/{name}/{d}"),
+                    lang,
+                    format!("<p{attr}>{text}</p>"),
+                ));
             }
         }
     }
@@ -83,7 +146,11 @@ fn styles() -> Vec<String> {
         }
     }
     for lh in ["0.6", "0.4"] {
-        for s in ["word-spacing: 0.6em", "letter-spacing: 0.3em", "letter-spacing: 0.1em; word-spacing: 0.5em; text-align: justify"] {
+        for s in [
+            "word-spacing: 0.6em",
+            "letter-spacing: 0.3em",
+            "letter-spacing: 0.1em; word-spacing: 0.5em; text-align: justify",
+        ] {
             out.push(format!("p {{ margin: 0 30%; line-height: {lh}; {s} }}"));
         }
     }

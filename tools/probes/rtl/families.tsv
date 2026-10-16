@@ -80,5 +80,7 @@ zz_v6_numsep	tinker-pdf	probes/pdf/zz_v6_numsep.rs	v6	2	rows	round 6 lane V (hun
 zz_v6_cells	tinker-pdf	probes/pdf/zz_v6_cells.rs	v6	2	rows	round 6 lane V (hunt)	word and letter spacing around table cells, wrapping cells
 zz_v6_measure	tinker-pdf	probes/pdf/zz_v6_measure.rs	v6	2	rows	round 6 lane V (hunt)	narrow and wide measures, type sizes, preserved white space, page breaks
 zz_v6_auto	tinker-pdf	probes/pdf/zz_v6_auto.rs	v6	2	rows	round 6 lane V (hunt)	dir=auto, unicode-bidi: plaintext, bdi
+zz_v6_time	tinker-pdf	probes/pdf/zz_v6_time.rs	v6time	1	timing	round 6 lane V (code)	SCALE: wall-clock of Document::open at doubling sizes; no baseline
+zz_v6_pdf	tinker-pdf	probes/pdf/zz_v6_pdf.rs	v6pdf	1	rows	round 6 lane V (hunt)	plain synthetic PDFs drawn as producers draw right-to-left lines
 zz_v6_transform	tinker-pdf	probes/pdf/zz_v6_transform.rs	v6t	2	rows	round 6 lane V (hunt)	CSS transforms (scaleX, scale, rotate, skew, translate) and tight line heights under spacing
 zz_f6_transform	tinker-pdf	probes/pdf/zz_f6_transform.rs	f6	2	rows	round 6 lane F (sweep)	the class of lane V V1: CSS transforms (a scale of one axis or both, turns, skews, a matrix, shifts; on the paragraph, its block, both, an inline block) under spacing and none

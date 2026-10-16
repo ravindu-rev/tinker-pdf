@@ -1,7 +1,7 @@
 //! `zz_v6_lists` (v6, round 6 lane V (hunt)): the books of
 //! `tools/probes/rtl/probes/pdf/zz_v6_lists.rs`, which is the probe as it ran.
 
-use super::common::{AR, Case, HE, HEP, run_book};
+use super::common::{run_book, Case, AR, HE, HEP};
 
 fn probe() {
     let mut n = 0usize;
@@ -32,7 +32,20 @@ pub(crate) fn run() {
 // quotes, blockquotes and a heading. Every one of these draws a run the
 // painter generates, or a box beside the text, on the line a reader reads.
 
-const FA: [&str; 12] = ["کتاب", "خانه", "بزرگ", "ایران", "می\u{200C}خواهم", "دانشگاه", "تهران", "سال", "روز", "شهر", "کشور", "نمی\u{200C}دانم"];
+const FA: [&str; 12] = [
+    "کتاب",
+    "خانه",
+    "بزرگ",
+    "ایران",
+    "می\u{200C}خواهم",
+    "دانشگاه",
+    "تهران",
+    "سال",
+    "روز",
+    "شهر",
+    "کشور",
+    "نمی\u{200C}دانم",
+];
 
 const GEN: &str = " .b::before { content: \"\u{a7} \" } .a::after { content: \" (*)\" } \
     .s::before { content: \"\u{66d} \" } .c { counter-increment: n } .c::before { content: counter(n) \". \" } \
@@ -40,9 +53,25 @@ const GEN: &str = " .b::before { content: \"\u{a7} \" } .a::after { content: \" 
 
 fn cases() -> Vec<Case> {
     let mut out: Vec<Case> = Vec::new();
-    for (sc, lang, w) in [("ar", "ar", AR), ("he", "he", HE), ("hep", "he", HEP), ("fa", "fa", FA)] {
+    for (sc, lang, w) in [
+        ("ar", "ar", AR),
+        ("he", "he", HE),
+        ("hep", "he", HEP),
+        ("fa", "fa", FA),
+    ] {
         let s = |i: usize| w[i % w.len()];
-        let sent = |i: usize| format!("{} {} <b>{}</b> {}، {} ({}) {}.", s(i), s(i + 1), s(i + 2), s(i + 3), s(i + 4), s(i + 5), s(i + 6));
+        let sent = |i: usize| {
+            format!(
+                "{} {} <b>{}</b> {}، {} ({}) {}.",
+                s(i),
+                s(i + 1),
+                s(i + 2),
+                s(i + 3),
+                s(i + 4),
+                s(i + 5),
+                s(i + 6)
+            )
+        };
         let shapes: Vec<(&str, String)> = vec![
             ("ol", format!("<ol{{D}}><li>{}</li><li>{}</li></ol>", sent(0), sent(3))),
             ("ul", format!("<ul{{D}}><li>{}</li><li>{}</li></ul>", sent(1), sent(4))),

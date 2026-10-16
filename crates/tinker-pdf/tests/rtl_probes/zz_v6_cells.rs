@@ -1,7 +1,7 @@
 //! `zz_v6_cells` (v6, round 6 lane V (hunt)): the books of
 //! `tools/probes/rtl/probes/pdf/zz_v6_cells.rs`, which is the probe as it ran.
 
-use super::common::{AR, Case, HE, run_book};
+use super::common::{run_book, Case, AR, HE};
 
 fn probe() {
     let mut n = 0usize;
@@ -49,11 +49,26 @@ fn cases() -> Vec<Case> {
         ];
         for (name, rows) in &tables {
             for (d, attr) in [("rtl", " dir=\"rtl\""), ("none", "")] {
-                out.push((format!("{sc}/{name}/{d}"), lang, format!("<table{attr}>{rows}</table>")));
+                out.push((
+                    format!("{sc}/{name}/{d}"),
+                    lang,
+                    format!("<table{attr}>{rows}</table>"),
+                ));
             }
             // A left-to-right cell beside a right-to-left one, each with its own dir.
             if *name == "pair" || *name == "gloss" {
-                out.push((format!("{sc}/{name}/cells"), lang, format!("<table>{}</table>", rows.replacen("<td>", "<td dir=\"rtl\">", 1).replacen("<td>", "<td dir=\"ltr\">", 1))));
+                out.push((
+                    format!("{sc}/{name}/cells"),
+                    lang,
+                    format!(
+                        "<table>{}</table>",
+                        rows.replacen("<td>", "<td dir=\"rtl\">", 1).replacen(
+                            "<td>",
+                            "<td dir=\"ltr\">",
+                            1
+                        )
+                    ),
+                ));
             }
         }
     }
@@ -64,7 +79,10 @@ fn styles() -> Vec<String> {
     let borders = [
         ("touch", "table { border-spacing: 0 } td, th { padding: 0 }"),
         ("px", "table { border-spacing: 1px } td, th { padding: 0 }"),
-        ("pad", "table { border-spacing: 0 } td, th { padding: 0 2px }"),
+        (
+            "pad",
+            "table { border-spacing: 0 } td, th { padding: 0 2px }",
+        ),
     ];
     let spacing = [
         "td, th { word-spacing: 1em }",

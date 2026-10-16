@@ -1,7 +1,7 @@
 //! `zz_v6_numsep` (v6, round 6 lane V (hunt)): the books of
 //! `tools/probes/rtl/probes/pdf/zz_v6_numsep.rs`, which is the probe as it ran.
 
-use super::common::{AR, Case, hash, HE, rep, run_book};
+use super::common::{rep, run_book, Case, AR, HE};
 
 fn probe() {
     let mut n = 0usize;
@@ -60,7 +60,10 @@ const NUMS: [(&str, &str); 32] = [
     ("arsemi", "\u{661}\u{61B}\u{662}"),
     ("arcomma", "\u{661}\u{60C}\u{662}"),
     ("euro-group", "1.000.000,50"),
-    ("an-group", "\u{661}\u{66C}\u{660}\u{660}\u{660}\u{66C}\u{660}\u{660}\u{660}"),
+    (
+        "an-group",
+        "\u{661}\u{66C}\u{660}\u{660}\u{660}\u{66C}\u{660}\u{660}\u{660}",
+    ),
     ("sign-after", "\u{665}-"),
     ("sign-before", "-\u{665}"),
     ("pct-space", "50 %"),
@@ -75,13 +78,32 @@ fn cases() -> Vec<Case> {
         let s = |i: usize| w[i % w.len()];
         for (nn, n) in NUMS {
             let shapes: Vec<(&str, String)> = vec![
-                ("mid", rep(2, |i| format!("{} {} {n} {} {}.", s(i), s(i + 1), s(i + 2), s(i + 3)))),
-                ("bold", format!("{} {} <b>{n}</b> {}، {} {}.", s(0), s(1), s(2), s(3), s(4))),
-                ("end", format!("{} {} {} {} {} {n}", s(5), s(6), s(7), s(8), s(9))),
+                (
+                    "mid",
+                    rep(2, |i| {
+                        format!("{} {} {n} {} {}.", s(i), s(i + 1), s(i + 2), s(i + 3))
+                    }),
+                ),
+                (
+                    "bold",
+                    format!("{} {} <b>{n}</b> {}، {} {}.", s(0), s(1), s(2), s(3), s(4)),
+                ),
+                (
+                    "end",
+                    format!("{} {} {} {} {} {n}", s(5), s(6), s(7), s(8), s(9)),
+                ),
             ];
             for (name, text) in shapes {
-                for (d, attr) in [("rtl", " dir=\"rtl\""), ("ltr", " dir=\"ltr\""), ("none", "")] {
-                    out.push((format!("{sc}/{nn}/{name}/{d}"), lang, format!("<p{attr}>{text}</p>")));
+                for (d, attr) in [
+                    ("rtl", " dir=\"rtl\""),
+                    ("ltr", " dir=\"ltr\""),
+                    ("none", ""),
+                ] {
+                    out.push((
+                        format!("{sc}/{nn}/{name}/{d}"),
+                        lang,
+                        format!("<p{attr}>{text}</p>"),
+                    ));
                 }
             }
         }

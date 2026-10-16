@@ -1197,15 +1197,64 @@ impl<'a> Fonts<'a> {
                 .flat_map(|run| run.text.chars().filter_map(|ch| self.read_as(run, ch)))
                 .collect();
             let written = Words::of(&typed);
-            let tried = std::cell::Cell::new(0usize);
-            // The first drawing that reads the line's letters right but not
-            // its words, kept where none reads both.
-            let letters_only: std::cell::RefCell<Option<BTreeMap<RunKey, Drawing>>> =
-                std::cell::RefCell::new(None);
-            let reads_right = |chosen: &BTreeMap<RunKey, Drawing>| {
-                tried.set(tried.get() + 1);
-                self.read_back(&line, &matrices, frame, chosen).map(|read| {
-                    match written.read_as(&read) {
+            // Each run's drawings other than the rules'.
+            let options: Vec<(RunKey, Drawing)> = line
+                .iter()
+                .flat_map(|run| drawings_of(run, self.along(run)))
+                .collect();
+            let page = self.search(&line, &matrices, frame, &written, &options);
+            // Under a transform, where nothing tried reads the line right on
+            // the page — glyphs the transform sets over others, whose letters
+            // no drawing reads in order — the line is read back in its runs'
+            // own space, as it was before the page's matrix was modelled.
+            let found = match page {
+                Search::Rules => continue,
+                Search::Found(found) => Some(found),
+                Search::Nothing if matrices.iter().any(|matrix| *matrix != IDENTITY) => {
+                    let own = vec![IDENTITY; line.len()];
+                    match self.search(&line, &own, frame, &written, &options) {
+                        Search::Found(found) => Some(found),
+                        Search::Rules | Search::Nothing => None,
+                    }
+                }
+                Search::Nothing => None,
+            };
+            if let Some(found) = found {
+                drawings.extend(found);
+            }
+        }
+        *self.drawings.borrow_mut() = drawings;
+    }
+
+    /// [`Fonts::set_readings`]'s search for one line under `matrices`: the
+    /// rules' drawing where it reads the line's words right; else the first
+    /// drawing of one run, then of two, within [`READINGS_PER_LINE`]
+    /// readings, that does; else, where the rules' drawing does not read the
+    /// line's letters right, the first that does; else nothing.
+    fn search(
+        &self,
+        line: &[&TextRun],
+        matrices: &[[f64; 6]],
+        frame: &Frame,
+        written: &Words,
+        options: &[(RunKey, Drawing)],
+    ) -> Search {
+        let tried = std::cell::Cell::new(0usize);
+        // The first drawing that reads the line's letters right but not
+        // its words, kept where none reads both.
+        let letters_only: std::cell::RefCell<Option<BTreeMap<RunKey, Drawing>>> =
+            std::cell::RefCell::new(None);
+        // How many glyphs the rules' drawing sets over another: a drawing
+        // that sets more is not taken, however it reads.
+        let mut over_by_rules = usize::MAX;
+        let reads_right = |chosen: &BTreeMap<RunKey, Drawing>, over_by_rules: usize| {
+            tried.set(tried.get() + 1);
+            self.read_back(line, matrices, frame, chosen)
+                .map(|(read, over)| {
+                    if over > over_by_rules {
+                        return (false, over);
+                    }
+                    let right = match written.read_as(&read) {
                         Read::Words => true,
                         Read::Letters => {
                             letters_only
@@ -1214,71 +1263,45 @@ impl<'a> Fonts<'a> {
                             false
                         }
                         Read::Otherwise => false,
-                    }
+                    };
+                    (right, over)
                 })
-            };
-            match reads_right(&BTreeMap::new()) {
-                Some(false) => {}
-                None | Some(true) => continue,
+        };
+        match reads_right(&BTreeMap::new(), over_by_rules) {
+            Some((false, over)) => over_by_rules = over,
+            None | Some((true, _)) => return Search::Rules,
+        }
+        // Where the rules' drawing reads the letters right, it is kept
+        // unless another reads the words right too.
+        let rules_letters = letters_only.borrow_mut().take().is_some();
+        for &(key, drawing) in options {
+            if tried.get() >= READINGS_PER_LINE {
+                break;
             }
-            // Where the rules' drawing reads the letters right, it is kept
-            // unless another reads the words right too.
-            let rules_letters = letters_only.borrow_mut().take().is_some();
-            // Each run's drawings that write something other than the rules'
-            // and than each other's: a drawing that writes what another wrote
-            // reads as that one did, and is not read again.
-            let mut options: Vec<(RunKey, Drawing)> = Vec::new();
-            for run in &line {
-                let mut planned: Vec<Vec<Vec<Segment>>> =
-                    vec![self.plan_run(run, Drawing::default()).unwrap_or_default()];
-                for (key, drawing) in drawings_of(run, self.along(run)) {
-                    let plan = self.plan_run(run, drawing).unwrap_or_default();
-                    if !planned.contains(&plan) {
-                        planned.push(plan);
-                        options.push((key, drawing));
-                    }
+            let one = BTreeMap::from([(key, drawing)]);
+            if reads_right(&one, over_by_rules).is_some_and(|(right, _)| right) {
+                return Search::Found(one);
+            }
+        }
+        for (at, &(first, one)) in options.iter().enumerate() {
+            for &(second, other) in options.get(at + 1..).unwrap_or_default() {
+                if second == first {
+                    continue;
                 }
-            }
-            let mut found: Option<BTreeMap<RunKey, Drawing>> = None;
-            for &(key, drawing) in &options {
                 if tried.get() >= READINGS_PER_LINE {
                     break;
                 }
-                let one = BTreeMap::from([(key, drawing)]);
-                if reads_right(&one) == Some(true) {
-                    found = Some(one);
-                    break;
+                let two = BTreeMap::from([(first, one), (second, other)]);
+                if reads_right(&two, over_by_rules).is_some_and(|(right, _)| right) {
+                    return Search::Found(two);
                 }
-            }
-            if found.is_none() {
-                'pairs: for (at, &(first, one)) in options.iter().enumerate() {
-                    for &(second, other) in options.get(at + 1..).unwrap_or_default() {
-                        if second == first {
-                            continue;
-                        }
-                        if tried.get() >= READINGS_PER_LINE {
-                            break 'pairs;
-                        }
-                        let two = BTreeMap::from([(first, one), (second, other)]);
-                        if reads_right(&two) == Some(true) {
-                            found = Some(two);
-                            break 'pairs;
-                        }
-                    }
-                }
-            }
-            let found = found.or_else(|| {
-                if rules_letters {
-                    None
-                } else {
-                    letters_only.borrow_mut().take()
-                }
-            });
-            if let Some(found) = found {
-                drawings.extend(found);
             }
         }
-        *self.drawings.borrow_mut() = drawings;
+        if rules_letters {
+            return Search::Nothing;
+        }
+        let first = letters_only.borrow_mut().take();
+        first.map_or(Search::Nothing, Search::Found)
     }
 
     /// The text objects [`plan_coded`] writes for the whole of `run` drawn as
@@ -1337,7 +1360,7 @@ impl<'a> Fonts<'a> {
         matrices: &[[f64; 6]],
         frame: &Frame,
         drawings: &BTreeMap<RunKey, Drawing>,
-    ) -> Option<String> {
+    ) -> Option<(String, usize)> {
         let metrics = BookMetrics::with(self.faces);
         let mut device = tinker_pdf_content::TextDevice::new();
         for (at, run) in line.iter().enumerate() {
@@ -1422,15 +1445,17 @@ impl<'a> Fonts<'a> {
             }
         }
         let mut page = device.finish();
+        let over = drawn_over(&page);
         crate::text_order::into_logical_order(&mut page);
-        Some(
+        Some((
             page.blocks
                 .iter()
                 .flat_map(|block| &block.lines)
                 .map(|line| line.text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n"),
-        )
+            over,
+        ))
     }
 
     /// The context [`Fonts::set_contexts`] recorded for `run`.
@@ -4023,8 +4048,7 @@ impl Segment {
 /// its glyph name in the font's `/Differences` names, as
 /// [`Fonts::register`] writes it — `space` for a character with no name.
 fn overflow_reads_as(ch: char) -> char {
-    glyph_name_to_char(&glyph_name_for_char(ch).unwrap_or_else(|| "space".to_owned()))
-        .unwrap_or(ch)
+    glyph_name_to_char(&glyph_name_for_char(ch).unwrap_or_else(|| "space".to_owned())).unwrap_or(ch)
 }
 
 /// How [`plan_coded`] draws a run whose line, as the rules draw it, a reader
@@ -4140,8 +4164,8 @@ fn page_lines<'r>(
     for run in order {
         match rows.last_mut() {
             Some(row)
-                if row.last().is_some_and(|last| {
-                    (last.y - run.y).abs() <= last.font_size.max(run.font_size) * 0.5
+                if row.first().is_some_and(|first| {
+                    (first.y - run.y).abs() <= first.font_size.max(run.font_size) * 0.5
                 }) =>
             {
                 row.push(run);
@@ -4181,6 +4205,46 @@ fn page_lines<'r>(
 struct Words {
     letters: String,
     words: String,
+}
+
+/// How many glyphs of `page` stand over the one before them on their
+/// baseline, as a reader of the page sees them: each glyph that draws
+/// something but a nonspacing mark, which rides on its letter, by its box,
+/// rows of one baseline to a tenth of a point, a glyph over another where it
+/// starts more than a fiftieth of its size inside the one left of it.
+fn drawn_over(page: &tinker_pdf_content::TextPage) -> usize {
+    let mut boxes: Vec<(i64, f64, f64, f64)> = page
+        .blocks
+        .iter()
+        .flat_map(|block| &block.lines)
+        .flat_map(|line| &line.chars)
+        .filter(|c| {
+            !c.text.trim().is_empty()
+                && c.text
+                    .chars()
+                    .next()
+                    .is_none_or(|first| bidi_class(first) != BidiClass::NSM)
+        })
+        .map(|c| {
+            let (x0, _, x1, _) = c.quad.bounds();
+            ((c.origin.1 * 10.0).round() as i64, x0, x1, c.size)
+        })
+        .collect();
+    boxes.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    boxes
+        .windows(2)
+        .filter(|pair| pair[0].0 == pair[1].0 && pair[1].1 < pair[0].2 - 0.02 * pair[1].3)
+        .count()
+}
+
+/// What [`Fonts::search`] found for a line.
+enum Search {
+    /// The rules' drawing reads the line right, or the line is not read back.
+    Rules,
+    /// Draw the line so.
+    Found(BTreeMap<RunKey, Drawing>),
+    /// Nothing tried reads the line right.
+    Nothing,
 }
 
 /// How a reading of a line compares with its text ([`Words::read_as`]).

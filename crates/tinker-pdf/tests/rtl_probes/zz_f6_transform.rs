@@ -1,7 +1,7 @@
 //! `zz_f6_transform` (f6, round 6 lane F (sweep)): the books of
 //! `tools/probes/rtl/probes/pdf/zz_f6_transform.rs`, which is the probe as it ran.
 
-use super::common::{AR, ARP, Case, HE, HEP, rep, run_book};
+use super::common::{rep, run_book, Case, AR, ARP, HE, HEP};
 
 fn probe() {
     let mut n = 0usize;
@@ -48,26 +48,116 @@ fn cases() -> Vec<Case> {
         let s = |i: usize| w[i % w.len()];
         let q = |i: usize| p[i % p.len()];
         let shapes: Vec<(&str, Box<dyn Fn(usize) -> String>)> = vec![
-            ("prose", Box::new(move |i| format!("{} {} {}\u{60C} {} {} {}.", s(i), s(i + 1), s(i + 2), s(i + 3), s(i + 4), s(i + 5)))),
-            ("styled", Box::new(move |i| format!("{} <b>{}</b> {} <i>{}</i>, ({}).", s(i), s(i + 1), s(i + 2), s(i + 3), s(i + 4)))),
-            ("punct", Box::new(move |i| format!("{} <b>?!</b> {} {}. <i>(</i>{}<i>)</i> {}!", s(i), s(i + 1), s(i + 2), s(i + 3), s(i + 4)))),
-            ("num", Box::new(move |i| format!("{} 25\u{66A} <b>{}</b> \u{661}\u{662}\u{663} {} 2010\u{60C} {}.", s(i), s(i + 1), s(i + 2), s(i + 3)))),
-            ("gloss", Box::new(move |i| format!("{} {} (lingua franca) {} <i>sic</i> {}.", s(i), s(i + 1), s(i + 2), s(i + 3)))),
-            ("marks", Box::new(move |i| format!("{} <b>{}</b> {}\u{60C} {} ({}) {}.", q(i), q(i + 1), q(i + 2), q(i + 3), q(i + 4), q(i + 5)))),
-            ("ib", Box::new(move |i| format!("{} <span style=\"display: inline-block; transform: scaleX(0.5)\">{} <b>?!</b> {}</span> {} 25\u{66A} {}.", s(i), s(i + 1), s(i + 2), s(i + 3), s(i + 4)))),
+            (
+                "prose",
+                Box::new(move |i| {
+                    format!(
+                        "{} {} {}\u{60C} {} {} {}.",
+                        s(i),
+                        s(i + 1),
+                        s(i + 2),
+                        s(i + 3),
+                        s(i + 4),
+                        s(i + 5)
+                    )
+                }),
+            ),
+            (
+                "styled",
+                Box::new(move |i| {
+                    format!(
+                        "{} <b>{}</b> {} <i>{}</i>, ({}).",
+                        s(i),
+                        s(i + 1),
+                        s(i + 2),
+                        s(i + 3),
+                        s(i + 4)
+                    )
+                }),
+            ),
+            (
+                "punct",
+                Box::new(move |i| {
+                    format!(
+                        "{} <b>?!</b> {} {}. <i>(</i>{}<i>)</i> {}!",
+                        s(i),
+                        s(i + 1),
+                        s(i + 2),
+                        s(i + 3),
+                        s(i + 4)
+                    )
+                }),
+            ),
+            (
+                "num",
+                Box::new(move |i| {
+                    format!(
+                        "{} 25\u{66A} <b>{}</b> \u{661}\u{662}\u{663} {} 2010\u{60C} {}.",
+                        s(i),
+                        s(i + 1),
+                        s(i + 2),
+                        s(i + 3)
+                    )
+                }),
+            ),
+            (
+                "gloss",
+                Box::new(move |i| {
+                    format!(
+                        "{} {} (lingua franca) {} <i>sic</i> {}.",
+                        s(i),
+                        s(i + 1),
+                        s(i + 2),
+                        s(i + 3)
+                    )
+                }),
+            ),
+            (
+                "marks",
+                Box::new(move |i| {
+                    format!(
+                        "{} <b>{}</b> {}\u{60C} {} ({}) {}.",
+                        q(i),
+                        q(i + 1),
+                        q(i + 2),
+                        q(i + 3),
+                        q(i + 4),
+                        q(i + 5)
+                    )
+                }),
+            ),
+            (
+                "ib",
+                Box::new(move |i| {
+                    format!("{} <span style=\"display: inline-block; transform: scaleX(0.5)\">{} <b>?!</b> {}</span> {} 25\u{66A} {}.", s(i), s(i + 1), s(i + 2), s(i + 3), s(i + 4))
+                }),
+            ),
         ];
         for (name, shape) in &shapes {
             let text = rep(3, |k| shape(k));
             for (d, attr) in [("rtl", " dir=\"rtl\""), ("none", "")] {
-                out.push((format!("{sc}/{name}/{d}"), lang, format!("<div class=\"w\"><p{attr}>{text}</p></div>")));
+                out.push((
+                    format!("{sc}/{name}/{d}"),
+                    lang,
+                    format!("<div class=\"w\"><p{attr}>{text}</p></div>"),
+                ));
             }
         }
     }
     let gloss = rep(3, |k| {
         let h = |i: usize| HE[i % HE.len()];
-        format!("The word <b>{}</b> means <i>peace</i>, ({}) 25% {}.", h(k), h(k + 1), h(k + 2))
+        format!(
+            "The word <b>{}</b> means <i>peace</i>, ({}) 25% {}.",
+            h(k),
+            h(k + 1),
+            h(k + 2)
+        )
     });
-    out.push(("lat/gloss/none".to_owned(), "en", format!("<div class=\"w\"><p>{gloss}</p></div>")));
+    out.push((
+        "lat/gloss/none".to_owned(),
+        "en",
+        format!("<div class=\"w\"><p>{gloss}</p></div>"),
+    ));
     out
 }
 
@@ -107,7 +197,9 @@ fn styles() -> Vec<String> {
     let mut out = Vec::new();
     for (p, w) in transforms {
         for s in spacing {
-            out.push(format!("p {{ margin: 0 30%; transform: {p}; {s} }} .w {{ transform: {w} }}"));
+            out.push(format!(
+                "p {{ margin: 0 30%; transform: {p}; {s} }} .w {{ transform: {w} }}"
+            ));
         }
     }
     out

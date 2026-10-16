@@ -1,7 +1,7 @@
 //! `zz_v6_measure` (v6, round 6 lane V (hunt)): the books of
 //! `tools/probes/rtl/probes/pdf/zz_v6_measure.rs`, which is the probe as it ran.
 
-use super::common::{AR, Case, HE, HEP, run_book};
+use super::common::{run_book, Case, AR, HE, HEP};
 
 fn probe() {
     let mut n = 0usize;
@@ -37,14 +37,30 @@ fn soft(w: &str) -> String {
         return w.to_owned();
     }
     let k = v.len() / 2;
-    format!("{}&shy;{}", v[..k].iter().collect::<String>(), v[k..].iter().collect::<String>())
+    format!(
+        "{}&shy;{}",
+        v[..k].iter().collect::<String>(),
+        v[k..].iter().collect::<String>()
+    )
 }
 
 fn cases() -> Vec<Case> {
     let mut out: Vec<Case> = Vec::new();
     for (sc, lang, w) in [("ar", "ar", AR), ("he", "he", HE), ("hep", "he", HEP)] {
         let s = |i: usize| w[i % w.len()];
-        let sent = |i: usize| format!("{} {} <b>{}</b> {}، {} ({}) {}. {}?!", s(i), s(i + 1), s(i + 2), s(i + 3), s(i + 4), s(i + 5), s(i + 6), s(i + 7));
+        let sent = |i: usize| {
+            format!(
+                "{} {} <b>{}</b> {}، {} ({}) {}. {}?!",
+                s(i),
+                s(i + 1),
+                s(i + 2),
+                s(i + 3),
+                s(i + 4),
+                s(i + 5),
+                s(i + 6),
+                s(i + 7)
+            )
+        };
         let long = (0..8).map(|k| sent(k * 3)).collect::<Vec<_>>().join(" ");
         let mut shapes: Vec<(String, String)> = vec![
             ("w1em".into(), format!("<div style=\"width: 1em\"><p{{D}}>{}</p></div>", sent(0))),
@@ -58,7 +74,10 @@ fn cases() -> Vec<Case> {
             ("pre".into(), format!("<pre{{D}}>{} {}  {}\n{}   ({}) {}.</pre>", s(0), s(1), s(2), s(3), s(4), s(5))),
         ];
         for h in [560, 590, 610, 625, 640, 655, 670, 690, 710] {
-            shapes.push((format!("break{h}"), format!("<div style=\"height: {h}pt\"></div><p{{D}}>{long}</p>")));
+            shapes.push((
+                format!("break{h}"),
+                format!("<div style=\"height: {h}pt\"></div><p{{D}}>{long}</p>"),
+            ));
         }
         for (name, text) in &shapes {
             for (d, attr) in [("rtl", " dir=\"rtl\""), ("none", "")] {
