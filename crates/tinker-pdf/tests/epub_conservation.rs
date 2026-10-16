@@ -1937,12 +1937,15 @@ fn a_dirless_line_with_a_right_to_left_gloss() {
             "p { word-spacing: 2em }",
             "<p>αλφα <b>βήτα</b> ספר בית xyz.</p>", Expect::Pinned("found apart"), Expect::Holds("found apart")),
         Case::both("a bold Armenian word before a bare gloss and a Latin tail (H2-2)", "he", px12, "<p>գիրք <b>տուն</b> ספר בית xyz.</p>", Expect::Holds("cons logical whole found apart")),
-        Case::both(
+        // With `bundled-fonts` the Hebrew book conserves at every tree: a
+        // guard there.
+        Case::each(
             "two touching right-to-left cells, no dir (V3)",
             "he",
             "table { border-spacing: 0 } td, th { padding: 0 } td, th { word-spacing: 1em }",
             "<table><tr><td><b>שלום</b> <i>עולם</i>،</td><td>מלחמה <i>(</i>ספר<i>)</i>.</td></tr></table>",
             Expect::Pinned("logical found apart"),
+            Expect::Holds("cons logical found apart"),
         ),
         Case::both(
             "two touching right-to-left cells, no dir, Arabic (V3)",
