@@ -1730,7 +1730,28 @@ fix was to sharpen the injection rather than to shrug at the number.
   `56dfd93` and `935b077`. A change to right-to-left text is measured against
   those three trees in both builds before it is reported: no book that
   conserved, read whole or was found by search at any of them may read worse,
-  beyond ruling 14's accepted price.
+  beyond ruling 14's accepted price. Its families are committed suites too,
+  two `#[ignore]`d binaries that build every family's books and fail if one
+  reads worse than at `935b077` in its build on any metric its line carries,
+  each test printing one `RAN` line with its row count:
+
+  ```bash
+  cargo test -p tinker-pdf --test rtl_probes -- --ignored --nocapture
+  cargo test -p tinker-pdf --features bundled-fonts --test rtl_probes -- --ignored --nocapture
+  cargo test -p tinker-pdf-shape --test rtl_lines -- --ignored --nocapture
+  ```
+
+  A whole run prints 63, 63 and 4 `RAN` lines (`grep -c '^RAN'`); fewer is a
+  family that did not run, and a run is read by its banners, its `test
+  result` and its exit status together. They take 13 and 15 minutes and 10
+  seconds in debug on four cores, and run on demand: no workflow runs them
+  yet. Their comparisons' own tests are not ignored and run with every
+  `cargo test`. Every book a review of K-11 or CD-19 named is a case, 244 in
+  each build, in the test of its mechanism (`epub_conservation.rs`,
+  `epub_fallback.rs`, read through `tests/epub_support/reading.rs`), which
+  every `cargo test` runs: a case fixed is held to its right reading, a case
+  still open is pinned at today's and names the ROADMAP CD-19 item that
+  leaves it, so that it fails when that item closes.
 - **`cargo xtask`**: `dag` (crate-graph enforcement), `libm`
   (transcendental ban on pixel paths), `oracles` (ruling 13's boundary:
   no test may spawn a program the workspace did not build), `vendor`

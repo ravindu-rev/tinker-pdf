@@ -215,6 +215,17 @@ normaliser, and the decoder refusing a damaged file, a block whose CRC-64 does
 not hold and a check it does not compute. Each rule of the two comparisons is
 an injection in [injections.json](scripts/injections.json), named `suites/…`.
 
+The suites hold the families' books by the thousand against a baseline. The
+books a review named one by one are held otherwise: each is a case, a row of
+the table-driven test of its mechanism in
+`crates/tinker-pdf/tests/epub_conservation.rs` and `epub_fallback.rs`, read
+as this kit reads a book (`tests/epub_support/reading.rs`, whose text, words
+and marks `rtl_probes/common.rs` takes too) and held to its right reading or,
+while its finding is open, pinned at today's. Those tests are not ignored,
+build their books in seconds and run with every `cargo test`; their rules are
+the injections named `cases/…`. [The regressions](#the-regressions) says which
+of them carries which of the verifiers' tests.
+
 ### The suites and the runner
 
 The probes here are the families as they ran at the three trees, and `run.sh`
