@@ -3911,7 +3911,7 @@ fn squeezed_blocks(words: &[&'static str; 12]) -> String {
 
 /// **A line nothing reads right on the page under a transform is searched
 /// again in its runs' own space** (round 6's lane F, the sweep of V1's
-/// class), guards.
+/// class), guards and a case.
 ///
 /// An inline block squeezed by `scaleX(0.5)` draws glyphs over the ones
 /// beside it at every tree, with no spacing as with any (the sweep's `ib`
@@ -3925,8 +3925,10 @@ fn squeezed_blocks(words: &[&'static str; 12]) -> String {
 /// (`paint::Fonts::set_readings`). What that search finds is drawn only
 /// where it reads closer to the line on the page than the rules' drawing
 /// (`paint::Fonts::reads_closer`): turned a quarter (`rotate(90deg)`) at
-/// `0.6em`, the paragraph keeps the rules' drawing and its structure tree's
-/// order, which the drawing found in the runs' space loses on the page.
+/// `0.6em`, the paragraph held its structure tree's order at 9297d2d and
+/// 56dfd93 and lost it at 935b077, which drew what its search found in the
+/// runs' space; that drawing reads no closer on the page, and the rules'
+/// drawing, kept, holds the order again.
 /// With `bundled-fonts` the paragraph at
 /// `0.6em` is pinned at what it reads: a word of it is not found by search,
 /// as at 56dfd93 and 935b077, where 9297d2d found every one (15 books of the
@@ -3954,7 +3956,7 @@ fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
             Expect::Holds("found"),
         ),
         Case::each(
-            "the same at 0.6em turned a quarter (guard)",
+            "the same at 0.6em turned a quarter (f6 sweep, as at 9297d2d and 56dfd93)",
             "he",
             "p { margin: 0 30%; transform: rotate(90deg); word-spacing: 0.6em } .w { transform: none }",
             body,
