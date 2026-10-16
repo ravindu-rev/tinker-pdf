@@ -7,28 +7,23 @@ delete it in the same commit that moves the work on.
 
 ## Where the work continues
 
-**On the branch `rtl-probe-kit`, not on `develop`** (the owner, 12 October
-2026). It starts from `develop` at `935b077` and adds:
-- the probe kit;
-- this note;
-- a line in AGENTS.md pointing here.
-
-`develop` was left as it is. Push the next session's work to
-`rtl-probe-kit` until the owner says otherwise.
+**On `develop`.**
+- On 12 October 2026 the owner paused the work on a side branch,
+  `rtl-probe-kit`.
+- On 16 October the owner had it brought back. It was fast-forwarded into
+  `develop` (`b9b6970`, signed hashes kept) and then deleted.
+- Round 6 picks up from "Next, in this order" below.
 
 ## State
 
-- **`develop`** (`935b077`) carries round 5 of ROADMAP CD-19 and the K-11
-  follow-ups: eight signed commits, from `c7e9b89` to `935b077`. The probe
-  kit, [tools/probes/rtl](../tools/probes/rtl/README.md), is on
-  `rtl-probe-kit` only. Every gate was green on
-  that code, in the default, `bundled-fonts` and no-default-features builds,
+- **`develop`** carries round 5 of ROADMAP CD-19 and the K-11 follow-ups:
+  eight signed commits, from `c7e9b89` to `935b077`. It also carries the
+  probe kit, [tools/probes/rtl](../tools/probes/rtl/README.md). Every gate
+  was green on that code, in the default, `bundled-fonts` and no-default-features builds,
   and no determinism hash moved.
 - **`main`** is still the merge of `56dfd93`. By the owner's standing
   instruction, nothing goes to `main` and no pull request is opened until
   the owner says so.
-- **Merging back:** whether and when `rtl-probe-kit` merges into `develop`
-  is the owner's call.
 - **What closed in round 5:**
   - CD-19's root: the standard-14 overflow font is written at `0 Tw`, so
     nothing after its code-32 letter moves.
@@ -114,7 +109,7 @@ is expected. Read them finding by finding before turning any into a guard.
    `cargo test -- --ignored` and prints a `RAN` banner. Commit a test for
    every case the families found, even the small ones.
 2. **Run the round-2 verification that was skipped,** and a fresh hunt, on
-   this branch. Both baselines apply: `9297d2d` and `56dfd93`.
+   `develop`. Both baselines apply: `9297d2d` and `56dfd93`.
 3. **Put the three owner decisions above to the owner:** H1, H2-3 and H6.
 4. **Fix what remains by class,** not by instance (AGENTS.md): one lane for
    the reader-side mechanism behind H2-2 and H2-7.
