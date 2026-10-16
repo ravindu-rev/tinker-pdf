@@ -36,6 +36,7 @@ mod rtl_probes {
     pub(crate) mod zz_c1_tw;
     pub(crate) mod zz_code1_neg;
     pub(crate) mod zz_code1_tdprobe;
+    pub(crate) mod zz_f6_ems;
     pub(crate) mod zz_f6_transform;
     pub(crate) mod zz_k11rv_fixtures;
     pub(crate) mod zz_rr3m_extra;
@@ -199,4 +200,5 @@ families! {
     zz_v6_transform = "zz_v6_transform": "v6t: round 6 lane V (hunt); CSS transforms and tight line heights under spacing",
     zz_v6_pdf = "zz_v6_pdf": "v6pdf: round 6 lane V (hunt); plain synthetic PDFs drawn as producers draw right-to-left lines",
     zz_f6_transform = "zz_f6_transform": "f6: round 6 lane F (sweep); the class of V1: CSS transforms of one axis or both, turns, skews, a matrix, shifts, on the paragraph, its block, both, an inline block",
+    zz_f6_ems = "zz_f6_ems": "f6: round 6 lane F (sweep); the edges of the fix of V1: two cells near half an em apart, inline blocks of about half an em, marks of no advance opening a styled run, under no transform, a scale of one axis and a skew",
 }

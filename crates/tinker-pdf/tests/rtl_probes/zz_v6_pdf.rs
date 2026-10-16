@@ -91,7 +91,7 @@ impl Font {
                     out.push('\\');
                     out.push(code as char)
                 }
-                33..=126 | 32 => out.push(code as char),
+                32..=126 => out.push(code as char),
                 _ => {
                     let _ = write!(out, "\\{code:03o}");
                 }
@@ -311,9 +311,9 @@ fn content(font: &Font, line: &Line, pattern: &str, size: f64) -> String {
                 _ => (0.0, 0.0),
             };
             let w = font.width(&joined, size, tc, tw);
-            let _ = write!(
+            let _ = writeln!(
                 s,
-                "BT /F0 {size} Tf {tc} Tc {tw} Tw {} {y} Td ({}) Tj ET\n",
+                "BT /F0 {size} Tf {tc} Tc {tw} Tw {} {y} Td ({}) Tj ET",
                 start(w),
                 font.string(&joined)
             );
@@ -347,9 +347,9 @@ fn content(font: &Font, line: &Line, pattern: &str, size: f64) -> String {
                     }
                 }
             }
-            let _ = write!(
+            let _ = writeln!(
                 s,
-                "BT /F0 {size} Tf 0 Tc 0 Tw {} {y} Td [{arr}] TJ ET\n",
+                "BT /F0 {size} Tf 0 Tc 0 Tw {} {y} Td [{arr}] TJ ET",
                 start(w)
             );
         }
@@ -372,16 +372,16 @@ fn content(font: &Font, line: &Line, pattern: &str, size: f64) -> String {
             }
             if pattern == "word-objects" {
                 for (x, tok) in placed {
-                    let _ = write!(
+                    let _ = writeln!(
                         s,
-                        "BT /F0 {size} Tf {x:.3} {y} Td ({}) Tj ET\n",
+                        "BT /F0 {size} Tf {x:.3} {y} Td ({}) Tj ET",
                         font.string(tok)
                     );
                 }
             } else {
                 s.push_str(&format!("BT /F0 {size} Tf\n"));
                 for (x, tok) in placed {
-                    let _ = write!(s, "1 0 0 1 {x:.3} {y} Tm ({}) Tj\n", font.string(tok));
+                    let _ = writeln!(s, "1 0 0 1 {x:.3} {y} Tm ({}) Tj", font.string(tok));
                 }
                 s.push_str("ET\n");
             }
@@ -402,9 +402,9 @@ fn content(font: &Font, line: &Line, pattern: &str, size: f64) -> String {
                 if c == ' ' {
                     continue;
                 }
-                let _ = write!(
+                let _ = writeln!(
                     s,
-                    "1 0 0 1 {x:.3} {y} Tm ({}) Tj\n",
+                    "1 0 0 1 {x:.3} {y} Tm ({}) Tj",
                     font.string(&c.to_string())
                 );
             }

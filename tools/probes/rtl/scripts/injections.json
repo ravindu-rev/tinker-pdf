@@ -3200,58 +3200,8 @@
    "edits": [
     {
      "file": "crates/tinker-pdf/src/epub/paint.rs",
-     "old": "        over <= over_by_rules && written.pairs_in(&read) > written.pairs_in(&rules)",
+     "old": "        written.pairs_in(&read) > written.pairs_in(&rules)",
      "new": "        true",
-     "count": 1
-    }
-   ],
-   "suites": [
-    [
-     "cargo",
-     "test",
-     "--no-fail-fast",
-     "-p",
-     "tinker-pdf",
-     "--test",
-     "epub_conservation",
-     "--test",
-     "epub_fallback"
-    ]
-   ]
-  },
-  {
-   "name": "page/closer-overprint-unchecked",
-   "round": "round 6 lane F: the read-back reads the page",
-   "edits": [
-    {
-     "file": "crates/tinker-pdf/src/epub/paint.rs",
-     "old": "        over <= over_by_rules && written.pairs_in(&read) > written.pairs_in(&rules)",
-     "new": "        written.pairs_in(&read) > written.pairs_in(&rules)",
-     "count": 1
-    }
-   ],
-   "suites": [
-    [
-     "cargo",
-     "test",
-     "--no-fail-fast",
-     "-p",
-     "tinker-pdf",
-     "--test",
-     "epub_conservation",
-     "--test",
-     "epub_fallback"
-    ]
-   ]
-  },
-  {
-   "name": "page/mark-in-the-runs-ems",
-   "round": "round 6 lane F: the read-back reads the page",
-   "edits": [
-    {
-     "file": "crates/tinker-pdf/src/epub/paint.rs",
-     "old": "font_size * RESUMED_WITHIN / along",
-     "new": "font_size * RESUMED_WITHIN",
      "count": 1
     }
    ],

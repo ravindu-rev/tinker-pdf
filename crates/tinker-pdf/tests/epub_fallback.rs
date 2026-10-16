@@ -3924,8 +3924,7 @@ fn squeezed_blocks(words: &[&'static str; 12]) -> String {
 /// (`paint::Fonts::set_readings`).
 #[test]
 fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
-    let at_06 =
-        "p { margin: 0 30%; transform: none; word-spacing: 0.6em } .w { transform: none }";
+    let at_06 = "p { margin: 0 30%; transform: none; word-spacing: 0.6em } .w { transform: none }";
     let at_1 = "p { margin: 0 30%; transform: none; word-spacing: 1em } .w { transform: none }";
     let body = format!("<div class=\"w\"><p>{}</p></div>", squeezed_blocks(&HE));
     check(&[
@@ -3975,5 +3974,57 @@ fn a_drawing_that_sets_more_glyphs_over_others_than_the_rules_is_not_taken() {
         more.is_empty(),
         "more glyphs drawn over another than at 935b077 (1):\n{}",
         more.join("\n")
+    );
+}
+
+/// **Two cells a reader parts on the page are read back apart** (round 6's
+/// lane F, the edges of V1's class: the kit's `zz_f6_ems` sweep).
+///
+/// The read-back reads together the runs a reader reads as one line
+/// (`paint::page_lines`), and a gap between two runs parts them where it is
+/// wide in a reader's ems on the page (`paint::along_the_line`). Under
+/// `scaleX(2)` or `scaleX(3)` two right-to-left cells `6px` or `8px` apart,
+/// at `word-spacing: 1em`, are parted on the page and not in their runs:
+/// read back as one line in the runs' ems, the drawing found right for it
+/// set the first cell's two words and its comma each on a line of its own,
+/// as 9297d2d, 56dfd93 and 935b077 drew them. Read back apart, the first
+/// cell's words read on one line. With no transform the two cells are one
+/// line to a reader, and read so at every tree.
+#[test]
+fn two_cells_a_reader_parts_on_the_page_are_read_back_apart() {
+    let mut cut = Vec::new();
+    for (language, cells, first) in [
+        (
+            "he",
+            "<td><b>מלחמה</b> ספר\u{60C}</td><td>בית <i>(</i>גדול<i>)</i>.</td>",
+            "מלחמה ספר\u{60C}",
+        ),
+        (
+            "ar",
+            "<td><b>الطالب</b> جميل\u{60C}</td><td>بيت <i>(</i>كبير<i>)</i>.</td>",
+            "الطالب جميل\u{60C}",
+        ),
+    ] {
+        for spacing in ["6px", "8px"] {
+            for transform in ["scaleX(2)", "scaleX(3)"] {
+                let style = format!(
+                    "table {{ border-spacing: {spacing}; transform: {transform} }} \
+                     td {{ padding: 0; word-spacing: 1em }}"
+                );
+                let reading = read(
+                    language,
+                    &style,
+                    &format!("<table><tr>{cells}</tr></table>"),
+                );
+                if !reading.text.lines().any(|line| line.contains(first)) {
+                    cut.push(format!("{language}, {style}: {:?}", reading.text));
+                }
+            }
+        }
+    }
+    assert!(
+        cut.is_empty(),
+        "a cell's words read on more than one line:\n{}",
+        cut.join("\n")
     );
 }

@@ -1324,8 +1324,8 @@ impl<'a> Fonts<'a> {
     /// in its runs' own space where nothing it tried reads it right on the
     /// page, reads the line's letters closer to the order written on the page
     /// than the rules' drawing does there — more of the text's pairs of
-    /// letters in order ([`Words::pairs_in`]) — and sets no more glyphs over
-    /// others there. A drawing found right in a space that is not the page's
+    /// letters in order ([`Words::pairs_in`]). A drawing found right in a
+    /// space that is not the page's
     /// is no better than a guess on the page: a styled `?!` turned for a
     /// reading in which it joined its word read `!?` alone on the page under
     /// `scaleX(2)`, where the rules' drawing read it right.
@@ -1337,14 +1337,13 @@ impl<'a> Fonts<'a> {
         written: &Words,
         found: &BTreeMap<RunKey, Drawing>,
     ) -> bool {
-        let Some((rules, over_by_rules)) = self.read_back(line, matrices, frame, &BTreeMap::new())
-        else {
+        let Some((rules, _)) = self.read_back(line, matrices, frame, &BTreeMap::new()) else {
             return false;
         };
-        let Some((read, over)) = self.read_back(line, matrices, frame, found) else {
+        let Some((read, _)) = self.read_back(line, matrices, frame, found) else {
             return false;
         };
-        over <= over_by_rules && written.pairs_in(&read) > written.pairs_in(&rules)
+        written.pairs_in(&read) > written.pairs_in(&rules)
     }
 
     /// The text objects [`plan_coded`] writes for the whole of `run` drawn as
@@ -6486,8 +6485,8 @@ fn parted(run: &TextRun, along: f64) -> bool {
 /// the page and whose glyphs are `√2` times as large; one too where the
 /// matrix is not finite or flattens the plane, which draws nothing.
 ///
-/// Every rule that asks whether a reader parts two text objects of a run
-/// asks it in these ems ([`parted`], [`page_lines`], [`leading_mark_at`]):
+/// The rules that ask whether a reader parts two text objects of a run, or
+/// two runs, ask it in these ems ([`parted`], [`page_lines`]):
 /// in the run's own, a styled `?!` glued to a Hebrew word at
 /// `word-spacing: 0.6em` under `transform: scaleX(2)` was drawn for a page
 /// where it read with the word and read alone on the page written (lane V
@@ -6528,10 +6527,9 @@ fn along_the_line(matrix: [f64; 6]) -> f64 {
 /// spacing the mark's centre is still the nearer of its letter's box and the
 /// next glyph's by most of the spacing, whatever rounding set its letter's
 /// end.
-fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64, along: f64) -> f64 {
+fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
     let end = start - letter_spacing;
-    // Half an em on the page, in a reader's ems ([`along_the_line`]).
-    let near = start - letter_spacing.max(font_size * RESUMED_WITHIN / along);
+    let near = start - letter_spacing.max(font_size * RESUMED_WITHIN);
     (end - font_size * MARK_INSET).max(near - font_size * EXACT_MARK_INSET)
 }
 
@@ -6883,12 +6881,9 @@ fn plan_coded(
             // Its letter ended where this slice starts, less the spacing
             // after it — this run's, the one to hand — so the mark goes
             // inside it as though it rode on it ([`leading_mark_at`]).
-            (true, false) if leading => Some(leading_mark_at(
-                start,
-                run.letter_spacing,
-                run.font_size,
-                along,
-            )),
+            (true, false) if leading => {
+                Some(leading_mark_at(start, run.letter_spacing, run.font_size))
+            }
             (true, false) => None,
         };
         // A letter the stand-in draws, carrying a mark of no advance: a piece

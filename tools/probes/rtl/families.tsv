@@ -84,3 +84,4 @@ zz_v6_time	tinker-pdf	probes/pdf/zz_v6_time.rs	v6time	1	timing	round 6 lane V (c
 zz_v6_pdf	tinker-pdf	probes/pdf/zz_v6_pdf.rs	v6pdf	1	rows	round 6 lane V (hunt)	plain synthetic PDFs drawn as producers draw right-to-left lines
 zz_v6_transform	tinker-pdf	probes/pdf/zz_v6_transform.rs	v6t	2	rows	round 6 lane V (hunt)	CSS transforms (scaleX, scale, rotate, skew, translate) and tight line heights under spacing
 zz_f6_transform	tinker-pdf	probes/pdf/zz_f6_transform.rs	f6	2	rows	round 6 lane F (sweep)	the class of lane V V1: CSS transforms (a scale of one axis or both, turns, skews, a matrix, shifts; on the paragraph, its block, both, an inline block) under spacing and none
+zz_f6_ems	tinker-pdf	probes/pdf/zz_f6_ems.rs	f6	2	rows	round 6 lane F (sweep)	the edges of the fix of V1: two cells whose gap is near half an em, inline blocks of about half an em between words, marks of no advance opening a styled run, letter-spaced; under no transform, a scale of one axis and a skew

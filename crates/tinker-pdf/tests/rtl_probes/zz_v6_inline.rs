@@ -1,7 +1,7 @@
 //! `zz_v6_inline` (v6, round 6 lane V (hunt)): the books of
 //! `tools/probes/rtl/probes/pdf/zz_v6_inline.rs`, which is the probe as it ran.
 
-use super::common::{rep, run_book, Case, AR, HE, HEP};
+use super::common::{rep, run_book, Case, Shape, AR, HE, HEP};
 
 fn probe() {
     let mut n = 0usize;
@@ -62,7 +62,7 @@ fn cases() -> Vec<Case> {
         ("fa", "fa", FA),
     ] {
         let s = |i: usize| w[i % w.len()];
-        let shapes: Vec<(&str, Box<dyn Fn(usize) -> String>)> = vec![
+        let shapes: Vec<Shape> = vec![
             (
                 "nest3",
                 Box::new(move |i| {
@@ -259,7 +259,7 @@ fn cases() -> Vec<Case> {
             ),
         ];
         for (name, shape) in &shapes {
-            let text = rep(2, |k| shape(k));
+            let text = rep(2, shape);
             for (d, attr) in [
                 ("rtl", " dir=\"rtl\""),
                 ("ltr", " dir=\"ltr\""),

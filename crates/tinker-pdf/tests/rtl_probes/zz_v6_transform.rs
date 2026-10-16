@@ -1,7 +1,7 @@
 //! `zz_v6_transform` (v6t, round 6 lane V (hunt)): the books of
 //! `tools/probes/rtl/probes/pdf/zz_v6_transform.rs`, which is the probe as it ran.
 
-use super::common::{rep, run_book, Case, AR, HE};
+use super::common::{rep, run_book, Case, Shape, AR, HE};
 
 fn probe() {
     let mut n = 0usize;
@@ -39,7 +39,7 @@ fn cases() -> Vec<Case> {
     let mut out: Vec<Case> = Vec::new();
     for (sc, lang, w) in [("ar", "ar", AR), ("he", "he", HE)] {
         let s = |i: usize| w[i % w.len()];
-        let shapes: Vec<(&str, Box<dyn Fn(usize) -> String>)> = vec![
+        let shapes: Vec<Shape> = vec![
             (
                 "prose",
                 Box::new(move |i| {
@@ -106,7 +106,7 @@ fn cases() -> Vec<Case> {
             ),
         ];
         for (name, shape) in &shapes {
-            let text = rep(3, |k| shape(k));
+            let text = rep(3, shape);
             for (d, attr) in [("rtl", " dir=\"rtl\""), ("none", "")] {
                 out.push((
                     format!("{sc}/{name}/{d}"),
