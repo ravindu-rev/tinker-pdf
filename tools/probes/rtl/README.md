@@ -7,13 +7,19 @@ committed so that the next round starts from the repository and not from a
 directory a container restart can lose ([AGENTS.md](../../../AGENTS.md), "A
 test for every case").
 
-Nothing here is compiled by cargo. The `.rs` files sit outside every crate's
-`tests/` directory and `tools/probes` is not a workspace member, so no build,
-test, clippy or fmt run sees them. The runner copies a probe into a checkout's
-`crates/<crate>/tests/`, runs it there, and removes exactly what it copied.
-Turning the families into `#[ignore]`d suites that print a `RAN` banner, as
-AGENTS.md asks of every probe family that found something, is the next step;
-see [What comes next](#what-comes-next).
+The families are committed tests as well: two `#[ignore]`d integration-test
+binaries, `crates/tinker-pdf/tests/rtl_probes.rs` and
+`crates/tinker-pdf-shape/tests/rtl_lines.rs`, build every family's books and
+fail when one reads worse than at `935b077`, each family's test printing a
+`RAN` banner ([The suites](#the-suites)). That is how a change is held to the
+kit.
+
+Nothing in this directory is compiled by cargo. The `.rs` files here are the
+probes as they ran; they sit outside every crate's `tests/` directory and
+`tools/probes` is not a workspace member, so no build, test, clippy or fmt run
+sees them. The runner copies a probe into a checkout's `crates/<crate>/tests/`,
+runs it there, and removes exactly what it copied, which is how the three
+trees were measured and how another tree is.
 
 ## What a probe measures
 
@@ -135,7 +141,122 @@ worse; `classes.py` sorts a run's books into those classes and lists the ones
 no class claims. Both builds, always: the default and `--features
 bundled-fonts`.
 
-## Running
+## The suites
+
+Every family a ratchet reads is also a committed test, in two `#[ignore]`d
+integration-test binaries, so that CI compiles two binaries and not seventy:
+
+- `crates/tinker-pdf/tests/rtl_probes.rs`: one test a `rows` or `tsv` family
+  of [families.tsv](families.tsv), 63 in all, each its module under
+  `rtl_probes/`; the harness the rr3m families share is
+  `rtl_probes/common.rs`, the overprint shim of the `zz_vx_*` families
+  `rtl_probes/vov.rs`, and the comparison `rtl_probes/ratchet.rs`;
+- `crates/tinker-pdf-shape/tests/rtl_lines.rs`: one test a `lines` family, 4
+  in all, under `rtl_lines/`.
+
+```bash
+cargo test -p tinker-pdf --test rtl_probes -- --ignored --nocapture
+cargo test -p tinker-pdf --features bundled-fonts --test rtl_probes -- --ignored --nocapture
+cargo test -p tinker-pdf-shape --test rtl_lines -- --ignored --nocapture
+# one family, or a few:
+cargo test -p tinker-pdf --test rtl_probes zz_rr3m_hunt_min -- --ignored --nocapture
+```
+
+Each test builds its family's books exactly as the probe here does (the
+modules are the probes with their shared code taken out, their `println!` sent
+to the ratchet, and the knobs that narrowed a run removed) and prints one line:
+
+```text
+RAN rtl_probes zz_rr3m_hunt_min [default] against 935b077: 12 rows (the baseline has 12), 0 books worse, 0 books better, 0 changed without a verdict
+RAN rtl_lines zz_k11rv_bidi against 935b077: 93851 rows, 2 printed lines; 0 worse, 0 gains, 0 changed without a verdict
+```
+
+then a `WORSE`, `GAIN` or `CHANGED` line for each book that moved (up to 40 of
+each), and fails if any book reads worse than at 935b077 in that build. A run
+of the three commands prints 63, 63 and 4 `RAN` lines; fewer means a family
+did not run. Worse is any of:
+
+- a book the baseline has and the run lacks, or fewer rows;
+- `content`, `logical`, `cons`, read whole (`text`), found by search
+  (`search=a/b`, `a == b`) or `holds`, true at 935b077 and not now;
+- a glyph drawn over another more often (the rr3m `overlap`, `VOV`, `VOVX`,
+  `TWROW`'s `vov`, `ZZN`), or the overflow font showing code 32 at a word
+  spacing other than zero more often (`TWROW`'s `twbad`);
+- a `FAIL` key `zz_vx_probe_paren` did not have, more dir-less lines misread
+  (`TALLY`) or more misread `LINE`s in a book, a fixture whose hashes moved
+  (`FIX`), a book whose probe panicked, the td probe writing fewer rows;
+- for a line family, a key with more rows `NO`, or `undrawn`, than at 935b077.
+
+A gain is the same metrics the other way; it is printed and never fails.
+Lines that carry no verdict (the td probe's rows, `zz_fv_shape`'s readings, a
+book's `thash` and `chash`) are printed when they change, as `CHANGED`, for a
+person to read, and never fail. Timing families stay probes: a wall-clock time
+is no measurement another machine repeats.
+
+The suites read `baselines/935b077/` with this repository's own code (ruling
+13): `rtl_probes` decodes the `.xz` files through `tinker-pdf-archive`'s LZMA2
+decoder, checking every header's CRC-32 and each block's CRC-64, and
+`rtl_lines`, whose crate has no decompressor and takes none for a test, reads
+the plain `lines/*.txt` and `lines/*.not-ok.tsv` (each line TSV reduced to its
+row count and the rows not read right or not drawn, `rtlkit.not_ok`).
+
+At 935b077's code every family passes in both builds with nothing worse,
+nothing better and nothing changed, and its data lines and TSVs are the
+baseline's byte for byte (the `TINKER_RTL_KIT_OUT` directory below against the
+decoded baselines; `cmp.py` and `tsvdiff.py` read it as 0 worse, 0 better, 0
+changed). In debug, on four cores, the 63 tinker-pdf families take 13 minutes
+in a default build and 15 with `bundled-fonts`, and the 4 line families 10
+seconds.
+
+Both binaries also hold their comparison to this section in tests that are not
+ignored and build no book (`cargo test -p tinker-pdf --test rtl_probes`, `cargo
+test -p tinker-pdf-shape --test rtl_lines`, which every `cargo test` runs): each
+kind of worse above, the gains, the changes that carry no verdict, the
+normaliser, and the decoder refusing a damaged file, a block whose CRC-64 does
+not hold and a check it does not compute. Each rule of the two comparisons is
+an injection in [injections.json](scripts/injections.json), named `suites/…`.
+
+### The suites and the runner
+
+The probes here are the families as they ran at the three trees, and `run.sh`
+runs them at any checkout, an old tree included, where the suites' baseline
+does not apply. The suites run the same books at this checkout and hold them
+to 935b077. A suite is where a family changes from now on: a book added to a
+suite module is not in its probe, and the probe stays as it ran.
+
+With `TINKER_RTL_KIT_OUT=DIR` set, each suite also writes what it printed in
+the layout of a kit run: `DIR/<build>/<family>.txt` (the data lines, sorted, and
+`exit 0` once its books are all built) and its TSVs beside it, and the line
+suite `DIR/lines/`. The comparators read that directory as they read a
+`run.sh` output: `table.py DIR`, `cmp.py 935b077 DIR`, `tsvdiff.py 935b077 DIR`.
+Setting it changes nothing a suite asserts.
+
+### Refreshing the baseline
+
+The baseline moves only for a reason a person can name: a gain worth keeping
+as the new floor, or a price the owner accepted (AGENTS.md, "The owner decides
+prices"; ruling 14 records the price and its figures). A baseline that moves
+when nothing under it changed is a finding, not a refresh. To refresh:
+
+1. Run the three suite commands with `TINKER_RTL_KIT_OUT=DIR` at the commit
+   whose readings become the floor, and check every `RAN` line and every exit
+   status. A run with a family worse than the old baseline fails; that is
+   expected for an accepted price, and every `WORSE` line must be one the
+   ruling names.
+2. Compare: `python3 -I tools/probes/rtl/scripts/cmp.py 935b077 DIR --show 20`
+   and `tsvdiff.py 935b077 DIR`, and read every book that moved.
+3. Pack: `python3 -I tools/probes/rtl/scripts/pack.py DIR
+   tools/probes/rtl/baselines/<commit> --suites --note '{family} at <commit>,
+   {build}: the suites'' run'`. `--suites` refuses a directory in which a family
+   did not finish.
+4. Point `BASELINE` in both `ratchet.rs` files at `<commit>`, rerun the suites
+   (every family passes with nothing worse), and say in the commit message what
+   moved, by how many books, and on whose decision.
+
+The old baseline directory stays: the three-tree tables (`table.py`) read
+9297d2d, 56dfd93 and 935b077 by name.
+
+## Running the probes
 
 The runner needs `bash`, `python3` and the checkout's own toolchain. From the
 repository root:
@@ -267,7 +388,10 @@ tools/probes/rtl/scripts/diag.sh . default tools/probes/rtl/probes/diag/open-cas
 
 ## Regenerating a baseline
 
-A baseline is a run at a commit, packed. With a worktree beside this one:
+This is how the three trees' baselines were made, and how another tree's is:
+a `run.sh` run at a commit, packed. The suites' floor is refreshed from the
+suites instead ([Refreshing the baseline](#refreshing-the-baseline)). With a
+worktree beside this one:
 
 ```bash
 git worktree add --detach ../rtl-at-56dfd93 56dfd93
@@ -278,9 +402,11 @@ git worktree remove ../rtl-at-56dfd93
 ```
 
 `pack.py` refuses a run without its `done` marker and writes every normalised
-output and TSV with `xz -9` in the layout of `baselines/`. `--note` puts a `#`
-line at the top of each normalised output; the TSVs are copied as the probes
-wrote them, with no note. Compare the packed directory with the committed one
+output and TSV with `xz -9` in the layout of `baselines/`, except the line
+families' outputs, which it writes as plain text, and beside each line TSV its
+`.not-ok.tsv` (both below). `--note` puts a `#` line at the top of each
+normalised output; the TSVs are copied as the probes wrote them, with no
+note. Compare the packed directory with the committed one
 (`cmp.py`, `tsvdiff.py`) before replacing anything: a baseline that moves when nothing under it changed is a finding,
 not a refresh. A family that calls an API the commit does not have fails to
 compile there, and its output says so (`zz_fv_shape` and `zz_code1_time` at
@@ -298,7 +424,16 @@ rounds' counts are in their fixes' commit messages. Fourteen more targeted code
 that has changed since and were left out, and so was one whose round edited a
 second line in code of its own (the code review's `bx-full-tw-paint` is the
 same injection, whole). An injection that several rounds ran is kept once,
-under the latest, with the others named in `also`.
+under the latest, with the others named in `also`. The 20 named `suites/…`
+put back broken each rule of the two suites' comparisons, and fire the
+suites' own checks (round 6's commit of the suites records their counts).
+`--suite` runs a suite of your choosing instead of the catalogue's, the
+suites themselves included:
+
+```bash
+python3 -I tools/probes/rtl/scripts/inject.py run . /tmp/rtl/inj \
+  --suite 'cargo test --no-fail-fast -p tinker-pdf --test rtl_probes -- --ignored' bx-full-tw-paint
+```
 
 ```bash
 python3 -I tools/probes/rtl/scripts/inject.py list
@@ -315,12 +450,18 @@ and 0 in the default build, the counts recorded.
 
 `baselines/<commit>/<build>/<family>.txt.xz` are the rounds' own outputs,
 normalised by `rtlkit.normalise` and compressed, and each opens with a `#` line
-saying what it is. The 17 TSVs beside them are not: they carry no `#` line
-and are not normalised. Each `.tsv.xz` is a probe's TSV as the probe wrote it,
-compressed and nothing else: `lines/bct-auto`, `wrapped`, `sent` and `laneR`
-at each tree, and `zz_code1_tdprobe` in both builds at 9297d2d and 935b077 and
-in the default build at 56dfd93. Rerun at 935b077 with `run.sh`, the line
-probes and the td probe, in both builds, write theirs byte for byte.
+saying what it is. The line families' are the same outputs uncompressed,
+`lines/<family>.txt`, so that `rtl_lines` reads them with no decompressor
+(ruling 13); they are a few hundred bytes each. The 17 TSVs beside them are
+not normalised and carry no `#` line. Each `.tsv.xz` is a probe's TSV as the
+probe wrote it, compressed and nothing else: `lines/bct-auto`, `wrapped`,
+`sent` and `laneR` at each tree, and `zz_code1_tdprobe` in both builds at
+9297d2d and 935b077 and in the default build at 56dfd93. Rerun at 935b077 with
+`run.sh`, the line probes and the td probe, in both builds, write theirs byte
+for byte, and so do the suites. `935b077/lines/<tsv>.not-ok.tsv` is each line
+TSV reduced by `rtlkit.not_ok` to a `#` line, its row count and the rows not
+read right or not drawn, by key and verdicts: what `rtl_lines` holds a run
+to.
 
 - **935b077**: the second CD-19 fix's last full run of every family, both
   builds, on 7f1b3f8, whose `crates/` tree is 935b077's: the two commits
@@ -373,13 +514,3 @@ beside the families', and `table.py` prints it under each build's table:
 Which of them become guards of what the tree does now, and how the ones for
 open findings are held, is the conversion step's to settle, finding by
 finding.
-
-## What comes next
-
-AGENTS.md asks that a probe family that found something become a committed
-suite: an `#[ignore]`d integration test that prints a `RAN` banner and runs on
-demand or nightly, with its baseline committed. These families are the input
-to that step. Each becomes a test file under `crates/tinker-pdf/tests/` (or
-`crates/tinker-pdf-shape/tests/`), its books unchanged and its output compared
-with the baseline here, and `run.sh` shrinks to `cargo test -- --ignored`. The
-regressions are read against their findings first, as above.

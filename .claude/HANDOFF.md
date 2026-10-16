@@ -101,10 +101,12 @@ is expected. Read them finding by finding before turning any into a guard.
 
 ## Next, in this order
 
-1. **Turn the probe kit into `#[ignore]`d suites,** per AGENTS.md, so every
-   family runs with `cargo test -- --ignored` and prints a `RAN` banner.
-   Commit a test for every case the families found, even the small ones.
-   (The kit's known issues, the first half of this step, are fixed.)
+1. **Commit a test for every case the families found,** even the small ones.
+   The kit's known issues are fixed, and its families are `#[ignore]`d
+   ratchets against `935b077`, each printing a `RAN` banner:
+   `crates/tinker-pdf/tests/rtl_probes.rs` (63 families) and
+   `crates/tinker-pdf-shape/tests/rtl_lines.rs` (4); see the kit's README,
+   "The suites".
 2. **Run the round-2 verification that was skipped,** and a fresh hunt, on
    `develop`. Both baselines apply: `9297d2d` and `56dfd93`.
 3. **Put the three owner decisions above to the owner:** H1, H2-3 and H6.

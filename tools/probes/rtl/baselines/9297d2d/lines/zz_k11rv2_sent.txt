@@ -1,0 +1,5 @@
+# zz_k11rv2_sent at 9297d2d, lines
+Running tests/zz_k11rv2_sent.rs
+SENT total=13300 ok=8867
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+exit 0

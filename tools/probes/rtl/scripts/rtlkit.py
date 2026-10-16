@@ -324,6 +324,35 @@ def tally_lines(o):
     return sum(o.tally.values())
 
 
+def not_ok(text):
+    """A line probe's TSV reduced to what the line suite's ratchet reads: the
+    number of rows, and every row not read right (its OK/NO verdict NO) or not
+    drawn again (bct-auto's draws/undrawn verdict undrawn), as its key (the
+    fields before its OK/NO verdict) and its verdicts, in file order.
+    `crates/tinker-pdf-shape/tests/rtl_lines/ratchet.rs` reads the same rows
+    from a TSV the same way."""
+    rows, out = 0, []
+    for line in text.split('\n'):
+        if not line:
+            continue
+        rows += 1
+        p = line.split('\t')
+        at = next((i for i, f in enumerate(p) if f in ('OK', 'NO')), None)
+        if at is None:
+            continue
+        draws = next((f for f in p[at + 1:] if f in ('draws', 'undrawn')), None)
+        if p[at] == 'NO' or draws == 'undrawn':
+            out.append('\t'.join(p[:at] + [p[at]] + ([draws] if draws else [])))
+    return rows, out
+
+
+def not_ok_text(name, text, note):
+    """The `.not-ok.tsv` file of one TSV: a `#` line, `rows<TAB>N`, the rows."""
+    rows, out = not_ok(text)
+    head = f'# {note}: the rows of {name} not read right or not drawn, by key and verdicts, of {rows}'
+    return '\n'.join([head, f'rows\t{rows}'] + out) + '\n'
+
+
 def conserve(v):
     """Conserving: every one of content, logical and cons the line carries is true."""
     ks = [m for m in ('content', 'logical', 'cons') if m in v]

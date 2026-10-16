@@ -1,0 +1,498 @@
+//! `zz_rr3m_probe` (kit, K-11 round 4 kit): the books of
+//! `tools/probes/rtl/probes/pdf/zz_rr3m_probe.rs`, which is the probe as it ran.
+//!
+//! Re-review probe: marks under spacing, both orders.
+
+use super::common::{
+    esc, hash, nsm, rtl, ALLAH3, AMALIYYAN, BERESHIT, CANTILLATED, GRCY, HASHABBAT, HET_VAV,
+    KATABA, LATIN, MELEKH, MUDDA_MUALLIM, SHALOM, VIET,
+};
+use crate::epub_support::book::styled_book;
+use crate::epub_support::conservation::{conservation, conservation_in_logical_order};
+use tinker_pdf::{Document, TextOptions};
+
+type Case = (String, &'static str, String, Option<String>);
+
+fn cases() -> Vec<Case> {
+    let mut out: Vec<Case> = Vec::new();
+    let mut add = |name: &str, lang: &'static str, body: String, expected: Option<String>| {
+        out.push((name.to_owned(), lang, body, expected));
+    };
+    for (name, word, lang) in [
+        ("ar1-kataba", KATABA, "ar"),
+        ("ar2-amaliyyan", AMALIYYAN, "ar"),
+        ("ar2-mudda", MUDDA_MUALLIM, "ar"),
+        ("ar3-allah", ALLAH3, "ar"),
+        ("he-shalom", SHALOM, "he"),
+        ("he-melekh", MELEKH, "he"),
+        ("he3-hashabbat", HASHABBAT, "he"),
+        ("he-bereshit", BERESHIT, "he"),
+        ("he4-cantillated", CANTILLATED, "he"),
+    ] {
+        add(
+            &format!("{name}/rtl"),
+            lang,
+            format!("<p dir=\"rtl\">{word} {word}.</p>"),
+            Some(format!("{word} {word}.")),
+        );
+        add(
+            &format!("{name}/none"),
+            lang,
+            format!("<p>{word} {word}.</p>"),
+            Some(format!("{word} {word}.")),
+        );
+        add(
+            &format!("{name}/en-mid"),
+            "en",
+            format!("<p>The word {word}, <i>quoted</i>, ends.</p>"),
+            Some(format!("The word {word}, quoted, ends.")),
+        );
+        add(
+            &format!("{name}/en-bold"),
+            "en",
+            format!("<p>a <b>{word}</b> b.</p>"),
+            Some(format!("a {word} b.")),
+        );
+        let long_rtl: String = (0..14)
+            .map(|_| format!("{word} \u{643}\u{62A}\u{628} "))
+            .collect();
+        add(
+            &format!("{name}/rtl-long"),
+            lang,
+            format!("<p dir=\"rtl\">{long_rtl}</p>"),
+            None,
+        );
+        let long_en: String = (0..14).map(|_| format!("so {word} and ")).collect();
+        add(
+            &format!("{name}/en-long"),
+            "en",
+            format!("<p>{long_en}</p>"),
+            None,
+        );
+    }
+    add(
+        "latin/alone",
+        "en",
+        format!("<p>{LATIN} end.</p>"),
+        Some(format!("{LATIN} end.")),
+    );
+    add(
+        "grcy/alone",
+        "en",
+        format!("<p>{GRCY} end.</p>"),
+        Some(format!("{GRCY} end.")),
+    );
+    add(
+        "latin/beside-he",
+        "en",
+        format!("<p>{LATIN} {HET_VAV} {GRCY}.</p>"),
+        Some(format!("{LATIN} {HET_VAV} {GRCY}.")),
+    );
+    add(
+        "latin/in-rtl",
+        "he",
+        format!("<p dir=\"rtl\">{HET_VAV} {LATIN} {HET_VAV}.</p>"),
+        Some(format!("{HET_VAV} {LATIN} {HET_VAV}.")),
+    );
+    let long_latin: String = (0..20).map(|_| format!("{LATIN} {GRCY} ")).collect();
+    add("latin/long", "en", format!("<p>{long_latin}</p>"), None);
+    let long_mixed: String = (0..16).map(|_| format!("{LATIN} {HET_VAV} ")).collect();
+    add(
+        "latin/long-mixed",
+        "en",
+        format!("<p>{long_mixed}</p>"),
+        None,
+    );
+    add(
+        "viet/serif",
+        "vi",
+        format!("<p>{VIET}.</p>"),
+        Some(format!("{VIET}.")),
+    );
+    add(
+        "viet/sans",
+        "vi",
+        format!("<p style=\"font-family: sans-serif\">{VIET}.</p>"),
+        Some(format!("{VIET}.")),
+    );
+    add(
+        "viet/mono",
+        "vi",
+        format!("<p style=\"font-family: monospace\">{VIET}.</p>"),
+        Some(format!("{VIET}.")),
+    );
+    add(
+        "viet/sans-he",
+        "vi",
+        format!("<p style=\"font-family: sans-serif\">{HET_VAV} {VIET}.</p>"),
+        Some(format!("{HET_VAV} {VIET}.")),
+    );
+    // Runs ending on a mark, stand-in letters and the standard 14's own.
+    for (tag, letter) in [
+        ("e", 'e'),
+        ("alpha", '\u{3B1}'),
+        ("cyr-a", '\u{430}'),
+        ("eng", '\u{14B}'),
+        ("schwa", '\u{259}'),
+    ] {
+        add(
+            &format!("endmark/{tag}"),
+            "en",
+            format!("<p>x <b>{letter}\u{301}</b>y z.</p>"),
+            Some(format!("x {letter}\u{301}y z.")),
+        );
+        add(
+            &format!("endmark/{tag}-2"),
+            "en",
+            format!("<p>x <b>{letter}\u{301}\u{308}</b>y z.</p>"),
+            Some(format!("x {letter}\u{301}\u{308}y z.")),
+        );
+        add(
+            &format!("endmark/{tag}-he"),
+            "en",
+            format!("<p>{HET_VAV} x <b>{letter}\u{301}</b>y z.</p>"),
+            Some(format!("{HET_VAV} x {letter}\u{301}y z.")),
+        );
+        add(
+            &format!("endmark/{tag}-rtl"),
+            "he",
+            format!("<p dir=\"rtl\">{HET_VAV} x <b>{letter}\u{301}</b>y {HET_VAV}.</p>"),
+            Some(format!("{HET_VAV} x {letter}\u{301}y {HET_VAV}.")),
+        );
+        add(
+            &format!("endmark/{tag}-word"),
+            "en",
+            format!("<p>x <b>ab{letter}\u{301}</b>yz w.</p>"),
+            Some(format!("x ab{letter}\u{301}yz w.")),
+        );
+        add(
+            &format!("nomark/{tag}"),
+            "en",
+            format!("<p>x <b>{letter}</b>y z.</p>"),
+            Some(format!("x {letter}y z.")),
+        );
+        add(
+            &format!("apart/{tag}"),
+            "en",
+            format!("<p>x<b>{letter}</b><i>\u{301}</i>x y.</p>"),
+            Some(format!("x{letter}\u{301}x y.")),
+        );
+        add(
+            &format!("apart/{tag}-he"),
+            "en",
+            format!("<p>{HET_VAV} x<b>{letter}</b><i>\u{301}</i>x y.</p>"),
+            Some(format!("{HET_VAV} x{letter}\u{301}x y.")),
+        );
+    }
+    // Run boundaries.
+    add(
+        "bound/he-i-ltr",
+        "en",
+        "<p>a <i>\u{5E9}</i>\u{5B8}\u{5DC}\u{5D5}\u{5DD} b.</p>".to_owned(),
+        Some("a \u{5E9}\u{5B8}\u{5DC}\u{5D5}\u{5DD} b.".to_owned()),
+    );
+    add(
+        "bound/he-i-rtl",
+        "he",
+        "<p dir=\"rtl\"><i>\u{5E9}</i>\u{5B8}\u{5DC}\u{5D5}\u{5DD} \u{5D0}.</p>".to_owned(),
+        Some("\u{5E9}\u{5B8}\u{5DC}\u{5D5}\u{5DD} \u{5D0}.".to_owned()),
+    );
+    add(
+        "bound/ar-b-rtl",
+        "ar",
+        "<p dir=\"rtl\"><b>\u{643}</b>\u{64E}\u{62A}\u{628} \u{643}\u{62A}\u{628}.</p>".to_owned(),
+        Some("\u{643}\u{64E}\u{62A}\u{628} \u{643}\u{62A}\u{628}.".to_owned()),
+    );
+    add(
+        "bound/latin-b",
+        "en",
+        "<p>x<b>e</b>\u{301}x <i>a</i>\u{308}y.</p>".to_owned(),
+        Some("xe\u{301}x a\u{308}y.".to_owned()),
+    );
+    add(
+        "bound/latin-b-he",
+        "en",
+        format!("<p>{HET_VAV} x<b>e</b>\u{301}x <i>a</i>\u{308}y.</p>"),
+        Some(format!("{HET_VAV} xe\u{301}x a\u{308}y.")),
+    );
+    add("bound/two-marks-split", "ar", "<p dir=\"rtl\">\u{639}\u{645}\u{644}\u{64A}<b>\u{651}</b>\u{64B}\u{627} \u{643}\u{62A}\u{628}.</p>".to_owned(), Some("\u{639}\u{645}\u{644}\u{64A}\u{651}\u{64B}\u{627} \u{643}\u{62A}\u{628}.".to_owned()));
+    add(
+        "bound/he-b-mem",
+        "en",
+        format!("<p>a <b>\u{5DE}\u{5B6}</b>\u{5DC}\u{5B6}\u{5DA}\u{5B0} b {MELEKH}.</p>"),
+        Some(format!("a {MELEKH} b {MELEKH}.")),
+    );
+    add("bound/he-b-mem-rtl", "he", format!("<p dir=\"rtl\"><b>\u{5DE}\u{5B6}</b>\u{5DC}\u{5B6}\u{5DA}\u{5B0} {HET_VAV} {MELEKH}.</p>"), Some(format!("{MELEKH} {HET_VAV} {MELEKH}.")));
+    add(
+        "bound/shin4-b",
+        "en",
+        "<p>a <b>\u{5E9}\u{5BC}\u{5C1}\u{5B8}\u{591}</b>\u{5DC}\u{5B5}\u{5DD} b.</p>".to_owned(),
+        Some(format!("a {CANTILLATED} b.")),
+    );
+    add("bound/shin4-b-rtl", "he", format!("<p dir=\"rtl\"><b>\u{5E9}\u{5BC}\u{5C1}\u{5B8}\u{591}</b>\u{5DC}\u{5B5}\u{5DD} {HET_VAV}.</p>"), Some(format!("{CANTILLATED} {HET_VAV}.")));
+    add(
+        "bound/ar-b-kaf",
+        "en",
+        format!("<p>a <b>\u{643}\u{64E}</b>\u{62A}\u{64E}\u{628}\u{64E} b {KATABA}.</p>"),
+        Some(format!("a {KATABA} b {KATABA}.")),
+    );
+    add(
+        "bound/hashabbat-b",
+        "en",
+        format!("<p>The words {CANTILLATED}, <b>{HASHABBAT}</b> end.</p>"),
+        Some(format!("The words {CANTILLATED}, {HASHABBAT} end.")),
+    );
+    // Mark-free controls.
+    add(
+        "ctl/he-b",
+        "en",
+        "<p>a <b>\u{5E9}</b>\u{5DC}\u{5DD} b.</p>".to_owned(),
+        Some("a \u{5E9}\u{5DC}\u{5DD} b.".to_owned()),
+    );
+    add(
+        "ctl/he-b-sans",
+        "en",
+        "<p style=\"font-family: sans-serif\">a <b>\u{5E9}</b>\u{5DC}\u{5DD} b.</p>".to_owned(),
+        Some("a \u{5E9}\u{5DC}\u{5DD} b.".to_owned()),
+    );
+    add(
+        "ctl/he-b-mono",
+        "en",
+        "<p style=\"font-family: monospace\">a <b>\u{5E9}</b>\u{5DC}\u{5DD} b.</p>".to_owned(),
+        Some("a \u{5E9}\u{5DC}\u{5DD} b.".to_owned()),
+    );
+    add("ctl/ar-rtl", "ar", "<p dir=\"rtl\">\u{643}\u{62A}\u{628} <b>\u{643}\u{62A}\u{628}</b> \u{643}\u{62A}\u{628}.</p>".to_owned(), Some("\u{643}\u{62A}\u{628} \u{643}\u{62A}\u{628} \u{643}\u{62A}\u{628}.".to_owned()));
+    add(
+        "ctl/latin",
+        "en",
+        "<p>The <b>quick</b> brown <i>fox</i> jumps over caf\u{e9} na\u{ef}ve.</p>".to_owned(),
+        Some("The quick brown fox jumps over caf\u{e9} na\u{ef}ve.".to_owned()),
+    );
+    add(
+        "ctl/greek",
+        "en",
+        "<p>x <b>\u{3B1}\u{3BB}</b>\u{3C6}\u{3B1} \u{430}\u{431} y.</p>".to_owned(),
+        Some("x \u{3B1}\u{3BB}\u{3C6}\u{3B1} \u{430}\u{431} y.".to_owned()),
+    );
+    let long_ctl: String = (0..20)
+        .map(|_| "cafe naive Nguyen \u{3B1}\u{3BB}\u{3C6}\u{3B1} \u{5D7}\u{5D5} ")
+        .collect();
+    add("ctl/long", "en", format!("<p>{long_ctl}</p>"), None);
+    out
+}
+
+fn styles() -> Vec<String> {
+    let mut out = vec![String::new()];
+    for size in ["9px", "12.5px", "14px", "21.5px", "31px"] {
+        out.push(format!("p {{ font-size: {size} }}"));
+    }
+    for ls in [
+        "0.5px", "1.5px", "1.7px", "2px", "3px", "3.5px", "4px", "4.5px", "5px", "0.1em", "0.12em",
+        "0.3em", "7.84px", "0.49em", "7.92px", "0.495em", "0.4999em", "8px", "0.5em", "0.5001em",
+        "8.01px", "0.501em", "0.502em", "0.51em", "0.55em", "0.6em", "0.75em", "1em", "-1px",
+        "-2px", "-0.1em",
+    ] {
+        out.push(format!("p {{ letter-spacing: {ls} }}"));
+    }
+    for (size, ls) in [
+        ("6px", "3px"),
+        ("12.5px", "0.5em"),
+        ("13px", "6.5px"),
+        ("21.5px", "0.5em"),
+        ("21.5px", "0.49em"),
+        ("9px", "0.3em"),
+    ] {
+        out.push(format!("p {{ font-size: {size}; letter-spacing: {ls} }}"));
+    }
+    for ws in ["4px", "0.49em", "0.5em", "8px", "1em", "-2px"] {
+        out.push(format!("p {{ word-spacing: {ws} }}"));
+    }
+    out.push("p { letter-spacing: 0.25em; word-spacing: 0.25em }".to_owned());
+    out.push("p { letter-spacing: 0.5em; word-spacing: 0.5em }".to_owned());
+    out.push("p { letter-spacing: 3px; word-spacing: 0.5em }".to_owned());
+    out.push("p { text-align: justify }".to_owned());
+    out.push("p { text-align: justify; margin: 0 30% }".to_owned());
+    out.push("p { text-align: justify; letter-spacing: 2px; word-spacing: 6px }".to_owned());
+    out.push("p { text-align: justify; letter-spacing: 0.5em; margin: 0 20% }".to_owned());
+    for fam in ["sans-serif", "monospace"] {
+        out.push(format!("p {{ font-family: {fam} }}"));
+        for ls in [
+            "1px", "3px", "0.3em", "0.49em", "0.495em", "8px", "0.5em", "0.5001em", "0.6em", "1em",
+        ] {
+            out.push(format!("p {{ font-family: {fam}; letter-spacing: {ls} }}"));
+        }
+    }
+    out
+}
+
+fn probe() {
+    let cos_pages = |doc: &Document| -> u64 {
+        let cos = doc.cos();
+        let mut all = Vec::new();
+        for page in tinker_pdf_cos::pages::collect(cos) {
+            all.extend_from_slice(&tinker_pdf_cos::pages::content_bytes(cos, &page));
+        }
+        hash(&all)
+    };
+    for style in styles() {
+        for (name, lang, body, expected) in cases() {
+            let bytes = styled_book(lang, &style, &body);
+            let doc = Document::open(bytes.clone()).expect("the book opens");
+            let marked = body.chars().any(nsm);
+            let mut text = String::new();
+            let mut lines = 0;
+            let mut outside = 0usize;
+            let mut overlaps = 0usize;
+            let mut maxx = f64::MIN;
+            for at in 0..doc.page_count() {
+                let page = doc.page(at).expect("a page");
+                text.push_str(&page.text().plain_text());
+                let drawn = page.text_with(&TextOptions {
+                    content_order: true,
+                });
+                lines += drawn.lines().len();
+                for line in drawn.lines() {
+                    let mut base: Option<&tinker_pdf::TextChar> = None;
+                    let mut prev: Option<&tinker_pdf::TextChar> = None;
+                    for c in &line.chars {
+                        let (x0, _, x1, _) = c.quad.bounds();
+                        maxx = maxx.max(x1);
+                        let mark = c.text.chars().next().is_some_and(nsm);
+                        if mark {
+                            match base {
+                                Some(b) => {
+                                    let centre = (x0 + x1) / 2.0;
+                                    let (b0, _, b1, _) = b.quad.bounds();
+                                    if !(b0 < centre && centre < b1) {
+                                        outside += 1;
+                                    }
+                                }
+                                None => outside += 1,
+                            }
+                            continue;
+                        }
+                        if let Some(p) = prev {
+                            let (_, _, p1, _) = p.quad.bounds();
+                            // Drawn left to right in content order on a line.
+                            if x0 < p1 - 0.02 * c.size && x0 > p1 - 3.0 * c.size {
+                                overlaps += 1;
+                            }
+                        }
+                        base = Some(c);
+                        prev = Some(c);
+                    }
+                }
+            }
+            // Visual overlap: every non-mark glyph on a page, grouped by
+            // baseline, sorted along it; a box starting more than a fiftieth
+            // of an em inside the one before it overlaps it.
+            let mut vov = 0usize;
+            let mut vov_at = String::new();
+            for at in 0..doc.page_count() {
+                let page = doc.page(at).expect("a page");
+                let drawn = page.text_with(&TextOptions {
+                    content_order: true,
+                });
+                let mut boxes: Vec<(i64, f64, f64, f64, String)> = Vec::new();
+                for line in drawn.lines() {
+                    for c in &line.chars {
+                        if c.text.chars().next().is_some_and(nsm) || c.text.trim().is_empty() {
+                            continue;
+                        }
+                        let (x0, _, x1, _) = c.quad.bounds();
+                        boxes.push((
+                            (c.origin.1 * 10.0).round() as i64,
+                            x0,
+                            x1,
+                            c.size,
+                            c.text.clone(),
+                        ));
+                    }
+                }
+                boxes.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+                for pair in boxes.windows(2) {
+                    let (p, n) = (&pair[0], &pair[1]);
+                    if p.0 == n.0 && n.1 < p.2 - 0.02 * n.3 {
+                        vov += 1;
+                        if vov_at.is_empty() {
+                            vov_at = format!(
+                                "{}@{:.2}..{:.2}/{}@{:.2}",
+                                esc(&p.4),
+                                p.1,
+                                p.2,
+                                esc(&n.4),
+                                n.1
+                            );
+                        }
+                    }
+                }
+            }
+            let page0 = doc.page(0).expect("a page");
+            let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+            let text_ok = expected.as_ref().map_or("-".to_owned(), |e| {
+                (norm(&text).contains(&norm(e)) as u8).to_string()
+            });
+            let tokens = |e: &str| -> Vec<String> {
+                e.split_whitespace()
+                    .map(|t| t.trim_matches(|c: char| c == ',' || c == '.').to_owned())
+                    .filter(|t| !t.is_empty())
+                    .collect()
+            };
+            let found = expected.as_ref().map_or("-".to_owned(), |e| {
+                let needles: Vec<String> = tokens(e)
+                    .into_iter()
+                    .filter(|t| t.chars().any(nsm))
+                    .collect();
+                if needles.is_empty() {
+                    return "-".to_owned();
+                }
+                let hits = needles
+                    .iter()
+                    .filter(|n| !page0.text().search(n).is_empty())
+                    .count();
+                format!("{hits}/{}", needles.len())
+            });
+            let ltr = expected.as_ref().map_or("-".to_owned(), |e| {
+                let needles: Vec<String> = tokens(e)
+                    .into_iter()
+                    .filter(|t| !t.chars().any(rtl))
+                    .collect();
+                if needles.is_empty() {
+                    return "-".to_owned();
+                }
+                let hits = needles
+                    .iter()
+                    .filter(|n| !page0.text().search(n).is_empty())
+                    .count();
+                format!("{hits}/{}", needles.len())
+            });
+            let c = conservation(&bytes, &doc);
+            let l = conservation_in_logical_order(&bytes, &doc);
+            let first = |v: &crate::epub_support::conservation::Verdict| {
+                v.divergences
+                    .first()
+                    .map(|d| esc(&format!("{d:?}")))
+                    .unwrap_or_default()
+            };
+            emit!(
+                "ROW\t{style}\t{name}\tm={}\ttext={text_ok}\tsearch={found}\tltr={ltr}\tcons={}\tlogical={}\tride={outside}\toverlap={overlaps}/{vov}\tlines={lines}\tmaxx={maxx:.3}\tthash={:016x}\tchash={:016x}\t{}\t{}\t{}",
+                marked as u8,
+                c.holds() as u8,
+                l.holds() as u8,
+                hash(text.as_bytes()),
+                cos_pages(&doc),
+                if text.chars().count() < 200 { esc(&text) } else { String::from("<long>") },
+                first(&c),
+                first(&l),
+            );
+            if vov > 0 {
+                emit!("VOV\t{style}\t{name}\t{vov}\t{vov_at}");
+            }
+        }
+    }
+}
+
+/// Every book of the family, as its probe's tests built them, in order.
+pub(crate) fn run() {
+    probe();
+}

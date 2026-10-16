@@ -1,0 +1,180 @@
+//! The right-to-left probe kit's families as ratchets: every book the K-11 and
+//! CD-19 rounds built to measure right-to-left text, held to what it read at
+//! `935b077`.
+//!
+//! One `#[ignore]`d test a family of `tools/probes/rtl/families.tsv` (its
+//! `rows` and `tsv` kinds), each building the family's books exactly as its
+//! probe in `tools/probes/rtl/probes/pdf/` did and failing when any book reads
+//! worse than the committed baseline of that build, on any metric its line
+//! carries (`rtl_probes/ratchet.rs` lists them). Gains are printed and never
+//! fail; refreshing the baseline after one, or after a price the owner
+//! accepted, is the kit README's "Refreshing the baseline".
+//!
+//! ```text
+//! cargo test -p tinker-pdf --test rtl_probes -- --ignored --nocapture
+//! cargo test -p tinker-pdf --features bundled-fonts --test rtl_probes -- --ignored --nocapture
+//! ```
+//!
+//! Each test prints one `RAN rtl_probes <family> [<build>] against 935b077:`
+//! line with its row count; a run that prints fewer `RAN` lines than there are
+//! families did not run them all. The timing probes stay probes: a wall-clock
+//! time is not a measurement another machine repeats.
+
+mod epub_support;
+
+/// A family's line, to the ratchet rather than to stdout.
+macro_rules! emit {
+    ($($arg:tt)*) => {
+        crate::rtl_probes::ratchet::emit(format!($($arg)*))
+    };
+}
+
+mod rtl_probes {
+    pub(crate) mod common;
+    pub(crate) mod ratchet;
+    pub(crate) mod vov;
+    pub(crate) mod zz_c1_tw;
+    pub(crate) mod zz_code1_neg;
+    pub(crate) mod zz_code1_tdprobe;
+    pub(crate) mod zz_k11rv_fixtures;
+    pub(crate) mod zz_rr3m_extra;
+    pub(crate) mod zz_rr3m_fv_extra;
+    pub(crate) mod zz_rr3m_fv_marks;
+    pub(crate) mod zz_rr3m_h1_breadth;
+    pub(crate) mod zz_rr3m_h1_gaps;
+    pub(crate) mod zz_rr3m_h1_h4;
+    pub(crate) mod zz_rr3m_h1_inline;
+    pub(crate) mod zz_rr3m_h1_marks;
+    pub(crate) mod zz_rr3m_h1_ofscripts;
+    pub(crate) mod zz_rr3m_h1_tables;
+    pub(crate) mod zz_rr3m_h1_v1;
+    pub(crate) mod zz_rr3m_h1_v3;
+    pub(crate) mod zz_rr3m_h1min;
+    pub(crate) mod zz_rr3m_h1min2;
+    pub(crate) mod zz_rr3m_h2_faces;
+    pub(crate) mod zz_rr3m_h2_gaps2;
+    pub(crate) mod zz_rr3m_h2_h4b;
+    pub(crate) mod zz_rr3m_h2_marks2;
+    pub(crate) mod zz_rr3m_h2_nested;
+    pub(crate) mod zz_rr3m_h2_pages;
+    pub(crate) mod zz_rr3m_h2_r2gloss;
+    pub(crate) mod zz_rr3m_h2_r2ibword;
+    pub(crate) mod zz_rr3m_h2_r2lvl2;
+    pub(crate) mod zz_rr3m_h2_r2ornate;
+    pub(crate) mod zz_rr3m_h2_r2qeglue;
+    pub(crate) mod zz_rr3m_h2_r3justgloss;
+    pub(crate) mod zz_rr3m_h2_r3rtlgloss;
+    pub(crate) mod zz_rr3m_h2_tables;
+    pub(crate) mod zz_rr3m_h2_v1b;
+    pub(crate) mod zz_rr3m_h2_v3b;
+    pub(crate) mod zz_rr3m_hunt_brackets;
+    pub(crate) mod zz_rr3m_hunt_cells;
+    pub(crate) mod zz_rr3m_hunt_code32;
+    pub(crate) mod zz_rr3m_hunt_dirless;
+    pub(crate) mod zz_rr3m_hunt_etsweep;
+    pub(crate) mod zz_rr3m_hunt_gaps;
+    pub(crate) mod zz_rr3m_hunt_gloss;
+    pub(crate) mod zz_rr3m_hunt_isolates;
+    pub(crate) mod zz_rr3m_hunt_min;
+    pub(crate) mod zz_rr3m_hunt_numbers;
+    pub(crate) mod zz_rr3m_hunt_pointed;
+    pub(crate) mod zz_rr3m_hunt_punct;
+    pub(crate) mod zz_rr3m_hunt_rtlpunct;
+    pub(crate) mod zz_rr3m_hunt_scripts;
+    pub(crate) mod zz_rr3m_hunt_spacing;
+    pub(crate) mod zz_rr3m_hunt_urls;
+    pub(crate) mod zz_rr3m_hunt_ws;
+    pub(crate) mod zz_rr3m_lane_r;
+    pub(crate) mod zz_rr3m_probe;
+    pub(crate) mod zz_rr3m_tie;
+    pub(crate) mod zz_vx_k11r2_extra;
+    pub(crate) mod zz_vx_k11rv2_epub;
+    pub(crate) mod zz_vx_k11rv3_just;
+    pub(crate) mod zz_vx_k11rv3_own;
+    pub(crate) mod zz_vx_k11rv_dirless;
+    pub(crate) mod zz_vx_k11rv_ext;
+    pub(crate) mod zz_vx_k11rv_neutral;
+    pub(crate) mod zz_vx_probe_paren;
+    pub(crate) mod zz_vx_rv4code;
+}
+
+/// One `#[ignore]`d ratchet a family: the test, the family's name in the kit
+/// (which names its baseline), and what the family is.
+macro_rules! families {
+    ($($test:ident = $family:literal: $what:literal,)*) => {
+        $(
+            #[doc = $what]
+            #[test]
+            #[ignore = "a probe family; run with -- --ignored --nocapture"]
+            fn $test() {
+                rtl_probes::ratchet::family($family, rtl_probes::$test::run);
+            }
+        )*
+    };
+}
+
+families! {
+    zz_k11rv_fixtures = "zz_k11rv_fixtures": "kit: K-11 round 4 kit",
+    zz_rr3m_extra = "zz_rr3m_extra": "kit: K-11 round 4 kit",
+    zz_rr3m_probe = "zz_rr3m_probe": "kit: K-11 round 4 kit",
+    zz_rr3m_tie = "zz_rr3m_tie": "kit: K-11 round 4 kit",
+    zz_vx_k11r2_extra = "zz_vx_k11r2_extra": "vx: round-5 review (confirm); zz_k11r2_extra with the overprint shim: the same ROW lines and a VOVX line a book",
+    zz_vx_k11rv2_epub = "zz_vx_k11rv2_epub": "vx: round-5 review (confirm); zz_k11rv2_epub with the overprint shim: the same ROW lines and a VOVX line a book",
+    zz_vx_k11rv3_just = "zz_vx_k11rv3_just": "vx: round-5 review (confirm); zz_k11rv3_just with the overprint shim: the same ROW lines and a VOVX line a book",
+    zz_vx_k11rv3_own = "zz_vx_k11rv3_own": "vx: round-5 review (confirm); zz_k11rv3_own with the overprint shim: the same ROW lines and a VOVX line a book",
+    zz_vx_k11rv_dirless = "zz_vx_k11rv_dirless": "vx: round-5 review (confirm); zz_k11rv_dirless with the overprint shim: the same ROW lines and a VOVX line a book",
+    zz_vx_k11rv_ext = "zz_vx_k11rv_ext": "vx: round-5 review (confirm); zz_k11rv_ext with the overprint shim: the same ROW lines and a VOVX line a book",
+    zz_vx_k11rv_neutral = "zz_vx_k11rv_neutral": "vx: round-5 review (confirm); zz_k11rv_neutral with the overprint shim: the same ROW lines and a VOVX line a book",
+    zz_vx_probe_paren = "zz_vx_probe_paren": "vx: round-5 review (confirm); zz_probe_paren with the overprint shim: the same ROW lines and a VOVX line a book",
+    zz_vx_rv4code = "zz_vx_rv4code": "vx: round-5 review (confirm); zz_rv4code with the overprint shim: the same ROW lines and a VOVX line a book",
+    zz_c1_tw = "zz_c1_tw": "tw: round-5 review (confirm); TWROW: code 32 and Tw of the overflow font",
+    zz_rr3m_hunt_brackets = "zz_rr3m_hunt_brackets": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_numbers = "zz_rr3m_hunt_numbers": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_urls = "zz_rr3m_hunt_urls": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_gloss = "zz_rr3m_hunt_gloss": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_isolates = "zz_rr3m_hunt_isolates": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_pointed = "zz_rr3m_hunt_pointed": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_scripts = "zz_rr3m_hunt_scripts": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_spacing = "zz_rr3m_hunt_spacing": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_ws = "zz_rr3m_hunt_ws": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_punct = "zz_rr3m_hunt_punct": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_code32 = "zz_rr3m_hunt_code32": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_gaps = "zz_rr3m_hunt_gaps": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_cells = "zz_rr3m_hunt_cells": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_rtlpunct = "zz_rr3m_hunt_rtlpunct": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_etsweep = "zz_rr3m_hunt_etsweep": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_dirless = "zz_rr3m_hunt_dirless": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_hunt_min = "zz_rr3m_hunt_min": "hunt: K-11 round-4 review (hunt)",
+    zz_rr3m_fv_extra = "zz_rr3m_fv_extra": "fv: 56dfd93 verification",
+    zz_rr3m_fv_marks = "zz_rr3m_fv_marks": "fv: 56dfd93 verification",
+    zz_rr3m_lane_r = "zz_rr3m_laneR": "laneR: lane R (round 5); holds price/ and soft/, ruling 14's price",
+    zz_rr3m_h1_gaps = "zz_rr3m_h1_gaps": "h1: round-5 review (hunt)",
+    zz_rr3m_h1_h4 = "zz_rr3m_h1_h4": "h1: round-5 review (hunt)",
+    zz_rr3m_h1_marks = "zz_rr3m_h1_marks": "h1: round-5 review (hunt)",
+    zz_rr3m_h1_ofscripts = "zz_rr3m_h1_ofscripts": "h1: round-5 review (hunt)",
+    zz_rr3m_h1_tables = "zz_rr3m_h1_tables": "h1: round-5 review (hunt)",
+    zz_rr3m_h1_v1 = "zz_rr3m_h1_v1": "h1: round-5 review (hunt)",
+    zz_rr3m_h1_v3 = "zz_rr3m_h1_v3": "h1: round-5 review (hunt)",
+    zz_rr3m_h1_inline = "zz_rr3m_h1_inline": "h1: round-5 review (hunt)",
+    zz_rr3m_h1_breadth = "zz_rr3m_h1_breadth": "h1: round-5 review (hunt)",
+    zz_rr3m_h1min = "zz_rr3m_h1min": "h1: round-5 review (hunt)",
+    zz_rr3m_h1min2 = "zz_rr3m_h1min2": "h1: round-5 review (hunt)",
+    zz_rr3m_h2_faces = "zz_rr3m_h2_faces": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_gaps2 = "zz_rr3m_h2_gaps2": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_h4b = "zz_rr3m_h2_h4b": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_marks2 = "zz_rr3m_h2_marks2": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_nested = "zz_rr3m_h2_nested": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_pages = "zz_rr3m_h2_pages": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_tables = "zz_rr3m_h2_tables": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_v1b = "zz_rr3m_h2_v1b": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_v3b = "zz_rr3m_h2_v3b": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_r2gloss = "zz_rr3m_h2_r2gloss": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_r2ibword = "zz_rr3m_h2_r2ibword": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_r2lvl2 = "zz_rr3m_h2_r2lvl2": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_r2ornate = "zz_rr3m_h2_r2ornate": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_r2qeglue = "zz_rr3m_h2_r2qeglue": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_r3justgloss = "zz_rr3m_h2_r3justgloss": "h2: CD-19 fix review (hunt)",
+    zz_rr3m_h2_r3rtlgloss = "zz_rr3m_h2_r3rtlgloss": "h2: CD-19 fix review (hunt)",
+    zz_code1_neg = "zz_code1_neg": "neg: round-5 review (code); ZZN: negative word spacing, glyphs drawn over another",
+    zz_code1_tdprobe = "zz_code1_tdprobe": "td: round-5 review (code); content streams built by hand, read by TextDevice and ruling 14; writes <build>/zz_code1_tdprobe.tsv",
+}

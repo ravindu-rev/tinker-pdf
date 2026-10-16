@@ -76,6 +76,10 @@ def tsvs(root):
         if not os.path.isdir(d):
             continue
         for name in os.listdir(d):
+            # A `.not-ok.tsv` is a baseline's reduction of the TSV beside it,
+            # for the line suite (pack.py --suites), not a probe's output.
+            if name.endswith('.not-ok.tsv'):
+                continue
             if name.endswith('.tsv') or name.endswith('.tsv.xz'):
                 out[f'{build}/{name[:-3] if name.endswith(".xz") else name}'] = os.path.join(d, name)
     return out

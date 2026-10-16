@@ -2346,6 +2346,472 @@
     ]
    ],
    "recorded": "2 (2)"
+  },
+  {
+   "name": "suites/lost-metric-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "            if *a == Some(true) && *b != Some(true) {\n",
+     "new": "            if *a == Some(true) && *b != Some(true) && false {\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/missing-book-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "            report.worse(key, \"missing\".to_owned());\n            continue;\n",
+     "new": "            continue;\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/fewer-rows-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "    if now.rows_seen < base.rows_seen {\n",
+     "new": "    if now.rows_seen < base.rows_seen && false {\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/overprint-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "                Some(is) if is > was => report.worse(key, format!(\"{what} {was} -> {is}\")),\n",
+     "new": "",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/vov-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "        if *is > was && base.rows.contains_key(key) {\n",
+     "new": "        if *is > was && base.rows.contains_key(key) && false {\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/vovx-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "            Some(is) if is > was => {\n                report.worse(&format!(\"VOVX {key}\"), format!(\"overprint {was} -> {is}\"))\n            }\n",
+     "new": "",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/zzn-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "            Some(is) if is > was => report.worse(key, format!(\"overprint {was} -> {is}\")),\n",
+     "new": "",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/fail-line-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "        report.worse(key, \"a FAIL line new\".to_owned());\n",
+     "new": "        let _ = key;\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/fixture-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "            Some(is) if is != was => {\n                report.worse(key, format!(\"fixture's hashes moved: {was} -> {is}\"))\n            }\n",
+     "new": "",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/tally-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "            report.worse(FAMILY, format!(\"TALLY lines misread {was} -> {is}\"));\n",
+     "new": "            let _ = 0;\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/line-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "            report.worse(book, format!(\"LINE lines misread {was} -> {is}\"));\n",
+     "new": "            let _ = 0;\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/panic-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "        report.worse(key, \"its probe panicked\".to_owned());\n",
+     "new": "        let _ = key;\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/tsv-row-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "            None => report.worse(&format!(\"{name}: {key}\"), \"row missing\".to_owned()),\n",
+     "new": "            None => {}\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/crc64-unchecked",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "            4 => crc64(&block).to_le_bytes()[..] == *field,\n",
+     "new": "            4 => true,\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/sha256-trusted",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "        4 => 8,\n",
+     "new": "        4 => 8,\n        0x0A => 32,\n",
+     "count": 1
+    },
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "            _ => check == 0,\n",
+     "new": "            _ => true,\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/one-letter-tag-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/rtl_probes/ratchet.rs",
+     "old": "matches!(tail, Some(at) if at >= 1 &&",
+     "new": "matches!(tail, Some(at) if at < usize::MAX &&",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "rtl_probes"
+    ]
+   ]
+  },
+  {
+   "name": "suites/line-misread-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf-shape/tests/rtl_lines/ratchet.rs",
+     "old": "            if *n > m {\n",
+     "new": "            if *n > m && false {\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf-shape",
+     "--test",
+     "rtl_lines"
+    ]
+   ]
+  },
+  {
+   "name": "suites/line-rows-kept",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf-shape/tests/rtl_lines/ratchet.rs",
+     "old": "    if is.rows < was.rows {\n",
+     "new": "    if is.rows < was.rows && false {\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf-shape",
+     "--test",
+     "rtl_lines"
+    ]
+   ]
+  },
+  {
+   "name": "suites/undrawn-read-as-drawn",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf-shape/tests/rtl_lines/ratchet.rs",
+     "old": "        \"undrawn\" => Some(false),\n",
+     "new": "        \"undrawn\" => Some(true),\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf-shape",
+     "--test",
+     "rtl_lines"
+    ]
+   ]
+  },
+  {
+   "name": "suites/printed-change-unseen",
+   "round": "the suites (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf-shape/tests/rtl_lines/ratchet.rs",
+     "old": "        if !was.contains(line) {\n",
+     "new": "        if !was.contains(line) && false {\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf-shape",
+     "--test",
+     "rtl_lines"
+    ]
+   ]
   }
  ]
 }
