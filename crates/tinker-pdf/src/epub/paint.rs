@@ -1268,24 +1268,24 @@ impl<'a> Fonts<'a> {
             self.read_back(line, matrices, frame, chosen)
                 .map(|(read, over)| {
                     if over > over_by_rules {
-                        return (false, over);
+                        return (Read::Otherwise, over);
                     }
-                    let right = match written.read_as(&read) {
-                        Read::Words => true,
-                        Read::Letters => {
-                            letters_only
-                                .borrow_mut()
-                                .get_or_insert_with(|| chosen.clone());
-                            false
-                        }
-                        Read::Otherwise => false,
-                    };
-                    (right, over)
+                    let how = written.read_as(&read);
+                    if matches!(how, Read::Cut | Read::Letters) {
+                        letters_only
+                            .borrow_mut()
+                            .get_or_insert_with(|| chosen.clone());
+                    }
+                    (how, over)
                 })
         };
         match reads_right(&BTreeMap::new(), over_by_rules) {
-            Some((false, over)) => over_by_rules = over,
-            None | Some((true, _)) => return Search::Rules,
+            // A reading of the rules' drawing that only cuts a word where a
+            // reader parts the spacing is kept, as 935b077 kept it: searching
+            // for a drawing that reads such a line whole spent the whole
+            // budget of every letter-spaced line, to no end on the probes.
+            None | Some((Read::Words | Read::Cut, _)) => return Search::Rules,
+            Some((_, over)) => over_by_rules = over,
         }
         // Where the rules' drawing reads the letters right, it is kept
         // unless another reads the words right too.
@@ -1295,7 +1295,7 @@ impl<'a> Fonts<'a> {
                 break;
             }
             let one = BTreeMap::from([(key, drawing)]);
-            if reads_right(&one, over_by_rules).is_some_and(|(right, _)| right) {
+            if reads_right(&one, over_by_rules).is_some_and(|(how, _)| how == Read::Words) {
                 return Search::Found(one);
             }
         }
@@ -1308,7 +1308,7 @@ impl<'a> Fonts<'a> {
                     break;
                 }
                 let two = BTreeMap::from([(first, one), (second, other)]);
-                if reads_right(&two, over_by_rules).is_some_and(|(right, _)| right) {
+                if reads_right(&two, over_by_rules).is_some_and(|(how, _)| how == Read::Words) {
                     return Search::Found(two);
                 }
             }
@@ -1403,6 +1403,8 @@ impl<'a> Fonts<'a> {
         frame: &Frame,
         drawings: &BTreeMap<RunKey, Drawing>,
     ) -> Option<(String, usize)> {
+        #[cfg(test)]
+        READINGS.with(|readings| readings.set(readings.get().saturating_add(1)));
         let metrics = BookMetrics::with(self.faces);
         let mut device = tinker_pdf_content::TextDevice::new();
         for (at, run) in line.iter().enumerate() {
@@ -4294,7 +4296,10 @@ enum Search {
 enum Read {
     /// Its words, each where it was written, and so its letters.
     Words,
-    /// Its letters in the order written, with a word cut or two run together.
+    /// Its letters in the order written, with a word cut where the reader
+    /// parts it and no two run together.
+    Cut,
+    /// Its letters in the order written, with two words run together.
     Letters,
     /// Anything else.
     Otherwise,
@@ -4346,7 +4351,25 @@ impl Words {
             return Read::Otherwise;
         }
         if read.split_whitespace().eq(self.words.split_whitespace()) {
-            Read::Words
+            return Read::Words;
+        }
+        // Where each word of the line ends, counted in letters: a reading
+        // that ends a word at every one of them, and somewhere more, cuts a
+        // word and runs none together.
+        let ends = |text: &str| -> Vec<usize> {
+            text.split_whitespace()
+                .scan(0usize, |at, word| {
+                    *at += word.chars().count();
+                    Some(*at)
+                })
+                .collect()
+        };
+        let read_ends = ends(read);
+        if ends(&self.words)
+            .iter()
+            .all(|end| read_ends.binary_search(end).is_ok())
+        {
+            Read::Cut
         } else {
             Read::Letters
         }
@@ -6055,6 +6078,10 @@ pub(crate) fn cut_run(
 thread_local! {
     /// [`step`]'s count, on this thread.
     pub(crate) static STEPS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    /// How many times [`Fonts::read_back`] read a line back, on this thread:
+    /// counted under `cfg(test)` only, so that `epub/tests.rs` holds the
+    /// read-back's work by count where a clock would only run slowly.
+    pub(crate) static READINGS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 /// One step of a lookup a crafted line could make quadratic: a piece

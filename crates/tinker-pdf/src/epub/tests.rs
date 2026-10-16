@@ -2458,3 +2458,152 @@ fn the_public_draw_page_still_tags_a_page_from_its_element_tree() {
     assert_eq!(text.plain_text().trim(), "Words");
     assert_eq!(text.unmarked, 0);
 }
+
+// ---- The read-back's work ----------------------------------------------------
+
+/// A book of one chapter whose `<style>` is `style` and whose `<body>` is
+/// `body`, in `language`: what the integration tests' `styled_book` writes,
+/// with every entry stored, for the counts below, which only a unit test
+/// reads.
+fn stored_book(language: &str, style: &str, body: &str) -> Vec<u8> {
+    let container = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">"#,
+        r#"<rootfiles><rootfile full-path="EPUB/content.opf" media-type="application/oebps-package+xml"/>"#,
+        r#"</rootfiles></container>"#
+    );
+    let package = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">"#,
+            r#"<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+            r#"<dc:identifier id="pub-id">urn:uuid:1f0c2c1e-0000-4000-8000-00000000000c</dc:identifier>"#,
+            r#"<dc:title>A Styled Book</dc:title><dc:language>{language}</dc:language>"#,
+            r#"</metadata><manifest>"#,
+            r#"<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>"#,
+            r#"</manifest><spine><itemref idref="c1"/></spine></package>"#
+        ),
+        language = language
+    );
+    let chapter = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{language}"><head>"#,
+            r#"<title>A Chapter</title><style>{style}</style>"#,
+            r#"</head><body>{body}</body></html>"#
+        ),
+        language = language,
+        style = style,
+        body = body
+    );
+    let entries: [(&str, &[u8]); 4] = [
+        ("mimetype", b"application/epub+zip"),
+        ("META-INF/container.xml", container.as_bytes()),
+        ("EPUB/content.opf", package.as_bytes()),
+        ("EPUB/ch1.xhtml", chapter.as_bytes()),
+    ];
+    let mut out: Vec<u8> = Vec::new();
+    let mut directory: Vec<u8> = Vec::new();
+    for (name, data) in entries {
+        let at = u32::try_from(out.len()).expect("a small book");
+        let size = u32::try_from(data.len()).expect("a small book");
+        let crc = tinker_pdf_filters::crc32(data);
+        let length = u16::try_from(name.len()).expect("a short name");
+        // A local header and a directory record, each stored (method 0),
+        // version 2.0, the name UTF-8 (bit 11), no time, no extra field.
+        out.extend_from_slice(b"PK\x03\x04");
+        for field in [20u16, 1 << 11, 0, 0, 0] {
+            out.extend_from_slice(&field.to_le_bytes());
+        }
+        for field in [crc, size, size] {
+            out.extend_from_slice(&field.to_le_bytes());
+        }
+        out.extend_from_slice(&length.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        directory.extend_from_slice(b"PK\x01\x02");
+        for field in [20u16, 20, 1 << 11, 0, 0, 0] {
+            directory.extend_from_slice(&field.to_le_bytes());
+        }
+        for field in [crc, size, size] {
+            directory.extend_from_slice(&field.to_le_bytes());
+        }
+        directory.extend_from_slice(&length.to_le_bytes());
+        for field in [0u16, 0, 0, 0] {
+            directory.extend_from_slice(&field.to_le_bytes());
+        }
+        directory.extend_from_slice(&0u32.to_le_bytes());
+        directory.extend_from_slice(&at.to_le_bytes());
+        directory.extend_from_slice(name.as_bytes());
+    }
+    let start = u32::try_from(out.len()).expect("a small book");
+    let size = u32::try_from(directory.len()).expect("a small book");
+    out.extend_from_slice(&directory);
+    out.extend_from_slice(b"PK\x05\x06");
+    for field in [0u16, 0, 4, 4] {
+        out.extend_from_slice(&field.to_le_bytes());
+    }
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(&start.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+/// How many lines `book` reads back to open (`paint::READINGS`).
+fn readings_to_open(book: Vec<u8>) -> usize {
+    use super::paint::READINGS;
+    READINGS.with(|readings| readings.set(0));
+    let doc = crate::Document::open(book).expect("opens");
+    assert!(doc.page_count() > 0);
+    READINGS.with(core::cell::Cell::get)
+}
+
+/// **A line a reader cuts only where its spacing parts it is read back once**
+/// (round 6, lane F).
+///
+/// The read-back holds what a reader reads off a line to the line's words
+/// (`paint::Words`), so that a drawing that runs two words together is not
+/// taken for the line's text. A reader parts letter-spaced text at its
+/// spacing, though, and reads `٦٠.` as `٦٠ .` whatever the writer draws:
+/// held to its words, a line so spaced spent the read-back's whole budget
+/// on drawings none of which a reader reads whole, and kept the rules' —
+/// one line of 3 528 characters letter-spaced by `0.6em` took 11.9 s to
+/// open in debug, where 935b077, which held a reading to the letters alone,
+/// took 0.2 s (`zz_v6_time`'s `ls-nowrap`). A reading of the rules' drawing
+/// that holds the line's letters in order and only cuts a word, running none
+/// together (`paint::Read::Cut`), is kept now, as 935b077 kept it: the line
+/// is read back once. Held by count, as `paint::step` holds `cut_run`, not
+/// by a clock. A line whose rules' drawing runs two words together is still
+/// searched, and read right (a guard).
+#[test]
+fn a_line_a_reader_cuts_only_at_its_spacing_is_read_back_once() {
+    let he = [
+        "בראשית",
+        "ברא",
+        "אלהים",
+        "את",
+        "השמים",
+        "ואת",
+        "הארץ",
+        "אור",
+    ];
+    let spaced: String = (0..8)
+        .map(|i| format!("<b>{}</b> <i>!</i> {} ", he[i % 8], he[(i + 1) % 8]))
+        .collect();
+    let cut = readings_to_open(stored_book(
+        "he",
+        "p { letter-spacing: 0.6em; white-space: nowrap }",
+        &format!("<p>{spaced}\u{666}\u{660}.</p>"),
+    ));
+    assert_eq!(cut, 1, "the letter-spaced line was read back {cut} times");
+    let joined = readings_to_open(stored_book(
+        "ar",
+        "p { margin: 0 30%; word-spacing: 1em }",
+        "<p dir=\"rtl\">كتاب 25\u{66A} <b>مدرسة</b> \u{661}\u{662}\u{663} الطالب 2010\u{60C} جميل.</p>",
+    ));
+    assert!(
+        joined > 2,
+        "a line whose rules' drawing runs two words together was read back {joined} times"
+    );
+}
