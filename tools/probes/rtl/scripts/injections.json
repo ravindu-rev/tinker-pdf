@@ -3145,12 +3145,12 @@
    ]
   },
   {
-   "name": "page/cut-searched",
+   "name": "page/letters-searched",
    "round": "round 6 lane F: the read-back reads the page",
    "edits": [
     {
      "file": "crates/tinker-pdf/src/epub/paint.rs",
-     "old": "            Some((Read::Cut, _)) => return Search::Cut,\n",
+     "old": "            Some((Read::Letters, _)) => return Search::Letters,\n",
      "new": "",
      "count": 1
     }
@@ -3179,13 +3179,13 @@
    ]
   },
   {
-   "name": "page/cut-kept-under-a-transform",
+   "name": "page/letters-kept-under-a-transform",
    "round": "round 6 lane F: the read-back reads the page",
    "edits": [
     {
      "file": "crates/tinker-pdf/src/epub/paint.rs",
-     "old": "                Search::Cut if transformed => {",
-     "new": "                Search::Cut if false && transformed => {",
+     "old": "                Search::Letters if transformed => {",
+     "new": "                Search::Letters if false && transformed => {",
      "count": 1
     }
    ],
@@ -3225,40 +3225,6 @@
      "epub_conservation",
      "--test",
      "epub_fallback"
-    ]
-   ]
-  },
-  {
-   "name": "page/joins-are-cuts",
-   "round": "round 6 lane F: the read-back reads the page",
-   "edits": [
-    {
-     "file": "crates/tinker-pdf/src/epub/paint.rs",
-     "old": "            .all(|end| read_ends.binary_search(end).is_ok())",
-     "new": "            .all(|end| true || read_ends.binary_search(end).is_ok())",
-     "count": 1
-    }
-   ],
-   "suites": [
-    [
-     "cargo",
-     "test",
-     "--no-fail-fast",
-     "-p",
-     "tinker-pdf",
-     "--test",
-     "epub_conservation",
-     "--test",
-     "epub_fallback"
-    ],
-    [
-     "cargo",
-     "test",
-     "--no-fail-fast",
-     "-p",
-     "tinker-pdf",
-     "--lib",
-     "epub::tests"
     ]
    ]
   },

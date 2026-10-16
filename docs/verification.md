@@ -1724,7 +1724,8 @@ fix was to sharpen the injection rather than to shrug at the number.
 - **The right-to-left probe kit** (`tools/probes/rtl`,
   [its README](../tools/probes/rtl/README.md)): the probes the K-11 and CD-19
   rounds wrote to measure right-to-left text in synthetic EPUB books, 89 291
-  distinct books a build, 12 084 content streams built by hand, and the whole
+  distinct books a build and round 6's 13 510 more, 540 plain PDFs drawn as
+  producers draw right-to-left lines, 12 084 content streams built by hand, and the whole
   of `BidiCharacterTest.txt` read back under ruling 14, with their runner,
   comparators and outputs at `9297d2d`,
   `56dfd93` and `935b077`. A change to right-to-left text is measured against

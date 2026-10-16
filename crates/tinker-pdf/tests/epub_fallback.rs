@@ -3227,11 +3227,11 @@ fn a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed() {
         )
     });
     cases.push(Case::both(
-        "a styled ; glued to a word, letter-spaced (CR1, read whole again since round 6)",
+        "a styled ; glued to a word, letter-spaced (CR1, Left (5))",
         "ar",
         LS025_JUSTIFIED,
         format!("<p dir=\"rtl\">{gap8}</p>"),
-        Expect::Holds("cons logical whole found apart"),
+        Expect::Pinned("cons logical found apart"),
     ));
     let styled = rep(6, |i| {
         format!(
@@ -3828,19 +3828,25 @@ fn a_line_is_read_back_as_the_pages_fonts_give_its_characters_back() {
 /// a drawing that a reader reads with a word run into the next, or cut, was
 /// taken as right, and search and reading the block whole lost it: a styled
 /// `?!` glued to a Hebrew word at `word-spacing: 0.6em` conserved and read
-/// `שלום?! עולם.`, its word space gone. A reading is right now where its
-/// words are the line's, each run of white space one space
-/// (`paint::Words`); where no drawing tried reads the words right, the first
-/// that reads the letters right is drawn, as before, and the rules' drawing
-/// where it reads the letters right itself.
+/// `שלום?! עולם.`, its word space gone. A drawing the read-back tries is
+/// taken now where its words are the line's, each run of white space one
+/// space (`paint::Words`); where none tried reads the words right, the
+/// first that reads the letters right is drawn, as before. The rules'
+/// drawing is kept where it reads the letters in order itself, as 935b077
+/// kept it (`paint::Read::Letters`): a sign after European digits before a
+/// bold word at `word-spacing: 1em`, which a reader runs into the word
+/// before it on that drawing, `كتاب25٪`, reads so, as at 935b077, and
+/// searching on finds a drawing that reads it whole, at a cost in time that
+/// is the owner's to price (ROADMAP CD-19; pinned).
 #[test]
 fn a_reading_that_cuts_or_joins_a_word_is_not_taken_for_the_lines_text() {
     let right = Expect::Holds("cons logical whole found apart");
+    let joined = Expect::Pinned("cons logical found apart");
     check(&[
         Case::both("a styled ?! glued to a Hebrew word at 0.6em", "he", "p { word-spacing: 0.6em }", "<p dir=\"rtl\">שלום <b>?!</b> עולם.</p>", right),
         Case::both("the same under scale(2)", "he", "p { transform: scale(2); word-spacing: 0.6em }", "<p dir=\"rtl\">שלום <b>?!</b> עולם.</p>", right),
-        Case::both("a sign after European digits before a bold word at 1em", "ar", "p { margin: 0 30%; word-spacing: 1em }", format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(1)), right),
-        Case::both("two such sentences at 1em", "ar", "p { margin: 0 30%; word-spacing: 1em }", format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(2)), right),
+        Case::both("a sign after European digits before a bold word at 1em", "ar", "p { margin: 0 30%; word-spacing: 1em }", format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(1)), joined),
+        Case::both("two such sentences at 1em", "ar", "p { margin: 0 30%; word-spacing: 1em }", format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(2)), joined),
         Case::both("the punctuation shape at line-height 0.6", "ar", "p { margin: 0 30%; line-height: 0.6; word-spacing: 0.6em }", format!("<p dir=\"rtl\">{}</p>", styled_marks(&AR)), right),
         Case::both(
             "three number sentences under scaleY(2), letter-spaced and justified (guard)",
@@ -3970,14 +3976,14 @@ fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
 /// runs' own space too** (round 6's lane F, the sweep of V1's class),
 /// guards.
 ///
-/// A reading of the rules' drawing that has the line's letters in order
-/// and only cuts a word where a reader parts the spacing is searched no
-/// further, as 935b077 searched it no further. But 935b077 read a line
-/// under a transform in its runs' own space: an Arabic paragraph of
-/// numbers, letter-spaced and justified, under a scale of one axis, whose
-/// rules' drawing a reader parts inside `25٪` on the page, read wrong in
-/// that space, and the drawing 935b077's search found there reads it whole
-/// on the page. Kept as the rules drew it, each lost its text; searched in
+/// A reading of the rules' drawing that has the line's letters in order,
+/// a word cut where a reader parts the spacing or two run together, is
+/// searched no further, as 935b077 searched it no further. But 935b077
+/// read a line under a transform in its runs' own space: an Arabic
+/// paragraph of numbers, letter-spaced and justified, under a scale of one
+/// axis, whose rules' drawing a reader parts inside `25٪` on the page, read
+/// wrong in that space, and the drawing 935b077's search found there reads
+/// it whole on the page. Kept as the rules drew it, each lost its text; searched in
 /// its runs' space as well, and drawn where what that finds reads its
 /// words right on the page, each reads whole (`paint::Fonts::set_readings`).
 #[test]
@@ -4058,10 +4064,10 @@ fn a_drawing_that_sets_more_glyphs_over_others_than_the_rules_is_not_taken() {
 /// Under `scaleX(2)` or `scaleX(3)` two right-to-left cells `6px` or `8px`
 /// apart are parted on the page and not in their runs, and each is read back
 /// alone; the first cell's words read on lines of their own, as at 9297d2d,
-/// 56dfd93 and 935b077: a reading of the rules' drawing that only cuts a
-/// word is kept (`paint::Read::Cut`), and searching on for one that reads the
-/// cell on one line, which finds it, cost a letter-spaced line fifty-five
-/// times its time to open and is the owner's to price (pinned).
+/// 56dfd93 and 935b077: a reading of the rules' drawing that holds the
+/// letters in order is kept (`paint::Read::Letters`), and searching on for
+/// one that reads the cell on one line, which finds it, cost a letter-spaced
+/// line fifty times its time to open and is the owner's to price (pinned).
 #[test]
 fn two_cells_are_read_back_as_a_reader_parts_them_on_the_page() {
     let mut wrong = Vec::new();

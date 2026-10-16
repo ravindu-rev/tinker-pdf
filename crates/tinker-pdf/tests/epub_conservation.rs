@@ -1760,9 +1760,11 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
 /// e7ca679 (held); the paragraph alone, its own first letter at code 32,
 /// reads as at every tree (a guard). And with them, H4(2) of the same review:
 /// a right-to-left paragraph of the same words letter-spaced and justified
-/// read `٢٠١٠ .۴۵` at 935b077 in a default build, where 9297d2d read it
-/// whole; read back as the page's fonts give its characters back since round
-/// 6 (`paint::Segment::read_as`), it reads whole again (held). V2 of round
+/// reads `٢٠١٠ .۴۵` where 9297d2d read it whole (Left (4)), pinned in a
+/// default build: a reader runs the number into the word beside it on the
+/// rules' drawing, which holds the line's letters in order and is kept, as
+/// 935b077 kept it; searching on finds a drawing that reads it whole, at a
+/// cost in time that is the owner's to price (ROADMAP CD-19). V2 of round
 /// 6's hunt is the same tie-break at a closing bracket, which it refuses as
 /// it does a number: `<p>שלום.<br/>בראשית (אלהים).</p>` letter-spaced, a
 /// number at spacings the review did not name, and with `bundled-fonts`
@@ -1867,7 +1869,7 @@ fn a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop() {
         "he",
         "p { letter-spacing: 0.1em; word-spacing: 0.5em; text-align: justify; margin: 0 25% }",
         format!("<p>ף</p><p dir=\"rtl\">{prose}</p>"),
-        Expect::Holds("cons logical whole found apart"),
+        Expect::Pinned("cons logical found apart"),
         Expect::Holds("cons logical found apart"),
     ));
     // V2 of round 6's lane V: the same class at a closing bracket and at

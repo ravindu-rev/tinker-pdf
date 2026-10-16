@@ -2559,25 +2559,29 @@ fn readings_to_open(book: Vec<u8>) -> usize {
     READINGS.with(core::cell::Cell::get)
 }
 
-/// **A line a reader cuts only where its spacing parts it is read back once**
-/// (round 6, lane F).
+/// **A line whose rules' drawing a reader reads the letters of in order is
+/// read back once** (round 6, lane F).
 ///
 /// The read-back holds what a reader reads off a line to the line's words
 /// (`paint::Words`), so that a drawing that runs two words together is not
-/// taken for the line's text. A reader parts letter-spaced text at its
-/// spacing, though, and reads `٦٠.` as `٦٠ .` whatever the writer draws:
-/// held to its words, a line so spaced spent the read-back's whole budget
-/// on drawings none of which a reader reads whole, and kept the rules' —
-/// one line of 3 528 characters letter-spaced by `0.6em` took 11.9 s to
-/// open in debug, where 935b077, which held a reading to the letters alone,
-/// took 0.2 s (`zz_v6_time`'s `ls-nowrap`). A reading of the rules' drawing
-/// that holds the line's letters in order and only cuts a word, running none
-/// together (`paint::Read::Cut`), is kept now, as 935b077 kept it: the line
-/// is read back once. Held by count, as `paint::step` holds `cut_run`, not
-/// by a clock. A line whose rules' drawing runs two words together is still
+/// taken for the line's text where another reads it whole. But a reader
+/// parts letter-spaced text at its spacing, and reads `٦٠.` as `٦٠ .`
+/// whatever the writer draws, and under word spacing it runs a number into
+/// the word before it: held to its words, a line so read spent the
+/// read-back's whole budget on drawings, and kept the rules' where none read
+/// it whole — one line of 3 141 characters letter-spaced by `0.6em` took
+/// 10.9 s to open in debug, where 935b077, which held a reading to the
+/// letters alone, took 0.2 s (`zz_v6_time`'s `ls-nowrap`), and a justified
+/// right-to-left paragraph of styled stops and brackets 21.0 s against 3.3 s
+/// (`rtl-justified`). A reading of the rules' drawing that holds the line's
+/// letters in order (`paint::Read::Letters`), a word cut or two run
+/// together, is kept now, as 935b077 kept it: the line is read back once;
+/// what searching on finds is the owner's to price (ROADMAP CD-19). Held by
+/// count, as `paint::step` holds `cut_run`, not by a clock. A line whose
+/// rules' drawing a reader reads the letters of out of order is still
 /// searched, and read right (a guard).
 #[test]
-fn a_line_a_reader_cuts_only_at_its_spacing_is_read_back_once() {
+fn a_line_whose_rules_drawing_reads_its_letters_in_order_is_read_back_once() {
     let he = [
         "בראשית",
         "ברא",
@@ -2599,11 +2603,20 @@ fn a_line_a_reader_cuts_only_at_its_spacing_is_read_back_once() {
     assert_eq!(cut, 1, "the letter-spaced line was read back {cut} times");
     let joined = readings_to_open(stored_book(
         "ar",
-        "p { margin: 0 30%; word-spacing: 1em }",
+        "p { word-spacing: 1em; white-space: nowrap }",
         "<p dir=\"rtl\">كتاب 25\u{66A} <b>مدرسة</b> \u{661}\u{662}\u{663} الطالب 2010\u{60C} جميل.</p>",
     ));
-    assert!(
-        joined > 2,
+    assert_eq!(
+        joined, 1,
         "a line whose rules' drawing runs two words together was read back {joined} times"
+    );
+    let turned = readings_to_open(stored_book(
+        "he",
+        "p { word-spacing: 0.6em }",
+        "<p dir=\"rtl\">שלום <b>?!</b> עולם.</p>",
+    ));
+    assert!(
+        turned > 1,
+        "a line whose rules' drawing reads its letters out of order was read back {turned} times"
     );
 }
