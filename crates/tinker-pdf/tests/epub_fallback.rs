@@ -3948,6 +3948,50 @@ fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
     ]);
 }
 
+/// **A line a reader cuts on the page under a transform is searched in its
+/// runs' own space too** (round 6's lane F, the sweep of V1's class),
+/// guards.
+///
+/// A reading of the rules' drawing that has the line's letters in order
+/// and only cuts a word where a reader parts the spacing is searched no
+/// further, as 935b077 searched it no further. But 935b077 read a line
+/// under a transform in its runs' own space: an Arabic paragraph of
+/// numbers, letter-spaced and justified, under a scale of one axis, whose
+/// rules' drawing a reader parts inside `25٪` on the page, read wrong in
+/// that space, and the drawing 935b077's search found there reads it whole
+/// on the page. Kept as the rules drew it, each lost its text; searched in
+/// its runs' space as well, and drawn where what that finds reads its
+/// words right on the page, each reads whole (`paint::Fonts::set_readings`).
+#[test]
+fn a_line_a_reader_cuts_on_the_page_under_a_transform_is_searched_in_its_runs_space_too() {
+    let body = format!(
+        "<div class=\"w\"><p dir=\"rtl\">{}</p></div>",
+        signs_and_numbers(3)
+    );
+    let mut cases = Vec::new();
+    for (name, style) in [
+        (
+            "numbers, letter-spaced and justified, under scaleX(2) (guard)",
+            "p { margin: 0 30%; transform: scaleX(2); letter-spacing: 0.1em; word-spacing: 0.5em; text-align: justify } .w { transform: none }",
+        ),
+        (
+            "the same under scaleY(0.5) (guard)",
+            "p { margin: 0 30%; transform: scaleY(0.5); letter-spacing: 0.1em; word-spacing: 0.5em; text-align: justify } .w { transform: none }",
+        ),
+        (
+            "the same under matrix(1.6, 0, 0, 0.8, 0, 0) (guard)",
+            "p { margin: 0 30%; transform: matrix(1.6, 0, 0, 0.8, 0, 0); letter-spacing: 0.1em; word-spacing: 0.5em; text-align: justify } .w { transform: none }",
+        ),
+        (
+            "the same with scaleX(2) on the block around it (guard)",
+            "p { margin: 0 30%; transform: none; letter-spacing: 0.1em; word-spacing: 0.5em; text-align: justify } .w { transform: scaleX(2) }",
+        ),
+    ] {
+        cases.push(Case::both(name, "ar", style, body.clone(), Expect::Holds("cons logical whole found")));
+    }
+    check(&cases);
+}
+
 /// **A drawing that sets more glyphs over others than the rules' is not
 /// taken** (round 6's lane F, the sweep of V1's class), a guard.
 ///

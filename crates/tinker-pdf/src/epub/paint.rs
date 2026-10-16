@@ -1164,17 +1164,21 @@ impl<'a> Fonts<'a> {
     /// drawing that reads the line's words right is the one drawn; where none
     /// does, the first that reads its letters in order, unless the rules'
     /// drawing reads them so itself; and none that sets more glyphs over
-    /// others than the rules' ([`drawn_over`]). Under a transform, a line
-    /// nothing tried reads right on the page is searched again in its runs'
-    /// own space, and what that finds is drawn only where it reads closer to
-    /// the line on the page than the rules' drawing ([`Fonts::reads_closer`]).
-    /// A line the rules' drawing reads right — its words, or its letters in
-    /// order with a word cut where a reader parts the spacing and none run
-    /// together ([`Read::Cut`]), which is searched no further, as 935b077
-    /// searched it no further — or that no drawing tried reads right, is
-    /// drawn by the rules; and a line with no right-to-left character, or a
-    /// run of a face of the book's own, which [`plan_coded`] does not draw, is
-    /// not read.
+    /// others than the rules' ([`drawn_over`]). A line the rules' drawing
+    /// reads with its letters in order and a word cut where a reader parts
+    /// the spacing, none run together ([`Read::Cut`]), is searched no
+    /// further on the page, as 935b077 searched it no further. Under a
+    /// transform, a line nothing tried reads right on the page is searched
+    /// again in its runs' own space, and what that finds is drawn only where
+    /// it reads closer to the line on the page than the rules' drawing
+    /// ([`Fonts::reads_closer`]); and a line the rules' drawing reads there
+    /// with a word cut is searched in its runs' own space too, as 935b077
+    /// searched every line under a transform, and what that finds is drawn
+    /// only where it reads the words right on the page
+    /// ([`Fonts::reads_whole`]). A line the rules' drawing reads right, or
+    /// that no drawing tried reads right, is drawn by the rules; and a line
+    /// with no right-to-left character, or a run of a face of the book's
+    /// own, which [`plan_coded`] does not draw, is not read.
     ///
     /// The work is linear in the line, once a reading, and a line is read at
     /// most [`READINGS_PER_LINE`] times, twice that and twice more under a
@@ -1217,25 +1221,43 @@ impl<'a> Fonts<'a> {
                 .flat_map(|run| drawings_of(run, self.along(run)))
                 .collect();
             let page = self.search(&line, &matrices, frame, &written, &options);
-            // Under a transform, where nothing tried reads the line right on
-            // the page — glyphs the transform sets over others, whose letters
-            // no drawing reads in order — the line is read back in its runs'
-            // own space, as it was before the page's matrix was modelled.
+            let transformed = matrices.iter().any(|matrix| *matrix != IDENTITY);
+            let own = || vec![IDENTITY; line.len()];
             let found = match page {
                 Search::Rules => continue,
                 Search::Found(found) => Some(found),
-                Search::Nothing if matrices.iter().any(|matrix| *matrix != IDENTITY) => {
-                    let own = vec![IDENTITY; line.len()];
-                    match self.search(&line, &own, frame, &written, &options) {
+                // Under a transform, where nothing tried reads the line right
+                // on the page — glyphs the transform sets over others, whose
+                // letters no drawing reads in order — the line is read back in
+                // its runs' own space, as it was before the page's matrix was
+                // modelled.
+                Search::Nothing if transformed => {
+                    match self.search(&line, &own(), frame, &written, &options) {
                         Search::Found(found)
                             if self.reads_closer(&line, &matrices, frame, &written, &found) =>
                         {
                             Some(found)
                         }
-                        Search::Found(_) | Search::Rules | Search::Nothing => None,
+                        Search::Found(_) | Search::Rules | Search::Cut | Search::Nothing => None,
                     }
                 }
-                Search::Nothing => None,
+                // Under a transform, where the rules' drawing reads the line
+                // on the page with a word cut, the line is searched in its
+                // runs' own space too, as every line under a transform was
+                // searched before the page's matrix was modelled, and what
+                // that finds is drawn where it reads the words right on the
+                // page.
+                Search::Cut if transformed => {
+                    match self.search(&line, &own(), frame, &written, &options) {
+                        Search::Found(found)
+                            if self.reads_whole(&line, &matrices, frame, &written, &found) =>
+                        {
+                            Some(found)
+                        }
+                        Search::Found(_) | Search::Rules | Search::Cut | Search::Nothing => None,
+                    }
+                }
+                Search::Cut | Search::Nothing => None,
             };
             if let Some(found) = found {
                 drawings.extend(found);
@@ -1284,10 +1306,12 @@ impl<'a> Fonts<'a> {
         };
         match reads_right(&BTreeMap::new(), over_by_rules) {
             // A reading of the rules' drawing that only cuts a word where a
-            // reader parts the spacing is kept, as 935b077 kept it: searching
-            // for a drawing that reads such a line whole spent the whole
-            // budget of every letter-spaced line, to no end on the probes.
-            None | Some((Read::Words | Read::Cut, _)) => return Search::Rules,
+            // reader parts the spacing is not searched further, as 935b077
+            // searched it no further: searching for a drawing that reads such
+            // a line whole spent the whole budget of every letter-spaced
+            // line, to no end on the probes.
+            None | Some((Read::Words, _)) => return Search::Rules,
+            Some((Read::Cut, _)) => return Search::Cut,
             Some((_, over)) => over_by_rules = over,
         }
         // Where the rules' drawing reads the letters right, it is kept
@@ -1347,6 +1371,31 @@ impl<'a> Fonts<'a> {
             return false;
         };
         written.pairs_in(&read) > written.pairs_in(&rules)
+    }
+
+    /// Whether `found`, a drawing [`Fonts::search`] found in `line`'s runs'
+    /// own space where the rules' drawing reads the line on the page only
+    /// with a word cut ([`Search::Cut`]), reads its words right on the page,
+    /// setting no more glyphs over others there than the rules' drawing. A
+    /// letter-spaced and justified Arabic line under `scaleX(2)` whose rules'
+    /// drawing a reader parts inside `25٪` on the page was drawn so, and read
+    /// whole, before the page's matrix was modelled.
+    fn reads_whole(
+        &self,
+        line: &[&TextRun],
+        matrices: &[[f64; 6]],
+        frame: &Frame,
+        written: &Words,
+        found: &BTreeMap<RunKey, Drawing>,
+    ) -> bool {
+        let Some((_, over_by_rules)) = self.read_back(line, matrices, frame, &BTreeMap::new())
+        else {
+            return false;
+        };
+        self.read_back(line, matrices, frame, found)
+            .is_some_and(|(read, over)| {
+                over <= over_by_rules && written.read_as(&read) == Read::Words
+            })
     }
 
     /// The text objects [`plan_coded`] writes for the whole of `run` drawn as
@@ -4288,6 +4337,9 @@ fn drawn_over(page: &tinker_pdf_content::TextPage) -> usize {
 enum Search {
     /// The rules' drawing reads the line right, or the line is not read back.
     Rules,
+    /// The rules' drawing reads the line's letters in order, with a word cut
+    /// where a reader parts the spacing and none run together ([`Read::Cut`]).
+    Cut,
     /// Draw the line so.
     Found(BTreeMap<RunKey, Drawing>),
     /// Nothing tried reads the line right.

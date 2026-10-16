@@ -78,6 +78,22 @@ fn shape(name: &str, n: usize) -> (&'static str, &'static str, String) {
                 .collect();
             ("he", "p { letter-spacing: 0.6em; white-space: nowrap }", format!("<p>{body}\u{666}\u{660}.</p>"))
         }
+        // The same under a scale of one axis: the line is read back on the
+        // page, and a reading that cuts a word there is searched again in
+        // the runs' own space.
+        "ls-scaled" => {
+            let body: String = (0..n)
+                .map(|i| format!("<b>{}</b> <i>!</i> {} ", w(i), w(i + 1)))
+                .collect();
+            ("he", "p { letter-spacing: 0.6em; white-space: nowrap; transform: scaleX(2) }", format!("<p>{body}\u{666}\u{660}.</p>"))
+        }
+        // rtl-justified under a scale of one axis.
+        "rtl-justified-scaled" => {
+            let body: String = (0..n)
+                .map(|i| format!("{} <b>?!</b> {} <i>(</i>{}<i>)</i> {}، ", w(i), w(i + 1), w(i + 2), w(i + 3)))
+                .collect();
+            ("he", "p { letter-spacing: 0.1em; word-spacing: 0.5em; text-align: justify; transform: scaleX(2) }", format!("<p dir=\"rtl\">{body}.</p>"))
+        }
         _ => ("en", "", String::new()),
     }
 }
@@ -86,7 +102,7 @@ fn shape(name: &str, n: usize) -> (&'static str, &'static str, String) {
 fn probe() {
     let only = std::env::var("V6T_ONLY").ok();
     let max: usize = std::env::var("V6T_MAX").ok().and_then(|s| s.parse().ok()).unwrap_or(256);
-    for name in ["h1-nowrap", "h1-nowrap-unspaced", "h1-wrapped", "rtl-justified", "rtl-prose-justified", "rtl-styled-justified", "dirless-prose", "ls-nowrap"] {
+    for name in ["h1-nowrap", "h1-nowrap-unspaced", "h1-wrapped", "rtl-justified", "rtl-prose-justified", "rtl-styled-justified", "dirless-prose", "ls-nowrap", "ls-scaled", "rtl-justified-scaled"] {
         if only.as_deref().is_some_and(|o| o != name) {
             continue;
         }
