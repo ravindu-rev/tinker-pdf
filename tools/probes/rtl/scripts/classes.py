@@ -62,6 +62,10 @@ CLASSES = [
     # word-spacing 1em, which conserved at 56dfd93 only.
     ('Left (6) half turn', lambda p, n, s='': p in ('zz_v6_transform', 'zz_f6_transform')
         and n in ('ar/num/none', 'ar/num/rtl') and 'rotate(180deg)' in s),
+    # Round 6's sweep, Left (7), with bundled-fonts: a dir-less Hebrew
+    # paragraph of inline blocks squeezed by scaleX(0.5), a word of which
+    # search found at 9297d2d only.
+    ('Left (7) squeezed inline blocks', lambda p, n, s='': p == 'zz_f6_transform' and n == 'he/ib/none'),
 ]
 
 

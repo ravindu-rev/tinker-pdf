@@ -3853,7 +3853,7 @@ fn a_reading_that_cuts_or_joins_a_word_is_not_taken_for_the_lines_text() {
 }
 
 /// **A line whose right drawing lies past the read-back's budget is drawn by
-/// the rules** (V5 of round 6's lane V; ROADMAP CD-19, Left (7)), pinned.
+/// the rules** (V5 of round 6's lane V; ROADMAP CD-19, Left (8)), pinned.
 ///
 /// The read-back tries each run's drawings, then two runs' at a time, and
 /// gives up after `paint::READINGS_PER_LINE` readings. Many of a run's
@@ -3922,7 +3922,15 @@ fn squeezed_blocks(words: &[&'static str; 12]) -> String {
 /// holds at 935b077 in a default build: there the read-back, in the runs'
 /// space, had found a drawing that reads right in it, and that drawing
 /// reads the logical order right on the page as well
-/// (`paint::Fonts::set_readings`).
+/// (`paint::Fonts::set_readings`). What that search finds is drawn only
+/// where it reads closer to the line on the page than the rules' drawing
+/// (`paint::Fonts::reads_closer`): turned a quarter (`rotate(90deg)`) at
+/// `0.6em`, the paragraph keeps the rules' drawing and its structure tree's
+/// order, which the drawing found in the runs' space loses on the page.
+/// With `bundled-fonts` the paragraph at
+/// `0.6em` is pinned at what it reads: a word of it is not found by search,
+/// as at 56dfd93 and 935b077, where 9297d2d found every one (15 books of the
+/// sweep, with no transform and under fourteen; ROADMAP CD-19, Left (7)).
 #[test]
 fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
     let at_06 = "p { margin: 0 30%; transform: none; word-spacing: 0.6em } .w { transform: none }";
@@ -3930,19 +3938,27 @@ fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
     let body = format!("<div class=\"w\"><p>{}</p></div>", squeezed_blocks(&HE));
     check(&[
         Case::each(
-            "a dir-less Hebrew paragraph with inline blocks under scaleX(0.5) at 0.6em (guard)",
+            "a dir-less Hebrew paragraph with inline blocks under scaleX(0.5) at 0.6em (guard; pinned with bundled-fonts)",
             "he",
             at_06,
             body.clone(),
             Expect::Holds("logical"),
-            Expect::Neither,
+            Expect::Pinned("logical"),
         ),
         Case::each(
             "the same at 1em (guard)",
             "he",
             at_1,
-            body,
+            body.clone(),
             Expect::Holds("logical found"),
+            Expect::Holds("found"),
+        ),
+        Case::each(
+            "the same at 0.6em turned a quarter (guard)",
+            "he",
+            "p { margin: 0 30%; transform: rotate(90deg); word-spacing: 0.6em } .w { transform: none }",
+            body,
+            Expect::Holds("logical"),
             Expect::Holds("found"),
         ),
     ]);

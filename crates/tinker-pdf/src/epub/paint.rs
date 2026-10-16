@@ -1375,11 +1375,12 @@ impl<'a> Fonts<'a> {
 
     /// Whether `found`, a drawing [`Fonts::search`] found in `line`'s runs'
     /// own space where the rules' drawing reads the line on the page only
-    /// with a word cut ([`Search::Cut`]), reads its words right on the page,
-    /// setting no more glyphs over others there than the rules' drawing. A
-    /// letter-spaced and justified Arabic line under `scaleX(2)` whose rules'
-    /// drawing a reader parts inside `25٪` on the page was drawn so, and read
-    /// whole, before the page's matrix was modelled.
+    /// with a word cut ([`Search::Cut`]), reads its words right on the page.
+    /// A letter-spaced and justified Arabic line under `scaleX(2)` whose
+    /// rules' drawing a reader parts inside `25٪` on the page was drawn so,
+    /// and read whole, before the page's matrix was modelled; a styled `?!`
+    /// with no `dir`, turned for a reading in which it joined its word in
+    /// that space, is not.
     fn reads_whole(
         &self,
         line: &[&TextRun],
@@ -1388,14 +1389,8 @@ impl<'a> Fonts<'a> {
         written: &Words,
         found: &BTreeMap<RunKey, Drawing>,
     ) -> bool {
-        let Some((_, over_by_rules)) = self.read_back(line, matrices, frame, &BTreeMap::new())
-        else {
-            return false;
-        };
         self.read_back(line, matrices, frame, found)
-            .is_some_and(|(read, over)| {
-                over <= over_by_rules && written.read_as(&read) == Read::Words
-            })
+            .is_some_and(|(read, _)| written.read_as(&read) == Read::Words)
     }
 
     /// The text objects [`plan_coded`] writes for the whole of `run` drawn as

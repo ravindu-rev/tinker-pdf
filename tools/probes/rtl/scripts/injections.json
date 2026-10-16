@@ -3150,8 +3150,8 @@
    "edits": [
     {
      "file": "crates/tinker-pdf/src/epub/paint.rs",
-     "old": "            None | Some((Read::Words | Read::Cut, _)) => return Search::Rules,",
-     "new": "            None | Some((Read::Words, _)) => return Search::Rules,",
+     "old": "            Some((Read::Cut, _)) => return Search::Cut,\n",
+     "new": "",
      "count": 1
     }
    ],
@@ -3175,6 +3175,56 @@
      "tinker-pdf",
      "--lib",
      "epub::tests"
+    ]
+   ]
+  },
+  {
+   "name": "page/cut-kept-under-a-transform",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                Search::Cut if transformed => {",
+     "new": "                Search::Cut if false && transformed => {",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/whole-unchecked",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "            .is_some_and(|(read, _)| written.read_as(&read) == Read::Words)",
+     "new": "            .is_some_and(|(read, _)| true || written.read_as(&read) == Read::Words)",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
     ]
    ]
   },
@@ -3218,7 +3268,7 @@
    "edits": [
     {
      "file": "crates/tinker-pdf/src/epub/paint.rs",
-     "old": "                Search::Nothing if matrices.iter().any(|matrix| *matrix != IDENTITY) => {",
+     "old": "                Search::Nothing if transformed => {",
      "new": "                Search::Nothing if false => {",
      "count": 1
     }
