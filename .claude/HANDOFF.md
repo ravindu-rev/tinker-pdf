@@ -1,5 +1,13 @@
 # Where the last session stopped
 
+> **16 October 2026, 16:43 UTC: round 6 was stopped in the cloud session**
+> so the owner could continue it locally. It sits on the branch `r6-wip`.
+> **Read [.r6-resume/README.md](../.r6-resume/README.md) first.** It says
+> what that branch holds, where lane F stopped, what is left, and the owner's
+> decisions of 16 October (H-01, H-03). The note below is older: its kit
+> issues and its first two "Next" items are done on `r6-wip`. Rewrite this
+> file when round 6 lands.
+
 Written 12 October 2026, when the owner paused the work. The next session
 starts here: read this, then [AGENTS.md](../AGENTS.md), then continue with
 "Next, in this order" below. When this note is out of date, rewrite it or
