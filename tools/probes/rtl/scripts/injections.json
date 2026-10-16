@@ -2065,8 +2065,8 @@
    "edits": [
     {
      "file": "crates/tinker-pdf/src/epub/paint.rs",
-     "old": "            if found.is_none() {\n                'pairs:",
-     "new": "            if found.is_none() && tried.get() > READINGS_PER_LINE {\n                'pairs:",
+     "old": "        for (at, &(first, one)) in options.iter().enumerate() {",
+     "new": "        for (at, &(first, one)) in options.iter().enumerate().take(0) {",
      "count": 1
     }
    ],
@@ -2281,7 +2281,7 @@
    "edits": [
     {
      "file": "crates/tinker-pdf/src/epub/paint.rs",
-     "old": "if !line.is_empty() && run.x > end + size.max(run.font_size) * RESUMED_WITHIN {",
+     "old": "if !line.is_empty() && gap > size.max(run.font_size) * RESUMED_WITHIN {",
      "new": "if !line.is_empty() && run.x > end + 0.01 {",
      "count": 1
     }
@@ -2946,6 +2946,237 @@
      "file": "crates/tinker-pdf/tests/epub_support/reading.rs",
      "old": "        logical: conservation_in_logical_order(&bytes, &doc).holds(),\n",
      "new": "        logical: conservation(&bytes, &doc).holds(),\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/read-back-under-no-matrix",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                line.iter().map(|run| effects.matrix(run.anchor)).collect();",
+     "new": "                line.iter().map(|_| IDENTITY).collect();",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/rules-in-the-runs-ems",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "            .map(|run| (run_key(run), along_the_line(effects.matrix(run.anchor))))",
+     "new": "            .map(|run| (run_key(run), along_the_line(IDENTITY)))",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/along-inverted",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "    let along = hypot(a, b) / size;",
+     "new": "    let along = size / hypot(a, b);",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/parted-in-the-runs-ems",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "        .max(run.letter_spacing + run.word_spacing)\n        * along\n        > run.font_size * PARTED_FROM",
+     "new": "        .max(run.letter_spacing + run.word_spacing)\n        * along.min(1.0).max(1.0)\n        > run.font_size * PARTED_FROM",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/lines-cut-in-the-runs-ems",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "            let gap = (run.x - end) * along(run).max(line.last().map_or(1.0, |last| along(last)));",
+     "new": "            let gap = (run.x - end) * along(run).max(line.last().map_or(1.0, |last| along(last))).min(1.0).max(1.0);",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/read-as-typed",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                .flat_map(|run| run.text.chars().filter_map(|ch| self.read_as(run, ch)))",
+     "new": "                .flat_map(|run| run.text.chars())",
+     "count": 1
+    },
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                            text: segment.read_as(ch, code).to_string(),",
+     "new": "                            text: ch.to_string(),",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/letters-are-enough",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                        Read::Words => true,",
+     "new": "                        Read::Words => true,\n                        Read::Letters if true => true,",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/no-fallback-to-the-runs-space",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                Search::Nothing if matrices.iter().any(|matrix| *matrix != IDENTITY) => {",
+     "new": "                Search::Nothing if false => {",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/overprint-taken",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                    if over > over_by_rules {",
+     "new": "                    if over > over_by_rules && false {",
      "count": 1
     }
    ],

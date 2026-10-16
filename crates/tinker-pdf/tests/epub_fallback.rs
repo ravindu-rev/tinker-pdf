@@ -21,7 +21,7 @@ mod epub_support;
 
 use epub_support::book::{faces_book, styled_book};
 use epub_support::conservation::{conservation, conservation_in_logical_order};
-use epub_support::reading::{check, rep, word, Case, Expect, AR, AR8, HE, HEP};
+use epub_support::reading::{check, read, rep, word, Case, Expect, AR, AR8, HE, HEP};
 use epub_support::typeface::covering;
 use tinker_pdf::{ArchiveWarning, Document, TextOptions};
 use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
@@ -3864,4 +3864,90 @@ fn a_line_whose_right_drawing_lies_past_the_budget_is_drawn_by_the_rules() {
         Case::both("a justified Arabic paragraph at line-height 0.4, no dir (what reading each drawing once costs)", "ar", tight, format!("<p>{}</p>", styled_marks(&AR)), Expect::Pinned("logical found apart")),
         Case::both("the same, right to left (what reading each drawing once costs)", "ar", tight, format!("<p dir=\"rtl\">{}</p>", styled_marks(&AR)), Expect::Pinned("logical found apart")),
     ]);
+}
+
+/// The inline-block shape of the round-6 sweep: a word, an inline block
+/// squeezed by `scaleX(0.5)` holding two words and a styled `?!`, a word,
+/// `25٪` and a word, three times.
+fn squeezed_blocks(words: &[&'static str; 12]) -> String {
+    rep(3, |i| {
+        format!(
+            "{} <span style=\"display: inline-block; transform: scaleX(0.5)\">{} <b>?!</b> {}</span> {} 25\u{66A} {}.",
+            word(words, i),
+            word(words, i + 1),
+            word(words, i + 2),
+            word(words, i + 3),
+            word(words, i + 4)
+        )
+    })
+}
+
+/// **A line nothing reads right on the page under a transform is searched
+/// again in its runs' own space** (round 6's lane F, the sweep of V1's
+/// class), guards.
+///
+/// An inline block squeezed by `scaleX(0.5)` draws glyphs over the ones
+/// beside it at every tree, with no spacing as with any (the sweep's `ib`
+/// shape), and on such a line no drawing the read-back tries reads the
+/// letters in order on the page. Searched on the page alone, the line was
+/// drawn by the rules, and a Hebrew paragraph with no `dir` at
+/// `word-spacing: 0.6em` or `1em` lost its structure tree's order, which it
+/// holds at 935b077 in a default build: there the read-back, in the runs'
+/// space, had found a drawing that reads right in it, and that drawing
+/// reads the logical order right on the page as well
+/// (`paint::Fonts::set_readings`).
+#[test]
+fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
+    let at_06 =
+        "p { margin: 0 30%; transform: none; word-spacing: 0.6em } .w { transform: none }";
+    let at_1 = "p { margin: 0 30%; transform: none; word-spacing: 1em } .w { transform: none }";
+    let body = format!("<div class=\"w\"><p>{}</p></div>", squeezed_blocks(&HE));
+    check(&[
+        Case::each(
+            "a dir-less Hebrew paragraph with inline blocks under scaleX(0.5) at 0.6em (guard)",
+            "he",
+            at_06,
+            body.clone(),
+            Expect::Holds("logical"),
+            Expect::Neither,
+        ),
+        Case::each(
+            "the same at 1em (guard)",
+            "he",
+            at_1,
+            body,
+            Expect::Holds("logical found"),
+            Expect::Holds("found"),
+        ),
+    ]);
+}
+
+/// **A drawing that sets more glyphs over others than the rules' is not
+/// taken** (round 6's lane F, the sweep of V1's class), a guard.
+///
+/// The same inline blocks in an Arabic paragraph turned by half a turn at
+/// `word-spacing: 1em` draw one glyph over another at 9297d2d, 56dfd93 and
+/// 935b077. Read back under the page's matrix, a drawing that read the
+/// line's letters right in the runs' space drew two, and was taken: a
+/// glyph more over another under word spacing. The read-back counts the
+/// glyphs each drawing sets over another as the kit does
+/// (`paint::drawn_over`) and takes none that sets more than the rules'.
+#[test]
+fn a_drawing_that_sets_more_glyphs_over_others_than_the_rules_is_not_taken() {
+    let body = format!("<div class=\"w\"><p>{}</p></div>", squeezed_blocks(&AR));
+    let mut more = Vec::new();
+    for style in [
+        "p { margin: 0 30%; transform: rotate(180deg); word-spacing: 1em } .w { transform: none }",
+        "p { margin: 0 30%; transform: scaleX(2) rotate(180deg); word-spacing: 1em } .w { transform: none }",
+    ] {
+        let reading = read("ar", style, &body);
+        if reading.overprint > 1 {
+            more.push(format!("{style}: {} glyphs over another", reading.overprint));
+        }
+    }
+    assert!(
+        more.is_empty(),
+        "more glyphs drawn over another than at 935b077 (1):\n{}",
+        more.join("\n")
+    );
 }
