@@ -3978,54 +3978,71 @@ fn a_drawing_that_sets_more_glyphs_over_others_than_the_rules_is_not_taken() {
     );
 }
 
-/// **Two cells a reader parts on the page are read back apart** (round 6's
+/// **Two cells are read back as a reader parts them on the page** (round 6's
 /// lane F, the edges of V1's class: the kit's `zz_f6_ems` sweep).
 ///
 /// The read-back reads together the runs a reader reads as one line
 /// (`paint::page_lines`), and a gap between two runs parts them where it is
 /// wide in a reader's ems on the page (`paint::along_the_line`). Under
-/// `scaleX(2)` or `scaleX(3)` two right-to-left cells `6px` or `8px` apart,
-/// at `word-spacing: 1em`, are parted on the page and not in their runs:
-/// read back as one line in the runs' ems, the drawing found right for it
-/// set the first cell's two words and its comma each on a line of its own,
-/// as 9297d2d, 56dfd93 and 935b077 drew them. Read back apart, the first
-/// cell's words read on one line. With no transform the two cells are one
-/// line to a reader, and read so at every tree.
+/// `scaleX(0.5)` a Latin cell `abc (x).` and a right-to-left one `10px` apart
+/// at `word-spacing: 1em` are one line to a reader and two in their runs'
+/// ems: read back as two, the right-to-left cell was drawn whole and the
+/// reader read the row from the right, `שלום עולם.abc (x)`, as 935b077 drew
+/// such a row when its cells touched. Read back as a reader reads it, the
+/// row holds two paragraphs' text, and the right-to-left cell is left in
+/// pieces (`paint::sharing_a_line`): its two words are not read together
+/// before the Latin cell.
+///
+/// Under `scaleX(2)` or `scaleX(3)` two right-to-left cells `6px` or `8px`
+/// apart are parted on the page and not in their runs, and each is read back
+/// alone; the first cell's words read on lines of their own, as at 9297d2d,
+/// 56dfd93 and 935b077: a reading of the rules' drawing that only cuts a
+/// word is kept (`paint::Read::Cut`), and searching on for one that reads the
+/// cell on one line, which finds it, cost a letter-spaced line fifty-five
+/// times its time to open and is the owner's to price (pinned).
 #[test]
-fn two_cells_a_reader_parts_on_the_page_are_read_back_apart() {
-    let mut cut = Vec::new();
-    for (language, cells, first) in [
+fn two_cells_are_read_back_as_a_reader_parts_them_on_the_page() {
+    let mut wrong = Vec::new();
+    for (language, cells, whole) in [
+        ("he", "<td>abc (x).</td><td>שלום עולם</td>", "שלום עולם"),
+        ("ar", "<td>abc (x).</td><td>كتاب مدرسة</td>", "كتاب مدرسة"),
+    ] {
+        let style =
+            "table { border-spacing: 10px; transform: scaleX(0.5) } td { padding: 0; word-spacing: 1em }";
+        let reading = read(language, style, &format!("<table><tr>{cells}</tr></table>"));
+        if reading.text.contains(whole) {
+            wrong.push(format!("{language}, {style}: {:?}", reading.text));
+        }
+    }
+    for (language, cells, pinned) in [
         (
             "he",
             "<td><b>מלחמה</b> ספר\u{60C}</td><td>בית <i>(</i>גדול<i>)</i>.</td>",
-            "מלחמה ספר\u{60C}",
+            if cfg!(feature = "bundled-fonts") {
+                "מלחמה\n ספר\n\u{60C}\nבית\n(גדול)\n.\n"
+            } else {
+                "מלחמה\n ספר\n\u{60C}\n.בית(גדול)\n"
+            },
         ),
         (
             "ar",
             "<td><b>الطالب</b> جميل\u{60C}</td><td>بيت <i>(</i>كبير<i>)</i>.</td>",
-            "الطالب جميل\u{60C}",
+            "الطالب\n جميل\n\u{60C}\n.بيت(كبير)\n",
         ),
     ] {
-        for spacing in ["6px", "8px"] {
-            for transform in ["scaleX(2)", "scaleX(3)"] {
-                let style = format!(
-                    "table {{ border-spacing: {spacing}; transform: {transform} }} \
-                     td {{ padding: 0; word-spacing: 1em }}"
-                );
-                let reading = read(
-                    language,
-                    &style,
-                    &format!("<table><tr>{cells}</tr></table>"),
-                );
-                if !reading.text.lines().any(|line| line.contains(first)) {
-                    cut.push(format!("{language}, {style}: {:?}", reading.text));
-                }
-            }
+        let style =
+            "table { border-spacing: 6px; transform: scaleX(2) } td { padding: 0; word-spacing: 1em }";
+        let reading = read(language, style, &format!("<table><tr>{cells}</tr></table>"));
+        if reading.text != pinned {
+            wrong.push(format!(
+                "{language}, {style} (pinned {pinned:?}): {:?}",
+                reading.text
+            ));
         }
     }
     assert!(
-        cut.is_empty(),
-        "a cell's words read on more than one line:\n{}",
-        cut.join("\n")
+        wrong.is_empty(),
+        "cells read otherwise:\n{}",
+        wrong.join("\n")
     );
 }
