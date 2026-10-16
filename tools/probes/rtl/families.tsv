@@ -72,11 +72,3 @@ zz_k11rv2_sent	tinker-pdf-shape	probes/shape/zz_k11rv2_sent.rs	lines	2	lines	K-1
 zz_laneR_lines	tinker-pdf-shape	probes/shape/zz_laneR_lines.rs	lines	2	lines	lane R (round 5)	writes lines/laneR.tsv
 zz_fv_shape	tinker-pdf-shape	probes/shape/zz_fv_shape.rs	lines	1	lines	56dfd93 verification	LINE; does not compile before 56dfd93
 zz_code1_time	tinker-pdf-shape	probes/shape/zz_code1_time.rs	timing	1	timing	round-5 review (code)	ZZT: wall-clock of drawn_reading; no baseline
-zz_vc_verify	tinker-pdf	probes/regressions/zz_vc_verify.rs	regressions	2	tests	K-11 round-4 review, code verifier	
-zz_vc_pal	tinker-pdf	probes/regressions/zz_vc_pal.rs	regressions	2	tests	K-11 round-4 review, confirm verifier	
-zz_vh_verify	tinker-pdf	probes/regressions/zz_vh_verify.rs	regressions	2	tests	K-11 round-4 review, hunt verifier	
-zz_vc1_repro	tinker-pdf	probes/regressions/zz_vc1_repro.rs	regressions	2	tests	round-5 review, code verifier	
-zz_vc1_min	tinker-pdf	probes/regressions/zz_vc1_min.rs	regressions	2	tests	round-5 review, confirm verifier	
-zz_vfv1	tinker-pdf	probes/regressions/zz_vfv1.rs	regressions	2	tests	CD-19 fix verification, verifier	
-zz_vh1	tinker-pdf	probes/regressions/zz_vh1.rs	regressions	2	tests	round-5 review, hunt verifier	
-zz_vh2t	tinker-pdf	probes/regressions/zz_vh2t.rs	regressions	2	tests	CD-19 fix review, hunt verifier	

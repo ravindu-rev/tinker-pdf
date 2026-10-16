@@ -21,6 +21,7 @@ mod epub_support;
 
 use epub_support::book::{faces_book, styled_book};
 use epub_support::conservation::{conservation, conservation_in_logical_order};
+use epub_support::reading::{check, rep, word, Case, Expect, AR, AR8, HE, HEP};
 use epub_support::typeface::covering;
 use tinker_pdf::{ArchiveWarning, Document, TextOptions};
 use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
@@ -2835,4 +2836,763 @@ fn a_standard_14_hebrew_word_alone_on_its_line_is_drawn_right_to_left() {
         text.contains(&format!("{HET_VAV},")) && !text.contains(&format!(",{HET_VAV}")),
         "the cell's comma does not trail its word: {text:?}"
     );
+}
+
+// ---- the cases the reviews found -------------------------------------------
+//
+// Every book a finding of the K-11 and CD-19 reviews named about what the
+// writer draws is a row of the test of its mechanism here; the reader's are
+// in `epub_conservation.rs`. Read as the right-to-left probe kit reads a book
+// (`epub_support::reading`): a case that was fixed is held to its right
+// reading (`Expect::Holds`), a case still open is pinned at what it reads
+// today (`Expect::Pinned`) and says which ROADMAP row leaves it, so that it
+// fails when the limit closes and the row moves.
+
+const SANS_NARROW: &str = "body { font-family: sans-serif } p { margin: 0 42% }";
+const WS06: &str = "p { word-spacing: 0.6em }";
+const WS06_20: &str = "p { word-spacing: 0.6em; margin: 0 20% }";
+const LS025_JUSTIFIED: &str = "p { letter-spacing: 0.25em; text-align: justify; margin: 0 25% }";
+const LS05_JUSTIFIED: &str = "p { letter-spacing: 0.5em; text-align: justify; margin: 0 25% }";
+const LS055_JUSTIFIED: &str =
+    "p, li, td { letter-spacing: 0.55em; text-align: justify; margin: 0 20% }";
+const MONO_JUSTIFIED: &str =
+    "body { font-family: monospace } p { word-spacing: 0.5em; text-align: justify; margin: 0 25% }";
+
+/// **A neutral beside a number or a styled word is drawn for the reading a
+/// reader makes of its line** (`paint::neutrals_drawn_as_typed`, the
+/// read-back of 935b077).
+///
+/// - The K-11 round-4 review's hunt H1, fixed by 56dfd93: a sign after a
+///   European number opening a wrapped Arabic or Persian line in
+///   sans-serif, `5%` and the sweep's `‰ ° ¢ £`, a range, a decimal and a
+///   minus, read with the sign first (W2 makes the number Arabic for the
+///   letter on the line above; a reader of the line alone takes it as
+///   European). Hebrew, a `<br/>` instead of the wrap, and an Arabic-Indic
+///   number guard it. `$5` and `#5`, the sign before the number, read `5$`
+///   and `5#` at every tree since 9297d2d, pinned (ROADMAP CD-19, "Read so
+///   at every tree").
+/// - The fix's verification, V3, fixed by ff6d650: `٥٪ <b>W</b>` at
+///   `word-spacing: 0.5em` read the sign after the next word.
+/// - The review of CD-19's fix, H3 and H4(1), and the second review's H2-4,
+///   H2-5 and H2-7e: C3's one text object for neutrals a reader undoes read
+///   `25٪ <b>W</b>` at `1em`, `N، <b>W</b>` justified with `bundled-fonts`,
+///   ornate parentheses round Arabic-Indic digits before a bold word, a `₪`
+///   in a justified list item, `25، <b><i>W</i></b>` and `25٪ <b>W</b>` in a
+///   right-to-left table's cell with the sign before the number; fixed by
+///   935b077's read-back, but for `25، <b>W</b>` in a dir-less table's cell
+///   (ROADMAP CD-19, Left (4)), pinned.
+/// - The confirm review's F3: the witness of the "glyphs read alike either
+///   way round" condition, and the books of its survey.
+/// - The second review's fix: `5°<i>W</i>.` at `0.5em`, which lost the
+///   structure tree's order 9297d2d and 56dfd93 held, outside the Left
+///   list's scope, pinned.
+#[test]
+fn a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading() {
+    let mut cases = Vec::new();
+    for sign in ["5%", "5‰", "10–20%", "5°", "5¢", "5£", "۵%", "15.5%", "-5%"] {
+        cases.push(Case::both(
+            "a sign after a number opening a wrapped Arabic line (hunt H1)",
+            "ar",
+            SANS_NARROW,
+            format!("<p dir=\"rtl\">جميل بيت كبير نور {sign} يوم</p>"),
+            Expect::Holds("cons logical found apart"),
+        ));
+    }
+    for sign in ["٥%", "٥٪"] {
+        cases.push(Case::both(
+            "a sign after an Arabic-Indic number opening a wrapped Arabic line (guard)",
+            "ar",
+            SANS_NARROW,
+            format!("<p dir=\"rtl\">جميل بيت كبير نور {sign} يوم</p>"),
+            Expect::Holds("cons logical whole found apart"),
+        ));
+    }
+    for sign in ["$5", "#5"] {
+        cases.push(Case::both(
+            "a sign before a number opening a wrapped Arabic line (as at every tree)",
+            "ar",
+            SANS_NARROW,
+            format!("<p dir=\"rtl\">جميل بيت كبير نور {sign} يوم</p>"),
+            Expect::Pinned("found apart"),
+        ));
+    }
+    cases.extend([
+        Case::both("a sign after a number opening a wrapped Persian line (hunt H1)", "fa", SANS_NARROW, "<p dir=\"rtl\">جميل بيت كبير نور 5% يوم</p>", Expect::Holds("cons logical found apart")),
+        Case::both("a sign after a number opening a wrapped dir-less line (hunt H1)", "ar", SANS_NARROW, "<p>جميل بيت كبير نور 5% يوم</p>", Expect::Holds("cons logical found apart")),
+        Case::both("a sign after a number opening a Hebrew line (guard)", "he", SANS_NARROW, "<p dir=\"rtl\">שלום עולם ספר בית 5% יום</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("a sign after a number after a break (guard)", "ar", SANS_NARROW, "<p dir=\"rtl\">جميل بيت كبير نور<br/>5% يوم</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both(
+            "٥٪ <b>W</b> three times, dir-less, word-spaced (V3)",
+            "ar",
+            "p { word-spacing: 0.5em; margin: 0 20% }",
+            "<p>مدرسة الطالب جميل بيت ٥٪ <b>كبير</b> نور بيت كبير نور يوم ٥٪ <b>عوامل</b> وقد يوم عوامل وقد أصبحنا ٥٪ <b>نعرف</b> كتاب</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("٥٪ <b>W</b> once, dir-less, word-spaced (V3)", "ar", "p { word-spacing: 0.5em; margin: 0 20% }", "<p>مدرسة الطالب جميل بيت ٥٪ <b>كبير</b> نور</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("25٪ <b>W</b> at 1em (H3)", "ar", "p, td { word-spacing: 1em }", "<p dir=\"rtl\">جميل بيت 25٪ <b>كبير</b> نور.</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("25₪ <b>W</b> at 1em (H3)", "ar", "p, td { word-spacing: 1em }", "<p dir=\"rtl\">جميل بيت 25₪ <b>كبير</b> نور.</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("25٪ <b>W</b> at 1em, dir-less (H3)", "ar", "p { word-spacing: 1em }", "<p>كتاب عوامل 25٪ <b>مدرسة</b> الطالب.</p>", Expect::Holds("cons logical found apart")),
+        Case::both("25٪ <b>W</b> at 1em, the word after (H4(1))", "ar", "p, td { word-spacing: 1em }", "<p dir=\"rtl\">نور أصبحنا 25٪ <b>نعرف</b> كتاب.</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("25٪ <b>W</b> at 1em, the word after, dir-less (H4(1))", "ar", "p, td { word-spacing: 1em }", "<p>نور أصبحنا 25٪ <b>نعرف</b> كتاب.</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("﴾٢٥﴿ <b>W</b> at 0.75em (H2-4)", "ar", "p { word-spacing: 0.75em }", "<p dir=\"rtl\">﴾٢٥﴿ <b>مدرسة</b> الطالب.</p>", Expect::Holds("cons logical found apart")),
+        Case::both("﴾٢٥﴿ <b>W</b> at 1em (H2-4)", "ar", "p { word-spacing: 1em }", "<p dir=\"rtl\">﴾٢٥﴿ <b>مدرسة</b> الطالب.</p>", Expect::Holds("cons logical found apart")),
+        Case::both("﴾٢٥﴿ <b>W</b> after a break, he (H2-4)", "he", "p { word-spacing: 0.75em }", "<p dir=\"rtl\">שלום בראשית<br/>﴾٢٥﴿ <b>עולם</b> מלחמה ברא.</p>", Expect::Holds("cons logical found apart")),
+        Case::both("﴾٢٥﴿ <b>W</b> at 0.5em (guard)", "ar", "p { word-spacing: 0.5em }", "<p dir=\"rtl\">﴾٢٥﴿ <b>مدرسة</b> الطالب.</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("﴾٢٥﴿ <b>W</b>. at 0.75em (guard)", "ar", "p { word-spacing: 0.75em }", "<p dir=\"rtl\">﴾٢٥﴿ <b>مدرسة</b>.</p>", Expect::Holds("cons logical whole found apart")),
+    ]);
+    let list = "p, li, td { text-align: justify; letter-spacing: 0.1em; word-spacing: 0.25em; margin: 0 30% }";
+    for sign in ["₪", "٪"] {
+        cases.push(Case::both(
+            "25₪ <b>W</b> in a justified list item (H2-5)",
+            "ar",
+            list,
+            format!(
+                "<div dir=\"rtl\"><ol><li>كتاب عوامل 25{sign} <b>مدرسة</b> الطالب.</li></ol></div>"
+            ),
+            Expect::Holds("cons logical whole found apart"),
+        ));
+    }
+    cases.push(Case::both(
+        "25₪ <b>W</b> in a justified paragraph (H2-5)",
+        "ar",
+        list,
+        "<p dir=\"rtl\">كتاب عوامل 25₪ <b>مدرسة</b> الطالب.</p>",
+        Expect::Holds("cons logical whole found apart"),
+    ));
+    let justified =
+        "p { letter-spacing: 0.1em; word-spacing: 0.25em; text-align: justify; margin: 0 35% }";
+    let breadth = "p { letter-spacing: 0.1em; word-spacing: 0.25em; text-align: justify; margin: 0 35% } td { letter-spacing: 0.1em; word-spacing: 0.5em }";
+    for sign in ["25\u{60C}", "\u{27E8}25\u{27E9}"] {
+        for attr in [" dir=\"rtl\"", ""] {
+            for style in [justified, breadth] {
+                cases.push(Case::each(
+                    "25، <b>W</b> justified, he (H3(a))",
+                    "he",
+                    style,
+                    format!("<p{attr}>שלום בראשית {sign} <b>עולם</b> מלחמה.</p>"),
+                    Expect::Holds("cons logical whole found apart"),
+                    Expect::Holds("cons logical found apart"),
+                ));
+            }
+        }
+    }
+    cases.extend([
+        Case::both(
+            "25، <b><i>W</i></b> at 0.75em, he (H2-7e)",
+            "he",
+            "p, li, td { word-spacing: 0.75em }",
+            "<p dir=\"rtl\">שלום בראשית 25، <b><i>עולם</i></b> מלחמה, ספר 25،.</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both(
+            "25، <b>W</b> in a dir-less table cell, ar (H2-7c of the fix, Left (4))",
+            "ar",
+            "p, li, td { word-spacing: 16px; letter-spacing: 1px }",
+            "<div><table><tr><td>كتاب 25، <b>مدرسة</b></td><td>25، الطالب</td></tr></table></div>", Expect::Pinned("found apart")),
+        Case::both(
+            "25، <b>W</b> in a dir-less table cell, he (H2-7c of the fix, Left (4))",
+            "he",
+            "p, li, td { word-spacing: 16px; letter-spacing: 1px }",
+            "<div><table><tr><td>שלום 25، <b>עולם</b></td><td>25، מלחמה</td></tr></table></div>", Expect::Pinned("found apart")),
+        Case::both(
+            "25٪ <b>W</b> in a table cell (H2-7e)",
+            "ar",
+            "p, li, td { word-spacing: 16px; letter-spacing: 1px }",
+            "<div dir=\"rtl\"><table><tr><td>كتاب 25٪ <b>مدرسة</b></td><td>25٪ الطالب</td></tr></table></div>", Expect::Holds("cons logical whole found apart")),
+    ]);
+    for (style, attr) in [
+        (
+            "p { word-spacing: 0.3em; letter-spacing: 0.1em }",
+            " dir=\"rtl\"",
+        ),
+        ("p { word-spacing: 0.3em; letter-spacing: 0.1em }", ""),
+        ("p { word-spacing: 1em }", " dir=\"rtl\""),
+    ] {
+        cases.push(Case::both(
+            "a word-spaced ` ?!` slice (confirm F3)",
+            "ar",
+            style,
+            format!("<p{attr}>عوامل<i> ?!</i> عدّة وقد أصبحنا</p>"),
+            Expect::Holds("cons logical whole found apart"),
+        ));
+    }
+    cases.extend([
+        Case::both(
+            "a word-spaced ` :-)` slice (confirm F3)",
+            "ar",
+            "p { word-spacing: 1em }",
+            "<p dir=\"rtl\">عوامل<b> :-)</b> عدّة</p>",
+            Expect::Holds("cons logical whole found apart"),
+        ),
+        Case::both(
+            "a word-spaced ` #1` slice (confirm F3)",
+            "ar",
+            "p { word-spacing: 1em }",
+            "<p dir=\"rtl\">عوامل<i> #1</i> عدّة</p>",
+            Expect::Holds("cons logical found apart"),
+        ),
+        Case::both(
+            "a word-spaced ` ?!` slice, monospace, he (confirm F3)",
+            "he",
+            "p { word-spacing: 0.5em; font-family: monospace }",
+            "<p dir=\"rtl\">שלום<i> ?!</i> עולם מלחמה</p>",
+            Expect::Holds("cons logical whole found apart"),
+        ),
+    ]);
+    let s = |i: usize| word(&AR, i);
+    let glued = rep(3, |i| {
+        format!(
+            "{} {} {} {} 5°<i>{}</i>. {}",
+            s(i + 4),
+            s(i + 5),
+            s(i + 6),
+            s(i + 7),
+            s(i + 8),
+            s(i + 9)
+        )
+    });
+    for attr in [" dir=\"rtl\"", ""] {
+        cases.push(Case::both(
+            "5°<i>W</i>. word-spaced (fv_extra m/ar/n4/glued)",
+            "ar",
+            "p { word-spacing: 0.5em; margin: 0 20% }",
+            format!("<p{attr}>{glued}</p>"),
+            Expect::Pinned("found apart"),
+        ));
+    }
+    check(&cases);
+}
+
+/// **A styled neutral glued to a word under spacing reads where it was
+/// typed** (`paint::Gaps`, and the read-back of 935b077, which reads every
+/// line holding a right-to-left character back through `TextDevice` and
+/// ruling 14 and draws it otherwise where they read it otherwise).
+///
+/// - The K-11 round-4 review's hunt H3, fixed by 56dfd93: a styled `?!`
+///   glued to the word after it, letter-spaced and justified, read `!?`.
+/// - Its hunt H4 and the fix's verification V2: CD-19's code-32 move put a
+///   word over the styled neutrals glued to it, and K-11's carry read them
+///   interleaved, so search lost the word; the overflow font at 0 Tw
+///   (e7ca679) moves nothing. With the overflow font's code 32 another
+///   letter, with the stop unstyled, or with no word spacing, the book reads
+///   right as well (held).
+/// - The review of CD-19's fix, CR1, F1, F2, F4 and F5, and the second
+///   review's H2-1 and H2-6: books that read right only because the moved
+///   glyph closed or widened a gap, fixed by ce0b3de's one text object for
+///   the inside of a spaced slice and 935b077's read-back, the `?!` glued to
+///   a word at `0.5em`, which no tree before 935b077 read right, among them;
+///   but for `;` glued to a word, which reads whole no more, and an inline
+///   `word-spacing` span cutting a word (ROADMAP CD-19, Left (5)), pinned.
+///   H2-6, a letter-spaced dir-less Arabic line with Cyrillic words, was
+///   `bundled-fonts`' (fixed); a default build reads it, and its Greek twin,
+///   from the right at every tree since 9297d2d, `.مدرسة ,книга дом свет
+///   день كتاب`, pinned (ROADMAP CD-19, "Read so at every tree").
+#[test]
+fn a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed() {
+    let right = Expect::Holds("cons logical whole found apart");
+    let ar = |i: usize| word(&AR, i);
+    let he = |i: usize| word(&HE, i);
+    let mut cases = vec![
+        Case::both(
+            "a styled ?! glued to the word after it (hunt H3)",
+            "ar",
+            LS025_JUSTIFIED,
+            "<p dir=\"rtl\">كتاب <i>?!</i> مدرسة <b>?!</b>الطالب جميل.</p>",
+            Expect::Holds("logical found apart"),
+        ),
+        Case::both(
+            "a styled ?! glued to the word after it, he (hunt H3)",
+            "he",
+            LS025_JUSTIFIED,
+            "<p dir=\"rtl\">שלום <i>?!</i> עולם <b>?!</b>מלחמה ספר.</p>",
+            Expect::Holds("cons logical whole found apart"),
+        ),
+        Case::both(
+            "a styled ... glued to the word after it (guard)",
+            "ar",
+            LS025_JUSTIFIED,
+            "<p dir=\"rtl\">كتاب <i>...</i> مدرسة <b>...</b>الطالب جميل.</p>",
+            Expect::Holds("cons logical whole found apart"),
+        ),
+        Case::both(
+            "a styled stop glued to a word (hunt H4)",
+            "ar",
+            WS06,
+            "<p dir=\"rtl\">ا <b>.</b>أصبحنا ن</p>",
+            Expect::Holds("cons logical found apart"),
+        ),
+        Case::both(
+            "a styled ... glued to a word (hunt H4)",
+            "ar",
+            WS06,
+            "<p dir=\"rtl\">ال <i>...</i> وقد <b>...</b>أصبحنا نعرف.</p>",
+            Expect::Holds("cons logical found apart"),
+        ),
+        Case::both(
+            "a styled stop glued to a word, KAF at code 32 (guard)",
+            "ar",
+            WS06,
+            "<p>ك</p><p dir=\"rtl\">ا <b>.</b>أصبحنا ن</p>",
+            Expect::Holds("cons logical found apart"),
+        ),
+        Case::both(
+            "an unstyled stop glued to a word (guard)",
+            "ar",
+            WS06,
+            "<p dir=\"rtl\">ا .أصبحنا ن</p>",
+            Expect::Holds("cons logical whole found apart"),
+        ),
+        Case::both(
+            "a styled stop glued to a word, no word spacing (guard)",
+            "ar",
+            "p { word-spacing: 0 }",
+            "<p dir=\"rtl\">ا <b>.</b>أصبحنا ن</p>",
+            Expect::Holds("cons logical whole found apart"),
+        ),
+    ];
+    let conserves = Expect::Holds("cons logical found apart");
+    let in_order = Expect::Holds("logical found apart");
+    for (pi, piece, expects) in [
+        (1, "!!", [conserves, conserves, conserves, conserves]),
+        (2, "...", [conserves, conserves, conserves, right]),
+        (14, "?! ?!", [in_order, right, right, in_order]),
+    ] {
+        let text = rep(3, |i| {
+            format!(
+                "{} <i>{piece}</i> {} <b>{piece}</b>{} {}.",
+                ar(i + pi),
+                ar(i + pi + 1),
+                ar(i + pi + 2),
+                ar(i + pi + 3)
+            )
+        });
+        let styles = [
+            "p { word-spacing: 0.51em; margin: 0 20% }",
+            WS06_20,
+            "p { word-spacing: 1em; margin: 0 20% }",
+            MONO_JUSTIFIED,
+        ];
+        for (style, expect) in styles.into_iter().zip(expects) {
+            cases.push(Case::both(
+                "styled neutrals glued to a word, word-spaced (hunt gaps, H4 and CR1)",
+                "ar",
+                style,
+                format!("<p dir=\"rtl\">{text}</p>"),
+                expect,
+            ));
+        }
+    }
+    let both = |s: &dyn Fn(usize) -> &'static str, pi: usize, piece: &str| {
+        rep(3, |i| {
+            format!(
+                "{} {}<b>{piece}</b>{} {}.",
+                s(i + pi),
+                s(i + pi + 1),
+                s(i + pi + 2),
+                s(i + pi + 3)
+            )
+        })
+    };
+    for (language, text, bundled) in [
+        ("he", both(&he, 0, "?!"), conserves),
+        ("he", both(&he, 6, "»,"), right),
+        ("ar", both(&ar, 2, "!!"), right),
+    ] {
+        cases.push(Case::each(
+            "styled neutrals glued on both sides (V2)",
+            language,
+            WS06_20,
+            format!("<p dir=\"rtl\">{text}</p>"),
+            right,
+            bundled,
+        ));
+        cases.push(Case::both(
+            "styled neutrals glued on both sides (V2)",
+            language,
+            "p { word-spacing: 1em; margin: 0 20% }",
+            format!("<p dir=\"rtl\">{text}</p>"),
+            right,
+        ));
+    }
+    cases.push(Case::both(
+        "a styled !! opening a monospace justified paragraph (V2)",
+        "ar",
+        MONO_JUSTIFIED,
+        format!("<p dir=\"rtl\"><b>!!</b>{} {} {}.</p>", ar(2), ar(3), ar(4)),
+        Expect::Holds("cons logical whole found apart"),
+    ));
+    let gap8 = rep(3, |i| {
+        format!(
+            "{} <i>;</i> {} <b>;</b>{} {}.",
+            ar(i + 8),
+            ar(i + 9),
+            ar(i + 10),
+            ar(i + 11)
+        )
+    });
+    cases.push(Case::both(
+        "a styled ; glued to a word, letter-spaced (CR1, Left (5))",
+        "ar",
+        LS025_JUSTIFIED,
+        format!("<p dir=\"rtl\">{gap8}</p>"),
+        Expect::Pinned("cons logical found apart"),
+    ));
+    let styled = rep(6, |i| {
+        format!(
+            "{} <b>{}</b> <i>?!</i> {} <b>(</b>{}<b>)</b> {}.",
+            ar(i),
+            ar(i + 1),
+            ar(i + 2),
+            ar(i + 3),
+            ar(i + 4)
+        )
+    });
+    for (attr, expect) in [(" dir=\"rtl\"", right), ("", in_order)] {
+        cases.push(Case::both(
+            "styled neutrals between styled words, letter-spaced and justified (CR1, F1)",
+            "ar",
+            "p { letter-spacing: 0.45em; text-align: justify; margin: 0 32% }",
+            format!("<p{attr}>{styled}</p>"),
+            expect,
+        ));
+    }
+    cases.push(Case::each(
+        "?! before styled braces after a break, letter-spaced (CR1, F2)",
+        "he",
+        LS05_JUSTIFIED,
+        "<p dir=\"rtl\">אור יום<br/>?!<b>{</b>בראשית<b>}</b> ברא אלהים</p>",
+        Expect::Holds("cons logical whole found apart"),
+        Expect::Holds("cons logical found apart"),
+    ));
+    let midws = rep(6, |i| {
+        let cut: Vec<char> = ar(i).chars().collect();
+        let k = cut.len() / 2;
+        format!(
+            "{} <span style=\"word-spacing: 1em\">{} {}</span>{} ({}).",
+            ar(i + 1),
+            ar(i + 3),
+            cut[..k].iter().collect::<String>(),
+            cut[k..].iter().collect::<String>(),
+            ar(i + 2)
+        )
+    });
+    cases.push(Case::both(
+        "an inline word-spacing span cutting a word (CR1, Left (5))",
+        "ar",
+        "",
+        format!("<p>{midws}</p>"),
+        Expect::Pinned("found apart"),
+    ));
+    let s8 = |i: usize| word(&AR8, i);
+    let long_neutral = format!(
+        "{} {} {} <i>?! -- ?!</i> {} {} {} {}.",
+        s8(0),
+        s8(1),
+        s8(2),
+        s8(3),
+        s8(4),
+        s8(5),
+        s8(6)
+    );
+    for (body, expect) in [
+        (format!("<p dir=\"rtl\">{long_neutral}</p>"), right),
+        (format!("<p>{long_neutral}</p>"), conserves),
+        (
+            format!("<div style=\"direction: rtl\"><p>{long_neutral}</p></div>"),
+            right,
+        ),
+    ] {
+        cases.push(Case::both(
+            "a long run of neutrals mid-line, letter-spaced (F5)",
+            "ar",
+            LS055_JUSTIFIED,
+            body,
+            expect,
+        ));
+    }
+    for inside in ["[HDAC]", "«HDAC»"] {
+        let text: String = (0..3)
+            .map(|i| {
+                format!(
+                    "{} {} {} {inside}, {} {} {} {}. ",
+                    s8(i),
+                    s8(i + 1),
+                    s8(i + 2),
+                    s8(i + 3),
+                    s8(i + 4),
+                    s8(i + 5),
+                    s8(i + 6)
+                )
+            })
+            .collect();
+        cases.push(Case::both(
+            "a bracketed run three times, letter-spaced (F5)",
+            "ar",
+            LS055_JUSTIFIED,
+            format!("<p>{text}</p>"),
+            Expect::Holds("cons logical found apart"),
+        ));
+    }
+    let greek: String = (0..3)
+        .map(|i| {
+            format!(
+                "{} {} (αλφα βήτα), {} {} {} {}. ",
+                s8(i),
+                s8(i + 1),
+                s8(i + 3),
+                s8(i + 4),
+                s8(i + 5),
+                s8(i + 6)
+            )
+        })
+        .collect();
+    cases.push(Case::both(
+        "a bracketed Greek run three times, letter-spaced (F5, code greek-x3)",
+        "ar",
+        LS055_JUSTIFIED,
+        format!("<p>{greek}</p>"),
+        Expect::Holds("cons logical found apart"),
+    ));
+    let h8 = |i: usize| HEP[i % 8];
+    let own = (0..5)
+        .map(|i| {
+            format!(
+                "{} <b>.</b>{} <i>?!</i> {} <b>(</b>{}<b>)</b> {};",
+                h8(i),
+                h8(i + 1),
+                h8(i + 2),
+                h8(i + 3),
+                h8(i + 4)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    cases.push(Case::each(
+        "a glued <b>.</b> and an italic ?!, pointed he, monospace (F4)",
+        "he",
+        MONO_JUSTIFIED,
+        format!("<p>{own}</p>"),
+        Expect::Holds("cons logical found apart"),
+        Expect::Holds("logical found apart"),
+    ));
+    let soft = rep(2, |i| {
+        format!(
+            "{} {} {} \u{60C}({}) {} {}.",
+            ar(i + 18),
+            ar(i + 19),
+            ar(i + 20),
+            ar(i + 21),
+            ar(i + 22),
+            ar(i + 23)
+        )
+    });
+    cases.push(Case::both(
+        "، before a pair after a space, letter-spaced (F5, soft/ar/acomma)",
+        "ar",
+        LS05_JUSTIFIED,
+        format!("<p dir=\"rtl\">{soft}</p>"),
+        Expect::Holds("cons logical found apart"),
+    ));
+    let three = rep(3, |i| {
+        format!(
+            "{} {} {} <b>(</b>{}<b>)</b> {}!!",
+            ar(i + 2),
+            ar(i + 3),
+            ar(i + 4),
+            ar(i + 5),
+            ar(i + 6)
+        )
+    });
+    cases.push(Case::both(
+        "(W) W!! three times, dir-less, letter-spaced (F5, end/ar/ee)",
+        "ar",
+        LS05_JUSTIFIED,
+        format!("<p>{three}</p>"),
+        Expect::Holds("cons logical whole found apart"),
+    ));
+    cases.push(Case::both(
+        "a Greek word before Hebrew at 0.5001em (F5, mf/greek-he)",
+        "en",
+        "p { word-spacing: 0.5001em }",
+        "<p>x αλφα שלום עולם y.</p>",
+        Expect::Holds("cons logical whole found apart"),
+    ));
+    for (what, language, style, body) in [
+        ("a styled ?! glued to a word, ar (H2-1)", "ar", WS06, "<p dir=\"rtl\"><b>?!</b>ابا اما.</p>"),
+        ("a styled ?! glued to a word at 2em (H2-1)", "ar", "p { word-spacing: 2em }", "<p dir=\"rtl\"><b>?!</b>ابا اما.</p>"),
+        ("an italic ?! glued to a word (H2-1)", "ar", WS06, "<p dir=\"rtl\"><i>?!</i>ابا اما.</p>"),
+        ("a styled ?! glued to a word, he (H2-1)", "he", WS06, "<p dir=\"rtl\"><b>?!</b>אבא אמא.</p>"),
+        (
+            "a styled ?! glued to a word, a Syriac caption (H2-1)",
+            "syr",
+            "p, li, figcaption { word-spacing: 0.6em }",
+            "<div dir=\"rtl\"><figure><figcaption><i>?!</i>ܐܠܗܐ ܐܪܥܐ ܫܡܝܐ ܡܠܬܐ ܪܒܐ.</figcaption></figure></div>",
+        ),
+        ("a styled ?! glued to a word with its letter once (H2-7c)", "ar", WS06, "<p dir=\"rtl\"><b>?!</b>ابو اما.</p>"),
+        ("a styled ? glued to a word (guard)", "ar", WS06, "<p dir=\"rtl\"><b>?</b>ابا اما.</p>"),
+        ("a styled ?! glued to a word at 0.45em (guard)", "ar", "p { word-spacing: 0.45em }", "<p dir=\"rtl\"><b>?!</b>ابا اما.</p>"),
+        ("a styled ?! glued to a word at 0.5em (H2-1)", "ar", "p { word-spacing: 0.5em }", "<p dir=\"rtl\"><b>?!</b>ابا اما.</p>"),
+        ("a letter-spaced dir-less Arabic line with Latin words (guard)", "ar", "p { letter-spacing: 0.5em }", "<p>كتاب book house light day, مدرسة.</p>"),
+    ] {
+        cases.push(Case::both(what, language, style, body, right));
+    }
+    for (what, body) in [
+        (
+            "a letter-spaced dir-less Arabic line with Cyrillic words (H2-6)",
+            "<p>كتاب книга дом свет день, مدرسة.</p>",
+        ),
+        (
+            "a letter-spaced dir-less Arabic line with Greek words (as at every tree)",
+            "<p>كتاب αλφα βήτα γάμμα δέλτα, مدرسة.</p>",
+        ),
+    ] {
+        cases.push(Case::each(
+            what,
+            "ar",
+            "p { letter-spacing: 0.5em }",
+            body,
+            Expect::Pinned("found apart"),
+            right,
+        ));
+    }
+    check(&cases);
+}
+
+/// **A cell or a spaced slice is one text object only where its line reads
+/// it whole** (`paint::draw_coded`'s inside of a spaced slice,
+/// `paint::sharing_a_line`).
+///
+/// - H2 of the review of CD-19's fix, fixed by ce0b3de: a Greek or Cyrillic
+///   cell before a Hebrew or Arabic one at `word-spacing: 0.6em` or `1em`
+///   was cut at each stretched space and its last word read with the next
+///   cell (breadth B's `αλφα βήτα | שלום` row, in a default build, by
+///   e7ca679's 0 Tw already).
+/// - R1-TABLECOST of its verification, fixed by 935b077: a dir-less table's
+///   `abc (x).` cell touching a right-to-left one read the row as a
+///   right-to-left line. Its cost, a Latin or Greek cell's row whose
+///   structure tree read in order only at ce0b3de, through the join that fix
+///   took back, and which no tree conserved, is pinned (outside the Left
+///   list's scope); in a default build the Greek row letter-spaced by
+///   `0.1em` reads in order since c7e9b89 (held).
+/// - CR3 of the review of CD-19's fix: the right-to-left table whose
+///   `أصبحنا نعرف` cells 9297d2d and 56dfd93 read `أصبحنان عرف` finds both
+///   words since e7ca679.
+#[test]
+fn a_cell_or_a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whole() {
+    let mut cases = vec![
+        Case::both(
+            "a Greek cell before a Hebrew one at 1em (H2)",
+            "he",
+            "td { word-spacing: 1em }",
+            "<table><tr><td>αβ γδ</td><td>ספר</td></tr></table>",
+            Expect::Holds("cons logical whole found apart"),
+        ),
+        Case::both(
+            "a Greek cell before a Hebrew one at 0.6em (H2)",
+            "he",
+            "td { word-spacing: 0.6em }",
+            "<table><tr><td>αβ γδ</td><td>ספר</td></tr></table>",
+            Expect::Holds("cons logical whole found apart"),
+        ),
+        Case::both(
+            "a Greek cell before a pointed Hebrew one (H2)",
+            "he",
+            "td { word-spacing: 1em }",
+            "<table><tr><td>αλφα βήτα</td><td>סֵפֶר בַּיִת</td></tr></table>",
+            Expect::Holds("cons logical whole found apart"),
+        ),
+        Case::both(
+            "a Cyrillic cell before an Arabic one (H2)",
+            "ar",
+            "p, td { word-spacing: 1em }",
+            "<table><tr><td>привет мир</td><td>كتاب</td></tr></table>",
+            Expect::Holds("cons logical whole found apart"),
+        ),
+        Case::both(
+            "a Greek cell before a Hebrew one, breadth B (H2)",
+            "he",
+            "p, td { word-spacing: 1em }",
+            "<table><tr><td>αλφα βήτα</td><td>שלום</td></tr></table>",
+            Expect::Holds("cons logical whole found apart"),
+        ),
+    ];
+    let cost = Expect::Pinned("whole found apart");
+    for (style, greek) in [
+        ("table { border-spacing: 0 } td { padding: 0; word-spacing: 1em }", cost),
+        (
+            "table { border-spacing: 0 } td { padding: 0; letter-spacing: 0.1em; word-spacing: 0.5em }",
+            Expect::Holds("logical whole found apart"),
+        ),
+    ] {
+        for (language, cell) in [("ar", "أصبحنا نعرف"), ("he", "ספר בית")] {
+            cases.push(Case::both(
+                "an abc (x). cell touching a right-to-left one (R1-TABLECOST)",
+                language,
+                style,
+                format!("<table><tr><td>abc (x).</td><td>{cell}</td></tr><tr><td>{cell}</td><td>abc (x).</td></tr></table>"), Expect::Holds("whole found apart")));
+        }
+        for (before, default) in [("abc def", cost), ("αλφα βήτα", greek)] {
+            cases.push(Case::each(
+                "a Latin or Greek cell touching an Arabic one (R1-TABLECOST's cost)",
+                "ar",
+                style,
+                format!("<table><tr><td>{before}</td><td>أصبحنا نعرف</td></tr><tr><td>أصبحنا نعرف</td><td>{before}</td></tr></table>"),
+                default,
+                cost,
+            ));
+        }
+    }
+    let rows: String = [
+        "<td>عوامل</td><td>عدّة</td><td>وقد.</td><td>(HDAC)</td>",
+        "<td>أصبحنا نعرف</td><td>الآن</td><td>(2010)</td><td>x</td>",
+        "<td>«الموادّ»</td><td>تكبح</td><td>[عوامل]</td><td>عدّة</td>",
+        "<td>abc</td><td>وقد</td><td>def</td><td>أصبحنا نعرف</td>",
+    ]
+    .iter()
+    .map(|row| format!("<tr>{row}</tr>"))
+    .collect();
+    for style in ["", "body { font-family: sans-serif }"] {
+        for rows in [
+            rows.clone(),
+            rows.replace("<td>", "<td style=\"padding: 0\">"),
+        ] {
+            cases.push(Case::both(
+                "a right-to-left table's أصبحنا نعرف cells (CR3)",
+                "ar",
+                style,
+                format!("<table dir=\"rtl\" style=\"border-spacing: 0; word-spacing: 1em\">{rows}</table>"), Expect::Holds("cons logical whole found apart")));
+        }
+    }
+    check(&cases);
+}
+
+/// **A word of an overflow script an inline block cuts reads as a Latin word
+/// so cut does** — ROADMAP CD-19, Left (2), pinned; H2-3 of the second
+/// review of CD-19's fix.
+///
+/// `<p>αλφα<span style="display: inline-block; width: 1em"></span>βήτα</p>`
+/// at `word-spacing: 0.6em`: Greek, Cyrillic or Armenian words read whole
+/// and were found at 9297d2d and 56dfd93 only because the code-32 letter's
+/// move closed the block's gap; at 0 Tw the word reads in two, as a Latin
+/// word so cut does at every tree, and a Greek one with no word spacing
+/// (pinned with them). With `bundled-fonts` the Greek and Cyrillic words read
+/// as at every tree, and the Armenian one as in a default build. A padded
+/// inline span, not a block, keeps the word whole (held). Whether these
+/// scripts should read otherwise than Latin is the owner's to say. And a
+/// pre-existing one the hunt found: the writer draws no Adlam letter in
+/// either build, at any tree (pinned; ROADMAP CD-19, "Read so at every
+/// tree").
+#[test]
+fn a_word_of_an_overflow_script_an_inline_block_cuts_reads_as_a_latin_word_does() {
+    let block = "<span style=\"display: inline-block; width: 1em\"></span>";
+    check(&[
+        Case::each("a Greek word an inline block cuts (H2-3)", "el", WS06, format!("<p>αλφα{block}βήτα</p>"), Expect::Pinned("cons logical apart"), Expect::Holds("cons logical apart")),
+        Case::each("a Cyrillic word an inline block cuts (H2-3)", "ru", WS06, format!("<p>дома{block}книга свет.</p>"), Expect::Pinned("cons logical apart"), Expect::Holds("cons logical apart")),
+        Case::both("an Armenian word an inline block cuts (H2-3)", "hy", WS06, format!("<p>գիրք{block}տուն մեծ լույս.</p>"), Expect::Pinned("cons logical apart")),
+        Case::each(
+            "a Greek word a padded inline block cuts (H2-3)",
+            "el",
+            WS06,
+            "<p>αλφα<span style=\"display: inline-block; padding-left: 1em\">βήτα</span> γάμμα.</p>", Expect::Pinned("cons logical apart"), Expect::Holds("cons logical apart")),
+        Case::both("a Latin word an inline block cuts (as at every tree)", "en", WS06, format!("<p>abcd{block}efgh</p>"), Expect::Pinned("cons logical apart")),
+        Case::both("a Greek word an inline block cuts, no word spacing (as at every tree)", "el", "", format!("<p>αλφα{block}βήτα</p>"), Expect::Pinned("cons logical apart")),
+        Case::both("a Greek word a padded inline span cuts (guard)", "el", WS06, "<p>αλφα<span style=\"padding-left: 1em\">βήτα</span> γάμμα.</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("Adlam (hunt, as at every tree)", "ff", "", "<p>𞤀𞤣𞤤𞤢𞤥 𞤆𞤵𞤤𞤢𞤪.</p>", Expect::Pinned("apart")),
+    ]);
 }

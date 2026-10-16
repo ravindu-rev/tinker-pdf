@@ -33,6 +33,7 @@
 pub mod book;
 pub mod conservation;
 pub mod layout;
+pub mod reading;
 pub mod typeface;
 
 use tinker_pdf_zip::{Archive, Entry, Limits, Method};

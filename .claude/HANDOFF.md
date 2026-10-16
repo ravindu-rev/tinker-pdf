@@ -94,25 +94,26 @@ changed this paragraph; its message has the measurements:
 6. every script answers `--help`, the README names `progress`, `lines/` is
    made only for a line probe, and `docs/verification.md` points at the kit.
 
-The 77 tests in `probes/regressions/` are the verifiers' repro tests. Each
-asserts what its finding said a book did at the tree its verifier used, so
-29 fail at `935b077` in the default build and 26 with `bundled-fonts`. That
-is expected. Read them finding by finding before turning any into a guard.
+Every book a finding of the K-11 round-4 review and of round 5 named, the
+77 regression tests' among them, is a committed case in the test of its
+mechanism, read as the kit reads a book (`epub_conservation.rs` and
+`epub_fallback.rs`, 245 cases in each build; the kit's README, "The
+regressions", says which test carries which): a case fixed is held to its
+right reading, a case still open is pinned at today's and names the ROADMAP
+CD-19 item that leaves it, so that it fails when that item closes. The
+families are `#[ignore]`d ratchets against `935b077`, each printing a `RAN`
+banner: `crates/tinker-pdf/tests/rtl_probes.rs` (63 families) and
+`crates/tinker-pdf-shape/tests/rtl_lines.rs` (4); see the kit's README, "The
+suites". `probes/regressions/` is gone.
 
 ## Next, in this order
 
-1. **Commit a test for every case the families found,** even the small ones.
-   The kit's known issues are fixed, and its families are `#[ignore]`d
-   ratchets against `935b077`, each printing a `RAN` banner:
-   `crates/tinker-pdf/tests/rtl_probes.rs` (63 families) and
-   `crates/tinker-pdf-shape/tests/rtl_lines.rs` (4); see the kit's README,
-   "The suites".
-2. **Run the round-2 verification that was skipped,** and a fresh hunt, on
+1. **Run the round-2 verification that was skipped,** and a fresh hunt, on
    `develop`. Both baselines apply: `9297d2d` and `56dfd93`.
-3. **Put the three owner decisions above to the owner:** H1, H2-3 and H6.
-4. **Fix what remains by class,** not by instance (AGENTS.md): one lane for
+2. **Put the three owner decisions above to the owner:** H1, H2-3 and H6.
+3. **Fix what remains by class,** not by instance (AGENTS.md): one lane for
    the reader-side mechanism behind H2-2 and H2-7.
-5. **Then the roadmap's order of work:**
+4. **Then the roadmap's order of work:**
    - MS-11: `ci.yml` on push to `develop`, and the nightly fuzz and corpus
      runs dispatched on `develop`. Its epub-corpus clause is already met.
    - K-06: seven green nightly `jbig2` fuzz runs.

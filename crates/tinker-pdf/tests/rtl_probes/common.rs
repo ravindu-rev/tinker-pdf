@@ -6,6 +6,10 @@ use crate::epub_support::conservation::{conservation, conservation_in_logical_or
 use tinker_pdf::{Document, TextOptions};
 use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
 
+// The kit's reading of a book: its blocks, its words, its marks, as
+// `epub_support::reading` defines them for the suites and the cases alike.
+pub(crate) use crate::epub_support::reading::{norm, nsm, segments, tokens};
+
 pub(crate) fn hash(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in bytes {
@@ -60,10 +64,6 @@ pub(crate) fn esc(s: &str) -> String {
             }
         })
         .collect()
-}
-
-pub(crate) fn nsm(c: char) -> bool {
-    bidi_class(c) == BidiClass::NSM
 }
 
 pub(crate) fn rtl(c: char) -> bool {
@@ -161,133 +161,10 @@ pub(crate) const ARP: [&str; 12] = [
     "نَعْرِفُ",
 ];
 
-pub(crate) fn format_char(c: char) -> bool {
-    matches!(c, '\u{AD}' | '\u{61C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
-}
-
-pub(crate) fn norm(s: &str) -> String {
-    s.chars()
-        .filter(|c| !format_char(*c))
-        .map(|c| if c.is_whitespace() { ' ' } else { c })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 pub(crate) fn strip_marks(s: &str) -> String {
     s.chars()
         .filter(|c| !matches!(c, '\u{064B}'..='\u{065F}' | '\u{0670}' | '\u{0591}'..='\u{05C7}'))
         .collect()
-}
-
-pub(crate) const BLOCKS: [&str; 26] = [
-    "p",
-    "li",
-    "td",
-    "th",
-    "tr",
-    "figcaption",
-    "div",
-    "br",
-    "h1",
-    "h2",
-    "h3",
-    "h4",
-    "h5",
-    "h6",
-    "dt",
-    "dd",
-    "caption",
-    "pre",
-    "blockquote",
-    "figure",
-    "table",
-    "ul",
-    "ol",
-    "dl",
-    "section",
-    "tbody",
-];
-
-/// The book's visible text, one string per block (and per preserved line).
-pub(crate) fn segments(body: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut chars = body.chars().peekable();
-    let flush = |cur: &mut String, out: &mut Vec<String>| {
-        let n = norm(cur);
-        if !n.is_empty() {
-            out.push(n);
-        }
-        cur.clear();
-    };
-    while let Some(c) = chars.next() {
-        if c == '<' {
-            let mut tag = String::new();
-            for d in chars.by_ref() {
-                if d == '>' {
-                    break;
-                }
-                tag.push(d);
-            }
-            let name = tag
-                .trim_start_matches('/')
-                .split(|c: char| c.is_whitespace() || c == '/')
-                .next()
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if BLOCKS.contains(&name.as_str()) {
-                flush(&mut cur, &mut out);
-            }
-        } else if c == '&' {
-            let mut ent = String::new();
-            for d in chars.by_ref() {
-                if d == ';' {
-                    break;
-                }
-                ent.push(d);
-            }
-            let ch = match ent.as_str() {
-                "amp" => Some('&'),
-                "lt" => Some('<'),
-                "gt" => Some('>'),
-                "quot" => Some('"'),
-                "nbsp" => Some('\u{A0}'),
-                e if e.starts_with("#x") => u32::from_str_radix(&e[2..], 16)
-                    .ok()
-                    .and_then(char::from_u32),
-                e if e.starts_with('#') => e[1..].parse::<u32>().ok().and_then(char::from_u32),
-                _ => None,
-            };
-            if let Some(ch) = ch {
-                cur.push(ch);
-            }
-        } else if c == '\n' {
-            flush(&mut cur, &mut out);
-        } else {
-            cur.push(c);
-        }
-    }
-    flush(&mut cur, &mut out);
-    out
-}
-
-pub(crate) fn tokens(segs: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for s in segs {
-        for t in s.split(|c: char| !(c.is_alphanumeric() || nsm(c))) {
-            if t.chars()
-                .filter(|c| c.is_alphanumeric() && !nsm(*c))
-                .count()
-                >= 2
-                && !out.iter().any(|o| o == t)
-            {
-                out.push(t.to_owned());
-            }
-        }
-    }
-    out
 }
 
 pub(crate) fn run_book(style: &str, name: &str, lang: &str, body: &str) {

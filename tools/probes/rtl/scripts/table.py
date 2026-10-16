@@ -33,9 +33,10 @@ not run are named in one line under the build's table, and the groups of
 --by group add up only the families NEW ran.
 --show N lists up to N books of each of >B, >M, >T with their metrics at each
 tree: c conserving, t read whole, s found by search, h holds; 1 true, 0 false.
-Under each build's table, the verifiers' repro tests (group regressions) show
-their passed/failed counts at each tree that ran them, and with --show the
-names failing now. The line probes (build `lines`) show their own totals.
+Under each build's table, a family of kind `tests` (a file of plain tests,
+none since round 6 carried the verifiers' into committed tests) shows its
+passed/failed counts at each tree that ran it, and with --show the names
+failing now. The line probes (build `lines`) show their own totals.
 """
 import collections
 import importlib.util
@@ -286,7 +287,7 @@ def regressions(dirs, build, order, kind_of, pat, show, new=False):
             for name in outs[-1].failed[:show]:
                 rows.append(f'    failing now\t{name}')
     if rows:
-        print('regressions (the verifiers\' tests; a failure is read against its finding, see README):')
+        print('tests (a failure is read against its finding):')
         for r in rows:
             print(r)
 

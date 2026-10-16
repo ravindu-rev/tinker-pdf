@@ -2812,6 +2812,156 @@
      "rtl_lines"
     ]
    ]
+  },
+  {
+   "name": "cases/holds-unchecked",
+   "round": "the cases (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/epub_support/reading.rs",
+     "old": "            if missing.is_empty() {\n",
+     "new": "            if missing.is_empty() || true {\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "cases/pinned-as-holds",
+   "round": "the cases (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/epub_support/reading.rs",
+     "old": "            if now\n                == VERDICTS\n                    .iter()\n                    .copied()\n                    .filter(|v| want.contains(v))\n                    .collect::<Vec<_>>()\n            {\n",
+     "new": "            if want.iter().all(|w| now.contains(w)) {\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "cases/whole-unread",
+   "round": "the cases (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/epub_support/reading.rs",
+     "old": "    let whole = segs.iter().all(|s| full.contains(s.as_str()));\n",
+     "new": "    let whole = !full.is_empty() || segs.is_empty();\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "cases/found-unread",
+   "round": "the cases (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/epub_support/reading.rs",
+     "old": "        .all(|t| texts.iter().any(|x| !x.search(t).is_empty()));\n",
+     "new": "        .all(|_| !texts.is_empty());\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "cases/overprint-unread",
+   "round": "the cases (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/epub_support/reading.rs",
+     "old": ".filter(|pair| pair[0].0 == pair[1].0 && pair[1].1 < pair[0].2 - 0.02 * pair[1].3)",
+     "new": ".filter(|pair| pair[0].0 == pair[1].0 && pair[1].1 < pair[0].2 - 2.0 * pair[1].3)",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "cases/logical-as-content",
+   "round": "the cases (lane K, round 6)",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/tests/epub_support/reading.rs",
+     "old": "        logical: conservation_in_logical_order(&bytes, &doc).holds(),\n",
+     "new": "        logical: conservation(&bytes, &doc).holds(),\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
   }
  ]
 }

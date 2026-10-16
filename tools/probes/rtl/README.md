@@ -114,12 +114,11 @@ Each `zz_vx_*` family is an earlier family with a shim around
 byte those of the families they wrap, in both builds, so the originals are not
 kept.
 
-[probes/regressions/](probes/regressions/) holds the minimised tests the
-verifiers wrote to confirm or refute each finding, eight files and 77 tests
-([The regressions](#the-regressions));
-[probes/diag/](probes/diag/) holds one diagnostic probe. The probes are
-committed as they ran: their opening comments still call them scratch, which
-is what they were when they produced the baselines.
+[probes/diag/](probes/diag/) holds one diagnostic probe. The verifiers'
+minimised tests are committed tests now
+([The regressions](#the-regressions)). The probes are committed as they ran:
+their opening comments still call them scratch, which is what they were when
+they produced the baselines.
 
 ## Two baselines and the tip
 
@@ -475,8 +474,8 @@ to.
   they wrap, which ran there; their `VOVX` lines were not measured at those
   trees, and those files say so.
 - Measured for this kit on 12 October 2026 with `run.sh`: `zz_code1_neg` and
-  `zz_code1_tdprobe` at 9297d2d, `zz_code1_tdprobe` at 935b077, and the
-  regressions' outcome at 935b077, each in both builds.
+  `zz_code1_tdprobe` at 9297d2d and `zz_code1_tdprobe` at 935b077, each in
+  both builds.
 - Not measured: `zz_code1_neg` and `zz_code1_tdprobe` with `bundled-fonts` at
   56dfd93, and the timing families anywhere. `zz_fv_shape` does not compile at
   9297d2d, and its baseline there is the compiler's error.
@@ -491,26 +490,46 @@ conserving at 9297d2d, 56dfd93 and now, those worse than either baseline, the
 
 ## The regressions
 
-Each file in `probes/regressions/` is a verifier's minimised repro of the
-findings of one review, one test a book or two. A test asserts what its
-finding said a book did at the tree the verifier ran it on, which was a
-baseline or the fix under review, so a test that fails at 935b077 is not by
-itself a regression: it may be a finding fixed since, a finding still open
-(ROADMAP CD-19, Left), or ruling 14's price. The runner runs them as the group
-`regressions`; their outcome at 935b077 is under `baselines/935b077/<build>/`
-beside the families', and `table.py` prints it under each build's table:
+The verifiers of the K-11 round-4 review and of round 5 each wrote a file of
+minimised repro tests, 77 in eight files, asserting what a finding said a book
+did at the tree they ran on. They were here, in `probes/regressions/`, as the
+group `regressions`, until round 6 carried every one of their books into a
+committed test of its mechanism, beside every other book a finding of those
+reviews named (`crates/tinker-pdf/tests/epub_support/reading.rs` says how a
+case is read and held): a case fixed is held to its right reading, a case
+still open is pinned at today's and names the ROADMAP CD-19 item that leaves
+it. The files, their group and their outcome at 935b077 went with them; the
+round-6 commit that removed them gives each case's reading at the tree before
+its fix. Which test carries which:
 
-| File | Review | Tests | Pass at 935b077, default (bundled-fonts) |
-| --- | --- | ---: | --- |
-| `zz_vc_verify` | K-11 round 4, code | 4 | 3 (3) |
-| `zz_vc_pal` | K-11 round 4, confirm | 2 | 2 (2) |
-| `zz_vh_verify` | K-11 round 4, hunt | 5 | 5 (5) |
-| `zz_vc1_repro` | round 5, code | 13 | 7 (8) |
-| `zz_vc1_min` | round 5, confirm | 21 | 14 (13) |
-| `zz_vfv1` | the first CD-19 fix, verification | 11 | 5 (7) |
-| `zz_vh1` | round 5, hunt | 5 | 2 (2) |
-| `zz_vh2t` | the first CD-19 fix, hunt | 16 | 10 (11) |
-
-Which of them become guards of what the tree does now, and how the ones for
-open findings are held, is the conversion step's to settle, finding by
-finding.
+| Regression test (file) | Carried by (test, `epub_conservation.rs` or `epub_fallback.rs`) |
+| --- | --- |
+| `zz_vc_verify`: `f1_an_ornate_parenthesis_cut_from_its_line_carries_no_pen`, `f1_control_guillemets` | `a_neutral_the_pen_could_carry_into_a_word_reads_where_it_was_typed` |
+| `zz_vc_verify`: `f2_a_line_opening_with_a_bracketed_arabic_number_reads_its_stop_last`, `f2_control_plain_number` | `a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed` |
+| `zz_vc_pal`: `zz_vc_pal_survey`, `zz_vc_pal_witness` | `a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading` |
+| `zz_vh_verify`: `h1_et_after_number_opening_wrapped_arabic_line` | `a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading` |
+| `zz_vh_verify`: `h2_dirless_styled_brackets_full_stop` | `a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed` |
+| `zz_vh_verify`: `h3_styled_qx_glued_letter_spaced_justified`, `h4_word_spaced_overprint_word_found` | `a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed` |
+| `zz_vh_verify`: `h5_styled_arabic_percent_opening_justified_line` | `a_neutral_the_pen_could_carry_into_a_word_reads_where_it_was_typed` |
+| `zz_vc1_repro`: the six `cr1_*` | `a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed` |
+| `zz_vc1_repro`: the five `cr2_*` | `a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed` |
+| `zz_vc1_repro`: `cr3_table_diag` | `a_cell_or_a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whole` |
+| `zz_vc1_repro`: `cr4_negative_word_spacing_overprint` | `a_standard_14_overflow_letter_at_code_32_takes_no_word_spacing` (already, since ce0b3de) |
+| `zz_vc1_min`: `f1_*`, `f2_*`, `f4_*`, the thirteen `f5_*` | `a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed` |
+| `zz_vc1_min`: `f3_*`, `f6_*` | `a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed` |
+| `zz_vfv1`: `r1_tablecost_read_whole` | `a_cell_or_a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whole` |
+| `zz_vfv1`: `h1_final_stop_conserves`, `h1_monospace_conserves_at_m_only` | `a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop` |
+| `zz_vfv1`: `f1_styled_neutrals_letter_spaced`, `f2_price_he_qe_b2_conserves`, `cr1_vs_m` | `a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed` |
+| `zz_vfv1`: `h3_vs_m` | `a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading` |
+| `zz_vfv1`: `h4_f3_f4_vs_b` | its `25٪ <b>نعرف</b>` books `a_neutral_beside_…`, its Persian-digit book `a_left_to_right_hebrew_paragraph_…`, F4 `a_styled_neutral_glued_…`, F3 `a_line_opening_with_a_bracket_pair_…` |
+| `zz_vfv1`: `h6_mixed_runs_vs_m`, `interaction_logical_vs_m`, `apos_stop_logical_vs_b` | `a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed` |
+| `zz_vh1`: `h1_final_stop_after_a_number` | `a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop` |
+| `zz_vh1`: `h2_overflow_cell_before_rtl_cell` | `a_cell_or_a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whole` |
+| `zz_vh1`: `h3_v3_one_text_object` | `a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading` |
+| `zz_vh1`: `h4_preexisting` | `a_neutral_beside_…` and `a_left_to_right_hebrew_paragraph_…` |
+| `zz_vh1`: `h6_mixed_stop_runs` | `a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed` |
+| `zz_vh2t`: `h2_1_*`, `h2_6_*`, `h2_7c_*` | `a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed` |
+| `zz_vh2t`: `h2_2_*`, `h2_7a_*`, `h2_7b_*` | `a_dirless_line_with_a_right_to_left_gloss` |
+| `zz_vh2t`: `h2_3_*` | `a_word_of_an_overflow_script_an_inline_block_cuts_reads_as_a_latin_word_does` |
+| `zz_vh2t`: `h2_4_*`, `h2_5_*`, `h2_7e_*` | `a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading` |
+| `zz_vh2t`: `h2_7d_*` | `a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed` |
