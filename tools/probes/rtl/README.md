@@ -118,7 +118,8 @@ kept.
 minimised tests are committed tests now
 ([The regressions](#the-regressions)). The probes are committed as they ran:
 their opening comments still call them scratch, which is what they were when
-they produced the baselines.
+they produced the baselines. One has changed since, in what it prints on
+Windows only ([On Windows](#on-windows)).
 
 ## Two baselines and the tip
 
@@ -211,9 +212,11 @@ Both binaries also hold their comparison to this section in tests that are not
 ignored and build no book (`cargo test -p tinker-pdf --test rtl_probes`, `cargo
 test -p tinker-pdf-shape --test rtl_lines`, which every `cargo test` runs): each
 kind of worse above, the gains, the changes that carry no verdict, the
-normaliser, and the decoder refusing a damaged file, a block whose CRC-64 does
-not hold and a check it does not compute. Each rule of the two comparisons is
-an injection in [injections.json](scripts/injections.json), named `suites/…`.
+normaliser, the decoder refusing a damaged file, a block whose CRC-64 does
+not hold and a check it does not compute, and `zz_k11rv_fixtures`'s names,
+the baseline's on every platform ([On Windows](#on-windows)). Each rule of
+the two comparisons is an injection in
+[injections.json](scripts/injections.json), named `suites/…`.
 
 The suites hold the families' books by the thousand against a baseline. The
 books a review named one by one are held otherwise: each is a case, a row of
@@ -307,7 +310,8 @@ itself. The output directory holds, per build (`default`, `bundled`, and
 - `raw/<family>.txt`, cargo's output and its exit status;
 - `<family>.txt`, the same normalised: the `Running tests/<family>.rs`
   header, the data lines sorted, test results without their times, failing
-  tests, panics, compiler errors and the exit status, and nothing else;
+  tests, panics, compiler errors and the exit status, and nothing else, the
+  header's path and a panic's file with a `/` on every platform;
 - the TSVs the probes write, exactly as they write them: the line probes'
   `lines/bct-auto.tsv`, `wrapped.tsv`, `sent.tsv` and `laneR.tsv`, and the td
   probe's `<build>/zz_code1_tdprobe.tsv`;
@@ -325,6 +329,44 @@ so an earlier run's markers never vouch for this one.
 A run without its `done` marker did not finish, and a family whose rows fall
 short of the baseline's was cut off; neither is a measurement (`table.py`'s
 `miss` column counts the books missing).
+
+### On Windows
+
+The kit runs under Git for Windows' `bash` with a native Python in UTF-8 mode
+(`python -X utf8`: `-I` ignores `PYTHONUTF8`, and the scripts print Hebrew and
+Arabic through pipes). A run's normalised outputs and TSVs, and the suites'
+dumps, are then the ones Linux writes, byte for byte. Until 17 October 2026
+two of the kit's readings depended on the platform's path separator, and
+both read alike on every platform now:
+
+- `zz_k11rv_fixtures` named a fixture by its path's text with the root's
+  taken out, so on Windows every name was `\crates\...` and the suites read
+  all 107 fixtures as missing; its probe and its suite module both build the
+  name from the path's components, `/crates/...` everywhere, and read a seed
+  of the fuzz corpus by that name.
+- cargo on Windows heads a test binary's output `Running tests\<family>.rs`,
+  which the normaliser did not read: it dropped the header, and with
+  `--binary` it kept nothing but the exit status. It reads either form and
+  writes `Running tests/<family>.rs`. A panic it keeps names its file with
+  a `/` too, where Windows prints `panicked at crates\...`.
+
+The suites' own tests hold the names, and `python3 -I
+tools/probes/rtl/scripts/selfcheck.py` holds the normaliser on both forms.
+Three things still differ on Windows:
+
+- A test binary killed from outside comes back from cargo as an exit code
+  (`exit code: 1` after `taskkill /F`, `0xffffffff` after `Stop-Process`),
+  not a signal, so `run.sh` reads it as a family that failed rather than an
+  interrupt: the run goes on, and its done marker names the family among
+  those not exit 0.
+- A probe run by cargo directly, outside `run.sh`, writes its TSV where its
+  variable is unset to `/tmp` or `/dev/null`, which Windows reads as
+  `\tmp` and `\dev\null` on the current drive: `zz_code1_tdprobe` panics
+  after printing its rows, and a line probe does unless `\tmp` exists.
+- The scripts' reports on stdout, and `inject.py`'s summary and logs, end
+  their lines with CRLF (Python's text mode). Nothing in the kit reads them
+  back but `run.sh`, which reads `norm.py`'s count through Git Bash's
+  `$(...)`, and that drops the CR.
 
 ## Reading the tables
 

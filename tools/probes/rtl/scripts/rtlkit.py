@@ -31,7 +31,14 @@ DATA = re.compile(r'^[A-Z][A-Z0-9_-]+[\t ]')
 # A probe's own summary line: rows=, books=, twbooks=, opened=.
 SUMMARY = re.compile(r'^(rows|books|twbooks|opened|fails)=\S')
 STATUS_PREFIX = re.compile(r'^test (\S+) \.\.\. ?(.*)$')
-RUNNING = re.compile(r'Running (tests/\S+\.rs)')
+# cargo's header of one test binary's output, `Running tests/<family>.rs (...)`,
+# which cargo on Windows prints with the platform's separator,
+# `Running tests\<family>.rs (...)`. Either is read, and `normalise` writes `/`.
+RUNNING = re.compile(r'Running (tests[/\\]\S+\.rs)')
+# Where a panic happened, `... panicked at <file>:<line>:<column>:`: the file
+# as cargo handed it to rustc, with the platform's separator, which `normalise`
+# writes as a `/`.
+PANICKED = re.compile(r'(panicked at )(\S+)(:\d+:\d+:?)$')
 METRICS = ('content', 'logical', 'cons', 'text', 'search', 'holds')
 
 
@@ -80,13 +87,15 @@ def manifest():
 def normalise(lines, binary=None, note=None, exit_line=None):
     """Cargo's output of one family reduced to what a comparison reads.
 
-    Kept: the `Running tests/<family>.rs` header; every data line (a probe's
-    upper-case tag, or its own `rows=`/`books=` summary), sorted, so that the
-    order the test threads printed in does not matter; then `test result`
-    lines without their time, the names of failing tests, panics and compiler
-    errors, in order; then the run's exit status. Dropped: compiling, timing
-    and libtest's per-test status lines. A data line printed straight after
-    libtest's `test <name> ... ` keeps its data and loses the prefix.
+    Kept: the `Running tests/<family>.rs` header, with a `/` whichever
+    separator cargo printed; every data line (a probe's upper-case tag, or
+    its own `rows=`/`books=` summary), sorted, so that the order the test
+    threads printed in does not matter; then `test result` lines without
+    their time, the names of failing tests, panics (the file each names with
+    a `/` too) and compiler errors, in order; then the run's exit status.
+    Dropped: compiling, timing and libtest's per-test status lines. A data
+    line printed straight after libtest's `test <name> ... ` keeps its data
+    and loses the prefix.
 
     With `binary`, only that test binary's section of a longer output is read.
     """
@@ -98,7 +107,7 @@ def normalise(lines, binary=None, note=None, exit_line=None):
         line = raw.rstrip('\n').rstrip('\r')
         m = RUNNING.search(line)
         if m and line.lstrip().startswith('Running '):
-            current = m.group(1)
+            current = m.group(1).replace('\\', '/')
             in_failures = False
             if binary is None or current == f'tests/{binary}.rs':
                 header.append(f'Running {current}')
@@ -132,7 +141,8 @@ def normalise(lines, binary=None, note=None, exit_line=None):
         elif line.startswith('test result:'):
             status.append(re.sub(r'; finished in [0-9.]+s$', '', line))
         elif 'panicked at' in line:
-            status.append(line.strip())
+            status.append(PANICKED.sub(lambda p: p.group(1) + p.group(2).replace('\\', '/') + p.group(3),
+                                       line.strip()))
         elif line.startswith('error'):
             status.append(line)
     out = []

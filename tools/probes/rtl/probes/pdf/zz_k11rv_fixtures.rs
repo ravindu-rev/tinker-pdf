@@ -1,7 +1,13 @@
 //! Scratch re-review probe (never committed): every local fixture's text,
 //! in logical and content order, and every page's content stream bytes.
+//!
+//! Its names and its fuzz-corpus filter are built from a path's components
+//! (`fixture_name`, `read_by_the_family`, as in the suite's module), so that
+//! it prints on Windows the names it printed on Linux; it took them from the
+//! path's text, whose separator is the platform's, until 17 October 2026.
 #![allow(missing_docs, clippy::all)]
 
+use std::path::Path;
 use tinker_pdf::{Document, TextOptions};
 
 fn hash(bytes: &[u8]) -> u64 {
@@ -29,6 +35,31 @@ fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
+/// A fixture's name: its path below `root`, a `/` before each component, as
+/// the probe printed it on Linux, where the baseline was made.
+fn fixture_name(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .expect("a file the walk found below the root")
+        .components()
+        .map(|part| format!("/{}", part.as_os_str().to_string_lossy()))
+        .collect()
+}
+
+/// Whether the family reads a file: a seed of the fuzz corpus whatever its
+/// extension, and elsewhere a document its extension names.
+fn read_by_the_family(root: &Path, path: &Path) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    fixture_name(root, path).contains("fuzz/corpus")
+        || matches!(
+            ext.as_str(),
+            "pdf" | "xps" | "oxps" | "epub" | "cbz" | "fb2" | "fdf"
+        )
+}
+
 #[test]
 fn fixtures() {
     let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
@@ -45,16 +76,14 @@ fn fixtures() {
     }
     let mut opened = 0;
     for path in files {
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        let in_fuzz = path.to_string_lossy().contains("fuzz/corpus");
-        if !in_fuzz && !matches!(ext.as_str(), "pdf" | "xps" | "oxps" | "epub" | "cbz" | "fb2" | "fdf") {
+        if !read_by_the_family(&root, &path) {
             continue;
         }
         let Ok(bytes) = std::fs::read(&path) else { continue };
         if bytes.len() > 30_000_000 {
             continue;
         }
-        let name = path.to_string_lossy().replace(&root.to_string_lossy().to_string(), "");
+        let name = fixture_name(&root, &path);
         let doc = match std::panic::catch_unwind(|| Document::open(bytes)) {
             Ok(Ok(doc)) => doc,
             _ => continue,

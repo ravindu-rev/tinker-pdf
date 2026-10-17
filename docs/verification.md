@@ -1746,7 +1746,9 @@ fix was to sharpen the injection rather than to shrug at the number.
   result` and its exit status together. They take 13 and 15 minutes and 10
   seconds in debug on four cores, and run on demand: no workflow runs them
   yet. Their comparisons' own tests are not ignored and run with every
-  `cargo test`. Every book a review of K-11 or CD-19 named is a case, 244 in
+  `cargo test`. On Windows, under Git Bash, the suites and the kit read
+  what they read on Linux (the kit README's "On Windows" names what still
+  differs there). Every book a review of K-11 or CD-19 named is a case, 244 in
   each build, in the test of its mechanism (`epub_conservation.rs`,
   `epub_fallback.rs`, read through `tests/epub_support/reading.rs`), which
   every `cargo test` runs: a case fixed is held to its right reading, a case

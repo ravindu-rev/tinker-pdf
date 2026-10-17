@@ -986,6 +986,11 @@ fn what_the_normaliser_keeps_is_what_the_ratchet_reads() {
         ("books=12", true),
         ("rows=480 fails=90", true),
         ("Running tests/x.rs", false),
+        // cargo's header on Windows, which the normaliser writes as the one above.
+        (
+            "     Running tests\\x.rs (target\\debug\\deps\\x-0123.exe)",
+            false,
+        ),
         ("test probe ... ok", false),
         ("R\tx", false),
         ("books=", false),
