@@ -1450,14 +1450,21 @@ impl<'a> Fonts<'a> {
     /// Whether `found`, a drawing [`Fonts::search`] found reading `line` right
     /// otherwise than on the page as the page's fonts give it back — in its
     /// runs' own space, or read as typed — where nothing it tried reads it
-    /// right so, reads the line's letters closer to the order written on the
-    /// page than the rules' drawing does there — more of the text's pairs of
-    /// letters in order ([`Words::pairs_in`]). A drawing found right in a
-    /// space that is not the page's is no better than a guess on the page: a
-    /// Hebrew paragraph with no `dir` of inline blocks squeezed by
-    /// `scaleX(0.5)`, turned a quarter at `word-spacing: 0.6em`, drawn as
-    /// that search found it, as 935b077 drew it, lost the structure tree's
-    /// order the rules' drawing holds.
+    /// right so, reads the line closer to the order written on the page than
+    /// the rules' drawing does there: more of the line's runs with their own
+    /// characters in the order typed ([`Fonts::runs_in_order`]), as a reader
+    /// of the structure tree reads each element's text, and where as many,
+    /// more of the text's pairs of letters side by side ([`Words::pairs_in`]).
+    /// A drawing found right in a space that is not the page's is no better
+    /// than a guess on the page: a Hebrew paragraph with no `dir` of inline
+    /// blocks squeezed by `scaleX(0.5)`, turned a quarter at
+    /// `word-spacing: 0.6em`, drawn as that search found it, as 935b077 drew
+    /// it, lost the structure tree's order the rules' drawing holds. Held to
+    /// the pairs alone, a styled `?!` in an inline block squeezed by
+    /// `scaleX(0.6)` to `0.8` at `0.5em`, which the drawing found reads in
+    /// its order with a letter of the next word between and the rules'
+    /// drawing turns about, kept the rules' drawing and lost the order
+    /// 935b077 held (round 6's review).
     fn reads_closer(
         &self,
         line: &[&TextRun],
@@ -1473,7 +1480,28 @@ impl<'a> Fonts<'a> {
         let Some((read, _)) = self.read_back(line, matrices, frame, found, Given::ByTheFont) else {
             return false;
         };
-        written.pairs_in(&read) > written.pairs_in(&rules)
+        let (found_pairs, rules_pairs) = (written.pairs_in(&read), written.pairs_in(&rules));
+        let (found_runs, rules_runs) = (
+            self.runs_in_order(line, &read),
+            self.runs_in_order(line, &rules),
+        );
+        found_runs > rules_runs || (found_runs == rules_runs && found_pairs > rules_pairs)
+    }
+
+    /// How many of `line`'s runs `read` reads with their own characters in
+    /// the order typed, side by side or not: what a reader of the structure
+    /// tree reads of each element's text ([`Fonts::reads_closer`]).
+    fn runs_in_order(&self, line: &[&TextRun], read: &str) -> usize {
+        line.iter()
+            .filter(|run| {
+                let mut rest = read.chars().filter(|c| !c.is_whitespace());
+                run.text
+                    .chars()
+                    .filter_map(|ch| self.read_as(run, ch))
+                    .filter(|c| !c.is_whitespace())
+                    .all(|ch| rest.any(|r| r == ch))
+            })
+            .count()
     }
 
     /// Whether `found`, a drawing [`Fonts::search`] found in `line`'s runs'

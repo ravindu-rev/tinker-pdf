@@ -4427,6 +4427,65 @@ fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
     ]);
 }
 
+/// The review's `narrowmark` shape: twice, a word, an inline block squeezed
+/// by `scaleX(sx)` that holds a word and a styled `?!`, two words and a
+/// stop.
+fn marked_blocks(words: &[&'static str; 12], sx: &str) -> String {
+    rep(2, |i| {
+        format!(
+            "{} <span style=\"display: inline-block; transform: scaleX({sx})\">{} <b>?!</b></span> {} {}.",
+            word(words, i),
+            word(words, i + 1),
+            word(words, i + 2),
+            word(words, i + 3)
+        )
+    })
+}
+
+/// **A drawing found in the runs' own space is drawn where it reads more of
+/// the line's runs in their own order on the page than the rules' drawing**
+/// (round 6's review), cases.
+///
+/// A styled `?!` in an inline block squeezed by `scaleX(0.6)`, `0.7` or
+/// `0.8`, in a Hebrew or Arabic paragraph with no `dir` at
+/// `word-spacing: 0.5em` or `0.55em`, under no transform or `scaleX(2)`: no
+/// drawing the read-back tries reads the line's letters in order on the
+/// page, and in the runs' own space its search finds one
+/// (`paint::Fonts::set_readings`). On the page that drawing reads the `?!`
+/// in its order with a letter of the next word between them, where the
+/// rules' drawing turns it about, and the two keep as many of the text's
+/// pairs of letters side by side, or the rules' more
+/// (`paint::Words::pairs_in`). Held to the pairs alone, the rules' drawing
+/// was kept, and paragraphs whose structure tree's order 935b077 held, by
+/// drawing what its search found, lost it. What the search finds is drawn
+/// now where it reads more of the line's runs with their own characters in
+/// order, as a reader of the structure tree reads each element's text
+/// (`paint::Fonts::reads_closer`), and where as many, more pairs. Each of
+/// the 24 paragraphs holds its order, in both builds.
+#[test]
+fn a_styled_mark_in_a_squeezed_block_reads_in_its_order_where_the_runs_space_drawing_holds_it() {
+    let mut cases = Vec::new();
+    for (lang, words) in [("he", &HE), ("ar", &AR)] {
+        for sx in ["0.6", "0.7", "0.8"] {
+            for style in [
+                "p { margin: 0 30%; transform: none; word-spacing: 0.5em; } .w { transform: none }",
+                "p { margin: 0 30%; transform: none; word-spacing: 0.55em; } .w { transform: none }",
+                "p { margin: 0 30%; transform: scaleX(2); word-spacing: 0.5em; } .w { transform: none }",
+                "p { margin: 0 30%; transform: scaleX(2); word-spacing: 0.55em; } .w { transform: none }",
+            ] {
+                cases.push(Case::both(
+                    "a dir-less paragraph's styled ?! in an inline block squeezed by scaleX(sx)",
+                    lang,
+                    style,
+                    format!("<div class=\"w\"><p>{}</p></div>", marked_blocks(words, sx)),
+                    Expect::Holds("logical"),
+                ));
+            }
+        }
+    }
+    check(&cases);
+}
+
 /// **A line a reader cuts on the page under a transform is searched in its
 /// runs' own space too** (round 6's lane F, the sweep of V1's class),
 /// guards.

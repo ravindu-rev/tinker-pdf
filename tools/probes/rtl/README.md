@@ -509,7 +509,10 @@ suites' own checks (round 6's commit of the suites records their counts).
 Round 6's fix of CD-19, which reads each line back on the page it is drawn
 on, added the 22 named `page/…` and rewrote two of 935b077's, `no-pairs` and
 `lines-touching`, to the code it changed under them; its commit message
-records their counts: 106 injections in all.
+records their counts. Round 6's review fix of what a drawing found in the
+runs' own space is compared by added `page/closer-by-pairs-alone` and
+`page/closer-ties-unbroken`, and moved `page/closer-unchecked` to its
+comparison: 108 injections in all.
 `--suite` runs a suite of your choosing instead of the catalogue's, the
 suites themselves included:
 

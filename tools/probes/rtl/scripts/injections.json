@@ -3284,8 +3284,58 @@
    "edits": [
     {
      "file": "crates/tinker-pdf/src/epub/paint.rs",
-     "old": "        written.pairs_in(&read) > written.pairs_in(&rules)",
+     "old": "        found_runs > rules_runs || (found_runs == rules_runs && found_pairs > rules_pairs)",
      "new": "        true",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/closer-by-pairs-alone",
+   "round": "round 6 review: a found drawing that keeps more runs in order",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "        found_runs > rules_runs || (found_runs == rules_runs && found_pairs > rules_pairs)",
+     "new": "        found_pairs > rules_pairs",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/closer-ties-unbroken",
+   "round": "round 6 review: a found drawing that keeps more runs in order",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "        found_runs > rules_runs || (found_runs == rules_runs && found_pairs > rules_pairs)",
+     "new": "        found_runs > rules_runs",
      "count": 1
     }
    ],
