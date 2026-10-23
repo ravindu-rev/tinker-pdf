@@ -378,7 +378,8 @@ both read alike on every platform now:
   a `/` too, where Windows prints `panicked at crates\...`.
 
 The suites' own tests hold the names, and `python3 -I
-tools/probes/rtl/scripts/selfcheck.py` holds the normaliser on both forms.
+tools/probes/rtl/scripts/selfcheck.py` holds the normaliser on both forms,
+and `inject.py`'s reading of what cargo prints on Windows.
 Three things still differ on Windows:
 
 - A test binary killed from outside comes back from cargo as an exit code
@@ -527,10 +528,21 @@ python3 -I tools/probes/rtl/scripts/inject.py check .
 python3 -I tools/probes/rtl/scripts/inject.py run . /tmp/rtl/inj --build bundled control readings-off no-pairs
 ```
 
-A count from a run whose suites did not all report a `test result`, or in
-which a crate did not compile, is absent, not zero (CONTRIBUTING.md, "Working
-an item"). At 935b077, `run . OUT control readings-off no-pieces` gave 0, 2
-and 0 in the default build, the counts recorded.
+A count comes from the bytes on disk and from every test binary a run
+started, or it is absent, not zero (CONTRIBUTING.md, "Working an item").
+Cargo calls a crate fresh by file times, so a tree whose files are older than
+a target's last build (another tree's injected one, in a shared target) would
+run that build: round 6's review saw a control fire 1 and, rebuilt, 0. So
+before every run, the control included, `inject.py` touches every file the
+call's injections edit, and a run is incomplete unless its log shows each
+crate it had to build compiling (its own edits' crates; for the control,
+every touched file's). A crate no injection of the call names is not touched,
+so give each tree a target of its own. A run is also incomplete when a crate
+did not compile, when a test binary cargo started printed no `test result`
+(it crashed: a stack overflow, an abort), or when a suite exited non-zero
+naming no failing test; cargo's output and its binaries' are read as one
+stream, in the order printed. At 935b077, `run . OUT control readings-off
+no-pieces` gave 0, 2 and 0 in the default build, the counts recorded.
 
 ## Where the baselines came from
 

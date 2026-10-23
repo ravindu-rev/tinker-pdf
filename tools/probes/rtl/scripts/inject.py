@@ -18,11 +18,24 @@ longer occurs exactly as often as it says belongs to code that has changed.
 OUTDIR/<name>-<build>.log and one line in OUTDIR/summary-<build>.txt, and
 restores the files, checking their sha256 after every run, also when the run
 is interrupted. `control` runs, with nothing injected, every suite the other
-injections named in the same call run (or --suite). A run in
-which a suite printed no `test result`, or a crate did not compile, is marked
-incomplete, and its count is absent rather than zero (CONTRIBUTING.md,
-"Working an item"). With --build bundled, `--features bundled-fonts` goes into
-every suite that tests tinker-pdf and does not name its features already.
+injections named in the same call run (or --suite). With --build bundled,
+`--features bundled-fonts` goes into every suite that tests tinker-pdf and
+does not name its features already.
+
+A run's count comes from the bytes on disk and from every test binary it
+started, or it is absent rather than zero (CONTRIBUTING.md, "Working an
+item"). Cargo calls a crate fresh by file times, so a tree whose files are
+older than a target's last build, another tree's injected one in a shared
+target, would run that build. Before every run, the control included, every
+file the edits of the call's injections name is touched, and a run is
+incomplete unless its log shows each crate it must have built compiling: the
+crates of its own edits, and for the control those of every file touched.
+(A crate whose files no injection of the call names is not touched: a target
+shared with another tree can still hold that tree's build of it, so give
+each tree a target of its own.) A run is also incomplete when a suite's
+build was refused, when a test binary cargo started (`Running ...`,
+`Doc-tests ...`) printed no `test result` (a crash: a stack overflow, an
+abort), or when a suite exited non-zero naming no failing test.
 """
 import hashlib
 import json
@@ -65,23 +78,73 @@ def with_build(cmd, build):
     return out
 
 
-def run_suites(tree, suites, build, log):
-    env = dict(os.environ)
-    env.setdefault('CARGO_BUILD_JOBS', '3')
-    env.update(CARGO_INCREMENTAL='0', CARGO_PROFILE_DEV_DEBUG='0', CARGO_PROFILE_TEST_DEBUG='0')
+def crate_of(tree, path):
+    """The package `path` (relative to `tree`) belongs to: the name in the
+    nearest Cargo.toml above it with a [package], or None."""
+    parts = path.replace('\\', '/').split('/')[:-1]
+    while parts:
+        toml = os.path.join(tree, *parts, 'Cargo.toml')
+        if os.path.isfile(toml):
+            text = open(toml, encoding='utf-8').read()
+            if '[package]' in text:
+                m = re.search(r'^name\s*=\s*"([^"]+)"', text.split('[package]', 1)[1], re.M)
+                return m.group(1) if m else None
+        parts.pop()
+    return None
+
+
+def freshen(tree, files):
+    """Touch `files` (relative to `tree`), so that cargo compiles the bytes on
+    disk whatever a shared target last built; their crates, which the run must
+    then show compiling."""
+    for f in files:
+        if os.path.isfile(os.path.join(tree, f)):
+            os.utime(os.path.join(tree, f))
+    return sorted({c for c in (crate_of(tree, f) for f in files) if c})
+
+
+# cargo's header of each test binary it starts, and of the doc tests.
+STARTED = re.compile(r'^ +(Running \S.*\(.*\)|Doc-tests \S+)$', re.M)
+# A failing test as libtest prints it, `#[should_panic]` ones too.
+FAILED = re.compile(r'^test (\S+)(?: - should panic)? \.\.\. FAILED', re.M)
+
+
+def read_run(outputs, crates):
+    """A run's verdict from what its suites printed, [(cargo's output with its
+    test binaries', in the order printed; exit status)], and the crates it
+    must show compiling: the failing tests, whether the run is complete, and
+    the crates it did not show compiling."""
     failing, complete = [], True
-    for cmd in suites:
-        cmd = with_build(cmd, build)
-        r = subprocess.run(cmd, cwd=tree, env=env, capture_output=True, text=True)
-        text = r.stdout + r.stderr
-        log.write('$ ' + ' '.join(cmd) + f'\nexit {r.returncode}\n' + text + '\n')
-        if not re.search(r'^test result: ', text, re.M):
+    for text, code in outputs:
+        starts = [m.start() for m in STARTED.finditer(text)]
+        if not starts or not all(re.search(r'^test result: ', text[a:b], re.M)
+                                 for a, b in zip(starts, starts[1:] + [len(text)])):
             complete = False
         if 'could not compile' in text or 'failed to run custom build command' in text:
             complete = False
             failing.append('BUILD-REFUSED')
-        failing += re.findall(r'^test (\S+) \.\.\. FAILED', text, re.M)
-    return failing, complete
+        named = FAILED.findall(text)
+        if code != 0 and not named:
+            complete = False
+        failing += named
+    built = '\n'.join(text for text, _ in outputs)
+    unbuilt = [c for c in crates if not re.search(r'^ *Compiling ' + re.escape(c) + r' v', built, re.M)]
+    return failing, complete and not unbuilt, unbuilt
+
+
+def run_suites(tree, suites, build, log):
+    env = dict(os.environ)
+    env.setdefault('CARGO_BUILD_JOBS', '3')
+    env.update(CARGO_INCREMENTAL='0', CARGO_PROFILE_DEV_DEBUG='0', CARGO_PROFILE_TEST_DEBUG='0')
+    outputs = []
+    for cmd in suites:
+        cmd = with_build(cmd, build)
+        # One stream, so that each test binary's output follows its header.
+        r = subprocess.run(cmd, cwd=tree, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           text=True, encoding='utf-8', errors='replace')
+        log.write('$ ' + ' '.join(cmd) + f'\nexit {r.returncode}\n' + r.stdout + '\n')
+        outputs.append((r.stdout, r.returncode))
+    return outputs
 
 
 def main():
@@ -137,6 +200,8 @@ def main():
         for s in (suites_override or (cat[name]['suites'] if name in cat else [])):
             if s not in control_suites:
                 control_suites.append(s)
+    # Every file the call's injections edit, touched before every run.
+    touched = sorted({ed['file'] for name in names if name in cat for ed in cat[name]['edits']})
     for name in names:
         if name == 'control':
             if not control_suites:
@@ -153,12 +218,18 @@ def main():
             summary.flush()
             continue
         try:
+            # The crates the run must show compiling: its own edits', and for
+            # the control, which runs every suite of the call, every file's.
+            crates = freshen(tree, touched)
+            if e['edits']:
+                crates = sorted({c for c in (crate_of(tree, f) for f in files) if c})
             for ed in e['edits']:
                 p = os.path.join(tree, ed['file'])
                 text = open(p, encoding='utf-8').read()
                 open(p, 'w', encoding='utf-8', newline='').write(text.replace(ed['old'], ed['new']))
             with open(os.path.join(out, f'{name.replace("/", "_")}-{build}.log'), 'w', encoding='utf-8') as log:
-                failing, complete = run_suites(tree, suites_override or e['suites'], build, log)
+                outputs = run_suites(tree, suites_override or e['suites'], build, log)
+            failing, complete, unbuilt = read_run(outputs, crates)
         finally:
             for f, data in saved.items():
                 open(os.path.join(tree, f), 'wb').write(data)
@@ -168,7 +239,8 @@ def main():
                     summary.flush()
                     raise SystemExit(f'{f} was not restored; stop and look at it')
         fires = len(failing) if complete else 'absent (incomplete run)'
-        summary.write(f'{name} {build} fires {fires} complete={complete} {sorted(set(failing))}\n')
+        stale = f' not compiled: {" ".join(unbuilt)}' if unbuilt else ''
+        summary.write(f'{name} {build} fires {fires} complete={complete} {sorted(set(failing))}{stale}\n')
         summary.flush()
         print(f'{name} {build}: fires {fires}')
     summary.close()
