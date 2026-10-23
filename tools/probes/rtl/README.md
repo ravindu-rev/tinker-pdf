@@ -116,7 +116,9 @@ group, test threads and kind. Books a build at 935b077:
 | `v6` | eight `zz_v6_*` | 8 472 | nested inline styles, lists and generated content, spacing units and the `0.45em` and `0.5em` thresholds, supplementary-plane scripts, numbers with every separator, table cells, measures, `dir=auto` and `<bdi>` | round 6's hunt (lane V) |
 | `v6t` | `zz_v6_transform` | 1 120 | CSS transforms and tight line heights under spacing | round 6's hunt (lane V) |
 | `f6` | `zz_f6_transform`, `zz_f6_ems` | 3 654 + 264 | the class of the hunt's V1: a scale of one axis or both, turns, skews, a matrix and a shift, on the paragraph, its block, both and an inline block, under spacing and none; and the edges of its fix: two cells whose gap is near half an em, inline blocks of about half an em, marks of no advance opening a styled run, under no transform, a scale of one axis and a skew | round 6's fix (lane F) |
+| `f6inj` | `zz_f6_readas`, `zz_f6_unfired` | 464 + 170 | characters a page's fonts read otherwise than they were typed, so that reading a line back as the fonts give it back (`read_as`) can decide its drawing: a NO-BREAK SPACE in a number, before a sign, a comma or a styled `?!`, a SOFT HYPHEN, letters past the Basic Multilingual Plane, under spacing and a scale of one axis; and books for the rules of reading a line back that a build's suites did not fire when each was put back broken: dir-less lines under a scale of one axis or a matrix (`reads_whole`, with `bundled-fonts`), squeezed inline blocks, styled marks and signs turned (`reads_closer`, with `bundled-fonts`), a number with a NO-BREAK SPACE before an ARABIC COMMA (`read_as`, in both) | round 6's counted injections (lane F) |
 | `v6pdf` | `zz_v6_pdf` | 540 | plain synthetic PDFs drawn as producers draw right-to-left lines, read by ruling 14 (no EPUB) | round 6's hunt (lane V) |
+| `f6pdf` | `zz_f6_h23price` | 64 | plain synthetic PDFs: two words of one script, each its own text object, 0.3em to 2em apart with no space glyph, as two positioned words and as two table cells, in Greek, Cyrillic, Armenian and Latin; what answering H2-3 in the reader would cost | round 6's owner options (lane F) |
 | `v6time` | `zz_v6_time` | | what reading each line back costs `Document::open`, at doubling sizes | round 6's hunt (lane V) |
 
 Each `zz_vx_*` family is an earlier family with a shim around
@@ -162,7 +164,7 @@ Every family a ratchet reads is also a committed test, in two `#[ignore]`d
 integration-test binaries, so that CI compiles two binaries and not seventy:
 
 - `crates/tinker-pdf/tests/rtl_probes.rs`: one test a `rows` or `tsv` family
-  of [families.tsv](families.tsv), 75 in all, each its module under
+  of [families.tsv](families.tsv), 78 in all, each its module under
   `rtl_probes/`; the harness the rr3m families share is
   `rtl_probes/common.rs`, the overprint shim of the `zz_vx_*` families
   `rtl_probes/vov.rs`, and the comparison `rtl_probes/ratchet.rs`;
@@ -188,7 +190,7 @@ RAN rtl_lines zz_k11rv_bidi against 935b077: 93851 rows, 2 printed lines; 0 wors
 
 then a `WORSE`, `GAIN` or `CHANGED` line for each book that moved (up to 40 of
 each), and fails if any book reads worse than at 935b077 in that build. A run
-of the three commands prints 75, 75 and 4 `RAN` lines; fewer means a family
+of the three commands prints 78, 78 and 4 `RAN` lines; fewer means a family
 did not run. Worse is any of:
 
 - a book the baseline has and the run lacks, or fewer rows;
@@ -219,13 +221,13 @@ At 935b077's code every family passes in both builds with nothing worse,
 nothing better and nothing changed, and its data lines and TSVs are the
 baseline's byte for byte (the `TINKER_RTL_KIT_OUT` directory below against the
 decoded baselines; `cmp.py` and `tsvdiff.py` read it as 0 worse, 0 better, 0
-changed): on Linux for the 63 families before round 6, and for all 75 on the
+changed): on Linux for the 63 families before round 6, and for all 78 on the
 owner's Windows machine (Windows 11, 8 logical CPUs) at a tree whose
 `crates/*/src` is 935b077's. In debug the 63 tinker-pdf families took 13
 minutes in a default build and 15 with `bundled-fonts` on four cores on Linux,
-and the 4 line families 10 seconds; on the Windows machine the 75 take 5
-minutes in a default build and 6 with `bundled-fonts`, and the line families
-5 seconds (300, 357 and 5 seconds of the tests' own time).
+and the 4 line families 10 seconds; on the Windows machine the 78 take
+6 minutes in a default build and 7 with `bundled-fonts`, and the line families
+6 seconds (369, 431 and 6 seconds of the tests' own time).
 
 Both binaries also hold their comparison to this section in tests that are not
 ignored and build no book (`cargo test -p tinker-pdf --test rtl_probes`, `cargo
@@ -563,6 +565,14 @@ to.
   `crates/*/src` is 935b077's, read all 75 families' 935b077 outputs with
   nothing worse, better or changed, their dump the baselines' data lines and
   TSVs byte for byte.
+- **`zz_f6_readas`, `zz_f6_unfired` and `zz_f6_h23price`** were made on the
+  owner's Windows machine on 17 October 2026, by `run.sh` at each tree in both
+  builds, at 935b077 on a checkout of 05cea0b, from scratch probes of round
+  6's fix (its counted injections and an option for the owner); at 935b077's
+  code they read, book for book, what those probes read: every verdict, the
+  overprint and the text. At a tree whose `crates/*/src` is 935b077's the
+  suites read their 935b077 outputs with nothing worse, better or changed,
+  their dump the baselines' data lines byte for byte.
 
 Rerunning `zz_rr3m_hunt_min` at 9297d2d, and `zz_rr3m_hunt_min`,
 `zz_rr3m_h1min2`, `zz_c1_tw`, `zz_code1_neg` and every line probe at 935b077,

@@ -1724,9 +1724,10 @@ fix was to sharpen the injection rather than to shrug at the number.
 - **The right-to-left probe kit** (`tools/probes/rtl`,
   [its README](../tools/probes/rtl/README.md)): the probes the K-11 and CD-19
   rounds wrote to measure right-to-left text in synthetic EPUB books, 89 291
-  distinct books a build and round 6's 13 510 more, 540 plain PDFs drawn as
-  producers draw right-to-left lines, 12 084 content streams built by hand,
-  and the whole
+  distinct books a build, round 6's 13 510 more and 634 for the rules of
+  reading a line back (612 distinct), 540 plain PDFs drawn as producers draw
+  right-to-left lines and 64 of two words a gap apart, 12 084 content streams
+  built by hand, and the whole
   of `BidiCharacterTest.txt` read back under ruling 14, with their runner,
   comparators and outputs at `9297d2d`,
   `56dfd93` and `935b077`. A change to right-to-left text is measured against
@@ -1743,10 +1744,10 @@ fix was to sharpen the injection rather than to shrug at the number.
   cargo test -p tinker-pdf-shape --test rtl_lines -- --ignored --nocapture
   ```
 
-  A whole run prints 75, 75 and 4 `RAN` lines (`grep -c '^RAN'`); fewer is a
+  A whole run prints 78, 78 and 4 `RAN` lines (`grep -c '^RAN'`); fewer is a
   family that did not run, and a run is read by its banners, its `test
-  result` and its exit status together. At 935b077's code they take 5 and 6
-  minutes and 5 seconds in debug on the owner's Windows machine (Windows 11,
+  result` and its exit status together. At 935b077's code they take 6 and 7
+  minutes and 6 seconds in debug on the owner's Windows machine (Windows 11,
   8 logical CPUs), where the 63 families before round 6 took 13 and 15
   minutes and 10 seconds on four cores on Linux, and they run on demand: no
   workflow runs them yet. Their comparisons' own tests are not ignored and

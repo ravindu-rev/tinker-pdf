@@ -37,7 +37,10 @@ mod rtl_probes {
     pub(crate) mod zz_code1_neg;
     pub(crate) mod zz_code1_tdprobe;
     pub(crate) mod zz_f6_ems;
+    pub(crate) mod zz_f6_h23price;
+    pub(crate) mod zz_f6_readas;
     pub(crate) mod zz_f6_transform;
+    pub(crate) mod zz_f6_unfired;
     pub(crate) mod zz_k11rv_fixtures;
     pub(crate) mod zz_rr3m_extra;
     pub(crate) mod zz_rr3m_fv_extra;
@@ -201,4 +204,7 @@ families! {
     zz_v6_pdf = "zz_v6_pdf": "v6pdf: round 6 lane V (hunt); plain synthetic PDFs drawn as producers draw right-to-left lines",
     zz_f6_transform = "zz_f6_transform": "f6: round 6 lane F (sweep); the class of V1: CSS transforms of one axis or both, turns, skews, a matrix, shifts, on the paragraph, its block, both, an inline block",
     zz_f6_ems = "zz_f6_ems": "f6: round 6 lane F (sweep); the edges of the fix of V1: two cells near half an em apart, inline blocks of about half an em, marks of no advance opening a styled run, under no transform, a scale of one axis and a skew",
+    zz_f6_readas = "zz_f6_readas": "f6inj: round 6 lane F (injections); characters the page's fonts read otherwise than typed (a NO-BREAK SPACE, a SOFT HYPHEN, letters past the Basic Multilingual Plane) under spacing and a scale, the books of read_as",
+    zz_f6_unfired = "zz_f6_unfired": "f6inj: round 6 lane F (injections); books for the rules of the read-back no suite fired in a build: reads_whole and reads_closer with bundled-fonts, read_as",
+    zz_f6_h23price = "zz_f6_h23price": "f6pdf: round 6 lane F (owner options); plain synthetic PDFs, two words of one script in two text objects a gap apart: the price of answering H2-3 in the reader",
 }
