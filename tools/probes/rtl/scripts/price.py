@@ -15,6 +15,9 @@ before stops, an ellipsis, opening a right-to-left line before a pair after
   bstrict    worse than B in the strict sense (conserving, read whole, found)
   logBM      logical order held at B and M and lost now
 soft/ is the same books with a soft wrap where price/ has <br/>.
+A directory without zz_rr3m_laneR's output for a build, or a run.sh output
+without the build's done marker (a cut run), is named at the end on an
+`INCOMPLETE` line, and the exit status is 1.
 """
 import collections
 import importlib.util
@@ -54,7 +57,12 @@ def main():
     if len(args) > 1:
         raise SystemExit(__doc__)
     new = K.resolve(args[0]) if args else K.resolve(opts['--tip'])
+    problems = []
     for build in opts['--builds'].split(','):
+        for d in (K.resolve(opts['--base']), K.resolve(opts['--mid']), new):
+            why = K.unfinished(d, build)
+            if why or not K.family_file(d, build, FAMILY):
+                problems.append(why or f'{d}: no {FAMILY} output for {build}')
         Bk = K.load(K.family_file(K.resolve(opts['--base']), build, FAMILY)).rows
         Mk = K.load(K.family_file(K.resolve(opts['--mid']), build, FAMILY)).rows
         Nk = K.load(K.family_file(new, build, FAMILY)).rows
@@ -92,6 +100,7 @@ def main():
                     allc.update(tot[g])
             print(f'{fam:5} {"priced":8} {"TOTAL":10} ' + ' '.join(f'{x} {allc[x]}' for x in
                                                               ('n', 'worse', 'consM', 'wbc', 'bstrict', 'logBM')))
+    K.incomplete(problems, 'price.py')
 
 
 if __name__ == '__main__':

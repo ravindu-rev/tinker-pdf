@@ -75,6 +75,31 @@ def families_in(root, build):
     return sorted(out)
 
 
+def unfinished(root, build):
+    """Why one build of a run or baseline directory is no whole measurement, or
+    None. run.sh makes `<build>/raw/` as it starts a build and writes
+    `<build>/done` after the build's last family, so a build with the first
+    and not the second was cut. A build run.sh never started has neither, and
+    a comparison names the families it lacks. A baseline or a suites'
+    TINKER_RTL_KIT_OUT directory has no marker: pack.py packs no unfinished
+    run, and a suite writes a family's output only once its books are all
+    built, so a cut suite run lacks families too."""
+    d = os.path.join(root, build)
+    if os.path.isdir(os.path.join(d, 'raw')) and not os.path.isfile(os.path.join(d, 'done')):
+        return f'{root}: run.sh started {build} and wrote no done marker for it, so it did not finish'
+    return None
+
+
+def incomplete(problems, script):
+    """End a comparison that is no measurement: each reason on a line of its
+    own, then exit 1. Nothing when there is none."""
+    if not problems:
+        return
+    for p in problems:
+        print(f'INCOMPLETE {p}')
+    raise SystemExit(f'{script}: incomplete, so nothing it printed is a measurement')
+
+
 def manifest():
     """families.tsv as a list of dicts, in file order."""
     rows = []

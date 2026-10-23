@@ -7,6 +7,10 @@ A and B are TSV files (plain or .xz), or run or baseline directories (or a
 baseline's name), in which case every TSV the two share is compared. A line's
 key is its fields up to its OK/NO verdict, with its position among lines of the
 same key; lines without a verdict (the td probe's) are compared whole.
+
+A TSV only one directory has, or a run.sh output without a build's done
+marker (a cut run), makes the comparison incomplete: each reason is printed
+at the end on an `INCOMPLETE` line, and the exit status is 1.
 """
 import collections
 import importlib.util
@@ -98,11 +102,15 @@ def main():
     if os.path.isfile(args[0]) and os.path.isfile(args[1]):
         compare(os.path.basename(args[1]), args[0], args[1], show)
         return
-    A, B = tsvs(K.resolve(args[0])), tsvs(K.resolve(args[1]))
+    roots = K.resolve(args[0]), K.resolve(args[1])
+    A, B = tsvs(roots[0]), tsvs(roots[1])
     for name in sorted(set(A) & set(B)):
         compare(name, A[name], B[name], show)
     for name in sorted(set(A) ^ set(B)):
         print(f'{name}: only in {"A" if name in A else "B"}')
+    problems = [f'{name}: only in {"A" if name in A else "B"}, not compared' for name in sorted(set(A) ^ set(B))]
+    problems += [why for r in roots for b in ('lines', 'default', 'bundled') for why in [K.unfinished(r, b)] if why]
+    K.incomplete(problems, 'tsvdiff.py')
 
 
 if __name__ == '__main__':

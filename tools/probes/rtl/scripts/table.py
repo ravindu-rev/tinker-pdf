@@ -30,7 +30,10 @@ Columns, per family and build:
 With NEW, a family NEW has no output for is absent from the table, not a
 family that lost every book: the families of the baselines a partial run did
 not run are named in one line under the build's table, and the groups of
---by group add up only the families NEW ran.
+--by group add up only the families NEW ran. Such a table is incomplete, and
+so is one with a run.sh output that lacks its build's done marker (a cut
+run): each reason is printed at the end on an `INCOMPLETE` line, after the
+JSON is written, and the exit status is 1.
 --show N lists up to N books of each of >B, >M, >T with their metrics at each
 tree: c conserving, t read whole, s found by search, h holds; 1 true, 0 false.
 Under each build's table, a family of kind `tests` (a file of plain tests,
@@ -174,7 +177,9 @@ def main():
     pat = re.compile(opts['--families']) if opts['--families'] else None
     jout = {}
     labels = 'B/M/T/N' if new else 'B/M/T'
+    problems = []
     for build in opts['--builds'].split(','):
+        problems += [why for why in (K.unfinished(d, build) for d in dirs) if why]
         fams = set()
         for d in dirs:
             fams.update(K.families_in(d, build))
@@ -185,6 +190,8 @@ def main():
             ran = set(K.families_in(dirs[-1], build))
             not_run = [f for f in fams if f not in ran]
             fams = [f for f in fams if f in ran]
+            if not_run:
+                problems.append(f'{build}: the run lacks {len(not_run)} families the trees have, not compared')
         if not fams:
             if not_run:
                 print(f'## {build}: the run has none of these families; not run: {len(not_run)}\n')
@@ -261,6 +268,7 @@ def main():
     if opts['--json']:
         with open(opts['--json'], 'w', encoding='utf-8') as f:
             json.dump(jout, f)
+    K.incomplete(problems, 'table.py')
 
 
 def regressions(dirs, build, order, kind_of, pat, show, new=False):

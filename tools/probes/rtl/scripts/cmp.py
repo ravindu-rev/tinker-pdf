@@ -17,7 +17,11 @@ whose probe panicked (PANIC).
 
 A family one side has and the other does not is named as such and not
 compared: a run of a few families against a whole baseline compares those
-few, and says which of the baseline's it did not run.
+few, and says which of the baseline's it did not run. Such a comparison is
+incomplete, and so is one of a run.sh output without its build's done
+marker (a cut run): each reason is printed after TOTAL on an `INCOMPLETE`
+line, and the exit status is 1. --families narrows both what is compared and
+what both sides must have.
 """
 import importlib.util
 import os
@@ -128,7 +132,9 @@ def main():
     A, B = K.resolve(args[0]), K.resolve(args[1])
     pat = re.compile(opts['--families']) if opts['--families'] else None
     total = 0
+    problems = []
     for build in opts['--builds'].split(','):
+        problems += [f'{tag} {why}' for tag, why in (('A', K.unfinished(A, build)), ('B', K.unfinished(B, build))) if why]
         in_a, in_b = set(K.families_in(A, build)), set(K.families_in(B, build))
         only = {'A': [], 'B': []}
         for fam in sorted(in_a | in_b):
@@ -141,7 +147,9 @@ def main():
         for side, fams in only.items():
             if fams:
                 print(f'{build}: {len(fams)} families only in {side}, not compared: {" ".join(fams)}')
+                problems.append(f'{build}: {len(fams)} families only in {side}, not compared')
     print(f'TOTAL worse {total} (books worse, VOV books whose overprint rose, new panics, TALLY lines misread more)')
+    K.incomplete(problems, 'cmp.py')
 
 
 if __name__ == '__main__':

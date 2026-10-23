@@ -355,7 +355,13 @@ so an earlier run's markers never vouch for this one.
 
 A run without its `done` marker did not finish, and a family whose rows fall
 short of the baseline's was cut off; neither is a measurement (`table.py`'s
-`miss` column counts the books missing).
+`miss` column counts the books missing). The comparators say so: `cmp.py`,
+`table.py`, `tsvdiff.py` and `price.py` print an `INCOMPLETE` line at the
+end for each build run.sh started and wrote no done marker for, and for the
+families (TSVs) one side has and the other lacks, and exit 1; a whole
+comparison prints what it always did. A baseline and a `TINKER_RTL_KIT_OUT`
+directory have no marker: `pack.py` packs no unfinished run, and a suite
+writes a family's output only once its books are all built.
 
 ### On Windows
 
@@ -427,7 +433,8 @@ one, 9297d2d's books 935b077 lacks), the books conserving at each tree, and:
 With a run, a family the run has no output for is left out, not read as a
 family that lost every book: a run of one group compared `--by group` shows
 that group, and one line under each build's table names the families not run.
-`cmp.py` does the same, naming the families only one side has.
+`cmp.py` does the same, naming the families only one side has. Either is then
+incomplete, and exits 1 (`--families` narrows what both sides must have).
 
 `--show N` lists up to N books of each of `>B`, `>M` and `>T` with their
 metrics at each tree (`c` conserving, `t` read whole, `s` found, `h` holds; 1

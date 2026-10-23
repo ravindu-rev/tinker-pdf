@@ -186,6 +186,60 @@ def injected(out, code, names):
             return f.read().splitlines(), seen[:1]
 
 
+def ran(script, *argv):
+    """`script`.main()'s exit status and printed lines, given `argv`."""
+    mod, old, out, code = load(script), sys.argv, io.StringIO(), 0
+    sys.argv = [script + '.py'] + list(argv)
+    try:
+        with contextlib.redirect_stdout(out):
+            mod.main()
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else 1
+    finally:
+        sys.argv = old
+    return code, out.getvalue().splitlines()
+
+
+def kit_run(root, families, done=True):
+    """A run.sh output of a default build: each family's output (no books,
+    `exit 0`) and a TSV of its name, `raw/`, `progress`, and with `done` the
+    done markers run.sh writes last."""
+    os.makedirs(os.path.join(root, 'default', 'raw'))
+    write(os.path.join(root, 'progress'), ''.join(f'default {f} exit 0 0 1s\n' for f in families))
+    for f in families:
+        write(os.path.join(root, 'default', f + '.txt'), f'Running tests/{f}.rs\nexit 0\n')
+        write(os.path.join(root, 'default', f + '.tsv'), 'x\tOK\n')
+    if done:
+        write(os.path.join(root, 'default', 'done'), f'families {len(families)}\nnot exit 0:\n')
+        write(os.path.join(root, 'done'), 'done\n')
+    return root
+
+
+def compared(cases):
+    """Each comparator's exit status, and how many INCOMPLETE lines it printed,
+    over throwaway runs: W and W2 whole, F whole but lacking a family (a
+    filtered run), N with every family and no done marker, C cut before its
+    last family (both); `cases` names the script and the runs, B M T NEW."""
+    with tempfile.TemporaryDirectory() as tmp:
+        both = ['zz_a', 'zz_rr3m_laneR']
+        d = {'W': kit_run(os.path.join(tmp, 'W'), both), 'W2': kit_run(os.path.join(tmp, 'W2'), both),
+             'F': kit_run(os.path.join(tmp, 'F'), both[:1]),
+             'N': kit_run(os.path.join(tmp, 'N'), both, done=False),
+             'C': kit_run(os.path.join(tmp, 'C'), both[:1], done=False)}
+        out = []
+        for script, runs in cases:
+            if script == 'cmp' or script == 'tsvdiff':
+                argv = [d[r] for r in runs] + (['--builds', 'default'] if script == 'cmp' else [])
+            else:
+                argv = [d[runs[-1]], '--base', d[runs[0]], '--mid', d[runs[1]], '--tip', d[runs[2]],
+                        '--builds', 'default']
+            code, printed = ran(script, *argv)
+            out.append((code, sum(l.startswith('INCOMPLETE ') for l in printed)))
+            if script == 'cmp' and runs == ['W', 'W2']:
+                out[-1] = (code, printed)
+        return out
+
+
 def checks():
     windows = on_windows(LINUX)
     fixtures = WINDOWS_HEADER + '\n' + LINUX.split('fedcba9876543210)\n', 1)[1]
@@ -225,6 +279,28 @@ def checks():
     yield ('inject: a run that shows no crate of its files compiling is incomplete',
            lambda: injected(cargo(PASS, compiling=False), 0, ['control', 'demo/v'])[0],
            [f'{n} default fires absent (incomplete run) complete=False [] not compiled: demo' for n in ('control', 'demo/v')])
+    # The comparators: a run cut short, or lacking what the other side has,
+    # is no measurement (round 6's review, F5).
+    yield ('cmp: a run cut before its last family and its done marker is incomplete, exit 1',
+           lambda: compared([('cmp', ['W', 'C'])]), [(1, 2)])
+    yield ('cmp: a family only one side has is incomplete, exit 1',
+           lambda: compared([('cmp', ['W', 'F']), ('cmp', ['F', 'W'])]), [(1, 1), (1, 1)])
+    yield ('cmp: a run with every family and no done marker is incomplete, exit 1',
+           lambda: compared([('cmp', ['W', 'N'])]), [(1, 1)])
+    yield ('cmp: two whole runs read as before, exit 0',
+           lambda: compared([('cmp', ['W', 'W2'])]),
+           [(0, ['default zz_a: rows 0/0 missing 0: worse 0, better 0, overprint rose 0',
+                 'default zz_rr3m_laneR: rows 0/0 missing 0: worse 0, better 0, overprint rose 0',
+                 'TOTAL worse 0 (books worse, VOV books whose overprint rose, new panics, TALLY lines misread more)'])])
+    yield ('table: a run lacking a family, or its done marker, is incomplete, exit 1',
+           lambda: compared([('table', ['W', 'W', 'W', 'F']), ('table', ['W', 'W', 'W', 'N'])]), [(1, 1), (1, 1)])
+    yield ('tsvdiff: a TSV only one side has, or a run without its done marker, is incomplete, exit 1',
+           lambda: compared([('tsvdiff', ['W', 'F']), ('tsvdiff', ['W', 'N'])]), [(1, 1), (1, 1)])
+    yield ("price: a run without lane R's family, or its done marker, is incomplete, exit 1",
+           lambda: compared([('price', ['W', 'W', 'W', 'F']), ('price', ['W', 'W', 'W', 'N'])]), [(1, 1), (1, 1)])
+    yield ('table, tsvdiff and price: whole runs exit 0',
+           lambda: compared([('table', ['W', 'W', 'W', 'W2']), ('tsvdiff', ['W', 'W2']), ('price', ['W', 'W', 'W', 'W2'])]),
+           [(0, 0)] * 3)
 
 
 def main():
