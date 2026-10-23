@@ -119,6 +119,7 @@ group, test threads and kind. Books a build at 935b077:
 | `f6inj` | `zz_f6_readas`, `zz_f6_unfired` | 464 + 170 | characters a page's fonts read otherwise than they were typed, so that reading a line back as the fonts give it back (`read_as`) can decide its drawing: a NO-BREAK SPACE in a number, before a sign, a comma or a styled `?!`, a SOFT HYPHEN, letters past the Basic Multilingual Plane, under spacing and a scale of one axis; and books for the rules of reading a line back that a build's suites did not fire when each was put back broken: dir-less lines under a scale of one axis or a matrix (`reads_whole`, with `bundled-fonts`), squeezed inline blocks, styled marks and signs turned (`reads_closer`, with `bundled-fonts`), a number with a NO-BREAK SPACE before an ARABIC COMMA (`read_as`, in both) | round 6's counted injections (lane F) |
 | `v6pdf` | `zz_v6_pdf` | 540 | plain synthetic PDFs drawn as producers draw right-to-left lines, read by ruling 14 (no EPUB) | round 6's hunt (lane V) |
 | `f6pdf` | `zz_f6_h23price` | 64 | plain synthetic PDFs: two words of one script, each its own text object, 0.3em to 2em apart with no space glyph, as two positioned words and as two table cells, in Greek, Cyrillic, Armenian and Latin; what answering H2-3 in the reader would cost | round 6's owner options (lane F) |
+| `rv6` | `zz_rv6_hunt`, `zz_rv6_ib` | 1 650 + 576 | the review's two hunts of round 6's fix, in Hebrew and Arabic, right-to-left and with no dir: a styled `?!` and brackets, numbers with a NO-BREAK, NARROW NO-BREAK or FIGURE SPACE and Arabic separators, SOFT HYPHENs, directional marks, a widened and a narrowed inline block in one line (`mixib`), under no transform, a scale of one axis and a quarter turn, word and letter spacing, with a text shadow and without; and the class of `ar/mixib`: inline blocks widened by `scaleX(2)` or narrowed by `scaleX(0.6)` to `0.8`, holding a word, a styled `?!` or both. They found the review's F1, a styled `?!` in a squeezed inline block losing the structure tree's order, and F2, an Arabic line with a widened block drawing more glyphs over others | round 6's independent review |
 | `v6time` | `zz_v6_time` | | what reading each line back costs `Document::open`, at doubling sizes | round 6's hunt (lane V) |
 
 Each `zz_vx_*` family is an earlier family with a shim around
@@ -164,7 +165,7 @@ Every family a ratchet reads is also a committed test, in two `#[ignore]`d
 integration-test binaries, so that CI compiles two binaries and not seventy:
 
 - `crates/tinker-pdf/tests/rtl_probes.rs`: one test a `rows` or `tsv` family
-  of [families.tsv](families.tsv), 78 in all, each its module under
+  of [families.tsv](families.tsv), 80 in all, each its module under
   `rtl_probes/`; the harness the rr3m families share is
   `rtl_probes/common.rs`, the overprint shim of the `zz_vx_*` families
   `rtl_probes/vov.rs`, and the comparison `rtl_probes/ratchet.rs`;
@@ -190,7 +191,7 @@ RAN rtl_lines zz_k11rv_bidi against 935b077: 93851 rows, 2 printed lines; 0 wors
 
 then a `WORSE`, `GAIN` or `CHANGED` line for each book that moved (up to 40 of
 each), and fails if any book reads worse than at 935b077 in that build. A run
-of the three commands prints 78, 78 and 4 `RAN` lines; fewer means a family
+of the three commands prints 80, 80 and 4 `RAN` lines; fewer means a family
 did not run. Worse is any of:
 
 - a book the baseline has and the run lacks, or fewer rows;
@@ -234,6 +235,19 @@ At round 6's fix, which reads each line back on the page it is drawn on
 books better in a default build and 415 with `bundled-fonts`, and on the
 Windows machine the suites take 6 and 7 minutes and 6 seconds (365, 398 and
 6 seconds of the tests' own time).
+
+The two `rv6` families, the hunts of round 6's independent review, joined the
+suites on 23 October 2026, after both measurements. On f280daf1's code they
+fail, in both builds, and the other 78 families pass with nothing worse: they
+read 8 books (`zz_rv6_hunt`) and 15 (`zz_rv6_ib`) worse than at 935b077, and
+every one is the review's open finding F2: an Arabic paragraph with no dir and
+an inline block widened by `scaleX(2)` that holds a styled `?!` (`ar/mixib`,
+`ar/both*`) draws one or two more glyphs over others than at 935b077 (6 to 8,
+2 to 4, 11 to 13, and 0 to 1 under a quarter turn), and reads in logical order
+where 935b077 did not. The over-glyph count is each book's `overlap=a/b` (`b`,
+glyphs over another on one baseline) and its `VOV` line, which says where.
+The two tests fail until F2 is fixed or the owner accepts its price and the
+baseline moves ([Refreshing the baseline](#refreshing-the-baseline)).
 
 Both binaries also hold their comparison to this section in tests that are not
 ignored and build no book (`cargo test -p tinker-pdf --test rtl_probes`, `cargo
@@ -605,6 +619,13 @@ to.
   overprint and the text. At a tree whose `crates/*/src` is 935b077's the
   suites read their 935b077 outputs with nothing worse, better or changed,
   their dump the baselines' data lines byte for byte.
+- **`zz_rv6_hunt` and `zz_rv6_ib`** were made on the owner's Windows machine
+  on 23 October 2026, by `run.sh` at each tree in both builds, at 935b077 on a
+  checkout of 05cea0b, from the scratch probe of round 6's independent review
+  (`zz_rv6_ib` is its first 276 lines with the second hunt's cases): at
+  05cea0b their data lines are the review's own runs there, line for line,
+  and on f280daf1's code the suites' dump is `run.sh`'s output. They have
+  not been run as suites at a tree whose `crates/*/src` is 935b077's.
 
 Rerunning `zz_rr3m_hunt_min` at 9297d2d, and `zz_rr3m_hunt_min`,
 `zz_rr3m_h1min2`, `zz_c1_tw`, `zz_code1_neg` and every line probe at 935b077,

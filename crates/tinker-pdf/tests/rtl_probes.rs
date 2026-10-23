@@ -92,6 +92,8 @@ mod rtl_probes {
     pub(crate) mod zz_rr3m_lane_r;
     pub(crate) mod zz_rr3m_probe;
     pub(crate) mod zz_rr3m_tie;
+    pub(crate) mod zz_rv6_hunt;
+    pub(crate) mod zz_rv6_ib;
     pub(crate) mod zz_v6_auto;
     pub(crate) mod zz_v6_cells;
     pub(crate) mod zz_v6_inline;
@@ -207,4 +209,6 @@ families! {
     zz_f6_readas = "zz_f6_readas": "f6inj: round 6 lane F (injections); characters the page's fonts read otherwise than typed (a NO-BREAK SPACE, a SOFT HYPHEN, letters past the Basic Multilingual Plane) under spacing and a scale, the books of read_as",
     zz_f6_unfired = "zz_f6_unfired": "f6inj: round 6 lane F (injections); books for the rules of the read-back no suite fired in a build: reads_whole and reads_closer with bundled-fonts, read_as",
     zz_f6_h23price = "zz_f6_h23price": "f6pdf: round 6 lane F (owner options); plain synthetic PDFs, two words of one script in two text objects a gap apart: the price of answering H2-3 in the reader",
+    zz_rv6_hunt = "zz_rv6_hunt": "rv6: round 6 review (hunt); a styled ?! and brackets, numbers with a NO-BREAK, NARROW NO-BREAK or FIGURE SPACE and Arabic separators, SOFT HYPHENs, directional marks, a widened and a narrowed inline block in one line, a line repeated under transforms and over pages; under none, a scale of one axis and a quarter turn, word and letter spacing, with a text shadow and without",
+    zz_rv6_ib = "zz_rv6_ib": "rv6: round 6 review (hunt); the class of the first hunt's ar/mixib/none: inline blocks widened by scaleX(2) or narrowed by scaleX(0.6) to 0.8, holding a word, a styled ?! or both, under none, a quarter turn and scaleX(2), word spacing 0.4em to 0.55em and letter spacing",
 }
