@@ -1744,9 +1744,16 @@ fix was to sharpen the injection rather than to shrug at the number.
   cargo test -p tinker-pdf-shape --test rtl_lines -- --ignored --nocapture
   ```
 
-  A whole run prints 78, 78 and 4 `RAN` lines (`grep -c '^RAN'`); fewer is a
+  A whole run prints 80, 80 and 4 `RAN` lines (`grep -c '^RAN'`); fewer is a
   family that did not run, and a run is read by its banners, its `test
-  result` and its exit status together. In debug on the owner's Windows
+  result` and its exit status together. Two families fail today, in both
+  builds, and only on one class: `zz_rv6_hunt` (8 books) and `zz_rv6_ib`
+  (15), round 6's review hunts, hold dir-less Arabic paragraphs with a
+  styled `?!` in an inline block widened by `scaleX(2)` that draw one or two
+  more glyphs over others than at 935b077 while reading in logical order
+  where 935b077 did not. The owner landed them red on 23 October 2026, first
+  in ROADMAP's order of work (CD-19, Left (10)); the other 78 families and
+  `rtl_lines` pass. In debug on the owner's Windows
   machine (Windows 11, 8 logical CPUs) they take 6 and 7 minutes and 6
   seconds at 935b077's code (369, 431 and 6 seconds of the tests' own
   time) and at round 6's fix alike (365, 398 and 6), where the 63 families
@@ -1756,9 +1763,11 @@ fix was to sharpen the injection rather than to shrug at the number.
   `cargo test`. On Windows, under Git Bash, the suites and the kit read
   what they read on Linux (the kit README's "On Windows" names what still
   differs there). Every book a review of K-11 or CD-19 named is a case, and
-  so is every book round 6's fix found, with its guards and controls:
-  306 in a default build and 308 with `bundled-fonts` (the `CASE` lines a
-  run with `--nocapture` prints), each in the test of its mechanism
+  so is every book round 6's fix and its review found, with its guards and
+  controls: 348 in a default build and 351 with `bundled-fonts` (the `CASE`
+  lines a run of `epub_conservation` and `epub_fallback` with `--nocapture`
+  prints, counted wherever a line holds one: libtest can print its own
+  `test … ok` before one on the same line), each in the test of its mechanism
   (`epub_conservation.rs`,
   `epub_fallback.rs`, read through `tests/epub_support/reading.rs`), which
   every `cargo test` runs: a case fixed is held to its right reading, a case

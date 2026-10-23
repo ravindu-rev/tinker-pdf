@@ -4486,6 +4486,86 @@ fn a_styled_mark_in_a_squeezed_block_reads_in_its_order_where_the_runs_space_dra
     check(&cases);
 }
 
+/// The review's `both` shape: twice, a word, an inline block widened by
+/// `scaleX(2)` that holds a word and a styled `?!`, a word, an inline block
+/// squeezed by `scaleX(sx)` that holds a word, a word and a stop.
+fn widened_and_squeezed(words: &[&'static str; 12], sx: &str) -> String {
+    rep(2, |i| {
+        format!(
+            "{} <span style=\"display: inline-block; transform: scaleX(2)\">{} <b>?!</b></span> {} <span style=\"display: inline-block; transform: scaleX({sx})\">{}</span> {}.",
+            word(words, i),
+            word(words, i + 1),
+            word(words, i + 2),
+            word(words, i + 3),
+            word(words, i + 4)
+        )
+    })
+}
+
+/// **A styled `?!` in an inline block widened by `scaleX(2)` reads in its
+/// order, and draws more glyphs over others than at 935b077** (round 6's
+/// review, F2; ROADMAP CD-19, Left (10)), pins.
+///
+/// A dir-less Arabic paragraph that holds, twice, an inline block widened
+/// by `scaleX(2)` with a word and a styled `?!` in it, and one squeezed by
+/// `scaleX(0.6)`, `0.7` or `0.8`, at `word-spacing: 0.5em` or `0.55em`. At
+/// 935b077 the review's hunts read it out of logical order, drawing 11, 6
+/// and 2 glyphs over others, and none turned a quarter. Here it reads in
+/// logical order and draws 13, 8 and 4, and 1 turned a quarter: the CASE
+/// lines print each count. The owner has not said whether that is a price
+/// to pay for the order (ROADMAP CD-19, Left (10), first in the order of
+/// work), so each paragraph is pinned at exactly what it reads today, the
+/// same in both builds: no glyph apart in any, found as well where the
+/// block is squeezed least, and conserved turned a quarter.
+#[test]
+fn a_styled_mark_in_a_widened_block_reads_in_order_and_is_pinned_at_what_it_draws_over() {
+    const STYLES: [&str; 6] = [
+        "p { margin: 0 30%; transform: none; word-spacing: 0.5em; } .w { transform: none }",
+        "p { margin: 0 30%; transform: none; word-spacing: 0.55em; } .w { transform: none }",
+        "p { margin: 0 30%; transform: rotate(90deg); word-spacing: 0.5em; } .w { transform: none }",
+        "p { margin: 0 30%; transform: scaleX(1.4); word-spacing: 0.5em; } .w { transform: none }",
+        "p { margin: 0 30%; transform: scaleX(2); word-spacing: 0.5em; } .w { transform: none }",
+        "p { margin: 0 30%; transform: scaleX(2); word-spacing: 0.55em; } .w { transform: none }",
+    ];
+    let mut cases = Vec::new();
+    for (sx, pins) in [
+        (
+            "0.6",
+            [
+                "logical",
+                "logical",
+                "cons logical found",
+                "logical",
+                "logical",
+                "logical",
+            ],
+        ),
+        ("0.7", ["logical"; 6]),
+        (
+            "0.8",
+            [
+                "logical",
+                "logical found",
+                "cons logical found",
+                "logical found",
+                "logical found",
+                "logical found",
+            ],
+        ),
+    ] {
+        for (style, pin) in STYLES.into_iter().zip(pins) {
+            cases.push(Case::both(
+                "a dir-less Arabic paragraph's styled ?! in an inline block widened by scaleX(2) (pinned)",
+                "ar",
+                style,
+                format!("<div class=\"w\"><p>{}</p></div>", widened_and_squeezed(&AR, sx)),
+                Expect::Pinned(pin),
+            ));
+        }
+    }
+    check(&cases);
+}
+
 /// **A line a reader cuts on the page under a transform is searched in its
 /// runs' own space too** (round 6's lane F, the sweep of V1's class),
 /// guards.
