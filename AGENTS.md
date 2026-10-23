@@ -20,8 +20,12 @@ what comes next.
 ## Commits
 
 - Commit as **Ravindu Wijegunawardhana <ravindudenuwan.dev@gmail.com>**,
-  signed with the owner's SSH signing key through the repository's git
-  config.
+  signed with the default ed25519 key in `~/.ssh` (the owner, 23 October
+  2026: "to commit you should use the default ed25519 key in .ssh to
+  sign"), through the repository's git config: `gpg.format ssh`,
+  `user.signingkey` set to `~/.ssh/id_ed25519.pub`, `commit.gpgsign true`.
+  - A clone without that config gets those three keys and the identity
+    above before its first commit, and nothing else.
   - Never pass `--no-gpg-sign`, never change the git identity or signing
     config to get a commit through, and never commit unsigned or under
     another identity.
@@ -41,11 +45,20 @@ what comes next.
 
 ## Branches and releases
 
-- **All work goes to `develop`**, directly, with no pull request, and is
-  pushed there. The owner alone merges `develop` into `main`, for releases
-  (H-01, the owner on 16 October 2026: "that's fine you can do the changes
-  directly to develop, i'll manually check and merge develop to master for
-  releases").
+- **All work goes to `develop`**, with no pull request, and is pushed there.
+  The owner alone merges `develop` into `main`, for releases (H-01, the
+  owner on 16 October 2026: "that's fine you can do the changes directly to
+  develop, i'll manually check and merge develop to master for releases").
+- **When a roadmap step is done, everything it changed is merged into
+  `develop` and every other branch is cleared** (the owner, 23 October 2026:
+  "when a step of roadmap is done all the changes should be merged to
+  develop and clear all other branches").
+  - While a step runs it may use side branches and git worktrees.
+  - When it is done, they are merged into `develop` fast-forward, so
+    `develop` stays linear, and `develop` is pushed.
+  - Then every branch except `develop` and `main` is deleted: local
+    branches, worktrees, and any side branch on `origin`. `main` is the
+    owner's and is never touched.
 - **Until the owner says otherwise** (standing since 12 October 2026):
   - open no pull request to `main`;
   - merge nothing into `main`.
@@ -55,21 +68,23 @@ what comes next.
 
 ## How work runs
 
-- **Work runs in the session, concept first** (the owner, 23 October 2026:
-  workflows cost too many tokens).
-  - Name the mechanism and prototype the fix. Then run the cheap checks
-    that decide it: does any book change, and what does it cost in time,
-    in release and in debug? Only then write the tests, injections and
-    docs.
-  - A single subagent takes the work that needs a fresh, independent
-    context: the review, which hunts new shapes, reads the code and
-    re-measures every claim, or a long self-contained lane in its own git
-    worktree. Multi-agent workflows run only when the owner asks for one.
+- **Work runs as workflows, one roadmap step per run** (the owner, 23
+  October 2026, replacing that day's earlier "workflows cost too many
+  tokens": "since we use workflows for everything each of those should be
+  cut to small pieces"). [docs/ROADMAP.md](docs/ROADMAP.md) says what a
+  step is and how one runs. A step that turns out bigger than one run is
+  split in the roadmap before the work goes on.
+  - Concept first, inside the run: name the mechanism and prototype the
+    fix. Then run the cheap checks that decide it: does any book change,
+    and what does it cost in time, in release and in debug? Only then
+    write the tests, injections and docs.
+  - The review is an agent with a fresh, independent context: it hunts new
+    shapes, reads the code and re-measures every claim. Agents that change
+    files at the same time each work in their own git worktree.
   - Every finding is reproduced before it is fixed, and fixes run in a
     bounded loop.
 - A lane resets against the local `develop`, so `develop` does not move while
-  lanes are running. Work that must land meanwhile goes on a side branch and
-  is pushed from there.
+  a step's lanes are running.
 - **Test corpora are never downloaded**, by any route. They run only in CI's
   jobs. Locally, behaviour is shown with synthetic fixtures and probes.
 - **The owner decides prices.** When a fix costs anything that used to work,
