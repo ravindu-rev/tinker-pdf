@@ -303,8 +303,9 @@ figure): a right-to-left line that opens with one of them before a pair,
 line with no `dir` draws and reads as that one does, its ending last,
 `نور) يوم(…` (read alone, neither line can see the line above that gave the
 pair its level). A run that mixes the stops, `.!` or `!…`, which the rule
-as built takes as well, pays the same, and the owner's decision does not
-name it; ruling 14 counts it, and ROADMAP CD-19 keeps it for the owner.
+as built takes as well, reads the same, and the owner's decision does not
+name it: ruling 14 counts its books and leaves to the owner whether they are
+of its price, and ROADMAP CD-19 keeps them.
 As first proposed the tie-break asked neither, and read every such line backwards
 (`.and 2) close it )שלום( open the file )Step 1`; review of the K-11 fix).
 Applying L2 to levels resolved over the drawn line, which

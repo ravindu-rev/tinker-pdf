@@ -456,7 +456,9 @@ styled apart across a stretch of two ems, `αλφα <b>βήτα</b> ספר בי�
 at `word-spacing: 2em` (12 (4) that conserved at 56dfd93), whose stretch no
 placement of a space parts into halves a reader resumes a line across; and
 a run of `.!` or `!…` opening a right-to-left line before a styled pair
-(ruling 14 counts it with the price); and two of the hunt's in each build,
+(the owner's decision of 12 October 2026 does not name it, and whether it
+is of ruling 14's price is the owner's to say: ROADMAP CD-19 keeps it); and
+two of the hunt's in each build,
 a paragraph of Arabic with no `dir` whose inline `word-spacing: 1em` span
 cuts a word (it conserved at 56dfd93) and a `;` glued to an Arabic word,
 letter-spaced by `0.25em` and justified, which conserves now and no longer

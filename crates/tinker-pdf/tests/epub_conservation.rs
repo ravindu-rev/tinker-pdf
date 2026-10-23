@@ -1534,9 +1534,10 @@ fn price_book(words: &[&'static str], lead: usize, mark: &str, open: &str, close
 ///   reads right.
 /// - H6 and PRICE-RESIDUAL, a run of stops before a styled pair after a
 ///   `<br/>`: with no spacing, `…`, `?!` and `!!` pay the price, and the
-///   mixed runs `.!` and `!…`, which the decision does not name (ROADMAP
-///   CD-19, Left (5)), pay it too; a lone `.`, the price's control, reads as
-///   at 9297d2d and 56dfd93 (it conserved at 94e3bb5 alone); all six pinned.
+///   mixed runs `.!` and `!…` read as they do, which the decision does not
+///   name: whether they are of its price is the owner's to say (ROADMAP
+///   CD-19, Left (5)); a lone `.`, the price's control, reads as at 9297d2d
+///   and 56dfd93 (it conserved at 94e3bb5 alone); all six pinned.
 ///   At `word-spacing: 0.6em` all six read right, and so do the `!?` and `?!`
 ///   books before styled brackets at `0.6em` and `1em` that lost their
 ///   structure tree's order where the overflow font at 0 Tw met the rule,
