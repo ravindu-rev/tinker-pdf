@@ -1757,7 +1757,7 @@ fix was to sharpen the injection rather than to shrug at the number.
   what they read on Linux (the kit README's "On Windows" names what still
   differs there). Every book a review of K-11 or CD-19 named is a case, and
   so is every book round 6's fix found, with its guards and controls:
-  299 in a default build and 302 with `bundled-fonts` (the `CASE` lines a
+  306 in a default build and 308 with `bundled-fonts` (the `CASE` lines a
   run with `--nocapture` prints), each in the test of its mechanism
   (`epub_conservation.rs`,
   `epub_fallback.rs`, read through `tests/epub_support/reading.rs`), which

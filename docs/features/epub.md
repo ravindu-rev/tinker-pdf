@@ -576,7 +576,21 @@ Greek cell before it had joined to that cell's line and which, alone on
 its line, reads from the right now. And with `bundled-fonts` a word of a
 Hebrew paragraph with no `dir` of inline blocks squeezed by `scaleX(0.5)`,
 at `word-spacing: 0.6em`, is not found by search, which 9297d2d found and no
-tree since (15 books of round 6's sweep; ROADMAP CD-19, Left (7)).
+tree since (15 books of round 6's sweep; ROADMAP CD-19, Left (7)). A line
+whose right drawing comes after the read-back's budget is drawn by the
+rules: a right-to-left paragraph after a generated `§ ` at
+`word-spacing: 0.6em` or `1em`, and a `<bdi>` of Latin with Hebrew in it,
+books no tree read right (ROADMAP CD-19, (8)).
+**What reading back costs** is measured for the owner (ROADMAP CD-19). In
+debug on the owner's Windows machine, `Document::open` of one line of 3 528
+characters that no drawing reads right, which spends the whole budget, takes
+0.22 of 935b077's time (4 377 ms at 935b077), plain right-to-left prose,
+justified, 0.69–0.70, and no shape of the probe kit's `zz_v6_time` more than
+0.80; in release no shape more than 0.95. It is linear in the line. Holding
+each drawing tried to the line's words, searching on past a reading of the
+rules' drawing that runs two words together or cuts one, and reading each
+drawing once read more books right, at a cost in time or in books that
+ROADMAP CD-19 measures for the owner; none is taken.
 A slice that ends on a mark ends its text object a spacing less a millionth
 of an em from the next run, so a run that ends on a mark is not cut from
 what follows up to half an em of spacing, half an em included, and is cut

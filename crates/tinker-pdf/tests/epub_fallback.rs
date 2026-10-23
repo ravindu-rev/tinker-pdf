@@ -4304,6 +4304,47 @@ fn a_reading_that_cuts_or_joins_a_word_is_taken_as_935b077_took_it() {
     ]);
 }
 
+/// **A line whose right drawing lies past the read-back's budget is drawn by
+/// the rules** (V5 of round 6's lane V; ROADMAP CD-19, Left (8)), pinned.
+///
+/// The read-back tries each run's drawings, then two runs' at a time, and
+/// gives up after `paint::READINGS_PER_LINE` readings. Many of a run's
+/// drawings write the same text objects as the rules' or as another of its
+/// own, and each is read again: on a line of a few spaced runs the pair that
+/// reads it right comes after the budget. A right-to-left paragraph after a
+/// generated `§ ` at `word-spacing: 0.6em` or `1em` is not read whole, and a
+/// `<bdi>` holding a Latin sentence with Hebrew in it, in a Hebrew paragraph
+/// at `word-spacing: 1em`, does not conserve; no tree read them so. Reading
+/// each drawing once reaches those drawings, and costs an Arabic paragraph
+/// at `line-height: 0.4`, whose rows a reader runs into the next ones, its
+/// structure tree's order, which it holds at 56dfd93 and 935b077: the
+/// read-back reads a line alone, and a drawing it finds right for the line
+/// is read with the next on the page. Whether that is a price worth paying
+/// is the owner's; both are pinned at what they read.
+#[test]
+fn a_line_whose_right_drawing_lies_past_the_budget_is_drawn_by_the_rules() {
+    let he = "<p dir=\"rtl\" class=\"b\">שלום עולם <b>מלחמה</b> ספר، בית (גדול) אור.</p>";
+    let ar = "<p dir=\"rtl\" class=\"b\">كتاب مدرسة <b>الطالب</b> جميل، بيت (كبير) نور.</p>";
+    let generated_06 = "p { word-spacing: 0.6em } .b::before { content: \"\u{a7} \" }";
+    let generated_1 = "p { word-spacing: 1em } .b::before { content: \"\u{a7} \" }";
+    let tight = "p { margin: 0 30%; line-height: 0.4; letter-spacing: 0.1em; word-spacing: 0.5em; text-align: justify }";
+    check(&[
+        Case::both("a Hebrew paragraph after a generated \u{a7} at 0.6em (V5)", "he", generated_06, he, Expect::Pinned("found apart")),
+        Case::both("the same at 1em (V5)", "he", generated_1, he, Expect::Pinned("found apart")),
+        Case::both("an Arabic paragraph after a generated \u{a7} at 0.6em (V5)", "ar", generated_06, ar, Expect::Pinned("found apart")),
+        Case::both("the same at 1em (V5)", "ar", generated_1, ar, Expect::Pinned("found apart")),
+        Case::both(
+            "a bdi of Latin with Hebrew in it in a Hebrew paragraph at 1em (V5)",
+            "he",
+            "p { word-spacing: 1em; margin: 0 20% }",
+            "<p dir=\"rtl\">יום <bdi>The word שלום means עולם in <i>מלחמה</i>. The word שלום means עולם in <i>מלחמה</i>.</bdi> בראשית.</p>",
+            Expect::Pinned("found apart"),
+        ),
+        Case::both("a justified Arabic paragraph at line-height 0.4, no dir (what reading each drawing once costs)", "ar", tight, format!("<p>{}</p>", styled_marks(&AR)), Expect::Pinned("logical found apart")),
+        Case::both("the same, right to left (what reading each drawing once costs)", "ar", tight, format!("<p dir=\"rtl\">{}</p>", styled_marks(&AR)), Expect::Pinned("logical found apart")),
+    ]);
+}
+
 /// The inline-block shape of the round-6 sweep: a word, an inline block
 /// squeezed by `scaleX(0.5)` holding two words and a styled `?!`, a word,
 /// `25٪` and a word, three times.

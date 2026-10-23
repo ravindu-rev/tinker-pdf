@@ -805,7 +805,11 @@ living in one feature's head.
       (best of six), and every book of the kit reads as before, its outputs
       byte for byte.
 
-    No time or text price of the read-back is accepted.
+    No time or text price of the read-back is accepted. Every other option
+    measured for the owner — holding each drawing to the line's words,
+    searching on past a reading of the rules' drawing that joins or cuts a
+    word, reading each drawing once, and H1, H2-3 and H6 — is in ROADMAP
+    CD-19 with its price, and none is taken.
 
 ## How to add a ruling
 
