@@ -240,6 +240,15 @@ def compared(cases):
         return out
 
 
+def classed(books):
+    """classes.py's exit status and lines for a TABLE.json whose bundled books,
+    {family: [key]}, were conserving at 56dfd93 and are not now."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'table.json')
+        write(path, json.dumps({f'bundled/{fam}': {'worse_m': keys} for fam, keys in books.items()}))
+        return ran('classes', path, '--builds', 'bundled')
+
+
 def checks():
     windows = on_windows(LINUX)
     fixtures = WINDOWS_HEADER + '\n' + LINUX.split('fedcba9876543210)\n', 1)[1]
@@ -308,6 +317,18 @@ def checks():
            lambda: K.not_ok('a\tOK\nb\tmaybe\nc\tNO\n'), "raised ValueError: a row without an OK/NO verdict: 'b\\tmaybe'")
     yield ('not_ok: rows with verdicts reduce as before',
            lambda: K.not_ok('a\tx\tOK\tdraws\na\tx\tNO\tundrawn\nb\tNO\nc\tOK\n'), (4, ['a\tx\tNO\tundrawn', 'b\tNO']))
+    # classes.py: ROADMAP CD-19's Left (9), the NO-BREAK SPACE number before an
+    # ARABIC COMMA under scaleX(2), a class of its own; the same book under
+    # word spacing alone is none of it.
+    scaled, spaced = 'p { transform: scaleX(2); word-spacing: 0.6em }\t', 'p { word-spacing: 0.6em }\t'
+    yield ('classes: Left (9) is a class, its books under word spacing alone are not',
+           lambda: classed({'zz_f6_readas': [scaled + 'he/comma/none', scaled + 'he/comma/rtl', spaced + 'he/comma/none'],
+                            'zz_f6_unfired': [scaled + 'readas/he/comma2/none', scaled + 'readas/he/comma2/rtl']}),
+           (0, ['## bundled',
+                'Left (9) NO-BREAK SPACE number before an ARABIC COMMA\tbooks 4, worse than 9297d2d 0, '
+                'conserving at 56dfd93, not now 4, both 0',
+                'others\tbooks 1, worse than 9297d2d 0, conserving at 56dfd93, not now 1, both 0',
+                "  other\tzz_f6_readas\t'p { word-spacing: 0.6em }\\the/comma/none'"]))
 
 
 def main():

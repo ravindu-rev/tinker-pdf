@@ -69,6 +69,14 @@ CLASSES = [
     # paragraph of inline blocks squeezed by scaleX(0.5), a word of which
     # search found at 9297d2d only.
     ('Left (7) squeezed inline blocks', lambda p, n, s='': p == 'zz_f6_transform' and n == 'he/ib/none'),
+    # Round 6's fix, Left (9), with bundled-fonts: `W 1 234، <b>W</b> W.` in
+    # Hebrew, the number's halves a NO-BREAK SPACE apart, right to left or
+    # with no dir, under scaleX(2) at word-spacing 0.6em, which conserved at
+    # 56dfd93 only and reads the comma apart since 935b077 (cause not found).
+    ('Left (9) NO-BREAK SPACE number before an ARABIC COMMA', lambda p, n, s='': 'scaleX(2)' in s
+        and 'word-spacing: 0.6em' in s and (
+        (p == 'zz_f6_readas' and n in ('he/comma/none', 'he/comma/rtl'))
+        or (p == 'zz_f6_unfired' and n in ('readas/he/comma2/none', 'readas/he/comma2/rtl')))),
 ]
 
 
