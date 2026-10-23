@@ -1,121 +1,151 @@
 # Where the last session stopped
 
-Written 12 October 2026, when the owner paused the work. The next session
-starts here: read this, then [AGENTS.md](../AGENTS.md), then continue with
-"Next, in this order" below. When this note is out of date, rewrite it or
-delete it in the same commit that moves the work on.
+Written 23 October 2026, when round 6 of ROADMAP CD-19 landed on `develop`.
+The next session starts here: read this, then [AGENTS.md](../AGENTS.md),
+then continue with "Next, in this order" below. AGENTS.md changed in this
+round: work runs in the session, concept first, with a single subagent for
+the review. When this note is out of date, rewrite it or delete it in the
+same commit that moves the work on.
 
 ## Where the work continues
 
-**On `develop`.**
-- On 12 October 2026 the owner paused the work on a side branch,
-  `rtl-probe-kit`.
-- On 16 October the owner had it brought back. It was fast-forwarded into
-  `develop` (`b9b6970`, signed hashes kept), and its local copy was deleted.
-- The remote `rtl-probe-kit` still has to be deleted by the owner on GitHub,
-  with the stale `wave8/8A-impl` and `wave8/8B-impl`: this session's proxy
-  refuses branch deletion. Nothing is lost by deleting them: `rtl-probe-kit`
-  is an ancestor of `develop`, and the two `wave8/*` branches' work reached
-  `develop` by cherry-pick in October.
-- Round 6 picks up from "Next, in this order" below.
+**On `develop`**, pushed. Every change goes to `develop` directly, and only
+the owner merges `develop` into `main` (H-01). `main` is unchanged at
+`1a9013c`.
+
+- Round 6 ran on the owner's Windows machine from 16 to 23 October 2026,
+  after a cloud session had stopped it.
+- Its sub-branches are deleted: `r6-wip` and `rtl-probe-kit` on GitHub, and
+  every local lane branch. The folded commits on `develop` are the record.
+- The lanes' notes, measurements and scratch probes stay in `.scratch/` on
+  that machine only (gitignored). Nothing below depends on them.
 
 ## State
 
-- **`develop`** carries round 5 of ROADMAP CD-19 and the K-11 follow-ups:
-  eight signed commits, from `c7e9b89` to `935b077`. It also carries the
-  probe kit, [tools/probes/rtl](../tools/probes/rtl/README.md). Every gate
-  was green on that code, in the default, `bundled-fonts` and no-default-features builds,
-  and no determinism hash moved.
-- **`main`** is still the merge of `56dfd93`. By the owner's standing
-  instruction, nothing goes to `main` and no pull request is opened until
-  the owner says so.
-- **What closed in round 5:**
-  - CD-19's root: the standard-14 overflow font is written at `0 Tw`, so
-    nothing after its code-32 letter moves.
-  - H4, where search lost a word to CD-19's overprint, is gone.
-  - V1: closing quotes and runs of stops end a line. The owner accepted the
-    full price on 12 October 2026, and ruling 14 records it with its figures.
-  - V3: a sign past WinAnsi reads with its number.
-  - The reader's word cut: a word continues across a cut only where spacing
-    put the next glyph.
-- **Not run:** the workflow was stopped right after its second fix round, as
-  the owner asked. That fix (`935b077`, "read each right-to-left line back as
-  a reader does") has had no independent verification and no fresh hunt.
+- **Round 6 on `develop`**: 20 signed commits after `d1c32cd`, up to
+  `dedd99a`, then this note.
+  - **Lane K** (`35ab4ab`…`05cea0b`): the probe kit's families are
+    `#[ignore]`d ratchet suites against 935b077.
+  - **`30d92c5`:** the kit names its fixtures with `/` on every platform,
+    so the suites hold on Windows.
+  - **Lane F, CD-19's fix** (`fcdba59`…`ade0b2e`): each right-to-left line
+    is read back on the page it is drawn on. It costs no time: release
+    `zz_v6_time` runs at 0.24–0.91× of 935b077 on every shape (`ls-scaled`
+    0.90–0.95×), and debug at 0.20–0.80×, against a noise band of about
+    ±7%. `read_as` is narrowed, so the NO-BREAK SPACE grid reads `?!` as
+    typed. The owner declined three prices, and ruling 14 records each with
+    its figures: A9L's time and `read_as`'s text on 17 October; the release
+    `ls-scaled` time and NOOWN's books on 23 October.
+  - **The review's fixes:**
+    - `d134267`: a drawing found in the runs' own space is taken where it
+      keeps more of the line's runs in their order. 19 paragraphs (8 with
+      `bundled-fonts`) are back at 935b077's order, and 9 more read in
+      order.
+    - The kit's harness: `494f38e` (an injection's count comes from the
+      bytes on disk and every binary started), `eba8649` (a cut run fails
+      its comparison), `40862d7` (a TSV row needs a verdict) and `f280daf`
+      (Left (9) has a class).
+    - `a26d92d`: the review's hunts are kit families, `zz_rv6_hunt` and
+      `zz_rv6_ib`.
+    - `60d6426`: F2's books are pinned.
+    - `dedd99a`: the owner's decisions (AGENTS.md, `.claude/settings.json`,
+      and ROADMAP's H-01, H-03, MS-11 and K-06).
+- **Gates at the landed tip (`dedd99a`), on Windows.** Every step exits 0:
+  - fmt, checked package by package, all 22;
+  - clippy, in the default and `bundled-fonts` builds;
+  - `cargo test --workspace`: 6 994 passed;
+  - `tinker-pdf` with `bundled-fonts`: 2 748 passed; with no default
+    features: 2 742;
+  - determinism in both builds, and the shaping fingerprints;
+  - the seven examples;
+  - wasm32-unknown-unknown and the four wasm32-wasip1 legs;
+  - the fuzz check and `xtask check`.
+
+  The only exception is the suites, below.
+- **The suites** print 80, 80 and 4 `RAN` lines. The 78 older families and
+  `rtl_lines` pass. `zz_rv6_hunt` (8 books) and `zz_rv6_ib` (15) fail in
+  both builds, on CD-19 Left (10) alone: the owner landed them red on 23
+  October as its tripwire.
+- **CI on GitHub has not run on `develop`:** `ci.yml` fires on `main` and on
+  pull requests (MS-11).
 
 ## Still open
 
-The ROADMAP CD-19 row stays, narrowed. Its "Left" list (1)–(5) holds every
-item below, with the counts measured on `935b077`.
+- **CD-19 Left (10), first in the order of work.** A dir-less Arabic
+  paragraph with a styled `?!` in an inline block widened by `scaleX(2)`
+  reads in logical order since round 6, where 935b077 did not. It draws two
+  more glyphs over others (11→13, 6→8, 2→4), and one where none were drawn
+  turned a quarter: 23 rows a build. The owner has to say whether that is a
+  price for the order or wants a guard on the page. Held by the two red
+  families above, and pinned by `epub_fallback.rs`'s
+  `a_styled_mark_in_a_widened_block_reads_in_order_and_is_pinned_at_what_it_draws_over`.
+- **CD-19's owner options**, none taken. Books worse/better against the
+  tip, default build (`bundled-fonts` in brackets). Each was built on
+  `6f4a8e12`'s `paint.rs`, whose kit outputs equal the landed tip's: rebuild
+  each on the landed code before deciding (`d134267` changed
+  `reads_closer`).
 
-- **H1, needs the owner's word on the comma tie-break.**
-  - Shape: a Hebrew paragraph with no `dir` (or `dir=ltr`) ending in a
-    number and a stop, under `word-spacing`, such as
-    `<p>בראשית. אור ٦٠.</p>` at 0.5em.
-  - Cost: 56 books in a default build, 53 of which conserved at `9297d2d`.
-  - No drawing reads it right; the tie-break decides it.
-- **H2-3, needs the owner's call on Latin parity.**
-  - Shape: an inline-block cutting a Greek, Cyrillic or Armenian word.
-  - Cost: 93 (30 with bundled fonts) books that read whole only because the
-    overprint closed the block's gap.
-  - A Latin word cut the same way reads as two words at every tree.
-- **H6 with no spacing, needs the owner.** A right-to-left line opening with
-  `.!` or `!…` after a `<br/>`: 4 (4) books plus 4 (4) minimised ones. The
-  owner's 12 October decision does not name these.
-- **H2-2 remainder and H2-7a–d, need reader changes.** About 50 books where
-  no drawing reads the line right under K-11's reader:
-  - a styled Greek word, then a bare right-to-left gloss and a Latin tail at
-    2em;
-  - a Latin gloss;
-  - table cells;
-  - `25، <b>W</b>`;
-  - a dir-less Hebrew line ending in `؟`.
-- **Smaller items:**
-  - two hunt books per build;
-  - 26 (25) dir-less table books that lose structure-tree order only (none
-    ever conserved);
-  - `5°<i>W</i>.`: 2 (2) books.
+  | Option | What it is | Worse / better | Cost |
+  | --- | --- | --- | --- |
+  | H1 | the comma tie-break | 1 075 / 871 (1 775 / 916) | 6 case tests flip |
+  | H6 | mixed stop runs | 8 / 12 (6 / 10) | — |
+  | D | each drawing read once | 6 / 341 (7 / 257) | 4 more glyphs drawn over others |
+  | W | hold each drawing tried to the line's words | 0 / 360 (0 / 333) | time only |
+  | WJ | W, and search on where the rules' drawing runs two words together | 0 / 2 166 (0 / 1 784) | time only |
+  | WJC | WJ, and search on where it cuts a word at the spacing | 0 / 3 903 (0 / 3 710) | time only |
+  | H2-3 (i) | give the moved glyph back | 279 / 75 (189 / 24) | 174 (119) more books overprint |
+  | H2-3 (i2) | its narrower form | 24 / 75 (8 / 24) | 24 (8) more books overprint |
+  | H2-3 (ii) | a reader-side join | 24 / 189 (24 / 202) | glues Greek and Cyrillic words in plain PDFs |
+  | H2-3 (iii) | one text object across the box | 0 / 370 (0 / 370) | class 93 → 18 (30 → 6); no price measured |
 
-## Known issues in the probe kit: fixed
+  W, WJ and WJC cost time. It was measured only in debug, against the
+  fix's first form (A9L), which itself took 1.06–1.13× of 935b077's time:
+  - W: `rtl-justified` 2.3–2.7×;
+  - WJ: `rtl-justified` 5.8–6.6× and `rtl-justified-scaled` 2.1–2.2×;
+  - WJC: a letter-spaced line 48–51×, and 69–72× under `scaleX(2)`.
 
-The kit's own verification, run from its README on a fresh checkout,
-reproduced the `935b077` baselines byte for byte, and found six issues in the
-kit. Round 6's lane K fixed all six on 16 October 2026, in the commit that
-changed this paragraph; its message has the measurements:
+  Re-measure each on the landed code, in release and debug.
+- **CD-19 Left (1)–(9):** see ROADMAP CD-19. Each names its test and what
+  it waits on.
+- **The review's leftovers:**
+  - `paint::plan_key` keys the page's plans by memory address. It is safe
+    as called today, but fragile; keying by the run's place in the page
+    would end that.
+  - No ratchet holds `ride=`, the marks drawn outside their letter.
+  - In the new families, 33 books (19 with `bundled-fonts`) read worse
+    than at 9297d2d, though none worse than at 935b077, and `classes.py`
+    names none of them. 23 (12) are `narrowmark` books like Left (7), 8 (4)
+    are `both0.8`, and 2 (0) are `ar/fmt/rtl` turned a quarter.
+- **The kit:**
+  - `inject.py` touches only the crates its injections name, so give each
+    tree its own cargo target.
+  - The suites' times swing with load; the docs quote a quiet machine.
+- **Small and measured, not yet made:**
+  - **`perf(shape)`:** `crates/tinker-pdf-shape/build.rs`'s `bidi_class`
+    calls `abbreviate` once per code point. Hoisting the call out of the
+    loop took the build script from 35.0 s to 0.21 s, with `ucd.rs`
+    byte-identical, as measured by a peer session.
+  - **`fix(rtl)`:** `run.sh`, `diag.sh` and `inject.py` force
+    `CARGO_BUILD_JOBS=3`. Cargo's default is faster on 8 CPUs.
 
-1. an interrupt now stops the whole run and writes no done marker, however
-   it arrives (Ctrl-C, a signal to the runner, or one to cargo or the test
-   binary alone, which used to cost one family and still write the markers);
-2. the runner unsets every variable a probe reads, `RV4C_FILTER` included,
-   read off the probes;
-3. the `935b077` baseline's provenance says what is true: `7f1b3f8`'s
-   `crates/` tree is `935b077`'s;
-4. `table.py` and `cmp.py` leave out a family a partial run did not run;
-5. `VOV`, `TALLY`, `ZZ` and `PANIC` lines are parsed and compared;
-6. every script answers `--help`, the README names `progress`, `lines/` is
-   made only for a line probe, and `docs/verification.md` points at the kit.
+## Known issues on Windows
 
-Every book a finding of the K-11 round-4 review and of round 5 named, the
-77 regression tests' among them, is a committed case in the test of its
-mechanism, read as the kit reads a book (`epub_conservation.rs` and
-`epub_fallback.rs`, 245 cases in each build; the kit's README, "The
-regressions", says which test carries which): a case fixed is held to its
-right reading, a case still open is pinned at today's and names the ROADMAP
-CD-19 item that leaves it, so that it fails when that item closes. The
-families are `#[ignore]`d ratchets against `935b077`, each printing a `RAN`
-banner: `crates/tinker-pdf/tests/rtl_probes.rs` (63 families) and
-`crates/tinker-pdf-shape/tests/rtl_lines.rs` (4); see the kit's README, "The
-suites". `probes/regressions/` is gone.
+- `cargo fmt --all` passes Windows's command-line limit (os error 206) in a
+  deep worktree. Check each package with `cargo fmt -p`.
+- A tree copied with `tar` keeps its files' times, so cargo can reuse a
+  stale binary from a shared target. Never share a target between trees.
 
 ## Next, in this order
 
-1. **Run the round-2 verification that was skipped,** and a fresh hunt, on
-   `develop`. Both baselines apply: `9297d2d` and `56dfd93`.
-2. **Put the three owner decisions above to the owner:** H1, H2-3 and H6.
-3. **Fix what remains by class,** not by instance (AGENTS.md): one lane for
-   the reader-side mechanism behind H2-2 and H2-7.
-4. **Then the roadmap's order of work:**
-   - MS-11: `ci.yml` on push to `develop`, and the nightly fuzz and corpus
-     runs dispatched on `develop`. Its epub-corpus clause is already met.
-   - K-06: seven green nightly `jbig2` fuzz runs.
-   - K-01, K-02.
-   - The rest of Tier 0.
+1. **CD-19 Left (10):** the owner's word. If it is a guard, work concept
+   first: prototype an over-glyph check on the page, then measure the books
+   and the time.
+2. **The owner's CD-19 option decisions**, each option rebuilt on the
+   landed code with its time measured in release and debug.
+3. **MS-11:**
+   - `ci.yml` on push to `develop`;
+   - dispatch `fuzz.yml` and `corpus.yml` on `develop` (H-03), and fix
+     each failure or make it a row;
+   - K-06's seven nights count from the owner's next merge.
+4. **`perf(shape)` and the kit's `CARGO_BUILD_JOBS`.**
+5. **Then ROADMAP's order of work:** K-01, K-02, and on.
