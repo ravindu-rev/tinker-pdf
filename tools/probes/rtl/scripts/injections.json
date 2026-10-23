@@ -2065,8 +2065,8 @@
    "edits": [
     {
      "file": "crates/tinker-pdf/src/epub/paint.rs",
-     "old": "            if found.is_none() {\n                'pairs:",
-     "new": "            if found.is_none() && tried.get() > READINGS_PER_LINE {\n                'pairs:",
+     "old": "        for (at, &(first, one)) in options.iter().enumerate() {",
+     "new": "        for (at, &(first, one)) in options.iter().enumerate().take(0) {",
      "count": 1
     }
    ],
@@ -2281,7 +2281,7 @@
    "edits": [
     {
      "file": "crates/tinker-pdf/src/epub/paint.rs",
-     "old": "if !line.is_empty() && run.x > end + size.max(run.font_size) * RESUMED_WITHIN {",
+     "old": "if !line.is_empty() && gap > size.max(run.font_size) * RESUMED_WITHIN {",
      "new": "if !line.is_empty() && run.x > end + 0.01 {",
      "count": 1
     }
@@ -2956,6 +2956,587 @@
      "--no-fail-fast",
      "-p",
      "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/read-back-under-no-matrix",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                line.iter().map(|run| effects.matrix(run.anchor)).collect();",
+     "new": "                line.iter().map(|_| IDENTITY).collect();",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/rules-in-the-runs-ems",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "            .map(|run| (run_key(run), along_the_line(effects.matrix(run.anchor))))",
+     "new": "            .map(|run| (run_key(run), along_the_line(IDENTITY)))",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/along-inverted",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "    let along = hypot(a, b) / size;",
+     "new": "    let along = size / hypot(a, b);",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/parted-in-the-runs-ems",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "        .max(run.letter_spacing + run.word_spacing)\n        * along\n        > run.font_size * PARTED_FROM",
+     "new": "        .max(run.letter_spacing + run.word_spacing)\n        * along.min(1.0).max(1.0)\n        > run.font_size * PARTED_FROM",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/lines-cut-in-the-runs-ems",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "            let gap = (run.x - end) * along(run).max(line.last().map_or(1.0, |last| along(last)));",
+     "new": "            let gap = (run.x - end) * along(run).max(line.last().map_or(1.0, |last| along(last))).min(1.0).max(1.0);",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/read-as-typed",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                    if let Some(read) = *known.entry(ch).or_insert_with(|| self.read_as(run, ch)) {",
+     "new": "                    if let Some(read) = *known.entry(ch).or_insert_with(|| Some(ch)) {",
+     "count": 1
+    },
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                            Given::ByTheFont => segment.read_as(ch, code, self),",
+     "new": "                            Given::ByTheFont => ch,",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/letters-are-enough",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "        if read.split_whitespace().eq(self.words.split_whitespace()) {\n            return Read::Words;",
+     "new": "        if true || read.split_whitespace().eq(self.words.split_whitespace()) {\n            return Read::Words;",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/letters-searched",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "            Some((Read::Letters, _)) => return Search::Letters,\n            Some((Read::Otherwise, over)) => over.count(),\n",
+     "new": "            Some((_, over)) => over.count(),\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ],
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--lib",
+     "epub::tests"
+    ]
+   ]
+  },
+  {
+   "name": "page/letters-kept-under-a-transform",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                Search::Letters if transformed => {",
+     "new": "                Search::Letters if false && transformed => {",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/whole-unchecked",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "            .is_some_and(|(read, _)| written.read_as(&read) == Read::Words)",
+     "new": "            .is_some_and(|(read, _)| true || written.read_as(&read) == Read::Words)",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/no-fallback-to-the-runs-space",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                Search::Nothing if transformed => {",
+     "new": "                Search::Nothing if false => {",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/overprint-taken",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                .is_some_and(|(how, over)| how != Read::Otherwise && over.count() <= over_by_rules)",
+     "new": "                .is_some_and(|(how, over)| how != Read::Otherwise && (over.count() <= over_by_rules || true))",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/closer-unchecked",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "        written.pairs_in(&read) > written.pairs_in(&rules)",
+     "new": "        true",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/plans-by-place",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "    std::ptr::from_ref(run) as usize\n",
+     "new": "    use std::hash::{Hash, Hasher};\n    let mut hasher = std::hash::DefaultHasher::new();\n    run_key(run).hash(&mut hasher);\n    hasher.finish() as usize\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/typed-unsearched",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                None if nothing && retyped => {",
+     "new": "                None if false && nothing && retyped => {",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/typed-closer-unchecked",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                            if self.reads_closer(&line, &matrices, frame, &written, &retyping) =>",
+     "new": "                            if true || self.reads_closer(&line, &matrices, frame, &written, &retyping) =>",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/typed-glyphs-by-the-font",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                            Given::AsTyped => ch,\n",
+     "new": "                            Given::AsTyped => segment.read_as(ch, code, self),\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/typed-words-by-the-font",
+   "round": "round 6 lane F: the read-back reads the page",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "                    let typed_words = Words::of(&as_typed);\n",
+     "new": "                    let typed_words = Words::of(&typed);\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/readings-never-kept",
+   "round": "round 6 lane F:search: the read-back keeps each line of units' reading",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/text_order.rs",
+     "old": "        lines.push((text, ends, reading.clone()));\n",
+     "new": "        let _ = (lines, text, ends);\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--lib",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/read-back-forgets-readings",
+   "round": "round 6 lane F:search: the read-back keeps each line of units' reading",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/epub/paint.rs",
+     "old": "crate::text_order::into_logical_order_knowing(&mut page, &mut self.readings.borrow_mut());",
+     "new": "crate::text_order::into_logical_order(&mut page);",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--lib",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/readings-by-text-alone",
+   "round": "round 6 lane F:search: the read-back keeps each line of units' reading",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/text_order.rs",
+     "old": "        for byte in unit.bytes().chain(core::iter::once(0xff)) {\n",
+     "new": "        for byte in unit.bytes() {\n",
+     "count": 1
+    },
+    {
+     "file": "crates/tinker-pdf/src/text_order.rs",
+     "old": "fn holds_units(text: &str, ends: &[usize], visual: &[&str]) -> bool {\n",
+     "new": "fn holds_units(text: &str, ends: &[usize], visual: &[&str]) -> bool {\n    return *text == visual.concat();\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--lib",
+     "--test",
+     "epub_conservation",
+     "--test",
+     "epub_fallback"
+    ]
+   ]
+  },
+  {
+   "name": "page/readings-by-count-alone",
+   "round": "round 6 lane F:search: the read-back keeps each line of units' reading",
+   "edits": [
+    {
+     "file": "crates/tinker-pdf/src/text_order.rs",
+     "old": "            print = (print ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);\n",
+     "new": "            print = print.wrapping_add(u64::from(byte == 0xff));\n",
+     "count": 1
+    },
+    {
+     "file": "crates/tinker-pdf/src/text_order.rs",
+     "old": "fn holds_units(text: &str, ends: &[usize], visual: &[&str]) -> bool {\n",
+     "new": "fn holds_units(text: &str, ends: &[usize], visual: &[&str]) -> bool {\n    return ends.len() == visual.len();\n",
+     "count": 1
+    }
+   ],
+   "suites": [
+    [
+     "cargo",
+     "test",
+     "--no-fail-fast",
+     "-p",
+     "tinker-pdf",
+     "--lib",
      "--test",
      "epub_conservation",
      "--test",

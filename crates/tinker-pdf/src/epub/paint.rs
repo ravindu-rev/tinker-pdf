@@ -95,7 +95,7 @@ use tinker_pdf_css::property::{
     Transform, TransformOrigin,
 };
 use tinker_pdf_font::base14::Standard14;
-use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, BaseEncoding};
+use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, glyph_name_to_char, BaseEncoding};
 use tinker_pdf_font::Sfnt;
 use tinker_pdf_layout::metrics::{
     FirstStrong, FontRequest, Metrics, Neighbour, PlacedGlyph, ShapedText, Shaper, ShapingContext,
@@ -959,6 +959,24 @@ pub struct Fonts<'a> {
     /// The page being drawn's runs drawn otherwise than by the rules, where a
     /// reader read their line back otherwise. See [`Fonts::set_readings`].
     drawings: RefCell<BTreeMap<RunKey, Drawing>>,
+    /// How long an em of each run's own spacing is in a reader's ems on the
+    /// page being drawn, where it is not one ([`along_the_line`]). See
+    /// [`Fonts::set_contexts`].
+    along: RefCell<BTreeMap<RunKey, f64>>,
+    /// The page being drawn's runs as [`Fonts::set_readings`] planned them,
+    /// by run ([`plan_key`]) and the drawing each was planned in: planned
+    /// once however often a search reads them back, and written by
+    /// [`draw_run`] as planned. See [`Fonts::plan_run`].
+    plans: RefCell<BTreeMap<(usize, Drawing), RunPlan>>,
+    /// The character a reader reads for each character the overflow font
+    /// has drawn, by its `/Differences` name ([`overflow_reads_as`]): looked
+    /// up once a book, not once a glyph a reading.
+    overflow_reads: RefCell<BTreeMap<char, char>>,
+    /// The reading in logical order of each line of units the page being
+    /// drawn's read-back has read ([`crate::text_order::Readings`]): searched
+    /// for once a page however often a reading meets the units again. See
+    /// [`Fonts::read_back`].
+    readings: RefCell<crate::text_order::Readings>,
     /// Characters drawn in a face that has no glyph for them.
     uncovered: usize,
 }
@@ -978,6 +996,10 @@ impl<'a> Fonts<'a> {
             contexts: RefCell::new(BTreeMap::new()),
             shared: RefCell::new(std::collections::BTreeSet::new()),
             drawings: RefCell::new(BTreeMap::new()),
+            along: RefCell::new(BTreeMap::new()),
+            plans: RefCell::new(BTreeMap::new()),
+            overflow_reads: RefCell::new(BTreeMap::new()),
+            readings: RefCell::new(crate::text_order::Readings::default()),
         }
     }
 
@@ -1068,10 +1090,17 @@ impl<'a> Fonts<'a> {
     ///
     /// Through `&self`, because drawing holds the registry shared; it is
     /// replaced whole per page, and read by nothing but [`draw_run`].
-    pub fn set_contexts(&self, runs: &[TextRun]) {
+    pub fn set_contexts(&self, runs: &[TextRun], effects: &OnPage<'_>) {
         let painted: Vec<&TextRun> = runs
             .iter()
             .filter(|run| run.painted && !run.generated)
+            .collect();
+        // A run's spacing as a reader measures it on the page: first, since
+        // which runs share a line is measured so too.
+        *self.along.borrow_mut() = painted
+            .iter()
+            .map(|run| (run_key(run), along_the_line(effects.matrix(run.anchor))))
+            .filter(|(_, along)| *along != 1.0)
             .collect();
         let mut map: BTreeMap<RunKey, (String, String)> = BTreeMap::new();
         for (at, run) in painted.iter().enumerate() {
@@ -1091,7 +1120,18 @@ impl<'a> Fonts<'a> {
             }
         }
         *self.contexts.borrow_mut() = map;
-        *self.shared.borrow_mut() = sharing_a_line(&painted);
+        *self.shared.borrow_mut() = sharing_a_line(&painted, &|run| self.along(run));
+    }
+
+    /// How long an em of `run`'s own spacing is in a reader's ems on the page
+    /// being drawn ([`along_the_line`]): one but under a transform that scales
+    /// the baseline otherwise than the glyphs.
+    fn along(&self, run: &TextRun) -> f64 {
+        self.along
+            .borrow()
+            .get(&run_key(run))
+            .copied()
+            .unwrap_or(1.0)
     }
 
     /// Whether `run` is on a line that holds another paragraph's text too,
@@ -1129,22 +1169,56 @@ impl<'a> Fonts<'a> {
     /// model said read it alone, was read with the word before it, `!?`.
     ///
     /// So the line is drawn into the reader itself — the text objects
-    /// [`plan_coded`] would write, each glyph where it would stand, fed to a
+    /// [`plan_coded`] would write, each glyph where the page has it, under
+    /// the matrix the page draws its run under ([`OnPage::matrix`]), and read
+    /// back as the page's font gives it back ([`Segment::read_as`]), fed to a
     /// `TextDevice` and read in logical order — and the text it reads is
-    /// held to the line's own, its runs' text in the order written, white
-    /// space aside. Where they differ, each run is drawn another way in turn:
-    /// its neutrals in the other order ([`Drawing::level_order`]), or its
-    /// slice cut otherwise into text objects ([`Cut`]); then two runs at a
-    /// time, within [`READINGS_PER_LINE`]. The first drawing that reads the
-    /// line right is the one drawn. A line the rules' drawing reads right, or
-    /// that no drawing tried reads right, is drawn by the rules, byte for
-    /// byte as before; and a line with no right-to-left character, or a run
-    /// of a face of the book's own, which [`plan_coded`] does not draw, is
-    /// not read.
+    /// held to the line's own so read, its runs' text in the order written
+    /// ([`Words`]). A line the rules' drawing reads with its words is drawn
+    /// by the rules; one it reads with its letters in order, a word cut where
+    /// a reader parts the spacing or two run together ([`Read::Letters`]), is
+    /// searched no further on the page, as 935b077, which held a reading to
+    /// the letters alone, searched it no further. Where the rules' drawing
+    /// does not read the letters in order, each run is drawn another way in
+    /// turn: its neutrals in the other order ([`Drawing::level_order`]), or
+    /// its slice cut otherwise into text objects ([`Cut`]); then two runs at
+    /// a time, within [`READINGS_PER_LINE`] ([`Fonts::search`]). The first
+    /// drawing that reads the line's letters in order is the one drawn, as
+    /// 935b077 drew it, though a reader cut a word of it or ran two
+    /// together; and none that sets more glyphs over others than the rules'
+    /// ([`Overprint`]). Under a transform, a line nothing tried reads right
+    /// on the page is searched again in its runs' own space, and what that
+    /// finds is drawn only where it reads closer to the line on the page
+    /// than the rules' drawing ([`Fonts::reads_closer`]); and a line the
+    /// rules' drawing reads there with its letters in order and not its
+    /// words is searched in its runs' own space too, as 935b077 searched
+    /// every line under a transform, and what that finds is drawn only where
+    /// it reads the words right on the page ([`Fonts::reads_whole`]). A line
+    /// nothing tried reads right, one of whose characters the page's fonts
+    /// give back otherwise than typed, is searched again with each character
+    /// read as typed, as 05cea0b read every line ([`Given::AsTyped`]), and
+    /// what that finds is drawn only where it reads closer to the line on
+    /// the page than the rules' drawing: a NO-BREAK SPACE is a word space on
+    /// the page, which parts `1 234` into two numbers a right-to-left line
+    /// reads the other way round in every drawing tried, and no drawing read
+    /// the line's letters in order, though one read the styled `?!` after the
+    /// number as typed where the rules' drawing turns it. A line the rules'
+    /// drawing reads right, or that no drawing tried reads right, is drawn by
+    /// the rules; and a line with no right-to-left character, no drawing to
+    /// try ([`drawings_of`]), or a run of a face of the book's own, which
+    /// [`plan_coded`] does not draw, is not read.
     ///
     /// The work is linear in the line, once a reading, and a line is read at
-    /// most [`READINGS_PER_LINE`] times.
-    pub fn set_readings(&self, runs: &[TextRun], frame: &Frame) {
+    /// most [`READINGS_PER_LINE`] times, twice that and twice more under a
+    /// transform, and that again and twice more where a character is read
+    /// otherwise than typed. Each run is planned once a page for each
+    /// drawing a reading tries it in, and drawn as planned
+    /// ([`Fonts::plan_run`]); and a line of units a reading puts in logical
+    /// order is searched for its reading once a page, however often a reading
+    /// meets those units again, but for a chain of pieces the bracket
+    /// tie-break reads whole ([`Fonts::readings`]). It is not free: a line
+    /// that no drawing reads right spends the whole budget (ROADMAP CD-19).
+    pub fn set_readings(&self, runs: &[TextRun], frame: &Frame, effects: &OnPage<'_>) {
         let painted: Vec<&TextRun> = runs
             .iter()
             .filter(|run| run.painted && !run.generated)
@@ -1155,7 +1229,16 @@ impl<'a> Fonts<'a> {
             .map(|(at, run)| (run_key(run), at))
             .collect();
         let mut drawings: BTreeMap<RunKey, Drawing> = BTreeMap::new();
-        for mut line in page_lines(&painted) {
+        // The page's runs are planned anew ([`Fonts::plan_run`]), and its
+        // lines of units read anew ([`Fonts::readings`]).
+        self.plans.borrow_mut().clear();
+        *self.readings.borrow_mut() = crate::text_order::Readings::default();
+        // How the page's fonts give each character back, by the font a run
+        // asks for, which is all [`Fonts::read_as`] depends on: worked out
+        // once a page for each, where a line's characters are a few dozen
+        // met again on every line.
+        let mut reads: Vec<(&TextRun, BTreeMap<char, Option<char>>)> = Vec::new();
+        for mut line in page_lines(&painted, &|run| self.along(run)) {
             if !line
                 .iter()
                 .any(|run| run.text.chars().any(undoes_its_levels))
@@ -1164,186 +1247,464 @@ impl<'a> Fonts<'a> {
             }
             // In the order drawn, which is the order written.
             line.sort_by_key(|run| order.get(&run_key(run)).copied().unwrap_or(usize::MAX));
-            let options: Vec<(RunKey, Drawing)> =
-                line.iter().flat_map(|run| drawings_of(run)).collect();
+            // Each run's drawings other than the rules'. A line with none is
+            // drawn by the rules whatever a reading of it finds, and is not
+            // read, as 935b077 did not read it.
+            let options: Vec<(RunKey, Drawing)> = line
+                .iter()
+                .flat_map(|run| drawings_of(run, self.along(run)))
+                .collect();
             if options.is_empty() {
                 continue;
             }
-            let written: String = line
-                .iter()
-                .flat_map(|run| run.text.chars())
-                .filter(|c| !c.is_whitespace())
-                .collect();
-            let tried = std::cell::Cell::new(0usize);
-            let reads_right = |chosen: &BTreeMap<RunKey, Drawing>| {
-                tried.set(tried.get() + 1);
-                self.read_back(&line, frame, chosen).map(|read| {
-                    read.chars()
-                        .filter(|c| !c.is_whitespace())
-                        .eq(written.chars())
-                })
-            };
-            match reads_right(&BTreeMap::new()) {
-                Some(false) => {}
-                None | Some(true) => continue,
-            }
-            let mut found: Option<BTreeMap<RunKey, Drawing>> = None;
-            for &(key, drawing) in &options {
-                if tried.get() >= READINGS_PER_LINE {
-                    break;
-                }
-                let one = BTreeMap::from([(key, drawing)]);
-                if reads_right(&one) == Some(true) {
-                    found = Some(one);
-                    break;
-                }
-            }
-            if found.is_none() {
-                'pairs: for (at, &(first, one)) in options.iter().enumerate() {
-                    for &(second, other) in options.get(at + 1..).unwrap_or_default() {
-                        if second == first {
-                            continue;
-                        }
-                        if tried.get() >= READINGS_PER_LINE {
-                            break 'pairs;
-                        }
-                        let two = BTreeMap::from([(first, one), (second, other)]);
-                        if reads_right(&two) == Some(true) {
-                            found = Some(two);
-                            break 'pairs;
-                        }
+            // Each run under the matrix the page draws it under: a reader's
+            // thresholds are in the page's ems, not the run's.
+            let matrices: Vec<[f64; 6]> =
+                line.iter().map(|run| effects.matrix(run.anchor)).collect();
+            // The line's text as the page's fonts give it back, and as typed,
+            // the characters they draw; and whether the two differ.
+            let mut typed = String::new();
+            let mut as_typed = String::new();
+            for run in &line {
+                let font = match reads.iter().position(|(seen, _)| same_font(seen, run)) {
+                    Some(font) => font,
+                    None => {
+                        reads.push((run, BTreeMap::new()));
+                        reads.len() - 1
+                    }
+                };
+                let Some((_, known)) = reads.get_mut(font) else {
+                    continue;
+                };
+                for ch in run.text.chars() {
+                    if let Some(read) = *known.entry(ch).or_insert_with(|| self.read_as(run, ch)) {
+                        typed.push(read);
+                        as_typed.push(ch);
                     }
                 }
             }
+            let retyped = typed != as_typed;
+            let written = Words::of(&typed);
+            let page = self.search(
+                &line,
+                &matrices,
+                frame,
+                &written,
+                &options,
+                Given::ByTheFont,
+            );
+            let nothing = matches!(page, Search::Nothing);
+            let transformed = matrices.iter().any(|matrix| *matrix != IDENTITY);
+            let own = || vec![IDENTITY; line.len()];
+            let found = match page {
+                Search::Rules => continue,
+                Search::Found(found) => Some(found),
+                // Under a transform, where nothing tried reads the line right
+                // on the page — glyphs the transform sets over others, whose
+                // letters no drawing reads in order — the line is read back in
+                // its runs' own space, as it was before the page's matrix was
+                // modelled.
+                Search::Nothing if transformed => {
+                    match self.search(&line, &own(), frame, &written, &options, Given::ByTheFont) {
+                        Search::Found(found)
+                            if self.reads_closer(&line, &matrices, frame, &written, &found) =>
+                        {
+                            Some(found)
+                        }
+                        Search::Found(_) | Search::Rules | Search::Letters | Search::Nothing => {
+                            None
+                        }
+                    }
+                }
+                // Under a transform, where the rules' drawing reads the line
+                // on the page with its letters in order and not its words,
+                // the line is searched in its runs' own space too, as every
+                // line under a transform was searched before the page's
+                // matrix was modelled, and what that finds is drawn where it
+                // reads the words right on the page.
+                Search::Letters if transformed => {
+                    match self.search(&line, &own(), frame, &written, &options, Given::ByTheFont) {
+                        Search::Found(found)
+                            if self.reads_whole(&line, &matrices, frame, &written, &found) =>
+                        {
+                            Some(found)
+                        }
+                        Search::Found(_) | Search::Rules | Search::Letters | Search::Nothing => {
+                            None
+                        }
+                    }
+                }
+                Search::Letters | Search::Nothing => None,
+            };
+            // Where nothing tried reads the line right as the page's fonts
+            // give its characters back, and they give one back otherwise
+            // than typed — a NO-BREAK SPACE between two digits, a word space
+            // on the page, which parts the number in every drawing tried —
+            // the line is searched again with each character read as typed,
+            // as 05cea0b read it, and what that finds is drawn where it reads
+            // closer to the line on the page than the rules' drawing.
+            let found = match found {
+                None if nothing && retyped => {
+                    let typed_words = Words::of(&as_typed);
+                    match self.search(
+                        &line,
+                        &matrices,
+                        frame,
+                        &typed_words,
+                        &options,
+                        Given::AsTyped,
+                    ) {
+                        Search::Found(retyping)
+                            if self.reads_closer(&line, &matrices, frame, &written, &retyping) =>
+                        {
+                            Some(retyping)
+                        }
+                        Search::Found(_) | Search::Rules | Search::Letters | Search::Nothing => {
+                            None
+                        }
+                    }
+                }
+                found => found,
+            };
             if let Some(found) = found {
                 drawings.extend(found);
             }
         }
         *self.drawings.borrow_mut() = drawings;
+        *self.readings.borrow_mut() = crate::text_order::Readings::default();
+    }
+
+    /// [`Fonts::set_readings`]'s search for one line under `matrices`: the
+    /// rules' drawing where it reads the line's words right, and
+    /// [`Search::Letters`] where it reads its letters in order; else the
+    /// first drawing of one run, then of two, within [`READINGS_PER_LINE`]
+    /// readings, that reads the letters in order, as 935b077 took it; else
+    /// nothing. A drawing that sets more glyphs over others than the rules'
+    /// is never taken. Each glyph is read back as `given` says.
+    fn search(
+        &self,
+        line: &[&TextRun],
+        matrices: &[[f64; 6]],
+        frame: &Frame,
+        written: &Words,
+        options: &[(RunKey, Drawing)],
+        given: Given,
+    ) -> Search {
+        let tried = std::cell::Cell::new(0usize);
+        let reads_right = |chosen: &BTreeMap<RunKey, Drawing>| {
+            tried.set(tried.get() + 1);
+            self.read_back(line, matrices, frame, chosen, given)
+                .map(|(read, over)| (written.read_as(&read), over))
+        };
+        // How many glyphs the rules' drawing sets over another: a drawing
+        // that sets more is not taken, however it reads.
+        let over_by_rules = match reads_right(&BTreeMap::new()) {
+            // A reading of the rules' drawing that holds the line's letters
+            // in order is not searched further, as 935b077, which held a
+            // reading to the letters alone, searched it no further: searching
+            // on for a drawing that reads such a line's words right spends the
+            // whole budget of many a line a reader cuts at its spacing or runs
+            // two words of together, a cost in time that is the owner's to
+            // price (ROADMAP CD-19).
+            None | Some((Read::Words, _)) => return Search::Rules,
+            Some((Read::Letters, _)) => return Search::Letters,
+            Some((Read::Otherwise, over)) => over.count(),
+        };
+        // A drawing that reads the line's letters in order is taken, as
+        // 935b077 took it, though a reader cut a word of it or ran two
+        // together: holding it to the words spends the whole budget of many
+        // a line no drawing reads whole, a cost in time that is the owner's
+        // to price (ROADMAP CD-19). None is taken that sets more glyphs over
+        // others than the rules' drawing, which is counted only where it
+        // decides, of a drawing that reads the letters in order.
+        let taken = |chosen: &BTreeMap<RunKey, Drawing>| {
+            reads_right(chosen)
+                .is_some_and(|(how, over)| how != Read::Otherwise && over.count() <= over_by_rules)
+        };
+        for &(key, drawing) in options {
+            if tried.get() >= READINGS_PER_LINE {
+                break;
+            }
+            let one = BTreeMap::from([(key, drawing)]);
+            if taken(&one) {
+                return Search::Found(one);
+            }
+        }
+        for (at, &(first, one)) in options.iter().enumerate() {
+            for &(second, other) in options.get(at + 1..).unwrap_or_default() {
+                if second == first {
+                    continue;
+                }
+                if tried.get() >= READINGS_PER_LINE {
+                    break;
+                }
+                let two = BTreeMap::from([(first, one), (second, other)]);
+                if taken(&two) {
+                    return Search::Found(two);
+                }
+            }
+        }
+        Search::Nothing
+    }
+
+    /// Whether `found`, a drawing [`Fonts::search`] found reading `line` right
+    /// otherwise than on the page as the page's fonts give it back — in its
+    /// runs' own space, or read as typed — where nothing it tried reads it
+    /// right so, reads the line's letters closer to the order written on the
+    /// page than the rules' drawing does there — more of the text's pairs of
+    /// letters in order ([`Words::pairs_in`]). A drawing found right in a
+    /// space that is not the page's is no better than a guess on the page: a
+    /// Hebrew paragraph with no `dir` of inline blocks squeezed by
+    /// `scaleX(0.5)`, turned a quarter at `word-spacing: 0.6em`, drawn as
+    /// that search found it, as 935b077 drew it, lost the structure tree's
+    /// order the rules' drawing holds.
+    fn reads_closer(
+        &self,
+        line: &[&TextRun],
+        matrices: &[[f64; 6]],
+        frame: &Frame,
+        written: &Words,
+        found: &BTreeMap<RunKey, Drawing>,
+    ) -> bool {
+        let rules = self.read_back(line, matrices, frame, &BTreeMap::new(), Given::ByTheFont);
+        let Some((rules, _)) = rules else {
+            return false;
+        };
+        let Some((read, _)) = self.read_back(line, matrices, frame, found, Given::ByTheFont) else {
+            return false;
+        };
+        written.pairs_in(&read) > written.pairs_in(&rules)
+    }
+
+    /// Whether `found`, a drawing [`Fonts::search`] found in `line`'s runs'
+    /// own space where the rules' drawing reads the line on the page with its
+    /// letters in order and not its words ([`Search::Letters`]), reads its
+    /// words right on the page.
+    /// A letter-spaced and justified Arabic line under `scaleX(2)` whose
+    /// rules' drawing a reader parts inside `25٪` on the page was drawn so,
+    /// and read whole, before the page's matrix was modelled; a styled `?!`
+    /// with no `dir`, turned for a reading in which it joined its word in
+    /// that space, is not.
+    fn reads_whole(
+        &self,
+        line: &[&TextRun],
+        matrices: &[[f64; 6]],
+        frame: &Frame,
+        written: &Words,
+        found: &BTreeMap<RunKey, Drawing>,
+    ) -> bool {
+        self.read_back(line, matrices, frame, found, Given::ByTheFont)
+            .is_some_and(|(read, _)| written.read_as(&read) == Read::Words)
+    }
+
+    /// The text objects [`plan_coded`] writes for the whole of `run` drawn as
+    /// `drawing` says, each face segment's in the order drawn, and where the
+    /// pen ends: what [`Fonts::read_back`] reads and [`draw_run`] writes.
+    /// `None` for a run with a character in a face of the book's own, which
+    /// [`draw_shaped`] draws.
+    ///
+    /// Planned once a page for each drawing ([`Fonts::plans`]): a plan
+    /// depends on neither the drawings of the run's neighbours nor the space
+    /// a line is read in, and a search reads a run back in as many of the
+    /// one as it tries and, under a transform, in both of the other. Returns
+    /// the plan's key.
+    fn plan_run(&self, run: &TextRun, drawing: Drawing) -> (usize, Drawing) {
+        let key = (plan_key(run), drawing);
+        if !self.plans.borrow().contains_key(&key) {
+            let plan = self.plan_anew(run, drawing);
+            self.plans.borrow_mut().insert(key, plan);
+        }
+        key
+    }
+
+    /// [`Fonts::plan_run`]'s plan, made.
+    fn plan_anew(&self, run: &TextRun, drawing: Drawing) -> RunPlan {
+        let font = request(run);
+        let mut segments = face_runs(self.faces, &font, &run.text);
+        if segments
+            .iter()
+            .any(|(_, chosen)| matches!(chosen, Chosen::Embedded(_)))
+        {
+            return None;
+        }
+        if reads_right_to_left(run) {
+            segments.reverse();
+        }
+        let mut x = run.x;
+        let mut out = Vec::new();
+        for (range, _) in segments {
+            let slice = run.text.get(range).unwrap_or("");
+            let (objects, end) = plan_coded(run, self, slice, x, drawing);
+            x = end;
+            out.extend(objects);
+        }
+        Some((out, x))
+    }
+
+    /// The character a reader of the page reads where `run` draws `ch`, as
+    /// the font this registry draws it in gives it back ([`Segment::read_as`]),
+    /// or `None` where it has no code and is not drawn ([`Fonts::encode`]).
+    fn read_as(&self, run: &TextRun, ch: char) -> Option<char> {
+        let chosen = choose(self.faces, &request(run), Some(ch));
+        match self.encode(chosen, ch)? {
+            Coded::Composite { .. } => Some(ch),
+            Coded::Simple { resource, code } => Some(match chosen {
+                Chosen::Standard(face) if resource == face.overflow_resource() => {
+                    self.overflow_read(ch)
+                }
+                _ => base_char(BaseEncoding::WinAnsi, code).unwrap_or(ch),
+            }),
+        }
+    }
+
+    /// [`overflow_reads_as`], looked up once a book for each character.
+    fn overflow_read(&self, ch: char) -> char {
+        let known = self.overflow_reads.borrow().get(&ch).copied();
+        if let Some(read) = known {
+            return read;
+        }
+        let read = overflow_reads_as(ch);
+        self.overflow_reads.borrow_mut().insert(ch, read);
+        read
     }
 
     /// What a reader of the page reads off `line`, one line's runs in the
     /// order they are drawn, drawn as `drawings` say and the rest by the rules
     /// ([`Fonts::set_readings`]): the text objects [`plan_coded`] writes, each
     /// glyph where the page has it and as wide as its font says, fed to a
-    /// `TextDevice` and read in logical order (ruling 14). `None` for a line
-    /// with a run in a face of the book's own, which [`draw_shaped`] draws.
+    /// `TextDevice` and read in logical order (ruling 14), and the glyphs it
+    /// draws, to count those it sets over others ([`Overprint`]). Each glyph
+    /// is read as `given` says. `None` for a line with a run in a face of the
+    /// book's own, which [`draw_shaped`] draws.
+    ///
+    /// A line of units the page's read-back has put in logical order before
+    /// is read as it was then ([`Fonts::readings`]): its reading is a
+    /// function of its units alone, and the device parts a letter-spaced line
+    /// at every text object into pieces of a word or two that the line
+    /// repeats, read again in every drawing tried and, under a transform, in
+    /// the runs' own space too ([`crate::text_order::Readings`]).
     fn read_back(
         &self,
         line: &[&TextRun],
+        matrices: &[[f64; 6]],
         frame: &Frame,
         drawings: &BTreeMap<RunKey, Drawing>,
-    ) -> Option<String> {
-        let metrics = BookMetrics::with(self.faces);
+        given: Given,
+    ) -> Option<(String, Overprint)> {
+        #[cfg(test)]
+        READINGS.with(|readings| readings.set(readings.get().saturating_add(1)));
+        let keys: Vec<(usize, Drawing)> = line
+            .iter()
+            .map(|run| {
+                let drawing = drawings.get(&run_key(run)).copied().unwrap_or_default();
+                self.plan_run(run, drawing)
+            })
+            .collect();
+        let plans = self.plans.borrow();
+        if keys
+            .iter()
+            .any(|key| plans.get(key).is_none_or(Option::is_none))
+        {
+            return None;
+        }
         let mut device = tinker_pdf_content::TextDevice::new();
-        let identity = tinker_pdf_content::Matrix {
-            a: 1.0,
-            b: 0.0,
-            c: 0.0,
-            d: 1.0,
-            e: 0.0,
-            f: 0.0,
-        };
-        for run in line {
-            let font = request(run);
-            let mut segments = face_runs(self.faces, &font, &run.text);
-            if segments
-                .iter()
-                .any(|(_, chosen)| matches!(chosen, Chosen::Embedded(_)))
-            {
-                return None;
-            }
-            if reads_right_to_left(run) {
-                segments.reverse();
-            }
-            let drawing = drawings.get(&run_key(run)).copied().unwrap_or_default();
+        for ((at, run), key) in line.iter().enumerate().zip(&keys) {
+            let Some(Some((objects, _))) = plans.get(key) else {
+                continue;
+            };
+            // The `cm`s [`OnPage::open`] writes before the run's text object.
+            let [a, b, c, d, e, f] = matrices.get(at).copied().unwrap_or(IDENTITY);
+            let page = tinker_pdf_content::Matrix { a, b, c, d, e, f };
             let size = run.font_size * PX_TO_PT;
             let y = frame.y(run.y);
             let letters = run.letter_spacing * PX_TO_PT;
             let words = run.word_spacing * PX_TO_PT;
-            let mut x = run.x;
-            for (range, _) in segments {
-                let slice = run.text.get(range).unwrap_or("");
-                let (objects, end) = plan_coded(run, self, slice, x, drawing);
-                x = end;
-                for object in objects {
-                    for segment in &object {
-                        // As [`flush`] writes it: the overflow font and the
-                        // stand-in at no word spacing.
-                        let spacing = if segment.composite || (segment.unspaced && words != 0.0) {
-                            0.0
+            for object in objects {
+                for segment in object {
+                    // As [`flush`] writes it: the overflow font and the
+                    // stand-in at no word spacing.
+                    let spacing = if segment.composite || (segment.unspaced && words != 0.0) {
+                        0.0
+                    } else {
+                        words
+                    };
+                    let mut state = tinker_pdf_content::GraphicsState::new(page);
+                    state.text.size = size;
+                    state.text.char_spacing = letters;
+                    state.text.word_spacing = spacing;
+                    let font_id = segment
+                        .resource
+                        .iter()
+                        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                            (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+                        });
+                    let mut pen = frame.x(segment.x);
+                    for (at, ch) in segment.characters.chars().enumerate() {
+                        let code = if segment.composite {
+                            segment.glyphs.get(at).map_or(0, |(id, _)| u32::from(*id))
                         } else {
-                            words
+                            segment.codes.get(at).map_or(0, |code| u32::from(*code))
                         };
-                        let mut state = tinker_pdf_content::GraphicsState::new(identity);
-                        state.text.size = size;
-                        state.text.char_spacing = letters;
-                        state.text.word_spacing = spacing;
-                        let font_id = segment
-                            .resource
-                            .iter()
-                            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-                                (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
-                            });
-                        let mut pen = frame.x(segment.x);
-                        for (at, ch) in segment.characters.chars().enumerate() {
-                            let code = if segment.composite {
-                                segment.glyphs.get(at).map_or(0, |(id, _)| u32::from(*id))
+                        // As wide as its font says: a simple font's
+                        // `/Widths` are the widths layout measured with,
+                        // and the stand-in's `/W` that width rounded to a
+                        // thousandth of an em ([`EXACT_MARK_INSET`]).
+                        let measured = segment.advances.get(at).copied().unwrap_or_default();
+                        let advance = if segment.composite && run.font_size > 0.0 {
+                            (measured / run.font_size * 1000.0).round() / 1000.0 * run.font_size
+                        } else {
+                            measured
+                        } * PX_TO_PT;
+                        let text = match given {
+                            Given::ByTheFont => segment.read_as(ch, code, self),
+                            Given::AsTyped => ch,
+                        };
+                        let glyph = tinker_pdf_content::Glyph {
+                            code,
+                            text: text.to_string(),
+                            // 9.4.4's text rendering matrix: the glyph
+                            // in text space, then the page's matrix.
+                            transform: tinker_pdf_content::Matrix {
+                                a: size,
+                                b: 0.0,
+                                c: 0.0,
+                                d: size,
+                                e: pen,
+                                f: y,
+                            }
+                            .then(&page),
+                            baseline: None,
+                            advance,
+                            size,
+                            vertical: false,
+                            font_id,
+                            font_name: None,
+                        };
+                        tinker_pdf_content::Device::show_glyph(&mut device, &glyph, &state);
+                        pen += advance
+                            + letters
+                            + if code == 32 && !segment.composite {
+                                spacing
                             } else {
-                                segment.codes.get(at).map_or(0, |code| u32::from(*code))
+                                0.0
                             };
-                            // As wide as its font says: a simple font's
-                            // `/Widths` are the widths layout measured with,
-                            // and the stand-in's `/W` that width rounded to a
-                            // thousandth of an em ([`EXACT_MARK_INSET`]).
-                            let measured = metrics.advance(ch, &font);
-                            let advance = if segment.composite && run.font_size > 0.0 {
-                                (measured / run.font_size * 1000.0).round() / 1000.0 * run.font_size
-                            } else {
-                                measured
-                            } * PX_TO_PT;
-                            let glyph = tinker_pdf_content::Glyph {
-                                code,
-                                text: ch.to_string(),
-                                transform: tinker_pdf_content::Matrix {
-                                    a: size,
-                                    b: 0.0,
-                                    c: 0.0,
-                                    d: size,
-                                    e: pen,
-                                    f: y,
-                                },
-                                baseline: None,
-                                advance,
-                                size,
-                                vertical: false,
-                                font_id,
-                                font_name: None,
-                            };
-                            tinker_pdf_content::Device::show_glyph(&mut device, &glyph, &state);
-                            pen += advance
-                                + letters
-                                + if code == 32 && !segment.composite {
-                                    spacing
-                                } else {
-                                    0.0
-                                };
-                        }
                     }
-                    tinker_pdf_content::Device::end_text(&mut device);
                 }
+                tinker_pdf_content::Device::end_text(&mut device);
             }
         }
         let mut page = device.finish();
-        crate::text_order::into_logical_order(&mut page);
-        Some(
+        let over = Overprint::of(&page);
+        crate::text_order::into_logical_order_knowing(&mut page, &mut self.readings.borrow_mut());
+        Some((
             page.blocks
                 .iter()
                 .flat_map(|block| &block.lines)
                 .map(|line| line.text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n"),
-        )
+            over,
+        ))
     }
 
     /// The context [`Fonts::set_contexts`] recorded for `run`.
@@ -2938,6 +3299,23 @@ impl OnPage<'_> {
         false
     }
 
+    /// The matrix a fragment anchored here is drawn under on the page: the
+    /// product of the `cm`s [`OnPage::open`] writes for it, each transformed
+    /// element's own matrix but those that flatten the plane, which write a
+    /// clip and no `cm`, and the identity where there are none. What a reader
+    /// of the page measures the fragment's text in ([`Fonts::set_readings`]).
+    pub(crate) fn matrix(&self, anchor: Option<u32>) -> [f64; 6] {
+        let mut out = IDENTITY;
+        // Nearest first, so each is applied in the space of the ones above it.
+        for element in self.effects.turns(&self.locals, anchor) {
+            match self.locals.get(&element).copied().flatten() {
+                Some(matrix) if matrix != IDENTITY => out = concat(out, matrix),
+                _ => {}
+            }
+        }
+        out
+    }
+
     /// The clipping elements above a fragment, nearest first.
     fn chain(&self, anchor: Option<u32>, inside: bool) -> Vec<u32> {
         let effects = self.effects;
@@ -3213,8 +3591,8 @@ pub(crate) fn draw_page_tagged(
     let mut refused = 0usize;
     // What each run is shaped against, from its neighbours on the page, and
     // how each line holding a right-to-left character reads back.
-    fonts.set_contexts(&laid.runs);
-    fonts.set_readings(&laid.runs, frame);
+    fonts.set_contexts(&laid.runs, effects);
+    fonts.set_readings(&laid.runs, frame, effects);
     for (index, fragment) in laid.boxes.iter().enumerate() {
         let opened = effects.open(page, fragment.anchor, false);
         draw_box(page, fragment, frame, effects.background(index), effects);
@@ -3874,7 +4252,9 @@ fn drawable(style: BorderStyle) -> bool {
 
 /// One stretch of a run sharing a font resource, one string of codes from one
 /// position: a text object of its own, or a piece of one that holds a mark
-/// ([`flush`]).
+/// ([`flush`]). Two plans of the same segments are written byte for byte alike
+/// ([`Fonts::plan_run`]).
+#[derive(Clone, Debug, PartialEq)]
 struct Segment {
     resource: Vec<u8>,
     composite: bool,
@@ -3885,13 +4265,56 @@ struct Segment {
     codes: Vec<u8>,
     glyphs: Vec<(u16, char)>,
     characters: String,
+    /// Each character's advance as layout measured it, which
+    /// [`Fonts::read_back`] draws it at.
+    advances: Vec<f64>,
     x: f64,
+}
+
+/// What [`Fonts::plan_run`] plans for a run: the text objects
+/// [`plan_coded`] writes for the whole of it, each face segment's in the
+/// order drawn, and where the pen ends — `None` for a run with a character
+/// in a face of the book's own, which [`draw_shaped`] draws.
+type RunPlan = Option<(Vec<Vec<Segment>>, f64)>;
+
+impl Segment {
+    /// The character a reader of the page reads for `ch`, drawn at `code` in
+    /// this segment, as its font gives it back: a composite font by the
+    /// `/ToUnicode` written from the characters drawn, so `ch`; the overflow
+    /// font by its `/Differences` name ([`overflow_reads_as`]); and a
+    /// standard face by `WinAnsiEncoding`, which 9.6.5 reads by glyph name,
+    /// so that its NO-BREAK SPACE is a space and its SOFT HYPHEN a hyphen
+    /// (`base_char`). Read back as typed, a NO-BREAK SPACE between two digits,
+    /// `CS` and so part of one number to UAX #9, was read where the page has
+    /// a word space, and a drawing that read right in the model read the
+    /// number's halves the other way round on the page (round 6, lane F).
+    /// The overflow font's names are looked up once a book, through `fonts`
+    /// ([`Fonts::overflow_read`]).
+    fn read_as(&self, ch: char, code: u32, fonts: &Fonts<'_>) -> char {
+        if self.composite {
+            ch
+        } else if self.unspaced {
+            fonts.overflow_read(ch)
+        } else {
+            u8::try_from(code)
+                .ok()
+                .and_then(|code| base_char(BaseEncoding::WinAnsi, code))
+                .unwrap_or(ch)
+        }
+    }
+}
+
+/// The character a reader reads for `ch` drawn in the overflow font: the one
+/// its glyph name in the font's `/Differences` names, as
+/// [`Fonts::register`] writes it — `space` for a character with no name.
+fn overflow_reads_as(ch: char) -> char {
+    glyph_name_to_char(&glyph_name_for_char(ch).unwrap_or_else(|| "space".to_owned())).unwrap_or(ch)
 }
 
 /// How [`plan_coded`] draws a run whose line, as the rules draw it, a reader
 /// of the page reads back otherwise ([`Fonts::set_readings`]); the default
 /// is the rules' drawing.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct Drawing {
     /// Whether a slice of neutrals at a right-to-left level is drawn in its
     /// level's order ([`coded_order`]) — `None`, as the line decided
@@ -3904,7 +4327,7 @@ struct Drawing {
 
 /// A cut of a spaced slice into text objects other than the rules'
 /// ([`Drawing::cut`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Cut {
     /// The whole slice one text object, the white space at its ends too.
     Whole,
@@ -3967,8 +4390,11 @@ fn one_embedded_face(
 /// The runs of `painted`, a page's, on a line that holds the text of more
 /// than one paragraph ([`holds_two_paragraphs`]), a line as [`page_lines`]
 /// finds it.
-fn sharing_a_line(painted: &[&TextRun]) -> std::collections::BTreeSet<RunKey> {
-    page_lines(painted)
+fn sharing_a_line(
+    painted: &[&TextRun],
+    along: &dyn Fn(&TextRun) -> f64,
+) -> std::collections::BTreeSet<RunKey> {
+    page_lines(painted, along)
         .into_iter()
         .filter(|line| holds_two_paragraphs(line.iter().copied()))
         .flatten()
@@ -3983,10 +4409,17 @@ fn sharing_a_line(painted: &[&TextRun]) -> std::collections::BTreeSet<RunKey> {
 /// end, so that two table cells half a point apart are one line, as they are
 /// to it — each line left to right. Found by sorting, so that a page of many
 /// runs costs its sort.
-fn page_lines<'r>(painted: &[&'r TextRun]) -> Vec<Vec<&'r TextRun>> {
+fn page_lines<'r>(
+    painted: &[&'r TextRun],
+    along: &dyn Fn(&TextRun) -> f64,
+) -> Vec<Vec<&'r TextRun>> {
     let mut order: Vec<&TextRun> = painted.to_vec();
     order.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
-    // Rows of one baseline, then each row by `x`.
+    // Rows of one baseline, then each row by `x`. A run is on the row of the
+    // run above it within half an em, as `TextDevice` asks each glyph of the
+    // one before it: under a `line-height` of half an em or less every line
+    // of a paragraph is within that of the next, and a reader runs them all
+    // together, so they are one row.
     let mut rows: Vec<Vec<&TextRun>> = Vec::new();
     for run in order {
         match rows.last_mut() {
@@ -4007,7 +4440,10 @@ fn page_lines<'r>(painted: &[&'r TextRun]) -> Vec<Vec<&'r TextRun>> {
         let mut end = f64::NEG_INFINITY;
         let mut size = 0.0f64;
         for run in row {
-            if !line.is_empty() && run.x > end + size.max(run.font_size) * RESUMED_WITHIN {
+            // The gap in a reader's ems on the page: the wider of the two
+            // runs' measures of it, so that no line a reader joins is parted.
+            let gap = (run.x - end) * along(run).max(line.last().map_or(1.0, |last| along(last)));
+            if !line.is_empty() && gap > size.max(run.font_size) * RESUMED_WITHIN {
                 lines.push(std::mem::take(&mut line));
                 end = f64::NEG_INFINITY;
                 size = 0.0;
@@ -4023,6 +4459,152 @@ fn page_lines<'r>(painted: &[&'r TextRun]) -> Vec<Vec<&'r TextRun>> {
     lines
 }
 
+/// A line's text as [`Fonts::set_readings`] holds a reading to it: its
+/// letters, white space aside, and its words, each run of white space one
+/// space and none at either end.
+struct Words {
+    letters: String,
+    words: String,
+}
+
+/// The glyphs a reading of a line draws ([`Fonts::read_back`]) that draw
+/// something but a nonspacing mark, which rides on its letter: each one's
+/// baseline, to a tenth of a point, and its box, in the order drawn — taken
+/// before the reading is put in logical order, and counted
+/// ([`Overprint::count`]) only where the count decides whether a drawing is
+/// taken ([`Fonts::search`]).
+struct Overprint(Vec<(i64, f64, f64, f64)>);
+
+impl Overprint {
+    /// The glyphs of `page`, a reading in the order drawn.
+    fn of(page: &tinker_pdf_content::TextPage) -> Overprint {
+        Overprint(
+            page.blocks
+                .iter()
+                .flat_map(|block| &block.lines)
+                .flat_map(|line| &line.chars)
+                .filter(|c| {
+                    !c.text.trim().is_empty()
+                        && c.text
+                            .chars()
+                            .next()
+                            .is_none_or(|first| bidi_class(first) != BidiClass::NSM)
+                })
+                .map(|c| {
+                    let (x0, _, x1, _) = c.quad.bounds();
+                    ((c.origin.1 * 10.0).round() as i64, x0, x1, c.size)
+                })
+                .collect(),
+        )
+    }
+
+    /// How many of the glyphs stand over the one before them on their
+    /// baseline, as a reader of the page sees them: by their boxes, rows of
+    /// one baseline, a glyph over another where it starts more than a
+    /// fiftieth of its size inside the one left of it. The box is the
+    /// glyph's quad's bounds, as the probe kit counts overprint, so under a
+    /// skew a slanted glyph's box reaches over its neighbour's where nothing
+    /// is drawn over anything (V7 of round 6's review): every drawing tried
+    /// is counted so, the rules' among them.
+    fn count(self) -> usize {
+        let Overprint(mut boxes) = self;
+        boxes.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        boxes
+            .windows(2)
+            .filter(|pair| pair[0].0 == pair[1].0 && pair[1].1 < pair[0].2 - 0.02 * pair[1].3)
+            .count()
+    }
+}
+
+/// What [`Fonts::search`] found for a line.
+enum Search {
+    /// The rules' drawing reads the line right, or the line is not read back.
+    Rules,
+    /// The rules' drawing reads the line's letters in order and not its
+    /// words ([`Read::Letters`]).
+    Letters,
+    /// Draw the line so.
+    Found(BTreeMap<RunKey, Drawing>),
+    /// Nothing tried reads the line right.
+    Nothing,
+}
+
+/// How a reading of a line compares with its text ([`Words::read_as`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Read {
+    /// Its words, each where it was written, and so its letters.
+    Words,
+    /// Its letters in the order written and not its words: a word cut where
+    /// the reader parts the spacing, or two run together.
+    Letters,
+    /// Anything else.
+    Otherwise,
+}
+
+/// How [`Fonts::read_back`] gives each glyph of a reading back.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Given {
+    /// As the page's font gives it back ([`Segment::read_as`]), as a reader
+    /// of the page reads it.
+    ByTheFont,
+    /// As typed, as 05cea0b read every line back: where nothing tried reads
+    /// a line right as the page's fonts give it back
+    /// ([`Fonts::set_readings`]).
+    AsTyped,
+}
+
+impl Words {
+    fn of(text: &str) -> Words {
+        Words {
+            letters: text.chars().filter(|c| !c.is_whitespace()).collect(),
+            words: text.split_whitespace().collect::<Vec<_>>().join(" "),
+        }
+    }
+
+    /// How many of the line's pairs of letters, each letter and the one
+    /// written after it, `read` reads in that order, each pair counted as
+    /// often as the text has it: how near a reading that is not the text's
+    /// comes to it, in time linear in the two, near enough.
+    fn pairs_in(&self, read: &str) -> usize {
+        let mut wanted: BTreeMap<(char, char), usize> = BTreeMap::new();
+        let mut before: Option<char> = None;
+        for ch in self.letters.chars() {
+            if let Some(first) = before {
+                *wanted.entry((first, ch)).or_default() += 1;
+            }
+            before = Some(ch);
+        }
+        let mut found = 0;
+        let mut before: Option<char> = None;
+        for ch in read.chars().filter(|c| !c.is_whitespace()) {
+            if let Some(left) = before.and_then(|first| wanted.get_mut(&(first, ch))) {
+                if *left > 0 {
+                    *left -= 1;
+                    found += 1;
+                }
+            }
+            before = Some(ch);
+        }
+        found
+    }
+
+    /// How `read`, a reading of the line (its lines joined by a line feed),
+    /// compares with the line's text.
+    fn read_as(&self, read: &str) -> Read {
+        if !read
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .eq(self.letters.chars())
+        {
+            return Read::Otherwise;
+        }
+        if read.split_whitespace().eq(self.words.split_whitespace()) {
+            return Read::Words;
+        }
+        Read::Letters
+    }
+}
+
 /// How many drawings [`Fonts::set_readings`] reads one line back in before
 /// it keeps the rules' drawing: the rules' own, each run drawn otherwise in
 /// turn, then two runs at a time. A bound on the work per line, which
@@ -4035,14 +4617,11 @@ const READINGS_PER_LINE: usize = 128;
 /// ([`PARTED_FROM`]) its slice cut each way [`Cut`] names — centred
 /// ([`Cut::Centered`]) only where it is white space alone — by itself and
 /// with its neutrals turned.
-fn drawings_of(run: &TextRun) -> Vec<(RunKey, Drawing)> {
+fn drawings_of(run: &TextRun, along: f64) -> Vec<(RunKey, Drawing)> {
     let key = run_key(run);
     let odd = run.bidi_level.is_some_and(|level| level % 2 == 1);
     let turns = odd && run.text.chars().any(|c| !opens_right_to_left(c));
-    let spaced = run
-        .letter_spacing
-        .max(run.letter_spacing + run.word_spacing)
-        > run.font_size * PARTED_FROM;
+    let spaced = parted(run, along);
     let mut out = Vec::new();
     let level_orders: &[Option<bool>] = if turns {
         &[None, Some(!run.bidi_line_rtl)]
@@ -4083,6 +4662,25 @@ type RunKey = (usize, u64, u64);
 
 fn run_key(run: &TextRun) -> RunKey {
     (run.order, run.x.to_bits(), run.y.to_bits())
+}
+
+/// Which run of the page being drawn a plan is of ([`Fonts::plans`]): the
+/// run itself, by where it is held. Not [`run_key`], which two runs of one
+/// page may share, a run of format characters alone set where the next one
+/// starts: each run is written as it was planned, its own characters.
+/// [`Fonts::set_readings`] plans the runs of the page it is given, which
+/// stay where they are until that page is drawn, and forgets them at the
+/// next page; a copy drawn somewhere else, a text shadow, finds no plan and
+/// is planned anew.
+fn plan_key(run: &TextRun) -> usize {
+    std::ptr::from_ref(run) as usize
+}
+
+/// Whether two runs ask for one font for every character they draw: the
+/// family list, weight and style [`choose`] reads, which is all that
+/// [`Fonts::read_as`] reads of a run.
+fn same_font(a: &TextRun, b: &TextRun) -> bool {
+    a.families == b.families && a.weight == b.weight && a.style == b.style
 }
 
 /// How many characters of a neighbour a run is shaped against.
@@ -4365,6 +4963,16 @@ fn draw_run_against(
     let mut refused = 0usize;
 
     set_fill(page, run.color);
+    // A run whose line [`Fonts::set_readings`] read back is written as it
+    // planned the drawing it read, a standard-14 run's every face segment's
+    // text objects in the order drawn ([`Fonts::plan_run`]): planned once.
+    if let Some(Some((objects, end))) = fonts.plans.borrow().get(&(plan_key(run), drawing)) {
+        for object in objects {
+            flush(page, object, size, baseline, run, frame);
+        }
+        decorate(page, run, frame, *end);
+        return refused;
+    }
     // `css-fonts-4` §5.3 first, then shaping: see [`face_runs`]. An embedded
     // face's stretch is shaped whole; a standard-14 one keeps the
     // character-at-a-time path, because a simple font addresses a code and
@@ -5728,6 +6336,10 @@ pub(crate) fn cut_run(
 thread_local! {
     /// [`step`]'s count, on this thread.
     pub(crate) static STEPS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    /// How many times [`Fonts::read_back`] read a line back, on this thread:
+    /// counted under `cfg(test)` only, so that `epub/tests.rs` holds the
+    /// read-back's work by count where a clock would only run slowly.
+    pub(crate) static READINGS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 /// One step of a lookup a crafted line could make quadratic: a piece
@@ -6137,6 +6749,44 @@ const RESUMED_WITHIN: f64 = 0.5;
 /// gap that wide is written as it always was.
 const PARTED_FROM: f64 = RESUMED_WITHIN * 0.9;
 
+/// Whether `run` is spaced so that a reader may part two text objects of it
+/// ([`PARTED_FROM`]): its `letter-spacing`, and after a word space its
+/// `word-spacing` too, as wide on the page in a reader's ems, under a matrix
+/// whose [`along_the_line`] is `along`.
+fn parted(run: &TextRun, along: f64) -> bool {
+    run.letter_spacing
+        .max(run.letter_spacing + run.word_spacing)
+        * along
+        > run.font_size * PARTED_FROM
+}
+
+/// How long one em of a run's own spacing is on the page in a reader's ems,
+/// under `matrix`, the one the page draws the run under ([`OnPage::matrix`]):
+/// the matrix's scale along the baseline over the scale it gives a glyph's
+/// size, which is what `TextDevice` measures every gap against (its
+/// `Matrix::expansion`, the square root of the determinant's magnitude).
+/// One under every matrix that scales both axes alike — a shift, a turn,
+/// `scale(2)` — and `√2` under `scaleX(2)`, whose gaps are twice as wide on
+/// the page and whose glyphs are `√2` times as large; one too where the
+/// matrix is not finite or flattens the plane, which draws nothing.
+///
+/// The rules that ask whether a reader parts two text objects of a run, or
+/// two runs, ask it in these ems ([`parted`], [`page_lines`]):
+/// in the run's own, a styled `?!` glued to a Hebrew word at
+/// `word-spacing: 0.6em` under `transform: scaleX(2)` was drawn for a page
+/// where it read with the word and read alone on the page written (lane V
+/// of round 6).
+fn along_the_line(matrix: [f64; 6]) -> f64 {
+    let [a, b, c, d, _, _] = matrix;
+    let size = (a * d - b * c).abs().sqrt();
+    let along = hypot(a, b) / size;
+    if along.is_finite() && along > 0.0 {
+        along
+    } else {
+        1.0
+    }
+}
+
 /// Where [`draw_coded`] draws a mark of no advance that opens a
 /// left-to-right slice and rides on nothing in it, its letter drawn by the
 /// run or face segment before — styled apart from it, or, in a sans-serif or
@@ -6380,7 +7030,7 @@ fn draw_coded(
     drawing: Drawing,
 ) -> f64 {
     let (objects, x) = plan_coded(run, fonts, slice, x, drawing);
-    for object in objects {
+    for object in &objects {
         flush(page, object, size, baseline, run, frame);
     }
     x
@@ -6430,10 +7080,8 @@ fn plan_coded(
     // of it: each starts a spacing past where the one before it ended, and
     // `TextDevice` resumes a line across an object's end only within half an
     // em ([`PARTED_FROM`]).
-    let spaced = run
-        .letter_spacing
-        .max(run.letter_spacing + run.word_spacing)
-        > run.font_size * PARTED_FROM;
+    let along = fonts.along(run);
+    let spaced = parted(run, along);
     // Whether the slice is neutrals [`coded_order`] draws in their level's
     // order for a reader to undo with their line: at a right-to-left level,
     // on a line that holds a right-to-left character, with none of their
@@ -6556,6 +7204,7 @@ fn plan_coded(
                 codes: Vec::new(),
                 glyphs: Vec::new(),
                 characters: String::new(),
+                advances: Vec::new(),
                 x: placed.unwrap_or(if Some(at) == tail { x + shift } else { x }),
             });
         }
@@ -6571,6 +7220,7 @@ fn plan_coded(
                 Coded::Composite { id, .. } => open.glyphs.push((id, ch)),
             }
             open.characters.push(ch);
+            open.advances.push(advance);
         }
         after_mark = mark;
         // One sum, `advance + letter-spacing`, as before a mark took none:
@@ -6914,7 +7564,7 @@ fn mark_clusters(slice: &str) -> Vec<&str> {
 /// the two paths are not the same path.
 fn flush(
     page: &mut PageBuilder,
-    object: Vec<Segment>,
+    object: &[Segment],
     size: f64,
     y: f64,
     run: &TextRun,
@@ -6946,7 +7596,7 @@ fn flush(
                 .collect()
         })
         .collect();
-    if let [segment] = object.as_slice() {
+    if let [segment] = object {
         let x = frame.x(segment.x);
         if segment.composite {
             let Some(glyphs) = drawn.first().filter(|glyphs| !glyphs.is_empty()) else {

@@ -137,6 +137,11 @@ producer that emits one text object per styled span writes one paragraph as
 many `BT … ET` pairs on one baseline, so a line closed by `ET` is resumed
 when the next glyph continues within half an em of where the pen stopped,
 while a real gap on the same baseline (two table cells) stays two lines.
+An em is the glyph's size on the page, the expansion of its text rendering
+matrix (9.4.4), so a transform that scales one axis more than the other
+widens or narrows a gap against it: the EPUB writer, which reads each line it
+draws back through this device, reads it under the matrix the page draws it
+under ([epub](epub.md), ROADMAP CD-19).
 Within right-to-left text, where the pen stopped after a glyph is past the
 glyph's box by the spacing 9.4.4 moved it on by — `Tc` after every glyph,
 and `Tw` as well after a word space: a justified line set as one text object

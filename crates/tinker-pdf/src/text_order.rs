@@ -116,6 +116,7 @@
 //! opt-out: the characters in the order the content stream showed them, as
 //! `TextDevice` collected them.
 
+use std::collections::BTreeMap;
 use tinker_pdf_content::{Quad, TextChar, TextLine, TextPage, WritingMode};
 use tinker_pdf_shape::bidi::{drawn_reading, faces_outward, BaseDirection, DrawnReading};
 use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
@@ -137,17 +138,114 @@ pub struct TextOptions {
 /// Puts every line of `page` into logical order, and returns how many lines it
 /// changed.
 pub(crate) fn into_logical_order(page: &mut TextPage) -> usize {
+    in_logical_order(page, None)
+}
+
+/// [`into_logical_order`], asking `known` for each line's reading before
+/// [`drawn_reading`] searches for it, and keeping what that finds there
+/// ([`Readings`]): for a caller that reads lines of the same characters over
+/// and over.
+pub(crate) fn into_logical_order_knowing(page: &mut TextPage, known: &mut Readings) -> usize {
+    in_logical_order(page, Some(known))
+}
+
+/// [`into_logical_order`], each line's reading asked of `known` where there
+/// is one.
+fn in_logical_order(page: &mut TextPage, mut known: Option<&mut Readings>) -> usize {
     let mut changed = 0usize;
     for block in &mut page.blocks {
         let (joined, mut read) = rejoin_split_lines(&mut block.lines);
         changed += joined;
         for (at, line) in block.lines.iter_mut().enumerate() {
-            if logical_line(line, read.get_mut(at).and_then(Option::take)) {
+            let read = read.get_mut(at).and_then(Option::take);
+            let moved = match known.as_deref_mut() {
+                Some(known) => logical_line_reading(line, read, |visual| known.reading(visual)),
+                None => logical_line(line, read),
+            };
+            if moved {
                 changed += 1;
             }
         }
     }
     changed
+}
+
+/// The readings [`drawn_reading`] found of lines of units, kept for a caller
+/// that reads lines of the same characters over and over
+/// ([`into_logical_order_knowing`]).
+///
+/// A line's reading is a function of its units alone, the text of each of
+/// its characters with its marks in the order drawn ([`drawn_units`]): a
+/// line of the units of one read before is read as that one was, wherever
+/// its characters lie. The read-back of an EPUB page reads a line in every
+/// drawing it tries, and under a transform on the page and in its runs' own
+/// space as well (`epub::paint::Fonts::set_readings`), and a reader parts a
+/// letter-spaced line at every text object into pieces of a word or two that
+/// the line repeats: each line of units [`logical_line`] reads is searched
+/// once, and found again wherever it is met again. A chain of pieces
+/// [`turned_whole`] reads, to ask whether the bracket tie-break turns it, is
+/// searched each time.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Readings {
+    /// Each line of units searched, by its [`fingerprint`]: its units' text,
+    /// where each unit ends in that text, and its reading.
+    found: BTreeMap<u64, Vec<(String, Vec<usize>, DrawnReading)>>,
+}
+
+impl Readings {
+    /// What [`drawn_reading`] finds for `visual`: what it found for these
+    /// units before, or else what it finds now, kept.
+    fn reading(&mut self, visual: &[&str]) -> DrawnReading {
+        let lines = self.found.entry(fingerprint(visual)).or_default();
+        if let Some((_, _, reading)) = lines
+            .iter()
+            .find(|(text, ends, _)| holds_units(text, ends, visual))
+        {
+            return reading.clone();
+        }
+        let reading = search(visual);
+        let mut text = String::new();
+        let mut ends = Vec::with_capacity(visual.len());
+        for unit in visual {
+            text.push_str(unit);
+            ends.push(text.len());
+        }
+        lines.push((text, ends, reading.clone()));
+        reading
+    }
+}
+
+/// FNV-1a over `visual`'s units, each followed by a byte no UTF-8 text holds,
+/// so that the same text parted into other units prints otherwise.
+fn fingerprint(visual: &[&str]) -> u64 {
+    let mut print = 0xcbf2_9ce4_8422_2325_u64;
+    for unit in visual {
+        for byte in unit.bytes().chain(core::iter::once(0xff)) {
+            print = (print ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    print
+}
+
+/// Whether `visual` is the units `text` holds, each ending where `ends` says.
+fn holds_units(text: &str, ends: &[usize], visual: &[&str]) -> bool {
+    ends.len() == visual.len()
+        && ends
+            .iter()
+            .zip(visual)
+            .try_fold(0usize, |start, (end, unit)| {
+                (text.get(start..*end) == Some(*unit)).then_some(*end)
+            })
+            .is_some()
+}
+
+/// [`drawn_reading`]'s search for a line's reading. Counted only under
+/// `cfg(test)`, where the tests hold how often the read-back searches by
+/// count ([`Readings`]), not by a clock.
+fn search(visual: &[&str]) -> DrawnReading {
+    #[cfg(test)]
+    SEARCHES.with(|searches| searches.set(searches.get().saturating_add(1)));
+    drawn_reading(visual)
 }
 
 /// Joins consecutive lines of one block that the content stream's order split
@@ -356,7 +454,7 @@ fn turned_whole(pieces: &[TextLine]) -> Option<Read> {
     if !faces_outward(&visual) {
         return None;
     }
-    let reading = drawn_reading(&visual);
+    let reading = search(&visual);
     let turned = reading.turned_by_brackets;
     turned.then_some(Read { units, reading })
 }
@@ -580,6 +678,9 @@ fn extent(c: &TextChar, (ux, uy): (f64, f64)) -> (f64, f64) {
 thread_local! {
     /// [`look`]'s count, on this thread.
     static LOOKS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    /// How many lines [`drawn_reading`] searched for a reading, on this
+    /// thread ([`search`]).
+    pub(crate) static SEARCHES: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 /// One look at one character: its extent along a baseline ([`extent`]), its
@@ -709,6 +810,16 @@ fn drawn_units(chars: &[TextChar]) -> Units {
 /// Puts one line into logical order, reading it as `read` says where
 /// [`rejoin_split_lines`] already read it. Returns whether anything moved.
 fn logical_line(line: &mut TextLine, read: Option<Read>) -> bool {
+    logical_line_reading(line, read, search)
+}
+
+/// [`logical_line`], a line it reads read by `reading_of`, which finds what
+/// [`drawn_reading`] finds ([`Readings`]).
+fn logical_line_reading(
+    line: &mut TextLine,
+    read: Option<Read>,
+    reading_of: impl FnOnce(&[&str]) -> DrawnReading,
+) -> bool {
     if line.wmode == WritingMode::Vertical {
         return false;
     }
@@ -722,7 +833,7 @@ fn logical_line(line: &mut TextLine, read: Option<Read>) -> bool {
     let Read { units, reading } = read.unwrap_or_else(|| {
         let units = drawn_units(&line.chars);
         let visual: Vec<&str> = units.texts.iter().map(String::as_str).collect();
-        let reading = drawn_reading(&visual);
+        let reading = reading_of(&visual);
         Read { units, reading }
     });
     line.rtl = reading.direction == BaseDirection::RightToLeft;
@@ -1370,5 +1481,109 @@ mod tests {
         ];
         assert_eq!(rejoin_split_lines(&mut lines).0, 0);
         assert_eq!(lines.len(), 3);
+    }
+
+    /// **A line of units read before is read as it was, and no other line
+    /// is** (round 6, lane F:search): [`Readings`] hands back what
+    /// [`drawn_reading`] found for the same units, and searches every other
+    /// line, among them the same units in another order and the same text
+    /// parted into other units.
+    #[test]
+    fn a_line_of_units_read_before_is_read_as_it_was_and_no_other_is() {
+        let lines: [&[&str]; 4] = [
+            &[ALEF, BET, " ", "1", "2", "."],
+            &["1", "2", " ", ALEF, BET, "."],
+            &["\u{5D0}\u{5D1}", " ", "12", "."],
+            &[GIMEL, QAMATS, BET, " ", "(", "1", ")"],
+        ];
+        let mut known = Readings::default();
+        SEARCHES.with(|searches| searches.set(0));
+        for visual in lines.iter().chain(lines.iter()) {
+            assert_eq!(known.reading(visual), drawn_reading(visual), "{visual:?}");
+        }
+        assert_eq!(
+            SEARCHES.with(core::cell::Cell::get),
+            lines.len(),
+            "each line of units searched once"
+        );
+    }
+
+    /// And a page put in logical order knowing the readings of lines read
+    /// before, on another page and on itself, reads as one put in order
+    /// afresh, line for line.
+    #[test]
+    fn a_page_read_knowing_lines_read_before_reads_as_one_read_afresh() {
+        let word = |x: f64| {
+            line(
+                vec![
+                    ch(GIMEL, x, 5.0),
+                    ch(BET, x + 5.0, 5.0),
+                    ch(ALEF, x + 10.0, 5.0),
+                ],
+                true,
+            )
+        };
+        let page = |lines: Vec<TextLine>| {
+            let mut page = TextPage::default();
+            for (at, line) in lines.into_iter().enumerate() {
+                let quad = line.quad;
+                let mut line = line;
+                let shift = |(x, y): (f64, f64)| (x, y - 20.0 * at as f64);
+                for c in &mut line.chars {
+                    c.origin = shift(c.origin);
+                    c.quad = Quad {
+                        ll: shift(c.quad.ll),
+                        lr: shift(c.quad.lr),
+                        ul: shift(c.quad.ul),
+                        ur: shift(c.quad.ur),
+                    };
+                }
+                page.blocks.push(tinker_pdf_content::TextBlock {
+                    lines: vec![line],
+                    quad,
+                });
+            }
+            page
+        };
+        let numbers = || {
+            line(
+                vec![
+                    ch("1", 0.0, 5.0),
+                    ch("2", 5.0, 5.0),
+                    ch(" ", 10.0, 5.0),
+                    ch(BET, 15.0, 5.0),
+                    ch(ALEF, 20.0, 5.0),
+                ],
+                true,
+            )
+        };
+        let marked = || {
+            line(
+                vec![
+                    ch(GIMEL, 0.0, 5.0),
+                    ch(QAMATS, 1.0, 0.0),
+                    ch(BET, 5.0, 5.0),
+                    ch(ALEF, 10.0, 5.0),
+                ],
+                true,
+            )
+        };
+        let pages = [
+            page(vec![word(0.0), numbers(), marked()]),
+            page(vec![marked(), word(100.0), numbers(), word(0.0)]),
+        ];
+        let mut known = Readings::default();
+        for page in &pages {
+            let mut afresh = page.clone();
+            let mut knowing = page.clone();
+            assert_eq!(
+                into_logical_order_knowing(&mut knowing, &mut known),
+                into_logical_order(&mut afresh)
+            );
+            assert_eq!(
+                format!("{:?}", knowing.blocks),
+                format!("{:?}", afresh.blocks)
+            );
+        }
     }
 }

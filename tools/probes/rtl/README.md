@@ -229,6 +229,12 @@ and the 4 line families 10 seconds; on the Windows machine the 78 take
 6 minutes in a default build and 7 with `bundled-fonts`, and the line families
 6 seconds (369, 431 and 6 seconds of the tests' own time).
 
+At round 6's fix, which reads each line back on the page it is drawn on
+(ROADMAP CD-19), every family passes in both builds with nothing worse, 361
+books better in a default build and 415 with `bundled-fonts`, and on the
+Windows machine the suites take 6 and 7 minutes and 6 seconds (365, 398 and
+6 seconds of the tests' own time).
+
 Both binaries also hold their comparison to this section in tests that are not
 ignored and build no book (`cargo test -p tinker-pdf --test rtl_probes`, `cargo
 test -p tinker-pdf-shape --test rtl_lines`, which every `cargo test` runs): each
@@ -500,6 +506,10 @@ same injection, whole). An injection that several rounds ran is kept once,
 under the latest, with the others named in `also`. The 20 named `suites/…`
 put back broken each rule of the two suites' comparisons, and fire the
 suites' own checks (round 6's commit of the suites records their counts).
+Round 6's fix of CD-19, which reads each line back on the page it is drawn
+on, added the 22 named `page/…` and rewrote two of 935b077's, `no-pairs` and
+`lines-touching`, to the code it changed under them; its commit message
+records their counts: 106 injections in all.
 `--suite` runs a suite of your choosing instead of the catalogue's, the
 suites themselves included:
 

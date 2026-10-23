@@ -1746,16 +1746,20 @@ fix was to sharpen the injection rather than to shrug at the number.
 
   A whole run prints 78, 78 and 4 `RAN` lines (`grep -c '^RAN'`); fewer is a
   family that did not run, and a run is read by its banners, its `test
-  result` and its exit status together. At 935b077's code they take 6 and 7
-  minutes and 6 seconds in debug on the owner's Windows machine (Windows 11,
-  8 logical CPUs), where the 63 families before round 6 took 13 and 15
-  minutes and 10 seconds on four cores on Linux, and they run on demand: no
-  workflow runs them yet. Their comparisons' own tests are not ignored and
-  run with every
+  result` and its exit status together. In debug on the owner's Windows
+  machine (Windows 11, 8 logical CPUs) they take 6 and 7 minutes and 6
+  seconds at 935b077's code (369, 431 and 6 seconds of the tests' own
+  time) and at round 6's fix alike (365, 398 and 6), where the 63 families
+  before round 6 took 13 and 15 minutes and 10 seconds on four cores on
+  Linux; they run on demand: no workflow runs them yet. Their comparisons'
+  own tests are not ignored and run with every
   `cargo test`. On Windows, under Git Bash, the suites and the kit read
   what they read on Linux (the kit README's "On Windows" names what still
-  differs there). Every book a review of K-11 or CD-19 named is a case, 244 in
-  each build, in the test of its mechanism (`epub_conservation.rs`,
+  differs there). Every book a review of K-11 or CD-19 named is a case, and
+  so is every book round 6's fix found, with its guards and controls:
+  294 in a default build and 296 with `bundled-fonts` (the `CASE` lines a
+  run with `--nocapture` prints), each in the test of its mechanism
+  (`epub_conservation.rs`,
   `epub_fallback.rs`, read through `tests/epub_support/reading.rs`), which
   every `cargo test` runs: a case fixed is held to its right reading, a case
   still open is pinned at today's and names the ROADMAP CD-19 item that

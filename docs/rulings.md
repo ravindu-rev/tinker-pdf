@@ -751,6 +751,62 @@ living in one feature's head.
     `a_dirless_line_opening_with_a_bracket_pair_reads_its_closing_quotes_and_stops_last`
     (a sentence's end).
 
+    *The EPUB writer's read-back and its prices: the owner's decisions of
+    17 and 23 October 2026.* The EPUB writer reads each line that holds a
+    right-to-left character back as a reader of the page reads it, on the
+    page it is drawn on, and draws it otherwise where that reads it right
+    (ROADMAP CD-19). Round 6's fix of CD-19 measured what its first form
+    cost against 935b077, and the owner, Ravindu Wijegunawardhana, declined
+    three prices, each with its figures known:
+
+    - **Its time** (17 October 2026). Reading each line back on the page
+      took 1.06–1.13 times 935b077's time to open every shape of the probe
+      kit's `zz_v6_time` in debug, and a letter-spaced line under
+      `scaleX(2)` (`ls-scaled`) 1.47–1.51 (best of six interleaved runs on
+      the owner's Windows machine; two series of 935b077 0.0–1.7% apart).
+      The landed fix plans each run once a page for every reading of its
+      line, and searches each line of units' reading once a page: in debug
+      it opens every shape in 0.20–0.80 of 935b077's time (best of three
+      interleaved rounds; a build of 935b077's code again at 0.94–1.00).
+    - **`read_as`'s text** (17 October 2026). Reading each glyph back as
+      the page's font gives it back turned a styled `?!` that 935b077 read
+      as typed: in `W W <b>1 234</b> <i>?!</i> W.`, twice, the number's
+      halves a NO-BREAK SPACE apart, a reader reads that space by its glyph
+      name, UAX #9 then reads two numbers, and no drawing tried reads the
+      line's letters in order. The price put to the owner was 12 books of
+      the NO-BREAK SPACE grid in a default build and 7 with
+      `bundled-fonts`, at `word-spacing: 0.6em`, `1em` and `12px`. Measured
+      since, the class is wider: 16 (10) books of the probe kit's
+      `zz_f6_readas`, the 12 (7) and 4 (3) under `scaleY(2)`, where 935b077
+      turned the first `?!` already; and beside a letter the overflow font
+      names `space`, or a SOFT HYPHEN, 52 (39) books of a 64-book probe read
+      a `!?`, where 935b077 read 16 (20). The landed fix searches such a line
+      again with each glyph read as typed where the page's fonts' reading
+      finds nothing, and draws what that finds only where it reads more of
+      the line's pairs of letters in order on the page: every one of those
+      books reads its `?!` as typed, and none of the 64 a `!?`
+      (`epub_fallback.rs`'s
+      `a_styled_mark_after_a_number_a_no_break_space_holds_together_reads_as_typed`
+      and
+      `a_styled_mark_after_a_number_reads_as_typed_beside_a_letter_the_page_gives_back_otherwise`).
+    - **The second reading's time, and the books its removal costs** (23
+      October 2026). Under a transform, a line whose rules' drawing reads
+      on the page with its letters in order and not its words is read again
+      in its runs' own space, as 935b077 read every line under a transform.
+      In release that reading kept `ls-scaled` at 1.02–1.09 times 935b077's
+      time to open (best of ten interleaved rounds; median 1.065–1.08), and
+      leaving it out made 12 books worse in each build, 10 of them right at
+      935b077, and failed two case tests. The owner declined both, and
+      chose to keep searching for a form that costs neither. The landed fix
+      keeps the second reading and searches each line of units' reading
+      once a page (`text_order::Readings`): in release `ls-scaled` opens in
+      0.90–0.95 of 935b077's time (best of ten rounds, median 0.92–0.95; a
+      build of 935b077's code again 0.98–1.02) and every shape in 0.24–0.91
+      (best of six), and every book of the kit reads as before, its outputs
+      byte for byte.
+
+    No time or text price of the read-back is accepted.
+
 ## How to add a ruling
 
 State it in one bold sentence, name the features it binds, give the reason

@@ -403,6 +403,104 @@ reads right, is drawn by the rules, byte for byte as before; a line with a
 run in a face of the book's own is not read back, since that face is
 shaped (`neutrals_a_reader_reads_with_the_word_beside_them_are_drawn_for_that_reading`,
 `a_line_a_reader_cuts_where_it_is_spaced_apart_is_drawn_to_read_whole`).
+**Each line is read back on the page it is drawn on** (round 6;
+`paint::OnPage::matrix`, `paint::along_the_line`, `paint::Segment::read_as`,
+`paint::Given`, `paint::Words`, `paint::Read::Letters`). The read-back fed
+`TextDevice` each glyph in its run's own space, but the page draws the run
+under the `cm` its CSS `transform` writes (`paint::OnPage::open`), and a
+reader's thresholds are in the glyphs' size on the page: a transform that
+scales one axis more than the other widens or narrows every gap against it.
+Under `transform: scaleX(2)` at `word-spacing: 0.6em` a styled `?!` glued to
+a Hebrew or Arabic word was read with the word in the model, drawn turned for
+that reading, and read alone on the page, turned: `שלום!? עולם.`, where
+9297d2d and 56dfd93 read `שלום?! עולם.` (V1 of round 6's review). Two of the
+writer's rules asked in the run's ems too — whether a reader parts two text
+objects of a run (`paint::parted`) and which runs it reads as one line
+(`paint::page_lines`) — so that `25٪ <b>W</b>` in Arabic under
+`scaleX(1.4)`, which conserved at 56dfd93, read its number backwards since
+round 5. Each line is read back now under the matrix the page draws each of
+its runs under, and both rules ask in a reader's ems on the page: an em of a
+run's own spacing is `along_the_line` of its matrix, the scale along the
+baseline over the square root of the determinant's magnitude, which is how
+`TextDevice` sizes a glyph — `√2` under `scaleX(2)`, one under a turn, a
+shift or `scale(2)`. And each glyph is read back as the page's font gives it
+back: a standard face draws a NO-BREAK SPACE at `WinAnsiEncoding`'s `0xA0`,
+which a reader reads by its glyph name as a space, and the overflow font
+names no letter of the supplementary planes, so an Adlam word is spaces to a
+reader, and a styled `?!` between two of them is drawn as typed, not turned
+for letters the page does not have. Where nothing tried reads such a line
+right, it is searched again with each glyph read as typed, and what that
+finds is drawn only where it reads more of the line's pairs of letters in
+order on the page than the rules' drawing: read as its font gives it back,
+`1 234` is two numbers to UAX #9, which no drawing puts back together, and
+the styled `?!` after it in `W W <b>1 234</b> <i>?!</i> W.`, which 935b077
+read as typed, was turned, a price the owner declined on 17 October 2026
+([ruling 14](../rulings.md)). A reading is held to the line's letters in
+order, white space aside, as at 935b077 (`paint::Read::Letters`): a drawing
+tried that reads them so is taken, though a reader cut a word of it or ran
+two together, and a line whose rules' drawing reads them so is searched no
+further on the page. Holding each drawing to the line's words, and searching
+on past such a reading of the rules', read more books right, at a cost in
+time that is the owner's to price (ROADMAP CD-19). Under a transform, a line
+the rules' drawing reads on the page with its letters in order and not its
+words is searched in its runs' own space too, as 935b077 searched every line
+under a transform, and what that finds is drawn only where it reads the
+words right on the page (`paint::Fonts::reads_whole`): kept as the rules drew
+it, an Arabic paragraph of numbers letter-spaced, word-spaced and justified
+under `scaleX(2)`, which read whole at 935b077, lost its text, and taken as
+found, the third `?!` of a paragraph with no `dir` under `scaleX(2)` was
+turned for a reading only that space has. Where nothing tried reads a line
+right on the page under a transform — glyphs the transform sets over others,
+whose letters no drawing reads in order — the line is searched again in its
+runs' own space, and what that finds is drawn only where, read back on the
+page, it holds more of the text's pairs of letters in order than the rules'
+drawing does there (`paint::Fonts::reads_closer`): drawn as found, a Hebrew
+paragraph with no `dir` of inline blocks squeezed by `scaleX(0.5)` and
+turned a quarter lost the structure tree's order it held at 9297d2d and
+56dfd93, as it did at 935b077. And no drawing that sets more glyphs over
+others than the rules' is taken (`paint::Overprint`, which counts a glyph
+over another by its box as the probe kit does, so that under a skew a
+slanted glyph's box reaches over its neighbour's where nothing is drawn over
+anything: V7 of the review). `paint::leading_mark_at`, which places a mark
+of no advance against half an em, keeps the run's ems: asked in the page's,
+it moved no book of the sweeps. None of it costs time on a book that read
+right at 935b077, as the owner asked on 17 and 23 October 2026: each run is
+planned once a page for every reading of its line, and the page writes the
+plan its line was read in (`paint::Fonts::plans`), and a line of units whose
+reading the page has searched is not searched again
+(`text_order::Readings`), so that on the owner's Windows machine
+`Document::open` takes 0.20–0.80 of 935b077's time on every shape of the
+probe kit's `zz_v6_time` in debug and 0.24–0.95 in release. On round 6's
+families (14 748 books and plain PDFs a build) and every family before them
+(137 665 rows a build in all), measured there, 361 books read better than at
+935b077 in a default build and 415 with `bundled-fonts`, 316 (378) of them
+conserving where they did not, and none reads worse on any metric or draws a
+glyph over another more often by the kit's count; of the books that
+conserved at 56dfd93 and not at 935b077, 148 (93) conserve again
+(`a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on`,
+`a_line_is_read_back_as_the_pages_fonts_give_its_characters_back`,
+`a_styled_mark_between_letters_the_page_gives_back_as_spaces_reads_as_typed`,
+`a_styled_mark_after_a_number_a_no_break_space_holds_together_reads_as_typed`,
+`what_a_line_read_as_typed_finds_is_drawn_only_where_it_reads_closer_on_the_page`,
+`a_styled_mark_after_a_number_reads_as_typed_beside_a_letter_the_page_gives_back_otherwise`,
+`each_run_is_written_as_the_read_back_planned_it_though_two_share_a_place`,
+`a_reading_that_cuts_or_joins_a_word_is_taken_as_935b077_took_it`,
+`a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space`,
+`a_line_a_reader_cuts_on_the_page_under_a_transform_is_searched_in_its_runs_space_too`,
+`a_drawing_that_sets_more_glyphs_over_others_than_the_rules_is_not_taken`,
+`two_cells_are_read_back_as_a_reader_parts_them_on_the_page`, and in
+`epub::tests`,
+`a_line_whose_rules_drawing_reads_its_letters_in_order_is_read_back_once` and
+`a_line_of_units_the_read_back_has_read_is_not_searched_again`). A half
+turn at `word-spacing: 1em` is left: `25٪ <b>W</b>` in an Arabic paragraph
+turned by `rotate(180deg)` conserved at 56dfd93 only, where the moved glyphs
+drew the bold word apart around its sign, and no drawing reads it right on
+the page now, since `TextDevice` asks whether a glyph continues a line along
+the page's `x`, which a half turn runs the other way (10 (10) books; ROADMAP
+CD-19, Left (6)); and so, with `bundled-fonts`, is `W 1 234، <b>W</b> W.` in
+Hebrew, the number's halves a NO-BREAK SPACE apart, under `scaleX(2)` at
+`word-spacing: 0.6em`, which conserved at 56dfd93 only and reads its comma
+apart since 935b077 (2 books; Left (9)).
 **Measured, and what is left.** Over the synthetic probes of ROADMAP K-11
 and its reviews (the kit's 30 230 books a build, the hunt's 6 298, its 954
 sweeps and 12 minimised books, the code review's 2 688, the fix-verify
@@ -412,7 +510,10 @@ overflow script, tables, glosses, marks and inline spacing, 2 700 of word
 spacing and code 32 and 21 152 more that count overlaps; of the second,
 15 176 of styled neutrals, glosses, inline blocks, tables and nested
 levels; no corpus was fetched), neither build draws a glyph over another
-under `word-spacing` or justification, where 56dfd93 drew one so in 975
+under `word-spacing` or justification (counted as the probe kit counts, by
+glyph boxes on a baseline, which under a skew see slanted neighbours overlap
+where nothing is drawn over anything: V7 of round 6's review), where 56dfd93
+drew one so in 975
 books in a default build and 620 with `bundled-fonts` on the first six of
 those (3 of the kit's books on its probes that count overlaps and 296 on
 its others, 179 of the hunt's, 12 of its sweeps, both minimised books, 19 of

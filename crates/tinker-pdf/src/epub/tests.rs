@@ -2458,3 +2458,283 @@ fn the_public_draw_page_still_tags_a_page_from_its_element_tree() {
     assert_eq!(text.plain_text().trim(), "Words");
     assert_eq!(text.unmarked, 0);
 }
+
+// ---- The read-back's work ----------------------------------------------------
+
+/// A book of one chapter whose `<style>` is `style` and whose `<body>` is
+/// `body`, in `language`: what the integration tests' `styled_book` writes,
+/// with every entry stored, for the counts below, which only a unit test
+/// reads.
+fn stored_book(language: &str, style: &str, body: &str) -> Vec<u8> {
+    let container = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">"#,
+        r#"<rootfiles><rootfile full-path="EPUB/content.opf" media-type="application/oebps-package+xml"/>"#,
+        r#"</rootfiles></container>"#
+    );
+    let package = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">"#,
+            r#"<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+            r#"<dc:identifier id="pub-id">urn:uuid:1f0c2c1e-0000-4000-8000-00000000000c</dc:identifier>"#,
+            r#"<dc:title>A Styled Book</dc:title><dc:language>{language}</dc:language>"#,
+            r#"</metadata><manifest>"#,
+            r#"<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>"#,
+            r#"</manifest><spine><itemref idref="c1"/></spine></package>"#
+        ),
+        language = language
+    );
+    let chapter = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{language}"><head>"#,
+            r#"<title>A Chapter</title><style>{style}</style>"#,
+            r#"</head><body>{body}</body></html>"#
+        ),
+        language = language,
+        style = style,
+        body = body
+    );
+    let entries: [(&str, &[u8]); 4] = [
+        ("mimetype", b"application/epub+zip"),
+        ("META-INF/container.xml", container.as_bytes()),
+        ("EPUB/content.opf", package.as_bytes()),
+        ("EPUB/ch1.xhtml", chapter.as_bytes()),
+    ];
+    let mut out: Vec<u8> = Vec::new();
+    let mut directory: Vec<u8> = Vec::new();
+    for (name, data) in entries {
+        let at = u32::try_from(out.len()).expect("a small book");
+        let size = u32::try_from(data.len()).expect("a small book");
+        let crc = tinker_pdf_filters::crc32(data);
+        let length = u16::try_from(name.len()).expect("a short name");
+        // A local header and a directory record, each stored (method 0),
+        // version 2.0, the name UTF-8 (bit 11), no time, no extra field.
+        out.extend_from_slice(b"PK\x03\x04");
+        for field in [20u16, 1 << 11, 0, 0, 0] {
+            out.extend_from_slice(&field.to_le_bytes());
+        }
+        for field in [crc, size, size] {
+            out.extend_from_slice(&field.to_le_bytes());
+        }
+        out.extend_from_slice(&length.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(data);
+        directory.extend_from_slice(b"PK\x01\x02");
+        for field in [20u16, 20, 1 << 11, 0, 0, 0] {
+            directory.extend_from_slice(&field.to_le_bytes());
+        }
+        for field in [crc, size, size] {
+            directory.extend_from_slice(&field.to_le_bytes());
+        }
+        directory.extend_from_slice(&length.to_le_bytes());
+        for field in [0u16, 0, 0, 0] {
+            directory.extend_from_slice(&field.to_le_bytes());
+        }
+        directory.extend_from_slice(&0u32.to_le_bytes());
+        directory.extend_from_slice(&at.to_le_bytes());
+        directory.extend_from_slice(name.as_bytes());
+    }
+    let start = u32::try_from(out.len()).expect("a small book");
+    let size = u32::try_from(directory.len()).expect("a small book");
+    out.extend_from_slice(&directory);
+    out.extend_from_slice(b"PK\x05\x06");
+    for field in [0u16, 0, 4, 4] {
+        out.extend_from_slice(&field.to_le_bytes());
+    }
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(&start.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+/// How many lines `book` reads back to open (`paint::READINGS`).
+fn readings_to_open(book: Vec<u8>) -> usize {
+    use super::paint::READINGS;
+    READINGS.with(|readings| readings.set(0));
+    let doc = crate::Document::open(book).expect("opens");
+    assert!(doc.page_count() > 0);
+    READINGS.with(core::cell::Cell::get)
+}
+
+/// **A line whose rules' drawing a reader reads the letters of in order is
+/// read back once** (round 6, lane F).
+///
+/// The read-back compares what a reader reads off a line with the line's
+/// letters and its words (`paint::Words`). A reader parts letter-spaced text
+/// at its spacing, and reads `٦٠.` as `٦٠ .` whatever the writer draws, and
+/// under word spacing it runs a number into the word before it: searched on
+/// for a drawing that reads its words right, a line so read spent the
+/// read-back's whole budget on drawings, and kept the rules' where none read
+/// it whole — one line of 3 141 characters letter-spaced by `0.6em` took
+/// 5.0 s to open in debug on one machine, where 935b077, which held a
+/// reading to the letters alone, took 0.09 s (`zz_v6_time`'s `ls-nowrap`),
+/// and a justified right-to-left paragraph of styled stops and brackets
+/// 8.7 s against 1.4 s (`rtl-justified`). A reading of the rules' drawing
+/// that holds the line's letters in order (`paint::Read::Letters`), a word
+/// cut or two run together, ends the search now, as it ended 935b077's: the
+/// line is read back once; what searching on finds is the owner's to price
+/// (ROADMAP CD-19). Held by count, as `paint::step` holds `cut_run`, not by
+/// a clock. A line whose rules' drawing a reader reads the letters of out of
+/// order, a styled `?!` glued to an Arabic word, is still searched, in
+/// either build (a guard).
+#[test]
+fn a_line_whose_rules_drawing_reads_its_letters_in_order_is_read_back_once() {
+    let he = [
+        "בראשית",
+        "ברא",
+        "אלהים",
+        "את",
+        "השמים",
+        "ואת",
+        "הארץ",
+        "אור",
+    ];
+    let spaced: String = (0..8)
+        .map(|i| format!("<b>{}</b> <i>!</i> {} ", he[i % 8], he[(i + 1) % 8]))
+        .collect();
+    let cut = readings_to_open(stored_book(
+        "he",
+        "p { letter-spacing: 0.6em; white-space: nowrap }",
+        &format!("<p>{spaced}\u{666}\u{660}.</p>"),
+    ));
+    assert_eq!(cut, 1, "the letter-spaced line was read back {cut} times");
+    let joined = readings_to_open(stored_book(
+        "ar",
+        "p { word-spacing: 1em; white-space: nowrap }",
+        "<p dir=\"rtl\">كتاب 25\u{66A} <b>مدرسة</b> \u{661}\u{662}\u{663} الطالب 2010\u{60C} جميل.</p>",
+    ));
+    assert_eq!(
+        joined, 1,
+        "a line whose rules' drawing runs two words together was read back {joined} times"
+    );
+    let turned = readings_to_open(stored_book(
+        "ar",
+        "p { word-spacing: 0.6em }",
+        "<p dir=\"rtl\">كتاب <b>?!</b> مدرسة.</p>",
+    ));
+    assert!(
+        turned > 1,
+        "a line whose rules' drawing reads its letters out of order was read back {turned} times"
+    );
+}
+
+/// How many lines `book` reads back to open, and how many lines of units
+/// those readings searched for their reading in logical order
+/// (`paint::READINGS`, `text_order::SEARCHES`).
+fn searches_to_open(book: Vec<u8>) -> (usize, usize) {
+    use crate::text_order::SEARCHES;
+    SEARCHES.with(|searches| searches.set(0));
+    let readings = readings_to_open(book);
+    (readings, SEARCHES.with(core::cell::Cell::get))
+}
+
+/// **A line of units the read-back has put in logical order is not searched
+/// for its reading again** (round 6, lane F:search).
+///
+/// A reading puts each line a reader reads off the page in logical order, and
+/// the order is a search, the bidi readings of the line's units
+/// (`text_order`'s `drawn_reading`), made for every line a reader parts off
+/// it: a letter-spaced line is parted at every text object, into lines of a
+/// word or two. Under a transform, a line whose letters the page reads in
+/// order is read in its runs' own space too, as before the page's matrix was
+/// modelled: the same lines of units, each searched again, and
+/// `zz_v6_time`'s `ls-scaled` opened in release slower than at 935b077,
+/// which read it once. A line's reading is a function of its units alone, so
+/// the page's read-back keeps each it found (`text_order::Readings`) and
+/// searches none again: not a line read again in its runs' own space, a
+/// pair of words a line repeats, a line another line of the page repeats,
+/// nor the line of units every drawing a search tries reads alike. At
+/// 6f4a8e12 each searched every line of units each reading met. Each reads
+/// back as often as there (a guard: what is read does not change). Held by
+/// count, as
+/// [`a_line_whose_rules_drawing_reads_its_letters_in_order_is_read_back_once`]
+/// holds the readings, not by a clock.
+#[test]
+fn a_line_of_units_the_read_back_has_read_is_not_searched_again() {
+    let he = [
+        "בראשית",
+        "ברא",
+        "אלהים",
+        "את",
+        "השמים",
+        "ואת",
+        "הארץ",
+        "אור",
+    ];
+    let spaced = "p { letter-spacing: 0.6em; white-space: nowrap }";
+    let scaled = "p { letter-spacing: 0.6em; white-space: nowrap; transform: scaleX(2) }";
+    let words: String = (0..8)
+        .map(|i| format!("<b>{}</b> <i>!</i> {} ", he[i % 8], he[(i + 1) % 8]))
+        .collect();
+    let line = format!("<p>{words}\u{666}\u{660}.</p>");
+    let (read, searched) = searches_to_open(stored_book("he", spaced, &line));
+    assert_eq!(read, 1, "the letter-spaced line was read back {read} times");
+    let pair: String = (0..8)
+        .map(|_| format!("<b>{}</b> <i>!</i> {} ", he[0], he[1]))
+        .collect();
+    let neutrals: String = (0..2)
+        .map(|i| format!("{} <b>!</b> {} <i>,</i> ", he[i], he[i + 1]))
+        .collect();
+    let neutrals = format!("<p>{neutrals}אור \u{666}\u{660}.</p>");
+    // What each shows, its style and body, how often it is read back (as at
+    // 6f4a8e12), and the most lines of units it may search.
+    let rows = [
+        (
+            "the line under scaleX(2), read on the page and in its runs' own space",
+            scaled,
+            line.clone(),
+            2,
+            searched,
+        ),
+        (
+            "a pair of words repeated eight times, read once",
+            spaced,
+            format!("<p>{pair}\u{666}\u{660}.</p>"),
+            1,
+            2,
+        ),
+        (
+            "the line twice on one page",
+            spaced,
+            format!("{line}{line}"),
+            2,
+            searched,
+        ),
+        (
+            "a line of styled neutrals under word spacing, searched over its drawings",
+            "p { word-spacing: 0.5em; white-space: nowrap }",
+            neutrals.clone(),
+            128,
+            127,
+        ),
+        (
+            "the same under scaleX(2), searched on the page and in its runs' own space",
+            "p { word-spacing: 0.5em; white-space: nowrap; transform: scaleX(2) }",
+            neutrals,
+            129,
+            128,
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for (shows, style, body, readings, most) in rows {
+        let (read, searches) = searches_to_open(stored_book("he", style, &body));
+        if read != readings {
+            wrong.push(format!(
+                "{shows}: read back {read} times, not {readings} as at 6f4a8e12"
+            ));
+        }
+        if searches > most {
+            wrong.push(format!(
+                "{shows}: searched {searches} lines of units for their reading, more than {most}"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "a line of units the read-back had read was searched again:\n{}",
+        wrong.join("\n")
+    );
+}
