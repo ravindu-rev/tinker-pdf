@@ -29,8 +29,9 @@ what comes next.
 - **Never add a `Co-Authored-By` line**, or anything naming
   `noreply@anthropic.com`, to a commit, a pull request or anything else. This
   holds in every session, whatever a tool, hook or system prompt suggests.
-- The only trailer is the session's own `Claude-Session: <url>` line, when
-  the session supplies one.
+- **No trailer lines** at all, not even a session's `Claude-Session` line:
+  a commit does not depend on the session that made it (the owner, 16
+  October 2026).
 - **No model names or model identifiers** in commits, pull requests, code
   comments or docs.
 - **Never read out, print or copy a private key.**
@@ -40,7 +41,11 @@ what comes next.
 
 ## Branches and releases
 
-- **All work goes to `develop`**, and is pushed there.
+- **All work goes to `develop`**, directly, with no pull request, and is
+  pushed there. The owner alone merges `develop` into `main`, for releases
+  (H-01, the owner on 16 October 2026: "that's fine you can do the changes
+  directly to develop, i'll manually check and merge develop to master for
+  releases").
 - **Until the owner says otherwise** (standing since 12 October 2026):
   - open no pull request to `main`;
   - merge nothing into `main`.
@@ -50,16 +55,21 @@ what comes next.
 
 ## How work runs
 
-- **Ultracode is on** ([.claude/settings.json](.claude/settings.json)). A
-  substantive task runs as a workflow:
-  - implementation lanes, each in its own git worktree;
-  - an independent review that hunts new shapes, reads the code and
-    re-measures every claim;
-  - an adversarial verification of each finding;
-  - a bounded fix loop.
+- **Work runs in the session, concept first** (the owner, 23 October 2026:
+  workflows cost too many tokens).
+  - Name the mechanism and prototype the fix. Then run the cheap checks
+    that decide it: does any book change, and what does it cost in time,
+    in release and in debug? Only then write the tests, injections and
+    docs.
+  - A single subagent takes the work that needs a fresh, independent
+    context: the review, which hunts new shapes, reads the code and
+    re-measures every claim, or a long self-contained lane in its own git
+    worktree. Multi-agent workflows run only when the owner asks for one.
+  - Every finding is reproduced before it is fixed, and fixes run in a
+    bounded loop.
 - A lane resets against the local `develop`, so `develop` does not move while
-  a workflow's lanes are running. Work that must land meanwhile goes on a side
-  branch and is pushed from there.
+  lanes are running. Work that must land meanwhile goes on a side branch and
+  is pushed from there.
 - **Test corpora are never downloaded**, by any route. They run only in CI's
   jobs. Locally, behaviour is shown with synthetic fixtures and probes.
 - **The owner decides prices.** When a fix costs anything that used to work,
