@@ -1,11 +1,44 @@
 # Where the last session stopped
 
-Written 23 October 2026, when round 6 of ROADMAP CD-19 landed on `develop`.
-The next session starts here: read this, then [AGENTS.md](../AGENTS.md),
-then continue with "Next, in this order" below. AGENTS.md changed in this
-round: work runs in the session, concept first, with a single subagent for
-the review. When this note is out of date, rewrite it or delete it in the
-same commit that moves the work on.
+Written 23 October 2026, when round 6 of ROADMAP CD-19 landed on `develop`,
+and brought up to date on 24 October 2026, when the roadmap was cut into
+steps. The next session starts here: read this, then
+[AGENTS.md](../AGENTS.md), then continue with "Next, in this order" below.
+When this note is out of date, rewrite it or delete it in the same commit
+that moves the work on.
+
+## The roadmap, cut into steps (24 October 2026)
+
+- **What changed.** [docs/ROADMAP.md](../docs/ROADMAP.md) is now the index:
+  what a step is, how one runs, the order of work. Each tier's rows are in
+  `docs/roadmap/<PREFIX>.md`, with each row's text kept verbatim and its
+  steps under it. The people's acts are in `docs/roadmap/H.md` and the hard
+  limits in `docs/roadmap/NG.md`. Every row ID is unchanged, so every
+  reference to one still holds.
+- **How far the cut got.** 111 of 459 rows are cut into 932 steps: tiers 0,
+  1, P and rendering and colour whole, 37 of the 43 fonts-and-text rows,
+  ED-01, FJ-01 and CD-19. An independent pass reviewed 16 of those cuts
+  against the code (CD-19, FJ-01, K-01…K-09, P-10…P-14); the other 95 say
+  their steps are not yet reviewed. The 348 rows not cut yet each say so.
+- **New rows.** P-27, the shape crate's build script (below, "Small and
+  measured"), and 25 new H rows, H-134 to H-158. CD-19's decisions are
+  H-149 to H-158.
+- **The owner's instructions** (AGENTS.md):
+  - 23 October 2026: work runs as workflows, one roadmap step per run;
+    commits are signed with the default ed25519 key in `~/.ssh` through
+    the repository's git config; when a step is done, its changes are
+    merged into `develop` fast-forward, `develop` is pushed, and every
+    branch except `develop` and `main` is deleted.
+  - 24 October 2026: the rows not yet cut are cut in the session, tier by
+    tier, without workflows.
+- **Signing on the Linux machine.** Its key is `SHA256:6fQ5We1x…`, not the
+  one that signed the history before (`SHA256:TsJhk…`). GitHub marks a
+  commit verified only when its key is registered on the owner's account as
+  a signing key.
+- **The cut's working files** (the step JSON, its checker and renderer)
+  stay in `.claude/worktrees/roadmap-cut` on that machine only, ignored by
+  git. Nothing below needs them: the rows not yet cut are cut directly in
+  `docs/roadmap/*.md`.
 
 ## Where the work continues
 
@@ -71,6 +104,9 @@ the owner merges `develop` into `main` (H-01). `main` is unchanged at
 
 ## Still open
 
+Every CD-19 item below is now a step or an H row of ROADMAP CD-19 (CD-19.1
+to CD-19.37, H-149 to H-158), in the order "Next" gives.
+
 - **CD-19 Left (10), first in the order of work.** A dir-less Arabic
   paragraph with a styled `?!` in an inline block widened by `scaleX(2)`
   reads in logical order since round 6, where 935b077 did not. It draws two
@@ -120,7 +156,7 @@ the owner merges `develop` into `main` (H-01). `main` is unchanged at
   - `inject.py` touches only the crates its injections name, so give each
     tree its own cargo target.
   - The suites' times swing with load; the docs quote a quiet machine.
-- **Small and measured, not yet made:**
+- **Small and measured, not yet made** (now ROADMAP P-27.1 and CD-19.2):
   - **`perf(shape)`:** `crates/tinker-pdf-shape/build.rs`'s `bidi_class`
     calls `abbreviate` once per code point. Hoisting the call out of the
     loop took the build script from 35.0 s to 0.21 s, with `ucd.rs`
@@ -137,15 +173,19 @@ the owner merges `develop` into `main` (H-01). `main` is unchanged at
 
 ## Next, in this order
 
-1. **CD-19 Left (10):** the owner's word. If it is a guard, work concept
-   first: prototype an over-glyph check on the page, then measure the books
-   and the time.
-2. **The owner's CD-19 option decisions**, each option rebuilt on the
-   landed code with its time measured in release and debug.
-3. **MS-11:**
-   - `ci.yml` on push to `develop`;
-   - dispatch `fuzz.yml` and `corpus.yml` on `develop` (H-03), and fix
-     each failure or make it a row;
-   - K-06's seven nights count from the owner's next merge.
-4. **`perf(shape)` and the kit's `CARGO_BUILD_JOBS`.**
-5. **Then ROADMAP's order of work:** K-01, K-02, and on.
+1. **ROADMAP's "Order of work"**, step by step:
+   - CD-19.1 to CD-19.7: the design doc for what is left, the kit's fixes,
+     the timing runner, the `ride=` ratchet, the review hunts' classes,
+     `plan_key` by place, and Left (10)'s guard prototyped and priced;
+   - the owner's word on Left (10) (H-149), then CD-19.8;
+   - the options rebuilt on the landed code and re-timed (CD-19.9 to
+     CD-19.13), the owner's choices (H-150 to H-154), CD-19.14 to CD-19.18,
+     and the rest of CD-19 in its order;
+   - then P-27.1, MS-11 and K-06, K-01 and K-02, MS-01, MS-04, MS-06 and
+     MS-02, P-01 to P-05, and the tiers.
+2. **Separately, in the session and without workflows**: cut the rows not
+   yet cut, tier by tier, in the order of work (6 in FT, 56 in ED, and every
+   row of AN, FJ but FJ-01, SG, SE, FI, FO, SD, SU, CD but CD-19, and OC).
+   Each tier's cut lands as its own commit.
+3. The 95 cut rows whose steps are not yet reviewed are reviewed when each
+   comes up ("How a step runs", 1).

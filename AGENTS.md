@@ -9,7 +9,8 @@ It sits on top of [CONTRIBUTING.md](CONTRIBUTING.md) (the four rules that are
 not negotiable, how to work an item, tests) and
 [docs/rulings.md](docs/rulings.md) (the rulings, which override everything).
 Read both before changing code. What to work on next is
-[docs/ROADMAP.md](docs/ROADMAP.md)'s "Order of work".
+[docs/ROADMAP.md](docs/ROADMAP.md)'s "Order of work": a list of steps,
+each one workflow run, whose rows live in [docs/roadmap/](docs/roadmap/).
 
 The owner is Ravindu Wijegunawardhana.
 

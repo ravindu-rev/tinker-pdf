@@ -111,10 +111,12 @@ now, and reviews enforce all four.
 
 ## Working an item
 
-Roadmap items carry **exit criteria** that are deliberately concrete — a
+Roadmap rows carry **exit criteria** that are deliberately concrete — a
 test that runs, a corpus number, a counted injection — and a design doc when
-the item is large. Build to the exit criteria and treat a design doc's milestone
-table as the commit boundary set.
+the row is large. A row is cut into **steps** before work on it starts,
+each one workflow run with its own exit ([docs/ROADMAP.md](docs/ROADMAP.md),
+"What a step is"). Build to the step's exit, and treat the row's steps — a
+design doc's milestones — as the commit boundary set.
 
 **Two ways a counted injection lies, and both have happened here.**
 

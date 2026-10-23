@@ -42,7 +42,8 @@ Forward-looking work lives only in the [roadmap](ROADMAP.md) and its
 | Doc | Covers |
 | --- | --- |
 | [architecture.md](architecture.md) | crate DAG, leaf rule, error model, concurrency, per-crate map |
-| [ROADMAP.md](ROADMAP.md) | what is not built yet, tiered by evidence |
+| [ROADMAP.md](ROADMAP.md) | what is not built yet, tiered by evidence: what a step is, how one runs, and the order of work |
+| [roadmap/](roadmap/) | one file per tier, each row with its steps; the acts only a person can do (`H.md`); the hard limits (`NG.md`) |
 | [design/](design/) | one design doc per major roadmap item |
 | [pdf20-deltas.md](pdf20-deltas.md) | ISO 32000-2 deltas against the 1.7 baseline |
 
