@@ -535,7 +535,11 @@ times at `word-spacing: 4px` drew a MEM over the full stop at `270pt`. The
 owner accepted that for the October 2026 release and put CD-19 first in the
 order of work; with the overflow font written at `0 Tw` no book of the
 probes measured since draws a glyph over another under `word-spacing` or
-justification, marks or none (above). Every book that conserves, reads whole or is found by search
+justification, marks or none (above), but for what a transform itself
+sets over its neighbours: round 6's sweep squeezes inline blocks by
+`scaleX(0.5)` onto the glyphs beside them at every tree, and under a skew
+the probe kit's count of glyph boxes sees slanted neighbours overlap where
+nothing is drawn over anything (V7 of round 6's review). Every book that conserves, reads whole or is found by search
 at cd407d5 and not now — on the round-4 probe 15 in a default build and 94
 with `bundled-fonts` at 9297d2d, 9 and 92 since the review of the K-11 fix —
 is in one of two classes, each a known limit; a book that meets both is
