@@ -365,7 +365,9 @@ def not_ok(text):
     drawn again (bct-auto's draws/undrawn verdict undrawn), as its key (the
     fields before its OK/NO verdict) and its verdicts, in file order.
     `crates/tinker-pdf-shape/tests/rtl_lines/ratchet.rs` reads the same rows
-    from a TSV the same way."""
+    from a TSV the same way, and refuses a row without a verdict, which
+    counted among the rows and listed nowhere would hide a line nobody read:
+    ValueError."""
     rows, out = 0, []
     for line in text.split('\n'):
         if not line:
@@ -374,7 +376,7 @@ def not_ok(text):
         p = line.split('\t')
         at = next((i for i, f in enumerate(p) if f in ('OK', 'NO')), None)
         if at is None:
-            continue
+            raise ValueError(f'a row without an OK/NO verdict: {line[:200]!r}')
         draws = next((f for f in p[at + 1:] if f in ('draws', 'undrawn')), None)
         if p[at] == 'NO' or draws == 'undrawn':
             out.append('\t'.join(p[:at] + [p[at]] + ([draws] if draws else [])))

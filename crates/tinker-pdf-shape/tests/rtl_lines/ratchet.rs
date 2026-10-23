@@ -91,11 +91,16 @@ impl Wrong {
     }
 }
 
+/// Today's TSV, every row of which carries a verdict, as the baseline's must:
+/// a row without one would count among the rows and never as wrong.
 fn wrong_in_tsv(tsv: &str) -> Wrong {
     let mut out = Wrong::default();
     for line in tsv.lines() {
         out.rows += 1;
-        out.tally(&line.split('\t').collect::<Vec<_>>());
+        assert!(
+            out.tally(&line.split('\t').collect::<Vec<_>>()),
+            "a row of today's TSV without a verdict: {line:?}"
+        );
     }
     out
 }
@@ -319,6 +324,19 @@ fn fewer_rows_read_worse_and_a_line_read_right_now_is_a_gain() {
     let (worse, gains) = compared(base, "a\tOK\nb\tOK\n");
     assert_eq!(worse, ["t.tsv: rows 3 -> 2"]);
     assert_eq!(gains, ["t.tsv: misread 1 -> 0: b"]);
+}
+
+#[test]
+#[should_panic(expected = "a row of today's TSV without a verdict: \"b\\tmaybe\"")]
+fn a_row_of_todays_tsv_without_a_verdict_is_refused_as_the_baselines_is() {
+    // Counted among the rows and never as wrong, it would hide a line nobody read.
+    wrong_in_tsv("a\tOK\nb\tmaybe\nc\tNO\n");
+}
+
+#[test]
+#[should_panic(expected = "a baseline row without a verdict")]
+fn a_row_of_the_baseline_without_a_verdict_is_refused() {
+    wrong_in_baseline("# t.tsv at x\nrows\t3\nb\tmaybe\n");
 }
 
 #[test]

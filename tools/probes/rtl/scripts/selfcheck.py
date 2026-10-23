@@ -301,6 +301,13 @@ def checks():
     yield ('table, tsvdiff and price: whole runs exit 0',
            lambda: compared([('table', ['W', 'W', 'W', 'W2']), ('tsvdiff', ['W', 'W2']), ('price', ['W', 'W', 'W', 'W2'])]),
            [(0, 0)] * 3)
+    # A line TSV's row without its verdict, refused as the line suite's
+    # ratchet refuses it (round 6's review, F6), where pack.py writes the
+    # baseline's reduced form.
+    yield ('not_ok: a line TSV row without an OK/NO verdict is refused',
+           lambda: K.not_ok('a\tOK\nb\tmaybe\nc\tNO\n'), "raised ValueError: a row without an OK/NO verdict: 'b\\tmaybe'")
+    yield ('not_ok: rows with verdicts reduce as before',
+           lambda: K.not_ok('a\tx\tOK\tdraws\na\tx\tNO\tundrawn\nb\tNO\nc\tOK\n'), (4, ['a\tx\tNO\tundrawn', 'b\tNO']))
 
 
 def main():
