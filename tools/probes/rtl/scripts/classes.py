@@ -51,6 +51,13 @@ CLASSES = [
     ('since 56dfd93: pointed Hebrew, two pairs and an ARABIC COMMA', lambda p, n: p == 'fv_extra' and '/m6/' in n),
     # A dir-less Arabic paragraph with an inline word-spacing span cutting a word.
     ('hunt mid-ws', lambda p, n: p == 'hunt_punct' and n == 'ar/mid-ws/none'),
+    # Round 6, V2 (Left (1)): a dir-less line of styled words whose left end is
+    # a closing bracket, `W <b>W</b> W <i>W</i>, (W).`, its stop read first.
+    ('V2 closing bracket at the left end', lambda p, n, s='': p in ('zz_v6_units', 'zz_v6_transform', 'zz_f6_transform')
+        and n in ('he/styled/none', 'ar/styled/none')),
+    # Round 6, V3 (Left (4)): two touching right-to-left cells with no dir,
+    # read as one line from the right.
+    ('V3 touching right-to-left cells', lambda p, n, s='': p == 'zz_v6_cells' and n in ('he/styled/none', 'ar/styled/none')),
     # Round 6, Left (6): `25٪ <b>W</b> ١٢٣ … 2010،` under a half turn at
     # word-spacing 1em, which conserved at 56dfd93 only. zz_f6_unfired's
     # closer/ar/num/rtl under rotate(180deg) is epub_fallback.rs's pinned case
@@ -58,6 +65,10 @@ CLASSES = [
     ('Left (6) half turn', lambda p, n, s='': 'rotate(180deg)' in s and (
         (p in ('zz_v6_transform', 'zz_f6_transform') and n in ('ar/num/none', 'ar/num/rtl'))
         or (p == 'zz_f6_unfired' and n in ('closer/ar/num/none', 'closer/ar/num/rtl')))),
+    # Round 6's sweep, Left (7), with bundled-fonts: a dir-less Hebrew
+    # paragraph of inline blocks squeezed by scaleX(0.5), a word of which
+    # search found at 9297d2d only.
+    ('Left (7) squeezed inline blocks', lambda p, n, s='': p == 'zz_f6_transform' and n == 'he/ib/none'),
 ]
 
 

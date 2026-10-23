@@ -547,7 +547,10 @@ CD-19 counts, shape by shape: a Hebrew paragraph with no `dir` that ends a
 number and a stop, `בראשית. אור ٦٠.` at `word-spacing: 0.5em` (56 books in
 a default build), whose stop, alone at 9297d2d, now abuts the right-to-left
 run and is read first, since the comma tie-break asks for a right-to-left
-letter at the line's left end; a word of an overflow script that an
+letter at the line's left end, and so is the stop of a line whose left end
+is a closing bracket, `W <b>W</b> W <i>W</i>, (W).` with no `dir`,
+letter-spaced or under a transform (32 (8) more of round 6's hunt and its
+sweep); a word of an overflow script that an
 inline block cuts, `αλφα<span style="display: inline-block; width: 1em">
 </span>βήτα` at `word-spacing: 0.6em` (93 (30), found by search at 9297d2d
 and 56dfd93 and 69 (22) of them read whole there, only because the moved
@@ -565,11 +568,15 @@ cuts a word (it conserved at 56dfd93) and a `;` glued to an Arabic word,
 letter-spaced by `0.25em` and justified, which conserves now and no longer
 reads whole. Lines K-11's reader reads from the
 right whatever the writer draws — a Latin gloss before a bracketed
-right-to-left word, table cells, an ARABIC COMMA or QUESTION MARK after
+right-to-left word, table cells (two right-to-left cells with no `dir`
+touching among them, 2 (1) of round 6's hunt that conserved at 9297d2d), an ARABIC COMMA or QUESTION MARK after
 Latin text — lost what they lost at 56dfd93, before this row, but one
 table in a default build, whose cell `(ספר) בית` the moved glyphs of the
 Greek cell before it had joined to that cell's line and which, alone on
-its line, reads from the right now.
+its line, reads from the right now. And with `bundled-fonts` a word of a
+Hebrew paragraph with no `dir` of inline blocks squeezed by `scaleX(0.5)`,
+at `word-spacing: 0.6em`, is not found by search, which 9297d2d found and no
+tree since (15 books of round 6's sweep; ROADMAP CD-19, Left (7)).
 A slice that ends on a mark ends its text object a spacing less a millionth
 of an em from the next run, so a run that ends on a mark is not cut from
 what follows up to half an em of spacing, half an em included, and is cut

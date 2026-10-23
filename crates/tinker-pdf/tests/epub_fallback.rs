@@ -4341,6 +4341,10 @@ fn squeezed_blocks(words: &[&'static str; 12]) -> String {
 /// runs' space; that drawing reads no closer on the page, and the rules'
 /// drawing, kept, holds the order again; and so turned three quarters
 /// (`rotate(270deg)`), which lost it at 05cea0b too.
+/// With `bundled-fonts` the paragraph at
+/// `0.6em` is pinned at what it reads: a word of it is not found by search,
+/// as at 56dfd93 and 935b077, where 9297d2d found every one (15 books of the
+/// sweep, with no transform and under fourteen; ROADMAP CD-19, Left (7)).
 #[test]
 fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
     let at_06 = "p { margin: 0 30%; transform: none; word-spacing: 0.6em } .w { transform: none }";
@@ -4348,12 +4352,12 @@ fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
     let body = format!("<div class=\"w\"><p>{}</p></div>", squeezed_blocks(&HE));
     check(&[
         Case::each(
-            "a dir-less Hebrew paragraph with inline blocks under scaleX(0.5) at 0.6em (guard)",
+            "a dir-less Hebrew paragraph with inline blocks under scaleX(0.5) at 0.6em (guard; pinned with bundled-fonts)",
             "he",
             at_06,
             body.clone(),
             Expect::Holds("logical"),
-            Expect::Neither,
+            Expect::Pinned("logical"),
         ),
         Case::each(
             "the same at 1em (guard)",
