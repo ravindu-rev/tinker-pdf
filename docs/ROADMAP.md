@@ -100,16 +100,16 @@ tier's own rules and history, then gives each row its text and its steps.
 | RC | Capability tier — rendering and colour | [roadmap/RC.md](roadmap/RC.md) | 21 | 21 | 172 |
 | FT | Capability tier — fonts and text | [roadmap/FT.md](roadmap/FT.md) | 43 | 43 | 380 |
 | ED | Capability tier — editing, document operations and creation | [roadmap/ED.md](roadmap/ED.md) | 57 | 57 | 269 |
-| AN | Capability tier — annotations, forms and XFA | [roadmap/AN.md](roadmap/AN.md) | 37 | 37 | 149 |
+| AN | Capability tier — annotations, forms and XFA | [roadmap/AN.md](roadmap/AN.md) | 37 | 37 | 151 |
 | FJ | Capability tier — form JavaScript (complete) | [roadmap/FJ.md](roadmap/FJ.md) | 23 | 23 | 213 |
 | SG | Capability tier — signatures (private-key signing in the engine) | [roadmap/SG.md](roadmap/SG.md) | 28 | 28 | 129 |
 | SE | Capability tier — security | [roadmap/SE.md](roadmap/SE.md) | 15 | 15 | 36 |
 | FI | Capability tier — formats in | [roadmap/FI.md](roadmap/FI.md) | 50 | 50 | 229 |
 | FO | Capability tier — formats out and print production | [roadmap/FO.md](roadmap/FO.md) | 42 | 42 | 126 |
-| SD | Capability tier — standards | [roadmap/SD.md](roadmap/SD.md) | 26 | 26 | 163 |
+| SD | Capability tier — standards | [roadmap/SD.md](roadmap/SD.md) | 26 | 26 | 164 |
 | SU | Capability tier — surface: CLI, bindings, packaging, API stability, documentation | [roadmap/SU.md](roadmap/SU.md) | 24 | 24 | 112 |
 | CD | Container depth | [roadmap/CD.md](roadmap/CD.md) | 19 | 19 | 133 |
-| OC | OCR — the last implementation tier | [roadmap/OC.md](roadmap/OC.md) | 24 | 24 | 100 |
+| OC | OCR — the last implementation tier | [roadmap/OC.md](roadmap/OC.md) | 24 | 24 | 101 |
 | H | Human verification and owner decisions | [roadmap/H.md](roadmap/H.md) | 137 | — | — |
 | NG | Named non-goals | [roadmap/NG.md](roadmap/NG.md) | 14 | — | — |
 
@@ -230,6 +230,17 @@ milestones.
   row's exit criterion changes only by the owner's word.
 - **Bands and floors move one way.** Lowering a ratchet floor or widening a
   benchmark band is a reviewed act (H-78).
+- **The sweep holds every change.** `python3 -I tools/roadmap/sweep.py`
+  checks every step at once for the classes of defect the reviews found by
+  hand: a new file beside an existing home, a name the tree does not have,
+  two rows building one thing, two rows changing one function with no order
+  between them, a row that ignores an H row blocking it, an H row that does
+  not name a row waiting on it, a wait on a whole row that can never close,
+  machine work waiting on a person's act that only a row's tail needs, and
+  the rest its [README](../tools/roadmap/README.md) lists. It runs after
+  every change to the roadmap and exits 0 before the change lands: each
+  finding is fixed in the roadmap, or accepted in
+  `tools/roadmap/accepted.tsv` with the reason it is not a defect.
 
 ## What "best" means here
 
@@ -317,4 +328,4 @@ ED-12, OC-15b, AN-24; ED-26, ED-27 → OC-12; MS-01 lands with every P row;
 MS-13 (the corpus runs) closes AN-01, SG-26, SD-01, SD-04, SD-11, FT-30,
 FT-31, CD-01 and CD-08.
 
-**The count**: 459 capability, gap and finding rows in the tiers, 459 of them cut into 2528 steps — MS 13 of 13 rows, 70 steps, K 10 of 10 rows, 59 steps, P 27 of 27 rows, 188 steps, RC 21 of 21 rows, 172 steps, FT 43 of 43 rows, 380 steps, ED 57 of 57 rows, 269 steps, AN 37 of 37 rows, 149 steps, FJ 23 of 23 rows, 213 steps, SG 28 of 28 rows, 129 steps, SE 15 of 15 rows, 36 steps, FI 50 of 50 rows, 229 steps, FO 42 of 42 rows, 126 steps, SD 26 of 26 rows, 163 steps, SU 24 of 24 rows, 112 steps, CD 19 of 19 rows, 133 steps, OC 24 of 24 rows, 100 steps; 14 hard limits (NG-01…NG-14); 137 rows for a person (H-01…H-163, H-134 onward added by the cut).
+**The count**: 459 capability, gap and finding rows in the tiers, 459 of them cut into 2532 steps — MS 13 of 13 rows, 70 steps, K 10 of 10 rows, 59 steps, P 27 of 27 rows, 188 steps, RC 21 of 21 rows, 172 steps, FT 43 of 43 rows, 380 steps, ED 57 of 57 rows, 269 steps, AN 37 of 37 rows, 151 steps, FJ 23 of 23 rows, 213 steps, SG 28 of 28 rows, 129 steps, SE 15 of 15 rows, 36 steps, FI 50 of 50 rows, 229 steps, FO 42 of 42 rows, 126 steps, SD 26 of 26 rows, 164 steps, SU 24 of 24 rows, 112 steps, CD 19 of 19 rows, 133 steps, OC 24 of 24 rows, 101 steps; 14 hard limits (NG-01…NG-14); 137 rows for a person (H-01…H-163, H-134 onward added by the cut).

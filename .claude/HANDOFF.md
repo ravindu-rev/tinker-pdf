@@ -2,10 +2,10 @@
 
 Written 23 October 2026, when round 6 of ROADMAP CD-19 landed on `develop`,
 and brought up to date on 24 October 2026, when the roadmap was cut into
-steps. The next session starts here: read this, then
-[AGENTS.md](../AGENTS.md), then continue with "Next, in this order" below.
-When this note is out of date, rewrite it or delete it in the same commit
-that moves the work on.
+steps and the roadmap sweep landed. The next session starts here: read
+this, then [AGENTS.md](../AGENTS.md), then continue with "Next, in this
+order" below. When this note is out of date, rewrite it or delete it in the
+same commit that moves the work on.
 
 ## The roadmap, cut into steps (24 October 2026)
 
@@ -46,6 +46,91 @@ that moves the work on.
   one that signed the history before (`SHA256:TsJhk…`). GitHub marks a
   commit verified only when its key is registered on the owner's account as
   a signing key.
+- **The roadmap sweep** (24 October 2026, the second step of that day's
+  plan): `tools/roadmap/sweep.py` checks every step at once for the classes
+  of defect the reviews found by hand. `selfcheck.py` holds each check to a
+  fixture and a twin, each way the input can be unreadable to its own exit
+  and message, and each word a rule reads to a phrase and its twin; with
+  `--inject` it puts each rule back broken. `accepted.tsv` records each
+  finding that is not a defect, with its reason. Its README lists the
+  checks, how the sweep reads the roadmap, and what it cannot see.
+  - What it found was fixed in the roadmap in the same commit, in 230 rows:
+    - 148 waits on a whole row narrowed to the 254 steps of it that the
+      step needs. So no step waits on a close that counts on it, and no
+      machine work waits on a person's act that only a row's tail needs.
+    - 97 waits added on another row's step:
+      - 61 order two steps that change one file;
+      - 13 wait for the step that creates a file they name;
+      - 13 wait for the step that creates the crate or module they put a
+        file in;
+      - 9 wait for what they use: a golden the step moves, the EC
+        arithmetic, the decoder a step measures, the faces it renders;
+      - 1 waits for an instrument the step names.
+    - 21 H rows added to the steps whose exits need them, and 9 waits on a
+      whole row, 7 of them on MS-11 by steps that read its runs on
+      `develop`. FI-02b.6 no longer waits on H-61: its row's exit gives the
+      visual review to H-61, which says it blocks nothing.
+    - Four new steps. AN-04.3 and AN-05.3 watch for the goldens H-66
+      signs. OC-01.4 creates the OCR crate, which no step created. SD-23.7
+      moves the validators' five other walks over an XMP packet onto
+      SD-23.1's model.
+    - RC-20.15 and RC-21.5, which add only a speed row, were `ci` and are
+      now `measure`, as 59 other speed-row steps already were. The new
+      `speed-kind` check holds the class.
+    - 13 closing lines say which H row is outside the exit. 39 notes name
+      the H row default a step builds toward; others settle two unordered
+      edits ("whichever lands second keeps …") or say why a file stands
+      apart.
+    - 17 H rows' Blocks cells now also name the rows whose steps wait on
+      them ("; also MS-04, whose steps wait on it"), the owner's words
+      kept. The new `h-listed` check holds the class.
+    - Second homes and duplicate builds removed: two gzip readers, two XML
+      schema checkers, a second XMP reader (SD-23.1 and SD-23.7 put all six
+      packet walks on one model), and `parse.rs` and `lex.rs` beside
+      `parse/` and `lexer.rs`. FO-15b's accessible HTML keeps its own
+      module beside FO-15a's positioned HTML; the two share only
+      escaping, and FO-15b.1's note says so.
+    - Six rows' findings had stale pointers rewritten: five to
+      `docs/ROADMAP.md:<n>` (K-01, RC-01, RC-02, FJ-01, CD-19) and one
+      partial path (P-14). K-01, P-14 and CD-19 changed only there.
+  - Steps waiting on a person's act: 3 872 step-and-act pairs became 2 810.
+    - Fewer: H-109 722→192 and H-112 721→182 (the bands' re-baselining
+      and the planning-time comparison), H-67 110→1, H-68 94→1, H-81
+      35→1, H-61 10→0, and ten more.
+    - More, where rows an H row blocks now wait on it: H-102 90→296 (the
+      standards to buy), H-92 338→367 (the terms of test data), H-116
+      27→43 (data licences), H-118 0→4 (the trust lists SG-14.2 commits as
+      fixtures) and H-66 1→3 (the two new `watch` steps). And H-02
+      1 030→1 115, through added waits: 7 on MS-11, whose act it is, and
+      orderings on steps that already reached it. MS-11 is third in the
+      order of work, after CD-19 and P-27.1 and before every other row.
+  - At this commit it reports 68 findings, every one accepted (68 lines),
+    none unexplained. It does not judge whether a whole-row wait is wider
+    than the step needs, through steps the waiting step may need. `--waits`
+    lists 289 such waits by 282 steps, and the README sorts them.
+  - Run it after every change to the roadmap ("How the roadmap changes").
+  - **Four questions for the owner**, left as they are:
+    - P-13.8 rewrites the private-key path's Montgomery core. It now waits
+      on SG-01.6, not on all of SG-01, so it no longer waits on SG-01.8,
+      which records H-67's side-channel review of that path. One option is
+      that the review comes after P-13.8: SG-01.8 then waits on P-13.8, and
+      through it on H-109 and H-112. The other is that a change to the core
+      after the review needs the review again.
+    - SU-12's closing line reads the .NET column from its CI leg, which
+      H-104 names as its alternative. It puts H-104's check by hand, where
+      an SDK exists, outside the exit. Does the CI leg alone close that
+      column?
+    - H-112's Blocks cell says "nothing; an input to H-77", yet MS-04.10,
+      which measures the set on the named machine, waits on it; the cell
+      now also names MS-04. Does MS-04.10 need H-112? It brings H-112 to
+      182 steps.
+    - The index says both "A row's steps run in number order" and "Pick
+      the first step in Order of work whose Depends on are all done". The
+      sweep reads the second: a step whose Depends on are done may run
+      while an earlier step of its row waits. If number order is strict, a
+      row's tail is only its trailing `watch` and `measure` steps, and a
+      wait narrowed to a step after an earlier `measure` step (FJ-01.42
+      after FJ-01.41) avoids less than the figures above say.
 - **The cut's working files** (the step JSON, its checker and renderer)
   stay in `.claude/worktrees/roadmap-cut` on that machine only, ignored by
   git. Nothing below needs them: every row is cut, and a row added later is
@@ -197,7 +282,7 @@ to CD-19.37, H-149 to H-158), in the order "Next" gives.
 2. **Separately, as the owner asked on 24 October 2026**: the review of the
    cut rows whose steps are not yet reviewed (430 rows). Until it happens,
    each is reviewed against the tree when it comes up ("How a step runs",
-   1). The next piece proposed is a script that checks all steps at once
-   for the defects the reviews found: a new file beside an existing home,
-   a name the tree does not have, two rows building one thing, two rows
-   editing one file with no order between them.
+   1). The sweep now checks every step at once for the classes the reviews
+   found, and holds every roadmap change to them; it reads names, paths and
+   dependencies, not whether a step is right, so it does not replace that
+   review.

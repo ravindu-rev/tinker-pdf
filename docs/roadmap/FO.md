@@ -21,7 +21,7 @@ preflight — that the standards tier's conversions need.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FO-01.1 | build | Netpbm output from a bitmap: PBM halftoned to 1 bit, PGM, PPM, PAM with alpha and CMYK, and PKM's 1-bit CMYK, beside `Bitmap::to_png`, and `tpdf render`'s formats. | `crates/tinker-pdf-filters/src/netpbm.rs` (new), `crates/tinker-pdf/src/lib.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/raster_outputs.rs` (new) | `raster_outputs.rs` (new): each file's samples equal the bitmap's and its header holds to the format description. | RC-06 |
+| FO-01.1 | build | Netpbm output from a bitmap: PBM halftoned to 1 bit, PGM, PPM, PAM with alpha and CMYK, and PKM's 1-bit CMYK, beside `Bitmap::to_png`, and `tpdf render`'s formats. *Note:* The writer joins FI-05.1's reader in `netpbm.rs`, and the test re-reads each file through that reader. | `crates/tinker-pdf-filters/src/netpbm.rs` (new), `crates/tinker-pdf/src/lib.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/raster_outputs.rs` (new) | `raster_outputs.rs` (new): each file's samples equal the bitmap's and its header holds to the format description. | RC-06.5, RC-06.6, FI-05.1 |
 
 **Closes the row:** FO-01.1 writes every Netpbm form with samples equal to the bitmap's and headers per the description, which is the row's exit.
 
@@ -57,7 +57,7 @@ preflight — that the standards tier's conversions need.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FO-03.1 | build | TIFF output: multi-page, uncompressed, PackBits, LZW, Deflate and JPEG, CMYK and one plane per ink from RC-04's separations, BigTIFF, and resolution and ICC tags. | `crates/tinker-pdf-filters/src/tiff_write.rs` (new), `crates/tinker-pdf-filters/src/lib.rs`, `crates/tinker-pdf/tests/raster_outputs.rs` (new) | Every file re-read by the in-tree TIFF reader yields the samples written. | RC-04 |
+| FO-03.1 | build | TIFF output: multi-page, uncompressed, PackBits, LZW, Deflate and JPEG, CMYK and one plane per ink from RC-04's separations, BigTIFF, and resolution and ICC tags. | `crates/tinker-pdf-filters/src/tiff_write.rs` (new), `crates/tinker-pdf-filters/src/lib.rs`, `crates/tinker-pdf/tests/raster_outputs.rs` (new) | Every file re-read by the in-tree TIFF reader yields the samples written. | RC-04.16 |
 | FO-03.2 | build | Fax output: G3 1D and 2D encoders beside the G4 one, and TIFF Class F's tags. | `crates/tinker-pdf-filters/src/ccitt.rs`, `crates/tinker-pdf-filters/src/tiff_write.rs` (new) | G3 and G4 files re-read to their samples; a Class F file carries the tags and values Class F's description requires. | FO-03.1 |
 
 **Closes the row:** FO-03.1 and FO-03.2 write every form, each re-read to its samples, and a conforming Class F file, which is the row's exit.
@@ -76,7 +76,7 @@ preflight — that the standards tier's conversions need.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FO-04.1 | build | PSD output with spot channels: the composite and one channel per separation RC-04 renders, named in the image resources. | `crates/tinker-pdf-filters/src/psd.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/raster_outputs.rs` (new) | Read back through FI-05's PSD reader, each channel equals the separation RC-04 renders. | RC-04, FI-05 |
+| FO-04.1 | build | PSD output with spot channels: the composite and one channel per separation RC-04 renders, named in the image resources. | `crates/tinker-pdf-filters/src/psd.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/raster_outputs.rs` (new) | Read back through FI-05's PSD reader, each channel equals the separation RC-04 renders. | RC-04.16, FI-05 |
 | FO-04.2 | build | `tpdf render --format psd`. | `tools/tpdf/src/main.rs` | A CLI test writes a PSD whose channels match the facade's. | FO-04.1 |
 
 **Closes the row:** FO-04.1 writes channels equal to the rendered separations, which is the row's exit.
@@ -95,7 +95,7 @@ preflight — that the standards tier's conversions need.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FO-05.1 | build | PNG options: 16-bit samples from RC-07's render, an embedded ICC profile, physical resolution and P-04's fast level. | `crates/tinker-pdf-filters/src/png.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/raster_outputs.rs` (new) | Each chunk re-reads as written; 16-bit samples equal the RC-07 render. | P-04, RC-07 |
+| FO-05.1 | build | PNG options: 16-bit samples from RC-07's render, an embedded ICC profile, physical resolution and P-04's fast level. | `crates/tinker-pdf-filters/src/png.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/raster_outputs.rs` (new) | Each chunk re-reads as written; 16-bit samples equal the RC-07 render. | P-04, RC-07.14 |
 
 **Closes the row:** FO-05.1 re-reads each chunk and matches the 16-bit render, which is the row's exit.
 
@@ -113,7 +113,7 @@ preflight — that the standards tier's conversions need.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FO-06.1 | build | JPEG 2000 raster output through ED-26's encoder, lossless and lossy. | `crates/tinker-pdf/src/lib.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/raster_outputs.rs` (new) | Outputs decode within the bound computed in the test, lossless exactly. | ED-26 |
+| FO-06.1 | build | JPEG 2000 raster output through ED-26's encoder, lossless and lossy. | `crates/tinker-pdf/src/lib.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/raster_outputs.rs` (new) | Outputs decode within the bound computed in the test, lossless exactly. | ED-26.15 |
 
 **Closes the row:** FO-06.1's outputs decode within the bound, lossless exactly, which is the row's exit.
 
@@ -214,7 +214,7 @@ preflight — that the standards tier's conversions need.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | FO-08b.1 | design | Create `docs/design/postscript-output.md`: page content mapped to Level 2 and 3 operators, fonts by kind, masked images and shading with Level 2 fallbacks, separations, page devices, transparency through FO-10, DSC and OPI comments, and EPS. | `docs/design/postscript-output.md` (new) | The doc exists in the design-doc order, names FO-08b.2 to FO-08b.9's exit tests, and is reviewed. | FO-10, FI-17b |
-| FO-08b.2 | build | The document's DSC structure, the graphics state, paths and painting. | `crates/tinker-pdf/src/ps_out.rs` (new), `crates/tinker-pdf/tests/ps_output.rs` (new) | Path fixtures written and interpreted by FI-17b's interpreter render byte-identically to the PDF. | FO-08b.1 |
+| FO-08b.2 | build | The document's DSC structure, the graphics state, paths and painting. | `crates/tinker-pdf/src/ps_out.rs` (new), `crates/tinker-pdf/tests/ps_output.rs` (new) | Path fixtures written and interpreted by FI-17b's interpreter render byte-identically to the PDF. | FO-08b.1, FO-08a.1 |
 | FO-08b.3 | build | Fonts as Type 42, Type 1, CFF and CID with CMaps, and text. | `crates/tinker-pdf/src/ps_out.rs` (new), `crates/tinker-pdf/tests/ps_output.rs` (new) | Text fixtures interpreted render byte-identically to the PDF, in both builds. | FO-08b.2 |
 | FO-08b.4 | build | Images, masked images at Level 3 with a Level 2 fallback. | `crates/tinker-pdf/src/ps_out.rs` (new), `crates/tinker-pdf/tests/ps_output.rs` (new) | Image fixtures interpreted render byte-identically at each level. | FO-08b.2 |
 | FO-08b.5 | build | Smooth shading at Level 3 with a Level 2 fallback. | `crates/tinker-pdf/src/ps_out.rs` (new), `crates/tinker-pdf/tests/ps_output.rs` (new) | Shading fixtures interpreted render byte-identically at each level. | FO-08b.2 |
@@ -257,7 +257,7 @@ preflight — that the standards tier's conversions need.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FO-09b.1 | build | PCLm output: the bitmap in strips of a stated height, each compressed as PCLm allows. | `crates/tinker-pdf/src/pcl_out.rs` (new), `crates/tinker-pdf/tests/print_streams.rs` (new) | The output re-opened as PDF yields the bitmap strip by strip. | — |
+| FO-09b.1 | build | PCLm output: the bitmap in strips of a stated height, each compressed as PCLm allows. | `crates/tinker-pdf/src/pclm_out.rs` (new), `crates/tinker-pdf/tests/print_streams.rs` (new) | The output re-opened as PDF yields the bitmap strip by strip. | — |
 
 **Closes the row:** FO-09b.1's output re-opened as PDF yields the bitmap strip by strip, which is the row's exit.
 
@@ -293,7 +293,7 @@ preflight — that the standards tier's conversions need.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FO-09d.1 | build | URF raster output, and a first-party parser in the test. | `crates/tinker-pdf/src/pwg_out.rs` (new), `crates/tinker-pdf/tests/print_streams.rs` (new) | Headers and pixels re-read by the parser in the test equal what was written. | — |
+| FO-09d.1 | build | URF raster output, and a first-party parser in the test. | `crates/tinker-pdf/src/pwg_out.rs` (new), `crates/tinker-pdf/tests/print_streams.rs` (new) | Headers and pixels re-read by the parser in the test equal what was written. | FO-09c.1 |
 
 **Closes the row:** FO-09d.1's headers and pixels re-read as written, which is the row's exit.
 
@@ -331,7 +331,7 @@ preflight — that the standards tier's conversions need.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FO-10.1 | design | Create `docs/design/flattening.md`: which objects take part in transparency, path booleans and atomic regions, regions computed as vectors and areas rasterised at a set resolution, text kept or outlined, overprint (RC-03), the stated tolerance, and the PDF/A-1 and PDF/X-1a rules the output passes. | `docs/design/flattening.md` (new) | The doc exists in the design-doc order, names FO-10.2 to FO-10.11's exit tests and the tolerance, and is reviewed. | RC-03 |
+| FO-10.1 | design | Create `docs/design/flattening.md`: which objects take part in transparency, path booleans and atomic regions, regions computed as vectors and areas rasterised at a set resolution, text kept or outlined, overprint (RC-03), the stated tolerance, and the PDF/A-1 and PDF/X-1a rules the output passes. | `docs/design/flattening.md` (new) | The doc exists in the design-doc order, names FO-10.2 to FO-10.11's exit tests and the tolerance, and is reviewed. | RC-03.4, RC-03.8 |
 | FO-10.2 | build | Transparency analysis: each object classed by its soft mask, blend mode, opacity and group. | `crates/tinker-pdf/src/flatten/mod.rs` (new), `crates/tinker-pdf/src/flatten/analyse.rs` (new), `crates/tinker-pdf/src/lib.rs` | Unit tests: fixtures' objects are classed as the test expects. | FO-10.1 |
 | FO-10.3 | build | Polygon booleans on flattened paths: intersection, difference and union with exact winding. | `crates/tinker-pdf-raster/src/boolean.rs` (new), `crates/tinker-pdf-raster/src/lib.rs` | Unit tests: result areas equal those computed in the test for every case, degenerate ones included. | FO-10.1 |
 | FO-10.4 | build | Curves through the booleans within a stated flattening tolerance, robust against near-coincident edges. | `crates/tinker-pdf-raster/src/boolean.rs` (new) | Unit tests: curved operands give areas within the tolerance; a property test finds no failure. | FO-10.3 |
@@ -341,7 +341,7 @@ preflight — that the standards tier's conversions need.
 | FO-10.8 | build | Vector text kept where nothing transparent covers it, and the outline-text option through ED-05. | `crates/tinker-pdf/src/flatten/regions.rs` (new), `crates/tinker-pdf/tests/flatten.rs` (new) | Kept text still extracts; outlined text renders within the tolerance; both builds. | FO-10.6, ED-05 |
 | FO-10.9 | build | Overprint-aware flattening. | `crates/tinker-pdf/src/flatten/regions.rs` (new), `crates/tinker-pdf/tests/flatten.rs` (new) | Overprinting fixtures render within the tolerance under RC-03's simulation. | FO-10.6 |
 | FO-10.10 | build | A transparency-free PDF out: no soft masks, blend modes, partial opacity or groups. | `crates/tinker-pdf/src/flatten/mod.rs` (new), `crates/tinker-pdf/tests/flatten.rs` (new) | Outputs contain no transparency and pass the PDF/A-1 and PDF/X-1a transparency rules. | FO-10.7, FO-10.8, FO-10.9 |
-| FO-10.11 | build | `tpdf flatten`, a speed row and a fingerprint of one flattened page. | `tools/tpdf/src/main.rs`, `crates/tinker-pdf/benches/engine.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/writing.md` | The command flattens `testdata/` fixtures to the facade's output; the speed row is in the benchmark set; the fingerprint holds on every K-07 target. | FO-10.10, MS-04, K-07 |
+| FO-10.11 | build | `tpdf flatten`, a speed row and a fingerprint of one flattened page. | `tools/tpdf/src/main.rs`, `crates/tinker-pdf/benches/engine.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/writing.md` | The command flattens `testdata/` fixtures to the facade's output; the speed row is in the benchmark set; the fingerprint holds on every K-07 target. | FO-10.10, MS-04.8, K-07 |
 
 **Closes the row:** FO-10.6 to FO-10.9 render flattened pages within the stated tolerance per pixel and FO-10.10 leaves no transparency, passing the PDF/A-1 and PDF/X-1a rules, which is the row's exit.
 
@@ -404,7 +404,7 @@ preflight — that the standards tier's conversions need.
 | FO-12b.3 | build | XHTML content from the structure tree, text styles as CSS. | `crates/tinker-pdf/src/epub_out.rs` (new), `crates/tinker-pdf/tests/epub_output.rs` (new) | A tagged committed document written as EPUB re-opens with its text in its order. | FO-12b.2 |
 | FO-12b.4 | build | Images and fonts carried, fonts obfuscated as OCF states. | `crates/tinker-pdf/src/epub_out.rs` (new), `crates/tinker-pdf/tests/epub_output.rs` (new) | The re-opened book draws its images and fonts. | FO-12b.3 |
 | FO-12b.5 | build | Untagged documents written in FT-30's inferred order. | `crates/tinker-pdf/src/epub_out.rs` (new), `crates/tinker-pdf/tests/epub_output.rs` (new) | An untagged document re-opens with its text in the inferred order. | FO-12b.3 |
-| FO-12b.6 | build | `tpdf convert --to epub` and a fingerprint of one written book. | `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/epub.md` | The command writes `testdata/` fixtures to the facade's output; the fingerprint holds on every K-07 target. | FO-12b.4, FO-12b.5, K-07 |
+| FO-12b.6 | build | `tpdf convert --to epub` and a fingerprint of one written book. | `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/epub.md` | The command writes `testdata/` fixtures to the facade's output; the fingerprint holds on every K-07 target; in the default and `bundled-fonts` builds. | FO-12b.4, FO-12b.5, K-07 |
 
 **Closes the row:** FO-12b.3 and FO-12b.4 re-open a tagged committed document written as EPUB with its text, order and images, which is the row's exit.
 
@@ -505,7 +505,7 @@ preflight — that the standards tier's conversions need.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | FO-14c.1 | design | Add XLSX to `docs/design/office-export.md`: typed cells and tables stitched across pages. | `docs/design/office-export.md` | The section names FO-14c.2 and FO-14c.3's exit tests and is reviewed. | FO-14a.1 |
-| FO-14c.2 | build | An XLSX package: a sheet per table, FT-32's tables stitched across pages, cells typed as numbers, dates or text. | `crates/tinker-pdf/src/office_out/xlsx.rs` (new), `crates/tinker-pdf/tests/office_export.rs` (new) | Exported tables re-read to the reconstructed grid, each cell of its type. | FO-14c.1, FT-32 |
+| FO-14c.2 | build | An XLSX package: a sheet per table, FT-32's tables stitched across pages, cells typed as numbers, dates or text. | `crates/tinker-pdf/src/office_out/xlsx.rs` (new), `crates/tinker-pdf/tests/office_export.rs` (new) | Exported tables re-read to the reconstructed grid, each cell of its type. | FO-14c.1, FT-32.4, FT-32.5, FT-32.6, FO-14a.2 |
 | FO-14c.3 | build | `tpdf convert --to xlsx`. | `tools/tpdf/src/main.rs` | A CLI test exports a fixture's tables that re-read as the facade's export. | FO-14c.2 |
 
 **Closes the row:** FO-14c.2's tables re-read to the reconstructed grid, which is the row's exit.
@@ -566,7 +566,7 @@ preflight — that the standards tier's conversions need.
 | FO-15a.2 | build | WOFF and WOFF2 writers, WOFF2's tables transformed and compressed through FO-18, each font's `cmap` corrected so every used glyph maps to its text. | `crates/tinker-pdf-font/src/woff_write.rs` (new), `crates/tinker-pdf-font/src/lib.rs` | Unit tests: written fonts re-read through the in-tree WOFF readers; every used glyph maps to its text. | FO-15a.1, FO-18 |
 | FO-15a.3 | build | Page HTML: text runs absolutely positioned in those fonts, with their sizes and transforms. | `crates/tinker-pdf/src/html_out.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/html_output.rs` (new) | `html_output.rs` (new): every glyph's text extracts from the HTML re-laid out by the engine's HTML path. | FO-15a.2 |
 | FO-15a.4 | build | Vector art as SVG through FO-13, or as a background image. | `crates/tinker-pdf/src/html_out.rs` (new), `crates/tinker-pdf/tests/html_output.rs` (new) | The HTML re-laid out by the engine's HTML path renders within the stated tolerance of the page. | FO-15a.3 |
-| FO-15a.5 | build | Per-page files or one file, the outline as navigation, `tpdf convert --to html`, and a fingerprint. | `crates/tinker-pdf/src/html_out.rs` (new), `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/writing.md` | Both layouts write and re-lay out within the tolerance; the navigation equals the outline; the fingerprint holds on every K-07 target. | FO-15a.4, K-07 |
+| FO-15a.5 | build | Per-page files or one file, the outline as navigation, `tpdf convert --to html`, and a fingerprint. | `crates/tinker-pdf/src/html_out.rs` (new), `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/writing.md` | Both layouts write and re-lay out within the tolerance; the navigation equals the outline; the fingerprint holds on every K-07 target; in the default and `bundled-fonts` builds. | FO-15a.4, K-07 |
 
 **Closes the row:** FO-15a.3 extracts every glyph's text and FO-15a.4 renders within the stated tolerance after re-layout, which is the row's exit.
 
@@ -584,7 +584,7 @@ preflight — that the standards tier's conversions need.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FO-15b.1 | build | Accessible HTML from tagged PDF: standard structure types mapped to HTML, attributes to CSS, alternate text, MathML and table headers. | `crates/tinker-pdf/src/html_out.rs` (new), `crates/tinker-pdf/tests/accessible_html.rs` (new), `docs/features/writing.md` | `accessible_html.rs` (new): each committed tagged document's HTML re-read yields the structure tree's order, headings, lists and tables. | — |
+| FO-15b.1 | build | Accessible HTML from tagged PDF: standard structure types mapped to HTML, attributes to CSS, alternate text, MathML and table headers. *Note:* Its own module beside FO-15a's `html_out.rs`: this writes the structure tree as semantic HTML, that positioned runs in embedded fonts, and the two share only HTML escaping, which whichever lands second takes from the other rather than writing its own. | `crates/tinker-pdf/src/accessible_html.rs` (new), `crates/tinker-pdf/tests/accessible_html.rs` (new), `docs/features/writing.md` | `accessible_html.rs` (new): each committed tagged document's HTML re-read yields the structure tree's order, headings, lists and tables. | — |
 | FO-15b.2 | build | `tpdf convert --to html --accessible`. | `tools/tpdf/src/main.rs` | A CLI test writes a tagged fixture's HTML equal to the facade's. | FO-15b.1 |
 
 **Closes the row:** FO-15b.1's HTML re-reads to the structure tree's order, headings, lists and tables, which is the row's exit.
@@ -603,7 +603,7 @@ preflight — that the standards tier's conversions need.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FO-15c.1 | build | Hybrid HTML: the page rendered without its text as a background image, the text positioned over it. | `crates/tinker-pdf/src/html_out.rs` (new), `crates/tinker-pdf/tests/html_output.rs` (new) | Text positions equal the glyph boxes. | — |
+| FO-15c.1 | build | Hybrid HTML: the page rendered without its text as a background image, the text positioned over it. | `crates/tinker-pdf/src/html_out.rs` (new), `crates/tinker-pdf/tests/html_output.rs` (new) | Text positions equal the glyph boxes. | FO-15a.3 |
 
 **Closes the row:** FO-15c.1 places text at the glyph boxes, which is the row's exit.
 
@@ -699,7 +699,7 @@ preflight — that the standards tier's conversions need.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FO-20.1 | build | A JPEG XR encoder: the forward transforms, quantisation, coefficient coding, tiles, the container, and lossless mode. | `crates/tinker-pdf-filters/src/jxr/encode.rs` (new), `crates/tinker-pdf-filters/src/jxr/mod.rs` | Unit tests: outputs decode through the in-tree decoder, lossless exactly. | — |
+| FO-20.1 | build | A JPEG XR encoder: the forward transforms, quantisation, coefficient coding, tiles, the container, and lossless mode. *Note:* The run takes this row after every other row of its tier: H-30's default orders it last. | `crates/tinker-pdf-filters/src/jxr/encode.rs` (new), `crates/tinker-pdf-filters/src/jxr/mod.rs` | Unit tests: outputs decode through the in-tree decoder, lossless exactly. | — |
 | FO-20.2 | build | The pixel formats the encoder writes, and JPEG XR raster output. | `crates/tinker-pdf-filters/src/jxr/encode.rs` (new), `crates/tinker-pdf/src/lib.rs` | Each format's outputs decode through the in-tree decoder, lossless exactly. | FO-20.1 |
 
 **Closes the row:** FO-20.1 and FO-20.2 decode every output through the in-tree decoder, lossless exactly, which is the row's exit.
@@ -757,7 +757,7 @@ preflight — that the standards tier's conversions need.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FO-23.1 | build | Ink coverage per page and plate from RC-04's separations, a total-area-coverage heat map with its maximum, and spot and overprint inventories. | `crates/tinker-pdf/src/ink.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/ink_coverage.rs` (new) | `ink_coverage.rs` (new): coverage equals the plates' sums computed in the test. | RC-04 |
+| FO-23.1 | build | Ink coverage per page and plate from RC-04's separations, a total-area-coverage heat map with its maximum, and spot and overprint inventories. | `crates/tinker-pdf/src/ink.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/ink_coverage.rs` (new) | `ink_coverage.rs` (new): coverage equals the plates' sums computed in the test. | RC-04.16 |
 | FO-23.2 | build | `tpdf inks`, the report as text and JSON. | `tools/tpdf/src/main.rs` | A CLI test prints the report the facade gives. | FO-23.1 |
 
 **Closes the row:** FO-23.1's coverage equals the plates' sums, which is the row's exit.
@@ -776,10 +776,10 @@ preflight — that the standards tier's conversions need.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FO-24.1 | design | Create `docs/design/trapping.md`: presets, the colour-pair rules (neutral density, steps, spreads and chokes, black and images), raster trapping on separations and vector `/TrapNet` generation. | `docs/design/trapping.md` (new) | The doc exists in the design-doc order, names FO-24.2 to FO-24.6's exit tests, and is reviewed. | RC-04 |
+| FO-24.1 | design | Create `docs/design/trapping.md`: presets, the colour-pair rules (neutral density, steps, spreads and chokes, black and images), raster trapping on separations and vector `/TrapNet` generation. | `docs/design/trapping.md` (new) | The doc exists in the design-doc order, names FO-24.2 to FO-24.6's exit tests, and is reviewed. | RC-04.16 |
 | FO-24.2 | build | The colour-pair rules: whether an edge traps, spread or choke, and the trap colour. | `crates/tinker-pdf/src/trapping/mod.rs` (new), `crates/tinker-pdf/src/lib.rs` | Unit tests: rules for each colour pair equal the test's computation. | FO-24.1 |
 | FO-24.3 | build | Raster trapping on RC-04's separations. | `crates/tinker-pdf/src/trapping/raster.rs` (new), `crates/tinker-pdf/tests/trapping.rs` (new) | `trapping.rs` (new): traps are placed where the rules require on raster fixtures. | FO-24.2 |
-| FO-24.4 | build | Vector edges from the page's objects (ED-01) and trap paths along them. | `crates/tinker-pdf/src/trapping/vector.rs` (new), `crates/tinker-pdf/tests/trapping.rs` (new) | Trap paths lie where the rules require on vector fixtures. | FO-24.2, ED-01 |
+| FO-24.4 | build | Vector edges from the page's objects (ED-01) and trap paths along them. | `crates/tinker-pdf/src/trapping/vector.rs` (new), `crates/tinker-pdf/tests/trapping.rs` (new) | Trap paths lie where the rules require on vector fixtures. | FO-24.2, ED-01.7, ED-01.17, ED-01.18 |
 | FO-24.5 | build | `/TrapNet` annotations generated with their appearances, as 14.11.6 states. | `crates/tinker-pdf/src/trapping/vector.rs` (new), `crates/tinker-pdf/tests/trapping.rs` (new) | Generated trap networks re-read and their appearances place the traps the rules require. | FO-24.4 |
 | FO-24.6 | build | Presets and `tpdf trap`. | `crates/tinker-pdf/src/trapping/mod.rs` (new), `tools/tpdf/src/main.rs`, `docs/features/rendering.md` | Each preset traps fixtures as its rules state; the CLI runs over `testdata/` fixtures. | FO-24.3, FO-24.5 |
 
@@ -819,7 +819,7 @@ preflight — that the standards tier's conversions need.
 | --- | --- | --- | --- | --- | --- |
 | FO-26.1 | build | CxF/X-4 spectral spot-colour data read and written. | `crates/tinker-pdf/src/spectral.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/spectral.rs` (new) | `spectral.rs` (new): ISO 17972-4's structures round-trip. | H-102 |
 | FO-26.2 | build | Spectral data to Lab from the CIE observer and illuminant tables. | `crates/tinker-pdf-color/src/spectral.rs` (new), `crates/tinker-pdf-color/src/lib.rs` | Unit tests: spectral-to-Lab equals the computation from the CIE tables in the test. | FO-26.1 |
-| FO-26.3 | build | Spot colours rendered from their spectral data. | `crates/tinker-pdf-render/src/lib.rs`, `crates/tinker-pdf/tests/spectral.rs` (new) | A spot with spectral data renders as its computed Lab converted to the output. | FO-26.2, RC-04 |
+| FO-26.3 | build | Spot colours rendered from their spectral data. | `crates/tinker-pdf-render/src/lib.rs`, `crates/tinker-pdf/tests/spectral.rs` (new) | A spot with spectral data renders as its computed Lab converted to the output. | FO-26.2, RC-04.16 |
 
 **Closes the row:** FO-26.2 computes spectral-to-Lab from the CIE tables and FO-26.1 and FO-26.3 read, write and render with it, which is the row's exit.
 
@@ -840,7 +840,7 @@ preflight — that the standards tier's conversions need.
 | FO-27.1 | design | Create `docs/design/preflight.md`: profiles of checks built on the validators, the fix-up catalogue and each fix-up's row, the inventory, and the report document. | `docs/design/preflight.md` (new) | The doc exists in the design-doc order, names FO-27.2 to FO-27.7's exit tests, and is reviewed. | SD-02, SD-12 |
 | FO-27.2 | build | Profiles and their runner over the PDF/A, PDF/X and PDF/UA validators, with custom checks. | `crates/tinker-pdf/src/preflight/mod.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/preflight.rs` (new) | `preflight.rs` (new): each profile reports the typed findings its fixtures carry. | FO-27.1 |
 | FO-27.3 | build | The inventory: fonts, images with effective resolution, colour spaces, overprint and transparency. | `crates/tinker-pdf/src/preflight/inventory.rs` (new), `crates/tinker-pdf/tests/preflight.rs` (new) | The inventory equals each fixture's contents. | FO-27.2 |
-| FO-27.4 | build | Fix-ups for colour conversion (ED-06b), font embedding from a host face, boxes and object removal. | `crates/tinker-pdf/src/preflight/fixups.rs` (new), `crates/tinker-pdf/tests/preflight.rs` (new) | Each fix-up removes the finding it targets on a fixture built to carry it, with no new finding. | FO-27.2, ED-06b |
+| FO-27.4 | build | Fix-ups for colour conversion (ED-06b), font embedding from a host face, boxes and object removal. | `crates/tinker-pdf/src/preflight/fixups.rs` (new), `crates/tinker-pdf/tests/preflight.rs` (new) | Each fix-up removes the finding it targets on a fixture built to carry it, with no new finding. | FO-27.2, ED-06b.4, ED-06b.5, ED-06b.8 |
 | FO-27.5 | build | Fix-ups for flattening (FO-10) and downsampling (ED-25). | `crates/tinker-pdf/src/preflight/fixups.rs` (new), `crates/tinker-pdf/tests/preflight.rs` (new) | Each removes its finding with no new finding. | FO-27.4, FO-10, ED-25 |
 | FO-27.6 | build | The report document: findings listed with their places, pages annotated where they occur. | `crates/tinker-pdf/src/preflight/report.rs` (new), `crates/tinker-pdf/tests/preflight.rs` (new) | The report lists each finding once and annotates its location. | FO-27.3 |
 | FO-27.7 | build | `tpdf preflight --profile` with fix-ups. | `tools/tpdf/src/main.rs`, `docs/features/writing.md` | The command reports and fixes `testdata/` fixtures to the facade's output. | FO-27.5, FO-27.6 |

@@ -25,7 +25,7 @@ it.
 | FI-01.2 | build | HUFF/CDIC records decompressed. | `crates/tinker-pdf/src/mobi.rs` (new), `crates/tinker-pdf/tests/mobi.rs` (new) | Records built from the published description decode as it states. | FI-01.1 |
 | FI-01.3 | build | MOBI 6 markup turned into XHTML (`filepos` anchors, image records) and laid out by the EPUB path; a book with DRM refused by name. | `crates/tinker-pdf/src/mobi.rs` (new), `crates/tinker-pdf/tests/mobi.rs` (new), `docs/features/epub.md` | Books generated once by a producer (dated, bytes only, provenance recorded) open and draw as their XHTML twins pixel for pixel. | FI-01.2, H-106 |
 | FI-01.4 | build | KF8 (AZW3): the KF8 boundary, skeleton and fragment reassembly, fonts, CSS and images, and the NCX as the outline. | `crates/tinker-pdf/src/mobi.rs` (new), `crates/tinker-pdf/tests/mobi.rs` (new) | KF8 books generated once by a producer draw as their XHTML twins pixel for pixel; the outline matches the NCX. | FI-01.3 |
-| FI-01.5 | build | MOBI, PRC, PDB and AZW3 sniffed and opened like the other formats, with a speed row and a fingerprint. | `crates/tinker-pdf/src/standalone.rs`, `crates/tinker-pdf/benches/engine.rs`, `crates/tinker-pdf/tests/determinism.rs` | `Document::open` opens each kind; the speed row is in the benchmark set; a book's render is fingerprinted on every K-07 target. | FI-01.4, MS-04, K-07 |
+| FI-01.5 | build | MOBI, PRC, PDB and AZW3 sniffed and opened like the other formats, with a speed row and a fingerprint. | `crates/tinker-pdf/src/standalone.rs`, `crates/tinker-pdf/benches/engine.rs`, `crates/tinker-pdf/tests/determinism.rs` | `Document::open` opens each kind; the speed row is in the benchmark set; a book's render is fingerprinted on every K-07 target. | FI-01.4, MS-04.8, K-07 |
 
 **Closes the row:** FI-01.3 and FI-01.4 draw producer-made books as their XHTML twins pixel for pixel and FI-01.2 holds HUFF/CDIC to its description, which is the row's exit.
 
@@ -43,7 +43,7 @@ it.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FI-02a.1 | build | DOCX to XHTML: paragraphs, headings by outline level, lists, tables, images through the package's relationships, and links, laid out by the EPUB path. | `crates/tinker-pdf/src/office/mod.rs` (new), `crates/tinker-pdf/src/office/docx.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/office_text.rs` (new) | `office_text.rs` (new): documents built in the test from ECMA-376's schemas open with the expected text, structure and images. | FI-21 |
+| FI-02a.1 | build | DOCX to XHTML: paragraphs, headings by outline level, lists, tables, images through the package's relationships, and links, laid out by the EPUB path. | `crates/tinker-pdf/src/office/mod.rs` (new), `crates/tinker-pdf/src/office/docx.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/office_text.rs` (new) | `office_text.rs` (new): documents built in the test from ECMA-376's schemas open with the expected text, structure and images. | FI-21, H-102 |
 | FI-02a.2 | build | XLSX to XHTML: each sheet a table of its cached values, shared and inline strings. | `crates/tinker-pdf/src/office/xlsx.rs` (new), `crates/tinker-pdf/tests/office_text.rs` (new) | Generated workbooks open with each sheet's values in place. | FI-02a.1 |
 | FI-02a.3 | build | PPTX to XHTML: each slide a section with its text and images. | `crates/tinker-pdf/src/office/pptx.rs` (new), `crates/tinker-pdf/tests/office_text.rs` (new) | Generated presentations open with each slide's text and images in order. | FI-02a.1 |
 | FI-02a.4 | build | ODF text, spreadsheet and presentation documents to XHTML. | `crates/tinker-pdf/src/office/odf.rs` (new), `crates/tinker-pdf/tests/office_text.rs` (new) | Documents built from the ODF schemas open with the expected text, structure and images. | FI-02a.1 |
@@ -66,14 +66,14 @@ it.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FI-02b.1 | design | Create `docs/design/office-layout.md` for FI-02b to FI-02f: why office layout is its own model and not CSS (line-spacing rules, tab stops, widow and keep rules, sections), where it lives beside the layout crate, analytic fixtures from ECMA-376's and ODF's rules, determinism, and each milestone. | `docs/design/office-layout.md` (new) | The doc exists in the design-doc order, names this row's exit tests and the milestones FI-02c to FI-02f extend, and is reviewed. | FI-02a |
+| FI-02b.1 | design | Create `docs/design/office-layout.md` for FI-02b to FI-02f: why office layout is its own model and not CSS (line-spacing rules, tab stops, widow and keep rules, sections), where it lives beside the layout crate, analytic fixtures from ECMA-376's and ODF's rules, determinism, and each milestone. | `docs/design/office-layout.md` (new) | The doc exists in the design-doc order, names this row's exit tests and the milestones FI-02c to FI-02f extend, and is reviewed. | FI-02a, H-102 |
 | FI-02b.2 | build | Styles and their inheritance resolved: document defaults, style chains and direct formatting of paragraphs and runs. | `crates/tinker-pdf/src/office/styles.rs` (new), `crates/tinker-pdf/tests/office_layout.rs` (new) | `office_layout.rs` (new): resolved properties equal ECMA-376's rules applied in the test. | FI-02b.1 |
 | FI-02b.3 | build | Runs and paragraphs laid out: fonts and sizes, spacing, line-spacing rules, indentation, alignment and tab stops. | `crates/tinker-pdf/src/office/layout.rs` (new), `crates/tinker-pdf/tests/office_layout.rs` (new) | Analytic fixtures place every box where the test computes from ECMA-376's rules. | FI-02b.2 |
 | FI-02b.4 | build | Numbering: abstract and concrete numbering, levels, level text and restarts. | `crates/tinker-pdf/src/office/numbering.rs` (new), `crates/tinker-pdf/tests/office_layout.rs` (new) | Analytic fixtures' list labels and positions equal the test's computation. | FI-02b.3 |
 | FI-02b.5 | build | Sections and page setup: page size, margins, orientation, columns and section breaks, with widow and orphan control and the keep and page-break rules. | `crates/tinker-pdf/src/office/layout.rs` (new), `crates/tinker-pdf/tests/office_layout.rs` (new) | Analytic fixtures paginate where the test computes. | FI-02b.3 |
-| FI-02b.6 | test | Determinism on the four targets, and producer documents read by a person. | `crates/tinker-pdf/tests/determinism.rs`, `docs/features/office.md` (new) | A laid-out document's render is fingerprinted on every K-07 target; H-61's dated visual review is recorded. | FI-02b.4, FI-02b.5, K-07, H-61 |
+| FI-02b.6 | test | Determinism on the four targets. *Note:* The visual review of producer documents is H-61's, an input a person reads and never a check; it is recorded when it is made, outside this exit. | `crates/tinker-pdf/tests/determinism.rs`, `docs/features/office.md` (new) | A laid-out document's render is fingerprinted on every K-07 target. | FI-02b.4, FI-02b.5, K-07 |
 
-**Closes the row:** FI-02b.2 to FI-02b.5 place analytic fixtures' boxes as ECMA-376's rules compute, and FI-02b.6 fingerprints them on four targets with the visual review, which is the row's exit.
+**Closes the row:** FI-02b.2 to FI-02b.5 place analytic fixtures' boxes as ECMA-376's rules compute, and FI-02b.6 fingerprints them on four targets, which is the row's exit; the visual review of producer documents is H-61's, outside this exit.
 
 ## FI-02c — DOCX layout, milestone 2
 
@@ -183,7 +183,7 @@ it.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FI-02g.1 | build | RTF read: groups and destinations, code pages and `\u` escapes with `\uc`, and the font, colour, style and list tables. | `crates/tinker-pdf/src/office/rtf.rs` (new), `crates/tinker-pdf/tests/rtf.rs` (new) | `rtf.rs` (new): documents generated per control-word family parse to the expected properties. | FI-02a |
+| FI-02g.1 | build | RTF read: groups and destinations, code pages and `\u` escapes with `\uc`, and the font, colour, style and list tables. | `crates/tinker-pdf/src/office/rtf.rs` (new), `crates/tinker-pdf/tests/rtf.rs` (new) | `rtf.rs` (new): documents generated per control-word family parse to the expected properties. | FI-02a, H-102 |
 | FI-02g.2 | build | RTF laid out through FI-02a's XHTML path: paragraphs and runs, tables, lists, fields, and pictures (metafiles through FI-36, PNG and JPEG). | `crates/tinker-pdf/src/office/rtf.rs` (new), `crates/tinker-pdf/tests/rtf.rs` (new) | Generated documents per control-word family render with the expected text, structure and pictures. | FI-02g.1, FI-36 |
 | FI-02g.3 | build | RTF sniffed and opened, and documented. | `crates/tinker-pdf/src/standalone.rs`, `docs/features/office.md` (new) | `Document::open` opens RTF; the feature doc states what is read. | FI-02g.2 |
 
@@ -222,7 +222,7 @@ it.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FI-04.1 | build | Gzip members (RFC 1952) unwrapped over the in-tree inflate and the inner bytes opened as whatever they are, SVGZ included. | `crates/tinker-pdf-filters/src/gzip.rs` (new), `crates/tinker-pdf-filters/src/lib.rs`, `crates/tinker-pdf/src/standalone.rs`, `crates/tinker-pdf/tests/gzip_documents.rs` (new), `docs/features/opening.md` | `gzip_documents.rs` (new): a gzipped copy of every committed fixture, made in the test by the in-tree deflate, opens as the original; a bad CRC is a typed error. | — |
+| FI-04.1 | build | Gzip-wrapped documents unwrapped by FT-06.7's member reader (RFC 1952), member after member, and the inner bytes opened as whatever they are, SVGZ included. | `crates/tinker-pdf-filters/src/gzip.rs` (new), `crates/tinker-pdf-filters/src/lib.rs`, `crates/tinker-pdf/src/standalone.rs`, `crates/tinker-pdf/tests/gzip_documents.rs` (new), `docs/features/opening.md` | `gzip_documents.rs` (new): a gzipped copy of every committed fixture, made in the test by the in-tree deflate, opens as the original; a bad CRC is a typed error. | FT-06.7 |
 
 **Closes the row:** FI-04.1 opens a gzipped copy of every committed fixture as the original, which is the row's exit.
 
@@ -279,7 +279,7 @@ it.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FI-07a.1 | design | Create `docs/design/jpeg-xl.md` for FI-07a, FI-07b and the encoder FO-07c: the container and codestream, entropy coding, modular mode and its transforms, VarDCT and its filters, JPEG reconstruction, and the conformance data the decoder is held to. | `docs/design/jpeg-xl.md` (new) | The doc exists in the design-doc order, names this row's exit tests and the milestones FI-07b and FO-07c extend, and is reviewed. | H-47 |
+| FI-07a.1 | design | Create `docs/design/jpeg-xl.md` for FI-07a, FI-07b and the encoder FO-07c: the container and codestream, entropy coding, modular mode and its transforms, VarDCT and its filters, JPEG reconstruction, and the conformance data the decoder is held to. | `docs/design/jpeg-xl.md` (new) | The doc exists in the design-doc order, names this row's exit tests and the milestones FI-07b and FO-07c extend, and is reviewed. | H-47, H-102 |
 | FI-07a.2 | build | The container and codestream headers: size, image metadata, colour encoding, frame headers and the table of contents. | `crates/tinker-pdf-filters/src/jxl/mod.rs` (new), `crates/tinker-pdf-filters/src/jxl/headers.rs` (new), `crates/tinker-pdf-filters/src/lib.rs` | Unit tests: the conformance bitstreams' headers parse to their stated values. | FI-07a.1 |
 | FI-07a.3 | build | Entropy decoding: ANS and prefix codes, hybrid integer configurations, LZ77 and clustered histograms. | `crates/tinker-pdf-filters/src/jxl/entropy.rs` (new) | Unit tests hold each part to the specification's definitions; the conformance streams' entropy-coded sections decode. | FI-07a.2 |
 | FI-07a.4 | build | Modular mode: meta-adaptive trees decoded and evaluated, the predictors including the weighted one, and channel decoding. | `crates/tinker-pdf-filters/src/jxl/modular.rs` (new) | Modular conformance bitstreams without transforms decode to their reference samples. | FI-07a.3 |
@@ -309,7 +309,7 @@ it.
 | FI-07b.4 | build | Restoration filters: Gaborish and the edge-preserving filter. | `crates/tinker-pdf-filters/src/jxl/filters.rs` (new) | Streams using each filter decode to their reference samples. | FI-07b.3 |
 | FI-07b.5 | build | Patches, splines and noise synthesis. | `crates/tinker-pdf-filters/src/jxl/frame.rs` (new) | Streams using each feature decode to their reference samples. | FI-07b.3 |
 | FI-07b.6 | build | Lossless JPEG reconstruction from the reconstruction data. | `crates/tinker-pdf-filters/src/jxl/jpeg_recon.rs` (new) | Reconstructed JPEGs are byte-equal to their originals. | FI-07b.2 |
-| FI-07b.7 | test | Close the milestone: every remaining conformance bitstream, a decode fingerprint and the decoder's speed row. | `crates/tinker-pdf-filters/tests/jxl_conformance.rs` (new), `crates/tinker-pdf/tests/determinism.rs`, `crates/tinker-pdf/benches/engine.rs` | Every published conformance bitstream decodes to its reference; the fingerprint holds on every K-07 target; the speed row is in the benchmark set. | FI-07b.4, FI-07b.5, FI-07b.6, K-07, MS-04 |
+| FI-07b.7 | test | Close the milestone: every remaining conformance bitstream, a decode fingerprint and the decoder's speed row. | `crates/tinker-pdf-filters/tests/jxl_conformance.rs` (new), `crates/tinker-pdf/tests/determinism.rs`, `crates/tinker-pdf/benches/engine.rs` | Every published conformance bitstream decodes to its reference; the fingerprint holds on every K-07 target; the speed row is in the benchmark set. | FI-07b.4, FI-07b.5, FI-07b.6, K-07, MS-04.8 |
 
 **Closes the row:** FI-07b.7 decodes the remaining conformance bitstreams and FI-07b.6 reconstructs JPEGs byte-equal, which is the row's exit.
 
@@ -328,7 +328,7 @@ it.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | FI-07c.1 | build | JPEG XL as a PDF image filter, by its published definition: name, parameters and colour handling. | `crates/tinker-pdf-filters/src/lib.rs`, `crates/tinker-pdf/src/images.rs`, `crates/tinker-pdf/tests/jxl_filter.rs` (new), `docs/features/filters.md` | `jxl_filter.rs` (new): fixtures built from the published definition decode to FI-07a and FI-07b's decode of the same codestream as a bare file. | FI-07b, H-122 |
-| FI-07c.2 | build | HDR content: PQ and HLG transfer at high bit depth carried through RC-07's 16-bit pipeline and tone-mapped to the output space. | `crates/tinker-pdf-color/src/lib.rs`, `crates/tinker-pdf/tests/jxl_filter.rs` (new) | The PQ and HLG transfers equal BT.2100's equations recomputed in the test; tone mapping follows the stated operator. | FI-07c.1, RC-07 |
+| FI-07c.2 | build | HDR content: PQ and HLG transfer at high bit depth carried through RC-07's 16-bit pipeline and tone-mapped to the output space. | `crates/tinker-pdf-color/src/lib.rs`, `crates/tinker-pdf/tests/jxl_filter.rs` (new) | The PQ and HLG transfers equal BT.2100's equations recomputed in the test; tone mapping follows the stated operator. | FI-07c.1, RC-07.15 |
 
 **Closes the row:** FI-07c.1 decodes filter fixtures as the bare codestream and FI-07c.2 holds PQ and HLG to BT.2100's equations, which is the row's exit.
 
@@ -454,7 +454,7 @@ it.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FI-13.1 | design | Create `docs/design/jpx-part2.md`: which T.801 extensions and extended file-format features PDF can carry, each with the clause and annex example it is held to, and what stays refused by name. | `docs/design/jpx-part2.md` (new) | The doc exists in the design-doc order, names FI-13.2 to FI-13.8's exit tests, and is reviewed. | — |
+| FI-13.1 | design | Create `docs/design/jpx-part2.md`: which T.801 extensions and extended file-format features PDF can carry, each with the clause and annex example it is held to, and what stays refused by name. *Note:* The run takes this row after every other row of its tier: H-30's default orders it last. | `docs/design/jpx-part2.md` (new) | The doc exists in the design-doc order, names FI-13.2 to FI-13.8's exit tests, and is reviewed. | — |
 | FI-13.2 | build | Part 2's markers parsed to their fields instead of refused as unknown. | `crates/tinker-pdf-filters/src/jpx/codestream.rs` | Unit tests: each marker parses to T.801's fields; failing first on today's refusal. | FI-13.1 |
 | FI-13.3 | build | Variable DC offset and the non-linear point transform. | `crates/tinker-pdf-filters/src/jpx/colour.rs` | Unit tests hold both to T.801's text and its examples where published. | FI-13.2 |
 | FI-13.4 | build | Arbitrary decomposition styles and arbitrary transformation kernels. | `crates/tinker-pdf-filters/src/jpx/wavelet.rs` | Unit tests hold both to T.801's text and its examples. | FI-13.2 |
@@ -537,7 +537,7 @@ it.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FI-17a.1 | design | Create `docs/design/postscript.md` for FI-17a to FI-17c: the scanner, objects and virtual memory, stacks and dictionaries, the Level 3 operator set, errors, the graphics model and fonts, DSC and EPS, and how the reference's examples are transcribed as tests. | `docs/design/postscript.md` (new) | The doc exists in the design-doc order, names this row's exit tests and the milestones FI-17b and FI-17c extend, and is reviewed. | — |
+| FI-17a.1 | design | Create `docs/design/postscript.md` for FI-17a to FI-17c: the scanner, objects and virtual memory, stacks and dictionaries, the Level 3 operator set, errors, the graphics model and fonts, DSC and EPS, and how the reference's examples are transcribed as tests. | `docs/design/postscript.md` (new) | The doc exists in the design-doc order, names this row's exit tests and the milestones FI-17b and FI-17c extend, and is reviewed. | H-102 |
 | FI-17a.2 | build | The scanner: numbers with radix, literal, hex and ASCII85 strings, names, procedures, binary tokens and binary object sequences. | `crates/tinker-pdf-ps/src/scan.rs` (new), `crates/tinker-pdf-ps/src/lib.rs` (new), `crates/tinker-pdf-ps/Cargo.toml` (new), `Cargo.toml`, `docs/architecture.md` | Unit tests: the reference's scanner examples tokenise as stated; the new crate is in `docs/architecture.md`. | FI-17a.1 |
 | FI-17a.3 | build | Objects and virtual memory: composites, access attributes, local and global VM, and `save` and `restore`. | `crates/tinker-pdf-ps/src/vm.rs` (new) | Unit tests: the reference's `save`/`restore` examples hold. | FI-17a.2 |
 | FI-17a.4 | build | The stacks and dictionaries: operand, dictionary and execution stacks, `systemdict`, `userdict` and `globaldict`. | `crates/tinker-pdf-ps/src/interp.rs` (new) | Unit tests: the reference's stack and dictionary operators hold to their stated behaviour. | FI-17a.3 |
@@ -572,8 +572,8 @@ it.
 | FI-17b.4 | build | Images and image masks, and every colour space family. | `crates/tinker-pdf-ps/src/ops/image.rs` (new), `crates/tinker-pdf/tests/postscript_graphics.rs` (new) | Analytic fixtures render as their PDF twins. | FI-17b.3 |
 | FI-17b.5 | build | Patterns and shading types 1 to 7. | `crates/tinker-pdf-ps/src/ops/pattern.rs` (new), `crates/tinker-pdf/tests/postscript_graphics.rs` (new) | Analytic fixtures render as their PDF twins. | FI-17b.4 |
 | FI-17b.6 | build | Halftones and transfer functions stored, `setpagedevice`, and `showpage` producing PDF pages. | `crates/tinker-pdf-ps/src/ops/device.rs` (new), `crates/tinker-pdf/tests/postscript_graphics.rs` (new) | Multi-page fixtures with page-device changes produce the pages their twins have. | FI-17b.3 |
-| FI-17b.7 | build | Fonts and the show family: Type 1, 3 and 42 and CID fonts through the font crate and FT-10. | `crates/tinker-pdf-ps/src/ops/font.rs` (new), `crates/tinker-pdf/tests/postscript_graphics.rs` (new) | Analytic text fixtures render as their PDF twins and extract their text, in both builds. | FI-17b.3, FT-10 |
-| FI-17b.8 | test | PostScript opened as a document, a determinism fingerprint and a speed row. | `crates/tinker-pdf/src/standalone.rs`, `crates/tinker-pdf/tests/determinism.rs`, `crates/tinker-pdf/benches/engine.rs`, `docs/features/opening.md` | `Document::open` opens a PostScript file; the fingerprint holds on every K-07 target; the speed row is in the benchmark set. | FI-17b.5, FI-17b.6, FI-17b.7, K-07, MS-04 |
+| FI-17b.7 | build | Fonts and the show family: Type 1, 3 and 42 and CID fonts through the font crate and FT-10. | `crates/tinker-pdf-ps/src/ops/font.rs` (new), `crates/tinker-pdf/tests/postscript_graphics.rs` (new) | Analytic text fixtures render as their PDF twins and extract their text, in both builds. | FI-17b.3, FT-10.3, FT-10.5 |
+| FI-17b.8 | test | PostScript opened as a document, a determinism fingerprint and a speed row. | `crates/tinker-pdf/src/standalone.rs`, `crates/tinker-pdf/tests/determinism.rs`, `crates/tinker-pdf/benches/engine.rs`, `docs/features/opening.md` | `Document::open` opens a PostScript file; the fingerprint holds on every K-07 target; the speed row is in the benchmark set. | FI-17b.5, FI-17b.6, FI-17b.7, K-07, MS-04.8 |
 
 **Closes the row:** FI-17b.2 to FI-17b.7 render analytic PostScript fixtures to the same pixels as their PDF twins, which is the row's exit.
 
@@ -611,7 +611,7 @@ it.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FI-18a.1 | design | Create `docs/design/pcl.md` for FI-18a to FI-18c: the escape-sequence parser, the page model and units, fonts and symbol sets with the engine's faces standing in, raster graphics, area fills, macros, PCL 5c colour, PCL XL and HP-GL/2. | `docs/design/pcl.md` (new) | The doc exists in the design-doc order, names this row's exit tests and the milestones FI-18b and FI-18c extend, and is reviewed. | — |
+| FI-18a.1 | design | Create `docs/design/pcl.md` for FI-18a to FI-18c: the escape-sequence parser, the page model and units, fonts and symbol sets with the engine's faces standing in, raster graphics, area fills, macros, PCL 5c colour, PCL XL and HP-GL/2. | `docs/design/pcl.md` (new) | The doc exists in the design-doc order, names this row's exit tests and the milestones FI-18b and FI-18c extend, and is reviewed. | H-102 |
 | FI-18a.2 | build | The parser and job and page control: page size, orientation, margins, units of measure and copies. | `crates/tinker-pdf/src/pcl/mod.rs` (new), `crates/tinker-pdf/src/pcl/parse.rs` (new), `crates/tinker-pdf/tests/pcl.rs` (new) | `pcl.rs` (new): analytic fixtures from the PCL 5 technical reference place pages and margins where the test computes. | FI-18a.1 |
 | FI-18a.3 | build | Cursor positioning and text: symbol sets, font selection by characteristics mapped to the engine's faces, and downloaded soft fonts. | `crates/tinker-pdf/src/pcl/text.rs` (new), `crates/tinker-pdf/tests/pcl.rs` (new) | Analytic text fixtures render to their builder-made PDF twins, in both builds. | FI-18a.2 |
 | FI-18a.4 | build | Raster graphics with its compression modes. | `crates/tinker-pdf/src/pcl/raster.rs` (new), `crates/tinker-pdf/tests/pcl.rs` (new) | Analytic raster fixtures render to their PDF twins. | FI-18a.2 |
@@ -637,7 +637,7 @@ it.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | FI-18b.1 | design | Add PCL XL to `docs/design/pcl.md`: the stream header, encodings, attribute lists and operators, and each graphics family. | `docs/design/pcl.md` | The section names FI-18b.2 to FI-18b.7's exit tests and is reviewed. | FI-18a.1 |
-| FI-18b.2 | build | The stream header, binary and ASCII encodings, attribute lists and operator parsing. | `crates/tinker-pdf/src/pcl/xl.rs` (new), `crates/tinker-pdf/tests/pcl_xl.rs` (new) | `pcl_xl.rs` (new): streams built from the protocol reference parse to their operators and attributes. | FI-18b.1 |
+| FI-18b.2 | build | The stream header, binary and ASCII encodings, attribute lists and operator parsing. | `crates/tinker-pdf/src/pcl/xl.rs` (new), `crates/tinker-pdf/tests/pcl_xl.rs` (new) | `pcl_xl.rs` (new): streams built from the protocol reference parse to their operators and attributes. | FI-18b.1, FI-18a.2 |
 | FI-18b.3 | build | Page and graphics-state operators: pages, origin, scale, colour space, pen and brush. | `crates/tinker-pdf/src/pcl/xl.rs` (new), `crates/tinker-pdf/tests/pcl_xl.rs` (new) | Analytic fixtures render to their builder-made PDF twins. | FI-18b.2 |
 | FI-18b.4 | build | Paths and painting: lines, Béziers, arcs, rectangles and ellipses. | `crates/tinker-pdf/src/pcl/xl.rs` (new), `crates/tinker-pdf/tests/pcl_xl.rs` (new) | Analytic fixtures render to their PDF twins. | FI-18b.3 |
 | FI-18b.5 | build | Images and raster patterns with their compressions. | `crates/tinker-pdf/src/pcl/xl.rs` (new), `crates/tinker-pdf/tests/pcl_xl.rs` (new) | Analytic fixtures render to their PDF twins. | FI-18b.3 |
@@ -745,7 +745,7 @@ it.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | FI-21.1 | build | CFB/OLE2 compound files: sectors, allocation tables, the directory and mini streams. | `crates/tinker-pdf-archive/src/cfb.rs` (new), `crates/tinker-pdf-archive/src/lib.rs` | Unit tests: generated compound files open with every stream byte for byte. | — |
-| FI-21.2 | build | EML messages: headers, MIME parts with their transfer encodings and charsets, the body laid out by the HTML path and attachments carried as PDF attachments. | `crates/tinker-pdf/src/mail.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/mail.rs` (new) | `mail.rs` (new): generated messages open with every part; each attachment is a PDF attachment byte for byte. | — |
+| FI-21.2 | build | EML messages: headers, MIME parts with their transfer encodings and charsets, the body laid out by the HTML path and attachments carried as PDF attachments. | `crates/tinker-pdf/src/mail.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/mail.rs` (new) | `mail.rs` (new): generated messages open with every part; each attachment is a PDF attachment byte for byte; in the default and `bundled-fonts` builds. | — |
 | FI-21.3 | build | MSG messages from their compound file's properties, opened the same way. | `crates/tinker-pdf/src/mail.rs` (new), `crates/tinker-pdf/tests/mail.rs` (new) | Generated MSG files open with every part and attachment. | FI-21.1, FI-21.2 |
 | FI-21.4 | build | MHTML and WARC pages through the HTML path with their resources from the archive. | `crates/tinker-pdf/src/mail.rs` (new), `crates/tinker-pdf/tests/mail.rs` (new) | Generated pages open with every resource drawn. | FI-21.2 |
 | FI-21.5 | build | CHM help files: the container and its LZX compression, pages through the HTML path. | `crates/tinker-pdf-archive/src/chm.rs` (new), `crates/tinker-pdf-archive/src/lzx.rs` (new), `crates/tinker-pdf/tests/mail.rs` (new) | Generated help files open with every page; LZX holds to its published description. | FI-21.4 |
@@ -769,7 +769,7 @@ it.
 | --- | --- | --- | --- | --- | --- |
 | FI-22.1 | fix | Customizable `<select>`'s selectedness algorithm and the copy into `<selectedcontent>` in the HTML tree builder. | `crates/tinker-pdf-xml/src/html`, `crates/tinker-pdf-xml/tests/html5lib.rs` | The four html5lib tree-construction tests that need it pass, and no other changes. | — |
 
-**Closes the row:** FI-22.1 implements the algorithm and the copy so those four tests pass, which is the row's exit.
+**Closes the row:** FI-22.1 implements the algorithm and the copy so those four tests pass, which is the row's exit; a producer's document using the customizable `<select>` is H-107's evidence, outside this exit.
 
 ## FI-23 — Multi-byte legacy encodings
 
@@ -785,12 +785,12 @@ it.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FI-23.1 | build | GBK and gb18030 decoders from the vendored WHATWG indexes, gb18030's ranges included. | `crates/tinker-pdf-xml/src/encoding.rs` | Unit tests: each decoder holds to the vendored index and the encoding standard's test files. | H-90 |
+| FI-23.1 | build | GBK and gb18030 decoders from the vendored WHATWG indexes, gb18030's ranges included. *Note:* H-90 reads the WHATWG grant these indexes are published under, and H-116 lists multi-byte encoding indexes among the data licences it rules; the indexes are vendored once both have answered. | `crates/tinker-pdf-xml/src/encoding.rs` | Unit tests: each decoder holds to the vendored index and the encoding standard's test files. | H-90, H-116 |
 | FI-23.2 | build | Big5 and EUC-KR. | `crates/tinker-pdf-xml/src/encoding.rs` | Unit tests: each holds to its index and the standard's test files. | FI-23.1 |
 | FI-23.3 | build | EUC-JP, stateful ISO-2022-JP and Shift_JIS. | `crates/tinker-pdf-xml/src/encoding.rs` | Unit tests: each holds to its index and the standard's test files. | FI-23.1 |
 | FI-23.4 | build | The decoders wired into FB2, loose HTML and XHTML by their declarations and labels. | `crates/tinker-pdf/src/fb2.rs`, `crates/tinker-pdf/src/html.rs`, `crates/tinker-pdf/tests/legacy_encodings.rs` (new), `docs/features/opening.md` | `legacy_encodings.rs` (new): an FB2 in each encoding equals its UTF-8 twin, and so does a loose HTML page. | FI-23.2, FI-23.3 |
 
-**Closes the row:** FI-23.1 to FI-23.3 hold each decoder to the vendored index and the standard's tests, and FI-23.4 makes each FB2 equal its UTF-8 twin, which is the row's exit.
+**Closes the row:** FI-23.1 to FI-23.3 hold each decoder to the vendored index and the standard's tests, and FI-23.4 makes each FB2 equal its UTF-8 twin, which is the row's exit; an FB2 corpus in these encodings is H-107's evidence, outside this exit.
 
 ## FI-24 — Sniffing refusals
 
