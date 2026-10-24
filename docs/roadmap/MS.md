@@ -95,7 +95,7 @@ held to, and the censuses no corpus run has fed.
 
 **Closes the row:** MS-01.2 to MS-01.5 thread the tally through the render, text, save, merge, decode and page-lookup contexts and surface it on the facade; MS-01.6 lands the guard suite, its A1–A10 roster and the pinned counts; MS-01.7 settles A10; MS-01.8 runs the suite on the four targets. Each A1–A9 clause is met in its P row's commit (P-01 A1 A2, P-02 A3, P-06 A4, P-03 A5 A6, P-09 and P-10 A7, P-04 A8, P-15 A9), which flips its roster entry failing first; those rows depend on MS-01, so no step here waits on them.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The exit cannot close inside the row: it says each guard lands with its P row, and every row that owns one depends on MS-01 (P-01, P-02, P-03, P-04, P-06, P-09 and P-15 directly, P-10 through P-15), so the A1–A9 clauses are met by those rows' commits under MS-01.6's roster.
 - No P row names A10 (allocations O(1) per page), so MS-01.7 measures it and assigns it.
@@ -127,7 +127,7 @@ held to, and the censuses no corpus run has fed.
 
 **Closes the row:** MS-02.2 is the paired check, with its injected-10 % and A/A tests; MS-02.3 and MS-02.4 hold MS-04's suite against `61adcde` by committed floors, calibrations and relations; MS-02.5 lands the job, MS-02.6 sets every band by the A/A rule and records them in `verification.md`, and MS-02.7 reads it green within 15 minutes.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `verification.md:1779-1784` no longer holds the 135 % sentence: it is at `docs/verification.md:1917-1922`, and lines 1779-1784 end 'Tools' and open 'Clocks'.
 - H-111's default, every pull request, meets H-01's decision that every change goes to `develop` with no pull request (`docs/ROADMAP.md`, H-01), so a pull-request trigger alone would never run; MS-02.5 also fires on pushes to `develop`.
@@ -154,7 +154,7 @@ held to, and the censuses no corpus run has fed.
 
 **Closes the row:** MS-03.1 makes the pinned entry refuse any other host, MS-03.2 runs the suite on the pinned runner on every push to `develop` and nightly, MS-03.3 records its bands by the 15-run rule with every A/A swing at most 5 %, and MS-03.4 reads both triggers green.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `verification.md:1697-1712` no longer holds the desktop measurement: the 259 % table and 'cannot be the named machine' are at `docs/verification.md:1835-1850`.
 - The 15-run rule and per-machine entries already exist (`crates/tinker-pdf/benches/baseline.json`, `docs/verification.md:1852-1943`) and `bench-check` already selects an entry by name, so what remains is the machine, its workflow, an identity check and the entry.
@@ -185,7 +185,7 @@ held to, and the censuses no corpus run has fed.
 
 **Closes the row:** MS-04.2 splits `benches/` by group and makes `cargo xtask baseline` hold the files, the guard counts and `baseline.json` to one list per group; MS-04.3 to MS-04.7 add every operation whose capability exists, each fixture generated in the bench or in the tree; MS-04.8 checks the 20–300 ms window on the runner and MS-04.9 measures the whole set; each operation whose capability is absent is added by its own row's commit, as the exit says.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The tree writes baseline JPEG, CCITT G4, JBIG2 generic regions, PNG and deflate (`crates/tinker-pdf-filters/src/jpeg/encode.rs:819`, `ccitt/encode.rs:386`, `jbig2/encode.rs:251`, `png/encode.rs:135`, `deflate.rs:200`) but no progressive JPEG (`jpeg/encode.rs:12-16`), no LZW and no JPEG 2000 image writer (`jpx/tests/writer.rs` writes test-only headers), so three decode fixtures cannot be generated in the bench as things stand.
 - The crypto crate performs no private-key operation (`crates/tinker-pdf-crypto/src/rsa.rs:5`); the RSA-2048 signature operation is the private-exponent `pow` of `bignum::Modulus` (`crates/tinker-pdf-crypto/src/bignum.rs:468`), the pairing tier P's Gate column already names.
@@ -212,7 +212,7 @@ held to, and the censuses no corpus run has fed.
 
 **Closes the row:** MS-05.1 lands the Linux-only test that re-executes itself as a first-party probe per case and reads each process's peak from the OS against a committed band at 2 %; MS-05.2 runs it in CI on the seven cases the row names; MS-05.3 commits the figures and holds each.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The peak is already read the way the exit asks, by the corpus child: `tools/tpdf/src/main.rs:2430-2445` reads `VmHWM` from `/proc/self/status` with no FFI, and `xtask/src/ratchet.rs:150` bands each corpus's maximum at `PEAK_TOLERANCE_PERCENT = 2`.
 - `CONTRIBUTING.md` (Tests) admits a test that spawns a program only through a `SPAWNERS` row with its reason (`xtask/src/main.rs:953-1017`), so the probe the exit has a test spawn needs one, as the corpus child, a workspace binary of the same revision, has (`xtask/src/main.rs:993-997`).
@@ -237,7 +237,7 @@ held to, and the censuses no corpus run has fed.
 
 **Closes the row:** MS-06.1 is the comparison and its record line, MS-06.2 the pull-request job that builds each profile exactly as `release.yml` does, and MS-06.3 commits the measured figures and tolerances; a shrink passes and prints the figure the next commit records.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `bindings/js/Cargo.toml` forwards only `cmap-predefined`, so the `bundled-fonts` profile cannot be built as `release.yml` builds the wasm until the binding forwards the facade's feature (ruling 11), which MS-06.2 does.
 - Nothing between releases measures the wasm: `ci.yml`'s `wasm` job runs `cargo build --target wasm32-unknown-unknown -p tinker-pdf` and checks no size (`.github/workflows/ci.yml:357-368`), as the row says.
@@ -264,7 +264,7 @@ held to, and the censuses no corpus run has fed.
 
 **Closes the row:** MS-07.2 and MS-07.3 make the child time open-and-count and each page, and put pages/s, the latency and p50/p95/p99 into the report and the ratchet with `--check` failing past a band; MS-07.4 measures the bands over five runs and records the ten slowest by `/Producer`; MS-07.5 reads `corpus.yml` green holding them.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The per-file timeout is 180 s, not 20 s: `RunArgs::default` sets it (`xtask/src/corpus.rs:184`), all three committed bars record `timeout_seconds: 180`, and `corpus.yml`'s own comment still says sixty (`.github/workflows/corpus.yml:131-139`).
 - Every record already carries the document's `/Producer` (`xtask/src/runner.rs:159-168`), and `producer_table` already attributes failures by it (`xtask/src/report.rs:638`), so the ten-slowest listing needs no new key.
@@ -291,7 +291,7 @@ held to, and the censuses no corpus run has fed.
 
 **Closes the row:** MS-08.2 makes a window's missing chunks one request; MS-08.3 is the row's counted guard in `cargo test` on MS-01's four targets, page one of the linearized fixture in at most 29 696 bytes and 6 requests with the main table never fetched, and of the unlinearized twin within its tail, cross-reference data and page one's objects plus 4 KiB a request in at most 12; MS-08.4 adds the bench row at 50 ms and 10 Mbit/s whose time is the measured work plus the link time those counts give.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Requests are already counted, though nothing bounds them: `CountingSource::reads()` (`crates/tinker-pdf-cos/src/source.rs:190-194`) is every read that reached the source, and outside its own unit tests the one assertion on it is `reads() > 0` (`crates/tinker-pdf/tests/streaming_determinism.rs:264`).
 - By the code's arithmetic page one costs eight requests today, over the row's six: the chunk cache reads one 4 KiB chunk a request (`crates/tinker-pdf-cos/src/source.rs:410-463`), `/E` 28 222 ends in the seventh chunk, and the facade first reads 1 024 bytes straight from the source to sniff for a container (`CONTAINER_SNIFF`, `crates/tinker-pdf/src/lib.rs:206`, read at `:1529`), which chunk 0 then fetches again; 7 x 4 096 + 1 024 is exactly `LINEARIZED_PAGE_ONE_BUDGET`'s 29 696, the figure `docs/design/streaming-open.md`'s Measured table records.
@@ -318,7 +318,7 @@ held to, and the censuses no corpus run has fed.
 
 **Closes the row:** MS-09.1 puts A9 in `cargo test` for the CLI's pool and banded regions; MS-09.2 adds the `threads` group and measures its ratios on the hosted runner; MS-09.3 holds the row's floors as ratios inside one run in `bench.yml`, oversubscription armed on four CPUs; MS-09.4 arms 8 threads at least 6.5x on the pinned runner (H-110); MS-09.5 holds the facade's pool to the same floors once P-15 lands.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The CLI's pool is `render_pages` (`tools/tpdf/src/main.rs:1149-1222`), in a binary with no library target; the mechanism is copied, not shared, in `crates/tinker-pdf/examples/parallel.rs` and `crates/tinker-pdf/tests/tinker_parity.rs:323`.
 - Nothing holds the pools to bytes today: `jobs_changes_the_clock_and_not_one_byte_of_the_output` (`tools/tpdf/src/main.rs:3105`) compares the lines `--jobs 8` and `--jobs 1` print while both write into one directory, and no test renders bands on threads.
@@ -344,7 +344,7 @@ held to, and the censuses no corpus run has fed.
 
 **Closes the row:** MS-10.1 runs the suite on `wasm32-wasip1`, plain and `+simd128`, beside the native set on one runner on MS-02's trigger; MS-10.2 reports wasm/native and `+simd128`/plain per operation and fails past the committed figures; MS-10.3 commits today's measured figures, each ratio at most 1.94x, which only H-78 raises and P-19 lowers.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Under H-01 (16 October 2026) nothing reaches `develop` by pull request, so 'on every pull request' is MS-02's trigger read through H-01, every push to `develop`, which H-111 may move to a schedule.
 - The tree holds no wasm speed figure: the 1.0-1.94x and 0-11 % are this engine's own measurement of 9 October 2026, taken outside the tree, which tier P's intro says MS-04's set re-derives before it is quoted as current; the runtime is already installed in CI for `wasm-determinism` (`.github/workflows/ci.yml:370-388`).
@@ -371,7 +371,7 @@ held to, and the censuses no corpus run has fed.
 
 **Closes the row:** MS-11.1 makes `ci.yml` fire on push to `develop` and MS-11.2 reads that first run to its end; MS-11.3 and MS-11.4 dispatch `fuzz.yml` and `corpus.yml` on `develop` under H-03 and read them to the end; MS-11.5 makes each failure the three runs show a row here (or K-06's), which for three green runs is only their ids.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - CI last ran on `develop`'s code on 11 October 2026, not 26 September: pull requests #4 and #5 into `main` ran all thirteen checks green at `94e3bb5` and `56dfd93` (their merge commits `99bc5c38` and `1a9013c4` say so), the three-OS matrix, wasm determinism and bindings parity for waves 6-8 included; what has run nowhere hosted is the 36 commits since `56dfd93`.
 - `main` is `1a9013c` (11 October 2026), 36 commits behind `develop`, so the schedules have run that commit since; whether `corpus.yml` still fails there at 'Run the corpus and hold the bar' and `fuzz.yml` on `jbig2` is a run to read, not something the tree shows.
@@ -397,7 +397,7 @@ held to, and the censuses no corpus run has fed.
 
 **Closes the row:** MS-12.1 gives the MS-04 set a fixed-iteration count mode, MS-12.2 admits the host counter under H-16's default and measures its repeatability and cost, and MS-12.3 is the counting job, holding each operation within 1 % of its base on every push to `develop` and every pull request.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Under H-01 nothing reaches `develop` by pull request, so 'per pull request' is read as per push to `develop` against the push's previous head; H-111 holds the trigger.
 - The exempt dev tooling is listed in three places, `docs/architecture.md:15-22`, `CONTRIBUTING.md:76-82` and the root `Cargo.toml:5-7`, none names an instruction counter, so H-16's admission adds one to all three.
@@ -426,7 +426,7 @@ held to, and the censuses no corpus run has fed.
 
 **Closes the row:** MS-13.1 makes the corpus job fail on any census that read nothing; MS-13.2 to MS-13.5 take the first figures of the eight corpus censuses on `develop`, record each in its row (SD-01, SD-04, SD-11, FT-30, FT-31, SG-26, AN-01) and pin them as floors; MS-13.6 records `epub_fetched.rs`'s in CD-01 and CD-08, and MS-13.7 pins them as H-134 decides.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `epub_fetched.rs` has run: `ci.yml`'s `epub-corpus` job (`.github/workflows/ci.yml:456-499`) runs it with `TINKER_EPUB_CORPUS_REQUIRED=1` and greps its banner, and was green on `94e3bb5` (run 38118684750) and `56dfd93` (run 38138512898), the file unchanged since; CD-08's `the_six_svg_spine_items_draw_rather_than_placehold`, which CD-08 calls owed, passed in both. What it has never had is a figure recorded or pinned.
 - By the workflow's own order, a nightly that fails at 'Run the corpus and hold the bar', as MS-11's Today records, has first passed 'Hold every corpus census' (`.github/workflows/corpus.yml:94-128`), which at `main` = `1a9013c` names all eight corpus censuses; but the step sets no `TINKER_CORPUS_REQUIRED` and greps no banner, so passing it does not show that any census read a file.

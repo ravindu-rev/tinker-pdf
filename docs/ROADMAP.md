@@ -52,14 +52,14 @@ run takes one piece of work and lands it (AGENTS.md, the owner on 23
 October 2026). So each row is cut into **steps**, each one run's worth,
 under the row's own text, which stays as it was written; "What a step is",
 below, says what one holds. The rows at the front of the order of work
-were cut on 23 and 24 October 2026, against the tree at `5297133`: tier 0,
-tier 1, tier P and rendering and colour whole, 37 of the 43 fonts-and-text
-rows, ED-01, FJ-01 and CD-19. An independent pass reviewed sixteen of those
-cuts against the code (CD-19, FJ-01, K-01…K-09 and P-10…P-14); every other
-cut row says its steps are not yet reviewed. Where a row's text and the
-tree disagree, the row says so under its steps. Every row not cut yet says
-so, and is cut in the session, tier by tier and without workflows (the
-owner, 24 October 2026). Every number and every `file:line` pointer in a
+were cut first, on 23 and 24 October 2026, and an independent pass reviewed
+sixteen of those cuts against the code (CD-19, FJ-01, K-01…K-09 and
+P-10…P-14). The rest are cut in the session, tier by tier and without
+workflows (the owner, 24 October 2026); "Where the rows are" counts each
+tier's. A cut row no independent pass has reviewed says so, and so does a
+row not yet cut. Every cut so far was made against the tree at `5297133`,
+and where a row's text and that tree disagree, the row says so under its
+steps. Every number and every `file:line` pointer in a
 row was read from the tree on 9 October 2026, or carries its own date. A
 number the roadmap carries and the tree contradicts is a defect in the
 roadmap.
@@ -95,7 +95,7 @@ tier's own rules and history, then gives each row its text and its steps.
 | K | Tier 1 — prove correctness | [roadmap/K.md](roadmap/K.md) | 10 | 10 | 59 |
 | P | Tier P — performance | [roadmap/P.md](roadmap/P.md) | 27 | 27 | 184 |
 | RC | Capability tier — rendering and colour | [roadmap/RC.md](roadmap/RC.md) | 21 | 21 | 172 |
-| FT | Capability tier — fonts and text | [roadmap/FT.md](roadmap/FT.md) | 43 | 37 | 353 |
+| FT | Capability tier — fonts and text | [roadmap/FT.md](roadmap/FT.md) | 43 | 43 | 380 |
 | ED | Capability tier — editing, document operations and creation | [roadmap/ED.md](roadmap/ED.md) | 57 | 1 | 19 |
 | AN | Capability tier — annotations, forms and XFA | [roadmap/AN.md](roadmap/AN.md) | 37 | 0 | 0 |
 | FJ | Capability tier — form JavaScript (complete) | [roadmap/FJ.md](roadmap/FJ.md) | 23 | 1 | 42 |
@@ -311,4 +311,4 @@ ED-12, OC-15b, AN-24; ED-26, ED-27 → OC-12; MS-01 lands with every P row;
 MS-13 (the corpus runs) closes AN-01, SG-26, SD-01, SD-04, SD-11, FT-30,
 FT-31, CD-01 and CD-08.
 
-**The count**: 459 capability, gap and finding rows in the tiers, 111 of them cut into 932 steps — MS 13 of 13 rows, 66 steps, K 10 of 10 rows, 59 steps, P 27 of 27 rows, 184 steps, RC 21 of 21 rows, 172 steps, FT 37 of 43 rows, 353 steps, ED 1 of 57 rows, 19 steps, AN 0 of 37 rows, 0 steps, FJ 1 of 23 rows, 42 steps, SG 0 of 28 rows, 0 steps, SE 0 of 15 rows, 0 steps, FI 0 of 50 rows, 0 steps, FO 0 of 42 rows, 0 steps, SD 0 of 26 rows, 0 steps, SU 0 of 24 rows, 0 steps, CD 1 of 19 rows, 37 steps, OC 0 of 24 rows, 0 steps; 14 hard limits (NG-01…NG-14); 132 rows for a person (H-01…H-158, H-134 onward added by the cut).
+**The count**: 459 capability, gap and finding rows in the tiers, 117 of them cut into 959 steps — MS 13 of 13 rows, 66 steps, K 10 of 10 rows, 59 steps, P 27 of 27 rows, 184 steps, RC 21 of 21 rows, 172 steps, FT 43 of 43 rows, 380 steps, ED 1 of 57 rows, 19 steps, AN 0 of 37 rows, 0 steps, FJ 1 of 23 rows, 42 steps, SG 0 of 28 rows, 0 steps, SE 0 of 15 rows, 0 steps, FI 0 of 50 rows, 0 steps, FO 0 of 42 rows, 0 steps, SD 0 of 26 rows, 0 steps, SU 0 of 24 rows, 0 steps, CD 1 of 19 rows, 37 steps, OC 0 of 24 rows, 0 steps; 14 hard limits (NG-01…NG-14); 132 rows for a person (H-01…H-158, H-134 onward added by the cut).

@@ -168,7 +168,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-01.2 and P-01.3 give `page(i)` a validated `/Count` descent and a memoised page index shared by every clone, with Annex F's head-only lookups untouched and the streaming-open tests unchanged; P-01.4 takes every editor and redaction loop off the walk; A1 and A2 land with the steps that make them pass, each failing first, and P-01.5 raises the row's three floors and two relations in MS-02's paired job.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `Document::page_count` walks every page on every call as well (`crates/tinker-pdf-cos/src/pages.rs:406-422`, `count` calls `collect`), and reading-order inference calls it once per inferred page and `pages::at` once per neighbour (`crates/tinker-pdf/src/reading_order.rs:2076`, `:2092`).
 - The editor walks the page tree on every page operation: `page_refs()` collects every page whenever the editor has not reordered (`crates/tinker-pdf-cos/src/edit/page_ops.rs:16-24`), `import_page` collects the source's every page per imported page (`page_ops.rs:185`), `page_box` per call (`page_ops.rs:403-407`), and facade redaction finds its page the same way (`crates/tinker-pdf/src/redact.rs:1115`), so rotate, merge and redaction loops are quadratic through the editor as well as through `Document::page`.
@@ -200,7 +200,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-02.2 to P-02.5 land the row's four mechanisms (names as constants, fonts once per scope with A3, Type 3 tables once, colour spaces, functions and graphics states once); P-02.6 and P-02.7 remove the two costs the JSON target and the reading-order relation carry outside resource resolution; P-02.8 raises the seven floors in MS-02's paired job with the six relations holding.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `type3_glyph` is at `crates/tinker-pdf/src/resources.rs:1425` at the tip (1398 at `61adcde`). The interpreter calls it for every glyph of every font (`crates/tinker-pdf-content/src/interpret.rs:1777`), and it clones the font dictionary before it checks `/Subtype` (`resources.rs:1428-1434`), then walks `/Differences` for each Type 3 glyph (`resources.rs:1445-1460`).
 - Subsetting's per-glyph lookups clone as well: `font_object` resolves and clones the `/Font` subdictionary on every call (`resources.rs:2341-2366`) and `resource_name` scans `font_ids` (`resources.rs:2333-2338`); `color_space` resolves the `/ColorSpace` table and parses the space again on every call (`resources.rs:922-958`).
@@ -230,7 +230,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-03.2 lands the per-operation decoded-stream cache for subset-on-save (A5); P-03.3 buckets deduplication on encoded bytes with the tree's own XXH64 and merges identical encodings undecoded; P-03.4 ends decoding outside a collision (A6) once the owner accepts its price; P-03.5 raises the three floors and sets merge's MS-05 band in MS-02's paired job.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Every deduplication candidate is decoded and SHA-256-hashed (`crates/tinker-pdf-cos/src/dedup.rs:186-195`, through `dedup_content`, `crates/tinker-pdf-cos/src/edit/save.rs:459`), each member of a bucket of two or more is decoded a second time to compare (`dedup.rs:225`), and the whole object set, stream data and all, is cloned before the first round (`dedup.rs:198`).
 - Decoded comparison is a documented capability with a passing test: two encodings of one content merge (`dedup.rs:14-20`; `crates/tinker-pdf/tests/stream_dedup.rs:319`). Deduplicating on encoded bytes with A6 as MS-01 states it ends that, so the row's mechanism carries a price, H-137.
@@ -262,7 +262,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-04.2 to P-04.4 give deflate a fixed ring, a streaming deflater with fast and ratio levels and dynamic blocks held to level 6's size; P-04.5 streams PNG rows through the fast level (A8); P-04.6 raises the encoder floors, P-04.7 moves document writing to the ratio level once its byte change is reviewed, and P-04.8 raises the render-to-PNG floors and the 60 MB band.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The encoder writes one fixed-Huffman block over the whole input and builds a whole stored copy to compare it with (`crates/tinker-pdf-filters/src/deflate.rs:200-211`, `:245-350`); no dynamic block exists (`deflate.rs:8-12`), so the row's 'within 2 % of level 6's size' needs dynamic blocks, which the Item does not name.
 - The PNG writer holds the whole filtered image (`crates/tinker-pdf-filters/src/png/encode.rs:222-267`), compresses it in one call that allocates eight bytes of chain per filtered byte and a stored copy (`deflate.rs:200-211`, `:275-276`), and costs each row by filtering it five times into a scratch row (`encode.rs:249-259`).
@@ -292,7 +292,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-05.2 and P-05.3 let a streamed document decide its ladder without holding the file and hold it once when it must; P-05.4 opens the CLI's reading commands through a file-backed source with `info`'s answers unchanged; P-05.5 and P-05.6 bring the C ABI and the bindings to one copy of a slice and on-demand path opens; P-05.7 raises the 6x floor and holds MS-05's 10 MB band.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - An `Arc<[u8]>` handed to `Document::open` is already shared, not copied: `open_with` converts with `Into`, the identity for an `Arc` (`crates/tinker-pdf/src/lib.rs:1394-1398`), and the buffer backing keeps it (`crates/tinker-pdf-cos/src/doc.rs:370-372`). The copies are the callers': the CLI reads a `Vec` and hands it over (`tools/tpdf/src/main.rs:859-860`), the C ABI and both bindings copy a borrowed slice into a `Vec` first (`crates/tinker-pdf-ffi/src/lib.rs:647`, `bindings/python/src/lib.rs:99`, `bindings/js/src/lib.rs:192`), and Python's and .NET's path opens read the whole file before that (`bindings/python/src/lib.rs:106-109`, `bindings/dotnet/TinkerPdf.cs:1253`).
 - A whole-file fetch over a source holds the file twice: `materialise` fills the chunk map through `window` and keeps the joined copy beside it (`crates/tinker-pdf-cos/src/source.rs:446-475`, chunks kept at `:436-443`).
@@ -319,7 +319,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-06.2 draws filled outline glyphs from position-independent, phase-quantised masks through the existing mask path, its one-time pixel change reviewed under H-76 and H-133 and ruling 5 kept; P-06.3 caches those masks under a byte bound with deterministic eviction and lands A4; P-06.4 raises the three render floors in MS-02's paired job, which with the reviewed fingerprints meets the row's exit.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Every glyph is built into a path and filled through `paint_inked`, which rasterises its coverage afresh (`crates/tinker-pdf-render/src/lib.rs:2847-2960`, `coverage` at `:2073-2104`), and each outline lookup hands back a clone of the cached outline (`crates/tinker-pdf/src/resources.rs:1759-1787`).
 - The font id a glyph carries is the interned resource name (`crates/tinker-pdf/src/resources.rs:588`), and a form's scope replaces the page's glyph source while it runs (`crates/tinker-pdf-render/src/lib.rs:3164-3174`), so two fonts can reach the renderer under one id within one render.
@@ -351,7 +351,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-07.3 to P-07.8 land the row's six mechanisms (sort-free cell accumulation, reused scratch, solid spans, the opaque Normal composite, the stroker writing into the accumulator, dashes outlined as they are cut), each byte-identical to today's output against P-07.2's reference sweep and `strokes` fingerprint and each with a counted guard failing first; P-07.9 makes the loops vectorise for the `+simd128` relation; P-07.10 raises the four floors in MS-02's paired job with every fingerprint unchanged on the four targets, as tier P closes a row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `fill` sorts its edges by top once per call and the crossings of every sub-scanline (`crates/tinker-pdf-raster/src/fill.rs:360`, `fill.rs:426`), and allocates its polylines, edge list, row accumulator, crossing and active lists on every call (`fill.rs:347-367`).
 - `fill_mask_inked` reads each pixel's coverage through the bounds-checked `Mask::at` and sends every covered pixel through the general `blend`, whatever the mode or opacity (`crates/tinker-pdf-raster/src/canvas.rs:412-437`, `blend` at `canvas.rs:1100`).
@@ -387,7 +387,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-08.3 and P-08.4 land the integer resampler with per-column weights and no `u128` or libm call on the image path, P-08.5 and P-08.6 the 8-bit Gray/RGB identity and the one-bit table, P-08.7 and P-08.8 draw bilevel images as coverage masks, each byte-identical to today's pixels (held by P-08.2's `bilevel` fingerprint and the existing ones) with a counted guard failing first; P-08.9 holds the handshake P-09 and P-10 answer through the new resampler; P-08.10 raises the four floors in MS-02's paired job.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Every destination pixel maps its centre through the inverse transform in `f64` (`crates/tinker-pdf-raster/src/image.rs:759`), `area` accumulates and divides in `u128` per pixel (`image.rs:984-1014`), and `bilinear` floors per pixel through `split` (`image.rs:1041-1048`). `area`'s comment that the pyramid caps the footprint at two texels per axis and nine taps (`image.rs:955-957`) is stale: exact integration runs to 128:1 before any halving (`PYRAMID_ABOVE`, `image.rs:208`; `sampling_for`, `image.rs:297-320`).
 - `Filter::Nearest` is never chosen: `sampling_for` returns `Bilinear` or `Area` (`crates/tinker-pdf-raster/src/image.rs:283-322`) though its doc table still lists `Nearest` (`image.rs:265`), so the column plan serves two filters, not three.
@@ -425,7 +425,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-09.2 to P-09.5 land the look-ahead Huffman tables, the 32-bit-lane IDCT, strips with fused replication and colour and streamed sequential frames, each byte-identical to today's decode with a counted guard failing first; P-09.6 writes strips straight into the page's image for the 1.3x peak; P-09.7 and P-09.8 add DCT-domain scaling and choose it from the drawn size with guard A7's JPEG half and a `jpeg_minified` fingerprint; P-09.9 brings the quarter-scale decode into MS-04, P-09.10 reads the corpus relations, and P-09.11 raises the five floors in MS-02's paired job with MS-05's band.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The Huffman reader takes one bit at a time and searches code lengths one by one (`crates/tinker-pdf-filters/src/jpeg.rs:282-339`), and the IDCT is a direct separable sum over a 14-bit cosine table in `i64` that skips only zero inputs (`jpeg.rs:1450-1499`).
 - Every frame decodes into whole-image coefficient buffers (`jpeg.rs:416-450`); `finish` then writes one full-resolution plane per component, replicating chroma, and interleaves them through `f32` colour conversion into a third whole-image buffer (`jpeg.rs:1300-1365`), which the facade copies into RGB again (`crates/tinker-pdf/src/resources.rs:4281-4306`). The header records baseline sharing the buffered path on purpose, against drift (`jpeg.rs:50-54`).
@@ -460,7 +460,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-10.2 to P-10.11 build the mechanisms the Item names (packed tier-1 state, MQ registers, row-blocked lifting, discard and window decode from the drawn size, parallel code-blocks with synthesis on the pool for the four-thread figure) with guard A7's JPX half and the capability's fingerprint; P-10.4 and P-10.12 bring the new operations into MS-04; P-10.13 raises the operations' floors to the Gate column's factors in MS-02's paired job with MS-05's 140 MB band, which is how tier P closes a row, the absolute figures being MS-03's second check.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Every level is always decoded, as Today says: `tier1::decode_tiles` walks every resolution (`crates/tinker-pdf-filters/src/jpx/tier1.rs:926-950`) and `wavelet::ladder` synthesises every one (`crates/tinker-pdf-filters/src/jpx/wavelet.rs:909-964`).
 - Tier-1 keeps six per-coefficient arrays (`jpx/tier1.rs:288-326`), forms each context from eight separate `significant` reads (`jpx/tier1.rs:398-407`) and each pass collects its stripe list into a `Vec` (`jpx/tier1.rs:620`, `650`, `678`); the 2D synthesis copies every row and every column into a scratch line (`jpx/wavelet.rs:846-869`) and the 5/3 allocates three vectors per line (`jpx/wavelet.rs:402-406`).
@@ -486,7 +486,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-11.1 and P-11.2 finish JBIG2's word-at-a-time decoding and typical prediction, P-11.3 and P-11.4 make CCITT's run decoding and row walk table-driven and linear, each with a counted guard shown failing first; P-11.5 raises the two decode operations' floors to 4.25x and 1.84x in MS-02's paired job on MS-04's in-tree pages, which takes the exit figure against a page in the tree as Today asks.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The rolling register for generic and refinement regions is in the tree (`RolledContext`, `RolledRefinement`, `crates/tinker-pdf-filters/src/jbig2.rs:4361-4535` and `jbig2.rs:4703-4805`), landed in `758531ed` on 10 October 2026, after the planning baseline `61adcde`; only the steps the row lists as Left are cut.
 - The doc comments on `RolledRefinement` and `decode_refinement_into` say TPGRON is absent (`jbig2.rs:4356-4360`, `jbig2.rs:4582`), yet `decode_refinement_into` decodes it (`jbig2.rs:4597-4601`) and `refinement_region` passes the segment's flag (`jbig2.rs:5289`).
@@ -512,7 +512,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-12.1 to P-12.3 give inflate its combined tables, a fast loop over a word-refilled 64-bit buffer and word-sized overlapping copies; P-12.4 writes LZW strings backwards into place; each lands a counted guard shown failing first, and P-12.5 raises inflate's floors to 1.79x and 1.06x and holds LZW's 200 MB/s calibration in MS-02's paired job.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The bit buffer is already 64 bits (`BitState`, `crates/tinker-pdf-filters/src/inflate.rs:223-226`) but `fill` refills it a byte per loop iteration (`inflate.rs:235-246`), every symbol returns through the state machine with the length and distance bases looked up after it (`inflate.rs:556-619`), and a match copies one byte per `push` (`inflate.rs:621-640`).
 - LZW walks each code's chain into a scratch `Vec` and reverses it before copying it out (`crates/tinker-pdf-filters/src/lzw.rs:112-136`), and reads each code as three bytes (`lzw.rs:139-152`, `read_code`). No `/LZWDecode` encoder ships; the only one is a test helper (`crates/tinker-pdf-filters/src/tiff/tests.rs:376`), so MS-04's LZW input needs one of its own.
@@ -541,7 +541,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-13.3 to P-13.8 build the SHA-256 schedule, the constant-time byte-sliced AES cores for both directions with batched CBC decryption and side-by-side sealing on save, and the faster Montgomery core under SG-01's constant-time exponentiation, each against P-13.2's or SG-01's vectors with a counted test shown failing first; P-13.9 raises the six floors in MS-02's paired job with the operation-count test green, which is the row's exit as tier P closes it.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The AES module note claims the implementation is table-free, with no key-dependent table indices (`crates/tinker-pdf-crypto/src/aes.rs:8-13`), but `sub` indexes the S-box with state bytes after each AddRoundKey and with key bytes in the key schedule (`aes.rs:48-51`; `aes.rs:104-106` and `aes.rs:114-116`), `decrypt_block` indexes the inverse table with state bytes (`aes.rs:154-167`), and `xtime` branches on a secret bit (`aes.rs:53-55`); each call also expands the key and rebuilds the inverse S-box (`aes.rs:241`, `aes.rs:254`), once per string and stream (`crates/tinker-pdf-crypto/src/handler.rs:225-235`).
 - The writer seals each stream on its own CBC chain (`crates/tinker-pdf-cos/src/write.rs:425-427`), so at the row's single-chain encrypt target (80 MB/s) sealing 23 MB alone takes about 287 ms against 150 ms for the whole CLI command; the row names only multi-block decryption, which is why P-13.7 seals several streams' chains side by side.
@@ -568,7 +568,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-14.1 and P-14.2 land the bit-identical speed-ups (allocation-free evaluation and hoisting, span-walked mesh colour); P-14.3 to P-14.5 land the row's incremental parameters, stepped mesh colour and integer-interpolated function tables at the exactness H-139 decides, with any moved fingerprint or golden reviewed under H-76 and H-133 and ruling 5 kept; P-14.6 raises the four floors in MS-02's paired job with the fingerprints holding on four targets, which is the row's 'fingerprints' and its speed targets as tier P closes a row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Every shaded pixel allocates: `Function::eval` returns a fresh `Vec<f64>` (`crates/tinker-pdf-color/src/function.rs:102`) and is called per pixel through `Shading::color_at` in both the shading-pattern fill and `sh` (`crates/tinker-pdf-render/src/lib.rs:1645-1665`, `lib.rs:3111-3132`), and through the mesh's colour callback (`crates/tinker-pdf-render/src/mesh.rs:147`).
 - The mesh colour pass walks each triangle's whole bounding box and divides for every pixel's weights (`crates/tinker-pdf-raster/src/mesh.rs:374-400`), and the box is clamped to the region being drawn (`raster/src/mesh.rs:341-344`), so a span's start differs between a tile and the page.
@@ -602,7 +602,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-15.2 to P-15.8 build the pool and every walk the Item names (page-parallel render and text, the subset walk, per-object compression on save, band-parallel render from a display list over single-flight caches, and the CLI on the facade's pool), each byte-identical to serial under guard A9 with a counted guard shown failing first; P-15.9 adds the K-07 fingerprint check, P-15.10 the speed rows, and P-15.11 raises the floors and relations in MS-02's paired job with MS-05's 120 MB band, which is how tier P closes a row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The facade has no `Parallelism` and starts no thread: the only pools are the CLI's `render_pages` (`tools/tpdf/src/main.rs:1166-1222`) and `crates/tinker-pdf/examples/parallel.rs`, both page-level; the decision P-15 amends now reads at `docs/architecture.md:308-322` rather than 305-315.
 - `subset::collect` walks the pages serially into one `Usage` whose maps keep the first refusal reason and the first naming font (`crates/tinker-pdf/src/subset.rs:498-508`, `:524-526`, `:549-578`), and streams are compressed one at a time as each object is serialised (`crates/tinker-pdf-cos/src/write.rs:758`, `crates/tinker-pdf-cos/src/linearize.rs:1370`), and only when `WriteOptions::compress` is on, which is off by default (`write.rs:161`).
@@ -639,7 +639,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-16.2 builds the document cache, `CacheLimits` and counted hits and misses with decoded images, and P-16.4 to P-16.9 bring every kind the Item names under one byte budget (ICC transforms, form recordings through the interpreter, P-06's glyph masks, parsed objects in `tinker-pdf-cos`) and degrade an image by a reduced decode instead of aborting; P-16.3 holds every cache to the fingerprints (K-07), P-16.10 measures the second render and MS-05's cases under stated budgets, and P-16.11 gates the 30 % relation and the memory bands in MS-02 and MS-05.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Every cache is per `PageResources` (`crates/tinker-pdf/src/resources.rs:63-101`), built fresh by `PageResources::new` (`resources.rs:600`), and `Page::render` builds new resources on every call (`crates/tinker-pdf/src/lib.rs:2278`), so only a `DisplayList` keeps decoded images, ICC transforms and form scopes across renders (`crates/tinker-pdf/src/display.rs:181-204`), as Today says.
 - Nothing bounds a cache by bytes: the bounds are entry counts, 256 images keyed by resource name (`resources.rs:2002`) and 65 536 outlines (`resources.rs:1782`), and the cos slot store keeps every parsed object for the document's life (`crates/tinker-pdf-cos/src/store.rs:51-64`).
@@ -672,7 +672,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-17.2 to P-17.4 make an incremental save and a reopen cost what changed in `tinker-pdf-cos` (the section written alone, a two-segment backing, a reopen that keeps the base's parsed state), P-17.5 puts the counted reopen on the facade and P-17.6 re-renders only the changed rectangle through the region path, each with a counted guard failing first; P-17.7 fingerprints the patch (K-07), P-17.8 measures both operations and P-17.9 gates the two relations in MS-02's job.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `incremental_update` begins by copying the whole original (`crates/tinker-pdf-cos/src/write.rs:867`), so an incremental save costs the file's size however little changed, and a reopen is `Document::open` of the result, which parses the reference chain afresh into an empty store.
 - `DocumentEditor::view` writes the whole update and reopens the file on every call, 'a copy of the file and a parse of its cross-reference tables' (`crates/tinker-pdf-cos/src/edit/view.rs:38-58`), and subsetting reads through it (`crates/tinker-pdf/src/subset.rs:471-484`).
@@ -703,7 +703,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-18.1 to P-18.3 land the Item's three mechanisms (pre-folded family keys, cascade memoisation, CRC once per entry in the archive reader), each with a counted guard failing first; P-18.4 measures every producer's growth after them and P-18.5 makes any superlinear one linear and lands guard A2 over the 1 000-chapter book and the per-producer guards; P-18.6 raises the floors and holds the calibrations and relations in MS-02's job, with MS-04's layout group already carrying the operations.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Font choice runs per character, not per run: `face_runs` calls `choose` for every character (`crates/tinker-pdf/src/epub/paint.rs:280-295`), and `choose` compares each named family against every embedded face (`crates/tinker-pdf/src/epub/typeface.rs:300-331`) and folds it through `Standard14::from_base_font`, an allocation, a `replace` and up to ten `contains` scans (`crates/tinker-pdf-font/src/base14.rs:108-142`).
 - The cascade clones the parent's computed style twice for every element and applies its winners afresh (`crates/tinker-pdf-css/src/cascade.rs:1074-1086`), with nothing shared between elements of equal parent style and winners.
@@ -732,7 +732,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-19.1 builds derived decoder tables at first use and refuses new static ones, P-19.2 publishes the `+simd128` build with a plain fallback under H-44, and P-19.3 measures in a browser-class host beside MS-10's standalone runtime; after P-07 to P-12, P-19.4 records every operation's ratio and gain and P-19.5 commits them at 1.5x and 1.3x in MS-10's `wasm.json` with MS-06's footprint held, which is the row's exit.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The only derived tables evaluated at compile time today are two 1 KiB CRC-32 tables (`crates/tinker-pdf-filters/src/crc32.rs:57`, `crates/tinker-pdf-archive/src/bzip2.rs:126`), the first static by a stated choice (`crc32.rs:27-47`); JPEG's cosine and YCbCr tables are built at first use already (`crates/tinker-pdf-filters/src/jpeg.rs:1503`, `crates/tinker-pdf-filters/src/jpeg/encode.rs:516`), so today two 1 KiB tables are what the rule moves, and it binds the tables P-07 to P-12 add.
 - The published wasm builds from `bindings/js`, a workspace root of its own (`bindings/js/Cargo.toml:3`) with no `[profile.release]`, so it does not get the root's `lto` and `codegen-units` (`Cargo.toml:86-88`), while MS-10's legs build the suite in the root workspace; P-20.2 brings the binding's profile into line.
@@ -761,7 +761,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-20.1 gives the paired gate the suite's geometric mean, P-20.2 makes the release profile reach the separately rooted bindings, and P-20.3 measures fat LTO and adopts it at 5 % or more by the row's rule; P-20.4 and P-20.5 build and measure profile-guided optimisation once H-45 (and H-16) accept the toolchain step, adopting it by the same rule; P-20.6 records the outcome. If the owner declines H-45, the row closes on P-20.3 with that answer recorded.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Today's `lto = "thin"`, `codegen-units = 1` is the root workspace's (`Cargo.toml:86-88`); the npm wasm and the Python wheels build from `bindings/js` and `bindings/python`, each a workspace root of its own (`bindings/js/Cargo.toml:3`, `bindings/python/Cargo.toml:9`) with no `[profile.release]`, so they ship with cargo's default release profile, while the C ABI builds in the root (`.github/workflows/release.yml:270`).
 - H-16 also lists profile-guided optimisation among its hard rules and names P-20 in its Blocks column beside H-45; P-20.4 carries both.
@@ -787,7 +787,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-21.1 adds the three held operations MS-04's groups do not carry, P-21.2 gives all six their bands in `baseline.json` under H-109, and P-21.3 holds them at a factor of 1 in MS-02's paired job, which is the row's exit; the bold absolute figures are MS-03's.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - MS-04's group list carries the 100-page rewrite into object streams and linearized and the committed TrueType faces (its write and fonts groups) but not opening a small file through the CLI, raw extraction of a Flate image with predictors or a no-op incremental save, so P-21.1 adds those three.
 - A no-op incremental save is not short-circuited: it writes an update section after copying the original (`crates/tinker-pdf-cos/src/write.rs:867`), the path P-17.2 changes; a held floor of 1 lets that change only make it faster.
@@ -817,7 +817,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-22.1 and P-22.2 price and choose the grid; P-22.4 and P-22.5 precompute each transform into an integer table read by fixed-point tetrahedral interpolation and give 8-bit CMYK its fast path; P-22.6 converts each image once, at its decoded size as today, through a converter chosen per image, the Gray and RGB identity paths among its arms; P-22.7 caches transforms per document by (profile pair, intent, compensation) inside P-16's budget with the row's counted guard; P-22.3's fingerprint moves once under H-76's review, and P-22.8 holds 100 Mpixel/s in MS-02's job.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Compiled transforms are cached per `PageResources`, and every page and form scope gets fresh caches (`crates/tinker-pdf/src/resources.rs:600`, `:704`) keyed by the profile stream's object number (`resources.rs:108`, `:621-645`); `Page::render` builds new resources on every call (`crates/tinker-pdf/src/lib.rs:2278`), so a profile compiles again per page, form scope and render, and two objects carrying one profile compile twice.
 - There is no intent or compensation to key on yet: `Profile::parse` takes `A2B1`, then `A2B0`, then `A2B2` whatever the intent (`crates/tinker-pdf-color/src/icc.rs:691-704`); every other intent is RC-01's, black-point compensation RC-02's, and a destination other than sRGB RC-05's and RC-06's.
@@ -848,7 +848,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-23.1 turns an uncoloured cell into colour-free coverage recoloured at the blit, and P-23.2 keeps cells between fills and pages in P-16's byte-budgeted cache keyed by pattern object, device matrix and sub-pixel phase, the per-fill rasterisation the fallback past the budget, with the row's counted guard and the fingerprints unchanged on four targets; P-23.3 holds the 50-fills relation in MS-02's job.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Each fill asks for its cell again: `fill_with_tiles` calls `GlyphSource::tile` on every fill (`crates/tinker-pdf-render/src/lib.rs:1977-1996`), and the facade's `tile` builds the pattern's own resources and interprets its content each time (`crates/tinker-pdf/src/resources.rs:1842-1940`); nothing is kept, as Today says.
 - Within one page every fill of a pattern asks for the same cell: the lattice is anchored to the page's `base`, not the paint-time CTM (`lib.rs:1830`), so `TileRequest::to_pixels` is the same for each fill and the page re-rasterises an identical cell per fill.
@@ -878,7 +878,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-24.1 profiles today's search and P-24.2 decides where the folded forms live; P-24.3 keeps them once per page with the row's folding guard, and P-24.4 keeps the UAX #29 boundaries and makes matching and mapping linear, every search fixture's hits unchanged; P-24.5 raises the two floors to 6× and 6.41× in MS-02's job.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Every search folds every character again: `search` lower-cases each glyph's text into a fresh `String` and joins the line per call (`crates/tinker-pdf-content/src/text.rs:274-275`), and `search_with` folds per character and computes the joined line's UAX #29 boundaries per call (`crates/tinker-pdf-content/src/search.rs:118-125`).
 - A hit is mapped back to glyphs by walking the line from its start (`text.rs:283-296`, `search.rs:139-152`), which is quadratic in a line's hits; the matcher is `str::find`, re-run one character on after each rejected whole-word candidate (`search.rs:162-167`).
@@ -907,7 +907,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-25.1 decides how the buffers shrink; P-25.2 keeps soft masks at their boxes and P-25.3 keeps each group at its clipped bounds once, which together meet the counted guard of 1.1 × the groups' clipped bounds; P-25.4 adds the opaque Normal fast path inside groups; fingerprints hold on four targets throughout, and P-25.5 raises the fixture's floor to 2.8× in MS-02's job.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Group buffers are already sized to the clip in force, clipped to the canvas being drawn (`crates/tinker-pdf-render/src/lib.rs:1201-1210`), and the interpreter clips to a form's `/BBox` before `begin_group` (`crates/tinker-pdf-content/src/interpret.rs:1510-1525`), so a form group's buffer is its box clipped to the region today; what a group holds beyond that is a kept copy of a non-isolated group's backdrop (`lib.rs:1240`, `crates/tinker-pdf-raster/src/canvas.rs:667-707`) and a knockout group's snapshot (`lib.rs:1244`, `canvas.rs:764-775`).
 - A luminosity mask whose `/BC` is not black is installed as a field the size of the canvas being drawn (`lib.rs:1468-1478`); the committed fixture's mask carries `/BC [0.2]`.
@@ -938,7 +938,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Closes the row:** P-26.1 interprets CFF charstrings into a reused buffer with the subroutine biases resolved at parse; P-26.2 designs and P-26.3 builds the per-face, per-feature-set plan and coverage index, which P-26.4 makes once per face in the engine's own callers, the shaping fixtures unchanged throughout; P-26.5 holds the CFF and the three shaping targets in MS-02's job.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `Cff::outline` builds a fresh interpreter, operand stack and outline per glyph (`crates/tinker-pdf-font/src/cff.rs:414-452`), `advance` runs the whole charstring again for a width (`cff.rs:426-431`), and `bias` is computed at every `callsubr` and `callgsubr` (`cff.rs:1872`, `:1886`).
 - The facade parses the whole CFF program again (charset, encoding, FD array) for every distinct glyph it draws (`crates/tinker-pdf/src/resources.rs:2412-2438`); that is per-glyph font resolution, nearer P-02's Item than this row's, and no step here changes it.

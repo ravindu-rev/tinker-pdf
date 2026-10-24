@@ -15,11 +15,10 @@ that moves the work on.
   steps under it. The people's acts are in `docs/roadmap/H.md` and the hard
   limits in `docs/roadmap/NG.md`. Every row ID is unchanged, so every
   reference to one still holds.
-- **How far the cut got.** 111 of 459 rows are cut into 932 steps: tiers 0,
-  1, P and rendering and colour whole, 37 of the 43 fonts-and-text rows,
-  ED-01, FJ-01 and CD-19. An independent pass reviewed 16 of those cuts
-  against the code (CD-19, FJ-01, K-01…K-09, P-10…P-14); the other 95 say
-  their steps are not yet reviewed. The 348 rows not cut yet each say so.
+- **How far the cut got.** The roadmap's "Where the rows are" counts each
+  tier's cut rows and steps. An independent pass reviewed 16 cuts against
+  the code (CD-19, FJ-01, K-01…K-09, P-10…P-14); every other cut row says
+  its steps are not yet reviewed, and every row not cut yet says so.
 - **New rows.** P-27, the shape crate's build script (below, "Small and
   measured"), and 25 new H rows, H-134 to H-158. CD-19's decisions are
   H-149 to H-158.
@@ -184,8 +183,7 @@ to CD-19.37, H-149 to H-158), in the order "Next" gives.
    - then P-27.1, MS-11 and K-06, K-01 and K-02, MS-01, MS-04, MS-06 and
      MS-02, P-01 to P-05, and the tiers.
 2. **Separately, in the session and without workflows**: cut the rows not
-   yet cut, tier by tier, in the order of work (6 in FT, 56 in ED, and every
-   row of AN, FJ but FJ-01, SG, SE, FI, FO, SD, SU, CD but CD-19, and OC).
-   Each tier's cut lands as its own commit.
-3. The 95 cut rows whose steps are not yet reviewed are reviewed when each
+   yet cut, tier by tier, in the order of work. Each tier's cut lands as its
+   own commit.
+3. The cut rows whose steps are not yet reviewed are reviewed when each
    comes up ("How a step runs", 1).

@@ -32,7 +32,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-01.2 to RC-01.4 compile each intent from every source table a profile carries (`A2B*`, `D2B*`), with absolute colorimetric's white scaling in closed form, held in the leaf; RC-01.5 to RC-01.7 carry the intent from `ri`, ExtGState `/RI` and an image's `/Intent` to every flat colour, image and shading, each per intent held to a LUT and a matrix/TRC profile converted to the sRGB output and recomputed in the test, with twins per operator path; RC-01.7 and RC-01.8 add its fingerprint and speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The 0 the row quotes counted ExtGState `/RenderingIntent` (`docs/design/icc.md:316`), the key PDF/A's walk still reads (`crates/tinker-pdf/src/pdfa/colour.rs:1764`), while Table 58's key is `/RI`, as the row's Item and K-01's list (`docs/ROADMAP.md:372`) write it. The count was a one-off recorded in commit 63d07dcd's message with no committed census, so no count of ExtGState `/RI` exists.
 - Nothing outside PDF/A validation reads `/Intent` (`crates/tinker-pdf/src/pdfa/colour.rs:1412`); `docs/design/icc.md:34` puts it on the `ICCBased` stream, where the row names an image's `/Intent`.
@@ -62,7 +62,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-02.2 meets the exit criterion: the black-point estimate and the scaling recomputed in the test agree with the transform for a matrix/TRC, an `mft2` and a v4 `mAB ` profile; RC-02.3 extends the estimate to the printer class, RC-02.4 lands ExtGState `/UseBlackPtComp` and the render option on every conversion RC-01 wired, with twins and a fingerprint, and RC-02.5 adds the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The v4 `mAB ` shape the exit names is read today (`crates/tinker-pdf-color/src/icc.rs:777`, `read_mab` at `:952`; `docs/features/rendering.md:33`), while `docs/design/icc.md:302` (milestone 5) and the module comment at `icc.rs:20-25` still call it refused by name.
 - `/UseBlackPtComp` is a PDF 2.0 key (SD-18 lists it, `docs/ROADMAP.md:1017`) defined in ISO 32000-2, which H-95 obtains; the row names H-102 alone, so RC-02.1 carries both.
@@ -96,7 +96,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-03.5 to RC-03.7 meet the exit's closed-form fixtures: every OPM case over every colour-space kind, for flat colours, sampled sources and under transparency, with twins, each pixel the composite computed in the test, on RC-04's canvas through RC-03.2's channel mask; RC-03.3 converts the composite to the output space and holds a page render to it; RC-03.8 and RC-03.9 add the fingerprints and speed row; RC-03.10 is H-81's reading of the visual suites' pages.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - No overprint key reaches the interpreter: the `gs` handler reads `/CA`, `/ca`, `/BM` and `/SMask` alone (`crates/tinker-pdf-content/src/interpret.rs:1133-1134`, `crates/tinker-pdf/src/resources.rs:1538-1669`), and nothing under `crates/` reads `/OP`, `/op` or `/OPM`.
 - Ink reaches the device for DeviceCMYK colours alone (`fill_ink`, `crates/tinker-pdf-content/src/state.rs:398-410`); a `/Separation` or `/DeviceN` colour arrives as light through its alternate (`docs/features/rendering.md:212-214`), so the CMYK-plus-spot composite waits on RC-04's colorant path.
@@ -136,7 +136,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-04.2 lands the colorant inventory, held to the resources the test walks; RC-04.3 to RC-04.14 render a page's N+4 plates on a CMYK-plus-spot canvas through every content class (flat paints, groups and patterns, images, shadings, meshes), each plate composite, spot or disabled and handed out as an image, with RC-04.10 holding the plates' sums to the composite computed in the test; RC-04.15 shows 64 spots as 68 plates under a ledgered cap; RC-04.16 and RC-04.17 bring the fingerprint and the speed rows. H-81's reading of the print-production suites' pages, spot colour among them, is carried by RC-03 and blocks only claims past this exit, which no step here makes.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Colorant names are read today by `describe_space` for `Page::images` (`crates/tinker-pdf/src/resources.rs:3882`, `:3986-4010`) and by the PDF/A colour walk, `/Colorants` included (`crates/tinker-pdf/src/pdfa/colour.rs:852-950`), but the render path's `parse_space` keeps only their count (`resources.rs:1030-1057`) in `ColorSpace::Separation` (`crates/tinker-pdf-color/src/lib.rs:62-69`), so nothing that draws knows which spot it is drawing.
 - Ink exists for DeviceCMYK alone: `resolve_ink` answers only that space (`crates/tinker-pdf/src/resources.rs:1516-1532`), so on an ink page a `/Separation` or `/DeviceN` colour, an image and a shading arrive as light turned to ink (`docs/features/rendering.md:209-214`), and `DecodedImage` keeps RGB only (`crates/tinker-pdf-render/src/lib.rs:380-403`).
@@ -168,7 +168,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-05.2 composes the proof transform and holds it to the composition recomputed from ICC.1's equations; RC-05.3 and RC-05.4 render through a caller's profile and through the document's output intent, the rendered samples agreeing with the proof transform recomputed in the test, which is the row's exit; RC-05.5 and RC-05.6 bring the fingerprint on four targets and the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The CMM compiles only the input direction: `Profile::parse` reads `A2B1`, `A2B0` or `A2B2` (`crates/tinker-pdf-color/src/icc.rs:691-704`) and `Transform::compile` builds device-to-sRGB (`icc.rs:1182-1251`); no `B2A*` tag is read and no matrix/TRC profile is inverted. A proof needs the proof profile's output direction, which RC-20 names (`B2A*`, `mBA `), while the row depends on RC-01 alone; RC-05.2 depends on both.
 - The document's output intents are already read with their profile by reference, the catalog's and a PDF 2.0 page's own (`Document::output_intents` and `Page::output_intents`, `crates/tinker-pdf/src/output_intents.rs:88`, `:110`; `OutputIntent::destination_profile`), so proofing through the intent needs no new dictionary reader.
@@ -198,7 +198,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-06.2 to RC-06.5 land BGR and BGRA, 1-bit ordered dither, 1-bit error diffusion and ICC destinations, each format's bytes held to the conversion of the `Rgba8` render computed in the test and each tile to its page; RC-06.6 pins the two halftones' fingerprints and reads them on linux, windows, macos and `wasm32-wasip1`, which is the row's exit; RC-06.7 adds the speed rows.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `docs/features/rasterizer.md:153` says a `Canvas` stores one of five formats; `PixelFormat` has six, the sixth, `LabA8`, a group buffer that is never a page format (`crates/tinker-pdf-raster/src/canvas.rs:36-50`, `page_format` at `crates/tinker-pdf-render/src/lib.rs:3728-3733`). The row's five are the page formats, `CmykA8` among them only with `RenderOptions::allow_cmyk` (`crates/tinker-pdf/src/lib.rs:585-639`).
 - The row depends on nothing, but an ICC destination needs the CMM's output direction, which the tree does not have (`Profile::parse` reads only `A2B*` tags and `Transform::compile` builds device-to-sRGB, `crates/tinker-pdf-color/src/icc.rs:691-704`, `:1182-1251`) and which RC-20 names (`B2A*`, `mBA `); RC-06.5 depends on RC-20.
@@ -238,7 +238,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-07.3 to RC-07.13 carry 16 bits per channel through coverage, compositing, the blend modes, groups and masks, images, meshes, shadings, resolved colour and the facade's `Bitmap`, each holding its low byte to arithmetic fixtures computed in the test; RC-07.14 holds the top byte of every fingerprint fixture's 16-bit render to today's 8-bit render, RC-07.15 pins the 16-bit renders on the four targets, and RC-07.16 adds the speed rows. 16-bit PNG, TIFF and PSD files are FO-05's, FO-03's and FO-04's.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The 8-bit arithmetic rounds at every stage — a colour component to `round(255·v)` (`crates/tinker-pdf-color/src/lib.rs:293-298`), coverage to `floor(units / 16)` at the end of `fill` (`crates/tinker-pdf-raster/src/fill.rs`), each product through `mul255` (`crates/tinker-pdf-raster/src/canvas.rs:1054-1057`) — so a value carried at 16 bits does not keep today's byte in its top byte: a component of 0.1981 is 51 at eight bits and 12 982 at sixteen, top byte 50. The exit as written therefore fixes the arithmetic, which is why RC-07.2 prices it and H-140 asks the owner.
 - Every image path narrows to eight bits before the renderer sees it: a JPEG frame of twelve bits (`crates/tinker-pdf-filters/src/jpeg.rs:1290-1294`), a JPEG 2000 codestream above eight bits by its high byte (`crates/tinker-pdf/src/resources.rs:2873-2885`), and `DecodedImage` holds bytes; `Bitmap::from_png` rounds 16-bit samples to eight (`crates/tinker-pdf/src/png_read.rs:172-180`) and `to_png` writes none (`crates/tinker-pdf/src/lib.rs:811-815`).
@@ -273,7 +273,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-08.2 to RC-08.10 apply every key the row names — transfer, black generation and undercolour removal, flatness, smoothness, stroke adjustment, alpha-is-shape, text knockout, and halftones of types 1, 5, 6, 10 and 16 with `/HTO` on RC-06's 1-bit output — each held to a fixture whose effect the test computes (a transfer curve, a threshold array's dot pattern, the 11.7.4.3 knockout case, AIS's shape/opacity split); RC-08.11 pins them on the four targets and RC-08.12 adds the speed rows.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `/TR` is read inside a soft mask at `crates/tinker-pdf/src/resources.rs:1648-1659` at the tip, not `:1626`; the archival validator also reads an ExtGState's `/TR` and `/TR2` (`crates/tinker-pdf/src/pdfa/colour.rs:1456`, `:1465`), to report them, never to apply them.
 - No output in the tree is 1-bit or screened: all six `PixelFormat`s are a byte a channel (`crates/tinker-pdf-raster/src/canvas.rs:14-54`), so every halftone here lands on RC-06's formats, and among this row's dependencies a type 5 halftone's per-colorant screens have only RC-06's grey 1-bit output to land on.
@@ -305,7 +305,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-09.2 to RC-09.4 give `Bitmap` the per-pixel maps and tests, scale and subsample, and conversion between the six formats, each held to its closed form over the reviewed goldens, and RC-09.5 adds forced colours with fill-to-stroke as a render option held to its coverage and to a twin; RC-09.6 pins them on the four targets and RC-09.7 adds the speed rows.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `to_png` is at `crates/tinker-pdf/src/lib.rs:832`; `Bitmap` also has `from_png` (`crates/tinker-pdf/src/png_read.rs:145`) and `components` (`lib.rs:759`), and private premultiply, straighten and ink-or-Lab-to-RGBA conversions (`lib.rs:878`, `:913`, `:954`) that convert can reuse.
 - Forced colours with fill-to-stroke cannot be an operation on a `Bitmap`: a fill turned into a stroke needs the path, which only the renderer holds, so that part of the row is a render option (RC-09.5) and the rest post-processes a `Bitmap`.
@@ -335,7 +335,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-10.2 and RC-10.3 build stripe coverage and its three-coverage composite in the rasterizer, and RC-10.4 renders text with them in RGB or BGR order, the exit's stripe coverage equal to three-times-horizontal coverage filtered in the test held at the raster and through the facade; RC-10.5 adds the contrast control, RC-10.6 pins the fingerprints on the four targets and RC-10.7 adds the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The row's search still finds nothing at `5297133`: `rg -i '\blcd\b|subpixel_text|subpixel_render' crates tools` is empty.
 - Glyphs are painted as paths, each fill through `Renderer::coverage` from `show_glyph` (`crates/tinker-pdf-render/src/lib.rs:2847`), with no glyph cache yet (P-06), so stripe text is a second way of filling a glyph's path rather than a second cache.
@@ -365,7 +365,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-11.2 quantises coverage to 0-8 bits, RC-11.3 and RC-11.4 add the centre-of-pixel and any-part-of-pixel rules held to analytic shapes, RC-11.5 hands a level for graphics, one for text and the rule to every coverage site with each level's coverage equal to the 8-bit coverage quantised in the test, and RC-11.6 makes the minimum line width an option whose hairlines drop out nowhere and pins the fingerprints; RC-11.7 adds the speed rows.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Hard edges are one threshold, `Mask::harden`'s half coverage (`crates/tinker-pdf-raster/src/fill.rs:188-192`), which is neither of the row's two rules; it is applied at four sites — `Renderer::coverage` (`crates/tinker-pdf-render/src/lib.rs:2085`), a mesh's silhouette (`:1749`), an image's edge (`:2268`, `crates/tinker-pdf-raster/src/image.rs:732-733`) and a tiling cell (`lib.rs:1986`, `crates/tinker-pdf/src/resources.rs:1885`) — each of which must take a level and a rule.
 - A minimum line width exists only as fixed floors: 0.8 px, 0.6 px for a stroked glyph and 1 px without anti-aliasing (`crates/tinker-pdf-render/src/lib.rs:1029-1035`, `:2803`, `:2975`).
@@ -395,7 +395,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-12.2 and RC-12.3 cull each class and force black on every render path, each culled render checked against the display list's events less that class, the exit's first clause; RC-12.4 lands the layout-only pass and the no-interpolation hint, under which an `/Interpolate` image draws as its twin without the key; RC-12.5 culls to rectangles; RC-12.6's no-cache render counts zero cache hits; RC-12.7 brings the speed rows.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - A Type 3 glyph reaches a device as the paints of its procedure, inside the text object and with no `show_glyph` (`crates/tinker-pdf-content/src/interpret.rs:1773-1810`), so the text class cannot be read off glyph calls alone.
 - A display list's events are crate-private (`DisplayList::content`, `crates/tinker-pdf/src/display.rs:227`), so the exit's check against `display_list` is a facade unit test.
@@ -425,7 +425,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-13.2 renders for View, Print or Export usage through `/AS` and the groups' `/Usage`, with the exit's print-usage render of an OCMD with `/Print` usage and a `/D` twin per usage; RC-13.3 honours `/Hidden`, `/NoView` and `/Print` by usage (with `/Invisible` and an annotation's `/OC`, the same decision); RC-13.4 places `/NoZoom` and `/NoRotate`; RC-13.5 renders content, annotations and widgets separately and widgets without highlight in print usage; every flag and usage has its fixture and twin. No speed row: these choose what draws and add no operation of their own to time.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `annots::prepare` hides an annotation on `/Hidden` or `/NoView` only (`crates/tinker-pdf/src/annots.rs:24-26`, `:168-172`); `/Print`, `/NoZoom`, `/NoRotate` and `/Invisible` are read nowhere on the drawing path, though `AnnotationFlags` exposes every bit (`crates/tinker-pdf/src/annotations.rs:304-392`).
 - An annotation's `/OC` is read nowhere: the only `/OC` the renderer reads is an XObject's (`crates/tinker-pdf/src/resources.rs:1687-1695`), so an annotation in a layer the configuration turns off is drawn.
@@ -455,7 +455,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-14.2 chooses a `/Configs` entry per render, RC-14.3 overrides a layer with `/RBGroups` and `/Locked` honoured, RC-14.4 applies the zoom, language and user auto-state categories (the print, view and export events are RC-13's, which these steps build on), and RC-14.5 exposes the `/Order` tree; each configuration and auto-state category has its fixture with a twin written as the equivalent `/D`, which is the row's exit. No speed row: a configuration is a bind per render and adds no operation of its own to time.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `OptionalContent::bind` reads `/D`'s `/BaseState`, `/ON` and `/OFF` only (`crates/tinker-pdf/src/optional.rs:64-112`); `/Configs`, `/AS`, `/RBGroups`, `/Locked`, `/Order`, `/Intent` and `/ListMode` are read nowhere on the rendering path (the PDF/UA rule reads `/Configs` and `/AS` only to report them, `crates/tinker-pdf/src/pdfua/syntax.rs:113-160`).
 - The configuration is bound once per resource object, not once per render: `PageResources::new` and `from_dict` each call `OptionalContent::bind` (`crates/tinker-pdf/src/resources.rs:607`, `:711`), so every form scope, tiling cell and appearance binds `/D` again; `features/rendering.md:290-291`'s 'resolved once at bind' holds per scope.
@@ -484,7 +484,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-15.2 makes a replay resumable, RC-15.3 gives a partial result that disturbs nothing, and RC-15.4 puts start, pause on a budget, resume, progress and the partial result on the facade, with the exit's test over every fingerprint fixture paused at every k-th event; RC-15.5 brings the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `CancelToken` only stops a render (`crates/tinker-pdf-render/src/lib.rs:111-137`), and `replay` runs a slice of events to its end with no cursor to resume from (`crates/tinker-pdf-content/src/replay.rs:74`).
 - `Renderer` borrows its page scope for its whole life (`Scope::Borrowed`, `crates/tinker-pdf-render/src/lib.rs:721-737`, `:879`) though it already owns the scopes pushed for appearances (`Scope::Owned`), so a render that outlives one call needs only its page scope owned.
@@ -513,7 +513,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-16.2 and RC-16.3 render a page in bands into a streaming PNG writer whose file equals the whole page's, RC-16.4 does the same through FO-01's Netpbm writer, RC-16.5 lets a banded page of any size render past the pixel cap, and RC-16.6 holds the peak to one band plus writer state under MS-05 and brings the speed row. The PNG options FO-05 adds go into the one writer RC-16.2 makes, so they reach banded output with no step here.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `png_encode` filters the whole raster into one buffer and compresses it in one call (`crates/tinker-pdf-filters/src/png/encode.rs:135-186`), and `Bitmap::to_png` hands it the whole bitmap (`crates/tinker-pdf/src/lib.rs:832-869`); streaming the rows is P-04's.
 - No Netpbm writer exists (a search for `pnm`, `ppm` and `pgm` in `crates` and `tools` finds only the PPMd archive coder), so the exit's PNM leg waits for FO-01, which itself depends on RC-06; the row's Depends on names only P-04.
@@ -544,7 +544,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-17.2 answers the bounding box of all marks, held to known fixtures and recomputed from the recorded events, and 'uses transparency'; RC-17.3 'uses overprint' over K-01's keys; RC-17.4 the grey test at its thresholds; RC-17.5 the per-render statistics on MS-01's surface; each answer is held to fixtures with a known answer, which is the exit; RC-17.6 brings the speed rows.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Three test files carry their own `ink_bounds` helper, not one: `crates/tinker-pdf/tests/page_geometry.rs:49`, `optional_content.rs:61` and `vertical_metrics.rs:305`.
 - One static reading of transparency already exists, shared by PDF/A-1 and PDF/X: a page or form group, a soft mask in a graphics state or on an XObject, a blend mode other than the two that do not blend, and a constant alpha below one (`crates/tinker-pdf/src/pdfa/colour.rs:1484-1501`).
@@ -577,7 +577,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-18.2 to RC-18.4 make the versioned stream and replay it through the engine's own rasteriser byte-identical to a direct render for every fingerprint fixture, the exit's first half; RC-18.5 to RC-18.8 carry it through the C ABI and every binding SU-12 names, each with a device interface for custom devices and a canvas replay example where its platform has a 2D canvas, and RC-18.9 round-trips the format through every surface under one recorded hash, the exit's second half; RC-18.10 brings the speed rows.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The `Device` trait is Rust-only (`crates/tinker-pdf-content/src/device.rs:159`) and a display list's events are crate-private (`crates/tinker-pdf/src/display.rs:227`); `to_svg` is the one serialised drawing form and it rasterises what SVG 1.1 cannot state (`docs/features/rendering.md:468-481`), so it cannot replay byte-identically.
 - A render resolves resources by name through `GlyphSource` as it draws, and a tiling cell by interpreting the cell at the render's own geometry (`crates/tinker-pdf-render/src/lib.rs:325-367`, `:407-478`), so a stream that replays byte-identically carries those answers and each cell's own commands, not pixels.
@@ -606,7 +606,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-19.2 meets the exit criterion: its test recomputes the colorant matrix and the TRC from IEC 61966-2-1's numbers and holds the bytes `build.rs` writes to them, and the profile parses, compiles to the identity and carries the header and tags RC-19.1 lists, all through `tinker-pdf-color`. RC-19.3 lands the two uses the Item names as far as the tree has them (an archival destination and a `/DefaultRGB` the PDF/A rules admit, ready for SD-02's conversion to add by default), RC-19.4 moves the record and RC-19.5 fingerprints the bytes.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `tinker-pdf-color` has no profile validator: `Profile::parse` is a transform builder, which is why 6.2.2's profile conformance is a staged rule (`crates/tinker-pdf/src/pdfa.rs:699-712`, SD-01's to land); RC-19's 'validates' is held by RC-19.2's header and tag checks and by the in-tree PDF/A rules in RC-19.3.
 - PDF/A conversion does not exist at 5297133: SD-02, which lists RC-19, is the row that adds an output intent to a converted document, so RC-19 hands the profile out and proves it admissible, and SD-02 makes it the default.
@@ -645,7 +645,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** Each tag type the Item names is held to a fixture whose transform is recomputed in the test: output through `B2A*` in `mft1`/`mft2` (RC-20.5) and `mBA ` (RC-20.6) beside matrix/TRC and grey inverted (RC-20.4), device links (RC-20.7), `gamt` (RC-20.8), `ncl2` (RC-20.9), and v5's multi-process, calculator and spectral constructs (RC-20.10 to RC-20.12). RC-20.3 is the one mechanism that can teach the parser a refused corpus profile, RC-20.2 makes the census a ratchet, and RC-20.16 raises it toward 3 235 from CI's run.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `docs/design/icc.md:302` (milestone 5) says v4 `mAB ` 'is three tags and refused by name', as do `icc.rs`'s module doc (`crates/tinker-pdf-color/src/icc.rs:21-25`), `Model::Lut`'s doc (`:370-375`) and the doc of `a_v4_lookup_table_reads_and_its_inverse_is_refused_by_name` (`:2219`); `read_mab` reads it (`:952`, since 93bf5157) and `crates/tinker-pdf/tests/icc_census.rs:378-381` counts it among the compiled.
 - The comment at `crates/tinker-pdf-color/src/icc.rs:683-685` says 'a lookup table first, where there is one', but the branch under it takes the table only when the profile has neither matrix nor grey tags (`:686`), so a profile whose matrix or grey branch refuses it never reaches an `A2B*` table it carries.
@@ -676,7 +676,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Closes the row:** RC-21.4 meets the exit: whether a draw joins a run is answered in the page's frame by the mechanism H-15 took, its counted guard shows a tile reads only the bands where draws meet the run rather than the page's image work, and `an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception` becomes a byte-equality assertion with the rest of the class RC-21.2 pinned. RC-21.1 states the mechanisms, RC-21.3 prices them for H-15, and RC-21.5 keeps the accepted price in the paired gate.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The class is wider than 'overlap outside, abut inside': a draw wholly outside the tile has no rectangle on the canvas, so `run_would_overlap` answers no (`crates/tinker-pdf-render/src/lib.rs:2311-2313`) and a draw that overlaps a run member outside the tile ends the page's run and not the tile's.
 - The run's budget is already decided in the page's frame (`frame_area`, `crates/tinker-pdf-render/src/lib.rs:2220-2223`), while its fragments are allocated over the canvas (`:2282-2283`) and its covered rectangle grows from the draw's on-canvas rectangle only (`:2215`, `:2291-2297`): the overlap question is the one decision left to the canvas, as the row says.

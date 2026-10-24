@@ -115,7 +115,7 @@ new rendered surface.
 
 **Closes the row:** K-01.2 to K-01.5 land every key of Table 58 and its 2.0 additions — the device-independent keys whose mechanism exists applied, the rest stored for RC-01, RC-02, RC-03 and RC-08 — each with a fixture and its twin compared in recordings and in pixels; K-01.6 re-runs the `rotate` and `crop` relations over the corpus with no regression.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `crates/tinker-pdf/src/resources.rs:1511-1559` has drifted: at 5297133 the handler's three readers, `ext_g_state_alpha`, `ext_g_state_blend` and `ext_g_state_soft_mask`, are at `resources.rs:1538-1669`.
 - The operators `ri` and `i` are no-ops as well (`crates/tinker-pdf-content/src/interpret.rs:1018`), and `GraphicsState` has no field for an intent or a flatness (`crates/tinker-pdf-content/src/state.rs:385-439`), so the `/RI` and `/FL` twins need the operators to gain state.
@@ -145,7 +145,7 @@ new rendered surface.
 
 **Closes the row:** K-02.2 makes every device-space selection resolve through the scope's default, held by fixtures and their twins drawn in the substituted space directly and compared byte for byte, and K-02.3 carries it into extraction; K-02.4 writes the corpus census and K-02.5 records its first figures from CI.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The device operators `g`/`G`, `rg`/`RG` and `k`/`K` convert inside the interpreter without asking the resource seam (`crates/tinker-pdf-content/src/interpret.rs:1020-1050`), so substitution needs a seam question there as well as in `color_space` and `parse_space` (`crates/tinker-pdf/src/resources.rs:922-1148`), the one choke point every other painting path already goes through (images at `:3178`, inline images at `:3532`, shadings at `:1183`).
 
@@ -172,7 +172,7 @@ new rendered surface.
 
 **Closes the row:** K-03.2's helper is what every writing test file calls once K-03.4 to K-03.8 have migrated them, and K-03.3's lint, its pending list emptied and deleted by K-03.8, makes `cargo xtask check` fail a writing test that does not call it. Eight steps for an S row, because the writing tests are over a hundred files across four crates and each migration can surface its own defects.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - By a search for the writer entry points (`DocumentBuilder`, `.save(`, `save_signed`, `save_sealed`, `save_timestamped`, `finish_archival`, `finish_reporting`, `.finish()`, `save_incremental`, `.rewrite(`), 83 test files under `crates/tinker-pdf/tests` and 24 under `crates/tinker-pdf-cos/tests` write a document, and `#[cfg(test)]` modules in `crates/tinker-pdf-cos/src`, `crates/tinker-pdf-ffi/src`, `crates/tinker-pdf/src/redact.rs` and `tools/tpdf/src/writing.rs` write documents too. 26 test files call the strict validator, a few through a local helper of their own (`clean` at `crates/tinker-pdf-cos/tests/strict_validator.rs:141` and `crates/tinker-pdf/tests/editor_stamp.rs:44`, `validated` at `crates/tinker-pdf/tests/stream_dedup.rs:137`) and the rest inline.
 
@@ -204,7 +204,7 @@ new rendered surface.
 
 **Closes the row:** K-04.2 to K-04.8 add the eight generators (COS syntax, content streams, CFF, `glyf`, JPX, XML and HTML, CSS) and K-04.9 to K-04.11 the three metamorphic relations, every disagreement a failure; K-04.12 records each new target's coverage figure in `verification.md` from a dispatched run, and K-04.13 sees them run on the nightly schedule once the owner's merge puts them on `main`.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Not all 51 targets are byte-mutation targets: `docs/verification.md:283-285` names `crypt`, `crypt_ciphers`, `form_script`, `layout`, `render_page` and `signatures` as carving the body into fields, and `layout` already drives a structured generator (`fuzz/README.md`, its row).
 - No target has a coverage figure today: the roster (`docs/verification.md:132-186`) carries seeds, control prefix and signature check, and the only edge and feature counts are `jbig2`'s, in prose (`docs/verification.md:606-607`).
@@ -233,7 +233,7 @@ new rendered surface.
 
 **Closes the row:** K-05.2 and K-05.3 make `fuzz.yml` set memory and per-allocation limits derived from `bounds_ledger.rs`, and a stack budget, and fail on any of them; K-05.4 to K-05.8 put a size-scaling complexity test for each named parser family in `cargo test` (eight steps for an S row, because the exit names six families, each in a crate of its own).
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Complexity tests exist one at a time, and most are held by time rather than by count: `moving_many_children_is_linear` (`crates/tinker-pdf-xml/tests/html.rs:308`) and `a_hostile_run_of_regional_indicators_is_linear` (`crates/tinker-pdf-content/src/words.rs:697`) pass by finishing, so a quadratic shows only as a slow test. The HTML tree builder alone counts, through a `cfg(test)` step tally (`crates/tinker-pdf-xml/src/html/mod.rs:326-343`) and `assert_linear` (`crates/tinker-pdf-xml/src/html/tree.rs:3312-3377`), which the first test names as its bound.
 
@@ -256,7 +256,7 @@ new rendered surface.
 
 **Closes the row:** K-06.1 closes the review's last finding by charging per element and K-06.3 sees the corpus keep every image it drew; K-06.2 commits the nightly's own crashing input to the seed corpus rather than inferring it from its shape; K-06.4 reads seven consecutive green nights for all 51 targets counted from the owner's next merge into `main` (H-01).
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - What the row records as done is on `develop`: `MAX_JBIG2_WORK_MULTIPLE` (`crates/tinker-pdf-filters/src/jbig2.rs:1728`), the seeds `symbol-dictionary-spun-past-its-marker` and `symbol-dictionary-export-runs-of-nothing`, and `the_marker_spun_seed_stops_at_the_work_budget` (`crates/tinker-pdf-filters/tests/jbig2_seeds.rs:244`). What is left is `copy_cost`'s one unit per bitmap (`jbig2.rs:1813-1821`) and the uncharged `Bitmap` per pattern in the slicing loop (`jbig2.rs:3620-3632`).
 
@@ -278,7 +278,7 @@ new rendered surface.
 
 **Closes the row:** K-07.1 makes the rule checkable, every fingerprint test grepped on every leg and held by `cargo xtask check`, and K-07.2 and K-07.3 fingerprint the subsystems already in the tree that had none (SVG output, banded rendering through regions); the rest of the row's list land their fingerprints in their own commits under that roster: signing in SG-01 and SG-02, the script engine's host clock and seeded random in FJ-04, XFA layout in AN-29, OCR inference in OC-07, parallel rendering in P-15, banded rendering into streaming writers in RC-16, and the caches in P-02, P-03, P-06 and P-16.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The tree has 19 render fingerprints, not 15: `crates/tinker-pdf/tests/determinism.rs`'s table and `docs/features/determinism.md:49-54`; beside them are three document hashes in `determinism.rs`, the archival hash in `pdfa_writer.rs` and the shaped book in `epub_shaped.rs`.
 - Not every fingerprint is reproduced on four targets: the native legs grep only `rendering_is_stable_across_targets` and the shaper's two tests (`.github/workflows/ci.yml:48-67`) while the wasm job also greps the archival and shaped-book hashes (`ci.yml:410-441`), and `render_options.rs`'s hashes were recorded on one target and are claimed for the other three (`docs/features/determinism.md:68-79`).
@@ -305,7 +305,7 @@ new rendered surface.
 
 **Closes the row:** K-08.1 extends `render_goldens.rs`'s mechanism, and K-08.2 to K-08.6 commit a family for each named surface with `unreviewed` headers, held byte for byte; the last two follow FJ-07 and OC-01, the rows that add their surfaces. The reading is H-73.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Two of the named surfaces are not in the tree yet: no appearance is drawn from a format script's display string (`DisplayString` reaches no writer, `docs/features/forms.md:378-391`), and no OCR text layer exists (OC-01). Every other surface the row names is.
 - The nine operator goldens take 63 842 bytes of `render_goldens.rs`'s 96 KiB ceiling (`a_golden_stays_small_enough_to_review`, `crates/tinker-pdf/tests/render_goldens.rs:786-788`), so the eleven families this row adds cannot join that list without raising it.
@@ -327,7 +327,7 @@ new rendered surface.
 
 **Closes the row:** K-09.1 makes `cargo xtask check` fail on a hash match anywhere in `docs/ROADMAP.md`, a wrapped two-word name included, with no exemption and a test that injects a hashed name and sees it caught, and K-09.2 commits the hash list it compares against; whether that list is complete is H-75's reading, and whether the lint reaches beyond the roadmap is H-07's.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `docs/ROADMAP.md` at 5297133 already names none of the engines, viewers, validators or document tools a scan for the never-named list looks for, and its measures table names each corpus by its role, so the lint lands green without editing the file.
 
@@ -352,7 +352,7 @@ new rendered surface.
 
 **Closes the row:** K-10.3 meets the exit criterion: `ci.yml`'s `fuzz-service` job builds every target in the service's container recipe from the in-tree `fuzz/service/` files and fails, through K-10.2's first-party check, unless each target's binary, seed archive and options reach the output; K-10.1 settles the contract both are built to, and K-10.4 carries H-119, reading the service's own first build of those same files once the application is accepted.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The seed corpora the Item names are already in-tree for every target: `fuzz/corpus/` holds 51 directories and 541 seeds for the 51 files in `fuzz/fuzz_targets/`, kept in agreement with `fuzz/Cargo.toml` by `xtask/src/fuzzaudit.rs` `survey`, and the Today cell matches `fuzz.yml`, which reads its matrix off the directory (`.github/workflows/fuzz.yml:50`) and runs 600 s per target (`:26`, `:95`) with `-timeout=25` (`:96`). Everything service-shaped is missing: no container recipe, build script, seed-archive packing or CI build of them exists in the tree.
 - No fuzz target's source reads a file or the environment at run time (`fuzz/fuzz_targets/*.rs` holds no `std::fs`, `std::env`, `env!` or `include_bytes!`), so the built binaries need nothing beside them in the service's output directory.

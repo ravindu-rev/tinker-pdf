@@ -36,7 +36,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-01.8 puts an OFL face behind `bundled-fonts` and the CJK profile, FT-01.10 holds that profile's wasm in MS-06's job with the default profile unmoved (the size gate H-04 sets), FT-01.9 answers unembedded CJK fonts with it through FT-01.3's addressing, and FT-01.12 reads the corpus run in which the CJK files' 'rendered with something reported' falls below FT-01.7's figure.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Today's 'the 202 predefined CMaps extract CJK text' holds only where a document supplies `/ToUnicode`: `Font::text_of` (`crates/tinker-pdf-cos/src/font.rs:578-588`) falls back to `char_of`, which reads one-byte codes only (`font.rs:511-517`). The registry's CMaps split strings and choose CIDs; nothing in the tree maps a CID to a character through its collection.
 - 'Nothing draws it without a host face' understates the defect: with a face, an unembedded composite font's CID is taken as the face's glyph index (`crates/tinker-pdf/src/resources.rs:2515-2519`, `cid_glyph` at `:2592`, `gid_for_cid`'s identity at `crates/tinker-pdf-cos/src/font.rs:281-292`; a plain CFF likewise at `resources.rs:4334-4343`), and a `bundled-fonts` build answers a CJK descriptor not flagged symbolic with Liberation, `family_for` falling to the flags (`crates/tinker-pdf-font/src/bundled.rs:152-155`). Each CID below the face's glyph count (2 620 in Liberation Sans Regular) draws whichever glyph has that index, and a CID past it reads an empty outline that is drawn as a space (`crates/tinker-pdf-render/src/lib.rs:2888-2890`); nothing is reported.
@@ -68,7 +68,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-02.3's lookup is driven by the UCD `Script` property; FT-02.5's page per script draws no `.notdef` and reports nothing through the faces FT-02.4 vendors behind features, and FT-02.6 brings the lookup to unembedded fonts; FT-02.4's `cargo xtask vendor` and `cargo deny` runs hold each face's licence. FT-02.7 to FT-02.9 bring the fingerprints, the footprint profiles and the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The UCD `Script` property is already vendored and compiled for itemization (`crates/tinker-pdf-shape/data/ucd/Scripts.txt`; `script` at `crates/tinker-pdf-shape/src/unicode.rs:870`), and the facade already depends on that crate, so the lookup reuses it; `ScriptExtensions.txt` is not vendored.
 - `cargo deny` reads the crate graph only (`deny.toml:10-16`, `xtask/src/main.rs:1121-1135`); a vendored face's licence is held to the same allowlist by `cargo xtask vendor`, which `cargo xtask check` runs in CI, so 'passes `cargo deny`' is met by the two together.
@@ -97,7 +97,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** If H-94 admits a face, FT-03.5 draws every code of both built-in encodings with it in a `bundled-fonts` build, through FT-03.2's tables and FT-03.4's route; if it admits none, FT-03.6 opens the L row the exit names, with FT-03.3's census as its evidence. Exactly one of FT-03.5 and FT-03.6 runs.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Neither built-in encoding is in the tree: `BaseEncoding` holds Standard, WinAnsi, MacRoman and PDFDoc only (`crates/tinker-pdf-font/src/encoding.rs:8-21`), and `Standard14::advance` answers every Symbol and ZapfDingbats code with a flat 600 (`crates/tinker-pdf-font/src/base14.rs:97`, `:161-163`), so 'draws every code' needs the tables before any face.
 - Text extraction reads an unembedded Symbol font's codes through StandardEncoding: a font with no `/Encoding` keeps `BaseEncoding::Standard` (`crates/tinker-pdf-cos/src/font.rs:723`) and `char_of` reads the code through it (`font.rs:511-517`), so without `/ToUnicode` an alpha extracts as `a`. Outside this row's exit; FT-03.2's tables are what a fix would read.
@@ -125,7 +125,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-04a.3's test measures stem width at every whole size from 8 to 16 px against the amount FT-04a.1 states, and FT-04a.4 runs it on linux, windows, macos and `wasm32-wasip1`; FT-04a.5 adds the speed row. Whether darkening becomes the default is H-65's judgement and outside this exit.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The quoted 'unhinted, not degraded' is at `docs/features/fonts.md:985` at the tip, in the 'Refused by name' table, not at `:926`.
 
@@ -163,7 +163,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-04b.2 to FT-04b.8 hold every instruction family to its specified effect computed in the test, FT-04b.9 and FT-04b.10 hint whole glyphs and pin the committed faces' hinted outlines, which FT-04b.14 reproduces on four targets; FT-04b.11 and FT-04b.12 draw them behind the option, antialiased and monochrome; FT-04b.17 is H-65's small-text judgement.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The committed faces that carry TrueType instructions are the twelve Liberation faces (`fpgm`, `prep`, `cvt ` and `gasp` in each; in Liberation Sans Regular 1 484 of 1 529 simple glyphs carry a program and 1 076 glyphs are composites) and `crates/tinker-pdf-shape/data/text-rendering-tests/fonts/TestGPOSThree.ttf` (`fpgm` and `cvt `, no glyph program), read from their table directories; no other of the 215 `.ttf` and `.otf` files under `crates/` and `testdata/` carries an `fpgm`, `prep` or `cvt ` table.
 - `tinker-pdf-font` is not among `cargo xtask libm`'s pixel paths (`xtask/src/main.rs:840-846`); once its outlines depend on the size they feed pixels, which FT-04b.1 decides.
@@ -195,7 +195,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-04c.2 to FT-04c.4 build the rules the exit criterion names, stem snapping and alignment zones with hint masks and counter control, each held in the test to FT-04c.1's clause-by-clause transcription of the Type 1 and Type 2 specifications; FT-04c.5 and FT-04c.6 feed them every hint a CFF or Type 1 program carries and FT-04c.7 draws them under FT-04b's option, which meets the exit. FT-04c.8 and FT-04c.9 bring the fingerprint and speed row, and FT-04c.10 carries H-65, whose Blocks column names this row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The cited line holds: `hintmask` and `cntrmask` add their implicit `vstem`s and skip `stems.div_ceil(8)` mask bytes (`crates/tinker-pdf-font/src/cff.rs:1700-1708`), and `hstem`, `vstem`, `hstemhm` and `vstemhm` count and discard (`cff.rs:1693-1698`).
 - No hint parameter is read in either format: the CFF `Private` keeps only `Subrs`, `defaultWidthX` and `nominalWidthX` (`crates/tinker-pdf-font/src/cff.rs:57-63`, `:488-519`), and the Type 1 private half is read for `/lenIV`, `/Subrs` and `/CharStrings` only (`crates/tinker-pdf-font/src/type1.rs:101-108`).
@@ -230,7 +230,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-04d.2 to FT-04d.5 build the autohinter in the font crate and assert in the test the measurable properties the exit criterion names, stems on the pixel grid in both directions (FT-04d.4, FT-04d.5) and the x-height on a pixel boundary (FT-04d.4); FT-04d.6 draws unhinted faces through it under FT-04b's option and asserts the same properties on rendered pages; FT-04d.7 and FT-04d.8 bring the fingerprint and speed row; FT-04d.9 is the visual judgement the exit criterion leaves to H-65.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Nothing in the tree analyses outlines for an x-height or a stem: a search of `crates/tinker-pdf-font/src`, `crates/tinker-pdf-render/src` and `crates/tinker-pdf-raster/src` for `autohint`, `x_height`, `xheight` and `x-height` finds nothing, and the only stem width the engine reads is a font descriptor's `/StemV`, to choose a bold substitute (`crates/tinker-pdf/src/fonts.rs:100-106`).
 - Outlines reach the renderer in em units with no pixel size (`GlyphSource::outline`, `crates/tinker-pdf-render/src/lib.rs:407-412`) and are cached by font and code alone (`crates/tinker-pdf/src/resources.rs:1759-1787`), so drawing a fitted outline needs a per-size request the tree does not have; FT-04b's hinted rendering needs the same one, which is why the build steps here wait on that row.
@@ -269,7 +269,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-05.2 to FT-05.7 read and apply every table the Item names: `fvar` and `avar` (FT-05.2), the tuple store with `cvar` (FT-05.3), `gvar` (FT-05.4), the item store with `HVAR`, `VVAR` and `MVAR` (FT-05.5), and CFF2 with its blends (FT-05.6, FT-05.7). FT-05.4 and FT-05.7 meet the exit's first two clauses, instance outlines at named and arbitrary coordinates equal to the deltas applied in the test and CFF2 blends likewise; FT-05.10 to FT-05.12 meet the third, an instanced embedding re-read to the same outlines. FT-05.13 and FT-05.15 draw instances (a PDF's CFF2 face at its default; a book's face at the instance a run asks for), and FT-05.9, FT-05.16 and FT-05.17 bring fuzzing, the fingerprint and the speed rows.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The Today cell holds: in code the variation tables appear only in `woff.rs`'s known-tag table (`crates/tinker-pdf-font/src/woff.rs:469-470`) and the shaper's `FeatureVariations` (`crates/tinker-pdf-shape/src/common.rs:318-330`, its axis index at `:423`); `CFF2` appears nowhere under `crates/`.
 - A variable face embedded today is written at its default instance without saying so: when the writer subsets, `KEEP` (`crates/tinker-pdf-font/src/subset.rs:43-55`) keeps no variation table. The committed XPS packages carry such a face, with `fvar`, `avar`, `gvar`, `HVAR`, `cvar` and `STAT` beside `cvt `, `fpgm` and `prep` (read after de-obfuscating `crates/tinker-pdf/tests/xps/wpf-image-and-text.xps`; `xps_validated.rs:596` notes its `gvar`), and `determinism.rs`'s `the_synthesised_fixed_document_is_the_same_bytes_on_every_target` hashes the document it is embedded in.
@@ -315,7 +315,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-06.3 to FT-06.9 read `CPAL`, both `COLR` versions, `sbix`, CBLC/CBDT and SVG documents (gzipped ones through FT-06.7) and pick a glyph out of a document; FT-06.10 writes a colour glyph into a PDF as FT-06.1's object (Type 3 glyph or form), extractable through FT-06.2; FT-06.11 to FT-06.16 and FT-06.20 hold each table to fixtures whose paint graph, bitmap or markup the test evaluates (COLR v1 gradients and composites by the specification's formulas, the rest of the composites as the owner rules in FT-06.18); FT-06.19 draws emoji in an EPUB and a Markdown page.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - A Type 3 glyph never reaches `Device::show_glyph`: the interpreter runs its procedure and `continue`s (`crates/tinker-pdf-content/src/interpret.rs:1777-1809`) before the only call (`interpret.rs:1823`), so no Type 3 run's `/ToUnicode` text is extracted or searched today; a colour glyph written as Type 3 would lose the text a CID run extracts, so FT-06.2 fixes it first.
 - `DocumentBuilder` writes no Type 3 font: its font entry points are `add_base_font`, `add_named_font`, `add_embedded_font` and `add_cid_font` (`crates/tinker-pdf-cos/src/build.rs:5561-5743`), and `glyph_run` refuses anything but a registered composite font (`build.rs:5815`).
@@ -347,7 +347,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-07a.2 to FT-07a.4 apply feature variations in `GSUB` and `GPOS` and variation-index deltas, and shape a run at an instance with its advances, held to synthetic tables whose expected output each test computes; FT-07a.5 carries the instance to every producer path; FT-07a.8 meets the exit with H-64's person-written fixtures per feature, no other shaper's recording involved.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The `FeatureVariations` comment the row cites at `common.rs:318-330` is at `crates/tinker-pdf-shape/src/common.rs:319-331`, the type at `:332`.
 - The `GPOS` half has no code either: a value record holds none of its device offsets (`crates/tinker-pdf-shape/src/gpos.rs:64-78`, skipped by `value_size`), an anchor's are read past (`gpos.rs:134-148`), and `GDEF`'s item variation store is surfaced and not read (`crates/tinker-pdf-shape/src/gdef.rs:208-220`).
@@ -382,7 +382,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-07b.2 to FT-07b.5 give the shaper vertical metrics, UTR #50's orientation, a top-to-bottom plan and `GPOS` down a column (`vert`, `vrt2`, `vkrn`, `vhal`, vertical positioning), held to synthetic tables whose output each test computes; FT-07b.6 moves the form-field column onto that plan and FT-07b.7 sets a variable face's column at its instance; FT-07b.10 meets the exit with H-64's person-written fixtures for vertical CJK and Mongolian per feature.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Part of the Item is already done outside the shaper and the Today cell does not say so: a form field under a vertical CMap runs `vert` and `vrt2` through `with_features` over a left-to-right paragraph (`crates/tinker-pdf-cos/src/fill.rs:263-268`, `:424`), placing glyphs by `/W2` with no `GPOS` (`fill.rs:150-156`), held by `crates/tinker-pdf/tests/shaped_forms.rs:760`.
 - The shaper has no vertical direction (`crates/tinker-pdf-shape/src/buffer.rs:76-82`), and `tinker-pdf-font` reads no vertical metrics: `vhea`, `vmtx` and `VORG` appear only in WOFF2's known-tag list (`crates/tinker-pdf-font/src/woff.rs:467-468`) and `VORG` in the CFF subsetter's keep-list (`crates/tinker-pdf-font/src/subset.rs:72`).
@@ -426,7 +426,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-07c.4 to FT-07c.16 build `morx`, `kerx`, `trak` and `feat` into the shaper and through every consumer, each state machine's step transcribing the TrueType Reference Manual's worked examples FT-07c.1 lists; FT-07c.20 meets the exit as written, every machine held to its examples by count, with H-142 for any machine the manual gives none. FT-07c.2 makes Today's typed warning real meanwhile, FT-07c.3 adds the corpus's AAT sections as a second gate, and FT-07c.17 to FT-07c.19 add the fuzzer, the fingerprint and the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Today's 'with a typed warning' is not in the tree: `Warning` has no variant for a table other than `GSUB`/`GPOS` (`crates/tinker-pdf-shape/src/lib.rs:137-214`) and `Layout::parse` reads only `GDEF`, `GSUB` and `GPOS` (`lib.rs:445-455`), so a face carrying only `morx` shapes as if unshaped with no warning at all; `morx`, `trak` and `feat` appear only in `crates/tinker-pdf-font/src/woff.rs:470-471`'s table list, and `kerx` and `ankr` nowhere.
 - No consumer surfaces a shaped run's warnings: `crates/tinker-pdf/src/epub/paint.rs:809-841` (`shape_with`), `:854` (`shape_in_context`), `:4815` (`shaped_glyphs`), `crates/tinker-pdf/src/shaping.rs:198` (`write_run`) and `crates/tinker-pdf-cos/src/fill.rs:424-436` read the glyphs and drop `ShapedRun::warnings`, so a shaper warning, FT-07c.2's included, reaches no caller.
@@ -467,7 +467,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-07d.4 to FT-07d.13 build Graphite's tables, its stack machine, its substitution, positioning and collision passes and its justification into the shaper, each transcribing the specification's examples FT-07d.1 lists; FT-07d.17 meets the exit as written, the examples counted and H-64's person-written fixtures for FT-07d.3's faces reproduced. FT-07d.2 refuses a Graphite-only face by name meanwhile (ruling 3), and FT-07d.14 to FT-07d.16 add the fuzzer, the fingerprint and the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Nothing in the tree reads a Graphite table: `Silf`, `Glat`, `Gloc`, `Feat` and `Sill` appear only in `crates/tinker-pdf-font/src/woff.rs:471-472`'s table list, and `Layout::parse` reads `GDEF`, `GSUB` and `GPOS` alone (`crates/tinker-pdf-shape/src/lib.rs:445-455`), so a face whose only layout tables are Graphite's shapes as if unshaped with no warning, short of ruling 3's 'still refuses by name (ruling 2) until its row closes' (`docs/rulings.md:45-46`).
 - None of the 237 font files tracked at `5297133`, WOFF and WOFF2 included, nor the faces inside its 40 committed EPUB, CBZ and XPS packages (three Liberation faces in two EPUBs, and one face seven XPS packages embed obfuscated, read after de-obfuscation), carries a Graphite table (a scan of each table directory), so H-64's fixtures need a face vendored (FT-07d.3).
@@ -500,7 +500,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-07e.2 to FT-07e.4 build `JSTF` and kashida into the shaper's justify call, and FT-07e.5 to FT-07e.7 carry it through `text-justify`, the layout seam and the EPUB provider and painter; FT-07e.10 meets the exit as written, H-64's person-written fixtures for Arabic kashida and a `JSTF`-carrying face reproduced and counted. FT-07e.8 prices making it the default and FT-07e.9 lands the owner's ruling (H-143); FT-07e.4 carries the fingerprint and FT-07e.11 the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `JSTF` appears in the tree only in `crates/tinker-pdf-font/src/woff.rs:469`'s table list, and layout justifies a line only by spreading its slack over its spaces (`crates/tinker-pdf-layout/src/flow.rs:5493-5530`); none of the 237 font files tracked at `5297133`, WOFF and WOFF2 included, nor the faces inside its 40 committed EPUB, CBZ and XPS packages, carries `JSTF` (a scan of each table directory).
 - `text-justify` is unknown to the CSS crate: `crates/tinker-pdf-css/src/property.rs` lists it in neither `UNSUPPORTED_PROPERTIES` (`:2424`) nor `IMPLEMENTED_NAMES` (`:3327`), so a book's `text-justify` falls to `Declaration::Unknown`.
@@ -542,7 +542,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-08.19 meets the exit as the row states it — every one of the sixteen Brahmic sections whole, asserted by count, `TRIAGE` empty — once FT-08.4 to FT-08.10 have closed the USE rows FT-08.1 attributes and FT-08.11 to FT-08.14 have built the second cluster model, which closes `SHKNDA-2` without the sixty-nine. The named debts land in FT-08.13 (base finding), FT-08.14 (reph position), FT-08.16 (canonical ordering), FT-08.15 (Hangul), FT-08.6 (confinement) and FT-08.8 (`Default_Ignorable_Code_Point`); FT-08.17 and FT-08.18 bring the fingerprint and speed rows.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `crates/tinker-pdf-shape/src/universal.rs:266-276` prices the single-model matra rule at six gained for sixty-nine lost with `SHKNDA-2` at 8 before it; `PASSING` holds `SHKNDA-2` at 10 (`crates/tinker-pdf-shape/tests/text_rendering.rs:696`), so the price was measured before two of its cases passed and has not been retaken at the tip.
 - `crates/tinker-pdf-shape/src/shape.rs:1220-1228` and `docs/features/fonts.md:883-890` say no case in either corpus reaches a default-ignorable character other than `ZWJ` and `ZWNJ` (the variation selectors aside); `SHLANA-10/28` (a `TRIAGE` row, `Order`) and `SHLANA-10/41` type U+034F COMBINING GRAPHEME JOINER, which `crates/tinker-pdf-layout/data/ucd/DerivedCoreProperties.txt:10723` lists as `Default_Ignorable_Code_Point`.
@@ -572,7 +572,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-09.2 builds the bar a person-written expectation is wired into and FT-09.3 wires each script as H-64 delivers it, every other name staying on the list, which is the row's exit script by script; FT-09.4 and FT-09.5 build the two refused mechanisms once their expectations exist. After FT-09.2 every remaining step waits on H-64's act.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The cited list has moved: the shaped-and-unverified row is `docs/features/fonts.md:792` and the Alaph and topographical paragraph `fonts.md:942-948`; line 733 now falls in the EPUB bidi notes.
 - Both refused mechanisms are absences: `Joining_Group` is not generated (`crates/tinker-pdf-shape/build.rs:384-389`) and `fin2`/`fin3`/`med2` are never requested (`src/arabic.rs:37-43`); the topographical group is left out of `USE_GSUB_STAGES` (`src/shape.rs:844-850`), and a run holding any joining character takes `Plan::Joining`, without syllables, before `Plan::Universal` is considered (`src/shape.rs:555-568`).
@@ -601,7 +601,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-10.3's test holds a Type 42 face to its embedded TrueType twin pixel for pixel, and FT-10.4 and FT-10.5 hold an `/MMType1` instance's outlines to the blend design recomputed in the test, in the leaf and on the page; FT-10.3 and FT-10.5 add the fingerprints and FT-10.6 the speed rows.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `/MMType1` falls through to `FontKind::Type1` in both readers of `/Subtype` (`crates/tinker-pdf-cos/src/font.rs:698-703`, `crates/tinker-pdf/src/fontlist.rs:250-255`), and the Type 1 interpreter knows othersubrs 0 to 3 only, handing any other's arguments back for `pop` (`crates/tinker-pdf-font/src/type1.rs:524-567`), so a multiple-master charstring draws whatever operands `pop` returns rather than an instance.
 - A Type 42 program reaching the facade goes to `Type1::parse`, which needs `eexec` (`crates/tinker-pdf-font/src/type1.rs:80`) and declines it, so the font draws nothing and reports `UnreadableFont`; no code names a Type 42 program, and which keys carry one is FT-10.1's to read from 9.9.
@@ -634,7 +634,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-11.2 to FT-11.4 subset Type 1 programs, FT-11.5 and FT-11.6 subset the CFFs renumbering refused, FT-11.7 and FT-11.8 convert Type 1 to CFF, and FT-11.9 extends a subset for ED-02; each re-read draws the used glyphs identically by fingerprint and passes the strict validator in its own test, and FT-11.10 records the byte savings over the committed fixtures and the corpus.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The citation `features/fonts.md:915` has moved: the CFF refusal row is `docs/features/fonts.md:974`; `features/editing.md:839` is current.
 - No Type 1 glyph is ever counted: `PageResources::selection` answers `None` for a Type 1 program (`crates/tinker-pdf/src/resources.rs:2488-2502`), so the usage walk records nothing for it (`crates/tinker-pdf/src/subset.rs:1063-1073`) and the program is left whole when `tinker_pdf_font::subset` declines its bytes (`subset.rs:1306-1309`).
@@ -666,7 +666,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-12.3 embeds and subsets a provider face for each non-embedded simple font and holds the rewritten page to the provider-drawn page by fingerprint, FT-12.4 reports each width mismatch as a typed warning, FT-12.5 holds the output to PDF/A's font rules, FT-12.6 extends all three to composite fonts whose face states their CIDs, and FT-12.2 gives the request the PANOSE it is matched by.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `FontRequest` carries the name, the serif, fixed-pitch and symbolic flags and weight and slope (`crates/tinker-pdf/src/fonts.rs:29-110`) and no PANOSE, so no provider can match on it today.
 - A face substituted under a composite font is indexed by CID: `sfnt_selection` answers a Type 0 font with `cid_glyph` (`crates/tinker-pdf/src/resources.rs:2515-2520`), the CID itself when there is no `/CIDToGIDMap` (`crates/tinker-pdf-cos/src/font.rs:281-292`), so a host face mapped by Unicode draws the glyph that happens to carry the CID's number.
@@ -696,7 +696,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-13.4 puts the provider in `tools/sysfonts`, outside the engine crates, and FT-13.5 projects it in the native bindings; FT-13.3's helper is pure and held to `policy_table.rs`'s table of names and their resolved faces, and FT-13.2 and FT-13.6 hand it the faces' and the documents' facts to match on.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The CLI already reads faces from outside the engine: `--fonts PATH` takes one face or a directory matched by `bold` and `italic` in file stems (`tools/tpdf/src/main.rs:752-847`), so the native provider replaces a heuristic rather than filling a missing seam.
 - Name reading is in three places and none yields a normalised family: `FontRequest::read` strips a subset prefix and reads weight and slope from the name (`crates/tinker-pdf/src/fonts.rs:59-110`), `Standard14::from_base_font` maps aliases to the standard 14 (`crates/tinker-pdf-font/src/base14.rs:108-142`), and `bundled::family_for` picks a generic family (`crates/tinker-pdf-font/src/bundled.rs:105-155`).
@@ -728,7 +728,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-14.2's test holds every substituted advance equal to the dictionary's width exactly, FT-14.3 and FT-14.4 add the descriptor-driven synthesis and weight emulation, FT-14.6 lands the owner's choice of default with its fingerprint and FT-14.7 its speed row, and FT-14.8 holds the corpus count 'rendered with something reported' at its bars.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The row's '459 corpus files' is the synthetic-face bar before 5fc8a23a (8 September 2026); the committed `corpus/ratchet-fonts.json` sums to 456 files rendered with something reported of 5 525 over its five corpora, and its siblings to 1 409 (no faces) and 492 (bundled faces).
 - A substituted face is drawn at its own design advance while the pen moves by the dictionary's width: `extract_outline` scales a substitute's outline by its units per em and nothing else (`crates/tinker-pdf/src/resources.rs:2403-2466`), and nothing on the substitution path reads `/ItalicAngle`, `/XHeight`, `/CapHeight` or `/FontWeight`, while `/StemV` only sets the request's bold flag at 120 or more (`crates/tinker-pdf/src/fonts.rs:98-108`).
@@ -759,7 +759,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-15.4's test holds each vendored language's patterns to its dictionary's published test words, and FT-15.6 adds a reftest pair per language in `epub_reftest.rs`, with `auto` honoured in EPUB and HTML (FT-15.6) and through the layout crate's own API (FT-15.5); FT-15.7 and FT-15.8 bring the fingerprint and the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The layout crate is never told a run's language today (`crates/tinker-pdf-layout/src/case.rs:22-29`); the cascade resolves it per element only to count casing (`crates/tinker-pdf-css/src/cascade.rs:1125-1139`), so `auto` needs the language carried first (FT-15.2).
 - A line is flagged hyphenated only when its last run's text ends in U+00AD (`crates/tinker-pdf-layout/src/flow.rs:5430`), and a break opportunity shows a hyphen only after a literal soft hyphen (`flow.rs:6720-6750`), so an automatic point needs both tests replaced, not a new break alone.
@@ -787,7 +787,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-16.4 puts every answer the row names on the facade and holds each to the committed faces' tables read by the test's own reader, on the table readers FT-16.2 and FT-16.3 add; FT-16.5 and FT-16.6 bring the fingerprint and the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `tinker-pdf-font` reads no `OS/2` table, no `head` or `glyf` bounding box, and no `cmap` in the code-point direction: `Sfnt` offers `advance`, `glyph_for_char` and `glyph_for_name` only (`crates/tinker-pdf-font/src/sfnt.rs:115-213`), and `glyph_for_name` reads `post` format 2 alone (`sfnt.rs:183-188`).
 - The only descriptor flags the facade reads are for choosing a substitute face (`FontRequest`, `crates/tinker-pdf/src/fonts.rs:31-112`); `DocumentFont` carries names, kind and the program's address and nothing measured (`crates/tinker-pdf/src/fontlist.rs:96-136`).
@@ -822,7 +822,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** Each of FT-17.4 to FT-17.12 lands the row's options with a fixture whose answer its test computes, and FT-17.3's pin, passing after every one, holds the defaults unchanged on every committed fixture; FT-17.2 fixes the unmapped-code report the fallback stands on, and FT-17.13 brings the fingerprint and the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - `TextWarning::UnmappedCode` is never constructed outside `serialize.rs`'s tests: it appears only at `crates/tinker-pdf-content/src/text.rs:213` and `serialize.rs:412`, `:529` and `:765`, while `show_glyph` drops a glyph with no text silently (`text.rs:847`), though `features/content-and-text.md`'s refusal table names the warning.
 - No extraction path inserts spaces: a line's text is its drawn glyphs' text joined (`crates/tinker-pdf-content/src/text.rs:470`), so the row's 'no inserted spaces' is today's default and the missing half is an opt-in insertion (FT-17.7).
@@ -859,7 +859,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-18.3 to FT-18.9 each land flags or blocks held to a fixture built to show them, FT-18.10 the multi-page value and the walker, and FT-18.11 writes every field into JSON, XML and HTML while FT-18.2's pin holds the existing fields byte for byte; FT-18.12 brings the fingerprint and the speed rows.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The text device implements no path or clip call (`crates/tinker-pdf-content/src/text.rs:783` implements marked content, `show_glyph` and `end_text` only; `device.rs:172-196`'s defaults stand), so nothing of fill, stroke, clip or rules reaches `TextChar`; `crates/tinker-pdf/src/observe.rs` already tees one interpretation into the text device and keeps rules, fills and a rectangular clip, which FT-18.4 and FT-18.8 reuse.
 - A marked-content `/Lang` reaches only `TextPage::mcid_props`, keyed by stream and `/MCID` (`crates/tinker-pdf-content/src/text.rs:166-191`), so a `BDC` that sets `/Lang` without an `/MCID` reaches no consumer.
@@ -890,7 +890,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-19.2 to FT-19.4 land every mode with a fixture whose expected text is computed from its own geometry, FT-19.5 and FT-19.6 the output encodings and transliterations that need no new data, held to the vendored tables, and FT-19.7 the ones whose data H-116 must admit; FT-19.8 brings the fingerprint and the speed row, and the row closes when FT-19.7 has landed.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Raw stream order exists already: `Page::text()`'s lines come in the order the content stream drew them, geometry deciding only line and block breaks, and `Page::text_with(&TextOptions { content_order: true })` takes ruling 14's reordering off (`crates/tinker-pdf/src/lib.rs:2524-2530`), so FT-19.2 names it as a mode rather than building it.
 - Only the decoding half of the Encoding Standard's single-byte encodings exists (`crates/tinker-pdf-xml/src/encoding.rs:149-180`), and the module refuses the multi-byte ones as `Label::Unsupported`; no output encoding is written anywhere.
@@ -919,7 +919,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-20.2 and FT-20.3 hold every construct of H-17's syntax to fixtures and show a hostile pattern's work bounded by program size times text length in MS-01's guard suite; FT-20.4 puts the pattern inside the search options on the facade, documented; FT-20.5 fuzzes it and FT-20.6 brings its speed row. The exit's third clause is FJ-02's architecture: FT-20.1 records it as a non-goal, and nothing here is shared with that engine.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Today holds at 5297133: `SearchOptions` carries the three switches (`crates/tinker-pdf-content/src/search.rs:42-51`), `search_with` is at `:108`, no manifest names a regex crate, and `rg -i 'regex|regular expression' crates` finds comments and no matcher.
 - The search module still calls the regex question "a decision the roadmap keeps open" (`crates/tinker-pdf-content/src/search.rs:31-33`); since 9 October 2026 it is this row, with only the syntax and its guarantee open (H-17). FT-20.4 replaces that comment and `docs/features/content-and-text.md:496-498`.
@@ -947,7 +947,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-21.2 holds a match across a page break, found forwards and backwards, and the three keep- options; FT-21.3 and FT-21.4 search each other source with a known hit; FT-21.5 runs `tpdf grep` across `testdata/`'s fixtures; FT-21.6 brings the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Today's pointer has drifted: at 5297133 `search` and `search_with` are documented at `docs/features/content-and-text.md:446-449` and their options at `:468-506`; lines 294-333 now hold ruling 14's bracket tie-break.
 - `tpdf` has no `grep` verb: its dispatch (`tools/tpdf/src/main.rs:291-308`) names eighteen subcommands and none searches.
@@ -976,7 +976,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-22.5 is the exit as the row states it: an index over the committed fixtures and books answers a query table with known hits, through FT-22.3's boolean, phrase and proximity evaluation and FT-22.4's error-tolerant terms; FT-22.2 holds the build counted-linear in MS-01's guard suite, and FT-22.6 brings the speed rows.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Absent as Today says: no index, posting list or edit-distance code exists (`rg -i 'levenshtein|edit.distance|posting' crates tools` finds one test comment, `crates/tinker-pdf/tests/epub_support/conservation.rs:635`). What it builds on exists: UAX #29 word boundaries (`crates/tinker-pdf-content/src/words.rs:158`) and the search options' folding (`crates/tinker-pdf-content/src/search.rs:83`).
 
@@ -1001,7 +1001,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-23.2 and FT-23.3 meet the exit, fixtures on rotated and right-to-left lines whose expected quads are computed from the glyph boxes, and land copying a selection or a rectangle; FT-23.4 brings the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Absent as Today says (`rg -i 'select_quads|selection_between' crates tools` finds nothing at 5297133), but what a selection builds on exists: `TextLine::words` returns UAX #29 words with boxes in the line's baseline frame (`crates/tinker-pdf-content/src/words.rs:366`) through the private `oriented_union` (`:416`), and `span_quad` already boxes a logical-order right-to-left run from whichever end starts first (`crates/tinker-pdf-content/src/text.rs:321`).
 - No call returns the text inside a rectangle either: `rg 'pub fn [a-z_]*(rect|region|area)[a-z_]*\(' crates/tinker-pdf/src crates/tinker-pdf-content/src` finds only EPUB painting's `run_rect`; FT-17 asks the same of extraction ("clip to the page or a rectangle").
@@ -1029,7 +1029,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-24.3 to FT-24.5 write the five formats from one model a caller can fill without a page, the seam OC-10 reuses; FT-24.5's tests validate ALTO v4 and PAGE XML against their published schemas through FT-24.2's harness, and FT-24.3's and FT-24.4's hold TSV, bbox HTML and hOCR to their published definitions; FT-24.6 brings the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Today holds: `TextWriter` writes the engine's own JSON, XML and HTML of one model (`crates/tinker-pdf-content/src/serialize.rs:73`), and no word-box format exists (OC-10's own search, `rg -i 'hocr|\balto\b|page_xml' crates tools`, finds nothing at 5297133).
 - Those serialisations are in PDF user space, y upward, with `/Rotate` not applied (`crates/tinker-pdf-content/src/serialize.rs:27-32`), and nothing in the tree validates XML against a schema (`rg -il xsd crates` finds only CBZ's comments on `ComicInfo.xsd` and the bounds ledger's); so the frame the five formats write in and the schema harness are both new work (FT-24.1, FT-24.2).
@@ -1062,7 +1062,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-25.10 is the exit as the row states it: over the committed fixtures and books the Markdown, re-read by the engine's own reader, yields the same headings, lists and tables, and no chunk boundary splits a sentence, on FT-25.3 to FT-25.9's model, inference, marks, writer and chunker and FT-25.2's sentence boundaries; FT-25.11 brings the speed rows.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Today holds: the structured view (`Page::structured_text`, `crates/tinker-pdf/src/lib.rs:2593`), the inferred order with its `RunningHead`, `RunningFoot` and `PageNumber` roles (`crates/tinker-pdf/src/reading_order.rs:229-250`) and stated and inferred tables (`crates/tinker-pdf/src/tables.rs:468`, `:495`) exist; nothing writes Markdown or chunks, since `crates/tinker-pdf/src/markdown.rs` reads Markdown into the EPUB path only.
 - The engine's own CommonMark reader has no table syntax: `markdown.rs` follows CommonMark 0.31.2 and names `table` only among section 4.6's HTML-block tags (`crates/tinker-pdf/src/markdown.rs:1194`). So "the same ... tables" can be read back only from tables written as HTML blocks, which `to_html` passes through (`:2996`) and the document path, `to_xhtml` (`:3017`), sets as text.
@@ -1090,7 +1090,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-26.2 holds every item equal to its recorded event and FT-26.3 holds the clustering to fixtures with known groups, which is the exit as stated; FT-26.4 brings the speed row.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - Today holds and its pointer is current: `docs/features/rendering.md:355-412` documents the retained page. The recorded events are public in `tinker-pdf-content` (`Event`, `crates/tinker-pdf-content/src/record.rs:240`), but the facade neither re-exports nor hands them out (`DisplayList::content` is `pub(crate)`, `crates/tinker-pdf/src/display.rs:227`), so the items are new public surface, not a re-export.
 - A page past `MAX_DISPLAY_LIST_BYTES` keeps no events (`DisplayList::is_retained`, `crates/tinker-pdf/src/display.rs:272`), so its items come from a direct interpretation, as `DisplayList::to_svg` draws such a page (`crates/tinker-pdf/src/svg_out.rs:351-364`).
@@ -1116,7 +1116,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-27.1 reads every drawn annotation's appearance as text, and its fixtures — one annotation of each of the 27 subtypes that draw, each with known text, and the writer's own FreeText and filled field — meet the exit criterion; FT-27.2 lets the structure tree claim that text through `/StmOwn`, which is what the refusal the row cites names, and removes the refusal; FT-27.3 and FT-27.4 bring the fingerprint and speed row a new capability owes, and the row leaves the roadmap with FT-27.4.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The refusal the row cites at `docs/features/content-and-text.md:662` stands at line 838 at 5297133; what it refuses is an `/MCR` whose `/StmOwn` names an annotation matching nothing, because the join keys every character with owner 0 (`crates/tinker-pdf/src/structure.rs:1577-1601`).
 - Everything that places an appearance already exists: `annots::prepare` fits, clips and scopes the normal appearance in its `/AS` state for `Page::render` and `Page::render_annotation` (`crates/tinker-pdf/src/annots.rs:168-246`, `crates/tinker-pdf/src/render_part.rs:230-255`); no text device has ever been run over it.
@@ -1144,7 +1144,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-28.1 to FT-28.3 list the images inside tiling-pattern cells, soft-mask groups and annotation appearances, each path with its own fixture; FT-28.4 lists a JPEG 2000 image's own opacity channel and holds it equal to the decoded component — the two halves of the exit criterion. FT-28.5 surfaces both in `tpdf images`, and FT-28.6 fingerprints the listing and takes the row out of the roadmap; the listing extends an existing capability, so no speed row of its own is added.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The refusals the row cites at `docs/features/content-and-text.md:664-665` stand at lines 840-841 at 5297133.
 - A soft-mask group's own `/Resources` are entered by neither the interpreter nor the renderer: `run_soft_mask` keeps the scope that set the `gs` (`crates/tinker-pdf-content/src/interpret.rs:1597-1658`), the renderer's `begin_soft_mask` swaps no scope where its `begin_form` does (`crates/tinker-pdf-render/src/lib.rs:3164-3218`), and the subset walk visits a group in both scopes for that reason (`crates/tinker-pdf/src/subset.rs:697-702`). A name a group defines only in its own `/Resources` therefore resolves in the setting scope when the page is drawn; FT-28.2 lists the images as 8.10.1 places them, and a fix to the drawing is outside this row.
@@ -1177,7 +1177,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** FT-29.5 passes JPEG, JPEG 2000, fax and JBIG2 data through as stand-alone files whose payload equals the stream's bytes, FT-29.6 writes the other images' samples as PNG with the soft mask as alpha and the ICC profile embedded and reads them back equal, and FT-29.7 gives each placement its resolution recomputed from the placement matrix — the exit's three clauses. FT-29.1 to FT-29.4 design the files and build the three writers the tree lacks, FT-29.8 surfaces them in `tpdf images`, and FT-29.9 and FT-29.10 bring the fingerprint and speed row, the row leaving the roadmap with the last.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The PNG encoder writes colour types 0, 2, 4 and 6 at eight bits only — no palette, no 1, 2 or 4-bit rows, no 16-bit samples (`crates/tinker-pdf-filters/src/png/encode.rs:22-49`) — and nothing in the tree reads or writes `iCCP`, so a PNG of an image's own samples with its profile cannot be written today.
 - Nothing writes a TIFF or a stand-alone JBIG2 file: `tiff_embed.rs` maps the other way, TIFF compressions 2, 3 and 4 onto `/CCITTFaxDecode` (`crates/tinker-pdf-cos/src/tiff_embed.rs:381-414`), and `jbig2.rs` reads Annex D's file header (`crates/tinker-pdf-filters/src/jbig2.rs:83-88`, `:564-580`) without anything that writes one. Those three writers are why an S row takes ten steps.
@@ -1210,7 +1210,7 @@ list, each held to first-party evidence.
 
 **Closes the row:** The inference is already opt-in, labelled and never the default; FT-30.6 makes the census read and count the 1 078 tagged files the ratchet states and hold the design's other exits, FT-30.7 records the floors in `INFERRED_FLOORS` beside the precision floors from a corpus run after MS-13's first, and FT-30.8 reads a run green over them, which is the exit criterion. FT-30.1 to FT-30.4 add the region segmentation API the Item names, FT-30.5 fingerprints the inference, and FT-30.9 takes the row out of the roadmap.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The region segmentation API the Item names does not exist: `crates/tinker-pdf/src/reading_order.rs` exposes `InferredBlock`s with a `section`, a `column` and a quad (lines 337-359) but no region type, and `docs/design/reading-order.md` does not design one.
 - The census tries only the empty password on an encrypted file (`crates/tinker-pdf/tests/reading_order_census.rs:135-141`) and asserts no more of its population than that some file was tagged (`:378-382`); a scratch walk the design records, which supplied no passwords, found 1 073 of the 1 078 tagged files (`docs/design/reading-order.md:212-214`).
@@ -1228,7 +1228,15 @@ list, each held to first-party evidence.
 
 **Doc:** [design/table-reconstruction.md](../design/table-reconstruction.md) · **Depends on:** MS-13
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| FT-31.1 | watch | Dispatch `corpus.yml` on `develop` and read `table_census.rs`'s output to its end in every corpus: found, grid agreement by evidence class, cells placed, spans reproduced, extra tables, the most rules one page draws and the pages past `MAX_TABLE_RULES`. *Note:* No corpus is fetched locally; the census has never run where the row was written. | `.github/workflows/corpus.yml`, `crates/tinker-pdf/tests/table_census.rs` | The census prints its `RAN` line and every per-corpus line in a green run on `develop`; the run's id and figures are quoted in the next two steps' commits. | MS-13, MS-11, H-03 |
+| FT-31.2 | measure | Hold the census's figures as floors: per corpus, found over stated, grid agreement scored apart for `Ruled` and `Aligned`, and cells placed over placeable, each compared by cross-multiplication with `compared` beside `held`, as `corpus/ratchet.json`'s relations are; the extra count stays printed, never asserted, on real documents. | `crates/tinker-pdf/tests/table_census.rs`, `docs/features/content-and-text.md`, `docs/design/table-reconstruction.md` | `every_stated_table_in_the_corpora_is_counted_and_read` fails when a corpus's found, grid or cell figure falls below its committed floor (one counted injection lowering a placement fires it) and passes at FT-31.1's figures; the zero-extras test over the archival validator's table fixtures still passes; the feature doc and the design's "As built" quote the floors and the run. | FT-31.1 |
+| FT-31.3 | measure | Size `MAX_TABLE_RULES` from FT-31.1's largest ruled page by the ledger's own headroom rule, and turn its `bounds_ledger.rs` row from "not yet sized" into the measured figure and the multiple the cap clears it by. *Note:* If the census's maximum is above 16 384, the cap rises and the quadratic junction search's time is measured at the new cap in release and debug before landing; a cost is put to the owner, never accepted here. | `crates/tinker-pdf/src/tables.rs`, `crates/tinker-pdf/tests/bounds_ledger.rs`, `crates/tinker-pdf/tests/tables.rs` | `bounds_ledger.rs` holds the cap against the census's maximum with the recorded multiple; a builder page one rule past the cap yields `TableWarning::TooManyRules` and reads no rule, and one at the cap reads them all. | FT-31.1 |
+
+**Closes the row:** FT-31.1 runs the census on CI; FT-31.2 holds the stated-table scores as per-corpus floors and FT-31.3 sizes `MAX_TABLE_RULES` from the census, which is the row's exit.
 
 ## FT-32 — Table export and reach
 
@@ -1240,7 +1248,19 @@ list, each held to first-party evidence.
 
 **Doc:** [design/table-reconstruction.md](../design/table-reconstruction.md) · **Depends on:** FT-31
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| FT-32.1 | design | Add export and reach to `docs/design/table-reconstruction.md`: how a span is written in each format (CSV and Markdown carry no span), the JSON shape (cells, spans, evidence, warnings), when a table ending in `TableWarning::MayContinue` joins the next page's first table (matching column edges, a repeated header row), and how a lattice inside a cell becomes that cell's child table in place of `NestedLattice`. | `docs/design/table-reconstruction.md` | The section exists in the design's order, settles each of those four questions, and names FT-32.2 to FT-32.6's exit tests; reviewed. | FT-31 |
+| FT-32.2 | build | CSV (RFC 4180) and Markdown (pipe-table) export of an `InferredTable` and a `StatedTable` grid, spans written as FT-32.1 settles. | `crates/tinker-pdf/src/tables.rs`, `crates/tinker-pdf/tests/table_export.rs` (new), `docs/features/content-and-text.md` | `table_export.rs` (new) `csv_and_markdown_read_back_to_the_grid`: each format, re-read by a parser in the test, gives the grid's rows, columns and cell text, quotes, commas, pipes and newlines in cells included. | FT-32.1 |
+| FT-32.3 | build | JSON and HTML export: JSON with every cell's row, column, spans, text, evidence class and warnings; HTML `<table>` with `rowspan` and `colspan`. | `crates/tinker-pdf/src/tables.rs`, `crates/tinker-pdf/tests/table_export.rs` (new) | `json_and_html_read_back_to_the_grid`: the JSON re-read by a parser in the test and the HTML re-read through the layout crate's own HTML tree builder give the same grid, spans included, for a builder-drawn table with a row span and a column span. | FT-32.2 |
+| FT-32.4 | build | `tpdf text --tables` takes `--format csv\|json\|md\|html`, writing each table of each page in that format, with the page and table index in a heading line per format's convention. | `tools/tpdf/src/main.rs`, `docs/features/content-and-text.md` | A CLI test runs each format over a two-table fixture and re-reads the output to both grids; an unknown format is a usage error with exit status 2. | FT-32.3 |
+| FT-32.5 | build | Tables across pages: a document-level pass joins a table ending in `MayContinue` to the next page's first table when FT-32.1's criteria hold, dropping a repeated header row, and reports the joined table with the pages it spans. | `crates/tinker-pdf/src/tables.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/tables.rs` | `a_two_page_table_joins_as_its_tagged_twin`: a builder table split over two pages, with and without a repeated header, is recovered as one grid equal to the stated `Table` its tagged twin carries; two unrelated tables on consecutive pages stay apart. | FT-32.1 |
+| FT-32.6 | build | Nested tables: a lattice inside another table's cell is reconstructed as that cell's child table, and `NestedLattice` remains only for a lattice that crosses cell borders. | `crates/tinker-pdf/src/tables.rs`, `crates/tinker-pdf/tests/tables.rs` | `a_nested_table_recovers_as_its_tagged_twin`: a builder table holding a 2 x 2 table in one cell is recovered with the child grid in that cell, equal to the nested `Table` its tagged twin states; the outer grid is unchanged; a lattice crossing a cell border still yields `NestedLattice`. | FT-32.1 |
+| FT-32.7 | measure | The new operations' speed row and fingerprint: tables inferred, joined across pages and exported over 100 generated pages in the benchmark set, and the four exports of a fixed table in the determinism fingerprints. | `crates/tinker-pdf/benches/engine.rs`, `crates/tinker-pdf/tests/determinism.rs` | The operation runs in the benchmark set with its figure recorded; the export fingerprint holds on every target K-07 runs. | FT-32.4, FT-32.5, FT-32.6, MS-04, K-07 |
+
+**Closes the row:** FT-32.2 to FT-32.4 export every format and re-read it to the grid; FT-32.5 and FT-32.6 recover a two-page and a nested table against their tagged twins, which is the row's exit; FT-32.7 adds the speed row and fingerprint.
 
 ## FT-33 — Zone and template extraction
 
@@ -1252,7 +1272,15 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| FT-33.1 | build | A template of named regions: `Template` maps names to page-space rectangles, and applying it to a page returns each name's text through `Page::text_with`'s region; the type and its rules are stated in the feature doc. | `crates/tinker-pdf/src/text_order.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/templates.rs` (new), `docs/features/content-and-text.md` | `templates.rs` (new) `named_regions_return_the_generated_values`: a family of builder documents with known values at fixed places returns every value under its name, in both builds. | — |
+| FT-33.2 | build | Column guides: a region split at given x positions returns one value per column per line, so a table-like block without rules reads into fields. | `crates/tinker-pdf/src/text_order.rs`, `crates/tinker-pdf/tests/templates.rs` (new) | `column_guides_split_lines_into_fields`: generated statements with known columns return each line's fields; a value straddling a guide is reported by a typed warning, not split silently. | FT-33.1 |
+| FT-33.3 | build | Label-anchored selectors: a region placed relative to the quad of a label found by its text, so values are found when a family moves its fields. | `crates/tinker-pdf/src/text_order.rs`, `crates/tinker-pdf/tests/templates.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | `labels_anchor_regions_across_moved_layouts`: a generated family whose fields shift and wrap between members returns the generated values; a missing label is a typed miss; a fingerprint of one template's output is added to the determinism suite. | FT-33.1 |
+
+**Closes the row:** FT-33.1 to FT-33.3 land named regions, column guides and label-anchored selectors, each applied to generated families that return the generated values, which is the row's exit.
 
 ## FT-34 — Mathematics from born-digital text
 
@@ -1264,7 +1292,19 @@ list, each held to first-party evidence.
 
 **Doc:** `design/math-extraction.md` (owed) · **Depends on:** CD-04
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| FT-34.1 | design | Create `docs/design/math-extraction.md`: what makes a run mathematical (a face with a `MATH` table, math alphanumerics, operator and delimiter glyphs), the tree built from glyph boxes (scripts by baseline offset and size, fractions by a rule between stacked runs, radicals, large operators with limits, matrices and stretched fences), Presentation MathML and LaTeX as two writings of that tree, and CD-04's builder as the source of known answers. | `docs/design/math-extraction.md` (new) | The doc exists in the design-doc order (scope, non-goals, design, milestones, risks), names FT-34.2 to FT-34.7's exit tests, and is reviewed. | — |
+| FT-34.2 | build | Math zones: runs drawn in math faces or math characters, inline or displayed, found on a page and handed on as glyph boxes with their characters, sizes and baselines. | `crates/tinker-pdf/src/math.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/math_extraction.rs` (new) | `math_extraction.rs` (new) `zones_are_found_on_generated_formulas`: pages CD-04's builder lays out from known MathML yield exactly their formulas' zones, and prose pages yield none. | FT-34.1, CD-04 |
+| FT-34.3 | build | Scripts: superscripts, subscripts and their nesting read from baseline offset and size ratio into `msup`, `msub` and `msubsup`. | `crates/tinker-pdf/src/math.rs` (new), `crates/tinker-pdf/tests/math_extraction.rs` (new) | `scripts_read_back_to_their_mathml`: every generated formula with scripts, nested to three levels, reads back to its MathML. | FT-34.2 |
+| FT-34.4 | build | Fractions, radicals and large operators: a rule between stacked runs as `mfrac`, a radical glyph with its bar as `msqrt` or `mroot`, an operator with limits as `munderover`. | `crates/tinker-pdf/src/math.rs` (new), `crates/tinker-pdf/tests/math_extraction.rs` (new) | `fractions_radicals_and_operators_read_back`: each generated formula of those kinds, nested in one another, reads back to its MathML. | FT-34.3 |
+| FT-34.5 | build | Matrices and fences: aligned grids of runs as `mtable` and stretched delimiters as stretchy `mo` around their content. | `crates/tinker-pdf/src/math.rs` (new), `crates/tinker-pdf/tests/math_extraction.rs` (new) | `matrices_and_fences_read_back`: generated matrices, cases and fenced expressions read back to their MathML. | FT-34.4 |
+| FT-34.6 | build | LaTeX: the same tree written as LaTeX, by a mapping table from each MathML element and operator to its command. | `crates/tinker-pdf/src/math.rs` (new), `crates/tinker-pdf/tests/math_extraction.rs` (new) | `latex_is_written_from_the_tree`: every fixture's LaTeX equals the expectation committed beside its MathML, written by hand from the MathML. | FT-34.5 |
+| FT-34.7 | build | The surface: `Page::math` and `tpdf text --math mathml\|latex`, the feature doc, a speed row for math extraction over generated pages and a determinism fingerprint of one page's MathML. | `crates/tinker-pdf/src/lib.rs`, `tools/tpdf/src/main.rs`, `docs/features/content-and-text.md`, `crates/tinker-pdf/tests/determinism.rs` | A CLI test writes both forms for a generated page; the fingerprint holds on every K-07 target; the speed row is in the benchmark set. | FT-34.6, MS-04, K-07 |
+
+**Closes the row:** FT-34.2 to FT-34.5 read formulas generated by CD-04's builder from known MathML back to that MathML, which is the row's exit; FT-34.6 adds LaTeX and FT-34.7 the surface.
 
 ## FT-35 — Text from fonts with no usable Unicode
 
@@ -1276,7 +1316,17 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| FT-35.1 | design | Create `docs/design/glyph-matching.md`: an outline's normal form (scale, origin, contour order, composite glyphs flattened), the distance and threshold that call two outlines one glyph, the faces whose `cmap` gives the known mappings (the committed faces, and the bundled ones with `bundled-fonts`), and how a match reaches extraction and a saved `/ToUnicode`. | `docs/design/glyph-matching.md` (new) | The doc exists in the design-doc order, names FT-35.2 to FT-35.5's exit tests and the false-match risk with its fixture, and is reviewed. | — |
+| FT-35.2 | build | Outline normal form and distance in the font crate, PDF-free: a glyph's outline from `glyf`, CFF or Type 1 reduced to FT-35.1's normal form, and two normal forms compared. | `crates/tinker-pdf-font/src/outline_match.rs` (new), `crates/tinker-pdf-font/src/lib.rs` | `outline_match` unit tests: one glyph at several scales and offsets, and as TrueType and CFF from one design, compares within the threshold; every distinct glyph pair of a committed face compares outside it. | FT-35.1 |
+| FT-35.3 | build | The index of known glyphs: every glyph of the known faces in normal form keyed to the characters their `cmap` maps to it, built once per process. | `crates/tinker-pdf/src/glyph_match.rs` (new), `crates/tinker-pdf/src/lib.rs` | A unit test: each glyph of a committed face, looked up by its outline, returns the character its `cmap` gives, in the default build and with `bundled-fonts`. | FT-35.2 |
+| FT-35.4 | build | Extraction: a code that would raise `TextWarning::UnmappedCode` is matched by its glyph's outline, and the text carries the matched character with a typed warning naming the match. | `crates/tinker-pdf/src/glyph_match.rs` (new), `crates/tinker-pdf/src/fontlist.rs`, `crates/tinker-pdf/tests/outline_text.rs` (new), `docs/features/content-and-text.md` | `outline_text.rs` (new) `a_face_with_its_cmap_stripped_reads_its_text`: fixtures embedding a committed face with no `cmap` and no `/ToUnicode` extract the original text, in both builds; a face matching nothing still warns `UnmappedCode`. | FT-35.3 |
+| FT-35.5 | build | Writing the correction: an editor call writes a `/ToUnicode` for each matched font through the CMap writer in `build.rs`, so the saved file reads without matching. | `crates/tinker-pdf-cos/src/build.rs`, `crates/tinker-pdf/src/glyph_match.rs` (new), `crates/tinker-pdf/tests/outline_text.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | `the_corrected_tounicode_is_saved`: the saved fixture re-opens and extracts the original text with no match and no `UnmappedCode`, passes the strict validator, and its bytes are fingerprinted on every K-07 target. | FT-35.4, K-03, K-07 |
+
+**Closes the row:** FT-35.4 recovers the text of faces whose `cmap` is stripped by outline matching, the row's exit, and FT-35.5 writes the corrected `/ToUnicode` the Item names.
 
 ## FT-36 — Link detection
 
@@ -1288,4 +1338,11 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| FT-36.1 | build | Detect URLs (with a scheme, or starting `www.`) and e-mail addresses in a page's extracted text, across a soft line break, and report each with its target and quads; trailing punctuation and a closing bracket the link did not open are left out. | `crates/tinker-pdf/src/links.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/link_detection.rs` (new), `docs/features/content-and-text.md` | `link_detection.rs` (new) `known_links_are_reported_and_nothing_else`: builder pages with known links (wrapped, bracketed, at sentence ends) report exactly those targets and quads, prose without links reports none, in both builds. | — |
+| FT-36.2 | build | Turn detected links into Link annotations through `DocumentEditor::add_annotation`: `/Rect`, `/QuadPoints` and a URI action (`mailto:` for addresses), skipping text an existing link already covers. *Note:* Non-ASCII targets are ED-47's (IRIs percent-encoded on write); until it lands they are reported and not written. | `crates/tinker-pdf/src/links.rs` (new), `crates/tinker-pdf-cos/src/edit/annotations.rs`, `crates/tinker-pdf/tests/link_detection.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | `created_links_validate_and_read_back`: the saved file passes the strict validator, its annotations read back as Links with the detected URIs, running it twice adds nothing, and the output is fingerprinted on every K-07 target. | FT-36.1, K-03, K-07 |
+
+**Closes the row:** FT-36.1 reports links in fixtures with known links and FT-36.2 creates link annotations that validate strictly, which is the row's exit.

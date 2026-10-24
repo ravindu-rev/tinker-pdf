@@ -273,7 +273,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Closes the row:** CD-19.8 lands Left (10) as the owner says (H-149); CD-19.14 to CD-19.18 land the owner's choices on the options re-measured on the landed code, for the words search, (8), (1), (5)'s mixed runs and (2); CD-19.21, CD-19.24, CD-19.25 and CD-19.29 land or record the reader changes for (3), (4) and (6); CD-19.31, CD-19.33, CD-19.35 and CD-19.36 fix (7), (9) and (5)'s findings or record them; CD-19.2 to CD-19.6 close the kit's and the review's leftovers and give the kit the re-timing the options need. CD-19.37 then reads every family in both builds against 9297d2d, 56dfd93 and 935b077 and shows each book conserving, read whole and found by search as it did there, or in a price ruling 14 records (H-158), with no glyph over another under word spacing or justification beyond the overlaps the feature doc names: the row's exit criterion.
 
-**The tree on 23 October 2026, against this row's text:**
+**The tree at `5297133`, against this row's text:**
 
 - The row is banded S, about half an engine-month (`docs/ROADMAP.md:1085`), but its remainder is ten decisions of the owner's, three reader changes that bind every PDF's text, three diagnoses and the review's and the kit's leftovers: 37 steps.
 - `crates/tinker-pdf/tests/epub_fallback.rs:4622` cites `paint::drawn_over`, which `paint.rs` no longer has; the read-back counts glyphs over others with `paint::Overprint` (`crates/tinker-pdf/src/epub/paint.rs:4504`). CD-19.8 corrects it.
