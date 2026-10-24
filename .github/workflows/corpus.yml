@@ -62,7 +62,15 @@ jobs:
           path: corpus/cache
           key: corpora-${{ hashFiles('corpus/corpora.lock') }}
 
+      # Every check after this one carries the same `if:`. A step with none
+      # runs only while every step before it succeeded, so a red census used
+      # to skip all three bars, and a red bar the bars after it: a run
+      # measured only as far as its first failure. Each check now runs
+      # whatever the check before it returned, so long as the corpora are
+      # there to read, and a cancelled run still stops. `cargo xtask
+      # corpusjob` holds the rule (MS-11.4).
       - name: Fetch the pinned corpora
+        id: fetch
         run: cargo run --release -p xtask -- corpus-fetch
 
       # The corpus is not only a never-crash bar. Some of it is *ground truth*:
@@ -74,6 +82,7 @@ jobs:
       # is the only place they run, and without this step they would be
       # documentation rather than a gate.
       - name: Hold the fixtures the corpus adjudicates
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
         run: |
           cargo test --release --no-fail-fast -p tinker-pdf \
             --test jbig2_refinement --test jbig2_lineages \
@@ -92,6 +101,7 @@ jobs:
       # repository keeps catching itself doing. `--no-fail-fast` so one stale
       # number does not hide the next.
       - name: Hold every corpus census
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
         run: |
           cargo test --release --no-fail-fast -p tinker-pdf \
             --test annotation_census \
@@ -126,6 +136,7 @@ jobs:
       # is the point: the two numbers answer different questions and mixing
       # them silently would make the ratchet meaningless.
       - name: Run the corpus and hold the bar
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
         run: |
           set -o pipefail
           # No `--timeout`: the default is sixty seconds, raised from twenty
@@ -159,9 +170,10 @@ jobs:
           # nothing rather than as a regression.
           grep -Eq '^strict +[1-9][0-9]* rewritten' corpus-run.log
 
-      # The second bar, and a second job rather than a second step: one
-      # failing must not stop the other from being measured, and the two
-      # answer different questions.
+      # The second bar, a second step that runs whatever the first returned
+      # (the `if:` every check after the fetch carries): one failing must not
+      # stop the other from being measured, and the two answer different
+      # questions.
       #
       # `--fonts synthetic` writes the face `cargo xtask synth-face` writes —
       # every glyph from 32 up a filled box — and measures against it. No
@@ -171,6 +183,7 @@ jobs:
       # much of the degradation was the absence of a face rather than a defect
       # in the engine.
       - name: Run the corpus with a face, and hold that bar too
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
         run: |
           set -o pipefail
           cargo run --release -p xtask -- corpus-run \
@@ -196,9 +209,11 @@ jobs:
       # bundled binary cannot quietly record the no-faces bar and a plain one
       # cannot be passed off as this.
       - name: Rebuild the child with the faces this project ships
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
         run: cargo build --release -p tpdf --features bundled-fonts
 
       - name: Run the corpus with the bundled faces, and hold that bar too
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
         run: |
           set -o pipefail
           cargo run --release -p xtask -- corpus-run \

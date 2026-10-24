@@ -27,7 +27,9 @@ usage:
   cargo xtask baseline  check the committed speed baseline against the
                         operations `benches/engine.rs` defines and the count
                         `bench.yml` guards — three files carrying one list
-  cargo xtask check     all eight of the above
+  cargo xtask corpusjob check that every check of `corpus.yml` after the
+                        fetch runs whatever the check before it returned
+  cargo xtask check     all nine of the above
 
   cargo xtask release [options]  publish to crates.io, PyPI, npm and NuGet
 
@@ -114,6 +116,7 @@ fn main() -> ExitCode {
         "fuzz" => report("fuzz", fuzzaudit::run(&repo_root(), rest).map(|_| ())),
         "versions" => report("versions", version::check(&repo_root())),
         "baseline" => report("baseline", bench::check(&repo_root())),
+        "corpusjob" => report("corpusjob", check_corpus_job()),
         "check" => {
             let dag = check_dag();
             let libm = check_libm();
@@ -123,6 +126,7 @@ fn main() -> ExitCode {
             let conflicts = check_conflicts();
             let fuzz = fuzzaudit::check(&repo_root());
             let baseline = bench::check(&repo_root());
+            let corpus_job = check_corpus_job();
             let mut problems = dag.err().unwrap_or_default();
             problems.extend(libm.err().unwrap_or_default());
             problems.extend(oracles.err().unwrap_or_default());
@@ -131,6 +135,7 @@ fn main() -> ExitCode {
             problems.extend(conflicts.err().unwrap_or_default());
             problems.extend(fuzz.err().unwrap_or_default());
             problems.extend(baseline.err().unwrap_or_default());
+            problems.extend(corpus_job.err().unwrap_or_default());
             report(
                 "check",
                 if problems.is_empty() {
@@ -1367,6 +1372,114 @@ fn check_conflicts() -> Result<(), Vec<String>> {
     }
 }
 
+/// `cargo xtask corpusjob` — every check of `corpus.yml` after the fetch runs
+/// whatever the check before it returned.
+///
+/// A step with no `if:` runs only while every step before it has succeeded, so
+/// a red census skipped all three bars after it, and a red bar the bars after
+/// it, while the workflow's own comment said the bars were kept apart so that
+/// one failing would not stop the other from being measured (MS-11.4). Each
+/// check after the fetch carries [`AFTER_THE_FETCH`]: the corpora must be
+/// there to read, and nothing else before it decides. The report's upload
+/// keeps `if: always()`, which is wider still.
+fn check_corpus_job() -> Result<(), Vec<String>> {
+    let path = repo_root().join(CORPUS_WORKFLOW);
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| vec![format!("{CORPUS_WORKFLOW}: {e}")])?;
+    corpus_checks_run_on_their_own(&text)
+}
+
+const CORPUS_WORKFLOW: &str = ".github/workflows/corpus.yml";
+
+/// The condition each check after the fetch carries.
+const AFTER_THE_FETCH: &str = "${{ !cancelled() && steps.fetch.outcome == 'success' }}";
+
+/// The rule over a workflow's text: a step has `id: fetch`, and every step
+/// after it carries [`AFTER_THE_FETCH`] or `always()`.
+///
+/// The workflow is read as this repository writes it rather than as YAML in
+/// general: a step begins at a `- ` six spaces in under `steps:`, its keys are
+/// the one on that line and those eight spaces in, and comments and blank
+/// lines belong to no step. A job whose steps it cannot find is a problem,
+/// not a pass.
+fn corpus_checks_run_on_their_own(text: &str) -> Result<(), Vec<String>> {
+    let mut steps: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+    let mut in_steps = false;
+    for line in text.lines() {
+        let body = line.trim_start();
+        if body.is_empty() || body.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - body.len();
+        if indent == 4 && body == "steps:" {
+            in_steps = true;
+            continue;
+        }
+        if !in_steps {
+            continue;
+        }
+        if indent < 6 {
+            in_steps = false;
+            continue;
+        }
+        let key_value = if indent == 6 {
+            let Some(item) = body.strip_prefix("- ") else {
+                continue;
+            };
+            steps.push((String::new(), None, None));
+            item
+        } else if indent == 8 {
+            body
+        } else {
+            continue;
+        };
+        let (Some(step), Some((key, value))) = (steps.last_mut(), key_value.split_once(':')) else {
+            continue;
+        };
+        let value = value.trim().to_string();
+        match key.trim() {
+            "name" => step.0 = value,
+            "uses" if step.0.is_empty() => step.0 = value,
+            "id" => step.1 = Some(value),
+            "if" => step.2 = Some(value),
+            _ => {}
+        }
+    }
+
+    let Some(fetch) = steps.iter().position(|s| s.1.as_deref() == Some("fetch")) else {
+        return Err(vec![format!(
+            "{CORPUS_WORKFLOW}: no step has `id: fetch`, so no check can ask whether the \
+             corpora are there"
+        )]);
+    };
+    let after = &steps[fetch + 1..];
+    if after.is_empty() {
+        return Err(vec![format!(
+            "{CORPUS_WORKFLOW}: no step follows the fetch, so the job checks nothing"
+        )]);
+    }
+    let problems: Vec<String> = after
+        .iter()
+        .filter(|(_, _, condition)| {
+            !matches!(condition.as_deref(), Some(c) if c == AFTER_THE_FETCH || c == "always()" || c == "${{ always() }}")
+        })
+        .map(|(name, _, condition)| match condition {
+            None => format!(
+                "{CORPUS_WORKFLOW}: '{name}' has no `if:`, so a red check before it skips it; \
+                 give it `if: {AFTER_THE_FETCH}`"
+            ),
+            Some(other) => format!(
+                "{CORPUS_WORKFLOW}: '{name}' has `if: {other}`, not `if: {AFTER_THE_FETCH}`"
+            ),
+        })
+        .collect();
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
 /// Whether a line is one of git's conflict markers.
 ///
 /// The space is load-bearing on both. Git writes `<<<<<<< ` and `>>>>>>> `
@@ -1643,5 +1756,104 @@ mod conflict_tests {
         assert!(!is_conflict_marker("<<<<<<<"));
         // Not at the start of the line.
         assert!(!is_conflict_marker("    <<<<<<< HEAD"));
+    }
+}
+
+#[cfg(test)]
+mod corpus_job_tests {
+    use super::{check_corpus_job, corpus_checks_run_on_their_own, AFTER_THE_FETCH};
+
+    /// The rule over the committed workflow, which is the point of it.
+    #[test]
+    fn every_corpus_check_after_the_fetch_runs_on_its_own() {
+        if let Err(problems) = check_corpus_job() {
+            panic!("corpus.yml:\n{}", problems.join("\n"));
+        }
+    }
+
+    /// A job as `corpus.yml` writes one: a build, the fetch, two checks and
+    /// the report, each check's condition given by the caller.
+    fn job(fixtures: &str, census: &str) -> String {
+        format!(
+            "jobs:\n  corpus:\n    runs-on: ubuntu-latest\n    steps:\n      \
+             - uses: actions/checkout@v4\n      \
+             - name: Build\n        run: cargo build\n\n      \
+             # A comment that says if: always() and is no step's key.\n      \
+             - name: Fetch the pinned corpora\n        id: fetch\n        run: fetch\n      \
+             - name: Hold the fixtures\n{fixtures}        run: |\n          cargo test\n      \
+             - name: Hold every census\n{census}        run: cargo test\n      \
+             - name: Keep the per-file report\n        if: always()\n        uses: upload\n"
+        )
+    }
+
+    fn condition(value: &str) -> String {
+        format!("        if: {value}\n")
+    }
+
+    #[test]
+    fn checks_that_carry_the_condition_pass() {
+        let text = job(&condition(AFTER_THE_FETCH), &condition(AFTER_THE_FETCH));
+        assert_eq!(corpus_checks_run_on_their_own(&text), Ok(()));
+    }
+
+    #[test]
+    fn a_check_with_no_condition_is_named() {
+        let text = job(&condition(AFTER_THE_FETCH), "");
+        let problems = corpus_checks_run_on_their_own(&text).unwrap_err();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("'Hold every census' has no `if:`"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_check_with_another_condition_is_named() {
+        let text = job(&condition("success()"), &condition(AFTER_THE_FETCH));
+        let problems = corpus_checks_run_on_their_own(&text).unwrap_err();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("'Hold the fixtures' has `if: success()`"),
+            "{problems:?}"
+        );
+    }
+
+    /// The steps before the fetch, and a comment that mentions `if:`, are no
+    /// check's business.
+    #[test]
+    fn steps_before_the_fetch_and_comments_are_not_read_as_checks() {
+        let text = job(&condition(AFTER_THE_FETCH), &condition(AFTER_THE_FETCH));
+        assert!(text.contains("- name: Build\n        run:"));
+        assert_eq!(corpus_checks_run_on_their_own(&text), Ok(()));
+    }
+
+    #[test]
+    fn a_job_without_the_fetch_id_fails() {
+        let text = job(&condition(AFTER_THE_FETCH), &condition(AFTER_THE_FETCH))
+            .replace("        id: fetch\n", "");
+        let problems = corpus_checks_run_on_their_own(&text).unwrap_err();
+        assert!(
+            problems[0].contains("no step has `id: fetch`"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_job_with_nothing_after_the_fetch_fails() {
+        let text = "jobs:\n  corpus:\n    steps:\n      - name: Fetch\n        id: fetch\n        run: fetch\n";
+        let problems = corpus_checks_run_on_their_own(text).unwrap_err();
+        assert!(
+            problems[0].contains("no step follows the fetch"),
+            "{problems:?}"
+        );
+    }
+
+    /// A workflow read as nothing, a job at another indentation, does not
+    /// pass by finding no checks to hold.
+    #[test]
+    fn a_workflow_whose_steps_are_not_found_fails() {
+        let text = job(&condition(AFTER_THE_FETCH), &condition(AFTER_THE_FETCH))
+            .replace("\n      ", "\n     ");
+        assert!(corpus_checks_run_on_their_own(&text).is_err());
     }
 }
