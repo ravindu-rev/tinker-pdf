@@ -496,7 +496,7 @@ is checked for breaks and documented by examples that run.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | SU-22.1 | build | Feature gates per format and capability: PDF only, each container, HTML and CSS, SVG, scripts, signing, OCR. | `Cargo.toml`, `crates/tinker-pdf/Cargo.toml`, `crates/tinker-pdf/src/lib.rs` | Each gated build compiles and passes its own tests. | — |
-| SU-22.2 | ci | Each gated build a footprint profile in MS-06's ratchet. | `.github/workflows/ci.yml`, `bindings/js/footprint.json` (new) | CI builds every gated profile on `develop`, runs its tests, and reports its footprint against its committed figure. | SU-22.1, MS-06.3 |
+| SU-22.2 | ci | Each gated build a footprint profile in MS-06's ratchet. | `.github/workflows/ci.yml`, `bindings/js/footprint.json` | CI builds every gated profile on `develop`, runs its tests, and reports its footprint against its committed figure. | SU-22.1, MS-06.3 |
 
 **Closes the row:** SU-22.1 compiles and tests every gated build and SU-22.2 reports each one's footprint, which is the row's exit.
 

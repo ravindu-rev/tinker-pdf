@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use xtask::version::{internal_dependencies, package_name};
-use xtask::{bench, corpus, fetch, fuzzaudit, parity, release, repo_root, version};
+use xtask::{bench, corpus, fetch, footprint, fuzzaudit, parity, release, repo_root, version};
 
 const USAGE: &str = "\
 xtask — repository chores
@@ -29,7 +29,9 @@ usage:
                         `bench.yml` guards — three files carrying one list
   cargo xtask corpusjob check that every check of `corpus.yml` after the
                         fetch runs whatever the check before it returned
-  cargo xtask check     all nine of the above
+  cargo xtask footprint check that every figure in bindings/js/footprint.json
+                        carries its tolerance, date and run
+  cargo xtask check     all ten of the above
 
   cargo xtask release [options]  publish to crates.io, PyPI, npm and NuGet
 
@@ -79,6 +81,26 @@ bindings-parity options:
   cargo xtask corpus-licences [--check]  the corpus lock's licence table
   cargo xtask corpus-run [options]       open and render every corpus file
   cargo xtask bench-check --machine NAME  hold `cargo bench` to the committed baseline
+  cargo xtask footprint --profile NAME --gzipped BYTES [options]
+                                         hold a profile's gzipped wasm to its
+                                         figure in bindings/js/footprint.json
+                                         plus its tolerance. With no options,
+                                         the check above
+
+footprint options:
+  --profile NAME  the build profile, as the file names it
+  --gzipped BYTES its wasm's size as `gzip -9 -c ... | wc -c` counts it. The
+                  workflow measures it and passes it in, so this spawns
+                  nothing. A size over the figure plus the tolerance fails; a
+                  shrink passes and prints the `--record` line that takes it
+  --run ID        the workflow run that measured it, and
+  --date DAY      the day, as YYYY-MM-DD: the `--record` line carries both
+  --unrecorded    a profile with no figure is reported rather than failed.
+                  Refused for a profile that has one, so the switch cannot
+                  outlive its figure's commit
+  --record        write the size as the profile's figure, with its run and
+                  day, and keep its tolerance. A shrink only: raising a figure
+                  is a price the owner decides (H-04)
 
 corpus-run options:
   --corpus NAME   only this one; repeatable
@@ -117,6 +139,8 @@ fn main() -> ExitCode {
         "versions" => report("versions", version::check(&repo_root())),
         "baseline" => report("baseline", bench::check(&repo_root())),
         "corpusjob" => report("corpusjob", check_corpus_job()),
+        "footprint" if rest.is_empty() => report("footprint", footprint::check(&repo_root())),
+        "footprint" => one("footprint", footprint::run(&repo_root(), rest)),
         "check" => {
             let dag = check_dag();
             let libm = check_libm();
@@ -127,6 +151,7 @@ fn main() -> ExitCode {
             let fuzz = fuzzaudit::check(&repo_root());
             let baseline = bench::check(&repo_root());
             let corpus_job = check_corpus_job();
+            let figures = footprint::check(&repo_root());
             let mut problems = dag.err().unwrap_or_default();
             problems.extend(libm.err().unwrap_or_default());
             problems.extend(oracles.err().unwrap_or_default());
@@ -136,6 +161,7 @@ fn main() -> ExitCode {
             problems.extend(fuzz.err().unwrap_or_default());
             problems.extend(baseline.err().unwrap_or_default());
             problems.extend(corpus_job.err().unwrap_or_default());
+            problems.extend(figures.err().unwrap_or_default());
             report(
                 "check",
                 if problems.is_empty() {

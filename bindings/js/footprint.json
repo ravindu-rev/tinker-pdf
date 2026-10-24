@@ -1,0 +1,25 @@
+{
+  "note": [
+    "Each wasm build profile's gzipped size, held by `cargo xtask footprint",
+    "--profile NAME --gzipped BYTES`. The workflow builds the profile as",
+    "release.yml's npm job builds the wasm, counts `gzip -9 -c ... | wc -c`",
+    "and passes the number in. A size over `figure.bytes` plus",
+    "`tolerance.bytes` fails; a shrink passes and prints the `--record` line",
+    "that writes it as the figure, with its run and day, keeping the",
+    "tolerance. A profile with no entry fails unless the job names it",
+    "`--unrecorded`.",
+    "",
+    "`figure` is one run's measurement: `bytes`, the `date` (YYYY-MM-DD) and",
+    "the `run` id. `tolerance` is measured, never assumed: `bytes` is the",
+    "widest spread of one revision's size over the workflow `runs` it names",
+    "and the `toolchains` they built with, and zero is a measurement too.",
+    "`cargo xtask check` refuses an entry missing any of these, or carrying a",
+    "key nothing reads.",
+    "",
+    "No profile is recorded yet. Each figure and tolerance comes from the",
+    "footprint job's own runs, not from a local build, and is first written",
+    "by hand with those runs; `--record` only moves a figure whose tolerance",
+    "it keeps."
+  ],
+  "profiles": {}
+}
