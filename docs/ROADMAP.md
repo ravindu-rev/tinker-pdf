@@ -97,7 +97,7 @@ tier's own rules and history, then gives each row its text and its steps.
 | RC | Capability tier — rendering and colour | [roadmap/RC.md](roadmap/RC.md) | 21 | 21 | 172 |
 | FT | Capability tier — fonts and text | [roadmap/FT.md](roadmap/FT.md) | 43 | 43 | 380 |
 | ED | Capability tier — editing, document operations and creation | [roadmap/ED.md](roadmap/ED.md) | 57 | 57 | 269 |
-| AN | Capability tier — annotations, forms and XFA | [roadmap/AN.md](roadmap/AN.md) | 37 | 0 | 0 |
+| AN | Capability tier — annotations, forms and XFA | [roadmap/AN.md](roadmap/AN.md) | 37 | 37 | 150 |
 | FJ | Capability tier — form JavaScript (complete) | [roadmap/FJ.md](roadmap/FJ.md) | 23 | 1 | 42 |
 | SG | Capability tier — signatures (private-key signing in the engine) | [roadmap/SG.md](roadmap/SG.md) | 28 | 0 | 0 |
 | SE | Capability tier — security | [roadmap/SE.md](roadmap/SE.md) | 15 | 0 | 0 |
@@ -311,4 +311,4 @@ ED-12, OC-15b, AN-24; ED-26, ED-27 → OC-12; MS-01 lands with every P row;
 MS-13 (the corpus runs) closes AN-01, SG-26, SD-01, SD-04, SD-11, FT-30,
 FT-31, CD-01 and CD-08.
 
-**The count**: 459 capability, gap and finding rows in the tiers, 173 of them cut into 1209 steps — MS 13 of 13 rows, 66 steps, K 10 of 10 rows, 59 steps, P 27 of 27 rows, 184 steps, RC 21 of 21 rows, 172 steps, FT 43 of 43 rows, 380 steps, ED 57 of 57 rows, 269 steps, AN 0 of 37 rows, 0 steps, FJ 1 of 23 rows, 42 steps, SG 0 of 28 rows, 0 steps, SE 0 of 15 rows, 0 steps, FI 0 of 50 rows, 0 steps, FO 0 of 42 rows, 0 steps, SD 0 of 26 rows, 0 steps, SU 0 of 24 rows, 0 steps, CD 1 of 19 rows, 37 steps, OC 0 of 24 rows, 0 steps; 14 hard limits (NG-01…NG-14); 133 rows for a person (H-01…H-159, H-134 onward added by the cut).
+**The count**: 459 capability, gap and finding rows in the tiers, 210 of them cut into 1359 steps — MS 13 of 13 rows, 66 steps, K 10 of 10 rows, 59 steps, P 27 of 27 rows, 184 steps, RC 21 of 21 rows, 172 steps, FT 43 of 43 rows, 380 steps, ED 57 of 57 rows, 269 steps, AN 37 of 37 rows, 150 steps, FJ 1 of 23 rows, 42 steps, SG 0 of 28 rows, 0 steps, SE 0 of 15 rows, 0 steps, FI 0 of 50 rows, 0 steps, FO 0 of 42 rows, 0 steps, SD 0 of 26 rows, 0 steps, SU 0 of 24 rows, 0 steps, CD 1 of 19 rows, 37 steps, OC 0 of 24 rows, 0 steps; 14 hard limits (NG-01…NG-14); 133 rows for a person (H-01…H-159, H-134 onward added by the cut).
