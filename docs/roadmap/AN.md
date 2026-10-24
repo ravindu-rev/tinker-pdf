@@ -720,7 +720,7 @@ rows. Form JavaScript has its own tier, next.
 | AN-31.5 | build | Date and time built-ins, with locales through AN-32. | `crates/tinker-pdf-script/src/formcalc/builtins.rs` (new) | Unit tests: each built-in holds to the stated examples. | AN-31.4, AN-32 |
 | AN-31.6 | build | Financial built-ins. | `crates/tinker-pdf-script/src/formcalc/builtins.rs` (new) | Unit tests: each built-in holds to the stated examples. | AN-31.4 |
 | AN-31.7 | build | String built-ins, and URL calls handed to the host as typed requests. | `crates/tinker-pdf-script/src/formcalc/builtins.rs` (new) | Unit tests: each built-in holds to the stated examples; URL calls yield their requests and perform no I/O. | AN-31.4 |
-| AN-31.8 | test | The grammar fuzzed as FJ-05 fuzzes the language. | `fuzz/fuzz_targets/formcalc.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md` | The target runs clean in the fuzz check and its seeds replay; the roster is regenerated. | AN-31.2, FJ-05 |
+| AN-31.8 | test | The grammar fuzzed as FJ-05 fuzzes the language. | `fuzz/fuzz_targets/formcalc.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md` | The target runs clean in the fuzz check and its seeds replay; the roster is regenerated. | AN-31.2, FJ-05.1 |
 
 **Closes the row:** AN-31.4 to AN-31.7 hold each built-in to the specification's examples and AN-31.8 fuzzes the grammar, which is the row's exit.
 
