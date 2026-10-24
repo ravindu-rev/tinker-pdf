@@ -158,8 +158,8 @@ the owner merges `develop` into `main` (H-01). `main` is unchanged at
   `rtl_lines` pass. `zz_rv6_hunt` (8 books) and `zz_rv6_ib` (15) fail in
   both builds, on CD-19 Left (10) alone: the owner landed them red on 23
   October as its tripwire.
-- **CI on GitHub has not run on `develop`:** `ci.yml` fires on `main` and on
-  pull requests (MS-11).
+- **CI on `develop`:** `ci.yml` fires on every push to `develop` since
+  MS-11.1 (25 October 2026); MS-11.2 reads its first run to the end (H-02).
 
 ## Still open
 

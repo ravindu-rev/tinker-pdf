@@ -96,7 +96,7 @@ tier's own rules and history, then gives each row its text and its steps.
 
 | Prefix | Tier | File | Rows | Cut into steps | Steps |
 | --- | --- | --- | ---: | ---: | ---: |
-| MS | Tier 0 — measure what is not measured | [roadmap/MS.md](roadmap/MS.md) | 13 | 13 | 70 |
+| MS | Tier 0 — measure what is not measured | [roadmap/MS.md](roadmap/MS.md) | 13 | 13 | 69 |
 | K | Tier 1 — prove correctness | [roadmap/K.md](roadmap/K.md) | 10 | 10 | 59 |
 | P | Tier P — performance | [roadmap/P.md](roadmap/P.md) | 26 | 26 | 187 |
 | RC | Capability tier — rendering and colour | [roadmap/RC.md](roadmap/RC.md) | 21 | 21 | 172 |
@@ -290,7 +290,7 @@ later is cut before its first step is taken ("How a step runs", 1).
    CD-19.9 to CD-19.13; the owner's choices (H-150 to H-154) and CD-19.14
    to CD-19.18; then the rest of the row in its order, to its close
    (H-158).
-2. **MS-11**, CI on `develop` (MS-11.1 to MS-11.6) — whose `epub-corpus`
+2. **MS-11**, CI on `develop` (MS-11.2 to MS-11.6) — whose `epub-corpus`
    job has shown that K-11's fix, closed 10 October 2026 on synthetic books
    alone since no corpus is fetched here, lets
    `sample-regime-anticancer-arabic.epub` conserve past character 20 963:
@@ -332,4 +332,4 @@ ED-12, OC-15b, AN-24; ED-26, ED-27 → OC-12; MS-01 lands with every P row;
 MS-13 (the corpus runs) closes AN-01, SG-26, SD-01, SD-04, SD-11, FT-30,
 FT-31, CD-01 and CD-08.
 
-**The count**: 458 capability, gap and finding rows in the tiers, 458 of them cut into 2531 steps — MS 13 of 13 rows, 70 steps, K 10 of 10 rows, 59 steps, P 26 of 26 rows, 187 steps, RC 21 of 21 rows, 172 steps, FT 43 of 43 rows, 380 steps, ED 57 of 57 rows, 269 steps, AN 37 of 37 rows, 151 steps, FJ 23 of 23 rows, 213 steps, SG 28 of 28 rows, 129 steps, SE 15 of 15 rows, 36 steps, FI 50 of 50 rows, 229 steps, FO 42 of 42 rows, 126 steps, SD 26 of 26 rows, 164 steps, SU 24 of 24 rows, 112 steps, CD 19 of 19 rows, 133 steps, OC 24 of 24 rows, 101 steps; 14 hard limits (NG-01…NG-14); 137 rows for a person (H-01…H-163, H-134 onward added by the cut).
+**The count**: 458 capability, gap and finding rows in the tiers, 458 of them cut into 2530 steps — MS 13 of 13 rows, 69 steps, K 10 of 10 rows, 59 steps, P 26 of 26 rows, 187 steps, RC 21 of 21 rows, 172 steps, FT 43 of 43 rows, 380 steps, ED 57 of 57 rows, 269 steps, AN 37 of 37 rows, 151 steps, FJ 23 of 23 rows, 213 steps, SG 28 of 28 rows, 129 steps, SE 15 of 15 rows, 36 steps, FI 50 of 50 rows, 229 steps, FO 42 of 42 rows, 126 steps, SD 26 of 26 rows, 164 steps, SU 24 of 24 rows, 112 steps, CD 19 of 19 rows, 133 steps, OC 24 of 24 rows, 101 steps; 14 hard limits (NG-01…NG-14); 137 rows for a person (H-01…H-163, H-134 onward added by the cut).

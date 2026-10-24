@@ -31,6 +31,7 @@ idents	K-03	finding 1: save_incremental	one of the search terms the finding list
 idents	FT-04d	finding 1: x_height	one of the search terms the finding says find nothing
 idents	ED-01	finding 1: ContentFilter	quoted from ruling 7's text, which names the path it excepts
 double-create	SD-24b.2|SG-12.6	crates/tinker-pdf-xml/src/schema.rs	one schema checker, which each step says either may create; ordering them would make one wait on the other's standard (H-102, H-161)
+h-blocks	H-01	MS-13	H-01 is decided, and MS-13 reached it only through MS-11.1, which carried out its default (develop in ci.yml's push branches) and landed on 25 October 2026
 h-blocks	H-110	MS-02	H-110 names MS-02 as the job tier P gates through without the pinned runner, not as a row it blocks
 wiring	MS-03.4	MS-02	the note names MS-02's job only to say tier P gates through it with or without the pinned machine
 wiring	P-09.6	MS-05	the note names MS-05's band only as P-09.11's process-level check, which this step does not run

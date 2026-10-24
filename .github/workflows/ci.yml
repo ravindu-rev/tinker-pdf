@@ -6,8 +6,13 @@
 name: CI
 
 on:
+  # `develop` as well as `main`: every change lands on `develop` directly,
+  # with no pull request, and only the owner merges it into `main` (H-01), so
+  # without the branch no change is checked between its push and that merge.
+  # No `cancel-in-progress`: each step's push is the run that checks that
+  # step. `pull_request` stays, for anyone else's pull request.
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
 
 env:
