@@ -273,11 +273,11 @@ reconstruction — each a typed report before it is a removal.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SE-14.1 | design | Amend `docs/design/comic-archives.md` with each encryption scheme, the password seam H-25 decides, multi-volume sets and sparse tar entries. | `docs/design/comic-archives.md` | The amended doc names SE-14.2 to SE-14.5's exit tests and is reviewed. | H-25 |
+| SE-14.1 | design | Amend `docs/design/comic-archives.md` with each encryption scheme, the password seam H-25 decides and multi-volume sets. | `docs/design/comic-archives.md` | The amended doc names SE-14.2 to SE-14.5's exit tests and is reviewed. | H-25 |
 | SE-14.2 | build | ZipCrypto and AES in ZIP (AE-1 and AE-2) through the password seam. | `crates/tinker-pdf-zip/src/lib.rs`, `crates/tinker-pdf-archive/src/lib.rs` | Each scheme holds to its published format description; fixtures generated once by an outside archiver (dated, bytes only) open with their passwords. | SE-14.1, H-106 |
 | SE-14.3 | build | 7z AES-256. | `crates/tinker-pdf-archive/src/lib.rs` | The scheme holds to its format description; a fixture generated once outside opens with its password. | SE-14.2 |
 | SE-14.4 | build | RAR 5 encryption of stored entries. | `crates/tinker-pdf-archive/src/lib.rs` | The scheme holds to its format description; a fixture generated once outside opens with its password. | SE-14.2 |
-| SE-14.5 | build | Multi-volume sets and sparse tar entries, retiring `MultiDisk` and `TarEntryRefused` for them. | `crates/tinker-pdf-archive/src/lib.rs`, `docs/features/cbz.md` | Multi-volume and sparse fixtures open; failing first on today's refusals. | SE-14.2 |
+| SE-14.5 | build | Multi-volume sets, retiring `MultiDisk`; sparse tar entries are FI-25's. | `crates/tinker-pdf-archive/src/lib.rs`, `docs/features/cbz.md` | Multi-volume fixtures open; failing first on today's refusal. | SE-14.2 |
 
 **Closes the row:** SE-14.2 to SE-14.5 hold each scheme to its format description and open outside-made fixtures with their passwords, which is the row's exit.
 
