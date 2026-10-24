@@ -54,12 +54,12 @@ under the row's own text, which stays as it was written; "What a step is",
 below, says what one holds. The rows at the front of the order of work
 were cut first, on 23 and 24 October 2026, and an independent pass reviewed
 sixteen of those cuts against the code (CD-19, FJ-01, K-01…K-09 and
-P-10…P-14). The rest are cut in the session, tier by tier and without
-workflows (the owner, 24 October 2026); "Where the rows are" counts each
-tier's. A cut row no independent pass has reviewed says so, and so does a
-row not yet cut. Every cut so far was made against the tree at `5297133`,
-and where a row's text and that tree disagree, the row says so under its
-steps. Every number and every `file:line` pointer in a
+P-10…P-14). The rest were cut in the session, tier by tier and without
+workflows (the owner, 24 October 2026), and every row now has its steps;
+"Where the rows are" counts each tier's. A cut row no independent pass has
+reviewed says so. Every cut was made against the code at `5297133`, which
+no commit since has changed, and where a row's text and that tree disagree,
+the row says so under its steps. Every number and every `file:line` pointer in a
 row was read from the tree on 9 October 2026, or carries its own date. A
 number the roadmap carries and the tree contradicts is a defect in the
 roadmap.
@@ -106,7 +106,7 @@ tier's own rules and history, then gives each row its text and its steps.
 | SD | Capability tier — standards | [roadmap/SD.md](roadmap/SD.md) | 26 | 26 | 163 |
 | SU | Capability tier — surface: CLI, bindings, packaging, API stability, documentation | [roadmap/SU.md](roadmap/SU.md) | 24 | 24 | 112 |
 | CD | Container depth | [roadmap/CD.md](roadmap/CD.md) | 19 | 19 | 133 |
-| OC | OCR — the last implementation tier | [roadmap/OC.md](roadmap/OC.md) | 24 | 0 | 0 |
+| OC | OCR — the last implementation tier | [roadmap/OC.md](roadmap/OC.md) | 24 | 24 | 100 |
 | H | Human verification and owner decisions | [roadmap/H.md](roadmap/H.md) | 135 | — | — |
 | NG | Named non-goals | [roadmap/NG.md](roadmap/NG.md) | 14 | — | — |
 
@@ -153,7 +153,7 @@ owner's standing instructions behind each of these.
 
 1. **Pick** the first step in "Order of work" whose **Depends on** are all
    done: every step it names has landed, every row it names has left the
-   roadmap, and every H row it names is decided or done. A row not yet cut
+   roadmap, and every H row it names is decided or done. A row added later
    is cut first, in the session, and its cut lands as its own commit to its
    tier's file, with the H rows it needs. A row whose steps are not yet
    reviewed has them reviewed against the tree first, and the corrections
@@ -311,4 +311,4 @@ ED-12, OC-15b, AN-24; ED-26, ED-27 → OC-12; MS-01 lands with every P row;
 MS-13 (the corpus runs) closes AN-01, SG-26, SD-01, SD-04, SD-11, FT-30,
 FT-31, CD-01 and CD-08.
 
-**The count**: 459 capability, gap and finding rows in the tiers, 435 of them cut into 2420 steps — MS 13 of 13 rows, 66 steps, K 10 of 10 rows, 59 steps, P 27 of 27 rows, 184 steps, RC 21 of 21 rows, 172 steps, FT 43 of 43 rows, 380 steps, ED 57 of 57 rows, 269 steps, AN 37 of 37 rows, 149 steps, FJ 23 of 23 rows, 213 steps, SG 28 of 28 rows, 129 steps, SE 15 of 15 rows, 36 steps, FI 50 of 50 rows, 229 steps, FO 42 of 42 rows, 126 steps, SD 26 of 26 rows, 163 steps, SU 24 of 24 rows, 112 steps, CD 19 of 19 rows, 133 steps, OC 0 of 24 rows, 0 steps; 14 hard limits (NG-01…NG-14); 135 rows for a person (H-01…H-161, H-134 onward added by the cut).
+**The count**: 459 capability, gap and finding rows in the tiers, 459 of them cut into 2520 steps — MS 13 of 13 rows, 66 steps, K 10 of 10 rows, 59 steps, P 27 of 27 rows, 184 steps, RC 21 of 21 rows, 172 steps, FT 43 of 43 rows, 380 steps, ED 57 of 57 rows, 269 steps, AN 37 of 37 rows, 149 steps, FJ 23 of 23 rows, 213 steps, SG 28 of 28 rows, 129 steps, SE 15 of 15 rows, 36 steps, FI 50 of 50 rows, 229 steps, FO 42 of 42 rows, 126 steps, SD 26 of 26 rows, 163 steps, SU 24 of 24 rows, 112 steps, CD 19 of 19 rows, 133 steps, OC 24 of 24 rows, 100 steps; 14 hard limits (NG-01…NG-14); 135 rows for a person (H-01…H-161, H-134 onward added by the cut).

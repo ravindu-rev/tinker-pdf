@@ -15,13 +15,14 @@ that moves the work on.
   steps under it. The people's acts are in `docs/roadmap/H.md` and the hard
   limits in `docs/roadmap/NG.md`. Every row ID is unchanged, so every
   reference to one still holds.
-- **How far the cut got.** The roadmap's "Where the rows are" counts each
-  tier's cut rows and steps. An independent pass reviewed 16 cuts against
-  the code (CD-19, FJ-01, K-01…K-09, P-10…P-14); every other cut row says
-  its steps are not yet reviewed, and every row not cut yet says so.
+- **How far the cut got.** Every row is cut; the roadmap's "Where the rows
+  are" counts each tier's rows and steps. An independent pass reviewed 16
+  cuts against the code (CD-19, FJ-01, K-01…K-09, P-10…P-14); every other
+  row says its steps are not yet reviewed.
 - **New rows.** P-27, the shape crate's build script (below, "Small and
-  measured"), and 25 new H rows, H-134 to H-158. CD-19's decisions are
-  H-149 to H-158.
+  measured"), and 28 new H rows, H-134 to H-161. CD-19's decisions are
+  H-149 to H-158; H-160 buys ISO 15930-8 for PDF/X-5 (SD-11) and H-161
+  obtains EN 16931 and the terms of its validation artefacts (SD-24b).
 - **The owner's instructions** (AGENTS.md):
   - 23 October 2026: work runs as workflows, one roadmap step per run;
     commits are signed with the default ed25519 key in `~/.ssh` through
@@ -36,8 +37,8 @@ that moves the work on.
   a signing key.
 - **The cut's working files** (the step JSON, its checker and renderer)
   stay in `.claude/worktrees/roadmap-cut` on that machine only, ignored by
-  git. Nothing below needs them: the rows not yet cut are cut directly in
-  `docs/roadmap/*.md`.
+  git. Nothing below needs them: every row is cut, and a row added later is
+  cut directly in its tier's file in `docs/roadmap/`.
 
 ## Where the work continues
 
@@ -182,8 +183,6 @@ to CD-19.37, H-149 to H-158), in the order "Next" gives.
      and the rest of CD-19 in its order;
    - then P-27.1, MS-11 and K-06, K-01 and K-02, MS-01, MS-04, MS-06 and
      MS-02, P-01 to P-05, and the tiers.
-2. **Separately, in the session and without workflows**: cut the rows not
-   yet cut, tier by tier, in the order of work. Each tier's cut lands as its
-   own commit.
-3. The cut rows whose steps are not yet reviewed are reviewed when each
-   comes up ("How a step runs", 1).
+2. **Separately, as the owner asked on 24 October 2026**: the review of the
+   cut rows whose steps are not yet reviewed. Until it happens, each is
+   reviewed against the tree when it comes up ("How a step runs", 1).
