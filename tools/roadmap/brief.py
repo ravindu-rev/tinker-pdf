@@ -387,7 +387,7 @@ def file_brief(rm, tree, ctx, path, full):
 
 def main(argv):
     ap = argparse.ArgumentParser(description='Print what a run needs to know about one roadmap step.')
-    ap.add_argument('id', nargs='?', help='a step (P-27.1) or a row (MS-03)')
+    ap.add_argument('id', nargs='?', help='a step (MS-03.1) or a row (MS-03)')
     ap.add_argument('--file', help='list the steps that change one file')
     ap.add_argument('--repo', default=os.path.normpath(os.path.join(HERE, '..', '..')))
     ap.add_argument('--base', default=BASE, help='the commit history is counted from (default: %(default)s)')

@@ -98,7 +98,7 @@ tier's own rules and history, then gives each row its text and its steps.
 | --- | --- | --- | ---: | ---: | ---: |
 | MS | Tier 0 — measure what is not measured | [roadmap/MS.md](roadmap/MS.md) | 13 | 13 | 70 |
 | K | Tier 1 — prove correctness | [roadmap/K.md](roadmap/K.md) | 10 | 10 | 59 |
-| P | Tier P — performance | [roadmap/P.md](roadmap/P.md) | 27 | 27 | 188 |
+| P | Tier P — performance | [roadmap/P.md](roadmap/P.md) | 26 | 26 | 187 |
 | RC | Capability tier — rendering and colour | [roadmap/RC.md](roadmap/RC.md) | 21 | 21 | 172 |
 | FT | Capability tier — fonts and text | [roadmap/FT.md](roadmap/FT.md) | 43 | 43 | 380 |
 | ED | Capability tier — editing, document operations and creation | [roadmap/ED.md](roadmap/ED.md) | 57 | 57 | 269 |
@@ -290,9 +290,7 @@ later is cut before its first step is taken ("How a step runs", 1).
    CD-19.9 to CD-19.13; the owner's choices (H-150 to H-154) and CD-19.14
    to CD-19.18; then the rest of the row in its order, to its close
    (H-158).
-2. **P-27.1**, the shape crate's build script: measured and not yet made,
-   and every build pays for it.
-3. **MS-11**, CI on `develop` (MS-11.1 to MS-11.6) — whose `epub-corpus`
+2. **MS-11**, CI on `develop` (MS-11.1 to MS-11.6) — whose `epub-corpus`
    job has shown that K-11's fix, closed 10 October 2026 on synthetic books
    alone since no corpus is fetched here, lets
    `sample-regime-anticancer-arabic.epub` conserve past character 20 963:
@@ -300,15 +298,15 @@ later is cut before its first step is taken ("How a step runs", 1).
    38138512898 — and **K-06**, the fuzz failure (K-06.1 to K-06.4; its
    seven nights count from the owner's next merge of `develop` into
    `main`), with H-02 and H-03.
-4. **K-01** (the external graphics state) and **K-02** (default colour
+3. **K-01** (the external graphics state) and **K-02** (default colour
    spaces; K-02.2 waits on H-135), because both change what every page
    draws.
-5. **MS-01, MS-04, MS-05, MS-06 and MS-02**, the speed, memory and
+4. **MS-01, MS-04, MS-05, MS-06 and MS-02**, the speed, memory and
    footprint instruments, in that order. MS-01 runs to MS-01.8 here; its
    last step, MS-01.9, reads every guard green once the P rows that land
    them have, so every step that needs the tally waits on MS-01.8, never on
    the whole row.
-6. **P-01 to P-05**: algorithmic, small, a 3–30× win each on its operation.
+5. **P-01 to P-05**: algorithmic, small, a 3–30× win each on its operation.
 
 Then the capability tiers in the order of "Where the rows are", each
 ordered inside by corpus evidence (ruling 3 as amended), with signatures'
@@ -334,4 +332,4 @@ ED-12, OC-15b, AN-24; ED-26, ED-27 → OC-12; MS-01 lands with every P row;
 MS-13 (the corpus runs) closes AN-01, SG-26, SD-01, SD-04, SD-11, FT-30,
 FT-31, CD-01 and CD-08.
 
-**The count**: 459 capability, gap and finding rows in the tiers, 459 of them cut into 2532 steps — MS 13 of 13 rows, 70 steps, K 10 of 10 rows, 59 steps, P 27 of 27 rows, 188 steps, RC 21 of 21 rows, 172 steps, FT 43 of 43 rows, 380 steps, ED 57 of 57 rows, 269 steps, AN 37 of 37 rows, 151 steps, FJ 23 of 23 rows, 213 steps, SG 28 of 28 rows, 129 steps, SE 15 of 15 rows, 36 steps, FI 50 of 50 rows, 229 steps, FO 42 of 42 rows, 126 steps, SD 26 of 26 rows, 164 steps, SU 24 of 24 rows, 112 steps, CD 19 of 19 rows, 133 steps, OC 24 of 24 rows, 101 steps; 14 hard limits (NG-01…NG-14); 137 rows for a person (H-01…H-163, H-134 onward added by the cut).
+**The count**: 458 capability, gap and finding rows in the tiers, 458 of them cut into 2531 steps — MS 13 of 13 rows, 70 steps, K 10 of 10 rows, 59 steps, P 26 of 26 rows, 187 steps, RC 21 of 21 rows, 172 steps, FT 43 of 43 rows, 380 steps, ED 57 of 57 rows, 269 steps, AN 37 of 37 rows, 151 steps, FJ 23 of 23 rows, 213 steps, SG 28 of 28 rows, 129 steps, SE 15 of 15 rows, 36 steps, FI 50 of 50 rows, 229 steps, FO 42 of 42 rows, 126 steps, SD 26 of 26 rows, 164 steps, SU 24 of 24 rows, 112 steps, CD 19 of 19 rows, 133 steps, OC 24 of 24 rows, 101 steps; 14 hard limits (NG-01…NG-14); 137 rows for a person (H-01…H-163, H-134 onward added by the cut).

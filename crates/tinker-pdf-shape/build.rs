@@ -60,6 +60,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn main() {
     let data = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this"))
@@ -195,12 +196,26 @@ fn bidi_class(data: &Path, out: &mut String) {
     let path = data.join("DerivedBidiClass.txt");
     let mut map: BTreeMap<u32, String> = BTreeMap::new();
     // In file order: `0000..10FFFF; Left_To_Right` comes first and the block
-    // defaults that follow narrow it.
-    for (first, last, value) in missing(&path) {
-        for code in first..=last {
-            map.insert(code, abbreviate(&value));
+    // defaults that follow narrow it. `abbreviate` reads the alias file on
+    // every call, so each line's name is resolved once, before the loop over
+    // its code points: resolved inside it, the first line alone would read
+    // the file 1 114 112 times.
+    let defaults = missing(&path);
+    let before = ABBREVIATE_CALLS.load(Ordering::Relaxed);
+    for (first, last, value) in &defaults {
+        let class = abbreviate(value);
+        for code in *first..=*last {
+            map.insert(code, class.clone());
         }
     }
+    let calls = ABBREVIATE_CALLS.load(Ordering::Relaxed) - before;
+    assert_eq!(
+        calls,
+        defaults.len(),
+        "abbreviate ran {calls} times for {} @missing lines; it reads \
+         PropertyValueAliases.txt on every call, so it runs once per line",
+        defaults.len()
+    );
     for (first, last, values) in rows(&path) {
         for code in first..=last {
             map.insert(code, values[0].clone());
@@ -220,6 +235,10 @@ fn bidi_class(data: &Path, out: &mut String) {
     emit(out, "BIDI_CLASS", "BidiClass", &merged);
 }
 
+/// How many times [`abbreviate`] has run, which [`bidi_class`] holds to once
+/// per `@missing` line.
+static ABBREVIATE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
 /// The long `Bidi_Class` names the `@missing` lines use, as the abbreviations
 /// the data rows use.
 ///
@@ -228,7 +247,9 @@ fn bidi_class(data: &Path, out: &mut String) {
 /// stops the build in the same way an unknown class does.
 fn abbreviate(long: &str) -> String {
     // The alias file is read once per call rather than threaded through, and
-    // the number of `@missing` lines is twenty-five.
+    // there is one call per `@missing` line, 24 for the vendored 17.0.0
+    // `DerivedBidiClass.txt`, which `bidi_class` asserts.
+    ABBREVIATE_CALLS.fetch_add(1, Ordering::Relaxed);
     let path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this"))
         .join("data")
         .join("ucd")

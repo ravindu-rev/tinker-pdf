@@ -41,8 +41,8 @@ same commit that moves the work on.
   them, so the 49 steps that needed MS-01's tally now wait on MS-01.8, not
   the whole row (as cut, MS-01 could never close); and an ordering was
   added wherever two steps edit the same code without one.
-- **New rows.** P-27, the shape crate's build script (below, "Small and
-  measured"), and 30 new H rows, H-134 to H-163. CD-19's decisions are
+- **New rows.** P-27, the shape crate's build script (landed 25 October
+  2026, P-27.1), and 30 new H rows, H-134 to H-163. CD-19's decisions are
   H-149 to H-158; H-160 buys ISO 15930-8 for PDF/X-5 (SD-11) and H-161
   obtains EN 16931 and the terms of its validation artefacts (SD-24b);
   H-162 decides what gives if MS-02's paired job cannot fit its 15 minutes,
@@ -215,11 +215,7 @@ to CD-19.37, H-149 to H-158), in the order "Next" gives.
   - `inject.py` touches only the crates its injections name, so give each
     tree its own cargo target.
   - The suites' times swing with load; the docs quote a quiet machine.
-- **Small and measured, not yet made** (now ROADMAP P-27.1 and CD-19.2):
-  - **`perf(shape)`:** `crates/tinker-pdf-shape/build.rs`'s `bidi_class`
-    calls `abbreviate` once per code point. Hoisting the call out of the
-    loop took the build script from 35.0 s to 0.21 s, with `ucd.rs`
-    byte-identical, as measured by a peer session.
+- **Small and measured, not yet made** (now ROADMAP CD-19.2):
   - **`fix(rtl)`:** `run.sh`, `diag.sh` and `inject.py` force
     `CARGO_BUILD_JOBS=3`. Cargo's default is faster on 8 CPUs.
 
@@ -240,7 +236,7 @@ to CD-19.37, H-149 to H-158), in the order "Next" gives.
    - the options rebuilt on the landed code and re-timed (CD-19.9 to
      CD-19.13), the owner's choices (H-150 to H-154), CD-19.14 to CD-19.18,
      and the rest of CD-19 in its order;
-   - then P-27.1, MS-11 and K-06, K-01 and K-02, MS-01 (to MS-01.8),
+   - then MS-11 and K-06, K-01 and K-02, MS-01 (to MS-01.8),
      MS-04, MS-05, MS-06 and MS-02, P-01 to P-05, and the tiers.
 2. **Review and verification, once all the work is done** ("How a step
    runs", 4): a fresh review of the work, the counted injections, and each

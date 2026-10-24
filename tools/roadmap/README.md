@@ -13,7 +13,7 @@ python3 -I tools/roadmap/sweep.py --quiet      # unexplained findings only
 python3 -I tools/roadmap/sweep.py --only h-blocks,row-deps
 python3 -I tools/roadmap/sweep.py --waits      # every whole-row wait that brings a person's act
 python3 -I tools/roadmap/selfcheck.py --inject # the sweep's own tests
-python3 -I tools/roadmap/brief.py P-27.1       # what a run reads about one step first
+python3 -I tools/roadmap/brief.py MS-03.1      # what a run reads about one step first
 ```
 
 It exits 0 when every finding is fixed or accepted. It exits 1 when a finding
@@ -174,8 +174,8 @@ decision, so such a wait is narrowed to the row's other steps:
   steps waits on, at any depth.
 - The waited rows' tails are all left out at once.
 - An act the step reaches another way is no stall.
-- MS-11's acts are taken with MS-11, third in the order of work after CD-19
-  and P-27.1 and before every other row, so they stall nothing.
+- MS-11's acts are taken with MS-11, second in the order of work after
+  CD-19 and before every other row, so they stall nothing.
 - A `watch` or `measure` step in its own row's tail may mean to wait on a
   tail. One that other kinds of its row's steps wait on is their
   prerequisite, and is read as they are.
@@ -260,7 +260,7 @@ code, so that no run reads a whole tier file (`docs/roadmap/FT.md` is
 513 508 bytes) or makes the same searches one at a time:
 
 ```sh
-python3 -I tools/roadmap/brief.py P-27.1                     # one step
+python3 -I tools/roadmap/brief.py MS-03.1                    # one step
 python3 -I tools/roadmap/brief.py MS-03                      # a row, every step in full
 python3 -I tools/roadmap/brief.py --file xtask/src/bench.rs  # the steps that change one file
 ```
@@ -289,10 +289,10 @@ A step's brief holds:
 It reads through `sweep.py`'s reader, so it reads what the sweep reads, and
 exits 2 where the sweep would, or when the ID names nothing. It changes no
 file, fetches nothing, and runs `git` only to list the commits. A list stops
-at twelve and says how many it left out; `--all` prints every item. P-27.1's
-brief is 3 545 bytes, where its tier file, `P.md`, is 325 685. Over every
-step, with the names' places and the commits left out, the median brief is
-3 126 bytes and the largest 14 417 (MS-04.8).
+at twelve and says how many it left out; `--all` prints every item. At
+`5dcff366`, P-27.1's brief was 3 545 bytes, where its tier file, `P.md`, was
+325 685; over every step, with the names' places and the commits left out,
+the median brief was 3 126 bytes and the largest 14 417 (MS-04.8).
 
 `briefcheck.py` holds each part of the brief to a fixture of its own (45
 checks); with `--inject` it puts each of 43 rules back broken in the source,

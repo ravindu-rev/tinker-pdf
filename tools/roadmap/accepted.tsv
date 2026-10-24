@@ -14,7 +14,6 @@ refs	MS-13.4	what: bug854315.pdf	a corpus file, fetched only in CI's corpus job 
 refs	MS-13.4	notes: bug854315.pdf	a corpus file, fetched only in CI's corpus job and never into the tree
 refs	MS-13.4	exit: bug854315.pdf	a corpus file, fetched only in CI's corpus job and never into the tree
 refs	MS-13.6	what: MANIFEST.tsv	written by fetch-corpus.sh each run, never committed
-refs	P-27.1	exit: ucd.rs	the shape crate's build script output, written into OUT_DIR
 refs	FT-24.2	notes: spec.txt	CommonMark's examples, fetched into target/ by fetch-spec.sh and not vendored
 refs	SG-13.4	what: signatures.xml	the META-INF entry inside an EPUB container
 refs	SE-15.1	what: META-INF/encryption.xml	the entry inside an EPUB container
@@ -23,8 +22,6 @@ refs	MS-13	finding 4: MANIFEST.tsv	written by fetch-corpus.sh each run, never co
 refs	FT-02	finding 1: ScriptExtensions.txt	the finding says the file is not vendored
 row-refs	MS-02	exit: estimates.json	criterion's per-operation output, written under target/criterion by each run
 row-refs	MS-02	exit: sample.json	criterion's per-operation output, written under target/criterion by each run
-row-refs	P-27	today: ucd.rs	the shape crate's build script output, written into OUT_DIR
-row-refs	P-27	exit: ucd.rs	the shape crate's build script output, written into OUT_DIR
 row-refs	SG-13	item: signatures.xml	the META-INF entry inside an EPUB container
 row-refs	SG-26	today: bug854315.pdf	a corpus file, fetched only in CI's corpus job and never into the tree
 row-refs	SE-15	item: signatures.xml	the META-INF entry inside an EPUB container

@@ -1477,8 +1477,8 @@ def check_tail_wait(rm, tree, ctx):
     bringing one act do not hide each other. A `watch` or `measure` step in
     its own row's tail may mean to wait on a tail; one that other kinds of its
     row's steps wait on is their prerequisite, and stalls them. The acts MS-11
-    waits on are taken with MS-11, third in the order of work, after CD-19 and
-    P-27.1 and before every other row, so no other row stalls on them."""
+    waits on are taken with MS-11, second in the order of work, after CD-19
+    and before every other row, so no other row stalls on them."""
     out = []
     tails = {}
 
