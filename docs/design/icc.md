@@ -44,6 +44,13 @@ records what they measured.
 - Fixtures, fingerprints, a fuzz target and specification-derived
   known-answer tables for all of the above
   ([verification.md](../verification.md), ruling 13).
+- **Default colour spaces** (8.6.5.6; roadmap row K-02): a scope's
+  `/DefaultGray`, `/DefaultRGB` and `/DefaultCMYK` stand in for the device
+  space each is named for, on every path that selects one, when rendering
+  and when extracting. Designed in
+  [Default colour spaces](#default-colour-spaces-8656) below. It waits on
+  no milestone here and builds on both stages: a default is a CIE or
+  `ICCBased` space like any other, and stage 2's CMM converts it.
 
 ## Non-goals
 
@@ -67,6 +74,28 @@ records what they measured.
 - **Exact CalGray/CalRGB.** `parse_space` maps them to device spaces
   today; 8.6.5.2–8.6.5.3 fidelity rides on the same PCS machinery and can
   follow, but no milestone below depends on it.
+  *Built, 7 September 2026*: `parse_space` reads both arrays' white point,
+  gamma and matrix (`crates/tinker-pdf/src/resources.rs:1075-1111`); only a
+  bare `/CalGray` or `/CalRGB` name, which carries no parameters, is still
+  drawn as its device space.
+- **For default colour spaces, a JPEG or JPEG 2000 image's colour.** Such an
+  image is drawn in the colour its codestream carries and never reads its
+  `/ColorSpace`: an image XObject returns at
+  `crates/tinker-pdf/src/resources.rs:3135-3166`, before the space is read at
+  `:3176`, and an inline one at `:3500-3524`, before `:3530`. Neither a
+  default nor a space named directly reaches it — the gap P-22's notes record
+  for an ICC-based CMYK JPEG (`docs/roadmap/P.md:840`). Closing it moves
+  every profiled JPEG a document draws, which is a row's own question rather
+  than K-02's.
+- **For default colour spaces, the scope a Type 3 glyph or a soft-mask group
+  runs in.** Both run in the scope that invokes them rather than in their own
+  `/Resources` (see [the scope a default is read in](#the-scope-a-default-is-read-in)).
+  A default follows the scope the engine resolves their other names in; the
+  scope is the gap, and it is not this design's.
+- **For default colour spaces, PDF/A's and PDF/X's reading.** The validators
+  record a default per walk rather than per resource dictionary
+  (`crates/tinker-pdf/src/pdfa/colour.rs:800-819`), a simplification they
+  name; this design changes rendering and extraction, not validation.
 
 ## Design
 
@@ -291,6 +320,350 @@ volume, and the corpus census counts tags and bytes.
   committed fingerprints in `determinism.rs`, holding ruling 4's
   bit-identical contract across targets once profiles drive conversion.
 
+### Default colour spaces (8.6.5.6)
+
+Roadmap row K-02, designed on 25 October 2026 and not yet built. A resource
+dictionary's `/ColorSpace` may carry `/DefaultGray`, `/DefaultRGB` and
+`/DefaultCMYK` (PDF 1.1), and 8.6.5.6 makes each stand in for the device
+space it is named for, so that device colours are drawn calibrated. Nothing
+outside the PDF/A and PDF/X validators reads them today
+(`crates/tinker-pdf/src/pdfa/colour.rs:800-819`,
+`crates/tinker-pdf/src/pdfx/print.rs:187-190`): a page that calibrates its
+device colours through one is drawn as though it had not, and the space the
+default names is never asked. This section transcribes what the standard
+says, maps every path in the tree that selects a device space and every
+scope a default is read in, and settles what K-02.2 to K-02.5 build.
+
+**Quoted from ISO 32000-1:2008 with no copy of it in the tree**, so the
+wording is a reviewer's to check against the standard. Where the standard is
+silent, or this section is not sure what it says, it says so, and each such
+place carries the decision this design takes and the test that holds it, so
+a different reading moves one test.
+
+#### What the standard says
+
+8.6.5.6, in its own words:
+
+> A colour space is selected for painting each graphics object. This is
+> either the current colour space parameter in the graphics state or a
+> colour space given as an entry in an image XObject, inline image, or
+> shading dictionary. Regardless of how the colour space is specified, it
+> shall be subject to remapping as described here.
+>
+> When a device colour space is selected, the ColorSpace subdictionary of
+> the current resource dictionary is checked for the presence of an entry
+> designating a corresponding default colour space (DefaultGray,
+> DefaultRGB, or DefaultCMYK, corresponding to DeviceGray, DeviceRGB, or
+> DeviceCMYK, respectively). If such an entry is present, its value shall
+> be used as the colour space for the operation currently being performed.
+
+The rest of the clause, in short:
+
+- **Values pass unchanged.** The device space's colour values go to the
+  default as they are; the default shall have the device space's number of
+  components, and a value outside its range is adjusted to the nearest valid
+  one. That it be compatible — the components' ranges, additive or
+  subtractive — is a *should*.
+- **Any space but Lab, Indexed or Pattern** may be a default.
+- **A special space over a device space** has the default used in place of
+  the underlying space: the underlying space of an uncoloured tiling
+  pattern, the base of an Indexed space, and the alternate of a Separation
+  or DeviceN space, "but only if the alternate colour space is actually
+  selected".
+
+Two other clauses reach it:
+
+- **8.6.8.** `G` sets the stroking colour space "to DeviceGray (or the
+  DefaultGray colour space; see 8.6.5.6, "Default Colour Spaces")", and `g`,
+  `RG`/`rg` and `K`/`k` say the same of theirs, so the device operators are
+  selections exactly as `cs` is. `CS`'s own entry adds that the names
+  DeviceGray, DeviceRGB, DeviceCMYK and Pattern "always identify the
+  corresponding colour spaces directly; they never refer to resources in the
+  ColorSpace subdictionary": a `cs` operand naming one is never looked up,
+  and the default is what reaches the resources.
+- **11.6.6**, the group attributes dictionary's `/CS`: "Device colour spaces
+  shall be subject to remapping according to the DefaultGray, DefaultRGB,
+  and DefaultCMYK entries in the ColorSpace subdictionary of the current
+  resource dictionary (see 8.6.5.6, "Default Colour Spaces")". So a group's
+  device `/CS` remaps, and with it a luminosity soft mask's `/BC`, which
+  11.6.5.2 counts in "the colour space specified by the CS entry in the
+  group attributes dictionary". The same entry uses "default" for something
+  else: an absent `/CS` defaults to the parent group's or page's space, the
+  space a group inherits to blend in, which is not 8.6.5.6's default.
+
+#### Which selections remap
+
+| Selection | Remapped | Said by | This engine today |
+| --- | --- | --- | --- |
+| `g`/`G`, `rg`/`RG`, `k`/`K` | yes | 8.6.8 | converted in place, never asking the resource seam (`crates/tinker-pdf-content/src/interpret.rs:1022-1050`) |
+| `cs`/`CS` naming a device space, or a `/ColorSpace` entry that is one | yes | 8.6.5.6 | `color_space` (`crates/tinker-pdf/src/resources.rs:922-958`); `parse_space`'s name arm (`:967-975`) |
+| `sc`/`scn` in such a space, or with no space named | yes | 8.6.5.6 | `interpret.rs:1071-1131`; with none named, read by count (`:1120-1126`, `components_to_rgb` at `:1874`) |
+| An `/Indexed` base | yes | 8.6.5.6 | `parse_space` (`resources.rs:1010-1029`) |
+| `[/Pattern base]`'s base | yes, in the scope whose `cs` selected it | 8.6.5.6 | `resources.rs:1064-1068`; `scn`'s operands (`interpret.rs:1087-1108`) |
+| A `/Separation` or `/DeviceN` alternate | when selected — which, as this section reads 8.6.6.4, `/All` and `/None` never are | 8.6.5.6 | always selected, since no render paints a named colorant on a plate of its own, the ink render's process plates included, and `/All` and `/None` are not told apart (`resources.rs:1030-1057`; RC-04.5) |
+| An image XObject's `/ColorSpace` | yes | 8.6.5.6 | a sampled image's at `resources.rs:3176-3179`; **a JPEG or JPEG 2000 image returns before it is read** (`:3135-3166`) |
+| An inline image's `/CS` | yes | 8.6.5.6, 8.9.7 | `resources.rs:3530-3533`, after `expand_inline_abbreviations` (`:319-376`); **an inline JPEG or JPEG 2000 returns before it** (`:3500-3524`) |
+| A shading's `/ColorSpace`, under `sh` and in a shading pattern, and its `/Background` with it | yes | 8.6.5.6 | `read_shading` (`resources.rs:1181-1184`) |
+| A transparency group's `/CS`, a form's and the page's | yes | 11.6.6 | `resources.rs:2102-2106` and `:653-674`, reduced to a shape by `group_space` (`:385-398`) |
+| A luminosity soft mask's `/BC` | yes, through `/G`'s `/CS` | 11.6.5.2, 11.6.6 | `resources.rs:1626-1645` |
+| A stencil mask, and an image's `/Mask` | nothing to remap | 8.9.6.2, 8.9.6.3 | — |
+| A soft-mask image (`/SMask`) | no | read here from 11.6.5.3 | — |
+| A JPEG 2000 codestream's own colour, under no `/ColorSpace` | no | read here | — |
+| A space inside a default | not stated; no, here | — | — |
+| A `/DeviceN`'s `/Process` space | not stated | 8.6.6.5 | not read (RC-04.5) |
+
+**Four of those answers are this design's readings, not quotations.** A
+soft-mask image's samples are the parent image's opacity (11.6.5.3), and
+8.6.5.6 remaps a space "selected for painting": nothing is painted in that
+one, but this section cannot quote a sentence that says it is not remapped.
+A JPEG 2000 codestream with no `/ColorSpace` over it carries its own colour
+specification (7.4.9), which is not a PDF device space and is read as
+selecting none. A default's own spaces are resolved as written and never
+remapped again: nothing is said of a `/Separation` default whose alternate is
+`/DeviceRGB` under a `/DefaultRGB`, and resolving the substitute once is the
+reading that terminates — `/DefaultRGB /DeviceRGB`, a legal default, would
+otherwise remap itself without end. Whether `/Process` remaps is RC-04.1's to
+read when it reads the attributes. A stencil has no space of its own: it
+paints the fill colour (8.9.6.2), remapped when that was set.
+
+**The engine's own readings of a device space remap too.** `cs /G`, `/RGB`
+or `/CMYK` where no resource has that name, and a bare `/CalGray` or
+`/CalRGB` name with no parameters, are drawn as the device space in every
+other respect (`resources.rs:925-955`), so a default applies to them as it
+does to the names they stand for.
+
+#### The scope a default is read in
+
+**A default is read from the dictionary the stream's other names resolve
+in.** 8.6.5.6 says "the current resource dictionary", and the engine keeps
+one object per such dictionary, `PageResources`. Reading the default from
+the object a `cs /CS0` beside it resolves against means the two are never
+read in different scopes, including in the two rows below where the
+engine's scope is itself the wrong one.
+
+| Scope | The standard | This engine |
+| --- | --- | --- |
+| Page | its `/Resources`, inherited down the page tree (7.7.3.4) | `PageResources::new` (`resources.rs:574`), over the inherited dictionary (`crates/tinker-pdf-cos/src/pages.rs:235-239`) |
+| Form XObject | its own `/Resources` (8.10.1); without them, the page's, a construct 7.8.3 calls obsolete | its own (`form_resources`, `resources.rs:857-891`), or the invoking scope when it has none (`interpret.rs:1470-1475`) |
+| Tiling pattern | its own `/Resources`, required (Table 75) | its own, or the invoking scope's when absent (`resources.rs:1860-1873`) |
+| Type 3 glyph | the font's `/Resources`, or the page's when absent (9.6.5) | **the enclosing scope**: a glyph procedure runs without changing scope (`interpret.rs:1777-1800`), which `docs/features/editing.md:844` records for subsetting |
+| Annotation appearance | its own `/Resources`, an appearance stream being a form XObject (12.5.5) | its own, or an empty scope when it has none (`crates/tinker-pdf/src/annots.rs:234-238`) |
+| Soft-mask group | `/G`'s own `/Resources`, `/G` being a form XObject (11.6.5.2) | **the scope that set the `gs`** (`interpret.rs:1597-1657`), the deviation FT-28's notes record (`docs/roadmap/FT.md:1150`) |
+
+- **A page's default does not reach into a form that has `/Resources` of
+  its own**, even resources with no `/ColorSpace`: they are the current
+  resource dictionary inside it, and 8.10.1 makes an independent form's
+  resources the whole of what it may name. A reader that carries a scope's
+  defaults into the forms it invokes draws such a form in the substitute
+  where this design draws it in the device space; K-02.4 counts the files
+  where the two part. The other way, a form's default applies inside it
+  only.
+- **An uncoloured pattern's base is remapped where `[/Pattern base]` was
+  selected**, since its colour is given there. A coloured cell paints under
+  its own `/Resources`' defaults; an uncoloured cell paints no colour of its
+  own (8.7.3.3).
+- **An image or a shading brings no resources**, so it is read in the scope
+  that paints it: `Do`, `sh`, or the fill a shading pattern paints.
+- **A Type 3 glyph and a soft-mask group** run in a scope that is not the one
+  9.6.5 and 11.6.5.2 name, for every name in them alike, and the default
+  follows that scope rather than being put right alone (the non-goal
+  above). A `d1` glyph specifies shape only (9.6.5), so only a `d0`
+  glyph's colours are in question.
+
+**A group's `/CS`: which "current resource dictionary", the standard does
+not say.** For the page group it can only be the page's. For a form's group
+it could be the form's own `/Resources`, where its contents are painted, or
+the invoking stream's, where `Do` runs. This design reads the scope the
+group's contents run in: the form's own when it has them, the invoking scope
+when it has not, and for a soft-mask group the scope the engine runs it in.
+A group whose `/CS` were remapped by one dictionary and its contents by
+another would paint them in one calibration and composite them in another.
+Today `form_from` reads a form group's `/CS` on the invoking scope
+(`resources.rs:2102-2106`); K-02.2 reads it on the form's.
+
+**Remapping a group's `/CS` changes no pixel this engine draws today, and the
+`/BC` is where a default shows.** `group_space` keeps only a space's shape —
+one, three or four channels, or Lab (`resources.rs:385-398`) — and a default
+has its device space's component count, so a remapped group composites in
+the same buffer through the same boundary conversions; the remap starts to
+matter when a group composites through a profile. A luminosity mask's `/BC`
+is converted to light through the space (`resources.rs:1626-1645`), so a
+default there moves the backdrop the mask is measured against.
+
+#### One selection, two answers
+
+**The space as selected and the space as substituted.** `resolve_color` and
+every decode — images, inline images, shadings, the `/BC` — convert through
+the substitute. `resolve_ink` (`resources.rs:1516-1532`) and `initial_color`
+(`:1534-1536`) read the space as selected: the first so that a DeviceCMYK
+colour keeps its ink under a default (below), the second for the colour `cs`
+resets to. Both answers come from one parse of the selection — the substitute
+is the parsed space with the scope's defaults put in — so nothing is parsed
+twice, and the per-name cache P-02.5 adds keeps the two together.
+
+**The initial colour is the device space's, carried into the default.** The
+standard does not settle what `/DeviceCMYK cs` sets the colour to under a
+`/DefaultCMYK`: DeviceCMYK's own `0 0 0 1` (8.6.8), passed unchanged into the
+default as every other value is, or the default's own initial value, which
+for an `ICCBased` space is all zeros — in CMYK, no ink at all. The two differ
+wherever the default's own initial value is not the device space's: under an
+`ICCBased` `/DefaultCMYK`, and under any default that is a `/Separation` or
+`/DeviceN`, whose own initial value is the full tint. Under an `ICCBased`,
+`CalGray` or `CalRGB` default for gray or RGB they agree: both are zeros, and
+a range that leaves zero out moves both to the same nearest value. This
+design carries the device space's value into the default, so
+`/DeviceCMYK cs` and `0 0 0 1 k` paint one colour under one default, and
+selecting a space never turns a page's black into paper. It follows that a
+page selecting `/DeviceCMYK` and its twin naming the substitute directly
+start from different colours, so K-02.2's twins set their components before
+they paint.
+
+**A default the clause does not allow is refused, not obeyed**: Lab,
+Indexed or Pattern, a component count other than the device space's, or a
+value that is no colour space. The device space is drawn as today and the
+refusal is named — `RenderWarning::RepairedColorSpace` under the default's
+own name, once per render of the scope (ruling 10). 8.6.5.6 says what may be
+a default and not what a reader does with one that may not; drawing what the
+content asked for, and saying so, is ruling 2's answer.
+
+**The device operators leave the space slot as they found it, and must
+not.** `g`, `rg` and `k` pass no space to `set_color`, which then leaves
+`fill_space` naming whatever `cs` set last (`interpret.rs:1387-1404`), so
+`/CS1 cs 1 sc 0.5 g 0.7 sc` paints `0.7` in `/CS1` where 8.6.8 has `g`
+select DeviceGray. Measured on this tree with a scratch probe, over
+`/CS1 [/Indexed /DeviceRGB 1 <FF0000 0000FF>]`: the fill is `(0, 0, 255)`,
+where the same page without `/CS1 cs 1 sc` paints DeviceGray's
+`(179, 179, 179)`.
+The slot is what `sc` asks the default by, so K-02.2 sets it to the reading
+by count (`interpret.rs:1120-1126`), which allocates nothing, and the reading
+by count asks the default of the family it takes the components as: one is
+gray, four is CMYK, any other count is RGB.
+
+#### `k` under `/DefaultCMYK` on an ink render (H-135)
+
+[H-135](../roadmap/H.md) is the owner's open question: on an ink render
+(`format: PixelFormat::CmykA8` with `RenderOptions::allow_cmyk`), does a
+DeviceCMYK colour under a `/DefaultCMYK` keep the document's own components
+as ink, or is it converted through the default like every other colour and
+lose them? This section does not settle it. K-02.2 builds H-135's default
+until the owner decides:
+
+- **The light render paints the default.** `k` under
+  `/DefaultCMYK [/ICCBased …]` paints the profile's light, as `/CS0 cs … sc`
+  naming that profile directly does.
+- **An ink render keeps the document's ink**, as it does today: `1 1 1 1 k`
+  arrives as all four inks, from `fill_ink`
+  (`crates/tinker-pdf-content/src/state.rs:398-410`). The light beside it,
+  which an ink page reads wherever it needs light rather than ink — inside a
+  group whose `/CS` is `/DeviceRGB`, say — is the default's.
+- **The same for every flat DeviceCMYK colour**, which is everything that
+  carries ink today ([rendering.md](../features/rendering.md), "CMYK page
+  output"): a fill, stroke or glyph colour set by `k` or `K`, by `sc`/`scn`
+  in a space selected as DeviceCMYK, or by four components with no space
+  named, and a stencil mask painted in one.
+- **What carries no ink today is not H-135's question.** An image, a
+  shading, an uncoloured pattern's colour, and an `/Indexed` or separation
+  space over DeviceCMYK reach an ink canvas as light taken back to ink;
+  under a default that light is the default's, and there was no ink of the
+  document's to keep.
+- **The two contracts H-135 names part on such a page.** `Bitmap::to_png`
+  writes an ink page as 8.6.4.4's light, and the light render paints the
+  profile's, so a page painting `k` under `/DefaultCMYK` writes a PNG that is
+  not its light render.
+  `an_ink_page_written_as_png_is_the_light_the_switch_would_have_returned`
+  (`crates/tinker-pdf/tests/render_options.rs:536`) holds two pages that
+  carry no default and says nothing of this one. Choosing conversion
+  instead is one later change to `resolve_ink`, as H-135 says.
+
+#### What `Page::images` reports for an image drawn under a default
+
+- **`color_space` stays the space the image states**
+  (`crates/tinker-pdf/src/images.rs:87-90`): a `/DeviceRGB` image is
+  `DeviceRgb` under any default.
+- **`PageImage::substituted_space` beside it** is that space with each
+  device space in it that the scope remaps replaced by the default, described
+  as `describe_space` describes any space (`resources.rs:3882`): an image in
+  `[/Indexed /DeviceRGB …]` under a `/DefaultRGB [/ICCBased …]` is
+  `Indexed { base: Icc { … } }`. It is `None` where nothing was replaced, so
+  a page with no default lists exactly what it lists today.
+  `PageImage::sample_space` answers the space the samples are in — the
+  substituted one where there is one, the stated one otherwise — and is what
+  K-02.3's twins compare.
+- **One entry per image and space.** `Collector` lists an XObject once, by
+  its reference, with every placement (`images.rs:259-299`). Under defaults
+  one XObject can be drawn in two spaces — on a page with a `/DefaultRGB` and
+  in a form whose own `/Resources` have none — and is then listed once for
+  each, each with its own placements. An inline image is its own entry, as
+  now.
+- **A JPEG or JPEG 2000 image reports its substitute like any other.**
+  Extraction describes the space the standard puts the samples in, which is
+  the default's, though the renderer reads neither space (the non-goal
+  above).
+- **A refused default replaces nothing**, and an image in its family names
+  the refusal in `warnings`, as it names a decoder's leniency (ruling 10). A
+  soft-mask image and a stencil have nothing substituted.
+- **`to_svg` follows the render with no change of its own.** It writes the
+  interpreter's `fill_color` (`crates/tinker-pdf/src/svg_out.rs:737`) and
+  decodes images and shadings through the `GlyphSource` calls the renderer
+  makes (`svg_out.rs:1298-1345`), so K-02.2's substitution reaches it, and
+  K-02.3's SVG test holds that.
+
+#### Read once a scope, so a page with none pays nothing per operator
+
+- **Where.** A scope's `Caches` (`resources.rs:63-101`) gains its three
+  defaults, read on the first question the scope is asked about a device
+  space and shared by every render of it, since `for_one_render` shares
+  `caches` (`:546-561`). The read is one `/ColorSpace` lookup and three keyed
+  gets; an entry that is present is parsed once, as written, and checked
+  against the rules above. A tiling cell's scope is built anew per tile
+  (`:1866-1868`), so its read is once per tile, beside drawing the cell.
+- **Per selection on the resource side**, a device arm of `color_space` or
+  `parse_space` reads the cached answer: on a page with none, a load and a
+  branch.
+- **Per operator in the interpreter, nothing.** `g`, `rg` and `k` do not ask
+  the seam today and must not start to. `FontSource` gains one method,
+  `device_defaults`, asked once per scope — when `interpret` starts
+  (`interpret.rs:563`) and when a form changes scope (`:1470-1475`), restored
+  when it ends (`:1552-1553`) — answering which of the three device spaces
+  the scope remaps. Its default answers none, so `recode.rs` and the tests'
+  sources behave as they do, and `subset.rs`'s `Recorded` forwards it as it
+  forwards the rest of the colour seam (`crates/tinker-pdf/src/subset.rs:963-1003`).
+  With none remapped, `g`, `rg` and `k` run today's code behind one branch
+  on a field the interpreter holds; with one, that operator resolves through
+  `resolve_color` and `resolve_ink` under the device space's own name, the
+  way `/DeviceGray cs … sc` already resolves.
+- **Measured, not assumed.** K-02.2 times the bench's render rows in
+  release and in debug. A page with no default must cost nothing beyond
+  noise, and any cost goes to the owner before it lands.
+
+#### Found while writing this section
+
+Three selections a default rides on are wrong before any default is
+involved. Each was read from the code and then measured on this tree with a
+scratch probe — a 10 × 10 page rendered with default options, and
+`Page::images` — and K-02.2 fixes all three, failing first, because each is
+a path its twins draw through:
+
+- **`sc` after a device operator** reads in the last `cs`'s space (above).
+- **An inline image's `[/I …]`.** 8.9.7 abbreviates the key `/Interpolate`
+  and the family `/Indexed` both as `/I`, and `expand_inline_abbreviations`
+  expands every `/I` as the key (`resources.rs:330`). So
+  `/CS [/I /RGB 1 <FF0000 0000FF>]` becomes `[/Interpolate …]`: its samples
+  `0` and `1` paint `(0, 0, 0)` and `(1, 1, 1)` where `[/Indexed /RGB …]`
+  paints red and blue, and `Page::images` lists it as
+  `Unreadable { family: "Interpolate" }`.
+- **An inline image naming a `/ColorSpace` resource**, which 8.9.7 allows.
+  `describe_space` resolves the name (`resources.rs:3900-3913`), but
+  `decode_inline` hands it to `parse_space`, whose name arm knows only the
+  device spaces (`:967-975`), and falls back to DeviceGray (`:3533`):
+  `/CS /CS0` over `[/Indexed /DeviceRGB 1 <0000FF 00FF00>]` paints
+  `(0, 0, 0)` and `(1, 1, 1)` while `Page::images` lists the palette.
+
+And one it does not fix: a JPEG or JPEG 2000 image reads no `/ColorSpace`
+(the non-goal above). A default cannot reach it, and nor can the space its
+twin names directly, so a twin comparison over a JPEG passes with neither
+applied; K-02.2's twins use sampled images for that reason.
+
 ## Milestones
 
 | # | Deliverable | Exit criteria (concrete, testable) | Size (S/M/L/XL) |
@@ -303,6 +676,10 @@ volume, and the corpus census counts tags and bytes.
 | 6 | `ColorSpace::Icc` wired | **Done**, except rendering intents, which stay parsed and discarded. No ICCBased fingerprint was committed and none was needed: no existing fixture names an `ICCBased` space, so nothing moved, and the facade tests assert pixels directly. The fallback is asserted rather than warned — see the note below | M |
 | 7 | Known-answer tables | **Done**, in the form the arithmetic allows: the fixed-point encodings are pinned bit pattern by bit pattern, a linear curve's compiled ramp is pinned entry by entry across all 4 096, and two injections are counted (2 and 3 of 3 012) | S |
 | 8 | Corpus movement | `corpus/report.json` shows the `iccbased` count; the metamorphic rows of [render-verification](render-verification.md) still hold over the files carrying profiles, so the new conversion path did not break resolution or rotation coherence | S |
+| 9 | K-02.2: the scope's default substituted on every painting path that reads a space, and the three selections it rides on put right | `default_spaces.rs` (new): `each_default_space_draws_as_its_substitute_named_directly`, where each default — CalGray and ICCBased N=1, CalRGB and ICCBased N=3, ICCBased N=4 — through the operators, `cs`, a sampled image, an inline image, a shading, an `/Indexed` base, an uncoloured pattern's base and a selected `/Separation` alternate renders in light byte-identical to its twin naming the substitute, under the scope, group, `/BC`, initial-colour and refusal rules above; `the_selections_a_default_rides_on_read_what_the_file_names`, failing first; `an_ink_render_keeps_a_device_cmyk_colour_s_ink_under_default_cmyk`; fingerprints unchanged, and a default-space page added to `determinism.rs` | L |
+| 10 | K-02.3: extraction reports the space the samples are in | `default_spaces.rs`: `an_extracted_image_names_the_space_its_samples_are_in` — the stated space kept, the substitute reported, the twin's `sample_space` the same, one XObject drawn in two spaces listed twice, a refusal named in `warnings`; `a_default_space_page_writes_the_svg_its_twin_writes` | M |
+| 11 | K-02.4: the census, by scope | `default_space_census.rs` (new): `the_census_finds_a_default_in_every_scope` counts synthetic files carrying a default in each scope exactly, and a form a page's default does not reach; the `#[ignore]`d corpus test prints `default-space-census: RAN`, or `SKIPPED` with no corpora, and `corpus.yml`'s `Hold every corpus census` step names it | M |
+| 12 | K-02.5: the census's first figures | The dispatched `corpus.yml` run on `develop` is green and its log carries `default-space-census: RAN`; the counts it printed are committed as floors in `default_space_census.rs` and quoted, with the run's id, in `docs/features/rendering.md` | S |
 
 ### Rendering intents, measured and declined
 
@@ -411,6 +788,10 @@ recover the *unadapted* primaries, which nothing here does.
   bounds ledger (`crates/tinker-pdf/tests/bounds_ledger.rs`).
 - [render-verification](render-verification.md)'s metamorphic rows —
   milestone 8 only; nothing earlier waits on it.
+- [H-135](../roadmap/H.md), the owner's open question, for milestone 9:
+  it builds H-135's default — an ink render keeps a `k` colour's own
+  components under `/DefaultCMYK` — until the owner decides. Milestone 12's
+  corpus run waits on MS-11 and H-03, as K-02.5 lists them.
 
 ## Risks
 
@@ -423,3 +804,8 @@ recover the *unadapted* primaries, which nothing here does.
 | Every colour-touching fingerprint churns when the CMM lands | Expected and staged: milestone 6 re-records fingerprints in its own PR with before/after renders attached, the discipline `corpus/ratchet.json` updates already follow |
 | **No second CMM adjudicates this, under ruling 13.** A misreading of ICC.1 that survives one review converts every profiled page wrongly, and every check here agrees with it | Matrix/TRC transforms are pinned bit-exactly against tables hand-computed from named clauses, which is arithmetic rather than opinion. LUT interpolation has no such anchor and the doc says so; it is the largest named limit of this design |
 | v2 versus v4 profile differences (PCS encoding, curve types) handled subtly wrongly | Known-answer tables per profile version in milestones 4, 5 and 7, each citing the clause it came from, over both v2 and v4 fixture profiles |
+| A silence the default-space design decides — a form group's scope, the initial colour after `cs`, a default's own spaces, a refused default — is later read the other way | Each is stated as this design's decision rather than the standard's, and a K-02.2 test holds it, so a different reading moves one test and one function |
+| A page's default stops at a form with `/Resources` of its own, where a reader that carries defaults inward draws the substitute | The clause's words are followed ("the current resource dictionary"; 8.10.1); K-02.4 counts the files where the two readings part, and K-02.5 records the count |
+| The device operators, the most frequent in a content stream, start paying for the seam | A scope's defaults are read once and the interpreter branches on a field it holds; K-02.2 times release and debug and puts any cost to the owner |
+| H-135 is decided for conversion | One change to `resolve_ink`; K-02.2's ink test names the contract it holds, so the change shows where it lands |
+| A twin comparison over a JPEG passes with nothing applied and is taken for proof | K-02.2's twins use sampled images, and the JPEG path is a named non-goal |

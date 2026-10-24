@@ -173,7 +173,7 @@ that stated them now point at those rows.
 | ECMAScript beyond the subset; catalog actions; automatic recalculation | a decision row of the roadmap; `design/form-script-policy.md:33-52`; `features/forms.md:569-571` | FJ-01…FJ-18 |
 | OCR, "if ever, as a host seam" | the roadmap's decision items; `design/table-reconstruction.md:40-43` | OC-01…OC-17 |
 | Hinting; stem darkening | a decision row of the roadmap; `features/fonts.md:926` | FT-04a–d |
-| Rendering intents; overprint and spot simulation; N-channel output; black-point compensation; gamut mapping; iccMAX; named colour; proofing | the roadmap's decision items; `design/icc.md:34-69` | RC-01…RC-05, RC-20 |
+| Rendering intents; overprint and spot simulation; N-channel output; black-point compensation; gamut mapping; iccMAX; named colour; proofing | the roadmap's decision items; `design/icc.md:34-76` | RC-01…RC-05, RC-20 |
 | Variation-aware, vertical, AAT, Graphite shaping; `JSTF`; kashida | the roadmap's decision items; `design/shaping.md:66-83` | FT-07a–e |
 | Search by regular expression | a decision row of the roadmap | FT-20 |
 | PostScript and PCL output | a decision row of the roadmap | FO-08a/b, FO-09a–e |
