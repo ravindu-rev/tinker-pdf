@@ -253,6 +253,34 @@ unexplained:
 | `h-blocks` | 1 |
 | `double-create` | 1 |
 
+## Moving pointers with the code
+
+A `file:line` pointer names lines of today's tree, so a change that inserts or
+removes lines in a cited file moves the pointers into it too. `remap.py` does
+that for every file that differs between a base and the working tree:
+
+```sh
+python3 -I tools/roadmap/remap.py develop          # move them
+python3 -I tools/roadmap/remap.py develop --check  # change nothing; exit 1 if one would move
+python3 -I tools/roadmap/remapcheck.py             # its own tests
+```
+
+A pointer moves through its file's diff when its line of the roadmap is
+unchanged since the base, so it was written against the base, and the lines
+it cites survive the diff whole: a range moves only if every line in it is
+kept and they stay together. It reads pointers as the sweep does, a bare `:N`
+included, and a bare name more than one file has means the file of the
+nearest full path ending in it earlier on the same line. Everything else
+into a changed file is left as it is and printed: a pointer whose lines the
+change edited, one into a file that is gone, a bare name it cannot place, and
+one on a line of the roadmap that has changed since the base, which includes
+an earlier run's output, so a second run moves nothing the first moved. It
+writes only the roadmap's files and reads the base through `git show`.
+
+`remapcheck.py` builds a roadmap and a tree in a temporary folder, with the
+base's files given by a dictionary, so it makes no commit, and holds each of
+those rules to a fixture: 22 checks.
+
 ## The step brief
 
 `brief.py` prints, in one call, what a run reads about one step before the

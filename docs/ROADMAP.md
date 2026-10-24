@@ -62,10 +62,13 @@ workflows (the owner, 24 October 2026), and every row now has its steps;
 "Where the rows are" counts each tier's. A cut row no independent pass has
 reviewed says so; its review, like every review, runs once all the work is
 done ("How a step runs", 4). Every cut was
-made against the code at `5297133`, which
-no commit since has changed, and where a row's text and that tree disagree,
-the row says so under its steps. Every number and every `file:line` pointer in a
-row was read from the tree on 9 October 2026, or carries its own date. A
+made against the code at `5297133`, and where a row's text and that tree
+disagree, the row says so under its steps. Every number and every `file:line`
+pointer in a row was read from the tree on 9 October 2026, or carries its own
+date; a pointer whose lines a later commit moved has moved with them ("How the
+roadmap changes"), so a pointer cites today's tree, and a note headed "The tree
+at `5297133`" says what that tree showed, at the lines where the same code
+stands now. A
 number the roadmap carries and the tree contradicts is a defect in the
 roadmap.
 
@@ -236,6 +239,13 @@ milestones.
   row's exit criterion changes only by the owner's word.
 - **Bands and floors move one way.** Lowering a ratchet floor or widening a
   benchmark band is a reviewed act (H-78).
+- **A pointer moves with the lines it cites.** A change that inserts or
+  removes lines in a file the roadmap cites runs
+  `python3 -I tools/roadmap/remap.py develop` before it lands, and the
+  pointers it moves land in the same commit. A pointer whose lines the change
+  itself edited, or whose bare name more than one file has, is left as it is
+  and listed, and the change moves it by hand or leaves it with the history
+  it records.
 - **The sweep holds every change.** `python3 -I tools/roadmap/sweep.py`
   checks every step at once for the classes of defect the reviews found by
   hand: a new file beside an existing home, a name the tree does not have,
