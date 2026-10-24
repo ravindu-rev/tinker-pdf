@@ -1362,9 +1362,382 @@ printed — each operation outside 20–300 ms with its mean — and the run's i
 
 ## MS-07 — Corpus throughput and latency ratchet
 
-Owed. MS-07.1 writes it: what the corpus child times, the per-corpus figures
-and their band rule over five runs, the `ratchet.json` keys, and the
-ten-slowest listing by `/Producer`.
+When this is done, each of the corpus job's three bars holds every corpus to
+five time figures at the run's dpi — pages rendered a second, the mean
+open-and-count latency, and the 50th, 95th and 99th percentile of a page's
+render time — each inside a band set by the five runs the bar records, and
+`corpus.yml` fails a figure past its band. Every run prints each corpus's ten
+slowest files with their `/Producer`, and each bar records them. The figures
+come from the runs the bars already make, four children at a time on today's
+runner, so the job's 56 minutes do not grow.
+
+Today the corpus job times nothing it holds. The child prints `ms`, its own
+clock from its first line to its last (`tools/tpdf/src/main.rs:2570`,
+`:2745`), across the open, every page, the strict rewrite and the metamorphic
+renders; the runner parses it (`xtask/src/runner.rs:624`) and then replaces it
+with its own wall time from spawn to reap (`:455`, `:462`), which the report
+keeps per file as `millis` (`xtask/src/report.rs:293`) and nothing compares.
+No bar has a time key, and `ratchet::parse` reads one setting, `fonts`
+(`xtask/src/ratchet.rs:613-618`), the only setting `compare` refuses on
+(`:251`), so the `dpi` a bar records binds no run. MS-11.5's run of
+`corpus.yml` on `develop`, 40129716194 at `94895d48`
+(`docs/roadmap/MS.md:376`), took 56 min 21 s of its 120
+(`.github/workflows/corpus.yml:32`) by its job's step times:
+13 min 41 s, 13 min 38 s and 13 min 40 s for the three bars, 10 min 58 s for
+the censuses, and 4 min 3 s for the build, the fetch, the fixtures and the
+bundled rebuild between them. By the `millis` in the reports MS-11.5 kept
+(`docs/roadmap/MS.md:380`), each bar's 5 525 children ran 3 239 s to 3 250 s
+in all, 3.96 at a time across its step, and safedocs's 1 000 were 85.3 % of
+that in the no-faces bar.
+
+### Scope
+
+- **What the child times**: one span for opening a document and counting its
+  pages, and one for each page's render at the run's dpi, both apart from the
+  strict and metamorphic passes, printed in microseconds in record format 7.
+- **The five figures** a corpus is held to, and how each is computed from
+  those spans.
+- **Where the times come from**: the shared run, how its concurrent children
+  bear on each figure, and what a pass of its own would cost the 120-minute
+  job.
+- **The keys** the report and the three bars carry, and what `--check`,
+  `--record` and `ratchet::parse` do with them.
+- **The band rule** over five runs, and what it does not catch.
+- **The ten slowest files** of each corpus, by `/Producer`.
+
+### Non-goals
+
+- **A clock in a test.** MS-07.2's and MS-07.3's tests feed records and bars
+  to the parsers and read no clock; the child and the runner keep the clocks,
+  as this document's first non-goal and `docs/verification.md:1784-1786` ask.
+- **Timing the rest of a child.** The disk read, the process, the page
+  lookup, the structure join, the strict rewrite and the metamorphic renders
+  stay outside every span, and `ms` and `millis` go on spanning them as they
+  do today. The page lookup is A1's and A2's to count (the roster, above) and
+  MS-04's `open/every page's size` operations' to time.
+- **A gate on a file.** The ten slowest are recorded and printed, never
+  compared, and no file has a band of its own.
+- **A figure that cancels the runner.** A calibrated figure divides by an
+  operation the same job runs; the corpus job runs none, so these figures are
+  absolute and their bands absorb the fleet (the band rule, below).
+- **Other platforms.** `corpus.yml` runs on `ubuntu-latest` alone
+  (`.github/workflows/corpus.yml:23`).
+- **Absolute targets.** A figure here is held to its own five runs, never to a
+  tier P target; absolute figures are MS-03's.
+
+### Design
+
+#### What the child times
+
+Two spans, each read from `std::time::Instant` and printed in whole
+microseconds.
+
+- **Open-and-count**: `Document::open` on the bytes the file's read returned
+  (`tools/tpdf/src/main.rs:860`), the face provider attached (`:861-864`), the
+  authentication with the empty password or the sidecar's (`:866-872`), and
+  the first `page_count` (`:2629`), which walks the page tree
+  (`crates/tinker-pdf/src/lib.rs:1754-1756`). The read itself
+  (`tools/tpdf/src/main.rs:859`) is outside, since it measures the runner's
+  disk; so are `ladder_level` and the `/Producer` read between the open and
+  the count (`:2606`, `:2618`), and every line the record prints. A file that
+  does not open has no span: its failure is the pass rate's, and the time it
+  spent failing stays in `millis`.
+- **A page**: `page.render` at the run's dpi (`:2663-2666`, `:2685`), once for
+  every page the loop reaches (`:2670`). The lookup before it,
+  `doc.page(index)` (`:2671`), is outside: today's walk to a page gathers
+  every leaf up to it (MS-01.4, above), so a document's lookups grow with the
+  square of its pages, and tier P's figures put every page's size over 10 000
+  generated pages at about 28.5 s (`open/every page's size, 10000 pages`, in
+  MS-04's table above); a span that held the lookup would make verapdf's
+  figures its 10 000-page fixture's lookups. The structure join on a tagged file
+  (`:2678`) and the progress line (`:2684`) are outside too.
+
+Neither span reaches the strict pass or the metamorphic pass (`:2727-2729`),
+which rewrite the document and render page one again (`:2129`, `:2159`,
+`:2163`, `:2173`). A child the runner kills writes no complete record, and
+the runner keeps nothing of one but its producer
+(`xtask/src/runner.rs:459-485`), so a file that timed out or stalled —
+safedocs's `0000578.pdf` stalled on page 1 of 5 in run 40129716194 — has no
+times; it is the pass rate's regression, and the producer table names it
+(`xtask/src/report.rs:638`). Each child renders on one thread: the engine
+spawns none outside its tests (the only `thread::spawn` under `crates/*/src`
+are in `tinker-pdf-cos`'s test modules, `name.rs:305` and `store.rs:234`), and
+P-15's pool, when it lands, runs serially unless a caller asks for threads
+(`docs/roadmap/P.md:604`).
+
+#### The figures
+
+Per corpus, over the files whose records carry the spans:
+
+| Figure | What it is | Kept as |
+| --- | --- | --- |
+| pages/s at the run's dpi | the pages timed over their summed render time | `pages`, `render_micros` |
+| open-and-count latency | the mean over the files that opened: their summed spans over their count | `files`, `open_micros` |
+| p50, p95 and p99 page render time | over the corpus's pages, not its files, by nearest rank: of n page times, the ⌈p × n ÷ 100⌉-th smallest | `p50_micros`, `p95_micros`, `p99_micros` |
+
+Every figure is a time once pages/s is read as its reciprocal, so every band
+reads one way: the run's figure may be at most (100 + band) % of the bar's.
+The two means stay a count and a sum, and every comparison is a
+cross-multiplication in `u128`, as every other axis in `ratchet.rs` is
+(`xtask/src/ratchet.rs:1-26`, `:200-207`). Every key is a whole number, which
+`json.rs` holds exactly below 2⁵³ (`xtask/src/json.rs:42-46`, `:105-107`); the
+largest, a corpus's summed render time, is safedocs's, under 2.8 × 10⁹
+microseconds, since safedocs's children ran 2 771 s in all.
+
+**Over pages, not files**, because a page is what a reader waits on; it makes
+a corpus's percentiles its long documents': 10 000 of verapdf's 12 950 pages
+are one implementation-limit fixture's, so that file is most of the
+population verapdf's percentiles are taken over. **The latency is a mean**
+rather than a percentile because it moves when any file's open moves — the
+common path a thousand times over, or one repair — where a percentile is
+blind to everything on one side of it; the report keeps each file's span,
+which is where the tail is read.
+
+#### Four children at once, and what a pass of its own would cost
+
+`corpus-run` runs one child a logical CPU unless told otherwise
+(`xtask/src/corpus.rs:192`, `:628-656`), and `corpus.yml` never tells it
+(`.github/workflows/corpus.yml:152-154`, `:190-193`, `:220-223`). In run
+40129716194 each bar's children ran 3.96 at a time across its step: four, on
+four logical CPUs. A span is wall time, so a page's includes what its three
+neighbours cost it — shared caches, memory bandwidth, and a core where two
+logical CPUs share one — and seldom a wait for a CPU: four single-threaded
+children do not outnumber the runner's logical CPUs, and the runner's own
+four worker threads sleep between polls (`xtask/src/runner.rs:451`). That
+cost has two parts. One is systematic, every child somewhat slower than it
+would run alone, and a bar measured at the same job count carries it inside
+its figures; the bar holds that constant by refusing times from a run at
+another job count. The other varies with which files share the machine with
+which, and the five runs' spread measures it.
+
+Run 40129716194 already shows how large the varying part is. Its no-faces
+and synthetic-face bars ran one binary over the same files, one after the
+other on one host, and for the 4 249 files that passed in both and report no
+`render:UnreadableFont` without faces, a face changes nothing they draw, so
+their `millis` differ only by the machine. A corpus's summed `millis` over
+those files moved 0.3 % (pdfjs), 1.0 % (qpdf), 2.3 % (safedocs) and 6.3 %
+(verapdf, whose 10 000-page fixture alone read 35.2 s and then 40.5 s)
+between the two; a file of 100 ms or more moved 1.1 % to 4.0 % at each
+corpus's median, and at most 26.9 %. That is a whole child's time rather
+than the spans, and MS-07.4 measures the spans' own; but it puts the
+neighbours' share well under what the fleet does across hosts — the bench's
+fifteen runs of one revision fell into two groups, at 1.00 to 1.16 and 1.30
+to 1.36 of the fastest (`docs/verification.md:1906-1915`) — which every band
+has to absorb anyway.
+
+**So the times come from the shared run**: each bar's own `corpus-run`, at the
+job count it runs at. Its cost is two clock reads and one record line a page,
+34 948 pages a bar in run 40129716194, and the job stays at its 56 minutes,
+63 min 39 s under its limit. A pass of its own, one child at a time over open
+and render alone, would remove the neighbours and nothing else. What it would
+cost no record says today, since none separates a child's spans from its
+strict and metamorphic passes (that is MS-07.2's); it is at most each bar's
+summed `millis` run end to end, 54.2, 54.0 and 54.1 minutes. Three such
+passes could take the job to 219 minutes, and one, for the no-faces bar
+alone, to 110.5 of its 120, leaving the other two bars untimed against the
+row's exit and MS-07.5's. Neither buys enough of the smaller term to be worth
+it.
+
+#### The record, the report and the bar
+
+**The record**, version 7. After `pages`, a file that opened prints
+`time open <micros>`; after each page's render, `time page <n> <micros>`, n
+counted from 1 as the progress line counts (`tools/tpdf/src/main.rs:2684`).
+`time` is a new key; `page` is already the progress line's, which the runner
+never reads (`:2680-2683`). Version 7 rather than a quiet new key, for
+`peak`'s reason (`xtask/src/runner.rs:569-575`): the runner requires the
+spans, so a version-6 child would read as a corpus whose files timed nothing
+rather than as a `tpdf` nobody rebuilt, and the handshake exists to name the
+second (`xtask/src/corpus.rs:762-794`). The runner keeps a file's open span as
+an `Option` and its page spans as a list of page and microseconds, and drops
+a value that does not parse rather than reading it as zero.
+
+**The report** gains, per file, `open_micros`, `render_micros` (its pages'
+sum) and `slowest_page` (`{ "page", "micros" }`), each absent where there was
+nothing to time; per corpus, in its `summary` (`xtask/src/report.rs:406-450`),
+`time` — `files`, `open_micros`, `pages`, `render_micros`, `p50_micros`,
+`p95_micros` and `p99_micros` — and `slowest`, the ten slowest; `jobs` in its
+`settings` (`:237-250`, `:395-404`); and a `host` beside them,
+`/proc/cpuinfo`'s first model name and the logical CPU count, absent off
+Linux, so that a figure that moved with the host is attributed rather than
+banded, which is why `bench.yml` logs its host
+(`.github/workflows/bench.yml:62-70`). Its summary lines
+(`xtask/src/report.rs:555-619`) gain a `time` line per corpus — pages/s at the
+dpi, the latency and the three percentiles — and one for the run,
+`time   N pages timed   M files opened`, which each bar's step in
+`corpus.yml` greps as it greps `strict` (`.github/workflows/corpus.yml:172`).
+
+**The bar** gains `time_runs` at its top and `time` and `slowest` in each
+corpus, and each run's per-corpus figures go into it whole:
+
+```text
+"time_runs": {
+  "dpi": …, "jobs": …, "revision": "…", "recorded": "…",
+  "dispatches": [ { "id": "…", "host": "…" }, … five in all … ]
+},
+"corpora": [
+  { "name": "pdfjs", …,
+    "time": {
+      "total": …,
+      "runs": [ { "files": …, "open_micros": …, "pages": …,
+                  "render_micros": …, "p50_micros": …,
+                  "p95_micros": …, "p99_micros": … }, … five in all … ]
+    },
+    "slowest": [ { "path": "…", "producer": "…", "pages": …,
+                   "micros": … }, … up to ten … ] },
+  …
+]
+```
+
+`time.runs` holds the five runs' `summary.time` objects in the order
+`dispatches` names them, and `time.total` the corpus's file count when they
+ran. No band is a key: `ratchet.rs` derives each from the five runs by the
+rule below, so none is typed by hand.
+
+- **`--check`** holds each figure to its band, and one figure past its band
+  fails the run alone. It refuses the times of a run at another dpi or job
+  count than `time_runs`', and those of a corpus whose file count is not
+  `time.total`, as it refuses a run under another `--fonts` today
+  (`xtask/src/ratchet.rs:251-258`): each is a different measurement. A run
+  that timed fewer files or pages in a corpus than the fewest of the five
+  fails, as a peak over fewer children does (`:567-576`). A figure faster
+  than the five's fastest is a note, not an improvement, because one run
+  measures no band. A bar with no `time_runs` is an improvement, new with no
+  recorded band, and `SCHEMA` stays 2, as it did when `peak` arrived
+  (`xtask/src/report.rs:23`, `xtask/src/ratchet.rs:82-90`).
+- **`--record`** writes every other axis from its run, as today
+  (`xtask/src/corpus.rs:508-524`), and the run's ten slowest; it carries
+  `time_runs` and each corpus's `time` over from the committed bar unchanged,
+  and never writes a time figure from one run. A figure from one run would
+  ratchet the bar onto whichever host that run landed on, and the next run on
+  the fleet's other group would fail on the machine rather than on the code.
+- **`ratchet::parse`** refuses a time block of other than five runs, or whose
+  runs do not match `dispatches`; a run with more files than `total`; and a
+  zero figure over files or pages that were timed, a band nothing can sit
+  under, as it refuses a peak of zero bytes (`xtask/src/ratchet.rs:756-761`).
+
+#### The band rule over five runs
+
+The five runs are five dispatches of `corpus.yml` at one revision of
+`develop`; a run at another revision is not one of them. They need not be
+green: every bar's step runs whatever the one before it returned
+(`.github/workflows/corpus.yml:65-71`), and the report is kept whatever the
+outcome (`:232-244`). For each corpus and each figure:
+
+- **The figure is the fastest of the five**, for the reason the bench's is the
+  fastest of fifteen: the comparison is one-sided, so the bar worth holding is
+  the best the runner has done (`docs/verification.md:1881-1886`).
+- **The band is the spread fifteen runs would show, set as the bench sets one
+  from fifteen.** The five runs' spread — slowest over fastest, less one — is
+  grown by 1.53, which is what the bench's widest spread grew by from five
+  runs to fifteen (`:1899-1901`), then made half again as wide and rounded up
+  to the next 5 %, the bench's own rule (`:1897`): 2.295 times the spread,
+  rounded up.
+- **And never under 20 %**, the swing the bench's noisiest operation showed
+  within one of the fleet's two groups (`:1911-1913`), so a figure whose five
+  runs all landed on one group is not held tighter than that group has been
+  seen to move.
+
+So a spread of 3 % is banded at 20 %, one of 10 % at 25 %, and one of 36 % —
+what the bench's fifteen runs put between their fastest and slowest scores,
+1.00 and 1.36 — at 85 %. Every recorded run holds the band it sets: its
+figure is at most the slowest, and the band is above the spread. `ratchet.rs`
+derives each band in integers, as it compares.
+
+**What this does not catch.** A regression inside its band: on a figure
+banded at 85 %, a page render half again slower passes in silence. The 9×
+rasteriser regression of 5 September 2026
+(`docs/verification.md:1918-1919`) would not. This is
+the corpus's ratchet against the catastrophic, on pages real producers wrote;
+the finer instruments are MS-02's paired job over MS-04's set and MS-01's
+counts, which the fleet does not move.
+
+#### The ten slowest
+
+Per corpus, the ten files whose spans sum the most — open-and-count and every
+page — slowest first, ties by path, each with its corpus, its path, its pages
+timed and its sum, under its `/Producer` as the record states it
+(`xtask/src/runner.rs:159-168`; `(none stated)` is a producer,
+`tools/tpdf/src/main.rs:2618-2627`). The table is `producer_table`'s shape,
+with its escaping of a producer's pipe (`xtask/src/report.rs:638`, `:680`),
+printed after it on every run (`xtask/src/corpus.rs:491-495`), in each
+corpus's report summary, and in the bar as `slowest`; nothing compares it. A
+file with no spans is not ranked, so a file the runner killed is in the
+producer table instead. Ranking by a file's sum favours long documents; the
+report's `slowest_page` names the page that cost a file most.
+
+### Milestones
+
+Each step is one workflow run, and its exit is quoted as the step states it
+in `docs/roadmap/MS.md`. MS-07.2 times `tpdf probe` against the tip over a
+generated document of many pages, in release and in debug, before it writes
+its tests, and stops if two clock reads and a line a page are not free.
+
+| Step | Deliverable | Exit, as the step states it | Waits on |
+| --- | --- | --- | --- |
+| MS-07.2 | The two spans in `tpdf probe`; record format 7 in the child and the runner; the handshake refusing a version-6 child by name | `xtask/src/runner.rs` unit tests (new) `the_open_and_page_times_are_read`, `a_record_without_them_is_a_version_6_record` and `a_page_time_that_does_not_parse_is_absent_not_zero`; `corpus.rs`'s handshake test names a version-6 child; `tpdf`'s own tests pass. | MS-07.1 |
+| MS-07.3 | The five figures and the ten slowest in the report and the bar; `--check` holding each figure to the band its five runs set; `corpus.yml`'s grep for the run's `time` line | `xtask/src/ratchet.rs` unit tests (new) `a_time_figure_past_its_band_fails_alone`, `a_bar_without_times_is_an_improvement` and `the_slowest_ten_name_their_producers`; `report.rs` `percentiles_are_over_pages_not_files` (new); the three committed bars still parse. | MS-07.2 |
+| MS-07.4 | Five dispatches at one revision of `develop`, their figures and ten slowest in the three bars, and the measurement in `docs/verification.md` | The three bars carry every corpus's time figures with bands and its ten slowest files by `/Producer`, each band above the spread the five runs measured, and each of the five runs passes the bars they set. | MS-07.3, MS-13, H-03 |
+| MS-07.5 | `corpus.yml` read to its end on `develop` with the time bars committed | The next run of `corpus.yml` on `develop` holds every corpus's time figures in all three bars and is green, read to the end, with the ten slowest printed. | MS-07.4 |
+
+**What each step needs beyond its text**, from the tree as this design reads
+it. Each step's own run corrects its text against this when it is taken.
+
+- **MS-07.2** reads the file before the open span starts, so `open`
+  (`tools/tpdf/src/main.rs:854-874`) takes bytes or the probe reads them
+  itself, and it times the first `page_count` with the open. Both constants
+  move, `tools/tpdf/src/main.rs:2402` and `xtask/src/runner.rs:575`; the
+  handshake test counts back from the runner's (`xtask/src/corpus.rs:804-828`),
+  so it names version 6 once the constant is 7, and the step writes the 6
+  out.
+- **MS-07.3**'s exit has no test for "the three committed bars still parse":
+  nothing in the tree reads a committed bar but `corpus-run --check`
+  (`xtask/src/corpus.rs:526-529`), which needs the corpora, and those are
+  fetched only in CI. It adds `the_committed_bars_parse` (new), reading the
+  three by path and printing each band it derives once they carry runs, and
+  beside it `each_of_five_runs_holds_the_band_they_set`,
+  `times_measured_another_way_are_refused` (a row each for the dpi, the job
+  count and the corpus's size), `a_mean_over_fewer_files_is_not_a_faster_mean`
+  and `record_carries_the_time_block_over` (new). `--record` reads the
+  committed bar before it writes, to carry the time block; today it writes the
+  run alone (`:508-524`). `jobs` is new to `Settings`
+  (`xtask/src/report.rs:237-250`), and `parse` reads `time_runs` where today it
+  reads one setting (`xtask/src/ratchet.rs:613-618`). `corpus.yml` greps the
+  run's `time` line in each bar's step.
+- **MS-07.4** copies each report's `summary.time` objects into the bars whole,
+  in dispatch order, with `time.total`, the fifth run's `slowest`, and
+  `time_runs` from the reports' `settings` and `host`, and records in
+  `docs/verification.md` the five ids, the revision, each run's host and the
+  bands `the_committed_bars_parse` prints. "Each of the five runs passes the
+  bars they set" is read from the bars, since the runs come before them, and
+  holds by the rule. The five runs' own `--check` fails whatever their times:
+  all three bars fail on seven regressions in run 40129716194
+  (`docs/roadmap/MS.md:376-380`), so MS-07.4 reads the time figures alone, and
+  the regressions are MS-11.6's to make rows of.
+- **MS-07.5**'s "is green" needs every check red in run 40129716194 green
+  first — the census step's five failing tests and the bars' seven
+  regressions — so it waits on the rows MS-11.6 makes of them as well as on
+  MS-07.4.
+
+Each rule a build step adds is put back broken at least once and the count of
+tests that fire is recorded: a span that holds the lookup, a percentile over
+files, the band's factor and its floor, each refusal and each denominator.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| A child's neighbours move its spans | Four single-threaded children on four logical CPUs; the job count is in `time_runs` and a run at another is refused; the five runs' spread measures the rest, which between run 40129716194's two bars on one binary was 0.3 % to 6.3 % of a corpus's summed `millis` |
+| `ubuntu-latest` is a fleet, and five runs may land on one group of it | The fastest of five is the figure, and the band is 2.295 times the spread and never under 20 %; each run's host is recorded beside its id |
+| Five runs read a spread below what fifteen would | The 1.53 the bench measured for tripling its sample; a band that fails on unchanged code is a finding, re-measured over five more runs and never widened by hand |
+| A run that times fewer files or pages reads as a faster one | Files and pages timed are held to the fewest of the five; a killed child's spans are dropped, and its timeout is already the pass rate's regression |
+| One run's figure ratchets the bar onto a fast host | Only five runs set figures; `--record` carries them and writes none; a faster figure is a note |
+| A re-pinned corpus, a new runner size or another dpi changes what is measured | Each is refused by name — `time.total`, `time_runs.jobs`, `time_runs.dpi` — until five runs re-measure, so a re-pin costs five runs before the job is green again |
+| A P row's speed-up leaves its corpora's bands slack | The bar is a backstop against the catastrophic; re-measuring is five more runs under H-03, never `--record`; MS-02's floors are what a speed-up raises |
+| The clocks cost the child time | Two clock reads and one line a page; MS-07.2 times it in release and in debug before its tests |
+| A probe that starts using threads changes what neighbours cost | The engine spawns none, and P-15's pool will run serially unless asked; a row that gives the probe threads re-measures the time block |
+| A corpus's percentiles are one long document's | Said above for verapdf; the report keeps each file's sum and slowest page, so a moved percentile is followed to its file |
+| A zero figure bands nothing | `parse` refuses one over files or pages that were timed |
 
 ## P-01 — Page index
 
