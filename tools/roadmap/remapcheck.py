@@ -36,6 +36,7 @@ ROW_BASE = '\n'.join([
     '| X-01.4 | build | A removed end `crates/a/src/lib.rs:9-10`, a gone file `crates/a/src/gone.rs:3`. | `x` | e | — |',
     '| X-01.5 | build | Two mains: `crates/c/src/main.rs:5` then `main.rs:6`. | `x` | e | — |',
     '| X-01.8 | build | A bare `main.rs:4` with no full path before it on its line. | `x` | e | — |',
+    '| X-01.9 | build | A bare `main.rs:40`, past the end of the changed one. | `x` | e | — |',
     '| X-01.6 | build | A new file `crates/a/src/fresh.rs:2`, and the roadmap `docs/roadmap/X.md:3`. | `x` | e | — |',
     '',
 ])
@@ -48,7 +49,7 @@ def build():
     root = tempfile.mkdtemp(prefix='remapcheck-')
     files = {
         CODE: '\n'.join(NEW),
-        'crates/b/src/main.rs': '\n'.join(f'b {n}' for n in range(1, 9)),
+        'crates/b/src/main.rs': '\n'.join(f'b {n}' for n in range(1, 49)),
         'crates/c/src/main.rs': '\n'.join(['c new'] + [f'c {n}' for n in range(1, 9)]),
         'crates/a/src/fresh.rs': 'fresh 1\nfresh 2\n',
         'docs/roadmap/X.md': ROW_HERE,
@@ -106,6 +107,8 @@ def main(argv):
               out.get('main.rs:6') == 'main.rs:7', str(out))
         check('a bare name two files have, with no full path before it, is left',
               why.get('main.rs:4') == "its bare name is 2 files'", str(why))
+        check('a bare name that cites past the end of every changed file it might mean is not read',
+              'main.rs:40' not in why and 'main.rs:40' not in out, str(why))
         check('a pointer written after the base is left',
               why.get('crates/a/src/lib.rs:11') == 'its line of the roadmap has changed since the base', str(why))
         check('a file the base does not have is not read', 'crates/a/src/fresh.rs:2' not in out

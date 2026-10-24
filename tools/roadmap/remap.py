@@ -12,7 +12,8 @@ so it was written against BASE, and the lines it cites survive the diff whole:
 a range moves only if every line in it is kept and they stay together. Every
 other pointer into a changed file is left as it is and printed for a person to
 read: one whose lines the change itself edited, one into a file that is gone,
-one whose bare name more than one file has, and one on a line of the roadmap
+one whose bare name more than one file has, a changed one among them long
+enough to hold the lines it cites, and one on a line of the roadmap
 that has changed since BASE, the step's own edits and an earlier run of this
 one among them, so a second run moves nothing the first moved.
 
@@ -70,13 +71,14 @@ def plan(repo, changed, base_read, tree):
 
     `changed` is the repository paths that differ from BASE; `base_read(path)`
     returns BASE's copy of a path, or None where BASE has none."""
-    maps, gone = {}, set()
+    maps, gone, lengths = {}, set(), {}
     for path in changed:
         if path == INDEX or path.startswith('docs/roadmap/'):
             continue
         old = base_read(path)
         if old is None:
             continue
+        lengths[path] = len(old.split('\n'))
         here = os.path.join(repo, path)
         if not os.path.isfile(here):
             gone.add(path)
@@ -107,7 +109,10 @@ def plan(repo, changed, base_read, tree):
             line = text.count('\n', 0, m.start()) + 1
             where = f'{rf}:{line}'
             if isinstance(target, tuple):
-                if target[0] in maps or target[0] in gone or target[1]:
+                end = int(p.group('b') or p.group('a'))
+                # A name it cannot place matters only if a changed file it
+                # might mean is long enough to hold the lines it cites.
+                if any(c in gone or lengths.get(c, 0) >= end for c in target[3]):
                     left.append((where, span, target[2]))
                 continue
             if target in gone:
@@ -144,15 +149,16 @@ def resolve(tree, ref, text, start, maps, gone):
     A bare name more than one file has means the file of the nearest full
     path ending in it earlier on the same line of the roadmap, as a row that
     names `xtask/src/main.rs` and then `main.rs:770` does; otherwise it is
-    ambiguous, and left. A tuple is a pointer that cannot be moved:
-    (a path it might mean, whether that matters, the reason)."""
+    ambiguous. A tuple is a pointer that cannot be moved: (a path it might
+    mean, whether a changed file is among those it might mean, the reason,
+    the changed or gone files it might mean)."""
     if ref in gone:
         return ref
     hits = tree.resolve(ref)
     if len(hits) == 1:
         return hits[0]
     if not hits:
-        return (ref, False, 'its file is not in the tree')
+        return (ref, False, 'its file is not in the tree', [])
     line = text[text.rfind('\n', 0, start) + 1:start]
     for m in reversed(list(sweep.TICK.finditer(line))):
         full = sweep.POINTER.match(m.group(1))
@@ -161,7 +167,7 @@ def resolve(tree, ref, text, start, maps, gone):
             if len(near) == 1:
                 return near[0]
     touched = [h for h in hits if h in maps or h in gone]
-    return (touched[0] if touched else hits[0], bool(touched), f'its bare name is {len(hits)} files\'')
+    return (touched[0] if touched else hits[0], bool(touched), f'its bare name is {len(hits)} files\'', touched)
 
 
 def git_base(repo, base):
