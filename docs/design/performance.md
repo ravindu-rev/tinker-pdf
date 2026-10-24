@@ -550,11 +550,485 @@ holds one paragraph saying what is owed until it is.
 
 ## MS-02 — A paired base-versus-head wall-clock gate on every pull request
 
-Owed. MS-02.1 writes it: the paired protocol, with base, head and `61adcde`
-built in one job and the suite run interleaved ten rounds; the verdict; where
-floors, calibrated targets, relations and A/A bands are committed; how the
-head's bench files build against `61adcde`; the triggers; and the 15-minute
-budget. MS-02.5 prices that budget on MS-04.10's measured set.
+When this is done, a change that makes an operation of MS-04's set slower
+fails the job that judges it, on whatever runner the job lands on, with no
+time recorded for that runner to compare against. Base, head and the
+planning baseline `61adcde` are built in one job on one runner, every
+operation runs ten interleaved rounds on each, and each pair is judged on the
+median of its ten paired ratios and a sign test. The same rounds hold the
+head to the floors, calibrated targets and relations of tier P's Gate column
+against `61adcde` (`docs/roadmap/P.md:29-55`).
+
+Today nothing is paired. `bench.yml` runs on a weekly cron and on dispatch,
+never on a push or a pull request, and its cron measures `main`
+(`.github/workflows/bench.yml:24-40`). Its one check,
+`bench-check --machine`, holds a run's means to the fastest of fifteen
+dispatches on `ubuntu-latest` (`xtask/src/bench.rs:88-89`, `:593-670`), with
+bands of 35 to 135 % that a fleet of unlike hosts forced
+(`docs/verification.md:1864-1915`), so the text renderer can lose half its
+speed in silence (`:1917-1922`). Criterion's own comparison of two revisions
+never exits non-zero (`xtask/src/bench.rs:5-7`). And `bench-check` reads
+`target/criterion` under the repository root and nothing else (`:614`),
+takes only each operation's `new/estimates.json` mean (`:359-391`), and
+refuses every option but `--machine` (`:596-607`).
+
+### Scope
+
+- **The paired protocol**: the three builds, a round and its interleaving,
+  criterion's sampling in the rounds, and where each round's output is kept.
+- **The inputs** both sides of a pair are timed on.
+- **The verdict** on base and head: the median paired ratio against 1 + the
+  operation's band, and the 8-of-10 sign test.
+- **The gates against `61adcde`**: floors, held operations, operations paired
+  with another, calibrated targets and relations.
+- **The bands**, and **where the numbers live**: the gates and the A/A bands
+  in `baseline.json`, the bands' runs in `docs/verification.md`.
+- **The head's bench files on `61adcde`**: the `cfg`, the copy and the
+  `tpdf` each build runs.
+- **The triggers**, and **the 15-minute budget**: what each part costs,
+  priced here on tier P's figures to show whether it can hold, and in MS-02.5
+  on MS-04.10's measured set.
+
+### Non-goals
+
+- **An absolute figure.** A pair says that one build is slower than another
+  on the runner both ran on, never that an operation takes more than so many
+  milliseconds; that is MS-03's pinned runner (H-110). `bench.yml`'s weekly
+  run and its bands stay MS-04's.
+- **A second timing.** Every figure is criterion's, read from the files it
+  wrote; nothing re-times anything, and no clock enters `cargo test`.
+- **Memory, counts and wasm**, which are MS-05's, MS-01's and MS-10's.
+- **A price.** What gives when the budget cannot hold is H-162's; a floor
+  below 1, a band wider than the A/A rule and any loosened gate are H-78's; a
+  target is H-77's and an input H-163's. This section gives the figures each
+  is decided on and decides none of them.
+- **The planning comparison.** H-112's figures stay outside the repository;
+  nothing here reads or writes them.
+
+### Design
+
+#### Three builds on one runner
+
+The job checks out three revisions side by side — the head, the base and
+`61adcde` — and builds each in release in a target directory of its own: the
+bench binaries of MS-04's thirteen group files, and `tpdf`, which the
+CLI-marked operations run as a child resolved beside the bench binary
+(MS-04, "The CLI operations"). The base and the head build as committed.
+`61adcde` builds with the head's `crates/tinker-pdf/benches/` and the head's
+`[[bench]]` entries in place of its own, under the `cfg` below, beside its
+own `tpdf`. Every timed process of all three then runs on the one runner, so
+each ratio is of two builds on one host minutes apart. The fifteen dispatches
+behind `bench.yml`'s bands scored in two groups with nothing between them,
+four at 1.00 to 1.16 times the fastest figures and eleven at 1.30 to 1.36,
+on hardware their logs did not name (`docs/verification.md:1906-1915`); a
+ratio taken on one host divides that out.
+
+Each build names its bench targets, `--bench <group>` for each of the
+thirteen, because `cargo bench -p tinker-pdf` also builds the library's own
+unit tests as a bench target (its output lists `benches src/lib.rs`), which
+no round runs; `tpdf` then builds in the same target directory, where it
+reuses the engine the bench build compiled and compiles itself alone. The
+job runs the binaries itself, never through `cargo bench`, whose start it
+would otherwise pay once a process: `--no-run --message-format=json` names
+each binary, and each runs with `--bench`, without which a criterion binary
+runs its test mode (`criterion-0.5.1/src/lib.rs:963-967`, the version
+`Cargo.lock:118-121` pins).
+
+#### A round
+
+A round times every operation once on each build, one operation a process:
+the group's binary with `--bench --exact <id>`, criterion's whole-id match
+(`criterion-0.5.1/src/lib.rs:1004-1006`, `:1139-1146`). The three builds'
+processes for one operation run back to back, so the two sides of a pair lie
+one operation's run apart rather than a round's. The build that goes first
+rotates — head, base, `61adcde` in round 1; base, `61adcde`, head in round
+2; and so on — so that none is always first, and the operations run in the
+head's order, group by group as its files declare them. Each build's ids
+come from its binaries' `--list` (`lib.rs:969-982`), which runs no routine
+(`benchmark_group.rs:331-335`); an id one build lists and another does not
+is timed where it is listed and reported, not judged (MS-02.2). Ten rounds
+of 138 operations on three builds are 4 140 processes.
+
+Each process writes into `CRITERION_HOME`, criterion's first choice of
+output directory (`lib.rs:133-145`), set to `rounds/<build>/round-NN/`, so
+each round of each build keeps criterion's `sample.json`, `estimates.json`
+and `benchmark.json` under `<group>/<name>/new/`
+(`analysis/mod.rs:159-181`, `:240-248`): the files `bench-check --paired`
+reads and the job uploads. A directory a round also means criterion never
+finds a saved `base` beside the operation, so it never runs a comparison of
+its own (`analysis/mod.rs:183-188`). The job never passes
+`--discard-baseline`, under which criterion writes none of these files
+(`lib.rs:1150-1154`).
+
+#### The rounds' sampling
+
+| Setting | In the rounds | How it is set | Why |
+| --- | --- | --- | --- |
+| Samples | 10 | `--sample-size 10` | criterion's least (`criterion-0.5.1/src/lib.rs:1096`, `benchmark_group.rs:98`); the command line overrides each file's `criterion_group!` `config` (MS-04, "Sampling, and the 30 minutes") |
+| Warm-up | one iteration | `--warm-up-time 0.001` | the warm-up loop stops at the first call whose time passes it (`routine.rs:257-282`) |
+| Measurement | one iteration a sample | `--measurement-time 0.001` | flat sampling takes ⌈measurement time ÷ (samples × the warm-up's mean)⌉ iterations a sample (`lib.rs:1430-1454`), which is 1 for any operation over 0.1 ms |
+| Mode | flat | by each group itself | no flag sets it (MS-04); linear sampling would take 55 iterations where flat takes 10 |
+| Resamples | 1 000 | `--nresamples 1000` | the verdict reads the mean, which criterion takes from the sample before it resamples (`analysis/mod.rs:313`, `:323`); its default of 100 000 (`lib.rs:430`) is most of what a process costs beyond its iterations |
+| Plots | none | `--noplot` | criterion 0.5.1 draws its report through gnuplot whenever one is on the path, whatever its features (`lib.rs:106-122`, `:421`, `:1029-1031`; `report.rs:328-330`), and the job's figures must not depend on the runner's image |
+
+An operation of t therefore costs 11 t a build a round, one warm-up iteration
+and ten samples of one, and 330 t over the job: H-162's "criterion's floor of
+ten samples an operation a round", and the least criterion allows. A scratch
+bench against criterion 0.5.1 with the tree's features
+(`crates/tinker-pdf/Cargo.toml:83`) shows the settings do what this says: a
+25 ms routine recorded ten flat samples of one iteration each, and its
+process took 55.5 ms beyond its 275 ms of iterations at 100 000 resamples
+and 10.0 ms at 1 000, the medians of twenty runs each on an Intel Core
+Ultra 5 125H; a 1 ms routine took 53.0 and 8.0.
+
+#### The inputs both sides are timed on
+
+A paired ratio compares two times of one input, and two engines generating
+"one" input write two. Every generator not pinned by formula writes through
+the tree's own builder, encoders and editor (MS-04, "The inputs"), and
+`scan()` through its renderer, so a head that changes any of them would be
+timed on other bytes than its base, and `61adcde`, a revision of 9 October
+2026, on other bytes again. So the job sets `TINKER_BENCH_FIXTURES` for
+every process, and with it set `support/inputs.rs` reads every input —
+generated, or committed and read by path — from that directory, writing it
+there first if it is absent. Round 1 runs the head first, so the first
+process to need an input is the head's: all three builds are timed on the
+head's bytes, and the generators run once a job rather than once a process.
+An input a base or `61adcde` process cannot read leaves that operation's
+rounds missing on that side. MS-04 left this to MS-02 (its "Files" and
+"Risks"); it widens MS-04's directory from the CLI operations' files to
+every input, and MS-02.4 writes it.
+
+A process that times one operation must build nothing for the rest of its
+group, so an operation's input and any state it starts from are built the
+first time criterion calls its routine and kept for the rest of the process
+(MS-02.4 again).
+
+#### The verdict
+
+An operation's figure for a round is that round's `mean.point_estimate`
+over the `calls` its side's committed list gives it (MS-04, "`baseline.json`'s
+lists"): a call's time, so a change to `calls` moves neither side.
+`sample.json` is read for its ten samples and their iteration counts, and a
+round sampled otherwise is refused. A round's paired ratio is the head's
+figure over the base's, and with b the operation's band:
+
+- the **median** of the ten ratios is the mean of the fifth and the sixth;
+- a round is **slower** when its ratio is above 1;
+- the operation **fails** when its median is above 1 + b and at least 8 of
+  its 10 rounds are slower.
+
+Each half covers what the other cannot. On identical code the sign test
+alone fires on 56 of the 1 024 equally likely patterns of ten rounds (45, 10
+and 1 for eight, nine and ten slower), 5.5 % an operation, and if the 138
+were independent the chance that none fired would be 0.945 to the 138th
+power, 0.04 %: it is the band that keeps an A/A run green. The band alone
+would fail an operation whose rounds split, some far above 1 and some below
+it; the sign test asks that a slowdown show in eight rounds of ten. An
+operation on one side only is reported, not judged, and a round missing on
+either side is refused (MS-02.2).
+
+#### The gates against `61adcde`
+
+The head's rounds are paired a second time, with `61adcde`'s, and each
+operation is held to what tier P's Gate column gives it
+(`docs/roadmap/P.md:29-55`):
+
+- **a floor** f, 1 until the P row that owns the operation raises it: the
+  head-over-`61adcde` ratio against 1 ÷ f. **Held** is a floor of 1 that no
+  row raises.
+- **paired with another operation**, where `61adcde` cannot express the
+  head's: that build runs, under the head's id, the operation the Gate column
+  names — the full-size decode for a quarter-scale one (MS-04, "What later
+  rows add") — and the ratio is held to 1 ÷ the factor as a floor is.
+- **calibrated**, where `61adcde` lacks the capability altogether: the head's
+  figure over `61adcde`'s `calibration/text of 100 dense pages` in the same
+  round, against the target over 751 ms (`P.md:43-47`), so 0.5 ms reads as at
+  most 1/1 502.
+- **a relation**: two operations of the head's group in the same round, the
+  ratio of their per-call figures against the bound, in its direction.
+
+Tier P writes the factor as the median against 1 ÷ the floor
+(`P.md:32-35`) and the others as bounds. Read that way, a floor of 1 cannot
+be met by a head that runs an operation at `61adcde`'s speed: with the two
+speeds equal, the median of ten ratios lands above 1 in about half of all
+runs, by symmetry, so on a day when most of the set runs where `61adcde` left
+it, each of those operations fails about one run in two and MS-02.8's exit
+cannot be read green. This design holds each gate to the regression pair's rule
+instead: the median beyond the bound by more than the operation's band, with
+at least eight of the ten rounds beyond the bound, a relation taking the
+wider of its two operations' bands. That loosens tier P's text by the band,
+and loosening a gate is H-78's, as H-77's default says; MS-02.7 asks for it
+with the bands H-109 approves, and until it is decided the job prints both
+readings.
+
+An operation whose gate names a baseline side that `61adcde`'s rounds lack
+is refused, not reported: the gate data says it can be judged, which MS-02.4's
+`every_operation_has_a_baseline_side_or_a_calibration` holds, so its absence
+is a fault of the mapping, and a check that can be absent is red
+(`docs/verification.md:1567`). A head slower than `61adcde` beyond its band
+on the day the floors are set is a finding against that operation's row; a
+floor below 1 is H-78's to grant, and no step lowers one (MS-02.8).
+
+#### The bands
+
+An A/A dispatch's **paired spread** for an operation is how far its median
+paired ratio lies from 1, in per cent: the statistic the verdict reads,
+taken on two builds of one revision. The operation's band is the worst
+spread of fifteen such dispatches, half again as wide, rounded up to the next
+5 % and never under 5 % — `bench.yml`'s rule, for the reason
+`docs/verification.md:1897-1904` gives: a spread over fifteen runs is a
+lower bound that has not converged. A band set so clears the medians of its
+own fifteen runs by arithmetic, so MS-02.7's last clause holds by
+construction and is no evidence that the band is wide enough; the first run
+no band was fitted to is MS-02.8's. An A/A dispatch needs no `61adcde`
+rounds, since a band is read from base and head alone. H-109 authorises the
+dispatches and approves the bands; a band wider than the rule gives is
+H-78's.
+
+#### Where the numbers live
+
+| What | Where | Written by | Moved by |
+| --- | --- | --- | --- |
+| Each operation's floor, 1 to start, or held | its entry in `baseline.json`'s group list, as `gate`, beside its unit (MS-04, "`baseline.json`'s lists") | MS-02.3, from tier P's Gate column | raised by a P row in its closing commit; lowered only by H-78 |
+| The operation `61adcde` runs in another's place | the same `gate`, naming it; the bench files' `cfg` arm runs it | MS-02.3 and MS-02.4 | the row that adds the operation |
+| Calibrated targets | the same `gate`, in milliseconds; the calibration operation and its 751 ms named once, ahead of the groups | MS-02.3 | re-stated by H-77; loosened by H-78 |
+| Relations | the same `gate`: the other operation of the group, the bound and its direction | MS-02.3 | as calibrated targets |
+| A/A bands | each operation's entry: its spread and its band; the fifteen run ids once, beside the calibration | MS-02.7 | approved by H-109; widened by H-78 |
+| The bands read, with their runs | `docs/verification.md`, as the seven's are (`:1864-1915`) | MS-02.7 | with the file |
+| The budget, with its runs | this section and `docs/verification.md` | MS-02.5 | — |
+
+```json
+"calibration": { "operation": "calibration/text of 100 dense pages",
+                 "planning_ms": 751 },
+"paired_runs": { "runner": "ubuntu-latest", "runs": [ ... ] },
+"groups": [
+  {
+    "group": "open",
+    "operations": [
+      { "name": "every page's size, 10000 pages", "unit": "pages",
+        "per_iteration": 10000, "calls": 1,
+        "gate": { "floor": 1,
+                  "relations": [ { "to": "every page's size, 3000 pages",
+                                   "at_most": 3.6 } ] },
+        "paired": { "spread_percent": 3.4, "band_percent": 10 } }
+    ]
+  }
+],
+```
+
+The block shows the shape, not measured figures. Today's reader cuts entries
+at `"machine":` and `"id":` (`xtask/src/bench.rs:243`, `:272`), which no key
+here contains. `cargo xtask baseline` refuses an operation with no gate and a
+relation naming an unknown operation (MS-02.3), and a band without its runs
+and spread (MS-02.7). H-112's planning comparison is in none of these
+places.
+
+#### The head's bench files on `61adcde`
+
+- **The `cfg`**, `tinker_planning_baseline`, is set for that build alone,
+  through `RUSTFLAGS`, which then drops the workflow's `-D warnings`
+  (`.github/workflows/ci.yml:20`) as the fuzz steps' `RUSTFLAGS: ''` does
+  (`:212`, `:234`): `61adcde` is frozen, and a lint a later stable adds must
+  not fail it. Its `tpdf` builds in the same target directory under the same
+  flags, so the engine compiles once for both. Under the `cfg` each bench
+  file's operation bodies call `61adcde`'s facade; the generators need no
+  arm, calling only what that revision exposes (MS-04, "Files").
+- **The declaration.** The head declares the `cfg` to `check-cfg` in
+  `crates/tinker-pdf/Cargo.toml`, or `unexpected_cfgs` fails its clippy
+  under `-D warnings`. No `Cargo.toml` in the tree has a `[lints]` table or
+  declares a `cfg` today.
+- **The copy.** The head's `crates/tinker-pdf/benches/` replaces
+  `61adcde`'s whole, `engine.rs` and `baseline.json` with it, and the head's
+  `[[bench]]` entries replace that revision's one
+  (`61adcde:crates/tinker-pdf/Cargo.toml:114-116`). No other code of the
+  head's enters that checkout, so every line the baseline's rounds time
+  outside the bench files is 9 October's.
+- **Its `tpdf`.** Every command line MS-04 gives its CLI operations runs as
+  written on `61adcde`'s `tpdf`, which already takes `--json`, `--dpi`,
+  `--jobs`, `--font-policy` and `--entropy`
+  (`61adcde:tools/tpdf/src/main.rs:36-53`) and opens a book through the
+  container sniffing in `Document::open_with`
+  (`61adcde:crates/tinker-pdf/src/lib.rs:1395-1408`).
+
+#### The triggers
+
+- **Every pull request**, H-111's default: head the merge commit the event
+  checks out, base that commit's first parent, the target branch's tip it was
+  made on, so the pair is the pull request's change and nothing else.
+- **Every push to `develop`**: H-01 sends every change to `develop` with no
+  pull request, so this is the trigger that reaches one. Base is the tip the
+  push replaced (`github.event.before`) and head the push's tip, so a push of
+  several commits is judged as one change.
+- **A dispatch for A/A runs**, base and head both the dispatched revision,
+  checked out and built twice exactly as a real pair's are, so a band
+  measures everything two builds differ by except the change. `ci.yml` has
+  no `workflow_dispatch` (`.github/workflows/ci.yml:8-16`), and one added
+  there dispatches its eleven other jobs as well unless each is told not to
+  run on it; a workflow of its own needs no such line.
+- **Not** on `main`, whose pushes are the owner's merges of commits already
+  judged on `develop` (H-01), and not on a schedule: `bench.yml`'s weekly run
+  is unchanged.
+
+No run cancels another: each push's run is the one that judges it, as
+`ci.yml` says of its own (`:12-13`). Until MS-02.7 commits bands the job
+prints every verdict and fails on none; from then on it fails as they say. A
+base or `61adcde` that cannot be checked out or built fails the job, since a
+pair that cannot be judged is red, not green (`docs/verification.md:1567`).
+
+#### The 15 minutes
+
+The row gives the job 15 minutes for three release builds and thirty runs of
+the set. Its parts, what each costs, and where MS-02.5 reads each from:
+
+| Part | Cost | By tier P's figures, or as measured | MS-02.5 reads it from |
+| --- | --- | --- | --- |
+| Three checkouts, the toolchain and the cache | once | 17 s from a job's start to its build in run 40129716194 (`corpus.yml`, one checkout, `develop` at `94895d48`, 24 October 2026) | the job's log |
+| Three release builds of the thirteen bench binaries and `tpdf` | 3 × b | b at least 81 s, that run's `cargo build --release -p xtask -p tpdf` with no cache, in which `tpdf`'s own compile and link took 27 s; each bench binary is a link of the same kind under the release profile's thin LTO and single codegen unit (`Cargo.toml:86-88`), and on the machine above rebuilding `engine.rs`'s bench binary alone took 42.5 s, and `tpdf`'s 59.3 s | the job's log |
+| 10 rounds × 3 builds × 138 operations, 11 iterations each | 330 × Σt | Σt, the time of one iteration of every operation, 207.7 s: 1 142 min | MS-04.10's figures |
+| Setup inside an iteration, untimed | 330 × s | s = 652 ms, the 72-dpi first render of `a second render of the JPEG page at 300 dpi` (`iter_batched`): 3.6 min | MS-04.10's figures |
+| 4 140 processes: start, criterion's analysis, its files | 4 140 × p | p = 8 to 10 ms at 1 000 resamples on the machine above: 0.6 to 0.7 min, where 53 to 56 ms at 100 000 would be 3.7 to 3.9 | the job's log |
+| Two calls of `bench-check --paired`, and the upload | once | — | the job's log |
+
+Σt takes MS-04's figures and the estimates its section makes: tier P's
+Today at `61adcde` with each operation's `calls`; an in-process twin at its
+CLI figure; every page's size over 10 000 pages at MS-04's 28 500 ms; an
+operation tier P states only against another at what that statement gives
+it — the analysis group at its relations' bounds over a 751 ms text, the
+stroked curves at their page's figure, the second JPEG render at the
+first's, the four bands at their relation's bound — and the standard-14 text
+and the annotated page at the dense text's and the text page's; the layout
+group's unmeasured operations at three times their targets; any other
+operation with a target and no Today at its target; a range at its top; and
+an operation with neither at 25 ms, the size MS-04's `calls` give one. The
+base and the head are taken at `61adcde`'s figures, since no P row that moves
+one has landed.
+
+| Group | Operations | Σt | Its rounds in the job |
+| --- | ---: | ---: | ---: |
+| text | 12 | 79.9 s | 439 min |
+| render | 33 | 39.5 s | 217 min |
+| open | 6 | 31.3 s | 172 min |
+| layout | 39 | 17.6 s | 97 min |
+| write | 16 | 15.3 s | 84 min |
+| analysis | 8 | 11.6 s | 64 min |
+| decode | 9 | 10.4 s | 57 min |
+| encode | 4 | 1.0 s | 5.3 min |
+| calibration | 1 | 0.8 s | 4.1 min |
+| fonts | 7 | 0.2 s | 1.0 min |
+| sign | 3 | 0.2 s | 0.8 min |
+| the set | 138 | 207.7 s | 1 142 min |
+
+**The budget cannot hold, and the figures say by how much.**
+
+- **As the row is written**, the rounds alone need 19.0 hours against 15
+  minutes, 76 times over before a build. Twelve operations would each take
+  longer than the whole job by themselves — `rewrite 3000 pages` at 5.48 s
+  needs 330 × 5.48 s, 30.1 minutes — and the three that read 10 000 pages
+  are 100.5 s of Σt's 207.7.
+- **In what the builds leave**, about 10 minutes once three builds of at
+  least 81 s, the set-up and the processes are taken out, Σt could be 1.8 s:
+  under 1 % of the set's.
+- **At any figures inside MS-04's window**, 138 operations of 20 ms or more
+  cost at least 138 × 330 × 20 ms, 15.2 minutes of rounds, so no answer to
+  H-163 that keeps the set inside the window fits three builds into 15
+  minutes.
+- **The planning baseline's third**, 110 × Σt, is 6.3 hours and never
+  shrinks: a P row makes the head faster, and `61adcde` stays what it was.
+- **On the runner**, the three of the seven that are tier P's operations ran
+  0.56 to 1.00 times tier P's figures (MS-04, "The operations"); at 0.56 the
+  rounds still need 10.7 hours.
+
+H-162 decides what gives. Each of its options alone, at the same figures:
+
+| What gives | Rounds | Against the budget |
+| --- | ---: | --- |
+| The number of rounds: one | 33 × Σt, 1.9 h | and a sign test of 8 in 10 needs ten |
+| The planning baseline's half, to a job of its own | 220 × Σt, 12.7 h, in each of two jobs | the baseline's job runs the head beside it, since a pair is one runner's |
+| The operations the pull-request job runs: the 82 inside 20–300 ms | 330 × 8.3 s, 45.7 min | 4.6 times the 10 minutes the builds leave |
+| The 15 minutes | 19.0 h | past six hours, a job's default limit (`.github/workflows/corpus.yml:24`) and the most a hosted job may run |
+
+None fits alone. A shape beyond the four — a matrix of jobs, each judging a
+share of the operations with all three builds on its own runner, which keeps
+each pair on one runner but not the set in one job — would need about 115
+jobs a run at these figures. Which combination, if any, is the owner's.
+MS-02.5 re-prices every line and every option on MS-04.10's measured
+figures before the owner chooses, never on tier P's column, and MS-02.6
+builds what H-162 decides.
+
+### Milestones
+
+Each step is one workflow run, and its exit is quoted as the step states it
+in `docs/roadmap/MS.md`.
+
+| Step | Deliverable | Exit, as the step states it | Waits on |
+| --- | --- | --- | --- |
+| MS-02.2 | `bench-check --paired BASE HEAD`: the regression pair's verdict over ten saved rounds | `xtask/src/bench.rs` unit tests (new) `a_ten_percent_slowdown_is_caught` (every round's head at 1.10 × base, band 5 %), `an_a_a_pair_passes`, `seven_slower_rounds_of_ten_pass_the_sign_test`, `a_median_inside_the_band_passes_however_many_rounds_are_slower` and `a_missing_round_is_refused`; USAGE names `--paired`. | MS-02.1 |
+| MS-02.3 | Tier P's Gate column as committed data, applied to the head-versus-`61adcde` pair | `bench.rs` unit tests (new) `a_floor_fails_a_ratio_above_its_inverse`, `a_calibrated_target_is_held_as_a_fraction_of_the_calibration_operation` (0.5 ms read as at most 1/1 502 of a 751 ms calibration), `a_relation_fails_when_its_bound_is_crossed` `an_operation_with_no_gate_is_refused` and `a_relation_naming_an_unknown_operation_is_refused`; `the_committed_baseline_agrees_with_the_tree` passes with every MS-04 operation gated. | MS-02.2, MS-04.9 |
+| MS-02.4 | The head's bench files on `61adcde`: the `cfg`, the mapping, the copy, its `tpdf` and the shared inputs | `bench.rs` `every_operation_has_a_baseline_side_or_a_calibration` (new) holds the mapping to MS-02.3's gate data and fails when one is removed; on a `61adcde` checkout with the head's `benches/` and `[[bench]]` entries copied in and its own `tpdf` built, `cargo test -p tinker-pdf --benches` builds and runs every mapped operation once. | MS-02.3 |
+| MS-02.5 | The budget priced on measured figures | MS-02's section carries the budget table with the runs it is read from; it fits in 15 minutes, or its shortfall is stated for H-162. | MS-02.4, MS-04.10 |
+| MS-02.6 | The paired job | The job exists and its first run on `develop` completes in at most 15 minutes, read from the run, printing every operation's paired ratio for both pairs, with its guard counting every MS-04 operation in all ten rounds. | MS-02.5, MS-11, H-111, H-162 |
+| MS-02.7 | The bands, from fifteen A/A dispatches | `baseline.json` carries a measured paired band for every MS-04 operation, `cargo xtask baseline` refuses one without its runs and spread, `every_committed_band_fires_at_its_own_edge_and_not_before` covers the paired bands, and each of the fifteen runs passes the bands they set. | MS-02.6, H-109 |
+| MS-02.8 | The job read to its end with the bands committed | The job's next run on a push to `develop` is green in at most 15 minutes with every operation judged in both pairs, read to the end; an operation slower than `61adcde` at floor 1 is a finding filed against its row, never a lowered floor. | MS-02.7 |
+
+MS-02.6's and MS-02.8's 15 minutes are the row's; the budget above says they
+cannot hold as the row is written, and they change only as H-162 decides.
+
+**What each step needs beyond its text**, from the tree as this design reads
+it. Each step's own run corrects its text against this when it is taken.
+
+- **MS-02.2** takes two directories, each holding `round-01` to `round-10`
+  as the job writes them, where today's `run` reads `target/criterion` under
+  the root and refuses any option but `--machine`
+  (`xtask/src/bench.rs:596-614`), and `measured` reads `new/estimates.json`'s
+  mean alone (`:359-391`). A round's figure is a call's, the side's mean over
+  the `calls` its own checkout's list gives; the median of ten is the mean of
+  the fifth and the sixth; a round is slower above 1; and `sample.json` is
+  read for its ten samples and their iteration counts.
+- **MS-02.3** judges every gate by the regression pair's rule, band and sign
+  test, and prints tier P's strict reading beside it until H-78 rules, so its
+  tests' ratios sit clear of both readings; names the calibration operation
+  and its 751 ms once; and refuses a relation to an operation outside its
+  group, a relation being two operations of one run (`P.md:48-49`).
+- **MS-02.4** declares `tinker_planning_baseline` under a `[lints.rust]`
+  table, which `crates/tinker-pdf/Cargo.toml` does not have today; routes
+  every input, generated or committed, through `TINKER_BENCH_FIXTURES` when
+  it is set, written by the first process that needs it; builds each
+  operation's input and starting state in its routine, once a process; and
+  runs its exit's `61adcde` build with the `cfg` in `RUSTFLAGS` and without
+  `-D warnings`.
+- **MS-02.5** prices each line of the budget table from the runs it names,
+  and each of H-162's options beside the row as written.
+- **MS-02.6** builds the bench targets by name and runs the binaries directly
+  with `--bench` and the sampling above; its A/A dispatch needs `ci.yml`'s
+  eleven other jobs told not to run on it, or a workflow of its own; and its
+  guard counts each round's `estimates.json` files against the committed
+  lists' total, as `bench.yml` counts its lines
+  (`.github/workflows/bench.yml:92`). The row's note that
+  "MS-02.5 also fires on pushes to `develop`" means MS-02.6.
+- **MS-02.7**'s paired spread is an A/A dispatch's median paired ratio's
+  distance from 1; its dispatches run the job's own steps with base and head
+  one revision, checked out and built twice; and it asks H-78 for the gates'
+  reading with the bands H-109 approves.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| The job cannot finish in 15 minutes | The budget above gives the figures — 19.0 hours of rounds at tier P's, at least 15.2 minutes at any figures inside the window — and H-162 decides on MS-02.5's prices from MS-04.10's figures |
+| A pair times two inputs, because two engines wrote them | Every input through `TINKER_BENCH_FIXTURES`, written by the head first and read by all three builds |
+| `ubuntu-latest` is a fleet, and two runs land on unlike hosts | Both sides of every pair run in one job on one runner, and the fleet's split divides out of a ratio |
+| The host drifts while a round runs | An operation's three processes run back to back, so a pair spans one operation's run, and the first build rotates by round |
+| The sign test fires on noise | It fires on 5.5 % of operations on identical code, so an operation fails only with its median past the band as well; the first run no band was fitted to is MS-02.8's |
+| A floor of 1 fails about half the runs of a head that matches `61adcde` | The gates take the band and the sign test, H-78's to approve; until then the job prints both readings |
+| A head is slower than `61adcde` on the day the floors are set | A finding against that operation's row; the floor stays 1 unless H-78 grants less (MS-02.8) |
+| An operation the base or `61adcde` cannot express | One the base lacks is reported, not judged; one `61adcde` lacks runs the operation its Gate column pairs it with, or is calibrated (MS-02.4) |
+| `61adcde` cannot read an input the head writes | Its rounds of that operation are missing, and an operation whose gate names a baseline side it lacks is refused, so the job fails on MS-02.4's mapping rather than passing the operation unjudged |
+| The calibration moves within a round | Each calibrated ratio is taken against the same round's calibration, and the band absorbs what moves between the two |
+| A lint a later stable adds fails the frozen baseline | Its build drops `-D warnings`, as the fuzz steps do (`ci.yml:212`, `:234`) |
+| A round writes nothing and reads as a pass | A directory a round and never `--discard-baseline`; the guard counts every operation in all ten rounds of every build (MS-02.6) |
+| A base or `61adcde` that will not build lets the job pass on the head alone | The job fails: a pair that cannot be judged is red (`docs/verification.md:1567`) |
+| Criterion's own cost swamps the rounds | `--nresamples 1000` and `--noplot`: 8 to 10 ms a process on the machine above, against 53 to 56 at its defaults |
 
 ## MS-04 — The benchmark set, replacing the seven
 
