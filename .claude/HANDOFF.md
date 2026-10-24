@@ -16,13 +16,24 @@ that moves the work on.
   limits in `docs/roadmap/NG.md`. Every row ID is unchanged, so every
   reference to one still holds.
 - **How far the cut got.** Every row is cut; the roadmap's "Where the rows
-  are" counts each tier's rows and steps. An independent pass reviewed 16
-  cuts against the code (CD-19, FJ-01, K-01…K-09, P-10…P-14); every other
-  row says its steps are not yet reviewed.
+  are" counts each tier's rows and steps. 29 rows are reviewed against the
+  code: the pilot's 16 (CD-19, FJ-01, K-01…K-09, P-10…P-14), and the 13 the
+  order of work reaches next (MS-01, MS-02, MS-04, MS-05, MS-06, MS-11,
+  P-01…P-06, P-27), by four independent reviewers on 24 October 2026 with a
+  fifth checking their corrections. Every other row says its steps are not
+  yet reviewed.
+- **What that review changed** beyond its rows: MS-01 gained a closing
+  step, MS-01.9, that reads every guard green after the P rows that land
+  them, so the 49 steps that needed MS-01's tally now wait on MS-01.8, not
+  the whole row (as cut, MS-01 could never close); and an ordering was
+  added wherever two steps edit the same code without one.
 - **New rows.** P-27, the shape crate's build script (below, "Small and
-  measured"), and 28 new H rows, H-134 to H-161. CD-19's decisions are
+  measured"), and 30 new H rows, H-134 to H-163. CD-19's decisions are
   H-149 to H-158; H-160 buys ISO 15930-8 for PDF/X-5 (SD-11) and H-161
-  obtains EN 16931 and the terms of its validation artefacts (SD-24b).
+  obtains EN 16931 and the terms of its validation artefacts (SD-24b);
+  H-162 decides what gives if MS-02's paired job cannot fit its 15 minutes,
+  and H-163 how MS-04 times an operation whose stated input cannot fit the
+  20–300 ms window.
 - **The owner's instructions** (AGENTS.md):
   - 23 October 2026: work runs as workflows, one roadmap step per run;
     commits are signed with the default ed25519 key in `~/.ssh` through
@@ -181,8 +192,12 @@ to CD-19.37, H-149 to H-158), in the order "Next" gives.
    - the options rebuilt on the landed code and re-timed (CD-19.9 to
      CD-19.13), the owner's choices (H-150 to H-154), CD-19.14 to CD-19.18,
      and the rest of CD-19 in its order;
-   - then P-27.1, MS-11 and K-06, K-01 and K-02, MS-01, MS-04, MS-06 and
-     MS-02, P-01 to P-05, and the tiers.
+   - then P-27.1, MS-11 and K-06, K-01 and K-02, MS-01 (to MS-01.8),
+     MS-04, MS-05, MS-06 and MS-02, P-01 to P-05, and the tiers.
 2. **Separately, as the owner asked on 24 October 2026**: the review of the
-   cut rows whose steps are not yet reviewed. Until it happens, each is
-   reviewed against the tree when it comes up ("How a step runs", 1).
+   cut rows whose steps are not yet reviewed (430 rows). Until it happens,
+   each is reviewed against the tree when it comes up ("How a step runs",
+   1). The next piece proposed is a script that checks all steps at once
+   for the defects the reviews found: a new file beside an existing home,
+   a name the tree does not have, two rows building one thing, two rows
+   editing one file with no order between them.
