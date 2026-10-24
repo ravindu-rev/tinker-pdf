@@ -165,6 +165,8 @@ Everything else measures stale code until these are done.
 | H-121 | A security-advisory process: advisories and identifiers issued, a disclosure timeline | — |
 | H-122 | Obtain the published definition of JPEG XL as a PDF image filter — its name, parameters and colour handling — once it is published | FI-07c |
 | H-159 | Purchase or obtain the barcode symbology specifications ED-49 holds its symbols to: ISO/IEC 15417 (Code 128), 16388 (Code 39), 15420 (EAN/UPC), 16390 (ITF), 18004 (QR), 23941 (rMQR), 16022 (Data Matrix), 15438 (PDF417), 24728 (MicroPDF417), 24778 (Aztec), 16023 (MaxiCode) and 24724 (DataBar); the free ones fetched (the GS1 General Specifications, the postal and payment-profile specifications the design names). | ED-49.3 to ED-49.13, and through them ED-50's read-back tests. |
+| H-160 | Purchase ISO 15930-8 (PDF/X-5g, X-5n and X-5pg) as reading for sessions, never committed. | SD-11.11, and through it SD-11.13's X-5 levels. |
+| H-161 | Obtain EN 16931-1 and its syntax bindings, EN 16931-3-2 for UBL and -3-3 for CII, sold by national standards bodies, and confirm the terms of the published validation artefacts, the CII and UBL schemas, the business-rule artefacts and their example and negative invoices, and of the XRechnung test suite, before any is vendored or fetched. | SD-24b.2 to SD-24b.10. |
 
 ## Standing duties
 
