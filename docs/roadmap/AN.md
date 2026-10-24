@@ -422,7 +422,7 @@ rows. Form JavaScript has its own tier, next.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | AN-17.1 | build | A signature field signed from the form layer: an empty field found by name and signed through SG-06's path, its widget given the signature's appearance. | `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/src/signature.rs`, `crates/tinker-pdf/tests/signature_fields.rs` (new), `docs/features/forms.md` | `signature_fields.rs` (new) `a_field_signed_through_the_form_layer_verifies`: a field created, signed and verified through the form layer gives the verdict the signing path gives. | SG-06, AN-14 |
-| AN-17.2 | build | Clearing a signature field: the value removed in an incremental save and the field left signable again, retiring the refusal in the forms doc. | `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/signature_fields.rs` (new), `docs/features/forms.md` | `a_cleared_field_signs_again`: the cleared field carries no value, earlier signatures still verify, and it signs again. | AN-17.1 |
+| AN-17.2 | build | Clearing a signature field from the form layer through SG-17's operation, retiring the refusal in the forms doc. | `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/signature_fields.rs` (new), `docs/features/forms.md` | `a_cleared_field_signs_again`: the cleared field carries no value, earlier signatures still verify, and it signs again. | AN-17.1, SG-17 |
 
 **Closes the row:** AN-17.1 gives the signing path's verdict through the form layer and AN-17.2 clears and re-signs, which is the row's exit.
 
@@ -780,9 +780,8 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-34.1 | design | Add XFA signatures to `docs/design/xfa.md`: XML signatures over data and template packets, canonicalisation, references and the `signature` packet. | `docs/design/xfa.md` | The section names AN-34.2 to AN-34.4's exit tests and is reviewed. | AN-27.1 |
-| AN-34.2 | build | XML canonicalisation (Canonical XML 1.0 and 1.1, and exclusive) in the XML crate. | `crates/tinker-pdf-xml/src/c14n.rs` (new), `crates/tinker-pdf-xml/src/lib.rs` | Unit tests: the specifications' canonicalisation examples are reproduced byte for byte. | AN-34.1 |
-| AN-34.3 | build | XML signatures created over generated data and template packets with SG-01's and SG-02's keys, written into the `signature` packet. | `crates/tinker-pdf/src/xfa/signature.rs` (new), `crates/tinker-pdf/tests/xfa_signatures.rs` (new) | `xfa_signatures.rs` (new) `created_signatures_verify`: each signature verifies through SG-13's verifier. | AN-34.2, AN-27, SG-01, SG-02, SG-13 |
-| AN-34.4 | build | XFA signatures verified, a packet changed after signing reported. | `crates/tinker-pdf/src/xfa/signature.rs` (new), `crates/tinker-pdf/tests/xfa_signatures.rs` (new), `docs/features/signatures.md` | `a_changed_packet_is_reported`: changing a signed packet after signing yields the typed report; untouched packets verify. | AN-34.3 |
+| AN-34.1 | design | Add XFA signatures to `docs/design/xfa.md`: XML signatures over data and template packets, canonicalisation, references and the `signature` packet. | `docs/design/xfa.md` | The section names AN-34.2 and AN-34.3's exit tests and is reviewed. | AN-27.1 |
+| AN-34.2 | build | XML signatures created over generated data and template packets with SG-01's and SG-02's keys and SG-13's canonicalisation, written into the `signature` packet. | `crates/tinker-pdf/src/xfa/signature.rs` (new), `crates/tinker-pdf/tests/xfa_signatures.rs` (new) | `xfa_signatures.rs` (new) `created_signatures_verify`: each signature verifies through SG-13's verifier. | AN-34.1, AN-27, SG-01, SG-02, SG-13 |
+| AN-34.3 | build | XFA signatures verified, a packet changed after signing reported. | `crates/tinker-pdf/src/xfa/signature.rs` (new), `crates/tinker-pdf/tests/xfa_signatures.rs` (new), `docs/features/signatures.md` | `a_changed_packet_is_reported`: changing a signed packet after signing yields the typed report; untouched packets verify. | AN-34.2 |
 
-**Closes the row:** AN-34.3 creates signatures that verify through SG-13 and AN-34.4 reports a packet changed after signing, which is the row's exit.
+**Closes the row:** AN-34.2 creates signatures that verify through SG-13 and AN-34.3 reports a packet changed after signing, which is the row's exit.
