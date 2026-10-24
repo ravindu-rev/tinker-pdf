@@ -164,6 +164,7 @@ Everything else measures stale code until these are done.
 | H-120 | Export-control notification for published cryptographic source; licence review of trust-list and model data | publishing with SG rows |
 | H-121 | A security-advisory process: advisories and identifiers issued, a disclosure timeline | — |
 | H-122 | Obtain the published definition of JPEG XL as a PDF image filter — its name, parameters and colour handling — once it is published | FI-07c |
+| H-159 | Purchase or obtain the barcode symbology specifications ED-49 holds its symbols to: ISO/IEC 15417 (Code 128), 16388 (Code 39), 15420 (EAN/UPC), 16390 (ITF), 18004 (QR), 23941 (rMQR), 16022 (Data Matrix), 15438 (PDF417), 24728 (MicroPDF417), 24778 (Aztec), 16023 (MaxiCode) and 24724 (DataBar); the free ones fetched (the GS1 General Specifications, the postal and payment-profile specifications the design names). | ED-49.3 to ED-49.13, and through them ED-50's read-back tests. |
 
 ## Standing duties
 
