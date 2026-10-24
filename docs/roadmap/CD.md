@@ -15,7 +15,39 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** [design/epub-layout.md](../design/epub-layout.md) · **Depends on:** MS-13
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-01.1 | watch | MS-13's first `epub_fetched.rs` run read for this row: each name's `UnimplementedProperty` count recorded, highest first, as the order this row's steps are taken in. | `crates/tinker-pdf/tests/epub_fetched.rs`, `docs/features/epub.md` | The counts from a dispatched run on `develop`, read to the end, are recorded in `epub.md`, and the order of work for this row follows them. | MS-13 |
+| CD-01.2 | build | Properties with no effect on a paged rendering accepted as recognised and inert, each documented: `animation`, `transition`, `cursor`, `resize` and `speak`. | `crates/tinker-pdf-css/src/property.rs`, `crates/tinker-pdf/tests/epub_reftest.rs`, `docs/features/epub.md` | Each name leaves `UNSUPPORTED_PROPERTIES`; a reftest pair with and without each declaration draws the same page. | — |
+| CD-01.3 | build | Aliases and font longhands: `word-wrap` as `overflow-wrap`, the `font` shorthand, `font-stretch` and `font-variant-numeric` through the face's features, and `tab-size`. | `crates/tinker-pdf-css/src/property.rs`, `crates/tinker-pdf-css/src/longhand.rs`, `crates/tinker-pdf-layout/src/text.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | Each warning stops firing on a reftest pair against its explicit equivalent, with its mismatch reference; each name leaves the table. | — |
+| CD-01.4 | build | Table properties: `caption-side` and `empty-cells`. | `crates/tinker-pdf-css/src/property.rs`, `crates/tinker-pdf-layout/src/table.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | Each warning stops firing on a reftest pair; both names leave the table. | — |
+| CD-01.5 | build | `@font-face`'s `unicode-range` read and honoured in the per-character choice of face, `font-display` accepted as inert, and `src`, `unicode-range` and `font-display` met in a style rule classed as descriptors out of place rather than unimplemented properties. | `crates/tinker-pdf-css/src/font_face.rs`, `crates/tinker-pdf-css/src/property.rs`, `crates/tinker-pdf/src/epub/typeface.rs`, `crates/tinker-pdf/tests/epub_fonts.rs` | A range keeps a book face off the characters outside it on a reftest pair; the three names leave the table. | — |
+| CD-01.6 | build | Text decoration of overflow and emphasis: `text-overflow`, `text-emphasis` and `text-emphasis-style`. | `crates/tinker-pdf-css/src/property.rs`, `crates/tinker-pdf-layout/src/text.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | Each warning stops firing on a reftest pair, the ellipsis and emphasis marks placed where the test computes them; the names leave the table. | — |
+| CD-01.7 | build | Backgrounds and lists: `background-attachment` and a second background layer, `list-style-image`, and `reversed()` with `<ol reversed>`. | `crates/tinker-pdf-css/src/property.rs`, `crates/tinker-pdf-css/src/counter.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | Each warning and count stops firing on a reftest pair; the names leave the table. | — |
+| CD-01.8 | build | Clipping: `clip` and `clip-path`, the shapes and references as clips the painter writes. | `crates/tinker-pdf-css/src/property.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | Each warning stops firing on a reftest pair, the clip geometry asserted arithmetically; both names leave the table. | — |
+| CD-01.9 | build | Blending and filters: `mix-blend-mode` as PDF blend modes, and `filter`'s functions, exact ones as transparency and the rest through CD-10's rasterised primitives. | `crates/tinker-pdf-css/src/property.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | Each function's output equals Filter Effects' formula computed in the test; both names leave the table. | CD-10.4 |
+| CD-01.10 | build | `border-image`: the slices, widths, outsets and repeat modes. | `crates/tinker-pdf-css/src/property.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | The warning stops firing on a reftest pair, each slice placed where the test computes it; the name leaves the table. | — |
+| CD-01.11 | build | The gradient remainders: repeating and conic gradients, translucent stops through soft masks, interpolation hints and colour spaces, and lists past `MAX_CSS_GRADIENT_STOPS` as a ledger row. | `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_reftest.rs`, `crates/tinker-pdf/tests/bounds_ledger.rs` | Each count stops firing on a reftest pair, the shading functions equal to those computed in the test. | — |
+| CD-01.12 | build | Blurred box and text shadows through CD-10's blur, and shadow lists past `MAX_CSS_SHADOWS` as a ledger row. | `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_reftest.rs`, `crates/tinker-pdf/tests/bounds_ledger.rs` | Each count stops firing on a reftest pair, the blur equal to the Gaussian computed in the test. | CD-10.4 |
+| CD-01.13 | build | The 3D transform functions: a matrix that reduces to two dimensions drawn through `cm`, and the rest drawn as the box's content mapped through the projection at a stated resolution. | `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf-layout/src/style.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | Each count stops firing on a reftest pair, corner positions equal to the projection computed in the test. | — |
+| CD-01.14 | build | `opacity` as one transparency group over the element's content, a form XObject the tagged writer carries marked content into. | `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/src/epub/tagging.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | Content overlapping its own background composites as §15.1 says on a reftest pair, the tagged output still validating; the count stops firing. | — |
+| CD-01.15 | build | Grid placement: `grid`, `grid-template` with its areas, rows and columns, and `grid-area`, `grid-row` and `grid-column`, with auto-placement. | `crates/tinker-pdf-layout/src/grid.rs` (new), `crates/tinker-pdf-layout/src/lib.rs`, `crates/tinker-pdf-css/src/property.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | Each item lands in the cell the test computes on reftest pairs; the eight grid names leave the table. | — |
+| CD-01.16 | build | Grid sizing and alignment: `fr`, `minmax()` and auto tracks, `justify-items` and `justify-self`, and a grid broken across pages. | `crates/tinker-pdf-layout/src/grid.rs` (new), `crates/tinker-pdf-css/src/property.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | Track sizes equal those computed in the test, alignment places each item where the test says, a tall grid fragments at row boundaries; both names leave the table. | CD-01.15 |
+| CD-01.17 | build | Vertical text: glyph orientation, vertical metrics and the vertical features, for `writing-mode`'s vertical values. | `crates/tinker-pdf-layout/src/text.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_shaped.rs` | Upright and rotated runs are placed at the advances the face's vertical metrics give, computed in the test. | — |
+| CD-01.18 | build | Vertical block flow: lines stacked across the block axis, pages progressing as `writing-mode` and the spine direction say. | `crates/tinker-pdf-layout/src/flow.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | A vertical book's lines and pages land where the test computes on reftest pairs; `writing-mode` leaves the table. | CD-01.17 |
+| CD-01.19 | build | The bidi remainders: `bidi-override` and `isolate-override` with `<bdo>`, right-to-left tables, flex containers and column sets, and over-constrained or positioned boxes in a right-to-left containing block. | `crates/tinker-pdf-layout/src/text.rs`, `crates/tinker-pdf-layout/src/table.rs`, `crates/tinker-pdf-layout/src/flex.rs`, `crates/tinker-pdf-layout/src/position.rs`, `crates/tinker-pdf/tests/epub_shaped.rs` | Each count stops firing, positions asserted in `epub_shaped.rs` as the bidi algorithm computes them. | — |
+| CD-01.20 | build | Custom properties and `calc()`: `var()` substituted with cycles detected, and `calc()`, `min()`, `max()` and `clamp()` in every numeric property. | `crates/tinker-pdf-css/src/cascade.rs`, `crates/tinker-pdf-css/src/longhand.rs`, `crates/tinker-pdf/tests/epub_css.rs` | Each computed value equals the one the test computes; a cycle makes the property invalid at computed-value time, asserted. | — |
+| CD-01.21 | test | `page` closed through CD-16.2's named pages. | `crates/tinker-pdf-css/src/property.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | The warning stops firing on a reftest pair; the name leaves the table. | CD-16.2 |
+| CD-01.22 | watch | The table empty and the corpus counts falling, and `design/epub-layout.md` brought up to date: milestone 7, `from_html`, has landed and `html_creation.rs` holds it. | `crates/tinker-pdf-css/src/property.rs`, `crates/tinker-pdf/tests/epub_fetched.rs`, `docs/design/epub-layout.md`, `docs/features/epub.md` | A test asserts `UNSUPPORTED_PROPERTIES` is empty; on a dispatched run on `develop`, read to the end, no `UnimplementedProperty` count is above zero; the design's milestone table is current. | CD-01.2, CD-01.3, CD-01.4, CD-01.5, CD-01.6, CD-01.7, CD-01.8, CD-01.9, CD-01.10, CD-01.11, CD-01.12, CD-01.13, CD-01.14, CD-01.16, CD-01.18, CD-01.19, CD-01.20, CD-01.21, CD-01.1 |
+
+**Closes the row:** CD-01.2 to CD-01.21 stop each warning on a reftest pair in `epub_reftest.rs` and delete each name from the table, and CD-01.1 and CD-01.22 record the corpus counts and watch them fall, which is the row's exit.
+
+**The tree at `5297133`, against this row's text:**
+
+- `docs/design/epub-layout.md` still lists milestone 7, `DocumentBuilder::from_html`, as open, while `crates/tinker-pdf/src/html.rs` provides it and `html_creation.rs` holds it through the EPUB reftests; CD-01.22 updates the table.
+- `src`, `unicode-range` and `font-display` are `@font-face` descriptors, and `font_face.rs` deliberately reads only four descriptors; CD-01.5 honours `unicode-range` and reclassifies the three met as properties.
 
 ## CD-02 — EPUB layout refusals
 
@@ -27,7 +59,20 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** [design/epub-layout.md](../design/epub-layout.md) · **Depends on:** H-13 (`@page`)
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-02.1 | build | `MaxHeightAsAuto`: content past `max-height` on a box whose `overflow-y` is `visible` drawn over the boxes after it, a straddling child painted whole. | `crates/tinker-pdf-layout/src/flow.rs`, `crates/tinker-pdf-layout/src/fragment.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | The warning stops firing on a reftest pair, the overflow drawn where the test computes it. | — |
+| CD-02.2 | build | An atomic box taller than a page inside a table band, a flex line or a column, sliced across pages, each slice clipped to its page. | `crates/tinker-pdf-layout/src/table.rs`, `crates/tinker-pdf-layout/src/flex.rs`, `crates/tinker-pdf-layout/src/fragment.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | The warning stops firing on a reftest pair per context, each slice's offset equal to the test's. | — |
+| CD-02.3 | build | `ColumnSpanAsNone`: `column-span: all` on a box below a multi-column container's own children, lifted out and the columns balanced before and after it. | `crates/tinker-pdf-layout/src/flow.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | The warning stops firing on a reftest pair. | — |
+| CD-02.4 | build | `PositionedInLine`: an absolutely positioned box's static position on the line it was written in, the lines placed before positioned boxes are. | `crates/tinker-pdf-layout/src/position.rs`, `crates/tinker-pdf-layout/src/floats.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | The warning stops firing on a reftest pair, the box at the line's position the test computes. | — |
+| CD-02.5 | build | A table column's background image (`ColumnBoxNotPainted`). | `crates/tinker-pdf-layout/src/table.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | The warning stops firing on a reftest pair. | — |
+| CD-02.6 | build | `content: url()`: a replaced box inside a generated one, the painter keying pictures by pseudo-element as well as element. | `crates/tinker-pdf-layout/src/flow.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_pseudo.rs` | The warning stops firing on a reftest pair; `::before` and `::after` with different images draw both. | — |
+| CD-02.7 | test | `::first-line` closed through CD-15.3's second layout pass. | `crates/tinker-pdf/tests/epub_reftest.rs` | `PseudoElementUnsupported` stops firing for `::first-line` on a reftest pair. | CD-15.3 |
+| CD-02.8 | test | `@page`'s size and margins closed through CD-16.2 and, for EPUB, CD-16.9 as H-13 rules. | `crates/tinker-pdf/tests/epub_reftest.rs` | `AtRuleUnsupported` stops firing for `@page` on a reftest pair, the page box as H-13 rules. | CD-16.9 |
+
+**Closes the row:** CD-02.1 to CD-02.7 stop each warning on a reftest pair in `epub_reftest.rs` and CD-02.8 settles `@page` as H-13 rules, which is the row's exit.
 
 ## CD-03 — EPUB text past 224 characters in a standard-14 fallback face, in a build without `bundled-fonts`
 
@@ -39,7 +84,13 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** H-04
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-03.1 | build | As H-04 decides: a face the default build carries for characters past a simple font's codes, keyed as an `/Identity-H` composite font within the footprint budget, or the owner's decision that it cannot recorded, with the counted ceiling kept. | `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_fallback.rs`, `docs/features/epub.md` | A default build sets the 234 characters `epub_fallback.rs` sets with the feature, none lost and none a notdef, inside MS-06's footprint figure; or H-04's decision is recorded and the ceiling's assertion stays. | H-04 |
+
+**Closes the row:** CD-03.1 gives a default build that loses nothing past 224, or records the owner's decision that it cannot, which is the row's exit.
 
 ## CD-04 — MathML layout
 
@@ -51,7 +102,24 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** `design/mathml.md` (owed) · **Depends on:** —
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-04.1 | design | Create `docs/design/mathml.md`: MathML Core's layout on the layout engine, the font's `MATH` table and what happens with a face that has none, the operator dictionary as data, stretchy and large operators, how `<math>` sits in a line and as a block, the structure tagging through SD-19.4, a math face committed as test data, and milestones with analytic exit tests. | `docs/design/mathml.md` (new) | The doc exists in the design-doc order, names CD-04.2 to CD-04.8's exit tests, and is reviewed. | — |
+| CD-04.2 | build | The OpenType `MATH` table read: constants, italics corrections, top-accent attachment, kerning, glyph variants and assemblies; a math face under OFL-1.1 committed as test data. | `crates/tinker-pdf-font/src/math_table.rs` (new), `crates/tinker-pdf-font/src/lib.rs`, `testdata`, `THIRDPARTY.md` | Every value read from the committed face equals the table bytes decoded by hand in the test. | CD-04.1 |
+| CD-04.3 | build | MathML parsed into a box tree: token elements, `mrow`, `mstyle`, `mspace`, `mpadded`, `mphantom` and `merror`, with the operator dictionary vendored under its licence. | `crates/tinker-pdf-layout/src/math/mod.rs` (new), `crates/tinker-pdf-layout/src/lib.rs`, `THIRDPARTY.md`, `crates/tinker-pdf/tests/mathml.rs` (new) | `mathml.rs` (new): each element's box metrics equal those computed in the test from the face's `MATH` constants. | CD-04.2 |
+| CD-04.4 | build | Fractions, radicals and scripts: `mfrac`, `msqrt`, `mroot`, `msub`, `msup`, `msubsup`, `munder`, `mover`, `munderover` and `mmultiscripts`, by MathML Core's rules. | `crates/tinker-pdf-layout/src/math/mod.rs` (new), `crates/tinker-pdf/tests/mathml.rs` (new) | Each layout's box metrics and child offsets equal those computed in the test from the `MATH` constants. | CD-04.3 |
+| CD-04.5 | build | Stretchy and large operators through glyph variants and assemblies. | `crates/tinker-pdf-layout/src/math/mod.rs` (new), `crates/tinker-pdf/tests/mathml.rs` (new) | A stretched operator's variant or assembly and its size equal those the test computes for each target size. | CD-04.4 |
+| CD-04.6 | build | Tables (`mtable`, `mtr`, `mtd`) and the remaining MathML Core elements, with `display` block and inline baselines. | `crates/tinker-pdf-layout/src/math/mod.rs` (new), `crates/tinker-pdf/tests/mathml.rs` (new) | Each layout's metrics equal those computed in the test; an inline formula's baseline sits on the line's. | CD-04.4 |
+| CD-04.7 | build | `<math>` in EPUB, HTML and Markdown laid out inline and as a block, in place of the `UnimplementedFeature` tally. | `crates/tinker-pdf-layout/src/flow.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/src/html.rs`, `crates/tinker-pdf/src/markdown.rs`, `crates/tinker-pdf/tests/mathml.rs` (new) | A book, an HTML document and a Markdown file with formulas draw them at the positions the test computes, with no `UnimplementedFeature` for MathML. | CD-04.5, CD-04.6 |
+| CD-04.8 | build | Formulas tagged as `Formula` carrying their MathML by namespace inclusion, through SD-19.4. | `crates/tinker-pdf/src/epub/tagging.rs`, `crates/tinker-pdf/tests/mathml.rs` (new) | Each formula's structure element reads back with its MathML under the namespace; the tagged output passes SD-04's rules as they stand. | CD-04.7, SD-19.4 |
+
+**Closes the row:** CD-04.3 to CD-04.6 hold MathML Core's layout to analytic fixtures from the face's `MATH` table and CD-04.8 tags formulas with MathML by namespace inclusion, which is the row's exit.
+
+**The tree at `5297133`, against this row's text:**
+
+- `tinker-pdf-math` holds deterministic transcendental functions, not formula layout; CD-04 adds a `MATH`-table reader and a math layout module.
 
 ## CD-05 — Media overlays
 
@@ -63,7 +131,14 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** AN-12
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-05.1 | build | Media overlays read: each content document's SMIL `par` elements with their text fragments and audio clips, and the package's overlay properties and durations. | `crates/tinker-pdf/src/epub/overlays.rs` (new), `crates/tinker-pdf/src/epub/package.rs`, `crates/tinker-pdf/tests/epub_overlays.rs` (new) | `epub_overlays.rs` (new): a generated book's overlay reads to its fragments and clips with their times. | — |
+| CD-05.2 | build | Each synchronised fragment carried into the PDF as a rendition action over its text, its clip embedded, for a host to play, read back through AN-12.1's model. | `crates/tinker-pdf/src/epub/overlays.rs` (new), `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_overlays.rs` (new) | A generated book's overlay yields one rendition per synchronised fragment, pointing at the right text and clip, read back through AN-12.1. | CD-05.1, AN-12.1 |
+
+**Closes the row:** CD-05.2 yields one rendition per synchronised fragment pointing at the right text and clip, which is the row's exit.
 
 ## CD-06 — `epub:switch` and the other conditional constructs
 
@@ -75,7 +150,14 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** —
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-06.1 | build | `epub:switch` honoured: the first `epub:case` whose required namespace this build supports drawn, else `epub:default`. | `crates/tinker-pdf/src/epub/xhtml.rs`, `crates/tinker-pdf/tests/epub_reading.rs` | Fixtures per case draw the branch the rules select, and `UnimplementedFeature` no longer names it. | — |
+| CD-06.2 | build | The other conditional constructs EPUB 3 defines: manifest fallback chains, and `<object>` fallback content. | `crates/tinker-pdf/src/epub/package.rs`, `crates/tinker-pdf/src/epub/xhtml.rs`, `crates/tinker-pdf/tests/epub_reading.rs` | Fixtures per case draw the item or fallback the rules select. | — |
+
+**Closes the row:** CD-06.1 and CD-06.2 draw the branch the rules select in fixtures per case, which is the row's exit.
 
 ## CD-07 — The EPUB corpus gaps
 
@@ -87,7 +169,14 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** H-107 (the books)
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-07.1 | test | A producer's book declaring `@layer`, found under H-107, run through the reader. | `corpus/corpora.lock`, `crates/tinker-pdf/tests/epub_fetched.rs` | On a dispatched run on `develop` the book draws with no unexpected warning, its result pinned. | H-107 |
+| CD-07.2 | test | A producer's book carrying `.woff` or `.woff2`, found under H-107, run through the reader. | `corpus/corpora.lock`, `crates/tinker-pdf/tests/epub_fetched.rs` | On a dispatched run on `develop` the book draws with no unexpected warning, its faces used, its result pinned. | H-107 |
+
+**Closes the row:** CD-07.1 and CD-07.2 pin a real producer's book for each gap drawing with no unexpected warning, which is the row's exit.
 
 ## CD-08 — SVG in the spine
 
@@ -99,7 +188,16 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** MS-13
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-08.1 | build | A `<tspan>`'s `objectBoundingBox` mask and clip resolved against its `<text>`'s box, the text measured before its spans' groups are built, as its paint already is. | `crates/tinker-pdf-svg/src/scene.rs`, `crates/tinker-pdf/src/epub/svg.rs`, `crates/tinker-pdf/tests/epub_svg.rs` | `TextBoxUnmeasured` no longer fires; the mask and clip geometry equal the test's computation from the text's box. | — |
+| CD-08.2 | build | `<textPath>`: glyphs placed along the path with `startOffset`, `method` and `spacing`. | `crates/tinker-pdf-svg/src/scene.rs`, `crates/tinker-pdf-svg/src/path.rs`, `crates/tinker-pdf/src/epub/svg.rs`, `crates/tinker-pdf/tests/epub_svg.rs` | Each glyph's position and angle equal those computed in the test from the path's length; `TextLayoutUnsupported` no longer names it. | — |
+| CD-08.3 | build | `<tref>` and `<altGlyph>`. | `crates/tinker-pdf-svg/src/scene.rs`, `crates/tinker-pdf/src/epub/svg.rs`, `crates/tinker-pdf/tests/epub_svg.rs` | Each draws the text or glyph its reference selects, held to a fixture whose geometry is computed in the test. | — |
+| CD-08.4 | watch | `the_six_svg_spine_items_draw_rather_than_placehold` run on the fetched corpus. | `crates/tinker-pdf/tests/epub_fetched.rs`, `.github/workflows/corpus.yml` | On a dispatched run on `develop`, read to the end, no marker reference among the thirty-two goes unresolved, or each is fixed by class. | MS-13 |
+
+**Closes the row:** CD-08.1 resolves a `<tspan>`'s box against its `<text>`, CD-08.2 and CD-08.3 draw the three text relatives held to fixtures, and CD-08.4 runs the corpus test, which is the row's exit.
 
 ## CD-09 — SVG `<switch>`
 
@@ -111,7 +209,14 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** [design/svg.md](../design/svg.md) (amend) · **Depends on:** —
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-09.1 | design | Amend `docs/design/svg.md`: `<switch>` from non-goal to design, its conditions evaluated against a stated user language and the extensions this build supports. | `docs/design/svg.md` | The amendment names CD-09.2's exit test and is reviewed. | — |
+| CD-09.2 | build | `<switch>`: the first child whose `systemLanguage`, `requiredExtensions` and `requiredFeatures` pass is drawn. | `crates/tinker-pdf-svg/src/scene.rs`, `crates/tinker-pdf-svg/src/document.rs`, `crates/tinker-pdf/tests/epub_svg.rs` | Fixtures per condition draw the selected child. | CD-09.1 |
+
+**Closes the row:** CD-09.2's fixtures per condition draw the selected child, which is the row's exit.
 
 ## CD-10 — SVG `<filter>`
 
@@ -123,7 +228,18 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** [design/svg.md](../design/svg.md) (amend) · **Depends on:** —
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-10.1 | design | Amend `docs/design/svg.md` with filters: the exact vector mappings first (offset, flood, merge, blend, composite, colour matrix to soft masks and groups), the rest rasterised inside the writer at a stated resolution; the filter region, primitive subregions, units and `color-interpolation-filters`; and what keeps the text under a filter as text. | `docs/design/svg.md` | The amendment names CD-10.2 to CD-10.6's exit tests and is reviewed. | — |
+| CD-10.2 | build | The filter graph: region and subregions in both unit systems, `SourceGraphic` and `SourceAlpha`, named results and the default chaining. | `crates/tinker-pdf-svg/src/filter.rs` (new), `crates/tinker-pdf-svg/src/lib.rs`, `crates/tinker-pdf/tests/epub_svg.rs` | Each region and subregion equals the one computed in the test; a graph with an unknown primitive is named and drawn without it. | CD-10.1 |
+| CD-10.3 | build | The exact mappings: `feOffset`, `feFlood`, `feMerge`, `feBlend`, `feComposite`'s operators and `feColorMatrix` expressed as PDF transparency. | `crates/tinker-pdf-svg/src/filter.rs` (new), `crates/tinker-pdf/src/epub/svg.rs`, `crates/tinker-pdf/tests/epub_svg.rs` | Each primitive's output equals Filter Effects' formula computed in the test, and text under each stays text. | CD-10.2 |
+| CD-10.4 | build | The rasteriser inside the writer at the stated resolution, and the first raster primitives: `feGaussianBlur`, `feMorphology`, `feConvolveMatrix` and `feComponentTransfer`. | `crates/tinker-pdf/src/epub/svg.rs`, `crates/tinker-pdf/tests/epub_svg.rs` | Each primitive's pixels equal Filter Effects' formula computed in the test at the stated resolution. | CD-10.2 |
+| CD-10.5 | build | The rest of the raster primitives: `feTurbulence`, `feDisplacementMap`, `feTile`, `feImage` and the two lighting primitives. | `crates/tinker-pdf/src/epub/svg.rs`, `crates/tinker-pdf/tests/epub_svg.rs` | Each primitive's pixels equal Filter Effects' formula computed in the test. | CD-10.4 |
+| CD-10.6 | test | A filter over vector text, held both ways: kept as text where every primitive maps exactly, and rasterised where one does not. | `crates/tinker-pdf/tests/epub_svg.rs`, `docs/design/svg.md` | The extracted text of each exact case equals its source; `ArchiveWarning::Svg` no longer names a filter. | CD-10.3, CD-10.5 |
+
+**Closes the row:** CD-10.3 to CD-10.5 make each primitive's output equal Filter Effects' formulas computed in the test and CD-10.6 keeps vector text under an exact filter as text, which is the row's exit.
 
 ## CD-11 — SVG `<foreignObject>`
 
@@ -135,7 +251,15 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** [design/svg.md](../design/svg.md) (amend) · **Depends on:** —
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-11.1 | design | Amend `docs/design/svg.md` with `<foreignObject>`: the leaf crate hands the subtree and its box to its caller and lays nothing out (ruling 8), and the facade lays the XHTML out at that box. | `docs/design/svg.md` | The amendment names CD-11.2 and CD-11.3's exit tests and is reviewed. | — |
+| CD-11.2 | build | The SVG crate surfaces a `<foreignObject>`'s subtree and box to its caller, still PDF-free and layout-free. | `crates/tinker-pdf-svg/src/scene.rs`, `crates/tinker-pdf-svg/src/document.rs`, `crates/tinker-pdf-svg/src/tests.rs` | A unit test reads the subtree and the box the test computes, and the crate's dependencies are unchanged. | CD-11.1 |
+| CD-11.3 | build | The facade lays the XHTML out at the box with the EPUB cascade, layout engine and painter, clipped to it. | `crates/tinker-pdf/src/epub/svg.rs`, `crates/tinker-pdf/tests/epub_svg.rs` | The embedded content's operators equal those of the same XHTML laid out at that box through `from_html`. | CD-11.2 |
+
+**Closes the row:** CD-11.3 makes the embedded content equal the same XHTML laid out at that box, which is the row's exit.
 
 ## CD-12 — Scripted content documents
 
@@ -147,7 +271,21 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** `design/scripted-documents.md` (owed) · **Depends on:** FJ-03e
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-12.1 | design | Create `docs/design/scripted-documents.md`: the DOM subset, the in-tree engine's binding to it, when scripts run (before layout, to quiescence), deny-by-default capabilities as form scripts have them, FJ-04's budgets, `<noscript>`, SVG's `<script>`, html5lib's `#script-on` tests as the adjudicator, and milestones with exit tests. | `docs/design/scripted-documents.md` (new) | The doc exists in the design-doc order, names CD-12.2 to CD-12.9's exit tests, and is reviewed. | FJ-03e |
+| CD-12.2 | build | The HTML parser's scripting flag: tree construction with scripting on, `<noscript>` parsed as text. | `crates/tinker-pdf-xml/src/html/tree.rs`, `crates/tinker-pdf-xml/tests/html5lib.rs` | html5lib's `#script-on` tree-construction tests pass, with the count recorded beside the `#script-off` one. | CD-12.1 |
+| CD-12.3 | build | The DOM subset over the engine: traversal and mutation, element creation, attributes, text, and lookup by ID and by selector through the CSS selector engine. | `crates/tinker-pdf/src/epub/dom_script.rs` (new), `crates/tinker-pdf/tests/scripted_documents.rs` (new) | `scripted_documents.rs` (new): each operation's effect on the tree equals the expected tree, compared node by node. | CD-12.1 |
+| CD-12.4 | build | Script order: classic scripts in document order, `defer` and `async` in a deterministic order, scripts from the container only, `DOMContentLoaded` and `load`, and timers run to quiescence. | `crates/tinker-pdf/src/epub/dom_script.rs` (new), `crates/tinker-pdf/tests/scripted_documents.rs` (new) | Fixtures exercising each order record the order the design states; two runs give the same tree. | CD-12.3 |
+| CD-12.5 | build | Deny by default as form scripts are: no network, storage or navigation, each refusal named, under FJ-04's budgets. | `crates/tinker-pdf/src/epub/dom_script.rs` (new), `crates/tinker-pdf/tests/scripted_documents.rs` (new) | Each denied capability is refused by name; a hostile script stops at its budget with a typed warning and the document still draws. | CD-12.4, FJ-04 |
+| CD-12.6 | build | EPUB: spine items with the `scripted` property run before layout and their post-script DOM laid out, in place of the `UnimplementedFeature` tally. | `crates/tinker-pdf/src/epub/read.rs`, `crates/tinker-pdf/src/epub/xhtml.rs`, `crates/tinker-pdf/tests/scripted_documents.rs` (new) | Scripted EPUB fixtures draw their post-script DOM; `<noscript>` is not drawn where scripts ran. | CD-12.5 |
+| CD-12.7 | build | HTML creation runs a document's scripts when asked, by an option off by default. | `crates/tinker-pdf/src/html.rs`, `crates/tinker-pdf/tests/html_creation.rs` | A scripted HTML fixture draws its post-script DOM with the option and its unscripted DOM without. | CD-12.5 |
+| CD-12.8 | build | SVG's `<script>` in spine SVG and standalone SVG, against the same subset. | `crates/tinker-pdf/src/epub/svg.rs`, `crates/tinker-pdf/tests/scripted_documents.rs` (new) | A scripted SVG fixture draws its post-script tree. | CD-12.5 |
+| CD-12.9 | test | The row's suite run whole: html5lib's `#script-on` tests, every scripted fixture, and the budget fixtures. | `crates/tinker-pdf/tests/scripted_documents.rs` (new), `crates/tinker-pdf/tests/hostile_input.rs`, `docs/features/opening.md` | All pass; `hostile_input.rs` runs scripted documents with zero panics; `opening.md` no longer says no script engine. | CD-12.2, CD-12.6, CD-12.7, CD-12.8 |
+
+**Closes the row:** CD-12.2 passes html5lib's `#script-on` tests, CD-12.6 to CD-12.8 draw scripted fixtures' post-script DOM, and CD-12.5 holds FJ-04's budgets, which is the row's exit.
 
 ## CD-13 — XPS remainder
 
@@ -159,7 +297,18 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** RC-20, SG-13, H-106
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-13.1 | build | `ContextColor` gradient stops evaluated through each profile RC-20 makes evaluable, a CMYK press profile with no `A2B*` table and an `mAB ` one among them, rather than approximated. | `crates/tinker-pdf/src/xps/brush.rs`, `crates/tinker-pdf/src/xps/profiles.rs`, `crates/tinker-pdf/tests/xps_context_colour.rs` | Each newly evaluable fixture converts through its profile to values computed in the test, and `BrushApproximated` no longer fires on it. | RC-20 |
+| CD-13.2 | test | A producer's package per row feature, from H-106, in the conservation sweep in place of the derived fixtures. | `crates/tinker-pdf/tests/xps_conservation.rs`, `crates/tinker-pdf/tests/xps_rows` | Each feature has a producer's package in the sweep, its census result pinned. | H-106 |
+| CD-13.3 | build | XPS digital signatures read and verified through SG-13. | `crates/tinker-pdf/src/xps/opc.rs`, `crates/tinker-pdf/src/xps/signatures.rs` (new), `crates/tinker-pdf/tests/xps_signatures.rs` (new) | `xps_signatures.rs` (new): a signed package verifies and a tampered twin does not, each verdict naming the signed parts. | SG-13 |
+| CD-13.4 | build | Print tickets at job, document and page level surfaced as metadata. | `crates/tinker-pdf/src/xps/opc.rs`, `crates/tinker-pdf/src/xps.rs`, `crates/tinker-pdf/tests/xps_opc.rs` | Each level's ticket reads back as typed metadata on a fixture. | — |
+| CD-13.5 | build | Story fragments feeding reading order: the document structure and story-fragment parts mapped to the page's reading order and structure. | `crates/tinker-pdf/src/xps/markup.rs`, `crates/tinker-pdf/src/xps.rs`, `crates/tinker-pdf/tests/xps_markup.rs` | A fixture's extracted reading order follows its story fragments, not its drawing order. | — |
+| CD-13.6 | build | 3D content parts read, each surfaced and named where it is not drawn. | `crates/tinker-pdf/src/xps/opc.rs`, `crates/tinker-pdf/tests/xps_opc.rs`, `docs/features/xps.md` | A package carrying 3D content reads with each part surfaced and named; `xps.md` no longer lists 3D as not read. | — |
+
+**Closes the row:** CD-13.1 grows the evaluable profile set with RC-20's, CD-13.2 puts a producer's package per feature in the sweep, CD-13.3 verifies signatures through SG-13, CD-13.4 surfaces print tickets, and CD-13.5 feeds story fragments into reading order, which is the row's exit.
 
 ## CD-14 — Language-conditional CSS data
 
@@ -171,7 +320,14 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** H-116
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-14.1 | build | `quotes: auto` per language from HTML's per-language table, vendored under a licence the allowlist admits. | `crates/tinker-pdf-css/src/counter.rs`, `crates/tinker-pdf-css/data/quotes` (new), `THIRDPARTY.md`, `crates/tinker-pdf/tests/epub_reftest.rs` | Each language's marks equal the table's on reftest pairs; the count against `quotes` stops firing. | H-116 |
+| CD-14.2 | build | `text-transform` in Lithuanian, Turkish and Azeri from the special-casing data, and `full-width` and `full-size-kana` from their specification's tables. | `crates/tinker-pdf-layout/src/case.rs`, `crates/tinker-pdf-layout/src/unicode.rs`, `THIRDPARTY.md`, `crates/tinker-pdf/tests/epub_reftest.rs` | Each mapping equals its table's on reftest pairs; the refusals by value stop firing. | H-116 |
+
+**Closes the row:** CD-14.1 and CD-14.2 hold each feature to its specification's tables, vendored under an admitted licence, which is the row's exit.
 
 ## CD-15 — Replaced-element and pseudo-element remainder
 
@@ -183,7 +339,15 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** [design/epub-layout.md](../design/epub-layout.md) · **Depends on:** —
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-15.1 | design | Amend `docs/design/epub-layout.md`: `object-fit`, `object-position` and `::first-line` move from non-goals into the design, the second layout pass's shape and cost stated. | `docs/design/epub-layout.md` | The amendment names CD-15.2 and CD-15.3's exit tests and is reviewed. | — |
+| CD-15.2 | build | `object-fit` and `object-position` on replaced boxes. | `crates/tinker-pdf-layout/src/flow.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/epub_reftest.rs` | A reftest pair per value, the image's placement equal to the test's computation. | CD-15.1 |
+| CD-15.3 | build | `::first-line` with its second layout pass: the first formatted line restyled and laid out again. | `crates/tinker-pdf-layout/src/flow.rs`, `crates/tinker-pdf-layout/src/text.rs`, `crates/tinker-pdf/tests/epub_pseudo.rs` | A reftest pair per property `::first-line` admits; `PseudoElementUnsupported` stops firing for it. | CD-15.1 |
+
+**Closes the row:** CD-15.2 and CD-15.3 hold each value to a reftest pair, which is the row's exit.
 
 ## CD-16 — CSS paged media and generated content for paged media
 
@@ -195,7 +359,26 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** `design/paged-media.md` (owed) · **Depends on:** H-13
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-16.1 | design | Create `docs/design/paged-media.md`: the page model with sizes, margins, page selectors and named pages, the sixteen margin boxes, running elements and `string-set`, the counters, `target-counter()` and `target-text()` through a second pass, `leader()`, footnotes, bleed and marks, outlines from headings, EPUB as H-13 decides, and milestones with reftests whose page geometry is computed in the test. | `docs/design/paged-media.md` (new) | The doc exists in the design-doc order, names CD-16.2 to CD-16.10's exit tests, and is reviewed. | — |
+| CD-16.2 | build | `@page` with sizes and margins, `:first`, `:left`, `:right` and `:blank`, and named pages through `page`, for HTML creation. | `crates/tinker-pdf-css/src/parser.rs`, `crates/tinker-pdf-layout/src/fragment.rs`, `crates/tinker-pdf/src/html.rs`, `crates/tinker-pdf/tests/paged_media.rs` (new) | `paged_media.rs` (new): reftest pairs per feature, each page's box and margins equal to the test's computation. | CD-16.1 |
+| CD-16.3 | build | The sixteen margin boxes, running elements, and `string-set` with `string()`. | `crates/tinker-pdf-layout/src/fragment.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/paged_media.rs` (new) | Each margin box's content and position equal the test's on reftest pairs; a running element repeats on the pages the test names. | CD-16.2 |
+| CD-16.4 | build | The page and pages counters, in margin boxes and content. | `crates/tinker-pdf-css/src/counter.rs`, `crates/tinker-pdf/tests/paged_media.rs` (new) | Each page shows its number and the total, as the test computes. | CD-16.3 |
+| CD-16.5 | build | `target-counter()` and `target-text()` through a second pass, and `leader()`. | `crates/tinker-pdf-layout/src/fragment.rs`, `crates/tinker-pdf-css/src/counter.rs`, `crates/tinker-pdf/tests/paged_media.rs` (new) | A generated report's table of contents carries the right page numbers, with leaders filling to the test's widths. | CD-16.4 |
+| CD-16.6 | build | Footnotes: `float: footnote`, the footnote area, and the call and marker pseudo-elements. | `crates/tinker-pdf-layout/src/floats.rs`, `crates/tinker-pdf-layout/src/fragment.rs`, `crates/tinker-pdf/tests/paged_media.rs` (new) | Each footnote lands at the foot of its call's page, the area's height equal to the test's. | CD-16.2 |
+| CD-16.7 | build | Bleed and crop and cross marks, with the trim and bleed boxes written. | `crates/tinker-pdf/src/html.rs`, `crates/tinker-pdf/tests/paged_media.rs` (new) | The boxes and marks equal the test's geometry on a fixture. | CD-16.2 |
+| CD-16.8 | build | Outlines from headings, by level and label. | `crates/tinker-pdf/src/html.rs`, `crates/tinker-pdf/tests/paged_media.rs` (new) | A generated document's outline equals its headings with the page of each. | CD-16.2 |
+| CD-16.9 | build | EPUB: `@page` honoured as H-13 decides. | `crates/tinker-pdf/src/epub/read.rs`, `crates/tinker-pdf/tests/epub_reftest.rs`, `docs/features/epub.md` | A book's `@page` changes its pages exactly as H-13 rules, held by a reftest pair, and the caller's box rules otherwise. | CD-16.2, H-13 |
+| CD-16.10 | test | The row's reftests run whole over HTML creation and EPUB. | `crates/tinker-pdf/tests/paged_media.rs` (new), `docs/features/epub.md` | Every feature's reftest pair passes with its page geometry computed in the test; `AtRuleUnsupported` no longer names `@page`. | CD-16.5, CD-16.6, CD-16.7, CD-16.8, CD-16.9 |
+
+**Closes the row:** CD-16.2 to CD-16.9 hold each feature to reftest pairs whose page geometry is computed in the test, CD-16.5 puts the right page numbers in a generated table of contents, and CD-16.10 runs them whole, which is the row's exit.
+
+**The tree at `5297133`, against this row's text:**
+
+- CD-02's `@page` item and CD-01's `page` property are both paged media; CD-02.8 and CD-01.21 close through CD-16.2 and CD-16.9 rather than building them twice.
 
 ## CD-17 — Typography quality
 
@@ -207,7 +390,15 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** —
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-17.1 | build | Paragraph-optimal line breaking as a layout option: minimum total demerits over UAX #14's break opportunities. | `crates/tinker-pdf-layout/src/text.rs`, `crates/tinker-pdf-layout/src/uax14.rs`, `crates/tinker-pdf/tests/line_breaking.rs` (new) | `line_breaking.rs` (new): an optimal break equals the minimum-demerits solution computed in the test; with the option off every reftest is unchanged. | — |
+| CD-17.2 | build | Optical margin alignment as an option: punctuation and edges protruding by a stated table. | `crates/tinker-pdf-layout/src/text.rs`, `crates/tinker-pdf/tests/line_breaking.rs` (new) | Each protrusion equals the table's amount on a fixture; defaults unchanged. | — |
+| CD-17.3 | build | Glyph-scaling justification as an option, within stated bounds. | `crates/tinker-pdf-layout/src/text.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/tests/line_breaking.rs` (new) | Each line's scale equals the one computed in the test and stays within the bounds; defaults unchanged. | CD-17.1 |
+
+**Closes the row:** CD-17.1 matches the minimum-demerits solution computed in the test and CD-17.1 to CD-17.3 leave the defaults unchanged, which is the row's exit.
 
 ## CD-18 — HTML form controls
 
@@ -219,7 +410,15 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** AN-14
 
-*Not yet cut into steps. It is cut before work on it starts ([How a step runs](../ROADMAP.md#how-a-step-runs), 1).*
+*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| CD-18.1 | build | HTML form controls drawn with appearances: `<input>` of each type, `<select>`, `<textarea>` and `<button>`, as atomic boxes with the user-agent style. | `crates/tinker-pdf-layout/src/flow.rs`, `crates/tinker-pdf/src/epub/paint.rs`, `crates/tinker-pdf/src/epub/ua.css`, `crates/tinker-pdf/tests/html_form_controls.rs` (new) | `html_form_controls.rs` (new): each control is drawn, its box equal to the test's computation and its state shown. | — |
+| CD-18.2 | build | Controls turned into AcroForm fields on request, each with its value, options and flags, through AN-14's field types. | `crates/tinker-pdf/src/html.rs`, `crates/tinker-pdf/tests/html_form_controls.rs` (new) | Each control becomes the field the test expects, its appearance matching the drawn control. | CD-18.1, AN-14 |
+| CD-18.3 | test | The converted form filled through the editor. | `crates/tinker-pdf/tests/html_form_controls.rs` (new) | Each field fills through the editor, saves, and reads back with its new value, the output passing the strict validator. | CD-18.2 |
+
+**Closes the row:** CD-18.1 draws each control and CD-18.3 fills the converted form's fields through the editor, which is the row's exit.
 
 ## CD-19 — What the overflow font's code-32 move hid under `word-spacing`
 
