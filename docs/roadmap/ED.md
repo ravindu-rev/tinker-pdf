@@ -965,7 +965,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Streaming write**: finished pages flushed to the sink; memory proportional to the largest object
 
-**Today.** a non-goal of the streaming design until 9 October 2026 (`design/streaming-open.md:47-66`)
+**Today.** a non-goal of the streaming design until 9 October 2026 (`design/streaming-open.md:47-70`)
 
 **Exit criterion.** a 10 000-page generated document written with peak memory within an MS-05 band independent of page count
 

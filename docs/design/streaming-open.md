@@ -47,6 +47,10 @@ operations that still need every byte.
 - **No transport in the engine.** No HTTP client, no file I/O, no mmap call
   anywhere in the workspace — hosts own transport, exactly as they own
   fonts. Zero third-party logic crates stays true; nothing new is linked.
+  *Narrowed, 25 October 2026*: to the engine crates. `tools/tpdf` is a
+  workspace member (`Cargo.toml:32`) that already reads files, and the source
+  of *A file-backed source in the hosts that own files* lives there and in the
+  Python and .NET bindings, never in an engine crate.
 - **No async.** Argued below; the trait is synchronous forever.
 - **No streaming write.** `DocumentEditor`'s incremental save requires the
   original bytes verbatim as its prefix (`CosDocument::bytes` says why:
@@ -86,6 +90,12 @@ range client (host code in `bindings/`; misses until the host fetches).
 wasm has neither files nor mmap — survives intact: this is not an I/O
 trait. It performs no transport, blocks on nothing, and on wasm is backed
 by memory the host has already fed.
+
+*Amended, 25 October 2026*: the native implementation is neither a mapping nor
+the facade's. It is a file read at offsets, in each host that owns one, and it
+can miss, since a read that fails is a `SourceMiss`; a mapping needs `unsafe`
+and cannot survive a truncated file. See *A file-backed source in the hosts that
+own files*.
 
 ### Discovery without the whole file
 
@@ -170,6 +180,9 @@ ranges" result. The host awaits its own `fetch`, feeds the chunk cache,
 and calls again; because parsing is pure and the store caches, the retry
 repeats no completed work. Native hosts back the source with mmap or a
 blocking file read and simply never miss. One engine, two host loops.
+*Amended, 25 October 2026*: a native host reads its file at offsets, and a read
+that fails is a miss it has nowhere to fetch from, so it fails the file rather
+than calling again (*A miss, to a host that cannot fetch*, below).
 
 ### Determinism: arrival is not an input
 
@@ -374,6 +387,10 @@ of them showed on a fixture this repository wrote.
 - The repair index is built at the first read that finds an entry lying, rather
   than at open. The *values* are the same on both paths -- that is asserted --
   and the fetch is declared with `WarningKind::WholeFileFetched`.
+  *Corrected, 25 October 2026*: it is built at the first read the table cannot
+  answer, which includes a free or an absent entry, and over a free entry whose
+  old body is still in the file the two paths read different values. P-05.2
+  gates it on the verdict; see *The read that disagrees today*, below.
 - `Revision::byte_range.end` is the document's end rather than the byte past
   `%%EOF` when the marker is more than 8 KiB past the section, which on the
   head path it always is.
@@ -682,6 +699,394 @@ MS-01.8's guard suite on four targets; MS-08.4 needs MS-04.3's open group.
 | The allowance and the committed counts are facts about the fixtures' layout, so a writer change can fail the guard with no engine change | The terms are recomputed on every run, and a failure names each read with the bytes it carried outside them, so a layout change can be told from an engine one; the counts then move by a reviewed change |
 | The row's time is mostly link time -- 50 ms a request against milliseconds of work -- so a slower open or render barely moves it | The counts are held exactly in `cargo test`, and the link part of the figure is a constant those counts give, so the work is the figure less it and reads on its own |
 | The model flatters a real link: no slow start, no per-request overhead, no server time | The model is stated beside its figure; it compares layouts and changes with each other, and predicts no network |
+
+## A file-backed source in the hosts that own files
+
+*25 October 2026, for [ROADMAP](../ROADMAP.md) row P-05.* Every native host
+that opens a path reads the whole file and then hands the facade a copy of it.
+`tpdf` reads a `Vec` that `Document::open` copies into an `Arc<[u8]>`
+(`tools/tpdf/src/main.rs:859-860`, `crates/tinker-pdf/src/lib.rs:1398`); Python
+reads one, copies it, and the facade copies the copy
+(`bindings/python/src/lib.rs:99`, `:106-109`); .NET reads a managed array that
+the C ABI copies twice more (`bindings/dotnet/TinkerPdf.cs:1253`,
+`crates/tinker-pdf-ffi/src/lib.rs:647`). Measured on this tree, a release
+`tpdf info` over a generated file of 22,992,669 bytes, one page and one
+uncompressed image, takes a median 27.62 ms over 21 runs and peaks at 48,508 to
+48,704 KiB over 11; over a 233-byte file it takes 1.48 ms and peaks at 4,896 to
+5,284 KiB. Nearly all of the first is the read and the copy. The row asks for
+6 ms and 10 MB. This section fixes where the source that gets there lives, what
+it may do, and how every host keeps the answers a buffered open gives, before
+P-05.2 builds on it.
+
+### Scope
+
+- **Where the source lives:** in the hosts that own files and in no engine
+  crate: `tools/tpdf/src/source.rs` (new, P-05.4), the Python binding's own copy
+  of it (P-05.7), and a `FileStream` behind the C ABI's vtable in .NET (P-05.8).
+- **How it reads:** at offsets, through std's per-platform `FileExt` traits for
+  unix and windows; no mapping and no `unsafe`.
+- **Its length,** fixed at open. A read that fails, or ends short of that
+  length, is a `SourceMiss`, which a host with nowhere to fetch from turns into
+  a failed file rather than a null.
+- **Which CLI commands read on demand,** and which read the file whole, once,
+  in place.
+- **One rule for every path open:** keep the streamed document only when it
+  answers as a buffered open of the same bytes does, and otherwise read the file
+  whole and open that. It is how `info` and `check` keep the buffered open's
+  ladder line and warnings, and it settles what a binding's path open reports in
+  `warnings()`.
+- **One copy:** a whole-file fetch holds the file once (P-05.3); a slice handed
+  to the facade costs one copy and an `Arc<[u8]>` none (P-05.6).
+- **What the engine owes first** (P-05.2): a verdict reached through windows it
+  keeps none of; a streamed document that reads an entry its table cannot place
+  as a buffered one does, which this section found it does not; and the
+  predicate the rule asks.
+- **The measures:** how MS-04's 23 MB open and MS-05's open case reach the
+  path, so P-05.9's 6x floor and 10 MB band measure it.
+
+### Non-goals
+
+- **No mapping.** std maps nothing, so a mapping is `unsafe` wherever it is
+  made, and a mapped file that another process truncates raises `SIGBUS` at the
+  next touch, which no Rust code turns into a `SourceMiss`: ruling 1 would end
+  at the first truncated file. A positioned read of the same file comes back
+  short, and short is a miss. The caller-owned mmap the design began with is
+  withdrawn where it stands (*One trait, three implementations*).
+- **No file I/O in the engine crates.** The non-goal above is narrowed to them,
+  since `tools/tpdf` is a workspace member (`Cargo.toml:32`) that already reads
+  files (`main.rs:859`); P-05.3 narrows `source.rs`'s header (`:9-11`,
+  `:21`) the same way. The engine gains no source and no trait method.
+- **No prefetch, still.** The source answers the ranges it is asked for, whole,
+  and reads nothing because it might be wanted next.
+- **`probe` keeps its record.** It opens buffered as today, because the corpus
+  ratchet reads what it prints (`xtask/src/runner.rs:584`). Reading the file once
+  instead of copying it lowers only its `peak` and `ms` lines, measurements the
+  ratchet records as an improvement and never as a regression
+  (`xtask/src/ratchet.rs:561-566`).
+- **No ladder in a binding's own surface.** Python decides in Rust; .NET asks
+  one C ABI function P-05.8 adds, which answers yes or no. Neither binding gains
+  a ladder accessor, and the C ABI still has none.
+- **Not the C ABI callback's own copy.** `CallbackSource` reads into a `Vec` and
+  copies that into an `Arc` (`crates/tinker-pdf-ffi/src/lib.rs:311-324`), so
+  each answer through a vtable costs its length twice for a moment. .NET reaches
+  it only for the documents it keeps streamed, which read whole only when a
+  caller asks for a whole-file operation; no band measures that, and P-05
+  leaves it.
+- **Not JavaScript, Go or Java.** JavaScript keeps `PdfSource`, the host-fed
+  source wasm needs; Go and Java already open through
+  `tpdf_document_open_streaming` with sources of their own and keep the
+  streamed contract they have.
+- **Unix and Windows only.** Those are the source's two arms and what CI builds
+  `tpdf` on (`.github/workflows/ci.yml:27`); a target with neither fails to
+  compile rather than reading through an arm no run exercises.
+
+### Design
+
+#### Where the source lives
+
+The engine keeps its one trait (`crates/tinker-pdf-cos/src/source.rs:79-102`)
+and implements it for memory alone. A host that owns a file implements it once
+more:
+
+- **`tools/tpdf/src/source.rs`** (P-05.4) holds the file source, the whole-file
+  read and the open every reading command calls. It names nothing but `std` and
+  `tinker_pdf`, so P-05.5's probe child includes it by path, as MS-05 reaches
+  `benches/support`, and runs the CLI's own open rather than a copy of it.
+- **The Python binding** (P-05.7) carries its own copy of that shape, because
+  it builds outside the workspace (`Cargo.toml:39-42`) and cannot depend on a
+  binary's module.
+- **.NET** (P-05.8) reads a `FileStream` at offsets behind
+  `tpdf_document_open_streaming`'s vtable
+  (`crates/tinker-pdf-ffi/src/lib.rs:685-737`), its context a `GCHandle` the
+  vtable's `free` releases, as Go's binding holds a `cgo.Handle`.
+
+#### Positioned reads, and a length fixed at open
+
+- **The length** is the open handle's `metadata().len()`, read once.
+  `ByteSource::len` is fixed for the life of a source (`source.rs:80-84`), and
+  the C ABI caches its host's for the same reason
+  (`crates/tinker-pdf-ffi/src/lib.rs:271-274`). Every read is clamped to it, so
+  bytes appended after open are never read: the document is the file as long as
+  it was when it opened, which is what every offset in it, `/L` among them, is
+  measured against.
+- **A read** allocates exactly its clamped range as a zero-filled `Arc<[u8]>`,
+  collected from `iter::repeat_n(0u8, n)`, which builds the `Arc` in one
+  allocation, and fills it in place through `Arc::get_mut`, which a freshly
+  collected `Arc` always grants. Measured with rustc 1.99.1, release and debug
+  alike: a mebibyte built that way allocates 1,048,592 bytes, the length and
+  the two reference counts, where `Arc::from(vec![0; 1 << 20])` allocates
+  2,097,168. No `Vec` is copied into an `Arc`, and nothing is `unsafe`.
+- **On unix** the fill is `std::os::unix::fs::FileExt::read_exact_at`, `pread`
+  in a loop that retries an interrupted call; **on windows** it is a loop of
+  `std::os::windows::fs::FileExt::seek_read`, which moves the handle's cursor
+  but takes its offset from every call. Nothing reads the cursor, so concurrent
+  reads share nothing, and the engine does read from several threads at once
+  (`ByteSource: Send + Sync`, `source.rs:79`; `render --jobs`).
+- **The answer is the whole range or a miss.** The trait allows a short answer
+  (`source.rs:92-101`); a file has no reason to give one, and a whole answer
+  keeps one read one request, which is what `CountingSource` counts
+  (`source.rs:241-255`) and what P-05.4's read budget is written in.
+- **A read that fails, or ends inside the fixed length** (the file shrank under
+  the reader, the disk failed) is `SourceMiss::at` its range
+  (`source.rs:50-61`). The engine's own loops already take an empty answer
+  inside the length for a miss rather than an end of file
+  (`source.rs:424-429`).
+- **The whole-file read** is the same read over `0..len`: one buffer of the
+  file's length, filled in place, handed to `Document::open` as an
+  `Arc<[u8]>`, which the facade keeps without a copy
+  (`crates/tinker-pdf/src/lib.rs:1394-1398`,
+  `crates/tinker-pdf-cos/src/doc.rs:370-372`).
+
+#### A miss, to a host that cannot fetch
+
+The engine never turns a miss into a value. A load that missed reads as null for
+that call and is not published, so the next call asks again
+(`doc.rs:1520-1527`), and an open that missed is `OpenError::SourceUnavailable`
+(`crates/tinker-pdf/src/lib.rs:1037`, `:1552-1554`). That is right for a host
+that goes and fetches the range, and wrong for one with nowhere to fetch it
+from: a CLI that printed a page count after a failed read would print the count
+of a page tree that was partly null.
+
+So the file source records its first failure, the range and the error, and
+`tpdf` asks it before printing or writing anything it read through the source:
+`info`'s and `check`'s lines for a file, each page for the commands that go page
+by page. A recorded failure fails that file, `reading {path}: {error} at bytes
+{start}..{end}`, and `run` goes on to the next, as it already does for one it
+cannot open (`main.rs:881-901`). In a binding a failed open raises as an
+unreadable file raises today. After open the binding keeps the engine's
+contract, in which the call that needed the bytes reads them as absent and the
+next asks again, as every streamed host already does
+(`crates/tinker-pdf-ffi/src/lib.rs:244-257`).
+
+#### One rule for every path open
+
+A streamed document can answer differently from a buffered open of the same
+bytes, and *What a streamed document does differently* lists how: its ladder is
+provisional, it repairs at first read and fetches the whole file to do it, and
+Annex F's fast path builds from the head what a buffered open builds from the
+page tree. P-05 removes none of that. It keeps every path open away from it:
+
+1. Open through the file source (`Document::open_streaming`,
+   `crates/tinker-pdf/src/lib.rs:1510-1562`).
+2. Straight after the open, before anything else is read, ask
+   `CosDocument::answers_as_buffered` (new, P-05.2), through `Document::cos`
+   (`lib.rs:2101`).
+3. If it says no, drop the document and read the file whole. If it says yes,
+   answer from the streamed document.
+
+`answers_as_buffered` is true for a document opened from a buffer and, for a
+streamed one, exactly when three things hold. Each is a way the two can part
+that nothing at open would otherwise show.
+
+- **It did not open on Annex F's head-only path** (`first_page_end()` is
+  `None`, `doc.rs:647-649`). That path builds page one from `/O`, and later
+  pages from the hint tables, out of the page's own dictionary
+  (`crates/tinker-pdf-cos/src/pages.rs:431-461`, `:477-484`), and declines only
+  for a missing `/MediaBox` or `/Resources` (`:446`): two of the four attributes
+  7.7.3.4 lets a page inherit. A probe for this section gave a linearized file's
+  one page its own `/MediaBox [0 0 200 100]` and `/Resources`, and its `/Pages`
+  node `/Rotate 90`. A buffered open's page one, and the streamed document's own
+  tree walk (`Document::pages`, `lib.rs:1760`), are 100 x 200 pt and rotated
+  90; the head path's is 200 x 100 pt and rotated 0. With a `/CropBox
+  [0 0 100 50]` on the node instead, 100 x 50 against 200 x 100. Neither open
+  warns. Until the head path builds a page as the walk does, which this row
+  does not own (see Risks), a path open reads a linearized file whole, as it
+  does today.
+- **It has warned nothing.** What a streamed open warns at open is the header
+  scan's and the cross-reference walk's, which a buffered open warns the same
+  from the same functions, and the source's own. Five kinds are raised only
+  where a streamed document does what a buffered one does not, by Annex F's
+  fast path (`doc.rs:421-428`) or by a whole-file fetch (`doc.rs:1861`):
+  `LinearizedLengthMismatch` and `LinearizedParametersUnusable` at open
+  (`doc.rs:2005`, `:2020`, `:2055`, `:2085`), the two hint-table kinds for a
+  page past the first (`doc.rs:1142-1265`, `:1361`; `pages.rs:481`), and
+  `WholeFileFetched` (`doc.rs:1867`). Rather than classify them, the rule reads
+  any document that has warned anything whole. The one other warning at open
+  that would matter, `HeaderNotAtStart` (`crates/tinker-pdf-cos/src/xref.rs:232`),
+  goes the same way: a buffered open rewrites every shifted entry
+  (`doc.rs:2101-2127`), where a streamed one reads each at the offset its table
+  states (`doc.rs:1677-1687`) and so repairs it at first read through the whole
+  file, which `crates/tinker-pdf/tests/streaming_open.rs:1300-1312` pins for a
+  linearized head.
+- **Its completed verdict is `Trust`.** `complete_validation`
+  (`doc.rs:716-742`) decides the ladder a buffered open would have, and after
+  P-05.2 it does so through windows it keeps none of, over the merged table.
+  `Patch` or `Rescan` means a buffered open repairs at open, and the answers
+  must come from that open's table and warnings.
+
+No host classifies a warning kind, and none has to: the predicate lives in the
+engine beside the mechanisms it sums up, and a change to one of them changes it
+in the same commit. `streaming.rs`'s comparison helper calls `WholeFileFetched`
+the one warning a streamed document has that a buffered one cannot
+(`crates/tinker-pdf-cos/tests/streaming.rs:96-103`), which is true of its
+fixtures, none of them linearized, and not of the five.
+
+**Why the streamed branch answers as a buffer does.** On that branch the open
+warned nothing, took the generic path, and decided the buffered open's `Trust`.
+A buffered open of the same bytes then warns nothing at open either: its header
+scan and its walk are the same functions over the same bytes, and its eager
+validation found no failure, which is what `Trust` means. With no header shift
+the only offset it tries for an entry is the stated one
+(`xref.rs:918-930`), so the only thing its validation rewrites is a generation
+the object's own header states, and both documents read every object from the
+same offset through the same parse, which reads the same over a window as over
+the whole buffer (`crates/tinker-pdf/tests/streaming_determinism.rs:8-14` holds
+the two to the same pixels). What a command reads afterwards therefore warns the
+same and reads the same values on both, once P-05.2 has made the one read that
+disagrees today agree. On the other branch the answers come from a
+buffered open, so they are a buffered open's by construction.
+
+**What reads on demand is therefore a file that opens cleanly and is not
+linearized**, the row's measured file among them. Every other file costs what it
+costs today, read once instead of twice.
+
+#### The read that disagrees today: an entry the table cannot place
+
+`load_uncached` asks the repair scanner for any object its table cannot place:
+a type-1 entry that does not parse as the object it names, and also an entry
+that is free or absent (`doc.rs:1532-1557`, the ask at `:1545`). `repair_index`
+builds that scanner for any streamed document by fetching the whole file
+(`doc.rs:1591-1603`), where a buffered document has one only when its open had
+to repair (`doc.rs:476-545`). So on a streamed document
+whose verdict is `Trust` a reference to a free or absent object costs the whole
+file, and a free object whose old body is still in the file is read back. A
+probe for this section, over a clean file whose object 3 is free in its table
+with its old body still in place: a buffered open reads object 3 as `Null` and
+warns nothing; a streamed one reads the string `(resurrected)` and warns
+`WholeFileFetched` and `ObjectRepaired`. A reference to a number with no entry
+reads `Null` both ways, and fetches the whole file streamed. 7.3.10 makes both
+null.
+
+P-05.2 gates the ask. A streamed document asks the scanner for an object its
+table cannot place only when a buffered open of the same bytes would have one,
+which is when its verdict, from `complete_validation` and memoized, is not
+`Trust`. That holds for a type-1 entry too: one whose header is right but whose
+object does not parse passes the eager probe, and a buffered open with no other
+failure reads it as null, with no scanner to ask. On a document nothing has
+asked for the verdict yet, the first such read completes it, through windows,
+where today it fetches the file. The streamed branch of the rule is then the
+buffered open's, value for value.
+
+#### Which commands read on demand
+
+| Command | Opens | Why |
+|---|---|---|
+| `info`; `check` with no verdict flag | on demand, by the rule | they print the ladder and the warnings, which the rule keeps a buffered open's |
+| `text`, `render`, `fields`, `fonts`, `images`, `outline` | on demand, by the rule | they print values only (`main.rs:959-1414`, `tools/tpdf/src/images.rs`) |
+| `check --strict`, `--pdfa`, `--pdfua`, `--pdfx` | whole | the strict and PDF/A passes read the file's bytes whole through `CosDocument::bytes()` (`crates/tinker-pdf-cos/src/validate.rs:774`, `crates/tinker-pdf/src/pdfa/syntax.rs:148`); the strict pass reports the ladder as it stands (`validate.rs:891-895`) and counts every warning kind but two as a defect (`validate.rs:851-856`); and `check` opens a file once for every flag (`main.rs:1659-1660`) |
+| `objects` | whole | it prints the table's offsets and generations (`main.rs:1445-1468`), which a buffered open's validation rewrites from each object's own header (`doc.rs:2101-2127`) and a streamed open never rewrites |
+| `probe` | whole | its record is the corpus ratchet's input |
+| `merge`, `split`, `rotate`, `encrypt`, `decrypt`, `attach`, `stamp`, `sanitise` | whole | every write is a rewrite (`tools/tpdf/src/writing.rs:30-38`) that reads every object it keeps, which on demand is the whole file in pieces |
+
+*Whole* is the in-place read above in every row, and it is also the read the
+rule's reopen uses: one copy, never a `Vec` copied into an `Arc`. `info` prints
+`complete_validation`'s verdict as its ladder line, which on the streamed branch
+is `Trust`, as `ladder_level()` is.
+
+#### The two files the exit names
+
+| | A file whose validation needs repair | A file whose streamed open raises the source's own warnings |
+|---|---|---|
+| Its shape | a type-1 entry pointing into another object (`a_damaged_document`, `crates/tinker-pdf-cos/tests/streaming.rs:194-207`) | a linearized file with bytes after it (`a_length_that_is_not_the_file_falls_back_to_the_generic_path`, `streaming_open.rs:495-526`), or a parameter dictionary without `/E`, `/T` or `/O` |
+| A buffered open | ladder `Patch`; `ObjectHeaderMismatch` and `ObjectRepaired` at open (`doc.rs:510-545`) | ladder `Trust`; no warning |
+| A streamed open, with P-05.2 | provisional `Trust`, verdict `Patch`; nothing warned until a read reaches the entry, then `ObjectHeaderMismatch`, `WholeFileFetched`, `ObjectRepaired` | `LinearizedLengthMismatch`, or `LinearizedParametersUnusable`, at open; verdict `Trust` |
+| The rule | the verdict is not `Trust`: whole | it warned: whole |
+| `tpdf info` | today's lines: `ladder      Patch`, then `warnings    2` over `ObjectHeaderMismatch` and `ObjectRepaired` | today's lines, for that fixture `ladder      Trust` and no `warnings` line |
+| `tpdf check` | `ok    {path}  {n} pages, Patch, 2 warnings`, and counted among the files with warnings | `ok    {path}  {n} pages, Trust, 0 warnings`, and not counted |
+| A binding's path open | `warnings()` is `ObjectHeaderMismatch`, `ObjectRepaired`, as the byte open's; not streamed | `warnings()` is empty, as the byte open's; not streamed |
+
+The third kind the step names, `WholeFileFetched`, is never all a streamed open
+raises at open: there it comes with `DocumentRescanned`, when the tables cannot
+be used (`doc.rs:476-509`), which is the left-hand column at `Rescan`. After
+open only `fetch_whole` raises it (`doc.rs:1860-1869`), and it has four callers:
+the two repairs at open, `complete_validation` and `repair_index` (`doc.rs:482`,
+`:512`, `:721`, `:1598`). On a document the rule keeps, none of them can run once
+P-05.2 has landed: the verdict is `Trust`, the scanner's ask is gated, and
+validation keeps the file out of its reads. So a binding's `warnings()` on a
+document it kept streamed gains only what that document's reads tolerate, which
+a buffered document's same reads tolerate the same way.
+
+#### One copy, and what a slice costs
+
+- **A whole-file fetch holds the file once** after P-05.3: `materialise` asks the
+  source for the whole range, keeps an answer of the whole length as the
+  document's buffer, gathers a short one into a buffer of the document's length
+  filled in place, and empties the chunk map, where today every chunk stays
+  beside a joined copy (`source.rs:446-475`) and the join itself is a `Vec`
+  copied into an `Arc` (`:454-462`). The file source keeps no bytes of its own,
+  so the process holds the file once. A `SliceSource` keeps its own, so a
+  streamed open over one holds them twice after a whole-file fetch; no host that
+  owns a file uses one.
+- **A slice handed to the facade costs one copy, and an `Arc<[u8]>` none.**
+  `Document::open` takes `impl Into<Arc<[u8]>>` and converts once
+  (`lib.rs:1394-1398`): a slice is copied into a new `Arc`, so is a `Vec`, both
+  existing for the moment of the copy, and an `Arc` is kept as it is
+  (`doc.rs:370-372`). The surfaces that take bytes copy a borrowed slice into a
+  `Vec` first, which the facade then copies again
+  (`crates/tinker-pdf-ffi/src/lib.rs:647`, `bindings/python/src/lib.rs:99`,
+  `bindings/js/src/lib.rs:192`); P-05.6 builds the `Arc` straight from the
+  slice.
+- **Every CLI command holds one copy fewer than today:** on demand it holds the
+  chunks its reads touched, and whole it holds the file once, where today it
+  holds it twice for the length of the copy.
+
+#### How the 6x floor and the 10 MB band reach the path
+
+- **MS-04's operation** is tier P's "Open and count a 23 MB file, CLI"
+  (`docs/roadmap/P.md:65`), which MS-04.8 runs as the release `tpdf` of the same
+  revision, a child per iteration, over a file the generator wrote once. Its
+  command line is MS-04.1's to write, and this section fixes it: `tpdf info
+  FILE`, the command the row's *Today* measured, over an unlinearized file, so
+  that P-05.4 opens it on demand and the rule keeps it streamed. Its time is then
+  the process, the open, the windowed verdict, the page tree's walk for the
+  count and page one: the work P-05.9's 6x floor holds against the planning
+  baseline's 36 ms. A linearized file, `probe` or a verdict flag would time a
+  whole-file read, and floor an operation P-05 does not change. MS-04.3's
+  in-process "open and count a 23 MB image file" opens bytes already in memory,
+  so it does not reach this path, and it is not the gated row.
+- **MS-05's open case** re-executes its own test binary, so it cannot time
+  `tpdf`; P-05.5 has its child do what `info` does to the file instead. The
+  parent writes the file to disk, so the child holds no generated copy; the
+  child includes `tools/tpdf/src/source.rs` by path, calls the CLI's own open,
+  which applies the rule, counts the pages, and asserts that what it counted is
+  streamed, which shows the rule kept it. The peak it reports is then the
+  child's own resident floor and the chunks those reads kept, which P-05.9
+  bands at 10 MB in both builds. `tpdf`'s own floor, over the 233-byte file
+  above, is 4,896 to 5,284 KiB, about half the band; the test binary's is
+  MS-05.3's to record.
+
+### Milestones
+
+| Step | Deliverable | Exit criteria (concrete, testable) | Size (S/M/L/XL) |
+|---|---|---|---|
+| P-05.2 | A windowed verdict over the merged table that keeps nothing, memoized; the repair scanner asked only when that verdict is not `Trust`; `CosDocument::answers_as_buffered` | `doc.rs` `windowed_validation_decides_what_the_buffered_open_decided` (new): clean, shifted-header, patched and rescanned fixtures, and a linearized file opened from its head whose main-table entry lies, give the buffered `ladder_level`, the last failing first; `validation_keeps_no_byte_it_read` (new): the chunk cache's retained bytes and `whole_file_fetched()` are unchanged by the call, failing first against `fetch_whole`; `a_free_or_absent_entry_reads_as_the_buffered_open_reads_it` (new): over a clean file a free entry whose old body is still in place and a reference to a number with no entry read `Null` streamed as buffered with `whole_file_fetched()` false, failing first, and over a patched file both read what the buffered scanner finds; `a_document_answers_as_buffered_only_when_nothing_could_part_them` (new): true for a buffered and a clean streamed document, false for a streamed one opened from a linearized head, one that warned at open and one that decides `Patch`, each failing first against the predicate without that condition; every `streaming_open.rs`, `streaming_determinism.rs` and `hostile_input.rs` test unchanged. | M |
+| P-05.3 | `materialise` holds the file once | `source.rs` `a_whole_file_fetch_holds_the_file_once` (new): bytes the backing retains after `materialise` over a 1 MiB source, counted, are 1 MiB, failing first against the chunks plus the joined copy; `streaming_determinism.rs` over `ShreddedSource` and every `streaming_open.rs` test unchanged. | S |
+| P-05.4 | The file source in `tools/tpdf`; the reading commands on demand by the rule; the rest read once, in place | `main.rs` `info_reads_a_large_file_on_demand_and_says_what_a_buffer_says` (new): over a generated multi-megabyte document `info`'s lines equal the buffered open's and its reads, counted through the source, stay under a committed budget, failing first against `std::fs::read`; the same equality for `info` and `check` over a damaged, a shifted-header, a linearized-then-updated and a linearized fixture whose first page inherits `/Rotate`, and for `render` of that page; `source.rs` (new) `a_read_inside_a_file_that_shrank_is_a_miss_naming_its_range`; `main.rs` `a_failed_read_fails_the_file_before_it_prints` (new); `main.rs` `a_verdict_flag_reads_the_whole_file` (new): `check --strict` over the linearized-then-updated fixture reports what the buffered open's verdict reports; every `main.rs` and `writing.rs` test unchanged. | M |
+| P-05.5 | MS-05's open case through the CLI's own open | `peak_memory.rs`'s self-tests pass and, run with `-- --ignored --nocapture` on Linux, its open case prints `RAN`, asserts the child's document is streamed and counts the file's pages, and prints a peak below the file's length, in both builds. | S |
+| P-05.6 | One copy of a slice in the C ABI, Python and JavaScript, and none of an `Arc` | `facade_read.rs` `an_arc_handed_to_open_is_not_copied` (new): `Document::cos().bytes()` points into the caller's allocation; `crates/tinker-pdf-ffi/tests/open_copies.rs` (new) `opening_bytes_copies_them_once`: bytes allocated by `tpdf_document_open` over a 1 MiB input, counted by the binary's own allocator, are one copy and the parse's own, failing first against two copies; `write_parity.py`, `write_parity.mjs` and the C ABI's tests unchanged. | S |
+| P-05.7 | Python's path open by the rule, and `is_streamed` | `wheel_smoke.py` opens a generated multi-megabyte document by path and from its bytes and asserts the same page count and page-one text and that the path open is streamed, failing first against today's whole-file read, and over a damaged file and a linearized-then-updated one that the path open's `warnings()` equals the byte open's and that it is not streamed; `ci.yml`'s `bindings-parity` job, which already builds and installs the wheel, runs `wheel_smoke.py` and greps `WHEEL-SMOKE: RAN`; `write_parity.py` unchanged. | M |
+| P-05.8 | `tpdf_document_answers_as_buffered`; .NET's path open by the rule, and `IsStreamed` | `crates/tinker-pdf-ffi/src/lib.rs` `a_streamed_document_says_whether_it_answers_as_buffered` (new), over a clean and a damaged document, and `header.rs` passing with the new export declared; the .NET smoke program opens a generated multi-megabyte document through `OpenFile` and through `Open(bytes)` and asserts the same page count and page-one text and that the file open is streamed, failing first against today's `ReadAllBytes`, and over a damaged file and a linearized-then-updated one that `OpenFile`'s `ReadWarnings()` equals `Open(bytes)`'s and that it is not streamed; `ci.yml`'s `bindings-parity` job, which already packs the NuGet package, runs the smoke program with the DejaVu face the job's Java smoke uses (`ci.yml:354`), since `release.yml`'s Windows font path is not on that runner, and greps `DOTNET-SMOKE: RAN`; the parity program's output unchanged. | M |
+| P-05.9 | The 6x floor and the 10 MB band held, and the row closed | MS-02's paired job is green with the 6x floor, MS-05's open-23-MB case in `peak_memory.tsv` holds at 10 MB or less on Linux in both builds, and `streaming_open.rs`, `streaming_determinism.rs` and the CLI's tests pass on linux, windows and macos. | S |
+
+P-05.2 to P-05.5 run in that order. P-05.6 needs this section alone; P-05.7
+needs P-05.4 and P-05.6, and P-05.8 needs P-05.7, so the two steps that edit the
+C ABI, P-05.6 and P-05.8, land in that order. P-05.9 needs all of them, and
+MS-02, MS-04 and MS-05.
+MS-08.2 follows P-05.3, which changes the same chunk cache.
+
+### Risks
+
+| Risk | Mitigation |
+|---|---|
+| Annex F's head path builds a page without its ancestors' `/Rotate` and `/CropBox`, silently, for every streamed host, wasm's page one among them (the probe above) | Not this row's to fix, and named for a row of its own; P-05 keeps its hosts off that path by the rule's first condition, and P-05.4's equality over a linearized fixture whose page one inherits `/Rotate` fails if the condition goes |
+| Linearized files are read whole by every path open, so the row's gain stops at the files that are not | It is today's cost, not a price on anything that works; the fix of the head path drops the condition in the same commit |
+| A clean file is read whole because its open raised some harmless warning | Whole is today's cost, read once; the predicate stays three observables rather than a list of kinds that would rot as kinds are added |
+| The streamed branch parts from a buffered open in a way none of the three conditions sees | The equality is asserted, not argued: P-05.4 over a damaged, a shifted-header, a linearized-then-updated and a linearized fixture, P-05.7 and P-05.8 over the two files above, and P-05.2's predicate test with an injection for each condition |
+| A local read fails after open in a binding, and a call reads that range as absent | The source never answers short of a failure, so absent means an I/O error, and the next call reads again (`doc.rs:1520-1527`); the CLI, which can, fails the file instead |
+| The file changes under the reader | Appended bytes are never read, since the length is fixed; a truncation is a miss; a rewrite in place reads whatever is there at each read, as a buffered read of a file being rewritten does at its one read, and every parse of it is ruling 1's untrusted input |
+| The windowed verdict costs a read per run of nearby object headers, so a file of many small objects pays close to one read of itself at open | Kept by nothing, against today's whole-file read kept for the life of the document; the 23 MB file has a handful of objects, and a figure that moves names the change |
+| The test binary's own resident floor, which nothing here has measured, leaves the 10 MB band less room than `tpdf`'s 5 MB does | MS-05.3 records the case from two runs before P-05.9 holds it; a floor over the band is a finding about the probe, not a reason to widen the band |
+| `CosDocument::bytes()` materialises a streamed document through `Backing::whole` (`source.rs:400-405`, `:477-485`) rather than `fetch_whole`, so a save, a signature's byte range or a verdict over one pulls the whole file without the `WholeFileFetched` that *What stays whole-file, and says so* promises | Not this row's: P-05's hosts read whole for every verdict flag and every writing command, so none of them meets it; named for the row that owns ruling 10's declarations |
 
 ## Dependencies
 

@@ -188,7 +188,7 @@ that stated them now point at those rows.
 | An archival profile on `WriteOptions` | the roadmap's decision items | SD-03 |
 | Layout on the builder's own methods; shaping in `text`/`glyphs`; non-ASCII link targets | `features/creation.md:383-385` | ED-44, ED-45, ED-47 |
 | Content editing beyond `append_content` | `design/bindings-write.md:47-50` | ED-01, ED-02 |
-| Streaming write; async; prefetch; progressive rendering below a page; container streaming | `design/streaming-open.md:47-66` | ED-38, SU-14, FI-32, RC-15 |
+| Streaming write; async; prefetch; progressive rendering below a page; container streaming | `design/streaming-open.md:47-70` | ED-38, SU-14, FI-32, RC-15 |
 | No threading API on the facade | `architecture.md:305-315` | P-15 (amends the locked decision; H-16) |
 | Tables across pages; nested tables; CSV/JSON export | `design/table-reconstruction.md:44-64` | FT-32 |
 | `object-fit`/`object-position`; `::first-line`; `max-height` on non-clipping boxes | `design/epub-layout.md:57-74`; `features/epub.md:580, 593` | CD-15, CD-02 |
