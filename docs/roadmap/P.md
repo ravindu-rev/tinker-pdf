@@ -348,7 +348,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** `design/rasterizer-accumulation.md` (owed) · **Depends on:** MS-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -384,7 +384,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** — · **Depends on:** P-09, P-10
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -421,7 +421,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** — · **Depends on:** MS-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -598,7 +598,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** `design/parallelism.md` (owed; amends [architecture.md](../architecture.md)) · **Depends on:** H-16, MS-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -635,7 +635,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** `design/performance.md` (owed) · **Depends on:** MS-05
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -670,7 +670,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** — · **Depends on:** MS-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -704,7 +704,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** — · **Depends on:** MS-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -734,7 +734,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** — · **Depends on:** MS-10, H-44
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -762,7 +762,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** — · **Depends on:** H-45
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -791,7 +791,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** — · **Depends on:** MS-04
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -816,7 +816,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** — · **Depends on:** MS-01, MS-04
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -852,7 +852,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** — · **Depends on:** P-16, MS-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -880,7 +880,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** — · **Depends on:** MS-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -909,7 +909,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** — · **Depends on:** MS-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -940,7 +940,7 @@ exit criterion are the pinned runner's (MS-03).
 
 **Doc:** — · **Depends on:** MS-04
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |

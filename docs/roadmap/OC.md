@@ -22,7 +22,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr.md` (owed) · **Depends on:** FT-24
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -43,7 +43,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr.md` (owed) · **Depends on:** OC-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -63,7 +63,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -86,7 +86,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -106,7 +106,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr.md` (owed) · **Depends on:** OC-07
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -126,7 +126,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/scan-layout.md` (owed) · **Depends on:** FT-30, FT-31, OC-03
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -149,7 +149,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr-inference.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -174,7 +174,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr-models.md` (owed) · **Depends on:** OC-07, H-39, H-71
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -197,7 +197,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr-models.md` (owed) · **Depends on:** OC-08a
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -217,7 +217,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr-models.md` (owed) · **Depends on:** OC-08a
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -238,7 +238,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr-models.md` (owed) · **Depends on:** OC-08a
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -258,7 +258,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr-models.md` (owed) · **Depends on:** OC-08a
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -280,7 +280,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr-models.md` (owed) · **Depends on:** OC-08a
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -300,7 +300,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** — · **Depends on:** FT-24, OC-08a
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -319,7 +319,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** — · **Depends on:** OC-02, P-15
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -340,7 +340,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/mrc.md` (owed) · **Depends on:** ED-26, ED-27
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -363,7 +363,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** — · **Depends on:** OC-08a, FT-35
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -382,7 +382,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr-vector.md` (owed) · **Depends on:** OC-08a
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -404,7 +404,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/scan-layout.md` (owed) · **Depends on:** OC-06
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -426,7 +426,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** — · **Depends on:** OC-06, ED-50
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -446,7 +446,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr-models.md` (owed) · **Depends on:** OC-08a, H-71
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -468,7 +468,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr-models.md` (owed) · **Depends on:** OC-08a, FT-34
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -490,7 +490,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** `design/ocr-models.md` (owed) · **Depends on:** OC-07
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -511,7 +511,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 
 **Doc:** — · **Depends on:** OC-08a, MS-04
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |

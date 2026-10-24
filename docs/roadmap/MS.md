@@ -144,7 +144,7 @@ held to, and the censuses no corpus run has fed.
 
 **Doc:** — · **Depends on:** H-110 (the runner), H-109, MS-04
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -256,7 +256,7 @@ held to, and the censuses no corpus run has fed.
 
 **Doc:** — · **Depends on:** MS-13
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -284,7 +284,7 @@ held to, and the censuses no corpus run has fed.
 
 **Doc:** — · **Depends on:** MS-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -310,7 +310,7 @@ held to, and the censuses no corpus run has fed.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -338,7 +338,7 @@ held to, and the censuses no corpus run has fed.
 
 **Doc:** — · **Depends on:** MS-02
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -391,7 +391,7 @@ held to, and the censuses no corpus run has fed.
 
 **Doc:** — · **Depends on:** H-16 (default: a host instruction counter on the CI runner, admitted)
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -416,7 +416,7 @@ held to, and the censuses no corpus run has fed.
 
 **Doc:** — · **Depends on:** H-03 (authorise the corpus run), MS-11
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |

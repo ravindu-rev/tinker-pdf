@@ -341,7 +341,7 @@ new rendered surface.
 
 **Doc:** — · **Depends on:** H-119 (the application)
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |

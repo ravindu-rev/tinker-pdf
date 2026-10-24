@@ -95,7 +95,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -126,7 +126,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-02
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -160,7 +160,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-03a
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -189,7 +189,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-03b
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -215,7 +215,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-03c
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -248,7 +248,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-03d
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -284,7 +284,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-03a, H-04 (the locale data's footprint)
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -319,7 +319,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -340,7 +340,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** — · **Depends on:** FJ-01, K-04
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -361,7 +361,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-02, H-70
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -383,7 +383,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-06
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -404,7 +404,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-02, H-70
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -425,7 +425,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-02, H-70
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -446,7 +446,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-02, AN-14, FJ-18, H-70
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -469,7 +469,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-10, AN-18, AN-19, FJ-18, H-70
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -493,7 +493,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-14, FJ-17, FJ-18
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -514,7 +514,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-11, FJ-14, FJ-18, H-70
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -540,7 +540,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** [design/form-script-policy.md](../design/form-script-policy.md) (amend) · **Depends on:** FJ-06, H-36
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -560,7 +560,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** — · **Depends on:** AN-20
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -579,7 +579,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** — · **Depends on:** MS-04, FJ-07
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -598,7 +598,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** [design/bindings-write.md](../design/bindings-write.md) (amend) · **Depends on:** SG-09 (the callback design), H-28
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -620,7 +620,7 @@ FJ-18's coverage check counts it as open work, not as done.
 
 **Doc:** — · **Depends on:** FJ-01, H-102 (ISO 21757-1, for the reconciliation)
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |

@@ -17,7 +17,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** [design/icc.md](../design/icc.md) (amend) · **Depends on:** K-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -50,7 +50,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** [design/icc.md](../design/icc.md) · **Depends on:** RC-01, H-102 (the standard)
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -79,7 +79,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** `design/overprint-separations.md` (owed) · **Depends on:** K-01, RC-04
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -112,7 +112,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** `design/overprint-separations.md` (owed) · **Depends on:** K-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -155,7 +155,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** [design/icc.md](../design/icc.md) · **Depends on:** RC-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -184,7 +184,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -215,7 +215,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** `design/sixteen-bit.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -254,7 +254,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** — · **Depends on:** K-01, RC-06
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -291,7 +291,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -321,7 +321,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -351,7 +351,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -381,7 +381,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -413,7 +413,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -443,7 +443,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -472,7 +472,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -500,7 +500,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** — · **Depends on:** P-04
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -531,7 +531,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** — · **Depends on:** MS-01
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -560,7 +560,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** — · **Depends on:** SU-12
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -594,7 +594,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -622,7 +622,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** [design/icc.md](../design/icc.md) (amend) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -664,7 +664,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Doc:** — · **Depends on:** H-15 (the speed/exactness trade)
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |

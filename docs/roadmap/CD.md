@@ -15,7 +15,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** [design/epub-layout.md](../design/epub-layout.md) · **Depends on:** MS-13
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -59,7 +59,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** [design/epub-layout.md](../design/epub-layout.md) · **Depends on:** H-13 (`@page`)
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -84,7 +84,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** H-04
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -102,7 +102,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** `design/mathml.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -131,7 +131,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** AN-12
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -150,7 +150,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -169,7 +169,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** H-107 (the books)
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -188,7 +188,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** MS-13
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -209,7 +209,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** [design/svg.md](../design/svg.md) (amend) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -228,7 +228,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** [design/svg.md](../design/svg.md) (amend) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -251,7 +251,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** [design/svg.md](../design/svg.md) (amend) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -271,7 +271,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** `design/scripted-documents.md` (owed) · **Depends on:** FJ-03e
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -297,7 +297,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** RC-20, SG-13, H-106
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -320,7 +320,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** H-116
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -339,7 +339,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** [design/epub-layout.md](../design/epub-layout.md) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -359,7 +359,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** `design/paged-media.md` (owed) · **Depends on:** H-13
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -390,7 +390,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -410,7 +410,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Doc:** — · **Depends on:** AN-14
 
-*Steps not yet reviewed: the run that takes this row's first step reviews them against the tree first.*
+*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |

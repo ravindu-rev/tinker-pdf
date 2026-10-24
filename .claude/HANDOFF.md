@@ -2,7 +2,8 @@
 
 Written 23 October 2026, when round 6 of ROADMAP CD-19 landed on `develop`,
 and brought up to date on 24 October 2026, when the roadmap was cut into
-steps and the roadmap sweep landed. The next session starts here: read
+steps, the roadmap sweep landed, and each step came to be reviewed by the
+run that takes it. The next session starts here: read
 this, then [AGENTS.md](../AGENTS.md), then continue with "Next, in this
 order" below. When this note is out of date, rewrite it or delete it in the
 same commit that moves the work on.
@@ -22,6 +23,16 @@ same commit that moves the work on.
   P-01…P-06, P-27), by four independent reviewers on 24 October 2026 with a
   fifth checking their corrections. Every other row says its steps are not
   yet reviewed.
+- **Each step is reviewed when it is taken** (the owner, later on 24
+  October 2026: "how about if we start, review fix and implementation at a
+  step level?"). It replaces the separate review of the 430 rows whose cuts
+  are not yet reviewed, which the owner had asked for earlier that day. The
+  run that takes a step first reviews it against the tree as it stands,
+  whether or not its row's cut was reviewed, and corrects it, and any
+  later step or other row it shows wrong, before the work starts ("How a
+  step runs", 1; AGENTS.md). A review of MS-03, MS-07 to MS-10, MS-12 and
+  MS-13 begun under the earlier instruction was stopped before it wrote
+  anything.
 - **What that review changed** beyond its rows: MS-01 gained a closing
   step, MS-01.9, that reads every guard green after the P rows that land
   them, so the 49 steps that needed MS-01's tally now wait on MS-01.8, not
@@ -279,10 +290,11 @@ to CD-19.37, H-149 to H-158), in the order "Next" gives.
      and the rest of CD-19 in its order;
    - then P-27.1, MS-11 and K-06, K-01 and K-02, MS-01 (to MS-01.8),
      MS-04, MS-05, MS-06 and MS-02, P-01 to P-05, and the tiers.
-2. **Separately, as the owner asked on 24 October 2026**: the review of the
-   cut rows whose steps are not yet reviewed (430 rows). Until it happens,
-   each is reviewed against the tree when it comes up ("How a step runs",
-   1). The sweep now checks every step at once for the classes the reviews
-   found, and holds every roadmap change to them; it reads names, paths and
-   dependencies, not whether a step is right, so it does not replace that
-   review.
+2. **The owner's word, once CD-19.1 is done:** how a step's run does its
+   two reviews, of the step against the tree before the work and of the
+   change after it: one fresh agent each, or a workflow per step.
+   AGENTS.md's "work runs as workflows" stands until then. No row is
+   reviewed ahead of its steps any more ("How a step runs", 1). The sweep
+   checks every step at once for the classes the reviews found, and holds
+   every roadmap change to them; it reads names, paths and dependencies,
+   not whether a step is right, which is what each step's review is for.

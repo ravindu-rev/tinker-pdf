@@ -75,13 +75,21 @@ what comes next.
   cut to small pieces"). [docs/ROADMAP.md](docs/ROADMAP.md) says what a
   step is and how one runs. A step that turns out bigger than one run is
   split in the roadmap before the work goes on.
+  - **The step is reviewed first**, when it is taken (the owner, 24
+    October 2026: "how about if we start, review fix and implementation at
+    a step level?", replacing that day's separate review of every row whose
+    cut was not yet reviewed). The run reads the step against the tree as
+    it stands, whether or not its row's cut was reviewed, and corrects it,
+    and any later step or other row it shows wrong, before the work starts.
+    No row is reviewed ahead of its steps.
   - Concept first, inside the run: name the mechanism and prototype the
     fix. Then run the cheap checks that decide it: does any book change,
     and what does it cost in time, in release and in debug? Only then
     write the tests, injections and docs.
-  - The review is an agent with a fresh, independent context: it hunts new
-    shapes, reads the code and re-measures every claim. Agents that change
-    files at the same time each work in their own git worktree.
+  - The review of the change is an agent with a fresh, independent
+    context: it hunts new shapes, reads the code and re-measures every
+    claim. Agents that change files at the same time each work in their
+    own git worktree.
   - Every finding is reproduced before it is fixed, and fixes run in a
     bounded loop.
 - A lane resets against the local `develop`, so `develop` does not move while
