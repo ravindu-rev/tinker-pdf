@@ -3041,7 +3041,7 @@ fn filter_names(cos: &CosDocument, value: &Object) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tinker_pdf::{DocumentBuilder, PdfString};
+    use tinker_pdf::{DocumentBuilder, ImageData, PdfString};
 
     fn document() -> Document {
         let mut builder = DocumentBuilder::new();
@@ -3136,6 +3136,266 @@ mod tests {
                 "attempt {attempt}: `--jobs 8` must print exactly what `--jobs 1` printed"
             );
         }
+    }
+
+    /// Liberation Serif, the face `bundled-fonts` carries, read from where the
+    /// font crate vendors it, as `writing`'s tests read it.
+    fn serif() -> Vec<u8> {
+        let path = format!(
+            "{}/../../crates/tinker-pdf-font/data/liberation/LiberationSerif-Regular.ttf",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::read(path).expect("the vendored Liberation face")
+    }
+
+    /// `count` pages, no two alike and no two the same work, each drawing
+    /// text in an embedded face, an image, anti-aliased edges and an
+    /// annotation with an appearance stream, and naming a face it does not
+    /// embed for one line, which `bundled-fonts` draws and the default build
+    /// warns about.
+    ///
+    /// One font program and one image serve every page, because what threads
+    /// rendering one document share is its objects. The pages differ so that
+    /// a page written under another page's name is a different picture, and
+    /// cost different amounts for the reason [`many_pages`] gives.
+    fn mixed_pages(count: u32) -> Vec<u8> {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_embedded_font(b"F0", b"LiberationSerif", &serif()));
+        builder.add_base_font(b"F1", b"Helvetica");
+        let samples: Vec<u8> = (0..48u8).map(|n| n.wrapping_mul(53)).collect();
+        assert!(builder.add_image(
+            b"Im0",
+            &ImageData::Rgb8 {
+                width: 4,
+                height: 4,
+                data: &samples,
+            }
+        ));
+        for n in 0..count {
+            let step = f64::from(n);
+            builder.add_page(90.0, 60.0, |page| {
+                page.text(
+                    b"F0",
+                    11.0 + step % 4.0,
+                    4.0,
+                    44.0,
+                    &format!("Page {}", n + 1),
+                );
+                page.text(b"F1", 7.0, 4.0, 33.0, "tinker-pdf");
+                page.image(b"Im0", 52.0 + step % 3.0, 26.0, 31.0, 21.5);
+                for k in 0..=n {
+                    let k = f64::from(k);
+                    page.fill_rect(
+                        2.5 + k % 21.0 * 4.1,
+                        3.3,
+                        2.6,
+                        7.0 + k % 5.0,
+                        0.2 + k % 9.0 * 0.03,
+                    );
+                }
+            });
+        }
+
+        let document = Document::open(builder.finish()).expect("it opens");
+        let mut editor = document.editor();
+        for n in 0..count {
+            let left = 40.0 + f64::from(n % 5);
+            let mut square = Dict::new();
+            square.insert(
+                editor.intern(b"Type"),
+                Object::Name(editor.intern(b"Annot")),
+            );
+            square.insert(
+                editor.intern(b"Subtype"),
+                Object::Name(editor.intern(b"Square")),
+            );
+            square.insert(
+                editor.intern(b"Rect"),
+                Object::Array(vec![
+                    Object::Real(left),
+                    Object::Real(8.5),
+                    Object::Real(left + 40.0),
+                    Object::Real(30.5),
+                ]),
+            );
+            square.insert(
+                editor.intern(b"C"),
+                Object::Array(vec![
+                    Object::Real(0.8),
+                    Object::Real(0.1),
+                    Object::Real(0.2),
+                ]),
+            );
+            // 12.5.2: the print flag, so the page shows it on paper as well.
+            square.insert(editor.intern(b"F"), Object::Int(4));
+            assert!(
+                editor.add_annotation(n, square).is_some(),
+                "page {n} takes its annotation"
+            );
+        }
+        editor.save(&WriteOptions::default())
+    }
+
+    /// What `tpdf render --out DIR --jobs N --quiet PATH` is given, parsed.
+    fn render_into(out: &str, jobs: usize, path: &str) -> Options {
+        Options::parse(&[
+            "--out".to_string(),
+            out.to_string(),
+            "--jobs".to_string(),
+            jobs.to_string(),
+            "--quiet".to_string(),
+            path.to_string(),
+        ])
+        .expect("parses")
+    }
+
+    /// Where two PNGs of one page part, in pixels: what the bytes of a
+    /// compressed file cannot say.
+    fn parted(mine: &[u8], theirs: &[u8]) -> String {
+        let (Ok(mine), Ok(theirs)) = (Bitmap::from_png(mine), Bitmap::from_png(theirs)) else {
+            return "one of the two does not decode as a PNG".to_string();
+        };
+        if (mine.width, mine.height, mine.format) != (theirs.width, theirs.height, theirs.format) {
+            return format!(
+                "a {}x{} {:?} picture against a {}x{} {:?} one",
+                mine.width, mine.height, mine.format, theirs.width, theirs.height, theirs.format
+            );
+        }
+        let components = mine.components();
+        let pixels = mine
+            .data
+            .chunks(components)
+            .zip(theirs.data.chunks(components));
+        let (mut differing, mut worst, mut first) = (0usize, 0u8, None);
+        for (at, (a, b)) in pixels.enumerate() {
+            if a != b {
+                differing += 1;
+                for (x, y) in a.iter().zip(b) {
+                    worst = worst.max(x.abs_diff(*y));
+                }
+                first.get_or_insert(at);
+            }
+        }
+        let width = mine.width.max(1) as usize;
+        match first {
+            Some(at) => format!(
+                "{differing} of {} pixels differ, worst component {worst} levels, first at ({}, {})",
+                mine.data.len() / components.max(1),
+                at % width,
+                at / width
+            ),
+            None => "the same pixels, encoded differently".to_string(),
+        }
+    }
+
+    /// **A9 for the CLI's pool: `tpdf render` at `--jobs` 2, 3, 4 and 7
+    /// writes, byte for byte, the files `--jobs 1` writes.**
+    ///
+    /// [`jobs_changes_the_clock_and_not_one_byte_of_the_output`] holds what the
+    /// pool prints, and both of its runs write into one directory, so the files
+    /// of one run are overwritten by the next and never compared. Here each job
+    /// count writes into a directory of its own and every file is read back.
+    /// Through `run(&options, render)`, which is what `tpdf render` runs once
+    /// its flags are parsed (the open, the pool, the encoder and the write),
+    /// in-process, because no test here may spawn a program.
+    ///
+    /// `--jobs 1` goes through the same code as every other job count, so a
+    /// defect keyed on a page's place in the queue rather than on the thread
+    /// that draws it would write the same wrong bytes at every job count, and
+    /// comparing job counts with each other could not see it. So one job's
+    /// files are first held to each page drawn here, on the test's own
+    /// thread, with the options `render` asks the facade for, through the same
+    /// encoder; and the pages are first shown to draw differently without
+    /// their annotations, the one option `render` sets besides the scale, so
+    /// that a page handed other options is a different file.
+    ///
+    /// Twenty-three pages, which none of 2, 3, 4 and 7 divides.
+    #[test]
+    fn every_job_count_writes_the_bytes_one_job_writes() {
+        const PAGES: u32 = 23;
+        let bytes = mixed_pages(PAGES);
+        // The process as well as the test in the name, so that two builds of
+        // this binary running at once do not empty each other's directory.
+        let dir = scratch(&format!("every-job-count-{}", std::process::id()));
+        let path = format!("{dir}/doc.pdf");
+        std::fs::write(&path, &bytes).expect("the document is written");
+
+        let written = |jobs: usize| -> BTreeMap<String, Vec<u8>> {
+            let out = format!("{dir}/jobs-{jobs}");
+            run(&render_into(&out, jobs, &path), render)
+                .unwrap_or_else(|message| panic!("`--jobs {jobs}`: {message}"));
+            std::fs::read_dir(&out)
+                .expect("the directory it wrote")
+                .map(|entry| {
+                    let entry = entry.expect("an entry");
+                    let png = std::fs::read(entry.path()).expect("a page it wrote");
+                    (entry.file_name().to_string_lossy().into_owned(), png)
+                })
+                .collect()
+        };
+
+        let flags = render_into(&dir, 1, &path);
+        let asked = RenderOptions {
+            annotations: flags.annotations,
+            ..RenderOptions::at_dpi(flags.dpi)
+        };
+        let doc = Document::open(bytes).expect("it opens");
+        let first = doc.page(0).expect("a first page");
+        let bare = RenderOptions {
+            annotations: false,
+            ..asked.clone()
+        };
+        assert!(
+            first.render(&asked).data != first.render(&bare).data,
+            "the annotations must show, or a page drawn without them is the same file"
+        );
+        let expected: BTreeMap<String, Vec<u8>> = (0..PAGES)
+            .map(|index| {
+                let bitmap = doc.page(index).expect("a page").render(&asked);
+                let png = bitmap.to_png().expect("a picture");
+                (format!("doc-{:04}.png", index + 1), png)
+            })
+            .collect();
+
+        let one = written(1);
+        assert_eq!(
+            one.keys().collect::<Vec<_>>(),
+            expected.keys().collect::<Vec<_>>(),
+            "`--jobs 1` writes one file for every page, named for it"
+        );
+        for (name, png) in &expected {
+            assert!(
+                one[name] == *png,
+                "`--jobs 1` wrote {name} as {} bytes, not the {} of the page drawn \
+                 outside the pool: {}",
+                one[name].len(),
+                png.len(),
+                parted(&one[name], png)
+            );
+        }
+
+        for jobs in [2, 3, 4, 7] {
+            let pooled = written(jobs);
+            assert_eq!(
+                pooled.keys().collect::<Vec<_>>(),
+                one.keys().collect::<Vec<_>>(),
+                "`--jobs {jobs}` writes the files `--jobs 1` writes"
+            );
+            for (name, png) in &one {
+                assert!(
+                    pooled[name] == *png,
+                    "`--jobs {jobs}` wrote {name} as {} bytes, not the {} `--jobs 1` \
+                     wrote: {}",
+                    pooled[name].len(),
+                    png.len(),
+                    parted(&pooled[name], png)
+                );
+            }
+        }
+
+        // Kept when the test fails, for a person to look at; a passing run's
+        // directory would only pile up, one per process.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// One job unless asked, and a job count of zero is refused.

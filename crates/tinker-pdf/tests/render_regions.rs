@@ -65,6 +65,15 @@
 //! pins it as measured — 40 pixels, 63 levels, at 1x — and ruling 5 and a
 //! ROADMAP row carry it until it is gone.
 //!
+//! # Bands on threads
+//!
+//! Every guard above draws one tile at a time on the test's own thread.
+//! [`bands_drawn_on_two_three_four_and_seven_threads_are_the_page`] is the
+//! band half of A9, the guard that parallel renders are the serial render: each
+//! fixture cut into 2, 3, 4 and 7 horizontal bands, all drawn at once on as
+//! many scoped threads through one `Page`, stitched back together and compared
+//! with the page drawn whole, byte for byte.
+//!
 //! # What this guard found
 //!
 //! It is worth recording that the first run of this file did not report a
@@ -113,6 +122,8 @@
 //! Both are now decided from rectangles the renderer keeps in the page's frame
 //! (`Bounds` in `tinker-pdf-render`), which also puts the lattice's and the
 //! mesh's budgets on the page's side of the decision.
+
+use std::sync::Barrier;
 
 use tinker_pdf::{
     DeviceSpace, Document, DocumentBuilder, Function, ImageData, Page, PixelRegion, RenderOptions,
@@ -1345,5 +1356,162 @@ fn a_display_list_tiles_as_the_page_does() {
     check(&annotated, "annotations");
     for fixture in fixtures() {
         with_page(&fixture, |page| check(page, fixture.name));
+    }
+}
+
+// ---- bands on threads -------------------------------------------------------
+
+/// `count` horizontal bands over a `width` by `height` bitmap, top to bottom:
+/// the whole width each, cut at row `height × i / count`, so no two heights
+/// differ by more than a row and the cuts fall wherever that arithmetic puts
+/// them, through a glyph or a shading's steps as readily as between them.
+fn bands(width: u32, height: u32, count: u32) -> Vec<PixelRegion> {
+    (0..count)
+        .map(|band| {
+            let top = height * band / count;
+            let bottom = height * (band + 1) / count;
+            PixelRegion::new(0, top, width, bottom - top)
+        })
+        .collect()
+}
+
+/// Draws each of `bands` of `page` on a scoped thread of its own, and hands
+/// them back in the order asked, whatever order the threads finished in.
+///
+/// Every thread waits at a barrier until all of them are running, so the
+/// bands are drawn at the same moment, through the one `Page` and the one
+/// `Document` behind it, rather than one after another as each thread
+/// happens to start.
+fn drawn_on_threads(
+    page: &Page,
+    options: &RenderOptions,
+    bands: &[PixelRegion],
+) -> Vec<tinker_pdf::Bitmap> {
+    let start = Barrier::new(bands.len());
+    std::thread::scope(|scope| {
+        let threads: Vec<_> = bands
+            .iter()
+            .map(|&band| {
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    page.render(&RenderOptions {
+                        region: Some(band),
+                        ..options.clone()
+                    })
+                })
+            })
+            .collect();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().expect("a band's thread panicked"))
+            .collect()
+    })
+}
+
+/// **A9 for bands: a page drawn as 2, 3, 4 and 7 horizontal bands, each on a
+/// thread of its own and all at once, then stitched back together row after
+/// row, is the page drawn whole on one thread, byte for byte.**
+///
+/// The guards above hold one tile at a time against the page, on the test's
+/// own thread. A caller who bands a page to use more cores asks for what none
+/// of them does: several regions of one `Page` drawn at the same moment,
+/// through one shared `Document`. So the bands here are drawn concurrently
+/// ([`drawn_on_threads`]), and what is compared is the stitched buffer
+/// against the serial render's, so a band that came back a row short or long
+/// fails too, and not only a band whose pixels moved.
+///
+/// Every page of [`fixtures`], and the two pages held to their tiles by tests
+/// of their own: the annotated page, whose ink is all annotation, and the
+/// stroked frame whose corners sit on a sub-scanline. Not the page of
+/// [`an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`]:
+/// that is ruling 5's named exception, which bands meet as tiles do (in two
+/// bands the top one differs from the page on 40 pixels by 63 levels,
+/// measured 25 October 2026), and that test pins it.
+#[test]
+fn bands_drawn_on_two_three_four_and_seven_threads_are_the_page() {
+    let options = RenderOptions::default();
+    let mut pages = fixtures();
+    pages.push(Fixture {
+        name: "annotations",
+        bytes: annotated_page(),
+        least_ink: 2_000,
+    });
+    pages.push(Fixture {
+        name: "the stroked frame",
+        bytes: framed_page(),
+        least_ink: 600,
+    });
+    for fixture in pages {
+        with_page(&fixture, |page| {
+            let full = page.render(&options);
+            for count in [2u32, 3, 4, 7] {
+                let what = format!("{} in {count} bands", fixture.name);
+                let cut = bands(full.width, full.height, count);
+                let drawn = drawn_on_threads(page, &options, &cut);
+
+                let mut stitched = Vec::with_capacity(full.data.len());
+                for (band, bitmap) in cut.iter().zip(&drawn) {
+                    assert_eq!(
+                        (bitmap.width, bitmap.height),
+                        (band.width, band.height),
+                        "{what}: the band from row {} came back the wrong size",
+                        band.y
+                    );
+                    assert_eq!(
+                        bitmap.format, full.format,
+                        "{what}: a band changed the pixel format"
+                    );
+                    stitched.extend_from_slice(&bitmap.data);
+                }
+                if stitched == full.data {
+                    continue;
+                }
+
+                // Which band parted from the page, said in full, and whether
+                // it still does drawn alone: a band on one thread is a tile,
+                // which is ruling 5's to answer for, not the threads'.
+                let parted = cut
+                    .iter()
+                    .zip(&drawn)
+                    .find_map(|(band, bitmap)| compare(bitmap, &full, *band).map(|d| (band, d)));
+                match parted {
+                    Some((band, d)) => {
+                        let alone = page.render(&RenderOptions {
+                            region: Some(*band),
+                            ..options.clone()
+                        });
+                        let why = match compare(&alone, &full, *band) {
+                            None => {
+                                "drawn again alone on this thread it is the page \
+                                 there, so the threads parted them"
+                            }
+                            Some(_) => {
+                                "drawn again alone on this thread it still is not, \
+                                 so a region of this shape parts from the page"
+                            }
+                        };
+                        panic!(
+                            "{what}: the band over rows {} to {} is not the page \
+                             there -- {} of its {} pixels differ, worst component \
+                             {} levels, first at ({}, {}) on the page; {why}",
+                            band.y,
+                            band.y + band.height - 1,
+                            d.pixels,
+                            u64::from(band.width) * u64::from(band.height),
+                            d.worst,
+                            d.at.0,
+                            band.y + d.at.1,
+                        )
+                    }
+                    None => panic!(
+                        "{what}: every band is its rectangle of the page, yet \
+                         the stitched buffer is {} bytes against the page's {}",
+                        stitched.len(),
+                        full.data.len()
+                    ),
+                }
+            }
+        });
     }
 }
