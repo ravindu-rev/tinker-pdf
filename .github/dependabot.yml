@@ -1,0 +1,39 @@
+# Dependabot version updates. The engine itself takes no third-party crates,
+# so what this watches is the exempt tooling: the CI actions, the dev/build
+# crates in each cargo workspace (root, fuzz, and the two binding workspaces
+# the root excludes), maturin for the Python wheel, and the demo's playwright.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    target-branch: develop
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directories:
+      - "/"
+      - "/fuzz"
+      - "/bindings/js"
+      - "/bindings/python"
+    target-branch: develop
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: "/bindings/python"
+    target-branch: develop
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: npm
+    directory: "/bindings/js/demo"
+    target-branch: develop
+    schedule:
+      interval: weekly
