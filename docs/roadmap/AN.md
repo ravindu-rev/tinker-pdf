@@ -18,7 +18,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** MS-13
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -37,7 +37,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** H-12
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -60,7 +60,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -79,7 +79,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** H-12
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -99,7 +99,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** H-12
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -119,7 +119,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -141,7 +141,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** AN-06
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -162,7 +162,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** H-102 (ISO 19444-1)
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -184,7 +184,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** AN-05
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -204,7 +204,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -223,7 +223,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** `design/geospatial.md` (owed) · **Depends on:** AN-10a
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -247,7 +247,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** `design/3d.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -269,7 +269,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** `design/3d.md` (owed) · **Depends on:** AN-11a
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -292,7 +292,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** `design/3d.md` (owed) · **Depends on:** AN-11b, FJ-11, H-70
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -313,7 +313,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -334,7 +334,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** RC-13
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -353,7 +353,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -374,7 +374,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** `design/form-session.md` (owed) · **Depends on:** FJ-06
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -399,7 +399,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -419,7 +419,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** SG-06
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -438,7 +438,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -457,7 +457,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** AN-20
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -477,7 +477,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -497,7 +497,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** AN-14
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -517,7 +517,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -536,7 +536,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** AN-08
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -555,7 +555,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** ED-49, ED-50, FJ-07
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -574,7 +574,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** `design/form-detection.md` (owed) · **Depends on:** FT-30
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -596,7 +596,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -615,7 +615,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** `design/xfa.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -635,7 +635,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** `design/xfa.md` (owed) · **Depends on:** AN-27
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -655,7 +655,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** `design/xfa.md` (owed) · **Depends on:** AN-27, CD-01
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -687,7 +687,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** `design/xfa.md` (owed) · **Depends on:** AN-29, FJ-03e, H-70
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -711,7 +711,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** `design/xfa.md` (owed) · **Depends on:** FJ-01
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -736,7 +736,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** `design/xfa.md` (owed) · **Depends on:** AN-27
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -757,7 +757,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** `design/xfa.md` (owed) · **Depends on:** AN-29
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -778,7 +778,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Doc:** `design/xfa.md` (owed) · **Depends on:** SG-13, AN-27
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |

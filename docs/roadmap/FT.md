@@ -17,7 +17,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** H-04, H-116 (face and footprint)
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -52,7 +52,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** FT-01, H-116
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -84,7 +84,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** H-94
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -113,7 +113,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -139,7 +139,7 @@ list, each held to first-party evidence.
 
 **Doc:** `design/hinting.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -178,7 +178,7 @@ list, each held to first-party evidence.
 
 **Doc:** `design/hinting.md` (owed) · **Depends on:** FT-04b
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -214,7 +214,7 @@ list, each held to first-party evidence.
 
 **Doc:** `design/hinting.md` (owed) · **Depends on:** FT-04b
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -245,7 +245,7 @@ list, each held to first-party evidence.
 
 **Doc:** `design/variable-fonts.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -288,7 +288,7 @@ list, each held to first-party evidence.
 
 **Doc:** `design/colour-fonts.md` (owed) · **Depends on:** FT-02
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -332,7 +332,7 @@ list, each held to first-party evidence.
 
 **Doc:** [design/shaping.md](../design/shaping.md) · **Depends on:** FT-05, H-64
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -365,7 +365,7 @@ list, each held to first-party evidence.
 
 **Doc:** [design/shaping.md](../design/shaping.md) · **Depends on:** H-64
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -399,7 +399,7 @@ list, each held to first-party evidence.
 
 **Doc:** [design/shaping.md](../design/shaping.md) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -443,7 +443,7 @@ list, each held to first-party evidence.
 
 **Doc:** [design/shaping.md](../design/shaping.md) · **Depends on:** H-64
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -482,7 +482,7 @@ list, each held to first-party evidence.
 
 **Doc:** [design/shaping.md](../design/shaping.md) · **Depends on:** H-64
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -516,7 +516,7 @@ list, each held to first-party evidence.
 
 **Doc:** [design/shaping.md](../design/shaping.md) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -560,7 +560,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** H-64 (the expectations)
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -588,7 +588,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -616,7 +616,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -652,7 +652,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -682,7 +682,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -713,7 +713,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -744,7 +744,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** H-116 (dictionary licences)
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -774,7 +774,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -802,7 +802,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -840,7 +840,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -875,7 +875,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -906,7 +906,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** H-17 (syntax)
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -934,7 +934,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -963,7 +963,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** FT-21
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -990,7 +990,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1016,7 +1016,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1044,7 +1044,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** FT-30, FT-31
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1079,7 +1079,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1105,7 +1105,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1131,7 +1131,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1160,7 +1160,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1194,7 +1194,7 @@ list, each held to first-party evidence.
 
 **Doc:** [design/reading-order.md](../design/reading-order.md) · **Depends on:** MS-13
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1228,7 +1228,7 @@ list, each held to first-party evidence.
 
 **Doc:** [design/table-reconstruction.md](../design/table-reconstruction.md) · **Depends on:** MS-13
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1248,7 +1248,7 @@ list, each held to first-party evidence.
 
 **Doc:** [design/table-reconstruction.md](../design/table-reconstruction.md) · **Depends on:** FT-31
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1272,7 +1272,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1292,7 +1292,7 @@ list, each held to first-party evidence.
 
 **Doc:** `design/math-extraction.md` (owed) · **Depends on:** CD-04
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1316,7 +1316,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1338,7 +1338,7 @@ list, each held to first-party evidence.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |

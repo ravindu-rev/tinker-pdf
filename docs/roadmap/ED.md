@@ -17,7 +17,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** `design/page-objects.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -60,7 +60,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** `design/text-editing.md` (owed) · **Depends on:** ED-01, FT-11, FT-30
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -93,7 +93,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** ED-01
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -113,7 +113,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -136,7 +136,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** ED-04
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -156,7 +156,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** ED-04
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -177,7 +177,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** `design/colour-conversion.md` (owed) · **Depends on:** RC-01, RC-02, RC-20
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -203,7 +203,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** ED-04
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -224,7 +224,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** ED-10
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -247,7 +247,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -269,7 +269,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -289,7 +289,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -308,7 +308,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** ED-50 (barcodes)
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -330,7 +330,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -355,7 +355,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** ED-15
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -374,7 +374,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** ED-45
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -395,7 +395,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** ED-15
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -414,7 +414,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -436,7 +436,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** ED-45
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -455,7 +455,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -475,7 +475,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -493,7 +493,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -513,7 +513,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -534,7 +534,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -556,7 +556,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** FT-11
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -579,7 +579,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -601,7 +601,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** `design/jpx-encoder.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -640,7 +640,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** [design/jbig2-symbol-text.md](../design/jbig2-symbol-text.md) (amend) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -664,7 +664,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -685,7 +685,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -706,7 +706,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -725,7 +725,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -746,7 +746,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -766,7 +766,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** FI-27
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -785,7 +785,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -805,7 +805,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** H-11
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -826,7 +826,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** H-20
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -846,7 +846,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -866,7 +866,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -885,7 +885,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** AN-06
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -905,7 +905,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -927,7 +927,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -946,7 +946,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** FO-18
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -971,7 +971,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -992,7 +992,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1012,7 +1012,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** RC-14
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1032,7 +1032,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** FI-14
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1053,7 +1053,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** ED-13
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1072,7 +1072,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1092,7 +1092,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** `design/layout-api.md` (owed) · **Depends on:** FT-15
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1117,7 +1117,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1138,7 +1138,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1156,7 +1156,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1174,7 +1174,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1193,7 +1193,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1225,7 +1225,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** ED-49
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1250,7 +1250,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |

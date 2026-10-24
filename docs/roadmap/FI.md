@@ -17,7 +17,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -39,7 +39,7 @@ it.
 
 **Doc:** — · **Depends on:** FI-21
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -62,7 +62,7 @@ it.
 
 **Doc:** `design/office-layout.md` (owed) · **Depends on:** FI-02a
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -85,7 +85,7 @@ it.
 
 **Doc:** `design/office-layout.md` (owed) · **Depends on:** FI-02b
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -108,7 +108,7 @@ it.
 
 **Doc:** `design/office-layout.md` (owed) · **Depends on:** FI-02c, FI-36
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -132,7 +132,7 @@ it.
 
 **Doc:** `design/office-layout.md` (owed) · **Depends on:** FI-02a
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -156,7 +156,7 @@ it.
 
 **Doc:** `design/office-layout.md` (owed) · **Depends on:** FI-02a, FI-36
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -179,7 +179,7 @@ it.
 
 **Doc:** — · **Depends on:** FI-02a, FI-36
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -199,7 +199,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -218,7 +218,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -236,7 +236,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -256,7 +256,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -275,7 +275,7 @@ it.
 
 **Doc:** `design/jpeg-xl.md` (owed) · **Depends on:** H-47
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -299,7 +299,7 @@ it.
 
 **Doc:** `design/jpeg-xl.md` (owed) · **Depends on:** FI-07a
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -323,7 +323,7 @@ it.
 
 **Doc:** — · **Depends on:** FI-07b, RC-07, H-122
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -342,7 +342,7 @@ it.
 
 **Doc:** `design/avif.md` (owed) · **Depends on:** H-47
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -366,7 +366,7 @@ it.
 
 **Doc:** `design/heif.md` (owed) · **Depends on:** H-46 (patents)
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -389,7 +389,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -409,7 +409,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -430,7 +430,7 @@ it.
 
 **Doc:** — · **Depends on:** H-106
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -450,7 +450,7 @@ it.
 
 **Doc:** `design/jpx-part2.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -475,7 +475,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -494,7 +494,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -512,7 +512,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -533,7 +533,7 @@ it.
 
 **Doc:** `design/postscript.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -562,7 +562,7 @@ it.
 
 **Doc:** `design/postscript.md` (owed) · **Depends on:** FI-17a, FT-10
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -587,7 +587,7 @@ it.
 
 **Doc:** `design/postscript.md` (owed) · **Depends on:** FI-17b
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -607,7 +607,7 @@ it.
 
 **Doc:** `design/pcl.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -632,7 +632,7 @@ it.
 
 **Doc:** `design/pcl.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -656,7 +656,7 @@ it.
 
 **Doc:** `design/pcl.md` (owed) · **Depends on:** FI-18a
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -676,7 +676,7 @@ it.
 
 **Doc:** `design/djvu.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -700,7 +700,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -720,7 +720,7 @@ it.
 
 **Doc:** — · **Depends on:** FI-20a
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -740,7 +740,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -763,7 +763,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -781,7 +781,7 @@ it.
 
 **Doc:** — · **Depends on:** H-90 (index licence)
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -802,7 +802,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -820,7 +820,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -842,7 +842,7 @@ it.
 
 **Doc:** — · **Depends on:** ED-09
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -860,7 +860,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -879,7 +879,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -901,7 +901,7 @@ it.
 
 **Doc:** — · **Depends on:** FT-30
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -921,7 +921,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -939,7 +939,7 @@ it.
 
 **Doc:** — · **Depends on:** P-05
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -959,7 +959,7 @@ it.
 
 **Doc:** — · **Depends on:** MS-08
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -978,7 +978,7 @@ it.
 
 **Doc:** `design/xsl-fo.md` (owed) · **Depends on:** CD-16
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1003,7 +1003,7 @@ it.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1021,7 +1021,7 @@ it.
 
 **Doc:** `design/afp.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1048,7 +1048,7 @@ it.
 
 **Doc:** `design/metafiles.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1072,7 +1072,7 @@ it.
 
 **Doc:** `design/dxf.md` (owed) · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |

@@ -1,6 +1,6 @@
 """Hold every rule of sweep.py to a fixture it must fire on and a twin it must not.
 
-usage: python3 -I tools/roadmap/selfcheck.py [--inject]
+usage: python3 -I tools/roadmap/selfcheck.py [--inject] [--quiet]
 
 Builds a small roadmap and tree in a temporary folder: every tier file, the
 index's counts, an H.md with a table that has a default, one that has none
@@ -20,7 +20,8 @@ in the source, one at a time; the run reads what the fixture, the variants
 and the table show each time, and fails on any change that shows nothing. A
 rule whose break shows nothing is not held by this file.
 
-Prints one line per check and rule; exits 1 on any failure.
+Prints one line per check and rule, or with `--quiet` only the failures and
+the count; exits 1 on any failure.
 """
 import contextlib
 import io
@@ -693,8 +694,16 @@ def run_main(mod, argv):
     return code, out.getvalue()
 
 
+# Whether a passing check prints, and how many checks ran and failed.
+QUIET = []
+TALLY = [0, 0]
+
+
 def check(name, cond, detail=''):
-    print(f"{'ok  ' if cond else 'FAIL'} {name}" + (f': {detail}' if detail and not cond else ''))
+    TALLY[0] += 1
+    TALLY[1] += not cond
+    if not cond or not QUIET:
+        print(f"{'ok  ' if cond else 'FAIL'} {name}" + (f': {detail}' if detail and not cond else ''))
     return cond
 
 
@@ -1568,6 +1577,7 @@ def load(src):
 
 def main(argv):
     good = True
+    QUIET[:] = ['--quiet'] if '--quiet' in argv else []
     with tempfile.TemporaryDirectory() as root:
         fx = Fixtures(root)
         found = keys(sweep, fx.main)
@@ -1658,6 +1668,7 @@ def main(argv):
             for d, dirs, _ in os.walk(path):
                 for x in dirs:
                     os.chmod(os.path.join(d, x), 0o755)
+    print(f'{TALLY[0]} checks, {TALLY[1]} failed')
     return 0 if good else 1
 
 

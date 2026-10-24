@@ -13,6 +13,14 @@ That is the whole prerequisite list: `rustup`, and nothing else. Keeping it
 that way is a feature, not an accident — see [README](README.md) for what
 this engine is.
 
+`python3 -I tools/gates.py` runs every gate CI's `test` job runs, in its
+order, and prints one line per gate; name gates to run only those
+(`--list` names them). Each gate's whole output is kept in
+`target/gates/<gate>.log`, and a gate that fails prints its failing tests,
+its first compiler errors and the lines it had to print and did not.
+`tools/gatescheck.py` holds the runner's rules to synthetic logs. Like the
+roadmap's tools, it needs Python 3; the build does not.
+
 One build step is not `rustc`: `tinker-pdf-font/build.rs` compiles Adobe's
 vendored CMap registry (`THIRDPARTY.md`) into static tables. It reads a
 directory that is in the repository — nothing is downloaded, so an offline

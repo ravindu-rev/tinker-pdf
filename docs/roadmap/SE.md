@@ -19,7 +19,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** — · **Depends on:** H-18
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -38,7 +38,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -58,7 +58,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** — · **Depends on:** SE-02
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -76,7 +76,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -95,7 +95,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** — · **Depends on:** ED-21
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -113,7 +113,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -132,7 +132,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** [design/pubsec.md](../design/pubsec.md) (amend) · **Depends on:** SG-05
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -155,7 +155,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -173,7 +173,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** — · **Depends on:** RC-17, ED-31
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -193,7 +193,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** — · **Depends on:** FT-20, ED-36d
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -212,7 +212,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** — · **Depends on:** AN-20
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -231,7 +231,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** — · **Depends on:** SE-09
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -251,7 +251,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** — · **Depends on:** SE-09
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -269,7 +269,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** [design/comic-archives.md](../design/comic-archives.md) (amend) · **Depends on:** H-25
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -291,7 +291,7 @@ reconstruction — each a typed report before it is a removal.
 
 **Doc:** — · **Depends on:** SG-13
 
-*Steps not yet reviewed: the run that takes each one reviews it against the tree first.*
+*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |

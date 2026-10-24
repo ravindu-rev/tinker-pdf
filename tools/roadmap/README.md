@@ -13,6 +13,7 @@ python3 -I tools/roadmap/sweep.py --quiet      # unexplained findings only
 python3 -I tools/roadmap/sweep.py --only h-blocks,row-deps
 python3 -I tools/roadmap/sweep.py --waits      # every whole-row wait that brings a person's act
 python3 -I tools/roadmap/selfcheck.py --inject # the sweep's own tests
+python3 -I tools/roadmap/brief.py P-27.1       # what a run reads about one step first
 ```
 
 It exits 0 when every finding is fixed or accepted. It exits 1 when a finding
@@ -229,6 +230,9 @@ With `--inject` it does more:
 - An injection whose source text has moved fails too, so an edit to a rule
   also updates its injection.
 
+It prints one line per check; `--quiet` prints only the failures and the
+count.
+
 ## At this commit
 
 The sweep reads 459 rows, 2 532 steps and 137 H rows. It reports 68
@@ -248,3 +252,48 @@ unexplained:
 | `wiring` | 2 |
 | `h-blocks` | 1 |
 | `double-create` | 1 |
+
+## The step brief
+
+`brief.py` prints, in one call, what a run reads about one step before the
+code, so that no run reads a whole tier file (`docs/roadmap/FT.md` is
+513 508 bytes) or makes the same searches one at a time:
+
+```sh
+python3 -I tools/roadmap/brief.py P-27.1                     # one step
+python3 -I tools/roadmap/brief.py MS-03                      # a row, every step in full
+python3 -I tools/roadmap/brief.py --file xtask/src/bench.rs  # the steps that change one file
+```
+
+A step's brief holds:
+
+- the step; its row's text, its other steps (the three either side with
+  their What) and its closing line, each row field cut at 1 500 characters
+  with what it left out counted, since the row's own brief prints it whole;
+- each wait and its state: landed or not, a split step's parts, the steps
+  an open row has left, a row that has left the roadmap, and whether an H
+  row is decided, open with a default the work builds toward, or open with
+  none;
+- the lines each `file:line` it cites points at;
+- where each code name it writes is defined, or where the code uses it, or
+  which step builds it;
+- the rulings it or its row cites, with the lines each spans in
+  `docs/rulings.md`;
+- the other steps that change its files, each before it, after it or
+  unordered;
+- the commits since the cut's tree (`--base`, `5297133` by default) that
+  touched those files;
+- the steps that wait on it or on its whole row, and the texts that name it;
+- the sweep's findings on it, accepted or not.
+
+It reads through `sweep.py`'s reader, so it reads what the sweep reads, and
+exits 2 where the sweep would, or when the ID names nothing. It changes no
+file, fetches nothing, and runs `git` only to list the commits. A list stops
+at twelve and says how many it left out; `--all` prints every item. P-27.1's
+brief is 3 545 bytes, where its tier file, `P.md`, is 325 685. Over every
+step, with the names' places and the commits left out, the median brief is
+3 126 bytes and the largest 14 417 (MS-04.8).
+
+`briefcheck.py` holds each part of the brief to a fixture of its own (45
+checks); with `--inject` it puts each of 43 rules back broken in the source,
+one at a time, and fails on any break the checks do not see.

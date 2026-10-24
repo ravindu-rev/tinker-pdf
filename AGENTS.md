@@ -69,29 +69,46 @@ what comes next.
 
 ## How work runs
 
-- **Work runs as workflows, one roadmap step per run** (the owner, 23
-  October 2026, replacing that day's earlier "workflows cost too many
-  tokens": "since we use workflows for everything each of those should be
-  cut to small pieces"). [docs/ROADMAP.md](docs/ROADMAP.md) says what a
-  step is and how one runs. A step that turns out bigger than one run is
-  split in the roadmap before the work goes on.
-  - **The step is reviewed first**, when it is taken (the owner, 24
-    October 2026: "how about if we start, review fix and implementation at
-    a step level?", replacing that day's separate review of every row whose
-    cut was not yet reviewed). The run reads the step against the tree as
-    it stands, whether or not its row's cut was reviewed, and corrects it,
-    and any later step or other row it shows wrong, before the work starts.
-    No row is reviewed ahead of its steps.
-  - Concept first, inside the run: name the mechanism and prototype the
-    fix. Then run the cheap checks that decide it: does any book change,
-    and what does it cost in time, in release and in debug? Only then
-    write the tests, injections and docs.
-  - The review of the change is an agent with a fresh, independent
-    context: it hunts new shapes, reads the code and re-measures every
-    claim. Agents that change files at the same time each work in their
-    own git worktree.
-  - Every finding is reproduced before it is fixed, and fixes run in a
-    bounded loop.
+- **One roadmap step per run: its implementation and its tests, nothing
+  more** (the owner, 25 October 2026: "each time a completion should only
+  do the implementation and the test case writing, we can do a review and
+  verififaction once all the things are done"; after 24 October's "do the
+  changes required to get accurate implementation while saving tokens
+  now"). [docs/ROADMAP.md](docs/ROADMAP.md) says what a step is and how
+  one runs. A step that turns out bigger than one run is split in the
+  roadmap before the work goes on.
+  - A run reads its step's brief and the code it points to, and builds the
+    step. Concept first: name the mechanism and prototype it, then run the
+    cheap checks that decide it (does any book change, and what does it
+    cost in time, in release and in debug?). Then the change and its
+    tests, green.
+  - No review or verification inside a run: no review of the step or the
+    change, no verifying agent, no counted injections, no re-measuring of
+    docs ("we spend too much tokens to verify and review documents etc so
+    no more that"). Review and verification run once, when all the work
+    is done; each finding is reproduced there before it is fixed.
+  - Never a workflow (the owner, 25 October 2026: "no more workflow
+    implementaions only multi agents"). Several agents only where the work
+    splits into parts independent of each other; agents that change files
+    at the same time each work in their own git worktree.
+- **Read cheaply** (the owner, 24 October 2026, as above). Every agent
+  reads what its step needs and no more: the largest tier file is half a
+  megabyte, and a long tool output stays in the context for every call
+  after it.
+  - Start a step from `python3 -I tools/roadmap/brief.py <STEP>`: the step,
+    its row, its waits, the lines it cites, where its names are defined,
+    the steps that change the same files, the commits since the cut and
+    the sweep's findings on it. `<ROW>` gives a whole row, and `--file
+    <PATH>` the steps that change one file. Never read a whole tier file.
+  - Find with `grep -n`, then read the lines with `sed -n 'A,Bp'`; read a
+    whole file only when the change needs all of it. Put independent
+    reads in one call.
+  - Run the gates with `python3 -I tools/gates.py`, or the gates a change
+    touches by name: one line per gate, each log kept under
+    `target/gates/`. Open a log only for a gate that failed, around its
+    failure.
+  - Run the sweep, `selfcheck.py`, `briefcheck.py` and `gatescheck.py`
+    with `--quiet`.
 - A lane resets against the local `develop`, so `develop` does not move while
   a step's lanes are running.
 - **Test corpora are never downloaded**, by any route. They run only in CI's
@@ -135,7 +152,8 @@ test.
   Neighbouring shapes that must *not* change get guard tests too.
 - **Failing first.** Each new test is shown to fail on the code before the
   fix, and the commit message says so.
-- **Counted injections.** Each rule a change adds is put back broken at
+- **Counted injections**, in the verification that runs once all the work
+  is done ("How work runs"). Each rule a change adds is put back broken at
   least once, and the count of tests that fire is recorded. See
   CONTRIBUTING.md, "Working an item": a row of zeros is a result about the
   harness as often as about the suite.

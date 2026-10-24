@@ -60,8 +60,8 @@ MS-06, MS-11, P-01…P-06 and P-27), and a fifth checked their corrections:
 twenty-nine reviewed rows in all. The rest were cut in the session, tier by tier and without
 workflows (the owner, 24 October 2026), and every row now has its steps;
 "Where the rows are" counts each tier's. A cut row no independent pass has
-reviewed says so. Every step, in a reviewed row or not, is reviewed against
-the tree by the run that takes it ("How a step runs", 1). Every cut was
+reviewed says so; its review, like every review, runs once all the work is
+done ("How a step runs", 4). Every cut was
 made against the code at `5297133`, which
 no commit since has changed, and where a row's text and that tree disagree,
 the row says so under its steps. Every number and every `file:line` pointer in a
@@ -160,25 +160,25 @@ owner's standing instructions behind each of these.
    done: every step it names has landed, every row it names has left the
    roadmap, and every H row it names is decided or done. A row added later
    is cut first, in the session, and its cut lands as its own commit to its
-   tier's file, with the H rows it needs. Then **review the step** against
-   the tree as it stands, before any work and whether or not its row's cut
-   was reviewed: every claim, path, exit and wait it carries, and, on a
-   row's first step, whether the row's steps still close its exit. What the
-   review shows wrong is corrected first, in the step and in any later step
-   or other row it reaches; the step is built as corrected, and the
-   corrections land with it (the owner, 24 October 2026).
+   tier's file, with the H rows it needs. The step's brief,
+   `python3 -I tools/roadmap/brief.py <STEP>`, gives the step, its row and
+   what it touches in one call; where the code contradicts the step, the
+   run builds what the code needs and its commit says so.
 2. **Concept first.** Name the mechanism and prototype the change, then run
    the cheap checks that decide it: does any book change, and what does it
    cost in time, in release and in debug?
-3. **Build to the exit.** Tests fail first; each rule the step adds gets a
-   counted injection ([CONTRIBUTING.md](../CONTRIBUTING.md), "Working an
-   item"); both builds, default and `bundled-fonts`, wherever fonts or text
-   are involved; the feature doc changes with the behaviour; a new
-   capability brings its speed row (MS-04) and its determinism fingerprint
-   (K-07).
-4. **Review the change** by an agent with a fresh context that hunts new
-   shapes, reads the code and re-measures every claim. Every finding is
-   reproduced before it is fixed, and fixes run in a bounded loop.
+3. **Build to the exit.** Tests fail first; both builds, default and
+   `bundled-fonts`, wherever fonts or text are involved; the feature doc
+   changes with the behaviour; a new capability brings its speed row
+   (MS-04) and its determinism fingerprint (K-07). The gates are CI's
+   `test` job, run by `python3 -I tools/gates.py`, which prints a line per
+   gate and keeps each log.
+4. **No review inside a run.** A run does its step's implementation and
+   its tests, and nothing more. Review and verification run once, when all
+   the work is done: a fresh review of the work, each rule's counted
+   injection ([CONTRIBUTING.md](../CONTRIBUTING.md), "Working an item"),
+   and every finding reproduced before it is fixed (the owner, 25 October
+   2026).
 5. **Stop for a price.** When the step would cost anything that used to
    work, the run records the figures and stops; the owner decides, through
    an H row, and their decision goes into [rulings.md](rulings.md).

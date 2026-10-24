@@ -23,16 +23,19 @@ same commit that moves the work on.
   P-01…P-06, P-27), by four independent reviewers on 24 October 2026 with a
   fifth checking their corrections. Every other row says its steps are not
   yet reviewed.
-- **Each step is reviewed when it is taken** (the owner, later on 24
-  October 2026: "how about if we start, review fix and implementation at a
-  step level?"). It replaces the separate review of the 430 rows whose cuts
-  are not yet reviewed, which the owner had asked for earlier that day. The
-  run that takes a step first reviews it against the tree as it stands,
-  whether or not its row's cut was reviewed, and corrects it, and any
-  later step or other row it shows wrong, before the work starts ("How a
-  step runs", 1; AGENTS.md). A review of MS-03, MS-07 to MS-10, MS-12 and
-  MS-13 begun under the earlier instruction was stopped before it wrote
-  anything.
+- **Implementation first** (the owner, 25 October 2026: "each time a
+  completion should only do the implementation and the test case writing,
+  we can do a review and verififaction once all the things are done", and
+  "no more workflow implementaions only multi agents"). A run reads
+  `tools/roadmap/brief.py <STEP>`, never a whole tier file, builds the step
+  and its tests, and runs the gates through `tools/gates.py`, a line per
+  gate with each log kept. No review of the step or the change, no
+  verifying agent and no counted injections inside a run: those run once,
+  when all the work is done. This replaces 24 October's review of each step
+  when it is taken, which had replaced that day's separate review of the
+  430 unreviewed rows; a review of MS-03, MS-07 to MS-10, MS-12 and MS-13
+  begun under the first was stopped before it wrote anything (AGENTS.md,
+  "How work runs").
 - **What that review changed** beyond its rows: MS-01 gained a closing
   step, MS-01.9, that reads every guard green after the P rows that land
   them, so the 49 steps that needed MS-01's tally now wait on MS-01.8, not
@@ -46,80 +49,29 @@ same commit that moves the work on.
   and H-163 how MS-04 times an operation whose stated input cannot fit the
   20–300 ms window.
 - **The owner's instructions** (AGENTS.md):
-  - 23 October 2026: work runs as workflows, one roadmap step per run;
-    commits are signed with the default ed25519 key in `~/.ssh` through
-    the repository's git config; when a step is done, its changes are
-    merged into `develop` fast-forward, `develop` is pushed, and every
-    branch except `develop` and `main` is deleted.
+  - 23 October 2026: one roadmap step per run; commits are signed with the
+    default ed25519 key in `~/.ssh` through the repository's git config;
+    when a step is done, its changes are merged into `develop`
+    fast-forward, `develop` is pushed, and every branch except `develop`
+    and `main` is deleted.
   - 24 October 2026: the rows not yet cut are cut in the session, tier by
-    tier, without workflows.
+    tier, without workflows; runs save tokens (below).
+  - 25 October 2026: a run does its step's implementation and its tests
+    and nothing more; review and verification run once, when all the work
+    is done; never a workflow, several agents only where the work splits
+    into independent parts (below).
 - **Signing on the Linux machine.** Its key is `SHA256:6fQ5We1x…`, not the
   one that signed the history before (`SHA256:TsJhk…`). GitHub marks a
   commit verified only when its key is registered on the owner's account as
   a signing key.
-- **The roadmap sweep** (24 October 2026, the second step of that day's
-  plan): `tools/roadmap/sweep.py` checks every step at once for the classes
-  of defect the reviews found by hand. `selfcheck.py` holds each check to a
-  fixture and a twin, each way the input can be unreadable to its own exit
-  and message, and each word a rule reads to a phrase and its twin; with
-  `--inject` it puts each rule back broken. `accepted.tsv` records each
-  finding that is not a defect, with its reason. Its README lists the
-  checks, how the sweep reads the roadmap, and what it cannot see.
-  - What it found was fixed in the roadmap in the same commit, in 230 rows:
-    - 148 waits on a whole row narrowed to the 254 steps of it that the
-      step needs. So no step waits on a close that counts on it, and no
-      machine work waits on a person's act that only a row's tail needs.
-    - 97 waits added on another row's step:
-      - 61 order two steps that change one file;
-      - 13 wait for the step that creates a file they name;
-      - 13 wait for the step that creates the crate or module they put a
-        file in;
-      - 9 wait for what they use: a golden the step moves, the EC
-        arithmetic, the decoder a step measures, the faces it renders;
-      - 1 waits for an instrument the step names.
-    - 21 H rows added to the steps whose exits need them, and 9 waits on a
-      whole row, 7 of them on MS-11 by steps that read its runs on
-      `develop`. FI-02b.6 no longer waits on H-61: its row's exit gives the
-      visual review to H-61, which says it blocks nothing.
-    - Four new steps. AN-04.3 and AN-05.3 watch for the goldens H-66
-      signs. OC-01.4 creates the OCR crate, which no step created. SD-23.7
-      moves the validators' five other walks over an XMP packet onto
-      SD-23.1's model.
-    - RC-20.15 and RC-21.5, which add only a speed row, were `ci` and are
-      now `measure`, as 59 other speed-row steps already were. The new
-      `speed-kind` check holds the class.
-    - 13 closing lines say which H row is outside the exit. 39 notes name
-      the H row default a step builds toward; others settle two unordered
-      edits ("whichever lands second keeps …") or say why a file stands
-      apart.
-    - 17 H rows' Blocks cells now also name the rows whose steps wait on
-      them ("; also MS-04, whose steps wait on it"), the owner's words
-      kept. The new `h-listed` check holds the class.
-    - Second homes and duplicate builds removed: two gzip readers, two XML
-      schema checkers, a second XMP reader (SD-23.1 and SD-23.7 put all six
-      packet walks on one model), and `parse.rs` and `lex.rs` beside
-      `parse/` and `lexer.rs`. FO-15b's accessible HTML keeps its own
-      module beside FO-15a's positioned HTML; the two share only
-      escaping, and FO-15b.1's note says so.
-    - Six rows' findings had stale pointers rewritten: five to
-      `docs/ROADMAP.md:<n>` (K-01, RC-01, RC-02, FJ-01, CD-19) and one
-      partial path (P-14). K-01, P-14 and CD-19 changed only there.
-  - Steps waiting on a person's act: 3 872 step-and-act pairs became 2 810.
-    - Fewer: H-109 722→192 and H-112 721→182 (the bands' re-baselining
-      and the planning-time comparison), H-67 110→1, H-68 94→1, H-81
-      35→1, H-61 10→0, and ten more.
-    - More, where rows an H row blocks now wait on it: H-102 90→296 (the
-      standards to buy), H-92 338→367 (the terms of test data), H-116
-      27→43 (data licences), H-118 0→4 (the trust lists SG-14.2 commits as
-      fixtures) and H-66 1→3 (the two new `watch` steps). And H-02
-      1 030→1 115, through added waits: 7 on MS-11, whose act it is, and
-      orderings on steps that already reached it. MS-11 is third in the
-      order of work, after CD-19 and P-27.1 and before every other row.
-  - At this commit it reports 68 findings, every one accepted (68 lines),
-    none unexplained. It does not judge whether a whole-row wait is wider
-    than the step needs, through steps the waiting step may need. `--waits`
-    lists 289 such waits by 282 steps, and the README sorts them.
-  - Run it after every change to the roadmap ("How the roadmap changes").
+- **The roadmap sweep** (24 October 2026, `e8a935f0`):
+  `tools/roadmap/sweep.py` checks every step at once for the classes of
+  defect the reviews found by hand, `selfcheck.py` holds each of its rules
+  to a fixture, and `accepted.tsv` records each finding that is not a
+  defect, with its reason; the README lists the checks and what they cannot
+  see. What it found was fixed in that commit, in 230 rows, and its message
+  gives the figures. It reports 68 findings, all accepted. Run it after
+  every change to the roadmap ("How the roadmap changes").
   - **Four questions for the owner**, left as they are:
     - P-13.8 rewrites the private-key path's Montgomery core. It now waits
       on SG-01.6, not on all of SG-01, so it no longer waits on SG-01.8,
@@ -141,7 +93,7 @@ same commit that moves the work on.
       while an earlier step of its row waits. If number order is strict, a
       row's tail is only its trailing `watch` and `measure` steps, and a
       wait narrowed to a step after an earlier `measure` step (FJ-01.42
-      after FJ-01.41) avoids less than the figures above say.
+      after FJ-01.41) avoids less than `e8a935f0`'s message says.
 - **The cut's working files** (the step JSON, its checker and renderer)
   stay in `.claude/worktrees/roadmap-cut` on that machine only, ignored by
   git. Nothing below needs them: every row is cut, and a row added later is
@@ -290,11 +242,8 @@ to CD-19.37, H-149 to H-158), in the order "Next" gives.
      and the rest of CD-19 in its order;
    - then P-27.1, MS-11 and K-06, K-01 and K-02, MS-01 (to MS-01.8),
      MS-04, MS-05, MS-06 and MS-02, P-01 to P-05, and the tiers.
-2. **The owner's word, once CD-19.1 is done:** how a step's run does its
-   two reviews, of the step against the tree before the work and of the
-   change after it: one fresh agent each, or a workflow per step.
-   AGENTS.md's "work runs as workflows" stands until then. No row is
-   reviewed ahead of its steps any more ("How a step runs", 1). The sweep
-   checks every step at once for the classes the reviews found, and holds
-   every roadmap change to them; it reads names, paths and dependencies,
-   not whether a step is right, which is what each step's review is for.
+2. **Review and verification, once all the work is done** ("How a step
+   runs", 4): a fresh review of the work, the counted injections, and each
+   finding reproduced before it is fixed. Until then the sweep holds every
+   roadmap change to the classes the reviews found; it reads names, paths
+   and dependencies, not whether a step is right.
