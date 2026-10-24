@@ -1216,7 +1216,7 @@ list, each held to first-party evidence.
 - The census tries only the empty password on an encrypted file (`crates/tinker-pdf/tests/reading_order_census.rs:135-141`) and asserts no more of its population than that some file was tagged (`:378-382`); a scratch walk the design records, which supplied no passwords, found 1 073 of the 1 078 tagged files (`docs/design/reading-order.md:212-214`).
 - Only pair agreement has a floor table (`INFERRED_FLOORS`, `reading_order_census.rs:83-89`); running-head and footnote precision are printed and not held (`:31-37`), and milestone 3's 'pair agreement does not fall on any corpus' (`docs/design/reading-order.md:273`) is not asserted.
 - No determinism fingerprint covers the inferred order: `crates/tinker-pdf/tests/determinism.rs` names none.
-- `corpus.yml`'s census step sets no `TINKER_CORPUS_REQUIRED` and greps no `RAN` banner (`.github/workflows/corpus.yml:103-127`), so a census that skipped would pass; FT-30.7 and FT-30.8 read the banner in the log.
+- `corpus.yml`'s census step sets no `TINKER_CORPUS_REQUIRED` and greps no `RAN` banner (`.github/workflows/corpus.yml:103-128`), so a census that skipped would pass; FT-30.7 and FT-30.8 read the banner in the log.
 
 ## FT-31 — Table reconstruction from geometry
 

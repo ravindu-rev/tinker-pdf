@@ -109,6 +109,7 @@ jobs:
             --test cff_subset_census \
             --test cmap_census \
             --test cms_census \
+            --test default_space_census \
             --test icc_census \
             --test jbig2_attribution \
             --test jbig2_census \
