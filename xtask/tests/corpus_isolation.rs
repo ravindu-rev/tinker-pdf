@@ -429,6 +429,10 @@ fn one_bad_file_does_not_affect_its_neighbours() {
 
 /// The synthetic files are PDFs, and the real child reads them as such.
 ///
+/// It is also the one test in which the real child's record meets this
+/// runner's parser, so it holds the time spans there too: hand-written records
+/// cannot say whether `tpdf` writes the lines `parse_record` reads.
+///
 /// Without this the fixtures could drift into being marker files that only
 /// the stub understands, and the isolation tests would stop saying anything
 /// about a corpus run. Skipped rather than failed when `tpdf` has not been
@@ -498,6 +502,22 @@ fn the_synthetic_files_are_real_pdfs() {
         );
         assert_eq!(result.pages, 1);
         assert_eq!(result.rendered, 1);
+        // The spans as the real child writes them and this runner reads them:
+        // one for the open and one for the page, under the number the child
+        // counts it by. Whether either is there, never how long it says.
+        assert!(
+            result.open_micros.is_some(),
+            "a file that opened has its open span: {result:#?}"
+        );
+        assert_eq!(
+            result
+                .page_micros
+                .iter()
+                .map(|time| time.page)
+                .collect::<Vec<_>>(),
+            [1],
+            "a rendered page has its span: {result:#?}"
+        );
     }
     println!("corpus-isolation: RAN the real-child check");
     let _ = std::fs::remove_dir_all(&dir);

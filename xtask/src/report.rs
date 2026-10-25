@@ -761,6 +761,8 @@ mod tests {
                 .map(|c| (*c).to_string())
                 .collect::<BTreeSet<_>>(),
             millis: 1,
+            open_micros: None,
+            page_micros: Vec::new(),
             metamorphic: BTreeMap::new(),
             strict: crate::runner::Strict::Checked {
                 structure: 0,

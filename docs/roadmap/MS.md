@@ -214,7 +214,7 @@ held to, and the censuses no corpus run has fed.
 
 **The tree at `5297133`, against this row's text:**
 
-- The peak is already read the way the exit asks, by the corpus child: `tools/tpdf/src/main.rs:2430-2445` reads `VmHWM` from `/proc/self/status` with no FFI, and `xtask/src/ratchet.rs:150` bands each corpus's maximum at `PEAK_TOLERANCE_PERCENT = 2`.
+- The peak is already read the way the exit asks, by the corpus child: `tools/tpdf/src/main.rs:2461-2476` reads `VmHWM` from `/proc/self/status` with no FFI, and `xtask/src/ratchet.rs:150` bands each corpus's maximum at `PEAK_TOLERANCE_PERCENT = 2`.
 - `CONTRIBUTING.md` (Tests) admits a test that spawns a program only through a `SPAWNERS` row with its reason (`xtask/src/main.rs:984-1048`), so the probe the exit has a test spawn needs one, as the corpus child, a workspace binary of the same revision, has (`xtask/src/main.rs:1024-1028`).
 - The 2 % the exit names was measured over corpus maxima, whose two recorded swings are 0.06 % and 0.76 % (`xtask/src/ratchet.rs:146-150`); no per-operation peak has a measured swing, so MS-05.3 records two runs before it holds one.
 - The row's '20 pages on 4 threads' is tier P's '20 pages at 150 dpi to PNG, CLI, 1 / 4 jobs; peak on 4' (262 MB on the planning machine), whose band P-15.11 sets at 120 MB, so the case renders to PNG at 150 dpi.
@@ -255,7 +255,6 @@ held to, and the censuses no corpus run has fed.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| MS-07.2 | build | The child times what the bar reads: `tpdf probe` prints its open-and-count latency and each page's render time in microseconds, timed apart from the strict and metamorphic passes; the record format moves to version 7 in the child and the runner, which parses the new keys and, through `corpus.rs`'s handshake, refuses a version-6 child by name. *Note:* The child and the runner keep the clocks; their tests feed records and read none. `ms` and the runner's `millis` stay as they are. | `tools/tpdf/src/main.rs`, `xtask/src/runner.rs`, `xtask/src/corpus.rs` | `xtask/src/runner.rs` unit tests (new) `the_open_and_page_times_are_read`, `a_record_without_them_is_a_version_6_record` and `a_page_time_that_does_not_parse_is_absent_not_zero`; `corpus.rs`'s handshake test names a version-6 child; `tpdf`'s own tests pass. | MS-07.1 |
 | MS-07.3 | build | The report and the bar: per corpus, pages/s at the run's dpi, open-and-count latency and p50/p95/p99 page render time in the report and in the ratchet, each with its band; `--check` fails past a band, an absent time key is an improvement (`SCHEMA` stays 2, as `peak` arrived), `--record` writes the ten slowest files with their `/Producer` beside the bar, and `corpus.yml` greps that the time axis was measured. *Note:* The listing reuses `producer_table`'s shape and its escaping of a producer's pipe (`xtask/src/report.rs:638`); it is recorded, never gated. | `xtask/src/report.rs`, `xtask/src/ratchet.rs`, `xtask/src/json.rs`, `.github/workflows/corpus.yml` | `xtask/src/ratchet.rs` unit tests (new) `a_time_figure_past_its_band_fails_alone`, `a_bar_without_times_is_an_improvement` and `the_slowest_ten_name_their_producers`; `report.rs` `percentiles_are_over_pages_not_files` (new); the three committed bars still parse. | MS-07.2 |
 | MS-07.4 | measure | Measure the bands: five runs of `corpus.yml` on `develop`, dispatched as H-03 authorises, since the nightly schedule runs `main` until the owner's merge; each corpus's figures and bands by MS-07.1's rule into `ratchet.json`, `ratchet-fonts.json` and `ratchet-bundled.json` with the ten slowest, and the measurement recorded in `docs/verification.md`. *Note:* The corpora are fetched by CI only, never locally. The figures are read from the runs' uploaded reports, which `corpus.yml` keeps 14 days (`.github/workflows/corpus.yml:244`), so they are copied before they expire. | `corpus/ratchet.json`, `corpus/ratchet-fonts.json`, `corpus/ratchet-bundled.json`, `docs/verification.md` | The three bars carry every corpus's time figures with bands and its ten slowest files by `/Producer`, each band above the spread the five runs measured, and each of the five runs passes the bars they set. | MS-07.3, MS-13, H-03 |
 | MS-07.5 | watch | Read `corpus.yml` on `develop` to the end with the time bars committed. | `.github/workflows/corpus.yml` | The next run of `corpus.yml` on `develop` holds every corpus's time figures in all three bars and is green, read to the end, with the ten slowest printed. | MS-07.4, MS-11.6 |
@@ -265,8 +264,8 @@ held to, and the censuses no corpus run has fed.
 **The tree at `5297133`, against this row's text:**
 
 - The per-file timeout is 180 s, not 20 s: `RunArgs::default` sets it (`xtask/src/corpus.rs:184`), all three committed bars record `timeout_seconds: 180`, and `corpus.yml`'s own comment still says sixty (`.github/workflows/corpus.yml:143-151`).
-- Every record already carries the document's `/Producer` (`xtask/src/runner.rs:159-168`), and `producer_table` already attributes failures by it (`xtask/src/report.rs:638`), so the ten-slowest listing needs no new key.
-- The child's `ms` spans the open, every render, the strict rewrite and the metamorphic renders together (`tools/tpdf/src/main.rs:2569-2747`), so it gives neither pages/s nor a page's render time as it stands.
+- Every record already carries the document's `/Producer` (`xtask/src/runner.rs:180-189`), and `producer_table` already attributes failures by it (`xtask/src/report.rs:638`), so the ten-slowest listing needs no new key.
+- The child's `ms` spans the open, every render, the strict rewrite and the metamorphic renders together (`tools/tpdf/src/main.rs:2600-2800`), so it gives neither pages/s nor a page's render time as it stands.
 
 ## MS-08 — Time to first page
 
@@ -316,8 +315,8 @@ held to, and the censuses no corpus run has fed.
 
 **The tree at `5297133`, against this row's text:**
 
-- The CLI's pool is `render_pages` (`tools/tpdf/src/main.rs:1149-1222`), in a binary with no library target; the mechanism is copied, not shared, in `crates/tinker-pdf/examples/parallel.rs` and `crates/tinker-pdf/tests/tinker_parity.rs:323`.
-- Nothing holds the pools to bytes today: `jobs_changes_the_clock_and_not_one_byte_of_the_output` (`tools/tpdf/src/main.rs:3105`) compares the lines `--jobs 8` and `--jobs 1` print while both write into one directory, and no test renders bands on threads.
+- The CLI's pool is `render_pages` (`tools/tpdf/src/main.rs:1171-1244`), in a binary with no library target; the mechanism is copied, not shared, in `crates/tinker-pdf/examples/parallel.rs` and `crates/tinker-pdf/tests/tinker_parity.rs:323`.
+- Nothing holds the pools to bytes today: `jobs_changes_the_clock_and_not_one_byte_of_the_output` (`tools/tpdf/src/main.rs:3158`) compares the lines `--jobs 8` and `--jobs 1` print while both write into one directory, and no test renders bands on threads.
 - The row's 100-page group cannot meet MS-04's sizing rule (head-side operations 20-300 ms): it measured 8 742 ms on one thread.
 
 ## MS-10 — wasm speed in CI

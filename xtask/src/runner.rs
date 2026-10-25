@@ -128,6 +128,27 @@ pub struct FileResult {
     pub capabilities: BTreeSet<String>,
     /// How long the child took, in milliseconds, as the runner measured it.
     pub millis: u64,
+    /// How long the child took to open the document and count its pages, in
+    /// microseconds by its own clock, or `None` where it did not say.
+    ///
+    /// The span is `Document::open` on bytes already read, the face provider,
+    /// the authentication and the first `page_count`. The read, the lines the
+    /// child prints and every later phase are outside it, so it is not a slice
+    /// of [`millis`](Self::millis), which spans the whole process. A file that
+    /// did not open has none, and neither does a value that does not parse:
+    /// read as zero, it would be a measurement, and a span of nothing drags a
+    /// corpus's figure toward a speed no run has.
+    pub open_micros: Option<u64>,
+    /// Each page's render time as the child measured it, in the order it
+    /// rendered them.
+    ///
+    /// `page.render` alone: the page lookup before it, the structure join and
+    /// the progress line are outside, and so are the strict and metamorphic
+    /// passes. A line whose page or time does not parse, or whose page is not
+    /// one of the document's 1 to [`pages`](Self::pages), is left out rather
+    /// than kept as a page that took no time, so the list may be shorter than
+    /// [`rendered`](Self::rendered) and holds no zero the child did not print.
+    pub page_micros: Vec<PageTime>,
     /// What the strict validator said about a **rewrite** of this file, or
     /// why the file was not eligible for one (ruling 13).
     pub strict: Strict,
@@ -196,6 +217,15 @@ pub struct Tagged {
     /// Characters carrying no `/MCID` at all, inside a document that has a
     /// structure tree.
     pub unmarked: u64,
+}
+
+/// One page's render time, as the child that rendered it measured it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageTime {
+    /// The page, counted from 1 as the child's progress line counts it.
+    pub page: u32,
+    /// How long its render took, in whole microseconds.
+    pub micros: u64,
 }
 
 /// A document's size, in the three dimensions that bound work on it.
@@ -327,6 +357,11 @@ pub fn run_one(
         warnings: BTreeMap::new(),
         capabilities: BTreeSet::new(),
         millis,
+        // A child that wrote no record timed nothing this runner keeps: a
+        // span from a child that did not finish is not a result, and the
+        // file is already counted as one that did not pass.
+        open_micros: None,
+        page_micros: Vec::new(),
         strict: Strict::Ineligible("the child produced no record".to_string()),
         // A child that wrote no record asked no relation, which is not the
         // same as a relation that held: an empty map counts as neither
@@ -572,7 +607,15 @@ fn hash(text: &str) -> u64 {
 /// incomplete. Without the bump, running against a version-5 binary would look
 /// like a platform that cannot measure memory rather than like a `tpdf` nobody
 /// rebuilt, and `corpus.rs`'s handshake exists precisely to name the second.
-pub const PROBE_VERSION: u32 = 6;
+///
+/// Version 7 adds `time`: `time open`, the child's span over opening the
+/// document and counting its pages, and a `time page` for each page it
+/// rendered, both in microseconds and both apart from the strict and
+/// metamorphic passes. Bumped for `peak`'s reason: the spans are what a
+/// corpus's time figures are made from, so a version-6 child read as this
+/// version would be a corpus whose files timed nothing rather than a `tpdf`
+/// nobody rebuilt.
+pub const PROBE_VERSION: u32 = 7;
 
 /// Reads a child's record, or `None` if it is not complete.
 ///
@@ -602,6 +645,8 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
     let mut peak: Option<u64> = None;
     let mut tagged: Option<Tagged> = None;
     let mut producer: Option<String> = None;
+    let mut open_micros: Option<u64> = None;
+    let mut page_micros: Vec<PageTime> = Vec::new();
 
     for line in text.lines() {
         let line = line.trim_end_matches(['\r', '\n']);
@@ -642,6 +687,20 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
             // value of the field is that "not measured" and "measured as
             // nothing" are different answers.
             "peak" => peak = rest.trim().parse::<u64>().ok(),
+            // The two spans, by `peak`'s rule: a value that does not parse is
+            // no span. A line needs exactly its words -- `open` and a time, or
+            // `page`, a page and a time -- and is dropped whole otherwise, so
+            // a garbled line can neither invent a page nor give a real one a
+            // time of zero.
+            "time" => match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
+                ["open", micros] => open_micros = micros.parse::<u64>().ok(),
+                ["page", page, micros] => {
+                    if let (Ok(page), Ok(micros)) = (page.parse::<u32>(), micros.parse::<u64>()) {
+                        page_micros.push(PageTime { page, micros });
+                    }
+                }
+                _ => {}
+            },
             "cost" => {
                 let mut rest = rest.split_whitespace();
                 while let (Some(field), Some(value)) = (rest.next(), rest.next()) {
@@ -756,6 +815,10 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
     if version != Some(PROBE_VERSION) {
         return None;
     }
+    // The child counts its pages from 1 to `pages`, so a span naming any
+    // other number is a garbled line rather than a page's time: kept, it
+    // would be the time of a page this document does not have.
+    page_micros.retain(|time| (1..=pages).contains(&time.page));
 
     let strict = match (eligible.is_some(), why_not) {
         (true, _) => Strict::Checked {
@@ -787,6 +850,8 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
         warnings,
         capabilities,
         millis,
+        open_micros,
+        page_micros,
         strict,
         metamorphic,
         bundled_faces,
@@ -801,7 +866,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
 mod tests {
     use super::*;
 
-    const GOOD: &str = "probe 6\nfile x.pdf\nopened yes\nladder Trust\npages 3\n\
+    const GOOD: &str = "probe 7\nfile x.pdf\nopened yes\nladder Trust\npages 3\n\
                         cap jbig2\nrendered 3\nstrict eligible\nstrict structure 0\n\
                         strict semantics 2\nstrict kind annot-rect-unordered 2\n\
                         warn render:UnreadableFont 2\nms 40\ndone\n";
@@ -814,6 +879,135 @@ mod tests {
         out
     }
 
+    /// A two-page file as a version-7 child writes it: `time open` after
+    /// `pages`, and `time page` after each page's render, both in
+    /// microseconds.
+    const TIMED: &str = "probe 7\nfile x.pdf\nphase open\nopened yes\nladder Trust\n\
+                         producer (none stated)\npages 2\ntime open 1830\ntagged tree no\n\
+                         phase render\npage 1/2\ntime page 1 5120\npage 2/2\n\
+                         time page 2 4875\nrendered 2\ncost bytes 900 objects 7 pixels 48000\n\
+                         phase strict\nstrict eligible\nstrict structure 0\n\
+                         strict semantics 0\npeak 21069824\nms 31\ndone\n";
+
+    /// The two spans the child keeps apart from the rest of its work: the
+    /// open-and-count once, and each page's render under its page number.
+    /// They arrive beside `ms` rather than instead of it, and nothing else the
+    /// record says moves for carrying them.
+    #[test]
+    fn the_open_and_page_times_are_read() {
+        let result = parse_record(TIMED).expect("a complete version-7 record");
+        assert_eq!(result.open_micros, Some(1830));
+        assert_eq!(
+            result.page_micros,
+            vec![
+                PageTime {
+                    page: 1,
+                    micros: 5120
+                },
+                PageTime {
+                    page: 2,
+                    micros: 4875
+                },
+            ]
+        );
+        assert_eq!(result.outcome, Outcome::Passed);
+        assert_eq!((result.pages, result.rendered), (2, 2));
+        assert_eq!(result.millis, 31);
+        assert_eq!(result.peak, Some(21_069_824));
+        assert_eq!(result.producer.as_deref(), Some("(none stated)"));
+        assert!(result.strict.clean());
+    }
+
+    /// A record that times nothing is what a version-6 child writes, and it is
+    /// refused by the version it states rather than read as a file whose
+    /// spans are missing.
+    ///
+    /// Read as version 7, a `tpdf` nobody rebuilt would arrive as a corpus
+    /// that timed nothing; refused, it is the stale binary `corpus.rs`'s
+    /// handshake names. The same lines stating version 7 read with both spans
+    /// absent rather than zero, and a version-7 record of a file that never
+    /// opened reads with none, because it had nothing to time.
+    #[test]
+    fn a_record_without_them_is_a_version_6_record() {
+        let untimed: String = TIMED
+            .lines()
+            .filter(|line| !line.starts_with("time "))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert!(
+            parse_record(&untimed.replace("probe 7", "probe 6")).is_none(),
+            "a version-6 record is refused, not read as one with no times"
+        );
+
+        let result = parse_record(&untimed).expect("the same lines at version 7 are a record");
+        assert_eq!(result.open_micros, None);
+        assert!(result.page_micros.is_empty());
+        assert_eq!(result.outcome, Outcome::Passed);
+        assert_eq!((result.pages, result.rendered), (2, 2));
+
+        let unopened = "probe 7\nfile x.pdf\nphase open\nopened no not a PDF\n\
+                        strict ineligible the file did not open\nms 2\ndone\n";
+        let result = parse_record(unopened).expect("a complete version-7 record");
+        assert!(matches!(result.outcome, Outcome::Failed(_)));
+        assert_eq!(result.open_micros, None);
+        assert!(result.page_micros.is_empty());
+    }
+
+    /// A page span the runner cannot read is left out, never kept as a page
+    /// that took no time: a zero is a measurement, and one nobody made pulls a
+    /// corpus's percentiles toward a speed no page has. So is one naming a
+    /// page the document does not have, page 0 or one past `pages`. The pages
+    /// around it and the rest of the record still read.
+    #[test]
+    fn a_page_time_that_does_not_parse_is_absent_not_zero() {
+        for broken in [
+            "time page 2 fast",
+            "time page 2",
+            "time page 2 -40",
+            "time page 2 4.5",
+            "time page 2 4875 more",
+            "time page 2 18446744073709551616",
+            "time page two 4875",
+            "time page -2 4875",
+            "time page 4294967296 4875",
+            "time page",
+            "time page 0 4875",
+            "time page 3 4875",
+        ] {
+            let result = parse_record(&TIMED.replace("time page 2 4875", broken))
+                .unwrap_or_else(|| panic!("{broken:?} leaves the record complete"));
+            assert_eq!(
+                result.page_micros,
+                vec![PageTime {
+                    page: 1,
+                    micros: 5120
+                }],
+                "{broken:?}"
+            );
+            assert_eq!(result.open_micros, Some(1830), "{broken:?}");
+            assert_eq!(result.outcome, Outcome::Passed, "{broken:?}");
+        }
+    }
+
+    /// The open span's own line, the same way: what does not parse is no
+    /// span, and the page spans beside it are not touched.
+    #[test]
+    fn an_open_time_that_does_not_parse_is_absent_not_zero() {
+        for broken in [
+            "time open soon",
+            "time open",
+            "time open -3",
+            "time open 1.5",
+            "time open 1830 more",
+            "time open 18446744073709551616",
+        ] {
+            let result = parse_record(&TIMED.replace("time open 1830", broken))
+                .unwrap_or_else(|| panic!("{broken:?} leaves the record complete"));
+            assert_eq!(result.open_micros, None, "{broken:?}");
+            assert_eq!(result.page_micros.len(), 2, "{broken:?}");
+        }
+    }
+
     /// The structure counts arrive on two lines because they are measured at
     /// two different times -- the tree once per document, the join once per
     /// page -- and a child that printed the first and died before the second
@@ -821,7 +1015,7 @@ mod tests {
     #[test]
     fn the_structure_counts_read_off_both_lines() {
         let text = record(&[
-            "probe 6",
+            "probe 7",
             "opened yes",
             "pages 1",
             "tagged tree yes elements 12 content 5 objects 2",
@@ -848,7 +1042,7 @@ mod tests {
     /// omission becomes a `limits` entry rather than a peak of zero bytes.
     #[test]
     fn a_peak_is_a_measurement_and_its_absence_is_not_a_zero() {
-        let lines = ["probe 6", "opened yes", "pages 1", "rendered 1", "ms 5"];
+        let lines = ["probe 7", "opened yes", "pages 1", "rendered 1", "ms 5"];
         let mut with = lines.to_vec();
         with.push("peak 21069824");
         with.push("done");
@@ -880,7 +1074,7 @@ mod tests {
     #[test]
     fn a_document_with_no_structure_tree_reads_as_none() {
         let text = record(&[
-            "probe 6",
+            "probe 7",
             "opened yes",
             "pages 1",
             "tagged tree no",
@@ -897,7 +1091,7 @@ mod tests {
     #[test]
     fn a_char_count_without_a_tree_invents_nothing() {
         let text = record(&[
-            "probe 6",
+            "probe 7",
             "opened yes",
             "pages 1",
             "tagged chars matched 40 orphans 0 unmarked 0",
@@ -967,22 +1161,22 @@ mod tests {
     fn a_record_without_its_sentinel_is_not_a_record() {
         let truncated = GOOD.replace("done\n", "");
         assert!(parse_record(&truncated).is_none());
-        let cut = "probe 6\nopened yes\npages 3\nrendered 1\n";
+        let cut = "probe 7\nopened yes\npages 3\nrendered 1\n";
         assert!(parse_record(cut).is_none());
     }
 
     #[test]
     fn a_record_in_an_unknown_format_is_refused() {
-        assert!(parse_record(&GOOD.replace("probe 6", "probe 8")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 7", "probe 8")).is_none());
         // And the version the strict pass replaced: a record without that
         // pass means something else by the same keys.
-        assert!(parse_record(&GOOD.replace("probe 6", "probe 1")).is_none());
-        assert!(parse_record(&GOOD.replace("probe 6\n", "")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 7", "probe 1")).is_none());
+        assert!(parse_record(&GOOD.replace("probe 7\n", "")).is_none());
     }
 
     #[test]
     fn a_file_that_would_not_open_is_a_failure_and_not_a_crash() {
-        let text = "probe 6\nfile x.pdf\nopened no not a PDF: no indirect objects\nms 2\ndone\n";
+        let text = "probe 7\nfile x.pdf\nopened no not a PDF: no indirect objects\nms 2\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert!(
             matches!(&result.outcome, Outcome::Failed(reason) if reason.contains("not a PDF")),
@@ -995,7 +1189,7 @@ mod tests {
     /// passed; it is degraded, which is the other number.
     #[test]
     fn a_degraded_page_passed() {
-        let text = "probe 6\nopened yes\npages 1\nrendered 1\n\
+        let text = "probe 7\nopened yes\npages 1\nrendered 1\n\
                     warn render:UnsupportedImage(JBIG2Decode) 1\ncap jbig2\nms 5\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert_eq!(result.outcome, Outcome::Passed);
@@ -1004,7 +1198,7 @@ mod tests {
 
     #[test]
     fn a_page_that_produced_nothing_did_not_pass() {
-        let text = "probe 6\nopened yes\npages 4\nrendered 2\nms 5\ndone\n";
+        let text = "probe 7\nopened yes\npages 4\nrendered 2\nms 5\ndone\n";
         let result = parse_record(text).expect("it is complete");
         assert!(
             matches!(&result.outcome, Outcome::Failed(reason) if reason.contains("2 of 4")),
@@ -1018,7 +1212,7 @@ mod tests {
     #[test]
     fn a_metamorphic_verdict_reads_its_three_states() {
         let text = concat!(
-            "probe 6\n",
+            "probe 7\n",
             "opened yes\n",
             "pages 1\n",
             "rendered 1\n",
@@ -1059,7 +1253,7 @@ mod tests {
     #[test]
     fn a_hold_with_no_measurement_is_still_a_hold() {
         let text = concat!(
-            "probe 6\n",
+            "probe 7\n",
             "opened yes\n",
             "pages 1\n",
             "rendered 1\n",
@@ -1088,7 +1282,7 @@ mod tests {
     #[test]
     fn a_producer_survives_a_record_that_never_finished() {
         let partial = concat!(
-            "probe 6\n",
+            "probe 7\n",
             "file x.pdf\n",
             "opened yes\n",
             "producer Microsoft(R) PowerPoint(R) for Microsoft 365\n",
@@ -1104,7 +1298,7 @@ mod tests {
             Some("Microsoft(R) PowerPoint(R) for Microsoft 365")
         );
         assert_eq!(
-            producer_line("probe 6\nopened no nope\n"),
+            producer_line("probe 7\nopened no nope\n"),
             None,
             "a file that never opened states no producer"
         );
@@ -1119,7 +1313,7 @@ mod tests {
     #[test]
     fn an_unknown_metamorphic_verdict_is_not_a_hold() {
         let text = concat!(
-            "probe 6\n",
+            "probe 7\n",
             "opened yes\n",
             "pages 1\n",
             "rendered 1\n",

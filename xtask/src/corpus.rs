@@ -800,18 +800,22 @@ mod tests {
     /// The failure this exists to replace: a child one version behind used to
     /// produce four thousand unreadable records, which arrived as `0/4525
     /// passed` — a message about rendering, for a problem about a binary.
+    ///
+    /// Version 6 is written out rather than counted back from the runner's
+    /// constant: it is the format from before the time spans, the one every
+    /// `tpdf` built before them writes, and the child this refusal has to
+    /// name.
     #[test]
     fn a_child_a_version_behind_is_named_rather_than_counted_as_a_regression() {
-        let stale = record_version_disagreement(
-            Path::new("target/release/tpdf"),
-            &format!(
-                "probe {}
-",
-                runner::PROBE_VERSION - 1
-            ),
-        )
-        .expect("a version behind is a refusal");
-        assert!(stale.contains("writes probe records at version"), "{stale}");
+        let stale = record_version_disagreement(Path::new("target/release/tpdf"), "probe 6\n")
+            .expect("a version-6 child is a refusal");
+        assert!(
+            stale.contains(&format!(
+                "target/release/tpdf writes probe records at version 6 and this runner reads version {}.",
+                runner::PROBE_VERSION
+            )),
+            "{stale}"
+        );
         assert!(stale.contains("cargo build -p tpdf"), "{stale}");
         assert!(
             record_version_disagreement(

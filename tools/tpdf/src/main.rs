@@ -193,6 +193,11 @@ child that panicked, aborted or was killed for hanging leaves a record with no
 `done` in it, so the runner can tell a file that failed from a file that never
 finished, which a summary line printed at the end could not.
 
+Two of its lines are times, in microseconds by its own clock: `time open`,
+opening the document and counting its pages, with the read left out; and
+`time page N` after each page, that page's render alone. The rewrite, its
+validation and the metamorphic renders are outside both; `ms` spans them all.
+
 It exits 0 whenever it finished, including for a file that would not open — a
 file that fails to open is a result to be counted, not an error in the tool,
 and an exit code that conflated them would make every unopenable file look
@@ -856,7 +861,24 @@ fn open(
     password: Option<&str>,
     fonts: Option<&Arc<SimpleFontProvider>>,
 ) -> Result<Document, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
+    open_bytes(path, read_file(path)?, password, fonts)
+}
+
+/// The file's bytes, or the line [`open`] reports when there are none.
+fn read_file(path: &str) -> Result<Vec<u8>, String> {
+    std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))
+}
+
+/// [`open`] after the read: the document, its faces and its password.
+///
+/// Apart from the read so `probe` can time what the engine does with the
+/// bytes and leave out what the disk does to fetch them.
+fn open_bytes(
+    path: &str,
+    bytes: Vec<u8>,
+    password: Option<&str>,
+    fonts: Option<&Arc<SimpleFontProvider>>,
+) -> Result<Document, String> {
     let doc = Document::open(bytes).map_err(|e| format!("{path}: {e:?}"))?;
     let doc = match fonts {
         Some(provider) => doc.with_fonts(provider.clone()),
@@ -2399,7 +2421,16 @@ fn resolution(page: &Page, base: &Bitmap, render: &RenderOptions) -> Relation {
 /// a record without it makes the run incomplete — so a runner that read an
 /// older child's record would call every corpus unmeasurable rather than
 /// naming the stale binary.
-const PROBE_VERSION: u32 = 6;
+///
+/// Version 7 adds `time`: `time open` after `pages`, the span over opening the
+/// document and counting its pages, and `time page <n> <micros>` after each
+/// page's render, n counted from 1 as the progress line counts. Both are whole
+/// microseconds, and both leave out the strict and metamorphic passes, which
+/// `ms` still spans. A bump for `peak`'s reason: the spans are what a corpus's
+/// time figures are made from, so a runner reading an older child's record as
+/// this version would see files that timed nothing rather than a binary nobody
+/// rebuilt.
+const PROBE_VERSION: u32 = 7;
 
 /// The `--fonts` value meaning "whatever faces this build carries".
 const BUNDLED: &str = "bundled";
@@ -2579,8 +2610,19 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     // `parse_record` ignores keys it does not know, so these cost an older
     // runner nothing.
     println!("phase open");
-    let doc = match open(path, options.password.as_deref(), fonts) {
-        Ok(doc) => doc,
+    // **The open-and-count span**, printed as `time open` once the pages are
+    // counted. It starts after the read, which measures the runner's disk
+    // rather than the engine, and it holds `Document::open`, the faces, the
+    // authentication and the first `page_count` -- the ladder, the producer
+    // and every line printed between them stay outside. A file that does not
+    // open has no span: its failure is a result, and its time stays in `ms`.
+    let opened = read_file(path).and_then(|bytes| {
+        let clock = std::time::Instant::now();
+        let doc = open_bytes(path, bytes, options.password.as_deref(), fonts)?;
+        Ok((doc, clock.elapsed()))
+    });
+    let (doc, opening) = match opened {
+        Ok(opened) => opened,
         Err(message) => {
             // On one line, and last but for the sentinel, so a reason
             // containing anything at all cannot be mistaken for another key.
@@ -2626,8 +2668,11 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
         }
     );
 
+    let counting = std::time::Instant::now();
     let pages = doc.page_count();
+    let counting = counting.elapsed();
     println!("pages {pages}");
+    println!("time open {}", opening.saturating_add(counting).as_micros());
 
     // Counted by kind rather than listed: a damaged file can emit tens of
     // thousands of warnings, and the report wants to know which kinds a
@@ -2682,7 +2727,15 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
         // finished. The runner never reads the number, only the fact that the
         // capture file grew; the number is for whoever reads the report.
         println!("page {}/{pages}", index + 1);
+        // **A page's span**: the render and nothing else. The lookup above
+        // is outside it, because today's walk to a page gathers every leaf
+        // before it, so on a long document the lookups grow with the square
+        // of its pages and would be most of what a span measured; so are the
+        // structure join and the progress line.
+        let clock = std::time::Instant::now();
         let bitmap = page.render(&render);
+        let micros = clock.elapsed().as_micros();
+        println!("time page {} {micros}", index + 1);
         // Ruling 2's definition, and the one the ratchet counts: a bitmap
         // came back. A page rendered with a JBIG2 placeholder on it rendered.
         rendered += 1;

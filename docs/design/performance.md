@@ -2014,17 +2014,34 @@ it.
 
 #### The record, the report and the bar
 
-**The record**, version 7. After `pages`, a file that opened prints
-`time open <micros>`; after each page's render, `time page <n> <micros>`, n
-counted from 1 as the progress line counts (`tools/tpdf/src/main.rs:2684`).
-`time` is a new key; `page` is already the progress line's, which the runner
-never reads (`:2680-2683`). Version 7 rather than a quiet new key, for
-`peak`'s reason (`xtask/src/runner.rs:569-575`): the runner requires the
-spans, so a version-6 child would read as a corpus whose files timed nothing
-rather than as a `tpdf` nobody rebuilt, and the handshake exists to name the
-second (`xtask/src/corpus.rs:762-794`). The runner keeps a file's open span as
-an `Option` and its page spans as a list of page and microseconds, and drops
-a value that does not parse rather than reading it as zero.
+**The record**, version 7, as MS-07.2 built it. After `pages`, a file that
+opened prints `time open <micros>`: `Document::open` on bytes already read,
+the faces, the authentication and the first `page_count`. The read, which
+times the runner's disk rather than the engine, is outside it, and so are the
+ladder, the producer and the lines printed between them
+(`tools/tpdf/src/main.rs:2613-2623`, `:2671-2675`). After each page's render
+it prints `time page <n> <micros>`, the render alone, n counted from 1 as the
+progress line counts (`:2729-2738`). The page's lookup is outside that span:
+the walk to page n gathers every leaf before it
+(`crates/tinker-pdf-cos/src/pages.rs:486-498`), so over a long document the
+lookups grow with the square of its pages. `time` is a new key; `page` is
+already the progress line's, which the runner never reads (`:2725-2728`).
+Version 7 rather than a quiet new key, for `peak`'s reason
+(`xtask/src/runner.rs:604-617`): the time figures are made from the spans, so
+a version-6 child read as version 7 would be a corpus whose files timed
+nothing rather than a `tpdf` nobody rebuilt, and the handshake exists to name
+the second (`xtask/src/corpus.rs:749-794`). The runner keeps a file's open
+span as an `Option` and its page spans as a list of page and microseconds
+(`xtask/src/runner.rs:131-151`, `:222-229`), and drops a line that does not
+parse, or that names a page outside 1 to `pages`, rather than reading it as
+zero (`:690-703`, `:818-821`). Timed against the tip before the tests were
+written, the two clock reads and the line cost 1.0 to 1.3 µs a page in
+release and in debug, most of it the line's write, beside a median render of
+0.4 ms for the smallest page timed (an inch square, release): at most 46 ms
+over a bar's 34 948 pages. Over documents of 400 and 2 000 such pages and of
+30 and 100 letter pages, by the fastest run of each pass, `tpdf probe` took
+0.94 to 1.09 times develop's, while two copies of develop's own binary
+differed by 0.90 to 1.19 on the shared machine that timed it.
 
 **The report** gains, per file, `open_micros`, `render_micros` (its pages'
 sum) and `slowest_page` (`{ "page", "micros" }`), each absent where there was

@@ -826,6 +826,8 @@ mod tests {
                 warnings,
                 capabilities: BTreeSet::new(),
                 millis: 1,
+                open_micros: None,
+                page_micros: Vec::new(),
                 strict: crate::runner::Strict::Checked {
                     structure: 0,
                     semantics: 0,
