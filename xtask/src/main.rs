@@ -24,9 +24,9 @@ usage:
                         `publish = false` where publishing would be wrong
   cargo xtask fuzz      check the fuzz roster against `fuzz_targets`, the seed
                         corpora and `fuzz/Cargo.toml`, which must agree
-  cargo xtask baseline  check the committed speed baseline against the
-                        operations `benches/engine.rs` defines and the count
-                        `bench.yml` guards — three files carrying one list
+  cargo xtask baseline  check the speed baseline's list for each group against
+                        its file `benches/<group>.rs`, its `[[bench]]` and the
+                        count `bench.yml`'s matrix guards for it
   cargo xtask corpusjob check that every check of `corpus.yml` after the
                         fetch runs whatever the check before it returned
   cargo xtask footprint check that every figure in bindings/js/footprint.json

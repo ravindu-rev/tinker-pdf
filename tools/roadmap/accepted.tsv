@@ -54,7 +54,6 @@ deadlock	AN-29.11	K-07	K-07's close names AN-29 among the rows that land their o
 tail-wait	P-02.1	MS-04	its exit says, from MS-04's measured figures, which step brings each relation within bound, and MS-04.10 takes those figures
 tail-wait	P-13.1	MS-04	its exit shares the 150 ms among phases from MS-04's committed figures, which MS-04.10 takes
 tail-wait	FT-08.18	MS-04	its exit commits the shaping operations' measured figures to baseline.json, which MS-04.10's measurement of the set gives; FT-08.19, its only dependent, closes the row
-tail-wait	FJ-16.1	MS-04	its exit records the three rows' bands, measured over the set MS-04.10 measures; FJ-16.2, its only dependent, waits on all of MS-02 and so on MS-04.10 anyway
 edit-order	FT-17.11|MS-01.3	crates/tinker-pdf/src/images.rs: images	FT-17.11 reads `Page::images`' placements for its image blocks and changes nothing of it
 edit-order	FT-17.11|K-02.3	crates/tinker-pdf/src/images.rs: images	FT-17.11 reads `Page::images`' placements for its image blocks and changes nothing of it
 edit-order	FT-17.11|FT-28.1	crates/tinker-pdf/src/images.rs: images	FT-17.11 reads `Page::images`' placements for its image blocks and changes nothing of it

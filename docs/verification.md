@@ -1785,24 +1785,27 @@ Clocks stay banned from **tests**. `bounds_ledger.rs` bans `Instant::now` from
 itself so that every hardening bound is a property of an input rather than of a
 machine, and that does not change.
 
-They live in `crates/tinker-pdf/benches/engine.rs` instead — seven operations
-under criterion, which is exempt tooling by name and whose plotting stack is
-switched off so the dependency tree stays four crates deep. `cargo bench` runs
-weekly in `bench.yml` and keeps its numbers as artefacts; it is scheduled rather
-than gating, because a hosted runner swings widely between two runs of
-identical code and a benchmark that fails a pull request on that teaches people
-to ignore it. This page said "20 %" there, unsourced, from the day the job was
-written until 19 September 2026, when fifteen runs of one revision put the
-figure at **88.36 %** for the worst of the seven operations and 22.61 % for the
-best. The guess was low, and low by enough that a band built on it would have
-failed on the machine rather than on the code — which is what
-`bench-check` refuses an entry for. The useful mode is criterion's own
+They live in `crates/tinker-pdf/benches/` instead — one file a group over a
+shared `support/` module, seven operations so far, under criterion, which is
+exempt tooling by name and whose plotting stack is switched off so the
+dependency tree stays four crates deep. `cargo bench` runs weekly in
+`bench.yml`, one job a group, and keeps its numbers as artefacts; it is
+scheduled rather than gating, because a hosted runner swings widely between two
+runs of identical code and a benchmark that fails a pull request on that
+teaches people to ignore it. This page said "20 %" there, unsourced, from the
+day the job was written until 19 September 2026, when fifteen runs of one
+revision put the figure at **88.36 %** for the worst of the seven operations
+and 22.61 % for the best. The guess was low, and low by enough that a band
+built on it would have failed on the machine rather than on the code — which is
+what `bench-check` refuses an entry for. The useful mode is criterion's own
 comparison, which needs two revisions on one machine:
 
 ```sh
 cargo bench -p tinker-pdf -- --save-baseline before
 cargo bench -p tinker-pdf -- --baseline before
 ```
+
+and `--bench <group>` narrows either to one group's file.
 
 **The comparison is `cargo xtask bench-check --machine NAME`, and it exists
 because criterion's own cannot fail.** `cargo bench -- --baseline` compares
@@ -1815,10 +1818,13 @@ each operation to a committed figure and a band.
 
 **And the weekly job had never passed at all, for two faults and not one.**
 Its guard read `time:+\[`, which is `time` followed by one-or-more colons and a
-bracket; criterion prints `time:` and then three spaces. It counts **seven**
-matches now: `engine.rs` gained a seventh operation on 5 September 2026,
-because six of the seven never enter the scanline rasteriser and the roadmap's
-vectorisation row had nothing to measure a speedup on.
+bracket; criterion prints `time:` and then three spaces. It counted **seven**
+matches from then on: `engine.rs`, the one bench file there was, gained a
+seventh operation on 5 September 2026, because six of the seven never enter
+the scanline rasteriser and the roadmap's vectorisation row had nothing to
+measure a speedup on. Since the seven moved into their groups' files (MS-04.2,
+25 October 2026) each group's job counts its own, the count its matrix entry
+gives.
 
 That fix landed on `develop` and the job went on failing weekly anyway. **A
 scheduled workflow runs the default branch**, whatever ref it was written on,
@@ -1922,17 +1928,22 @@ own `--baseline` between two revisions on one machine, which needs no band
 because it changes nothing but the code.
 
 **The entry is checked, not just written.** `cargo xtask baseline` — part of
-`cargo run -p xtask -- check`, so it fails a build — holds three files that
-carry the same list of operations to each other: `benches/engine.rs` defines
-them, `bench.yml`'s guard counts them, and `baseline.json` records a figure
-for each. Both ways they have already drifted apart are covered: a guard
-counting six when the file defines seven, and a baseline the path names that
-is not there at all. That second one was live until this measurement — there
-was no `baseline.json` — so the step that promises to "report and not fail for
-a machine with no entry" was exiting 1 on every dispatch, whatever the
-benchmarks had done. Every band in the committed file is pushed against from
-both sides by a unit test, because a band nobody has ever crossed is a number
-nobody has checked.
+`cargo run -p xtask -- check`, so it fails a build — holds the files that carry
+each group's list of operations to each other: a `[[bench]]` declares each
+group file, the file defines the group's operations, `bench.yml`'s matrix gives
+the count its job's guard holds the log to, and `baseline.json` lists them, in
+the file's order and each with its unit, and records a figure for each or names
+it unmeasured. It refuses a name criterion would record under another key — one
+holding any of the ten characters it writes as `_`, or longer than the 64 bytes
+it keeps — since a name it rewrites is reported as new and never held to its
+band. Both ways the one list had already drifted apart are covered: a guard
+counting six when the file defined seven, and a baseline the path names that is
+not there at all. That second one was live until this measurement — there was
+no `baseline.json` — so the step that promises to "report and not fail for a
+machine with no entry" was exiting 1 on every dispatch, whatever the benchmarks
+had done. Every band in the committed file is pushed against from both sides by
+a unit test, because a band nobody has ever crossed is a number nobody has
+checked.
 
 All fifteen runs pass the entry they set, and so do three more — dispatches
 35463898109, 35463900276 and 35463902573, run after the figures were fixed and

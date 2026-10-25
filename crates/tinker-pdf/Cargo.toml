@@ -109,8 +109,28 @@ tinker-pdf-css = { workspace = true }
 tinker-pdf-layout = { workspace = true }
 
 # Wall-clock benchmarks, outside the suite on purpose — see the module note in
-# `benches/engine.rs`. `harness = false` is criterion's requirement: it brings
-# its own `main`, so cargo's `#[bench]` harness must be off.
+# `benches/support/mod.rs`. One `[[bench]]` a group, each `benches/<name>.rs`,
+# so `cargo bench --bench <name>` measures one group and `bench.yml` runs one
+# job a group; `cargo xtask baseline` holds these entries to the files, to
+# `benches/baseline.json`'s lists and to the workflow's matrix. `harness =
+# false` is criterion's requirement: it brings its own `main`, so cargo's
+# `#[bench]` harness must be off.
 [[bench]]
-name = "engine"
+name = "open"
+harness = false
+
+[[bench]]
+name = "text"
+harness = false
+
+[[bench]]
+name = "render"
+harness = false
+
+[[bench]]
+name = "write"
+harness = false
+
+[[bench]]
+name = "layout"
 harness = false

@@ -516,7 +516,7 @@ seam (OC-01) is not recognition and may run ahead of the tier.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | OC-17.1 | measure | Character and word error rates per script on first-party synthetic pages, clean and degraded, recorded in `cargo test` as floors. | `crates/tinker-pdf-ocr/tests/latin.rs` (new), `docs/features/ocr.md` (new) | Latin on clean 300-dpi pages has at most 1 % of characters and 3 % of words wrong, and at most 3 % and 8 % on the degraded set, held as floors until H-71 re-states them. | OC-08a.5, OC-02.2, OC-01.4 |
-| OC-17.2 | measure | Pages per second per script in the benchmark set, one thread. | `crates/tinker-pdf/benches/engine.rs`, `crates/tinker-pdf/benches/baseline.json` | A Latin page recognises in at most 1.5 s on one thread, recorded in `baseline.json` and gated as tier P calibrates. | OC-08a.6, MS-04 |
+| OC-17.2 | measure | Pages per second per script in the benchmark set, one thread. | `crates/tinker-pdf/benches/ocr.rs` (new), `crates/tinker-pdf/Cargo.toml`, `.github/workflows/bench.yml`, `crates/tinker-pdf/benches/baseline.json` | A Latin page recognises in at most 1.5 s on one thread, recorded in `baseline.json` and gated as tier P calibrates. | OC-08a.6, MS-04 |
 | OC-17.3 | measure | Chinese pages' error rate and speed. | `crates/tinker-pdf-ocr/tests/cjk.rs` (new), `crates/tinker-pdf/benches/baseline.json` | Clean Chinese pages have at most 2 % of characters wrong and recognise in at most 4 s a page, both held as floors. | OC-08e.5, OC-17.2 |
 
 **Closes the row:** OC-17.1 to OC-17.3 record the rates and speeds in `cargo test` and `baseline.json` and hold them as floors at the stated targets, which is the row's exit.
