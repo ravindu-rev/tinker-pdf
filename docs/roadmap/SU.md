@@ -286,7 +286,7 @@ is checked for breaks and documented by examples that run.
 | --- | --- | --- | --- | --- | --- |
 | SU-18.1 | doc | A deprecation window, an MSRV policy, a changelog, and experimental markers. | `CONTRIBUTING.md`, `CHANGELOG.md` (new), `crates/tinker-pdf/src/lib.rs` | Each policy is written; experimental items carry the marker and are left out of the diff. | — |
 | SU-18.2 | build | Versioned C structures, each carrying its size as its first field and checked on entry, and a versioned shared object. | `crates/tinker-pdf-ffi/src/lib.rs`, `crates/tinker-pdf-ffi/include/tinker_pdf.h`, `crates/tinker-pdf-ffi/cbindgen.toml`, `crates/tinker-pdf-ffi/tests/layout.rs` | Every `#[repr(C)]` structure carries its size and one passed short is refused by status; the built library carries its versioned name. | — |
-| SU-18.3 | ci | A semver diff of the facade against the frozen release, in CI. | `.github/workflows/ci.yml`, `xtask/src/main.rs` | The CI diff fails on a break not announced in the changelog, shown by an injected break. | H-16, H-114, SU-18.1 |
+| SU-18.3 | ci | A semver diff of the facade against the frozen release, in CI. | `.github/workflows/ci.yml`, `xtask/src/main.rs` | The CI diff fails on a break not announced in the changelog. | H-16, H-114, SU-18.1 |
 | SU-18.4 | ci | The MSRV built in CI. | `.github/workflows/ci.yml`, `Cargo.toml` | A CI leg builds the workspace at the stated MSRV on `develop`. | SU-18.1, MS-11 |
 
 ## SU-19 — The documentation set

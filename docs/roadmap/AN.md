@@ -18,7 +18,7 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-01.2 | measure | Hold the per-family counts as floors in the census, and record them in the roadmap row's place in the feature doc. | `crates/tinker-pdf/tests/annotation_census.rs`, `docs/features/editing.md` | The census fails when a family's count falls below its committed floor (a counted injection dropping one family's payload fires it) and passes at AN-01.1's figures; the feature doc quotes them with the run. | — |
+| AN-01.2 | measure | Hold the per-family counts as floors in the census, and record them in the roadmap row's place in the feature doc. | `crates/tinker-pdf/tests/annotation_census.rs`, `docs/features/editing.md` | The census fails when a family's count falls below its committed floor and passes at AN-01.1's figures; the feature doc quotes them with the run. | — |
 
 ## AN-02 — Appearances for the subtypes no dictionary determines
 
@@ -30,7 +30,7 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-02.1 | doc | Record H-12's ruling in `docs/rulings.md` and the feature doc's refusal table: which of the fourteen `UNDETERMINED_SUBTYPES` and `Text`'s invented note are drawn, and which are refused by name. | `docs/rulings.md`, `docs/features/editing.md`, `crates/tinker-pdf-cos/src/appearance.rs` | The ruling is recorded with its date; `UNDETERMINED_SUBTYPES` and the table name exactly the subtypes still refused. | H-12 |
+| AN-02.1 | doc | Record H-12's ruling in `docs/rulings.md` and the feature doc's refusal table: which of the fourteen `UNDETERMINED_SUBTYPES` and `Text`'s invented note are drawn, and which are refused by name. | `docs/rulings.md`, `docs/features/editing.md`, `crates/tinker-pdf-cos/src/appearance.rs` | The ruling is recorded; `UNDETERMINED_SUBTYPES` and the table name exactly the subtypes still refused. | H-12 |
 | AN-02.2 | build | `Stamp` appearances: the fourteen standard stamp names drawn by a stated design, and image stamps drawn from their image. *Note:* Only the subtypes H-12 rules drawn. | `crates/tinker-pdf-cos/src/appearance.rs`, `crates/tinker-pdf/tests/annotation_appearances.rs` | `annotation_appearances.rs` `stamps_are_drawn`: each standard name and an image stamp get an `/AP` sized and coloured by its dictionary as fixtures hold; the family is a K-08 golden awaiting H-66. | AN-02.1, K-08.2 |
 | AN-02.3 | build | Icons: `FileAttachment`'s and `Sound`'s, and `Text`'s seven icon names. *Note:* Only the subtypes H-12 rules drawn. | `crates/tinker-pdf-cos/src/appearance.rs`, `crates/tinker-pdf/tests/annotation_appearances.rs` | `icons_are_drawn`: each icon gets an `/AP` coloured by `/C` and sized by `/Rect`; the family is a K-08 golden awaiting H-66. | AN-02.1, K-08.2 |
 | AN-02.4 | build | `Popup`, `Redact` overlays and `Watermark`. *Note:* Only the subtypes H-12 rules drawn. | `crates/tinker-pdf-cos/src/appearance.rs`, `crates/tinker-pdf/tests/annotation_appearances.rs` | `popups_redact_overlays_and_watermarks_are_drawn`: each gets an `/AP` from its dictionary's entries as fixtures hold; goldens awaiting H-66. | AN-02.1, K-08.2 |
@@ -46,7 +46,7 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-03.1 | build | Free text in a composite `/DA` font, a font `/DR` lacks, a symbolic font, or an encoding with no byte for a character, shaped and drawn through `fill.rs`'s composite path as a field's value is. | `crates/tinker-pdf-cos/src/appearance.rs`, `crates/tinker-pdf-cos/src/fill.rs`, `crates/tinker-pdf/tests/free_text.rs` (new), `docs/features/editing.md` | `free_text.rs` (new) `free_text_in_every_font_case_draws`: each case gets an `/AP` whose text renders where its layout puts it and extracts as written, in both builds; failing first on today's bare annotation. | — |
+| AN-03.1 | build | Free text in a composite `/DA` font, a font `/DR` lacks, a symbolic font, or an encoding with no byte for a character, shaped and drawn through `fill.rs`'s composite path as a field's value is. | `crates/tinker-pdf-cos/src/appearance.rs`, `crates/tinker-pdf-cos/src/fill.rs`, `crates/tinker-pdf/tests/free_text.rs` (new), `docs/features/editing.md` | `free_text.rs` (new) `free_text_in_every_font_case_draws`: each case gets an `/AP` whose text renders where its layout puts it and extracts as written, in both builds. | — |
 | AN-03.2 | build | Callout lines (`/CL` with `/LE`), quadding (`/Q`) and the typewriter intent. | `crates/tinker-pdf-cos/src/appearance.rs`, `crates/tinker-pdf/tests/free_text.rs` (new) | `callouts_quadding_and_typewriter`: the callout's geometry and line ending, each quadding's text position, and the typewriter's bare look equal what the test computes. | AN-03.1 |
 
 ## AN-04 — Border effects and styles
@@ -72,7 +72,7 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-05.1 | build | Line captions (`/Cap`, placed by `/CP` and `/CO`) and leaders (`/LL`, `/LLE`, `/LLO`) drawn. | `crates/tinker-pdf-cos/src/appearance.rs`, `crates/tinker-pdf/tests/line_captions.rs` (new), `docs/features/editing.md` | `line_captions.rs` (new) `captions_and_leaders_place_as_computed`: the caption's position and the leaders' geometry equal what the test computes from the entries; failing first on today's undrawn caption; the caption's look is a golden family awaiting H-66. | K-08.2 |
+| AN-05.1 | build | Line captions (`/Cap`, placed by `/CP` and `/CO`) and leaders (`/LL`, `/LLE`, `/LLO`) drawn. | `crates/tinker-pdf-cos/src/appearance.rs`, `crates/tinker-pdf/tests/line_captions.rs` (new), `docs/features/editing.md` | `line_captions.rs` (new) `captions_and_leaders_place_as_computed`: the caption's position and the leaders' geometry equal what the test computes from the entries; the caption's look is a golden family awaiting H-66. | K-08.2 |
 | AN-05.2 | build | A caret's paragraph symbol (`/Sy /P`) drawn. | `crates/tinker-pdf-cos/src/appearance.rs`, `crates/tinker-pdf/tests/line_captions.rs` (new) | `the_carets_paragraph_symbol_is_drawn`: the ¶ is drawn in the caret's box as a golden awaiting H-66, or, if H-12 refuses it, the refusal is recorded. | H-12, K-08.2 |
 
 ## AN-06 — Annotation editing, complete
@@ -275,7 +275,7 @@ rows. Form JavaScript has its own tier, next.
 | AN-15.5 | build | Buttons: radios toggling in unison, no toggle to off, check boxes, password masking and file selection through the host. | `crates/tinker-pdf/src/form_session.rs` (new), `crates/tinker-pdf/tests/form_session.rs` (new) | `buttons_passwords_and_files`: each ends with the direct-fill value and appearance; a password field never draws its characters. | AN-15.3 |
 | AN-15.6 | build | Comb and multi-line scrolling, the highlight mode on activation, and text direction per field. | `crates/tinker-pdf/src/form_session.rs` (new), `crates/tinker-pdf/tests/form_session.rs` (new) | `scrolling_highlight_and_direction`: long text scrolls to keep the caret visible, highlight draws per `/H`, and right-to-left fields edit in logical order. | AN-15.4 |
 | AN-15.7 | build | Invalidated rectangles reported after each change. | `crates/tinker-pdf/src/form_session.rs` (new), `crates/tinker-pdf/tests/form_session.rs` (new) | `invalidated_rectangles_cover_exactly_the_changed_pixels`: for each change, the reported rectangles cover the pixels a render before and after differ in, and no other. | AN-15.6 |
-| AN-15.8 | test | A scripted session over every committed form fixture, a fuzz target of random sessions, and a fingerprint of one session's result. | `crates/tinker-pdf/tests/form_session.rs` (new), `fuzz/fuzz_targets/form_session.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md`, `crates/tinker-pdf/tests/determinism.rs` | `a_scripted_session_equals_a_direct_fill`: every committed form ends with the values and appearances a direct fill produces; the fuzz target runs clean with the roster regenerated; the fingerprint holds on every K-07 target. | AN-15.5, AN-15.7, K-07 |
+| AN-15.8 | test | A scripted session over every committed form fixture, a fuzz target of random sessions, and a fingerprint of one session's result. | `crates/tinker-pdf/tests/form_session.rs` (new), `fuzz/fuzz_targets/form_session.rs` (new), `fuzz/Cargo.toml`, `crates/tinker-pdf/tests/determinism.rs` | `a_scripted_session_equals_a_direct_fill`: every committed form ends with the values and appearances a direct fill produces; the fuzz target runs clean; the fingerprint holds on every K-07 target. | AN-15.5, AN-15.7, K-07 |
 
 ## AN-16 — Rich text in free text and fields
 
@@ -437,7 +437,7 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-27.1 | design | Create `docs/design/xfa.md` for AN-27 to AN-34: the packets and the XFA DOMs, data binding and SOM, the layout engine's model and its tie to the layout crate, FormCalc and the scripting object model over FJ's engine, picture clauses and locales, flattening and signatures, with each row's milestones. *Note:* AN-27 to AN-34 are rows by H-23's default: in scope by the 9 October decision, ordered last in the tier. | `docs/design/xfa.md` (new) | The doc exists in the design-doc order, names this row's exit tests and the milestones AN-28 to AN-34 extend. | H-102 |
+| AN-27.1 | design | Create `docs/design/xfa.md` for AN-27 to AN-34: the packets and the XFA DOMs, data binding and SOM, the layout engine's model and its tie to the layout crate, FormCalc and the scripting object model over FJ's engine, picture clauses and locales, flattening and signatures, with each row's milestones. *Note:* AN-27 to AN-34 are ordered last in the tier. | `docs/design/xfa.md` (new) | The doc exists in the design-doc order, names this row's exit tests and the milestones AN-28 to AN-34 extend. | H-102 |
 | AN-27.2 | build | The packets read from `/XFA` as an array of name and stream pairs or one stream, and from a stand-alone XDP, through the XML crate; pure XFA detected. | `crates/tinker-pdf/src/xfa/mod.rs` (new), `crates/tinker-pdf/src/xfa/packets.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/xfa_packets.rs` (new), `docs/features/forms.md` | `xfa_packets.rs` (new) `every_packet_reads_byte_equal`: every packet of generated XFA documents and XDP files reads byte-equal; pure XFA is detected. | AN-27.1 |
 | AN-27.3 | build | Datasets exported and imported, and XFA removed to fall back to the AcroForm. | `crates/tinker-pdf/src/xfa/packets.rs` (new), `crates/tinker-pdf-cos/src/edit/sanitise.rs`, `crates/tinker-pdf/tests/xfa_packets.rs` (new) | `datasets_exchange_and_removal_leaves_an_acroform`: exported datasets import to the same packet; after removal the document validates strictly and its fields fill. | AN-27.2 |
 
@@ -451,7 +451,7 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-28.1 | design | Add static XFA's milestones to `docs/design/xfa.md`: how a field's SOM name and bind map to its AcroForm name, and which side wins on save. *Note:* A row by H-23's default, ordered last in the tier. | `docs/design/xfa.md` | The section names AN-28.2 and AN-28.3's exit tests. | AN-27.1 |
+| AN-28.1 | design | Add static XFA's milestones to `docs/design/xfa.md`: how a field's SOM name and bind map to its AcroForm name, and which side wins on save. *Note:* Ordered last in the tier. | `docs/design/xfa.md` | The section names AN-28.2 and AN-28.3's exit tests. | AN-27.1 |
 | AN-28.2 | build | Each static form's XFA fields mapped to their AcroForm fields. | `crates/tinker-pdf/src/xfa/static_form.rs` (new), `crates/tinker-pdf/tests/xfa_static.rs` (new) | `xfa_static.rs` (new) `every_field_maps`: generated static forms map every field both ways. | AN-28.1, AN-27 |
 | AN-28.3 | build | Fills kept in step: an AcroForm fill written into the datasets on save, and a datasets fill applied to the AcroForm values and appearances. | `crates/tinker-pdf/src/xfa/static_form.rs` (new), `crates/tinker-pdf/tests/xfa_static.rs` (new), `docs/features/forms.md` | `a_fill_through_either_model_shows_in_the_other`: after save and reopen, a fill through either model is visible in the other. | AN-28.2 |
 
@@ -465,7 +465,7 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-29.1 | design | Add the dynamic layout engine's milestones to `docs/design/xfa.md`: the template and form DOMs, merge and SOM, each layout strategy, pagination, rendering and instance managers, and how the specification's examples adjudicate geometry. *Note:* A row by H-23's default, ordered last in the tier. | `docs/design/xfa.md` | The section names AN-29.2 to AN-29.15's exit tests. | AN-27.1 |
+| AN-29.1 | design | Add the dynamic layout engine's milestones to `docs/design/xfa.md`: the template and form DOMs, merge and SOM, each layout strategy, pagination, rendering and instance managers, and how the specification's examples adjudicate geometry. *Note:* Ordered last in the tier. | `docs/design/xfa.md` | The section names AN-29.2 to AN-29.15's exit tests. | AN-27.1 |
 | AN-29.2 | build | The template DOM: subforms, fields, draws, areas and their properties parsed into a typed model. | `crates/tinker-pdf/src/xfa/template.rs` (new), `crates/tinker-pdf/tests/xfa_layout.rs` (new) | `xfa_layout.rs` (new) `templates_parse`: the specification's example templates parse to the stated structure. | AN-29.1, AN-27 |
 | AN-29.3 | build | SOM expressions resolved over the DOMs: names, indices, wildcards and the shortcuts, in a module FormCalc and the scripting model share. | `crates/tinker-pdf/src/xfa/som.rs` (new), `crates/tinker-pdf/tests/xfa_layout.rs` (new) | `som_expressions_resolve`: the specification's SOM examples resolve to the stated nodes. | AN-29.2 |
 | AN-29.4 | build | Data binding: template and data merged into the form DOM by normal, global and none binding and explicit binds. | `crates/tinker-pdf/src/xfa/merge.rs` (new), `crates/tinker-pdf/tests/xfa_layout.rs` (new) | `merges_give_the_stated_form`: the specification's merge examples give the stated form DOM. | AN-29.3 |
@@ -478,7 +478,7 @@ rows. Form JavaScript has its own tier, next.
 | AN-29.11 | build | Exclusion groups, and barcode (ED-49) and image fields. | `crates/tinker-pdf/src/xfa/render.rs` (new), `crates/tinker-pdf/tests/xfa_layout.rs` (new) | `exclusion_groups_barcodes_and_images`: groups behave as radios; barcodes decode through ED-50; images place as stated. | AN-29.10, ED-49, ED-50 |
 | AN-29.12 | build | Rich text (`exData` XHTML) laid out through AN-16's path, and typeface mapping. | `crates/tinker-pdf/src/xfa/render.rs` (new), `crates/tinker-pdf/tests/xfa_layout.rs` (new) | `rich_text_and_typefaces`: rich text renders as the same XHTML laid out at its box; mapped typefaces are the ones the mapping names, in both builds. | AN-29.10, AN-16 |
 | AN-29.13 | build | Instance managers: repeated subforms made from data records, with minimum, maximum and initial counts. | `crates/tinker-pdf/src/xfa/merge.rs` (new), `crates/tinker-pdf/tests/xfa_layout.rs` (new) | `instances_follow_the_data`: data with N records gives N instances within the limits, laid out as computed. | AN-29.10 |
-| AN-29.14 | test | Determinism and robustness: generated forms fingerprinted on the four targets, and a fuzz target over templates and data. | `crates/tinker-pdf/tests/determinism.rs`, `fuzz/fuzz_targets/xfa_layout.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md` | Generated forms paginate to the same fingerprint on every K-07 target; the fuzz target runs clean with the roster regenerated. | AN-29.11, AN-29.12, AN-29.13, K-07.1 |
+| AN-29.14 | test | Determinism and robustness: generated forms fingerprinted on the four targets, and a fuzz target over templates and data. | `crates/tinker-pdf/tests/determinism.rs`, `fuzz/fuzz_targets/xfa_layout.rs` (new), `fuzz/Cargo.toml` | Generated forms paginate to the same fingerprint on every K-07 target; the fuzz target runs clean. | AN-29.11, AN-29.12, AN-29.13, K-07.1 |
 
 ## AN-30 — The XFA scripting object model
 
@@ -490,7 +490,7 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-30.1 | design | Add the scripting object model's milestones to `docs/design/xfa.md`: its objects, their binding to FJ's engine, and the event processing order. *Note:* A row by H-23's default, ordered last in the tier. | `docs/design/xfa.md` | The section names AN-30.2 to AN-30.7's exit tests. | AN-27.1 |
+| AN-30.1 | design | Add the scripting object model's milestones to `docs/design/xfa.md`: its objects, their binding to FJ's engine, and the event processing order. *Note:* Ordered last in the tier. | `docs/design/xfa.md` | The section names AN-30.2 to AN-30.7's exit tests. | AN-27.1 |
 | AN-30.2 | build | `xfa.host`, `xfa.event` and `$record` bound to FJ's engine through its host objects. | `crates/tinker-pdf/src/xfa/script.rs` (new), `crates/tinker-pdf/tests/xfa_script.rs` (new) | `xfa_script.rs` (new) `host_event_and_record_behave_as_stated`: each member holds to the expectations a person wrote under H-70. | AN-30.1, AN-29.14, FJ-03e, H-70 |
 | AN-30.3 | build | `xfa.form`, `resolveNode` and `resolveNodes` through AN-29.3's SOM, and `xfa.datasets`. | `crates/tinker-pdf/src/xfa/script.rs` (new), `crates/tinker-pdf/tests/xfa_script.rs` (new) | `form_and_resolution_behave_as_stated`: the specification's script examples hold. | AN-30.2 |
 | AN-30.4 | build | `xfa.layout` from AN-29's results, and instance managers driven from script. | `crates/tinker-pdf/src/xfa/script.rs` (new), `crates/tinker-pdf/tests/xfa_script.rs` (new) | `layout_and_instances_behave_as_stated`: page counts, positions and instance changes hold to the expectations. | AN-30.3 |
@@ -508,14 +508,14 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-31.1 | design | Add FormCalc's milestones to `docs/design/xfa.md`: its grammar, evaluation over SOM through a host interface, the built-in families and URL calls as host requests. *Note:* A row by H-23's default, ordered last in the tier. | `docs/design/xfa.md` | The section names AN-31.2 to AN-31.8's exit tests. | AN-27.1 |
+| AN-31.1 | design | Add FormCalc's milestones to `docs/design/xfa.md`: its grammar, evaluation over SOM through a host interface, the built-in families and URL calls as host requests. *Note:* Ordered last in the tier. | `docs/design/xfa.md` | The section names AN-31.2 to AN-31.8's exit tests. | AN-27.1 |
 | AN-31.2 | build | FormCalc's lexer and parser in FJ-01's script crate. | `crates/tinker-pdf-script/src/formcalc/parse.rs` (new), `crates/tinker-pdf-script/src/formcalc/mod.rs` (new) | Unit tests: the specification's grammar examples parse; malformed input is a typed error with its position. | AN-31.1, FJ-01.37, FJ-01.40, FJ-01.42 |
 | AN-31.3 | build | The evaluator: expressions, control flow and function definitions, SOM references resolved through a host interface. | `crates/tinker-pdf-script/src/formcalc/eval.rs` (new) | Unit tests: the specification's evaluation examples give the stated values. | AN-31.2 |
 | AN-31.4 | build | Arithmetic and logical built-ins. | `crates/tinker-pdf-script/src/formcalc/builtins.rs` (new) | Unit tests: each built-in holds to the specification's stated examples. | AN-31.3 |
 | AN-31.5 | build | Date and time built-ins, with locales through AN-32. | `crates/tinker-pdf-script/src/formcalc/builtins.rs` (new) | Unit tests: each built-in holds to the stated examples. | AN-31.4, AN-32 |
 | AN-31.6 | build | Financial built-ins. | `crates/tinker-pdf-script/src/formcalc/builtins.rs` (new) | Unit tests: each built-in holds to the stated examples. | AN-31.4 |
 | AN-31.7 | build | String built-ins, and URL calls handed to the host as typed requests. | `crates/tinker-pdf-script/src/formcalc/builtins.rs` (new) | Unit tests: each built-in holds to the stated examples; URL calls yield their requests and perform no I/O. | AN-31.4 |
-| AN-31.8 | test | The grammar fuzzed as FJ-05 fuzzes the language. | `fuzz/fuzz_targets/formcalc.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md` | The target runs clean in the fuzz check and its seeds replay; the roster is regenerated. | AN-31.2, FJ-05.1 |
+| AN-31.8 | test | The grammar fuzzed as FJ-05 fuzzes the language. | `fuzz/fuzz_targets/formcalc.rs` (new), `fuzz/Cargo.toml` | The target runs clean in the fuzz check and its seeds replay. | AN-31.2, FJ-05.1 |
 
 ## AN-32 — XFA picture clauses and locales
 
@@ -527,7 +527,7 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-32.1 | design | Add picture clauses and locales to `docs/design/xfa.md`: the `localeSet` packet, default locales as the specification gives them, and each pattern family. *Note:* A row by H-23's default, ordered last in the tier. | `docs/design/xfa.md` | The section names AN-32.2 to AN-32.4's exit tests. | AN-27.1 |
+| AN-32.1 | design | Add picture clauses and locales to `docs/design/xfa.md`: the `localeSet` packet, default locales as the specification gives them, and each pattern family. *Note:* Ordered last in the tier. | `docs/design/xfa.md` | The section names AN-32.2 to AN-32.4's exit tests. | AN-27.1 |
 | AN-32.2 | build | Locale sets read: calendar and number symbols, currency and the date and time patterns. | `crates/tinker-pdf/src/xfa/locale.rs` (new), `crates/tinker-pdf/tests/xfa_pictures.rs` (new) | `xfa_pictures.rs` (new) `locale_sets_read`: generated locale sets read as written. | AN-32.1, AN-27 |
 | AN-32.3 | build | Date and time picture clauses formatted and parsed. | `crates/tinker-pdf/src/xfa/picture.rs` (new), `crates/tinker-pdf/tests/xfa_pictures.rs` (new) | `dates_and_times_format_and_parse`: the specification's examples format and parse as stated. | AN-32.2 |
 | AN-32.4 | build | Numeric, text, zero and null patterns formatted and parsed. | `crates/tinker-pdf/src/xfa/picture.rs` (new), `crates/tinker-pdf/tests/xfa_pictures.rs` (new) | `numbers_text_zero_and_null_format_and_parse`: the specification's examples format and parse as stated. | AN-32.3 |
@@ -542,7 +542,7 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-33.1 | design | Add flattening's milestones to `docs/design/xfa.md`: what static PDF the dynamic layout's pages become, with and without AcroForm fields, and the PDF/A option. *Note:* A row by H-23's default, ordered last in the tier. | `docs/design/xfa.md` | The section names AN-33.2 to AN-33.4's exit tests. | AN-27.1 |
+| AN-33.1 | design | Add flattening's milestones to `docs/design/xfa.md`: what static PDF the dynamic layout's pages become, with and without AcroForm fields, and the PDF/A option. *Note:* Ordered last in the tier. | `docs/design/xfa.md` | The section names AN-33.2 to AN-33.4's exit tests. | AN-27.1 |
 | AN-33.2 | build | XFA flattened: the dynamic layout's pages written as static content with the field values drawn, and the XFA removed. | `crates/tinker-pdf/src/xfa/flatten.rs` (new), `crates/tinker-pdf/tests/xfa_flatten.rs` (new), `docs/features/forms.md` | `xfa_flatten.rs` (new) `flattened_xfa_renders_as_the_layout_drew_it`: the flattened document renders as the dynamic layout drew it. | AN-33.1, AN-29.14 |
 | AN-33.3 | build | Flattening with AcroForm fields kept at the laid-out positions. | `crates/tinker-pdf/src/xfa/flatten.rs` (new), `crates/tinker-pdf/tests/xfa_flatten.rs` (new) | `flattened_fields_fill`: the kept fields fill and render as the layout drew them. | AN-33.2 |
 | AN-33.4 | build | PDF/A output where asked: an output intent, embedded fonts and metadata. | `crates/tinker-pdf/src/xfa/flatten.rs` (new), `crates/tinker-pdf/tests/xfa_flatten.rs` (new) | `flattened_xfa_passes_pdf_a`: the output passes the engine's PDF/A validation for the asked part. | AN-33.2 |
@@ -557,6 +557,6 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-34.1 | design | Add XFA signatures to `docs/design/xfa.md`: XML signatures over data and template packets, canonicalisation, references and the `signature` packet. *Note:* A row by H-23's default, ordered last in the tier. | `docs/design/xfa.md` | The section names AN-34.2 and AN-34.3's exit tests. | AN-27.1 |
+| AN-34.1 | design | Add XFA signatures to `docs/design/xfa.md`: XML signatures over data and template packets, canonicalisation, references and the `signature` packet. *Note:* Ordered last in the tier. | `docs/design/xfa.md` | The section names AN-34.2 and AN-34.3's exit tests. | AN-27.1 |
 | AN-34.2 | build | XML signatures created over generated data and template packets with SG-01's and SG-02's keys and SG-13's canonicalisation, written into the `signature` packet. | `crates/tinker-pdf/src/xfa/signature.rs` (new), `crates/tinker-pdf/tests/xfa_signatures.rs` (new) | `xfa_signatures.rs` (new) `created_signatures_verify`: each signature verifies through SG-13's verifier. | AN-34.1, AN-27, SG-01.7, SG-02.6, SG-13 |
 | AN-34.3 | build | XFA signatures verified, a packet changed after signing reported. | `crates/tinker-pdf/src/xfa/signature.rs` (new), `crates/tinker-pdf/tests/xfa_signatures.rs` (new), `docs/features/signatures.md` | `a_changed_packet_is_reported`: changing a signed packet after signing yields the typed report; untouched packets verify. | AN-34.2 |

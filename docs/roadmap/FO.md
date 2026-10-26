@@ -310,7 +310,7 @@ preflight — that the standards tier's conversions need.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FO-13.1 | build | Soft masks written as SVG masks, luminosity and alpha, retiring `SvgWarning::SoftMaskRefused`. | `crates/tinker-pdf/src/svg_out.rs`, `crates/tinker-pdf/tests/svg_output.rs` | `svg_output.rs`: masked fixtures re-opened through the in-tree SVG reader render within the stated tolerance of the page; failing first on today's refusal. | — |
+| FO-13.1 | build | Soft masks written as SVG masks, luminosity and alpha, retiring `SvgWarning::SoftMaskRefused`. | `crates/tinker-pdf/src/svg_out.rs`, `crates/tinker-pdf/tests/svg_output.rs` | `svg_output.rs`: masked fixtures re-opened through the in-tree SVG reader render within the stated tolerance of the page. | — |
 | FO-13.2 | build | Non-Normal blend modes and knockout groups expressed, retiring `BlendModeRefused` and `KnockoutRefused`. | `crates/tinker-pdf/src/svg_out.rs`, `crates/tinker-pdf/tests/svg_output.rs` | Blend and knockout fixtures re-opened render within the tolerance. | FO-13.1 |
 | FO-13.3 | build | Shadings and patterns as SVG gradients and patterns where exact, rasterised with `Rasterised` only where not. | `crates/tinker-pdf/src/svg_out.rs`, `crates/tinker-pdf/tests/svg_output.rs` | Exact cases write gradients and patterns and render within the tolerance; inexact ones are named. | FO-13.1 |
 | FO-13.4 | build | Text as text or as paths by option, and repeated images reused. | `crates/tinker-pdf/src/svg_out.rs`, `crates/tinker-pdf/tests/svg_output.rs`, `docs/features/rendering.md` | Text fixtures render within the tolerance either way and extract as text when kept; a repeated image is written once. | FO-13.1 |

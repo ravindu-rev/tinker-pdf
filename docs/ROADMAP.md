@@ -17,7 +17,7 @@ is described on its own terms.
 ## Where the steps are
 
 One file per tier, under [roadmap/](roadmap/), named by its rows' prefix.
-CD-19's third step is `CD-19.3`, and `grep -n '| CD-19.3 |'
+CD-19's first step is `CD-19.1`, and `grep -n '| CD-19.1 |'
 docs/roadmap/CD.md` finds it.
 
 | Prefix | Tier | File |

@@ -20,7 +20,7 @@ reconstruction — each a typed report before it is a removal.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | SE-01.1 | build | Encryption on save below R6, behind an explicit legacy option with a typed weakness warning: R4 with AES-128 and RC4 at 40 and 128 bits, `/O` and `/U` by Algorithms 3 to 5. | `crates/tinker-pdf-cos/src/security.rs`, `crates/tinker-pdf/src/write.rs`, `crates/tinker-pdf/tests/legacy_encryption.rs` (new), `docs/features/encryption.md` | `legacy_encryption.rs` (new): outputs of each revision reopen through the reader with the expected streams in clear, and the warning is raised. | H-18 |
-| SE-01.2 | test | A corpus check: for each file `corpus/passwords.tsv` lists at R2 to R4, `/O` and `/U` computed from the file's own parameters and known password and compared with its bytes. | `crates/tinker-pdf/tests/legacy_encryption_census.rs` (new), `.github/workflows/corpus.yml` | The check prints `RAN` and passes for every listed file on a dispatched run on `develop`. | SE-01.1, MS-11, H-03 |
+| SE-01.2 | test | A corpus check: for each file `corpus/passwords.tsv` lists at R2 to R4, `/O` and `/U` computed from the file's own parameters and known password and compared with its bytes. | `crates/tinker-pdf/tests/legacy_encryption_census.rs` (new), `.github/workflows/corpus.yml` | The check prints `RAN` and passes for every listed file on a dispatched run on `develop`. | SE-01.1, MS-11 |
 
 ## SE-02 — AES-256-GCM crypt filters
 
@@ -58,7 +58,7 @@ reconstruction — each a typed report before it is a removal.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SE-04.1 | fix | The reader takes `/EncryptMetadata` from a crypt filter as well as from `/Encrypt`, as Table 27 puts the public-key handler's. | `crates/tinker-pdf-cos/src/decrypt.rs`, `crates/tinker-pdf/tests/crypt_filters.rs` (new) | `crypt_filters.rs` (new): a public-key document whose crypt filter says `/EncryptMetadata false` reads its metadata in clear; failing first on today's reader. | — |
+| SE-04.1 | fix | The reader takes `/EncryptMetadata` from a crypt filter as well as from `/Encrypt`, as Table 27 puts the public-key handler's. | `crates/tinker-pdf-cos/src/decrypt.rs`, `crates/tinker-pdf/tests/crypt_filters.rs` (new) | `crypt_filters.rs` (new): a public-key document whose crypt filter says `/EncryptMetadata false` reads its metadata in clear. | — |
 | SE-04.2 | build | Crypt filters on write: embedded files only (`/EFF`), named filters, `/Identity`, and `/EncryptMetadata false`. | `crates/tinker-pdf-cos/src/security.rs`, `crates/tinker-pdf/tests/crypt_filters.rs` (new), `docs/features/encryption.md` | Fixtures per configuration reopen with exactly the expected streams in clear. | SE-04.1 |
 
 ## SE-05 — Unencrypted wrapper documents
@@ -97,7 +97,7 @@ reconstruction — each a typed report before it is a removal.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | SE-07.1 | design | Amend `docs/design/pubsec.md` with every recipient shape and content cipher, permissions per recipient, envelope `/P`, password with recipients, and sealed incremental saves. | `docs/design/pubsec.md` | The amended doc names SE-07.2 to SE-07.6's exit tests. | SG-05 |
-| SE-07.2 | build | AES-192 and RC2 content ciphers in enveloped data. | `crates/tinker-pdf-pki/src/enveloped.rs`, `crates/tinker-pdf-crypto/src/aes.rs` | NIST's AES-192 vectors and RFC 2268's RC2 vectors pass; envelopes generated once outside (dated, bytes only) open; failing first on today's refusal. | SE-07.1, H-106 |
+| SE-07.2 | build | AES-192 and RC2 content ciphers in enveloped data. | `crates/tinker-pdf-pki/src/enveloped.rs`, `crates/tinker-pdf-crypto/src/aes.rs` | NIST's AES-192 vectors and RFC 2268's RC2 vectors pass; envelopes generated once outside (dated, bytes only) open. | SE-07.1, H-106 |
 | SE-07.3 | build | Key-agreement recipients (ECDH, RFC 5753) and sealing to EC keys. *Note:* Added with the signing work, as H-29's default has it: the recipient's private scalar is multiplied on SG-02.3's constant-time path. | `crates/tinker-pdf-pki/src/enveloped.rs`, `crates/tinker-pdf-pki/src/seal.rs` | RFC 5753's structures, transcribed, open and are written; envelopes generated once outside open. | SE-07.2, SG-02.3 |
 | SE-07.4 | build | Key-encryption-key and password recipients with AES key wrap, and RSA-OAEP key transport. | `crates/tinker-pdf-pki/src/enveloped.rs`, `crates/tinker-pdf-crypto/src/aes.rs` | RFC 5652's structures open and are written; NIST's key-wrap and OAEP vectors pass. | SE-07.2 |
 | SE-07.5 | build | Per-recipient permissions, an envelope's `/P` applied, a password and recipients together, and a sealed incremental save. | `crates/tinker-pdf-pki/src/seal.rs`, `crates/tinker-pdf-cos/src/pubsec.rs`, `crates/tinker-pdf/tests/pubsec_breadth.rs` (new), `docs/features/encryption.md` | `pubsec_breadth.rs` (new): each recipient opens with its own permissions; the combined document opens by either route; the incremental save stays sealed. | SE-07.3, SE-07.4 |
@@ -194,7 +194,7 @@ reconstruction — each a typed report before it is a removal.
 | SE-14.2 | build | ZipCrypto and AES in ZIP (AE-1 and AE-2) through the password seam. | `crates/tinker-pdf-zip/src/lib.rs`, `crates/tinker-pdf-archive/src/lib.rs` | Each scheme holds to its published format description; fixtures generated once by an outside archiver (dated, bytes only) open with their passwords. | SE-14.1, H-106 |
 | SE-14.3 | build | 7z AES-256. | `crates/tinker-pdf-archive/src/lib.rs` | The scheme holds to its format description; a fixture generated once outside opens with its password. | SE-14.2 |
 | SE-14.4 | build | RAR 5 encryption of stored entries. | `crates/tinker-pdf-archive/src/lib.rs` | The scheme holds to its format description; a fixture generated once outside opens with its password. | SE-14.2 |
-| SE-14.5 | build | Multi-volume sets, retiring `MultiDisk`; sparse tar entries are FI-25's. | `crates/tinker-pdf-archive/src/lib.rs`, `docs/features/cbz.md` | Multi-volume fixtures open; failing first on today's refusal. | SE-14.2 |
+| SE-14.5 | build | Multi-volume sets, retiring `MultiDisk`; sparse tar entries are FI-25's. | `crates/tinker-pdf-archive/src/lib.rs`, `docs/features/cbz.md` | Multi-volume fixtures open. | SE-14.2 |
 
 ## SE-15 — EPUB resource encryption with caller keys and `signatures.xml`
 

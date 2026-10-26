@@ -2,16 +2,13 @@
 
 [The roadmap](../ROADMAP.md) says how a step is worked and what comes next.
 
-The owner's instruction puts signing with a private key in the engine. That
-reverses what [design/signatures.md](../design/signatures.md),
+Signing with a private key is in the engine:
+[design/signatures.md](../design/signatures.md),
 [features/signatures.md](../features/signatures.md),
-[design/pubsec.md](../design/pubsec.md) and `SECURITY.md` stated as a
-non-goal — "no key parsing … no RSA/ECDSA signing arithmetic", "a boundary
-a future signing feature would have to cross deliberately, not drift
-across" — and each of them now points here; the ruling that records the
-crossing is the owner's (H-09). `bignum` today skips constant-time
-discipline because every value it sees is public; from SG-01 on, every
-secret operand takes the constant-time path. The engine still links no
+[design/pubsec.md](../design/pubsec.md) and `SECURITY.md` point here for it,
+and the ruling that records it is the owner's (H-09). `bignum` skips
+constant-time discipline because every value it sees is public; from SG-01
+on, every secret operand takes the constant-time path. The engine links no
 random number generator: entropy is the caller's, and ECDSA nonces are
 deterministic by default.
 
@@ -26,7 +23,7 @@ deterministic by default.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | SG-01.1 | design | Create `docs/design/signing.md`, amending `docs/design/signatures.md`'s non-goals: the constant-time path for every secret operand, CRT with blinding from caller entropy, zeroisation, RSA signing, ECDSA, EdDSA, key import, CMS `SignedData`, PAdES levels, and the ruling H-09 asks the owner to add, drafted. | `docs/design/signing.md` (new), `docs/design/signatures.md` | The doc exists in the design-doc order, names this row's exit tests and the milestones SG-02, SG-03, SG-05, SG-06 and SG-07 extend. | H-32, H-09 |
-| SG-01.2 | build | The bignum's constant-time path: fixed-window Montgomery exponentiation with every table entry read, no branch or index on a secret. | `crates/tinker-pdf-crypto/src/bignum.rs` | An operation-count test (counters under `cfg(test)`) shows branch and lookup counts independent of the exponent's bits; failing first on today's exponentiation. | SG-01.1 |
+| SG-01.2 | build | The bignum's constant-time path: fixed-window Montgomery exponentiation with every table entry read, no branch or index on a secret. | `crates/tinker-pdf-crypto/src/bignum.rs` | An operation-count test (counters under `cfg(test)`) shows branch and lookup counts independent of the exponent's bits. | SG-01.1 |
 | SG-01.3 | test | The signature-generation vectors vendored with provenance: NIST CAVP's PKCS#1 v1.5 and PSS vectors and the Wycheproof RSA signature vectors (Apache-2.0), with their licence records. | `crates/tinker-pdf-crypto/tests/data/cavp/rsa_siggen15.rsp` (new), `THIRDPARTY.md`, `.gitattributes`, `crates/tinker-pdf-crypto/tests/data/cavp/rsa_siggen_pss.rsp` (new), `crates/tinker-pdf-crypto/tests/data/wycheproof` (new), `crates/tinker-pdf-crypto/tests/rsa_sign.rs` (new) | The vectors load in a test that prints their counts; their licence is recorded. | SG-01.1, H-92 |
 | SG-01.4 | build | The RSA private operation by CRT with blinding from caller entropy, and key material zeroised on drop. | `crates/tinker-pdf-crypto/src/rsa.rs`, `crates/tinker-pdf-crypto/src/bignum.rs` | Unit tests: the CRT result equals the plain private operation on every vector key; a blinded run equals an unblinded one; a key's limbs read zero after drop in a test harness. | SG-01.2 |
 | SG-01.5 | build | PKCS#1 v1.5 signature generation over SHA-256, SHA-384, SHA-512 and SHA-512/256, the digest the caller's choice. | `crates/tinker-pdf-crypto/src/rsa.rs`, `crates/tinker-pdf-crypto/tests/rsa_sign.rs` (new) | `rsa_sign.rs` (new): CAVP's PKCS#1 v1.5 generation vectors and Wycheproof's signature vectors pass for every SHA-2 digest they cover. | SG-01.3, SG-01.4 |
@@ -46,7 +43,7 @@ deterministic by default.
 | SG-02.1 | design | Add ECDSA to `docs/design/signing.md`: constant-time field arithmetic per curve, complete addition formulas, scalar multiplication without secret-dependent branches, RFC 6979 and hedged nonces. | `docs/design/signing.md` | The section names SG-02.2 to SG-02.7's exit tests. | SG-01.1, H-33 |
 | SG-02.2 | build | Constant-time field arithmetic for the P-256, P-384, P-521 and Brainpool primes on the bignum's constant-time path. | `crates/tinker-pdf-crypto/src/ecdsa.rs`, `crates/tinker-pdf-crypto/src/bignum.rs` | Unit tests hold each field's operations to values the test computes; an operation-count test shows counts independent of operands. | SG-02.1, SG-04 |
 | SG-02.3 | build | Complete addition formulas and a constant-time scalar multiplication. | `crates/tinker-pdf-crypto/src/ecdsa.rs` | Unit tests: multiples of the generator equal the published values; an operation-count test shows counts independent of the scalar's bits. | SG-02.2 |
-| SG-02.4 | build | Verification extended to P-521 and compressed points, retiring `Unchecked::UnsupportedKey` for them. | `crates/tinker-pdf-crypto/src/ecdsa.rs`, `crates/tinker-pdf-pki/src/cms.rs`, `docs/features/signatures.md` | Wycheproof's verification vectors pass on P-521 and with compressed points; failing first on today's refusal. | SG-02.3 |
+| SG-02.4 | build | Verification extended to P-521 and compressed points, retiring `Unchecked::UnsupportedKey` for them. | `crates/tinker-pdf-crypto/src/ecdsa.rs`, `crates/tinker-pdf-pki/src/cms.rs`, `docs/features/signatures.md` | Wycheproof's verification vectors pass on P-521 and with compressed points. | SG-02.3 |
 | SG-02.5 | build | Signing with RFC 6979 deterministic nonces by default and caller entropy as a hedged option. | `crates/tinker-pdf-crypto/src/ecdsa.rs`, `crates/tinker-pdf-crypto/tests/ecdsa_sign.rs` (new) | `ecdsa_sign.rs` (new): RFC 6979 A.2.5 to A.2.7's signatures are reproduced byte for byte for every digest the appendix lists. | SG-02.3, H-92 |
 | SG-02.6 | test | CAVP's generation and Wycheproof's ECDSA vectors on the NIST curves, Brainpool's deterministic signatures verified, and a signed document fingerprinted. | `crates/tinker-pdf-crypto/tests/ecdsa_sign.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | The vectors pass; every deterministic Brainpool signature over RFC 6979's messages verifies; the signed document's bytes are identical on every K-07 target. | SG-02.4, SG-02.5, K-07.1, H-92 |
 | SG-02.7 | measure | The speed targets: a P-256 signature at most 0.5 ms, P-384 1.2 ms, P-521 2.5 ms and Brainpool P-256 1 ms, constant-time, as calibrated tier-P targets. | `crates/tinker-pdf/benches/sign.rs`, `crates/tinker-pdf/benches/baseline.json` | MS-02's paired job holds the four targets. | SG-02.6, MS-04, MS-02 |
@@ -64,7 +61,7 @@ deterministic by default.
 | SG-03.1 | design | Add EdDSA to `docs/design/signing.md`: Curve25519's and Edwards448's arithmetic on the constant-time path, and RFC 8419's carriage in CMS. | `docs/design/signing.md` | The section names SG-03.2 to SG-03.4's exit tests. | SG-01.1 |
 | SG-03.2 | build | Ed25519 signing and verification. | `crates/tinker-pdf-crypto/src/eddsa.rs` (new), `crates/tinker-pdf-crypto/src/lib.rs`, `crates/tinker-pdf-crypto/tests/eddsa.rs` (new) | `eddsa.rs` (new): RFC 8032's Ed25519 vectors and Wycheproof's pass. | SG-03.1, SG-05 |
 | SG-03.3 | build | Ed448 signing and verification over SHAKE256. | `crates/tinker-pdf-crypto/src/eddsa.rs` (new), `crates/tinker-pdf-crypto/tests/eddsa.rs` (new) | RFC 8032's Ed448 vectors and Wycheproof's pass. | SG-03.2, SG-04 |
-| SG-03.4 | build | EdDSA in CMS by RFC 8419, signing and verifying, retiring `Unchecked::UnsupportedKey` for EdDSA keys. | `crates/tinker-pdf-pki/src/cms.rs`, `crates/tinker-pdf/tests/signatures_eddsa.rs` (new), `docs/features/signatures.md` | `signatures_eddsa.rs` (new): documents signed with each key verify through the engine's verdict; failing first on today's refusal. | SG-03.3, SG-06.6 |
+| SG-03.4 | build | EdDSA in CMS by RFC 8419, signing and verifying, retiring `Unchecked::UnsupportedKey` for EdDSA keys. | `crates/tinker-pdf-pki/src/cms.rs`, `crates/tinker-pdf/tests/signatures_eddsa.rs` (new), `docs/features/signatures.md` | `signatures_eddsa.rs` (new): documents signed with each key verify through the engine's verdict. | SG-03.3, SG-06.6 |
 
 ## SG-04 — Hash and curve breadth
 
@@ -78,7 +75,7 @@ deterministic by default.
 | --- | --- | --- | --- | --- | --- |
 | SG-04.1 | build | SHA-3-256, -384 and -512 and SHAKE256 on Keccak-f[1600]. *Note:* SHA-3 and the Brainpool curves are on the list H-32 approves, whose default is the list in this tier; SG-04 adds no private-key operation, so H-09's ruling covers none of it. | `crates/tinker-pdf-crypto/src/sha3.rs` (new), `crates/tinker-pdf-crypto/src/lib.rs`, `crates/tinker-pdf-crypto/tests/sha3.rs` (new) | `sha3.rs` (new): NIST SHA3VS vectors pass. | H-92 |
 | SG-04.2 | build | SHA-512/256. | `crates/tinker-pdf-crypto/src/sha2.rs` | CAVP's SHA-512/256 vectors pass. | H-92 |
-| SG-04.3 | build | Brainpool P256r1, P384r1 and P512r1 for verification, retiring `Unchecked::UnsupportedKey` for them. | `crates/tinker-pdf-crypto/src/ecdsa.rs`, `docs/features/signatures.md` | The parameters equal RFC 5639's; Wycheproof's Brainpool verification vectors pass; failing first on today's refusal. | H-92 |
+| SG-04.3 | build | Brainpool P256r1, P384r1 and P512r1 for verification, retiring `Unchecked::UnsupportedKey` for them. | `crates/tinker-pdf-crypto/src/ecdsa.rs`, `docs/features/signatures.md` | The parameters equal RFC 5639's; Wycheproof's Brainpool verification vectors pass. | H-92 |
 | SG-04.4 | build | DSA verification for legacy signatures. | `crates/tinker-pdf-crypto/src/dsa.rs` (new), `crates/tinker-pdf-pki/src/cms.rs` | CAVP's DSA verification vectors pass. | H-92 |
 | SG-04.5 | build | RSA moduli up to 16 384 bits, the limit a ledger row. | `crates/tinker-pdf-crypto/src/rsa.rs`, `crates/tinker-pdf/tests/bounds_ledger.rs` | 8 192- and 16 384-bit signatures verify; a larger modulus is a typed refusal; the limit is a ledger row. | — |
 
@@ -96,7 +93,7 @@ deterministic by default.
 | SG-05.2 | build | PBKDF2 with HMAC-SHA-256 and SHA-1, PBES2 with AES-CBC, and PBES1. | `crates/tinker-pdf-pki/src/pbe.rs` (new), `crates/tinker-pdf-pki/src/lib.rs` | Unit tests: RFC 6070's PBKDF2 vectors pass; PBES2 and PBES1 structures decrypt as their examples state. | SG-05.1, H-92 |
 | SG-05.3 | build | PKCS#8 plain and encrypted, PKCS#1 `RSAPrivateKey`, SEC 1 `ECPrivateKey` and PEM armour. | `crates/tinker-pdf-pki/src/keys.rs` (new), `crates/tinker-pdf-pki/tests/keys.rs` (new) | `keys.rs` (new): each committed key file, generated once by an outside tool with a known passphrase and committed with dated provenance, reads to the key its certificate's public key matches. | SG-05.2, H-106 |
 | SG-05.4 | build | PKCS#12: safe contents and bags, PBES2 and the legacy SHA-1 triple-DES and 40-bit RC2 schemes, the MAC by PKCS#12's key derivation with HMAC-SHA-1 or SHA-256, and certificate chains extracted. | `crates/tinker-pdf-pki/src/pkcs12.rs` (new), `crates/tinker-pdf-crypto/src/rc2.rs` (new), `crates/tinker-pdf-pki/tests/keys.rs` (new) | RFC 7292's structures read; each committed `.p12` yields its key and chain, held to the certificate's public key. | SG-05.3 |
-| SG-05.5 | test | A fuzz target over every key container. | `fuzz/fuzz_targets/key_import.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md` | Malformed containers are typed errors under fuzzing; the target runs clean and the roster is regenerated. | SG-05.4 |
+| SG-05.5 | test | A fuzz target over every key container. | `fuzz/fuzz_targets/key_import.rs` (new), `fuzz/Cargo.toml` | Malformed containers are typed errors under fuzzing; the target runs clean. | SG-05.4 |
 
 ## SG-06 — CMS `SignedData` built in the engine
 
@@ -176,7 +173,7 @@ deterministic by default.
 | SG-10.1 | design | Create `docs/design/signature-validation.md` for SG-10, SG-11 and SG-12: CRL and OCSP evaluation, RFC 5280 path validation with a revocation hook, EN 319 102-1's validation model, the clock as a parameter, fetching left to the host (H-27's default: no bundled roots, the engine builds requests and the host fetches), and the public test data each is held to. | `docs/design/signature-validation.md` (new) | The doc exists in the design-doc order, names this row's exit tests and the milestones SG-11 and SG-12 extend. | — |
 | SG-10.2 | build | CRLs parsed (RFC 5280 §5) and evaluated (§6.3): issuing distribution points, delta CRLs, reasons and indirect CRLs, through SG-11's revocation hook. | `crates/tinker-pdf-pki/src/crl.rs` (new), `crates/tinker-pdf-pki/src/lib.rs`, `crates/tinker-pdf-pki/tests/pkits.rs` (new) | `pkits.rs` (new): the NIST interoperability suite's CRL cases pass. | SG-10.1, SG-11.6 |
 | SG-10.3 | build | OCSP responses evaluated (RFC 6960): responder authorisation, `id-pkix-ocsp-nocheck`, `thisUpdate` and `nextUpdate` against the validation time, and nonces; request bytes built for the host to send. | `crates/tinker-pdf-pki/src/ocsp.rs` (new), `crates/tinker-pdf-pki/tests/ocsp.rs` (new) | `ocsp.rs` (new): RFC 6960's structures, transcribed, and responses generated once (dated, bytes only) evaluate as stated. | SG-10.2, H-106 |
-| SG-10.4 | build | AIA and distribution-point URLs extracted, `adbe-revocationInfoArchival` read and written, and the verdict consulting the DSS. | `crates/tinker-pdf-pki/src/x509.rs`, `crates/tinker-pdf-pki/src/cms.rs`, `crates/tinker-pdf/src/signature.rs`, `crates/tinker-pdf/tests/revocation.rs` (new), `docs/features/signatures.md` | `revocation.rs` (new): URLs extract as written; the archival attribute round-trips; a document whose DSS revokes the signer gets the revoked verdict; failing first on today's verdict. | SG-10.3 |
+| SG-10.4 | build | AIA and distribution-point URLs extracted, `adbe-revocationInfoArchival` read and written, and the verdict consulting the DSS. | `crates/tinker-pdf-pki/src/x509.rs`, `crates/tinker-pdf-pki/src/cms.rs`, `crates/tinker-pdf/src/signature.rs`, `crates/tinker-pdf/tests/revocation.rs` (new), `docs/features/signatures.md` | `revocation.rs` (new): URLs extract as written; the archival attribute round-trips; a document whose DSS revokes the signer gets the revoked verdict. | SG-10.3 |
 
 ## SG-11 — Certification path validation, complete
 
@@ -413,7 +410,7 @@ deterministic by default.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SG-26.2 | measure | The census's first figures recorded and pinned as floors. | `crates/tinker-pdf/tests/verdicts.rs`, `docs/features/signatures.md` | The census fails below its committed floors (a counted injection fires it) and passes at SG-26.1's figures; the feature doc quotes them with the run. | — |
+| SG-26.2 | measure | The census's first figures recorded and pinned as floors. | `crates/tinker-pdf/tests/verdicts.rs`, `docs/features/signatures.md` | The census fails below its committed floors and passes at SG-26.1's figures; the feature doc quotes them with the run. | — |
 
 ## SG-27 — A PKCS#11 signing provider
 

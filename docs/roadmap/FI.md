@@ -4,7 +4,7 @@
 
 Parity here means every input a widely deployed engine opens, and the
 field's print-stream and archive formats besides. Each is ordered inside the
-tier by corpus and producer evidence (ruling 3 as amended); none waits for
+tier by corpus and producer evidence (ruling 3); none waits for
 it.
 
 ## FI-01 — MOBI, PRC, PDB and AZW3/KF8
@@ -209,7 +209,7 @@ it.
 | FI-07a.4 | build | Modular mode: meta-adaptive trees decoded and evaluated, the predictors including the weighted one, and channel decoding. | `crates/tinker-pdf-filters/src/jxl/modular.rs` (new) | Modular conformance bitstreams without transforms decode to their reference samples. | FI-07a.3 |
 | FI-07a.5 | build | Modular transforms: RCT, palette with deltas, and squeeze. | `crates/tinker-pdf-filters/src/jxl/modular.rs` (new) | Conformance bitstreams with transforms decode to their reference samples. | FI-07a.4 |
 | FI-07a.6 | build | Frames composed: blending, cropping and extra channels such as alpha. | `crates/tinker-pdf-filters/src/jxl/frame.rs` (new) | Every published conformance bitstream for modular mode decodes to its reference samples. | FI-07a.5 |
-| FI-07a.7 | build | JPEG XL opened as a bare image and recognised in archives, books and HTML, with a fuzz target. | `crates/tinker-pdf/src/cbz.rs`, `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/jxl.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md`, `docs/features/filters.md` | A modular file opens by `Document::open`; the fuzz target runs clean with the roster regenerated. | FI-07a.6 |
+| FI-07a.7 | build | JPEG XL opened as a bare image and recognised in archives, books and HTML, with a fuzz target. | `crates/tinker-pdf/src/cbz.rs`, `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/jxl.rs` (new), `fuzz/Cargo.toml`, `docs/features/filters.md` | A modular file opens by `Document::open`; the fuzz target runs clean. | FI-07a.6 |
 
 ## FI-07b — JPEG XL, milestone 2
 
@@ -258,7 +258,7 @@ it.
 | FI-08.4 | build | Block partitioning and intra prediction: directional, smooth and Paeth modes, chroma from luma, palette and intra block copy. | `crates/tinker-pdf-filters/src/avif/intra.rs` (new) | Unit tests hold each predictor to the specification's equations. | FI-08.3 |
 | FI-08.5 | build | Coefficient decoding, dequantisation and every inverse transform size and type. | `crates/tinker-pdf-filters/src/avif/transform.rs` (new) | Unit tests hold each transform to its definition; conformance streams decode to their pre-filter reconstruction. | FI-08.4 |
 | FI-08.6 | build | The loop filter, CDEF, loop restoration, super-resolution and film grain. | `crates/tinker-pdf-filters/src/avif/postfilter.rs` (new) | The AV1 conformance streams for the intra-only profiles decode to their reference outputs. | FI-08.5 |
-| FI-08.7 | build | AVIF opened as a bare image, in archives (retiring `UnsupportedFormat(Avif)`), and in books and HTML, with a fuzz target. | `crates/tinker-pdf/src/cbz.rs`, `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/avif.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md`, `docs/features/cbz.md` | An AVIF opens everywhere an image does; the fuzz target runs clean with the roster regenerated; failing first on today's refusal. | FI-08.6 |
+| FI-08.7 | build | AVIF opened as a bare image, in archives (retiring `UnsupportedFormat(Avif)`), and in books and HTML, with a fuzz target. | `crates/tinker-pdf/src/cbz.rs`, `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/avif.rs` (new), `fuzz/Cargo.toml`, `docs/features/cbz.md` | An AVIF opens everywhere an image does; the fuzz target runs clean. | FI-08.6 |
 
 ## FI-09 — HEIC/HEIF
 
@@ -275,7 +275,7 @@ it.
 | FI-09.3 | build | HEVC NAL units, parameter sets, slice headers, and the CABAC engine with its context models. | `crates/tinker-pdf-filters/src/heif/hevc.rs` (new), `crates/tinker-pdf-filters/src/heif/cabac.rs` (new) | Unit tests hold CABAC to the specification; conformance streams' headers parse. | FI-09.2 |
 | FI-09.4 | build | Coding trees, intra prediction, transforms and dequantisation. | `crates/tinker-pdf-filters/src/heif/hevc.rs` (new) | Conformance streams decode to their pre-filter reconstruction. | FI-09.3 |
 | FI-09.5 | build | Deblocking and sample-adaptive offset. | `crates/tinker-pdf-filters/src/heif/hevc.rs` (new) | The HEVC conformance streams for the still-picture profile decode to their references. | FI-09.4 |
-| FI-09.6 | build | HEIC opened as a bare image and in archives, with a fuzz target. | `crates/tinker-pdf/src/cbz.rs`, `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/heif.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md` | A HEIC opens by `Document::open` and as a CBZ page; the fuzz target runs clean with the roster regenerated. | FI-09.5 |
+| FI-09.6 | build | HEIC opened as a bare image and in archives, with a fuzz target. | `crates/tinker-pdf/src/cbz.rs`, `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/heif.rs` (new), `fuzz/Cargo.toml` | A HEIC opens by `Document::open` and as a CBZ page; the fuzz target runs clean. | FI-09.5 |
 
 ## FI-10 — JPEG lossless and hierarchical processes
 
@@ -287,9 +287,9 @@ it.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FI-10.1 | build | The Huffman lossless process (SOF3): Annex H's predictors and point transform, retiring `JpegError::Lossless` for it. | `crates/tinker-pdf-filters/src/jpeg.rs`, `crates/tinker-pdf-filters/src/jpeg/lossless.rs` (new) | Unit tests: decoded samples equal Annex H's predictors recomputed in the test over streams built from the annex's tables; failing first on today's refusal. | — |
+| FI-10.1 | build | The Huffman lossless process (SOF3): Annex H's predictors and point transform, retiring `JpegError::Lossless` for it. | `crates/tinker-pdf-filters/src/jpeg.rs`, `crates/tinker-pdf-filters/src/jpeg/lossless.rs` (new) | Unit tests: decoded samples equal Annex H's predictors recomputed in the test over streams built from the annex's tables. | — |
 | FI-10.2 | build | The arithmetic lossless process (SOF11) and the differential lossless frames (SOF7, SOF15). | `crates/tinker-pdf-filters/src/jpeg/lossless.rs` (new) | Unit tests: decoded samples equal the annexes' computation. | FI-10.1 |
-| FI-10.3 | build | The hierarchical DCT processes (SOF5, SOF6, SOF13, SOF14): Annex J's differential reconstruction, retiring `JpegError::Differential`. | `crates/tinker-pdf-filters/src/jpeg/hierarchical.rs` (new), `docs/features/filters.md` | Unit tests: decoded samples equal Annex J's reconstruction recomputed in the test; failing first on today's refusal. | FI-10.2 |
+| FI-10.3 | build | The hierarchical DCT processes (SOF5, SOF6, SOF13, SOF14): Annex J's differential reconstruction, retiring `JpegError::Differential`. | `crates/tinker-pdf-filters/src/jpeg/hierarchical.rs` (new), `docs/features/filters.md` | Unit tests: decoded samples equal Annex J's reconstruction recomputed in the test. | FI-10.2 |
 
 ## FI-11 — Image-container refusals
 
@@ -331,7 +331,7 @@ it.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | FI-13.1 | design | Create `docs/design/jpx-part2.md`: which T.801 extensions and extended file-format features PDF can carry, each with the clause and annex example it is held to, and what stays refused by name. *Note:* The run takes this row after every other row of its tier: H-30's default orders it last. | `docs/design/jpx-part2.md` (new) | The doc exists in the design-doc order, names FI-13.2 to FI-13.8's exit tests. | — |
-| FI-13.2 | build | Part 2's markers parsed to their fields instead of refused as unknown. | `crates/tinker-pdf-filters/src/jpx/codestream.rs` | Unit tests: each marker parses to T.801's fields; failing first on today's refusal. | FI-13.1 |
+| FI-13.2 | build | Part 2's markers parsed to their fields instead of refused as unknown. | `crates/tinker-pdf-filters/src/jpx/codestream.rs` | Unit tests: each marker parses to T.801's fields. | FI-13.1 |
 | FI-13.3 | build | Variable DC offset and the non-linear point transform. | `crates/tinker-pdf-filters/src/jpx/colour.rs` | Unit tests hold both to T.801's text and its examples where published. | FI-13.2 |
 | FI-13.4 | build | Arbitrary decomposition styles and arbitrary transformation kernels. | `crates/tinker-pdf-filters/src/jpx/wavelet.rs` | Unit tests hold both to T.801's text and its examples. | FI-13.2 |
 | FI-13.5 | build | Multiple component transformations, array-based and wavelet-based. | `crates/tinker-pdf-filters/src/jpx/colour.rs` | Unit tests hold them to T.801's text and its examples. | FI-13.2 |
@@ -349,7 +349,7 @@ it.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FI-14.1 | build | Orientation applied in the facade: EXIF and TIFF orientation for bare images and archive pages, and JPEG XR's container orientation when converting. | `crates/tinker-pdf/src/cbz.rs`, `crates/tinker-pdf/src/standalone.rs`, `crates/tinker-pdf/tests/image_orientation.rs` (new), `docs/features/filters.md` | `image_orientation.rs` (new): fixtures in all eight orientations draw upright; failing first on today's unapplied orientation. | — |
+| FI-14.1 | build | Orientation applied in the facade: EXIF and TIFF orientation for bare images and archive pages, and JPEG XR's container orientation when converting. | `crates/tinker-pdf/src/cbz.rs`, `crates/tinker-pdf/src/standalone.rs`, `crates/tinker-pdf/tests/image_orientation.rs` (new), `docs/features/filters.md` | `image_orientation.rs` (new): fixtures in all eight orientations draw upright. | — |
 | FI-14.2 | build | Resolution reported from EXIF, TIFF, PNG and JFIF. | `crates/tinker-pdf/src/images.rs`, `crates/tinker-pdf/tests/image_orientation.rs` (new) | Reported resolution equals the tags for each source. | — |
 
 ## FI-15 — The Brotli filter
@@ -400,7 +400,7 @@ it.
 | FI-17a.9 | build | File operators over in-memory data, with the standard filters through the filters crate. | `crates/tinker-pdf-ps/src/ops/file.rs` (new) | Unit tests hold each to the reference's behaviour; no operator reaches the file system. | FI-17a.4 |
 | FI-17a.10 | build | Resources and error handling: `findresource` and `defineresource`, `errordict` and `$error`, each error typed. | `crates/tinker-pdf-ps/src/ops/resource.rs` (new), `crates/tinker-pdf-ps/src/error.rs` (new) | Unit tests: each error arises where the reference states and is reported typed. | FI-17a.5 |
 | FI-17a.11 | build | The interpreter's limits as ledger rows, and a deterministic clock. | `crates/tinker-pdf-ps/src/interp.rs` (new), `crates/tinker-pdf/tests/bounds_ledger.rs` | An injection per limit fires as a typed error, never a panic; each limit is a ledger row. | FI-17a.10 |
-| FI-17a.12 | test | The operator set's coverage and a fuzz target over the interpreter. | `crates/tinker-pdf-ps/tests/operators.rs` (new), `fuzz/fuzz_targets/postscript.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md` | Every language operator has a test of its stated behaviour; the fuzz target runs clean with the roster regenerated. | FI-17a.6, FI-17a.7, FI-17a.8, FI-17a.9, FI-17a.11, K-04 |
+| FI-17a.12 | test | The operator set's coverage and a fuzz target over the interpreter. | `crates/tinker-pdf-ps/tests/operators.rs` (new), `fuzz/fuzz_targets/postscript.rs` (new), `fuzz/Cargo.toml` | Every language operator has a test of its stated behaviour; the fuzz target runs clean. | FI-17a.6, FI-17a.7, FI-17a.8, FI-17a.9, FI-17a.11, K-04 |
 
 ## FI-17b — PostScript, milestone 2 — graphics and fonts
 
@@ -452,7 +452,7 @@ it.
 | FI-18a.5 | build | Rectangular area fills, patterns and the print model's transparency. | `crates/tinker-pdf/src/pcl/fill.rs` (new), `crates/tinker-pdf/tests/pcl.rs` (new) | Analytic fill fixtures render to their PDF twins. | FI-18a.2 |
 | FI-18a.6 | build | Macros and overlays. | `crates/tinker-pdf/src/pcl/parse.rs` (new), `crates/tinker-pdf/tests/pcl.rs` (new) | Fixtures using macros render as their expanded twins. | FI-18a.2 |
 | FI-18a.7 | build | PCL 5c colour: image data configuration, palettes, colour modes and colour raster. | `crates/tinker-pdf/src/pcl/colour.rs` (new), `crates/tinker-pdf/tests/pcl.rs` (new) | Analytic colour fixtures render to their PDF twins. | FI-18a.4 |
-| FI-18a.8 | test | PCL opened as a document, a fuzz target and a determinism fingerprint. | `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/pcl.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md`, `crates/tinker-pdf/tests/determinism.rs` | `Document::open` opens a PCL job; the fuzz target runs clean with the roster regenerated; the fingerprint holds on every K-07 target. | FI-18a.3, FI-18a.5, FI-18a.6, FI-18a.7, K-07 |
+| FI-18a.8 | test | PCL opened as a document, a fuzz target and a determinism fingerprint. | `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/pcl.rs` (new), `fuzz/Cargo.toml`, `crates/tinker-pdf/tests/determinism.rs` | `Document::open` opens a PCL job; the fuzz target runs clean; the fingerprint holds on every K-07 target. | FI-18a.3, FI-18a.5, FI-18a.6, FI-18a.7, K-07 |
 
 ## FI-18b — PCL XL input
 
@@ -470,7 +470,7 @@ it.
 | FI-18b.4 | build | Paths and painting: lines, Béziers, arcs, rectangles and ellipses. | `crates/tinker-pdf/src/pcl/xl.rs` (new), `crates/tinker-pdf/tests/pcl_xl.rs` (new) | Analytic fixtures render to their PDF twins. | FI-18b.3 |
 | FI-18b.5 | build | Images and raster patterns with their compressions. | `crates/tinker-pdf/src/pcl/xl.rs` (new), `crates/tinker-pdf/tests/pcl_xl.rs` (new) | Analytic fixtures render to their PDF twins. | FI-18b.3 |
 | FI-18b.6 | build | Downloaded fonts and text with escapements. | `crates/tinker-pdf/src/pcl/xl.rs` (new), `crates/tinker-pdf/tests/pcl_xl.rs` (new) | Analytic text fixtures render to their PDF twins and extract their text. | FI-18b.3 |
-| FI-18b.7 | test | PCL XL opened as a document and fuzzed. | `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/pcl_xl.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md` | `Document::open` opens a PCL XL job; the fuzz target runs clean with the roster regenerated. | FI-18b.4, FI-18b.5, FI-18b.6 |
+| FI-18b.7 | test | PCL XL opened as a document and fuzzed. | `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/pcl_xl.rs` (new), `fuzz/Cargo.toml` | `Document::open` opens a PCL XL job; the fuzz target runs clean. | FI-18b.4, FI-18b.5, FI-18b.6 |
 
 ## FI-18c — HP-GL/2 input
 
@@ -502,7 +502,7 @@ it.
 | FI-19.4 | build | JB2 bilevel images with their symbol dictionaries. | `crates/tinker-pdf-filters/src/djvu/jb2.rs` (new) | Unit tests: bitmaps generated here, encoded once outside, decode to their inputs exactly. | FI-19.3 |
 | FI-19.5 | build | IW44 wavelet images, progressive and in colour. | `crates/tinker-pdf-filters/src/djvu/iw44.rs` (new) | Unit tests: the wavelet arithmetic equals the specification's recomputed in the test; an encoded photograph decodes within the bound computed from the encoder's input. | FI-19.3 |
 | FI-19.6 | build | Pages composed from mask, foreground and background, with the text layer, annotations and outlines. | `crates/tinker-pdf/src/djvu.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/djvu.rs` (new), `docs/features/opening.md` | `djvu.rs` (new): composed pages draw as the test composes them; the text layer, annotations and outlines equal the values written. | FI-19.4, FI-19.5 |
-| FI-19.7 | build | DjVu sniffed and opened, fuzzed and fingerprinted. | `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/djvu.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md`, `crates/tinker-pdf/tests/determinism.rs` | `Document::open` opens a DjVu document; the fuzz target runs clean with the roster regenerated; the fingerprint holds on every K-07 target. | FI-19.6, K-07 |
+| FI-19.7 | build | DjVu sniffed and opened, fuzzed and fingerprinted. | `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/djvu.rs` (new), `fuzz/Cargo.toml`, `crates/tinker-pdf/tests/determinism.rs` | `Document::open` opens a DjVu document; the fuzz target runs clean; the fingerprint holds on every K-07 target. | FI-19.6, K-07 |
 
 ## FI-20a — OFD
 
@@ -586,7 +586,7 @@ it.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FI-24.1 | fix | Sniffing: a bare BMP, and an SVG or HTML root found past byte 4 096 within a stated cap, a PDF header in the first 4 096 bytes still winning. | `crates/tinker-pdf/src/standalone.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/sniffing.rs` (new), `docs/features/opening.md` | `sniffing.rs` (new): each case opens; a file with both a PDF header and a markup root opens as PDF; failing first on today's `NotAPdf`. | — |
+| FI-24.1 | fix | Sniffing: a bare BMP, and an SVG or HTML root found past byte 4 096 within a stated cap, a PDF header in the first 4 096 bytes still winning. | `crates/tinker-pdf/src/standalone.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/sniffing.rs` (new), `docs/features/opening.md` | `sniffing.rs` (new): each case opens; a file with both a PDF header and a markup root opens as PDF. | — |
 
 ## FI-25 — Archive breadth
 
@@ -642,7 +642,7 @@ it.
 | FI-28.1 | design | Amend `docs/design/epub-layout.md` with relayout: what is kept from the parse, how locations are named so they survive, how a late font provider re-paginates, and what the saved accelerators hold. | `docs/design/epub-layout.md` | The amended doc names FI-28.2 to FI-28.5's exit tests. | — |
 | FI-28.2 | build | Re-pagination at a new page size, font size or margin from the parsed book. | `crates/tinker-pdf/src/epub.rs`, `crates/tinker-pdf/src/epub/package.rs`, `crates/tinker-pdf/tests/relayout.rs` (new) | `relayout.rs` (new): a book laid out at size A then B equals the book opened at B. | FI-28.1 |
 | FI-28.3 | build | Locations (chapter and offset) that survive relayout. | `crates/tinker-pdf/src/epub.rs`, `crates/tinker-pdf/tests/relayout.rs` (new) | A location resolves to the same text at both sizes. | FI-28.2 |
-| FI-28.4 | build | Relayout after a font provider attached late, retiring `ArchiveWarning::FontsAttachedAfterPagination`. | `crates/tinker-pdf/src/epub.rs`, `crates/tinker-pdf/tests/relayout.rs` (new) | A book given its provider after open equals the book opened with it; failing first on today's warning. | FI-28.2 |
+| FI-28.4 | build | Relayout after a font provider attached late, retiring `ArchiveWarning::FontsAttachedAfterPagination`. | `crates/tinker-pdf/src/epub.rs`, `crates/tinker-pdf/tests/relayout.rs` (new) | A book given its provider after open equals the book opened with it. | FI-28.2 |
 | FI-28.5 | build | Layout accelerators saved as host-held bytes and reloaded. | `crates/tinker-pdf/src/epub.rs`, `crates/tinker-pdf/tests/relayout.rs` (new), `docs/features/epub.md` | Reloaded accelerators give identical pages; accelerators for other settings are ignored. | FI-28.3 |
 
 ## FI-29 — A reflowable view of fixed documents
@@ -727,7 +727,7 @@ it.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| FI-34.1 | fix | A partly encrypted EPUB opens its unencrypted parts (ruling 2), each encrypted resource a typed warning and drawn as missing, narrowing `ArchiveRefusal::EncryptedResources` to books with nothing readable. | `crates/tinker-pdf/src/epub.rs`, `crates/tinker-pdf/tests/epub_partial_encryption.rs` (new), `docs/features/epub.md` | `epub_partial_encryption.rs` (new): a generated book with one encrypted chapter opens with the rest drawn and one warning; failing first on today's refusal. | — |
+| FI-34.1 | fix | A partly encrypted EPUB opens its unencrypted parts (ruling 2), each encrypted resource a typed warning and drawn as missing, narrowing `ArchiveRefusal::EncryptedResources` to books with nothing readable. | `crates/tinker-pdf/src/epub.rs`, `crates/tinker-pdf/tests/epub_partial_encryption.rs` (new), `docs/features/epub.md` | `epub_partial_encryption.rs` (new): a generated book with one encrypted chapter opens with the rest drawn and one warning. | — |
 
 ## FI-35 — AFP and MO:DCA print streams
 
@@ -748,7 +748,7 @@ it.
 | FI-35.7 | build | Barcode objects drawn through ED-49's generators. | `crates/tinker-pdf/src/afp/barcode.rs` (new), `crates/tinker-pdf/tests/afp.rs` (new) | Analytic fixtures render to their PDF twins and the symbols decode through ED-50. | FI-35.2, ED-49, ED-50 |
 | FI-35.8 | build | Page segments, overlays, form definitions with medium maps, and copy groups. | `crates/tinker-pdf/src/afp/pages.rs` (new), `crates/tinker-pdf/tests/afp.rs` (new) | Analytic fixtures paginate and overlay as their PDF twins. | FI-35.4, FI-35.5 |
 | FI-35.9 | build | Resource groups inline and external, external ones through FI-27's provider. | `crates/tinker-pdf/src/afp/fields.rs` (new), `crates/tinker-pdf/tests/afp.rs` (new) | A stream whose resources are external renders as its inline twin. | FI-35.8, FI-27 |
-| FI-35.10 | test | AFP sniffed and opened, fuzzed and fingerprinted. | `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/afp.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md`, `crates/tinker-pdf/tests/determinism.rs` | `Document::open` opens an AFP stream; the fuzz target runs clean with the roster regenerated; the fingerprint holds on every K-07 target. | FI-35.6, FI-35.7, FI-35.9, K-07 |
+| FI-35.10 | test | AFP sniffed and opened, fuzzed and fingerprinted. | `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/afp.rs` (new), `fuzz/Cargo.toml`, `crates/tinker-pdf/tests/determinism.rs` | `Document::open` opens an AFP stream; the fuzz target runs clean; the fingerprint holds on every K-07 target. | FI-35.6, FI-35.7, FI-35.9, K-07 |
 
 ## FI-36 — EMF, EMF+ and WMF read
 
@@ -784,4 +784,4 @@ it.
 | FI-37.4 | build | Blocks and inserts, nested with attributes, line types and line weights. | `crates/tinker-pdf/src/dxf/entities.rs` (new), `crates/tinker-pdf/tests/dxf.rs` (new) | Fixtures render to their PDF twins. | FI-37.3 |
 | FI-37.5 | build | Text, formatted multi-line text and dimensions. | `crates/tinker-pdf/src/dxf/text.rs` (new), `crates/tinker-pdf/tests/dxf.rs` (new) | Fixtures render to their PDF twins and extract their text, in both builds. | FI-37.3 |
 | FI-37.6 | build | Layers as optional content groups, and paper-space layouts as pages with their viewports. | `crates/tinker-pdf/src/dxf/mod.rs` (new), `crates/tinker-pdf/tests/dxf.rs` (new) | Each layer is an optional content group; each layout is a page rendering as its twin. | FI-37.4, FI-37.5 |
-| FI-37.7 | test | DXF sniffed and opened, fuzzed and fingerprinted. | `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/dxf.rs` (new), `fuzz/Cargo.toml`, `docs/verification.md`, `crates/tinker-pdf/tests/determinism.rs` | `Document::open` opens a DXF drawing; the fuzz target runs clean with the roster regenerated; the fingerprint holds on every K-07 target. | FI-37.6, K-07 |
+| FI-37.7 | test | DXF sniffed and opened, fuzzed and fingerprinted. | `crates/tinker-pdf/src/standalone.rs`, `fuzz/fuzz_targets/dxf.rs` (new), `fuzz/Cargo.toml`, `crates/tinker-pdf/tests/determinism.rs` | `Document::open` opens a DXF drawing; the fuzz target runs clean; the fingerprint holds on every K-07 target. | FI-37.6, K-07 |

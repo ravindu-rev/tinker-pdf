@@ -2,8 +2,7 @@
 
 [The roadmap](../ROADMAP.md) says how a step is worked and what comes next.
 
-The owner's instruction puts OCR in scope and last, as a later
-implementation. Everything here is in-tree: preprocessing, layout analysis,
+OCR is in scope, and last. Everything here is in-tree: preprocessing, layout analysis,
 the recogniser and its models — built and trained here from data with known
 licences, or vendored as data with provenance where the owner admits it
 (H-39). Accuracy is never adjudicated by another recogniser (ruling 13):
