@@ -16,50 +16,31 @@ RSASSA-PSS and ECDSA in `tinker-pdf-crypto` beside the ciphers
 ([encryption](encryption.md)).
 
 **There is no boolean.** A verdict answers four questions separately, because
-they come apart in practice: four documents in the fetched corpora carry a
-signature that *verifies* over bytes the document no longer *has*, and no
-single flag can say that.
+they come apart in practice: a signature can *verify* over bytes the document
+no longer *has*, and no single flag can say that.
 
 ## What it does
 
 **Finding them.** `Document::signatures()` walks two roots. 12.7.4.5 says a
-signature is the `/V` of a `/FT /Sig` field, and believing only that finds 22
-of the 27 signatures in the fetched corpora; the other five are reachable only
-through the catalog's `/Perms` (12.8.4). Each entry records which root found
-it, because a `/UR3` usage-rights signature grants a reader capabilities and
-makes no claim about the document's content.
+signature is the `/V` of a `/FT /Sig` field, but some signatures are reachable
+only through the catalog's `/Perms` (12.8.4). Each entry records which root
+found it, because a `/UR3` usage-rights signature grants a reader capabilities
+and makes no claim about the document's content.
 
 **Coverage, classified rather than reported.** `/ByteRange` is four numbers a
 producer wrote. Every span is checked against the file it claims to describe:
 `WholeFile`, `Revision` for a signature a later incremental update was layered
 on (7.5.6), or `Suspicious` with the reason named — a range past the end of
 the file, spans that overlap, a gap that lands somewhere that is not a
-hexadecimal string. Of the corpus's 27: **16 whole-file, 5 over a revision, 6
-suspicious**.
-
-**All six suspicious ones are the file's defect, and the measurement that says
-so is the same in every one: the declared gap is exactly as long as the real
-`<…>` blob.** The signer wrote a `/ByteRange` that was right when it was
-written; what moved was the file. Two are veraPDF fixtures that reuse an
-11 516-byte sibling's `/ByteRange [0 1022 4862 6654]` verbatim in files of
-6 706 and 7 207 bytes — the clause they were built for is about `/Perms` and
-never looks at coverage, so nobody recomputed it. Three are full
-re-serialisations after signing, stale by 1 378, 4 214 and 523 273 bytes; the
-last of those carries two signatures whose shifts *differ*, which is what
-proves a re-serialisation rather than a trimmed prefix. One is a fuzzer
-mutation that breaks the cross-reference table as well. **None is this engine
-reading a well-formed file wrongly**, and the cases that would have been — an
-indirect `/ByteRange`, a signature over an earlier revision, a literal-string
-`/Contents`, an unfinished `[0 0 0 0]` placeholder — were each checked against
-the bytes and ruled out. This paragraph read 18/11/1/6 until 14 September 2026, which was
-the figure before the SafeDocs shard was pinned; the census at
-`crates/tinker-pdf/tests/signatures.rs` has asserted the current one since
-6 September, and the sentence ten lines above already used it.
+hexadecimal string.
 
 `/Contents` is read from the gap between the spans rather than from the object
 model. That is the only reading that can disagree with a lying `/ByteRange` —
 and in an encrypted document the object model returns a *decrypted* string
-where a signature covers the bytes as stored.
+where a signature covers the bytes as stored. A gap that is not a hexadecimal
+string yields no contents, so no CMS reaches a parser: reading a CMS the
+coverage classifier will not vouch for would be a verdict about the wrong
+bytes.
 
 **CMS and certificates.** `tinker-pdf-pki` reads RFC 5652 `SignedData`: both
 `SignerIdentifier` shapes, signed and unsigned attributes, `contentType`,
@@ -68,19 +49,18 @@ where a signature covers the bytes as stored.
 `tinker_pdf_pki::tsp` reads — and, for an RSASSA-PSS signer or certificate,
 the `RSASSA-PSS-params` that say how to verify it. RFC 5652
 §5.4's re-encoding (the stored `[0] IMPLICIT` tag replaced by `SET OF` before
-digesting) lives in one function and is **adjudicated by data**: 19 real
-signatures from six producers verify with the substitution and not one
-verifies without it.
+digesting) lives in one function and is **adjudicated by data**: the CMS
+census (`crates/tinker-pdf/tests/cms_census.rs`) verifies real signatures from
+several producers with the substitution and asserts that none verifies
+without it.
 
-`SignedData` is read as BER, which RFC 5652 §5.1 permits and a fifth of the
-corpus's signed documents need — Acrobat Distiller, Adobe LiveCycle and
-LibreOffice all emit indefinite lengths. The scan **walks** to the
-end-of-contents pair rather than searching for `00 00`, because those two
-bytes occur constantly inside real content and searching for them produces a
-different well-formed reading of the same bytes. `signedAttrs` is held to DER
-regardless, because that is what gets digested.
-
-All 71 X.509 certificates in the corpus parse.
+`SignedData` is read as BER, which RFC 5652 §5.1 permits and real producers
+write — Acrobat Distiller, Adobe LiveCycle and LibreOffice all emit indefinite
+lengths. The scan **walks** to the end-of-contents pair rather than searching
+for `00 00`, because those two bytes occur constantly inside real content and
+searching for them produces a different well-formed reading of the same
+bytes. `signedAttrs` is held to DER regardless, because that is what gets
+digested.
 
 **`GeneralNames` are decoded** (RFC 5280 §4.2.1.6), wherever a certificate or
 an attribute names something other than by distinguished name: the
@@ -160,9 +140,8 @@ finishes the file, patches `/ByteRange` to describe what it finished, digests
 the covered spans and hands the digest to a `Signer` that returns finished CMS
 bytes. It can certify the document at any of 12.8.2.2's three levels and lock
 fields per 12.8.2.4; a certifying save writes the catalog's `/Perms /DocMDP`
-(12.8.4), which until September 2026 it computed after the update's objects
-had been gathered and so never wrote. The writer and the reader share one
-`digest_spans`, so what is signed and what is checked cannot drift.
+(12.8.4). The writer and the reader share one `digest_spans`, so what is
+signed and what is checked cannot drift.
 
 **A document timestamp.** `DocumentEditor::save_timestamped` adds ISO
 32000-2 12.8.5's `/Type /DocTimeStamp` with `/SubFilter /ETSI.RFC3161`, through
@@ -215,9 +194,8 @@ seal is an object of the same incremental update as the signature, so the
 `/ByteRange` covers it: changing what it draws afterwards is a modification
 the signature detects. The page, the rectangle and the image are checked
 before anything is written (`SignError::NoSuchPage`, `RectUnusable`,
-`ImageUnusable`). The invisible field is unchanged: a zero `/Rect` and
-`/F 132`, which is Print and Locked — the comment beside it had called it
-the NoView bit, which is 32.
+`ImageUnusable`). An invisible field has a zero `/Rect` and `/F 132`, which is
+Print and Locked.
 
 ## API
 
@@ -256,9 +234,9 @@ naming where the signature goes, how much space to reserve, and what to
 certify. Where it goes is a `SigningTarget`: an existing empty field, a new
 invisible one, or a new visible one on a page and in a `Rect` with a
 `SignatureAppearance` (`new()` for text alone, `with_image(SignatureImage)`
-for a picture beside it). `SigningTarget` and `SignError` became
-`#[non_exhaustive]` with that variant, and `SigningTarget` lost `Eq`, since
-the rectangle is four `f64`s — one break, taken once.
+for a picture beside it). `SigningTarget` and `SignError` are
+`#[non_exhaustive]`, and `SigningTarget` is not `Eq`, since the rectangle is
+four `f64`s.
 
 ```rust
 let mut request = SigningRequest::new(
@@ -311,133 +289,99 @@ let crl = document.cos().stream_decoded(store.crls[0]);
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| Private-key operations of any kind | none offered — `Signer` returns finished CMS | no key parsing, no key generation, no signing arithmetic yet, so the engine holds no key material; signing with a private key in the engine is in scope since the owner's parity decision of 9 October 2026 | [ROADMAP](../ROADMAP.md) SG-01…SG-09, SG-23 |
-| A bundled root store | `Chain::NoAnchors` when the caller supplies none | which certificates to trust is a policy, and a library that ships one has made the caller's decision for them; trust lists the host supplies are a roadmap row, and bundling one is the owner's decision | [ROADMAP](../ROADMAP.md) SG-14 |
+| Private-key operations of any kind | none offered — `Signer` returns finished CMS | no key parsing, key generation or signing arithmetic, so the engine holds no key material; signing with a private key in the engine is a roadmap row | [ROADMAP](../ROADMAP.md) SG-01…SG-09, SG-23 |
+| A bundled root store | `Chain::NoAnchors` when the caller supplies none | which certificates to trust is a policy, and a library that ships one has made the caller's decision for them; trust lists the host supplies are a roadmap row | [ROADMAP](../ROADMAP.md) SG-14 |
 | Deciding whether a certificate is expired, unasked | validity reported; judged only against a caller-supplied instant | ruling 4 bans a clock, and "expired" is a claim about *now* — a library that invents one answers differently on different days | [rulings](../rulings.md) ruling 4 |
-| CRL and OCSP fetching | embedded revocation data surfaced, not yet evaluated | the engine performs no I/O, so fetching stays the host's; parsing and evaluating what the host supplies is a roadmap row | [ROADMAP](../ROADMAP.md) SG-10 |
-| An elliptic curve that is not P-256 or P-384 | `Unchecked::UnsupportedKey`, naming the curve's OID | each curve needs its own constants and its own vectors; P-521, the Brainpool curves and EdDSA are in scope since the owner's parity decision of 9 October 2026 | RFC 5480 §2.1.1; [ROADMAP](../ROADMAP.md) SG-02…SG-04 |
-| A compressed elliptic-curve point | `Unchecked::UnsupportedKey`, naming the form octet | recovering `y` means a square root in the field and guessing its sign, which would produce a different key half the time; no corpus certificate carries one | SEC 1 §2.3.3; [ROADMAP](../ROADMAP.md) SG-02 |
+| CRL and OCSP fetching | embedded revocation data surfaced, not evaluated | the engine performs no I/O, so fetching stays the host's; parsing and evaluating what the host supplies is a roadmap row | [ROADMAP](../ROADMAP.md) SG-10 |
+| An elliptic curve that is not P-256 or P-384 | `Unchecked::UnsupportedKey`, naming the curve's OID | each curve needs its own constants and its own vectors; P-521, the Brainpool curves and EdDSA are roadmap rows | RFC 5480 §2.1.1; [ROADMAP](../ROADMAP.md) SG-02…SG-04 |
+| A compressed elliptic-curve point | `Unchecked::UnsupportedKey`, naming the form octet | recovering `y` means a square root in the field and guessing its sign, which would produce a different key half the time | SEC 1 §2.3.3; [ROADMAP](../ROADMAP.md) SG-02 |
 | An indefinite length inside `signedAttrs` | `CmsError::IndefiniteSignedAttributes` | RFC 5652 §5.4 requires those bytes to be DER and they are what gets digested; BER is read everywhere else in a `SignedData`, and only here is it refused | RFC 5652 §5.4 |
 
 ## Verified
 
 **Published vectors gate the arithmetic**, as they gate every other primitive
-in this tree ([encryption](encryption.md)). **940 of them ran**: 360 NIST CAVP
-`SigVer15` for RSA (60 valid and 300 that must be refused, moduli of 1 024 to
-4 096 bits crossed with SHA-1/256/384/512, of which 150 are forged paddings),
-360 CAVP `SigVerPSS` for RSASSA-PSS (60 valid and 300 refused, NIST's five
-negative kinds sixty apiece), RSA Laboratories' 60 PSS signatures from
-`pss-vect.txt` with four spoilings each, 120 CAVP ECDSA `SigVer` and 24 `PKV`
-for P-256 and P-384, and 16 from RFC 6979. CAVP's exponents are all large, so it never tests the low-exponent
+in this tree ([encryption](encryption.md)): NIST CAVP `SigVer15` for RSA
+(valid vectors and vectors that must be refused, moduli of 1 024 to 4 096 bits
+crossed with SHA-1/256/384/512, forged paddings among them), CAVP `SigVerPSS`
+for RSASSA-PSS (NIST's five negative kinds), CAVP ECDSA `SigVer` and `PKV` for
+P-256 and P-384 (all in `tinker-pdf-crypto/tests/data/cavp/`), RSA
+Laboratories' PSS signatures from `pss-vect.txt` with four spoilings each, and
+RFC 6979's. CAVP's exponents are all large, so it never tests the low-exponent
 forgery; hand-built negatives cover it by choosing a modulus that makes the
-verifier recover any chosen block without a private key. Four more PSS signatures, which no
-published set has, are OpenSSL's: an MGF1 hash other than the message hash —
-SHA-256 under MGF1-SHA-1 among them — each verified under its own parameters
-and refused when unmasked with the message hash
+verifier recover any chosen block without a private key. Four more PSS
+signatures, which no published set has, are OpenSSL's: an MGF1 hash other than
+the message hash — SHA-256 under MGF1-SHA-1 among them — each verified under
+its own parameters and refused when unmasked with the message hash
 (`tinker-pdf-crypto/tests/data/openssl/pss-mgf1.txt`).
 
-**One bug those vectors did not catch**, recorded because of how it hid:
-Montgomery multiplication's conditional subtraction borrowed against the full
-limb count while the carry borrowed against the used count, so every RSA key
-below 4 096 bits came back correct in its low limbs and all-ones above them.
-The inner loops read only low limbs, so it rode through an entire modular
-exponentiation invisibly and would have surfaced as a *valid signature
-reported invalid*, intermittently. All 360 CAVP vectors passed before the fix.
+**The corpus adjudicates the parts it can.** Three `#[ignore]`d suites read the
+fetched corpora: the census in `crates/tinker-pdf/tests/signatures.rs`
+classifies every signature's coverage, `cms_census.rs` parses every CMS blob
+and holds RFC 5652 §5.4 to real signatures, and `verdicts.rs` gives every
+corpus signature a verdict. Corpus certificates are held to values OpenSSL
+produced and this repository committed
+(`tests/signature_support/certificates.tsv`, read by `tests/certificates.rs`)
+— serial octets, validity window, SubjectPublicKeyInfo digest and both common
+names.
 
-**The corpus adjudicates the parts it can.** Over the 27 signatures:
-**21 CMS blobs parse, 20 signatures verify** against the key in their own
-certificate, **0 fail**, 16 document digests match and **4 differ**. Nine of
-those signatures arrived on 6 September 2026 with the production corpus —
-documents signed by people rather than by a test suite, including a Romanian
-qualified signature on `safedocs/0000020.pdf` that verifies against the key in
-its own certificate. The four
-that differ are veraPDF's permission fixtures, and the cause is in the bytes:
-three of them, of different sizes, carry the byte-identical CMS blob. A
-signature cannot cover three documents.
+**ECDSA** is wired against published vectors — the curve arithmetic is NIST
+CAVP's — and two committed fixtures (`tests/signature_support/ecdsa-p256.pdf`
+and `-p384.pdf`, built by `ecdsa-fixtures.py` and OpenSSL 3.5.5) carry the CMS,
+the certificates and the signature value that a second implementation
+produced. `tests/ecdsa_verdict.rs` takes them from the `/ByteRange` to an
+anchored chain and, for every way it spoils the file, insists the answer is not
+`Verified`. The one link only this repository vouches for is the `/ByteRange`
+spans, because the generator and the reader are the same reading of 12.8.1 —
+the fixtures' own README says so, and `tests/ecdsa_verdict.rs` says it again at
+the top.
 
-The six remaining are the ones whose `/ByteRange` does not bracket their
-`/Contents`. They carry a readable blob and this build declines to hand it to
-a parser, because reading a CMS the coverage classifier will not vouch for is
-a verdict about the wrong bytes.
-
-All 71 certificates across those blobs parse, and 17 of them are held to
-values OpenSSL produced once and this repository committed
-(`tests/signature_support/certificates.tsv`) — serial octets, validity window,
-SubjectPublicKeyInfo digest and both common names.
-
-**ECDSA is verified, and the corpus says nothing about it.** Of the 34
-`SignerInfo`s and 71 certificates in those blobs, **not one uses ECDSA** —
-every signer is RSASSA-PKCS1-v1_5 and every certificate is signed with RSA,
-measured on 14 September 2026. So the P-256 and P-384 arms are wired against a
-published vector instead, which is the other half of the rule: the curve
-arithmetic is NIST CAVP's, and two committed fixtures
-(`tests/signature_support/ecdsa-p256.pdf` and `-p384.pdf`, built once by
-OpenSSL 3.5.5) carry the CMS, the certificates and the signature value that a
-second implementation produced. Ten tests in `tests/ecdsa_verdict.rs` take
-them from the `/ByteRange` to an anchored chain and, for each of six ways of
-spoiling the file, insist the answer is not `Verified`. The one link only this
-repository vouches for is the `/ByteRange` spans, because the generator and
-the reader are the same reading of 12.8.1 — the fixtures' own README says so,
-and `tests/ecdsa_verdict.rs` says it again at the top.
-
-**RSASSA-PSS is verified, on the same terms.** The corpus has no PSS signer
-either, so the arm is wired against the two published vector sets above and
-one fixture OpenSSL 3.0.13 built on 2 October 2026
-(`tests/signature_support/rsa-pss.pdf`): a PSS-signed CMS whose signer key is
-an `id-RSASSA-PSS` key restricted to SHA-256 and a salt of at least 32, under
-a root that signs certificates with PSS too. `tinker_pdf_pki::pss::parameters`
-reads RFC 4055 §3.1's `RSASSA-PSS-params` — every field defaulted, explicit
-tags, MGF1 the only mask generator, `trailerFieldBC` the only trailer — and the
-verifier takes the hash, the mask hash and the salt length from them and never
-from the recovered block. RFC 4056 §3's key restrictions are enforced: a
-signature with a salt shorter than its key permits is `Failed` even where the
-arithmetic would accept it. So is RFC 4055 §1.2's restriction of the key
-itself: an `id-RSASSA-PSS` key made no PKCS#1 v1.5 signature, so one is
-`Failed` as a signer's and `Broken` as a chain link's, and the sealing writer
-encrypts nothing to it. Eight tests in `tests/signature_shapes.rs` take the
-fixture to an anchored chain over a PSS link and refuse it five ways. Two of
+**RSASSA-PSS** is wired against the two published vector sets above and one
+fixture OpenSSL 3.0.13 built (`tests/signature_support/rsa-pss.pdf`): a
+PSS-signed CMS whose signer key is an `id-RSASSA-PSS` key restricted to
+SHA-256 and a salt of at least 32, under a root that signs certificates with
+PSS too. `tinker_pdf_pki::pss::parameters` reads RFC 4055 §3.1's
+`RSASSA-PSS-params` — every field defaulted, explicit tags, MGF1 the only mask
+generator, `trailerFieldBC` the only trailer — and the verifier takes the hash,
+the mask hash and the salt length from them and never from the recovered
+block. RFC 4056 §3's key restrictions are enforced: a signature with a salt
+shorter than its key permits is `Failed` even where the arithmetic would
+accept it. So is RFC 4055 §1.2's restriction of the key itself: an
+`id-RSASSA-PSS` key made no PKCS#1 v1.5 signature, so one is `Failed` as a
+signer's and `Broken` as a chain link's, and the sealing writer encrypts
+nothing to it. `tests/signature_shapes.rs` takes the fixture to an anchored
+chain over a PSS link and refuses its spoiled variants. Two of
 EMSA-PSS-VERIFY's checks — the bits above `emBits` and the `0xbc` trailer —
-are reached by no published vector at all, because a signer cannot produce a
-block that breaks either while keeping `H` right; a counted injection measured
-both at zero, and a block recovered from RSA Laboratories' own 1 026-bit
-example and then spoiled now holds them up.
+are reached by no published vector, because a signer cannot produce a block
+that breaks either while keeping `H` right; a block recovered from RSA
+Laboratories' own 1 026-bit example and then spoiled holds them up
+(`a_block_a_signer_could_not_have_written_is_refused_even_where_h_matches`).
 
-**The first signature this engine wrote that it also verifies.** Every
-signing test before September 2026 used a stub that returned bytes, so the
-round trip ended at "the digest the signer saw is the digest the reader
-recomputes". `crates/tinker-pdf/tests/visible_signature.rs` signs for real: a
-throwaway 2048-bit RSA key and self-signed certificate OpenSSL generated once
+**A signature this engine writes, verified by this engine.**
+`crates/tinker-pdf/tests/visible_signature.rs` signs for real: a throwaway
+2048-bit RSA key and self-signed certificate OpenSSL generated
 (`tests/signature_support/README.md`), a CMS `SignedData` the test assembles,
 and the private exponent applied with `tinker_pdf_crypto::bignum`. Over a
 document carrying a drawn seal the verdict is `WholeFile`, `Matches`,
 `Verified` and anchored to that certificate; the seal's object sits inside a
 covered span, and flipping one bit of what it draws turns the digest to
-`Differs`. Seven tests, and six reintroduced defects each firing — one of
-them only after the assertion was changed to look for the picture's own two
-greys, because a missing image draws ruling 2's placeholder and the first
-version counted ink. Both halves of the arithmetic are this repository's, so
-the evidence is the vectors that already gate `bignum` and the OpenSSL-made
-key and certificate, not a second verifier.
+`Differs`. Both halves of the arithmetic are this repository's, so the
+evidence is the vectors that gate `bignum` and the OpenSSL-made key and
+certificate, not a second verifier.
 
 **A signature with no signed attributes** is held to one OpenSSL 3.0.13
 fixture (`tests/signature_support/no-signed-attributes.pdf`, `cms -sign
--noattr`), and to five tests in `tests/signature_shapes.rs`: it verifies and
-anchors; a changed byte or a flipped signature bit fails it and leaves the
-digest unanswered; and naming SHA-384 in the signer's unsigned
-`digestAlgorithm` fails it, because the digest is the signer's to name. The
-corpus has exactly one such signer, `bug854315.pdf`'s, and its first verdict
-under this code has not been measured: `tests/verdicts.rs` tallies it apart
-and prints it, and asserts only that it is no longer unchecked.
+-noattr`) and to `tests/signature_shapes.rs`: it verifies and anchors; a
+changed byte or a flipped signature bit fails it and leaves the digest
+unanswered; and naming SHA-384 in the signer's unsigned `digestAlgorithm`
+fails it, because the digest is the signer's to name.
 
 **`adbe.pkcs7.sha1`** is held to two OpenSSL 3.0.13 fixtures
 (`tests/signature_support/pkcs7-sha1.pdf` and `pkcs7-sha1-no-attributes.pdf`,
 `cms -sign -nodetach` over the covered bytes' SHA-1, the signer digesting with
-SHA-256 so that the two digests cannot be confused) and five tests in
-`tests/signature_shapes.rs`, the one that matters being a document and its
-encapsulated digest replaced together. The corpus's one such file,
-`poppler-395-0-fuzzed.pdf`, is a fuzzer's mutation whose `/ByteRange` does not
-bracket its `/Contents`, so it reaches no CMS parser and its verdict does not
-move.
+SHA-256 so that the two digests cannot be confused) and to
+`tests/signature_shapes.rs`, the test that matters being a document and its
+encapsulated digest replaced together
+(`a_document_and_its_encapsulated_digest_replaced_together_are_caught`).
 
 **`GeneralNames`** are held to RFC 5280 Appendix C.2's own `subjectAltName`,
 octet for octet, and to a CAdES signature OpenSSL 3.0.13 made
@@ -450,40 +394,35 @@ the root.
 
 **Timestamps** are held to a real RFC 3161 token. OpenSSL 3.0.13's own TSA
 (`openssl ts -reply`) stamped the signature of
-`tests/signature_support/signature-timestamp.pdf` on 2 October 2026, with a
-certificate whose only purpose is `timeStamping`, critical, under a root of
-its own, and the token was spliced into the signer's unsigned attributes.
-Eight tests in `tests/signature_shapes.rs` read it as OpenSSL printed it and
-validate it end to end, and refuse it six ways: an authority nobody anchored,
-a token over a different signature, a flipped bit in the token's signature, a
-`genTime` rewritten under an intact signature, an extended key usage made
-non-critical, and an ESS hash naming another certificate. The corpus carries
-seven tokens (`cms_census.rs`); what this code makes of them has not been
-measured, because the corpora could not be fetched where it was written.
+`tests/signature_support/signature-timestamp.pdf`, with a certificate whose
+only purpose is `timeStamping`, critical, under a root of its own, and the
+token was spliced into the signer's unsigned attributes.
+`tests/signature_shapes.rs` reads it as OpenSSL printed it, validates it end to
+end, and refuses it spoiled: an authority nobody anchored, a token over a
+different signature, a flipped bit in the token's signature, a `genTime`
+rewritten under an intact signature, an extended key usage made
+non-critical, and an ESS hash naming another certificate.
 
 **Document timestamps** are held to two real tokens from the same OpenSSL
 TSA. One stamps a document the fixture script laid out
 (`tests/signature_support/document-timestamp.pdf`); the other stamps a document
 **this engine wrote** — `save_timestamped` over the signed
-`no-signed-attributes.pdf`, its digest handed to OpenSSL once and the token
+`no-signed-attributes.pdf`, its digest handed to OpenSSL and the token
 committed (`engine-timestamp-token.der`). The writer is deterministic, so the
-digest is the same on every run, and `tests/document_timestamp.rs` says so
-first, in as many words, if a writer change ever moves it. Over the engine's
-output the earlier signature reads `Revision` and still verifies, and the
-timestamp reads `WholeFile`, `Matches`, `Verified`, anchored and `Fit`; the
-strict validator finds nothing the update added. Nine tests.
+digest is the same on every run, and `tests/document_timestamp.rs` checks that
+first. Over the engine's output the earlier signature reads `Revision` and
+still verifies, and the timestamp reads `WholeFile`, `Matches`, `Verified`,
+anchored and `Fit`; the strict validator finds nothing the update added.
 
 **The document security store** is held to a CRL and an OCSP response
 OpenSSL 3.0.13 issued for the `no-signed-attributes.pdf` signer from the CA
-that issued it (`openssl ca -gencrl`, `openssl ocsp -index`). Eight tests in
+that issued it (`openssl ca -gencrl`, `openssl ocsp -index`), in
 `tests/security_store.rs`: the four kinds of material come back byte for byte;
 they are filed under the key SHA-1 of the stored `/Contents` gives, written
-out a second way; the signature still verifies, now over a revision; the
+out a second way; the signature still verifies, over a revision; the
 `/ESIC` extension is declared; a second round extends the store and writes
 nothing twice; a store built malformed by hand is read leniently with each
-skip named; and the strict validator finds nothing the update added. No
-corpus measurement: a census of `/DSS` across the fetched corpora is not
-taken here.
+skip named; and the strict validator finds nothing the update added.
 
 Fixtures cover what the corpus cannot: a signature over a revision, a merged
 field dictionary, both `/Contents` gap conventions, all four digest
@@ -492,16 +431,9 @@ declines, and — the shape the whole design exists for — one byte flipped
 inside a signed range, which turns the document digest to `Differs` and leaves
 the signature `Verified`.
 
-All of it rides in the workspace suite, which stood at **4 879 passed, 0
-failed, 58 ignored across 218 suites** when the ECDSA arm landed on
-14 September 2026 — measured on that branch alone, and other lanes were moving
-the same total on the same day.
-
-**What this cannot establish, stated rather than absorbed.** Under ruling 13
-nothing outside this repository has ever agreed that a signature this code
-accepts is acceptable, or that one it rejects is not. The primitives are
-gated on published vectors and RFC 5652 §5.4 is settled by real signatures
-from six producers, but the assembly is this engine agreeing with itself.
-**A signature everything in-tree accepts may still be rejected by a real
-validator.** That is not closed, and the interop measurement the roadmap asks
-for is a dated one-time record rather than a check.
+**What this cannot establish.** Under ruling 13 nothing outside this
+repository checks that a signature this code accepts is acceptable, or that
+one it rejects is not. The primitives are gated on published vectors and RFC
+5652 §5.4 is checked against real signatures, but the assembly is this engine
+agreeing with itself. **A signature everything in-tree accepts may still be
+rejected by a real validator.** That is not closed.

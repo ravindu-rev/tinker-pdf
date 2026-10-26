@@ -75,10 +75,9 @@ encrypted (7.6.2, 7.6.3.2) with a per-object initialisation vector derived
 from the file key and object number, so identical plaintexts never
 encrypt identically; ciphertext strings are written in hex form. That
 includes the strings in a stream's own dictionary — an embedded file's
-`/Params` `/CheckSum` and `/ModDate`, a form's `/PieceInfo` — which until
-October 2026 every encrypting save, a rewrite or an update under an
-inherited key, wrote as given: in the clear, and then decrypted into
-garbage on reopening (`strings_in_a_stream_dictionary_are_encrypted_too`).
+`/Params` `/CheckSum` and `/ModDate`, a form's `/PieceInfo` — on a rewrite
+and on an update under an inherited key
+(`strings_in_a_stream_dictionary_are_encrypted_too`).
 Encryption composes with object streams and with linearized output
 (Annex F) — the linearized writer encrypts each object as it serialises it
 and measures the layout from the ciphertext. A rewrite of an opened
@@ -107,20 +106,18 @@ callers build by field and `save` has no error to return
 
 **An empty owner password is the user's.** Algorithm 2.A tries the owner
 password before the user's, and a reader tries the empty password before
-asking for one, so an `/O` derived from the empty string opened the file
-with the owner's authority — and the file key — for anybody, whatever the
-user password was. That was the plainest call on every surface: the C ABI
-documents a null owner password as "none" and the Python binding defaults
-to one. The writer now takes Algorithm 3 step (a)'s rule for R2 to R4 — "if
-there is no owner password, use the user password instead" — for R6 too, so
-a document with only a user password opens with it and with nothing else
+asking for one, so an `/O` derived from the empty string — which is what the
+C ABI's null owner password and the Python binding's default both give —
+would open the file with the owner's authority, and the file key, for
+anybody, whatever the user password was. So the writer takes Algorithm 3
+step (a)'s rule for R2 to R4 — "if there is no owner password, use the user
+password instead" — for R6 too, and a document with only a user password
+opens with it and with nothing else
 (`an_empty_owner_password_is_the_user_password`, and through the C ABI
-`an_owner_password_left_null_is_the_users`). What it costs is stated rather
-than hidden: whoever has the user password then has the owner's authority,
-so `permissions` restrict nobody who can open the file unless an owner
-password is given. With neither password the empty one is both, as before.
-Found by `tpdf encrypt`, which refused the case on its own until the facade
-made the decision for every surface (ruling 11).
+`an_owner_password_left_null_is_the_users`). Whoever has the user password
+then has the owner's authority, so `permissions` restrict nobody who can open
+the file unless an owner password is given. With neither password the empty
+one is both.
 
 **A save that would undo the encryption is the editor's question.** A
 rewrite of an encrypted document asking for no encryption drops `/Encrypt`
@@ -157,9 +154,8 @@ allowed: the document is encrypted (`SaveRefusal::NotEncrypted` otherwise),
 and whoever opened it holds the owner's authority or was withheld nothing.
 A rollback forgets an import it undoes
 (`tinker-pdf-cos/tests/save_refusals.rs`). Permissions stay advisory and
-the save doors do not ask — `save` returns bytes, so whether it refuses is
-an API change the owner decides in the ROADMAP's CLI row — but `tpdf` asks
-before every write, which until October 2026 it decided on its own.
+the save doors do not ask — `save` returns bytes, so whether they refuse is
+an open API question — but `tpdf` asks before every write.
 
 ## API
 
@@ -220,9 +216,9 @@ let bytes = doc.editor().save_sealed(&WriteOptions::default(), &sealed)?;
 | Sealing to an RSA key its certificate restricts to signing | `SealError::KeyRestricted { index }` | RFC 4055 §1.2: a key published under `id-RSASSA-PSS` is for RSASSA-PSS signatures only, and only `rsaEncryption` leaves it free for key transport; `openssl cms -encrypt` refuses the same certificate | [design/pubsec.md](../design/pubsec.md) |
 | A sealed incremental save | `SealError::NotRewrite` | an update appends under an `/Encrypt` that still stands, and cannot change who the file is sealed to | this page |
 | A password and recipients both | `SealError::PasswordAlsoRequested` | a document has one security handler | 7.6 |
-| Recipients sealed with different permissions | none offered — one envelope, one `/P` for all | 7.6.5 allows an envelope per group; not yet asked for | [design/pubsec.md](../design/pubsec.md) |
-| Sealing below `/V 5` — `s3`, `s4`, RC4, AES-128 | none offered — the writer emits `AESV3` | as R6 is the password writer's only revision; reading all of them is unchanged | [ROADMAP](../ROADMAP.md) SE-01 |
-| An envelope's content cipher this build does not implement — AES-192-CBC and RC2 are the reachable ones | `PubSecError::UnsupportedContentCipher` | AES-128/256-CBC, RC4 and `des-ede3-cbc` are implemented, the last being what OpenSSL still picks by default for older recipients; anything else is named rather than silently unopenable | [design/pubsec.md](../design/pubsec.md) |
+| Recipients sealed with different permissions | none offered — one envelope, one `/P` for all | 7.6.5 allows an envelope per group; the writer writes one | [design/pubsec.md](../design/pubsec.md) |
+| Sealing below `/V 5` — `s3`, `s4`, RC4, AES-128 | none offered — the writer emits `AESV3` | as R6 is the password writer's only revision; all of them are read | [ROADMAP](../ROADMAP.md) SE-01 |
+| An envelope's content cipher this build does not implement — AES-192-CBC and RC2 are the reachable ones | `PubSecError::UnsupportedContentCipher` | AES-128/256-CBC, RC4 and `des-ede3-cbc` are implemented, the last being what OpenSSL picks by default for older recipients; anything else is named rather than silently unopenable | [design/pubsec.md](../design/pubsec.md) |
 | Recipient shapes other than key transport | `EnvelopedError::UnsupportedRecipientKind` | key agreement, KEK and password recipients are recognised by tag and refused; every PDF public-key handler in the wild uses key transport | RFC 5652 §6.2; [ROADMAP](../ROADMAP.md) SE-07 |
 | Writing R5 | none offered — the writer emits R6 and nothing else | R5 is the withdrawn draft; reading it works and carries `HandlerNote::DeprecatedRevision5` | [pdf20-deltas](../pdf20-deltas.md) |
 | Wrong password / unencrypted document | `AuthError::WrongPassword`, `AuthError::NotEncrypted` | the ordinary API errors, typed so a prompt loop can tell them apart | — |
@@ -236,36 +232,30 @@ engine holds no key material to do. The envelope is CMS `EnvelopedData` and is
 parsed by `tinker-pdf-pki`; the file key is the digest 7.6.5 describes over the
 unsealed seed and every `/Recipients` string in file order.
 
-**It has no corpus behind it at all — zero of 5 605 files use this handler**
-(re-measured 15 September 2026; `/Adobe.PubSec` and `/Recipients` are each
-zero), and no tool available here produces one, qpdf included. So the evidence
-splits three ways, and only the middle layer is weak:
+No fixture is a public-key-encrypted document another PDF implementation made,
+so the evidence splits three ways, and only the middle layer is weak:
 
 - the envelope parsing is checked against structures **OpenSSL produced**,
   which is real interop;
 - the **content ciphers are each held to published vectors** — FIPS 197 and
-  RFC 6229 as before, and since Triple DES landed, 500 NIST CAVP known answers
-  for `des-ede3-cbc`. That layer owes the corpus nothing;
+  RFC 6229, and NIST CAVP known answers for `des-ede3-cbc`;
 - the key derivation between them is checked against a second implementation
   written from the same clause by the same author, which catches a
   transcription slip and **cannot catch a misreading**.
 
 So a document this code opens is, at the derivation step, a document this code
 agrees with itself about. [design/pubsec.md](../design/pubsec.md) records that
-as an open risk rather than a footnote.
+as an open risk.
 
 Writing narrows the gap from the other side without closing it. The envelope
 the writer seals is RFC 5652's byte for byte outside its random fields, as is
 the one OpenSSL sealed to the same certificate, both held to an encoding
-written from the RFCs; and
-**OpenSSL 3.0.13 opened one** (`cms -decrypt`, 2 October 2026) to the seed and
-the permissions, after which `openssl enc -aes-256-cbc` decrypted every
-content stream of the sealed file under the derived key. RSAES-PKCS1-v1_5 is
-held to all 300 of RSA Laboratories' encryption known answers. The key
-OpenSSL was handed, though, came from the same reading of 7.6.5 the reader
-uses, so the derivation is still one author agreeing with themselves.
+written from the RFCs. RSAES-PKCS1-v1_5 is held to RSA Laboratories'
+encryption known answers. The key the writer derives comes from the same
+reading of 7.6.5 the reader uses, so the derivation is still one author
+agreeing with themselves.
 
-One reader gap the writer found and works around: ISO 32000-1 Table 27 puts the
+One reader gap, which the writer works around: ISO 32000-1 Table 27 puts the
 public-key handler's `/EncryptMetadata` in the crypt filter, and the reader
 looks for it on `/Encrypt` only. A third-party `/V 4` or `/V 5` file that
 says `false` in its crypt filter derives the wrong key here. The writer writes
@@ -278,18 +268,16 @@ FIPS 197 appendix C known-answer blocks and NIST SP 800-38A F.2 CBC
 vectors (`aes.rs`), FIPS 180-4 examples for SHA-256/384/512 (`sha2.rs`)
 and for SHA-1 including the million-`a` vector (`sha1.rs`), RFC 6229
 keystream vectors (`rc4.rs`), the complete RFC 1321 appendix A.5 suite
-(`md5.rs`), and for Triple DES **500 NIST CAVP known answers** across seven
-committed files (`des.rs`) — the variable-plaintext and variable-key KATs,
-which between them walk every plaintext and every key bit position, the
-substitution-table, permutation-operation and inverse-permutation KATs, and
-the two multi-block message tests. The five KATs are all keyed
-`K1 = K2 = K3` and all single-block, so between them they cannot see EDE3's
-*order*, the CBC chain, or the 16-byte key bundle at all; the three-key file
-sees the first two and the two-key file the third, and a counted-injection
-campaign is how that was established rather than assumed. `handler.rs` pins
-constant-time comparison, Algorithm 2.B
-termination and the `/P -2056` fixture that reads "printing denied,
-copying permitted" correctly.
+(`md5.rs`), and for Triple DES **NIST CAVP known answers** from the committed
+`tests/data/cavp/tdes_cbc_*.rsp` files (`des.rs`) — the variable-plaintext and
+variable-key KATs, which between them walk every plaintext and every key bit
+position, the substitution-table, permutation-operation and
+inverse-permutation KATs, and the two multi-block message tests. The five KATs
+are all keyed `K1 = K2 = K3` and all single-block, so between them they cannot
+see EDE3's *order*, the CBC chain, or the 16-byte key bundle at all; the
+three-key file sees the first two and the two-key file the third. `handler.rs`
+pins constant-time comparison and Algorithm 2.B termination, and `lib.rs` the
+`/P -2056` fixture that reads "printing denied, copying permitted" correctly.
 
 `crates/tinker-pdf-cos/tests/encryption.rs` decrypts real encrypted
 fixtures: user and owner passwords told apart, a wrong password refused,
@@ -306,8 +294,7 @@ does the same for a document sealed to a certificate, its key holder a test
 `Recipient` over the committed `visible-signer-key.der`.
 `crates/tinker-pdf-cos/tests/strict_validator.rs`
 holds the encrypted output — plain and linearized — to ISO 32000 read
-strictly, including 7.5.5 Table 15's `/ID`, which no file this engine wrote
-carried until the validator refused one.
+strictly, including 7.5.5 Table 15's `/ID`.
 
 That identifier is a hash of the document rather than of the moment (ruling 4
 bans a clock), and on an encrypted write the caller's entropy goes into the
@@ -316,11 +303,9 @@ holding a candidate document could hash it and check the `/ID`, which is in
 the clear, with no password. For the same reason an encrypted write derives
 *both* halves instead of inheriting 14.4's permanent one from its source.
 
-Two of the 51 fuzz targets are this feature's: `crypt` drives
+Two fuzz targets are this feature's: `crypt` drives
 authentication with input-chosen field widths and both decrypt paths over
 a handler the crate built itself, and `crypt_ciphers` drives the raw
 primitives; their committed seeds are written by a test inside
 `handler.rs` so seeds and carve order cannot drift, including the one
-pre-R6 seed that genuinely authenticates. All of it rides in the
-workspace suite: 4 879 passed, 0 failed, 58 ignored (Windows x86_64,
-14 September 2026) — [verification](../verification.md).
+pre-R6 seed that genuinely authenticates.

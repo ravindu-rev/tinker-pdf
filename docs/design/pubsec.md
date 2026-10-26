@@ -6,14 +6,11 @@ certificates instead of to a password. A recipient unseals a CMS
 seed, and the file key is a digest over that seed and every envelope in the
 array. Everything after the key — Algorithm 1's per-object salting, the four
 crypt methods, the decryptor a document installs — is what the standard
-handler already does. Since 2 October 2026 it is written as well as read:
-a document can be sealed on save to certificates the caller supplies.
+handler already does. It is written as well as read: a document can be sealed
+on save to certificates the caller supplies.
 
-This design doc exists for a reason the roadmap's size band does not capture.
-The item is **M**, and by the letter of this repository's process an M-sized
-item "lives in the roadmap alone". It gets a doc anyway, because what needs
-writing down here is not the design but the **evidence**, and the evidence is
-unlike anything else in the tree.
+What needs writing down here is the **evidence** as much as the design,
+because the evidence is unlike anything else in the tree.
 
 ## Scope
 
@@ -34,79 +31,53 @@ unlike anything else in the tree.
 
 ## Non-goals
 
-- ~~**Writing.** Nothing produces a public-key-encrypted document. Encrypting on
-  save would need to choose recipients, generate a seed and seal it — and the
-  sealing is the private-key side's public half, which needs a certificate
-  the engine has no business choosing.~~ *No longer a non-goal, 2 October
-  2026.* The reason was a scope choice and not a limit: the engine need not
-  choose a certificate when the caller hands it one, and sealing is the
-  public half of key transport, which needs no private key. See
-  [Writing](#writing).
 - **Recipients with different permissions.** 7.6.5 allows one envelope per
   group of recipients, each sealing its own `/P`. The writer seals every
-  recipient into one envelope under one `/P`.
-  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SE-07.
+  recipient into one envelope under one `/P`. Envelopes per group are
+  [ROADMAP](../ROADMAP.md) row SE-07.
 - **Writing below `/V 5`** — `s3`, `s4`, RC4, AES-128. The writer emits
   `AESV3` and nothing else, as the standard handler's emits R6 and nothing
-  else; reading all of them is unchanged.
-  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SE-01, behind an
-  explicit legacy option with a typed weakness warning.
+  else; all of them are read. Writing them, behind an explicit legacy option
+  with a typed weakness warning, is [ROADMAP](../ROADMAP.md) row SE-01.
 - **Sealing to a key that is not RSA.** Key agreement is not read, so it is
-  not written: an EC certificate is `SealError::NotRsa`.
-  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SE-07.
+  not written: an EC certificate is `SealError::NotRsa`. [ROADMAP](../ROADMAP.md)
+  row SE-07.
 - **Sealing to an RSA key restricted to signing.** RFC 4055 §1.2 makes a key
   published under `id-RSASSA-PSS` an RSASSA-PSS key and nothing else, so it
-  is `SealError::KeyRestricted`; only `rsaEncryption` is sealed to. Until
-  review on 3 October 2026 the writer sealed to one anyway, and wrote
-  `rsaEncryption` in its recipient info.
+  is `SealError::KeyRestricted`; only `rsaEncryption` is sealed to.
 - **Key material of any kind.** No PKCS#8, no PKCS#12, no passphrase handling,
-  no RSA private-key arithmetic. The same rule signing follows.
-  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: the owner's parity decision puts private-key
-  signing in the engine; key import is [ROADMAP](../ROADMAP.md) row SG-05 and
-  RSA signing SG-01.
+  no RSA private-key arithmetic. The same rule signing follows. Key import is
+  [ROADMAP](../ROADMAP.md) row SG-05 and RSA signing SG-01.
 - **`KeyAgreeRecipientInfo`, `KEKRecipientInfo`, `PasswordRecipientInfo`** and
   the `other` shape (§6.2.2–§6.2.5). Recognised by tag and refused by name.
-  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SE-07.
+  [ROADMAP](../ROADMAP.md) row SE-07.
 - **Content-encryption algorithms beyond AES-128/256-CBC, RC4 and
-  `des-ede3-cbc`.** Triple DES used to be listed here as the one real gap; it
-  is implemented now (`tinker_pdf_crypto::des`, FIPS 46-3 tables, 500 NIST
-  CAVP known answers), which closes the case that mattered, because
-  `des-ede3-cbc` is what OpenSSL's `cms -encrypt` still picks by default for
-  older recipients. **AES-192-CBC and RC2 are not implemented** — `cms
-  -encrypt` can be asked for either, this crate's AES takes 16- and 32-byte
-  keys only, and neither has ever been a PDF default. They are named where
-  they are met rather than guessed at, which is the same answer Triple DES
-  used to get.
-  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: AES-192 and RC2 are [ROADMAP](../ROADMAP.md)
-  row SE-07.
-- **Writing a `des-ede3-cbc` envelope**, or any DES encryption at all. The new
-  module decrypts and nothing more; its single-block encrypt exists only
-  because EDE3 decryption is `D(K1, E(K2, D(K3, c)))` and the middle step is
-  an encryption. A 64-bit block cipher is not something this engine should
-  offer a writer.
+  `des-ede3-cbc`.** `des-ede3-cbc` (`tinker_pdf_crypto::des`, FIPS 46-3
+  tables, NIST CAVP known answers) is what OpenSSL's `cms -encrypt` picks by
+  default for older recipients. **AES-192-CBC and RC2 are not implemented** —
+  `cms -encrypt` can be asked for either, this crate's AES takes 16- and
+  32-byte keys only, and neither has been a PDF default. They are named where
+  they are met rather than guessed at. AES-192 and RC2 are
+  [ROADMAP](../ROADMAP.md) row SE-07.
+- **Writing a `des-ede3-cbc` envelope**, or any DES encryption at all.
+  `tinker_pdf_crypto::des` decrypts and nothing more; its single-block encrypt
+  exists only because EDE3 decryption is `D(K1, E(K2, D(K3, c)))` and the
+  middle step is an encryption. A 64-bit block cipher is not something this
+  engine should offer a writer.
 - **Applying the enveloped permissions.** The unsealed content carries four
   bytes of `/P` and this build ignores them. PDF permissions are advisory
   (see [encryption](../features/encryption.md)), so honouring a second source
   of them would add a code path whose only effect is to disagree with the
-  first.
-  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: applying an envelope's `/P` is
-  [ROADMAP](../ROADMAP.md) row SE-07.
+  first. Applying an envelope's `/P` is [ROADMAP](../ROADMAP.md) row SE-07.
 
 ## Design
 
 `crates/tinker-pdf-cos/src/pubsec.rs`, beside `security.rs`, because a security
 handler is that crate's charter. The envelope is DER, which is
-`tinker-pdf-pki`'s, so this adds the edge `cos → pki` — the ninth amendment in
-`xtask/src/main.rs` argues it, and the argument is the same one `cos → font`
-already makes: reading a `/Recipients` envelope is object-model work that needs
-a leaf's parser.
-
-The alternative was putting the handler in the facade, which already depends on
-both crates. It was rejected on what it would cost: installing a decryptor is
-`CosDocument`'s own operation, so a facade-level handler needs
-`set_decryptor_with_key` to become public — and a public "install this
-decryptor on an opened document" is a hole with no floor under it, offered so
-that a dependency edge could be avoided.
+`tinker-pdf-pki`'s, so the handler needs the edge `cos → pki` — the ninth
+amendment in `xtask/src/main.rs` argues it, and the argument is the same one
+`cos → font` makes: reading a `/Recipients` envelope is object-model work that
+needs a leaf's parser.
 
 **`FileKey::from_derived`** is the other door into `tinker-pdf-crypto`'s key
 type. Everything after the file key is identical between the two handlers, and
@@ -120,23 +91,20 @@ decrypts nothing, with no error anywhere to say why.
 
 ## Writing
 
-**The API is beside `save`, not inside `WriteOptions`.** The roadmap row
-named `Encryption::PublicKey { recipients }`, with an additive design to be
-preferred if one existed. That variant is not one. `Encryption` is a struct
-with public fields that callers build by name, seventeen times in this tree
-before this change, the FFI and both bindings among them, so turning it into
-an enum would break every one of them and every caller's. And
-`DocumentEditor::save` returns bytes and nothing else, while sealing can
-fail in ways that are the caller's to hear about: a
-certificate that does not parse, a key that is not RSA, a source that will
-not fill. So sealing is its own step, `PublicKeyEncryption::seal(certificates,
-permissions, entropy)`, and writing is `DocumentEditor::save_sealed(options,
-&sealed)`. The writer is shared through a crate-private `Sealing` that
-`rewrite` and `linearize` take in place of `options.encryption`, so neither
-public type changed. A sealed save is refused when it is incremental
-(`SealError::NotRewrite`), because an update appends under an `/Encrypt` that
-still stands, and when a password is asked for as well
-(`SealError::PasswordAlsoRequested`).
+**The API is beside `save`, not inside `WriteOptions`.** `Encryption` is a
+struct with public fields that callers build by name — the FFI and the Python
+binding among them — so an `Encryption::PublicKey { recipients }` variant
+would break every one of them and every caller's. And `DocumentEditor::save`
+returns bytes and nothing else, while sealing can fail in ways that are the
+caller's to hear about: a certificate that does not parse, a key that is not
+RSA, a source that will not fill. So sealing is its own step,
+`PublicKeyEncryption::seal(certificates, permissions, entropy)`, and writing is
+`DocumentEditor::save_sealed(options, &sealed)`. The writer is shared through a
+crate-private `Sealing` that the rewriting and linearizing writers take in
+place of `options.encryption`, so neither public type carries it. A sealed
+save is refused when it is incremental (`SealError::NotRewrite`), because an
+update appends under an `/Encrypt` that still stands, and when a password is
+asked for as well (`SealError::PasswordAlsoRequested`).
 
 **Three crates, one job each.** `tinker_pdf_crypto::rsa::encrypt_pkcs1_v15`
 is RSAES-PKCS1-v1_5 (RFC 8017 §7.2.1), taking its padding from the caller,
@@ -161,10 +129,8 @@ replaced, and a source that returns 64 zeros running is refused as broken.
 **The crypt filter's `/Length` is 256, in bits.** ISO 32000-1 Table 25 has
 the standard handler give that entry in bytes and public-key handlers give it
 "as is", so the password writer's AESV3 filter says 32 and this one says 256.
-Until review on 3 October 2026 this one said 32 too, copied from the password
-writer; the reader here takes the key length from `/V` and ignores the
-filter's (`decrypt.rs` calls the entry ambiguous), so no test of this tree's
-could have noticed.
+The reader takes the key length from `/V` and ignores the filter's
+(`decrypt.rs` calls the entry ambiguous).
 
 **`/EncryptMetadata` is not written.** ISO 32000-1 Table 27 puts the public-key handler's
 flag in the crypt filter, and this tree's reader looks for it on `/Encrypt`
@@ -179,230 +145,101 @@ agrees on.
   (`tinker-pdf-pki/tests/enveloped.rs`) writes the expected encoding from RFC
   5652 §6 and RFC 3565, seals the content OpenSSL 3.5.5 sealed in
   `aes-256-cbc.der` to the same certificate, and holds both envelopes to it:
-  the same 484 octets outside the encrypted key, the IV and the ciphertext.
+  the same octets outside the encrypted key, the IV and the ciphertext.
   OpenSSL's bytes are an input checked against the clause, not the expected
-  answer (ruling 13); until review on 3 October 2026 the test compared the
-  writer to OpenSSL's bytes directly, which made them the answer.
-- **RSAES-PKCS1-v1_5 is RSA Laboratories'.** All 300 encryption known answers
-  in `pkcs1v15crypt-vectors.txt`, across fifteen keys from 1024 to 2048 bits,
+  answer (ruling 13), and the writer is held to the RFCs' encoding rather
+  than to this tree's own reader.
+- **RSAES-PKCS1-v1_5 is RSA Laboratories'.** All the encryption known answers
+  in `pkcs1v15crypt-vectors.txt`, across keys from 1024 to 2048 bits,
   including the 1025- to 1031-bit moduli whose leading octet is not full.
-- **The file opens.** `crates/tinker-pdf/tests/pubsec_write.rs`, ten tests: a
-  sealed `simple-text.pdf` reopened with a `Recipient` that holds the
-  committed `visible-signer-key.der` and does RFC 8017 §7.2.2 itself, text
-  and `/P` intact; the dictionary 7.6.5 asks for; the envelope opened by hand
-  to twenty octets and then the permissions, big-endian; a stranger told
+- **The file opens.** `crates/tinker-pdf/tests/pubsec_write.rs`: a sealed
+  `simple-text.pdf` reopened with a `Recipient` that holds the committed
+  `visible-signer-key.der` and does RFC 8017 §7.2.2 itself, text and `/P`
+  intact; the dictionary 7.6.5 asks for; the envelope opened by hand to
+  twenty octets and then the permissions, big-endian; a stranger told
   `NoMatchingRecipient` and a password `UnsupportedHandler`; two recipients
   in one envelope; object streams and the linearized layout; the same
   entropy giving the same bytes (ruling 4); the `/ID` mixed with the
   entropy; each refusal by name; a `Debug` that prints no key.
-- **OpenSSL opens what this writes.** A dated record, not a test (ruling 13).
-  Measured 2 October 2026 with OpenSSL 3.0.13, on `simple-text.pdf` sealed to
-  `visible-signer.der` with a counting source, `/P` −3392: `openssl cms
-  -decrypt -inform DER -recip visible-signer.pem -inkey visible-signer-key.pem`
-  opened the file's 481-octet `/Recipients` envelope to 24 octets,
-  `0102…1314` then `fffff2c0`, the seed and `/P` big-endian. And `openssl
-  enc -d -aes-256-cbc`, keyed with SHA-256 of that seed and the envelope and
-  with each stream's first sixteen octets as its IV, decrypted all three
-  content streams to the fixture's own bytes. So an independent
-  implementation reads the envelope and the cipher. **The derivation is still
-  this author's reading**: the key OpenSSL was handed was computed from the
-  same clause the reader and the writer share.
-
-### Counted injections: the writer
-
-Each defect injected in turn and `cargo test --no-fail-fast` run on
-`tinker-pdf-crypto`'s `rsa` tests, `tinker-pdf-pki`'s `seal` tests and
-`tests/enveloped.rs`, and `tests/pubsec_write.rs`, as far as each layer
-reaches. Measured 2 October 2026.
-
-| Injected | Tests that failed |
-| --- | ---: |
-| the permissions sealed least significant octet first | **0, then 1** |
-| the `/ID` mixed with a constant rather than the sealing's entropy | 1 |
-| the `/ID` derived without the sealing's entropy | 1 |
-| `/EncryptMetadata false` in the crypt filter | **0** — the entry was removed instead |
-| the file key derived as if the metadata were clear | 2 |
-| the file key derived at `/V 4` | 8 |
-| `/V 4` written | 4 |
-| `/CFM /AESV2` written | 1 |
-| `/SubFilter /adbe.pkcs7.s4` written | 1 |
-| sixteen octets of seed sealed rather than twenty | 4 |
-| the certificates not checked before entropy is drawn | 1 |
-| the linearized writer ignoring the sealing | 1 |
-| `save_sealed` accepting an incremental save | 1 |
-| `save_sealed` accepting a password too | 1 |
-| `Debug` printing the file key | 1 |
-| the recipients' `SET OF` left unsorted | 1 |
-| the IV left in front of the ciphertext | 5 |
-| `encryptedContent` tagged constructed | 1 |
-| a `KeyTransRecipientInfo` at version 2 | 1 |
-| `rsaEncryption` without its `NULL` | 1 |
-| one constant padding for every recipient | 2 |
-| a zero padding octet not redrawn | 14 |
-| the redraw left unbounded | hangs — the zero source's test never ends |
-| block type 1 rather than 2 | 5 |
-| a zero allowed in `PS` | 1 |
-| the separating zero dropped | 1 |
-| capacity `k − 10` rather than `k − 11` | 1 |
-| the padding length one octet long | 4 |
-
-**The two zeros are the rows worth reading.** The reader takes the seed and
-ignores the four permission octets (Non-goals), so sealing them in the wrong
-order broke nothing; the test that opens the envelope by hand is what reads
-them now. And `/EncryptMetadata false` written into the crypt filter broke
-nothing because the reader never looks there, which is the reader gap in
-Risks; the writer stopped writing the entry rather than keep a value nothing
-checked. Three rows reach only the OpenSSL comparison — a constructed
-`encryptedContent`, a version-2 recipient, a missing `NULL` — because this
-tree's own reader accepts all three, which is exactly why the writer is held
-to an encoding written from the RFCs — and OpenSSL's envelope to the same one
-— and not to its own reader.
 
 ## The evidence, and what it is not
 
-**No corpus file uses this handler.** Zero of 5 605, re-measured on 15
-September 2026 at the commit that landed Triple DES: `/Adobe.PubSec` and
-`/Recipients` are each zero across every PDF under `corpus/files`. Ten files
-match `pubsec` case-insensitively; every one of the ten carries `/Prop_Build`
-and none carries `/Adobe.PubSec`, because the hit is `/PubSec` inside a
-signature's build-properties dictionary — a different key entirely. That is
-worth writing down because a case-insensitive grep is the obvious way to
-re-take this measurement and it reads as ten hits. Ruling 3 schedules
-capabilities by corpus hit-rate, so this one was built because it was asked
-for and not because the evidence called for it — and the consequence is that
-its verification cannot be what the rest of this crate's is.
-
-The layers are not equally weak and the difference matters:
+No fixture is a public-key-encrypted document another PDF implementation
+made, so this handler's verification cannot be what the rest of this crate's
+is. The layers are not equally weak and the difference matters:
 
 | Layer | Evidence | Strength |
 | --- | --- | --- |
 | `EnvelopedData` parsing | Three envelopes **OpenSSL 3.5.5 produced**, in three content ciphers, with the recipient identifier checked against the certificate's own issuer and serial | Real interop: the parser reads what another implementation writes |
 | RSA unsealing | Not implemented here at all — it is the host's | N/A |
-| Content decryption | AES-CBC and RC4, gated on FIPS 197 and RFC 6229; `des-ede3-cbc`, gated on 500 NIST CAVP known answers, its tables read twice from FIPS 46-3 | Published vectors |
+| Content decryption | AES-CBC and RC4, gated on FIPS 197 and RFC 6229; `des-ede3-cbc`, gated on NIST CAVP known answers, its tables held to FIPS 46-3's published digit stream | Published vectors |
 | **7.6.5 key derivation** | A second implementation in Python, written from the same clause by the same author, generating the end-to-end fixture | **Catches a transcription slip; cannot catch a misreading** |
 | The document decrypting | `pubsec.rs`'s tests read "Public key" back out of the page and `PubSec fixture` out of `/Info` | Ties every layer together, on one file |
-| `EnvelopedData` writing | Byte-equal to OpenSSL 3.5.5's outside the random fields; opened by OpenSSL 3.0.13's `cms -decrypt` (dated record, 2 October 2026) | Real interop, both directions |
-| RSAES-PKCS1-v1_5 encryption | 300 RSA Laboratories known answers | Published vectors |
-| A written document's streams | `openssl enc -d -aes-256-cbc` decrypted them under the key derived from what OpenSSL unsealed (the same record) | Real interop for the cipher; the key is still the derivation's |
+| `EnvelopedData` writing | Byte-equal to OpenSSL 3.5.5's outside the random fields, both held to the RFCs' encoding | Real interop |
+| RSAES-PKCS1-v1_5 encryption | RSA Laboratories' known answers | Published vectors |
 
 **What `des-ede3-cbc.der` proves, and what it does not.** That fixture is one
-of the three OpenSSL 3.5.5 wrote, 475 bytes, and it was committed with the
-parser long before there was a cipher to use it. Walking it: `id-envelopedData`
-wrapping version 0, one `KeyTransRecipientInfo` naming the recipient by issuer
-and a 20-byte serial, `rsaEncryption` over a 256-byte encrypted key, and an
-`EncryptedContentInfo` over `id-data` whose algorithm is `1.2.840.113549.3.7`
-with an 8-byte `OCTET STRING` parameter and 32 bytes — four whole blocks — of
-content. So it proves three things and they are all about the *envelope*: the
-OID this module matches on is the one OpenSSL emits byte for byte rather than
-one transcribed from a table; the IV really is eight bytes in a real envelope,
-where the AES branch beside it reads sixteen and a copied line would have kept
-sixteen; and the branch now runs a cipher instead of returning
-`UnsupportedContentCipher`.
+of the three envelopes OpenSSL 3.5.5 wrote, 475 bytes. Walking it:
+`id-envelopedData` wrapping version 0, one `KeyTransRecipientInfo` naming the
+recipient by issuer and a 20-byte serial, `rsaEncryption` over a 256-byte
+encrypted key, and an `EncryptedContentInfo` over `id-data` whose algorithm is
+`1.2.840.113549.3.7` with an 8-byte `OCTET STRING` parameter and 32 bytes —
+four whole blocks — of content. So it proves three things and they are all
+about the *envelope*: the OID this module matches on is the one OpenSSL emits
+byte for byte rather than one transcribed from a table; the IV really is eight
+bytes in a real envelope, where the AES branch beside it reads sixteen; and
+the branch runs a cipher rather than returning `UnsupportedContentCipher`.
 
-It proves **nothing whatever about decryption**. The throwaway private key was
-not kept, so the 256-byte encrypted key cannot be unsealed, there is no
+It proves **nothing whatever about decryption**. The throwaway private key is
+not in the tree, so the 256-byte encrypted key cannot be unsealed, there is no
 recoverable content-encryption key, and no plaintext exists to compare against
 — `the_openssl_triple_des_envelope_reaches_the_cipher` hands the path an
 arbitrary 24-byte key and gets 32 bytes of garbage, which is all it claims. The
 32 bytes are not even known to *be* Triple DES output; any 32 bytes would parse
 the same. Parsing an algorithm identifier is not decrypting with it, and every
 question about whether the S-boxes, the key schedule, the sub-key order, the
-chain or the padding are right is settled by the 500 CAVP known answers in
+chain or the padding are right is settled by the CAVP known answers in
 `tinker_pdf_crypto::des` and by nothing in `pubsec.rs`.
 
-There was no way to do better. No tool on the machine this was written on
-produces a public-key-encrypted PDF — **qpdf 12.3.2, which is installed, has no
-public-key support at all** — and the corpus has none to borrow. This is the
-same class of gap `verification.md` names for the whole suite, in its sharpest
-form: reader, writer, fixture and reviewer share one author's reading of one
-clause, and if that reading is wrong everything agrees and everything is wrong.
+This is the same class of gap `verification.md` names for the whole suite, in
+its sharpest form: reader, writer, fixture and reviewer share one author's
+reading of one clause, and if that reading is wrong everything agrees and
+everything is wrong. **Not closed**, and
+[features/encryption.md](../features/encryption.md) says so where a caller
+will see it rather than only here.
 
-**Not closed.** It closes the day a real public-key-encrypted document arrives,
-and until then `docs/features/encryption.md` says so where a caller will see
-it rather than only here.
+### What the Triple DES content cipher is held to
 
-### Counted injections: the Triple DES content cipher
+`tinker_pdf_crypto::des` is held to NIST CAVP's known answers
+(`tinker-pdf-crypto/tests/data/cavp/tdes_cbc_*.rsp`) and to FIPS 46-3 itself.
+The variable-plaintext file walks a 1 bit through all 64 plaintext positions
+and the variable-key file through all 56 non-parity key positions, so every
+S-box is driven from every direction — a handful of random vectors would not
+do it, because an S-box entry is one of 512 and a random block reaches few of
+them. FIPS 46-3 works one S1 lookup out in prose, and
+`the_standards_own_worked_example_for_s1` pins it;
+`every_table_matches_the_published_digit_stream` keeps the tables' reading of
+the standard runnable.
 
-Each defect re-introduced in turn, `cargo test --no-fail-fast -p
-tinker-pdf-crypto` run on each, and the count recorded — zeros included,
-because a guard that catches nothing when its defect is injected is not a
-guard. Measured 15 September 2026 on the branch that landed the cipher.
-
-The eight S-boxes are injected identically so the counts can be compared:
-row 0's first two entries transposed, which leaves the row a permutation of
-0..16 and so is invisible to `the_tables_are_well_formed`.
-
-| Injected | Tests that failed |
-| --- | ---: |
-| `IP^-1`'s first entry, 40 → 41 | 12 |
-| `IP^-1` omitted entirely | 10 |
-| `IP` omitted entirely | 10 |
-| the final interchange omitted — preoutput read as `L16R16` | 10 |
-| **S1** row 0, columns 0 and 1 transposed | 9 |
-| **S2** the same | 8 |
-| **S3** the same | 8 |
-| **S4** the same | 8 |
-| **S5** the same | 8 |
-| **S6** the same | 8 |
-| **S7** the same | 8 |
-| **S8** the same | 8 |
-| `select()` reading the row as the top two bits and the column as the bottom four | 8 |
-| `E`'s last entry, 1 → 2 | 8 |
-| `PC-1`'s first entry, 57 → 58 | 7 |
-| the shift schedule: round 9 rotating by 2 rather than 1 | 7 |
-| the round keys consumed in the same order both ways | 7 |
-| `PC-2`'s first entry, 14 → 15 | 6 |
-| EDE3 performed as `D(K1, D(K2, D(K3, c)))` | 6 |
-| the CBC chain carrying the plaintext forward rather than the ciphertext | 2 |
-| the three sub-keys taken in the wrong order, `D(K3, E(K2, D(K1, c)))` | 1 |
-| PKCS#7 padding stripped without checking the pad bytes agree | 1 |
-| **the 16-byte key bundle expanding `K3 = K2` rather than `K3 = K1`** | **0, then 1** |
-
-**The zero is the row worth reading.** `TripleDes::new` takes all three of
-X9.52's keying options, and option 2 — 16 bytes, `K3 = K1` — was checked by
-nothing. `only_the_three_keying_options_are_accepted` asserts that 16 bytes
-are *accepted* and never asks what they expand to, so taking `K3 = K2` instead,
-one character from the real line, broke no test in the crate. The fix is the
-seventh committed vector file, CAVP's `TCBCMMT2`: it prints `K1`, `K2` and
-`K3 = K1` in full, so every vector can be run twice — once as the 24 bytes it
-spells out and once as `K1 || K2` — and the short form is then adjudicated by
-NIST's own plaintext rather than by the long form, which would only be this
-engine agreeing with itself about an abbreviation it invented. It also raised
-the CBC-chain row from 1 to 2, being the second multi-block file.
-
-**The two rows at 1 are structural, not an oversight.** All five KAT files are
-keyed `K1 = K2 = K3` and are single-block under a zero IV, so between them they
-cannot see the order of EDE3's sub-keys *or* the chain; `TCBCMMT3` is the only
-committed file whose three keys differ, and under `TCBCMMT2`'s `K3 = K1`
-transposing `K1` and `K3` is a no-op. One published multi-key vector set is the
-whole of the evidence for sub-key order, and the honest thing is to say so
-rather than to add a fixture this engine generated itself, which would prove
-nothing about the standard.
-
-**The eight S-boxes are covered evenly**, which is the question the separate
-rows were there to answer: seven tests catch each, plus the digit-stream
-reading, and S1 draws a ninth only because FIPS 46-3 works one S1 lookup out in
-prose and `the_standards_own_worked_example_for_s1` pins it. No box is
-under-covered, and that is a property of the KATs rather than luck — the
-variable-plaintext file walks a 1 bit through all 64 plaintext positions and
-the variable-key file through all 56 non-parity key positions, so every S-box
-is driven from every direction. A handful of random vectors would not do it: an
-S-box entry is one of 512, and a random block reaches few of them.
-
-**This is not a hypothetical.** The campaign was re-run on a working tree that
-still held a live defect from an interrupted session — `S4` row 0 ending
-`4, 14`, so 14 twice and no 15 — and nine tests caught it, including both table
-readings. It is exactly the shape the whole apparatus exists for: one wrong
-entry, wrong for only some inputs, which a spot check passes.
+All five KAT files are keyed `K1 = K2 = K3` and are single-block under a zero
+IV, so between them they cannot see the order of EDE3's sub-keys *or* the
+chain. `TCBCMMT3` is the only committed file whose three keys differ, so one
+published multi-key vector set is the whole of the evidence for sub-key order.
+`TripleDes::new` takes all three of X9.52's keying options, and option 2 — 16
+bytes, `K3 = K1` — is adjudicated by `TCBCMMT2`: it prints `K1`, `K2` and
+`K3 = K1` in full, so every vector runs twice — once as the 24 bytes it spells
+out and once as `K1 || K2` — and the short form is held to NIST's own
+plaintext rather than to the long form, which would only be this engine
+agreeing with itself about an abbreviation.
 
 ## Risks
 
 | Risk | Mitigation | Closed? |
 | --- | --- | --- |
-| An envelope OpenSSL wrote by default cannot be opened at all, because its content cipher is `des-ede3-cbc` | Implemented, 15 September 2026. `tinker_pdf_crypto::des` decrypts EDE3-CBC; the FIPS 46-3 tables were read twice by two routes that fail differently, and `every_table_matches_the_published_digit_stream` keeps the first reading runnable. 500 NIST CAVP known answers adjudicate. The two multi-block files carry the weight the five KATs cannot: under the KATs' `K1 = K2 = K3` the sub-key order and the CBC chain are both invisible, and a counted-injection campaign measured that exactly — transposing `K1` and `K3` fails one test, `TCBCMMT3`, and nothing else | **Yes** |
+| An envelope OpenSSL wrote by default cannot be opened at all, because its content cipher is `des-ede3-cbc` | `tinker_pdf_crypto::des` decrypts EDE3-CBC, held to NIST CAVP known answers and to FIPS 46-3's digit stream (`every_table_matches_the_published_digit_stream`). The two multi-block files carry the weight the five KATs cannot: under the KATs' `K1 = K2 = K3` the sub-key order and the CBC chain are both invisible | **Yes** |
 | The key derivation is misread and nothing catches it | Stated in the module doc, the feature doc and here; the derivation is small and each step is asserted separately in unit tests | **No** |
 | A wrong key reads as a decrypted document | 7.6.5 has no verifier the way `/U` is one, so this cannot be caught at authentication; a test pins that the failure stays visible as garbage rather than becoming plausible text | Partly |
-| An attacker-chosen envelope drives the parser | The parser is `tinker-pdf-pki`'s, under ruling 1 with its own fuzz targets; the tests sweep every single-byte mutation of a real envelope | Yes |
+| An attacker-chosen envelope drives the parser | The parser is `tinker-pdf-pki`'s, under ruling 1 with its own fuzz targets; `every_single_byte_mutation_is_an_error_or_a_parse_and_never_a_panic` sweeps every single-byte mutation of a real envelope | Yes |
 | A password offered to a public-key document reads as a wrong password | `AuthError::UnsupportedHandler`, asserted — `WrongPassword` would send a caller looking for a better password when none exists | Yes |
-| A `/V 4` or `/V 5` document whose crypt filter says `/EncryptMetadata false` opens with the wrong key | Found by the writer's injection campaign, 2 October 2026: Table 27 puts the public-key handler's flag in the crypt filter, and `decrypt.rs` reads it from `/Encrypt` only, so the key is derived as if the metadata were encrypted. The writer avoids it by writing the flag nowhere; a third-party file that writes it there would fail to open here | **No** |
+| A `/V 4` or `/V 5` document whose crypt filter says `/EncryptMetadata false` opens with the wrong key | Table 27 puts the public-key handler's flag in the crypt filter, and `decrypt.rs` reads it from `/Encrypt` only, so the key is derived as if the metadata were encrypted. The writer avoids it by writing the flag nowhere; a third-party file that writes it there fails to open here | **No** |
 | A sealed document is only as unpredictable as the host's entropy | The source is the caller's by design, because the engine links no random number generator; a source that cannot fill, or returns zeros, is refused; a predictable one is not detectable and is documented as the caller's | Partly |
