@@ -428,6 +428,17 @@ struct PendingLine {
     /// Whether the last glyph was part of a word, not white space, so that
     /// the next one that is not continues that word.
     in_word: bool,
+    /// Whether the line is **the rest of the one before**: started at a cut
+    /// [`TextDevice::show_glyph`] made for the slack alone — not for a turn,
+    /// another baseline or a jump back — after a word space that `Tw` moved
+    /// the pen on past ([`Stretch::word_space`]), at a glyph that starts
+    /// where the stretch left the pen and is not carried. As it ends it is
+    /// appended to the line before where [`mends`] says.
+    rest: bool,
+    /// The leftmost and the rightmost of the line's own glyphs that read
+    /// either way ([`Strong`]), kept as glyphs arrive; `None` before it
+    /// holds one.
+    ends: Option<(End, End)>,
     font_id: u64,
     /// Whether an `ET` closed the text object this line was collected in.
     ///
@@ -523,9 +534,21 @@ impl TextDevice {
         }
     }
 
+    /// Ends the line being collected: as the next starts, at an artifact's
+    /// edge, or in [`TextDevice::finish`]. A line that is the rest of the
+    /// one before ([`PendingLine::rest`]) is appended to it where the two
+    /// read as one left-to-right line ([`mends`]).
     fn flush(&mut self) {
         if let Some(line) = self.current.take() {
-            self.lines.push(line);
+            match self.lines.last_mut() {
+                Some(before) if line.rest && mends(before, &line) => {
+                    before.ends = End::joined(before.ends, line.ends);
+                    before.holds_rtl |= line.holds_rtl;
+                    before.holds_ltr |= line.holds_ltr;
+                    before.chars.extend(line.chars);
+                }
+                _ => self.lines.push(line),
+            }
         }
     }
 }
@@ -674,10 +697,26 @@ const STRETCH_ROUNDING: f64 = 0.05;
 /// they meet end to end, and these met only because the glyph after the
 /// overflow font's code-32 letter, moved on by `Tw`, had closed most of the
 /// gap.
+///
+/// **A cut at a word space's stretch is mended once the piece after it
+/// ends** (ROADMAP CD-19, Left (3)). Where the carry refuses a gap that a
+/// word space's `Tw` accounts for, the line the next glyph starts is the
+/// rest of the one before ([`PendingLine::rest`]), and as it ends it is
+/// appended to it where the two hold a right-to-left letter of their own and
+/// the leftmost and the rightmost of their glyphs that read either way both
+/// read left to right ([`mends`]): `αλφα <b>βήτα</b> ספר בית xyz.` at
+/// `word-spacing: 2em` with no `dir`, cut at `β` and at the gloss's first
+/// drawn glyph, reads `αλφα ` and `βήτα ספר בית xyz.`. The mend waits for
+/// the line's far end, which the gap does not show: taken at the gap,
+/// `αλφα βήτα ספר בית` is a line with a Hebrew right end, which ruling 14
+/// reads by its majority.
 #[derive(Clone, Copy, Debug)]
 struct Stretch {
     /// Where the pen stood after the glyph, along the baseline.
     pen: f64,
+    /// Whether the glyph was a word space that `Tw` moved the pen on past:
+    /// a code 32 that decodes to white space, under a `Tw` above zero.
+    word_space: bool,
 }
 
 impl Stretch {
@@ -710,6 +749,55 @@ impl Stretch {
     fn reaches(self, origin: f64, size: f64) -> bool {
         (origin - self.pen).abs() <= size.max(1.0) * STRETCH_ROUNDING
     }
+}
+
+/// A glyph of a line that reads either way ([`Strong`]), and where its box
+/// starts along the page's `x` axis — the baseline of every line a word
+/// space's stretch cuts, since a [`Stretch`] is kept only where the pen
+/// moves on rightwards.
+#[derive(Clone, Copy, Debug)]
+struct End {
+    at: f64,
+    strong: Strong,
+}
+
+impl End {
+    /// The leftmost and the rightmost of two sets of ends, `b`'s glyphs
+    /// collected after `a`'s. At a tie the earlier glyph is the left one and
+    /// the later the right, as `text_order`'s stable sort by where each base
+    /// starts puts them.
+    fn joined(a: Option<(End, End)>, b: Option<(End, End)>) -> Option<(End, End)> {
+        match (a, b) {
+            (Some((a_left, a_right)), Some((b_left, b_right))) => Some((
+                if b_left.at < a_left.at {
+                    b_left
+                } else {
+                    a_left
+                },
+                if b_right.at >= a_right.at {
+                    b_right
+                } else {
+                    a_right
+                },
+            )),
+            (ends, None) | (None, ends) => ends,
+        }
+    }
+}
+
+/// Whether `rest`, the rest of `before` ([`PendingLine::rest`]), is appended
+/// to it as it ends: where the two hold a right-to-left letter of their own
+/// ([`PendingLine::holds_rtl`]) and the leftmost and the rightmost of their
+/// glyphs that read either way both read left to right, so that ruling 14
+/// reads the line they make by its ends, left to right. Left-to-right text
+/// is never joined, nor a line with a right-to-left glyph at either end,
+/// which ruling 14 reads by its majority or from the right: `The word` before
+/// a longer Arabic phrase, `שלום abcdef <b>עולם</b>` with no `dir`.
+fn mends(before: &PendingLine, rest: &PendingLine) -> bool {
+    (before.holds_rtl || rest.holds_rtl)
+        && End::joined(before.ends, rest.ends).is_some_and(|(left, right)| {
+            left.strong == Strong::LeftToRight && right.strong == Strong::LeftToRight
+        })
 }
 
 /// Whether a character is in one of the right-to-left scripts' blocks — the
@@ -905,8 +993,8 @@ impl Device for TextDevice {
         };
         let direction = (t.a, t.b);
 
-        let (starts_new_line, word) = match &self.current {
-            None => (true, None),
+        let (starts_new_line, word, rest) = match &self.current {
+            None => (true, None, false),
             Some(line) => {
                 let same_font = line.font_id == glyph.font_id;
                 // A glyph continues the line when it runs the same way and sits
@@ -956,7 +1044,15 @@ impl Device for TextDevice {
                 } else {
                     line.word
                 };
-                (elsewhere || disjoint, word)
+                // A cut for the slack alone, after a word space `Tw` moved
+                // the pen on past, at a glyph that starts where the stretch
+                // left the pen and is not carried: the line it starts is the
+                // rest of this one ([`PendingLine::rest`]).
+                let rest = !elsewhere
+                    && disjoint
+                    && spaced
+                    && line.stretched.is_some_and(|stretch| stretch.word_space);
+                (elsewhere || disjoint, word, rest)
             }
         };
 
@@ -979,6 +1075,8 @@ impl Device for TextDevice {
                 word,
                 word_rtl: false,
                 in_word: word.is_some(),
+                rest,
+                ends: None,
             });
         }
 
@@ -1006,6 +1104,13 @@ impl Device for TextDevice {
                 line.in_word = true;
                 line.holds_ltr |= own == Strong::LeftToRight;
                 line.holds_rtl |= rtl;
+                if own != Strong::Neither {
+                    let end = End {
+                        at: x0,
+                        strong: own,
+                    };
+                    line.ends = End::joined(line.ends, Some((end, end)));
+                }
             }
             line.stretched = match wmode {
                 // 9.4.4: `tx = (w0 × Tfs + Tc + Tw) × Th`, which is
@@ -1027,7 +1132,10 @@ impl Device for TextDevice {
                     };
                     let spacing = (state.text.char_spacing + tw) / glyph.size;
                     let at = corner(advance + spacing, 0.0).0;
-                    (at.is_finite() && at > line.pen).then_some(Stretch { pen: at })
+                    (at.is_finite() && at > line.pen).then_some(Stretch {
+                        pen: at,
+                        word_space: tw > 0.0,
+                    })
                 }
                 _ => None,
             };
@@ -1600,6 +1708,56 @@ mod tests {
             let second: &[(&str, f64)] = &[("\u{5D1}", at)];
             assert_eq!(objects(&[first, second], 6.0).len(), lines, "at {at}");
         }
+    }
+
+    /// **A cut at a word space's stretch is mended once the piece after it
+    /// ends** (ROADMAP CD-19, Left (3)). `a` and its word space, `Tw` of
+    /// eight points moving the pen on to 18, and `ב c` in a text object of
+    /// its own at the stretched pen: the carry refuses the gap after a
+    /// left-to-right word, and the piece after it, ending in `c`, makes with
+    /// it a line whose ends both read left to right.
+    #[test]
+    fn a_cut_at_a_word_spaces_stretch_is_mended_where_the_line_reads_left_to_right() {
+        let a: &[(&str, f64)] = &[("a", 0.0), (" ", 5.0)];
+        let cell = |at: f64| [("\u{5D1}", at), (" ", at + 5.0), ("c", at + 18.0)];
+        let mended = cell(18.0);
+        assert_eq!(objects_spaced(&[a, &mended], 0.0, 8.0), ["a \u{5D1} c"]);
+        // Left (3)'s three pieces: `x` and `y` apart, since the two hold no
+        // right-to-left letter, and `y` and `ב z` one line.
+        let x: &[(&str, f64)] = &[("x", 0.0), (" ", 5.0)];
+        let y: &[(&str, f64)] = &[("y", 18.0), (" ", 23.0)];
+        let gloss: &[(&str, f64)] = &[("\u{5D1}", 36.0), (" ", 41.0), ("z", 54.0)];
+        assert_eq!(
+            objects_spaced(&[x, y, gloss], 0.0, 8.0),
+            ["x ", "y \u{5D1} z"]
+        );
+        // With no `Tw` the gap is one the spacing does not account for.
+        assert_eq!(objects_spaced(&[a, &mended], 0.0, 0.0).len(), 2);
+    }
+
+    /// **And nowhere else**: not a cell set two points past or short of the
+    /// stretched pen, where padding or `border-spacing` put it; not a line
+    /// with Hebrew at either end, which ruling 14 reads by its majority or
+    /// from the right; and not left-to-right text, collected as before.
+    #[test]
+    fn a_cut_at_a_word_spaces_stretch_stays_where_the_line_would_not_read_left_to_right() {
+        let a: &[(&str, f64)] = &[("a", 0.0), (" ", 5.0)];
+        for at in [20.0, 16.0] {
+            let cell = [("\u{5D1}", at), (" ", at + 5.0), ("c", at + 18.0)];
+            assert_eq!(
+                objects_spaced(&[a, &cell], 0.0, 8.0).len(),
+                2,
+                "a cell at {at} was joined"
+            );
+        }
+        let hebrew: &[(&str, f64)] = &[("\u{5D0}", 0.0), (" ", 5.0), ("b", 18.0), (" ", 23.0)];
+        let last: &[(&str, f64)] = &[("\u{5D2}", 36.0)];
+        assert_eq!(
+            objects_spaced(&[hebrew, last], 0.0, 8.0),
+            ["\u{5D0} b ", "\u{5D2}"]
+        );
+        let latin: &[(&str, f64)] = &[("b", 18.0), (" ", 23.0), ("c", 36.0)];
+        assert_eq!(objects_spaced(&[a, latin], 0.0, 8.0), ["a ", "b c"]);
     }
 
     #[test]

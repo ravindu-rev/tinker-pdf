@@ -1912,9 +1912,9 @@ fn a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop() {
 /// a bracketed Hebrew one in a spanned cell (Left (4)), pinned. A styled
 /// Latin, Greek, Cyrillic or Armenian word before a gloss was fixed at
 /// `12px` by 935b077's read-back, which centres the word space styled apart
-/// in its stretch (held); before a bare gloss and a Latin tail at `2em`, no
-/// placement of the space parts the stretch into halves a reader resumes a
-/// line across (Left (3)), pinned in a default build. And V3 of round 6's
+/// in its stretch (held); before a bare gloss and a Latin tail at `2em`,
+/// `TextDevice` mends the line the word space's stretch cut, since the joined
+/// line's ends read left to right (Left (3)), held in both builds. And V3 of round 6's
 /// hunt: two right-to-left cells of a table with no `dir`, touching, at
 /// `word-spacing: 1em`, which K-11's reader joins into one line that holds
 /// nothing left to right and whose left end is the second cell's `)`, so the
@@ -1946,11 +1946,11 @@ fn a_dirless_line_with_a_right_to_left_gloss() {
         Case::both("a bold Armenian word before (ספר) בית (H2-2)", "he", px12, "<p>գիրք <b>տուն</b> (ספר) בית</p>", Expect::Holds("cons logical whole found apart")),
         Case::both("a Greek word before (ספר) בית at 6px (guard)", "he", "p { word-spacing: 6px }", "<p>αλφα <b>βήτα</b> (ספר) בית</p>", Expect::Holds("cons logical whole found apart")),
         Case::both("an unstyled Greek gloss before (ספר) בית (guard)", "he", px12, "<p>αλφα βήτα (ספר) בית</p>", Expect::Holds("cons logical whole found apart")),
-        Case::each(
+        Case::both(
             "a bold Greek word before a bare gloss and a Latin tail at 2em (Left (3))",
             "he",
             "p { word-spacing: 2em }",
-            "<p>αλφα <b>βήτα</b> ספר בית xyz.</p>", Expect::Pinned("found apart"), Expect::Holds("found apart")),
+            "<p>αλφα <b>βήτα</b> ספר בית xyz.</p>", Expect::Holds("cons logical whole found apart")),
         Case::both("a bold Armenian word before a bare gloss and a Latin tail (H2-2)", "he", px12, "<p>գիրք <b>տուն</b> ספר בית xyz.</p>", Expect::Holds("cons logical whole found apart")),
         // With `bundled-fonts` the Hebrew book conserves at every tree: a
         // guard there.

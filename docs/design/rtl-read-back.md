@@ -236,6 +236,12 @@ through `TextDevice` and cannot see a change in it.
 - `cargo test -p tinker-pdf-content`, and each test it fails;
 - the suites' time in release and debug, against the tree without the rule.
 
+**What the rule reads.** Prototyped as stated, in both builds, it reads
+Left (3) whole, and in a default build a `<bdi>` of Latin with Hebrew in it
+in a Hebrew paragraph at `word-spacing: 1em` (Left (8)) as well; it reads no
+case worse, changes no plain PDF's text and moves no time past the noise, so
+the owner's rules take it.
+
 **CD-19.21's exit tests**, where the owner takes it: in `text.rs`, a line
 cut at a stretched word space after `a` and mended with a `ב c` set at the
 stretched pen, Left (3)'s three pieces read as `x` and `y ב z`, and the

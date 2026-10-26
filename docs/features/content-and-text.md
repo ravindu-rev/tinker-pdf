@@ -177,6 +177,21 @@ applies it to a single-byte one alone — so the device is carried to where the
 interpreter drew the next glyph; after a code 32 that decodes to anything
 else, a letter such as the overflow font's, the interpreter moves the pen on
 by `Tw` all the same and the device takes no `Tw` from it.
+
+A cut the device makes after such a word space, for the slack alone and
+where the next glyph starts at the pen the stretch left, is mended once the
+piece it starts ends: the piece is joined to the line before where one of
+the two holds a right-to-left glyph of its own and the leftmost and
+rightmost glyphs of the two that read either way both read left to right, so
+that ruling 14 reads the joined line left to right by its ends. A line with
+no `dir` that sets a bold Greek word before a bare Hebrew gloss and a Latin
+tail at `word-spacing: 2em` reads whole so. A glyph a gutter, a cell's
+padding, a `Td` or a `Tm` places other than at the stretched pen is never
+joined, nor a line whose joined ends would read right to left, and
+left-to-right text is collected as before
+(`a_cut_at_a_word_spaces_stretch_is_mended_where_the_line_reads_left_to_right`,
+`a_cut_at_a_word_spaces_stretch_stays_where_the_line_would_not_read_left_to_right`).
+
 Writing mode and directionality are separate properties: `TextLine::wmode`
 is the font's 9.7.4.3 wmode, `TextLine::rtl` is counted from the characters
 themselves, because vertical Japanese and right-to-left Arabic are not the

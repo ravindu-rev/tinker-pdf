@@ -4313,9 +4313,11 @@ fn a_reading_that_cuts_or_joins_a_word_is_taken_as_935b077_took_it() {
 /// drawings write the same text objects as the rules' or as another of its
 /// own, and each is read again: on a line of a few spaced runs the pair that
 /// reads it right comes after the budget. A right-to-left paragraph after a
-/// generated `§ ` at `word-spacing: 0.6em` or `1em` is not read whole, and a
-/// `<bdi>` holding a Latin sentence with Hebrew in it, in a Hebrew paragraph
-/// at `word-spacing: 1em`, does not conserve; no tree read them so. Reading
+/// generated `§ ` at `word-spacing: 0.6em` or `1em` is not read whole, and,
+/// with `bundled-fonts`, a `<bdi>` holding a Latin sentence with Hebrew in it,
+/// in a Hebrew paragraph at `word-spacing: 1em`, does not conserve; in a
+/// default build `TextDevice`'s mend of a cut at a word space's stretch reads
+/// that one whole. Reading
 /// each drawing once reaches those drawings, and costs an Arabic paragraph
 /// at `line-height: 0.4`, whose rows a reader runs into the next ones, its
 /// structure tree's order, which it holds at 56dfd93 and 935b077: the
@@ -4334,11 +4336,12 @@ fn a_line_whose_right_drawing_lies_past_the_budget_is_drawn_by_the_rules() {
         Case::both("the same at 1em (V5)", "he", generated_1, he, Expect::Pinned("found apart")),
         Case::both("an Arabic paragraph after a generated \u{a7} at 0.6em (V5)", "ar", generated_06, ar, Expect::Pinned("found apart")),
         Case::both("the same at 1em (V5)", "ar", generated_1, ar, Expect::Pinned("found apart")),
-        Case::both(
+        Case::each(
             "a bdi of Latin with Hebrew in it in a Hebrew paragraph at 1em (V5)",
             "he",
             "p { word-spacing: 1em; margin: 0 20% }",
             "<p dir=\"rtl\">יום <bdi>The word שלום means עולם in <i>מלחמה</i>. The word שלום means עולם in <i>מלחמה</i>.</bdi> בראשית.</p>",
+            Expect::Pinned("cons logical whole found apart"),
             Expect::Pinned("found apart"),
         ),
         Case::both("a justified Arabic paragraph at line-height 0.4, no dir (what reading each drawing once costs)", "ar", tight, format!("<p>{}</p>", styled_marks(&AR)), Expect::Pinned("logical found apart")),
