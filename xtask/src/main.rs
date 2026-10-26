@@ -135,7 +135,7 @@ fn main() -> ExitCode {
         "oracles" => report("oracles", check_oracles()),
         "vendor" => report("vendor", check_vendor()),
         "conflicts" => report("conflicts", check_conflicts()),
-        "fuzz" => report("fuzz", fuzzaudit::run(&repo_root(), rest).map(|_| ())),
+        "fuzz" => report("fuzz", fuzzaudit::run(&repo_root()).map(|_| ())),
         "versions" => report("versions", version::check(&repo_root())),
         "baseline" => report("baseline", bench::check(&repo_root())),
         "corpusjob" => report("corpusjob", check_corpus_job()),
