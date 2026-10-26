@@ -205,10 +205,9 @@ follow it, and an `inside` marker — its item's first inline box, and an
 isolate by `css-lists-3` §3.1's user-agent rule — is ordered with its line as
 one unit at the paragraph's level, where N1 or N2 puts a neutral at a
 paragraph's start: first on the left of a left-to-right item and first on the
-right of a right-to-left one, drawn in that direction (`paint::visual_lines`)
-— except beside an atomic inline on a right-to-left item's first line, a
-known limit, where it is ordered with the run it touches rather than the line
-box and drawn between the item's first word and the box, uncounted. An inline
+right of a right-to-left one, drawn in that direction (`paint::visual_lines`),
+an atomic inline beside it on the item's first line one unit of the line too
+(see *An atomic inline is one unit of its line's order* below). An inline
 box's `embed`, `isolate` and `plaintext` are carried on its runs as the
 levels §2.4.2 maps them to — one stack shared by every run set under the same
 boxes, no deeper than UAX #9's own 125
@@ -392,10 +391,22 @@ the other order, or its spaced slice whole, in a text object at each change
 of resource, whole with the white space at its right end drawn at the end of
 its stretch, against what is drawn next, or — a word space styled apart, a
 run of its own — at the middle of its stretch, so that the gap either side of
-it is half the stretch (`paint::Cut`); the first that reads the line right is
-drawn. A line the rules read right, or that no drawing tried reads right, is
-drawn by the rules; a line with a run in a face of the book's own is not read
-back, since that face is shaped
+it is half the stretch; whole with the white space at its left end drawn at
+the end of its stretch, against the glyph after it, so that its box does not
+reach what is drawn before the slice (`paint::Cut::Hugged`); and, a
+right-to-left run of more than one word, each word a text object written in
+reading order, every glyph where the rules draw it (`paint::Cut::Reading`).
+The first that reads the line right is drawn. A line under a matrix that turns
+its baseline, which nothing tried reads with its letters in order, is searched
+again the same way, up to as many readings, for the first drawing that reads
+it closer to the order written than the rules' drawing — more of its runs with
+their own characters in order, or as many and more pairs of its words — and
+sets no more glyphs over others (`paint::Fonts::search_closer`): `TextDevice`
+asks whether a glyph continues a line along the page's own `x` and `y`, so
+under a quarter turn it parts a word-spaced line at every space and keeps the
+pieces in the order drawn. Any other line the rules read right, or that no
+drawing tried reads right, is drawn by the rules; a line with a run in a face
+of the book's own is not read back, since that face is shaped
 (`neutrals_a_reader_reads_with_the_word_beside_them_are_drawn_for_that_reading`,
 `a_line_a_reader_cuts_where_it_is_spaced_apart_is_drawn_to_read_whole`).
 
@@ -490,12 +501,9 @@ These lines no drawing tried reads right, and they are drawn by the rules:
   gloss before a bracketed right-to-left word, table cells (two right-to-left
   cells with no `dir` touching, or a cell `(ספר) בית` alone on its line), an
   ARABIC COMMA or QUESTION MARK after Latin text;
-- with `bundled-fonts`, a word of a Hebrew paragraph with no `dir` of inline
-  blocks squeezed by `scaleX(0.5)`, at `word-spacing: 0.6em`, which search
-  does not find;
 - and a line whose right drawing comes after the read-back's budget: a
   right-to-left paragraph after a generated `§ ` at `word-spacing: 0.6em` or
-  `1em`, and a `<bdi>` of Latin with Hebrew in it.
+  `1em`.
 
 A word of Greek, Cyrillic or Armenian that an inline block cuts,
 `αλφα<span style="display: inline-block; width: 1em"> </span>βήτα`, reads in
@@ -505,13 +513,43 @@ A glyph is drawn over another where a negative `letter-spacing` sets it
 there, which layout itself does; where a `transform` paints a box past its
 edges, as CSS draws it; and, with `bundled-fonts`, where the stand-in draws a
 `U+200E`, `U+202A`, `U+202C` or `U+202D` as a glyph of no advance whose
-thousandth-of-an-em box lies on the glyph after it. And in a line UAX #9
-reorders, `paint::visual_lines` moves runs and not boxes: an inline block's
-own text is ordered as runs of the line, and its box fragment, with its
-background, border and outline and the origin of its `transform`
-(`paint::Effects::locals`), stays where layout set it in logical order, so a
-transformed block's glyphs land beside its box, over its neighbours'
-(ROADMAP CD-19, Left (10); [design/rtl-read-back.md](../design/rtl-read-back.md)).
+thousandth-of-an-em box lies on the glyph after it.
+
+**An atomic inline is one unit of its line's order.** In a line UAX #9
+reorders, an inline block, an `inline-flex` or a picture set inline is
+ordered as one U+FFFC OBJECT REPLACEMENT CHARACTER, a neutral
+(`css-writing-modes-3` §2.4), set inside the embeddings its inline ancestors
+open; its own text is ordered as the paragraph of its own it is, in its own
+`direction`. Which boxes are atomic inlines is read from the box tree, as
+layout gathers a box into its line (`paint::Atomics`), and each is set on
+the line whose baseline crosses its box. Where the reordering moves one,
+`paint::visual_lines` moves everything set in it by the same distance — its
+runs, its box fragment with its background, border and outline, its
+pictures and its clips — so the origin of its `transform`
+(`paint::Effects::locals`) stands where its text is drawn: a block turned,
+skewed or scaled turns about its own text, and one squeezed draws inside its
+box. A picture is ordered with its words, and a line with no right-to-left
+character moves nothing (`epub_paint.rs`'s
+`an_inline_blocks_background_border_and_outline_stand_around_its_own_text_in_a_reordered_line`,
+`a_turned_or_skewed_inline_block_turns_about_its_own_text_in_a_reordered_line`,
+`an_inline_block_in_a_line_with_no_right_to_left_character_moves_nothing`
+and `an_inside_marker_is_on_its_items_start_side_beside_an_inline_block`;
+`epub_images.rs`'s `an_inline_img_is_ordered_with_its_words_in_a_right_to_left_line`).
+What a transform paints past its box is CSS's: an inline block widened by
+`scaleX(2)` paints its glyphs over its neighbours', and the paragraph that
+holds it is pinned at the count (`epub_fallback.rs`'s
+`a_styled_mark_in_a_widened_block_reads_in_order_with_its_block_scaled_about_its_own_text`).
+A block's own paragraph is left to right in a paragraph with no `dir`, so a
+`?!` it ends on is drawn right of its word; where the block touches its
+neighbours a reader reads it with them, from the right, the `?!` first;
+where the word space after it is drawn against the word that follows
+(`paint::Cut::Hugged`), a block set more than half an em from its neighbours
+is read as a line of its own, left to right, the `?!` after its word. Not
+ordered: an atomic inline its margin sets apart from the run at a line's end,
+an empty inline block that paints nothing, and a line of atomic inlines
+alone; and a right-to-left inline block of `width: auto` is as wide as its
+line, so it is a line of its own
+([design/rtl-read-back.md](../design/rtl-read-back.md)).
 
 **A run that ends on a mark.** A slice that ends on a mark ends its text
 object a spacing less a millionth of an em from the next run, so a run that
@@ -959,7 +997,7 @@ inside its `Link` element, with no `/Contents` and no `/Alt`, on a page with no
 | A refused `<img>` — **not a refusal, a stated answer** | — | HTML §4.8.4.4 makes an element *"expected to be treated as a replaced element"* **only when the image is available**, so an unavailable one is an ordinary empty inline and generates **no box**. §10.3.2's 300 by 150 default would put a blank postcard into a paragraph for a reference that was merely misspelled, and carrying `alt` into it would put characters on the page the spine's markup does not contain — one per refused image, with no source character to answer it. Asserted as a byte-for-byte identity against the same book with an empty `<span>` in the `<img>`'s place | [design/epub-layout.md](../design/epub-layout.md) |
 | `text-transform` in Lithuanian, Turkish or Azeri, and its `full-width` and `full-size-kana` values | `ArchiveWarning::UnimplementedProperty { property: "text-transform", .. }` | §2.1 requires `SpecialCasing.txt`'s language-conditional mappings when the element's language is known, and the layout crate that applies the transform is handed computed styles and never a language — so the cascade counts every element in one of the three languages (by `xml:lang`/`lang`, inherited) that has a casing transform, rather than letting a Turkish heading set with an English `I` read as honoured. `full-width` and `full-size-kana` map to *other characters*, not cases, and are refused by value alone or beside a casing keyword | `crates/tinker-pdf-layout/src/case.rs` |
 | `font-kerning: normal`, or a feature switched on by `font-feature-settings`, for text set in one of the standard 14; an alternate index above one; a `font-feature-settings` list longer than `tinker_pdf_css::limits::MAX_CSS_FEATURE_SETTINGS` (32) | `ArchiveWarning::UnimplementedProperty { property: "font-kerning" \| "font-feature-settings", .. }` | an embedded face's run is shaped, and both properties reach its shaper (`font-kerning: none` as `kern` off, `font-feature-settings` switching features off out of the plan and on into it, `css-fonts-4` §7.2's precedence putting the low-level property last), measured and drawn alike. The standard 14 are drawn a character at a time from their widths — no `GSUB`, no `GPOS`, and none of their AFM kerning pairs, which this build does not carry — so a request switched **on** for such text cannot be met and its element is counted, at paint time, where the face a character is set in is known; a feature switched off is met there already, and `auto` kerning is the user agent's to decide. An alternate index is a parameter the shaper's alternate substitution does not take (it takes the first), and a list past the cap would be copied into every element that inherits it, so both are refused by value | `crates/tinker-pdf/tests/epub_paint.rs`, `crates/tinker-pdf/tests/epub_shaped.rs` |
-| `unicode-bidi: bidi-override` and `isolate-override` — every `<bdo>` — and `direction: rtl` on a table, a flex container or a multi-column container, or on the containing block of an over-constrained block, table, flex container or block-level picture, of a relatively positioned box with both `left` and `right`, or of an absolutely positioned box | `ArchiveWarning::UnimplementedProperty { property: "unicode-bidi" \| "direction", .. }` | an override makes every character inside it strong in one direction, so a Latin word under `rtl` is drawn letter by letter backwards — a glyph order the painter's shaper never produces, since it shapes a slice in that slice's own direction — and it is refused by value rather than drawn as an isolate. `direction` is met where it decides a paragraph; CSS 2.2 §9.10 gives it three more jobs this layout does not do — a table's columns (§17.5), a flex row's main axis (`css-flexbox-1` §2) and a multi-column container's columns (`css-multicol-1` §3) run from the right, and a block-level box over-constrained in a right-to-left containing block — a block, a list item, a table or a flex container with a definite width and neither margin `auto` — gives up its `margin-left` rather than its `margin-right` (§10.3.3), a relatively positioned box there with both `left` and `right` is offset by `right` (§9.4.3), and an absolutely positioned box in one is placed by `right` and from its static position's right edge (§10.3.7) — so each such element is counted rather than read mirror-wise. A width is definite when `width` states it, when §10.4 runs §10.3.3 again with a `max-width` that narrows the box or a `min-width` that widens it as its `width`, and when the box is a block-level `<img>`, whose used width §10.3.4 takes from the picture and never leaves `auto`; whether a `max-width` or `min-width` clamps is the containing block's width to say, which the cascade does not know, so every one that may is counted — a `max-width` of 100% or more over margins that are not negative never clamps and is not — and an `<img>` whose picture did not resolve is counted with the ones that did. A box with an `auto` margin whose width and other margin are wider than its containing block is over-constrained as well, the `auto` taken as zero, and is not counted: counting every `auto` margin beside a width would count every centred block, and `ContentOverflowedPage` names the box where it is itself wider than its containing block. Which margin or inset gives way is the **containing block's** direction to decide, not the box's own: a right-to-left block with a width in a left-to-right body is laid out as §10.3.3 says and is not counted. A flex container without a `width`, or a `min-width` or `max-width` that may clamp one, fills its line, as a table does in this layout, and gives up no margin; an inline box is not offset by `position: relative` at all here, so it is not counted against `direction`. An `inside` list marker in a right-to-left item is drawn at the right, its item's text to its left (`an_inside_marker_is_on_its_items_start_side`, `an_inside_marker_is_ordered_at_its_paragraphs_level`). A standard-14 piece holding a right-to-left character is drawn in L2's order (see *The standard 14* above), with two known limits: L4's mirroring is not applied, so a bracket pair at a right-to-left level faces outward and extracts as written; and a mark whose letter another run draws in a right-to-left run is read with the glyph drawn just before it (`a_standard_14_right_to_left_mark_styled_apart_rides_on_nothing`) | `crates/tinker-pdf/tests/epub_paint.rs`, `crates/tinker-pdf/tests/epub_images.rs`, `crates/tinker-pdf/tests/epub_shaped.rs`, `crates/tinker-pdf/tests/epub_fallback.rs` |
+| `unicode-bidi: bidi-override` and `isolate-override` — every `<bdo>` — and `direction: rtl` on a table, a flex container or a multi-column container, or on the containing block of an over-constrained block, table, flex container or block-level picture, of a relatively positioned box with both `left` and `right`, or of an absolutely positioned box | `ArchiveWarning::UnimplementedProperty { property: "unicode-bidi" \| "direction", .. }` | an override makes every character inside it strong in one direction, so a Latin word under `rtl` is drawn letter by letter backwards — a glyph order the painter's shaper never produces, since it shapes a slice in that slice's own direction — and it is refused by value rather than drawn as an isolate. `direction` is met where it decides a paragraph; CSS 2.2 §9.10 gives it three more jobs this layout does not do — a table's columns (§17.5), a flex row's main axis (`css-flexbox-1` §2) and a multi-column container's columns (`css-multicol-1` §3) run from the right, and a block-level box over-constrained in a right-to-left containing block — a block, a list item, a table or a flex container with a definite width and neither margin `auto` — gives up its `margin-left` rather than its `margin-right` (§10.3.3), a relatively positioned box there with both `left` and `right` is offset by `right` (§9.4.3), and an absolutely positioned box in one is placed by `right` and from its static position's right edge (§10.3.7) — so each such element is counted rather than read mirror-wise. A width is definite when `width` states it, when §10.4 runs §10.3.3 again with a `max-width` that narrows the box or a `min-width` that widens it as its `width`, and when the box is a block-level `<img>`, whose used width §10.3.4 takes from the picture and never leaves `auto`; whether a `max-width` or `min-width` clamps is the containing block's width to say, which the cascade does not know, so every one that may is counted — a `max-width` of 100% or more over margins that are not negative never clamps and is not — and an `<img>` whose picture did not resolve is counted with the ones that did. A box with an `auto` margin whose width and other margin are wider than its containing block is over-constrained as well, the `auto` taken as zero, and is not counted: counting every `auto` margin beside a width would count every centred block, and `ContentOverflowedPage` names the box where it is itself wider than its containing block. Which margin or inset gives way is the **containing block's** direction to decide, not the box's own: a right-to-left block with a width in a left-to-right body is laid out as §10.3.3 says and is not counted. A flex container without a `width`, or a `min-width` or `max-width` that may clamp one, fills its line, as a table does in this layout, and gives up no margin; an inline box is not offset by `position: relative` at all here, so it is not counted against `direction`. An `inside` list marker in a right-to-left item is drawn at the right, its item's text to its left, an inline block on its line too (`an_inside_marker_is_on_its_items_start_side`, `an_inside_marker_is_ordered_at_its_paragraphs_level`, `an_inside_marker_is_on_its_items_start_side_beside_an_inline_block`). A standard-14 piece holding a right-to-left character is drawn in L2's order (see *The standard 14* above), with two known limits: L4's mirroring is not applied, so a bracket pair at a right-to-left level faces outward and extracts as written; and a mark whose letter another run draws in a right-to-left run is read with the glyph drawn just before it (`a_standard_14_right_to_left_mark_styled_apart_rides_on_nothing`) | `crates/tinker-pdf/tests/epub_paint.rs`, `crates/tinker-pdf/tests/epub_images.rs`, `crates/tinker-pdf/tests/epub_shaped.rs`, `crates/tinker-pdf/tests/epub_fallback.rs` |
 | `color-scheme` naming `dark` and not `light` | `ArchiveWarning::UnimplementedProperty { property: "color-scheme", .. }` | a page is printed in the **light** scheme — paper is the light canvas, and print media's `prefers-color-scheme` is `light` — so `normal` and every list that names `light` (pandoc's `:root { color-scheme: light dark }`) is the scheme this build draws, and the property is the no-op it is on paper. A list asking for the dark scheme asks for a canvas and system colours this build does not have, and is refused by value rather than drawn light and called honoured | `crates/tinker-pdf/tests/epub_paint.rs` |
 | `opacity` on an element whose subtree holds a box that paints a background or border **and** has content over it | `ArchiveWarning::UnimplementedProperty { property: "opacity", .. }` | §15.1 composites the element as one group and then fades it; this painter fades each fragment, which is the same picture until something inside the element paints over something else inside it — text over its own box's background, each at half alpha, shows the background through the text. The group is a transparency-group form XObject, and the element's glyphs are tagged marked content the structure writer puts in the page stream rather than in a form, so the group is owed to that writer; the elements where the two differ are counted by element, and the rest are exact. An archival profile that forbids transparency refuses the alpha outright, and those elements are drawn opaque and counted the same way | `crates/tinker-pdf/tests/epub_paint.rs` |
 | A repeating or conic gradient, a gradient with a translucent stop, an interpolation hint or an interpolation colour space, one of more stops than `tinker_pdf_css::limits::MAX_CSS_GRADIENT_STOPS` (32), any other `<image>` function, a second background layer, `background-attachment` other than `scroll`, and a `<box>` in the `background` shorthand | `ArchiveWarning::UnimplementedProperty { property: "background-image" \| "background" \| …, .. }` | a PDF shading has no alpha, and a gradient with a translucent stop drawn opaque would be a different picture; a hint bends the ramp between two stops, which one straight piece per pair cannot; a gradient past the cap is a stitching function written for every fragment on every page its box crosses. The other functions of `css-images-4` are images this build does not draw, §2's comma-separated layers are one image too many, and `background-origin` and `background-clip` — which the shorthand's two `<box>`es set — are not implemented: each is refused by value rather than given its first part, which would draw a background the author did not write | [ROADMAP.md](../ROADMAP.md) |

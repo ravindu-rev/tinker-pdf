@@ -344,6 +344,10 @@ pub enum Expect {
     /// test: a gain is the limit closing, and its row moves to `Holds` with
     /// the ROADMAP row it names narrowed in the same commit.
     Pinned(&'static str),
+    /// [`Expect::Pinned`], and exactly this many glyphs drawn over others
+    /// ([`Reading::overprint`]): a case whose `apart` a transform's own
+    /// painting keeps from holding, held to the count it paints.
+    Drawing(&'static str, usize),
     /// Not asserted in this build: the case is the other build's.
     Neither,
 }
@@ -445,6 +449,17 @@ pub fn meets(expect: Expect, reading: &Reading) -> Result<(), String> {
                 Ok(())
             } else {
                 Err(format!("pinned at [{list}], reads [{}]", now.join(" ")))
+            }
+        }
+        Expect::Drawing(list, over) => {
+            meets(Expect::Pinned(list), reading)?;
+            if reading.overprint == over {
+                Ok(())
+            } else {
+                Err(format!(
+                    "pinned at {over} glyphs over others, draws {}",
+                    reading.overprint
+                ))
             }
         }
     }

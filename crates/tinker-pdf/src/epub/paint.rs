@@ -81,6 +81,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use tinker_pdf_cos::build::{
     DeviceSpace, DocumentBuilder, ExtGState, Function, Glyph, PageBuilder, PieceText, Shading,
@@ -89,21 +90,23 @@ use tinker_pdf_cos::build::{
 use tinker_pdf_css::cascade::StyleTree;
 
 use tinker_pdf_css::property::{
-    BackgroundSize, BorderStyle, Color, ColorStop, ComputedOffset, FeatureSetting, FontFamily,
-    FontKerning, FontStyle, Gradient, GradientOffset, GradientShape, Image, ImageRef,
-    LengthPercentage, LinearDirection, Position, RadialSize, RepeatStyle, Side, TextDecoration,
-    Transform, TransformOrigin,
+    BackgroundSize, BorderStyle, Color, ColorStop, ComputedOffset, Direction as CssDirection,
+    Display, FeatureSetting, Float, FontFamily, FontKerning, FontStyle, Gradient, GradientOffset,
+    GradientShape, Image, ImageRef, LengthPercentage, LinearDirection, Position, RadialSize,
+    RepeatStyle, Side, TextDecoration, Transform, TransformOrigin, UnicodeBidi,
 };
 use tinker_pdf_font::base14::Standard14;
 use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, glyph_name_to_char, BaseEncoding};
 use tinker_pdf_font::Sfnt;
+use tinker_pdf_layout::limits::MAX_EMBEDDING_DEPTH;
 use tinker_pdf_layout::metrics::{
     FirstStrong, FontRequest, Metrics, Neighbour, PlacedGlyph, ShapedText, Shaper, ShapingContext,
     Vertical, CONTEXT_BYTES,
 };
+use tinker_pdf_layout::style::{consume, Consumed};
 use tinker_pdf_layout::{
-    BackgroundLayer, BoxFragment, ClipFragment, Embedding, EmbeddingKind, Page as LayoutPage,
-    ReplacedFragment, TextRun,
+    BackgroundLayer, BoxFragment, BoxNode, ClipFragment, Content, Embedding, EmbeddingKind,
+    Page as LayoutPage, ReplacedFragment, TextRun,
 };
 use tinker_pdf_shape::bidi::{
     drawn_direction, order_units, reorder, BaseDirection, Level, Paragraph,
@@ -1203,11 +1206,16 @@ impl<'a> Fonts<'a> {
     /// the page, which parts `1 234` into two numbers a right-to-left line
     /// reads the other way round in every drawing tried, and no drawing read
     /// the line's letters in order, though one read the styled `?!` after the
-    /// number as typed where the rules' drawing turns it. A line the rules'
-    /// drawing reads right, or that no drawing tried reads right, is drawn by
-    /// the rules; and a line with no right-to-left character, no drawing to
-    /// try ([`drawings_of`]), or a run of a face of the book's own, which
-    /// [`plan_coded`] does not draw, is not read.
+    /// number as typed where the rules' drawing turns it. A line under a
+    /// matrix that turns its baseline, which nothing tried reads with its
+    /// letters in order, is drawn as the first drawing that reads more of its
+    /// runs with their own characters in order on the page than the rules'
+    /// drawing does, and sets no more glyphs over others
+    /// ([`Fonts::search_closer`]). A line the rules' drawing reads right, or
+    /// that nothing tried reads closer, is drawn by the rules; and a line
+    /// with no right-to-left character, no drawing to try ([`drawings_of`]),
+    /// or a run of a face of the book's own, which [`plan_coded`] does not
+    /// draw, is not read.
     ///
     /// The work is linear in the line, once a reading, and a line is read at
     /// most [`READINGS_PER_LINE`] times, twice that and twice more under a
@@ -1400,6 +1408,21 @@ impl<'a> Fonts<'a> {
                 }
                 found => found,
             };
+            // And where still nothing reads the line's letters in order under
+            // a matrix that turns its baseline off the page's `x` axis — where
+            // `TextDevice`, which asks whether a glyph continues a line along
+            // the page's own `x` and `y`, parts the line at its word spaces
+            // into pieces it keeps in the order drawn — a drawing that reads
+            // more of its runs with their own characters in order on the page
+            // is drawn ([`Fonts::search_closer`]): a right-to-left run's words
+            // written in reading order ([`Cut::Reading`]).
+            let turned = matrices.iter().any(|matrix| matrix[1] != 0.0);
+            let found = match found {
+                None if nothing && turned => {
+                    self.search_closer(&line, &places, &matrices, frame, &written, &options)
+                }
+                found => found,
+            };
             if let Some(found) = found {
                 drawings.extend(found);
             }
@@ -1532,6 +1555,66 @@ impl<'a> Fonts<'a> {
             self.runs_in_order(line, &rules),
         );
         found_runs > rules_runs || (found_runs == rules_runs && found_pairs > rules_pairs)
+    }
+
+    /// Where nothing [`Fonts::search`] tried reads `line`'s letters in order
+    /// on the page: the first drawing of one run, then of two, within
+    /// [`READINGS_PER_LINE`] readings, that reads it closer to the order
+    /// written than the rules' drawing, as [`Fonts::reads_closer`] measures
+    /// it, and sets no more glyphs over others; `None` where none does.
+    fn search_closer(
+        &self,
+        line: &[&TextRun],
+        places: &[usize],
+        matrices: &[[f64; 6]],
+        frame: &Frame,
+        written: &Words,
+        options: &[(RunKey, Drawing)],
+    ) -> Option<BTreeMap<RunKey, Drawing>> {
+        let (rules, over) = self.read_back(
+            line,
+            places,
+            matrices,
+            frame,
+            &BTreeMap::new(),
+            Given::ByTheFont,
+        )?;
+        let over = over.count();
+        let (runs, pairs) = (self.runs_in_order(line, &rules), written.pairs_in(&rules));
+        let tried = std::cell::Cell::new(1usize);
+        let closer = |chosen: &BTreeMap<RunKey, Drawing>| {
+            tried.set(tried.get() + 1);
+            self.read_back(line, places, matrices, frame, chosen, Given::ByTheFont)
+                .is_some_and(|(read, more)| {
+                    let found = self.runs_in_order(line, &read);
+                    more.count() <= over
+                        && (found > runs || (found == runs && written.pairs_in(&read) > pairs))
+                })
+        };
+        for &(key, drawing) in options {
+            if tried.get() >= READINGS_PER_LINE {
+                return None;
+            }
+            let one = BTreeMap::from([(key, drawing)]);
+            if closer(&one) {
+                return Some(one);
+            }
+        }
+        for (at, &(first, one)) in options.iter().enumerate() {
+            for &(second, other) in options.get(at + 1..).unwrap_or_default() {
+                if second == first {
+                    continue;
+                }
+                if tried.get() >= READINGS_PER_LINE {
+                    return None;
+                }
+                let two = BTreeMap::from([(first, one), (second, other)]);
+                if closer(&two) {
+                    return Some(two);
+                }
+            }
+        }
+        None
     }
 
     /// How many of `line`'s runs `read` reads with their own characters in
@@ -4435,6 +4518,20 @@ enum Cut {
     /// side of it are half the stretch each, which a reader resumes a line
     /// across where the whole of it, on one side, is a cut.
     Centered,
+    /// [`Cut::Whole`], and the white space at the slice's left end drawn at
+    /// the end of its stretch, against the glyph after it, rather than at
+    /// its start: a space draws nothing, and drawn there its box does not
+    /// reach towards what is drawn left of the slice, so a reader does not
+    /// join the two where the stretch between them is wider than half an
+    /// em. The word space a right-to-left run ends with, beside the atomic
+    /// inline that follows it on the line, is drawn so where the inline's
+    /// text reads alone, as its own paragraph does ([`visual_lines`]).
+    Hugged,
+    /// A text object for each word and each stretch of white space, written
+    /// in reading order — the right-to-left slice's rightmost first — each
+    /// glyph where the rules draw it: a reader that parts the slice at its
+    /// word spaces into lines of their own keeps them in the order written.
+    Reading,
 }
 
 /// One embedded face's shaped slice: where every glyph goes, and how wide the
@@ -4703,7 +4800,10 @@ const READINGS_PER_LINE: usize = 128;
 /// where it is spaced so that a reader may part its text objects
 /// ([`PARTED_FROM`]) its slice cut each way [`Cut`] names — centred
 /// ([`Cut::Centered`]) only where it is white space alone — by itself and
-/// with its neutrals turned.
+/// with its neutrals turned; then, where its slice opens with a word space,
+/// that space drawn against the glyph after it ([`Cut::Hugged`]), and where
+/// it is right to left and of more than one word, its words written in
+/// reading order ([`Cut::Reading`]).
 fn drawings_of(run: &TextRun, along: f64) -> Vec<(RunKey, Drawing)> {
     let key = run_key(run);
     let odd = run.bidi_level.is_some_and(|level| level % 2 == 1);
@@ -4739,6 +4839,34 @@ fn drawings_of(run: &TextRun, along: f64) -> Vec<(RunKey, Drawing)> {
                 out.push((key, Drawing { level_order, cut }));
             }
         }
+    }
+    // A spaced run whose slice opens, drawn, with a word space: the space
+    // drawn against the glyph after it ([`Cut::Hugged`]).
+    let opens_with_space = if reads_right_to_left(run) {
+        run.text.ends_with(' ')
+    } else {
+        run.text.starts_with(' ')
+    };
+    if spaced && !alone && opens_with_space {
+        out.push((
+            key,
+            Drawing {
+                level_order: None,
+                cut: Some(Cut::Hugged),
+            },
+        ));
+    }
+    // A spaced right-to-left run of more than one word: its words written in
+    // reading order ([`Cut::Reading`]).
+    let words = run.text.split_whitespace().nth(1).is_some();
+    if spaced && odd && words {
+        out.push((
+            key,
+            Drawing {
+                level_order: None,
+                cut: Some(Cut::Reading),
+            },
+        ));
     }
     out
 }
@@ -5263,8 +5391,52 @@ pub fn hyphenate(runs: &mut [TextRun]) {
 /// unit L2 can place, so [`split_at_levels`] cuts it at its line's level
 /// boundaries first, and every run this orders is at one level.
 ///
+/// # An atomic inline is one unit, and moves whole
+///
+/// An inline block or a replaced element set inline ([`Atomics`]) is one
+/// unit of the line it is set on, which UAX #9 reads as U+FFFC OBJECT
+/// REPLACEMENT CHARACTER, a neutral (`css-writing-modes-3` §2.4):
+/// [`split_at_levels`] sets a stand-in for it on that line ([`set_objects`]),
+/// its runs are ordered on lines of their own, as the paragraph of their own
+/// they are, and where L2 moves the stand-in, everything set in the atomic
+/// inline — its runs, its box fragments, its picture and its clips — moves
+/// with it by the same distance ([`carry`]), so its transform's origin, its
+/// background, its border and its outline stand where its text is drawn.
+/// The stand-ins are taken off the page here.
+///
 /// Returns how many lines moved.
-pub fn visual_lines(runs: &mut [TextRun]) -> usize {
+pub fn visual_lines(page: &mut LayoutPage, atomics: &Atomics) -> usize {
+    if !page.runs.iter().any(is_object) {
+        return lines_in_order(&mut page.runs);
+    }
+    let levels: Vec<Option<u32>> = page.runs.iter().map(|run| atomics.level(run)).collect();
+    let was: Vec<f64> = page.runs.iter().map(|run| run.x).collect();
+    let mut moved = 0usize;
+    for line in level_lines(&page.runs, &levels) {
+        if line.len() > 1 && reorder_at(&mut page.runs, &line) {
+            moved += 1;
+        }
+    }
+    let mut shift: BTreeMap<u32, f64> = BTreeMap::new();
+    for (run, was) in page.runs.iter().zip(&was) {
+        let Some(atomic) = run.anchor.filter(|_| is_object(run)) else {
+            continue;
+        };
+        let by = run.x - was;
+        if by != 0.0 && by.is_finite() {
+            shift.insert(atomic, by);
+        }
+    }
+    page.runs.retain(|run| !is_object(run));
+    if !shift.is_empty() {
+        carry(page, atomics, &shift);
+    }
+    moved
+}
+
+/// [`visual_lines`] over runs that hold no stand-in: each line is the runs
+/// in order whose ends meet ([`same_line`]).
+fn lines_in_order(runs: &mut [TextRun]) -> usize {
     let mut moved = 0usize;
     let mut start = 0usize;
     while start < runs.len() {
@@ -5280,6 +5452,573 @@ pub fn visual_lines(runs: &mut [TextRun]) -> usize {
         start = end;
     }
     moved
+}
+
+/// The lines of `runs`, each a list of indices in order: the runs of one
+/// level ([`Atomics::level`]) whose ends meet ([`same_line`]), so that an
+/// atomic inline's own runs are lines of their own and its stand-in is one
+/// unit of the line it is set on.
+fn level_lines(runs: &[TextRun], levels: &[Option<u32>]) -> Vec<Vec<usize>> {
+    let mut open: BTreeMap<Option<u32>, Vec<usize>> = BTreeMap::new();
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    for (at, (run, level)) in runs.iter().zip(levels).enumerate() {
+        let continues = open
+            .get(level)
+            .and_then(|line| line.last())
+            .and_then(|last| runs.get(*last))
+            .is_some_and(|last| same_line(last, run));
+        if !continues {
+            if let Some(done) = open.remove(level) {
+                lines.push(done);
+            }
+        }
+        open.entry(*level).or_default().push(at);
+    }
+    lines.extend(open.into_values());
+    lines
+}
+
+/// Moves everything set in each atomic inline `shift` names by its distance:
+/// the runs, box fragments, pictures and clips anchored in it, through every
+/// atomic inline it is set in ([`Atomics::chain`]).
+fn carry(page: &mut LayoutPage, atomics: &Atomics, shift: &BTreeMap<u32, f64>) {
+    let by = |anchor: Option<u32>| -> f64 {
+        atomics
+            .chain(anchor)
+            .filter_map(|atomic| shift.get(&atomic))
+            .sum()
+    };
+    for run in &mut page.runs {
+        let dx = by(run.anchor);
+        if dx != 0.0 {
+            run.x += dx;
+        }
+    }
+    for fragment in &mut page.boxes {
+        let dx = by(fragment.anchor);
+        if dx != 0.0 {
+            fragment.x += dx;
+        }
+    }
+    for fragment in &mut page.replaced {
+        let dx = by(fragment.anchor);
+        if dx != 0.0 {
+            fragment.x += dx;
+        }
+    }
+    for clip in &mut page.clips {
+        let dx = by(Some(clip.anchor));
+        if dx != 0.0 {
+            clip.x += dx;
+        }
+    }
+}
+
+/// The [`TextRun::order`] of an atomic inline's stand-in on its line
+/// ([`set_objects`]). No run layout makes carries it: its stamps count up
+/// from one.
+const OBJECT: usize = usize::MAX;
+
+/// Whether `run` is an atomic inline's stand-in ([`set_objects`]).
+fn is_object(run: &TextRun) -> bool {
+    run.order == OBJECT
+}
+
+/// How far a fragment's edge may lie from a run's and still meet it, in
+/// layout pixels: the two are sums of different terms.
+const SLACK: f64 = 1e-3;
+
+/// The atomic inlines of a chapter, CSS 2.2 §9.2.2 — an `inline-block`, an
+/// `inline-flex` and a replaced element set inline — each one unit of the
+/// line it is set on ([`visual_lines`]), and what is set in each.
+///
+/// Found in the box tree layout was given, as layout finds them (`flow.rs`'s
+/// `Builder::children` and `Builder::gather`): a box gathered into a line —
+/// an inline-level child of a block container, or a child of an inline box —
+/// that is not `display: none`, floated or absolutely positioned, and is an
+/// `inline-block`, an `inline-flex` or a replaced element. The page holds no
+/// mark of one: a fragment says whose box it is ([`BoxFragment::anchor`]) and
+/// a run whose characters it holds ([`TextRun::anchor`]), and only the tree
+/// says which elements are set inline and which is inside which.
+#[derive(Clone, Debug, Default)]
+pub struct Atomics {
+    /// For each anchor set inside an atomic inline, the innermost one: the
+    /// element itself, where it is one.
+    within: BTreeMap<u32, u32>,
+    /// For each atomic inline, the atomic inline its own box is set in.
+    around: BTreeMap<u32, Option<u32>>,
+    /// For each atomic inline, the embeddings its inline ancestors open
+    /// round it, as `flow.rs`'s `embedding_of` opens them: what the text of
+    /// its line writes round its U+FFFC.
+    embeddings: BTreeMap<u32, Arc<[Embedding]>>,
+}
+
+impl Atomics {
+    /// The atomic inlines of `tree`, the box tree a chapter is laid out from.
+    #[must_use]
+    pub fn of(tree: &BoxNode) -> Atomics {
+        /// How a box's parent sets it.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Set {
+            /// A child of a block container, gathered into its lines where it
+            /// is inline-level.
+            Block,
+            /// A child of an inline box, gathered into the line.
+            Inline,
+            /// The root, a flex item, a table's row or a row's cell: on no
+            /// line.
+            Apart,
+        }
+        /// A box still to walk: how its parent sets it, the atomic inline
+        /// it is set in, and the embeddings open round it.
+        type Pending<'t> = (&'t BoxNode, Set, Option<u32>, Arc<[Embedding]>);
+        let mut out = Atomics::default();
+        let mut stack: Vec<Pending<'_>> = vec![(tree, Set::Apart, None, Arc::default())];
+        while let Some((node, set, within, open)) = stack.pop() {
+            let style = consume(&node.style);
+            if style.is_none() {
+                continue;
+            }
+            let out_of_flow = style.float != Float::None
+                || matches!(style.position, Position::Absolute | Position::Fixed);
+            let gathered = !out_of_flow
+                && match set {
+                    Set::Inline => true,
+                    Set::Block => !style.is_block_level() && !style.is_internal_table(),
+                    Set::Apart => false,
+                };
+            let atomic = gathered
+                && (matches!(style.display, Display::InlineBlock | Display::InlineFlex)
+                    || matches!(node.content, Content::Replaced(_)));
+            let here = match node.anchor {
+                Some(anchor) if atomic => {
+                    out.around.insert(anchor, within);
+                    out.embeddings.insert(anchor, open.clone());
+                    Some(anchor)
+                }
+                _ => within,
+            };
+            if let (Some(anchor), Some(inner)) = (node.anchor, here) {
+                out.within.entry(anchor).or_insert(inner);
+            }
+            let Content::Children(children) = &node.content else {
+                continue;
+            };
+            let (set, open) = if atomic {
+                let set = if style.is_flex() {
+                    Set::Apart
+                } else {
+                    Set::Block
+                };
+                (set, Arc::default())
+            } else if gathered {
+                match opened_by(&style, node.anchor).filter(|_| open.len() < MAX_EMBEDDING_DEPTH) {
+                    Some(embedding) => {
+                        let mut more = open.to_vec();
+                        more.push(embedding);
+                        (Set::Inline, more.into())
+                    }
+                    None => (Set::Inline, open),
+                }
+            } else if style.is_flex()
+                || style.is_table()
+                || (style.is_internal_table()
+                    && !matches!(style.display, Display::TableCell | Display::TableCaption))
+            {
+                (Set::Apart, Arc::default())
+            } else {
+                (Set::Block, Arc::default())
+            };
+            for child in children.iter().rev() {
+                stack.push((child, set, here, open.clone()));
+            }
+        }
+        out
+    }
+
+    /// Whether the chapter holds no atomic inline.
+    fn is_empty(&self) -> bool {
+        self.around.is_empty()
+    }
+
+    /// Whether the element `anchor` is an atomic inline.
+    fn is_atomic(&self, anchor: u32) -> bool {
+        self.around.contains_key(&anchor)
+    }
+
+    /// The innermost atomic inline the element `anchor` is set in, the
+    /// element itself included.
+    fn innermost(&self, anchor: Option<u32>) -> Option<u32> {
+        anchor.and_then(|anchor| self.within.get(&anchor).copied())
+    }
+
+    /// The atomic inline `atomic`'s own box is set in.
+    fn around(&self, atomic: u32) -> Option<u32> {
+        self.around.get(&atomic).copied().flatten()
+    }
+
+    /// Which lines `run` is ordered with: an atomic inline's own (`Some`),
+    /// or those set in none (`None`). A stand-in is on the line of the atomic
+    /// inline it stands for is set in.
+    fn level(&self, run: &TextRun) -> Option<u32> {
+        if is_object(run) {
+            run.anchor.and_then(|atomic| self.around(atomic))
+        } else {
+            self.innermost(run.anchor)
+        }
+    }
+
+    /// The atomic inlines the element `anchor` is set in, innermost first.
+    /// Each is set in one whose element comes before it, so the walk ends;
+    /// it is held to the count of them besides.
+    fn chain(&self, anchor: Option<u32>) -> impl Iterator<Item = u32> + '_ {
+        let mut next = self.innermost(anchor);
+        let mut left = self.around.len();
+        core::iter::from_fn(move || {
+            let at = next?;
+            left = left.checked_sub(1)?;
+            next = self.around(at);
+            Some(at)
+        })
+    }
+}
+
+/// The embedding an inline box opens round its content, `css-writing-modes-3`
+/// §2.4.2, as `flow.rs`'s `embedding_of` opens it.
+fn opened_by(style: &Consumed, anchor: Option<u32>) -> Option<Embedding> {
+    let kind = match style.unicode_bidi {
+        UnicodeBidi::Normal => return None,
+        UnicodeBidi::Embed => EmbeddingKind::Embed,
+        UnicodeBidi::Isolate => EmbeddingKind::Isolate,
+        UnicodeBidi::Plaintext => EmbeddingKind::FirstStrong,
+    };
+    Some(Embedding {
+        kind,
+        rtl: style.direction == CssDirection::Rtl,
+        anchor,
+    })
+}
+
+/// A box on the page in layout pixels, grown to hold each rectangle it takes.
+#[derive(Clone, Copy, Debug)]
+struct Hull {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+}
+
+impl Default for Hull {
+    fn default() -> Self {
+        Hull {
+            left: f64::INFINITY,
+            top: f64::INFINITY,
+            right: f64::NEG_INFINITY,
+            bottom: f64::NEG_INFINITY,
+        }
+    }
+}
+
+impl Hull {
+    /// Grows to hold `(x, y, width, height)`.
+    fn take(&mut self, (x, y, width, height): (f64, f64, f64, f64)) {
+        self.left = self.left.min(x);
+        self.top = self.top.min(y);
+        self.right = self.right.max(x + width);
+        self.bottom = self.bottom.max(y + height);
+    }
+
+    /// Whether it holds anything, at finite places.
+    fn holds(&self) -> bool {
+        finite(&[self.left, self.top, self.right, self.bottom])
+            && self.left <= self.right
+            && self.top <= self.bottom
+    }
+
+    /// Whether it stands on `run`'s baseline: the baseline crosses it, as a
+    /// box set on a line at its baseline is crossed by the line's — a picture
+    /// at its bottom edge, an inline block at its last line's baseline. A
+    /// box of the line above or below, whose text stands a line height away,
+    /// is not crossed by it.
+    fn on(&self, run: &TextRun) -> bool {
+        self.top - SLACK <= run.y && run.y <= self.bottom + SLACK
+    }
+}
+
+/// Sets each atomic inline of a page on its line as one U+FFFC OBJECT
+/// REPLACEMENT CHARACTER, a stand-in [`split_at_levels`] and
+/// [`visual_lines`] order with the line's runs ([`OBJECT`]): unpainted, in
+/// its line's paragraph, inside the embeddings its inline ancestors open
+/// ([`Atomics`]), and as wide as the stretch of the line it takes.
+///
+/// Its box on the page is its own fragments' — its border box, its picture's
+/// content box — or, for one with none, the runs set in it. It is on the
+/// line, of the runs set in what it is set in, that it stands on
+/// ([`Hull::on`]) and either lies between two of whose runs, of one
+/// paragraph, or meets an end of ([`lines_across`], [`stands_on`]). It takes
+/// the stretch from the unit before it to the one after; at the line's ends,
+/// its own box's edge. A line of nothing but atomic inlines holds no run to
+/// find it by, and an atomic inline set apart from its neighbours by its
+/// margins only between two runs; it is not set.
+fn set_objects(page: &mut LayoutPage, atomics: &Atomics) {
+    if atomics.is_empty() {
+        return;
+    }
+    let mut boxes: BTreeMap<u32, Hull> = BTreeMap::new();
+    let own = page
+        .boxes
+        .iter()
+        .map(|b| (b.anchor, (b.x, b.y, b.width, b.height)))
+        .chain(
+            page.replaced
+                .iter()
+                .map(|r| (r.anchor, (r.x, r.y, r.width, r.height))),
+        );
+    for (anchor, rect) in own {
+        if let Some(atomic) = anchor.filter(|anchor| atomics.is_atomic(*anchor)) {
+            boxes.entry(atomic).or_default().take(rect);
+        }
+    }
+    let mut texts: BTreeMap<u32, Hull> = BTreeMap::new();
+    for run in &page.runs {
+        for atomic in atomics.chain(run.anchor) {
+            if !boxes.contains_key(&atomic) {
+                texts.entry(atomic).or_default().take((
+                    run.x,
+                    run.y - run.font_size,
+                    run.width,
+                    run.font_size * 1.25,
+                ));
+            }
+        }
+    }
+    for (atomic, hull) in texts {
+        boxes.entry(atomic).or_insert(hull);
+    }
+    let mut kids: BTreeMap<Option<u32>, Vec<(u32, Hull)>> = BTreeMap::new();
+    for (atomic, hull) in boxes {
+        if hull.holds() {
+            kids.entry(atomics.around(atomic))
+                .or_default()
+                .push((atomic, hull));
+        }
+    }
+    if kids.is_empty() {
+        return;
+    }
+    let levels: Vec<Option<u32>> = page
+        .runs
+        .iter()
+        .map(|run| atomics.innermost(run.anchor))
+        .collect();
+    let mut objects: Vec<(usize, TextRun)> = Vec::new();
+    for (level, kids) in &kids {
+        let own: Vec<usize> = levels
+            .iter()
+            .enumerate()
+            .filter(|(_, at)| *at == level)
+            .map(|(at, _)| at)
+            .collect();
+        let mut placed = vec![false; kids.len()];
+        for line in lines_across(&page.runs, &own, kids) {
+            stands_on(&page.runs, &line, kids, &mut placed, atomics, &mut objects);
+        }
+    }
+    if objects.is_empty() {
+        return;
+    }
+    objects.sort_by_key(|(at, _)| *at);
+    let taken = std::mem::take(&mut page.runs);
+    page.runs.reserve(taken.len() + objects.len());
+    let mut objects = objects.into_iter().peekable();
+    for (at, run) in taken.into_iter().enumerate() {
+        while let Some((_, object)) = objects.next_if(|(before, _)| *before <= at) {
+            page.runs.push(object);
+        }
+        page.runs.push(run);
+    }
+    page.runs.extend(objects.map(|(_, object)| object));
+}
+
+/// The lines of the runs `own` of `runs`, in order, as [`same_line`] finds
+/// them, but that two runs of one paragraph are one line across a stretch
+/// one of `kids` lies in, on their baseline ([`set_objects`]).
+fn lines_across(runs: &[TextRun], own: &[usize], kids: &[(u32, Hull)]) -> Vec<Vec<usize>> {
+    let bridged = |a: &TextRun, b: &TextRun| {
+        let end = a.x + a.width;
+        !beside_the_line(a)
+            && !beside_the_line(b)
+            && a.paragraph == b.paragraph
+            && (a.y - b.y).abs() <= a.font_size.max(b.font_size)
+            && end <= b.x + SLACK
+            && kids.iter().any(|(_, hull)| {
+                hull.left >= end - SLACK && hull.right <= b.x + SLACK && hull.on(b)
+            })
+    };
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    for &at in own {
+        let Some(run) = runs.get(at) else {
+            continue;
+        };
+        let continues = lines
+            .last()
+            .and_then(|line| line.last())
+            .and_then(|last| runs.get(*last))
+            .is_some_and(|last| same_line(last, run) || bridged(last, run));
+        match lines.last_mut() {
+            Some(line) if continues => line.push(at),
+            _ => lines.push(vec![at]),
+        }
+    }
+    lines
+}
+
+/// One unit of a line as [`stands_on`] sets it: a run, by its index on the
+/// page, or an atomic inline, by its index among the kids.
+#[derive(Clone, Copy)]
+enum Unit {
+    Run(usize),
+    Kid(usize),
+}
+
+/// Finds the atomic inlines among `kids` not yet `placed` that stand on
+/// `line` — between two of its runs, or meeting one of its ends, through
+/// each other — and adds a stand-in for each to `objects`, with the index of
+/// the run it goes before on the page ([`set_objects`]).
+fn stands_on(
+    runs: &[TextRun],
+    line: &[usize],
+    kids: &[(u32, Hull)],
+    placed: &mut [bool],
+    atomics: &Atomics,
+    objects: &mut Vec<(usize, TextRun)>,
+) {
+    let (Some(first), Some(last)) = (
+        line.first().and_then(|at| runs.get(*at)),
+        line.last().and_then(|at| runs.get(*at)),
+    ) else {
+        return;
+    };
+    let mut members: Vec<usize> = Vec::new();
+    for pair in line.windows(2) {
+        let (Some(a), Some(b)) = (
+            pair.first().and_then(|at| runs.get(*at)),
+            pair.get(1).and_then(|at| runs.get(*at)),
+        ) else {
+            continue;
+        };
+        let end = a.x + a.width;
+        for (kid, (_, hull)) in kids.iter().enumerate() {
+            let free = placed.get(kid).is_some_and(|placed| !placed);
+            if free && hull.left >= end - SLACK && hull.right <= b.x + SLACK && hull.on(b) {
+                if let Some(slot) = placed.get_mut(kid) {
+                    *slot = true;
+                }
+                members.push(kid);
+            }
+        }
+    }
+    let (mut left, mut right) = (first.x, last.x + last.width);
+    loop {
+        let mut grew = false;
+        for (kid, (_, hull)) in kids.iter().enumerate() {
+            if placed.get(kid).is_none_or(|placed| *placed) {
+                continue;
+            }
+            let before = (hull.right - left).abs() <= SLACK && hull.on(first);
+            let after = (hull.left - right).abs() <= SLACK && hull.on(last);
+            if before || after {
+                if let Some(slot) = placed.get_mut(kid) {
+                    *slot = true;
+                }
+                members.push(kid);
+                if before {
+                    left = hull.left;
+                } else {
+                    right = hull.right;
+                }
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    if members.is_empty() {
+        return;
+    }
+    // In the order layout set them, left to right: a kid before a run at the
+    // same edge, since only an empty one can start where a run does.
+    let mut units: Vec<(f64, u8, Unit)> = line
+        .iter()
+        .filter_map(|at| runs.get(*at).map(|run| (run.x, 1u8, Unit::Run(*at))))
+        .chain(members.iter().filter_map(|kid| {
+            kids.get(*kid)
+                .map(|(_, hull)| (hull.left, 0u8, Unit::Kid(*kid)))
+        }))
+        .collect();
+    units.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut edge: Option<f64> = None;
+    for (at, (_, _, unit)) in units.iter().enumerate() {
+        let kid = match unit {
+            Unit::Run(index) => {
+                edge = runs.get(*index).map(|run| run.x + run.width);
+                continue;
+            }
+            Unit::Kid(kid) => *kid,
+        };
+        let Some(&(atomic, hull)) = kids.get(kid) else {
+            continue;
+        };
+        let from = edge.unwrap_or(hull.left);
+        let to = match units.get(at + 1).map(|next| next.2) {
+            Some(Unit::Run(index)) => runs.get(index).map_or(hull.right, |run| run.x),
+            _ => hull.right,
+        }
+        .max(from);
+        edge = Some(to);
+        let after = units
+            .get(at + 1..)
+            .unwrap_or(&[])
+            .iter()
+            .find_map(|unit| match unit.2 {
+                Unit::Run(index) => Some(index),
+                Unit::Kid(_) => None,
+            });
+        let before = units
+            .get(..at)
+            .unwrap_or(&[])
+            .iter()
+            .rev()
+            .find_map(|unit| match unit.2 {
+                Unit::Run(index) => Some(index),
+                Unit::Kid(_) => None,
+            });
+        let (template, goes) = match (after, before) {
+            (Some(index), _) => (index, index),
+            (None, Some(index)) => (index, index + 1),
+            (None, None) => continue,
+        };
+        let Some(template) = runs.get(template) else {
+            continue;
+        };
+        let mut object = template.clone();
+        object.x = from;
+        object.width = to - from;
+        object.text = "\u{FFFC}".to_owned();
+        object.embeddings = atomics.embeddings.get(&atomic).cloned().unwrap_or_default();
+        object.bidi_level = None;
+        object.bidi_gap = None;
+        object.bidi_line_rtl = false;
+        object.hyphenated = false;
+        object.painted = false;
+        object.generated = false;
+        object.letter_spacing = 0.0;
+        object.word_spacing = 0.0;
+        object.anchor = Some(atomic);
+        object.order = OBJECT;
+        objects.push((goes, object));
+    }
 }
 
 /// Cuts every run that crosses one of its line's UAX #9 level boundaries
@@ -5344,29 +6083,93 @@ pub fn visual_lines(runs: &mut [TextRun]) -> usize {
 /// of its own; it stays with the character before it, so a `ZWJ` inside a
 /// word does not cut the word.
 ///
+/// # An atomic inline is one U+FFFC of its line
+///
+/// Each atomic inline is set on its line first, as a stand-in of one U+FFFC
+/// ([`set_objects`]), which is in its paragraph's text as UAX #9 reads it, a
+/// neutral; its own runs are lines of their own ([`level_lines`]).
+/// [`visual_lines`] takes the stand-ins off again.
+///
 /// A line with no right-to-left character is not touched. Returns how many
 /// runs were cut.
-pub fn split_at_levels(pages: &mut [LayoutPage], metrics: &BookMetrics<'_>) -> usize {
+pub fn split_at_levels(
+    pages: &mut [LayoutPage],
+    metrics: &BookMetrics<'_>,
+    atomics: &Atomics,
+) -> usize {
+    for page in pages.iter_mut() {
+        set_objects(page, atomics);
+    }
     let (resolved, places) = paragraphs(pages);
     let mut cut = 0usize;
     for (page, places) in pages.iter_mut().zip(places) {
         let taken = std::mem::take(&mut page.runs);
-        page.runs.reserve(taken.len());
-        let mut line: Vec<TextRun> = Vec::new();
-        let mut at: Vec<Place> = Vec::new();
         // Padded rather than zipped short: a run with no place is resolved by
         // its line alone, and a run the zip dropped would be text lost.
         let places = places.into_iter().chain(std::iter::repeat(None));
+        if taken.iter().any(is_object) {
+            let places: Vec<Place> = places.take(taken.len()).collect();
+            cut += split_lines_of_levels(taken, &places, &resolved, metrics, atomics, page);
+            continue;
+        }
+        page.runs.reserve(taken.len());
+        let mut line: Vec<TextRun> = Vec::new();
+        let mut at: Vec<Place> = Vec::new();
         for (run, place) in taken.into_iter().zip(places) {
             if line.last().is_some_and(|last| !same_line(last, &run)) {
-                cut += split_line(&mut line, &at, &resolved, metrics, &mut page.runs);
+                cut += split_line(&mut line, &at, &resolved, metrics, &mut page.runs, None);
                 at.clear();
             }
             line.push(run);
             at.push(place);
         }
-        cut += split_line(&mut line, &at, &resolved, metrics, &mut page.runs);
+        cut += split_line(&mut line, &at, &resolved, metrics, &mut page.runs, None);
     }
+    cut
+}
+
+/// [`split_at_levels`] over a page that holds a stand-in: each line is one
+/// level's ([`level_lines`]), and what [`split_line`] makes of each run is
+/// put back where the run was, so the page keeps its order.
+fn split_lines_of_levels(
+    taken: Vec<TextRun>,
+    places: &[Place],
+    resolved: &BTreeMap<usize, Paragraph>,
+    metrics: &BookMetrics<'_>,
+    atomics: &Atomics,
+    page: &mut LayoutPage,
+) -> usize {
+    let levels: Vec<Option<u32>> = taken.iter().map(|run| atomics.level(run)).collect();
+    let lines = level_lines(&taken, &levels);
+    let mut slots: Vec<Option<TextRun>> = taken.into_iter().map(Some).collect();
+    let mut made: Vec<Vec<TextRun>> = Vec::new();
+    made.resize_with(slots.len(), Vec::new);
+    let mut cut = 0usize;
+    for indices in lines {
+        let mut line: Vec<TextRun> = Vec::with_capacity(indices.len());
+        let mut at: Vec<Place> = Vec::with_capacity(indices.len());
+        let mut kept: Vec<usize> = Vec::with_capacity(indices.len());
+        for index in indices {
+            if let Some(run) = slots.get_mut(index).and_then(Option::take) {
+                line.push(run);
+                at.push(places.get(index).copied().flatten());
+                kept.push(index);
+            }
+        }
+        let mut out: Vec<TextRun> = Vec::with_capacity(line.len());
+        let mut ends: Vec<usize> = Vec::with_capacity(line.len());
+        cut += split_line(&mut line, &at, resolved, metrics, &mut out, Some(&mut ends));
+        let mut out = out.into_iter();
+        let mut from = 0usize;
+        for (index, end) in kept.into_iter().zip(ends) {
+            let pieces: Vec<TextRun> = out.by_ref().take(end.saturating_sub(from)).collect();
+            if let Some(slot) = made.get_mut(index) {
+                slot.extend(pieces);
+            }
+            from = end;
+        }
+    }
+    page.runs = made.into_iter().flatten().collect();
     cut
 }
 
@@ -5974,16 +6777,23 @@ fn drawn_units(
 }
 
 /// [`split_at_levels`] over one line, draining `line` into `out`. `places`
-/// are the line's runs' places in their paragraph, one per run.
+/// are the line's runs' places in their paragraph, one per run; `ends`, where
+/// given, takes the length of `out` after each run's pieces.
 fn split_line(
     line: &mut Vec<TextRun>,
     places: &[Place],
     paragraphs: &BTreeMap<usize, Paragraph>,
     metrics: &BookMetrics<'_>,
     out: &mut Vec<TextRun>,
+    mut ends: Option<&mut Vec<usize>>,
 ) -> usize {
     let Some(LineLevels { levels, base, gaps }) = line_levels(line, places, paragraphs) else {
-        out.append(line);
+        for run in line.drain(..) {
+            out.push(run);
+            if let Some(ends) = ends.as_deref_mut() {
+                ends.push(out.len());
+            }
+        }
         return 0;
     };
     // Whether a reader of the page finds a right-to-left character on this
@@ -6071,6 +6881,9 @@ fn split_line(
                 out.push(first);
             }
             out.extend(pieces);
+        }
+        if let Some(ends) = ends.as_deref_mut() {
+            ends.push(out.len());
         }
     }
     cut
@@ -6539,6 +7352,31 @@ fn reorder_line(line: &mut [TextRun]) -> bool {
     }
     for (run, x) in line.iter_mut().zip(xs) {
         run.x = x;
+    }
+    true
+}
+
+/// [`reorder_line`] over the runs of `runs` at `line`, a [`level_lines`]
+/// line: in place where they stand together, and over a copy of them where
+/// another level's runs stand between.
+fn reorder_at(runs: &mut [TextRun], line: &[usize]) -> bool {
+    let (Some(&first), Some(&last)) = (line.first(), line.last()) else {
+        return false;
+    };
+    if last.checked_sub(first) == Some(line.len() - 1) {
+        return runs.get_mut(first..=last).is_some_and(reorder_line);
+    }
+    let mut copy: Vec<TextRun> = line
+        .iter()
+        .filter_map(|at| runs.get(*at).cloned())
+        .collect();
+    if copy.len() != line.len() || !reorder_line(&mut copy) {
+        return false;
+    }
+    for (at, moved) in line.iter().zip(copy) {
+        if let Some(run) = runs.get_mut(*at) {
+            run.x = moved.x;
+        }
     }
     true
 }
@@ -7205,9 +8043,31 @@ fn plan_coded(
     // an object at a new resource, but inside a spaced slice (below).
     let one_object = whole
         || undone
-        || (spaced && matches!(drawing.cut, Some(Cut::Whole | Cut::Carried | Cut::Centered)));
+        || (spaced
+            && matches!(
+                drawing.cut,
+                Some(Cut::Whole | Cut::Carried | Cut::Centered | Cut::Hugged)
+            ));
     let start = x;
     let order = coded_order(run, slice, level_order);
+    // Where a reading back asked for it ([`Cut::Hugged`]), the end of the
+    // white space at the slice's left end — the first unit after it, which
+    // starts a piece of its own where the pen stands — and how far right of
+    // where the pen stands the white space is drawn: by the spacing after
+    // its last unit, so that its box ends where the next glyph starts.
+    let head = (spaced && drawing.cut == Some(Cut::Hugged))
+        .then(|| order.iter().position(|(c, _)| !c.is_whitespace()))
+        .flatten()
+        .filter(|head| *head > 0);
+    let lead = head
+        .and_then(|head| order.get(head - 1))
+        .map_or(0.0, |&(last, _)| {
+            (if letter_spaced(last) {
+                run.letter_spacing
+            } else {
+                0.0
+            }) + if last == ' ' { run.word_spacing } else { 0.0 }
+        });
     // Where a reading back asked for it ([`Cut::Carried`], [`Cut::Centered`]),
     // the white space at the slice's right end, from its first unit, and how
     // far right of where the pen stands it is drawn: by the word spacing of
@@ -7291,7 +8151,15 @@ fn plan_coded(
         let same = object
             .last()
             .is_some_and(|open| open.resource == coded.resource());
-        let continues = !mark && !after_mark && !alone && same && Some(at) != tail;
+        // Where a reading back asked for the words in reading order
+        // ([`Cut::Reading`]): a text object at every edge of a word.
+        let edge = drawing.cut == Some(Cut::Reading)
+            && at > 0
+            && order
+                .get(at - 1)
+                .is_some_and(|(before, _)| before.is_whitespace() != ch.is_whitespace());
+        let continues =
+            !mark && !after_mark && !alone && same && !edge && Some(at) != tail && Some(at) != head;
         if !continues {
             let joined = one_object || inside.is_some_and(|(lo, hi)| lo < at && at <= hi);
             if !joined && !object.is_empty() {
@@ -7312,7 +8180,13 @@ fn plan_coded(
                 glyphs: Vec::new(),
                 characters: String::new(),
                 advances: Vec::new(),
-                x: placed.unwrap_or(if Some(at) == tail { x + shift } else { x }),
+                x: placed.unwrap_or(if Some(at) == tail {
+                    x + shift
+                } else if at == 0 && head.is_some() {
+                    x + lead
+                } else {
+                    x
+                }),
             });
         }
         if !mark {
@@ -7346,6 +8220,9 @@ fn plan_coded(
     }
     if !object.is_empty() {
         objects.push(object);
+    }
+    if drawing.cut == Some(Cut::Reading) && reads_right_to_left(run) {
+        objects.reverse();
     }
     (objects, x)
 }

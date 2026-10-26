@@ -1141,6 +1141,197 @@ fn a_three_d_transform_and_a_turned_link_are_counted() {
     assert_eq!(counted(&linked, "transform"), Some(1));
 }
 
+// ---- an inline block in a line UAX #9 reorders ----------------------------------
+
+/// A rectangle on the first page in PDF points, `(x0, y0, x1, y1)`.
+type Rect = (f64, f64, f64, f64);
+
+/// Where every pixel of `colour` lies on the first page, in PDF points:
+/// rendered without antialiasing, so a fill is its own colour exactly.
+fn painted(doc: &Document, colour: [u8; 3]) -> Option<Rect> {
+    let scale = 2.0;
+    let bitmap = doc.page(0).expect("a page").render(&RenderOptions {
+        scale,
+        antialias: false,
+        ..RenderOptions::default()
+    });
+    let components = bitmap.components();
+    let mut found: Option<(u32, u32, u32, u32)> = None;
+    for row in 0..bitmap.height {
+        for column in 0..bitmap.width {
+            let start = row as usize * bitmap.stride + column as usize * components;
+            if bitmap.data.get(start..start + 3) == Some(&colour[..]) {
+                let r = found.get_or_insert((column, row, column, row));
+                *r = (r.0.min(column), r.1.min(row), r.2.max(column), r.3.max(row));
+            }
+        }
+    }
+    found.map(|(x0, y0, x1, y1)| {
+        (
+            f64::from(x0) / scale,
+            PAGE_HEIGHT - f64::from(y1 + 1) / scale,
+            f64::from(x1 + 1) / scale,
+            PAGE_HEIGHT - f64::from(y0) / scale,
+        )
+    })
+}
+
+/// Where the glyphs of every character in `letters` lie on the first page,
+/// by the boxes its text gives back.
+fn glyphs(doc: &Document, letters: &str) -> Option<Rect> {
+    let mut found: Option<Rect> = None;
+    for line in doc.page(0).expect("a page").text().lines() {
+        for c in &line.chars {
+            if !c.text.chars().any(|ch| letters.contains(ch)) {
+                continue;
+            }
+            let (x0, y0, x1, y1) = c.quad.bounds();
+            let r = found.get_or_insert((x0, y0, x1, y1));
+            *r = (r.0.min(x0), r.1.min(y0), r.2.max(x1), r.3.max(y1));
+        }
+    }
+    found
+}
+
+/// Whether `inner` lies inside `outer`, a point of slack at each edge.
+fn within(inner: Rect, outer: Rect) -> bool {
+    inner.0 + 1.0 >= outer.0
+        && inner.2 <= outer.2 + 1.0
+        && inner.1 + 1.0 >= outer.1
+        && inner.3 <= outer.3 + 1.0
+}
+
+/// The paragraph the cases below set: a word, an inline block of the class
+/// `b` holding a word of letters no other word has, and three words, in
+/// Arabic, with `dir="rtl"` or none — a line UAX #9 reorders either way —
+/// or in Latin, which nothing reorders.
+fn reordered_paragraph(attribute: &str, latin: bool) -> String {
+    if latin {
+        format!("<p{attribute}>fix <span class=\"b\">jazz</span> student lovely home.</p>")
+    } else {
+        format!("<p{attribute}>كتاب <span class=\"b\">ضحى</span> الطالب جميل بيت.</p>")
+    }
+}
+
+/// The decorations below, by name, their rule and the colour they paint.
+const DECORATIONS: [(&str, &str, [u8; 3]); 3] = [
+    ("background", "background-color: #ffff00", [255, 255, 0]),
+    ("border", "border: 2px solid #ff0000", [255, 0, 0]),
+    ("outline", "outline: 2px solid #0000ff", [0, 0, 255]),
+];
+
+/// **An inline block's background, border and outline stand around its own
+/// text in a line UAX #9 reorders** (`docs/design/rtl-read-back.md`,
+/// Left (10)): the block is one unit of its line's order, and its box
+/// fragment moves with its text (`paint::visual_lines`), so what `draw_box`
+/// and `draw_outlines` paint from the fragment is drawn where its glyphs
+/// are. The rectangle the decoration paints, read off the rendered page,
+/// holds the block's glyph boxes; and the box stands where a right-to-left
+/// line puts its word, right of the words written after it. Left where
+/// layout set it in logical order, it stood left of them, apart from its
+/// text.
+#[test]
+fn an_inline_blocks_background_border_and_outline_stand_around_its_own_text_in_a_reordered_line() {
+    let mut wrong = Vec::new();
+    for attribute in [" dir=\"rtl\"", ""] {
+        for (what, rule, colour) in DECORATIONS {
+            let style = format!(
+                "p {{ font-size: 16px }} .b {{ display: inline-block; width: 4em; {rule} }}"
+            );
+            let doc = open(&style, &reordered_paragraph(attribute, false));
+            let (Some(drawn), Some(text), Some(after)) = (
+                painted(&doc, colour),
+                glyphs(&doc, "ضحى"),
+                glyphs(&doc, "طجمي"),
+            ) else {
+                wrong.push(format!("{what}, p{attribute}: nothing to measure"));
+                continue;
+            };
+            if !within(text, drawn) {
+                wrong.push(format!(
+                    "{what}, p{attribute}: glyphs {text:?} outside {drawn:?}"
+                ));
+            }
+            if drawn.0 < after.2 {
+                wrong.push(format!(
+                    "{what}, p{attribute}: box {drawn:?} not right of {after:?}"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// **A turned or a skewed inline block turns about its own text in a line
+/// UAX #9 reorders**: its transform's reference box is its fragment
+/// (`paint::Effects::locals`), which moves with its text, so the background
+/// it turns or slants holds the glyphs it turns or slants with it. Turned
+/// about a box its text was not drawn at, the background stood beside them.
+#[test]
+fn a_turned_or_skewed_inline_block_turns_about_its_own_text_in_a_reordered_line() {
+    let mut wrong = Vec::new();
+    for attribute in [" dir=\"rtl\"", ""] {
+        for transform in ["rotate(20deg)", "skewX(20deg)"] {
+            let style = format!(
+                "p {{ font-size: 16px }} .b {{ display: inline-block; width: 4em; \
+                 background-color: #ffff00; transform: {transform} }}"
+            );
+            let doc = open(&style, &reordered_paragraph(attribute, false));
+            match (painted(&doc, [255, 255, 0]), glyphs(&doc, "ضحى")) {
+                (Some(drawn), Some(text)) if within(text, drawn) => {}
+                (drawn, text) => {
+                    wrong.push(format!(
+                        "{transform}, p{attribute}: glyphs {text:?}, background {drawn:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// **An inline block in a line with no right-to-left character moves
+/// nothing**: the line is in logical order left to right, the block between
+/// the word written before it and the words after it, and each decoration
+/// and each transform stands around the block's text, as layout set it.
+#[test]
+fn an_inline_block_in_a_line_with_no_right_to_left_character_moves_nothing() {
+    let mut wrong = Vec::new();
+    let rules = DECORATIONS
+        .iter()
+        .map(|(what, rule, colour)| (*what, (*rule).to_owned(), *colour))
+        .chain(["rotate(20deg)", "skewX(20deg)"].map(|transform| {
+            (
+                transform,
+                format!("background-color: #ffff00; transform: {transform}"),
+                [255, 255, 0],
+            )
+        }));
+    for (what, rule, colour) in rules {
+        let style =
+            format!("p {{ font-size: 16px }} .b {{ display: inline-block; width: 4em; {rule} }}");
+        let doc = open(&style, &reordered_paragraph("", true));
+        let (Some(drawn), Some(text), Some(before), Some(after)) = (
+            painted(&doc, colour),
+            glyphs(&doc, "jaz"),
+            glyphs(&doc, "fix"),
+            glyphs(&doc, "studenlovyhm"),
+        ) else {
+            wrong.push(format!("{what}: nothing to measure"));
+            continue;
+        };
+        if !within(text, drawn) {
+            wrong.push(format!("{what}: glyphs {text:?} outside {drawn:?}"));
+        }
+        if !(before.2 <= text.0 && text.2 <= after.0) {
+            wrong.push(format!(
+                "{what}: {before:?} {text:?} {after:?} out of order"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 // ---- color-scheme ---------------------------------------------------------------
 
 /// **`color-scheme` names the scheme a printed page is already in, and draws
@@ -2034,4 +2225,61 @@ fn an_inside_marker_is_on_its_items_start_side() {
         "`ab` is not to the marker's left: at {text}, the marker at {marker}"
     );
     assert_eq!(counted(&rtl, "direction"), None, "{:?}", warnings(&rtl));
+}
+
+/// **An `inside` marker is on its item's start side beside an inline
+/// block**: the block is one unit of its line's order
+/// (`paint::visual_lines`), so a right-to-left item's line is, from the
+/// right, the marker against the edge, the item's first word, the block and
+/// the word after it. Ordered with the run it touched, the marker was drawn
+/// between the first word and the block. A left-to-right item with no
+/// right-to-left character is drawn as layout set it, the marker first on
+/// the left.
+#[test]
+fn an_inside_marker_is_on_its_items_start_side_beside_an_inline_block() {
+    const RIGHT: f64 = 396.0;
+    let style = "ol { margin: 0; padding: 0; list-style-position: inside } \
+                 li { font-size: 16px } .b { display: inline-block; width: 4em }";
+    // The marker's width, read off a left-to-right item of one word.
+    let control = open(style, "<ol><li>ab</li></ol>");
+    let marker_width = shown_at(&control, "ab") - shown_at(&control, "1. ");
+    assert!(marker_width > 0.0, "{marker_width}");
+
+    let rtl = open(
+        style,
+        "<ol dir=\"rtl\"><li>كتاب <span class=\"b\">ضحى</span> الطالب</li></ol>",
+    );
+    let marker = shown_at(&rtl, "1. ");
+    let (Some(first), Some(block), Some(after)) =
+        (glyphs(&rtl, "كت"), glyphs(&rtl, "ضحى"), glyphs(&rtl, "طل"))
+    else {
+        panic!("nothing to measure: {:?}", tokens(&rtl));
+    };
+    assert!(
+        (marker - (RIGHT - marker_width)).abs() < 1e-9,
+        "the marker is not against the right edge: at {marker}, {marker_width} wide"
+    );
+    assert!(
+        first.2 <= marker + 0.01 && block.2 <= first.0 + 0.01 && after.2 <= block.0 + 0.01,
+        "the line is not the marker at {marker}, then {first:?}, {block:?} and {after:?} leftwards"
+    );
+
+    let ltr = open(
+        style,
+        "<ol><li>fix <span class=\"b\">jazz</span> student</li></ol>",
+    );
+    let marker = shown_at(&ltr, "1. ");
+    let (Some(first), Some(block), Some(after)) = (
+        glyphs(&ltr, "fix"),
+        glyphs(&ltr, "jaz"),
+        glyphs(&ltr, "studen"),
+    ) else {
+        panic!("nothing to measure: {:?}", tokens(&ltr));
+    };
+    assert!(
+        (marker - MARGIN).abs() < 1e-9
+            && first.2 <= block.0 + 0.01
+            && block.2 <= after.0 + 0.01,
+        "the line is not the marker at {marker}, then {first:?}, {block:?} and {after:?} rightwards"
+    );
 }

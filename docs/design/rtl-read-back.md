@@ -54,112 +54,81 @@ the options whose price the owner decides.
 ### Left (10): a transformed block in a reordered line
 
 **The case.** `epub_fallback.rs`'s
-`a_styled_mark_in_a_widened_block_reads_in_order_and_is_pinned_at_what_it_draws_over`:
+`a_styled_mark_in_a_widened_block_reads_in_order_with_its_block_scaled_about_its_own_text`:
 an Arabic paragraph with no `dir` that holds, twice, a word; an inline block
 widened by `scaleX(2)` that holds a word and a styled `?!`; a word; an inline
 block squeezed by `scaleX(0.6)`, `0.7` or `0.8` that holds a word; and a word
 and a stop, at `word-spacing: 0.5em` or `0.55em`, flat, turned a quarter or
-scaled along the line. Every paragraph reads in logical order and draws glyphs
-over others, the same in both builds.
+scaled along the line. Layout sets a line's runs and boxes in logical order,
+and a transformed element's matrix is built about its box fragment
+(`Effects::locals`, `local_matrix`): where UAX #9's L2 moved a block's runs
+and left its fragment, the block was scaled about a point its text was not
+drawn at, and its glyphs landed `1 − s` times the distance between text and
+box from where CSS draws them, for a scale `s` along the line. Its background,
+border and outline (`draw_box`, `draw_outlines`) stood where its text was not,
+and an atomic inline that did not touch its neighbours cut its line in two,
+each half ordered alone.
 
-**No acceptance path takes a drawing that sets glyphs over others.**
-Reproduced from the pin, with each place a drawing is taken traced, in both
-builds:
+**The rule, as landed.** An atomic inline — an inline block, an `inline-flex`
+or a replaced element set inline — is one unit of its line's order, which
+UAX #9 reads as U+FFFC OBJECT REPLACEMENT CHARACTER, a neutral
+(`css-writing-modes-3` §2.4). Which elements are atomic inlines, and which
+anchors each holds, is read from the box tree layout was given, as layout's
+`Builder::gather` gathers a box into a line (`paint::Atomics`): the page marks
+none, an unpainted inline block has no fragment, and two table cells on one
+baseline look like a block on a line. `split_at_levels` sets a stand-in for
+each on the line whose baseline crosses its box (`set_objects`, `Hull::on`):
+an unpainted run of one U+FFFC, in its line's paragraph, inside the
+embeddings its inline ancestors open, as wide as the stretch between its
+neighbours. The atomic inline's own runs are lines of their own, ordered as
+the paragraph of their own they are, in its own `direction`. Where L2 moves
+the stand-in, `visual_lines` moves everything set in the atomic inline by the
+same distance — its runs, box fragments, pictures and clips (`carry`) — so
+its transform's origin, background, border and outline stand where its text
+is drawn, and takes the stand-ins off. The line's extent does not change, so
+neither does its alignment.
 
-- Where a drawing other than the rules' is taken, by `Fonts::search`'s own
-  `Overprint` bound on the page or by `Fonts::reads_closer` after the search
-  in the runs' own space, it sets no more glyphs over others on the page than
-  the rules' drawing does. `Fonts::reads_whole` takes none.
-- On the first line of each paragraph, the search in the runs' own space finds
-  the styled run drawn with its neutrals in their level's order
-  (`Drawing::level_order`): the `?!` the other way round from the rules'
-  drawing. On the page that drawing sets fewer glyphs over others than the
-  rules' drawing and reads the line out of order, and `Fonts::reads_closer`,
-  or `Fonts::reads_whole` where the rules' drawing reads the line's letters in
-  order, refuses it. The rules' drawing is kept.
-
-So the glyphs over others are the rules' drawing's own, and a guard on the
-read-back has no drawing to refuse. One that took the refused drawing instead
-would give up the line's order and turn the `?!` about, to move glyphs that
-stand where they do for another reason.
-
-**Where the glyphs over others come from.** Layout sets a line's runs and
-boxes in logical order. `paint::visual_lines` then moves each run of a line
-that holds a right-to-left character to where UAX #9's L2 puts it, and leaves
-the line's box fragments (`LayoutPage::boxes`) where layout set them. An
-inline block's own text, touching the line it sits in, is ordered as runs of
-that line (`paint::same_line`), each run moved by itself. A transformed
-element's matrix is built about its box fragment (`Effects::locals`,
-`local_matrix`), so in a reordered line an inline block is scaled about a
-point its text is not drawn at: for a scale `s` along the line, its glyphs
-land `1 − s` times the distance between its text and its box from where CSS
-draws them. Reproduced with one block transformed at a time: the block
-squeezed by `scaleX(0.6)`, which CSS draws inside its own box, sets its word
-over its neighbour's; the block widened by `scaleX(2)` is displaced as well as
-painted past its box; and with neither transformed nothing is drawn over
-anything.
-
-The same fragments place an inline block's background, border and outline
-(`draw_page_tagged`'s `draw_box`, `draw_outlines`), so in a reordered line
-they stand where the block's text is not. Layout makes no fragment for an
-inline box that is not atomic, so a span's text moves with nothing beside it
-to move. An atomic inline that does not touch its neighbours, a picture or a
-block with padding, a border, a margin or a width past its text, ends its
-line for `paint::same_line`, and each half is ordered alone: a right-to-left
-line holding a picture keeps its halves in left-to-right order.
-
-**The rule.** An atomic inline (an inline block or a replaced element) is one
-unit of its line's order: UAX #9 reads it as U+FFFC OBJECT REPLACEMENT
-CHARACTER, a neutral (`css-writing-modes-3` §2.4). `visual_lines` moves the
-unit whole, its box fragment and every run, picture and clip set in it by the
-same distance, so its transform's origin, background, border and outline
-stand where its text is drawn; its own runs are ordered inside it, as the
-paragraph of their own they are, in the block's own `direction`. The line's
-extent does not change, so neither does its alignment. Which elements are
-atomic inlines, and which runs and fragments each holds, is layout's to
-record on the page, each atomic inline's anchor and margin box: the page does
-not mark one, an unpainted inline block has no fragment, and two table cells
-on one baseline look like a block on a line.
+Three changes beside it keep a block's text readable where its own paragraph
+draws it otherwise than its line does. Layout keeps the space after an atomic
+inline, which the collapser had folded into the space before it
+(`Collapser::passed_atomic`). A slice that opens with a word space may draw it
+against the glyph after it (`Cut::Hugged`), so that its box does not reach the
+block before it: a reader then reads a block set more than half an em apart
+as a line of its own, which the comma tie-break reads left to right, its
+trailing `?!` after its word. And on a line under a matrix that turns its
+baseline, a right-to-left run's words may be written in reading order
+(`Cut::Reading`), and where nothing reads the line's letters in order the
+drawing that reads most of its runs in order is taken (`Fonts::search_closer`):
+`TextDevice` asks whether a glyph continues a line along the page's `x` and
+`y`, and under a quarter turn parts a word-spaced line at every space.
 
 **What stays.** What a transform paints past its box is CSS's own (non-goal):
-scaled about its own text, the widened block paints over both its
-neighbours, more glyphs than it set over others about a misplaced origin,
-every one its transform's own, and the case's `apart` verdict counts them.
-And a block's own text is a paragraph of its own in the block's `direction`:
-in a paragraph with no `dir`, left to right, so a block's trailing `?!` is
-drawn right of its word, and a reader of the whole line reads it before the
-word. CD-19.8 holds each paragraph at the glyphs over others it then draws.
+scaled about its own text, the widened block paints over both its neighbours,
+8 glyphs a paragraph at `0.5em`, 7 at `0.55em` and 1 turned a quarter, and the
+case's `apart` verdict counts them; the squeezed block draws inside its box.
+A block's own paragraph is left to right in a paragraph with no `dir`, so its
+trailing `?!` is drawn right of its word: where the block touches its
+neighbours, a reader reads it with them, from the right, and the `?!` before
+its word.
 
-**What the prototype found.** With the box tree marking the atomic inlines and
-a U+FFFC standing in for each in its line's text, the rule reads many of
-`epub_fallback.rs`'s cases better in both builds and none of
-`epub_conservation.rs`'s otherwise, and no suite's time moves past its noise.
-It reads some worse: Left (10)'s paragraphs turned a quarter, whose widened
-block now stands over the line's last word, and squeezed blocks holding a
-styled `?!`, read reversed as above. Every inline block's decoration and
-transform stands around its own text, an inline picture is ordered with its
-words, and nothing on a line with no right-to-left character moves. H-149's
-row holds the figures. Taken from the box tree, the rule misses an atomic
-inline its margin sets apart at its line's end and an empty unpainted one, and
-orders no line of atomic inlines alone; recorded by layout, it would not.
+**Known limits.** A stand-in is set only where its box meets the line's runs:
+an atomic inline its margin sets apart from the run at a line's end is not
+set, and is not moved; an empty inline block that paints nothing has neither
+a fragment nor a run to find it by; and a line of nothing but atomic inlines
+has no run to find, and is not ordered. A right-to-left inline block of
+`width: auto` is as wide as its line, layout's shrink-to-fit counting the edge
+right-aligned text reaches, so it is a line of its own.
 
-**What CD-19.7 measures**, with the rule prototyped against the landed
-`paint.rs`, in the default and `bundled-fonts` builds:
-
-- each case of `epub_fallback.rs`, `epub_conservation.rs` and
-  `bidi_conformance.rs` whose verdicts change, better or worse, by its `CASE`
-  line: `cargo test -p tinker-pdf --test epub_fallback -- --nocapture` and
-  `cargo test -p tinker-pdf --test epub_conservation -- --nocapture`, each
-  again with `--features bundled-fonts`, and
-  `cargo test -p tinker-pdf-shape --test bidi_conformance`;
-- Left (10)'s glyphs over others, paragraph by paragraph, and how many of them
-  its transforms alone ask for;
-- the class's other shapes, which CD-19.8's tests hold: a background, a border
-  and an outline on an inline block in a reordered line, an inline image in
-  one, a block rotated and a block skewed, each in a
-  right-to-left paragraph and in one with no `dir`, and the same with no
-  right-to-left character, which moves nothing;
-- the suites' time in release and debug, against the tree without the rule.
+**What holds it.** The case above, pinned at each paragraph's verdicts and
+glyphs over others in both builds; `epub_paint.rs`'s
+`an_inline_blocks_background_border_and_outline_stand_around_its_own_text_in_a_reordered_line`,
+`a_turned_or_skewed_inline_block_turns_about_its_own_text_in_a_reordered_line`,
+`an_inline_block_in_a_line_with_no_right_to_left_character_moves_nothing`
+and `an_inside_marker_is_on_its_items_start_side_beside_an_inline_block`;
+`epub_images.rs`'s `an_inline_img_is_ordered_with_its_words_in_a_right_to_left_line`;
+and `tinker-pdf-layout`'s `the_space_after_an_inline_block_is_kept`,
+`the_space_after_an_inline_picture_is_kept` and
+`spaces_beside_an_atomic_inline_collapse_where_css_collapses_them`.
 
 ### Left (3): a word space styled apart across a two-em stretch
 
@@ -378,9 +347,9 @@ Every fix step also passes `epub_fallback.rs`, `epub_conservation.rs` and
 2. CD-19.7: Left (10)'s rule prototyped and priced; exit: its figures in this
    section and in H-149's row, regenerated by the commands above.
 3. CD-19.8: the rule landed as the owner decided on H-149; exit:
-   `a_styled_mark_in_a_widened_block_reads_in_order_and_is_pinned_at_what_it_draws_over`,
-   renamed for it, asserting each paragraph's verdicts and glyphs over others
-   in both builds, and a test for each of the class's other shapes.
+   `a_styled_mark_in_a_widened_block_reads_in_order_with_its_block_scaled_about_its_own_text`
+   asserting each paragraph's verdicts and glyphs over others in both builds,
+   and a test for each of the class's other shapes.
 4. CD-19.9 to CD-19.12: the options priced; exit: each option's figures here
    and in its H row, H-150 to H-153.
 5. CD-19.14: W, WJ or WJC, as the owner chose; exit:
@@ -442,6 +411,6 @@ Every fix step also passes `epub_fallback.rs`, `epub_conservation.rs` and
 |---|---|
 | An atomic inline read as U+FFFC gives its neighbours other levels, and a line reads otherwise | CD-19.7 compares every case in both builds before anything lands, and anything read worse is a price for H-149 |
 | Moving a box moves what else reads its fragment: a link's rectangle, a clip, a figure's tag | Every reader of `LayoutPage::boxes` and `LayoutPage::replaced` moves with it, and CD-19.8 tests each |
-| Which elements are atomic inlines is decided twice, by layout and by the writer, and the two drift | Layout records each atomic inline on its page, its anchor and margin box, and the writer reads that record (CD-19.8) |
+| Which elements are atomic inlines is decided twice, by layout and by the writer, and the two drift | The writer reads the box tree as layout's `Builder::gather` reads it (`paint::Atomics`), and the class's tests hold the two together; an atomic inline the writer does not find is ordered as its runs were before, unmoved |
 | A left-to-right page moves | `visual_lines` touches no line without a right-to-left character; `no_left_to_right_page_moves` and the determinism fingerprints hold that |
 | A block's own transform still paints over its neighbours, so `apart` never holds for Left (10) | CD-19.8 pins each paragraph at the glyphs over others its transforms ask for, and CD-19's exit counts only the others |

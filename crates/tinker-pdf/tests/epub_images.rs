@@ -376,6 +376,74 @@ fn an_inline_img_sits_on_the_line_beside_its_text() {
     );
 }
 
+/// Where the glyphs of every character in `letters` lie on page `at`, as
+/// `(x0, y0, x1, y1)` in PDF points, by the boxes its text gives back.
+fn glyphs(doc: &Document, at: u32, letters: &str) -> Option<(f64, f64, f64, f64)> {
+    let mut found: Option<(f64, f64, f64, f64)> = None;
+    for line in doc.page(at).expect("the page").text().lines() {
+        for c in &line.chars {
+            if !c.text.chars().any(|ch| letters.contains(ch)) {
+                continue;
+            }
+            let (x0, y0, x1, y1) = c.quad.bounds();
+            let r = found.get_or_insert((x0, y0, x1, y1));
+            *r = (r.0.min(x0), r.1.min(y0), r.2.max(x1), r.3.max(y1));
+        }
+    }
+    found
+}
+
+/// **An inline picture is one unit of its line's order**
+/// (`docs/design/rtl-read-back.md`, Left (10)): in a right-to-left line,
+/// with `dir="rtl"` or none, it is placed where UAX #9 puts the neutral it
+/// is (`paint::visual_lines`), right of the words written after it and left
+/// of the word written before it. Where layout set it, in logical order, its
+/// line was cut at it and the two halves drawn left to right, the picture
+/// between them the wrong way round. A line with no right-to-left character
+/// keeps it where layout set it, between its words left to right.
+#[test]
+fn an_inline_img_is_ordered_with_its_words_in_a_right_to_left_line() {
+    let png = rgb_png(24, 12, &[0, 255, 0].repeat(24 * 12));
+    let mut wrong = Vec::new();
+    for (body, rtl) in [
+        (
+            r#"<p dir="rtl">كتاب <img src="pic.png"/> الطالب جميل بيت.</p>"#,
+            true,
+        ),
+        (r#"<p>كتاب <img src="pic.png"/> الطالب جميل بيت.</p>"#, true),
+        (
+            r#"<p>fix <img src="pic.png"/> student lovely home.</p>"#,
+            false,
+        ),
+    ] {
+        let doc = open(body, &[("pic.png", png.clone())]);
+        let (matrix, _) = only_placement(&doc, 0);
+        let (left, right) = (matrix[4], matrix[4] + matrix[0]);
+        // Letters only the word before the picture holds, and only the words
+        // after it.
+        let (before, after) = if rtl {
+            ("ك", "طجمي")
+        } else {
+            ("fix", "studenlovyhm")
+        };
+        let (Some(before), Some(after)) = (glyphs(&doc, 0, before), glyphs(&doc, 0, after)) else {
+            wrong.push(format!("{body}: nothing to measure"));
+            continue;
+        };
+        let ordered = if rtl {
+            before.0 + 0.5 >= right && after.2 <= left + 0.5
+        } else {
+            before.2 <= left + 0.5 && after.0 + 0.5 >= right
+        };
+        if !ordered {
+            wrong.push(format!(
+                "{body}: picture {left}..{right}, before {before:?}, after {after:?}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// How many elements the report counts against `direction`, if any.
 fn direction_counted(doc: &Document) -> Option<usize> {
     warnings(doc).into_iter().find_map(|warning| match warning {

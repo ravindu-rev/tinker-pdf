@@ -3080,9 +3080,10 @@ fn a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading() {
 ///   but for `;` glued to a word, which reads whole no more, and an inline
 ///   `word-spacing` span cutting a word (ROADMAP CD-19, Left (5)), pinned.
 ///   H2-6, a letter-spaced dir-less Arabic line with Cyrillic words, was
-///   `bundled-fonts`' (fixed); a default build reads it, and its Greek twin,
+///   `bundled-fonts`' (fixed). A default build read it, and its Greek twin,
 ///   from the right at every tree since 9297d2d, `.مدرسة ,книга дом свет
-///   день كتاب`, pinned (ROADMAP CD-19, "Read so at every tree").
+///   день كتاب`; drawn with the Arabic word's space against the glyph after
+///   it (`paint::Cut::Hugged`), each reads right in both builds (held).
 #[test]
 fn a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed() {
     let right = Expect::Holds("cons logical whole found apart");
@@ -3442,12 +3443,11 @@ fn a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed() {
             "<p>كتاب αλφα βήτα γάμμα δέλτα, مدرسة.</p>",
         ),
     ] {
-        cases.push(Case::each(
+        cases.push(Case::both(
             what,
             "ar",
             "p { letter-spacing: 0.5em }",
             body,
-            Expect::Pinned("found apart"),
             right,
         ));
     }
@@ -4313,17 +4313,19 @@ fn a_reading_that_cuts_or_joins_a_word_is_taken_as_935b077_took_it() {
 /// drawings write the same text objects as the rules' or as another of its
 /// own, and each is read again: on a line of a few spaced runs the pair that
 /// reads it right comes after the budget. A right-to-left paragraph after a
-/// generated `§ ` at `word-spacing: 0.6em` or `1em` is not read whole, and,
-/// with `bundled-fonts`, a `<bdi>` holding a Latin sentence with Hebrew in it,
-/// in a Hebrew paragraph at `word-spacing: 1em`, does not conserve; in a
-/// default build `TextDevice`'s mend of a cut at a word space's stretch reads
-/// that one whole. Reading
-/// each drawing once reaches those drawings, and costs an Arabic paragraph
-/// at `line-height: 0.4`, whose rows a reader runs into the next ones, its
-/// structure tree's order, which it holds at 56dfd93 and 935b077: the
-/// read-back reads a line alone, and a drawing it finds right for the line
-/// is read with the next on the page. Whether that is a price worth paying
-/// is the owner's; both are pinned at what they read.
+/// generated `§ ` at `word-spacing: 0.6em` or `1em` is not read whole. A
+/// `<bdi>` holding a Latin sentence with Hebrew in it, in a Hebrew paragraph
+/// at `word-spacing: 1em`, reads right in both builds (held): in a default
+/// build `TextDevice`'s mend of a cut at a word space's stretch reads it so,
+/// and with `bundled-fonts` a run's word space drawn against the glyph after
+/// it (`paint::Cut::Hugged`), one run's drawing, which the read-back tries
+/// before any pair. Reading each drawing once reaches the `§ ` paragraphs'
+/// drawings, and costs an Arabic paragraph at `line-height: 0.4`, whose rows
+/// a reader runs into the next ones, its structure tree's order, which it
+/// holds at 56dfd93 and 935b077: the read-back reads a line alone, and a
+/// drawing it finds right for the line is read with the next on the page.
+/// Whether that is a price worth paying is the owner's; both are pinned at
+/// what they read.
 #[test]
 fn a_line_whose_right_drawing_lies_past_the_budget_is_drawn_by_the_rules() {
     let he = "<p dir=\"rtl\" class=\"b\">שלום עולם <b>מלחמה</b> ספר، בית (גדול) אור.</p>";
@@ -4336,13 +4338,12 @@ fn a_line_whose_right_drawing_lies_past_the_budget_is_drawn_by_the_rules() {
         Case::both("the same at 1em (V5)", "he", generated_1, he, Expect::Pinned("found apart")),
         Case::both("an Arabic paragraph after a generated \u{a7} at 0.6em (V5)", "ar", generated_06, ar, Expect::Pinned("found apart")),
         Case::both("the same at 1em (V5)", "ar", generated_1, ar, Expect::Pinned("found apart")),
-        Case::each(
+        Case::both(
             "a bdi of Latin with Hebrew in it in a Hebrew paragraph at 1em (V5)",
             "he",
             "p { word-spacing: 1em; margin: 0 20% }",
             "<p dir=\"rtl\">יום <bdi>The word שלום means עולם in <i>מלחמה</i>. The word שלום means עולם in <i>מלחמה</i>.</bdi> בראשית.</p>",
-            Expect::Pinned("cons logical whole found apart"),
-            Expect::Pinned("found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::both("a justified Arabic paragraph at line-height 0.4, no dir (what reading each drawing once costs)", "ar", tight, format!("<p>{}</p>", styled_marks(&AR)), Expect::Pinned("logical found apart")),
         Case::both("the same, right to left (what reading each drawing once costs)", "ar", tight, format!("<p dir=\"rtl\">{}</p>", styled_marks(&AR)), Expect::Pinned("logical found apart")),
@@ -4383,13 +4384,16 @@ fn squeezed_blocks(words: &[&'static str; 12]) -> String {
 /// (`paint::Fonts::reads_closer`): turned a quarter (`rotate(90deg)`) at
 /// `0.6em`, the paragraph held its structure tree's order at 9297d2d and
 /// 56dfd93 and lost it at 935b077, which drew what its search found in the
-/// runs' space; that drawing reads no closer on the page, and the rules'
-/// drawing, kept, holds the order again; and so turned three quarters
-/// (`rotate(270deg)`), which lost it at 05cea0b too.
-/// With `bundled-fonts` the paragraph at
-/// `0.6em` is pinned at what it reads: a word of it is not found by search,
-/// as at 56dfd93 and 935b077, where 9297d2d found every one (15 books of the
-/// sweep, with no transform and under fourteen; ROADMAP CD-19, Left (7)).
+/// runs' space; that drawing reads no closer on the page. Turned so, or
+/// three quarters (`rotate(270deg)`), which lost the order at 05cea0b too,
+/// a reader parts the line at every word space and keeps the pieces in the
+/// order drawn, and the paragraph holds its order where a right-to-left
+/// run's words are written in reading order (`paint::Cut::Reading`), the
+/// drawing that reads most of the line's runs in order on the page
+/// (`paint::Fonts::search_closer`). Each inline block is one unit of its
+/// line's order, scaled about its own text (`paint::visual_lines`), and with
+/// `bundled-fonts` the paragraph at `0.6em`, pinned, conserves, holds its
+/// order, finds every word and draws no glyph over another.
 #[test]
 fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
     let at_06 = "p { margin: 0 30%; transform: none; word-spacing: 0.6em } .w { transform: none }";
@@ -4402,7 +4406,7 @@ fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
             at_06,
             body.clone(),
             Expect::Holds("logical"),
-            Expect::Pinned("logical"),
+            Expect::Pinned("cons logical found apart"),
         ),
         Case::each(
             "the same at 1em (guard)",
@@ -4507,22 +4511,23 @@ fn widened_and_squeezed(words: &[&'static str; 12], sx: &str) -> String {
 }
 
 /// **A styled `?!` in an inline block widened by `scaleX(2)` reads in its
-/// order, and draws more glyphs over others than at 935b077** (round 6's
-/// review, F2; ROADMAP CD-19, Left (10)), pins.
+/// order, with each block scaled about its own text** (round 6's review,
+/// F2; `docs/design/rtl-read-back.md`, Left (10)), pins.
 ///
 /// A dir-less Arabic paragraph that holds, twice, an inline block widened
 /// by `scaleX(2)` with a word and a styled `?!` in it, and one squeezed by
-/// `scaleX(0.6)`, `0.7` or `0.8`, at `word-spacing: 0.5em` or `0.55em`. At
-/// 935b077 the review's hunts read it out of logical order, drawing 11, 6
-/// and 2 glyphs over others, and none turned a quarter. Here it reads in
-/// logical order and draws 13, 8 and 4, and 1 turned a quarter: the CASE
-/// lines print each count. The owner has not said whether that is a price
-/// to pay for the order (ROADMAP CD-19, Left (10), first in the order of
-/// work), so each paragraph is pinned at exactly what it reads today, the
-/// same in both builds: no glyph apart in any, found as well where the
-/// block is squeezed least, and conserved turned a quarter.
+/// `scaleX(0.6)`, `0.7` or `0.8`, at `word-spacing: 0.5em` or `0.55em`. Each
+/// inline block is one unit of its line's order, and its box moves with its
+/// text (`paint::visual_lines`), so its transform scales it about where its
+/// text is drawn: the squeezed block draws inside its own box, and every
+/// glyph drawn over another is one the widened block paints past its box,
+/// as CSS paints it — 8 a paragraph at `0.5em`, 7 at `0.55em`, 1 turned a
+/// quarter. Scaled about a box its text was not drawn at, as before, the
+/// two drew 13, 8 or 4 by how far the squeezed block was squeezed. Each
+/// paragraph reads in logical order, conserves and finds every word, the
+/// same in both builds, and is pinned at its verdicts and its count.
 #[test]
-fn a_styled_mark_in_a_widened_block_reads_in_order_and_is_pinned_at_what_it_draws_over() {
+fn a_styled_mark_in_a_widened_block_reads_in_order_with_its_block_scaled_about_its_own_text() {
     const STYLES: [&str; 6] = [
         "p { margin: 0 30%; transform: none; word-spacing: 0.5em; } .w { transform: none }",
         "p { margin: 0 30%; transform: none; word-spacing: 0.55em; } .w { transform: none }",
@@ -4531,39 +4536,18 @@ fn a_styled_mark_in_a_widened_block_reads_in_order_and_is_pinned_at_what_it_draw
         "p { margin: 0 30%; transform: scaleX(2); word-spacing: 0.5em; } .w { transform: none }",
         "p { margin: 0 30%; transform: scaleX(2); word-spacing: 0.55em; } .w { transform: none }",
     ];
+    // The glyphs over others each style's paragraph draws, the widened
+    // block's own, whichever block is squeezed how far.
+    const OVER: [usize; 6] = [8, 7, 1, 8, 8, 7];
     let mut cases = Vec::new();
-    for (sx, pins) in [
-        (
-            "0.6",
-            [
-                "logical",
-                "logical",
-                "cons logical found",
-                "logical",
-                "logical",
-                "logical",
-            ],
-        ),
-        ("0.7", ["logical"; 6]),
-        (
-            "0.8",
-            [
-                "logical",
-                "logical found",
-                "cons logical found",
-                "logical found",
-                "logical found",
-                "logical found",
-            ],
-        ),
-    ] {
-        for (style, pin) in STYLES.into_iter().zip(pins) {
+    for sx in ["0.6", "0.7", "0.8"] {
+        for (style, over) in STYLES.into_iter().zip(OVER) {
             cases.push(Case::both(
                 "a dir-less Arabic paragraph's styled ?! in an inline block widened by scaleX(2) (pinned)",
                 "ar",
                 style,
                 format!("<div class=\"w\"><p>{}</p></div>", widened_and_squeezed(&AR, sx)),
-                Expect::Pinned(pin),
+                Expect::Drawing("cons logical found", over),
             ));
         }
     }
