@@ -17,9 +17,11 @@ this engine is.
 order, and prints one line per gate; name gates to run only those
 (`--list` names them). Each gate's whole output is kept in
 `target/gates/<gate>.log`, and a gate that fails prints its failing tests,
-its first compiler errors and the lines it had to print and did not.
-`tools/gatescheck.py` holds the runner's rules to synthetic logs. Like the
-roadmap's tools, it needs Python 3; the build does not.
+its first compiler errors and the lines it had to print and did not. It
+needs Python 3; the build does not.
+
+Test binaries built with full debug info are large: on a machine short of
+disk, run the gates with `CARGO_PROFILE_DEV_DEBUG=0`.
 
 One build step is not `rustc`: `tinker-pdf-font/build.rs` compiles Adobe's
 vendored CMap registry (`THIRDPARTY.md`) into static tables. It reads a
@@ -79,16 +81,13 @@ you are looking at.
 
 ## The rules that are not negotiable
 
-Four of them. Each exists because breaking it costs more later than it saves
-now, and reviews enforce all four.
-
 1. **Everything is hand-rolled.** No third-party crate implements any part
    of parsing, filters, crypto, fonts, colour, layout or rasterization. Dev,
    build and binding tooling (proptest, criterion, cargo-fuzz, PyO3,
    wasm-bindgen, maturin, csbindgen) is exempt and never ships inside the
    engine. A new dependency on anything else needs a
-   [docs/architecture.md](docs/architecture.md) amendment first, not a PR
-   comment — the boundary is defined there.
+   [docs/architecture.md](docs/architecture.md) amendment first — the
+   boundary is defined there.
 
 2. **Never panic on untrusted input.** No `unwrap`, `expect` or unchecked
    indexing on anything derived from document bytes; `unwrap` is allowed only
@@ -100,31 +99,21 @@ now, and reviews enforce all four.
    structs and returns bytes and values. No COS types, no PDF vocabulary in
    their public APIs. That is what keeps them independently fuzzable, testable
    and publishable. This is ruling 8 in [docs/rulings.md](docs/rulings.md),
-   and the test of it is the definition rather than the list: if a crate takes
+   and the test of it is the definition rather than a list: if a crate takes
    bytes and returns values, it is a leaf and this rule binds it. The current
-   membership is counted in [docs/architecture.md](docs/architecture.md), in
-   one place, deliberately — this paragraph used to carry its own copy and had
-   drifted to ten names against that file's twelve, which is the third time
-   ruling 8's list has drifted and the reason the ruling made the definition
-   binding rather than the enumeration.
+   membership is listed in one place, [docs/architecture.md](docs/architecture.md).
 
-4. **The docs are the record.** Every crate's doc comment names the feature
-   doc that describes it ([docs/README.md](docs/README.md) indexes them). A
-   PR that changes behaviour updates that doc in the same PR — a doc that
-   drifts from the code is worse than no doc, because nobody goes looking.
-   Read [docs/rulings.md](docs/rulings.md) first — its rulings override
+4. **The docs describe the code.** Every crate's doc comment names the
+   feature doc that describes it ([docs/README.md](docs/README.md) indexes
+   them). A change that alters behaviour updates that doc in the same commit
+   — a doc that drifts from the code is worse than no doc. Read
+   [docs/rulings.md](docs/rulings.md) first: its rulings override
    everything, and a change that reverses one edits it in the same commit.
-   Forward-looking work is proposed in [docs/ROADMAP.md](docs/ROADMAP.md)
-   and, for large items, a design doc in [docs/design/](docs/design/).
+   Work not yet done lives in [docs/ROADMAP.md](docs/ROADMAP.md) and its
+   step files, and, for large items, a design doc in
+   [docs/design/](docs/design/).
 
-## Working an item
-
-Roadmap rows carry **exit criteria** that are deliberately concrete — a
-test that runs, a corpus number, a counted injection — and a design doc when
-the row is large. A row is cut into **steps** before work on it starts,
-each one workflow run with its own exit ([docs/ROADMAP.md](docs/ROADMAP.md),
-"What a step is"). Build to the step's exit, and treat the row's steps — a
-design doc's milestones — as the commit boundary set.
+## Code
 
 Warnings are data, not log lines: every leniency the engine performs emits a
 typed, object-addressed warning (ruling 10), so "it opened" and "it opened
@@ -147,34 +136,28 @@ Fixtures in `testdata/` were generated with mutool (see
 [`testdata/README.md`](testdata/README.md)); do not modify them — committed
 goldens and parity tests assume their exact bytes.
 
-External corpora are fetched, never committed. They are *inputs* — documents
-real producers emitted — and ruling 13 keeps them for exactly that reason.
+External corpora are fetched in CI, never committed. They are *inputs* —
+documents real producers emitted — and ruling 13 keeps them for exactly that
+reason.
 
-**No new test may spawn a program.** Ruling 13: nothing outside this
-repository renders, parses, validates or measures a document as evidence.
+**No test may spawn a program.** Ruling 13: nothing outside this repository
+renders, parses, validates or measures a document as evidence.
 `cargo xtask oracles` holds that boundary with a build failure, and it is
 part of `cargo xtask check`, so a `Command::new` in a test fails CI unless
-its file is listed in `SPAWNERS` with the reason it may — and a row there
-whose file has stopped spawning fails too, so an allowance cannot outlive
-the thing it allowed.
+its file is listed in `SPAWNERS` with the reason it may. Every row there is
+`PERMANENT` and none adjudicates a document: `rustc` to prove a type refuses
+a state, `curl`, `tar` and `unzip` to fetch corpora this repository then
+verifies against its own SHA-256, `cargo` to build and publish, and the
+corpus child, a workspace binary built from the same revision. A row whose
+file has stopped spawning fails the check too.
 
-**Every row is `PERMANENT`, and none of them adjudicates a document.** What is
-left spawns `rustc` to prove a type refuses a state, `curl`, `tar` and `unzip` to fetch
-corpora this repository then verifies against its own SHA-256, `cargo` to build
-and publish, and the corpus child, which is a workspace binary built from the
-same revision. The four qpdf rows left with the strict validator, the mutool row
-with `xps_conservation.rs`, the browser and epubcheck rows with
-`epub_analytic.rs` and `epub_reftest.rs`, and `tools/oracle-diff` was deleted
-outright — every allowance in the same commit as the thing it allowed.
-
-The `RAN` / `SKIPPED` discipline outlives the oracles it was written for. A
-skip exits 0 and reads exactly like a pass, so every job that depends on
-something being present greps its own output for a banner and fails without
-one — the fetched corpora and the corpus run's own strict pass included.
+A skipped test exits 0 and reads exactly like a pass, so every job that
+depends on something being present greps its own output for a `RAN` banner
+and fails without one.
 
 ## Commits and licensing
 
 Conventional Commits. Contributions are accepted under the project's dual
-**MIT OR Apache-2.0** license; by opening a PR you agree your work ships under
-both. Dependencies must fit `deny.toml`'s allowlist, which contains no
+**MIT OR Apache-2.0** license; by contributing you agree your work ships
+under both. Dependencies must fit `deny.toml`'s allowlist, which contains no
 copyleft at all and is meant to stay that way.
