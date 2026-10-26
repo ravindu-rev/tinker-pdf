@@ -14,11 +14,10 @@ The design and its milestones are in [design/pdfua.md](../design/pdfua.md).
 **The claim comes from the metadata.** ISO 14289 puts it in the XMP packet:
 `pdfuaid:part`, and for part 2 `pdfuaid:rev`, a four-digit year. Both RDF
 spellings are read, the namespace is checked, and `pdfaid` is never read as
-`pdfuaid` — that confusion once made 434 PDF/UA files read as PDF/A claims. A
-property in the identification namespace written under another prefix is read
-and reported (clause 5 of both parts). A file claiming no part is told so and
-numbered as part 1 numbers it; that is a presentation choice, since the kind
-is what a caller matches on.
+`pdfuaid`. A property in the identification namespace written under another
+prefix is read and reported (clause 5 of both parts). A file claiming no part
+is told so and numbered as part 1 numbers it; that is a presentation choice,
+since the kind is what a caller matches on.
 
 **Findings are the PDF/A kernel's.** A finding is a `ConformanceFinding`, its
 kind the one closed `FindingKind` both standards share, and the reaches are
@@ -72,21 +71,21 @@ number differs.
   are held to none of these; a `Popup`, a `Form` element's `Role`, and a
   media clip's `/CT` and `/Alt` are staged by name. An annotation is judged
   once, on the first page that names it, and an indirect `/Annots` array
-  read once (`/Tabs` is still read on every page); the walk reads at most
+  read once (`/Tabs` is read on every page); the walk reads at most
   2^18 entries across the document and stops at the group's 256 findings.
-- **Fonts**: **the PDF/A font group, run for a PDF/UA claim** and
-  re-numbered kind by kind, over the fonts a page draws with at a visible
-  rendering mode — embedding (UA-1 7.21.4.1, UA-2 8.4.5.5.1), a Type 2
-  CIDFont's `/CIDToGIDMap` (7.21.3.2, 8.4.5.3.2), a TrueType font's
-  `/Encoding` (7.21.6, 8.4.5.7), a mapping to Unicode with the PDF/A group's
-  exemptions (7.21.7, 8.4.5.8), glyph widths against the program (7.21.5,
-  8.4.5.6); and three rules of its own — a composite
-  font's encoding CMap embedded unless Table 118 predefines it, its `/WMode`
-  agreeing with its program, no `usecmap` outside Table 118 (7.21.3.3,
-  8.4.5.4), its collection the CIDFont's (7.21.3.1, 8.4.5.3.1) — and no drawn
-  code whose `/ToUnicode` maps to U+0000, U+FEFF or U+FFFE (7.21.7, 8.4.5.8),
-  over every code below 2^16 a font draws and its first 1 024 wider ones —
-  kept as codes, the drawn strings held a mebibyte at a time.
+- **Fonts**: **the PDF/A font group, run for a PDF/UA claim** under a part 2,
+  level U reading and re-numbered kind by kind, over the fonts a page draws
+  with at a visible rendering mode — embedding (UA-1 7.21.4.1, UA-2
+  8.4.5.5.1), a Type 2 CIDFont's `/CIDToGIDMap` (7.21.3.2, 8.4.5.3.2), a
+  TrueType font's `/Encoding` (7.21.6, 8.4.5.7), a mapping to Unicode with the
+  PDF/A group's exemptions (7.21.7, 8.4.5.8), glyph widths against the program
+  (7.21.5, 8.4.5.6), a composite font's encoding CMap embedded unless Table
+  118 predefines it, its `/WMode` agreeing with its program and no `usecmap`
+  outside Table 118 (7.21.3.3, 8.4.5.4), and its collection the CIDFont's
+  (7.21.3.1, 8.4.5.3.1) — and one rule of its own: no drawn code whose
+  `/ToUnicode` maps to U+0000, U+FEFF or U+FFFE (7.21.7, 8.4.5.8), over every
+  code below 2^16 a font draws and its first 1 024 wider ones — kept as codes,
+  the drawn strings held a mebibyte at a time.
   A Type 3 font, whose glyphs are content streams, has no program to embed.
 
 **One rule, two standards.** Where ISO 14289 asks what ISO 19005 asks, the
@@ -99,11 +98,11 @@ PDF/UA clause — a subset tag's spelling, a program under the wrong
 reported under the nearest number.
 
 **Abstentions are values.** `PdfUaVerdict::abstained` lists every clause of
-the part the verdict did not decide, each a `PdfUaGap` with the clause, what
-it asks and why it is not decided, in one of two classes: `Staged` — a reader
-could decide it and the machinery is missing, which is a milestone — and
-`Undecidable` — a judgement about meaning, which is a limit. `PDFUA_STAGED`
-and `PDFUA_UNDECIDABLE` are the static lists.
+the part the verdict did not decide, each a `PdfUaAbstention`: its class and a
+`PdfUaGap` with the clause, what it asks and why it is not decided. The class
+is one of two: `Staged` — a reader could decide it and the machinery is
+missing, which is a milestone — and `Undecidable` — a judgement about meaning,
+which is a limit. `PDFUA_STAGED` and `PDFUA_UNDECIDABLE` are the static lists.
 
 ## API
 
@@ -147,33 +146,27 @@ discipline `pdfa_fonts.rs` uses: a clean baseline under both parts, one change
 per test, one finding of one kind under one clause.
 
 `crates/tinker-pdf/tests/pdfua.rs` is the census against the veraPDF corpus's
-434 annotated PDF/UA fixtures, through the facade: caught, abstained, and
+annotated PDF/UA fixtures, through the facade: caught, abstained, and
 **false alarms, which must be zero** — the hard assertion — with what each
-abstaining verdict named printed beside the counts. It runs nightly in
-`corpus.yml`, and now finds `corpus/files` there without `TINKER_CORPUS`; it
-honours `TINKER_CORPUS_REQUIRED`.
+abstaining verdict named printed beside the counts, and the caught count held
+to a floor recorded from a run. It runs nightly in `corpus.yml`, finds
+`corpus/files` without `TINKER_CORPUS`, and honours `TINKER_CORPUS_REQUIRED`.
+
+`pdfua.rs` also runs the validator over this engine's own output — an EPUB it
+converted and a document built with the tagging API — and asserts exactly the
+findings each carries, each named with its reason: no `pdfuaid` claim, no
+metadata stream, no `/DisplayDocTitle`, and the unembedded standard 14 — the
+writer's to close when it claims PDF/UA (design/pdfua.md milestone 7) — and a
+link annotation with no `/Contents` and no `/Alt` on its `Link` element, on a
+page with no `/Tabs /S` — the tagged writer's to close, since it knows both
+the link's text and that the page carries one.
 
 ## What is not measured
 
-The census figure in the roadmap — 29 of 239 caught, 210 abstained, 0 false
-alarms over 195 conforming — was measured on 16 September 2026 by the census
-*before* the validator existed. The rules here — the nine moved in, the
-twenty-four milestone 2 adds, milestone 3's grammar and milestone 4's
-annotation rules — were written where the corpus was not
-reachable, so the census has not been run through the facade: the first
-nightly run owes the caught figure, and — the number that decides whether a
-rule stays — the false-alarm count over the 195 conforming
-files, which the census asserts is zero. Each rule's reading is held only to
-the fixture and the twin built here, which are this project's reading of the
-clause in both directions.
-
-This engine's own output carries seven findings, each named in `pdfua.rs`
-with its reason: no `pdfuaid` claim, no metadata stream, no
-`/DisplayDocTitle`, and the unembedded standard 14 — the writer's to close
-when it claims PDF/UA (design/pdfua.md milestone 7) — and, since the
-annotation rules, a link annotation with no `/Contents` and no `/Alt` on its
-`Link` element, on a page with no `/Tabs /S` — the tagged writer's to close,
-since it knows both the link's text and that the page carries one.
+Each rule's reading is held to the fixture and the twin built here, which are
+this project's reading of the clause in both directions. The census is what
+holds a rule to anybody else's reading, and its false-alarm count over the
+conforming fixtures is the number that decides whether a rule stays.
 
 ## Refused by name
 

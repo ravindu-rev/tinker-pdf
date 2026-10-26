@@ -1,36 +1,33 @@
 # PDF/X validation and writing
 
-When this is done, the engine answers "does this file conform to PDF/X, and
-if not, which clause of ISO 15930 did it break?" with the typed findings
-`Document::validate_pdfa` already gives for ISO 19005, and
-`DocumentBuilder::archival` gains a print flavour that either writes a file
-this engine's own validator finds nothing wrong with, or refuses at build time
-naming the clause. The roadmap row reads "an ISO 15930 rule group; the
-archival profile grows a PDF/X flavour", and this document exists because that
-row is L-sized and an L-sized row is not scheduled without one.
+`Document::validate_pdfx` answers "which PDF/X level does this file claim,
+and which requirement of ISO 15930 did it break?" with the typed findings
+`Document::validate_pdfa` gives for ISO 19005, and names by clause what it did
+not read. The design also gives `DocumentBuilder::archival` a print flavour
+that either writes a file this engine's own validator finds nothing wrong
+with, or refuses at build time naming the clause; that half is not built
+(milestone 6).
 
-**The first thing this document has to settle is not the design but the
-adjudicator, because the honest answer is different from PDF/A's.** ISO 19005
-has a 2 371-file annotated corpus in this tree, and every rule in
+**The adjudicator settles the design, and it is different from PDF/A's.**
+ISO 19005 has an annotated conformance corpus in this tree, and every rule in
 `crates/tinker-pdf/src/pdfa/` is held to it. ISO 15930 has **no annotated
 conformance corpus anywhere that this project could find**, and the
 requirement bodies of every part are behind ISO's paywall. What exists is
-written down below, with what each piece can and cannot decide, so that the
-roadmap schedules a validator knowing it would have a false-positive bar and
-no false-negative bar — which is a different proposition from the one
-[design/pdfa.md](pdfa.md) delivered.
+written down below, with what each piece can and cannot decide: the validator
+has a false-positive bar and no false-negative bar, which is a different
+proposition from the one [design/pdfa.md](pdfa.md) delivers.
 
 ## Scope
 
 - **A validator** over the opened `CosDocument`, one rule group per
-  machinery exactly as `pdfa/` is organised, keyed by the flavours ISO 15930
+  machinery as `pdfa/` is organised, keyed by the flavours ISO 15930
   defines for complete exchange: PDF/X-1a:2001 (ISO 15930-1:2001),
   PDF/X-3:2002 (15930-3:2002), PDF/X-1a:2003 (15930-4:2003), PDF/X-3:2003
   (15930-6:2003), PDF/X-4 and PDF/X-4p (15930-7:2010), and PDF/X-6, X-6p and
-  X-6n (15930-9:2020, on ISO 32000-2). Verdicts are the `Verdict { flavour,
-  findings, coverage }` shape `pdfa.rs` already has; a finding names the
-  clause as the part numbers it and the object it is about (ruling 10,
-  [rulings.md](../rulings.md)).
+  X-6n (15930-9:2020, on ISO 32000-2). A verdict carries the claim, the
+  flavour it is read as, the findings, the coverage and the abstentions; a
+  finding names the clause as the part numbers it and the object it is about
+  (ruling 10, [rulings.md](../rulings.md)).
 - **Flavour detection** from where ISO 15930 puts the claim, which is not
   where ISO 19005 puts it: the `GTS_PDFXVersion` key of the `/Info`
   dictionary, plus `GTS_PDFXConformance` for the 2001 levels, and for X-4 and
@@ -42,15 +39,15 @@ no false-negative bar — which is a different proposition from the one
   header of a PDF file, nor the value of the Version key in the Catalog of a
   PDF file shall be used in determining whether a file is in accordance with
   this part of this International Standard."*
-- **The evidence base**, pinned in `corpus/corpora.lock` like every other
-  corpus: the Ghent PDF Output Suite 5.0 and the Altona Test Suite 1.2
-  "Online Version" — conforming files, and only conforming files. What they
-  can decide is argued below.
+- **The evidence base**: the Ghent PDF Output Suite 5.0 and the Altona Test
+  Suite 1.2 "Online Version" — conforming files, and only conforming files —
+  to be pinned in `corpus/corpora.lock` like every other corpus. What they can
+  decide is argued below.
 - **A writer flavour** on `ArchivalProfile` (`crates/tinker-pdf-cos/src/build.rs`):
   the `/Info` identification keys, `/Trapped`, an output intent with
   `/S /GTS_PDFX`, a `/TrimBox` on every page, and every buildable-but-
   nonconforming request refused at the call that makes it, in the style
-  `ArchivalRefusal` already has.
+  `ArchivalRefusal` has.
 - **Surfacing**: `Document::validate_pdfx`, and `--pdfx` on `tpdf check`.
 
 ## Non-goals
@@ -62,83 +59,76 @@ no false-negative bar — which is a different proposition from the one
   X-2 that "communication must occur between the sender and receiver" — the
   opposite of what a rule engine over one file can check. X-4p and X-6p, which
   reference only an external *profile*, are in scope because the reference
-  itself is checkable.
-  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SD-11, which
-  validates what one file can show and names the rest.
+  itself is checkable. Validating what one file can show of X-2 and X-5, and
+  naming the rest, is [ROADMAP](../ROADMAP.md) row SD-11.
 - **PDF/X-1:2001.** The 2001 level that admitted OPI and encryption; the
   application notes call it deprecated and every later part dropped it. A file
-  claiming it is reported as claiming a level this build does not validate,
-  which is a finding rather than a silence.
-  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SD-11.
+  claiming it gets an `Unread` abstention naming the part rather than a
+  finding: every `FindingKind` is a statement that the file breaks something,
+  and claiming a deprecated level does not. [ROADMAP](../ROADMAP.md) row SD-11.
 - **The ICC characterization registry.** 15930's output intent may name a
   registered printing condition instead of embedding a profile, and the
   application notes (2.16.2) expect preflight tools to "be shipped with a list
   of the characterizations included in the ICC registry". That list is data
   with a date on it, and vendoring it is a decision to take when a corpus file
-  turns on it; until then a `RegistryName` is checked for shape and its
-  identifier is not looked up.
-  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: the lookup, from registry bytes the host
-  supplies, is [ROADMAP](../ROADMAP.md) row SD-11.
+  turns on it; a `RegistryName` is checked for shape and its identifier is not
+  looked up. The lookup, from registry bytes the host supplies, is
+  [ROADMAP](../ROADMAP.md) row SD-11.
 - **Trapping, screening, proofing.** `/Trapped` is a flag this build reads
-  and writes; it traps nothing. Colour-managed rendering with the output
-  intent's profile is the renderer's row, not this one.
-  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) rows FO-24 (trapping),
-  RC-08 (screening) and RC-05 (proofing).
+  and writes; it traps nothing. Colour-managed rendering with the output intent's profile
+  is the renderer's row, not this one. Trapping, screening and proofing are
+  [ROADMAP](../ROADMAP.md) rows FO-24, RC-08 and RC-05.
 - **Conversion.** No "make this file PDF/X". Validation reports; the builder
   conforms; nothing rewrites colour or fonts — the same line
-  [design/pdfa.md](pdfa.md) draws.
-  *No longer a non-goal, 9 October 2026 (ruling 3 as amended)*: [ROADMAP](../ROADMAP.md) row SD-12.
+  [design/pdfa.md](pdfa.md) draws. Conversion is [ROADMAP](../ROADMAP.md) row
+  SD-12.
 - **Receiver restrictions ("PDF/X Plus").** The notes describe publishers
   forbidding JPEG or TrueType on top of the standard (2.19). That is a policy
   layer a caller writes over the findings, not a rule here.
 
 ## What third-party material exists, and what each piece decides
 
-Ruling 13 admits data and refuses programs. For PDF/A the data was decisive:
-2 896 files each annotated `pass` or `fail` by the people who wrote the
-conformance suite. For PDF/X the search was made on 16 September 2026 and this
-is everything it found.
+Ruling 13 admits data and refuses programs. For PDF/A the data is decisive:
+a corpus of files each annotated `pass` or `fail` by the people who wrote the
+conformance suite. For PDF/X this is everything a search found.
 
 **The corpora in this tree carry no annotated PDF/X fixture.** The veraPDF
-corpus has 2 907 files in sixteen directories — PDF/A parts 1 to 4, PDF/UA-1
-and -2, Isartor, TWG, two ISO 32000 sets and `Undefined` — and none is a
-PDF/X test; its own README names ISO 19005, ISO 14289, ISO 32000-1 and
-ISO 32000-2 and no other standard. Across all five fetched corpora, **23
-files carry a `GTS_PDFXVersion` key** at all — 5 in pdfjs, 18 in SafeDocs —
-and 25 carry the string `/GTS_PDFX` anywhere (counted by a raw byte search,
-which misses an `/Info` dictionary inside an object stream, so these are
-floors). The version strings that search could read are `PDF/X-4`,
-`PDF/X-3:2002`, `PDF/X-1:2001` and one that is empty. None of the 23 is
-annotated by anybody; they are real producers' claims, and they are the
-false-positive check outside any suite, the role the fifteen real PDF/A-1a
-files play for the level A rules.
+corpus's directories are PDF/A parts 1 to 4, PDF/UA-1 and -2, Isartor, TWG,
+two ISO 32000 sets and `Undefined`, and none is a PDF/X test; its own README
+names ISO 19005, ISO 14289, ISO 32000-1 and ISO 32000-2 and no other
+standard. Some files in the fetched pdfjs and SafeDocs corpora carry a
+`GTS_PDFXVersion` key, and the version strings a raw byte search could read —
+a search that misses an `/Info` dictionary inside an object stream — are
+`PDF/X-4`, `PDF/X-3:2002`, `PDF/X-1:2001` and an empty one. None is annotated
+by anybody; they are real producers' claims, and the false-positive check
+outside any suite.
 
 **The published suites are all conforming files.** Three exist, and each was
 built to test an *output device*, not a validator:
 
-| Suite | Flavour | Contents | Terms, as read on 16 September 2026 |
+| Suite | Flavour | Contents | Terms |
 | --- | --- | --- | --- |
 | Ghent PDF Output Suite 5.0 (gwg.org/gos5) | PDF/X-4 (ISO 15930-7) | a test-page package of six pages with 48 assembled patches, and an individual-patch package, in three categories the suite calls CMYK, SPOT and CMS, the last being "ICC-based objects allowed in PDF/X-4"; per-patch documentation "distributed along with the patch" | free download; **no licence text on either page fetched** |
 | Altona Test Suite 1.2 Online Version (eci.org) | PDF/X-3 (ISO 15930-3) | three A3 pages — Altona Measure, Altona Visual, Altona Technical, the last "864 carefully structured patches" for overprinting and font formats | its documentation: "freeware. However nobody is allowed to redistribute, change or modify … without prior permission in writing from European Color Initiative (ECI)" |
 | Altona Test Suite 2.0 Application Kit | adds PDF/X-4 | ten reference print series | sold; not obtainable as data |
 
-Both free suites are admissible and both go into `corpora.lock` with
+Both free suites are admissible, and either enters `corpora.lock` with
 `redistribute = no`, which is this project's posture for every corpus
 regardless of upstream's terms. **What they decide is one direction only**:
 every file in them must produce zero findings under the flavour it claims,
-which is the false-positive assertion `tests/pdfua.rs` already makes over the
-195 conforming PDF/UA fixtures. What they cannot decide is whether a rule
-*fires when it should*, because no file in either suite is wrong on purpose.
-A rule with a typo that never fires passes both suites.
+which is the false-positive assertion `tests/pdfua.rs` makes over the
+conforming PDF/UA fixtures. What they cannot decide is whether a rule *fires
+when it should*, because no file in either suite is wrong on purpose. A rule
+with a typo that never fires passes both suites. And neither is a suite of
+the 2003 levels the rules run under: Altona 1.2 is PDF/X-3:2002, Ghent 5.0
+PDF/X-4.
 
 **The standards' own text is partly in hand.** ISO sells every part. The
-preview samples a standards reseller publishes were fetched on 16 September
-2026 — `WebFetch` could not read their text layers, and this engine's own
-`tpdf text` could, which is the fourth time that pattern has held here — and
-they give, verbatim, the foreword, the scope, the normative references, the
-terms and the conformance clause of ISO 15930-1:2001, 15930-4:2003,
+preview samples a standards reseller publishes, read with this engine's own
+`tpdf text`, give verbatim the foreword, the scope, the normative references,
+the terms and the conformance clause of ISO 15930-1:2001, 15930-4:2003,
 15930-7:2010 and 15930-9:2020, plus the full table of contents of each. What
-that buys is the **clause numbering** every finding will cite:
+that buys is the **clause numbering** findings cite:
 
 | Part | Technical-requirement clauses in its table of contents |
 | --- | --- |
@@ -148,10 +138,8 @@ that buys is the **clause numbering** every finding will cite:
 | 15930-9:2020 | 6.1 to 6.19: general, print and non-print elements, intended visual appearance, complete exchange, file structure (6.5.1 to 6.5.7), colour (6.6.1 to 6.6.3), graphics (6.7.1 to 6.7.5), fonts (6.8.1 to 6.8.5), bounding boxes, trapping, metadata and document identification (6.11.1 to 6.11.5), annotations, interactive forms, actions, optional content, viewer preferences, alternate presentations, document requirements, spectral data (CxF); annexes A and B for X-6p and X-6n |
 
 What it does **not** buy is a single requirement body. Clause 6 of every part
-is past the preview's last page. A rule written from a clause *title* is a
-guess, and the Annex B and JPX experience in this tree — four wrong tables,
-37 of 182 citations wrong when drafted from a text that was in hand — is the
-measured cost of guessing from less.
+is past the preview's last page, and a rule written from a clause *title* is a
+guess.
 
 **The one free restatement of the requirements is the CGATS application
 notes.** *Application Notes for PDF/X Standards, Version 4* (September 2006,
@@ -202,110 +190,119 @@ the notes predate: transparency permitted under restrictions, optional
 content, JPEG 2000, `BX`/`EX`, architectural limits, the XMP identification
 schema. Those groups are not written until the part is in hand.
 
-**One lead worth following came from ISO 19005-2 rather than from any PDF/X
-source.** Its normative references, read from the preview with `tpdf text`,
-list *ISO 15930-7:2010 … (PDF/X-4)* as indispensable — the only PDF/X part any
-ISO 19005 part cites. A file can claim PDF/A-2 and PDF/X-4 at once, and
-`pdfa/colour.rs` already collects every PDF/A output intent's
+**One question is open, and it came from ISO 19005-2 rather than from any
+PDF/X source.** Its normative references, read from the preview with
+`tpdf text`, list *ISO 15930-7:2010 … (PDF/X-4)* as indispensable — the only
+PDF/X part any ISO 19005 part cites. A file can claim PDF/A-2 and PDF/X-4 at
+once, and `pdfa/colour.rs` collects every PDF/A output intent's
 `DestOutputProfile` and reports `OutputIntentsDisagree` when two differ; it
-skips an intent whose `/S` is not `GTS_PDFA1` before collecting, with the
-comment that judging it "would be enforcing a standard the file did not
-claim". Whether 19005-2's rule about a file carrying more than one output
-intent is stated over PDF/A intents only or over every entry that carries a
-profile is a question the preview does not answer and no corpus fixture under
-`PDF_A-2b/6.2.2` asks. The PDF/X group is where that gets read and settled,
-because it is the group that will put a second intent into a document this
-engine writes.
+skips an intent whose `/S` is not `GTS_PDFA1` before collecting, since judging
+it "would be enforcing a standard the file did not claim". Whether 19005-2's
+rule about a file carrying more than one output intent is stated over PDF/A
+intents only or over every entry that carries a profile is a question the
+preview does not answer and no corpus fixture under `PDF_A-2b/6.2.2` asks, and
+no fixture here claims both standards. The PDF/X group is where that gets read
+and settled, because it is the group that will put a second intent into a
+document this engine writes.
 
 **So the adjudicator, stated plainly.** For the 2003 levels: the CGATS notes
-as the rule source; the two published suites as the false-positive bar; 23
-real producers' claims as the false-positive bar outside any suite; fixtures
-built here, each with a near-miss twin, as the only thing that ever makes a
-rule *fire* — and every one of those twins is this project's reading of a
-secondary source, so a clause read wrongly is read wrongly in both directions
-and the pair agrees with itself. That is the limit [design/pdfa.md](pdfa.md)
-names for its writer, applied to a whole validator. For X-4 and X-6: nothing
-yet, and the milestones below say so rather than pricing them.
+as the rule source; fixtures built here, each with a near-miss twin, as the
+only thing that ever makes a rule *fire* — and every one of those twins is
+this project's reading of a secondary source, so a clause read wrongly is read
+wrongly in both directions and the pair agrees with itself. That is the limit
+[design/pdfa.md](pdfa.md) names for its writer, applied to a whole validator.
+The false-positive bar is the published suites and the real producers'
+claims, and neither reaches the 2003 levels: no file anyone else made that
+claims PDF/X-1a:2003 or PDF/X-3:2003 is in reach. For X-4 and X-6: nothing.
 
 ## Design
 
-**Where it lives.** `crates/tinker-pdf/src/pdfx/`, a sibling of `pdfa/`,
-sharing its kernel rather than copying it: `Raw`, `Machinery` and its counted
-reaches, `RuleGroup`, `Coverage`, the content-stream walk in `pdfa/content.rs`
-and the font and colour visitors over it. The kernel moves to a module both
-standards use; the design doc for PDF/UA asks for the same move for the same
-reason, and whichever lands first does it. `FindingKind` stays one closed
-enum: a missing `/Trapped` is a new variant, an unembedded font is the variant
-that exists.
+**Where it lives.** `crates/tinker-pdf/src/pdfx.rs`, with `pdfx/syntax.rs`
+and `pdfx/print.rs`, beside `pdfa/`. It shares the PDF/A kernel the way the
+PDF/UA validator does — items opened to the crate rather than moved: the
+content walk's visitor and its record (`pdfa::colour::{scan, Used}`), part 1's
+transparency rule (`pdfa::colour::transparency`), and the embedding rule alone
+(`pdfa::fonts::embedding`, which opens no program). `FindingKind` stays one
+closed enum: a missing `/Trapped` is a variant of its own, an unembedded font
+is the PDF/A one. `hostile_input.rs` calls the validator.
 
 **Flavour comes from `/Info`, and that changes the cost.** `pdfa.rs` reads
 the claim out of an XMP packet because ISO 19005 puts it there, and that one
-XML parse is the reach the laziness counter records on nearly every corpus
-file. ISO 15930 puts the claim in the document information dictionary, so a
-PDF/X flavour is one trailer-reachable dictionary read with no parser behind
-it. For X-4 and later the XMP identification schema must agree with the
-`/Info` key, which is a rule of its own and the first use of the metadata
-group here. A file claiming both PDF/A and PDF/X is validated by both engines,
-and each reports under its own clause numbers; nothing is merged.
+XML parse is the reach the laziness counter records on nearly every file. ISO
+15930 puts the claim in the document information dictionary, so a PDF/X
+flavour is one trailer-reachable dictionary read with no parser behind it, and
+`Machinery`'s metadata counter stays at zero. The claim is read by exact
+string, and six levels are identified — PDF/X-1:2001 (the version key without
+the X-1a conformance key), PDF/X-1a:2001, PDF/X-3:2002, PDF/X-1a:2003,
+PDF/X-3:2003 and PDF/X-4. A string with a trailing space, an empty one and
+`PDF/X-5g` are carried as claims this build does not identify, and the
+PDF/X-4p and PDF/X-6 strings, in no source in hand, are not guessed. A claim
+in an XMP packet with none in `/Info` is no claim. For X-4 and later the XMP
+identification schema must also agree with the `/Info` key, a rule of its own
+and, with the rest of X-4, unread. A file claiming both PDF/A and PDF/X is
+validated by both engines, and each reports under its own clause numbers;
+nothing is merged.
 
-**Clause tables per part.** `pdfa.rs` keys each rule to three numbers —
-part 1, parts 2 and 3, part 4 — because the same defect is numbered
-differently by each part. ISO 15930 needs the same shape with more columns:
-the 2001, 2003, 2010 and 2020 parts each renumber. Encryption is 6.17 in
-15930-1, 6.11 in 15930-4, 6.15 in 15930-7 and 6.5.6 ("Permissions") in
-15930-9; the numbers above are from the tables of contents, which is exactly
-what a clause table needs and all it needs. A rule whose part is not yet in
-hand has no row for that part and does not run under it — the table is what
-says which flavours a rule has been transcribed for.
+**Clause numbers per part.** The same defect is numbered differently by each
+part: encryption is 6.17 in 15930-1, 6.11 in 15930-4, 6.15 in 15930-7 and
+6.5.6 ("Permissions") in 15930-9, from the tables of contents, which is what a
+clause table needs. Under PDF/X-1a:2003 a finding cites the 15930-4 clause
+whose contents title names the subject, and nothing finer. Under PDF/X-3:2003
+not even 15930-6's contents are in hand, so a finding cites the application
+note's section the rule was transcribed from (`AN 2.11`). A rule whose source
+is not in hand for a level does not run under it.
 
-**Rule groups, by machinery.**
+**Rule groups, by machinery.** `Coverage` is `syntax`, `print` and `fonts`;
+"print" rather than "colour" because transparency and PostScript ride the
+same walk as the colour rules.
 
-1. **Syntax**: the identification keys and their agreement; `/Trapped` as a
-   name in {`True`, `False`}; `/MediaBox` present, exactly one of `/ArtBox`
-   and `/TrimBox`, containment inside `/BleedBox` and `/CropBox` when present;
-   no `/Encrypt`; filters (LZW forbidden everywhere; JBIG2 forbidden under the
-   2003 levels); no PostScript XObject and no `PS` operator (the walk already
-   sees every operator); `BX`/`EX`; annotations' `/Rect` against the boxes,
-   with `PrinterMark` and `TrapNet` on their own rule; `/Info` private keys
-   as text strings; actions and JavaScript; alternate images; viewer
-   preferences. All of it is the COS document and the existing walk.
-2. **Colour**: an output intent with `/S /GTS_PDFX`, the
-   `OutputConditionIdentifier` / `RegistryName` / `DestOutputProfile`
-   arrangement per the notes' Table 2; device spaces admitted against the
-   intent's space, with the alternate-space rule for `Separation`, `DeviceN`,
-   `Indexed` and `Pattern`; `ICCBased` forbidden under X-1a; the profile read
-   by `tinker-pdf-color`, which [design/icc.md](icc.md) already delivers for
-   PDF/A.
-3. **Fonts**: embedding, through the visitor `pdfa/fonts.rs` already runs
-   over the walk, re-pointed at 15930's clause numbers.
-4. **Metadata**: the XMP identification schema for X-4 and later, staged
-   until the part is read.
+1. **Syntax**, the COS document: encryption (AN 2.11), LZW and JBIG2 (2.8),
+   `/Trapped` (2.17), the boxes (2.10), annotations against them (2.28),
+   private `/Info` keys (2.29).
+2. **Print**, the content walk and the output intent: the `GTS_PDFX` intent
+   and its profile-or-registry shape (2.16), `DeviceRGB` under a CMYK profile
+   (2.16), PDF/X-3's profile for device-independent colour (2.16),
+   transparency (2.25), PostScript (2.26).
+3. **Fonts**: embedding (2.18), through the PDF/A embedding rule.
+
+The readings a sentence did not settle are written beside each rule: with no
+bleed box, an annotation stays outside the trim or art box rather than the
+crop box ISO 32000 would default to; containment is exact; "used" is drawn at
+a visible rendering mode, as ISO 19005 reads it; the first `GTS_PDFX` intent
+is judged; the registry identifier is checked for shape; `DeviceRGB` is judged
+only where the profile's header says CMYK. Every clause the notes do not
+restate — 15930-4's 6.1, 6.4, 6.7 past the version string, 6.9, 6.12, 6.14,
+6.15, 6.17, `TrapNet`, Table 2's shapes, JPEG 2000, X-1a's device-independent
+colour — is an `Unread` gap by name in `PDFX_UNREAD`, and what is in hand but
+not decided is `Staged` in `PDFX_STAGED`; `pdfx_rules.rs` holds every one of
+15930-4's seventeen contents titles to a rule that runs or a gap that names
+it.
 
 **Transparency is where the tokenizer stops being enough.** `pdfa/content.rs`
 tracks the text rendering mode and the selected font and nothing else, by
 design. The 2003 levels forbid transparency outright, which is a dictionary
-question (`/Group`, `/SMask`, `/BM`, `/CA`, `/ca` — `ArchivalRefusal::
-Transparency` already names the five) and the walk answers it. X-4 *permits*
-transparency under restrictions its 6.20 states and this document has not
-read; if those restrictions turn on state — which blend mode is in force at
-which operator — the rule needs `tinker_pdf_content::interpret` and a
-`Device`, and the honest placement is the same the PDF/UA design gives its
-real-content group: the recording device, not a second walk.
+question (`/Group`, `/SMask`, `/BM`, `/CA`, `/ca` — the five constructs
+`ArchivalRefusal::Transparency` names) and the walk answers it. X-4 *permits*
+transparency under restrictions its 6.20 states and which are not in hand; if
+those restrictions turn on state — which blend mode is in force at which
+operator — the rule needs `tinker_pdf_content::interpret` and a `Device`, and
+the honest placement is the same the PDF/UA design gives its real-content
+group: the recording device, not a second walk.
 
-**The writer flavour.** `ArchivalProfile` today is `{ part, level,
-destination_profile, destination_space, output_condition, language }` and
-every field is PDF/A's. The generalisation is a `Standard` the profile
-carries — `PdfA { part, level }`, `PdfX(flavour)`, or both — with the shared
-fields shared and three new ones: `trapped: bool`, the `/Info` identification
-strings derived from the flavour rather than supplied, and the box the writer
-puts on every page. `PageBuilder` has `set_crop_box` and `set_bleed_box` and
-**no `set_trim_box` or `set_art_box`**; the flavour needs one of the two.
-(The page reader reads all five boundaries, and the *editor* writes the trim
-and art boxes, since September 2026 — the builder is the half still owed.) Refusals, in `ArchivalRefusal`'s style: `DeviceRGB` and
-`ICCBased` under X-1a, transparency under any 2003 level, a page with no trim
-or art box, an annotation inside the trim box, `add_base_font` under any
-flavour (the variant exists). Nothing is discovered at validation time that
-the builder allowed.
+**The writer flavour.** Not built. `ArchivalProfile` is `{ part, level,
+destination_profile, destination_space, output_condition, language }`, every
+field PDF/A's, and it lives in `tinker-pdf-cos`. The generalisation is a
+`Standard` the profile carries — `PdfA { part, level }`, `PdfX(flavour)`, or
+both — with the shared fields shared and three new ones: `trapped: bool`, the
+`/Info` identification strings derived from the flavour rather than supplied,
+and the box the writer puts on every page. `PageBuilder` has `set_crop_box`
+and `set_bleed_box` and **no `set_trim_box` or `set_art_box`**, and the
+flavour needs one of the two; the page reader reads all five boundaries and
+the editor writes the trim and art boxes. Refusals, in `ArchivalRefusal`'s
+style: `DeviceRGB` and `ICCBased` under X-1a, transparency under any 2003
+level, a page with no trim or art box, an annotation inside the trim box,
+`add_base_font` under any flavour (the variant exists). Nothing is discovered
+at validation time that the builder allowed.
 
 **How the writing half is adjudicated, given ruling 13.** No third-party
 program will ever say a file this writer produced conforms, and for PDF/X no
@@ -327,37 +324,43 @@ have:
   statement of what a conforming file looks like, and it is admissible where a
   verdict would not be.
 
-None of the three says "it conforms", and the feature doc will say what
+None of the three says "it conforms", and the feature doc says what
 [features/pdfa.md](../features/pdfa.md) says: *this validator and the
 structural one find nothing, and the shape matches the published files*.
 
 ## Milestones
 
-| # | Deliverable | Exit criteria (concrete, testable) | Size |
-| --- | --- | --- | --- |
-| 1 | Flavour detection, verdict types, `Document::validate_pdfx`, `tpdf check --pdfx`; the `pdfa` kernel shared rather than copied | Unit fixtures per identification form: each of the seven version strings, the 2001 conformance key, an empty string, a claim in XMP with none in `/Info`; a census over the fetched corpora prints `RAN` and the flavour of every one of the 23 files this document counted; `hostile_input.rs` calls the validator with zero panics; `Machinery`'s counters show a PDF/X flavour read costs no XML parse | S |
-| 2 | The evidence base pinned: Ghent Output Suite 5.0 and Altona 1.2 Online in `corpora.lock`, licence recorded, `redistribute = no` | `cargo xtask corpus-fetch` verifies both by sha256; `pdfx_census.rs` opens every file, asserts each claims the flavour its suite says, prints `RAN`/`SKIPPED`. **Blocked** on establishing the Ghent package's licence terms, which neither page fetched states; a corpus with no recorded terms does not enter the lock | S, and a decision |
-| 3 | Syntax group for the 2003 levels, transcribed from the CGATS notes with the note's section cited per rule | One fixture per rule with a near-miss twin, in `pdfx_syntax.rs`; **zero findings over every pinned suite file**, a hard assertion; zero findings over the 23 real claims or a ledger row per finding with a reason; counted injections with the zeros printed | M |
-| 4 | Colour group for the 2003 levels: output intent shapes, device-space admission against the intent, alternate spaces, `ICCBased` under X-1a | Twins per rule; zero findings over the Altona pages (PDF/X-3) and the Ghent CMYK and SPOT patches; the 19005-2 multiple-intent question read and settled, with a fixture claiming both standards | M |
-| 5 | Font group re-pointed at 15930's numbering | The embedding rule fires under a PDF/X claim with no PDF/A claim; zero on the suites; one injection: the clause table row removed, and the census names the fixture that stops being reported | S |
-| 6 | Writer flavour: `Standard` on the profile, `set_trim_box`, `/Trapped`, the identification keys, the `GTS_PDFX` intent, refusals | Fixtures per flavour in `pdfx_writer.rs` judged three ways — this validator, the strict validator, and the shape comparison against a pinned suite file; a document claiming PDF/A-2b and PDF/X-4 together with zero findings from both engines; one refusal test per forbidden feature | M |
-| 7 | X-4 and X-6 groups | **Not priced.** The requirement bodies are not in hand; the milestone opens when a part's text is, and its first exit criterion is the text read twice against the rules, which is what the JPX transcriptions needed | — |
-
-Milestones 3 to 6 are what the roadmap row's "L" buys under the evidence
-above. Milestone 7 is the part of the row that cannot be scheduled by this
-document, and saying so is its job.
+1. Flavour detection, verdict types, `Document::validate_pdfx`,
+   `tpdf check --pdfx`; the `pdfa` kernel shared rather than copied.
+2. The evidence base pinned: Ghent Output Suite 5.0 and Altona 1.2 Online in
+   `corpora.lock`, licence recorded, `redistribute = no`. The Ghent package's
+   terms come first: neither page fetched states them, and a corpus with no
+   recorded terms does not enter the lock.
+3. The syntax group for the 2003 levels, transcribed from the CGATS notes
+   with the note's section cited per rule.
+4. The colour group for the 2003 levels: output intent shapes, device-space
+   admission against the intent, alternate spaces, `ICCBased` under X-1a; and
+   the 19005-2 multiple-intent question read and settled, with a fixture
+   claiming both standards.
+5. The font group re-pointed at 15930's numbering.
+6. The writer flavour: `Standard` on the profile, `set_trim_box`, `/Trapped`,
+   the identification keys, the `GTS_PDFX` intent, refusals — judged by this
+   validator, the strict validator, and the shape comparison against a pinned
+   suite file.
+7. The X-4 and X-6 groups, which open when a part's text is in hand; the
+   first step is the text read twice against the rules.
 
 ## Dependencies
 
 - **`crates/tinker-pdf/src/pdfa/`** — the kernel, the content walk, the font
-  and colour visitors, `Machinery`'s laziness counter. Exists; needs to be
-  shared, not forked.
+  and colour visitors, `Machinery`'s laziness counter, shared by opening
+  items to the crate rather than forked.
 - **[design/icc.md](icc.md)** — profile parsing for the output intent's
-  destination profile. Done through milestone 7 there; the staged case it
-  records (a v4 profile with only an `mAB ` route leaves the intent's space
-  unknown) applies here unchanged.
-- **The corpus machinery** — `corpora.lock` already pins a `zip` archive with
-  no upstream commit (SafeDocs), which is the shape both suites need.
+  destination profile; the case it stages (a v4 profile with only an `mAB `
+  route leaves the intent's space unknown) applies here unchanged.
+- **The corpus machinery** — `corpora.lock` pins a `zip` archive with no
+  upstream commit (SafeDocs), which is the shape both suites need, and
+  `corpus.yml` runs `pdfx_census.rs` nightly.
 - **`PageBuilder::set_trim_box` / `set_art_box`** — do not exist.
 - **The recording device** (`crates/tinker-pdf-content/src/record.rs`) —
   only if X-4's transparency restrictions turn on graphics state; not needed
@@ -372,91 +375,9 @@ document, and saying so is its job.
 
 | Risk | Mitigation |
 | --- | --- |
-| **A rule that never fires passes every check this design has.** The suites are pass-only, the real claims are unannotated, and a fixture built here fires the rule its author expected | Named rather than closed. Every rule has a near-miss twin *and* a counted injection, and the census prints the count of rules that fired zero times over the suites — which for a pass-only suite should be every rule, so the number to watch is a rule that fires on a *suite* file, which is a false positive by definition |
-| A rule transcribed from the application notes disagrees with the standard the notes defer to | The note's section is cited in the rule and in the finding's documentation; the ledger class is `secondary-source` rather than `reading`, so a later reading of the part knows which rows to revisit |
-| The Ghent package's terms turn out to forbid fetching into a CI cache | Milestone 2 is blocked until the terms are read; Altona's terms are read and compatible with `redistribute = no`, so the PDF/X-3 half of the bar can land alone |
-| Twenty-three real claims are too few to catch a rule that is too strict | Every `-pass-` PDF/A file in the veraPDF corpus is also a file with no PDF/X claim, and a PDF/X rule that fires on one of them is wrong twice; the census runs the PDF/X groups over all 2 907 and asserts silence on every file that claims nothing |
+| **A rule that never fires passes every check this design has.** The suites are pass-only, the real claims are unannotated, and a fixture built here fires the rule its author expected | Named rather than closed. Every rule has a near-miss twin, and a rule that fires on a suite file is a false positive by definition |
+| A rule transcribed from the application notes disagrees with the standard the notes defer to | Every rule cites the note's section it was transcribed from, so a later reading of the part knows which rules to revisit. There is no PDF/X ledger, because there is no annotated file to disagree with |
+| The Ghent package's terms turn out to forbid fetching into a CI cache | Milestone 2 waits on the terms; Altona's are read and compatible with `redistribute = no` |
+| Real claims are too few to catch a rule that is too strict | `pdfx_census.rs` reads every fetched file, asserts an empty verdict for every file that claims nothing, holds a real claim to a validated level to no finding nobody has read, and prints how many files that held over |
 | The writer's shape comparison against a suite file is mistaken for a conformance verdict | The test's name and the feature doc say "shape", and the comparison is over dictionary keys and containment, never over a boolean the suite does not publish |
-| X-4 rules get written from clause titles because the row says "L" and the 2003 groups landed | Milestone 7 has no size and one entry criterion, and `PDFX_STAGED` carries every X-4 and X-6 clause by name with "text not in hand" as the reason until it is |
-
-## As built
-
-**October 2026: milestone 1, and milestones 3 to 5 as far as the notes
-restate them. Milestones 2, 6 and 7 have not landed, and nothing is
-measured.**
-
-**Milestone 1.** `Document::validate_pdfx`, `validate_pdfx_with` and
-`tpdf check --pdfx`, in `crates/tinker-pdf/src/pdfx.rs` with `pdfx/syntax.rs`
-and `pdfx/print.rs`. The claim is read from `/Info` by exact string, and six
-levels are identified — PDF/X-1:2001 (the version key without the X-1a
-conformance key), PDF/X-1a:2001, PDF/X-3:2002, PDF/X-1a:2003, PDF/X-3:2003
-and PDF/X-4 — each held by a unit fixture beside a trailing-space string, an
-empty one and `PDF/X-5g`, which are carried as claims this build does not
-identify. The PDF/X-4p and PDF/X-6 strings are in no source in hand and are
-not guessed. A claim in an XMP packet with none in `/Info` is no claim
-(`pdfx_rules.rs`). `Machinery`'s counters show a PDF/X read costs no XML
-parse: the metadata counter stays at zero. `hostile_input.rs` calls the
-validator. The census, `pdfx_census.rs`, is written and joined to the nightly
-`corpus.yml`; it skips here, where the corpora are not reachable, so **the
-flavour of each of the 23 real claims is owed by its first nightly run**.
-
-The kernel is shared the way the PDF/UA validator shared it — items opened to
-the crate rather than moved: the content walk's visitor and its record
-(`pdfa::colour::{scan, Used}`), part 1's transparency rule
-(`pdfa::colour::transparency`), and the embedding rule alone
-(`pdfa::fonts::embedding`, which opens no program). `Coverage` is `syntax`,
-`print` and `fonts`; "print" rather than "colour" because transparency and
-PostScript ride the same walk as the colour rules.
-
-**Two departures from the text above, both deliberate.** The design asks for
-X-1:2001 to be "a finding rather than a silence"; it is an `Unread`
-abstention naming the part instead, since every `FindingKind` is a statement
-that the file breaks something, and claiming a deprecated level does not. And
-the design's rule that a part not in hand gets no clause-table row would have
-left PDF/X-3:2003 with no rule at all — not even ISO 15930-6's contents are
-in hand — so under that level a finding cites the application note's section
-(`AN 2.11`), which is the source the rule was transcribed from. Under
-PDF/X-1a:2003 it cites 15930-4's contents as planned.
-
-**Milestones 3 to 5, for what the notes restate.** Held to `pdfx_rules.rs`,
-one fixture and twin per rule under both levels, with the injections counted
-in the commit: encryption (AN 2.11), LZW and JBIG2 (2.8), `/Trapped` (2.17),
-the boxes (2.10), annotations against them (2.28), private `/Info` keys
-(2.29), the `GTS_PDFX` intent and its profile-or-registry shape (2.16),
-`DeviceRGB` under a CMYK profile (2.16), PDF/X-3's profile for
-device-independent colour (2.16), transparency (2.25), PostScript (2.26) and
-embedding (2.18). The readings a sentence did not settle, each written beside
-its rule: with no bleed box, an annotation stays outside the trim or art box
-rather than the crop box ISO 32000 would default to; containment is exact;
-"used" is drawn at a visible rendering mode, as ISO 19005 reads it; the first
-`GTS_PDFX` intent is judged; the registry identifier is checked for shape;
-`DeviceRGB` is judged only where the profile's header says CMYK. Every
-clause the notes do not restate — 15930-4's 6.1, 6.4, 6.7 past the version
-string, 6.9, 6.12, 6.14, 6.15, 6.17, TrapNet, Table 2's shapes, JPEG 2000,
-X-1a's device-independent colour — is an `Unread` gap by name, and what is in
-hand but not decided is `Staged`. (6.7 was neither run nor named until the
-review of the lane: `pdfx_rules.rs` now holds every one of the seventeen
-titles to one or the other.)
-
-**What the exit criteria asked that is not met.** Milestone 3's and 4's
-"zero findings over every pinned suite file" and "the Ghent CMYK and SPOT
-patches" — nothing is pinned. Milestone 4's 19005-2 multiple-intent question
-— not read; the PDF/A colour group still skips an intent that is not
-`GTS_PDFA1`, and no fixture claims both standards. Milestone 3's ledger class
-`secondary-source` — there is no PDF/X ledger, because there is no annotated
-file to disagree with. **And one thing this document did not see:** the
-evidence it names for the false-positive bar does not reach the levels the
-rules run under. Altona 1.2 is a PDF/X-3:2002 suite (its own table above),
-Ghent 5.0 a PDF/X-4 one, and the real claims' readable strings named
-`PDF/X-4`, `PDF/X-3:2002`, `PDF/X-1:2001` and an empty string. So for
-PDF/X-1a:2003 and PDF/X-3:2003 no third party's file is in reach at all; the
-census's no-finding assertion over real 2003 claims may hold over zero files,
-and it prints how many.
-
-**Milestone 2** — not attempted: the corpora are not fetchable in the
-environment this was built in, and the Ghent package's licence is still
-unestablished. **Milestone 6** — not attempted: `ArchivalProfile` and
-`PageBuilder` live in `tinker-pdf-cos`, `PageBuilder` has no `set_trim_box`,
-and the writer's third leg is a shape comparison against a pinned suite file,
-which waits on milestone 2. **Milestone 7** — unpriced; every 15930-7 clause
-is an `Unread` gap by its title.
+| X-4 rules get written from clause titles | Every PDF/X-4 clause is an `Unread` gap in `PDFX_UNREAD` by its 15930-7 title, and milestone 7 opens only when a part's text is in hand |

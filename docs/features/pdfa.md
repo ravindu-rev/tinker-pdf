@@ -19,8 +19,8 @@ packet — `pdfaid:part`, `pdfaid:conformance` for parts 1 to 3, `pdfaid:rev`
 for part 4 — and nothing else in a PDF says which flavour it is meant to be.
 Both RDF spellings are read, the attribute form and the element form, and the
 namespace is checked: PDF/UA declares `pdfuaid:part`, an entirely different
-standard's version number, and matching on the local name alone read 434
-corpus files as claiming a PDF/A part they say nothing about.
+standard's version number, and a reader matching on the local name alone
+would read every PDF/UA file as a PDF/A claim.
 
 **Five rule groups, keyed by the machinery they need.** Five and not six
 because the annotation rules need no machinery at all — a subtype name, a flag
@@ -92,8 +92,8 @@ never happens.
   comparison answers "the same" rather than guess) and its `/DeviceN`
   colorants described, part 1's outright
   prohibition on transparency — a group, a graphics state's soft mask, blend
-  mode or alpha, and an `/SMask` on any XObject the pages draw (rule 6.4-2,
-  which until October 2026 did not run) — and the graphics clause's operator list
+  mode or alpha, and an `/SMask` on any XObject the pages draw (rule 6.4-2)
+  — and the graphics clause's operator list
   (6.2.10 / 6.2.2): an operator outside ISO 32000-1 Table A.1's seventy-three
   — `PS` among them — is a finding inside `BX`/`EX` or not, naming the page,
   form or appearance stream that used it.
@@ -172,58 +172,43 @@ exits by verdict.
 | An associated file (`associate_file`, `Tag::associated_file`) under parts 1, 2 or 4 | `ArchivalRefusal::AssociatedFile` | part 1 forbids embedded files; part 2, and part 4 without level F, require the embedded file itself to conform (veraPDF's rules 6.8-5, 6.9-3), which nothing here checks of a caller's bytes; part 4 level F asks for an `/EmbeddedFiles` tree (6.9-5) this writer does not keep. Part 3 admits them, and they are written | 6.1.11 (part 3 admits them) |
 | A second `/Separation` of one colorant with another alternate or tint transform, under parts 2 to 4 | `ArchivalRefusal::InconsistentSeparation` | 6.2.4.4 makes every `/Separation` array of one name agree on both, compared as the objects written; the builder remembers each colorant's first spelling, since a page begun earlier still draws with it | 6.2.4.4 (parts 2 to 4) |
 
-## Coverage, as a measured number
+## Coverage against the corpus
 
-Against the veraPDF corpus's own annotations, over the 2 371 files that are
-tests **of PDF/A** — the other 525 are PDF/UA, TWG and ISO 32000 fixtures that
-make no PDF/A claim, and scoring them would measure the measurement:
-
-| | files | agree |
-| --- | --- | --- |
-| annotated `-pass-` | 831 | 830 |
-| annotated `-fail-` | 1 540 | 1 118 |
-| **total** | **2 371** | **1 948** |
-
-The single disagreement on the `pass` side is a **reading**, recorded as one:
-ISO 19005-1 6.1.2 says the header consists of `%PDF-1.n`, one fixture carries
-`%PDF-2.0` and is annotated `pass`, and this build reads the clause literally.
+The census scores the validator against the veraPDF corpus's own
+annotations — each fixture's name carries `-pass-` or `-fail-` and its
+directory the clause — over the files that are tests **of PDF/A**: the
+`PDF_A-*` suites and the Isartor files, the original PDF/A-1b conformance
+suite. The corpus's PDF/UA, TWG and ISO 32000 fixtures make no PDF/A claim,
+and scoring them would measure the measurement.
 
 Every disagreement has a row in `crates/tinker-pdf/tests/pdfa_ledger.tsv`
 carrying a class — our bug, a staged rule, or a reading — and a **mandatory
 reason**; a row without one is refused by the reader that loads the file, and a
-row whose subject no longer disagrees fails as stale. `PDFA_STAGED` names 38
-rules this build knows it does not run, each with its clause and what it is
-waiting for, and a `staged` ledger row has to point at one.
+row whose subject no longer disagrees fails as stale. `PDFA_STAGED` names
+every rule this build knows it does not run, each with its clause and what it
+is waiting for, and a `staged` ledger row has to point at one.
 
-The predefined schemas' value types moved that total from 1 781 to 1 948 and
-left `830 of 831` where it was: the shape half now tells `rdf:Bag`, `rdf:Seq`
-and `rdf:Alt` apart instead of collapsing them to one array, and the value half
-reads a property's text against the grammar the XMP specification prints for
-its declared type — `Integer`, `Real`, `Boolean` and `Date`, and no others.
-Those four are what the corpus exercises: of the 468 `-fail-` fixtures under
-the two clause directories the rule serves, 467 are now reported on, and of the
-448 `-pass-` fixtures there, none is. What stays staged is the types nothing
-in the corpus exercises — `Rational`, `URI`, `URL`, `GPSCoordinate`, `XPath`,
-`Locale`, `MIMEType`, `ProperName`, `AgentName`, `RenditionClass` and a
-structure's own fields — because a grammar written against no test is a guess,
-and a guess that is too strict reports conforming files.
+One `pass` fixture is a recorded **reading**: ISO 19005-1 6.1.2 says the
+header consists of `%PDF-1.n`, the fixture carries `%PDF-2.0`, and this build
+reads the clause literally.
+
+The predefined schemas' value types are read in two halves: the shape tells
+`rdf:Bag`, `rdf:Seq` and `rdf:Alt` apart rather than collapsing them to one
+array, and the value reads a property's text against the grammar the XMP
+specification prints for its declared type — `Integer`, `Real`, `Boolean` and
+`Date`, and no others. Those four are what the corpus exercises. What stays
+staged is the types nothing in the corpus exercises — `Rational`, `URI`,
+`URL`, `GPSCoordinate`, `XPath`, `Locale`, `MIMEType`, `ProperName`,
+`AgentName`, `RenditionClass` and a structure's own fields — because a grammar
+written against no test is a guess, and a guess that is too strict reports
+conforming files.
 
 One property's value is left unread on purpose. September 2005 p. 41 declares
 `xmp:Rating` a `Closed Choice of Integer`, and `6-6-2-3-1-t07-pass-m` writes
 `1.0` into it and is annotated **conforming** with no failing twin. Where two
 published sources disagree and one of them is a conformance suite calling a
-file conforming, this build does not report it — the same rule that admitted
-`xmpMM:InstanceID` under part 1, and one property wide.
-
-The level A rules before them moved the total from 1 762 to 1 781 and left `830 of 831`
-untouched, which is the number that matters for them: a structure tree this
-build cannot follow reads exactly like a file with none, so a level A rule
-group that raised the bar by reporting conforming files would have raised it
-for nothing. The independent check is outside the suite — fifteen real
-PDF/A-1a and PDF/A-3a documents in the fetched pdfjs and SafeDocs corpora,
-unannotated and so invisible to the bar, gain exactly **one** level A finding
-between them, and that one file already carries a malformed object header and
-claims level A with no `/MarkInfo` and no `/StructTreeRoot` at all.
+file conforming, this build does not report it — the same rule admits
+`xmpMM:InstanceID` under part 1, and it is one property wide.
 
 ## Verified
 
@@ -258,7 +243,8 @@ a standard type against one on a custom type, `/Lang ()` and
 Cyrillic, and `en-12` reported under part 1 and admitted under parts 2 and 3.
 
 `pdfa_ledger.rs` is the census, which walks the fetched corpus and asserts in
-both directions that the ledger accounts for every disagreement.
+both directions that the ledger accounts for every disagreement. It runs
+nightly in `corpus.yml`.
 
 ## What is lost, and it is real
 
@@ -271,58 +257,47 @@ against the table its fixture passed, so a clause this build reads wrongly is
 read wrongly in both directions and the pair agrees with itself.
 
 The corpus is where that asymmetry breaks, and only for files somebody else
-made. It is why "1 948 of 2 371" is the honest measure of how much of ISO
-19005 this build understands, and why a document the writer produces is
-reported as *"this validator and the structural one find nothing"* rather than
-as *"it conforms"*.
+made. It is why the census, and not the writer suite, is the honest measure of
+how much of ISO 19005 this build understands, and why a document the writer
+produces is reported as *"this validator and the structural one find nothing"*
+rather than as *"it conforms"*.
 
-One limit closed and one still open, both worth naming rather than
-discovering:
+Two limits, named rather than discovered:
 
 - **A defect that exists only in the bytes is invisible to a rule engine that
-  reads the object graph** — and the readable half of that family is closed.
-  `PdfACoverage::structure` runs the strict structural validator and reports
-  its **structure tier** under ISO 19005's own clauses: the cross-reference
-  table's per-section spelling under 6.1.4, an indirect object's framing under
-  6.1.8, and `/Length` against where `endstream` actually is under 6.1.7. It is
-  a group of its own, and off in `PdfACoverage::SYNTAX`, because it parses the
-  file a second time with the leniency ladder off — which is machinery a
-  syntax-only sweep must not build.
+  reads the object graph**, and the readable half of that family is the
+  structure group's. `PdfACoverage::structure` runs the strict structural
+  validator and reports its **structure tier** under ISO 19005's own clauses:
+  the cross-reference table's per-section spelling under 6.1.4, an indirect
+  object's framing under 6.1.8, and `/Length` against where `endstream`
+  actually is under 6.1.7. It is a group of its own, and off in
+  `PdfACoverage::SYNTAX`, because it parses the file a second time with the
+  leniency ladder off — which is machinery a syntax-only sweep must not build.
 
   What it deliberately does **not** report is as much the point. A repair is a
   statement about this reader rather than about the file. ISO 19005 requires no
   linearization at all. The header and the trailer already have rules in the
   syntax group, and one defect reported twice under one clause is worse than
-  once. And five kinds more were mapped and then unmapped **against the
-  corpus**: `StreamDoesNotDecode` and `FreeHeadMissing` between them accounted
-  for 48 of the 52 false positives the first draft added, and a join that
-  closes by adding false positives has closed nothing. The bar moved from
-  1 201 to 1 211 with the false-positive count unchanged at one; the XMP
-  value-type rule took it to 1 476 on the same terms and the annotation group
-  to 1 624.
+  once. And five defect kinds are refused a clause, `StreamDoesNotDecode` and
+  `FreeHeadMissing` among them, each with its reason in `pdfa/structure.rs`.
 
-  What is still staged here is what nothing in the tree reads: hexadecimal
+  What is staged here is what nothing in the tree reads: hexadecimal
   string syntax, and the EOL markers around `obj` and `stream`. Implementation
   limits are staged for a different reason and keep their own row.
-- **Level A is validated now, in the same group and short of two files.** The
-  writer claimed level A by tagging and the validator said nothing about it;
-  it says four things about it now, under 6.8.2.2 / 6.7.2.2, 6.8.3.3 / 6.7.3.3,
-  6.8.3.4 / 6.7.3.4 and 6.8.4 / 6.7.4, and 19 of the 21 logical-structure
-  fixtures the corpus carries agree.
-
-  The two that do not are one file per numbering and one reason:
-  `6-8-4-t01-fail-c` and `6-7-4-t01-fail-c` write their only `/Lang` inside a
-  marked-content property list in a page's content stream, and reading that
-  needs `pdfa/content.rs`'s walk — the font and colour groups' machinery,
+- **Level A is validated in the structure group, except where the clause lives
+  in a content stream.** The group reports under 6.8.2.2 / 6.7.2.2,
+  6.8.3.3 / 6.7.3.3, 6.8.3.4 / 6.7.3.4 and 6.8.4 / 6.7.4. A `/Lang` written
+  only inside a marked-content property list in a page's content stream, as
+  `6-8-4-t01-fail-c` and `6-7-4-t01-fail-c` write theirs, is not read: reading
+  it needs `pdfa/content.rs`'s walk — the font and colour groups' machinery,
   which this group is deliberately not a third consumer of. `PDFA_STAGED`
   carries the refusal.
 
-  Level A's own font rule, 6.2.11.7.3, is staged for a harder reason and is
-  five more files: a character mapped into a Unicode Private Use Area needs an
-  `/ActualText` **for that character**, and two of the five fixtures carry one
-  for a *different* character in the same run. Deciding that is the
-  code-to-glyph mapping of every code a `Tj` drew, correlated with the
-  marked-content sequence it was drawn inside, which is the interpreter rather
-  than a tokenizer.
+  Level A's own font rule, 6.2.11.7.3, is staged for a harder reason: a
+  character mapped into a Unicode Private Use Area needs an `/ActualText`
+  **for that character**, and fixtures carry one for a *different* character
+  in the same run. Deciding that is the code-to-glyph mapping of every code a
+  `Tj` drew, correlated with the marked-content sequence it was drawn inside,
+  which is the interpreter rather than a tokenizer.
 
 The design and its milestones are in [design/pdfa.md](../design/pdfa.md).
