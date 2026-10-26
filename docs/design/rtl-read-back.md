@@ -317,6 +317,20 @@ alone is dropped, and it reads `كتاب25٪`, as its twin is pinned. A Latin li
 under a quarter turn, cut today wherever a glyph stands over half an em up
 the page from the last (`far`), and left so by `text_order`, reads whole.
 
+**What the prototype found.** Built as stated on `text.rs` as CD-19.21 leaves
+it, each line's frame fixed by its first glyph, the rest of a line in the
+frame of the line it is the rest of, and the mend's ends measured along the
+line, it reads every turned line the suites and their probes hold as its
+unturned twin but the two half-turned rows the `backwards` tie decides, and
+no committed document, none of which holds turned text, reads otherwise.
+Left (6) conserves. Rows that conserved or were found only because `far`, on
+the page's `y`, cut a quarter-turned line at nearly every glyph read as their
+twins and so lose those verdicts: Left (10)'s paragraphs turned a quarter,
+and with `bundled-fonts` the squeezed Hebrew blocks turned a quarter and
+three quarters; and the punctuation shape under `rotate(12deg)` loses
+`whole`, as its twin reads. No glyph moves, and no time moves past the noise.
+H-157's row holds the figures.
+
 **What CD-19.28 measures**, with the rule prototyped on `text.rs` as CD-19.21
 leaves it, in the default and `bundled-fonts` builds:
 
