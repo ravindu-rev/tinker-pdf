@@ -2652,6 +2652,54 @@ fn stored_book(language: &str, style: &str, body: &str) -> Vec<u8> {
     out
 }
 
+/// **Setting a page's atomic inlines on their lines is bounded.** Finding
+/// where each atomic inline stands compares the page's runs with its atomic
+/// inlines: a page a book crafts with thousands of both stops at
+/// `paint::OBJECT_WORK` comparisons and sets none, its lines ordered by their
+/// runs alone, and its text is all there; a page of a few is set as ever.
+#[test]
+fn a_page_of_many_atomic_inlines_is_set_within_its_budget() {
+    use super::paint::{OBJECT_PEAK, OBJECT_WORK};
+    // Small enough that every block is on one page.
+    let style = "body, p { margin: 0; padding: 0 } p { font-size: 0.25px; line-height: 0.25px }";
+    let book = |blocks: usize| {
+        let body: String = (0..blocks)
+            .map(|_| "א <span style=\"display: inline-block\">ב</span> ")
+            .collect();
+        stored_book("he", style, &format!("<p dir=\"rtl\">{body}</p>"))
+    };
+    let open = |blocks: usize| {
+        OBJECT_PEAK.with(|peak| peak.set(0));
+        let doc = crate::Document::open(book(blocks)).expect("opens");
+        let text: String = (0..doc.page_count())
+            .map(|at| doc.page(at).expect("a page").text().plain_text())
+            .collect();
+        (
+            OBJECT_PEAK.with(core::cell::Cell::get),
+            text.matches('ב').count(),
+            doc.page_count(),
+        )
+    };
+
+    let (peak, found, pages) = open(3000);
+    assert!(
+        peak > OBJECT_WORK,
+        "the crafted page reaches its budget ({peak}, {pages} pages)"
+    );
+    assert!(
+        peak <= OBJECT_WORK + 8 * 3000,
+        "and stops within one comparison of the page's after it ({peak})"
+    );
+    assert_eq!(found, 3000, "every block's letter is on the page");
+
+    let (peak, found, _) = open(20);
+    assert!(
+        peak > 0 && peak < OBJECT_WORK / 1000,
+        "a few are set as ever ({peak})"
+    );
+    assert_eq!(found, 20);
+}
+
 /// How many lines `book` reads back to open (`paint::READINGS`).
 fn readings_to_open(book: Vec<u8>) -> usize {
     use super::paint::READINGS;

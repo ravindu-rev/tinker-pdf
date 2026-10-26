@@ -535,6 +535,11 @@ character moves nothing (`epub_paint.rs`'s
 `an_inline_block_in_a_line_with_no_right_to_left_character_moves_nothing`
 and `an_inside_marker_is_on_its_items_start_side_beside_an_inline_block`;
 `epub_images.rs`'s `an_inline_img_is_ordered_with_its_words_in_a_right_to_left_line`).
+Finding where each atomic inline stands compares a page's runs with its
+atomic inlines, so a page whose search passes `paint::OBJECT_WORK`
+comparisons, which only a page a book crafts with thousands of them reaches,
+sets none and orders its lines by their runs alone, its text all there
+(`epub::tests`' `a_page_of_many_atomic_inlines_is_set_within_its_budget`).
 What a transform paints past its box is CSS's: an inline block widened by
 `scaleX(2)` paints its glyphs over its neighbours', and the paragraph that
 holds it is pinned at the count (`epub_fallback.rs`'s

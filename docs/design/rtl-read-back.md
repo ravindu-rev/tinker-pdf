@@ -117,7 +117,10 @@ set, and is not moved; an empty inline block that paints nothing has neither
 a fragment nor a run to find it by; and a line of nothing but atomic inlines
 has no run to find, and is not ordered. A right-to-left inline block of
 `width: auto` is as wide as its line, layout's shrink-to-fit counting the edge
-right-aligned text reaches, so it is a line of its own.
+right-aligned text reaches, so it is a line of its own. And the search for
+where each atomic inline stands is bounded: a page past `paint::OBJECT_WORK`
+comparisons, which only a page a book crafts with thousands of atomic inlines
+reaches, sets none, and its lines are ordered by their runs alone.
 
 **What holds it.** The case above, pinned at each paragraph's verdicts and
 glyphs over others in both builds; `epub_paint.rs`'s

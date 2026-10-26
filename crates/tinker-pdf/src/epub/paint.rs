@@ -5528,6 +5528,28 @@ fn is_object(run: &TextRun) -> bool {
 /// layout pixels: the two are sums of different terms.
 const SLACK: f64 = 1e-3;
 
+/// How many comparisons [`set_objects`] makes on one page before it sets no
+/// stand-in there. Finding where each atomic inline stands compares the
+/// page's runs with its atomic inlines, which a page a book crafts with many
+/// of both makes quadratic: a page past this orders its lines by their runs
+/// alone, each atomic inline's box where layout set it, as a page with none
+/// does ([`visual_lines`]).
+pub(crate) const OBJECT_WORK: usize = 4_000_000;
+
+/// The comparisons [`set_objects`] has made on a page, against
+/// [`OBJECT_WORK`].
+struct Work(usize);
+
+impl Work {
+    /// Charges `n` comparisons; false once the page's are spent.
+    fn charge(&mut self, n: usize) -> bool {
+        self.0 = self.0.saturating_add(n);
+        #[cfg(test)]
+        OBJECT_PEAK.with(|peak| peak.set(peak.get().max(self.0)));
+        self.0 <= OBJECT_WORK
+    }
+}
+
 /// The atomic inlines of a chapter, CSS 2.2 §9.2.2 — an `inline-block`, an
 /// `inline-flex` and a replaced element set inline — each one unit of the
 /// line it is set on ([`visual_lines`]), and what is set in each.
@@ -5759,7 +5781,8 @@ impl Hull {
 /// the stretch from the unit before it to the one after; at the line's ends,
 /// its own box's edge. A line of nothing but atomic inlines holds no run to
 /// find it by, and an atomic inline set apart from its neighbours by its
-/// margins only between two runs; it is not set.
+/// margins only between two runs; it is not set. A page whose search passes
+/// [`OBJECT_WORK`] comparisons sets none.
 fn set_objects(page: &mut LayoutPage, atomics: &Atomics) {
     if atomics.is_empty() {
         return;
@@ -5812,7 +5835,11 @@ fn set_objects(page: &mut LayoutPage, atomics: &Atomics) {
         .map(|run| atomics.innermost(run.anchor))
         .collect();
     let mut objects: Vec<(usize, TextRun)> = Vec::new();
+    let mut work = Work(0);
     for (level, kids) in &kids {
+        if !work.charge(levels.len()) {
+            return;
+        }
         let own: Vec<usize> = levels
             .iter()
             .enumerate()
@@ -5820,8 +5847,22 @@ fn set_objects(page: &mut LayoutPage, atomics: &Atomics) {
             .map(|(at, _)| at)
             .collect();
         let mut placed = vec![false; kids.len()];
-        for line in lines_across(&page.runs, &own, kids) {
-            stands_on(&page.runs, &line, kids, &mut placed, atomics, &mut objects);
+        let Some(lines) = lines_across(&page.runs, &own, kids, &mut work) else {
+            return;
+        };
+        for line in lines {
+            let set = stands_on(
+                &page.runs,
+                &line,
+                kids,
+                &mut placed,
+                atomics,
+                &mut objects,
+                &mut work,
+            );
+            if set.is_none() {
+                return;
+            }
         }
     }
     if objects.is_empty() {
@@ -5842,8 +5883,14 @@ fn set_objects(page: &mut LayoutPage, atomics: &Atomics) {
 
 /// The lines of the runs `own` of `runs`, in order, as [`same_line`] finds
 /// them, but that two runs of one paragraph are one line across a stretch
-/// one of `kids` lies in, on their baseline ([`set_objects`]).
-fn lines_across(runs: &[TextRun], own: &[usize], kids: &[(u32, Hull)]) -> Vec<Vec<usize>> {
+/// one of `kids` lies in, on their baseline ([`set_objects`]). `None` once
+/// the page's `work` is spent.
+fn lines_across(
+    runs: &[TextRun],
+    own: &[usize],
+    kids: &[(u32, Hull)],
+    work: &mut Work,
+) -> Option<Vec<Vec<usize>>> {
     let bridged = |a: &TextRun, b: &TextRun| {
         let end = a.x + a.width;
         !beside_the_line(a)
@@ -5860,17 +5907,26 @@ fn lines_across(runs: &[TextRun], own: &[usize], kids: &[(u32, Hull)]) -> Vec<Ve
         let Some(run) = runs.get(at) else {
             continue;
         };
-        let continues = lines
+        let continues = match lines
             .last()
             .and_then(|line| line.last())
             .and_then(|last| runs.get(*last))
-            .is_some_and(|last| same_line(last, run) || bridged(last, run));
+        {
+            Some(last) if same_line(last, run) => true,
+            Some(last) => {
+                if !work.charge(kids.len()) {
+                    return None;
+                }
+                bridged(last, run)
+            }
+            None => false,
+        };
         match lines.last_mut() {
             Some(line) if continues => line.push(at),
             _ => lines.push(vec![at]),
         }
     }
-    lines
+    Some(lines)
 }
 
 /// One unit of a line as [`stands_on`] sets it: a run, by its index on the
@@ -5884,7 +5940,8 @@ enum Unit {
 /// Finds the atomic inlines among `kids` not yet `placed` that stand on
 /// `line` — between two of its runs, or meeting one of its ends, through
 /// each other — and adds a stand-in for each to `objects`, with the index of
-/// the run it goes before on the page ([`set_objects`]).
+/// the run it goes before on the page ([`set_objects`]). `None` once the
+/// page's `work` is spent.
 fn stands_on(
     runs: &[TextRun],
     line: &[usize],
@@ -5892,12 +5949,13 @@ fn stands_on(
     placed: &mut [bool],
     atomics: &Atomics,
     objects: &mut Vec<(usize, TextRun)>,
-) {
+    work: &mut Work,
+) -> Option<()> {
     let (Some(first), Some(last)) = (
         line.first().and_then(|at| runs.get(*at)),
         line.last().and_then(|at| runs.get(*at)),
     ) else {
-        return;
+        return Some(());
     };
     let mut members: Vec<usize> = Vec::new();
     for pair in line.windows(2) {
@@ -5908,6 +5966,9 @@ fn stands_on(
             continue;
         };
         let end = a.x + a.width;
+        if !work.charge(kids.len()) {
+            return None;
+        }
         for (kid, (_, hull)) in kids.iter().enumerate() {
             let free = placed.get(kid).is_some_and(|placed| !placed);
             if free && hull.left >= end - SLACK && hull.right <= b.x + SLACK && hull.on(b) {
@@ -5920,6 +5981,9 @@ fn stands_on(
     }
     let (mut left, mut right) = (first.x, last.x + last.width);
     loop {
+        if !work.charge(kids.len()) {
+            return None;
+        }
         let mut grew = false;
         for (kid, (_, hull)) in kids.iter().enumerate() {
             if placed.get(kid).is_none_or(|placed| *placed) {
@@ -5945,7 +6009,7 @@ fn stands_on(
         }
     }
     if members.is_empty() {
-        return;
+        return Some(());
     }
     // In the order layout set them, left to right: a kid before a run at the
     // same edge, since only an empty one can start where a run does.
@@ -6019,6 +6083,7 @@ fn stands_on(
         object.order = OBJECT;
         objects.push((goes, object));
     }
+    Some(())
 }
 
 /// Cuts every run that crosses one of its line's UAX #9 level boundaries
@@ -7251,6 +7316,9 @@ pub(crate) fn cut_run(
 thread_local! {
     /// [`step`]'s count, on this thread.
     pub(crate) static STEPS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    /// The most comparisons [`set_objects`] made on any page, on this thread,
+    /// against [`OBJECT_WORK`].
+    pub(crate) static OBJECT_PEAK: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
     /// How many times [`Fonts::read_back`] read a line back, on this thread:
     /// counted under `cfg(test)` only, so that `epub/tests.rs` holds the
     /// read-back's work by count where a clock would only run slowly.
