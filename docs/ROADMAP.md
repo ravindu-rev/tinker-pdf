@@ -17,8 +17,9 @@ is described on its own terms.
 ## Where the steps are
 
 One file per tier, under [roadmap/](roadmap/), named by its rows' prefix.
-CD-19's first step is `CD-19.1`, and `grep -n '| CD-19.1 |'
-docs/roadmap/CD.md` finds it.
+A step's ID is its row's and a number: OC-01's first step is `OC-01.1`, and
+`grep -n '^| OC-01.1 |' docs/roadmap/OC.md` finds its row and no other row
+that depends on it.
 
 | Prefix | Tier | File |
 | --- | --- | --- |
