@@ -17,7 +17,7 @@ chased:
   fixed-point, so there is no float summation-order or FMA-contraction
   variance to leak into pixel values.
 - **No platform libm on any pixel path.** `tinker-pdf-math` supplies `sin`,
-  `cos`, `tan`, `atan`, `atan2`, `ln`, `exp`, `powf`, `cbrt`, `log2` and
+  `cos`, `tan`, `atan`, `atan2`, `ln`, `exp`, `pow`, `cbrt`, `log2` and
   `log10`, built from nothing but operations IEEE 754 pins exactly, and it
   is `no_std` so `x.sin()` does not compile inside it. The boundary is
   precise: `sqrt`, `floor`, `ceil`, `round`, `trunc` and `abs` **are**
@@ -31,7 +31,7 @@ chased:
   it branches on 16.16 fixed-point integers, because a count one different
   is a different image.
 
-The contract has a second half the container formats added: a book's page
+The contract has a second half for the container formats: a book's page
 count is a function of the box the caller passes
 ([epub](epub.md)), so the same book at two page boxes must each be stable
 on every target **and the two must differ** — a build that ignored the
@@ -46,27 +46,27 @@ enforced by the suite below.
 
 ## Verified
 
-`crates/tinker-pdf/tests/determinism.rs` commits **20 render
-fingerprints** — `text`, `curves`, `shading`, `pattern`, `optional`,
+`crates/tinker-pdf/tests/determinism.rs` commits a **render fingerprint** for
+each page of its table — `text`, `curves`, `shading`, `pattern`, `optional`,
 `image`, `jbig2`, `jpx`, `blend`, `transparency`, `tiling`, `mesh`, `cbz`,
 `xps`, `epub`, `analytic_axial`, `analytic_radial`, `analytic_blend`,
 `analytic_image`, `default_spaces` — each a hash of rendered pixels plus the
-page dimensions and ink counts it is computed from. `default_spaces`, added
-with K-02.2 in October 2026, is the one page that names a default colour
-space (8.6.5.6), each of the three through its own arithmetic: a CalGray's
-`pow`, a CalRGB's matrix and an ICC profile's lookup table.
+page dimensions and ink counts it is computed from. `default_spaces` is the
+one page that names a default colour space (8.6.5.6), each of the three
+through its own arithmetic: a CalGray's `pow`, a CalRGB's matrix and an ICC
+profile's lookup table.
 
-The four `analytic_` pages arrived with milestone 2 of
-[design/render-verification.md](../design/render-verification.md) and are a
-different kind of fixture from the fifteen before them: their pixels have a
-**closed-form right answer**, which `crates/tinker-pdf/tests/render_analytic.rs`
-evaluates per pixel over the whole page. Both files build the page through the
-same function in `tests/render_support/`, so the document the equation
-adjudicates and the document the hash covers cannot drift apart — and what the
-hash adds is the one thing the equation cannot say, that the same arithmetic
-comes out the same on every target. Every fixture asserts a minimum ink count
-and the absence of `UnreadableFont` before it is hashed, so a fixture that
-draws nothing fails on the day it is added rather than becoming a baseline.
+The `analytic_` pages are a different kind of fixture from the rest: their
+pixels have a **closed-form right answer**, which
+`crates/tinker-pdf/tests/render_analytic.rs` evaluates per pixel over the
+whole page ([design/render-verification.md](../design/render-verification.md)).
+Both files build the page through the same function in `tests/render_support/`,
+so the document the equation adjudicates and the document the hash covers
+cannot drift apart — and what the hash adds is the one thing the equation
+cannot say, that the same arithmetic comes out the same on every target.
+Every fixture asserts a minimum ink count and the absence of `UnreadableFont`
+before it is hashed, so a fixture that draws nothing fails rather than
+becoming a baseline.
 
 **The options that change what a page's bytes are** — ink instead of light,
 hard edges, a page with nothing under it, premultiplied alpha — are pinned
@@ -76,49 +76,16 @@ with the default options and nothing else, and its table is the one place a
 determinism bug shows, so a row meaning "this page, but differently" does not
 join it. Each is hashed the same way and floored by ink the same way, and the
 same file holds that the defaults did not move: the blend grid's default render
-there is this table's `analytic_blend`, copied. Those hashes were recorded on
-`x86_64-unknown-linux-gnu` in September 2026 and are *claimed*, not measured, for
-the other three targets until a run there says otherwise.
+there is this table's `analytic_blend`, copied. The `wasm32-wasip1` leg does
+not run that file, so on that target those hashes are claimed, not measured.
 
-**One fingerprint moved on purpose in September 2026, and the reason is the
-commit's rather than a target's.** `curves` fills `20 20 m 60 75 l 100 25 l f`,
-an open triangle, and the filler used to leave its third side out; ISO
-32000-1 8.5.3.1 closes an open subpath before a fill
-([rasterizer](rasterizer.md)), and fixing that moved exactly this one hash. The
-new value was produced on `x86_64-unknown-linux-gnu` and reproduced under
-`wasm32-wasip1` before it was committed, so the table's cross-target claim for
-that row rests on those two until the Windows and macOS legs next run. This is
-the first of this file's two failure modes — the same target renders
-differently — and not the second, which is why the hash was updated rather than
-investigated.
-
-**The canvas-origin change of the same month moved none of them, and that was
-its check.** Every canvas — a tile, a group's buffer, a soft mask's, a mesh's —
-is now drawn in the page's one frame rather than in a frame translated to its
-corner ([rulings](../rulings.md) 5). That changed what a *region* computes and
-was meant to leave every whole page's pixels where they were; the fingerprints
-are all of whole pages, so every one of them holding still, natively and under
-`wasm32-wasip1`, is the evidence that it did.
-
-Beside them, **three document byte-hashes** pin the writer as well as the
-renderer: a synthesised PDF, a synthesised fixed-layout document and a
-synthesised book are each hashed as *bytes*, which is where object
-numbering, dictionary key order and stream framing are pinned — none of
-which a rendered hash can see. The `epub` fixture asserts the two-box claim
-above: seven pages at one box, six at another, both stable.
-
-**The book's two byte-hashes moved on purpose in October 2026, and the reason
-is again the commit's.** Tagged writing made the EPUB path write the book's
-language as the catalog's `/Lang`, each `<a>` holding an annotation as a
-`/Link` structure element with its `/OBJR`, and each element's XHTML name
-under a `/RoleMap`; the 432 x 648 book went from `dcd5912d…` to `bcc9bb59…`
-and the 600 x 800 one from `51748067…` to `3b288a03…`, in three measured
-steps that `determinism.rs` lists one by one, each reverted alone to show it
-was the whole of its step. No raster fingerprint moved, the CSS and shaping
-work merged in the same wave moved neither hash, and the new values were
-produced on `x86_64-unknown-linux-gnu` and reproduced under `wasm32-wasip1`
-before they were committed — this file's first failure mode, the same target
-writing different bytes, and so updated rather than investigated.
+Beside them, **document byte-hashes** pin the writer as well as the renderer:
+a synthesised PDF, a synthesised fixed-layout document and a synthesised book
+are each hashed as *bytes*, which is where object numbering, dictionary key
+order and stream framing are pinned — none of which a rendered hash can see.
+`a_book_is_stable_at_each_page_box_and_the_two_boxes_differ` asserts the
+two-box claim above: the book is stable at 432 x 648 and at 600 x 800, and
+the two differ in bytes and in page count.
 
 Three fixtures carry guarantees of different kinds: one is synthesised
 rather than parsed, so it pins the writer and parser to each other; one is
@@ -126,34 +93,23 @@ a package a third-party serialiser wrote, so it can disagree with this
 engine about the *format* rather than only about arithmetic; and one is a
 reflowable book, whose pagination is a function of the open options.
 
-### Targets: measured versus claimed (August 2026)
+### Targets: measured versus claimed
 
-| Target | Status |
+| Target | Measured by |
 | --- | --- |
-| `x86_64-pc-windows-msvc` | measured — the committed fingerprint table is this one |
-| `wasm32-wasip1` | measured, under wasmtime — tests width: 64-bit against 32-bit, where a `usize` assumption would show |
-| `x86_64-unknown-linux-gnu` | measured, full suite green — tests everything below the arithmetic: a different `std`, allocator and linker |
-| `aarch64-apple-darwin` | measured — observed 23 August 2026, [run 32670809479](https://github.com/ravindu-rev/tinker-pdf/actions/runs/32670809479) at `b76e6f9` |
+| `x86_64-unknown-linux-gnu` | `test (ubuntu-latest)` |
+| `x86_64-pc-windows-msvc` | `test (windows-latest)` |
+| `aarch64-apple-darwin` | `test (macos-14)` |
+| `wasm32-wasip1` | `wasm-determinism`, under wasmtime |
 
-**All four are measured, and the fourth took some getting to.** The macOS
-row said *claimed, from CI configuration only* for as long as it did because
-nobody had watched a run, and watching one found out why: `cargo clippy
---workspace --all-targets -- -D warnings` runs before `cargo test` in that
-job and had been failing on every operating system for at least five runs,
-so the leg had never reached the fingerprints at all. Three separate lints
-had to be fixed, each found only by pushing, because CI's stable was 1.98
-and the checkout doing the fixing was on 1.93.
+All four are measured on every CI run. Between them they vary everything
+below the arithmetic — a different `std`, allocator and linker — and
+`wasm32-wasip1` varies width as well: 64-bit against 32-bit, where a `usize`
+assumption would show.
 
-The run recorded above has `test (macos-14)` and `wasm-determinism` green
-on the same commit, which is what this claim needed. The native legs now
-grep their own logs for `rendering_is_stable_across_targets ... ok`, the way
-the wasm leg always has: `cargo test --workspace` does run those tests, but
-a green tick from it is not evidence that it did, and an `#[ignore]` added
-one afternoon would look identical. That is
+Each leg runs `determinism.rs` on its own and greps its log for
+`rendering_is_stable_across_targets ... ok`: `cargo test --workspace` runs
+those tests too, but a green tick from it is not evidence that it did, and
+an `#[ignore]` added one afternoon would look identical. That is
 [verification.md](../verification.md)'s "a check that can be absent is red,
-not green", applied to the last place it was missing.
-
-One thing settled itself along the way. The suite, fingerprints included,
-passes on rustc 1.98 as well as on 1.93 — so ruling 4's arithmetic survived
-a compiler version bump on this target, which is the kind of property only
-ever noticed when it fails.
+not green".

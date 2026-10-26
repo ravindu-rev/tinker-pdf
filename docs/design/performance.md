@@ -1,23 +1,17 @@
 # Performance
 
-When this is done, a change that makes an operation of this engine do more
+The design holds an operation's speed two ways. A change that makes it do more
 work than its input calls for fails `cargo test` on linux, windows, macos and
-`wasm32-wasip1`, and one that makes an operation slower than the planning
-baseline fails a paired job beside it. Today neither can. `bench.yml` runs on
-dispatch and on a weekly schedule that measures the default branch, and it
-gates nothing (`.github/workflows/bench.yml:24-40`). The three tests tier 0
-names as its counted-work tests hold by finishing rather than by counting, so
-a quadratic in any of them is a slow test and not a failing one. What does
-count is seven `cfg(test)` thread-locals in six crates, each readable only by
-its own crate's unit tests, and none of it through the facade, which is where
-ruling 11 says a guard has to stand.
+`wasm32-wasip1`, through counts read at the facade, which is where ruling 11
+says a guard has to stand; one that makes it slower than the planning baseline
+fails a paired job beside it.
 
-This document is the design the speed rows share. Its first five sections are
+This document is the design the speed rows share. Its first sections are
 common to all of them — how a target gates, and which instrument holds each
 kind of gate — and they are also MS-01's own design: the `Work` tally, the
 doors that hand it out, the guard suite that reads it and the four legs that
-run it. After them, each other row the roadmap points here writes a section of
-its own, in the order the last part of this document gives.
+run it. After them, each row with an instrument of its own has a section:
+MS-02's paired job, MS-04's benchmark set and MS-07's corpus time ratchet.
 
 ## Scope
 
@@ -40,7 +34,8 @@ its own, in the order the last part of this document gives.
   (MS-01.7) rather than by the tally.
 - **The four legs** that run the suite: the three native `test` legs and
   `wasm-determinism`.
-- **A section for each row that adds one**, in a stated order.
+- **A section for each row with an instrument of its own**: MS-02, MS-04
+  and MS-07.
 
 ## Non-goals
 
@@ -72,7 +67,8 @@ its own, in the order the last part of this document gives.
   facade adds it to the operation's tally.
 - **The C ABI and the bindings.** MS-01 projects none of its doors; each is a
   'not projected' row in `docs/features/bindings.md` (ruling 11).
-- **The seven `cfg(test)` counters.** They stay until a row that reads one
+- **The `cfg(test)` step counters** some crates' unit tests read. They stay
+  until a row that reads one
   moves it onto the tally — K-05 for the HTML tree builder, whose crate is a
   leaf and so reports its steps as a value — and no test loses the count it
   has in the meantime.
@@ -89,7 +85,7 @@ on (`docs/roadmap/P.md:22-61`). The form is what gates. The figure is what
 MS-03's pinned runner checks once it exists (H-110), a second and tighter check
 that never decides by itself whether a target is met. Every "Today" figure is
 re-derived by MS-04's benchmark set before it is quoted as current, and a
-target gates because the owner set it (H-77), never because of the
+target gates as tier P states it until H-77 re-states it, never because of the
 planning-time comparison that suggested the number, which is not re-run
 (H-112).
 
@@ -108,15 +104,14 @@ Two consequences shape everything below.
 its Gate column names both.** A factor says an operation got faster on one
 machine. A guard says it does no more work than its input calls for on every
 machine, which is the property a regression breaks first and a wall clock on a
-shared runner sees last. That is why each P row lands with its counted guard,
-failing against the code before its fix (`docs/roadmap/P.md:19-20`).
+shared runner sees last. That is why each P row lands with its counted guard.
 
-**A count gates where a time cannot.** A hosted runner's worst benchmark swung
-88.36 % across fifteen runs of one revision (`docs/verification.md:1796`), and
-under wasmtime there is no benchmark job at all; a count of the same work is
-the same number on all four targets.
+**A count gates where a time cannot.** A hosted runner's benchmarks swing
+widely between runs of one revision (`docs/verification.md`, "Clocks: outside
+the suite, and not nowhere"), and under wasmtime there is no benchmark job at
+all; a count of the same work is the same number on all four targets.
 
-### What a count is, and what the tree counts today
+### What a count is
 
 A count is a number of steps of one named kind that one operation took: a
 `/Pages` node read, a filter chain run, a font dictionary resolved, a cache
@@ -126,29 +121,9 @@ most 4.4 times the work of 1 000). Neither depends on the machine, the build
 profile or the target, and the guard suite shows that by pinning counts on all
 four.
 
-The tree has nothing of the kind. The three tests tier 0's row names hold by
-finishing: `a_hostile_run_of_regional_indicators_is_linear` builds 200 000
-regional indicators and checks the boundaries it gets back
-(`crates/tinker-pdf-content/src/words.rs:697-701`),
-`moving_many_children_is_linear` parses 60 000 children and checks the tree
-(`crates/tinker-pdf-xml/tests/html.rs:308`), and
-`a_line_of_nothing_but_marks_is_linear_and_whole` orders 20 001 characters and
-checks none is lost (`crates/tinker-pdf/src/text_order.rs:1048-1056`). The
-counting that exists is under `cfg(test)`: seven thread-local step counters in
-six crates (`crates/tinker-pdf-xml/src/html/mod.rs:326-330`,
-`crates/tinker-pdf/src/epub/paint.rs:6364`,
-`crates/tinker-pdf/src/text_order.rs:677-684`,
-`crates/tinker-pdf-cos/src/build.rs:2339-2342`,
-`crates/tinker-pdf-layout/src/flow.rs:6855-6858`,
-`crates/tinker-pdf-shape/src/bidi.rs:1815`,
-`crates/tinker-pdf-filters/src/jbig2.rs:5869`). The HTML tree builder's
-`assert_linear` is what one of them can do inside its crate
-(`crates/tinker-pdf-xml/src/html/tree.rs:3305-3319`); an integration test can
-read none of them.
-
 ### The tally, and the value a door hands out
 
-**Shape.** Two types, both in a new `crates/tinker-pdf-cos/src/work.rs`.
+**Shape.** Two types, both in `crates/tinker-pdf-cos/src/work.rs`.
 
 `Work` is the tally one operation carries. Its counters are `u64`s behind one
 `Mutex`, beside a `BTreeMap` from stream reference to the decodes that stream
@@ -179,8 +154,8 @@ are.
 
 Nothing reads a `Work` but a door turning it into `Stats`. That is the whole of
 why a counted operation's output cannot differ from an uncounted one's, and
-MS-01.2's `stats_do_not_change_a_pixel` and MS-01.3's byte-identity checks hold
-it.
+`stats_do_not_change_a_pixel` (`tests/stats.rs`) and MS-01.3's byte-identity
+checks hold it.
 
 **Home.** `tinker-pdf-cos`, because it is the lowest crate with an operation
 context and three of the contexts the tally rides are in it: the page walk
@@ -219,15 +194,16 @@ writes its own entries; cos itself counts only its walk, its filter chain and
 its editor; each counter's doc comment names the layer that counts it, and a
 counter joins `Stats` in the commit of the row that counts it.
 
-**The counters MS-01 lands.**
+**The counters**, each with the step that adds it, or *built* where `Stats`
+already carries it.
 
 | Counter | One unit is | Counted in | Step |
 | --- | --- | --- | --- |
-| `glyphs_shown` | a glyph the interpreter showed the renderer (`Device::show_glyph`, `crates/tinker-pdf-render/src/lib.rs:2847`) | the renderer | MS-01.2 |
-| `outlines_filled` | a glyph outline the renderer built into a path and painted | the renderer | MS-01.2 |
-| `font_dictionaries_resolved` | a font dictionary read: each font `cos_font::from_resources` returns when a scope is built (`crates/tinker-pdf/src/resources.rs:585`), and each `fonts::font_dict` lookup (`crates/tinker-pdf/src/fonts.rs:215`), which `type3_glyph` makes for every glyph (`resources.rs:1428`) | the facade's scopes | MS-01.2 |
-| `images_decoded` | an image decoder run: an image XObject's cache miss, and every inline image, which is never cached (`resources.rs:222-224`) | the facade's scopes | MS-01.2 |
-| a `_hits` and a `_misses` for each of the five caches `Caches` holds — font programs, images, ICC transforms, glyph outlines, form scopes (`resources.rs:63-101`) | a lookup that found an entry, a cached `None` included, or one that did not | the facade's scopes | MS-01.2 |
+| `glyphs_shown` | a glyph the interpreter showed the renderer (`Device::show_glyph`, `crates/tinker-pdf-render/src/lib.rs:2847`) | the renderer | built |
+| `outlines_filled` | a glyph outline the renderer built into a path and painted | the renderer | built |
+| `font_dictionaries_resolved` | a font dictionary read: each font `cos_font::from_resources` returns when a scope is built (`crates/tinker-pdf/src/resources.rs:585`), and each `fonts::font_dict` lookup (`crates/tinker-pdf/src/fonts.rs:215`), which `type3_glyph` makes for every glyph (`resources.rs:1428`) | the facade's scopes | built |
+| `images_decoded` | an image decoder run: an image XObject's cache miss, and every inline image, which is never cached (`resources.rs:222-224`) | the facade's scopes | built |
+| a `_hits` and a `_misses` for each of the five caches `Caches` holds — font programs, images, ICC transforms, glyph outlines, form scopes (`resources.rs:63-101`) | a lookup that found an entry, a cached `None` included, or one that did not | the facade's scopes | built |
 | `page_walks` | a walk of the page tree from its root | the facade's call sites, then `collect_upto` itself from MS-01.4 | MS-01.3 |
 | `page_nodes_visited` | a `/Pages` tree node a lookup or a walk read, leaves included, and the one object the linearized or hinted first-page path reads (`pages.rs:459`, `:477`) | cos's page walk | MS-01.4 |
 | `streams_decoded` | a run of a stream's filter chain, whatever it returned | cos's two filter-chain entry points and every `Resolve` view | MS-01.5 |
@@ -259,10 +235,10 @@ can refuse, and a tally is only added to.
 | Context | How it carries the tally | Step |
 | --- | --- | --- |
 | A page lookup: `pages::at` and the walk under it (`pages.rs:488-499`) | a `Work` on the door's stack, passed as `Option<&Work>` down `at`, `collect_upto` and `walk`, and to the linearized and hinted paths | MS-01.4 |
-| A render: `Page::render` (`crates/tinker-pdf/src/lib.rs:2247`), `Page::render_form` and `Page::render_annotation` (`crates/tinker-pdf/src/render_part.rs:175`, `:230`), `DisplayList::render` (`display.rs:181`) | the render's `PageResources` holds it — built with it by `Page::render_layer` (`lib.rs:2269-2280`), handed it by `for_one_render` for a display list (`resources.rs:546`); `annots::draw` takes it for the appearances it draws; the page's content decode, made before the scope exists (`lib.rs:2248`), takes it too | MS-01.2, and MS-01.5 for decodes |
-| A scope a scope makes: a pattern cell's and a form's own in a render (`resources.rs:1858-1868`, `:872-890`); and `own_scope`'s — a pattern cell's, a mask group's or a form's in the save's font walk, which only `subset.rs` calls (`resources.rs:750-764`) | inherits its maker's | MS-01.2; MS-01.3 for `own_scope`, which no render reaches |
-| A scope a cache keeps: a form's, in `form_scopes` (`resources.rs:856-869`) | kept without one, and handed out bound to the asker's, its caches shared so a hit stays a hit — a kept scope outlives the render that built it, and two renders of one display list may hold it at once | MS-01.2 |
-| The renderer | its own plain counts, handed back by `finish_counted`, `finish`'s sibling, and added by the door | MS-01.2 |
+| A render: `Page::render` (`crates/tinker-pdf/src/lib.rs:2247`), `Page::render_form` and `Page::render_annotation` (`crates/tinker-pdf/src/render_part.rs:175`, `:230`), `DisplayList::render` (`display.rs:181`) | the render's `PageResources` holds it — built with it by `Page::render_layer` (`lib.rs:2269-2280`), handed it by `for_one_render` for a display list (`resources.rs:546`); `annots::draw` takes it for the appearances it draws; the page's content decode, made before the scope exists (`lib.rs:2248`), takes it too | built; MS-01.5 for decodes |
+| A scope a scope makes: a pattern cell's and a form's own in a render (`resources.rs:1858-1868`, `:872-890`); and `own_scope`'s — a pattern cell's, a mask group's or a form's in the save's font walk, which only `subset.rs` calls (`resources.rs:750-764`) | inherits its maker's | built; MS-01.3 for `own_scope`, which no render reaches |
+| A scope a cache keeps: a form's, in `form_scopes` (`resources.rs:856-869`) | kept without one, and handed out bound to the asker's, its caches shared so a hit stays a hit — a kept scope outlives the render that built it, and two renders of one display list may hold it at once | built |
+| The renderer | its own plain counts, handed back by `finish_counted`, `finish`'s sibling, and added by the door | built |
 | Text and image extraction | as a render: the content decode and the `PageResources` the door builds (`lib.rs:2533-2540`, `crates/tinker-pdf/src/images.rs:328-339`) | MS-01.3 |
 | Validation | `pdfa::validate`, `pdfua::validate` and `pdfx::validate` take it, so their page walks (`crates/tinker-pdf/src/pdfa/content.rs:90`) and their decodes count | MS-01.3 |
 | An editor | `DocumentEditor` holds it from `count_work` until it is dropped. Its own page and object operations count into it in cos — `page_refs`'s walk (`crates/tinker-pdf-cos/src/edit/page_ops.rs:16-24`), `import_page`'s `pages::collect(source)` (`:185`), its overlay's decodes (`edit/overlay.rs:48`) — and the facade's passes over it count into it too: a save's image and font passes (`crates/tinker-pdf/src/write.rs:337`; `subset.rs:553` builds a scope a page), a redaction. A rolled-back transaction keeps its counts: the work was done | MS-01.3, and MS-01.4 for its walks |
@@ -283,14 +259,13 @@ Two rules decide each door's shape, and the tree decides which applies.
 
 **The ask.** A door whose options value every caller builds from a base takes
 a flag on it, off by default: `RenderOptions::stats` and `SaveOptions::stats`.
-Of the 85 `RenderOptions` literals in the tree, every one but its own
-`Default` (`lib.rs:705-718`) names a base, and 12 of the 13 `SaveOptions`
-literals do; the thirteenth, `tools/tpdf/src/writing.rs:564`, gains one in
-MS-01.3. A door with no options value, or one whose callers write it out whole,
-gets a counted sibling instead. `TextOptions` is written out whole 113 times —
-31 under `crates/tinker-pdf/tests`, 82 in the probe kit's sources under
-`tools/probes/rtl` — so a field on it breaks every one of them, which is the
-constraint FT-17.1 is already designing around (`text_order.rs:128`).
+Every `RenderOptions` literal in the tree but its own `Default`
+(`lib.rs:705-718`) names a base, and so does every `SaveOptions` literal but
+`tools/tpdf/src/writing.rs:564`, which gains one in MS-01.3. A door with no
+options value, or one whose callers write it out whole, gets a counted sibling
+instead. `TextOptions` is written out whole by its callers, so a field on it
+breaks every one of them, which is the constraint FT-17.1 is already designing
+around (`text_order.rs:128`).
 `Document::page` and `Page::images` take no options at all, and the validators
 take only the rule groups to run, a value each verdict reports back as what
 ran and no place for a flag.
@@ -302,7 +277,7 @@ tree — or a list, or a verdict whose fields other code compares.
 
 | Door | Asked by | Answered by | Step |
 | --- | --- | --- | --- |
-| render: `Page::render`, `render_form`, `render_annotation`, `DisplayList::render` | `RenderOptions::stats: bool` | `Bitmap::stats: Option<Stats>` | MS-01.2 |
+| render: `Page::render`, `render_form`, `render_annotation`, `DisplayList::render` | `RenderOptions::stats: bool` | `Bitmap::stats: Option<Stats>` | built |
 | text | `Page::text_counted(&self, &TextOptions)` | `(TextPage, Stats)` | MS-01.3 |
 | save: `write::save` | `SaveOptions::stats: bool` | `Saved::stats: Option<Stats>` | MS-01.3 |
 | merge: pages imported, then saved | `DocumentEditor::count_work(&mut self)` before the first import, and `SaveOptions::stats` | `Saved::stats`: everything the editor counted since `count_work`, the save's own work included | MS-01.3 |
@@ -310,16 +285,11 @@ tree — or a list, or a verdict whose fields other code compares.
 | validation | `Document::validate_pdfa_counted(&self, PdfACoverage)`, and `validate_pdfua_counted` and `validate_pdfx_counted` alike | `(verdict, Stats)` | MS-01.3 |
 | page lookup, the document door | `Document::page_counted(&self, index: u32)` | `(Option<Page>, Stats)` | MS-01.4 |
 
-`Bitmap::stats` is a public field, not the method the row writes as
-`Bitmap::stats()`. A method needs a field the caller cannot see, and one
-private field would stop every hand-built `Bitmap` compiling, where a public
-one asks each of them for `stats: None`. In the tree that is eight literals
-outside the facade's own source — five in `crates/tinker-pdf/tests/png_output.rs`,
-two in `png_input.rs`, one in `tools/pdfcmp/src/main.rs` — and three inside it
-(`lib.rs:933`, `:2424`, `crates/tinker-pdf/src/png_read.rs:199`); nothing in
-the C ABI or the bindings builds one. `premultiplied` arrived the same way and
-touched the same eight (d47b2629). `Saved::stats` joins `Saved`'s other public
-fields; its one literal is the facade's own (`write.rs:368`).
+`Bitmap::stats` is a public field rather than a method: a method needs a field
+the caller cannot see, and one private field would stop every hand-built
+`Bitmap` compiling, where a public one asks each of them for `stats: None`;
+nothing in the C ABI or the bindings builds one. `Saved::stats` joins `Saved`'s
+other public fields; its one literal is the facade's own (`write.rs:368`).
 
 The other doors that walk or decode — `Document::pages`,
 `Document::page_count` and the rest — gain counted siblings in the rows that
@@ -349,14 +319,11 @@ or owed. `every_guard_is_landed_or_owed` reads each file the roster names
 through `include_str!`, since the wasm leg has no filesystem to read them from,
 and fails when a landed entry is not an un-ignored `#[test]` there or an owed
 one already is. An owning row lands its entry in the commit that fixes the
-cause, flipping it from owed to landed, and the commit names the run in which
-the guard failed against the code before the fix. A guard that holds at the tip
-— A2's subset, validation and split legs (`crates/tinker-pdf/src/subset.rs:552`,
-`crates/tinker-pdf/src/pdfa/content.rs:90`) and A10's flat entries — lands with
-a counted injection instead, which MS-01.9 reads as its failing run; that is
-the cut's reading of the exit's words, for the owner to correct. An entry a
-later row adds already landed, as P-18.5 adds A2's book, is never owed and adds
-nothing to MS-01.9's waits.
+cause, flipping it from owed to landed. A guard that holds at the tip — A2's
+subset, validation and split legs (`crates/tinker-pdf/src/subset.rs:552`,
+`crates/tinker-pdf/src/pdfa/content.rs:90`) and A10's flat entries — lands
+green. An entry a later row adds already landed, as P-18.5 adds A2's book, is
+never owed.
 
 **Pinned counts.** `the_tally_counts_the_same_on_every_target` holds the
 `Stats` of a render, a text extraction, a save and a page walk over fixed
@@ -404,11 +371,11 @@ MS-01.8 runs the suite where ruling 4's targets already run.
   roster entry by name: the determinism step's shape (`ci.yml:53-58`). A green
   tick from a filter that matched nothing, a `cfg` that dropped the target or
   an `#[ignore]` added one afternoon is the hazard "a check that can be absent
-  is red, not green" names (`docs/verification.md:1567`), and the greps are
+  is red, not green" names (`docs/verification.md`), and the greps are
   what close it.
 - **`wasm-determinism`** runs the same two files on `wasm32-wasip1` under
-  wasmtime, in the default build as its four steps do today
-  (`ci.yml:375-459`), with the same greps.
+  wasmtime, in the default build as its other steps do (`ci.yml:375-459`),
+  with the same greps.
 - **A guard in a file of its own** — A7's two, in `images.rs` and
   `jpx_images.rs` — joins every leg's commands as well as its greps, in its
   row's commit; a grep for a test its leg never ran fails, which is right, but
@@ -421,66 +388,14 @@ There are no threads on `wasm32-wasip1`: P-15's pool leaves the share of a
 worker that will not start to the caller (P-15.2), so A9's legs there cut and
 stitch on the caller and still compare against the serial render (P-15.9). The
 1 000-, 4 000- and 10 000-page generators run in debug on every leg and under
-wasmtime. MS-01.8 reads each leg's wall time from its run; a guard too slow for
-a leg is never ignored or shrunk below the exit's page counts, and what keeping
-it costs goes to the owner. `ci.yml` has fired on every push to `develop` since
-79506900 (`ci.yml:14-15`), so MS-01.8's note that it fires only on `main` and
-pull requests until MS-11 adds `develop` is out of date.
-
-## Milestones
-
-Each step is one workflow run, and its exit is quoted as the step states it in
-`docs/roadmap/MS.md`. Each build step times its paths with stats off against
-the tip, in release and in debug, before it writes its tests, and stops if off
-is not free.
-
-| Step | Deliverable | Exit, as the step states it | Waits on |
-| --- | --- | --- | --- |
-| MS-01.2 | `Work` and `Stats`, and the render door: `RenderOptions::stats` and `Bitmap::stats` over the render's scopes and the renderer | `tests/stats.rs` (new) `render_stats_are_none_unless_asked`, `render_stats_count_what_a_generated_page_draws` (a page of n glyphs in k fonts with one image drawn twice reports n glyphs shown, its font resolutions as today's code makes them, one decode and one cache hit) and `stats_do_not_change_a_pixel` (stats on and off, page and tiles, byte-identical); a doubled increment injected at each site fires. Default and `bundled-fonts` builds. | MS-01.1 |
-| MS-01.3 | The text, save, merge, image-extraction and validation doors | `tests/stats.rs` `text_stats_count_font_resolutions`, `save_stats_are_none_unless_asked`, `a_merge_reads_its_stats_from_the_save` (4 × 10 generated pages imported and saved) `image_stats_count_the_decodes_made` and `validation_stats_count_its_page_walks`: each count is what today's code makes, derived in the test; stats on leaves every output byte-identical; a doubled increment injected at each new site fires. Both builds. | MS-01.2, K-02.3 |
-| MS-01.4 | Page lookup counted, and the document door `Document::page_counted` | `tests/stats.rs` `page_lookup_counts_the_nodes_it_visits`: on generated balanced trees of known depth and fan-out, `page(i)` reports the nodes today's walk visits (`collect_upto` gathers index + 1 leaves, derived in the test), a streamed linearized first page reports its head-only path, and an injected double count fires; `streaming_open.rs` passes unchanged. | MS-01.3 |
-| MS-01.5 | Decoding counted, per stream and per operation, at every door | `tests/stats.rs` `decodes_are_counted_per_stream_and_operation`: a generated page whose form is shown three times reports the decodes today's code makes, and the inflated total equals the decoded lengths; a subset-on-save of a generated document reports each font program's decodes per page as today; an uncounted decode path injected fires. Both builds. | MS-01.4 |
-| MS-01.6 | The guard suite: generators, the roster below with every entry owed, the pinned counts, no clock | `guards.rs` (new) `every_guard_is_landed_or_owed` (each roster entry is a `#[test]` in the test file it names, not ignored, or owed to a named row; it fails when a landed name is missing or an owed one is already there), `the_tally_counts_the_same_on_every_target` (pinned `Stats` of a render, a text, a save and a page walk), `the_guard_suite_reads_no_clock`, and each generator asserting its own shape. Both builds. | MS-01.5 |
-| MS-01.7 | Allocations per page today, and A10's entries settled from them | `guard_allocations.rs` (new) `allocations_per_page_by_operation` prints each operation's allocations per page at both sizes, the table is committed in `docs/design/performance.md`, and A10's roster entries follow it: an operation flat at both sizes lands its guard green, firing when an allocation that grows with the page index is injected; each other is owed to the row the doc names for its cause. | MS-01.6 |
-| MS-01.8 | The suite on the four targets, and the pins in K-07's roster | The next CI run on `develop` is green on linux, windows, macos and `wasm32-wasip1`, each leg's log showing `every_guard_is_landed_or_owed` and `the_tally_counts_the_same_on_every_target` passed and `cargo xtask check` listing the pinned counts in the roster; a guard a P row lands later joins the greps in that row's commit. | MS-01.7, MS-11, K-07.1 |
-| MS-01.9 | The suite read to its end once every owning row has landed its guards | A `CI` run on `develop` green on linux, windows and macos in both builds and on `wasm32-wasip1`, each leg's log showing every A1–A10 guard passed and the roster owing none, and, read from `git log`, each guard that fails at the tip landed with the run in which it failed against the code before its fix named in its commit, and each that holds at the tip (A2's subset, validation and split legs, A10's flat entries) with its counted injection. | MS-01.8, P-01, P-02, P-03, P-04, P-06, P-09, P-10, P-15 |
-
-**What each step needs beyond its text**, from the tree as this design reads
-it. Each step's own review corrects its text against this when it is taken.
-
-- **MS-01.2** also creates `crates/tinker-pdf-cos/src/work.rs` and its line in
-  cos's `lib.rs`, the tally's home; threads the render's tally through
-  `render_part.rs`'s two doors and `annots::draw`; and gives the eleven `Bitmap`
-  literals `stats: None` (`png_output.rs`, `png_input.rs`,
-  `tools/pdfcmp/src/main.rs`, `png_read.rs`, `lib.rs`). Its text's
-  `Bitmap::stats()` is the field `Bitmap::stats`.
-- **MS-01.3**'s text door is `Page::text_counted`, not `TextOptions::stats`, so
-  `TextPage` gains no slot and neither `text_order.rs` nor
-  `tinker-pdf-content` changes for it. It adds `DocumentEditor::count_work`
-  (`crates/tinker-pdf-cos/src/edit/mod.rs`), gives
-  `tools/tpdf/src/writing.rs:564`'s `SaveOptions` a base, and binds the scopes
-  the save's font pass builds (`subset.rs:553`, `:560`), with the ones its walk
-  makes through `own_scope` (`resources.rs:750-764`), which MS-01.2 left
-  uncounted because no render reaches it.
-- **MS-01.4** counts the editor's walks as well as the facade's
-  (`edit/page_ops.rs:16-24`, `:185`), and moves MS-01.3's `page_walks` count
-  from the facade's call sites into `collect_upto`, so a walk counts once
-  whoever starts it.
-- **MS-01.5** reaches the decodes under a scope's font reading through the
-  counting view (`font.rs:601-602`), the page's content decode through
-  `content_bytes`'s counted sibling (`pages.rs:526-537`), and the editor's own
-  decodes through its overlay (`edit/overlay.rs:48`).
-- **MS-01.8** edits K-07.1's `xtask/src/determinism.rs` rather than creating
-  it, and its note about `ci.yml`'s triggers is out of date (the four targets,
-  above).
+wasmtime. A guard too slow for a leg is never ignored or shrunk below its page
+counts, and what keeping it costs goes to the owner.
 
 ### The roster
 
-Every entry MS-01.6 writes starts owed, because every A1–A9 clause fails
-against today's code or, where it holds, lands with its row's counted
-injection; A10's entries wait for MS-01.7, and A2's book is P-18.5's to add,
-landed. A guard lands in the step named, in `crates/tinker-pdf/tests/guards.rs`
-unless another file is named.
+Every entry MS-01.6 writes starts owed but A2's book, which P-18.5 adds
+landed; A10's entries wait for MS-01.7. A guard lands in the step named, in
+`crates/tinker-pdf/tests/guards.rs` unless another file is named.
 
 | Guard | Clause, as the row's exit states it | Test | Owner, and the step it lands in |
 | --- | --- | --- | --- |
@@ -517,42 +432,28 @@ The names A7 and A9 carry, and A2's book, are the ones their rows' steps
 already give; the rest are given here. A10's file is `guard_allocations.rs` or a
 binary per entry, as MS-01.7 settles the counting allocator.
 
-### Allocations per page, today
-
-Owed: MS-01.7 commits the table here — allocations per page for page lookup,
-text and render-all at 36 dpi, over every page of the generated 1 000- and
-4 000-page documents, in both builds — with, for each operation that is not
-flat, the row its cause belongs to.
-
 ## Risks
 
 | Risk | Mitigation |
 | --- | --- |
-| A count drifts from the work it names: a site moves, a path is added that does not count, a refactor counts twice | Every count MS-01.2 to MS-01.5 lands is checked against a figure the test derives from its fixture, and a doubled increment injected at each site fires; MS-01.5 injects an uncounted decode path and its test fires |
+| A count drifts from the work it names: a site moves, a path is added that does not count, a refactor counts twice | Every count is checked against a figure the test derives from its fixture |
 | Counting changes what an operation does | Nothing reads a `Work` but a door; a kept scope handed out bound shares its caches, so a hit stays a hit; `stats_do_not_change_a_pixel` (pages and tiles) and MS-01.3's byte-identity checks hold it |
-| Off is not free | An uncounted operation carries `None`: no lock, no allocation, one tested `Option` a site; each build step times its paths with stats off against the tip in release and in debug, and MS-02's floors of 1 hold every operation to the baseline once that job exists |
+| Off is not free | An uncounted operation carries `None`: no lock, no allocation, one tested `Option` a site; MS-02's floors of 1 hold every operation to the baseline once that job exists |
 | Two threads' counts mix | One `Work` an operation, never on `Document`, in a global or in a thread-local; an operation's own workers add to one total in any order |
 | Hits and misses depend on interleaving when threads share a cache | Guards and pins read serial runs; A9 compares pixels and warnings, not counts; P-15.6's single-flight fills make a shared cache's counts deterministic and its test reads them |
 | A count differs by target | `u64` counters with saturating adds, a `BTreeMap` for the per-stream decodes, no count of a hash-ordered walk; the pins are read on all four legs |
 | The pins are goldens and the P rows exist to cut work | MS-01.6 pins counts that are the fixture's rather than the algorithm's, and says which; a pin a fix has to move is a finding the owner rules on, raised by the row that moves it |
 | A2 reads only what is counted | A superlinear loop that counts nothing passes A2; P-01.1 records each leg's superlinear site at the tip and the counter that sees it, and a site outside P-01 is a finding, not absorbed |
 | A byte total hides a step count | `work()` leaves out maxima and quantities, and a failing leg prints every counter's ratio |
-| A guard is absent and reads as green | The roster checks each landed name is an un-ignored `#[test]` in its file, and every leg greps every landed name (`docs/verification.md:1567`) |
-| A guard is too slow for a leg, in debug or under wasmtime | Pages carry the least content that exercises their leg; MS-01.8 reads each leg's wall time; a slow guard is never ignored or shrunk below the exit's page counts, and what keeping it costs goes to the owner |
+| A guard is absent and reads as green | The roster checks each landed name is an un-ignored `#[test]` in its file, and every leg greps every landed name (`docs/verification.md`) |
+| A guard is too slow for a leg, in debug or under wasmtime | Pages carry the least content that exercises their leg; a slow guard is never ignored or shrunk below its page counts, and what keeping it costs goes to the owner |
 | A process-wide allocation count sees another test's allocations | One counted test a binary, or a per-thread count in `guard_support`; MS-01.7 settles which |
-| A hand-built `Bitmap` stops compiling | The field is public, so a literal needs `stats: None`; the tree's eight outside the facade change in MS-01.2, as they did for `premultiplied` (d47b2629); nothing in the C ABI or the bindings builds one |
+| A hand-built `Bitmap` stops compiling | The field is public, so a literal needs `stats: None`; nothing in the C ABI or the bindings builds one |
 | `Stats` names counts made above cos | Each counter's doc comment names the layer that counts it, and cos counts only its walk, its filter chain and its editor; the alternative was two ledgers an operation, and an editor able to carry only one of them |
-
-## The rows' sections
-
-Each row below writes its own section, under its own heading, with its own
-scope, non-goals, design, milestones with exit tests, and risks. The order is
-the tiers' and then the rows' own; a section is written by the step named and
-holds one paragraph saying what is owed until it is.
 
 ## MS-02 — A paired base-versus-head wall-clock gate on every pull request
 
-When this is done, a change that makes an operation of MS-04's set slower
+In this design, a change that makes an operation of MS-04's set slower
 fails the job that judges it, on whatever runner the job lands on, with no
 time recorded for that runner to compare against. Base, head and the
 planning baseline `61adcde` are built in one job on one runner, every
@@ -560,19 +461,6 @@ operation runs ten interleaved rounds on each, and each pair is judged on the
 median of its ten paired ratios and a sign test. The same rounds hold the
 head to the floors, calibrated targets and relations of tier P's Gate column
 against `61adcde` (`docs/roadmap/P.md:29-55`).
-
-Today nothing is paired. `bench.yml` runs on a weekly cron and on dispatch,
-never on a push or a pull request, and its cron measures `main`
-(`.github/workflows/bench.yml:24-40`). Its one check,
-`bench-check --machine`, holds a run's means to the fastest of fifteen
-dispatches on `ubuntu-latest` (`xtask/src/bench.rs:88-89`, `:593-670`), with
-bands of 35 to 135 % that a fleet of unlike hosts forced
-(`docs/verification.md:1864-1915`), so the text renderer can lose half its
-speed in silence (`:1917-1922`). Criterion's own comparison of two revisions
-never exits non-zero (`xtask/src/bench.rs:5-7`). And `bench-check` reads
-`target/criterion` under the repository root and nothing else (`:614`),
-takes only each operation's `new/estimates.json` mean (`:359-391`), and
-refuses every option but `--machine` (`:596-607`).
 
 ### Scope
 
@@ -584,7 +472,7 @@ refuses every option but `--machine` (`:596-607`).
 - **The gates against `61adcde`**: floors, held operations, operations paired
   with another, calibrated targets and relations.
 - **The bands**, and **where the numbers live**: the gates and the A/A bands
-  in `baseline.json`, the bands' runs in `docs/verification.md`.
+  in `baseline.json`, with the runs they were read from.
 - **The head's bench files on `61adcde`**: the `cfg`, the copy and the
   `tpdf` each build runs.
 - **The triggers**, and **the 15-minute budget**: what each part costs,
@@ -620,12 +508,10 @@ CLI-marked operations run as a child resolved beside the bench binary
 `[[bench]]` entries in place of its own, under the `cfg` below, beside its
 own `tpdf`. Every timed process of all three then runs on the one runner, so
 each ratio is of two builds on one host minutes apart. The fifteen dispatches
-behind `bench.yml`'s bands scored in two groups with nothing between them,
-four at 1.00 to 1.16 times the fastest figures and eleven at 1.30 to 1.36,
-on hardware their logs did not name (`docs/verification.md:1906-1915`); a
-ratio taken on one host divides that out.
+each ratio is of two builds on one host minutes apart. `ubuntu-latest` is a
+fleet of unlike hosts (`docs/verification.md`, "The named machine is
+`ubuntu-latest`"); a ratio taken on one host divides that out.
 
-Each build names its bench targets, `--bench <group>` for each of the
 thirteen, because `cargo bench -p tinker-pdf` also builds the library's own
 unit tests as a bench target (its output lists `benches src/lib.rs`), which
 no round runs; `tpdf` then builds in the same target directory, where it
@@ -675,13 +561,7 @@ its own (`analysis/mod.rs:183-188`). The job never passes
 
 An operation of t therefore costs 11 t a build a round, one warm-up iteration
 and ten samples of one, and 330 t over the job: H-162's "criterion's floor of
-ten samples an operation a round", and the least criterion allows. A scratch
-bench against criterion 0.5.1 with the tree's features
-(`crates/tinker-pdf/Cargo.toml:83`) shows the settings do what this says: a
-25 ms routine recorded ten flat samples of one iteration each, and its
-process took 55.5 ms beyond its 275 ms of iterations at 100 000 resamples
-and 10.0 ms at 1 000, the medians of twenty runs each on an Intel Core
-Ultra 5 125H; a 1 ms routine took 53.0 and 8.0.
+ten samples an operation a round", and the least criterion allows.
 
 #### The inputs both sides are timed on
 
@@ -689,8 +569,8 @@ A paired ratio compares two times of one input, and two engines generating
 "one" input write two. Every generator not pinned by formula writes through
 the tree's own builder, encoders and editor (MS-04, "The inputs"), and
 `scan()` through its renderer, so a head that changes any of them would be
-timed on other bytes than its base, and `61adcde`, a revision of 9 October
-2026, on other bytes again. So the job sets `TINKER_BENCH_FIXTURES` for
+timed on other bytes than its base, and `61adcde` on other bytes again. So the
+job sets `TINKER_BENCH_FIXTURES` for
 every process, and with it set `support/inputs.rs` reads every input —
 generated, or committed and read by path — from that directory, writing it
 there first if it is absent. Round 1 runs the head first, so the first
@@ -755,7 +635,7 @@ Tier P writes the factor as the median against 1 ÷ the floor
 be met by a head that runs an operation at `61adcde`'s speed: with the two
 speeds equal, the median of ten ratios lands above 1 in about half of all
 runs, by symmetry, so on a day when most of the set runs where `61adcde` left
-it, each of those operations fails about one run in two and MS-02.8's exit
+it, each of those operations fails about one run in two and the job
 cannot be read green. This design holds each gate to the regression pair's rule
 instead: the median beyond the bound by more than the operation's band, with
 at least eight of the ten rounds beyond the bound, a relation taking the
@@ -768,9 +648,9 @@ An operation whose gate names a baseline side that `61adcde`'s rounds lack
 is refused, not reported: the gate data says it can be judged, which MS-02.4's
 `every_operation_has_a_baseline_side_or_a_calibration` holds, so its absence
 is a fault of the mapping, and a check that can be absent is red
-(`docs/verification.md:1567`). A head slower than `61adcde` beyond its band
+(`docs/verification.md`). A head slower than `61adcde` beyond its band
 on the day the floors are set is a finding against that operation's row; a
-floor below 1 is H-78's to grant, and no step lowers one (MS-02.8).
+floor below 1 is H-78's to grant, and no step lowers one.
 
 #### The bands
 
@@ -779,14 +659,13 @@ paired ratio lies from 1, in per cent: the statistic the verdict reads,
 taken on two builds of one revision. The operation's band is the worst
 spread of fifteen such dispatches, half again as wide, rounded up to the next
 5 % and never under 5 % — `bench.yml`'s rule, for the reason
-`docs/verification.md:1897-1904` gives: a spread over fifteen runs is a
-lower bound that has not converged. A band set so clears the medians of its
-own fifteen runs by arithmetic, so MS-02.7's last clause holds by
-construction and is no evidence that the band is wide enough; the first run
-no band was fitted to is MS-02.8's. An A/A dispatch needs no `61adcde`
-rounds, since a band is read from base and head alone. H-109 authorises the
-dispatches and approves the bands; a band wider than the rule gives is
-H-78's.
+`docs/verification.md` gives under "The named machine is `ubuntu-latest`": a
+spread over fifteen runs is a lower bound that has not converged. A band set so
+clears the medians of its own fifteen runs by arithmetic, which is no evidence
+that the band is wide enough; only a run no band was fitted to is. An A/A
+dispatch needs no `61adcde` rounds, since a band is read from base and head
+alone. H-109 authorises the dispatches and approves the bands; a band wider
+than the rule gives is H-78's.
 
 #### Where the numbers live
 
@@ -797,8 +676,6 @@ H-78's.
 | Calibrated targets | the same `gate`, in milliseconds; the calibration operation and its 751 ms named once, ahead of the groups | MS-02.3 | re-stated by H-77; loosened by H-78 |
 | Relations | the same `gate`: the other operation of the group, the bound and its direction | MS-02.3 | as calibrated targets |
 | A/A bands | each operation's entry: its spread and its band; the fifteen run ids once, beside the calibration | MS-02.7 | approved by H-109; widened by H-78 |
-| The bands read, with their runs | `docs/verification.md`, as the seven's are (`:1864-1915`) | MS-02.7 | with the file |
-| The budget, with its runs | this section and `docs/verification.md` | MS-02.5 | — |
 
 ```json
 "calibration": { "operation": "calibration/text of 100 dense pages",
@@ -819,7 +696,7 @@ H-78's.
 ],
 ```
 
-The block shows the shape, not measured figures. Today's reader cuts entries
+The block shows the shape, not measured figures. The reader cuts entries
 at `"machine":` and `"id":` (`xtask/src/bench.rs:243`, `:272`), which no key
 here contains. `cargo xtask baseline` refuses an operation with no gate and a
 relation naming an unknown operation (MS-02.3), and a band without its runs
@@ -839,13 +716,13 @@ places.
 - **The declaration.** The head declares the `cfg` to `check-cfg` in
   `crates/tinker-pdf/Cargo.toml`, or `unexpected_cfgs` fails its clippy
   under `-D warnings`. No `Cargo.toml` in the tree has a `[lints]` table or
-  declares a `cfg` today.
+  declares a `cfg`.
 - **The copy.** The head's `crates/tinker-pdf/benches/` replaces
   `61adcde`'s whole, `engine.rs` and `baseline.json` with it, and the head's
   `[[bench]]` entries replace that revision's one
   (`61adcde:crates/tinker-pdf/Cargo.toml:114-116`). No other code of the
   head's enters that checkout, so every line the baseline's rounds time
-  outside the bench files is 9 October's.
+  outside the bench files is `61adcde`'s.
 - **Its `tpdf`.** Every command line MS-04 gives its CLI operations runs as
   written on `61adcde`'s `tpdf`, which already takes `--json`, `--dpi`,
   `--jobs`, `--font-policy` and `--entropy`
@@ -866,30 +743,30 @@ places.
   checked out and built twice exactly as a real pair's are, so a band
   measures everything two builds differ by except the change. `ci.yml` has
   no `workflow_dispatch` (`.github/workflows/ci.yml:8-16`), and one added
-  there dispatches its eleven other jobs as well unless each is told not to
+  there dispatches every other job in it as well unless each is told not to
   run on it; a workflow of its own needs no such line.
 - **Not** on `main`, whose pushes are the owner's merges of commits already
   judged on `develop` (H-01), and not on a schedule: `bench.yml`'s weekly run
   is unchanged.
 
 No run cancels another: each push's run is the one that judges it, as
-`ci.yml` says of its own (`:12-13`). Until MS-02.7 commits bands the job
-prints every verdict and fails on none; from then on it fails as they say. A
+`ci.yml` says of its own (`:12-13`). Without committed bands the job
+prints every verdict and fails on none; with them it fails as they say. A
 base or `61adcde` that cannot be checked out or built fails the job, since a
-pair that cannot be judged is red, not green (`docs/verification.md:1567`).
+pair that cannot be judged is red, not green (`docs/verification.md`).
 
 #### The 15 minutes
 
 The row gives the job 15 minutes for three release builds and thirty runs of
 the set. Its parts, what each costs, and where MS-02.5 reads each from:
 
-| Part | Cost | By tier P's figures, or as measured | MS-02.5 reads it from |
+| Part | Cost | By tier P's figures | MS-02.5 reads it from |
 | --- | --- | --- | --- |
-| Three checkouts, the toolchain and the cache | once | 17 s from a job's start to its build in run 40129716194 (`corpus.yml`, one checkout, `develop` at `94895d48`, 24 October 2026) | the job's log |
-| Three release builds of the thirteen bench binaries and `tpdf` | 3 × b | b at least 81 s, that run's `cargo build --release -p xtask -p tpdf` with no cache, in which `tpdf`'s own compile and link took 27 s; each bench binary is a link of the same kind under the release profile's thin LTO and single codegen unit (`Cargo.toml:86-88`), and on the machine above rebuilding `engine.rs`'s bench binary alone took 42.5 s, and `tpdf`'s 59.3 s | the job's log |
+| Three checkouts, the toolchain and the cache | once | — | the job's log |
+| Three release builds of the thirteen bench binaries and `tpdf` | 3 × b, each bench binary a link under the release profile's thin LTO and single codegen unit (`Cargo.toml:86-88`) | — | the job's log |
 | 10 rounds × 3 builds × 138 operations, 11 iterations each | 330 × Σt | Σt, the time of one iteration of every operation, 207.7 s: 1 142 min | MS-04.10's figures |
 | Setup inside an iteration, untimed | 330 × s | s = 652 ms, the 72-dpi first render of `a second render of the JPEG page at 300 dpi` (`iter_batched`): 3.6 min | MS-04.10's figures |
-| 4 140 processes: start, criterion's analysis, its files | 4 140 × p | p = 8 to 10 ms at 1 000 resamples on the machine above: 0.6 to 0.7 min, where 53 to 56 ms at 100 000 would be 3.7 to 3.9 | the job's log |
+| 4 140 processes: start, criterion's analysis, its files | 4 140 × p | — | the job's log |
 | Two calls of `bench-check --paired`, and the upload | once | — | the job's log |
 
 Σt takes MS-04's figures and the estimates its section makes: tier P's
@@ -928,18 +805,12 @@ one has landed.
   longer than the whole job by themselves — `rewrite 3000 pages` at 5.48 s
   needs 330 × 5.48 s, 30.1 minutes — and the three that read 10 000 pages
   are 100.5 s of Σt's 207.7.
-- **In what the builds leave**, about 10 minutes once three builds of at
-  least 81 s, the set-up and the processes are taken out, Σt could be 1.8 s:
-  under 1 % of the set's.
 - **At any figures inside MS-04's window**, 138 operations of 20 ms or more
   cost at least 138 × 330 × 20 ms, 15.2 minutes of rounds, so no answer to
   H-163 that keeps the set inside the window fits three builds into 15
   minutes.
 - **The planning baseline's third**, 110 × Σt, is 6.3 hours and never
   shrinks: a P row makes the head faster, and `61adcde` stays what it was.
-- **On the runner**, the three of the seven that are tier P's operations ran
-  0.56 to 1.00 times tier P's figures (MS-04, "The operations"); at 0.56 the
-  rounds still need 10.7 hours.
 
 H-162 decides what gives. Each of its options alone, at the same figures:
 
@@ -947,71 +818,16 @@ H-162 decides what gives. Each of its options alone, at the same figures:
 | --- | ---: | --- |
 | The number of rounds: one | 33 × Σt, 1.9 h | and a sign test of 8 in 10 needs ten |
 | The planning baseline's half, to a job of its own | 220 × Σt, 12.7 h, in each of two jobs | the baseline's job runs the head beside it, since a pair is one runner's |
-| The operations the pull-request job runs: the 82 inside 20–300 ms | 330 × 8.3 s, 45.7 min | 4.6 times the 10 minutes the builds leave |
+| The operations the pull-request job runs: the 82 inside 20–300 ms | 330 × 8.3 s, 45.7 min | three times the whole 15 minutes, before a build |
 | The 15 minutes | 19.0 h | past six hours, a job's default limit (`.github/workflows/corpus.yml:24`) and the most a hosted job may run |
 
 None fits alone. A shape beyond the four — a matrix of jobs, each judging a
 share of the operations with all three builds on its own runner, which keeps
 each pair on one runner but not the set in one job — would need about 115
-jobs a run at these figures. Which combination, if any, is the owner's.
+jobs a run at these figures. Which combination, if any, is H-162's.
 MS-02.5 re-prices every line and every option on MS-04.10's measured
-figures before the owner chooses, never on tier P's column, and MS-02.6
+figures before H-162 is decided, never on tier P's column, and MS-02.6
 builds what H-162 decides.
-
-### Milestones
-
-Each step is one workflow run, and its exit is quoted as the step states it
-in `docs/roadmap/MS.md`.
-
-| Step | Deliverable | Exit, as the step states it | Waits on |
-| --- | --- | --- | --- |
-| MS-02.2 | `bench-check --paired BASE HEAD`: the regression pair's verdict over ten saved rounds | `xtask/src/bench.rs` unit tests (new) `a_ten_percent_slowdown_is_caught` (every round's head at 1.10 × base, band 5 %), `an_a_a_pair_passes`, `seven_slower_rounds_of_ten_pass_the_sign_test`, `a_median_inside_the_band_passes_however_many_rounds_are_slower` and `a_missing_round_is_refused`; USAGE names `--paired`. | MS-02.1 |
-| MS-02.3 | Tier P's Gate column as committed data, applied to the head-versus-`61adcde` pair | `bench.rs` unit tests (new) `a_floor_fails_a_ratio_above_its_inverse`, `a_calibrated_target_is_held_as_a_fraction_of_the_calibration_operation` (0.5 ms read as at most 1/1 502 of a 751 ms calibration), `a_relation_fails_when_its_bound_is_crossed` `an_operation_with_no_gate_is_refused` and `a_relation_naming_an_unknown_operation_is_refused`; `the_committed_baseline_agrees_with_the_tree` passes with every MS-04 operation gated. | MS-02.2, MS-04.9 |
-| MS-02.4 | The head's bench files on `61adcde`: the `cfg`, the mapping, the copy, its `tpdf` and the shared inputs | `bench.rs` `every_operation_has_a_baseline_side_or_a_calibration` (new) holds the mapping to MS-02.3's gate data and fails when one is removed; on a `61adcde` checkout with the head's `benches/` and `[[bench]]` entries copied in and its own `tpdf` built, `cargo test -p tinker-pdf --benches` builds and runs every mapped operation once. | MS-02.3 |
-| MS-02.5 | The budget priced on measured figures | MS-02's section carries the budget table with the runs it is read from; it fits in 15 minutes, or its shortfall is stated for H-162. | MS-02.4, MS-04.10 |
-| MS-02.6 | The paired job | The job exists and its first run on `develop` completes in at most 15 minutes, read from the run, printing every operation's paired ratio for both pairs, with its guard counting every MS-04 operation in all ten rounds. | MS-02.5, MS-11, H-111, H-162 |
-| MS-02.7 | The bands, from fifteen A/A dispatches | `baseline.json` carries a measured paired band for every MS-04 operation, `cargo xtask baseline` refuses one without its runs and spread, `every_committed_band_fires_at_its_own_edge_and_not_before` covers the paired bands, and each of the fifteen runs passes the bands they set. | MS-02.6, H-109 |
-| MS-02.8 | The job read to its end with the bands committed | The job's next run on a push to `develop` is green in at most 15 minutes with every operation judged in both pairs, read to the end; an operation slower than `61adcde` at floor 1 is a finding filed against its row, never a lowered floor. | MS-02.7 |
-
-MS-02.6's and MS-02.8's 15 minutes are the row's; the budget above says they
-cannot hold as the row is written, and they change only as H-162 decides.
-
-**What each step needs beyond its text**, from the tree as this design reads
-it. Each step's own run corrects its text against this when it is taken.
-
-- **MS-02.2** takes two directories, each holding `round-01` to `round-10`
-  as the job writes them, where today's `run` reads `target/criterion` under
-  the root and refuses any option but `--machine`
-  (`xtask/src/bench.rs:596-614`), and `measured` reads `new/estimates.json`'s
-  mean alone (`:359-391`). A round's figure is a call's, the side's mean over
-  the `calls` its own checkout's list gives; the median of ten is the mean of
-  the fifth and the sixth; a round is slower above 1; and `sample.json` is
-  read for its ten samples and their iteration counts.
-- **MS-02.3** judges every gate by the regression pair's rule, band and sign
-  test, and prints tier P's strict reading beside it until H-78 rules, so its
-  tests' ratios sit clear of both readings; names the calibration operation
-  and its 751 ms once; and refuses a relation to an operation outside its
-  group, a relation being two operations of one run (`P.md:48-49`).
-- **MS-02.4** declares `tinker_planning_baseline` under a `[lints.rust]`
-  table, which `crates/tinker-pdf/Cargo.toml` does not have today; routes
-  every input, generated or committed, through `TINKER_BENCH_FIXTURES` when
-  it is set, written by the first process that needs it; builds each
-  operation's input and starting state in its routine, once a process; and
-  runs its exit's `61adcde` build with the `cfg` in `RUSTFLAGS` and without
-  `-D warnings`.
-- **MS-02.5** prices each line of the budget table from the runs it names,
-  and each of H-162's options beside the row as written.
-- **MS-02.6** builds the bench targets by name and runs the binaries directly
-  with `--bench` and the sampling above; its A/A dispatch needs `ci.yml`'s
-  eleven other jobs told not to run on it, or a workflow of its own; and its
-  guard counts each round's `estimates.json` files against the committed
-  lists' total, as `bench.yml` counts its lines
-  (`.github/workflows/bench.yml:92`). The row's note that
-  "MS-02.5 also fires on pushes to `develop`" means MS-02.6.
-- **MS-02.7**'s paired spread is an A/A dispatch's median paired ratio's
-  distance from 1; its dispatches run the job's own steps with base and head
-  one revision, checked out and built twice; and it asks H-78 for the gates'
-  reading with the bands H-109 approves.
 
 ### Risks
 
@@ -1021,36 +837,26 @@ it. Each step's own run corrects its text against this when it is taken.
 | A pair times two inputs, because two engines wrote them | Every input through `TINKER_BENCH_FIXTURES`, written by the head first and read by all three builds |
 | `ubuntu-latest` is a fleet, and two runs land on unlike hosts | Both sides of every pair run in one job on one runner, and the fleet's split divides out of a ratio |
 | The host drifts while a round runs | An operation's three processes run back to back, so a pair spans one operation's run, and the first build rotates by round |
-| The sign test fires on noise | It fires on 5.5 % of operations on identical code, so an operation fails only with its median past the band as well; the first run no band was fitted to is MS-02.8's |
+| The sign test fires on noise | It fires on 5.5 % of operations on identical code, so an operation fails only with its median past the band as well |
 | A floor of 1 fails about half the runs of a head that matches `61adcde` | The gates take the band and the sign test, H-78's to approve; until then the job prints both readings |
-| A head is slower than `61adcde` on the day the floors are set | A finding against that operation's row; the floor stays 1 unless H-78 grants less (MS-02.8) |
+| A head is slower than `61adcde` on the day the floors are set | A finding against that operation's row; the floor stays 1 unless H-78 grants less |
 | An operation the base or `61adcde` cannot express | One the base lacks is reported, not judged; one `61adcde` lacks runs the operation its Gate column pairs it with, or is calibrated (MS-02.4) |
 | `61adcde` cannot read an input the head writes | Its rounds of that operation are missing, and an operation whose gate names a baseline side it lacks is refused, so the job fails on MS-02.4's mapping rather than passing the operation unjudged |
 | The calibration moves within a round | Each calibrated ratio is taken against the same round's calibration, and the band absorbs what moves between the two |
 | A lint a later stable adds fails the frozen baseline | Its build drops `-D warnings`, as the fuzz steps do (`ci.yml:212`, `:234`) |
 | A round writes nothing and reads as a pass | A directory a round and never `--discard-baseline`; the guard counts every operation in all ten rounds of every build (MS-02.6) |
-| A base or `61adcde` that will not build lets the job pass on the head alone | The job fails: a pair that cannot be judged is red (`docs/verification.md:1567`) |
-| Criterion's own cost swamps the rounds | `--nresamples 1000` and `--noplot`: 8 to 10 ms a process on the machine above, against 53 to 56 at its defaults |
+| A base or `61adcde` that will not build lets the job pass on the head alone | The job fails: a pair that cannot be judged is red (`docs/verification.md`) |
+| Criterion's own cost swamps the rounds | `--nresamples 1000` and `--noplot`, which take out most of what a process costs beyond its iterations |
 
 ## MS-04 — The benchmark set, replacing the seven
 
-When this is done, `cargo bench` times every operation of tier P's target
+In this design, `cargo bench` times every operation of tier P's target
 table that the tree can run, and the row's own, in thirteen groups of one file
 each: 138 operations over inputs the benches generate or the tree holds, each
 held by `bench.yml` to a band measured on `ubuntu-latest`. MS-02's paired job,
 MS-05's probe, MS-09's thread group, MS-10's wasm ratio and every P row's
 floor are built on this set, and each later capability row adds its operation
 to it in the commit that adds the capability.
-
-Today it times seven operations, all in `crates/tinker-pdf/benches/engine.rs`
-(`:135-188`), one `[[bench]]` (`crates/tinker-pdf/Cargo.toml:111-116`), over
-inputs of one to three pages and one committed book read from disk
-(`engine.rs:122-128`). `bench.yml` counts seven criterion lines
-(`.github/workflows/bench.yml:92`) and `cargo xtask baseline` holds the file,
-that count and `baseline.json` to one list (`xtask/src/bench.rs:495-587`). Its
-"render text at 150 dpi" draws no glyph, by its file's own account
-(`engine.rs:85-93`); nothing decodes an image, encodes a PNG, walks more than
-three pages, merges, encrypts, subsets, signs or runs a thread.
 
 ### Scope
 
@@ -1111,7 +917,7 @@ crates/tinker-pdf/benches/
   baseline.json
 ```
 
-One `[[bench]]` per group file, `harness = false`, as today's is. `inputs.rs`
+One `[[bench]]` per group file, `harness = false`. `inputs.rs`
 holds no criterion type, no clock and no spawn, so a test reaches it by path
 alone — MS-05's probe for its cases (MS-05.1) and P-04's `deflate_size.rs` for
 the level-6 counts (P-04.1's exit) — without compiling the harness or the
@@ -1121,7 +927,8 @@ one `SPAWNERS` row `cargo xtask oracles` needs (`xtask/src/main.rs:984-1048`,
 the tree already hold, and a CLI operation's files are written once a process
 into `CARGO_TARGET_TMPDIR`'s `bench-fixtures/`, a directory cargo gives every
 bench target, or into the one `TINKER_BENCH_FIXTURES` names: that is how a
-paired job can hand two builds the same bytes, if MS-02.1 so decides.
+paired job hands two builds the same bytes (MS-02, "The inputs both sides
+are timed on").
 
 The generators call only what `61adcde` already exposes — the builder calls
 used below (`archival`, `tagged`, `output_intent`, `add_embedded_font`,
@@ -1131,7 +938,8 @@ used below (`archival`, `tagged`, `output_intent`, `add_embedded_font`,
 `BilevelCodec::Jbig2Generic`, `add_annotation`, `annot::square`, `FromHtml`
 and `Document::open_markdown` are all public at that revision — so MS-02.4's
 mapping onto the planning baseline covers operation bodies only.
-`PageBuilder::text_pieces` came later, which is why producer-style lines are
+`PageBuilder::text_pieces` is not in `61adcde`, which is why producer-style
+lines are
 written through `raw`.
 
 #### An operation: its id, its unit and its iteration
@@ -1165,8 +973,7 @@ operation measures.
   `crates/tinker-pdf/src/lib.rs:1369`), and does the operation. A render opens
   its document every time, so that a cache a later row keeps on the document —
   P-16's — cannot turn a first render into a warm one unnoticed. An open is
-  lazy, and small beside 20 ms: the seven's 3-page open is 0.0145 ms on
-  `ubuntu-latest`.
+  lazy, and small beside 20 ms.
 - **Over prebuilt state**, built once before the loop when the operation's
   name says it starts from it: prebuilt text, a recorded display list, a
   rendered bitmap, a decoder's input. The second render and the re-rendered
@@ -1189,8 +996,8 @@ target computes the same bytes) and through the tree's own writers elsewhere.
 | --- | --- | --- | --- |
 | `dense(n, seed)` | n A4 pages (595 × 842 pt), each about 5 600 characters of seeded words in 70 lines, drawn from about 80 distinct glyphs with a few accented letters | Liberation Serif Regular (`crates/tinker-pdf-font/data/liberation/`) embedded whole — `add_embedded_font` (`crates/tinker-pdf-cos/src/build.rs:5694`) with `set_subset_fonts(false)` (`:6795`), so subset-on-save has a program to cut | "100 dense pages", "the text page" (`dense(1, 0)`), "20 pages"; 5 600 characters a page is P-02's ≥ 5.6 M characters/s at 1 000 pages/s |
 | `producer(n)` | the dense pages' text in standard-14 Helvetica, unembedded, one `TJ` a line with kerning numbers | `add_base_font` (`build.rs:5561`) and `PageBuilder::raw` (`:4125`) | the Item's "100 producer-style standard-14 pages" |
-| `small(n)` | n pages of one Helvetica line each, the line `engine.rs:54` writes | the builder's flat page tree, one `/Kids` of every page (`build.rs:8508-8516`) | "small pages", "10 000-page document", "rewrite 100 / 1 000 / 3 000 pages" |
-| `three_pages()` | the seven's 3-page document | `engine.rs:43-60`, moved | — |
+| `small(n)` | n pages of one Helvetica line each, the line `three_pages()` writes | the builder's flat page tree, one `/Kids` of every page (`build.rs:8508-8516`) | "small pages", "10 000-page document", "rewrite 100 / 1 000 / 3 000 pages" |
+| `three_pages()` | the document `open/open a 3-page document` opens | `support/inputs.rs` | — |
 | `report(n)` | n A4 pages of two columns of body text in the embedded face, a running head and foot, a page number and one ruled table each; untagged | the builder | "100 text pages", "100 pages" of the analysis rows |
 | `claiming(n)` | `report(n)` tagged (`PageBuilder::tagged`, `build.rs:2980`) under `DocumentBuilder::archival` (`:9047`), claiming PDF/A-2b, PDF/UA-1 and PDF/X-1a:2003 (`set_info`'s `GTS_PDFXVersion`, `:7744`; an output intent, `:3306`, carrying `fuzz/corpus/icc_profile/cmyk-lut.icc`), so each validator runs its rules rather than reporting no claim | the builder | "100 pages" of the validation row |
 | `photo(w, h, seed)` | RGB samples by formula: smooth fields, hard edges and a few levels of seeded noise | `inputs.rs` | the photographic content of every image input |
@@ -1205,8 +1012,8 @@ target computes the same bytes) and through the tree's own writers elsewhere.
 | `jpeg_page()`, `flate_page()`, `cmyk_page()` | an A4 page covered by one 2480×3508 image: `baseline_jpeg()`; `photo(2480, 3508, 1)` through `zlib_compress` (`deflate.rs:218`); `photo` converted to CMYK by formula and Flate-coded under `/ICCBased` with `cmyk-lut.icc` (`add_icc_color_space`, `build.rs:6356`) | `add_image` | "full-page JPEG", "Flate RGB image page", "an ICC-based CMYK image"; the CMYK image is not DCT-coded, since `jpeg_image` never reads `/ColorSpace` (`crates/tinker-pdf/src/resources.rs:253-269`) |
 | `jpx_page()` | an A4 page covered by `data/`'s irreversible codestream | `ImageFilter::Jpx` (`build.rs:438`) | "full-page JPEG 2000" |
 | `g4_page()`, `jbig2_page()` | an A4 page covered by `scan()`: G4-coded (`ccitt_g4_encode`, `ccitt/encode.rs:386`, as `ImageFilter::CcittFax`); and the same page saved through the image pass's `BilevelCodec::Jbig2Generic` (`crates/tinker-pdf/src/recode.rs:188-197`), the builder having no JBIG2 filter | the builder, then `write::save` | "G4 / JBIG2 scan page" |
-| `paths(5000)`, `curves(2000)` | 3 000 filled polygons and closed curves at fractional coordinates, as `paths_document` draws them (`engine.rs:99-120`), and 2 000 stroked cubic curves, 0.5 to 4 pt wide, each of the nine cap-and-join pairs in turn, every fifth dashed; `curves` is those 2 000 alone | `raw` | "5 000 paths", "that page's 2 000 stroked curves alone" |
-| `triangles()`, `axial()` | the seven's 300 triangles and full-page axial shading | `engine.rs:99-120`, `:63-81`, moved | "300 triangles", "full-page axial shading" |
+| `paths(5000)`, `curves(2000)` | 3 000 filled polygons and closed curves at fractional coordinates, as `triangles()` draws them, and 2 000 stroked cubic curves, 0.5 to 4 pt wide, each of the nine cap-and-join pairs in turn, every fifth dashed; `curves` is those 2 000 alone | `raw` | "5 000 paths", "that page's 2 000 stroked curves alone" |
+| `triangles()`, `axial()` | the render group's 300 triangles and full-page axial shading | `support/inputs.rs` | "300 triangles", "full-page axial shading" |
 | `tiling(fills)` | one tiling pattern (`add_tiling_pattern`, `build.rs:6276`) filling an A4 page in one rectangle, or in 50 strips that together cover what the one covers | the builder | "a page filled by one tiling pattern 50 times / once" |
 | `annotated(base)` | `base` with one 100×100 pt square annotation on its first page, appearance included (`DocumentEditor::add_annotation`, `crates/tinker-pdf-cos/src/edit/annotations.rs:214`; `annot::square`, `edit/annot.rs:84`) | the editor | "a changed 100×100 pt annotation", "a 1 000-page file", "a 10-page one" |
 | `book(chapters)` | an EPUB of one paragraph a chapter, Liberation Serif embedded through `@font-face` so its glyphs are drawn in both builds | `tests/epub_support`'s OCF writer (`crates/tinker-pdf/tests/epub_support/mod.rs:543`), by path | "a generated 1 000-chapter book", "100 chapters" |
@@ -1237,7 +1044,7 @@ only where n × today's figure stays at or under 300 ms.
 
 | Id | Unit · an iteration | Input | Tier P: today → target; gate | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `open/open a 3-page document` | bytes · the file a call | `three_pages()` | — (0.0145 on `ubuntu-latest`); floor 1 | unmeasured | MS-04.2 |
+| `open/open a 3-page document` | bytes · the file a call | `three_pages()` | —; floor 1 | unmeasured | built |
 | `open/open and count the 23 MB image file` | bytes · the file a call | `image_file()` | twin; floor 1 | unmeasured | MS-04.3 |
 | `open/open the AES-256 file` | none | `aes_file()`, authenticated with the empty password (`lib.rs:1722`) and counted | the Item's; floor 1 | unmeasured | MS-04.3 |
 | `open/every page's size, 3000 pages` | pages · 3 000 | `small(3000)`, `page(i)` then `Page::size` (`lib.rs:1773`, `:2198`) for every i | 2 569 → 3; 856× | crosses | MS-04.3 |
@@ -1339,7 +1146,7 @@ text of the document the operation reads, so all six stay inside the group.
 | `decode/decode the CCITT G4 page` | pixels · `scan()`'s | `ccitt_g4_encode(scan())` | 46 → 25; 1.84× | in | MS-04.6 |
 
 **write** — a rewrite is the editor's save under `WriteMode::Rewrite`, as
-the seven's is (`engine.rs:168-175`); merge and subset-on-save go through
+`write/rewrite a document`'s is (`benches/write.rs`); merge and subset-on-save go through
 `write::save` (`crates/tinker-pdf/src/write.rs:337`) as `tpdf merge` does
 (`tools/tpdf/src/writing.rs:132-165`).
 
@@ -1458,11 +1265,7 @@ figures, 30 of them by their `calls`; 23 have no figure today, nine sized by
 their targets and 14 waiting for MS-04.10's figures; and
 `re-render a changed 100x100 pt annotation`
 is inside today and falls under 20 ms at its bound. The planning machine is
-not the runner: the three of the seven that are tier P's own operations ran
-0.56 to 1.00 times tier P's figures on `ubuntu-latest`, by the fastest of
-their fifteen runs (300 triangles 31.7 ms against 44, the axial shading
-123.7 against 124–170, a book 12.4 against 17–22), so an operation near
-300 ms may fall inside; MS-04.9's dispatch is the list H-163 is decided on.
+not the runner, so an operation near 300 ms may fall inside; MS-04.9's dispatch is the list H-163 is decided on.
 
 #### Fixtures the tree cannot write
 
@@ -1507,10 +1310,9 @@ its bytes and SHA-256, the producer and its version, the command, the date,
 and the SHA-256 of the input it was made from; the file names say what each
 is (`progressive-2480x3508.jpg`, `irreversible-2480x3508.jp2`,
 `reversible-2480x3508.jp2`), and `.jpg` and `.jp2` are already binary
-(`.gitattributes:13-14`). The largest committed JPEG 2000 file today is 2 741
-bytes (`fuzz/corpus/jpx/rgb-rct`) and the largest progressive JPEG 178
-(`fuzz/corpus/jpeg/progressive-refined.jpg`); these are megabytes each, the
-lossless one most, and MS-04.6 states each one's size.
+(`.gitattributes:13-14`). These are megabytes each, the lossless one most, far
+larger than any committed JPEG 2000 file or progressive JPEG, and MS-04.6
+states each one's size.
 
 #### The CLI operations
 
@@ -1582,13 +1384,10 @@ operation's `benchmark.json`, and `bench-check` refuses a run whose recorded
 figure is not the committed one, so a generator and its list cannot drift
 apart unseen on the runner. An operation named outside the window by the
 owner's word carries `"window": "outside: H-163, <date>"`, which MS-04.9's
-check reads. A machine entry gains `"unmeasured"`, the ids it has no figure
-for, ahead of its `"operations"`, so a hole is named and never silent:
-today's check refuses an entry short of any operation
-(`xtask/src/bench.rs:569-577`). Today's reader cuts entries at `"machine":`
-and `"id":` (`:243`, `:272`), so MS-04.2's cuts the file at `"machines"`
-first and no list entry can fall into a machine's chunk — the trap
-`BASELINE_PATH`'s comment describes (`:65-73`). MS-02.3 adds each operation's
+check reads. A machine entry carries `"unmeasured"`, the ids it has no figure
+for, ahead of its `"operations"`, so a hole is named and never silent. The
+reader cuts the file at `"machines"` first, so no list entry can fall into a
+machine's chunk. MS-02.3 adds each operation's
 gate beside its unit, in the same list.
 
 `cargo xtask baseline` then holds four things to each other: each
@@ -1617,8 +1416,7 @@ and times in `criterion_group!`'s `config`, which criterion's command line
 overrides, never on a `BenchmarkGroup`, whose settings would beat the command
 line, so MS-02's rounds can sample differently without editing a file; flat
 sampling, which criterion sets only on a group and which has no command-line
-flag, is the one setting each group makes itself. The seven's `shading` group,
-with its 20 samples and 10 s (`engine.rs:154-160`), goes with them.
+flag, is the one setting each group makes itself.
 
 At tier P's stated inputs the set cannot run in one 30-minute job. By tier
 P's figures, under this sampling, its 138 operations measure for about 43
@@ -1648,13 +1446,12 @@ The layout job's not-measured operations are taken at three times their
 targets — the 1 000-chapter book at 3 s to paginate and 10 s to render — and
 the analysis operations at their relations' bounds. Every job measures for
 under half its limit, which leaves at least 15 minutes for its checkout, its
-build and its generators; a job's build is read from MS-04.2's first matrix
-run, and a group whose job nears its limit splits by a criterion filter into
+build and its generators, and a group whose job nears its limit splits by a criterion filter into
 two entries with a count each, never by a changed input. Every job builds
 its group's bench in release, as `cargo bench` does, and the five with CLI
 operations build `tpdf` in release first. MS-02's paired job, three builds
-and ten rounds of this set in 15 minutes, is MS-02.1's to price and H-162's
-to decide.
+and ten rounds of this set in 15 minutes, is priced in MS-02's section and
+H-162's to decide.
 
 #### The window
 
@@ -1664,7 +1461,7 @@ estimates — an iteration's, so `calls` included — and fails one outside
 which it reports instead. It runs in each job after the bench, because the
 window is a property of the runner the job landed on and never of
 `cargo test`. One dispatch on `develop` in report mode prints every operation
-outside with its mean, which MS-04.9 commits below with its run id; H-163 is
+outside with its mean; H-163 is
 decided on that list, not on tier P's column. Until it is, every operation keeps
 tier P's input, a fast one runs its `calls`, and MS-04.10 names the slow ones
 outside as H-163 decides.
@@ -1689,26 +1486,22 @@ outside one may not decide a build (ruling 13).
 
 #### How the seven retire
 
-MS-04.2 moves the seven into their groups' files with their figures re-keyed
-under group ids and unchanged; they keep their bands while the set grows
-beside them, and take their groups' sampling: ten samples for criterion's
-hundred widen a mean's spread, which their bands, 35 to 135 %, were set
-above, and a run that fails one on the change is a finding MS-04.2 reads,
-never a band to widen. MS-04.10 measures the whole set, and the seven's figures
+Seven operations in the group files carry committed figures and bands, and the
+set grows beside them. MS-04.10 measures the whole set, and the seven's figures
 leave with the seven: three are tier P's own operations on the same input and
-continue under tier P's names, one continues as itself, and three are
-succeeded by the same call on tier P's larger input. None retires without a
-successor, so H-78 is asked nothing for them.
+continue under tier P's names, one continues as itself, and three are succeeded
+by the same call on tier P's larger input. None retires without a successor, so
+H-78 is asked nothing for them.
 
-| The seven, as MS-04.2 re-keys them | On `ubuntu-latest` | From MS-04.10 | Why |
-| --- | ---: | --- | --- |
-| `open/open a 3-page document` | 0.0145 ms | itself, with `calls` | the set's only in-process open of a small file; P-21's held operation is the CLI's |
-| `render/render text at 150 dpi` | 5.341 ms | `render/the text page at 150 dpi` | its page draws no glyph (`engine.rs:85-93`); the successor's does |
-| `text/extract a page of text` | 0.728 ms | `text/text of 100 standard-14 pages` | the same call over standard-14 Helvetica, 100 pages for one |
-| `render/render a full-page axial shading at 150 dpi`, the seven's `shading/…` | 123.662 ms | `render/a full-page axial shading at 150 dpi` | the same generator (`engine.rs:63-81`) |
-| `render/fill 300 anti-aliased paths at 150 dpi` | 31.739 ms | `render/300 triangles at 150 dpi` | the same 300 triangles (`engine.rs:99-120`) |
-| `write/rewrite a document` | 0.052 ms | `write/rewrite 100 pages` | the same call (`engine.rs:168-175`), 100 pages for three |
-| `layout/paginate a book at 432x648 pt` | 12.365 ms | `layout/open and paginate pandoc-book-cover.epub at 432x648 pt` | the same book, box and call (`engine.rs:122-128`, `:180-188`) |
+| Operation | From MS-04.10 | Why |
+| --- | --- | --- |
+| `open/open a 3-page document` | itself, with `calls` | the set's only in-process open of a small file; P-21's held operation is the CLI's |
+| `render/render text at 150 dpi` | `render/the text page at 150 dpi` | its page draws no glyph; the successor's does |
+| `text/extract a page of text` | `text/text of 100 standard-14 pages` | the same call over standard-14 Helvetica, 100 pages for one |
+| `render/render a full-page axial shading at 150 dpi` | `render/a full-page axial shading at 150 dpi` | the same generator, `axial()` |
+| `render/fill 300 anti-aliased paths at 150 dpi` | `render/300 triangles at 150 dpi` | the same 300 triangles, `triangles()` |
+| `write/rewrite a document` | `write/rewrite 100 pages` | the same call, 100 pages for three |
+| `layout/paginate a book at 432x648 pt` | `layout/open and paginate pandoc-book-cover.epub at 432x648 pt` | the same book, box and call |
 
 #### What later rows add
 
@@ -1736,95 +1529,16 @@ Tier P's "Time to first page over a source with 50 ms latency at 10 Mbit/s,
 the 60-page linearized fixture" cannot be a name — it holds a `/` and runs
 past 64 bytes — so MS-08.4's operation takes the id above. MS-10's two rows
 are relations over this set, not operations of their own. The other rows'
-speed rows — 115 steps of other rows wait on MS-04 or one of its steps
-(`python3 -I tools/roadmap/brief.py MS-04 --all` lists them) — come in by the
-same rule, each in the group its operation belongs to.
-
-### Milestones
-
-Each step is one workflow run, and its exit is quoted as the step states it
-in `docs/roadmap/MS.md`.
-
-| Step | Deliverable | Exit, as the step states it | Waits on |
-| --- | --- | --- | --- |
-| MS-04.2 | The per-group harness: the seven in their group files over `support`, a `[[bench]]` each, `baseline.json`'s lists with units and named-unmeasured entries, and `cargo xtask baseline` holding files, lists and `bench.yml`'s per-group counts to each other | `xtask/src/bench.rs` unit tests (new) `a_group_file_and_its_list_that_disagree_are_refused`, `a_group_guard_counting_short_is_refused`, `an_operation_neither_measured_nor_named_unmeasured_is_refused` and `the_seven_keep_their_figures_under_their_group_ids`; `the_committed_baseline_agrees_with_the_tree` passes; `cargo test -p tinker-pdf --benches` runs each of the seven once. | MS-04.1 |
-| MS-04.3 | The open, text and calibration groups, in-process | `cargo test -p tinker-pdf --benches` runs each operation once, each generator asserting what its operation needs (the file at least 23 MB, the page counts, the face embedded and its text extracted, the AES-256 file authenticating, each search finding its hits); `the_committed_baseline_agrees_with_the_tree` holds the three groups. Default and `bundled-fonts` builds. | MS-04.2 |
-| MS-04.4 | The write and analysis groups, in-process | `cargo test -p tinker-pdf --benches` runs each once, each generator asserting its shape (each saved file reopens with its page count, the decrypted bytes are the plain ones, the redaction removed the text under it, each validator returns a verdict); `the_committed_baseline_agrees_with_the_tree` holds both groups. Both builds. | MS-04.3 |
-| MS-04.5 | The render group's vectors and text pages, threads and bands | `cargo test -p tinker-pdf --benches` runs each once; the text page's generator asserts its render reports no `UnreadableFont` and inks glyph pixels, and the four bands reassemble to the whole page byte for byte (ruling 5); `the_committed_baseline_agrees_with_the_tree` holds the group. Default and `bundled-fonts` builds. | MS-04.4 |
-| MS-04.6 | The encode and decode groups and the image pages, with `data/` and the LZW encoder | `cargo test -p tinker-pdf --benches` runs each once, each decode asserting its samples' size and, where the tree writes the format (baseline JPEG, G4, JBIG2, PNG, deflate), a round trip, and each page asserting its image drew; `the_committed_baseline_agrees_with_the_tree` holds the groups. | MS-04.5 |
-| MS-04.7 | The sign, layout and fonts groups, with the Devanagari face | `cargo test -p tinker-pdf --benches` runs each once and each asserts its input (the signature verifies, every book under `crates/tinker-pdf/tests/epub/` paginates and renders every page, the generated books have their chapters, each face yields its outlines, each shaped paragraph has its glyphs and no `.notdef`); `the_committed_baseline_agrees_with_the_tree` holds the three groups and `cargo xtask vendor` the Devanagari face's declaration. Default and `bundled-fonts` builds. | MS-04.6 |
-| MS-04.8 | The CLI-marked operations through `support/cli.rs`, with its `SPAWNERS` row | `cargo test -p tinker-pdf --benches`, with `tpdf` built, runs each once and each asserts what its command wrote (the PNGs' count and size, the text's pages, each saved file reopening with its page count, the encrypted file authenticating); `cargo xtask oracles` passes with the helper's `SPAWNERS` row and fails without it; `the_committed_baseline_agrees_with_the_tree` holds the operations in their groups. Default and `bundled-fonts` builds of `tpdf`. | MS-04.7 |
-| MS-04.9 | Throughput from the committed unit, `--sizes`, and the report-mode dispatch | `xtask/src/bench.rs` unit tests (new) `throughput_is_read_from_the_committed_unit`, `an_operation_under_twenty_ms_fails_the_size_check`, `an_operation_over_three_hundred_ms_fails_it` `a_baseline_side_may_run_longer` and `an_operation_named_outside_the_window_is_reported_not_failed`; USAGE names `--sizes`; the report-mode run's list is committed in MS-04's section of `docs/design/performance.md` with its run id. | MS-04.8, H-109 |
-| MS-04.10 | The set measured by the 15-run rule; the seven's figures retired; the level-6 counts committed | `cargo xtask baseline` holds the bench files, the per-group guard counts and `baseline.json` to one list per group with no operation unmeasured; `every_committed_band_fires_at_its_own_edge_and_not_before` pushes on every band; all fifteen runs pass the entry they set and the sizes check; the two level-6 byte counts are committed where MS-04.1 puts them, dated. | MS-04.9, H-109, H-112, H-163 |
-
-**What each step needs beyond its text**, from the tree as this design reads
-it. Each step's own run corrects its text against this when it is taken.
-
-- **MS-04.2** creates `support/inputs.rs` beside `support/mod.rs` and moves
-  the seven's generators into it; makes `bench.yml` the matrix, its guard
-  reading each entry's count and each job uploading `bench-<group>`, with
-  `guard_count` (`xtask/src/bench.rs:478-482`) reading the matrix; changes
-  `BENCH_SOURCE` (`:78`) into the group files and the `baseline` task's usage
-  (`xtask/src/main.rs:27-29`); and refuses a name criterion would rewrite,
-  under a test of its own,
-  `an_operation_name_criterion_would_rewrite_is_refused`, since today a long
-  name would be reported new rather than refused. The seven's ids are
-  `open/open a 3-page document`,
-  `render/render text at 150 dpi`,
-  `text/extract a page of text`,
-  `render/render a full-page axial shading at 150 dpi` (the `shading/` prefix
-  gone),
-  `render/fill 300 anti-aliased paths at 150 dpi`,
-  `write/rewrite a document` and
-  `layout/paginate a book at 432x648 pt`.
-- **MS-04.3** opens the in-process documents from an `Arc<[u8]>`, reads every
-  page's size by index as `tpdf` would, and freezes `calibration.rs`.
-- **MS-04.4** writes `report` and `claiming`, and splits `claiming` into one
-  document a claim, each with its text, if the builder will not write three
-  claims into one; its merge keeps fonts, as above.
-- **MS-04.5** moves "a second render at another dpi" to MS-04.6, which adds
-  the JPEG page it renders: on a text page a second render has little to
-  reuse, since P-06's glyph masks are keyed by their scale (the roster's
-  A4), so P-16's 30 % could never be met there.
-- **MS-04.6** adds `benches/data/` with its README, the LZW encoder, the
-  pinned `page_like` and `photo_like` (the level-6 constants left for
-  MS-04.10), and the second render. Its note that a committed fixture carries
-  "never its producer's name" is read as its file name: ruling 13 records a
-  third party's bytes with the tool, its version and the command, as
-  `crates/tinker-pdf-filters/tests/images/README.md` and
-  `crates/tinker-pdf-font/tests/woff/PROVENANCE.tsv` do, and the rulings
-  override. `.jpg` and `.jp2` need no new `.gitattributes` line.
-- **MS-04.7** vendors the face into `crates/tinker-pdf-shape/data/devanagari/`,
-  which `.gitattributes` already covers, and embeds Liberation Serif in the
-  generated books so their glyphs are drawn in the default build.
-- **MS-04.8** puts the helper in `support/cli.rs`, the file its `SPAWNERS`
-  row names, and builds `tpdf` in release in the five jobs that run it.
-- **MS-04.9** reads `calls` and `per_iteration` as well as the unit, prints a
-  call's figure beside an iteration's, accepts outlines as a unit beside
-  pages, Mpixel and MB (P-26's target is in outlines a second), refuses a run
-  whose criterion `Throughput` disagrees with the list, and runs `--sizes` in
-  every job.
-- **MS-04.10** may change an operation's `calls` on its measured figure —
-  never its input — and commits the two level-6 constants in
-  `benches/support/inputs.rs`.
-
-The steps' `cargo test -p tinker-pdf --benches` runs each operation once,
-unoptimised, at tier P's inputs: the three that read 10 000 pages and the two
-JPEG 2000 decodes take minutes each in that profile, and the command stays as
-the exits state it, its wall time reported with each step.
-
-### The window, as the runner measured it
-
-Owed. MS-04.9 commits here the list its report-mode dispatch on `develop`
-printed — each operation outside 20–300 ms with its mean — and the run's id.
+speed rows come in by the same rule, each in the group its operation belongs
+to.
 
 ### Risks
 
 | Risk | Mitigation |
 | --- | --- |
-| A name criterion rewrites is recorded under another key, reported new and never held to its band | Every name ASCII, at most 64 bytes, free of criterion's ten replaced characters; `cargo xtask baseline` refuses one that is not (MS-04.2) |
+| A name criterion rewrites is recorded under another key, reported new and never held to its band | Every name ASCII, at most 64 bytes, free of criterion's ten replaced characters; `cargo xtask baseline` refuses one that is not |
 | A cache a later row adds turns a cold operation warm | An iteration opens its document from bytes; only an operation whose name says so starts from prebuilt state |
-| Two engines generating one input write different bytes, so a pair times two inputs | The fixture directory `TINKER_BENCH_FIXTURES` names lets a paired job hand both builds the head's bytes; whether it does is MS-02.1's |
+| Two engines generating one input write different bytes, so a pair times two inputs | MS-02's paired job routes every input through the directory `TINKER_BENCH_FIXTURES` names, written by the head first |
 | An input an engine encoder writes moves when the encoder changes (P-04.7's deflate, the JPEG encoder) | The row that changes the encoder names the operations it moved in its commit; the two inputs the level-6 counts describe are formulas pinned by length and digest, so they never move |
 | The run does not fit 30 minutes | One job a group, each measuring under half its limit by tier P's figures; a group nearing its limit splits by a filter, never by its input |
 | Tier P's figures are the planning machine's, so the budget and the window's list are predictions | MS-04.9's dispatch measures the list H-163 is decided on, and an operation outside that it missed goes to H-163 before MS-04.10 commits any figure |
@@ -1834,37 +1548,18 @@ printed — each operation outside 20–300 ms with its mean — and the run's i
 | A format's aggregate hides one container fixture's regression | Every fixture is opened and rendered in the operation and asserted in test mode; a figure for each fixture would take ninety operations, which a row that needs one adds |
 | The calibration operation moves | Its file is frozen; a change re-states every calibrated target, which is the owner's (H-77) |
 | A row's speed-up takes an operation under 20 ms | The row raises its `calls` in the commit that raises its floor, with the figure re-measured under H-109, or names it for H-163; the four that cross the window are listed above |
-| `ubuntu-latest` is a fleet, and one dispatch's jobs land on different hosts | Each band is per operation over fifteen dispatches, as today's are (`docs/verification.md:1906-1915`); every job logs its CPU model and count as `bench.yml:70` does |
+| `ubuntu-latest` is a fleet, and one dispatch's jobs land on different hosts | Each band is per operation over fifteen dispatches, as the committed ones are (`docs/verification.md`, "The named machine is `ubuntu-latest`"); every job logs its CPU model and count, as `bench.yml` does |
 
 ## MS-07 — Corpus throughput and latency ratchet
 
-When this is done, each of the corpus job's three bars holds every corpus to
+In this design, each of the corpus job's three bars holds every corpus to
 five time figures at the run's dpi — pages rendered a second, the mean
 open-and-count latency, and the 50th, 95th and 99th percentile of a page's
 render time — each inside a band set by the five runs the bar records, and
 `corpus.yml` fails a figure past its band. Every run prints each corpus's ten
 slowest files with their `/Producer`, and each bar records them. The figures
-come from the runs the bars already make, four children at a time on today's
-runner, so the job's 56 minutes do not grow.
-
-Today the corpus job times nothing it holds. The child prints `ms`, its own
-clock from its first line to its last (`tools/tpdf/src/main.rs:2570`,
-`:2745`), across the open, every page, the strict rewrite and the metamorphic
-renders; the runner parses it (`xtask/src/runner.rs:624`) and then replaces it
-with its own wall time from spawn to reap (`:455`, `:462`), which the report
-keeps per file as `millis` (`xtask/src/report.rs:293`) and nothing compares.
-No bar has a time key, and `ratchet::parse` reads one setting, `fonts`
-(`xtask/src/ratchet.rs:613-618`), the only setting `compare` refuses on
-(`:251`), so the `dpi` a bar records binds no run. MS-11.5's run of
-`corpus.yml` on `develop`, 40129716194 at `94895d48`
-(`docs/roadmap/MS.md:376`), took 56 min 21 s of its 120
-(`.github/workflows/corpus.yml:32`) by its job's step times:
-13 min 41 s, 13 min 38 s and 13 min 40 s for the three bars, 10 min 58 s for
-the censuses, and 4 min 3 s for the build, the fetch, the fixtures and the
-bundled rebuild between them. By the `millis` in the reports MS-11.5 kept
-(`docs/roadmap/MS.md:380`), each bar's 5 525 children ran 3 239 s to 3 250 s
-in all, 3.96 at a time across its step, and safedocs's 1 000 were 85.3 % of
-that in the no-faces bar.
+come from the runs the bars already make, four children at a time on the
+runner, so the job's time does not grow.
 
 ### Scope
 
@@ -1883,13 +1578,13 @@ that in the no-faces bar.
 
 ### Non-goals
 
-- **A clock in a test.** MS-07.2's and MS-07.3's tests feed records and bars
+- **A clock in a test.** The record's, the report's and the bar's tests feed records and bars
   to the parsers and read no clock; the child and the runner keep the clocks,
-  as this document's first non-goal and `docs/verification.md:1784-1786` ask.
+  as this document's first non-goal and `docs/verification.md`'s "Clocks:
+  outside the suite, and not nowhere" ask.
 - **Timing the rest of a child.** The disk read, the process, the page
   lookup, the structure join, the strict rewrite and the metamorphic renders
-  stay outside every span, and `ms` and `millis` go on spanning them as they
-  do today. The page lookup is A1's and A2's to count (the roster, above) and
+  stay outside every span, and `ms` and `millis` span them. The page lookup is A1's and A2's to count (the roster, above) and
   MS-04's `open/every page's size` operations' to time.
 - **A gate on a file.** The ten slowest are recorded and printed, never
   compared, and no file has a band of its own.
@@ -1920,7 +1615,7 @@ microseconds.
   spent failing stays in `millis`.
 - **A page**: `page.render` at the run's dpi (`:2663-2666`, `:2685`), once for
   every page the loop reaches (`:2670`). The lookup before it,
-  `doc.page(index)` (`:2671`), is outside: today's walk to a page gathers
+  `doc.page(index)` (`:2671`), is outside: the walk to a page gathers
   every leaf up to it (MS-01.4, above), so a document's lookups grow with the
   square of its pages, and tier P's figures put every page's size over 10 000
   generated pages at about 28.5 s (`open/every page's size, 10000 pages`, in
@@ -1932,8 +1627,7 @@ Neither span reaches the strict pass or the metamorphic pass (`:2727-2729`),
 which rewrite the document and render page one again (`:2129`, `:2159`,
 `:2163`, `:2173`). A child the runner kills writes no complete record, and
 the runner keeps nothing of one but its producer
-(`xtask/src/runner.rs:459-485`), so a file that timed out or stalled —
-safedocs's `0000578.pdf` stalled on page 1 of 5 in run 40129716194 — has no
+(`xtask/src/runner.rs:459-485`), so a file that timed out or stalled has no
 times; it is the pass rate's regression, and the producer table names it
 (`xtask/src/report.rs:638`). Each child renders on one thread: the engine
 spawns none outside its tests (the only `thread::spawn` under `crates/*/src`
@@ -1956,13 +1650,12 @@ reads one way: the run's figure may be at most (100 + band) % of the bar's.
 The two means stay a count and a sum, and every comparison is a
 cross-multiplication in `u128`, as every other axis in `ratchet.rs` is
 (`xtask/src/ratchet.rs:1-26`, `:200-207`). Every key is a whole number, which
-`json.rs` holds exactly below 2⁵³ (`xtask/src/json.rs:42-46`, `:105-107`); the
-largest, a corpus's summed render time, is safedocs's, under 2.8 × 10⁹
-microseconds, since safedocs's children ran 2 771 s in all.
+`json.rs` holds exactly below 2⁵³ (`xtask/src/json.rs:42-46`, `:105-107`), and the
+largest, a corpus's summed render time in microseconds, sits far below it.
 
 **Over pages, not files**, because a page is what a reader waits on; it makes
-a corpus's percentiles its long documents': 10 000 of verapdf's 12 950 pages
-are one implementation-limit fixture's, so that file is most of the
+a corpus's percentiles its long documents': most of verapdf's pages are one
+10 000-page implementation-limit fixture's, so that file is most of the
 population verapdf's percentiles are taken over. **The latency is a mean**
 rather than a percentile because it moves when any file's open moves — the
 common path a thousand times over, or one repair — where a percentile is
@@ -1973,50 +1666,30 @@ which is where the tail is read.
 
 `corpus-run` runs one child a logical CPU unless told otherwise
 (`xtask/src/corpus.rs:192`, `:628-656`), and `corpus.yml` never tells it
-(`.github/workflows/corpus.yml:152-154`, `:190-193`, `:220-223`). In run
-40129716194 each bar's children ran 3.96 at a time across its step: four, on
-four logical CPUs. A span is wall time, so a page's includes what its three
-neighbours cost it — shared caches, memory bandwidth, and a core where two
+(`.github/workflows/corpus.yml:152-154`, `:190-193`, `:220-223`): four, on the
+runner's four logical CPUs. A span is wall time, so a page's includes what its
+three neighbours cost it — shared caches, memory bandwidth, and a core where two
 logical CPUs share one — and seldom a wait for a CPU: four single-threaded
-children do not outnumber the runner's logical CPUs, and the runner's own
-four worker threads sleep between polls (`xtask/src/runner.rs:451`). That
-cost has two parts. One is systematic, every child somewhat slower than it
-would run alone, and a bar measured at the same job count carries it inside
-its figures; the bar holds that constant by refusing times from a run at
-another job count. The other varies with which files share the machine with
-which, and the five runs' spread measures it.
-
-Run 40129716194 already shows how large the varying part is. Its no-faces
-and synthetic-face bars ran one binary over the same files, one after the
-other on one host, and for the 4 249 files that passed in both and report no
-`render:UnreadableFont` without faces, a face changes nothing they draw, so
-their `millis` differ only by the machine. A corpus's summed `millis` over
-those files moved 0.3 % (pdfjs), 1.0 % (qpdf), 2.3 % (safedocs) and 6.3 %
-(verapdf, whose 10 000-page fixture alone read 35.2 s and then 40.5 s)
-between the two; a file of 100 ms or more moved 1.1 % to 4.0 % at each
-corpus's median, and at most 26.9 %. That is a whole child's time rather
-than the spans, and MS-07.4 measures the spans' own; but it puts the
-neighbours' share well under what the fleet does across hosts — the bench's
-fifteen runs of one revision fell into two groups, at 1.00 to 1.16 and 1.30
-to 1.36 of the fastest (`docs/verification.md:1906-1915`) — which every band
-has to absorb anyway.
+children do not outnumber the runner's logical CPUs, and the runner's own four
+worker threads sleep between polls (`xtask/src/runner.rs:451`). That cost has
+two parts. One is systematic, every child somewhat slower than it would run
+alone, and a bar measured at the same job count carries it inside its figures;
+the bar holds that constant by refusing times from a run at another job count.
+The other varies with which files share the machine with which, and the five
+runs' spread measures it. It sits under what the fleet does across hosts
+(`docs/verification.md`, "The named machine is `ubuntu-latest`"), which every band has to absorb
+anyway.
 
 **So the times come from the shared run**: each bar's own `corpus-run`, at the
 job count it runs at. Its cost is two clock reads and one record line a page,
-34 948 pages a bar in run 40129716194, and the job stays at its 56 minutes,
-63 min 39 s under its limit. A pass of its own, one child at a time over open
-and render alone, would remove the neighbours and nothing else. What it would
-cost no record says today, since none separates a child's spans from its
-strict and metamorphic passes (that is MS-07.2's); it is at most each bar's
-summed `millis` run end to end, 54.2, 54.0 and 54.1 minutes. Three such
-passes could take the job to 219 minutes, and one, for the no-faces bar
-alone, to 110.5 of its 120, leaving the other two bars untimed against the
-row's exit and MS-07.5's. Neither buys enough of the smaller term to be worth
-it.
+and the job's time does not grow. A pass of its own, one child at a time over
+open and render alone, would remove the neighbours and nothing else, and would
+run each bar's files end to end rather than four at a time inside the job's
+120 minutes; it does not buy enough of the smaller term to be worth that.
 
 #### The record, the report and the bar
 
-**The record**, version 7, as MS-07.2 built it. After `pages`, a file that
+**The record** is version 7. After `pages`, a file that
 opened prints `time open <micros>`: `Document::open` on bytes already read,
 the faces, the authentication and the first `page_count`. The read, which
 times the runner's disk rather than the engine, is outside it, and so are the
@@ -2026,8 +1699,8 @@ it prints `time page <n> <micros>`, the render alone, n counted from 1 as the
 progress line counts (`:2729-2738`). The page's lookup is outside that span:
 the walk to page n gathers every leaf before it
 (`crates/tinker-pdf-cos/src/pages.rs:486-498`), so over a long document the
-lookups grow with the square of its pages. `time` is a new key; `page` is
-already the progress line's, which the runner never reads (`:2725-2728`).
+lookups grow with the square of its pages. `time` is its own key; `page` is
+the progress line's, which the runner never reads (`:2725-2728`).
 Version 7 rather than a quiet new key, for `peak`'s reason
 (`xtask/src/runner.rs:604-617`): the time figures are made from the spans, so
 a version-6 child read as version 7 would be a corpus whose files timed
@@ -2036,16 +1709,9 @@ the second (`xtask/src/corpus.rs:749-794`). The runner keeps a file's open
 span as an `Option` and its page spans as a list of page and microseconds
 (`xtask/src/runner.rs:131-151`, `:222-229`), and drops a line that does not
 parse, or that names a page outside 1 to `pages`, rather than reading it as
-zero (`:690-703`, `:818-821`). Timed against the tip before the tests were
-written, the two clock reads and the line cost 1.0 to 1.3 µs a page in
-release and in debug, most of it the line's write, beside a median render of
-0.4 ms for the smallest page timed (an inch square, release): at most 46 ms
-over a bar's 34 948 pages. Over documents of 400 and 2 000 such pages and of
-30 and 100 letter pages, by the fastest run of each pass, `tpdf probe` took
-0.94 to 1.09 times develop's, while two copies of develop's own binary
-differed by 0.90 to 1.19 on the shared machine that timed it.
+zero (`:690-703`, `:818-821`).
 
-**The report** gains, per file, `open_micros`, `render_micros` (its pages'
+**The report** carries, per file, `open_micros`, `render_micros` (its pages'
 sum) and `slowest_page` (`{ "page", "micros" }`), each absent where there was
 nothing to time; per corpus, in its `summary` (`xtask/src/report.rs:406-450`),
 `time` — `files`, `open_micros`, `pages`, `render_micros`, `p50_micros`,
@@ -2055,12 +1721,12 @@ nothing to time; per corpus, in its `summary` (`xtask/src/report.rs:406-450`),
 Linux, so that a figure that moved with the host is attributed rather than
 banded, which is why `bench.yml` logs its host
 (`.github/workflows/bench.yml:62-70`). Its summary lines
-(`xtask/src/report.rs:555-619`) gain a `time` line per corpus — pages/s at the
+(`xtask/src/report.rs:555-619`) carry a `time` line per corpus — pages/s at the
 dpi, the latency and the three percentiles — and one for the run,
 `time   N pages timed   M files opened`, which each bar's step in
 `corpus.yml` greps as it greps `strict` (`.github/workflows/corpus.yml:172`).
 
-**The bar** gains `time_runs` at its top and `time` and `slowest` in each
+**The bar** carries `time_runs` at its top and `time` and `slowest` in each
 corpus, and each run's per-corpus figures go into it whole:
 
 ```text
@@ -2090,15 +1756,15 @@ rule below, so none is typed by hand.
 - **`--check`** holds each figure to its band, and one figure past its band
   fails the run alone. It refuses the times of a run at another dpi or job
   count than `time_runs`', and those of a corpus whose file count is not
-  `time.total`, as it refuses a run under another `--fonts` today
+  `time.total`, as it refuses a run under another `--fonts`
   (`xtask/src/ratchet.rs:251-258`): each is a different measurement. A run
   that timed fewer files or pages in a corpus than the fewest of the five
   fails, as a peak over fewer children does (`:567-576`). A figure faster
   than the five's fastest is a note, not an improvement, because one run
   measures no band. A bar with no `time_runs` is an improvement, new with no
-  recorded band, and `SCHEMA` stays 2, as it did when `peak` arrived
+  recorded band, and `SCHEMA` stays 2, as it does for `peak`
   (`xtask/src/report.rs:23`, `xtask/src/ratchet.rs:82-90`).
-- **`--record`** writes every other axis from its run, as today
+- **`--record`** writes every other axis from its run
   (`xtask/src/corpus.rs:508-524`), and the run's ten slowest; it carries
   `time_runs` and each corpus's `time` over from the committed bar unchanged,
   and never writes a time figure from one run. A figure from one run would
@@ -2119,15 +1785,15 @@ outcome (`:232-244`). For each corpus and each figure:
 
 - **The figure is the fastest of the five**, for the reason the bench's is the
   fastest of fifteen: the comparison is one-sided, so the bar worth holding is
-  the best the runner has done (`docs/verification.md:1881-1886`).
+  the best the runner has done (`docs/verification.md`, "The named machine is `ubuntu-latest`").
 - **The band is the spread fifteen runs would show, set as the bench sets one
   from fifteen.** The five runs' spread — slowest over fastest, less one — is
   grown by 1.53, which is what the bench's widest spread grew by from five
-  runs to fifteen (`:1899-1901`), then made half again as wide and rounded up
-  to the next 5 %, the bench's own rule (`:1897`): 2.295 times the spread,
+  runs to fifteen, then made half again as wide and rounded up to the next
+  5 %, the bench's own rule: 2.295 times the spread,
   rounded up.
 - **And never under 20 %**, the swing the bench's noisiest operation showed
-  within one of the fleet's two groups (`:1911-1913`), so a figure whose five
+  within one of the fleet's two groups, so a figure whose five
   runs all landed on one group is not held tighter than that group has been
   seen to move.
 
@@ -2138,9 +1804,8 @@ figure is at most the slowest, and the band is above the spread. `ratchet.rs`
 derives each band in integers, as it compares.
 
 **What this does not catch.** A regression inside its band: on a figure
-banded at 85 %, a page render half again slower passes in silence. The 9×
-rasteriser regression of 5 September 2026
-(`docs/verification.md:1918-1919`) would not. This is
+banded at 85 %, a page render half again slower passes in silence, and a
+several-fold regression would not. This is
 the corpus's ratchet against the catastrophic, on pages real producers wrote;
 the finer instruments are MS-02's paired job over MS-04's set and MS-01's
 counts, which the fleet does not move.
@@ -2159,129 +1824,18 @@ file with no spans is not ranked, so a file the runner killed is in the
 producer table instead. Ranking by a file's sum favours long documents; the
 report's `slowest_page` names the page that cost a file most.
 
-### Milestones
-
-Each step is one workflow run, and its exit is quoted as the step states it
-in `docs/roadmap/MS.md`. MS-07.2 times `tpdf probe` against the tip over a
-generated document of many pages, in release and in debug, before it writes
-its tests, and stops if two clock reads and a line a page are not free.
-
-| Step | Deliverable | Exit, as the step states it | Waits on |
-| --- | --- | --- | --- |
-| MS-07.2 | The two spans in `tpdf probe`; record format 7 in the child and the runner; the handshake refusing a version-6 child by name | `xtask/src/runner.rs` unit tests (new) `the_open_and_page_times_are_read`, `a_record_without_them_is_a_version_6_record` and `a_page_time_that_does_not_parse_is_absent_not_zero`; `corpus.rs`'s handshake test names a version-6 child; `tpdf`'s own tests pass. | MS-07.1 |
-| MS-07.3 | The five figures and the ten slowest in the report and the bar; `--check` holding each figure to the band its five runs set; `corpus.yml`'s grep for the run's `time` line | `xtask/src/ratchet.rs` unit tests (new) `a_time_figure_past_its_band_fails_alone`, `a_bar_without_times_is_an_improvement` and `the_slowest_ten_name_their_producers`; `report.rs` `percentiles_are_over_pages_not_files` (new); the three committed bars still parse. | MS-07.2 |
-| MS-07.4 | Five dispatches at one revision of `develop`, their figures and ten slowest in the three bars, and the measurement in `docs/verification.md` | The three bars carry every corpus's time figures with bands and its ten slowest files by `/Producer`, each band above the spread the five runs measured, and each of the five runs passes the bars they set. | MS-07.3, MS-13, H-03 |
-| MS-07.5 | `corpus.yml` read to its end on `develop` with the time bars committed | The next run of `corpus.yml` on `develop` holds every corpus's time figures in all three bars and is green, read to the end, with the ten slowest printed. | MS-07.4 |
-
-**What each step needs beyond its text**, from the tree as this design reads
-it. Each step's own run corrects its text against this when it is taken.
-
-- **MS-07.2** reads the file before the open span starts, so `open`
-  (`tools/tpdf/src/main.rs:854-874`) takes bytes or the probe reads them
-  itself, and it times the first `page_count` with the open. Both constants
-  move, `tools/tpdf/src/main.rs:2402` and `xtask/src/runner.rs:575`; the
-  handshake test counts back from the runner's (`xtask/src/corpus.rs:804-828`),
-  so it names version 6 once the constant is 7, and the step writes the 6
-  out.
-- **MS-07.3**'s exit has no test for "the three committed bars still parse":
-  nothing in the tree reads a committed bar but `corpus-run --check`
-  (`xtask/src/corpus.rs:526-529`), which needs the corpora, and those are
-  fetched only in CI. It adds `the_committed_bars_parse` (new), reading the
-  three by path and printing each band it derives once they carry runs, and
-  beside it `each_of_five_runs_holds_the_band_they_set`,
-  `times_measured_another_way_are_refused` (a row each for the dpi, the job
-  count and the corpus's size), `a_mean_over_fewer_files_is_not_a_faster_mean`
-  and `record_carries_the_time_block_over` (new). `--record` reads the
-  committed bar before it writes, to carry the time block; today it writes the
-  run alone (`:508-524`). `jobs` is new to `Settings`
-  (`xtask/src/report.rs:237-250`), and `parse` reads `time_runs` where today it
-  reads one setting (`xtask/src/ratchet.rs:613-618`). `corpus.yml` greps the
-  run's `time` line in each bar's step.
-- **MS-07.4** copies each report's `summary.time` objects into the bars whole,
-  in dispatch order, with `time.total`, the fifth run's `slowest`, and
-  `time_runs` from the reports' `settings` and `host`, and records in
-  `docs/verification.md` the five ids, the revision, each run's host and the
-  bands `the_committed_bars_parse` prints. "Each of the five runs passes the
-  bars they set" is read from the bars, since the runs come before them, and
-  holds by the rule. The five runs' own `--check` fails whatever their times:
-  all three bars fail on seven regressions in run 40129716194
-  (`docs/roadmap/MS.md:376-380`), so MS-07.4 reads the time figures alone, and
-  the regressions are MS-11.6's to make rows of.
-- **MS-07.5**'s "is green" needs every check red in run 40129716194 green
-  first — the census step's five failing tests and the bars' seven
-  regressions — so it waits on the rows MS-11.6 makes of them as well as on
-  MS-07.4.
-
-Each rule a build step adds is put back broken at least once and the count of
-tests that fire is recorded: a span that holds the lookup, a percentile over
-files, the band's factor and its floor, each refusal and each denominator.
-
 ### Risks
 
 | Risk | Mitigation |
 | --- | --- |
-| A child's neighbours move its spans | Four single-threaded children on four logical CPUs; the job count is in `time_runs` and a run at another is refused; the five runs' spread measures the rest, which between run 40129716194's two bars on one binary was 0.3 % to 6.3 % of a corpus's summed `millis` |
+| A child's neighbours move its spans | Four single-threaded children on four logical CPUs; the job count is in `time_runs` and a run at another is refused; the five runs' spread measures the rest |
 | `ubuntu-latest` is a fleet, and five runs may land on one group of it | The fastest of five is the figure, and the band is 2.295 times the spread and never under 20 %; each run's host is recorded beside its id |
 | Five runs read a spread below what fifteen would | The 1.53 the bench measured for tripling its sample; a band that fails on unchanged code is a finding, re-measured over five more runs and never widened by hand |
 | A run that times fewer files or pages reads as a faster one | Files and pages timed are held to the fewest of the five; a killed child's spans are dropped, and its timeout is already the pass rate's regression |
 | One run's figure ratchets the bar onto a fast host | Only five runs set figures; `--record` carries them and writes none; a faster figure is a note |
 | A re-pinned corpus, a new runner size or another dpi changes what is measured | Each is refused by name — `time.total`, `time_runs.jobs`, `time_runs.dpi` — until five runs re-measure, so a re-pin costs five runs before the job is green again |
 | A P row's speed-up leaves its corpora's bands slack | The bar is a backstop against the catastrophic; re-measuring is five more runs under H-03, never `--record`; MS-02's floors are what a speed-up raises |
-| The clocks cost the child time | Two clock reads and one line a page; MS-07.2 times it in release and in debug before its tests |
+| The clocks cost the child time | Two clock reads and one line a page |
 | A probe that starts using threads changes what neighbours cost | The engine spawns none, and P-15's pool will run serially unless asked; a row that gives the probe threads re-measures the time block |
 | A corpus's percentiles are one long document's | Said above for verapdf; the report keeps each file's sum and slowest page, so a moved percentile is followed to its file |
 | A zero figure bands nothing | `parse` refuses one over files or pages that were timed |
-
-## P-01 — Page index
-
-Owed. P-01.1 writes it: the lookup order, the descent and what it checks, the
-flat index and its life beside the object store, the editor's indexed lookups,
-and A1's and A2's counted quantities in this tally.
-
-## P-02 — Resolved-resource cache
-
-Owed. P-02.1 writes it: what one scope resolves once and under which key, what
-a hit reports again, A3's counted quantity, and each relation's path.
-
-## P-03 — A decoded-stream cache per operation, and deduplication on encoded bytes
-
-Owed. P-03.1 writes it: the operation-scoped decoded-stream cache, the
-deduplication bucket key and its confirmation, both outcomes of H-137, A5's and
-A6's counted quantities and MS-05's merge band. P-03.5 adds the measurements
-H-137 is priced on.
-
-## P-04 — PNG and deflate
-
-Owed. P-04.1 writes it: the encoder's two levels, the match finder, the
-streaming interface, the PNG writer's one pass, and A8's scratch bound.
-
-## P-06 — Glyph coverage cache
-
-Owed. P-06.1 writes it: the glyph-mask key, which glyphs take the cache, the
-blit, the byte bound and its eviction order, and A4's counts on the 5 600-glyph
-page.
-
-## P-16 — Caches with byte budgets and a caller memory budget
-
-Owed. P-16.1 writes it: one document-scoped cache of typed entries, each
-charged its bytes; `CacheLimits` and where a caller states it; the eviction
-order; reduced-resolution decode in place of abort; and how MS-05 reads
-resident memory against a stated budget.
-
-## P-17 — Incremental reparse and dirty-region re-render
-
-Owed. P-17.1 writes it: the update section written without the original's
-bytes, a reopen that keeps the base's work, the facade's edit, save and reopen
-call, and the changed rectangle an annotation edit gives.
-
-## P-24 — Search over prebuilt text
-
-Owed. P-24.2 writes it: where a `TextPage` keeps its folded forms and their
-offset tables, when a form is built, the boundary cache and the matcher.
-
-## P-25 — Transparency groups and soft masks
-
-Owed. P-25.1 writes it: a group's backdrop and a knockout group's initial state
-without the copies kept beside its buffer, a soft mask's outside value, what
-the guard counts as a group-buffer pixel, and the opaque fast path's reach into
-group buffers.
