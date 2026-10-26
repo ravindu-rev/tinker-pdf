@@ -10,8 +10,8 @@ ExtGStates, patterns, links, outlines) and nothing speculative.
 
 ## What it does
 
-**From HTML and CSS** (tier 5's formats row). The builder itself still
-places only what a caller positioned; `tinker_pdf::FromHtml`, implemented for
+**From HTML and CSS.** The builder itself places only what a caller
+positioned; `tinker_pdf::FromHtml`, implemented for
 it in the facade, is the one constructor that composes. With the trait in
 scope, `DocumentBuilder::from_html(markup, stylesheet, PageBox)` reads the
 markup into the EPUB reader's tree — as XML, and when it is not XML by HTML's
@@ -64,13 +64,12 @@ its own position along one baseline, as **one** text object, moving between
 them with `Td` — what a mark drawn back over its letter, and the glyph after
 it, need to stay one line to a reader that ends a line where a text object
 ends. A piece is `PieceText::Codes`, `PieceText::Glyphs` (written at a word
-spacing of zero) or, since October 2026, `PieceText::UnspacedCodes`: codes in
+spacing of zero) or `PieceText::UnspacedCodes`: codes in
 a simple font whose code 32 is a character and not a word space, such as a
 `/Differences` font from 32, written at a word spacing of zero too, since
 9.3.3 applies `Tw` to every single-byte code 32 whatever it draws (the EPUB
-writer's overflow font). `PieceText` is not `#[non_exhaustive]`, so a `match`
-on it outside this repository has a third arm to add. `glyph_run` on the
-builder records which glyphs a document draws, so that `set_subset_fonts`
+writer's overflow font). `PieceText` is not `#[non_exhaustive]`. `glyph_run`
+on the builder records which glyphs a document draws, so that `set_subset_fonts`
 can embed only those.
 
 **Fonts.** `add_base_font` names one of the standard 14; `add_named_font`
@@ -107,8 +106,7 @@ profile serves a page's operators and its pictures alike; an image whose
 its rows would be the wrong width. The image's
 `/ColorSpace` is a reference to the space's own array, not the resource name:
 Table 89 makes it a colour space, and only a content stream's `cs` looks a
-name up in `/Resources` (8.6.3). The name was written until September 2026,
-and this reader drew those samples as grey.
+name up in `/Resources` (8.6.3).
 
 **CIE-based spaces.** `add_cie_color_space(resource, &CieSpace)` registers a
 `/CalGray`, `/CalRGB` or `/Lab` array (ISO 32000-1 8.6.5.2–8.6.5.4) as an
@@ -138,12 +136,7 @@ a CIE-based space is device-independent, and 6.2.3.3 is about device colour.
 `ImageSpace` is the space written — and holds what the renderer draws to the
 clauses' arithmetic, computed in the test: neutral colours to IEC 61966-2-1's
 transfer of `Y`, and a chromatic `/Lab` colour through the published
-Bradford-adapted sRGB matrix for a D50 white. Two reader defects were found on
-the way and fixed with it: a `/Lab` image with no `/Decode` read its samples
-as fractions of one rather than Table 90's `0..100` and `/Range`, so it was all
-but black; and a `/ColorSpace` resource named `/G`, `/RGB` or `/CMYK` was
-read as the inline-image abbreviation for the device space it spells, so a
-`/CalGray` registered as `/G` was drawn in DeviceGray.
+Bradford-adapted sRGB matrix for a D50 white.
 
 **Spot colours.** `add_separation_color_space(resource, colorant, alternate,
 &tint)` registers `[/Separation /colorant /Alternate tint]` (8.6.6.4) and
@@ -161,8 +154,7 @@ another count writes outputs nobody meant. A type 0 sampled function,
 `Function::Sampled` — sixteen-bit samples and 7.10.2's multilinear
 interpolation — is offered too, of any number of inputs: it is how XPS writes
 a gradient blended in linear light and an `nCLR` profile's `/DeviceN` tint
-transform. It was not offered while this reader evaluated a table along its
-first input only, which it no longer does (3 October 2026). `DeviceNAttributes`
+transform. `DeviceNAttributes`
 writes Table 71's `/Colorants` from separations registered earlier.
 Colorant names are unique but for `/None`, at most 32 (Annex C), and never
 `/All`, which 8.6.6.5 reserves for a `/Separation`.
@@ -201,10 +193,7 @@ was never added — a typo is a `false`, never a dangling `/Resources` entry.
 **A resource name may be any bytes.** Every operator that names one — `Tf`,
 `Do`, `gs`, `sh`, `cs`/`CS` and the pattern `scn`/`SCN` — writes it through
 the same 7.3.5 escaper the dictionary keys go through, so a delimiter, white
-space, `#` or a byte outside `!`..`~` is a `#xx` escape on both sides. Until
-September 2026 the content-stream side wrote the bytes raw: `form(b"Fm B")`
-wrote `/Fm B Do`, which is the name `/Fm` and a stray operand, and the page
-drew nothing while its `/Resources` held the form under the whole name.
+space, `#` or a byte outside `!`..`~` is a `#xx` escape on both sides.
 
 **Layers.** `add_layer(name, visible)` writes an optional content group
 (8.11.2.1) and returns a `LayerId`; `optional(layer, |page| ...)` draws
@@ -252,9 +241,7 @@ Its values and the outline's titles are text strings, written by
 `encode_text_string` for the version the document declares
 ([document-model](document-model.md)): PDFDocEncoding where it carries the
 text, UTF-16BE where it does not, and UTF-8 instead of UTF-16BE in a
-document made with `DocumentBuilder::with_version(2, 0)` or later. They were
-written as bare UTF-8 bytes until September 2026, which 7.9.2.2 has every
-reader decode as PDFDocEncoding — "Ä" read back as "Ã—", in this engine too.
+document made with `DocumentBuilder::with_version(2, 0)` or later.
 
 **Version.** `DocumentBuilder::new()` declares 1.7; `with_version(major,
 minor)` declares another, fixed at construction because text is encoded for
@@ -312,17 +299,14 @@ let pdf = b.finish();
 `ImageData` and `Target` are `#[non_exhaustive]`: the next shape is an
 addition, not a break.
 
-**`ImageData::Compressed` is constructible from outside the workspace**, which
-it was not: the enum crossed the facade and its payload did not, so the variant
-was documented and unreachable — a shape worse than an absent one, because it
-reads as a capability. `CompressedImage`, `ImageColorSpace`, `ImageFilter`,
-`SoftMask` and `CcittParams` are re-exported now. The fifth is the one a grep
-over the writer's own names does not find: `ImageFilter::CcittFax` carries
-7.4.6's parameters as the *filters* crate's struct rather than a second
-spelling of `/K`, so without it that variant could be neither built nor matched
-on. The doctest on the re-export names all five through the facade and nothing
-else, so deleting any one of them fails `cargo test --doc` rather than quietly
-reopening the gap.
+**`ImageData::Compressed` is constructible from outside the workspace**:
+`CompressedImage`, `ImageColorSpace`, `ImageFilter`, `SoftMask` and
+`CcittParams` are re-exported. The fifth is the one a grep over the writer's
+own names does not find: `ImageFilter::CcittFax` carries 7.4.6's parameters
+as the *filters* crate's struct rather than a second spelling of `/K`, so
+without it that variant could be neither built nor matched on. The doctest
+on the re-export names all five through the facade and nothing else, so
+deleting any one of them fails `cargo test --doc`.
 
 **`ImageFilter::Jpx` places a JPEG 2000 file as `/JPXDecode`**, bare
 codestream or JP2 alike (7.4.9), and it is the one filter whose image
@@ -332,8 +316,7 @@ makes both optional for it alone, the codestream states both, and a
 `CompressedImage` fields are still filled in and checked — as a description
 of what a decode produces — and are not written; a colour-key mask with it is
 refused, having no stated depth to be ranges over. `ImageFilter` is not
-`#[non_exhaustive]`, so the variant was a break, and the workspace's one
-exhaustive match on it (the writer's own `/Filter` name) took the arm.
+`#[non_exhaustive]`.
 
 **The archival profile.** `DocumentBuilder::archival` takes an ISO 19005
 profile and turns this whole surface into one that says no: the standard 14,
@@ -367,7 +350,7 @@ Other parts record `ArchivalRefusal::AssociatedFile`. A structure element
 holding nothing but an associated file is kept, as one holding any other
 property is.
 
-Four more holders, October 2026, each from the Arlington model's list.
+Four more holders, each from the Arlington model's list.
 `PageBuilder::associate_file_with_link(index, file)` gives the page's
 `index`th accepted link its `/AF`; `DocumentBuilder::add_form_with_files`
 is `add_form` with an `/AF` on the form, refusing the whole registration
@@ -380,7 +363,7 @@ have. `PageBuilder::with_associated_files(files, draw)` draws a
 marked-content sequence associated with files: `/AF /AFn BDC … EMC` with a
 direct `<< /MCAF [...] >>` under `/Properties /AFn`, the shape of the
 errata's 14.13.5 EXAMPLE (Table 409a), nesting with structure elements and
-layers as `optional` does — the two now share one writer, byte for byte —
+layers as `optional` does — the two share one writer, byte for byte —
 and writing nothing for a closure that drew nothing. Where the document may
 not carry associated files, or a file is refused, the closure still draws,
 outside any `/AF` sequence, and the call answers `false`
@@ -390,10 +373,10 @@ outside any `/AF` sequence, and the call answers `false`
 
 | What | How it shows | Why | See |
 | --- | --- | --- | --- |
-| Any image encoder but deflate | `Rgb8`/`Gray8` are deflated; JPEG and PNG-IDAT pass through; nothing is encoded to JPEG, CCITT, JBIG2 or JPX | **The reason has now changed twice and the refusal has not.** It used to be "the engine decodes those codecs; it does not write them"; on 15 September 2026 `tinker-pdf-filters` gained CCITT G4 and JBIG2 generic regions, and on 16 September a baseline JPEG encoder, so three of the four codecs named here have a writer in the leaf crate and this builder calls none of them. What is missing is not a coder. It is the decision of *when* a raster is better off lossy, or as a fax coding, than as deflate — and, per codec, the framing: for JBIG2 D.3's embedded-stream assembly, which the filter crate deliberately does not write, and for JPEG the `/DCTDecode` XObject's own colour and `/Decode` agreement. JPX has no encoder at all | [filters](filters.md), [ROADMAP](../ROADMAP.md) |
+| Any image encoder but deflate | `Rgb8`/`Gray8` are deflated; JPEG and PNG-IDAT pass through; nothing is encoded to JPEG, CCITT, JBIG2 or JPX | `tinker-pdf-filters` has CCITT G4, JBIG2 generic-region and baseline JPEG encoders, and this builder calls none of them. What is missing is not a coder. It is the decision of *when* a raster is better off lossy, or as a fax coding, than as deflate — and, per codec, the framing: for JBIG2 D.3's embedded-stream assembly, which the filter crate deliberately does not write, and for JPEG the `/DCTDecode` XObject's own colour and `/Decode` agreement. JPX has no encoder at all | [filters](filters.md), [ROADMAP](../ROADMAP.md) |
 | Text shaping in `text` and `glyphs` | `text` is one byte per character; `glyphs` takes glyph indices the caller positioned | neither runs GSUB or GPOS: `glyph_run` is the shaped entry point, through `tinker-pdf-shape`, and shaped text in one call is a roadmap row | [fonts](fonts.md), [design/shaping.md](../design/shaping.md), [ROADMAP](../ROADMAP.md) ED-45 |
 | A `Target::Uri` outside 7-bit ASCII | `link` returns `false` | 12.6.4.7's `/URI` is ASCII; an unwritable target writes nothing rather than a plausible-and-wrong action | [ROADMAP](../ROADMAP.md) ED-47 |
-| Layout on the builder's own methods | none — positions are the caller's | a programmatic layout API is [ROADMAP](../ROADMAP.md) ED-44 since 9 October 2026; [epub](epub.md)'s layout engine is a *consumer* of this API, and `FromHtml` is where a caller reaches it: a constructor in the facade, because ruling 8 keeps the layout engine out of `tinker-pdf-cos` | — |
+| Layout on the builder's own methods | none — positions are the caller's | a programmatic layout API is [ROADMAP](../ROADMAP.md) ED-44; [epub](epub.md)'s layout engine is a *consumer* of this API, and `FromHtml` is where a caller reaches it: a constructor in the facade, because ruling 8 keeps the layout engine out of `tinker-pdf-cos` | — |
 | A cascade or layout cap spent | `HtmlError::{StyleRefused, LayoutRefused}` | a book keeps the page as a placeholder; a creation call has no page count to keep, so it is refused by which half refused it | [epub](epub.md) |
 | Everything an `ArchivalProfile` forbids | the call returns `false` and pushes a typed `ArchivalRefusal` naming its clause; `finish_archival` returns `Err` for what only a finished document can be judged on | a builder that emitted what the validator rejects would make the validator the last line of defence rather than the second | [pdfa](pdfa.md) |
 
@@ -428,8 +411,8 @@ outside any `/AF` sequence, and the call answers `false`
 - `crates/tinker-pdf/tests/html_creation.rs` holds `from_html` **by the EPUB
   reftests**, two ways: a document made from markup and a stylesheet renders
   pixel for pixel to the EPUB whose chapter is the same markup with the sheet
-  linked first, at two page boxes and over two pages; and nine of
-  `epub_reftest.rs`'s pairs — the `margin`, `padding` and `border` shorthands
+  linked first, at two page boxes and over two pages; and pairs from
+  `epub_reftest.rs` — the `margin`, `padding` and `border` shorthands
   against their longhands, `1.5em` against `24px`, `50%` against `120px`, an
   implied row group, `display: block`, a collapsed margin pair and padding
   against border — are laid out through `from_html` and read back out of the
@@ -437,9 +420,9 @@ outside any `/AF` sequence, and the call answers `false`
   agree. Beside them: the caller's sheet ahead of the document's and
   `!important` beating it, the page box and margin, an unusable box and margin
   named, a cascade cap refused as `StyleRefused` — the markup's element count,
-  and the caller's own sheet past its rule or byte cap, which before the
-  lane's review was dropped with no warning — and a provider answering a
-  `<link>`. `hostile_input.rs` runs `from_html` over its damaged markup.
+  and the caller's own sheet past its rule or byte cap — and a provider
+  answering a `<link>`. `hostile_input.rs` runs `from_html` over its damaged
+  markup.
 - `crates/tinker-pdf/tests/png_passthrough.rs` asserts a PNG's IDAT reaches
   the page untouched and decodes identically.
 - `crates/tinker-pdf-cos/tests/page_operations.rs` covers embedded and
@@ -448,7 +431,7 @@ outside any `/AF` sequence, and the call answers `false`
   (`a_subset_font_name_carries_its_tag`), by `/Length1` describing the
   subset rather than the original, and by the same document subsetting to
   the same bytes.
-- Three determinism byte-hashes pin builder output: a synthesised PDF, a
+- Determinism byte-hashes pin builder output: a synthesised PDF, a
   synthesised fixed document and a synthesised book hash as *bytes*
   ([determinism](determinism.md)), so object numbering, key order and
   stream framing cannot drift silently.

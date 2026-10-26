@@ -21,9 +21,7 @@ filled and then read back returns the filled value, not the saved one);
 `put`, `put_stream` and `delete` write; `intern` turns bytes into a `Name`
 through the document's name table. `stream_bytes` reads a stream as the
 editor has it, decoded — including a stream copied in by `import_page`,
-which keeps the file's `/Filter` and was handed back still compressed until
-September 2026, so `append_content` on an imported page spliced deflate
-output into it as operators.
+which keeps the file's `/Filter`.
 
 **Every read of the editor's own state goes through the overlay.** The
 editor implements `Resolve` — the trait `CosDocument` implements too, with
@@ -34,13 +32,10 @@ behind an appearance, and `trees::name_tree_in` / `number_tree_in` /
 `/Fields` is a field before anything is saved, and `fill_field` fills and
 draws it. `catalog()` is the catalog as the editor has it and
 `update_catalog(|catalog| ...)` is the one door every catalog edit goes
-through, so two compose; before it, `/NeedAppearances`' clean-up read the
-*file's* catalog and wrote it back over every earlier change to it, and a
-certifying save's `/Perms /DocMDP` was made after the update's object set
-had been taken and never reached the file. `add_name_tree` and
+through, so two compose. `add_name_tree` and
 `add_number_tree` write a 7.9.6 / 7.9.7 tree as new objects and return its
 root ([document model](document-model.md)). `add_named_destination(name,
-page, view)` is the first caller: it rewrites the catalog's `/Names /Dests`
+page, view)` rewrites the catalog's `/Names /Dests`
 tree with every entry the old one held plus the new one — a `/Names` that is
 an indirect object is replaced at its own number, a direct one through
 `update_catalog` — and refuses a name the tree already holds.
@@ -63,10 +58,8 @@ out, and an incremental update writes it as null, because a reader that
 merges each revision's trailer with the ones before it — this crate's does —
 would otherwise find the earlier revision's value and bring it back.
 `set_info(key, value)` is the use it exists for: an existing
-`/Info` is updated where it is, and a document with none gets one, which
-until September 2026 no save could name — `save` wrote the document's own
-trailer and nothing else. The value is a text string, encoded as the
-builder's `set_info` encodes it.
+`/Info` is updated where it is, and a document with none gets one. The
+value is a text string, encoded as the builder's `set_info` encodes it.
 
 **A view as a document.** `view()` returns an `Arc<CosDocument>` in which
 everything the editor has done resolves — objects put or allocated, streams
@@ -88,8 +81,8 @@ through `PageResources`.
 
 **Page surgery** (7.7.3). `delete_page`, `move_page`, `rotate_page` (any
 multiple of 90, stored as `/Rotate`; any other turn is refused and changes
-nothing, where it used to be rounded to the nearest quarter —
-`a_turn_that_is_not_a_quarter_is_refused_and_changes_nothing`), `set_crop_box` (14.11.2, written as the
+nothing — `a_turn_that_is_not_a_quarter_is_refused_and_changes_nothing`),
+`set_crop_box` (14.11.2, written as the
 caller states it and never clipped here — 14.11.2 lets a crop box and a media
 box disagree and the *reader* reconciles them; a rectangle of no area is
 refused), `insert_page` (a blank page of the
@@ -161,8 +154,8 @@ it was.
   every entry the type models is written as stated, a `None` removed, and a key
   it does not model kept where it was.
 
-**`/Info` and XMP are not kept in step, and that is decided rather than
-drifted into.** Keeping them in step means parsing a packet and rewriting part
+**`/Info` and XMP are not kept in step.** Keeping them in step means parsing
+a packet and rewriting part
 of it, and `tinker-pdf-cos` neither parses nor rewrites XML — it has no edge to
 `tinker-pdf-xml`, for the reason `xmp_metadata`'s own documentation gives —
 while deriving `/Info` from a caller's packet would be a second, smaller XMP
@@ -226,8 +219,7 @@ it is a field first.
 removed is a reference removed; an object only removed entries reached is
 deleted, and one anything else still reaches is not — reached through the
 pending page order too, since a page `import_page` or `insert_page` added is
-written into `/Kids` only by a save, and a walk that missed it once deleted an
-imported page's content and fonts when its link's `/P` led there. So a script and its
+written into `/Kids` only by a save. So a script and its
 `/JS` stream go, the page a removed action's `/Next` pointed at stays, and no
 reference is left dangling. An orphan the file carries — a script object
 nothing names, an embedded file stream, a metadata stream — is found by what
@@ -292,21 +284,18 @@ declined exactly as an unknown one is — and declining them is not a
 ruling: `Text`'s `/Name` icon is the reader's (12.5.6.4) exactly as a
 stamp's, a file attachment's and a sound's are (12.5.6.12, .15, .16), and
 `Text` is drawn, as an invented sticky note, so whether those three get
-invented icons too is owed to the owner (the ROADMAP's Editing row (d)).
-The first seven — `Highlight`, `Underline`, `StrikeOut`, `Square`,
-`Circle`, `Text` and `Link` (which draws none: 12.5.6.5's convention is no
-border) — are drawn byte for byte as they were before any other was added
-**for a dictionary that carries none of the entries they did not read
-before** — `/CA`, `/ca`, `/RD`, a `/BS /S /D` or a `/Border` dash — and
-none that is malformed: `the_seven_first_subtypes_are_drawn_exactly_as_they_were`
-pins the dictionaries the editor's own constructors make, which carry
-none. With one of those entries they draw what it says — under `/CA` an
+invented icons too is open ([ROADMAP](../ROADMAP.md) AN-02).
+`Highlight`, `Underline`, `StrikeOut`, `Square`, `Circle`, `Text` and `Link`
+(which draws none: 12.5.6.5's convention is no border) are pinned byte for
+byte for the dictionaries the editor's own constructors make, which carry
+none of `/CA`, `/ca`, `/RD`, a `/BS /S /D` or a `/Border` dash
+(`the_seven_first_subtypes_are_drawn_exactly_as_they_were`). With one of
+those entries they draw what it says — under `/CA` an
 underline is preceded by `/GS0 gs` and gains an `ExtGState`, and a square
 with `/RD [5 4 3 2]` is drawn at `16 23 90 32` rather than `11 21 98 38`
 (`the_first_seven_draw_what_an_entry_they_did_not_read_says`) — and with
-a malformed entry, one they read before included, they are declined, as
-every subtype is (below). Since October
-2026 a **`Line`** (12.5.6.7) is drawn too: `/L` in `/C` at the `/BS` width
+a malformed entry they are declined, as every subtype is (below). A
+**`Line`** (12.5.6.7) is drawn as `/L` in `/C` at the `/BS` width
 and dash, Table 176's ten endings filled with `/IC`, and Figure 60's leader
 lines from `/LL`, `/LLE` and `/LLO`; the endings go at the ends of the line
 proper, which the leader lines lift off `/L`, and with no leader lines `/LLO`
@@ -314,7 +303,7 @@ proper, which the leader lines lift off `/L`, and with no leader lines `/LLO`
 not its size; each is drawn three line widths (at least three points) from
 its point, so a square ending is six widths across and an arrowhead six
 widths long. An absent `/C` strokes a line-like annotation black, as
-`Underline` always has; an empty one is 12.5.2's "transparent". A
+`Underline` does; an empty one is 12.5.2's "transparent". A
 **`Square`** or **`Circle`** (12.5.6.8) is drawn inside Table 177's `/RD`
 when it has one — the left, top, right and bottom differences between
 `/Rect` and the shape, each at least zero and together leaving the shape a
@@ -335,10 +324,9 @@ same fourteen operators however long it is, where a loop over teeth would let
 eight numbers — a quad a kilometre long on a point of text — ask for a
 million. The lines are diagonal in the quad's frame rather than straight
 under a shear because a renderer that strokes in device space with one
-scale for the width squares a sheared dash back into a vertical bar — which
-this engine's did until October 2026, a defect [rendering](rendering.md)
-records as fixed; the squiggly keeps the construction that stays clear of
-it, which is right under either reading and under other renderers too. A **`Caret`** (12.5.6.11) is the typographic caret, filled in `/C`
+scale for the width squares a sheared dash back into a vertical bar; the
+diagonal construction stays clear of that under either reading and under
+other renderers too. A **`Caret`** (12.5.6.11) is the typographic caret, filled in `/C`
 (black when absent) inside `/Rect` less Table 180's `/RD`: a spike from the
 middle of the bottom edge to the middle of the top, its sides cubics bowed
 in from the bottom corners. 12.5.6.11 names the symbol and not its outline,
@@ -398,11 +386,7 @@ negative or non-finite element, or every one zero) or a `/BS /S` Table 166
 does not name; an `/LE` that is not names Table 176 lists; a negative
 `/LLE` or `/LLO`; a `/CA`, `/ca`, `/LL` that is not a number; a `/Q` other
 than 0, 1 or 2; a negative `/DA` size — declines the appearance rather than
-being read past (`a_malformed_entry_declines_the_appearance`). Until the
-October 2026 review a bad element was dropped and the rest re-paired, so
-`/L [10 (x) 50 90 50]` drew a line from (10, 50) to (90, 50) that is
-nowhere in the data, and an unlisted ending, a refused dash and a forbidden
-`/RD` were each drawn as something the producer did not write. Declining
+being read past (`a_malformed_entry_declines_the_appearance`). Declining
 repairs nothing, so it is not a leniency with a warning to emit; the
 annotation is left as it came, as one of an unknown subtype is. Constructors for the common
 shapes live in `tinker_pdf_cos::annot`: `highlight(doc, quads, color)`, `square(doc, rect,
@@ -435,41 +419,35 @@ pen walks text-space y by `/W2`'s `w1` (signed, and with no horizontal scale
 in it), the glyph box is the horizontal one stood on end where the
 position vector puts the glyph — `-v_x` to `w0 - v_x` across, and along the
 column the glyph's cell joined with the default cell measured from its
-horizontal origin `v_y` below the pen, where the interpreter draws it (until
-October 2026 `v_y` was not read, and a glyph whose `/W2` moved it off the
-cell below the pen was measured where it was not drawn) — and a `TJ`
-number or a removed glyph's gap displaces along y in thousandths of `Tfs`
-alone. Until September 2026 a vertical run was left whole as `VerticalRun`,
-and before that it was cut as if it were horizontal (`redact.rs`'s
-`vertical_runs` module, against an `Identity-V` font whose `/W2` gives one
-glyph a different advance, so a gap of the wrong length moves every glyph
-after it). A **Type 3** run is measured in the font's own glyph space
+horizontal origin `v_y` below the pen, where the interpreter draws it — and
+a `TJ` number or a removed glyph's gap displaces along y in thousandths of
+`Tfs` alone (`redact.rs`'s `vertical_runs` module, against an `Identity-V`
+font whose `/W2` gives one glyph a different advance, so a gap of the wrong
+length would move every glyph after it). A **Type 3** run is measured in the
+font's own glyph space
 (9.6.5): the advance is the horizontal component of the width carried
 through `/FontMatrix` (`w0 · a`, what the interpreter advances by), and the
 glyph box is a glyph-space rectangle — `0` to `w0` along, the `/FontBBox`
 height joined with one em across — carried through all six numbers of the
 matrix, so a scaled, skewed, rotated or translated glyph space is cut where
-its procedures draw. Until September 2026 any matrix but the 1/1000 default
-was left whole as `RescaledType3Font` (`type3_glyph_space`, where the skewed
-and rotated fixtures each name the neighbour an upright box would have cut).
+its procedures draw (`type3_glyph_space`, where the skewed and rotated
+fixtures each name the neighbour an upright box would cut).
 A glyph
 the rectangle covers only *partly* is removed, because a content stream can
 show a glyph or not show it and only one of those two can leak. The page is
 read **as the editor has it** — its place in the editor's page order, its
 content as the editor now holds it, and `/Resources` inherited through the
-page tree when the page has none (7.7.3.4). Until September 2026 it was read
-out of the file, which made a second redaction of a page put back what the
-first had removed, redacted the file's page *n* when the editor had moved
-pages, and silently skipped every form and image on a page whose resources
-were inherited (`redact.rs`'s `editor_reads` module, one test each). Its
-**fonts** are read through the editor too, since October 2026: every object a
+page tree when the page has none (7.7.3.4; `redact.rs`'s `editor_reads`
+module: a second redaction of a page, a moved page and inherited resources,
+one test each). Its
+**fonts** are read through the editor too: every object a
 font reaches — dictionary, descriptor, widths, encoding, CMaps, a Type 3
 face's procedures and resources — through `cos::font::from_resources_in`, the
-font loader made generic over `Resolve`, so a run in a font only the editor
+font loader generic over `Resolve`, so a run in a font only the editor
 holds (a page `import_page` copied in, a font object a caller wrote) is
 measured and cut rather than left whole as `UnknownFont`
 (`a_run_in_a_font_only_the_editor_holds_is_cut`). What
-redaction cannot **measure** it still leaves whole and names in
+redaction cannot **measure** it leaves whole and names in
 `RedactionReport::warnings` — two of that type's six classes, in the
 refusal table below; the third is the form placement one further down, the
 fourth a stream of more XObjects than one stream's walk follows, the
@@ -483,16 +461,13 @@ Form XObjects are rewritten recursively, each
 resolving names against its own `/Resources` (8.10.1), because forms are how
 most producers place repeated content and a redaction driven straight
 through one would leave the secret in the form — to at least the sixteen
-levels of nesting the interpreter draws (until October 2026 the walk
-stopped at thirteen, and text fourteen to sixteen forms down was drawn and
-never measured: `text_as_deep_in_forms_as_the_renderer_draws_is_redacted`,
-and `the_renderer_draws_no_deeper_than_the_walk_measures`, which pins the
+levels of nesting the interpreter draws
+(`text_as_deep_in_forms_as_the_renderer_draws_is_redacted`, and
+`the_renderer_draws_no_deeper_than_the_walk_measures`, which pins the
 two limits together). A rewritten form is written
 back as plain operators with the encoding keys of its dictionary dropped
-(`/Filter`, `/DecodeParms`, `/DL` and the external-file keys): until
-September 2026 a compressed form kept `/Filter /FlateDecode` over bytes that
-were never deflated, and the saved form drew nothing at all
-(`a_compressed_form_is_written_back_as_a_stream_that_decodes`, which holds
+(`/Filter`, `/DecodeParms`, `/DL` and the external-file keys;
+`a_compressed_form_is_written_back_as_a_stream_that_decodes`, which holds
 the saved file to the strict validator). A form drawn at several placements
 is **cut exactly at each**: every placement is measured against the form as
 it was, and each distinct outcome gets a stream of its own — a copy of the
@@ -511,31 +486,25 @@ draws it does it take the first placement's outcome, so it is never left in
 the file holding covered text with nothing drawing it. Drawn rather than
 named, because one `/Resources` shared by every page names every form, and
 counting that would leave exactly such a stream behind. That read is made
-once per redaction, and only when such a form arises; until October 2026 it
-was not made at all, and a page sharing the form lost what the redacted
-page's rectangles covered (`redact.rs`'s `forms_elsewhere`, a page two that
+once per redaction, and only when such a form arises (`redact.rs`'s
+`forms_elsewhere`, a page two that
 draws the form directly, through a form of its own, as an annotation's
 appearance and from a glyph procedure, and one whose resources only name
 it). The read follows a form again when it meets it shallower than before,
-since one met past the depth the read stops at was read for nothing — until
-October 2026 the first meeting was the only one, and a form page two drew
-both deep and shallow was not followed into (`a_form_met_deep_and_then_shallow_on_another_page_is_read`).
-A form cut the old way (below) is cut in place for everything that draws
+since one met past the depth the read stops at was read for nothing
+(`a_form_met_deep_and_then_shallow_on_another_page_is_read`).
+A form cut in place (below) is cut for everything that draws
 it, so when something else does, the widened cut is named `RepeatedForm`
-even at one placement here (`a_form_cut_in_place_that_another_page_draws_is_named`;
-until October 2026 it was named only for a form placed twice here). The
+even at one placement here (`a_form_cut_in_place_that_another_page_draws_is_named`). The
 guard that stops a self-referential form recursing is keyed by the transform
 as well as by the object — bitwise and not by tolerance, because two
 transforms an ulp apart are two placements and calling them one is a
 decision not to cut — and what bounds the walk is a cap on placements per
-form (`MAX_PLACEMENTS`) rather than any comparison of floats. This is the
-third form of this answer in September 2026: first the guard was keyed by
-the object alone and only the first placement was measured (a silent
-under-redaction reporting `glyphs: 0`); then every placement was cut in the
-one stream they share and `RedactionWarning::RepeatedForm` named the widened
-cut; now `RepeatedForm` is raised only for the two kinds of form that still
-go that way, with everything they draw — one that draws itself, directly or
-through another, and one placed past the cap (`a_form_whose_placements_are_cut_differently_is_cut_exactly_at_each`,
+form (`MAX_PLACEMENTS`) rather than any comparison of floats. A form that
+draws itself, directly or through another, and one placed past the cap are
+cut in place instead, every placement in the one stream they share, with
+everything they draw, and `RedactionWarning::RepeatedForm` names the
+widened cut (`a_form_whose_placements_are_cut_differently_is_cut_exactly_at_each`,
 and the tests beside it in `redact.rs`'s `tests`). The subsetter walks the
 editor's view, where the copies resolve, so a glyph drawn only in a copy
 stays in the program (`subset.rs`'s `redacted_copies`). An image a
@@ -543,15 +512,11 @@ redaction touches is scrubbed whole to a blank sample: cutting a hole would mean
 editing and re-encoding through a codec this build may have no encoder for,
 and leaving the rest is not a redaction — an inline image (8.9.7) as much as
 an XObject, and a stencil mask to a stencil sample that paints nothing. An
-inline image the rectangles do not touch is written back byte for byte:
-until September 2026 the rewrite tokenized its samples like the rest of the
-stream and wrote back whatever tokens they spelled, corrupting every inline
-image on a redacted page and scrubbing none (`an_inline_image_is_carried_through_a_rewrite_byte_for_byte`,
+inline image the rectangles do not touch is written back byte for byte
+(`an_inline_image_is_carried_through_a_rewrite_byte_for_byte`,
 `an_inline_image_under_a_redaction_is_scrubbed`). One a **form** or an
-appearance draws is scrubbed the same way: until October 2026 a form's cut
-was written back only when it removed a glyph, so an inline image a form drew
-once, or drew at placements every one of which a rectangle covered, kept its
-samples and its ink, and the report said `images: 0` (`an_inline_image_a_form_draws_under_a_redaction_is_scrubbed`).
+appearance draws is scrubbed the same way
+(`an_inline_image_a_form_draws_under_a_redaction_is_scrubbed`).
 An image already blank is not counted again. An **annotation's
 appearance** (12.5.5) is a form the page draws over itself, and is cut as
 one: every appearance an annotation on the page can show — each of `/N`,
@@ -561,9 +526,8 @@ draws it with, the `/BBox` carried through the form's `/Matrix` and fitted
 onto `/Rect`. One annotation's appearance is cut in place; one that
 annotations share and that is covered under one of them gives that one a
 copy, through an `/AP` of its own, since a shared `/AP` dictionary draws for
-the others too. The annotation is rewritten rather than removed. Until
-October 2026 appearances were not read at all, and a FreeText note under a
-rectangle stayed on the page (`redact.rs`'s `appearance_streams`, every test
+the others too. The annotation is rewritten rather than removed
+(`redact.rs`'s `appearance_streams`, every test
 read back flattened, by extraction, and by ink). A **Type 3 glyph whose
 procedure draws text or an image** (9.6.5) is measured through the
 procedure, under the transform the interpreter runs it with, because the
@@ -575,8 +539,7 @@ a form it draws and bounds one that shows its own glyph). A procedure is
 measured in the scope that showed the glyph, where this engine runs it, and
 in the font's own `/Resources`, where 9.6.5 puts what it names — each way
 round, so a name only one has resolves and one they bind differently is
-measured as each binds it; until October 2026 a `Do` only the font's
-resources named was passed over in silence (`a_procedure_is_measured_in_the_fonts_own_resources_too`). `mark` paints the area black
+measured as each binds it (`a_procedure_is_measured_in_the_fonts_own_resources_too`). `mark` paints the area black
 afterwards — cosmetic, because the content is already gone; it tells a
 reader something was removed rather than leaving a gap that reads as if
 nothing was there. The acceptance test is not "does it look right" but two
@@ -587,23 +550,19 @@ left the glyph in an untouched duplicate stream; an ink check alone would
 pass the black-rectangle non-redaction this module exists to refuse. Neither
 half is the property.
 
-**Font subsetting on rewrite** (9.6.4, 9.9). A rewrite used to copy every
-embedded font program through untouched however little of it the document
-still drew. `subset::apply(&mut editor)` cuts each one down to the glyphs the
-document draws now. Two costs go with it, and the second is why the redaction
-section above ends here:
+**Font subsetting on rewrite** (9.6.4, 9.9). `subset::apply(&mut editor)`
+cuts each embedded font program down to the glyphs the document draws. A
+program written through whole costs two things:
 
-- **Size.** Measured on the vendored Liberation Serif Regular, 393 576 bytes:
-  a page of ten characters carries **29 376** after the pass, and a page
-  drawing none of it 26 428 — not zero, and it should not be, since `cmap`,
-  `hmtx`, `OS/2` and the three hinting tables are copied through for the
-  readers that interpret them.
+- **Size.** The whole face is carried however little of it the document
+  draws. A subset is not empty even for a page drawing none of it, and
+  should not be, since `cmap`, `hmtx`, `OS/2` and the three hinting tables
+  are copied through for the readers that interpret them.
 - **Disclosure.** Redaction removes the *text*. It does not remove the
   **glyphs**, which sit in the program exactly as they were, and a face whose
   `glyf` entries are `J`, `o`, `h`, `n`, `S`, `m`, `i`, `t` and `h` names what
   the redaction was for. So a redaction that must not disclose runs this
-  afterwards. Measured on a two-line fixture: 395 534 bytes redacted, **30 301**
-  redacted and subsetted, and the six removed letters' outlines absent from the
+  afterwards, and the removed letters' outlines are then absent from the
   program that remains — asserted against its own `loca` and `glyf`, not
   against a picture.
 
@@ -613,9 +572,8 @@ per-page form of the operation that is not wrong; and it reads the content the
 *editor* now has rather than the file, so an edit applied first is an edit this
 sees — through `DocumentEditor::view`, the editor's state as a document of its
 own, so the page order it has, a page it inserted and a copy of a form a
-redaction made all resolve (until September 2026 the walk resolved names
-through the file with the editor's bytes substituted, and could not see a
-copy). Run the other way round it would keep exactly what the redaction removed.
+redaction made all resolve. Run the other way round it would keep exactly what
+the redaction removed.
 Save with `WriteMode::Rewrite` if the removal has to be real — an incremental
 save appends and leaves the original program's bytes in the file, the same
 caveat redaction carries.
@@ -630,8 +588,7 @@ Counted are a page's own content stream; a form XObject it draws, at any depth
 today's state loses tomorrow's tick; and a tiling pattern's cell or a soft
 mask's group anything of those paints with (8.7.3.2, 11.6.5.2), each in its
 own `/Resources` or the scope that painted, which the interpreter runs
-neither of — until October 2026 neither was walked, and a glyph shown only in
-a cell was dropped from its program and drew a blank. A hidden annotation's
+neither of. A hidden annotation's
 appearance counts too: the flag is a viewer's instruction, and clearing it is
 one bit.
 
@@ -652,9 +609,8 @@ or leaves whole. A shown code `/Differences` gives no name leaves the font
 whole, as a code mapped only by guess leaves a program whole. A Type 3 font is left whole, and listed, for the reasons a
 program is — no walked scope names it, the AcroForm `/DR` does, a Type 3
 font's own `/Resources` does, or it has no object — and one left whole makes
-`SubsetOutcome::removed` false, as a program does. Until October 2026 Type 3
-fonts went through whole and unmentioned, and `removed` was true over them
-(`subset.rs`'s `type3_fonts`).
+`SubsetOutcome::removed` false, as a program does (`subset.rs`'s
+`type3_fonts`).
 
 **How the encoding survives.** `tinker_pdf_font::subset` does not renumber — a
 dropped glyph becomes a zero-length `loca` entry rather than a gap the later
@@ -744,15 +700,13 @@ dictionary as `Untouched::program`; `bytes_before()`/`bytes_after()` total
 all four.
 An empty `untouched` is the answer a caller wants; a non-empty one is not an
 error list, since a document whose every face is already a tight subset reports
-all of them and is right to. Over the fetched corpora it is usually non-empty:
-4 950 of 10 832 programs went through whole, 3 406 of them because a rebuild
-came out no smaller than the producer's own subset.
+all of them and is right to.
 
-**A caller no longer has to remember.** `tinker_pdf::write::save` is the
-facade's save door and runs this pass by default, in the one order that is
-right — after every other edit, before the serializer
-([writing](writing.md)). Calling `apply` by hand is still correct and is what
-a caller wants when the report has to be read before the bytes are written.
+`tinker_pdf::write::save` is the facade's save door and runs this pass by
+default, in the one order that is right — after every other edit, before the
+serializer ([writing](writing.md)). Calling `apply` by hand is correct too,
+and is what a caller wants when the report has to be read before the bytes
+are written.
 
 ```rust
 // The arranged form: a rewrite that subsets, with the report on the way out.
@@ -763,9 +717,8 @@ if !saved.fonts.removed() {
     // Not a failure. `removed()` is false whenever *any* program went through
     // whole, because such a program still carries every outline it had.
     for whole in saved.fonts.report().into_iter().flat_map(|r| &r.untouched) {
-        // "/LiberationSerif left whole (393 576 bytes): a form field's /DA may
-        //  draw it at any character (12.7.3.3)" — ruling 10, so a caller
-        //  checking for disclosure can see what is still in the file
+        // Each line names a program and why it went through whole (ruling 10),
+        // so a caller checking for disclosure can see what is still in the file.
         println!("{whole}");
     }
 }
@@ -773,8 +726,8 @@ std::fs::write("out.pdf", &saved.bytes)?;
 ```
 
 ```rust
-// The asked-for form, unchanged: the report in hand before anything is
-// serialized, for a caller who decides whether to write at all from it.
+// By hand: the report in hand before anything is serialized, for a caller
+// who decides from it whether to write at all.
 let report = tinker_pdf::subset::apply(&mut editor); // after every other edit
 if report.untouched.is_empty() {
     let bytes = editor.save(&tinker_pdf::WriteOptions {
@@ -789,9 +742,9 @@ if report.untouched.is_empty() {
 later file, `split` is `keep_pages` per piece, `rotate` is `rotate_page`,
 `attach` is `attach_file`, `stamp` is `import_page_as_form` and then `stamp`
 per page, `sanitise` is `sanitise` with each flag one `Sanitise` field and
-`--all` `Sanitise::ALL` (no flag at all is refused, where it once meant all
-four — a default the facade's `Sanitise::default()`, which is nothing, does
-not have), and `encrypt` and `decrypt` change only `WriteOptions::encryption`.
+`--all` `Sanitise::ALL` (no flag at all is refused, since the facade's
+`Sanitise::default()` is nothing), and `encrypt` and `decrypt` change only
+`WriteOptions::encryption`.
 Every one saves through `write::save` as a rewrite and takes `--font-policy
 subset|keep`, defaulting to the facade's subset and printing the report
 above, a program left whole named with its reason; the image policy is there
@@ -805,36 +758,33 @@ rewrite asking for no encryption writes decrypted
 (`DocumentEditor::check_save`, `SaveRefusal::WouldDecrypt`), and those two
 refuse to lift an owner's restrictions with only the user's authority
 (`SaveRefusal::OwnerAuthorityNeeded`, `check_decrypt`; [encryption](encryption.md)).
-Until October 2026 both were the CLI's own refusals. The save doors do not
-ask, so the C ABI and a binding, which save without asking, still rewrite an
-encrypted input decrypted; whether `save` itself refuses is owed in the
-[roadmap](../ROADMAP.md)'s CLI row. What the CLI used to decide on its own
-and the facade now decides for every surface: a turn that is not a quarter
-(`rotate_page` refuses it), an empty owner password (the user's,
-[encryption](encryption.md)), and these two.
+The save doors do not
+ask, so the C ABI and a binding, which save without asking, rewrite an
+encrypted input decrypted; whether the save doors refuse is
+[ROADMAP](../ROADMAP.md) H-10.
 
 ## Refused by name
 
 | What | How it shows | Why | See |
 | --- | --- | --- | --- |
-| Redacting a run whose `Tf` named a font the resources in scope do not have | left whole, `UnknownFont` (`a_run_whose_font_is_not_in_scope_is_left_uncut_and_reported`) | no metrics at all, so no glyph can be placed. Permanent, and it was silent before: the run was kept, nothing was counted, and the report looked like a rectangle that covered nothing | — |
+| Redacting a run whose `Tf` named a font the resources in scope do not have | left whole, `UnknownFont` (`a_run_whose_font_is_not_in_scope_is_left_uncut_and_reported`) | no metrics at all, so no glyph can be placed. Permanent | — |
 | Redacting a run whose text rendering matrix is not finite | left whole, `UnmeasurableFrame` (`a_non_finite_text_matrix_is_left_uncut_and_reported`) | a position that is not a number cannot be compared with a rectangle. Permanent. The whole showing operand is left, never half of it | — |
 | Partial image redaction | the whole image is scrubbed (`RedactionReport::images`) | a hole needs a re-encode through a codec this build may not write | [filters](filters.md); [ROADMAP](../ROADMAP.md) ED-36a |
-| Cutting exactly, a copy per placement, a form that **draws itself** (directly or through another form), one **placed past `MAX_PLACEMENTS`**, or one whose distinct cuts would take a redaction past **`MAX_FORM_COPY_BYTES`** (32 MiB of held cuts, `a_walk_past_its_copy_budget_cuts_the_form_in_place`; until October 2026 there was no budget, and a form could be held and copied 64 times over at 128 MiB a copy) — and every form any of them draws | the cut is the union over every placement, in the one stream, and `RedactionWarning::RepeatedForm` names the form and its placement count when a cut was made or a placement went unmeasured (`a_self_referential_form_under_a_moving_transform_terminates`, `a_form_drawn_by_one_placed_past_the_cap_is_cut_the_old_way_too`) | a copy per placement of a form that draws itself would be a copy per round of a recursion, and a placement past the cap was never measured, so no copy could say what it should hold; what such a form draws goes the same way because its one stream names its children by their own objects. Over-removal is the direction this module errs in everywhere; the alternative here is the leak | 8.10 |
+| Cutting exactly, a copy per placement, a form that **draws itself** (directly or through another form), one **placed past `MAX_PLACEMENTS`**, or one whose distinct cuts would take a redaction past **`MAX_FORM_COPY_BYTES`** (32 MiB of held cuts, `a_walk_past_its_copy_budget_cuts_the_form_in_place`) — and every form any of them draws | the cut is the union over every placement, in the one stream, and `RedactionWarning::RepeatedForm` names the form and its placement count when a cut was made or a placement went unmeasured (`a_self_referential_form_under_a_moving_transform_terminates`, `a_form_drawn_by_one_placed_past_the_cap_is_cut_the_old_way_too`) | a copy per placement of a form that draws itself would be a copy per round of a recursion, and a placement past the cap was never measured, so no copy could say what it should hold; what such a form draws goes the same way because its one stream names its children by their own objects. Over-removal is the direction this module errs in everywhere; the alternative here is the leak | 8.10 |
 | Cutting a **tiling pattern's cell** at the tiles a rectangle covers alone | the cell is measured at every tile of its lattice whose `/BBox` meets a rectangle — the pattern's `/Matrix` anchored both where 8.7.2 puts it and where this engine's renderer does, the page's space (`a_cell_a_form_paints_with_is_measured_in_the_forms_space_too`) — and cut in its one stream, so at every tile wherever the pattern paints; `RedactionWarning::RepeatedForm` names the pattern and the tiles measured (`a_tiling_cell_whose_text_is_under_a_rectangle_is_cut_at_its_tiles`) — a count that, unlike a form's, does not saturate, so it does not say whether the cell was measured whole: `PatternOrMask` does (the row below). A tile the fill does not reach is measured too | every tile runs the cell's one stream, and a copy per tile would be a pattern per tile; this module does not follow paths, so it cannot tell a tile the fill reaches from one it does not, and measuring both removes more, never less | 8.7.3 |
-| Measuring a tiling cell with more than `MAX_PLACEMENTS` tiles under the rectangles — counted over every space its lattice is anchored to, the anchorings within the bound cut and the rest not measured (`a_cell_anchored_past_its_bound_is_cut_where_measured_and_named`) — one whose `/Matrix`, `/BBox` or steps place no lattice, what a cell invokes beyond its text and inline images (an XObject, a graphics state, another pattern), and a cell a Type 3 glyph's procedure paints with | **named**, `RedactionWarning::PatternOrMask` with the resource name that selected it (`a_tiling_pattern_whose_cell_shows_text_is_named`); a cell that only paints paths is not, since nothing in it is anything a redaction removes. A cell's own text is still cut when what it invokes is not followed | the tile count bounds the work a lattice of tiny cells under a page-sized rectangle would ask, and it is the cell's, over all its anchorings, so one cell runs its stream at most `MAX_PLACEMENTS` times (ruling 1; until the lane's review it bounded each anchoring alone, and one cell could run some four thousand passes); a cell's XObjects would be placements with no node of the walk's to hold them; a procedure is measured rather than cut | ruling 1, 8.7.3 |
-| Cutting a **soft mask's group** through a copy | the group is measured at its `gs`, as a form placement (`a_soft_mask_group_is_measured_where_its_gs_places_it`), and cut in its own stream, the old way; `RepeatedForm` names it when that is wider than asked — a second placement, or another page that sets the same state (`a_mask_group_another_page_draws_is_cut_in_place_and_named`). A group a **Type 3 glyph's procedure** sets is measured at each use, and a use whose group draws under a rectangle is removed, but the group is **not cut**: what it showed there stays in the file, and `PatternOrMask` names the state (`a_glyph_whose_procedure_masks_text_under_a_rectangle_is_removed`) — whatever removed the use: the glyph's own box (`a_covered_glyph_whose_procedure_masks_text_under_a_rectangle_names_the_group`), text the procedure shows itself (`a_procedure_whose_own_text_removed_the_use_still_names_its_group`), or the group, in either scope a font with `/Resources` of its own is read in (`a_group_the_fonts_own_resources_bind_is_measured_when_the_first_reading_removed_the_use`). Until the lane's second review a use its box removed was not measured, and a measurement stopped at the first thing it found, so a group showing covered text there went unnamed. The measurement shares the use's budget of `MAX_PLACEMENTS` streams, and what that budget cuts short is said rather than absorbed: a group whose measurement it cut short, or that it left nothing to measure with, is named `PatternOrMask` too (`a_group_after_a_naming_that_spent_the_budget_is_named`), and a group set inside a form or a glyph's procedure is reached whatever comes before it (`what_a_form_or_a_glyph_drawn_after_the_answer_paints_with_is_named`). Until the lane's third review a group measured only to be named spent the budget and later groups met none, unnamed | a copy would need a copied graphics state under a fresh name and the `gs` pointed at it, for a state a stream nearly always sets once; over-removal is this module's direction, and it is named. A procedure's group is the procedure's: every use of the glyph draws it, and the procedure is not rewritten (the Type 3 row below) | 11.6.5 |
+| Measuring a tiling cell with more than `MAX_PLACEMENTS` tiles under the rectangles — counted over every space its lattice is anchored to, the anchorings within the bound cut and the rest not measured (`a_cell_anchored_past_its_bound_is_cut_where_measured_and_named`) — one whose `/Matrix`, `/BBox` or steps place no lattice, what a cell invokes beyond its text and inline images (an XObject, a graphics state, another pattern), and a cell a Type 3 glyph's procedure paints with | **named**, `RedactionWarning::PatternOrMask` with the resource name that selected it (`a_tiling_pattern_whose_cell_shows_text_is_named`); a cell that only paints paths is not, since nothing in it is anything a redaction removes. A cell's own text is still cut when what it invokes is not followed | the tile count bounds the work a lattice of tiny cells under a page-sized rectangle would ask, and it is the cell's, over all its anchorings, so one cell runs its stream at most `MAX_PLACEMENTS` times (ruling 1); a cell's XObjects would be placements with no node of the walk's to hold them; a procedure is measured rather than cut | ruling 1, 8.7.3 |
+| Cutting a **soft mask's group** through a copy | the group is measured at its `gs`, as a form placement (`a_soft_mask_group_is_measured_where_its_gs_places_it`), and cut in its own stream, in place; `RepeatedForm` names it when that is wider than asked — a second placement, or another page that sets the same state (`a_mask_group_another_page_draws_is_cut_in_place_and_named`). A group a **Type 3 glyph's procedure** sets is measured at each use, and a use whose group draws under a rectangle is removed, but the group is **not cut**: what it showed there stays in the file, and `PatternOrMask` names the state (`a_glyph_whose_procedure_masks_text_under_a_rectangle_is_removed`) — whatever removed the use: the glyph's own box (`a_covered_glyph_whose_procedure_masks_text_under_a_rectangle_names_the_group`), text the procedure shows itself (`a_procedure_whose_own_text_removed_the_use_still_names_its_group`), or the group, in either scope a font with `/Resources` of its own is read in (`a_group_the_fonts_own_resources_bind_is_measured_when_the_first_reading_removed_the_use`). The measurement shares the use's budget of `MAX_PLACEMENTS` streams, and what that budget cuts short is said rather than absorbed: a group whose measurement it cut short, or that it left nothing to measure with, is named `PatternOrMask` too (`a_group_after_a_naming_that_spent_the_budget_is_named`), and a group set inside a form or a glyph's procedure is reached whatever comes before it (`what_a_form_or_a_glyph_drawn_after_the_answer_paints_with_is_named`) | a copy would need a copied graphics state under a fresh name and the `gs` pointed at it, for a state a stream nearly always sets once; over-removal is this module's direction, and it is named. A procedure's group is the procedure's: every use of the glyph draws it, and the procedure is not rewritten (the Type 3 row below) | 11.6.5 |
 | Measuring more than `MAX_PLACEMENTS` distinct placements of one form | the count in `RepeatedForm` saturates at the cap, which is how a caller tells "too much went" from "something may have survived" (`a_form_placed_more_times_than_the_cap_saturates_its_count`) | a form that invokes itself under a matrix that moves each round makes a fresh placement every time; a count bounds it, where a tolerance on matrices would have to be loose enough to call two real placements one | ruling 1 |
-| Following more than 4 096 `Do`s of one content stream | the ones past the bound are written back as they were and never resolved — an image they draw is tested against no rectangle, a form not entered — and `RedactionWarning::TooManyXObjects` counts them (`a_stream_of_more_xobjects_than_the_walk_follows_is_reported`); until October 2026 the bound was there and the warning was not | the walk holds a use per `Do`, and a content stream may be 128 MiB of six-byte `/a Do`s; a page of more than four thousand XObject placements — a map, a tiled scan — has to be told it was not measured whole | ruling 1 |
-| A free text annotation whose `/DA` names no font the form's `/DR` holds, or one it holds as a composite, Type 3 or symbolic font, or whose `/Contents` has a character that font's encoding gives no byte, or whose `/DA` does not lex cleanly | no appearance is synthesised, and the annotation renders only if it carries its own (`a_free_text_without_a_font_to_write_it_in_is_refused`, `a_free_text_is_written_in_the_bytes_its_fonts_encoding_gives`, `a_default_appearance_is_lexed_as_a_content_stream`) | the text is written a byte a glyph, each the byte the font's encoding draws that character with, and a font that is not there, a font addressed by multi-byte codes, a symbolic font's own glyphs or a character the encoding has no byte for would make a box of wrong text or question marks: this module draws none rather than a wrong one. Until October 2026 a character was written as its Latin-1 byte whatever the encoding, so a StandardEncoding font drew `café` as `cafØ`. A composite `/DA` font is what `fill.rs`'s shaped path writes for fields, and a free text annotation does not take it yet. **Not permanent** for a composite font: owed in the ROADMAP's Editing row (d); a missing font, a symbolic one and a character the encoding has no byte for are not ruled either — a substitute font is the alternative — and are the owner's with the rest of (d) | 12.5.6.6, 12.7.3.3 |
-| A free text annotation's rich text (`/RC`), default style (`/DS`), and the operators of `/DA` other than its `Tf` and its `g`, `rg` or `k` | `/Contents` is drawn as plain text in the `/DA` font, size and colour; the rest is not read | `/RC` is XHTML and `/DS` CSS (12.7.3.4), which this module does not lay out — **not permanent**, both owed in the ROADMAP's Editing row (d); `/DA`'s other operators are the producer's text, and copying them into the appearance could unbalance its `q`/`Q` or `BT`/`ET` | 12.5.6.6 |
-| Appearance synthesis for the subtypes whose appearance no dictionary determines — `Stamp`, `FileAttachment`, `Sound`, `Movie`, `Screen`, `3D`, `RichMedia`, `Popup`, `Widget`, `PrinterMark`, `TrapNet`, `Watermark`, `Redact` and `Projection` (`appearance::UNDETERMINED_SUBTYPES`) | `add_annotation` inserts the dictionary and synthesises no `/AP`, so the annotation renders only if it carries its own (`the_subtypes_no_dictionary_determines_are_declined`; `every_subtype_of_12_5_6_is_drawn_or_declined` fails if a subtype is in neither list). The list changes nothing a caller sees: a subtype on it is declined exactly as an unknown one is | what each would show is not in its dictionary: a stamp's, a file attachment's and a sound's `/Name` names an icon — `Approved`, `PushPin`, `Speaker` — that 12.5.6 gives no outline; a movie, a screen, a 3D annotation and rich media show their medium; a pop-up is the viewer's window for its parent's text; a widget's appearance is its field's, which the form filler builds from the value (`fill.rs`); a printer's mark, a trap network and a watermark exist only as the `/AP` their producer wrote; a redaction's entries say what replaces the content once it is applied and not what the mark looks like before; and a projection adds no entry at all. Inventing a picture is worse than drawing none — but `Text` is drawn with an invented note though 12.5.6.4 leaves its icon to the reader just as 12.5.6.12, .15 and .16 leave the first three's, and `Caret` with an invented outline, so the reason is not applied evenly. **Not ruled permanent**: this module's position, the owner's to accept or refuse in the ROADMAP's Editing row (d): draw invented icons for `Stamp`, `FileAttachment` and `Sound` as `Text` has one, or rule that an invented icon is refused and decide `Text`'s | 12.5.6 |
-| A line's caption (`/Cap`, `/CP`, `/CO`) | the line is drawn, its caption is not | a caption is text, and a line annotation names no font to draw it in. **Not ruled permanent**: this module's position, the owner's to accept or refuse in the ROADMAP's Editing row (d) | 12.5.6.7 |
-| A caret's paragraph symbol (`/Sy /P`) | the caret is drawn and the symbol is not, exactly as for `/Sy /None` | 12.5.6.11 says a ¶ "shall be associated with the caret" and says nothing of where it goes or how large it is; a symbol put somewhere is an invention, and a producer that wants one writes its own `/AP`. **Not ruled permanent**: this module's position, the owner's to accept or refuse in the ROADMAP's Editing row (d) | 12.5.6.11 |
+| Following more than 4 096 `Do`s of one content stream | the ones past the bound are written back as they were and never resolved — an image they draw is tested against no rectangle, a form not entered — and `RedactionWarning::TooManyXObjects` counts them (`a_stream_of_more_xobjects_than_the_walk_follows_is_reported`) | the walk holds a use per `Do`, and a content stream may be 128 MiB of six-byte `/a Do`s; a page of more than four thousand XObject placements — a map, a tiled scan — has to be told it was not measured whole | ruling 1 |
+| A free text annotation whose `/DA` names no font the form's `/DR` holds, or one it holds as a composite, Type 3 or symbolic font, or whose `/Contents` has a character that font's encoding gives no byte, or whose `/DA` does not lex cleanly | no appearance is synthesised, and the annotation renders only if it carries its own (`a_free_text_without_a_font_to_write_it_in_is_refused`, `a_free_text_is_written_in_the_bytes_its_fonts_encoding_gives`, `a_default_appearance_is_lexed_as_a_content_stream`) | the text is written a byte a glyph, each the byte the font's encoding draws that character with, and a font that is not there, a font addressed by multi-byte codes, a symbolic font's own glyphs or a character the encoding has no byte for would make a box of wrong text or question marks: this module draws none rather than a wrong one. A composite `/DA` font is what `fill.rs`'s shaped path writes for fields, and a free text annotation does not take one. **Not permanent**: [ROADMAP](../ROADMAP.md) AN-03; for a missing font, a symbolic one and a character the encoding has no byte for, a substitute font is the alternative | 12.5.6.6, 12.7.3.3 |
+| A free text annotation's rich text (`/RC`), default style (`/DS`), and the operators of `/DA` other than its `Tf` and its `g`, `rg` or `k` | `/Contents` is drawn as plain text in the `/DA` font, size and colour; the rest is not read | `/RC` is XHTML and `/DS` CSS (12.7.3.4), which this module does not lay out — **not permanent**: [ROADMAP](../ROADMAP.md) AN-16; `/DA`'s other operators are the producer's text, and copying them into the appearance could unbalance its `q`/`Q` or `BT`/`ET` | 12.5.6.6 |
+| Appearance synthesis for the subtypes whose appearance no dictionary determines — `Stamp`, `FileAttachment`, `Sound`, `Movie`, `Screen`, `3D`, `RichMedia`, `Popup`, `Widget`, `PrinterMark`, `TrapNet`, `Watermark`, `Redact` and `Projection` (`appearance::UNDETERMINED_SUBTYPES`) | `add_annotation` inserts the dictionary and synthesises no `/AP`, so the annotation renders only if it carries its own (`the_subtypes_no_dictionary_determines_are_declined`; `every_subtype_of_12_5_6_is_drawn_or_declined` fails if a subtype is in neither list). The list changes nothing a caller sees: a subtype on it is declined exactly as an unknown one is | what each would show is not in its dictionary: a stamp's, a file attachment's and a sound's `/Name` names an icon — `Approved`, `PushPin`, `Speaker` — that 12.5.6 gives no outline; a movie, a screen, a 3D annotation and rich media show their medium; a pop-up is the viewer's window for its parent's text; a widget's appearance is its field's, which the form filler builds from the value (`fill.rs`); a printer's mark, a trap network and a watermark exist only as the `/AP` their producer wrote; a redaction's entries say what replaces the content once it is applied and not what the mark looks like before; and a projection adds no entry at all. Inventing a picture is worse than drawing none — but `Text` is drawn with an invented note though 12.5.6.4 leaves its icon to the reader just as 12.5.6.12, .15 and .16 leave the first three's, and `Caret` with an invented outline, so the reason is not applied evenly. **Not ruled permanent**: [ROADMAP](../ROADMAP.md) AN-02 decides whether `Stamp`, `FileAttachment` and `Sound` get invented icons as `Text` has one, or an invented icon is refused and `Text`'s with it | 12.5.6 |
+| A line's caption (`/Cap`, `/CP`, `/CO`) | the line is drawn, its caption is not | a caption is text, and a line annotation names no font to draw it in. **Not ruled permanent**: [ROADMAP](../ROADMAP.md) AN-05 | 12.5.6.7 |
+| A caret's paragraph symbol (`/Sy /P`) | the caret is drawn and the symbol is not, exactly as for `/Sy /None` | 12.5.6.11 says a ¶ "shall be associated with the caret" and says nothing of where it goes or how large it is; a symbol put somewhere is an invention, and a producer that wants one writes its own `/AP`. **Not ruled permanent**: [ROADMAP](../ROADMAP.md) AN-05 | 12.5.6.11 |
 | An annotation without `/AP` whose dictionary has an entry that is present and not what its table says — coordinates or colours that are not finite numbers within Annex C's real limit or not the count Table 175, 177, 178, 180 or 182 asks for, an `/RD` Table 177 forbids, a dash 8.4.3.6 refuses, a `/BS /S` Table 166 does not name, an `/LE` name Table 176 does not list, a negative `/LLE` or `/LLO`, a `/CA`, `/ca` or `/LL` that is not a number, a `/Q` other than 0, 1 or 2, a negative `/DA` size | no appearance is synthesised (`a_malformed_entry_declines_the_appearance`) | what would be drawn from what is left is a shape the producer did not write: one bad element of `/L` re-paired moves every later coordinate, and a forbidden `/RD` read past puts the shape somewhere else. Declining repairs nothing, so no warning is emitted; the annotation is left as it came | 12.5.6 |
-| A synthesised border's **effect** (`/BE /S /C`, cloudy, on a square, circle, polygon or free text) and the **beveled, inset and underline** border styles (`/BS /S /B`, `/I`, `/U`) | the border is drawn solid, at its width and in its colour, as though `/BE` were absent and `/S` were `/S` | 12.5.4 says a cloudy border "shall appear cloudy" at an intensity from 0 to 2 and gives no geometry for a cloud; Table 166's beveled and inset styles are "simulated" embossing in shades nothing names, and the underline style draws a widget's bottom edge, which is not what a shape is. A producer that wants one of them writes its own `/AP`, and one it wrote is kept. **Not ruled permanent**: this module's position, the owner's to accept or refuse in the ROADMAP's Editing row (d). The corner radii of a legacy `/Border` are not drawn either, as they never were | 12.5.4 |
-| Rewriting a Type 3 glyph's procedure when it draws under a rectangle | the **use** is removed whole and the procedure is left byte for byte (`a_glyph_whose_procedure_shows_text_under_a_rectangle_is_removed_at_that_use`), so a procedure that shows the covered words still says them in `/CharProcs` while any use of it is left; once none is, `subset::apply` — the default save — empties it (`a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save`). What the procedure draws is left with it: a form it invokes is not cut, nor a soft mask's group it sets, and emptying the procedure removes neither from the file; a group is named `PatternOrMask` when it shows text or an image under a rectangle at a use, whatever removed the use (the soft mask row above), and a form is not named | the procedure is the font's: every use of the glyph on every page runs it, so cutting it would cut every use, and there is no copy to give the uncovered ones short of a new glyph in the font. This is a substitute for the ROADMAP Editing row's "glyph-procedure streams rewritten", chosen here and not yet ruled on: the row stays open until the owner accepts it or it is replaced | 9.6.5 |
-| Measuring a glyph procedure that shows glyphs whose procedures show glyphs, past `MAX_PLACEMENTS` streams for one use | the use is removed as though covered, and `RedactionWarning::UnboundedProcedure` names the font and counts the uses (`a_glyph_procedure_that_shows_its_own_glyph_ends_and_errs_toward_removal`); until October 2026 nothing reported it. It names the font as well whenever what the procedure draws past where the budget stopped is in no group named for it, whatever removed the use — the glyph's own box included (`a_covered_use_whose_measurement_ran_out_says_so`), since a group set there is not cut and was never read; until the lane's third review such a use said nothing | a procedure can show its own glyph, and a face that branches makes the measurement exponential; the budget is per use (`every_use_of_a_glyph_has_a_budget_of_its_own`), so only such a face reaches it | ruling 1 |
+| A synthesised border's **effect** (`/BE /S /C`, cloudy, on a square, circle, polygon or free text) and the **beveled, inset and underline** border styles (`/BS /S /B`, `/I`, `/U`) | the border is drawn solid, at its width and in its colour, as though `/BE` were absent and `/S` were `/S` | 12.5.4 says a cloudy border "shall appear cloudy" at an intensity from 0 to 2 and gives no geometry for a cloud; Table 166's beveled and inset styles are "simulated" embossing in shades nothing names, and the underline style draws a widget's bottom edge, which is not what a shape is. A producer that wants one of them writes its own `/AP`, and one it wrote is kept. **Not ruled permanent**: [ROADMAP](../ROADMAP.md) AN-04. The corner radii of a legacy `/Border` are not drawn either | 12.5.4 |
+| Rewriting a Type 3 glyph's procedure when it draws under a rectangle | the **use** is removed whole and the procedure is left byte for byte (`a_glyph_whose_procedure_shows_text_under_a_rectangle_is_removed_at_that_use`), so a procedure that shows the covered words still says them in `/CharProcs` while any use of it is left; once none is, `subset::apply` — the default save — empties it (`a_procedure_whose_last_use_was_redacted_is_emptied_by_the_default_save`). What the procedure draws is left with it: a form it invokes is not cut, nor a soft mask's group it sets, and emptying the procedure removes neither from the file; a group is named `PatternOrMask` when it shows text or an image under a rectangle at a use, whatever removed the use (the soft mask row above), and a form is not named | the procedure is the font's: every use of the glyph on every page runs it, so cutting it would cut every use, and there is no copy to give the uncovered ones short of a new glyph in the font. Rewriting the procedure streams is [ROADMAP](../ROADMAP.md) ED-35 | 9.6.5 |
+| Measuring a glyph procedure that shows glyphs whose procedures show glyphs, past `MAX_PLACEMENTS` streams for one use | the use is removed as though covered, and `RedactionWarning::UnboundedProcedure` names the font and counts the uses (`a_glyph_procedure_that_shows_its_own_glyph_ends_and_errs_toward_removal`). It names the font as well whenever what the procedure draws past where the budget stopped is in no group named for it, whatever removed the use — the glyph's own box included (`a_covered_use_whose_measurement_ran_out_says_so`), since a group set there is not cut and was never read | a procedure can show its own glyph, and a face that branches makes the measurement exponential; the budget is per use (`every_use_of_a_glyph_has_a_budget_of_its_own`), so only such a face reaches it | ruling 1 |
 | Removing an annotation's own text — `/Contents`, a rich-text `/RC`, a field's `/V` — when its appearance is cut | left as it was; only what the annotation draws is cut | what a redaction measures is what a page draws, and these have no position to compare with a rectangle. Deleting an annotation outright is the caller's decision, through the editor | 12.5 |
 | Subsetting a program `tinker_pdf_font::subset` will not rebuild — a Type 1 program, a CFF whose charstrings cannot be renumbered without guessing, bytes that are neither | the program is written through exactly as it arrived, `UntouchedReason::ProgramNotRebuildable` | ruling 2: a document that renders is worth more than one that is small | [fonts](fonts.md) |
 | A subset that comes out no smaller than the face | whole face, `SubsetNotSmaller` (`a_subset_that_is_no_smaller_is_refused_and_named`) | the face is both smaller and the one the producer tested — the same reason the builder refuses it | [fonts](fonts.md) |
@@ -843,9 +793,9 @@ and the facade now decides for every surface: a turn that is not a quarter
 | Subsetting a font no walked resource dictionary names — one reached only from a form XObject nothing draws | whole face, `ScopeNotWalked` (`a_font_no_walked_scope_names_is_left_whole_and_reported`) | "no glyphs were shown through it" is then ignorance rather than a measurement | — |
 | Subsetting a font a **Type 3 font's own `/Resources`** names | whole face, `Type3Resource` (`a_font_a_type3_fonts_own_resources_name_is_left_whole_and_reported`) | this engine runs a glyph procedure in the *enclosing* scope, so a `/F0` inside a procedure is credited to the enclosing `/F0`; the enclosing font merely gains glyphs it does not need, the Type 3 font's own would lose every glyph it does | 9.6.5 |
 | Subsetting a font written **directly** into a resource dictionary rather than by reference | whole face, `NotAnObject` (`a_font_written_directly_into_the_resources_is_left_whole_and_reported`) | there is no object to key glyph usage by; the refusal also protects a program such a font *shares* with one that does have an object, which would otherwise be cut to the other font's glyphs | — |
-| Subsetting a program a `/FontDescriptor` embeds that **no font dictionary names** | whole face, `NoFontNamesIt` (`a_program_no_font_dictionary_names_is_left_whole_and_reported`) | there is no font, so no encoding and no glyph usage — nothing to subset it against. It is *reported* because a `Rewrite` keeps unreferenced objects unless `garbage_collect` asks otherwise, so every outline is still in the output; it was silently invisible until the corpus census counted 73 of them across eight of 5 605 documents | 9.8.1 |
+| Subsetting a program a `/FontDescriptor` embeds that **no font dictionary names** | whole face, `NoFontNamesIt` (`a_program_no_font_dictionary_names_is_left_whole_and_reported`) | there is no font, so no encoding and no glyph usage — nothing to subset it against. It is *reported* because a `Rewrite` keeps unreferenced objects unless `garbage_collect` asks otherwise, so every outline is still in the output | 9.8.1 |
 | Running the subsetter automatically from `DocumentEditor::save` | it cannot: `save` takes `&self` and the pass rewrites the editor, and `WriteOptions` is a crate below the interpreter that drives the walk. That door writes every program through as it arrived and does not offer to do otherwise | a flag the crate carrying it cannot act on would read as done and do nothing, on the one path where that is a disclosure. The switch is `tinker_pdf::write::SaveOptions::fonts`, which **defaults to subsetting** | [writing](writing.md) |
-| Dropping every reference to a page `keep_pages` or `delete_page` removed | the page leaves the page tree and nothing else: an outline item, a named destination, a link, the structure tree or `/OpenAction` that names it still does, so a rewrite keeps the page and its content outside the tree, and `garbage_collect` keeps them too, because they are reached — page 6 of `outline-3level.pdf` kept alone still carries the four pages its outline names (`tools/tpdf/src/writing.rs`'s `a_page_the_outline_names_stays_in_a_piece_that_dropped_it`, found through `tpdf split`) | which references to null and which entries to drop — an outline item, a link annotation, a structure element — is a sweep over every object the editor has with a decision per kind, and none is made yet. **Not permanent**: owed in the ROADMAP's CLI row. Until it lands, a document cut down with `keep_pages` is not a redaction | 7.7.3, 12.3 |
+| Dropping every reference to a page `keep_pages` or `delete_page` removed | the page leaves the page tree and nothing else: an outline item, a named destination, a link, the structure tree or `/OpenAction` that names it still does, so a rewrite keeps the page and its content outside the tree, and `garbage_collect` keeps them too, because they are reached — page 6 of `outline-3level.pdf` kept alone still carries the four pages its outline names (`tools/tpdf/src/writing.rs`'s `a_page_the_outline_names_stays_in_a_piece_that_dropped_it`) | which references to null and which entries to drop — an outline item, a link annotation, a structure element — is a sweep over every object the editor has with a decision per kind, and none is made. **Not permanent**: [ROADMAP](../ROADMAP.md) ED-34. A document cut down with `keep_pages` is not a redaction | 7.7.3, 12.3 |
 | Keeping `/Info` and the XMP packet in step | each `/Info` setter and `set_xmp_metadata` returns `MetadataSync::OtherHalfUnchanged` when the other half exists and was left as it was (`a_caller_supplied_packet_is_written_verbatim_and_uncompressed`) | `tinker-pdf-cos` neither parses nor rewrites XML, and deriving `/Info` from a caller's packet would be a second XMP reader; the caller who is told is the one who can make them agree | [document model](document-model.md) |
 | Page labels with no range at page 0, past the last page, numbering from 0, or two at one page | `PageLabelError`, nothing written (`page_label_refusals_write_nothing`) | 12.4.2 requires page 0's entry and Table 159 a `/St` of at least 1; which of two ranges at one page the caller meant is theirs to say | 12.4.2 |
 | A second attachment under a name already filed | `AttachError::NameTaken`, nothing written | two entries under one key is a tree a reader resolves by whichever it reaches first | 7.9.6 |
@@ -855,8 +805,8 @@ and the facade now decides for every surface: a turn that is not a quarter
 | A link left with neither `/A` nor `/Dest` after sanitising | the link leaves its page's `/Annots` with its action, for its action's reason (`actions_alone_leave_the_scripts`) | 12.5.6.5: a link exists to be followed, and the strict validator refuses one that goes nowhere | 12.5.6.5 |
 | Removing an element from an array other than one in an action slot or `/Annots` | never done; an action found there stays | a name tree's `/Names` is positional pairs, and one element out would shift every key onto the wrong value | 7.9.6 |
 | Removing an action's `/Next` successors that are not themselves removed | they go with the action when nothing else reaches them | the chain is part of the action (12.6.2); what else still reaches stays | 12.6.2 |
-| Reading an XFA form's scripts to decide what to keep | `/XFA` is removed whole under `javascript` (`Removal::XfaForm`) | XFA was a named non-goal until 9 October 2026 and its packets carry `<script>` elements this engine does not parse yet | [forms](forms.md); [ROADMAP](../ROADMAP.md) AN-27, AN-30 |
-| Paying for the walk on a save that changed one annotation | `FontPolicy::Keep` on `write::save`, or `DocumentEditor::save`, which is unchanged | the pass is whole-document and order-dependent and costs a full interpretation of every page. The default is still `Subset`, because forgetting costs a disclosure and paying costs time | [writing](writing.md) |
+| Reading an XFA form's scripts to decide what to keep | `/XFA` is removed whole under `javascript` (`Removal::XfaForm`) | XFA's packets carry `<script>` elements this engine does not parse | [forms](forms.md); [ROADMAP](../ROADMAP.md) AN-27, AN-30 |
+| Paying for the walk on a save that changed one annotation | `FontPolicy::Keep` on `write::save`, or `DocumentEditor::save`, which does not subset | the pass is whole-document and order-dependent and costs a full interpretation of every page. The default is `Subset`, because forgetting costs a disclosure and paying costs time | [writing](writing.md) |
 
 ## Verified
 
@@ -874,12 +824,10 @@ and the facade now decides for every surface: a turn that is not a quarter
   another document's page stamps as a form with its image; every saved file
   is clean under the strict validator.
 - `crates/tinker-pdf-cos/tests/page_operations.rs` — delete, move, rotate,
-  insert, import, keep, append; each saved in both modes, because a page
-  operation once reached only the incremental set and nothing caught it.
+  insert, import, keep, append; each saved in both modes.
 - `crates/tinker-pdf-cos/tests/form_transactions.rs` — `transaction`
   restores the first four fields (the fifth, the trailer entries, is
-  `trailer_overlay.rs`'s); injection puts each restore under exactly one
-  test.
+  `trailer_overlay.rs`'s).
 - `crates/tinker-pdf/tests/annotation_appearances.rs` — synthesised
   appearances render and flatten.
 - `crates/tinker-pdf/tests/appearance_synthesis.rs` — one fixture per
@@ -910,10 +858,11 @@ and the facade now decides for every surface: a turn that is not a quarter
   face, embedded — wrapped onto three lines where the layout puts them, and
   set against the right side by `/Q 2`; and a callout from the box to the
   point it calls out, drawn only under `/IT /FreeTextCallout`.
-  `appearance.rs`'s own tests pin the seven first subtypes byte for byte and
+  `appearance.rs`'s own tests pin `Highlight`, `Underline`, `StrikeOut`,
+  `Square`, `Circle`, `Text` and `Link` byte for byte and
   each ending's path, decline every subtype whose appearance no dictionary
   determines and every dictionary with a malformed entry, fail if a subtype
-  of 12.5.6 is in neither list, and put 768 dictionaries of hostile numbers
+  of 12.5.6 is in neither list, and put dictionaries of hostile numbers
   — none, too few, enormous, infinite, not a number — and `/DA` strings of
   arbitrary bytes through every subtype without a panic, every stream they
   write read back by the crate's own lexer with no leniency
@@ -931,17 +880,7 @@ and the facade now decides for every surface: a turn that is not a quarter
   `viewer_preferences`, `Page::trim_box` and its siblings) and handed to the
   strict validator, which must find nothing. Replacement deletes the old
   structure; every refusal leaves the editor as it was; every setter on one
-  editor composes through the catalog. Sixteen defects put back one at a time
-  (`cargo test --no-fail-fast` over this file and the crate's unit tests):
-  production boxes inherited from `/Pages` 1, not clipped to the media box 2,
-  a date's zone sign flipped 3, the 1.x closing apostrophe on the wrong
-  version 1, the metadata stream compressed 1, a `None` preference left
-  standing 1, `/Direction`'s two names swapped in reader and writer alike 2
-  (the reader's own tests; a round trip cannot see a consistent swap), the
-  old outline or label tree orphaned rather than deleted 1 each, the checksum
-  taken over the wrong bytes 1, a label style's case 2, a closed entry's
-  `/Count` sign 3, the page-0 rule 1, an `/Info` write that never reports the
-  packet 1, `/Trapped` 1, a taken attachment name 1.
+  editor composes through the catalog.
 - `crates/tinker-pdf-cos/tests/editor_structures.rs` — replacing a structure
   on a file whose old one is damaged or written in place, each saved both
   ways and held to the strict validator: an old outline's dangling `/Next` at
@@ -953,11 +892,7 @@ and the facade now decides for every surface: a turn that is not a quarter
   leaves in place or as objects of their own, keeps its file beside the new
   one; and a UTC offset no zone has, `i32::MIN` included, is refused by
   `set_creation_date`, `set_modification_date` and `attach_file` rather than
-  panicking, with the widest offsets the syntax spells still written. Each of
-  the ten failed against the code before the fix. No injection campaign is
-  counted for this file yet: running the suites against a put-back defect
-  was refused by the permission policy of the session that wrote it, so the
-  evidence is the before-and-after run alone, and a campaign is owed.
+  panicking, with the widest offsets the syntax spells still written.
 - `crates/tinker-pdf-cos/tests/sanitise.rs` — one hand-written fixture with
   every kind in every place a viewer looks (listed in the file's header) and
   what must survive beside them. After `Sanitise::ALL`, saved both ways:
@@ -969,14 +904,7 @@ and the facade now decides for every surface: a turn that is not a quarter
   the object sets themselves: every object that differs is a holder or
   deleted, every reported path was there before and is gone after, and an
   object named nowhere is unchanged. Each switch is run alone against the
-  same fixture, and a second pass finds nothing. Seventeen defects put back:
-  `/S /JavaScript` not recognised 3, a rendition's `/JS` 1, a padded
-  `javascript:` URI 1, the `/P`/`/K` exclusion 1, `/Next` not swept 2, a
-  targetless link kept 4, `/CO` kept 3, `/Names /JavaScript` kept 3,
-  `/Metadata` kept 3, `/EF` kept 2, nothing deleted 5, deletion ignoring what
-  still reaches 3, a cleaned stream losing its data 1, the trailer's `/Info`
-  kept 3, a null trailer entry written rather than dropped 2, orphans not
-  found 2, one removal per object left unreported 5. Added after review:
+  same fixture, and a second pass finds nothing.
   `an_action_dressed_as_something_else_is_still_taken_out` — an `/AA` entry
   with an extra `/K`, one with `/Type /Whatever`, an `/OpenAction` whose `/S`
   is a reference, a navigation action with `/P` whose `/Next` is script, and
@@ -988,13 +916,9 @@ and the facade now decides for every surface: a turn that is not a quarter
   saves draw what the source drew; and
   `info_taken_out_does_not_come_back_from_an_earlier_trailer` — an
   incremental update writes `/Info null`, so an `/Info` something else still
-  names does not come back through the earlier trailer. Injections: the
-  strict test used in action slots fires 2, an `/S` reference not resolved 2,
-  an indirect object's slot not found 1, the page order left out of what is
-  reached 1, the null entry dropped from an update's trailer 1.
+  names does not come back through the earlier trailer.
 - Redaction tests live beside `crates/tinker-pdf/src/redact.rs`: multi-page
-  fixtures (a two-page file once redacted page 0's image and left page 1's
-  secret), text inside form XObjects, a self-referential form that
+  fixtures, text inside form XObjects, a self-referential form that
   terminates and one that does so under a transform that moves each round,
   a form drawn twice cut at the placement the rectangle covers and at both
   when both are covered, two placements cut differently each cut exactly at
@@ -1002,7 +926,7 @@ and the facade now decides for every surface: a turn that is not a quarter
   the same sharing one copy, a nested form measured and copied at every
   placement of its parent, a second redaction cutting the copy the first
   made and keeping a form's in-place cut, a form another page draws left
-  whole, a form placed past the cap cut the old way with everything it
+  whole, a form placed past the cap cut in place with everything it
   draws, an image drawn twice scrubbed from its second placement, scaled
   runs, and the needle-bytes-absent assertion over every
   decompressed stream. Three further modules carry the rotated cut: a
@@ -1033,7 +957,7 @@ and the facade now decides for every surface: a turn that is not a quarter
   appearance or from a glyph procedure — page two extracting and rendering
   exactly as before — and cut in place when page two's resources only name
   it; a form page two meets deep and then shallow followed into; and a form
-  cut the old way that page two draws named. `appearance_streams`:
+  cut in place that page two draws named. `appearance_streams`:
   an annotation's appearance cut where 12.5.5 fits it onto `/Rect`, a
   quarter-turned one where its `/Matrix` turns it, both states of `/N` and of
   `/D`, the `/R` and a hidden annotation's appearance all cut, one appearance
@@ -1053,12 +977,12 @@ and the facade now decides for every surface: a turn that is not a quarter
   (sixteen levels of forms redacted, seventeen not drawn), and `hostile`:
   one two-page file over every kind of content above — appearances and their
   states, procedures that show text and draw forms, a form drawn twice and
-  on the second page, a pattern, a mask, an inline image — put through 300
+  on the second page, a pattern, a mask, an inline image — put through
   deterministic injuries and then redacted twice, subsetted and saved, with
   nothing asserted but that nothing panics. `tests/hostile_input.rs` does the
   same for the reading surface and does not edit.
-- Subsetting-on-rewrite tests live beside `crates/tinker-pdf/src/subset.rs` —
-  26 of them over the **vendored Liberation faces**, which are third-party
+- Subsetting-on-rewrite tests live beside `crates/tinker-pdf/src/subset.rs`,
+  over the **vendored Liberation faces**, which are third-party
   bytes: which of their glyphs are composite, what those are built from and
   where `loca` puts them are facts about the face and not about a fixture
   written to pass. The document around them is this engine's own writer, which
@@ -1080,7 +1004,7 @@ and the facade now decides for every surface: a turn that is not a quarter
   unchanged. `crates/tinker-pdf/src/write.rs` repeats that one through the
   **arranged** door, where nobody asked for a subset at all, and carries the
   counterfactual beside it: the same redaction under `FontPolicy::Keep` still
-  has every removed letter's outline in the file. Six more, `type3_fonts`,
+  has every removed letter's outline in the file. `type3_fonts`,
   over Type 3 faces written here whose procedures are boxes of different
   heights: a procedure nothing shows emptied and one shown kept, the page
   rendering exactly as it did; a stream two fonts share kept for the one that
@@ -1091,68 +1015,13 @@ and the facade now decides for every surface: a turn that is not a quarter
   the disclosure half: a procedure whose last use was redacted is the empty
   one after the default save.
 - **The same pass, over the corpus**:
-  `crates/tinker-pdf/tests/cff_subset_census.rs` now runs
-  `subset::apply` over all 5 605 fetched documents, not just
-  `tinker_pdf_font::subset` over a program pulled out of one. 2 180 of them
-  carry an embedded program; 5 882 programs are cut and 4 950 written through
-  whole, and seven properties are asserted over documents nobody here wrote —
-  every font dictionary identical but for `/BaseFont`, every descriptor but
-  for `/FontName`, every cut program still declaring the same glyph count and
-  still parsing, none larger than it was, `/Length1` describing the bytes it
-  is on (Table 126), and every embedded program in one list or the other.
-  Three of the seven failed the first time it ran; the constants at the foot
-  of that file say what each was and where it was fixed.
-- **Counted injection over the subsetter's rewrite path**
-  (`docs/verification.md`'s house practice). Nineteen defects put back one at a
-  time, `cargo test --no-fail-fast -p tinker-pdf` run for each, and the
-  assertions that fire counted:
-
-  | defect reintroduced | tests that caught it |
-  | --- | --- |
-  | the used-glyph set is collected but not passed to the subsetter | 8 |
-  | a glyph used only in an annotation appearance is omitted | 2 |
-  | the pass moves an encoding key it must not touch (`/FirstChar`) | 3 |
-  | the pass truncates `/Widths` rather than leaving it at the original range | 3 |
-  | the 9.6.4 subset tag is omitted | 2 |
-  | the subset tag is written malformed — `abc+` for `ABCDEF+` | 1 |
-  | an existing tag is stacked rather than replaced | 2 |
-  | the composite-glyph closure is not taken | 1 here, 1 in `tinker-pdf-font` |
-  | the fallback-to-whole-program path is taken silently | 5 |
-  | the walk reads the file rather than the editor's rewritten content | 1 |
-  | `/Length1` is left describing the face | 1 |
-  | a glyph chosen by 9.6.6.4's closing guess is counted as used | 1 |
-  | `NotAnObject` dropped — a directly written font's program is cut | 1 |
-  | `ScopeNotWalked` dropped | 1 |
-  | `Type3Resource` dropped | 1 |
-  | `FieldResource` dropped | 2 |
-  | a `/AP` state dictionary written **inline** is dropped, only a stream counting | 1 |
-  | a `/AP` state dictionary reached by **reference** is dropped | **0**, then 1 |
-  | glyph usage keyed by the scope's first font rather than the named one | 1 |
-
-  **One row scored zero, and it is the row worth reading.** `appearance_streams`
-  has a branch for an `/AP` entry that is an indirect reference, which must then
-  be resolved and asked whether what came back is a stream (one appearance) or a
-  dictionary (a state per key). Deleting the dictionary half of that branch
-  broke nothing: every fixture wrote its states inline, so the branch real
-  producers actually take — the states are shared between widgets, so they get
-  an object — was reached by no test at all. It is now
-  `a_glyph_in_an_appearance_state_reached_by_reference_is_kept`, and the same
-  deletion scores 1.
-
-  The Type 3 half was counted the same way on 2 October 2026, over
-  `cargo test --no-fail-fast -p tinker-pdf --lib` (352 tests), none zero:
-
-  | defect reintroduced | tests that caught it |
-  | --- | --- |
-  | the Type 3 glyphs the interpreter runs never written down, so every procedure is emptied | 4 |
-  | only the first name `/Differences` gives a shown code kept | 1 |
-  | a procedure stream kept only for the font that shows it, not for one that shares it | 4 |
-  | a Type 3 font no walked scope names emptied anyway | 2 |
-  | a directly written Type 3 font's procedures not protected | 1 |
-  | a directly written Type 3 font not recognised as one | 1 |
-  | a form's own scope not written down in, so a glyph it shows is lost | 1 |
-  | `removed()` not asking about a Type 3 font left whole | 1 |
-
+  `crates/tinker-pdf/tests/cff_subset_census.rs` runs
+  `subset::apply` over every fetched document and asserts, over documents
+  nobody here wrote: every font dictionary identical but for `/BaseFont`,
+  every descriptor but for `/FontName`, every cut program still declaring the
+  same glyph count and still parsing, none larger than it was, `/Length1`
+  describing the bytes it is on (Table 126), and every embedded program in
+  one list or the other.
 - Every edited document is written through the [writer](writing.md), whose
   output is held to the strict validator (`strict_validator.rs`); the
   `render_page` and

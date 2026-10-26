@@ -25,11 +25,11 @@ overflowing the stack.
 **Full rewrite.** Every reachable revision of the document is flattened
 and re-emitted. Garbage collection (`WriteOptions::garbage_collect`) is
 opt-in mark-and-sweep from the trailer, walking every key of every
-reachable object with no schema — and it is *off* by default, because
-"rewrite" has meant "serialize everything" since the writer existed:
-redaction overwrites content streams in place precisely so that an
-unreferenced object cannot survive with the original text in it, and that
-guarantee is not inherited from a flag. The cross-reference is a classic
+reachable object with no schema — and it is *off* by default, because a
+rewrite serializes everything: redaction overwrites content streams in
+place precisely so that an unreferenced object cannot survive with the
+original text in it, and that guarantee is not inherited from a flag. The
+cross-reference is a classic
 table (7.5.4) with contiguous subsections and exactly-twenty-byte entries;
 with `object_streams` on, eligible non-stream objects pack into an
 `/ObjStm` container (7.5.7) and the file switches to a cross-reference
@@ -57,7 +57,7 @@ RC4, AES-128 or AES-256, with the per-object key derivation of Algorithm 1
 where the revision calls for it — and not a scheme this writer would rather
 use. The key is the one authentication produced, carried on the document for
 this single purpose; a document that was never authenticated has none and
-writes in the clear as before, which is correct because it was never encrypted.
+writes in the clear, which is correct because it was never encrypted.
 Initialisation vectors are derived from the file key and the object's identity
 rather than drawn from a random source, so the same edit writes the same bytes
 on every target (ruling 4) and `wasm32-unknown-unknown` needs no RNG. `/ID[0]`
@@ -81,13 +81,11 @@ before it knows anything about filters.
 written in subsections — the classic one by its `first count` runs (7.5.4),
 the stream by `/Index` (7.5.8.2 Table 17) — so a file holding four objects
 writes four entries whatever it numbered them. That is not a size
-optimisation. `pdfjs/test/pdfs/bug1980958.pdf` is 219 bytes, holds four
-objects and numbers the last of them `2147483647`; a rewrite that walked
-the range rather than the objects made two thousand million lookups and had
-not returned after three minutes. The rewrite path enumerates the
-cross-reference table's own entries for the same reason, and the reader has
-been hardened against this shape since it was written
-(`limits::MAX_XREF_SLOTS`).
+optimisation: a file of four objects may number the last of them
+`2147483647`, and a rewrite that walked the range rather than the objects
+would make two thousand million lookups. The rewrite path enumerates the
+cross-reference table's own entries for the same reason, and the reader
+bounds this shape (`limits::MAX_XREF_SLOTS`).
 
 **Stream deduplication.** `WriteOptions::deduplicate_streams` merges
 identical streams into one object on a rewrite, after garbage collection, and
@@ -110,7 +108,7 @@ structure element, a signature dictionary — can be merged; among streams a
 cross-reference or object stream and one an `/OBJR` names (14.7.5.3) are held
 apart. Off by default, because it decodes every filtered stream to compare it;
 ignored on an incremental update, which appends and must not rewrite what a
-signature's revision covers. `DocumentEditor::import_page` still copies a
+signature's revision covers. `DocumentEditor::import_page` copies a
 shared resource per import, and this pass merges the copies **only where
 every object the copies' dictionaries name is a stream or is direct**. A copy
 whose dictionary names an indirect object that is not a stream — an indirect
@@ -231,7 +229,7 @@ facade, because it is driven by the interpreter's own glyph walk — pages, form
 XObjects at any depth, Type 3 glyph procedures, every state of every `/AP`.
 `tinker-pdf-cos` depends on neither the interpreter nor the facade and
 `cargo xtask dag` holds that direction, so a `WriteOptions::subset_fonts: bool`
-would be a flag the crate carrying it cannot act on. Every caller who wrote
+would be a flag the crate carrying it cannot act on. Every caller who writes
 through `DocumentEditor::save` — the door this page documents — would set it,
 get no subsetting, and be told nothing; and the caller who reaches for that
 flag is by definition the caller redacting something. A silent flag on the
@@ -256,24 +254,22 @@ signature over the prefix survives; it is named, and
 **`removed()` is a question about the file, not about whether the pass ran.**
 It is true only for a `Cut` whose report leaves *nothing* whole, because a
 program written through entire carries every outline it had — including the
-ones a redaction has just removed the text of. All eight `UntouchedReason`s
-are good reasons to keep a program and none of them is a reason to tell a
+ones a redaction has just removed the text of. Every `UntouchedReason` is a
+good reason to keep a program and none of them is a reason to tell a
 caller the disclosure is gone, so a non-empty `untouched` is `false` here
 whatever is in it — and so is a non-empty `type3_untouched`, a Type 3 font
-whose glyph procedures went through whole: since October 2026 the pass empties
-the procedures nothing shown runs ([editing](editing.md)'s "Type 3 fonts"),
-and one it leaves whole is in the file. `false` is the ordinary answer rather than a failure: over
-the fetched corpora 4 950 of 10 832 programs went through whole, 3 406 of them
-because the rebuild came out no smaller than the producer's own subset. It is
-an instruction to read the report, which names each one (ruling 10).
+whose glyph procedures went through whole: the pass empties the procedures
+nothing shown runs ([editing](editing.md)'s "Type 3 fonts"), and one it
+leaves whole is in the file. `false` is the ordinary answer rather than a
+failure: it is an instruction to read the report, which names each one
+(ruling 10).
 `DocumentEditor::save_signed` has no facade door of its own for the same
 reason: signing is incremental by definition, so subsetting into it could never
 remove anything.
 
 **Images, on the same door, off by default.** `SaveOptions::images` is an
 `ImagePolicy`, `Keep` by default — the pass is not entered and every image
-stream is written through as the file stored it, so a default save is byte for
-byte the save this door made before the field existed. `Recode(ImageRecoding)`
+stream is written through as the file stored it. `Recode(ImageRecoding)`
 names a coding per image kind and, optionally, a resolution
 (`ImageRecoding::new(continuous, bilevel).with_max_ppi(ppi)`):
 
@@ -310,14 +306,14 @@ every image by object reference: `recoded` (coding, size before and after,
 bytes before and after, and `resolution_kept` when a resample was asked and
 not done) and `untouched` with an `UntouchedImageReason`.
 
-**Why the switch is not `WriteOptions::images`,** which is what the roadmap
-row first asked for: font subsetting's reason, and one of its own. A
+**Why the switch is not `WriteOptions::images`:** font subsetting's reason,
+and one of its own. A
 resolution is a property of where an image is *drawn* — one object placed as
 a thumbnail and as a page has two — and only the interpreter's walk can say
 where, which `tinker-pdf-cos` is below. And `WriteOptions` describes bytes on
-disk under a contract its writer has always kept, that it never re-encodes
-image bytes; this pass runs on the editor before that writer and the writer
-still re-encodes nothing.
+disk under a contract its writer keeps, that it never re-encodes image bytes;
+this pass runs on the editor before that writer and the writer still
+re-encodes nothing.
 
 **A `/Decode` array never blocks it.** Every operation here preserves one: a
 lossless coding keeps the samples it applies to, and 8.9.5.2's map is affine
@@ -366,15 +362,11 @@ twenty bytes), `a_stream_that_already_declares_a_filter_is_handed_through_untouc
 (both directions, so it cannot pass on a writer that stopped compressing),
 and object-stream round-trips through the engine's own reader.
 
-The encrypted incremental update carries two of its own in
+The encrypted incremental update has two tests of its own in
 `crates/tinker-pdf-cos/tests/strict_validator.rs`, and they are a pair on
 purpose: one asserts the appended string comes back through the reader, the
-other asserts it is **not** sitting in the file's bytes in the clear. Only the
-second would have caught what was there before — the writer passed no cipher at
-all, so it appended plaintext under a standing `/Encrypt`, and the engine's own
-reader decrypted it back either way. Taking the cipher away again fails exactly
-those two of the file's eighty-four. The round trip of every method against its
-own decryption is one level down, in
+other asserts it is **not** sitting in the file's bytes in the clear. The
+round trip of every method against its own decryption is one level down, in
 `crates/tinker-pdf-crypto/src/handler.rs`.
 
 `crates/tinker-pdf-cos/tests/linearized.rs` checks byte offsets against the
@@ -384,11 +376,9 @@ the *numbers* the same way: it derives every page's first object by Annex F's
 own arithmetic — `/O`, then object 1, then each page's declared count added to
 the one before — and asks the document whether the number it produced is the
 page it claims to be. Over files this project did not write, that sweep is
-`validate/hints.rs`'s `annex_f_numbering`, where the hint decoder lives; it
-finds every page of 31 linearized files in the fetched qpdf corpus and names
-the one it does not.
+`validate/hints.rs`'s `annex_f_numbering`, where the hint decoder lives.
 `crates/tinker-pdf-cos/tests/strict_validator.rs` then reads the file again
-with the leniency ladder **off**: eighty injections over the frame, the
+with the leniency ladder **off**: the frame, the
 cross-reference sections as the bytes spell them, the trailer's Table 15
 entries, stream extents against `endstream`, and Annex F's hint tables
 decoded by a reader that shares nothing with the writer and is held to the
@@ -400,11 +390,9 @@ those entries is one the *typed* readers supply a default for.
 
 What that costs is stated where it is spent: this is this project's own
 parser reading this project's own writer, so the one thing it cannot
-establish is that anybody else accepts these files. The qpdf oracle that
-used to make that claim is gone under ruling 13
-([verification](../verification.md)).
+establish is that anybody else accepts these files.
 
-The facade's door carries seven of its own in
+The facade's door has tests of its own in
 `crates/tinker-pdf/src/write.rs`. `the_default_save_cuts_the_programs_down`
 and `keeping_is_asked_for_by_name_and_reported_as_kept` are the two policies;
 `the_two_doors_differ_and_the_difference_is_pinned` holds them apart — the
@@ -414,7 +402,7 @@ two doors is a tested fact rather than a sentence on this page — and
 `an_incremental_save_says_the_originals_are_still_in_the_file` asserts the
 prefix invariant and the outcome variant together.
 
-The other three are about disclosure, which is what the door is for.
+Three are about disclosure, which is what the door is for.
 `a_redaction_saved_the_ordinary_way_does_not_carry_the_removed_glyphs` redacts
 a line and then saves with `SaveOptions::default()` — no policy named, nothing
 asked for — and reads the removed letters' absence out of the output program's
@@ -450,15 +438,7 @@ the limit the paragraph on `import_page` above states).
 what a real digest cannot be made to do: an injected digest that collides on
 everything, under which only true duplicates merge; the fixed point through
 two forms naming two copies of one image; the trailer redirected; and the
-`/OBJR` and cross-reference holds. Injections, counted over both suites before
-the two images and the import test were added (which adds assertions and
-removes none): bytes
-not compared under a shared digest 1, the dictionary compared as empty 2,
-`/Length` compared 1, a warned decode compared as whole 1, the `/OBJR` hold
-dropped 1, the trailer not redirected 1, one round only 1, bucketing by stored
-bytes 1, the pass never run 2 — and the dictionary dropped from the bucket key
-alone **0**, because the comparison that decides checks it again; that is the
-second layer doing its job, not a hole.
+`/OBJR` and cross-reference holds.
 
 The image pass is `crates/tinker-pdf/tests/image_recode.rs`, and every
 expected answer there is the generator's input or arithmetic done in the file.
@@ -484,20 +464,11 @@ policies.
 
 `crates/tinker-pdf-cos/tests/encrypt_on_save.rs` round-trips encrypted
 output ([encryption](encryption.md)); `tests/page_operations.rs` and the
-forms suites save through both modes. The three document byte-hashes in
+forms suites save through both modes. The document byte-hashes in
 `crates/tinker-pdf/tests/determinism.rs` pin writer byte-determinism —
 object numbering, dictionary order and stream framing frozen as bytes
-(ruling 4, [determinism](determinism.md)). All of it rides in the
-workspace suite: 4 879 passed, 0 failed, 58 ignored (Windows x86_64,
-14 September 2026) — [verification](../verification.md).
+(ruling 4, [determinism](determinism.md)).
 
 **And it runs at scale.** Every corpus file this engine reads cleanly is
-rewritten in memory and the rewrite is validated, which is 5 124
-documents nobody here authored: all 5 124 of those rewrites carry no
-structural defect at all, and `corpus/ratchet.json` holds the rate. That pass
-is what found the three defects this writer had and no other check could see,
-because this engine's own reader repairs all three in silence: no trailer
-`/ID` on any path, a `/Prev` inherited from a source that no longer exists, a
-cross-reference table with no free head whenever the lowest object number was
-two or more, and a linearization parameter dictionary carried into a rewrite
-that is not linearized.
+rewritten in memory and the rewrite is validated, and `corpus/ratchet.json`
+holds the rate.

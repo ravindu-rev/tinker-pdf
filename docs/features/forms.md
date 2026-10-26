@@ -55,16 +55,14 @@ back as a radio group. Everything that can refuse is checked before anything
 is written, inside a transaction, and each refusal is an `AddFieldError`
 naming what was wrong.
 
-**The `/DA` font is found through the editor.** `text_appearance` used to
-look the `/DA` font up in the *file*, so a field created and filled in one
-editor was laid out against a `/Helv` the file did not have yet — measured
-at half an em a character, which auto-sizes forty `i`s to 4.8 points where
-Helvetica's own widths give 10.8. The font dictionary is now read through the
-view. What is still read from the file is a font's subsidiary objects — its
-descriptor, `/Widths` array and program — because `font::read` takes a
-`CosDocument`: a standard-14 font, which is what a created field names, has
-none, and a composite font an editor adds together with its program is the
-case that remains.
+**The `/DA` font is found through the editor.** `text_appearance` reads the
+`/DA` font dictionary through the editor's view, so a field created and
+filled in one editor is laid out against the `/Helv` the editor added. A
+font's subsidiary objects — its descriptor, `/Widths` array and program —
+are read from the file, because `font::read` takes a `CosDocument`: a
+standard-14 font, which is what a created field names, has none, and a
+composite font an editor adds together with its program is the case this
+does not cover.
 
 **Filling.** Setting `/V` is the easy half and the useless half: a value
 with no matching appearance shows only in viewers that regenerate, which is
@@ -81,16 +79,12 @@ a text string written by the shared encoder (7.9.2.2,
 value, otherwise UTF-16BE behind `FE FF`, or UTF-8 behind `EF BB BF` in a
 document declaring 2.0 or later.
 
-**Non-Latin values are shaped** (milestone 8 of
-[design/shaping.md](../design/shaping.md)). Until it landed, this module
-mapped every character above the single-byte range onto `?` and said
-nothing, so a form whose Arabic field had become a row of question marks
-was indistinguishable from one that had been filled correctly. What
-unblocked it was `tinker_pdf_cos::Font::program`, which walks
-`/DescendantFonts` → `/FontDescriptor` → `/FontFile2` (or `/FontFile3`,
-or `/FontFile`) and returns the stream's *address* — not its bytes, which
-would put every embedded program in a document into memory the moment its
-resources were read. Where the `/DA` font is composite, horizontal, and
+**Non-Latin values are shaped** ([design/shaping.md](../design/shaping.md)).
+`tinker_pdf_cos::Font::program` walks `/DescendantFonts` →
+`/FontDescriptor` → `/FontFile2` (or `/FontFile3`, or `/FontFile`) and
+returns the stream's *address* — not its bytes, which would put every
+embedded program in a document into memory the moment its resources were
+read. Where the `/DA` font is composite, horizontal, and
 embeds a program `tinker_pdf_font::Sfnt` reads, the value is shaped
 through `tinker-pdf-shape` and written as a `TJ` run of codes: joining
 forms, marks positioned by `GPOS`, and UAX #9's rule L2 applied before
@@ -100,10 +94,9 @@ own, and the `TJ` numbers absorb the difference between those and the `/W`
 a viewer will advance by, glyph by glyph — one measurement path per run,
 which is the rule `tinker-pdf-layout`'s `metrics.rs` states.
 
-**Which encodings.** Milestone 8 shipped `/Identity-H` and nothing else,
-because going from a glyph back to a *code* means reading an encoding CMap
-backwards and 9.7.5's are written to be read forwards. "Written to be read
-forwards" is not "not invertible": `tinker_pdf_font::CMap::code_for_cid`
+**Which encodings.** Going from a glyph back to a *code* means reading an
+encoding CMap backwards, and 9.7.5's are written to be read forwards —
+which is not "not invertible": `tinker_pdf_font::CMap::code_for_cid`
 gathers every code a CMap's own tables could have meant by a CID, walks
 them in ascending order and returns the first that maps **back**, so the
 round trip is checked rather than assumed — a `cidchar` that overrode a
@@ -111,7 +104,7 @@ round trip is checked rather than assumed — a `cidchar` that overrode a
 and a CID nothing means any more is refused rather than guessed. The code
 comes back with its byte width, because 9.7.6.2's codespaces are what
 decide where one code ends and the next begins and `90ms-RKSJ-H` has both
-widths in one CMap. So four cases now fill: `/Identity-H`; an **embedded
+widths in one CMap. So four cases fill: `/Identity-H`; an **embedded
 CMap stream**, whose tables are the document's own; a **predefined
 registry CMap** of 9.7.5.2, where this build compiled its table in; and
 any of those over a non-identity `/CIDToGIDMap`, which is what every
@@ -119,8 +112,8 @@ subset font in the wild has. `Font::cid_for_gid` inverts that last step
 through an index built once per font rather than by scanning the table per
 glyph.
 
-**Three more fonts shape (October 2026).** The ROADMAP named them as the
-refusals left, and each now has a fixture whose operators the test computes:
+**Three more fonts shape**, each with a fixture whose operators the test
+computes:
 
 - **A vertical CMap** (9.7.4.3) is written as a **column**: the glyphs are
   found as above, `GSUB` runs `vert` and `vrt2` in place of the horizontal
@@ -147,7 +140,7 @@ refusals left, and each now has a fixture whose operators the test computes:
   `/Encoding` character (9.6.6) the program's `cmap` maps to that glyph — so
   `GPOS` kerning and placement reach the field as `TJ` numbers and `Ts`. A
   line that needs a glyph no byte reaches — a ligature, a joined form —
-  keeps the single-byte path whole, which is what it drew before.
+  keeps the single-byte path whole.
 
 Anything else keeps the single-byte path, still draws a `?`, and emits
 `WarningKind::FieldCharacterUnrepresentable { character }` against the
@@ -159,7 +152,7 @@ nothing in the document says which code means which character; a vertical
 is neither an sfnt nor a CFF.
 
 **The feature gate is declared, not silent.** The registry's code-to-CID
-tables are 1.19 MB behind the `cmap-predefined` cargo feature
+tables are behind the `cmap-predefined` cargo feature
 ([fonts.md](fonts.md)), so a `--no-default-features` build reads a
 `UniJIS-UCS2-H` field's codespaces and widths and has nothing to invert.
 That build refuses the shaped path and emits
@@ -167,8 +160,8 @@ That build refuses the shaped path and emits
 CMap whose table is missing, before the per-character warnings. The
 alternative — filling with `?` and saying only that the characters were
 undrawable — would make a capability's absence look like a document's
-defect, which is the failure PDF/A named once already: a verdict that
-depends on a feature is not a verdict, and neither is a fill. The two
+defect: a verdict that depends on a feature is not a verdict, and neither
+is a fill. The two
 paths that need no table at all — `/Identity-H` and an embedded CMap
 stream — work in either build, and `shaped_forms.rs` asserts both legs.
 
@@ -183,9 +176,9 @@ widget's `/AS` together, all widgets or none — through `set_checkbox` and
 XFDF file carries for a button. A state no widget's `/AP /N` offers is
 refused rather than written, because a `/V` naming a state nothing can draw
 is a box that reads as ticked and displays as empty. That door is the
-user's: `set_calculated_values` refuses a check box or radio group, as it
-always has, since no calculation in this build computes a button state and
-a ReadOnly box is not one to tick on a script's word. `reset_form` restores `/DV`
+user's: `set_calculated_values` refuses a check box or radio group, since
+no calculation in this build computes a button state and a ReadOnly box is
+not one to tick on a script's word. `reset_form` restores `/DV`
 into `/V` and removes `/V` where there is no `/DV` (12.7.5.3) — "never
 filled" and "filled with nothing" are different states.
 
@@ -208,10 +201,9 @@ whose entries name it as their own `/Kids`, is walked once and the second
 parent named as a `TreeCut` — and the field tree's own depth bound. What
 both readers hand back is held to one budget, `MAX_FORM_DATA_BYTES` (64 MiB
 of names, values and warnings), charged before each copy is made, because a
-copy is where a small file became a large allocation: a field's name was
+copy is where a small file becomes a large allocation: a field's name is
 copied into every warning met inside it, and one indirect `/T` or `/V` into
-every field beneath or beside it, so 67 KiB of FDF asked for 184 MB and
-22 KiB for a gigabyte. A file that asks for more is refused whole,
+every field beneath or beside it. A file that asks for more is refused whole,
 `FormDataError::TooLarge`, since part of a form's data imports as a
 different form. An entry whose qualified name is empty — no `/T` or `name`,
 or an empty one, and no named ancestor — is not read but named
@@ -290,9 +282,8 @@ fields).
 
 **The 4 MiB is one total, not three.** A document keeps its scripts in three
 places — the field tree's `/AA`, `/Names /JavaScript` and the catalog's
-`/AA` — and each walk used to start from the full total, so a file that
-filled all three surfaced twelve mebibytes. `ScriptBudget` is that total as a
-value the caller carries: `fields_within`, `document_scripts_within` and
+`/AA` — and `ScriptBudget` is one total across them, as a value the caller
+carries: `fields_within`, `document_scripts_within` and
 `catalog_scripts_within` spend one between them, in that order (the order is
 fixed because which scripts come back as source and which as
 `Script::Oversize` depends on it, and determinism is a contract — ruling 4).
@@ -300,17 +291,13 @@ fixed because which scripts come back as source and which as
 threads one. The bare `fields`, `document_scripts` and `catalog_scripts` are
 each **one read of one surface** and each start from the full total; a caller
 that reads more than one and wants the document's answer threads a budget.
-The alternative, a budget living inside `CosDocument`, was rejected because
-it would make reading a document mutate it and the same document read twice
-answer differently. One thing the shape of the defect says out loud: the
-catalog could never have tripled the total on its own, because 12.6.3
-Table 200 defines five triggers and 64 KiB each is a 320 KiB ceiling.
+A budget living inside `CosDocument` would make reading a document mutate it
+and the same document read twice answer differently. The catalog alone holds
+at most 320 KiB: 12.6.3 Table 200 defines five triggers, at 64 KiB each.
 
-**A form's own helpers now resolve** (7.7.4). `/Names /JavaScript` is where
-a generated form keeps the functions its `/AA /C` scripts call, and until
-`ScriptScope` existed the interpreter met the first call to one, raised
-`ScriptError::UnknownName` and refused the whole pass — a correctly authored
-file this build could not compute at all. Under a policy that allows
+**A form's own helpers resolve** (7.7.4). `/Names /JavaScript` is where
+a generated form keeps the functions its `/AA /C` scripts call. Under a
+policy that allows
 `Trigger::Document`, every document-level source is read into a **name table
 of function definitions and nothing else**, and the table is consulted after
 every builtin, so a document cannot redefine `getField` by declaring a
@@ -319,9 +306,9 @@ function of that name. Anything at document scope that is not a definition is
 skipped statement builds a table silently missing whatever it would have
 defined.
 
-Definition is document scope's production alone. `function` stays reserved
-everywhere a *field* script is parsed, so a calculate action gained the
-ability to **call** a helper and never to declare one — one place declares,
+Definition is document scope's production alone. `function` is reserved
+everywhere a *field* script is parsed, so a calculate action can **call** a
+helper and never declare one — one place declares,
 and it is the one the policy gates. A helper's body is read by the same
 statement productions a calculate action's is, so nothing the subset excludes
 can arrive through one. Recursion is refused by name
@@ -343,8 +330,7 @@ than something a pass fires.** A calculate action runs against the document as
 it stands; a keystroke action runs against what is being typed, where the
 caret is, and whether this is the commit at the end — three facts a host has
 and a reader does not — and a validate action runs against a value somebody
-committed. That, and not any limit of the interpreter, is why both sat
-surfaced-and-never-run. `DocumentEditor::keystroke(field, event, policy)` and
+committed. `DocumentEditor::keystroke(field, event, policy)` and
 `DocumentEditor::validate(field, value, policy)` take an event a host built
 and answer an `EventVerdict`: `Accepted(text)` — which for a keystroke is
 `event.change` as the script left it, because a keystroke action rewriting
@@ -366,26 +352,23 @@ field it wrote **without** checking: ruling 10 applied to a check rather than
 a repair, since a pass that silently skipped a form's own validation reads
 exactly like a pass over a form that has none.
 
-**Two strings compare as strings** (11.8.5). This engine compared every
-relational operator by number until the keystroke entry point arrived, and
-what found it is the commonest keystroke script there is —
-`event.change >= '0' && event.change <= '9'`, under which `'!'` is `NaN`,
-every comparison against it is false, and a digits-only field silently accepts
-everything. Both operands strings compares by code point; anything else is
-still arithmetic, which is what keeps `getField('a').value > 500` meaning what
-it says.
+**Two strings compare as strings** (11.8.5). Both operands strings compares
+by code point; anything else is arithmetic, which is what keeps
+`getField('a').value > 500` meaning what it says. Comparing two strings by
+number would break the commonest keystroke script there is —
+`event.change >= '0' && event.change <= '9'`, under which `'!'` would be
+`NaN`, every comparison against it false, and a digits-only field would
+accept everything.
 
 **The format string cannot reach `/V`, and a type says so.** 12.7.3.3 keeps
-a field's value and its appearance apart, and until this milestone that was
-held up by `formatted_value` simply not calling the editor — a property of
-how the code was arranged rather than a rule anything enforced. The first
-caller to write `editor.set_field_value(name, formatted)` would have produced
-a `/V` of "GBP 1,234.00" and nothing would have objected. So
-`formatted_value` returns a `DisplayString`: a newtype with no `Deref`, no
+a field's value and its appearance apart, so `formatted_value` returns a
+`DisplayString`: a newtype with no `Deref`, no
 `Into<String>` and no constructor outside `calc.rs`, and every door into the
 document — `set_field_value`, `fill_field`, `set_field_values`,
 `set_calculated_values` — takes `&str`, which one of these cannot be spelled
-as. `DisplayString::text` is the way out and is deliberately a spelling
+as. `editor.set_field_value(name, formatted)`, which would write a `/V` of
+"GBP 1,234.00", does not compile. `DisplayString::text` is the way out and is
+deliberately a spelling
 rather than a coercion: a caller who wants the characters writes `.text()`,
 and one who writes `.text()` into `/V` has made a decision a reviewer can
 see. What the type removes is the mistake nobody makes on purpose.
@@ -397,14 +380,10 @@ the six trigger classes a document's scripts arrive under — `Calculate`
 (`/AA` `/C`), `Format` (`/F`), `Keystroke` (`/K`), `Validate` (`/V`),
 `Document` (`/Names /JavaScript`, 7.7.4) and `Catalog` (12.6.3 Table 200's
 `WC WS DS WP DP`) — and says which of them this host allows to run. Deny by
-default, with two exceptions that are the shipped behaviour written down
-rather than a judgement about safety: `Calculate` and `Format` are allowed
-because `recalculate()` and `formatted_value()` have run them since the
-interpreter landed, and a type that silently turned an existing capability
-off would be a breaking change wearing a safety argument. The other four are
-denied because nothing ran them before the type existed, and a default that
-starts running document program text on the strength of a new struct is
-exactly the change nobody reviews.
+default, with two exceptions: `Calculate` and `Format` are allowed, so
+`recalculate()` and `formatted_value()` run the calculate and format actions
+a form carries; the other four are denied, so a host runs the rest of a
+document's program text only by allowing it.
 
 A denied trigger is a **named refusal**, never a silent skip:
 `CalcError::Refused` carries the trigger and the field or script that
@@ -415,9 +394,9 @@ recalculates to the same empty answer under every policy, since refusing an
 absent script would collapse "this host does not run calculations" into
 "this document has none".
 
-`recalculate()` and `formatted_value()` keep their signatures and run under
+`recalculate()` and the free `calc::formatted_value` run under
 `ScriptPolicy::default()`; `recalculate_under()` and
-`formatted_value_under()` take one. Nothing recalculates automatically —
+`calc::formatted_value_under` take one. Nothing recalculates automatically —
 when a calculation runs is host policy, so `recalculate()` is an explicit
 call.
 
@@ -430,7 +409,7 @@ what a host gets by changing it.
 | `Format` | a field's `/AA /F` | **allowed** | `formatted_value()` answers a `DisplayString` no write door will take | `CalcError::Refused`, naming the field |
 | `Keystroke` | a field's `/AA /K` | denied | `DocumentEditor::keystroke(field, event)` answers an `EventVerdict` for an event the host built | `CalcError::Refused` — there is no implicit path to reach it, so nothing else changes |
 | `Validate` | a field's `/AA /V` | denied | `DocumentEditor::validate(field, value)`; and a computed value is checked before it is committed (12.7.2), a refusal aborting the whole pass as `CalcError::Invalid` | the pass still runs, and `Recalculation::refused` names every field it wrote unchecked |
-| `Document` | `/Names /JavaScript` (7.7.4) | denied | the sources are read into a `ScriptScope` of **function definitions only**, and a field script calling one resolves | the table is empty, so a call to a helper is the `ScriptError::UnknownName` it always was — a refusal here would make every form carrying such a block uncomputable |
+| `Document` | `/Names /JavaScript` (7.7.4) | denied | the sources are read into a `ScriptScope` of **function definitions only**, and a field script calling one resolves | the table is empty, so a call to a helper is `ScriptError::UnknownName` — a refusal here would make every form carrying such a block uncomputable |
 | `Catalog` | the catalog's `/AA` (12.6.3 Table 200) | denied | **nothing**. No entry point in this build runs a catalog action | nothing. Declarable and inert — see below |
 
 `Trigger::Catalog` is the one row with no consumer, and it is written down
@@ -441,7 +420,7 @@ which is the one `/Names /JavaScript` covers. The bit exists because it names
 a real trigger class a host has to be able to deny and because the projection
 onto the C ABI is 1:1 (ruling 11). `form_document_scripts.rs`'s
 `allowing_the_catalog_trigger_changes_no_answer` is the assertion that says
-so, so that a guard holding nothing is a measured fact rather than an
+so, so that a guard holding nothing is an asserted fact rather than an
 assumption.
 
 ## API
@@ -567,39 +546,37 @@ let bytes = editor.save(&WriteOptions::default());
 | A computed value a field's own `/AA /V` refuses | `CalcError::Invalid { field, value }`, and the whole pass writes nothing | one total rejected and nine written anyway is a document that disagrees with itself | — |
 | A validate action the policy would not run, over a value the pass wrote anyway | `Recalculation::refused` names the field | a skipped check reads exactly like a form that has none, and the difference is whether the numbers were looked at (ruling 10) | — |
 | A catalog action (`WC`, `WS`, `DS`, `WP`, `DP`) | `Trigger::Catalog` exists and **nothing in this build runs one**; allowing it changes no answer | every one of the five names an event a reader has no notion of, and none of them is document-open | [ROADMAP](../ROADMAP.md) FJ-06 |
-| A format action's display string reaching `/V` | `DisplayString`, which no write door will take — `error[E0308]`, proved by compiling the mistake | 12.7.3.3 keeps value and appearance apart, and a type is a guarantee where an arrangement of code was a convention | — |
+| A format action's display string reaching `/V` | `DisplayString`, which no write door will take — `error[E0308]`, proved by compiling the mistake | 12.7.3.3 keeps value and appearance apart, and a type is a guarantee where an arrangement of code is a convention | — |
 | Automatic recalculation | none offered — `recalculate()` is explicit | when a calculation runs is a host's policy, not the engine's | [ROADMAP](../ROADMAP.md) FJ-07 |
 | Filling or signing a **signature field** | `FieldKind::Signature` recognises it and this module does neither | a signature field's value is a CMS blob over a `/ByteRange`, not text a fill layer could lay out; producing one is `DocumentEditor::save_signed` and reading one is `Document::verify_signatures` | [signatures](signatures.md); [ROADMAP](../ROADMAP.md) AN-17 |
-| XFA | not read anywhere | removed in ISO 32000-2, and a named non-goal until 9 October 2026; read, laid out, scripted and flattened as roadmap rows since the owner's parity decision | [ROADMAP](../ROADMAP.md) AN-27…AN-34 |
+| XFA | not read anywhere | removed in ISO 32000-2; reading, layout, scripting and flattening are roadmap rows | [ROADMAP](../ROADMAP.md) AN-27…AN-34 |
 
 ## Verified
 
-Unit tests sit beside the code: 17 in `form.rs` (tree walk, inheritance,
+Unit tests sit beside the code: in `form.rs` (tree walk, inheritance,
 merged widgets, qualified names, on-state discovery, cyclic trees, script
-surfacing including the stream form and the oversize refusal), 18 in
+surfacing including the stream form and the oversize refusal), in
 `fill.rs` (the `/DA` split, quadding, multiline, auto-size shrink, comb
 cells and their overflow, escaping, UTF-16BE values, `/MaxLen` and
-ReadOnly refusals), and 53 in `script.rs` (arithmetic through the AF
+ReadOnly refusals), and in `script.rs` (arithmetic through the AF
 helpers, each excluded construct refused by name, the inert `app.*` stubs,
 the policy defaults, and the document-level name table — arity, frames,
 recursion, the function cap and a hostile document scope that never panics).
 
-`crates/tinker-pdf-cos/tests/form_transactions.rs` (20 tests) holds up the
-atomicity claims against hand-written fixtures: a successful fill produces
-the bytes it always did, rollback restores objects, deletions, page order
-and the object-number counter, abandoned edits do not grow the next saved
-file, a refused field rolls back the ones before it, and a widget without
-a `/Rect` is reported by object number rather than skipped in silence.
-`crates/tinker-pdf-cos/tests/form_calculations.rs` (29 tests) runs an
+`crates/tinker-pdf-cos/tests/form_transactions.rs` holds up the
+atomicity claims against hand-written fixtures: a successful fill's saved
+bytes pinned, rollback restoring objects, deletions, page order
+and the object-number counter, abandoned edits not growing the next saved
+file, a refused field rolling back the ones before it, and a widget without
+a `/Rect` reported by object number rather than skipped in silence.
+`crates/tinker-pdf-cos/tests/form_calculations.rs` runs an
 invoice fixture end to end — `/CO` order honoured, a failing script
 leaving the editor byte-identical, ReadOnly totals written by the
 calculation and refused to the user, cascades cut and reported, and the
-format string never landing in `/V`. Its module header carries the six
-policy defaults flipped one at a time and how many assertions each flip
-fired, four of which are zero and say so.
+format string never landing in `/V`.
 
-`crates/tinker-pdf/tests/form_creation.rs` (9 tests) is the creation row's
-exit criterion, on a file with no form and on `testdata/form-fields.pdf`:
+`crates/tinker-pdf/tests/form_creation.rs` covers creation, on a file with
+no form and on `testdata/form-fields.pdf`:
 each of the four kinds created, found by `fields()` in the same editor,
 filled through `fill_field`, saved incrementally and as a rewrite, reopened,
 read back with its value and held clean by the strict validator; rendered
@@ -608,10 +585,10 @@ and the selected radio button counted against the frames beside them;
 initial values restored by a reset; a dotted name creating its ancestors
 once; the `/DR` font joined or added exactly once; the auto-size that proves
 the `/DA` font is read through the editor; and every `AddFieldError` leaving
-the editor clean. Its header carries six reintroduced defects, each firing.
+the editor clean.
 
-`crates/tinker-pdf/tests/form_data.rs` (17 tests) is the exchange row's
-exit criterion: export then import reproduces every terminal field's value,
+`crates/tinker-pdf/tests/form_data.rs` covers the exchange: export then
+import reproduces every terminal field's value,
 in both formats, on `testdata/form-fields.pdf` before and after a fill, and
 on a form `add_field` builds with names three deep, a list box, a combo box,
 a check box and a radio group, and values that need every escape both
@@ -620,26 +597,22 @@ by this writer, and their README says what was and was not available to
 write them from — are read value by value, and imported into the form they
 were written for. The refusals, the unread keys and a name ten thousand
 partial names deep are asserted; `hostile_input.rs`'s
-`mutated_form_data_never_panics` sweeps the fixtures on every commit, and
+`mutated_form_data_never_panics` sweeps the fixtures, and
 `form_data` is a fuzz target whose body is a round-trip property rather than
-a crash hunt. That property, run once as a stable-toolchain sweep of 360 000
-mutations before the target was committed, found two writer defects — a
-valueless field beneath which other fields sat was lost, and `.x` came back
-as `x` — and both are pinned. Seven reintroduced defects each fire. The
-review of the row found what the sweep could not reach: the copy budget is
-fired on every shape it named and the ones beside them (one field's name in
-four thousand warnings, one indirect `/T` down 127 inline and 256 indirect
-levels, one `/V` in five thousand fields, four thousand kids under one long
-name, the XFDF equivalents) and swept from small to past it by
-`hostile_input.rs`'s `form_data_hands_back_no_more_than_its_budget`; a
-self-naming `/Kids` array returns; a nameless entry is neither read nor
-imported; and a unit test beside the writer counts that writing names back
-into a tree compares each partial name with one sibling at most, where a
-scan of every sibling took seven seconds over forty thousand flat names.
+a crash hunt. A valueless field with other fields beneath it, and a name
+`.x`, round-trip as written. The copy budget is asserted on each shape that
+multiplies a copy (one field's name in thousands of warnings, one indirect
+`/T` down many inline and indirect levels, one `/V` in thousands of fields,
+thousands of kids under one long name, the XFDF equivalents) and swept from
+small to past it by `hostile_input.rs`'s
+`form_data_hands_back_no_more_than_its_budget`; a self-naming `/Kids` array
+returns; a nameless entry is neither read nor imported; and a unit test
+beside the writer counts that writing names back into a tree compares each
+partial name with one sibling at most.
 
-`crates/tinker-pdf/tests/shaped_forms.rs` (19 tests, and the same 19 in a
-`--no-default-features` build — the registry pair swap places) holds up the
-shaped half against a face the file synthesises, so the expected glyph
+`crates/tinker-pdf/tests/shaped_forms.rs`, run in the default build and in a
+`--no-default-features` build (where the registry pair swap places), holds up
+the shaped half against a face the file synthesises, so the expected glyph
 indices are ones the test names rather than reads back out of the engine.
 It asserts joined Arabic in visual order under `/Identity-H`, under an
 embedded CMap stream, under a one-byte codespace, under a registry CMap —
@@ -653,39 +626,31 @@ font carrying a `GPOS` placement as `TJ` numbers and `Ts`, and keeping the
 byte path for a line whose ligature no byte reaches; and it asserts each
 remaining refusal by name: a program that is no font, the CID whose code a
 `cidchar` took, and the registry CMap whose table a `cmap-predefined`-off
-build left out. Its module header carries milestone 8's nine reintroduced
-defects and how many assertions each one fired.
+build leaves out.
 
-`crates/tinker-pdf-cos/tests/form_script_budget.rs` (4 tests) builds a
+`crates/tinker-pdf-cos/tests/form_script_budget.rs` builds a
 document that crowds all three surfaces and asserts the four mebibytes are
 spent once between them, that the eight name-tree entries and five catalog
 triggers past the line come back named, and that each bare entry point is
-still one read of its own. Its header records what the catalog cannot hold
+one read of its own. Its header records what the catalog cannot hold
 and why.
 
-`crates/tinker-pdf-cos/tests/form_document_scripts.rs` (13 tests) is the
-milestone that made real calculating forms computable: one test asserts both
-that a form computes through its own helpers under the trigger **and** that
-it fails with `UnknownName` without it, because "it works now" and "it did
-not work before" are two claims and only the pair is evidence. Recursion
+`crates/tinker-pdf-cos/tests/form_document_scripts.rs` asserts in one test
+both that a form computes through its own helpers under the trigger **and**
+that it fails with `UnknownName` without it. Recursion
 direct and mutual, a helper that outruns the step budget, a statement at
 document scope, a field script that tries to declare a function, a helper
 that tries to take a builtin's name, and the catalog trigger changing no
-answer anywhere are each asserted by name. Its header carries the same six
-flips: `document` fires 3 of 13 here, where `form_calculations.rs` reports a
-zero.
+answer anywhere are each asserted by name.
 
-`crates/tinker-pdf-cos/tests/form_events.rs` (13 tests) covers the two
+`crates/tinker-pdf-cos/tests/form_events.rs` covers the two
 actions that need an event: a keystroke accepted, refused and rewritten; the
 selection and commit flag a host states and a script may not move; the
 default policy refusing both by name; a field with no action accepting under
 every policy; an event script refused a write; a validation that aborts a
-whole pass and one that is named as never having run. Its header explains why
-the keystroke and validate flips are 1 and 2 of 13 rather than more — most of
-the file passes an explicit policy, which a change to the default cannot
-reach.
+whole pass and one that is named as never having run.
 
-`crates/tinker-pdf-cos/tests/display_string_does_not_reach_v.rs` (2 tests)
+`crates/tinker-pdf-cos/tests/display_string_does_not_reach_v.rs`
 compiles the mistake rather than describing it: `rustc` builds a caller
 against the real rlib this test run produced, once with `.text()` — which
 must compile, or nothing below it means anything — and once per write door
@@ -695,18 +660,14 @@ with the `DisplayString` handed straight over, each asserted to fail with
 whether this repository's own type refuses a state, and adjudicates nothing
 about a document (ruling 13).
 
-`form_script` is one of the 51 fuzz targets, with a committed seed corpus.
+`form_script` is a fuzz target with a committed seed corpus.
 It drives every entry point the policy gates from one input, split at the
 first NUL byte: the prefix is offered to `ScriptScope::define` as document
 scope, and the suffix is run as a field script with whatever that produced
 in scope, then twice more as each event — because a keystroke action reads
 members no calculate action ever touches and a bound that holds for `run`
 and not for a helper's body is not a bound. A seed with no NUL defines
-nothing and runs whole, which is what every committed seed already did. Two
+nothing and runs whole. Two
 properties are asserted on each: no panic (ruling 1), and that a run never
 spends more budget than it was given, which is how a bounded interpreter is
 kept bounded rather than believed bounded.
-
-All of it rides in the workspace suite: 4 879 passed, 0 failed, 58 ignored across 218 suites
-(`x86_64-pc-windows-msvc`, 14 September 2026) —
-[verification](../verification.md).
