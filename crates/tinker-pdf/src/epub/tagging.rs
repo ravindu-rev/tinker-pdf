@@ -383,6 +383,7 @@ pub(crate) fn tag_runs(
     fonts: &Fonts<'_>,
     tagging: &Tagging<'_>,
     runs: &[&TextRun],
+    places: &[usize],
     chains: &[Vec<usize>],
     level: usize,
     refused: &mut usize,
@@ -413,7 +414,15 @@ pub(crate) fn tag_runs(
                     page.continue_at(tagging.chapter.saturating_add(here));
                 }
             }
-            *refused += artifact_or_run(builder, page, runs[at], frame, fonts, effects);
+            *refused += artifact_or_run(
+                builder,
+                page,
+                runs[at],
+                places.get(at).copied(),
+                frame,
+                fonts,
+                effects,
+            );
             last = Some(here);
             at += 1;
             continue;
@@ -424,6 +433,7 @@ pub(crate) fn tag_runs(
             end += 1;
         }
         let (slice, tails) = (&runs[at..end], &chains[at..end]);
+        let held = places.get(at..end).unwrap_or_default();
         // **The key is the element and the order is the reading position**,
         // and they are two numbers because they answer two questions. The key
         // has to be the same on every page this element appears on or its
@@ -440,6 +450,7 @@ pub(crate) fn tag_runs(
                 fonts,
                 tagging,
                 slice,
+                held,
                 tails,
                 level + 1,
                 refused,

@@ -2461,6 +2461,108 @@ fn the_public_draw_page_still_tags_a_page_from_its_element_tree() {
 
 // ---- The read-back's work ----------------------------------------------------
 
+/// **A run is drawn from its plan by its place in the page.** The read-back
+/// plans each run of a line it reads (`paint::Fonts::set_readings`), and the
+/// page writes each run as planned, found by where the run stands in the
+/// page's list of runs: runs held somewhere else by the time they are drawn
+/// are written from their plans, none planned anew, and a copy drawn with no
+/// place, as a text shadow is, is planned anew.
+#[test]
+fn a_run_is_drawn_from_its_plan_by_its_place_in_the_page() {
+    use super::paint::{artifact_or_run, Effects, Fonts, Frame, UNPLANNED};
+    use tinker_pdf_css::property::{
+        Color, FontFamily, FontKerning, FontStyle, FontVariant, TextDecoration,
+    };
+    use tinker_pdf_layout::{Page as LayoutPage, TextRun};
+
+    let run = |x: f64, width: f64, text: &str, order: usize| TextRun {
+        x,
+        y: 20.0,
+        width,
+        text: text.to_owned(),
+        font_size: 16.0,
+        families: vec![FontFamily::Serif],
+        weight: 400,
+        style: FontStyle::Normal,
+        variant: FontVariant::Normal,
+        kerning: FontKerning::Auto,
+        features: Vec::new(),
+        paragraph_rtl: Some(true),
+        paragraph: 1,
+        embeddings: Default::default(),
+        bidi_level: Some(1),
+        bidi_gap: None,
+        bidi_line_rtl: true,
+        hyphenated: false,
+        color: Color::BLACK,
+        decoration: TextDecoration::None,
+        painted: true,
+        letter_spacing: 0.0,
+        word_spacing: 0.0,
+        generated: false,
+        anchor: None,
+        order,
+    };
+    // A styled `?!` and a Hebrew word at a right-to-left level: a line the
+    // read-back reads, since the `?!` may be drawn with its neutrals turned.
+    let laid = LayoutPage {
+        boxes: Vec::new(),
+        replaced: Vec::new(),
+        runs: vec![run(10.0, 9.0, "?!", 2), run(19.0, 40.0, "שלום", 1)],
+        clips: Vec::new(),
+    };
+    let faces = super::typeface::FaceSet::new();
+    let mut fonts = Fonts::new(&faces);
+    for each in &laid.runs {
+        fonts.note(each);
+    }
+    let mut builder = tinker_pdf_cos::build::DocumentBuilder::new();
+    fonts.register(&mut builder);
+    let frame = Frame {
+        page: (300.0, 200.0),
+        margin: 10.0,
+    };
+    let effects = Effects::default();
+    let on = effects.on(&laid, &frame, 0);
+    fonts.set_contexts(&laid.runs, &on);
+    fonts.set_readings(&laid.runs, &frame, &on);
+
+    // The same runs, held somewhere else by the time they are drawn.
+    let moved: Vec<TextRun> = laid.runs.clone();
+    let mut page = builder.begin_page(300.0, 200.0);
+    UNPLANNED.with(|unplanned| unplanned.set(0));
+    for (place, each) in moved.iter().enumerate() {
+        let refused = artifact_or_run(
+            &mut builder,
+            &mut page,
+            each,
+            Some(place),
+            &frame,
+            &fonts,
+            &on,
+        );
+        assert_eq!(refused, 0);
+    }
+    assert_eq!(
+        UNPLANNED.with(core::cell::Cell::get),
+        0,
+        "every run is written from the plan its place keeps"
+    );
+
+    // A copy drawn with no place, as a text shadow is, is planned anew.
+    artifact_or_run(
+        &mut builder,
+        &mut page,
+        &moved[0],
+        None,
+        &frame,
+        &fonts,
+        &on,
+    );
+    assert_eq!(UNPLANNED.with(core::cell::Cell::get), 1);
+    builder.push_page(page);
+}
+
 /// A book of one chapter whose `<style>` is `style` and whose `<body>` is
 /// `body`, in `language`: what the integration tests' `styled_book` writes,
 /// with every entry stored, for the counts below, which only a unit test

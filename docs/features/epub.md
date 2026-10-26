@@ -437,7 +437,9 @@ under a skew a slanted glyph's box reaches over its neighbour's where nothing
 is drawn over anything). `paint::leading_mark_at`, which places a mark of no
 advance against half an em, keeps the run's ems. Each run is planned once a
 page for every reading of its line, and the page writes the plan its line was
-read in (`paint::Fonts::plans`), and a line of units whose reading the page
+read in, found by the run's place in the page's list of runs, wherever the run
+is held by then, while a text shadow, a copy with no place, is planned anew
+(`paint::Fonts::plans`, `paint::place_in`), and a line of units whose reading the page
 has searched is not searched again (`text_order::Readings`)
 (`a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on`,
 `a_line_is_read_back_as_the_pages_fonts_give_its_characters_back`,
@@ -451,8 +453,9 @@ has searched is not searched again (`text_order::Readings`)
 `a_drawing_that_sets_more_glyphs_over_others_than_the_rules_is_not_taken`,
 `two_cells_are_read_back_as_a_reader_parts_them_on_the_page`, and in
 `epub::tests`,
-`a_line_whose_rules_drawing_reads_its_letters_in_order_is_read_back_once` and
-`a_line_of_units_the_read_back_has_read_is_not_searched_again`).
+`a_line_whose_rules_drawing_reads_its_letters_in_order_is_read_back_once`,
+`a_line_of_units_the_read_back_has_read_is_not_searched_again` and
+`a_run_is_drawn_from_its_plan_by_its_place_in_the_page`).
 
 **What the read-back leaves** (ROADMAP CD-19). Holding each drawing tried to
 the line's words, searching on past a reading of the rules' drawing that runs

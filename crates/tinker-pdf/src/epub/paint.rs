@@ -964,9 +964,10 @@ pub struct Fonts<'a> {
     /// [`Fonts::set_contexts`].
     along: RefCell<BTreeMap<RunKey, f64>>,
     /// The page being drawn's runs as [`Fonts::set_readings`] planned them,
-    /// by run ([`plan_key`]) and the drawing each was planned in: planned
-    /// once however often a search reads them back, and written by
-    /// [`draw_run`] as planned. See [`Fonts::plan_run`].
+    /// by each run's place in the page's list of runs and the drawing it was
+    /// planned in: planned once however often a search reads them back, and
+    /// written by [`draw_run`], which is handed the place it draws, as
+    /// planned. See [`Fonts::plan_run`].
     plans: RefCell<BTreeMap<(usize, Drawing), RunPlan>>,
     /// The character a reader reads for each character the overflow font
     /// has drawn, by its `/Differences` name ([`overflow_reads_as`]): looked
@@ -1247,6 +1248,15 @@ impl<'a> Fonts<'a> {
             }
             // In the order drawn, which is the order written.
             line.sort_by_key(|run| order.get(&run_key(run)).copied().unwrap_or(usize::MAX));
+            // Each run's place in the page's list, which its plans are kept
+            // by ([`Fonts::plans`]).
+            let Some(places) = line
+                .iter()
+                .map(|run| place_in(runs, run))
+                .collect::<Option<Vec<usize>>>()
+            else {
+                continue;
+            };
             // Each run's drawings other than the rules'. A line with none is
             // drawn by the rules whatever a reading of it finds, and is not
             // read, as 935b077 did not read it.
@@ -1287,6 +1297,7 @@ impl<'a> Fonts<'a> {
             let written = Words::of(&typed);
             let page = self.search(
                 &line,
+                &places,
                 &matrices,
                 frame,
                 &written,
@@ -1305,9 +1316,19 @@ impl<'a> Fonts<'a> {
                 // its runs' own space, as it was before the page's matrix was
                 // modelled.
                 Search::Nothing if transformed => {
-                    match self.search(&line, &own(), frame, &written, &options, Given::ByTheFont) {
+                    match self.search(
+                        &line,
+                        &places,
+                        &own(),
+                        frame,
+                        &written,
+                        &options,
+                        Given::ByTheFont,
+                    ) {
                         Search::Found(found)
-                            if self.reads_closer(&line, &matrices, frame, &written, &found) =>
+                            if self.reads_closer(
+                                &line, &places, &matrices, frame, &written, &found,
+                            ) =>
                         {
                             Some(found)
                         }
@@ -1323,9 +1344,19 @@ impl<'a> Fonts<'a> {
                 // matrix was modelled, and what that finds is drawn where it
                 // reads the words right on the page.
                 Search::Letters if transformed => {
-                    match self.search(&line, &own(), frame, &written, &options, Given::ByTheFont) {
+                    match self.search(
+                        &line,
+                        &places,
+                        &own(),
+                        frame,
+                        &written,
+                        &options,
+                        Given::ByTheFont,
+                    ) {
                         Search::Found(found)
-                            if self.reads_whole(&line, &matrices, frame, &written, &found) =>
+                            if self.reads_whole(
+                                &line, &places, &matrices, frame, &written, &found,
+                            ) =>
                         {
                             Some(found)
                         }
@@ -1348,6 +1379,7 @@ impl<'a> Fonts<'a> {
                     let typed_words = Words::of(&as_typed);
                     match self.search(
                         &line,
+                        &places,
                         &matrices,
                         frame,
                         &typed_words,
@@ -1355,7 +1387,9 @@ impl<'a> Fonts<'a> {
                         Given::AsTyped,
                     ) {
                         Search::Found(retyping)
-                            if self.reads_closer(&line, &matrices, frame, &written, &retyping) =>
+                            if self.reads_closer(
+                                &line, &places, &matrices, frame, &written, &retyping,
+                            ) =>
                         {
                             Some(retyping)
                         }
@@ -1381,9 +1415,11 @@ impl<'a> Fonts<'a> {
     /// readings, that reads the letters in order, as 935b077 took it; else
     /// nothing. A drawing that sets more glyphs over others than the rules'
     /// is never taken. Each glyph is read back as `given` says.
+    #[allow(clippy::too_many_arguments)]
     fn search(
         &self,
         line: &[&TextRun],
+        places: &[usize],
         matrices: &[[f64; 6]],
         frame: &Frame,
         written: &Words,
@@ -1393,7 +1429,7 @@ impl<'a> Fonts<'a> {
         let tried = std::cell::Cell::new(0usize);
         let reads_right = |chosen: &BTreeMap<RunKey, Drawing>| {
             tried.set(tried.get() + 1);
-            self.read_back(line, matrices, frame, chosen, given)
+            self.read_back(line, places, matrices, frame, chosen, given)
                 .map(|(read, over)| (written.read_as(&read), over))
         };
         // How many glyphs the rules' drawing sets over another: a drawing
@@ -1468,16 +1504,26 @@ impl<'a> Fonts<'a> {
     fn reads_closer(
         &self,
         line: &[&TextRun],
+        places: &[usize],
         matrices: &[[f64; 6]],
         frame: &Frame,
         written: &Words,
         found: &BTreeMap<RunKey, Drawing>,
     ) -> bool {
-        let rules = self.read_back(line, matrices, frame, &BTreeMap::new(), Given::ByTheFont);
+        let rules = self.read_back(
+            line,
+            places,
+            matrices,
+            frame,
+            &BTreeMap::new(),
+            Given::ByTheFont,
+        );
         let Some((rules, _)) = rules else {
             return false;
         };
-        let Some((read, _)) = self.read_back(line, matrices, frame, found, Given::ByTheFont) else {
+        let Some((read, _)) =
+            self.read_back(line, places, matrices, frame, found, Given::ByTheFont)
+        else {
             return false;
         };
         let (found_pairs, rules_pairs) = (written.pairs_in(&read), written.pairs_in(&rules));
@@ -1516,12 +1562,13 @@ impl<'a> Fonts<'a> {
     fn reads_whole(
         &self,
         line: &[&TextRun],
+        places: &[usize],
         matrices: &[[f64; 6]],
         frame: &Frame,
         written: &Words,
         found: &BTreeMap<RunKey, Drawing>,
     ) -> bool {
-        self.read_back(line, matrices, frame, found, Given::ByTheFont)
+        self.read_back(line, places, matrices, frame, found, Given::ByTheFont)
             .is_some_and(|(read, _)| written.read_as(&read) == Read::Words)
     }
 
@@ -1534,10 +1581,10 @@ impl<'a> Fonts<'a> {
     /// Planned once a page for each drawing ([`Fonts::plans`]): a plan
     /// depends on neither the drawings of the run's neighbours nor the space
     /// a line is read in, and a search reads a run back in as many of the
-    /// one as it tries and, under a transform, in both of the other. Returns
-    /// the plan's key.
-    fn plan_run(&self, run: &TextRun, drawing: Drawing) -> (usize, Drawing) {
-        let key = (plan_key(run), drawing);
+    /// one as it tries and, under a transform, in both of the other. Kept by
+    /// the run's `place` in the page's list of runs. Returns the plan's key.
+    fn plan_run(&self, place: usize, run: &TextRun, drawing: Drawing) -> (usize, Drawing) {
+        let key = (place, drawing);
         if !self.plans.borrow().contains_key(&key) {
             let plan = self.plan_anew(run, drawing);
             self.plans.borrow_mut().insert(key, plan);
@@ -1614,6 +1661,7 @@ impl<'a> Fonts<'a> {
     fn read_back(
         &self,
         line: &[&TextRun],
+        places: &[usize],
         matrices: &[[f64; 6]],
         frame: &Frame,
         drawings: &BTreeMap<RunKey, Drawing>,
@@ -1623,9 +1671,10 @@ impl<'a> Fonts<'a> {
         READINGS.with(|readings| readings.set(readings.get().saturating_add(1)));
         let keys: Vec<(usize, Drawing)> = line
             .iter()
-            .map(|run| {
+            .zip(places)
+            .map(|(run, &place)| {
                 let drawing = drawings.get(&run_key(run)).copied().unwrap_or_default();
-                self.plan_run(run, drawing)
+                self.plan_run(place, run, drawing)
             })
             .collect();
         let plans = self.plans.borrow();
@@ -3692,6 +3741,7 @@ pub(crate) fn draw_page_tagged(
                 builder,
                 page,
                 &shadow,
+                None,
                 frame,
                 fonts,
                 fonts.context_of(run),
@@ -3710,17 +3760,23 @@ pub(crate) fn draw_page_tagged(
     // the page: the order is source order, which is what `TextRun::order`
     // already sorted these runs into.
     let Some(tagging) = tagging else {
-        for run in &laid.runs {
+        for (place, run) in laid.runs.iter().enumerate() {
             if !run.painted {
                 continue;
             }
-            refused += artifact_or_run(builder, page, run, frame, fonts, effects);
+            refused += artifact_or_run(builder, page, run, Some(place), frame, fonts, effects);
         }
         draw_outlines(page, laid, frame, effects);
         return refused;
     };
 
-    let drawn: Vec<&TextRun> = laid.runs.iter().filter(|run| run.painted).collect();
+    // Each run with its place in the page's list, which its plan is kept by.
+    let (places, drawn): (Vec<usize>, Vec<&TextRun>) = laid
+        .runs
+        .iter()
+        .enumerate()
+        .filter(|(_, run)| run.painted)
+        .unzip();
     let chains: Vec<Vec<usize>> = drawn
         .iter()
         .map(|run| match run.generated {
@@ -3737,6 +3793,7 @@ pub(crate) fn draw_page_tagged(
         fonts,
         tagging,
         &drawn,
+        &places,
         &chains,
         0,
         &mut refused,
@@ -3759,11 +3816,13 @@ fn draw_outlines(page: &mut PageBuilder, laid: &LayoutPage, frame: &Frame, effec
     }
 }
 
-/// One run, marked as an artifact where it is one.
+/// One run, marked as an artifact where it is one: `place` is where it
+/// stands in the page's list of runs ([`draw_run`]).
 pub(crate) fn artifact_or_run(
     builder: &mut DocumentBuilder,
     page: &mut PageBuilder,
     run: &TextRun,
+    place: Option<usize>,
     frame: &Frame,
     fonts: &Fonts<'_>,
     effects: &OnPage<'_>,
@@ -3783,7 +3842,7 @@ pub(crate) fn artifact_or_run(
     // The run's characters are its element's content, so its own clip cuts
     // them — a marker hung outside an `overflow: hidden` list item included.
     let opened = effects.open(page, run.anchor, true);
-    let refused = draw_run(builder, page, run, frame, fonts);
+    let refused = draw_run(builder, page, run, place, frame, fonts);
     Effects::close(page, opened);
     if run.generated {
         page.raw(b"EMC");
@@ -4692,16 +4751,20 @@ fn run_key(run: &TextRun) -> RunKey {
     (run.order, run.x.to_bits(), run.y.to_bits())
 }
 
-/// Which run of the page being drawn a plan is of ([`Fonts::plans`]): the
-/// run itself, by where it is held. Not [`run_key`], which two runs of one
+/// Where `run`, a reference into `runs`, stands in it: the place its plans
+/// are kept by ([`Fonts::plans`]). Not [`run_key`], which two runs of one
 /// page may share, a run of format characters alone set where the next one
-/// starts: each run is written as it was planned, its own characters.
-/// [`Fonts::set_readings`] plans the runs of the page it is given, which
-/// stay where they are until that page is drawn, and forgets them at the
-/// next page; a copy drawn somewhere else, a text shadow, finds no plan and
+/// starts: each run is written as it was planned, its own characters. The
+/// page draws each run by the same place ([`draw_run`]), wherever the run is
+/// held by then; a copy drawn somewhere else, a text shadow, has no place and
 /// is planned anew.
-fn plan_key(run: &TextRun) -> usize {
-    std::ptr::from_ref(run) as usize
+fn place_in(runs: &[TextRun], run: &TextRun) -> Option<usize> {
+    let size = std::mem::size_of::<TextRun>().max(1);
+    let offset = (std::ptr::from_ref(run) as usize).checked_sub(runs.as_ptr() as usize)?;
+    let at = offset / size;
+    runs.get(at)
+        .is_some_and(|held| std::ptr::eq(held, run))
+        .then_some(at)
 }
 
 /// Whether two runs ask for one font for every character they draw: the
@@ -4946,10 +5009,13 @@ fn shaped_glyphs(
     })
 }
 
+/// `place` is where `run` stands in the page's list of runs, which its plan
+/// is kept by ([`Fonts::plans`]).
 fn draw_run(
     builder: &mut DocumentBuilder,
     page: &mut PageBuilder,
     run: &TextRun,
+    place: Option<usize>,
     frame: &Frame,
     fonts: &Fonts<'_>,
 ) -> usize {
@@ -4957,6 +5023,7 @@ fn draw_run(
         builder,
         page,
         run,
+        place,
         frame,
         fonts,
         fonts.context_of(run),
@@ -4974,11 +5041,14 @@ fn draw_run(
 /// its offset, found none and was shaped alone — under a word whose middle
 /// letter is a span of its own, the text joined and its shadow did not.
 /// `css-text-decor-3` §4 makes the shadow the run's own glyphs again, so it is
-/// shaped against the run's own neighbours.
+/// shaped against the run's own neighbours. A shadow has no `place`, and is
+/// planned anew.
+#[allow(clippy::too_many_arguments)]
 fn draw_run_against(
     builder: &mut DocumentBuilder,
     page: &mut PageBuilder,
     run: &TextRun,
+    place: Option<usize>,
     frame: &Frame,
     fonts: &Fonts<'_>,
     (before, after): (String, String),
@@ -4994,13 +5064,17 @@ fn draw_run_against(
     // A run whose line [`Fonts::set_readings`] read back is written as it
     // planned the drawing it read, a standard-14 run's every face segment's
     // text objects in the order drawn ([`Fonts::plan_run`]): planned once.
-    if let Some(Some((objects, end))) = fonts.plans.borrow().get(&(plan_key(run), drawing)) {
-        for object in objects {
-            flush(page, object, size, baseline, run, frame);
+    if let Some(place) = place {
+        if let Some(Some((objects, end))) = fonts.plans.borrow().get(&(place, drawing)) {
+            for object in objects {
+                flush(page, object, size, baseline, run, frame);
+            }
+            decorate(page, run, frame, *end);
+            return refused;
         }
-        decorate(page, run, frame, *end);
-        return refused;
     }
+    #[cfg(test)]
+    UNPLANNED.with(|unplanned| unplanned.set(unplanned.get().saturating_add(1)));
     // `css-fonts-4` §5.3 first, then shaping: see [`face_runs`]. An embedded
     // face's stretch is shaped whole; a standard-14 one keeps the
     // character-at-a-time path, because a simple font addresses a code and
@@ -6368,6 +6442,11 @@ thread_local! {
     /// counted under `cfg(test)` only, so that `epub/tests.rs` holds the
     /// read-back's work by count where a clock would only run slowly.
     pub(crate) static READINGS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    /// How many runs [`draw_run_against`] wrote with no plan
+    /// [`Fonts::set_readings`] made for them, on this thread: a copy drawn
+    /// somewhere else, a run of a line nothing read back, or a run whose
+    /// plan was not found where it was kept.
+    pub(crate) static UNPLANNED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 /// One step of a lookup a crafted line could make quadratic: a piece

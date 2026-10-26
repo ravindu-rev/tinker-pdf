@@ -4175,8 +4175,8 @@ fn a_styled_mark_after_a_number_reads_as_typed_beside_a_letter_the_page_gives_ba
 /// order and place, is the next run's too: plans held by it gave one run the
 /// other's text objects, and with `bundled-fonts` 14 books of the round-4
 /// review's hunts (isolates and white space) read worse in a first form of
-/// the change. Held by the run itself (`paint::plan_key`), each run is
-/// written as its own. Guards: each book reads as at b6a622b2, in either
+/// the change. Held by each run's place in the page's list of runs
+/// (`paint::place_in`), each run is written as its own. Guards: each book reads as at b6a622b2, in either
 /// build.
 #[test]
 fn each_run_is_written_as_the_read_back_planned_it_though_two_share_a_place() {
