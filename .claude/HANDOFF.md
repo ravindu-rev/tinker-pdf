@@ -233,3 +233,36 @@ to CD-19.37, H-149 to H-158), in the order "Next" gives.
   and the rest of CD-19 in its order;
 - then MS-11 and K-06, K-01 and K-02, MS-01 (to MS-01.8),
   MS-04, MS-05, MS-06 and MS-02, P-01 to P-05, and the tiers.
+
+## The MS push, stopped on 26 October 2026
+
+The owner asked for tier MS's implementation, then on 26 October to stop
+once the steps under way had landed ("lets stop and complete the onlgoing
+steps only we can continue later"), with one gate run over them all
+rather than one a step ("after implementation run 1 gate not gate per
+step"). Landed on `develop`, last at `97a016c` (11 gates ok over the last
+four together): MS-11.1, MS-11.4, MS-11.5, MS-09.1, MS-08.1, MS-06.1,
+MS-01.1, MS-04.1, MS-07.1, MS-02.1, MS-04.2, MS-07.2, MS-01.2, and K-02.1,
+K-02.2, K-02.4, P-05.1, P-05.2, which MS steps wait on.
+
+- **Next, needing no person** (each waits on the one before it):
+  MS-04.3 to MS-04.8, then MS-05.1 (after MS-04.6) and MS-12.1, MS-12.2;
+  MS-03.1 and MS-02.2;
+  K-02.3, then MS-01.3 to MS-01.7; P-05.3, then MS-08.2; MS-07.3.
+- **Waiting on the owner:** H-02 holds 31 MS steps, H-109 18, H-112 8 and
+  H-110 4. Open choices: H-162 (MS-02's 15 minutes cannot hold), H-78 (the
+  floor check MS-02.1 proposes), H-135 (inside a `/DeviceCMYK` group a light
+  render keeps `k`'s own ink under `/DefaultCMYK`, as before; a guard row
+  in `default_spaces.rs` pins it), and MS-04.7's container fixtures timed
+  per format (6 operations) or per file (90).
+- **Found, with no row yet:** JPEG and JPEG 2000 images never read
+  `/ColorSpace`; Annex F's head path builds a page without its ancestors'
+  `/Rotate` and `/CropBox`; `CosDocument::bytes()` fetches a streamed file
+  whole without warning `WholeFileFetched`; `ScanIndex::build`
+  (`crates/tinker-pdf-cos/src/repair.rs`) is quadratic in a file's
+  objects, 13 s for 20 000 in release, a slow-input risk.
+- **On the Linux machine**, builds run with `CARGO_PROFILE_DEV_DEBUG=0`:
+  with debug info one full gate run built about 110 GB of test binaries a
+  worktree, and parallel worktrees filled the disk.
+- `cd-19.1` is a local branch only: an ended session's CD-19.1 draft
+  (`0215252`), not merged.
