@@ -543,7 +543,12 @@ instead of living in one feature's head.
     with its figures. A change that reads any case worse is the owner's to
     take or leave, case by case. A word of Greek, Cyrillic or Armenian that
     an inline block cuts reads in two, as a Latin word so cut does. A case
-    no change taken reaches is listed in ROADMAP's Bugs.
+    no change taken reaches is listed in ROADMAP's Bugs. A line turned on the
+    page is read along its own baseline, as it reads unturned; the owner took
+    the price, that a paragraph read whole only where a turn cut its lines
+    otherwise reads as its twin: the punctuation shape in a right-to-left
+    Arabic paragraph at `word-spacing: 0.6em` under `rotate(12deg)` no longer
+    reads whole.
 
 ## How to add a ruling
 
