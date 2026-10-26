@@ -332,8 +332,7 @@ holds what the owner takes on H-157.
 ### The other cases
 
 Each gets its section from its design step: Left (4), the lines the reader
-reads from the right whatever the writer draws (CD-19.22); Left (7), a word
-search does not find under `scaleX(0.5)` (CD-19.30); Left (9), a comma read
+reads from the right whatever the writer draws (CD-19.22); Left (9), a comma read
 apart after a number a NO-BREAK SPACE holds together (CD-19.32); and
 Left (5), its findings outside ruling 14's rules (CD-19.34). The options whose price the owner decides get
 their figures here from their measure steps: W, WJ and WJC (CD-19.9), D
@@ -395,9 +394,9 @@ Every fix step also passes `epub_fallback.rs`, `epub_conservation.rs` and
     then `text.rs` tests of a line under a half turn continued and cut as it
     is unturned, and that an unturned line reads as before, with the
     half-turn rows of that pin holding what their unturned twins hold.
-13. CD-19.30 and CD-19.31: Left (7); exit: the section, reproduced from
-    `a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space`;
-    then its rows of that pin finding the word with `bundled-fonts`, or the case in the roadmap's Bugs.
+13. CD-19.30 and CD-19.31: Left (7), reached by CD-19.8, which finds its word
+    with `bundled-fonts` in
+    `a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space`.
 14. CD-19.32 and CD-19.33: Left (9); exit: the section, reproduced from
     `what_a_line_read_as_typed_finds_is_drawn_only_where_it_reads_closer_on_the_page`;
     then its rows of that pin conserving with `bundled-fonts`, or the case in the roadmap's Bugs.
