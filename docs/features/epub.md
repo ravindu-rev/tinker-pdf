@@ -493,9 +493,16 @@ These lines no drawing tried reads right, and they are drawn by the rules:
   `1em`, and a `<bdi>` of Latin with Hebrew in it.
 
 A glyph is drawn over another where a negative `letter-spacing` sets it
-there, which layout itself does, and, with `bundled-fonts`, where the
-stand-in draws a `U+200E`, `U+202A`, `U+202C` or `U+202D` as a glyph of no
-advance whose thousandth-of-an-em box lies on the glyph after it.
+there, which layout itself does; where a `transform` paints a box past its
+edges, as CSS draws it; and, with `bundled-fonts`, where the stand-in draws a
+`U+200E`, `U+202A`, `U+202C` or `U+202D` as a glyph of no advance whose
+thousandth-of-an-em box lies on the glyph after it. And in a line UAX #9
+reorders, `paint::visual_lines` moves runs and not boxes: an inline block's
+own text is ordered as runs of the line, and its box fragment, with its
+background, border and outline and the origin of its `transform`
+(`paint::Effects::locals`), stays where layout set it in logical order, so a
+transformed block's glyphs land beside its box, over its neighbours'
+(ROADMAP CD-19, Left (10); [design/rtl-read-back.md](../design/rtl-read-back.md)).
 
 **A run that ends on a mark.** A slice that ends on a mark ends its text
 object a spacing less a millionth of an em from the next run, so a run that
