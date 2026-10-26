@@ -4,12 +4,12 @@
 //!
 //! # Why a file of its own, and why these hashes are not in `determinism.rs`
 //!
-//! `determinism.rs` pins nineteen pages rendered with `RenderOptions::default()`
+//! `determinism.rs` pins twenty pages rendered with `RenderOptions::default()`
 //! and nothing else: its `Fixture` has a builder, a way to open and an ink floor,
 //! and no options, and the table it checks is the one thing in the repository a
 //! determinism bug would show up in. Growing an options column there would
 //! change that file's shape to add a row, and a row that means "this page, but
-//! differently" beside nineteen that mean "this page" is how a reader of that
+//! differently" beside twenty that mean "this page" is how a reader of that
 //! table gets the wrong idea about what moved.
 //!
 //! So each option carries its own pinned hash here, computed the way that file
@@ -595,7 +595,7 @@ fn ink_output_is_pinned() {
 /// pinned beside it; and every switch spelled out at its default renders the
 /// same bytes as not mentioning it.
 ///
-/// The nineteen fingerprints in `determinism.rs` are the rest of this claim,
+/// The twenty fingerprints in `determinism.rs` are the rest of this claim,
 /// and the stronger half: they render with the defaults and did not move.
 #[test]
 fn the_default_is_unchanged() {

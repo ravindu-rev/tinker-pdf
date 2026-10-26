@@ -1002,6 +1002,10 @@ impl FontSource for Recorded {
         self.inner.initial_color(space)
     }
 
+    fn device_defaults(&self) -> tinker_pdf_content::DeviceDefaults {
+        self.inner.device_defaults()
+    }
+
     fn optional_content(&self, name: &[u8]) -> Option<tinker_pdf_content::Layer> {
         self.inner.optional_content(name)
     }

@@ -73,6 +73,57 @@ of an uncoloured pattern (8.7.3.2), so an `scn`'s components reach the paint.
 Initial colours follow 8.6.8 — CMYK starts at full black ink, not all zeros.
 Out-of-range components clamp rather than wrap.
 
+**Default colour spaces** (8.6.5.6), since October 2026 (K-02.2). A scope's
+`/DefaultGray`, `/DefaultRGB` and `/DefaultCMYK` — entries of the
+`/ColorSpace` subdictionary of a page's, a form's, a tiling cell's or an
+appearance stream's resources — stand in for the device space each is named
+for wherever one is selected for painting: `g`/`G`, `rg`/`RG` and `k`/`K`;
+`cs` naming the device space, a `/ColorSpace` entry that is one, Table 93's
+`/G`, `/RGB` and `/CMYK` and a bare `/CalGray` or `/CalRGB` name; `sc`/`scn`
+with no space named, read in the family its count gives; a sampled image's
+`/ColorSpace` and an inline image's `/CS`; a shading's, under `sh` and in a
+shading pattern; an `/Indexed` base, an uncoloured pattern's base, and the
+alternate of a `/Separation` or `/DeviceN` space — not of `/Separation /All`
+or `/None`, which 8.6.6.4 is read as never selecting; a group's `/CS`, and
+with it a luminosity mask's `/BC`. A default is read in the scope the stream's
+other names resolve in: a page's stops at a form or a cell with `/Resources`
+of its own, empty ones included (8.10.1), a form's applies inside it only, and
+a form group's `/CS` is remapped by the scope its contents run in. A Type 3
+glyph and a soft-mask group run in the scope that invokes them, and so do
+their defaults ([design/icc.md](../design/icc.md)). A group keeps only its
+space's shape, which a default cannot change, so remapping its `/CS` moves no
+pixel today; the `/BC` is where it shows. `cs` resets to the device space's
+initial colour carried into the default, so `/DeviceCMYK cs` paints what
+`0 0 0 1 k` paints where an `ICCBased` default's own zeros would be no ink at
+all. A default's own spaces are read as written and never remapped again —
+`/DefaultRGB /DeviceRGB` is a legal default, and no default at all. A `/Lab`,
+`/Indexed` or `/Pattern` default, one with another number of components and
+one that is no colour space is refused: the device space is drawn as it would
+be without it, and the refusal is named (the refusal table). A JPEG or JPEG
+2000 image reads no `/ColorSpace`, so neither a default nor a space named
+directly reaches it, which the design names as outside the row. A scope's
+defaults are read once, on its first device-space question, and the
+interpreter asks once a scope which families remap
+(`FontSource::device_defaults`), so a page naming none pays a load and a
+branch per selection and one flag check per device operator.
+`tests/default_spaces.rs` holds every path and scope above to a twin naming
+the substitute directly, byte for byte, under CalGray and ICCBased N=1,
+CalRGB and ICCBased N=3, and ICCBased N=4, each beside the page without its
+default that it must not equal
+(`each_default_space_draws_as_its_substitute_named_directly`).
+
+*Corrected with it, October 2026*: `g`, `rg` and `k` left the space slot
+naming whatever `cs` selected last, so `/CS1 cs 1 sc 0.5 g 0.7 sc` painted
+the `0.7` in `/CS1` where 8.6.8 has `g` select DeviceGray; the slot now holds
+the reading by count, so `sc` reads in the family the operator selected. An
+inline image's `[/I …]` was expanded as Table 93's `/Interpolate` rather than
+Table 94's `/Indexed`, so it painted its indices as grey and `Page::images`
+listed an unreadable `Interpolate` space; a palette written as a literal
+string had any abbreviation in its bytes rewritten; and an inline image naming
+a `/ColorSpace` resource (8.9.7), or an `/Indexed` one over a resource, was
+drawn as DeviceGray while `Page::images` listed the space it names
+(`the_selections_a_default_rides_on_read_what_the_file_names`).
+
 **Functions** (7.10). All four types: sampled (`Function::Sampled`, 7.10.2),
 exponential (`Function::Exponential`, 7.10.3), stitching
 (`Function::Stitching`, 7.10.4) and the PostScript calculator
@@ -245,6 +296,22 @@ where two inks and black share a partial pixel they are not, because
 compositing is linear in whichever components the canvas holds and 8.6.4.4 is
 a product: half a pixel of rich black is a quarter of white over ink and half
 of it over light (`a_rich_black_edge_composited_over_ink_is_not_the_light_edge`).
+**Under a `/DefaultCMYK` the ink stays the document's** — H-135's default
+until the owner decides it: `k`, `K`, `sc`/`scn` in a space selected as
+DeviceCMYK, four components with no space named, and a stencil painted in one
+arrive on an ink page as their own components, byte for byte the page without
+the default, while their light — what a light render paints, and what an ink
+page reads where it needs light, inside a `/CS /DeviceRGB` group — is the
+default's (`an_ink_render_keeps_a_device_cmyk_colour_s_ink_under_default_cmyk`).
+A light render composites that ink too wherever it composites in ink, which
+is inside a `/DeviceCMYK` group: there `k` under a `/DefaultCMYK` paints what
+the page without the default paints, and not its twin naming the profile, so
+the light render does not paint the default inside such a group — found in
+October 2026 and put to the owner with H-135.
+`FontSource::resolve_ink` reads the space as selected and
+`FontSource::resolve_color` the space as substituted; choosing conversion
+instead is one change to the first. It follows that `Bitmap::to_png` writes
+such an ink page as 8.6.4.4's light, which is not that page's light render.
 
 **`/Lab` composites in Lab too**, which was the last space that did not. Its
 components are not in the unit interval — `L*` runs 0..100 and `a`/`b` roughly
@@ -760,7 +827,7 @@ a defect to hide in.
 | A font program that could not be read | `RenderWarning::UnreadableFont` | Its glyphs are not drawn; the rest of the page is | [content and text](content-and-text.md) |
 | A shading that cannot be read into types 1–7 | `RenderWarning::UnsupportedShading` | Reported by type number rather than guessed at | [rulings](../rulings.md) |
 | A pattern whose cell cannot be read, or a lattice past 65 536 positions / 16.7 Mpx / 33.5 Mpx | `RenderWarning::UnsupportedPattern` | Unpainted reads as missing; `/Pattern`'s nominal black reads as content and hides the gap | [rulings](../rulings.md) |
-| A colour space whose parameters no space can mean, read the nearest way that does: today a `/Lab` `/Range` pair written backwards, read as the span it covers | `RenderWarning::RepairedColorSpace { name, reason }`, `reason` `LabRangeUnordered` | Drawn *and* named (ruling 10). Named where the space is reached through the page's resources or a tiling cell's, as every tolerance the resource layer reports is; **not yet** through a form XObject's or an annotation appearance's own `/Resources`, which keep what they tolerate to themselves — a font a form's own resources cannot resolve goes unreported the same way, measured October 2026 | [rulings](../rulings.md) |
+| A colour space whose parameters no space can mean, read the nearest way that does: a `/Lab` `/Range` pair written backwards, read as the span it covers; and a default colour space 8.6.5.6 does not allow — a `/Lab`, `/Indexed` or `/Pattern` one, one with another number of components than its device space, one that is no colour space — refused, the device space drawn as without it | `RenderWarning::RepairedColorSpace { name, reason }`, `reason` `LabRangeUnordered`; for a default, `name` the default's own (`DefaultRGB`) and `reason` `DefaultSpaceFamily`, `DefaultSpaceComponents` or `DefaultSpaceUnreadable`, once a render | Drawn *and* named (ruling 10). Named where the space is reached through the page's resources or a tiling cell's, as every tolerance the resource layer reports is; **not yet** through a form XObject's or an annotation appearance's own `/Resources`, which keep what they tolerate to themselves — a font a form's own resources cannot resolve goes unreported the same way, measured October 2026 | [rulings](../rulings.md) |
 | A layer the default configuration turns off | `RenderWarning::HiddenOptionalContent` | Correct behaviour, reported all the same — the one leniency a reader cannot see | [rulings](../rulings.md) |
 | More than 2 000 transparency-group buffers on one page | `RenderWarning::GroupBudgetSpent` | A budget, not a depth: branching soft-mask recursion stays inside any depth cap | [rulings](../rulings.md) |
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
@@ -778,7 +845,7 @@ a defect to hide in.
 ## Verified
 
 - Facade integration tests, one file per capability:
-  `crates/tinker-pdf/tests/colour_spaces.rs`, `blend_modes.rs`,
+  `crates/tinker-pdf/tests/colour_spaces.rs`, `default_spaces.rs`, `blend_modes.rs`,
   `transparency_groups.rs`, `optional_content.rs`, `mesh_shadings.rs`,
   `text_render_modes.rs`, `images.rs`, `inline_images.rs`,
   `stroke_parameters.rs`, `form_xobjects.rs`, `page_geometry.rs`,
@@ -811,7 +878,7 @@ a defect to hide in.
   default render still hashes to `determinism.rs`'s `analytic_blend` value.
   Those hashes were recorded on `x86_64-unknown-linux-gnu` on 26 September
   2026 and have not yet been run on the other three targets, which is the
-  difference between them and the nineteen `determinism.rs` carries.
+  difference between them and the twenty `determinism.rs` carries.
   The anti-aliasing switch's exit criterion is
   `with_anti_aliasing_off_every_pixel_is_wholly_covered_or_not_at_all`: text,
   a diagonal fill, a stroked curve, a hairline and a rotated image's edge, each

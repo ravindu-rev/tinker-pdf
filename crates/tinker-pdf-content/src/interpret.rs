@@ -217,6 +217,48 @@ pub struct Layer {
     pub label: String,
 }
 
+/// Which device colour spaces the resource dictionary in force remaps to a
+/// default colour space (8.6.5.6): its `/ColorSpace` subdictionary's
+/// `/DefaultGray`, `/DefaultRGB` and `/DefaultCMYK`, each standing in for the
+/// device space it is named for.
+///
+/// Asked once a scope rather than once an operator — when [`interpret`]
+/// starts, and when a form brings resources of its own — so that `g`, `rg` and
+/// `k`, the most frequent colour operators there are, go on converting in
+/// place in a scope that names no default, and ask the seam only for a family
+/// the scope does remap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeviceDefaults {
+    /// `/DefaultGray` stands in for DeviceGray.
+    pub gray: bool,
+    /// `/DefaultRGB` stands in for DeviceRGB.
+    pub rgb: bool,
+    /// `/DefaultCMYK` stands in for DeviceCMYK.
+    pub cmyk: bool,
+}
+
+impl DeviceDefaults {
+    /// No device space remapped, which is every scope that names no default.
+    pub const NONE: DeviceDefaults = DeviceDefaults {
+        gray: false,
+        rgb: false,
+        cmyk: false,
+    };
+
+    /// The device space `count` components are read in when no space is
+    /// named — one is DeviceGray, four is DeviceCMYK and any other count is
+    /// DeviceRGB, as [`components_to_rgb`] reads them — when this scope
+    /// remaps it, and `None` when it does not.
+    fn remapped_by_count(self, count: usize) -> Option<&'static [u8]> {
+        let (remapped, space): (bool, &'static [u8]) = match count {
+            1 => (self.gray, b"DeviceGray"),
+            4 => (self.cmyk, b"DeviceCMYK"),
+            _ => (self.rgb, b"DeviceRGB"),
+        };
+        remapped.then_some(space)
+    }
+}
+
 pub trait FontSource {
     /// Splits a string into `(code, text, advance in 1/1000 em)`.
     fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)>;
@@ -342,6 +384,20 @@ pub trait FontSource {
     /// above; an implementation that can tell those apart answers for them.
     fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
         self.color_components(space).map(|n| vec![0.0; n])
+    }
+
+    /// Which device spaces this scope remaps to a default colour space
+    /// (8.6.5.6), asked once a scope and not once an operator.
+    ///
+    /// Where one is remapped, `g`/`G`, `rg`/`RG` or `k`/`K`, and `sc`/`scn`
+    /// read by component count with no space named, resolve through
+    /// [`FontSource::resolve_color`] and [`FontSource::resolve_ink`] under the
+    /// device space's own name, as `/DeviceGray cs … sc` does — so the light
+    /// is the default's and the ink is the space as selected. The default,
+    /// [`DeviceDefaults::NONE`], converts every device colour in place as
+    /// 8.6.4 does, which is right for a source that names no default.
+    fn device_defaults(&self) -> DeviceDefaults {
+        DeviceDefaults::NONE
     }
 
     /// The fill and stroke alphas an `/ExtGState` sets, if it sets them.
@@ -569,6 +625,7 @@ pub fn interpret<D: Device, F: FontSource>(
     let mut interp = Interpreter {
         device,
         fonts: Scope::Borrowed(fonts),
+        defaults: fonts.device_defaults(),
         stack: Vec::new(),
         gs: GraphicsState::new(initial),
         saved: Vec::new(),
@@ -592,6 +649,9 @@ pub fn interpret<D: Device, F: FontSource>(
 struct Interpreter<'d, D: Device, F: FontSource> {
     device: &'d mut D,
     fonts: Scope<'d, F>,
+    /// What [`FontSource::device_defaults`] answered for the scope in force,
+    /// asked when the scope came into force and never per operator (8.6.5.6).
+    defaults: DeviceDefaults,
     stack: Vec<Token>,
     gs: GraphicsState,
     saved: Vec<GraphicsState>,
@@ -1017,35 +1077,60 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             b"d" => self.set_dashes(),
             b"ri" | b"i" => {}
 
-            // 8.6.8 colour. The device operators resolve immediately; the
-            // named ones go through the resource seam.
+            // 8.6.8 colour. The device operators resolve immediately, unless
+            // the scope remaps their space to a default (8.6.5.6); the named
+            // ones go through the resource seam.
             b"g" | b"G" => {
                 if let Some(v) = self.num(0) {
-                    let value = to_byte(v);
-                    let color = Rgb {
-                        r: value,
-                        g: value,
-                        b: value,
+                    let remapped = if self.defaults.gray {
+                        self.remapped(b"DeviceGray", &[v])
+                    } else {
+                        None
                     };
-                    self.set_color(op == b"g", color, None, None);
+                    let (color, ink) = remapped.unwrap_or_else(|| {
+                        let value = to_byte(v);
+                        let color = Rgb {
+                            r: value,
+                            g: value,
+                            b: value,
+                        };
+                        (color, None)
+                    });
+                    self.set_device_color(op == b"g", color, ink);
                 }
             }
             b"rg" | b"RG" => {
                 if let (Some(r), Some(g), Some(b)) = (self.num(2), self.num(1), self.num(0)) {
-                    let color = Rgb {
-                        r: to_byte(r),
-                        g: to_byte(g),
-                        b: to_byte(b),
+                    let remapped = if self.defaults.rgb {
+                        self.remapped(b"DeviceRGB", &[r, g, b])
+                    } else {
+                        None
                     };
-                    self.set_color(op == b"rg", color, None, None);
+                    let (color, ink) = remapped.unwrap_or_else(|| {
+                        let color = Rgb {
+                            r: to_byte(r),
+                            g: to_byte(g),
+                            b: to_byte(b),
+                        };
+                        (color, None)
+                    });
+                    self.set_device_color(op == b"rg", color, ink);
                 }
             }
             b"k" | b"K" => {
                 if let (Some(c), Some(m), Some(y), Some(k)) =
                     (self.num(3), self.num(2), self.num(1), self.num(0))
                 {
-                    let ink = [to_byte(c), to_byte(m), to_byte(y), to_byte(k)];
-                    self.set_color(op == b"k", cmyk_to_rgb(c, m, y, k), None, Some(ink));
+                    let remapped = if self.defaults.cmyk {
+                        self.remapped(b"DeviceCMYK", &[c, m, y, k])
+                    } else {
+                        None
+                    };
+                    let (color, ink) = remapped.unwrap_or_else(|| {
+                        let ink = [to_byte(c), to_byte(m), to_byte(y), to_byte(k)];
+                        (cmyk_to_rgb(c, m, y, k), Some(ink))
+                    });
+                    self.set_device_color(op == b"k", color, ink);
                 }
             }
             b"cs" | b"CS" => {
@@ -1116,14 +1201,27 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                         self.fonts.resolve_ink(space, &components),
                     ),
                     // Without a named space the component count is the only
-                    // clue, and it is a reliable one: four is DeviceCMYK.
-                    None => (
-                        Some(components_to_rgb(&components)),
-                        match components[..] {
-                            [c, m, y, k] => Some([to_byte(c), to_byte(m), to_byte(y), to_byte(k)]),
-                            _ => None,
-                        },
-                    ),
+                    // clue, and it is a reliable one: four is DeviceCMYK. A
+                    // scope that remaps the family the count reads in is
+                    // asked by that device space's name (8.6.5.6).
+                    None => {
+                        let remapped = match self.defaults.remapped_by_count(components.len()) {
+                            Some(family) => self.remapped(family, &components),
+                            None => None,
+                        };
+                        match remapped {
+                            Some((color, ink)) => (Some(color), ink),
+                            None => (
+                                Some(components_to_rgb(&components)),
+                                match components[..] {
+                                    [c, m, y, k] => {
+                                        Some([to_byte(c), to_byte(m), to_byte(y), to_byte(k)])
+                                    }
+                                    _ => None,
+                                },
+                            ),
+                        }
+                    }
                 };
                 if let Some(color) = resolved {
                     self.set_color(fill, color, space, ink);
@@ -1382,6 +1480,40 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         }
     }
 
+    /// What a device operator's colour is in a scope that remaps its space
+    /// (8.6.5.6): asked of the seam by the device space's own name, as
+    /// `/DeviceGray cs … sc` is, so the light is the default's and the ink is
+    /// what the space as selected keeps. `None` where the seam cannot say,
+    /// and the operator converts as 8.6.4 does.
+    ///
+    /// Out of line and cold, because it is asked only in a scope that names a
+    /// default, so the seam's two answers stay out of the operator arms that
+    /// every page runs.
+    #[cold]
+    #[inline(never)]
+    fn remapped(&self, space: &[u8], components: &[f64]) -> Option<(Rgb, Option<[u8; 4]>)> {
+        let color = self.fonts.resolve_color(space, components)?;
+        Some((color, self.fonts.resolve_ink(space, components)))
+    }
+
+    /// Applies the colour a device operator sets, and selects the operator's
+    /// device space with it.
+    ///
+    /// 8.6.8 has `g`, `rg` and `k` set the current colour space to DeviceGray,
+    /// DeviceRGB or DeviceCMYK, so the slot cannot go on naming whatever `cs`
+    /// selected last — `/CS1 cs 1 sc 0.5 g 0.7 sc` read the `0.7` in `/CS1`
+    /// until October 2026. It holds no name instead, which is the reading by
+    /// component count: the operands `sc` gives next are read in the family
+    /// the operator selected, and allocate nothing.
+    fn set_device_color(&mut self, fill: bool, color: Rgb, ink: Option<[u8; 4]>) {
+        self.set_color(fill, color, None, ink);
+        if fill {
+            self.gs.fill_space = None;
+        } else {
+            self.gs.stroke_space = None;
+        }
+    }
+
     /// Applies a colour to the fill or stroke slot, with its DeviceCMYK
     /// components when it has them.
     fn set_color(&mut self, fill: bool, color: Rgb, space: Option<Vec<u8>>, ink: Option<[u8; 4]>) {
@@ -1472,6 +1604,12 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             return;
         }
         let outer = nested.map(|scope| mem::replace(&mut self.fonts, Scope::Owned(scope)));
+        // 8.6.5.6 reads a default in "the current resource dictionary", which
+        // inside a form with resources of its own is those: the page's
+        // defaults stop at it, and its own apply inside it only.
+        let outer_defaults = outer
+            .is_some()
+            .then(|| mem::replace(&mut self.defaults, self.fonts.device_defaults()));
 
         // 8.10.2: a form's /Matrix maps its space into the current one, and
         // its content runs with the surrounding state saved.
@@ -1551,6 +1689,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         self.line_matrix = saved_line;
         if let Some(outer) = outer {
             self.fonts = outer;
+        }
+        if let Some(outer) = outer_defaults {
+            self.defaults = outer;
         }
         self.device.end_form(id);
     }

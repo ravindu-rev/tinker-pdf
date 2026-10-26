@@ -5,10 +5,12 @@
 //! the dictionaries actually get read.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use tinker_pdf_color::{ColorSpace, Function};
-use tinker_pdf_content::{Device, FontSource, Layer, MarkedProps, Matrix, PathSegment, Rgb};
+use tinker_pdf_content::{
+    Device, DeviceDefaults, FontSource, Layer, MarkedProps, Matrix, PathSegment, Rgb,
+};
 use tinker_pdf_cos::{
     decode_text_string, font as cos_font, limits, pages as cos_pages, CosDocument, Dict, Name,
     ObjRef, Object,
@@ -99,6 +101,79 @@ struct Caches {
     /// the dictionary it was looked up in. `None` is cached too: "this form
     /// brought no resources" is an answer worth not recomputing.
     form_scopes: Mutex<HashMap<u64, Option<Arc<PageResources>>>>,
+    /// The scope's default colour spaces (8.6.5.6), read on the first
+    /// question it is asked about a device space.
+    ///
+    /// One `/ColorSpace` lookup and three keyed gets, once a scope, so that a
+    /// page naming no default pays a load and a branch per device selection
+    /// and nothing per operator — the interpreter asks once a scope too
+    /// ([`FontSource::device_defaults`]).
+    defaults: OnceLock<Defaults>,
+}
+
+/// What a scope's `/ColorSpace` subdictionary puts in for each device space
+/// (8.6.5.6): its `/DefaultGray`, `/DefaultRGB` and `/DefaultCMYK`, read as
+/// written — a default's own spaces are never remapped again, which is the
+/// reading that terminates: `/DefaultRGB /DeviceRGB` is a legal default.
+///
+/// `None` for a family the scope names no default for, names a refused one
+/// for, or names its own device space for: three ways of painting the device
+/// space as 8.6.4 converts it, the last without asking anything per operator.
+#[derive(Default)]
+struct Defaults {
+    gray: Option<ColorSpace>,
+    rgb: Option<ColorSpace>,
+    cmyk: Option<ColorSpace>,
+}
+
+impl Defaults {
+    /// What stands in for `device` in this scope, if anything does.
+    fn for_device(&self, device: &ColorSpace) -> Option<&ColorSpace> {
+        match device {
+            ColorSpace::DeviceGray => self.gray.as_ref(),
+            ColorSpace::DeviceRgb => self.rgb.as_ref(),
+            ColorSpace::DeviceCmyk => self.cmyk.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+/// How [`PageResources::read_space`] reads a colour space.
+#[derive(Clone, Copy)]
+struct Reading<'a> {
+    /// The defaults each device space in the space is read as — the space as
+    /// painted (8.6.5.6) — and `None` for the space as selected: what `cs`
+    /// resets to, whether a colour is DeviceCMYK ink, and a default's own
+    /// value, which is never remapped again.
+    ///
+    /// Borrowed rather than asked of the scope reading, because the two can
+    /// differ: a form's group `/CS` is remapped by the form's own resources,
+    /// where its contents are painted, and read where `Do` runs, where what
+    /// it tolerates is reported.
+    defaults: Option<&'a Defaults>,
+    /// A name that is no family resolves in this scope's `/ColorSpace`, as an
+    /// inline image's may (8.9.7); everywhere else a name is a family.
+    inline: bool,
+}
+
+impl Reading<'_> {
+    /// The space as the file selected it.
+    const SELECTED: Reading<'static> = Reading {
+        defaults: None,
+        inline: false,
+    };
+
+    /// `device`, or the default this reading paints it in (8.6.5.6).
+    ///
+    /// A clone of the default, read once a scope. The device operators do
+    /// not come here: [`FontSource::resolve_color`] borrows the default
+    /// instead, so `k` under a `/DefaultCMYK` copies nothing.
+    fn device(self, device: ColorSpace) -> ColorSpace {
+        self.defaults
+            .and_then(|defaults| defaults.for_device(&device))
+            .cloned()
+            .unwrap_or(device)
+    }
 }
 
 /// Compiled ICC transforms, by the profile stream's object number and
@@ -327,9 +402,19 @@ fn jbig2_work_ceiling(width: u32, height: u32) -> u64 {
 /// `/Filter` entry stayed a two-letter name nothing matched, so a compressed
 /// inline image was sampled straight out of its compressed bytes, and `/DP`
 /// written tight against its dictionary took the predictor down with it.
+///
+/// **A name is read where it stands.** `/I` is the one abbreviation both of
+/// 8.9.7's tables use: Table 93's key `/Interpolate` and Table 94's family
+/// `/Indexed`, which only begins an array — `/CS [/I /RGB 1 <…>]`. Every `/I`
+/// was the key until October 2026, so that space became `[/Interpolate …]`,
+/// painted its indices as grey and was listed as a space nobody could read.
+/// And a string is not names: a palette written as a literal string carries
+/// whatever bytes its colours are, `(/I…)` among them, and is copied as it
+/// stands rather than rewritten into a different palette.
 fn expand_inline_abbreviations(dict: &[u8]) -> Vec<u8> {
-    // Every abbreviation of Table 93 and of Table 6, keys and values both:
+    // Every abbreviation of Table 93 and of Table 94, keys and values both:
     // `/CS /G` is a colour space named the short way, and `/F /AHx` a filter.
+    // `/I` is read by where it stands, below, and so is not here.
     const ABBREVIATIONS: &[(&[u8], &[u8])] = &[
         (b"BPC", b"BitsPerComponent"),
         (b"CS", b"ColorSpace"),
@@ -338,7 +423,6 @@ fn expand_inline_abbreviations(dict: &[u8]) -> Vec<u8> {
         (b"F", b"Filter"),
         (b"H", b"Height"),
         (b"IM", b"ImageMask"),
-        (b"I", b"Interpolate"),
         (b"W", b"Width"),
         (b"G", b"DeviceGray"),
         (b"RGB", b"DeviceRGB"),
@@ -360,30 +444,95 @@ fn expand_inline_abbreviations(dict: &[u8]) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(dict.len() + 32);
     out.extend_from_slice(b"<< ");
     let mut i = 0usize;
+    // Whether the next object is an array's first element, where `/I` is the
+    // family `/Indexed` rather than the key `/Interpolate`.
+    let mut array_start = false;
     while let Some(&byte) = dict.get(i) {
-        if byte != b'/' {
-            out.push(byte);
-            i += 1;
-            continue;
+        let copied = match byte {
+            // 7.3.4: a string, copied whole — a literal one to its balancing
+            // parenthesis, a hexadecimal one to its `>`.
+            b'(' => literal_string_end(dict, i),
+            b'<' if dict.get(i + 1) == Some(&b'<') => i + 2,
+            b'<' => dict
+                .iter()
+                .skip(i)
+                .position(|&b| b == b'>')
+                .map_or(dict.len(), |at| i + at + 1),
+            // 7.2.4: a comment runs to the end of its line, and is no object.
+            b'%' => {
+                let end = dict
+                    .iter()
+                    .skip(i)
+                    .position(|&b| b == b'\r' || b == b'\n')
+                    .map_or(dict.len(), |at| i + at);
+                out.extend_from_slice(dict.get(i..end).unwrap_or_default());
+                i = end;
+                continue;
+            }
+            b'/' => {
+                let start = i + 1;
+                let mut end = start;
+                while dict.get(end).copied().is_some_and(is_regular) {
+                    end += 1;
+                }
+                let name = dict.get(start..end).unwrap_or_default();
+                let long = if name == b"I" {
+                    if array_start {
+                        b"Indexed".as_slice()
+                    } else {
+                        b"Interpolate".as_slice()
+                    }
+                } else {
+                    ABBREVIATIONS
+                        .iter()
+                        .find(|(short, _)| *short == name)
+                        .map_or(name, |(_, long)| *long)
+                };
+                out.push(b'/');
+                out.extend_from_slice(long);
+                // No separator is added: whatever ended the short name —
+                // white space, a delimiter or the end of the dictionary —
+                // ends the long one too.
+                i = end;
+                array_start = false;
+                continue;
+            }
+            _ => i + 1,
+        };
+        out.extend_from_slice(dict.get(i..copied).unwrap_or_default());
+        if !byte.is_ascii_whitespace() && byte != 0 {
+            array_start = byte == b'[';
         }
-        let start = i + 1;
-        let mut end = start;
-        while dict.get(end).copied().is_some_and(is_regular) {
-            end += 1;
-        }
-        let name = dict.get(start..end).unwrap_or_default();
-        let long = ABBREVIATIONS
-            .iter()
-            .find(|(short, _)| *short == name)
-            .map_or(name, |(_, long)| *long);
-        out.push(b'/');
-        out.extend_from_slice(long);
-        // No separator is added: whatever ended the short name — white space,
-        // a delimiter or the end of the dictionary — ends the long one too.
-        i = end;
+        i = copied;
     }
     out.extend_from_slice(b" >>");
     out
+}
+
+/// Where the literal string opening at `start` ends (7.3.4.2): one past the
+/// parenthesis that balances it, a backslash taking the byte after it with
+/// it, or the end of `bytes` for a string that never closes.
+fn literal_string_end(bytes: &[u8], start: usize) -> usize {
+    let mut depth = 0usize;
+    let mut i = start;
+    while let Some(&byte) = bytes.get(i) {
+        match byte {
+            b'\\' => {
+                i += 2;
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    bytes.len()
 }
 
 /// 11.6.6's `/CS`, reduced to the blending space a compositor needs.
@@ -1000,17 +1149,32 @@ impl PageResources {
         Some((stream, reference))
     }
 
-    /// The colour space a resource name selects (8.6.6).
+    /// The colour space a resource name selects (8.6.6), as painted: a device
+    /// space this scope remaps is its default (8.6.5.6).
     fn color_space(&self, name: &[u8]) -> Option<ColorSpace> {
+        self.named_space(name, self.painted())
+    }
+
+    /// The colour space a resource name selects, as the file selected it:
+    /// what `cs` resets the colour to (8.6.8) and whether a colour is
+    /// DeviceCMYK ink are asked of the space as selected, whatever default
+    /// the scope paints it in (`docs/design/icc.md`, "One selection, two
+    /// answers").
+    fn selected_space(&self, name: &[u8]) -> Option<ColorSpace> {
+        self.named_space(name, Reading::SELECTED)
+    }
+
+    fn named_space(&self, name: &[u8], how: Reading) -> Option<ColorSpace> {
         // The device spaces may be named directly without appearing in
-        // /ColorSpace at all.
+        // /ColorSpace at all — 8.6.8: they "never refer to resources", so the
+        // default is what a resource dictionary is asked for.
         match name {
             // A bare `/CalGray` or `/CalRGB` name carries no parameter
             // dictionary at all, so there is no white point or gamma to read
             // and the device space *is* the whole of what the file said.
-            b"DeviceGray" | b"CalGray" => return Some(ColorSpace::DeviceGray),
-            b"DeviceRGB" | b"CalRGB" => return Some(ColorSpace::DeviceRgb),
-            b"DeviceCMYK" => return Some(ColorSpace::DeviceCmyk),
+            b"DeviceGray" | b"CalGray" => return Some(how.device(ColorSpace::DeviceGray)),
+            b"DeviceRGB" | b"CalRGB" => return Some(how.device(ColorSpace::DeviceRgb)),
+            b"DeviceCMYK" => return Some(how.device(ColorSpace::DeviceCmyk)),
             b"Pattern" => return Some(ColorSpace::Pattern { base: None }),
             _ => {}
         }
@@ -1030,29 +1194,137 @@ impl PageResources {
             table.as_dict()?.get(self.doc.intern(name)).cloned()
         });
         match entry {
-            Some(entry) => self.parse_space(&entry, 0, name),
+            Some(entry) => self.read_space(&entry, 0, name, how),
             None => match name {
-                b"G" => Some(ColorSpace::DeviceGray),
-                b"RGB" => Some(ColorSpace::DeviceRgb),
-                b"CMYK" => Some(ColorSpace::DeviceCmyk),
+                b"G" => Some(how.device(ColorSpace::DeviceGray)),
+                b"RGB" => Some(how.device(ColorSpace::DeviceRgb)),
+                b"CMYK" => Some(how.device(ColorSpace::DeviceCmyk)),
                 _ => None,
             },
         }
     }
 
+    /// This scope's default colour spaces, read on the first question asked
+    /// of it and shared by every render of it ([`Caches::defaults`]).
+    fn defaults(&self) -> &Defaults {
+        self.caches.defaults.get_or_init(|| self.read_defaults())
+    }
+
+    /// Every painting path's reading in this scope: images, shadings, a
+    /// group's `/CS`, a mask's backdrop and the colour `sc` sets, each device
+    /// space put in as this scope's default for it (8.6.5.6).
+    fn painted(&self) -> Reading<'_> {
+        Reading {
+            defaults: Some(self.defaults()),
+            inline: false,
+        }
+    }
+
+    /// Reads `/DefaultGray`, `/DefaultRGB` and `/DefaultCMYK` from this
+    /// scope's `/ColorSpace` subdictionary (8.6.5.6), each as written.
+    ///
+    /// 8.6.5.6 allows any space but `/Lab`, `/Indexed` and `/Pattern`, with
+    /// the device space's number of components. One that is not allowed, or
+    /// that is no colour space at all, is refused: the device space is
+    /// painted as it would be without it, and the refusal is named —
+    /// `RepairedColorSpace` under the default's own name, once a render of
+    /// the scope (ruling 10). The clause says what may be a default and not
+    /// what a reader does with one that may not; drawing what the content
+    /// asked for, and saying so, is ruling 2's answer.
+    fn read_defaults(&self) -> Defaults {
+        let mut defaults = Defaults::default();
+        let Some(resources) = self.resources.as_ref() else {
+            return defaults;
+        };
+        let table = self
+            .doc
+            .resolve_key(resources, self.doc.intern(b"ColorSpace"));
+        let Some(table) = table.as_dict() else {
+            return defaults;
+        };
+        let families: [(&[u8], ColorSpace); 3] = [
+            (b"DefaultGray", ColorSpace::DeviceGray),
+            (b"DefaultRGB", ColorSpace::DeviceRgb),
+            (b"DefaultCMYK", ColorSpace::DeviceCmyk),
+        ];
+        for (key, device) in families {
+            let Some(entry) = table.get(self.doc.intern(key)) else {
+                continue;
+            };
+            let refusal = match self.read_space(entry, 0, key, Reading::SELECTED) {
+                None => Err("DefaultSpaceUnreadable"),
+                Some(
+                    ColorSpace::Lab { .. }
+                    | ColorSpace::Indexed { .. }
+                    | ColorSpace::Pattern { .. },
+                ) => Err("DefaultSpaceFamily"),
+                Some(space) if space.components() != device.components() => {
+                    Err("DefaultSpaceComponents")
+                }
+                // The device space itself, `/DefaultRGB /DeviceRGB` or a
+                // bare `/CalRGB`, paints what no default paints, and costs a
+                // page's device operators nothing by being no default.
+                Some(space) if space == device => Ok(None),
+                Some(space) => Ok(Some(space)),
+            };
+            match refusal {
+                Ok(default) => match device {
+                    ColorSpace::DeviceGray => defaults.gray = default,
+                    ColorSpace::DeviceRgb => defaults.rgb = default,
+                    _ => defaults.cmyk = default,
+                },
+                Err(reason) => self.note_repaired_space((
+                    String::from_utf8_lossy(key).into_owned(),
+                    reason.to_string(),
+                )),
+            }
+        }
+        defaults
+    }
+
+    /// A colour space value, read as every painting path reads one: each
+    /// device space in it this scope remaps put in as its default.
     fn parse_space(&self, object: &Object, depth: u32, name: &[u8]) -> Option<ColorSpace> {
+        self.read_space(object, depth, name, self.painted())
+    }
+
+    fn read_space(
+        &self,
+        object: &Object,
+        depth: u32,
+        name: &[u8],
+        how: Reading<'_>,
+    ) -> Option<ColorSpace> {
         if depth > 8 {
             return None;
         }
         let resolved = self.doc.resolve(object);
 
-        if let Some(name) = resolved.as_name() {
-            let bytes = self.doc.name_bytes(name)?;
+        if let Some(family) = resolved.as_name() {
+            let bytes = self.doc.name_bytes(family)?;
             return match bytes.as_ref() {
-                b"DeviceGray" | b"G" | b"CalGray" => Some(ColorSpace::DeviceGray),
-                b"DeviceRGB" | b"RGB" | b"CalRGB" => Some(ColorSpace::DeviceRgb),
-                b"DeviceCMYK" | b"CMYK" => Some(ColorSpace::DeviceCmyk),
+                b"DeviceGray" | b"G" | b"CalGray" => Some(how.device(ColorSpace::DeviceGray)),
+                b"DeviceRGB" | b"RGB" | b"CalRGB" => Some(how.device(ColorSpace::DeviceRgb)),
+                b"DeviceCMYK" | b"CMYK" => Some(how.device(ColorSpace::DeviceCmyk)),
                 b"Pattern" => Some(ColorSpace::Pattern { base: None }),
+                // 8.9.7: an inline image's space may be a `/ColorSpace`
+                // resource, read as an image XObject's would be — so the
+                // entry, which is the space itself, cannot name another.
+                // Until October 2026 the name fell through to DeviceGray
+                // while `Page::images` listed the space it names.
+                resource if how.inline => {
+                    let entry = self.resources.as_ref().and_then(|resources| {
+                        let table = self
+                            .doc
+                            .resolve_key(resources, self.doc.intern(b"ColorSpace"));
+                        table.as_dict()?.get(self.doc.intern(resource)).cloned()
+                    })?;
+                    let how = Reading {
+                        inline: false,
+                        ..how
+                    };
+                    self.read_space(&entry, depth + 1, name, how)
+                }
                 _ => None,
             };
         }
@@ -1090,7 +1362,8 @@ impl PageResources {
                 Some(ColorSpace::Approximated { components })
             }
             b"Indexed" | b"I" => {
-                let base = self.parse_space(items.get(1)?, depth + 1, name)?;
+                // 8.6.5.6: an `/Indexed` base is remapped like any selection.
+                let base = self.read_space(items.get(1)?, depth + 1, name, how)?;
                 let high = items.get(2).and_then(|o| self.doc.resolve(o).as_int())?;
                 let lookup = match items.get(3).map(|o| self.doc.resolve(o)) {
                     Some(value) => match value.as_string() {
@@ -1118,7 +1391,21 @@ impl PageResources {
                         .as_array()
                         .map_or(1, <[Object]>::len)
                 };
-                let alternate = self.parse_space(items.get(2)?, depth + 1, name)?;
+                // 8.6.5.6 remaps an alternate "only if the alternate colour
+                // space is actually selected", which this engine does for
+                // every named colorant, since no render paints one on a plate
+                // of its own. 8.6.6.4's `/All` and `/None` are read here as
+                // never selecting it, so their alternate is read as written.
+                let colorant = (family.as_ref() == b"Separation")
+                    .then(|| items.get(1).and_then(|o| self.doc.resolve(o).as_name()))
+                    .flatten()
+                    .and_then(|n| self.doc.name_bytes(n));
+                let selects_alternate = !matches!(colorant.as_deref(), Some(b"All" | b"None"));
+                let alternate_how = Reading {
+                    defaults: how.defaults.filter(|_| selects_alternate),
+                    ..how
+                };
+                let alternate = self.read_space(items.get(2)?, depth + 1, name, alternate_how)?;
 
                 // 8.6.6.4: the fourth element converts tint values into the
                 // alternate space. Left as the identity, a one-ink Separation
@@ -1143,10 +1430,12 @@ impl PageResources {
             // second element and no colour. Without this branch the array form
             // resolved to nothing at all, so `cs` left the slot in whatever
             // space preceded it and the operands were read against that.
+            // 8.6.5.6 remaps the underlying space where `cs` selected it,
+            // since that is where the colour is given.
             b"Pattern" => Some(ColorSpace::Pattern {
                 base: items
                     .get(1)
-                    .and_then(|o| self.parse_space(o, depth + 1, name))
+                    .and_then(|o| self.read_space(o, depth + 1, name, how))
                     .map(Box::new),
             }),
             // 8.6.5.2 and 8.6.5.3. These were aliased to the device spaces,
@@ -1588,24 +1877,46 @@ impl FontSource for PageResources {
         if subtype.as_ref() != b"Form" {
             return None;
         }
-        self.form_from(&dict, reference, name)
+        self.form_from(&dict, reference, name, Contents::OwnScope)
     }
 
     fn resolve_color(&self, space: &[u8], components: &[f64]) -> Option<Rgb> {
-        let space = self.color_space(space)?;
-        let (r, g, b) = space.to_rgb(components);
+        // 8.6.5.6: the light is the space as painted. A device space named
+        // directly — `g`, `rg` and `k` in a scope that remaps them, and
+        // `/DeviceRGB cs … sc` — converts through the default where it lies,
+        // so the most frequent colour operators copy nothing.
+        let device = match space {
+            b"DeviceGray" => Some(ColorSpace::DeviceGray),
+            b"DeviceRGB" => Some(ColorSpace::DeviceRgb),
+            b"DeviceCMYK" => Some(ColorSpace::DeviceCmyk),
+            _ => None,
+        };
+        let (r, g, b) = match device {
+            Some(device) => match self.defaults().for_device(&device) {
+                Some(default) => default.to_rgb(components),
+                None => device.to_rgb(components),
+            },
+            None => self.color_space(space)?.to_rgb(components),
+        };
         Some(Rgb { r, g, b })
     }
 
     fn color_components(&self, space: &[u8]) -> Option<usize> {
-        Some(self.color_space(space)?.components())
+        // A default has its device space's count, so the space as selected
+        // answers without the copy a default would cost.
+        Some(self.selected_space(space)?.components())
     }
 
     fn resolve_ink(&self, space: &[u8], components: &[f64]) -> Option<[u8; 4]> {
         // 8.6.4.4: DeviceCMYK's own components, clamped as `to_rgb` clamps
         // them. Every other space — an ICC CMYK profile included, whose
         // components are a profile's to interpret — stays light.
-        if self.color_space(space)? != ColorSpace::DeviceCmyk {
+        //
+        // Asked of the space as selected, so a DeviceCMYK colour keeps the
+        // document's own ink under a `/DefaultCMYK` while its light is the
+        // default's: H-135's default until the owner decides, and choosing
+        // conversion instead is this one check.
+        if self.selected_space(space)? != ColorSpace::DeviceCmyk {
             return None;
         }
         let byte = |i: usize| {
@@ -1620,7 +1931,20 @@ impl FontSource for PageResources {
     }
 
     fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
-        Some(self.color_space(space)?.initial())
+        // 8.6.8's initial value of the space as selected, carried into the
+        // default as every other value is: `/DeviceCMYK cs` and `0 0 0 1 k`
+        // paint one colour under one default, where an `ICCBased` default's
+        // own initial value, all zeros, would be no ink at all.
+        Some(self.selected_space(space)?.initial())
+    }
+
+    fn device_defaults(&self) -> DeviceDefaults {
+        let defaults = self.defaults();
+        DeviceDefaults {
+            gray: defaults.gray.is_some(),
+            rgb: defaults.rgb.is_some(),
+            cmyk: defaults.cmyk.is_some(),
+        }
     }
 
     fn ext_g_state_alpha(&self, name: &[u8]) -> Option<(Option<f64>, Option<f64>)> {
@@ -1695,7 +2019,7 @@ impl FontSource for PageResources {
         // `/G` is required, and is a form XObject with a transparency group.
         let reference = mask.get_ref(self.doc.intern(b"G"))?;
         let group_dict = self.doc.get(reference).ok()?.as_dict()?.clone();
-        let form = self.form_from(&group_dict, reference, name)?;
+        let form = self.form_from(&group_dict, reference, name, Contents::ThisScope)?;
 
         // 11.6.5.2: `/S` selects what the rendered group is read as. A name
         // this build does not know is `/Alpha`'s opposite rather than an
@@ -2116,7 +2440,43 @@ impl GlyphSource for PageResources {
     }
 }
 
+/// Which scope a form's contents run in, for [`PageResources::form_from`].
+#[derive(Clone, Copy)]
+enum Contents {
+    /// An XObject's: its own `/Resources` when it brings them (8.10.1), the
+    /// invoking scope when it does not.
+    OwnScope,
+    /// A soft mask's `/G`, which the interpreter runs in the scope that set
+    /// the `gs` (`docs/design/icc.md`, "The scope a default is read in").
+    ThisScope,
+}
+
 impl PageResources {
+    /// A group's `/CS` (11.6.6), as its contents are painted: each device
+    /// space in it remapped by the defaults of the scope those contents run
+    /// in (8.6.5.6), and read here, where what it tolerates is reported.
+    ///
+    /// 11.6.6 remaps by "the current resource dictionary" without saying
+    /// whose; the scope the contents run in is the reading that never paints
+    /// them in one calibration and composites them in another. Today the
+    /// group keeps only the space's shape ([`group_space`]), which a default
+    /// cannot change — it has its device space's component count and is
+    /// never `/Lab` — so no pixel moves until a group composites through its
+    /// space.
+    fn group_colour_space(
+        &self,
+        cs: &Object,
+        name: &[u8],
+        contents: Contents,
+    ) -> Option<ColorSpace> {
+        let own = match contents {
+            Contents::OwnScope => self.form_resources(name),
+            Contents::ThisScope => None,
+        };
+        let scope: &PageResources = own.as_deref().unwrap_or(self);
+        self.read_space(cs, 0, name, scope.painted())
+    }
+
     /// The `/DecodeParms` of a stream, which may be one dictionary or an
     /// array with one entry per filter (7.4.1).
     /// A form XObject read from its own dictionary.
@@ -2126,11 +2486,17 @@ impl PageResources {
     /// resource table, and a second reader for the same dictionary is how
     /// `/Matrix` or `/BBox` comes to be honoured on one route and not the
     /// other.
+    ///
+    /// `contents` says which scope the form's contents run in, which is the
+    /// one its group's `/CS` is remapped by (11.6.6, 8.6.5.6): an XObject's
+    /// own `/Resources` when it has them, and this scope for a soft mask's
+    /// `/G`, which the interpreter runs where the `gs` was.
     fn form_from(
         &self,
         dict: &Dict,
         reference: ObjRef,
         name: &[u8],
+        contents: Contents,
     ) -> Option<tinker_pdf_content::Form> {
         let content = self.doc.stream_decoded(reference).ok()?;
         // 8.10.2: /Matrix maps the form's space into the one that invoked it.
@@ -2204,7 +2570,7 @@ impl PageResources {
                     space: group
                         .get(self.doc.intern(b"CS"))
                         .cloned()
-                        .and_then(|cs| self.parse_space(&cs, 0, name))
+                        .and_then(|cs| self.group_colour_space(&cs, name, contents))
                         .map(group_space),
                 })
             });
@@ -3638,9 +4004,16 @@ impl PageResources {
         // claims, exactly as on the XObject path.
         let bpc = if fax { 1 } else { bpc };
 
+        // 8.9.7: a device space, a `/ColorSpace` resource by name, or an
+        // `/Indexed` array over one of those — each remapped as an image
+        // XObject's space is (8.6.5.6).
         let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
+        let inline = Reading {
+            inline: true,
+            ..self.painted()
+        };
         let space = self
-            .parse_space(&space, 0, INLINE_NAME.as_bytes())
+            .read_space(&space, 0, INLINE_NAME.as_bytes(), inline)
             .unwrap_or(ColorSpace::DeviceGray);
         let n = if is_mask { 1 } else { space.components() };
 
@@ -4509,7 +4882,7 @@ fn scale(outline: &Outline, factor: f64) -> Outline {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_inline_abbreviations, PageResources, Remembered};
+    use super::{expand_inline_abbreviations, Contents, PageResources, Remembered};
     use tinker_pdf_color::ColorSpace;
     use tinker_pdf_content::FontSource;
 
@@ -4595,6 +4968,91 @@ mod tests {
         assert_eq!(
             expand("/D[1 0]/DP<<>>"),
             "<< /Decode[1 0]/DecodeParms<<>> >>"
+        );
+    }
+
+    /// 8.9.7's `/I` is read by where it stands: Table 94's `/Indexed` where
+    /// it begins an array, the one place a family name stands, and Table
+    /// 93's `/Interpolate` everywhere else. Every `/I` was the key until
+    /// October 2026.
+    #[test]
+    fn an_i_is_indexed_where_it_begins_an_array_and_interpolate_elsewhere() {
+        assert_eq!(
+            expand("/I true/CS[/I/RGB 1<FF00>]"),
+            "<< /Interpolate true/ColorSpace[/Indexed/DeviceRGB 1<FF00>] >>"
+        );
+        // White space and a comment between the bracket and the name.
+        assert_eq!(
+            expand("/CS [ %c\n/I /G 1 <00FF>] /I false"),
+            "<< /ColorSpace [ %c\n/Indexed /DeviceGray 1 <00FF>] /Interpolate false >>"
+        );
+        // Not an array's first element, so not a family.
+        assert_eq!(expand("/D [/X /I]"), "<< /Decode [/X /Interpolate] >>");
+    }
+
+    /// A string is copied as it stands: a palette's bytes may spell a name,
+    /// an escaped parenthesis or a balanced one, and none of them is a name.
+    /// Until October 2026 `(/I…)` became `(/Interpolate…)`, a longer palette
+    /// of other colours.
+    #[test]
+    fn a_string_in_an_inline_dictionary_is_copied_as_it_stands() {
+        assert_eq!(
+            expand(r"/CS[/I/RGB 1(/I/G\)(/Fl))]/F/AHx"),
+            r"<< /ColorSpace[/Indexed/DeviceRGB 1(/I/G\)(/Fl))]/Filter/ASCIIHexDecode >>"
+        );
+        assert_eq!(expand("/CS<</G>>"), "<< /ColorSpace<</DeviceGray>> >>");
+        // One that never closes runs to the end of the dictionary.
+        assert_eq!(expand("/D (/F"), "<< /Decode (/F >>");
+    }
+
+    /// 11.6.6: a form group's `/CS` is remapped by the defaults of the scope
+    /// its contents run in (8.6.5.6) — the form's own `/Resources` when it
+    /// has them, the invoking scope when it has none, and the invoking scope
+    /// for a soft mask's `/G`, which runs where the `gs` was. Today the
+    /// group keeps only the space's shape, which no default changes, so this
+    /// is the one place the scope it is read in shows.
+    #[test]
+    fn a_groups_cs_is_remapped_by_the_scope_its_contents_run_in() {
+        let cal = |gamma: f64| {
+            format!("[/CalRGB << /WhitePoint [0.9505 1 1.089] /Gamma [{gamma} {gamma} {gamma}] >>]")
+        };
+        let bytes = format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10]\n\
+   /Resources << /ColorSpace << /DefaultRGB {} >> /XObject << /Own 5 0 R /Bare 6 0 R >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 0 >>\nstream\n\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 10 10]\n\
+   /Resources << /ColorSpace << /DefaultRGB {} >> >> /Length 0 >>\nstream\n\nendstream\nendobj\n\
+6 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Length 0 >>\nstream\n\nendstream\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+            cal(2.0),
+            cal(3.0)
+        );
+        let doc = crate::Document::open(bytes.into_bytes()).expect("it opens");
+        let page = doc.page(0).expect("a page");
+        let res = PageResources::new(&page.doc, &page.inner, None);
+        let device = tinker_pdf_cos::Object::Name(res.doc.intern(b"DeviceRGB"));
+        let gamma = |space: Option<ColorSpace>| match space {
+            Some(ColorSpace::CalRgb { gamma, .. }) => Some(gamma[0]),
+            _ => None,
+        };
+        assert_eq!(
+            gamma(res.group_colour_space(&device, b"Own", Contents::OwnScope)),
+            Some(3.0),
+            "a form with resources of its own remaps by them"
+        );
+        assert_eq!(
+            gamma(res.group_colour_space(&device, b"Bare", Contents::OwnScope)),
+            Some(2.0),
+            "a form with none remaps by the page's"
+        );
+        assert_eq!(
+            gamma(res.group_colour_space(&device, b"Own", Contents::ThisScope)),
+            Some(2.0),
+            "a soft mask's group remaps where the gs was"
         );
     }
 

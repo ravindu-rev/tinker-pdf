@@ -430,7 +430,7 @@ preflight — that the standards tier's conversions need.
 
 **SVG output, complete**: soft masks, non-Normal blend modes and knockout groups expressed rather than refused; shadings and patterns as SVG gradients and patterns where exact; text as text or as paths; images reused
 
-**Today.** `SvgWarning::SoftMaskRefused`, `BlendModeRefused`, `KnockoutRefused`, `Rasterised` (`features/rendering.md:772-773`)
+**Today.** `SvgWarning::SoftMaskRefused`, `BlendModeRefused`, `KnockoutRefused`, `Rasterised` (`features/rendering.md:839-840`)
 
 **Exit criterion.** the SVG re-opened through the in-tree SVG reader renders within the stated tolerance of the page for every fingerprint fixture
 

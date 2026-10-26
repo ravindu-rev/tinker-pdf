@@ -322,7 +322,8 @@ volume, and the corpus census counts tags and bytes.
 
 ### Default colour spaces (8.6.5.6)
 
-Roadmap row K-02, designed on 25 October 2026 and not yet built. A resource
+Roadmap row K-02, designed on 25 October 2026; rendering built the same day
+(K-02.2, milestone 9), extraction and the census not yet. A resource
 dictionary's `/ColorSpace` may carry `/DefaultGray`, `/DefaultRGB` and
 `/DefaultCMYK` (PDF 1.1), and 8.6.5.6 makes each stand in for the device
 space it is named for, so that device colours are drawn calibrated. Nothing
@@ -561,6 +562,16 @@ until the owner decides:
   output"): a fill, stroke or glyph colour set by `k` or `K`, by `sc`/`scn`
   in a space selected as DeviceCMYK, or by four components with no space
   named, and a stencil mask painted in one.
+- **A light render composites in ink inside a `/DeviceCMYK` group**, found
+  building K-02.2. The renderer composites a colour's ink wherever a canvas
+  composites in ink: an ink page, and a `/DeviceCMYK` group's buffer on any
+  render (`crates/tinker-pdf-render/src/lib.rs:2156-2161`). So inside such a
+  group `k` under a `/DefaultCMYK` paints, on a light render, what the page
+  without the default paints, not what its twin naming the profile paints,
+  and the first bullet does not hold there. It follows from keeping the ink,
+  and choosing conversion would change it with the rest; a guard row of
+  `an_ink_render_keeps_a_device_cmyk_colour_s_ink_under_default_cmyk` holds
+  it until the owner decides.
 - **What carries no ink today is not H-135's question.** An image, a
   shading, an uncoloured pattern's colour, and an `/Indexed` or separation
   space over DeviceCMYK reach an ink canvas as light taken back to ink;
@@ -676,7 +687,7 @@ applied; K-02.2's twins use sampled images for that reason.
 | 6 | `ColorSpace::Icc` wired | **Done**, except rendering intents, which stay parsed and discarded. No ICCBased fingerprint was committed and none was needed: no existing fixture names an `ICCBased` space, so nothing moved, and the facade tests assert pixels directly. The fallback is asserted rather than warned — see the note below | M |
 | 7 | Known-answer tables | **Done**, in the form the arithmetic allows: the fixed-point encodings are pinned bit pattern by bit pattern, a linear curve's compiled ramp is pinned entry by entry across all 4 096, and two injections are counted (2 and 3 of 3 012) | S |
 | 8 | Corpus movement | `corpus/report.json` shows the `iccbased` count; the metamorphic rows of [render-verification](render-verification.md) still hold over the files carrying profiles, so the new conversion path did not break resolution or rotation coherence | S |
-| 9 | K-02.2: the scope's default substituted on every painting path that reads a space, and the three selections it rides on put right | `default_spaces.rs` (new): `each_default_space_draws_as_its_substitute_named_directly`, where each default — CalGray and ICCBased N=1, CalRGB and ICCBased N=3, ICCBased N=4 — through the operators, `cs`, a sampled image, an inline image, a shading, an `/Indexed` base, an uncoloured pattern's base and a selected `/Separation` alternate renders in light byte-identical to its twin naming the substitute, under the scope, group, `/BC`, initial-colour and refusal rules above; `the_selections_a_default_rides_on_read_what_the_file_names`, failing first; `an_ink_render_keeps_a_device_cmyk_colour_s_ink_under_default_cmyk`; fingerprints unchanged, and a default-space page added to `determinism.rs` | L |
+| 9 | K-02.2: the scope's default substituted on every painting path that reads a space, and the three selections it rides on put right | `default_spaces.rs` (new): `each_default_space_draws_as_its_substitute_named_directly`, where each default — CalGray and ICCBased N=1, CalRGB and ICCBased N=3, ICCBased N=4 — through the operators, `cs`, a sampled image, an inline image, a shading, an `/Indexed` base, an uncoloured pattern's base and a selected `/Separation` alternate renders in light byte-identical to its twin naming the substitute, under the scope, group, `/BC`, initial-colour and refusal rules above; `the_selections_a_default_rides_on_read_what_the_file_names`, failing first; `an_ink_render_keeps_a_device_cmyk_colour_s_ink_under_default_cmyk`; fingerprints unchanged, and a default-space page added to `determinism.rs` | L — **Done**, 25 October 2026. A refusal's `reason` is `DefaultSpaceFamily`, `DefaultSpaceComponents` or `DefaultSpaceUnreadable`, noted when the scope's defaults are read, once a render. A form group's `/CS` is read where `Do` runs and remapped by the defaults of the scope its contents run in, so what it tolerates is reported where it always was |
 | 10 | K-02.3: extraction reports the space the samples are in | `default_spaces.rs`: `an_extracted_image_names_the_space_its_samples_are_in` — the stated space kept, the substitute reported, the twin's `sample_space` the same, one XObject drawn in two spaces listed twice, a refusal named in `warnings`; `a_default_space_page_writes_the_svg_its_twin_writes` | M |
 | 11 | K-02.4: the census, by scope | `default_space_census.rs` (new): `the_census_finds_a_default_in_every_scope` counts synthetic files carrying a default in each scope exactly, and a form a page's default does not reach; the `#[ignore]`d corpus test prints `default-space-census: RAN`, or `SKIPPED` with no corpora, and `corpus.yml`'s `Hold every corpus census` step names it | M |
 | 12 | K-02.5: the census's first figures | The dispatched `corpus.yml` run on `develop` is green and its log carries `default-space-census: RAN`; the counts it printed are committed as floors in `default_space_census.rs` and quoted, with the run's id, in `docs/features/rendering.md` | S |

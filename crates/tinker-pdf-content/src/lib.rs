@@ -17,7 +17,9 @@ pub mod tokenizer;
 pub mod words;
 
 pub use device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
-pub use interpret::{interpret, FontSource, Form, Group, GroupSpace, Layer, MaskGroup, SoftMask};
+pub use interpret::{
+    interpret, DeviceDefaults, FontSource, Form, Group, GroupSpace, Layer, MaskGroup, SoftMask,
+};
 pub use plain::{HyphenCounts, PlainText, PlainTextOptions};
 pub use record::{Answers, Capture, Event, EventKind, MarkedScope, RecordingDevice};
 pub use replay::{replay, Replayed};

@@ -39,8 +39,8 @@ list, each held to first-party evidence.
 **The tree at `5297133`, against this row's text:**
 
 - Today's 'the 202 predefined CMaps extract CJK text' holds only where a document supplies `/ToUnicode`: `Font::text_of` (`crates/tinker-pdf-cos/src/font.rs:578-588`) falls back to `char_of`, which reads one-byte codes only (`font.rs:511-517`). The registry's CMaps split strings and choose CIDs; nothing in the tree maps a CID to a character through its collection.
-- 'Nothing draws it without a host face' understates the defect: with a face, an unembedded composite font's CID is taken as the face's glyph index (`crates/tinker-pdf/src/resources.rs:2626-2630`, `cid_glyph` at `:2703`, `gid_for_cid`'s identity at `crates/tinker-pdf-cos/src/font.rs:281-292`; a plain CFF likewise at `resources.rs:4445-4454`), and a `bundled-fonts` build answers a CJK descriptor not flagged symbolic with Liberation, `family_for` falling to the flags (`crates/tinker-pdf-font/src/bundled.rs:152-155`). Each CID below the face's glyph count (2 620 in Liberation Sans Regular) draws whichever glyph has that index, and a CID past it reads an empty outline that is drawn as a space (`crates/tinker-pdf-render/src/lib.rs:2920-2922`); nothing is reported.
-- An unembedded font whose codes map to no text draws nothing and reports nothing: `extract_outline` returns `None` with no report when no program resolves (`crates/tinker-pdf/src/resources.rs:2514-2515`), and the renderer counts an undrawn glyph only when its text is not blank (`crates/tinker-pdf-render/src/lib.rs:2914-2917`). A CJK page with neither `/ToUnicode` nor a face is blank and unreported, so 'rendered with something reported' misses it. The reporting rule is outside this row's mechanism; FT-01.7's no-faces `cjk` counts show its size.
+- 'Nothing draws it without a host face' understates the defect: with a face, an unembedded composite font's CID is taken as the face's glyph index (`crates/tinker-pdf/src/resources.rs:2992-2996`, `cid_glyph` at `:3069`, `gid_for_cid`'s identity at `crates/tinker-pdf-cos/src/font.rs:281-292`; a plain CFF likewise at `resources.rs:4818-4827`), and a `bundled-fonts` build answers a CJK descriptor not flagged symbolic with Liberation, `family_for` falling to the flags (`crates/tinker-pdf-font/src/bundled.rs:152-155`). Each CID below the face's glyph count (2 620 in Liberation Sans Regular) draws whichever glyph has that index, and a CID past it reads an empty outline that is drawn as a space (`crates/tinker-pdf-render/src/lib.rs:2926-2928`); nothing is reported.
+- An unembedded font whose codes map to no text draws nothing and reports nothing: `extract_outline` returns `None` with no report when no program resolves (`crates/tinker-pdf/src/resources.rs:2880-2881`), and the renderer counts an undrawn glyph only when its text is not blank (`crates/tinker-pdf-render/src/lib.rs:2920-2923`). A CJK page with neither `/ToUnicode` nor a face is blank and unreported, so 'rendered with something reported' misses it. The reporting rule is outside this row's mechanism; FT-01.7's no-faces `cjk` counts show its size.
 
 ## FT-02 — Fallback faces for every script, emoji, mathematics, music and symbols
 
@@ -72,7 +72,7 @@ list, each held to first-party evidence.
 
 - The UCD `Script` property is already vendored and compiled for itemization (`crates/tinker-pdf-shape/data/ucd/Scripts.txt`; `script` at `crates/tinker-pdf-shape/src/unicode.rs:870`), and the facade already depends on that crate, so the lookup reuses it; `ScriptExtensions.txt` is not vendored.
 - `cargo deny` reads the crate graph only (`deny.toml:10-16`, `xtask/src/main.rs:1152-1166`); a vendored face's licence is held to the same allowlist by `cargo xtask vendor`, which `cargo xtask check` runs in CI, so 'passes `cargo deny`' is met by the two together.
-- The reading path chooses one substitute per font, not per glyph (`program_for`, `crates/tinker-pdf/src/resources.rs:1408-1425`), so a glyph its face lacks has no second face to come from; the producing path sends a character the Liberation stand-in lacks to an overflow font whose glyph is the standard face's `.notdef` (`crates/tinker-pdf/src/epub/paint.rs:42-79`).
+- The reading path chooses one substitute per font, not per glyph (`program_for`, `crates/tinker-pdf/src/resources.rs:1697-1714`), so a glyph its face lacks has no second face to come from; the producing path sends a character the Liberation stand-in lacks to an overflow font whose glyph is the standard face's `.notdef` (`crates/tinker-pdf/src/epub/paint.rs:42-79`).
 
 ## FT-03 — Symbol and ZapfDingbats
 
@@ -101,7 +101,7 @@ list, each held to first-party evidence.
 
 - Neither built-in encoding is in the tree: `BaseEncoding` holds Standard, WinAnsi, MacRoman and PDFDoc only (`crates/tinker-pdf-font/src/encoding.rs:8-21`), and `Standard14::advance` answers every Symbol and ZapfDingbats code with a flat 600 (`crates/tinker-pdf-font/src/base14.rs:97`, `:161-163`), so 'draws every code' needs the tables before any face.
 - Text extraction reads an unembedded Symbol font's codes through StandardEncoding: a font with no `/Encoding` keeps `BaseEncoding::Standard` (`crates/tinker-pdf-cos/src/font.rs:723`) and `char_of` reads the code through it (`font.rs:511-517`), so without `/ToUnicode` an alpha extracts as `a`. Outside this row's exit; FT-03.2's tables are what a fix would read.
-- A host face given with `substituting_symbolic()` is addressed by `sfnt_selection`'s character and code readings (`crates/tinker-pdf/src/resources.rs:2633-2663`), which reach the intended glyph only through a `(3,0)` subtable laid out in the font's own encoding.
+- A host face given with `substituting_symbolic()` is addressed by `sfnt_selection`'s character and code readings (`crates/tinker-pdf/src/resources.rs:2999-3029`), which reach the intended glyph only through a `(3,0)` subtable laid out in the font's own encoding.
 
 ## FT-04a — Stem darkening
 
@@ -202,7 +202,7 @@ list, each held to first-party evidence.
 - Type 1 drops its hints the same way: `hstem`/`vstem` clear the stack (`type1.rs:360-361`), as do `dotsection`, `vstem3` and `hstem3` (`type1.rs:477-478`), and othersubr 3's hint replacement answers the no-op subr 3 (`type1.rs:554-558`).
 - Flex never reads its threshold: Type 2 `flex` draws both curves without its depth operand (`cff.rs:1921-1929`), and Type 1's othersubr 0 never reads its flex height (`type1.rs:533-548`).
 - `cff_subset.rs` keeps a second stem counter that must agree with `cff.rs` (`crates/tinker-pdf-font/src/cff_subset.rs:354-361`, `:431-445`), so recording stems in `cff.rs` must leave the count unchanged.
-- Outlines reach the renderer in em units with no pixel size (`GlyphSource::outline`, `crates/tinker-pdf-render/src/lib.rs:407-412`) and are cached by font and code alone (`crates/tinker-pdf/src/resources.rs:1847-1877`), so drawing a fitted outline needs a per-size request the tree does not have; FT-04b's hinted rendering needs the same one, which is why FT-04c.2 and FT-04c.7 wait on that row.
+- Outlines reach the renderer in em units with no pixel size (`GlyphSource::outline`, `crates/tinker-pdf-render/src/lib.rs:413-418`) and are cached by font and code alone (`crates/tinker-pdf/src/resources.rs:2171-2201`), so drawing a fitted outline needs a per-size request the tree does not have; FT-04b's hinted rendering needs the same one, which is why FT-04c.2 and FT-04c.7 wait on that row.
 
 ## FT-04d — An autohinter
 
@@ -233,7 +233,7 @@ list, each held to first-party evidence.
 **The tree at `5297133`, against this row's text:**
 
 - Nothing in the tree analyses outlines for an x-height or a stem: a search of `crates/tinker-pdf-font/src`, `crates/tinker-pdf-render/src` and `crates/tinker-pdf-raster/src` for `autohint`, `x_height`, `xheight` and `x-height` finds nothing, and the only stem width the engine reads is a font descriptor's `/StemV`, to choose a bold substitute (`crates/tinker-pdf/src/fonts.rs:102-108`).
-- Outlines reach the renderer in em units with no pixel size (`GlyphSource::outline`, `crates/tinker-pdf-render/src/lib.rs:407-412`) and are cached by font and code alone (`crates/tinker-pdf/src/resources.rs:1847-1877`), so drawing a fitted outline needs a per-size request the tree does not have; FT-04b's hinted rendering needs the same one, which is why the build steps here wait on that row.
+- Outlines reach the renderer in em units with no pixel size (`GlyphSource::outline`, `crates/tinker-pdf-render/src/lib.rs:413-418`) and are cached by font and code alone (`crates/tinker-pdf/src/resources.rs:2171-2201`), so drawing a fitted outline needs a per-size request the tree does not have; FT-04b's hinted rendering needs the same one, which is why the build steps here wait on that row.
 
 ## FT-05 — Variable fonts
 
@@ -273,7 +273,7 @@ list, each held to first-party evidence.
 
 - The Today cell holds: in code the variation tables appear only in `woff.rs`'s known-tag table (`crates/tinker-pdf-font/src/woff.rs:469-470`) and the shaper's `FeatureVariations` (`crates/tinker-pdf-shape/src/common.rs:318-330`, its axis index at `:423`); `CFF2` appears nowhere under `crates/`.
 - A variable face embedded today is written at its default instance without saying so: when the writer subsets, `KEEP` (`crates/tinker-pdf-font/src/subset.rs:43-55`) keeps no variation table. The committed XPS packages carry such a face, with `fvar`, `avar`, `gvar`, `HVAR`, `cvar` and `STAT` beside `cvt `, `fpgm` and `prep` (read after de-obfuscating `crates/tinker-pdf/tests/xps/wpf-image-and-text.xps`; `xps_validated.rs:596` notes its `gvar`), and `determinism.rs`'s `the_synthesised_fixed_document_is_the_same_bytes_on_every_target` hashes the document it is embedded in.
-- A CFF2-flavoured face draws nothing and cannot be embedded: `extract_outline` returns `None` for an sfnt with neither `glyf` nor `CFF ` (`crates/tinker-pdf/src/resources.rs:2530-2538`), reported only as `RenderWarning::UnreadableFont`, and the builder's `FontProgram::parse` refuses it (`crates/tinker-pdf-cos/src/build.rs:1762-1774`).
+- A CFF2-flavoured face draws nothing and cannot be embedded: `extract_outline` returns `None` for an sfnt with neither `glyf` nor `CFF ` (`crates/tinker-pdf/src/resources.rs:2896-2904`), reported only as `RenderWarning::UnreadableFont`, and the builder's `FontProgram::parse` refuses it (`crates/tinker-pdf-cos/src/build.rs:1762-1774`).
 - One real variable face is already in the tree: `crates/tinker-pdf-shape/data/text-rendering-tests/fonts/TestGPOSFour.ttf` (two axes, `wght` 100 to 900 and `wdth` 70 to 100, 36 named instances; `fvar`, `avar`, `gvar` and `MVAR`, no `HVAR`), the face of the GPOS-5 section the shaper declines (`crates/tinker-pdf-shape/tests/text_rendering.rs:135`).
 - EPUB already reads an `@font-face` weight range to choose a face (`crates/tinker-pdf/src/epub/typeface.rs:357`) and embeds each chosen face once whatever weights chose it (`crates/tinker-pdf/src/epub/paint.rs:1915`), so a variable face declared over a range draws every weight at its default instance.
 - No CSS input names an axis: `font-variation-settings` and `font-optical-sizing` are in neither `IMPLEMENTED_NAMES` nor `UNSUPPORTED_PROPERTIES` (`crates/tinker-pdf-css/src/property.rs:3327`, `:2424`), and `font-stretch` is listed as known and unimplemented (`property.rs:2436`), which is CD-01's.
@@ -317,7 +317,7 @@ list, each held to first-party evidence.
 
 **The tree at `5297133`, against this row's text:**
 
-- A Type 3 glyph never reaches `Device::show_glyph`: the interpreter runs its procedure and `continue`s (`crates/tinker-pdf-content/src/interpret.rs:1777-1809`) before the only call (`interpret.rs:1823`), so no Type 3 run's `/ToUnicode` text is extracted or searched today; a colour glyph written as Type 3 would lose the text a CID run extracts, so FT-06.2 fixes it first.
+- A Type 3 glyph never reaches `Device::show_glyph`: the interpreter runs its procedure and `continue`s (`crates/tinker-pdf-content/src/interpret.rs:1918-1950`) before the only call (`interpret.rs:1964`), so no Type 3 run's `/ToUnicode` text is extracted or searched today; a colour glyph written as Type 3 would lose the text a CID run extracts, so FT-06.2 fixes it first.
 - `DocumentBuilder` writes no Type 3 font: its font entry points are `add_base_font`, `add_named_font`, `add_embedded_font` and `add_cid_font` (`crates/tinker-pdf-cos/src/build.rs:5561-5743`), and `glyph_run` refuses anything but a registered composite font (`build.rs:5815`).
 - A book's colour face is embedded today as a CID font (`crates/tinker-pdf/src/epub/paint.rs:1915`), whose subset keeps only the tables `crates/tinker-pdf-font/src/subset.rs:43-55` lists, so its colour tables never reach the PDF and its glyphs draw as their plain outlines: the Today cell's 'no colour glyph is drawn' holds on the book path too.
 - Nothing in the tree reads gzip, which an `SVG ` table's documents may use; `tinker-pdf-filters` has the pieces (`inflate_raw`, `crc32`, `crates/tinker-pdf-filters/src/lib.rs:74-77`).
@@ -637,7 +637,7 @@ list, each held to first-party evidence.
 **The tree at `5297133`, against this row's text:**
 
 - The citation `features/fonts.md:915` has moved: the CFF refusal row is `docs/features/fonts.md:974`; `features/editing.md:839` is current.
-- No Type 1 glyph is ever counted: `PageResources::selection` answers `None` for a Type 1 program (`crates/tinker-pdf/src/resources.rs:2599-2613`), so the usage walk records nothing for it (`crates/tinker-pdf/src/subset.rs:1063-1073`) and the program is left whole when `tinker_pdf_font::subset` declines its bytes (`subset.rs:1306-1309`).
+- No Type 1 glyph is ever counted: `PageResources::selection` answers `None` for a Type 1 program (`crates/tinker-pdf/src/resources.rs:2965-2979`), so the usage walk records nothing for it (`crates/tinker-pdf/src/subset.rs:1067-1077`) and the program is left whole when `tinker_pdf_font::subset` declines its bytes (`subset.rs:1310-1313`).
 - The renderer reaches a Type 1 glyph through the code's text — `/ToUnicode` first, then the glyph-list name of its first character (`resources.rs:2556-2574`, `crates/tinker-pdf-cos/src/font.rs:578-587`) — while `Font::glyph_name` gives the encoding's own name (`font.rs:424-432`), whose doc says a route through a character loses every glyph whose name has no Unicode meaning, and which `cff_glyph` already asks first for a CFF (`resources.rs:4444-4470`).
 - The CFF reader runs no Type 2 arithmetic or conditional operator and stores only through `put`/`get` (`crates/tinker-pdf-font/src/cff.rs:1919-1985`), so a computed `callsubr` operand is not computed when drawing either; and it never reads `CharstringType`, which only the subsetter checks (`cff_subset.rs:785-790`).
 - Subset-on-save rewrites no `/CharSet` or `/CIDSet` (`rg -n 'CharSet|CIDSet' crates/tinker-pdf/src/subset.rs` finds nothing), so a descriptor's list can name glyphs a cut program no longer has; the Type 1 half is FT-11.4's, and the rest SD-02's fix-up.
@@ -669,7 +669,7 @@ list, each held to first-party evidence.
 **The tree at `5297133`, against this row's text:**
 
 - `FontRequest` carries the name, the serif, fixed-pitch and symbolic flags and weight and slope (`crates/tinker-pdf/src/fonts.rs:31-112`) and no PANOSE, so no provider can match on it today.
-- A face substituted under a composite font is indexed by CID: `sfnt_selection` answers a Type 0 font with `cid_glyph` (`crates/tinker-pdf/src/resources.rs:2626-2631`), the CID itself when there is no `/CIDToGIDMap` (`crates/tinker-pdf-cos/src/font.rs:281-292`), so a host face mapped by Unicode draws the glyph that happens to carry the CID's number.
+- A face substituted under a composite font is indexed by CID: `sfnt_selection` answers a Type 0 font with `cid_glyph` (`crates/tinker-pdf/src/resources.rs:2992-2997`), the CID itself when there is no `/CIDToGIDMap` (`crates/tinker-pdf-cos/src/font.rs:281-292`), so a host face mapped by Unicode draws the glyph that happens to carry the CID's number.
 - Once embedded, a face whose advance differs from `/Widths` by more than a thousandth of an em is a PDF/A metrics finding (`crates/tinker-pdf/src/pdfa/fonts.rs:811-812`, `:847-935`), so keeping `/Widths` and passing the font rules hold together only if the embedded program's advances are made to agree.
 
 ## FT-13 — A native system-font provider for the CLI and bindings
@@ -700,7 +700,7 @@ list, each held to first-party evidence.
 
 - The CLI already reads faces from outside the engine: `--fonts PATH` takes one face or a directory matched by `bold` and `italic` in file stems (`tools/tpdf/src/main.rs:757-852`), so the native provider replaces a heuristic rather than filling a missing seam.
 - Name reading is in three places and none yields a normalised family: `FontRequest::read` strips a subset prefix and reads weight and slope from the name (`crates/tinker-pdf/src/fonts.rs:61-112`), `Standard14::from_base_font` maps aliases to the standard 14 (`crates/tinker-pdf-font/src/base14.rs:108-142`), and `bundled::family_for` picks a generic family (`crates/tinker-pdf-font/src/bundled.rs:105-155`).
-- A request carries no collection, PANOSE or script (`fonts.rs:31-52`), and a face substituted under a composite font is indexed by CID number (`crates/tinker-pdf/src/resources.rs:2626-2631`), so a CJK default mapped by Unicode would draw the wrong glyphs; FT-13.1 and FT-13.6 answer such a request only with a face the engine selects correctly.
+- A request carries no collection, PANOSE or script (`fonts.rs:31-52`), and a face substituted under a composite font is indexed by CID number (`crates/tinker-pdf/src/resources.rs:2992-2997`), so a CJK default mapped by Unicode would draw the wrong glyphs; FT-13.1 and FT-13.6 answer such a request only with a face the engine selects correctly.
 - `Sfnt::parse` takes a collection's first member and nothing else (`crates/tinker-pdf-font/src/sfnt.rs:46-50`), and a tool may depend on the facade alone (`xtask/src/main.rs:830-834`), as may `tinker-pdf-ffi` (`:801`), so describing a system collection needs a member parse behind the facade and the C ABI needs a declared edge to the provider.
 
 ## FT-14 — Metric-matched substitution
@@ -731,7 +731,7 @@ list, each held to first-party evidence.
 **The tree at `5297133`, against this row's text:**
 
 - The row's '459 corpus files' is the synthetic-face bar before 5fc8a23a (8 September 2026); the committed `corpus/ratchet-fonts.json` sums to 456 files rendered with something reported of 5 525 over its five corpora, and its siblings to 1 409 (no faces) and 492 (bundled faces).
-- A substituted face is drawn at its own design advance while the pen moves by the dictionary's width: `extract_outline` scales a substitute's outline by its units per em and nothing else (`crates/tinker-pdf/src/resources.rs:2514-2577`), and nothing on the substitution path reads `/ItalicAngle`, `/XHeight`, `/CapHeight` or `/FontWeight`, while `/StemV` only sets the request's bold flag at 120 or more (`crates/tinker-pdf/src/fonts.rs:100-110`).
+- A substituted face is drawn at its own design advance while the pen moves by the dictionary's width: `extract_outline` scales a substitute's outline by its units per em and nothing else (`crates/tinker-pdf/src/resources.rs:2880-2943`), and nothing on the substitution path reads `/ItalicAngle`, `/XHeight`, `/CapHeight` or `/FontWeight`, while `/StemV` only sets the request's bold flag at 120 or more (`crates/tinker-pdf/src/fonts.rs:100-110`).
 - Every book fingerprint in `determinism.rs` is drawn through a provider (`book_face()`, `crates/tinker-pdf/tests/determinism.rs:126-128`, used at `:137`), and a `bundled-fonts` build draws every unembedded standard-14 page through its faces, so a change to how a substitute draws moves pinned renders in both builds.
 
 ## FT-15 — Hyphenation
@@ -1073,7 +1073,7 @@ list, each held to first-party evidence.
 
 **Vector graphics as data**: paths with items, fill and stroke colours, widths, dashes, opacity, even-odd, clip and group context, and clustering into drawings
 
-**Today.** `display_list` records events (`features/rendering.md:355-412`)
+**Today.** `display_list` records events (`features/rendering.md:422-479`)
 
 **Exit criterion.** every item equals the recorded event; clustering held to fixtures with known groups
 
@@ -1092,7 +1092,7 @@ list, each held to first-party evidence.
 
 **The tree at `5297133`, against this row's text:**
 
-- Today holds and its pointer is current: `docs/features/rendering.md:355-412` documents the retained page. The recorded events are public in `tinker-pdf-content` (`Event`, `crates/tinker-pdf-content/src/record.rs:240`), but the facade neither re-exports nor hands them out (`DisplayList::content` is `pub(crate)`, `crates/tinker-pdf/src/display.rs:229`), so the items are new public surface, not a re-export.
+- Today holds and its pointer is current: `docs/features/rendering.md:422-479` documents the retained page. The recorded events are public in `tinker-pdf-content` (`Event`, `crates/tinker-pdf-content/src/record.rs:240`), but the facade neither re-exports nor hands them out (`DisplayList::content` is `pub(crate)`, `crates/tinker-pdf/src/display.rs:229`), so the items are new public surface, not a re-export.
 - A page past `MAX_DISPLAY_LIST_BYTES` keeps no events (`DisplayList::is_retained`, `crates/tinker-pdf/src/display.rs:274`), so its items come from a direct interpretation, as `DisplayList::to_svg` draws such a page (`crates/tinker-pdf/src/svg_out.rs:351-370`).
 
 ## FT-27 — Text of annotation appearances
@@ -1147,8 +1147,8 @@ list, each held to first-party evidence.
 **The tree at `5297133`, against this row's text:**
 
 - The refusals the row cites at `docs/features/content-and-text.md:664-665` stand at lines 840-841 at 5297133.
-- A soft-mask group's own `/Resources` are entered by neither the interpreter nor the renderer: `run_soft_mask` keeps the scope that set the `gs` (`crates/tinker-pdf-content/src/interpret.rs:1597-1658`), the renderer's `begin_soft_mask` swaps no scope where its `begin_form` does (`crates/tinker-pdf-render/src/lib.rs:3199-3253`), and the subset walk visits a group in both scopes for that reason (`crates/tinker-pdf/src/subset.rs:697-702`). A name a group defines only in its own `/Resources` therefore resolves in the setting scope when the page is drawn; FT-28.2 lists the images as 8.10.1 places them, and a fix to the drawing is outside this row.
-- What the walks need exists: `PageResources::tiling_cell` and `own_scope` (`crates/tinker-pdf/src/resources.rs:808-840`), written for the subset walk's cells and groups, and `annots::prepare` for appearances; `jpx_samples` already carries the opacity channel out (`JpxImage::opacity`, `crates/tinker-pdf-filters/src/jpx/mod.rs:454-462`) and `take_jpx` drops it (`crates/tinker-pdf/src/resources.rs:4212-4218`).
+- A soft-mask group's own `/Resources` are entered by neither the interpreter nor the renderer: `run_soft_mask` keeps the scope that set the `gs` (`crates/tinker-pdf-content/src/interpret.rs:1738-1799`), the renderer's `begin_soft_mask` swaps no scope where its `begin_form` does (`crates/tinker-pdf-render/src/lib.rs:3205-3259`), and the subset walk visits a group in both scopes for that reason (`crates/tinker-pdf/src/subset.rs:697-702`). A name a group defines only in its own `/Resources` therefore resolves in the setting scope when the page is drawn; FT-28.2 lists the images as 8.10.1 places them, and a fix to the drawing is outside this row.
+- What the walks need exists: `PageResources::tiling_cell` and `own_scope` (`crates/tinker-pdf/src/resources.rs:957-989`), written for the subset walk's cells and groups, and `annots::prepare` for appearances; `jpx_samples` already carries the opacity channel out (`JpxImage::opacity`, `crates/tinker-pdf-filters/src/jpx/mod.rs:454-462`) and `take_jpx` drops it (`crates/tinker-pdf/src/resources.rs:4585-4591`).
 
 ## FT-29 — Image extraction as files
 

@@ -46,14 +46,17 @@ enforced by the suite below.
 
 ## Verified
 
-`crates/tinker-pdf/tests/determinism.rs` commits **19 render
+`crates/tinker-pdf/tests/determinism.rs` commits **20 render
 fingerprints** — `text`, `curves`, `shading`, `pattern`, `optional`,
 `image`, `jbig2`, `jpx`, `blend`, `transparency`, `tiling`, `mesh`, `cbz`,
 `xps`, `epub`, `analytic_axial`, `analytic_radial`, `analytic_blend`,
-`analytic_image` — each a hash of rendered pixels plus the page dimensions and
-ink counts it is computed from.
+`analytic_image`, `default_spaces` — each a hash of rendered pixels plus the
+page dimensions and ink counts it is computed from. `default_spaces`, added
+with K-02.2 in October 2026, is the one page that names a default colour
+space (8.6.5.6), each of the three through its own arithmetic: a CalGray's
+`pow`, a CalRGB's matrix and an ICC profile's lookup table.
 
-The last four arrived with milestone 2 of
+The four `analytic_` pages arrived with milestone 2 of
 [design/render-verification.md](../design/render-verification.md) and are a
 different kind of fixture from the fifteen before them: their pixels have a
 **closed-form right answer**, which `crates/tinker-pdf/tests/render_analytic.rs`

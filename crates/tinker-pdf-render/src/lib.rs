@@ -180,10 +180,16 @@ pub enum RenderWarning {
     ///
     /// Ruling 10, for the same reason as [`RenderWarning::DamagedImage`]: the
     /// page is drawn, and "the colours were read" stays distinguishable from
-    /// "the colours were read as written". `reason` is a stable identifier;
-    /// today there is one, `LabRangeUnordered` — a `/Lab` space whose
-    /// `/Range` writes a pair backwards, `[10 -10 …]`, which 8.6.5.4's
-    /// Table 65 makes a minimum then a maximum, read as the span it covers.
+    /// "the colours were read as written". `reason` is a stable identifier:
+    /// `LabRangeUnordered` — a `/Lab` space whose `/Range` writes a pair
+    /// backwards, `[10 -10 …]`, which 8.6.5.4's Table 65 makes a minimum then
+    /// a maximum, read as the span it covers — or, under a default colour
+    /// space's own name (`DefaultGray`, `DefaultRGB`, `DefaultCMYK`), a
+    /// default 8.6.5.6 does not allow, refused and its device space drawn as
+    /// without it: `DefaultSpaceFamily` for a `/Lab`, `/Indexed` or
+    /// `/Pattern` one, `DefaultSpaceComponents` for one with another number
+    /// of components than its device space, `DefaultSpaceUnreadable` for one
+    /// that is no colour space.
     ///
     /// Reported once per name and repair, wherever the facade reports what
     /// its resources tolerated — a space read through the page's resources
@@ -193,8 +199,8 @@ pub enum RenderWarning {
     RepairedColorSpace {
         /// The resource name the space was reached under: a `/ColorSpace`
         /// entry's for `cs`, or the image's, shading's, pattern's, form's or
-        /// graphics state's whose dictionary names the space — and `Group`
-        /// for a page's own `/Group`.
+        /// graphics state's whose dictionary names the space — `Group` for a
+        /// page's own `/Group`, and the default's own for a refused default.
         name: String,
         /// What was repaired.
         reason: String,

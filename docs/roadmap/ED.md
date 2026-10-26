@@ -921,7 +921,7 @@ API and by layout, each held to the strict validator (K-03).
 
 **Remove only invisible text** (render mode 3), the redaction mode for stripping an old OCR layer
 
-**Today.** absent — the owner's parity decision of 9 October 2026; invisible text is shown to the device like any other (`invisible_text_is_still_shown_to_the_device`, `crates/tinker-pdf-content/src/interpret.rs:2378`) and no redaction mode keys on it
+**Today.** absent — the owner's parity decision of 9 October 2026; invisible text is shown to the device like any other (`invisible_text_is_still_shown_to_the_device`, `crates/tinker-pdf-content/src/interpret.rs:2519`) and no redaction mode keys on it
 
 **Exit criterion.** fixtures with visible and invisible runs keep exactly the visible; `tpdf redact --invisible-text` runs it on `testdata/` fixtures
 

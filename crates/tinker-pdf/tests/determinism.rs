@@ -1680,6 +1680,125 @@ fn epub_book() -> Vec<u8> {
     include_bytes!("epub/pandoc-book-cover.epub").to_vec()
 }
 
+/// Default colour spaces (8.6.5.6): a page whose device colours are drawn
+/// through the defaults its `/ColorSpace` names.
+///
+/// *Added October 2026, with K-02.2.* No other fixture here names a default,
+/// so a build that stopped substituting one would move nothing in this file.
+/// This page names all three, each through different arithmetic:
+/// `/DefaultGray` a CalGray, whose gamma is `tinker-pdf-math`'s `pow`;
+/// `/DefaultRGB` a CalRGB, three gammas and a matrix; and `/DefaultCMYK` an
+/// ICC printer profile, whose four-channel lookup table is integer
+/// interpolation. It paints through them by the device operators, which ask
+/// the resource seam only in a scope with a default, by a DeviceCMYK shading,
+/// an `/Indexed` base and a sampled image, so the hash covers the operator
+/// branch, the seam and the image decode at once.
+fn default_spaces_page() -> Vec<u8> {
+    let content = "q 0 0 120 30 re W n /Sh0 sh Q\n\
+                   0.3 g 0 30 30 50 re f\n\
+                   0.2 0.5 0.8 rg 30 30 30 50 re f\n\
+                   0.1 0.6 0.3 0.2 k 60 30 30 50 re f\n\
+                   /CS1 cs 1 sc 90 30 30 25 re f\n\
+                   q 30 0 0 25 90 55 cm /Im0 Do Q";
+    let samples = "3366991188DDCC4422FF8800>";
+    let profile = default_cmyk_profile();
+    let mut bytes = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80]\n\
+   /Resources << /ColorSpace <<\n\
+       /DefaultGray [/CalGray << /WhitePoint [0.9505 1 1.089] /Gamma 2.2 >>]\n\
+       /DefaultRGB [/CalRGB << /WhitePoint [0.9505 1 1.089] /Gamma [1.8 1.8 1.8]\n\
+         /Matrix [0.4124 0.2126 0.0193 0.3576 0.7152 0.1192 0.1805 0.0722 0.9505] >>]\n\
+       /DefaultCMYK [/ICCBased 6 0 R]\n\
+       /CS1 [/Indexed /DeviceRGB 1 <4080C0C08040>] >>\n\
+     /Shading << /Sh0 << /ShadingType 2 /ColorSpace /DeviceCMYK /Coords [0 0 120 0]\n\
+       /Function << /FunctionType 2 /Domain [0 1] /C0 [0.1 0.6 0.3 0.2]\n\
+                    /C1 [0.5 0.1 0.2 0.3] /N 1 >> /Extend [true true] >> >>\n\
+     /XObject << /Im0 5 0 R >> >>\n\
+   /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Image /Width 4 /Height 1 /ColorSpace /DeviceRGB\n\
+   /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length {} >>\nstream\n{samples}\nendstream\nendobj\n\
+6 0 obj\n<< /N 4 /Length {} >>\nstream\n",
+        content.len(),
+        samples.len(),
+        profile.len()
+    )
+    .into_bytes();
+    bytes.extend_from_slice(&profile);
+    bytes.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n");
+    bytes
+}
+
+/// The `/DefaultCMYK` of [`default_spaces_page`]: a version 2 printer
+/// profile whose one `mft2` table takes four inks to XYZ on a grid of two
+/// points an axis, each corner the light of its inks squeezed into a tenth
+/// to nine tenths, so no colour comes out as 8.6.4.4 converts it.
+fn default_cmyk_profile() -> Vec<u8> {
+    let s15 = |value: f64| (((value * 65536.0).round() as i32) as u32).to_be_bytes();
+    let mut tag = b"mft2\0\0\0\0".to_vec();
+    tag.extend_from_slice(&[4, 3, 2, 0]);
+    for row in 0..3 {
+        for column in 0..3 {
+            tag.extend_from_slice(&s15(if row == column { 1.0 } else { 0.0 }));
+        }
+    }
+    tag.extend_from_slice(&2u16.to_be_bytes());
+    tag.extend_from_slice(&2u16.to_be_bytes());
+    for _ in 0..4 {
+        tag.extend_from_slice(&0u16.to_be_bytes());
+        tag.extend_from_slice(&u16::MAX.to_be_bytes());
+    }
+    // sRGB's primaries adapted to D50, the last ink (black) varying fastest.
+    let primaries = [
+        [0.436_065, 0.222_488, 0.013_916],
+        [0.385_147, 0.716_873, 0.097_076],
+        [0.143_066, 0.060_607, 0.714_096],
+    ];
+    for corner in 0..16u32 {
+        let ink = |bit: u32| f64::from((corner >> bit) & 1);
+        let (c, m, y, k) = (ink(3), ink(2), ink(1), ink(0));
+        let light = [
+            0.1 + 0.8 * (1.0 - c) * (1.0 - k),
+            0.1 + 0.8 * (1.0 - m) * (1.0 - k),
+            0.1 + 0.8 * (1.0 - y) * (1.0 - k) * 0.7,
+        ];
+        let xyz: [f64; 3] = std::array::from_fn(|axis| {
+            primaries
+                .iter()
+                .zip(light)
+                .map(|(primary, amount)| primary[axis] * amount)
+                .sum()
+        });
+        for value in xyz {
+            // 1.0 is 0x8000 in the connection space's sixteen-bit encoding.
+            tag.extend_from_slice(&((value * 32768.0).round() as u16).to_be_bytes());
+        }
+    }
+    for _ in 0..3 {
+        tag.extend_from_slice(&0u16.to_be_bytes());
+        tag.extend_from_slice(&u16::MAX.to_be_bytes());
+    }
+    let offset = 128 + 4 + 12;
+    let size = (offset + tag.len()).div_ceil(4) * 4;
+    let mut profile = vec![0u8; 128];
+    profile[0..4].copy_from_slice(&(size as u32).to_be_bytes());
+    profile[8..12].copy_from_slice(&0x0240_0000u32.to_be_bytes());
+    profile[12..16].copy_from_slice(b"prtr");
+    profile[16..20].copy_from_slice(b"CMYK");
+    profile[20..24].copy_from_slice(b"XYZ ");
+    profile[36..40].copy_from_slice(b"acsp");
+    profile.extend_from_slice(&1u32.to_be_bytes());
+    profile.extend_from_slice(b"A2B0");
+    profile.extend_from_slice(&(offset as u32).to_be_bytes());
+    profile.extend_from_slice(&(tag.len() as u32).to_be_bytes());
+    profile.extend_from_slice(&tag);
+    profile.resize(size, 0);
+    profile
+}
+
 /// The committed fingerprints.
 ///
 /// Every entry is a claim that this page renders to these exact bytes on
@@ -2015,6 +2134,13 @@ const GOLDEN: &[Fixture] = &[
         open: Open::Closed,
         least_ink: 64,
     },
+    // The page paints every one of its 9 600 pixels; the floor is half.
+    Fixture {
+        name: "default_spaces",
+        build: default_spaces_page,
+        open: Open::Closed,
+        least_ink: 4800,
+    },
 ];
 
 #[test]
@@ -2207,6 +2333,14 @@ fn rendering_is_stable_across_targets() {
         (
             "analytic_image",
             "37360b0c61ca919d525b75922112580518965e5f4ad12d52ce75953f46061872",
+        ),
+        // Added October 2026 with K-02.2: the one page here that names a
+        // default colour space (8.6.5.6), each of the three through its own
+        // arithmetic — CalGray's `pow`, CalRGB's matrix and an ICC lookup
+        // table. No other entry moved when it was added.
+        (
+            "default_spaces",
+            "cfe787612cba9228dd2a089986d409a34f599f2000ea708f96b6278036967374",
         ),
     ];
     assert_eq!(
