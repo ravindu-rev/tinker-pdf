@@ -32,8 +32,8 @@ gigabytes (ruling 1).
 
 **JPEG** (DCTDecode, 7.4.8; T.81): baseline (SOF0), extended sequential
 (SOF1) and progressive (SOF2) — spectral selection, successive approximation
-and EOB runs (T.81 G.1.1.1.1) all decode — and, since 20 September 2026, the
-**arithmetic** frames beside them: **SOF9 and SOF10**, which are those same two
+and EOB runs (T.81 G.1.1.1.1) all decode — and the **arithmetic** frames
+beside them: **SOF9 and SOF10**, which are those same two
 DCT processes with Annex D's entropy coder in place of Annex C's. **B.2.2's
 twelve-bit precision decodes too**, outside the baseline frame where the clause allows it:
 A.3.1's level shift is `2^(P-1)` rather than 128, and the samples are narrowed
@@ -64,15 +64,13 @@ answers.** The *coder* is adjudicated outright by published data: **T.81 K.4.1**
 prints a 256-bit test sequence, the 32 bytes it encodes to, and Tables K.7 and
 K.8's symbol-by-symbol traces of both directions. `qm.rs` decodes the published
 bytes to the published decisions and encodes the published decisions to the
-published bytes, which is the standing T.88 Annex H.2's fixture already has
-here. The *statistical model* — F.1.4.4's Tables F.4 and F.5, and Table G.2 for
+published bytes, which is the standing T.88 Annex H.2's fixture has here. The *statistical model* — F.1.4.4's Tables F.4 and F.5, and Table G.2 for
 a refinement scan — has no such data behind it, because **T.81 publishes no
-arithmetic-coded image**: Annex K was read section by section on 20 September
-2026 and K.4.1 is the only data in it, T.83's own clause 4.4 says its test data
-ships on diskettes rather than inside the document, and T.84 clause 4.2.1 says
-compliance data is obtained from ISO and the ITU. So the model is transcribed
-from its clauses, read against the document twice, and pinned by **hand-derived
-decision sequences**: each test states the decisions T.81's figures say an
+arithmetic-coded image**: K.4.1 is the only data in Annex K, T.83's own clause
+4.4 says its test data ships on diskettes rather than inside the document, and
+T.84 clause 4.2.1 says compliance data is obtained from ISO and the ITU. So the
+model is transcribed from its clauses and pinned by **hand-derived decision
+sequences**: each test states the decisions T.81's figures say an
 encoder emits for a given block, and asserts both the coefficients that come
 back *and the statistics bin every decision was taken against* — because a
 model that uses the wrong bin still decodes correctly while every bin is in its
@@ -106,8 +104,9 @@ the four bytes after it. The scan starts past the adaptive pixels, because a
 nominal AT pair is the bytes `FF FE` and a template-0 region carries four of
 them.
 
-**Symbol dictionaries (6.5) and text regions (6.4) decode, arithmetically**:
-Annex A's integer procedures and A.3's symbol-index procedure over the shared
+**Symbol dictionaries (6.5) and text regions (6.4) decode**, through the
+shared coder and through Annex B's Huffman tables (below): Annex A's integer
+procedures and A.3's symbol-index procedure over the shared
 coder; 6.5's height classes with one coder and one adaptive context set carried
 across every symbol in a dictionary, as 6.5.8.1 requires; 6.5.10's export runs
 selecting across imported and new symbols; and 6.4.5's strip decoding — the
@@ -140,19 +139,19 @@ rather than drawn: a refinement region's reference is either one of those or,
 failing that, whatever the page already holds under the region's own box
 (6.3.2).
 
-The refinement templates are **derived rather than transcribed**, and the
-reason that is sound is worth stating where a reader will meet it. A context
-index only labels an adaptive state slot — the decoder reads and writes
+The refinement templates match T.88's Figures 12 and 13, and are held to the
+corpus as well, which is sound for a reason worth stating where a reader will
+meet it. A context index only labels an adaptive state slot — the decoder reads and writes
 `state[cx]`, every slot starts identical, and the arithmetic coder's registers
 are global — so relabelling every context through a bijection cannot change a
 single decision, and the bit order in 6.3.5.3's figures is unobservable. Only
 the *set* of positions is a fact about the format, and that set is held to the
 pdf.js corpus, which codes one 399 by 400 picture a dozen ways: the encodings
-that do not refine are ground truth for the ten that do, and all ten reproduce
-it with **0 pixels different**
+that do not refine are ground truth for the ones that do, and every one
+reproduces it with **0 pixels different**
 ([`jbig2_refinement.rs`](../../crates/tinker-pdf/tests/jbig2_refinement.rs)).
-6.3.5.6's TPGRON slot does not survive the relabelling, so it was recovered the
-same way — one value in 8 192 reproduces the fixture, and one in 1 024 for the
+6.3.5.6's TPGRON slot does not survive the relabelling, so it is determined the
+same way — one value in 8 192 reproduces its fixture, and one in 1 024 for the
 narrower template.
 
 That last rule is why a region whose referred-to dictionary is **absent or
@@ -163,45 +162,27 @@ place — a page that looks like text and says something else. T.88 Annex H.1's
 own page 2 is that case, its arithmetic text region referring to page 1's
 Huffman dictionary.
 
-Every symbol of every one of those files is measured as well as counted, since
-26 September 2026, and the reason it took until then is a fact about the format:
-**neither of a symbol's dimensions is in any segment header.** 6.5.5 accumulates
-both from `IADH` and `IADW` deltas inside the arithmetic coder, and on the
-Huffman road from Annex B deltas inside the bit stream, so
+**Neither of a symbol's dimensions is in any segment header.** 6.5.5
+accumulates both from `IADH` and `IADW` deltas inside the arithmetic coder, and
+on the Huffman road from Annex B deltas inside the bit stream, so
 [`jbig2_census.rs`](../../crates/tinker-pdf/tests/jbig2_census.rs) — which
-shares no code with this decoder on purpose — could count symbols and could not
-measure one. It decodes for that half now, through `jbig2_decode_measured`, and
-what it reports is the yardstick `MAX_JBIG2_SYMBOL_PIXELS` never had (the
-largest dictionary spends **1 568 118** pixels against a cap of 67 108 864) and
-the one `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` was chosen from: over **88 736 symbols
-in 243 dictionaries across 502 images, not one symbol is wider or taller than
-the page it is drawn onto**, and the tightest fit is exactly one — the 399 by
-400 picture above, whose widest symbol is 399 pixels across.
+shares no code with this decoder on purpose — can count symbols from the
+headers and cannot measure one. It measures them by decoding, through
+`jbig2_decode_measured`, and what it reports is what `MAX_JBIG2_SYMBOL_PIXELS`
+and `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` are checked against.
 
-Measured over the corpus's JBIG2-bearing files, counting those whose decode
-reports any refusal: **65 before this lineage landed, 52 after the arithmetic
-variant, 49 after the Huffman one, 35 after refinement, 30 once the Huffman road
-followed it, 6 once transposed placement, clause 7.4.13's custom code tables,
-7.2.7's unknown data length and the halftone lineage had landed, and **1 of 118
-now** that 7.4.2's retained contexts, 6.5.8.2.2's reference offset, an
-empty text region and Annex B's four mis-transcribed tables have followed. None
-ever gained one. The one that is left is `pdfjs/issue3371.pdf`, a stream that
-stops inside a segment — damage rather than a capability, and
-`Jbig2Refusal::is_malformed` says so.
 [`jbig2_attribution.rs`](../../crates/tinker-pdf/tests/jbig2_attribution.rs)
-names it and pins the count.
+names why each JBIG2-bearing corpus file that refuses is refused, by
+`Jbig2Refusal`, and `Jbig2Refusal::is_malformed` says whether that is damage or
+a capability.
 
 Annex B's fifteen tables are **transcribed from ITU-T Rec. T.88 (02/2000)**,
-which is published free of charge. Until September 2026 they were
-*reconstructed* instead — the standard could not be fetched here — and four of
-the fifteen were wrong. Three were known wrong from inside this repository, by
-a property that needs no copy of it: B.3 assigns canonical codes from prefix
-lengths alone, so a table decodes every input only if `sum(2^-len)` is one, and
-B.7, B.10 and B.12 sat at 0.640, 0.945 and 0.921 of it. **B.15 summed to
-exactly one and was wrong anyway**, which is why the check that found the
-others could not have found it.
+which is published free of charge. B.3 assigns canonical codes from prefix
+lengths alone, so a table decodes every input only if `sum(2^-len)` is one —
+but a table can sum to exactly one and still be wrong, so completeness is
+necessary and not sufficient.
 
-What holds them now: the transcription, the standard's own printed Encoding
+What holds them: the transcription, the standard's own printed Encoding
 column beside each line (`the_codes_b3_assigns_are_the_ones_the_standard_prints`),
 Annex H coding the same two symbols twice — once with `SDHUFF`, once through
 the MQ coder — which decode byte-identically, and
@@ -214,11 +195,10 @@ B.3's assignment runs in 64 bits and stops at 32. The prefix lengths it is
 handed are often the file's: a clause 7.4.13 table's (up to eight bits of
 `HTPS` each), or a text region's symbol code lengths (7.4.3.1.7). A complete
 code whose longest prefix is 32 bits takes the running sum to exactly 2^32, and
-an over-subscribed one gets there sooner. In 32 bits that overflowed, and a fuzz
-build found it in 82 bytes (ruling 1). A line longer than the 32 bits the
-decoder reads is kept in its table and is never chosen, which is how it behaved
-before. A range line's offset can be 32 bits wide, and it is added in 64 now: a
-value outside `i32` ends the read rather than wrapping into a plausible wrong
+an over-subscribed one gets there sooner, so 32 bits would overflow (ruling 1).
+A line longer than the 32 bits the decoder reads is kept in its table and is
+never chosen. A range line's offset can be 32 bits wide, and it is added in 64:
+a value outside `i32` ends the read rather than wrapping into a plausible wrong
 number.
 
 Polarity is returned in JBIG2's own sense (1 = black, 6.2.2); the inversion
@@ -238,9 +218,8 @@ Annex G and I colour pipeline, palettes and `cdef` included. **All six of
 Table A.19's code-block styles decode**: segmentation symbols (D.5's integrity
 check), `RESET`'s return to Table D.7's states at every pass boundary,
 `VERTICALLY_CAUSAL`'s stripe that depends on nothing beneath it, `PREDICTABLE`,
-which constrains an encoder and leaves a decoder's reading unchanged, and — the
-last two, on 23 September 2026 — D.6's selective arithmetic coding bypass and
-D.4's termination on each coding pass. An opacity channel is carried out separately in
+which constrains an encoder and leaves a decoder's reading unchanged, D.6's
+selective arithmetic coding bypass and D.4's termination on each coding pass. An opacity channel is carried out separately in
 `JpxOpacity` because what it is *for* is `/SMaskInData`'s rule (8.9.5.4) and
 that decision stays outside the crate. The decoder's stance is that a wrong
 JPEG 2000 decode looks like a photograph — the inverse wavelet smooths wrong
@@ -260,9 +239,7 @@ context states are not. What they do *not* share is D.6's raw
 reader. `TERMALL` adds no new way of reading a decision; `BYPASS` makes the
 significance propagation and magnitude refinement passes from the fifth
 bit-plane down carry raw bits, with their sign taken straight from the stream
-by equation (D-2) rather than through D.2.2's context and XOR. The note this
-decoder used to carry said both were "not a tier-1 change", and half of that
-was wrong.
+by equation (D-2) rather than through D.2.2's context and XOR.
 
 **The progression order change is a bound on the loops, not a second
 sequencer.** A POC marker segment (A.6.6) is a list of progressions, and
@@ -278,7 +255,7 @@ own volumes may be spread across its tile-part headers (B.12.3's Figure
 B.15b), joined in `TPsot` order, provided the first tile-part header carries
 one.
 
-*What a skipped POC costs is measured rather than argued.* T.800 J.10's own
+*What a skipped POC costs is pinned.* T.800 J.10's own
 two published packets, swapped and described by a two-volume POC, decode to
 J.10.5's nine published samples; the identical bytes with the POC removed
 decode **cleanly, with no warning**, to `128, 130, 132, 139, 128, 124, 143,
@@ -310,39 +287,9 @@ exact-consumption check, and the seams the clauses name — each `Nppm` run's
 end, each marker segment's end — must fall between two headers rather than
 inside one.
 
-**Measured over five corpora, September 2026**, by
-[`jpx_attribution.rs`](../../crates/tinker-pdf/tests/jpx_attribution.rs), which
-names the *internal* refusal rather than the coarse warning: **39 files carry a
-JPX stream and 7 report a refusal, for 5 distinct reasons**, and **not one of
-the five is a coding capability**. One file is a ruling 1 budget; two are
-veraPDF fixtures whose `colr` box is deliberately non-conformant; two are
-`/JPXDecode` streams whose bytes are not JPEG 2000 at all; and two are real
-documents in which **no tile arrived whole**, which is the one truncation this
-decoder refuses rather than draws around — a tile short of its declared parts
-costs pixels and is drawn as far as it arrives, and only a codestream with no
-complete tile has nothing to degrade to. So precision above sixteen bits —
-the one coding-side entry left, and a limit rather than a gap — is reached by
-**zero** corpus files, fixture or real, as `BYPASS` and `TERMALL` were until
-they landed.
-
-*The file count in that sentence read 5 until September 2026, against a test
-that prints 7.* It was counting the five files whose reasons are not
-truncation and taking the test's five **reasons** for its five **files**; the
-two `a codestream with no complete tile` documents are refusals and are in the
-census rows, where the old text had them among the truncations that decode.
-The two numbers are now both given and both say which they are.
-
-RGN, PPM and PPT were on the zero-reachability list until 20 September 2026,
-POC until the 21st and `BYPASS` and `TERMALL` until the 23rd, and their leaving
-moved nothing: the census was re-run after each and reports the same 39 bearing
-files, the same 7 refusals and the same five reasons, because no corpus file
-carried any of the six to begin with. Under ruling 3 that is a scheduling input
-rather than a justification. The tier-2 roadmap row they belonged to is gone
-with the last of them; what is left of the story is in that tier's preamble.
-
-That paragraph used to read "the corpus's nineteen readable JPX files as of
-August 2026: 16 decode and 3 refuse", which was a count over four corpora
-taken before the attribution existed, and a coarse one.
+[`jpx_attribution.rs`](../../crates/tinker-pdf/tests/jpx_attribution.rs)
+names the *internal* refusal for every corpus file that carries a JPX stream,
+rather than the coarse warning.
 
 **Container codecs, not `/Filter` names.** No PDF stream is a PNG file, but
 the archive formats need one, so the crate also exports a PNG decoder
@@ -356,7 +303,7 @@ with no wrapper, for ZIP entries) and `crc32` — the reflected-polynomial
 CRC-32 that ZIP (APPNOTE 4.4.7) and PNG (5.3) both carry, with a resumable
 `Crc32` for checksums over non-adjacent slices.
 
-**And a PNG *encoder*, the first of this crate's four image writers.**
+**And a PNG *encoder*.**
 `png_encode` takes an interleaved 8-bit raster and returns a whole file:
 signature, IHDR, IDAT, IEND, each chunk's CRC over its type and its data. It
 is here rather than in the tool that wanted it because a PNG file *is* the
@@ -371,10 +318,9 @@ with the filtered bytes read as *signed* (a byte of `0xFF` is a difference of
 minus one, and the unsigned reading rejects exactly the rows a filter helped
 most). Integer arithmetic throughout, ties to the lowest-numbered filter, so
 the chosen filter and therefore every compressed byte is identical on every
-target (ruling 4). Across PngSuite the tally is 115 rows on None, 679 on Sub,
-1 313 on Up, 26 on Average and 2 813 on Paeth — measured, and asserted to be
-non-zero for all five, because an encoder emitting type 0 everywhere would
-round-trip perfectly and exercise 9.2's other four formulas on neither side.
+target (ruling 4). Across PngSuite each of the five is asserted to be chosen
+for some row, because an encoder emitting type 0 everywhere would round-trip
+perfectly and exercise 9.2's other four formulas on neither side.
 
 Four colour types are written — 0, 2, 4 and 6 — at **eight bits a component**.
 There is no indexed output, because a palette is a compression decision that
@@ -395,8 +341,7 @@ legal picture — a page at `MAX_PAGE_PIXELS` (67.1 Mpx) is 268 million samples
 as RGBA, four times the ceiling. So the largest page this engine renders writes
 a PNG this crate's own decoder will not read back.
 
-**Two bilevel encoders joined it on 15 September 2026**, both promoted from
-code that already existed as a test fixture, and both shaped like `png_encode`:
+**Two bilevel encoders sit beside it**, both shaped like `png_encode`:
 a borrowed raster with an explicit stride, plain numbers beside it, a free
 function returning `Result<Vec<u8>, _>`, and a refusal enum whose every variant
 is a caller mis-describing its own buffer rather than damage in something read.
@@ -414,8 +359,8 @@ that wants one should have to ask.
 
 `jbig2_generic_encode` takes a `Jbig2GenericSource` and writes **T.88 6.2.5's
 arithmetically coded generic region**: all four templates of Figures 8 to 11 at
-any AT positions 7.4.6.3 can express, 6.2.5.7's typical prediction, over an
-`MqEncoder` that stopped being `#[cfg(test)]` to carry it.
+any AT positions 7.4.6.3 can express, 6.2.5.7's typical prediction, over the
+public `MqEncoder`.
 `jbig2_generic_region_segment` wraps that in 7.4.1's region information field
 and 7.4.6.2's flags, which is one segment's *data* and not a JBIG2 file: no
 page information segment, no file header, no D.3 embedded-stream assembly.
@@ -429,9 +374,9 @@ wrong.
 through this crate's own decoder proves the two halves of one misunderstanding
 agree, so it is never the claim:
 
-- **ITU-T T.4 Tables 2, 3a, 3b and 4** — fetched 15 September 2026, read twice
-  (once out of the text layer, once off the rendered pages at 170 dpi), and all
-  195 run-length entries asserted against that transcription. No fixture in the
+- **ITU-T T.4 Tables 2, 3a, 3b and 4** — read twice (once out of the text
+  layer, once off the rendered pages at 170 dpi), and all 195 run-length
+  entries asserted against that transcription. No fixture in the
   tree has a run longer than 63, so this is the only guard on a make-up code.
 - **ITU-T T.88 Annex H.1** publishes a 54 × 44 bitmap *and* the bytes its own
   encoder produced for it twice over: segment 4 is 26 bytes of MMR and segment
@@ -442,10 +387,10 @@ agree, so it is never the claim:
 
 One limit is recorded rather than glossed: **no published bitstream can pin the
 context numbering.** A context index is a label into an array whose slots all
-start identical, so any bijection of the numbering is invisible to a coder —
-measured, by injecting two such permutations and watching Annex H.1 still match
-byte for byte. T.88's Figures 8 to 11, transcribed pixel by pixel, are what pin
-it, and they pin all four templates rather than the one the annex uses.
+start identical, so any bijection of the numbering is invisible to a coder.
+T.88's Figures 8 to 11, transcribed pixel by pixel, are what pin it
+(`template_context_bits_match_the_figures`), and they pin all four templates
+rather than the one the annex uses.
 
 **One caller outside the tests, and only when asked**: the facade's save
 door recodes image XObjects through G4 and a JBIG2 generic region (and
@@ -454,23 +399,21 @@ embedded stream this crate leaves to its caller ([writing](writing.md)). The
 cos writer's contract — it never re-encodes image bytes — is unchanged
 ([creation](creation.md), [ROADMAP](../ROADMAP.md)).
 
-**And a baseline JPEG encoder joined them on 16 September 2026**, which closes
-the roadmap's image-encoder row with one gap named rather than papered over.
-`jpeg_encode` takes a `JpegSource` — the same borrowed raster, explicit stride
+**And a baseline JPEG encoder.** `jpeg_encode` takes a `JpegSource` — the same borrowed raster, explicit stride
 and plain numbers as the other three — and writes **ITU-T T.81's baseline
 process and only that**: sequential DCT, Huffman coding, 8-bit precision, one
 SOF0 frame, one scan, `Ss = 0`, `Se = 63`, `Ah = Al = 0`, SOI to EOI with no
 abbreviated form. Everything else T.81 defines is excluded rather than
 half-built, each named in the module header with its reason: progressive and
 extended sequential, arithmetic (Annex D's QM coder — which the decoder beside
-it **no longer** refuses, and writing one would need an encoder-side model this
-does not have), lossless, hierarchical and differential, 12-bit precision,
+it reads, and writing one would need an encoder-side model this does not have),
+lossless, hierarchical and differential, 12-bit precision,
 four-component CMYK and YCCK — whose meaning comes from Adobe's APP14 and not
 from T.81 or T.871, so writing one would be inventing a convention — and K.2's
 procedure for optimising a Huffman table from an image's own statistics.
 
-Three things had to be settled, and each is settled against a published clause
-rather than against what other encoders do:
+Three things are settled, each against a published clause rather than against
+what other encoders do:
 
 - **Colour.** T.81 A.1 specifies no colour space at all; it codes numbered
   components. The published outside is **ITU-T T.871 clause 7**, the same
@@ -505,8 +448,8 @@ costs the same as replication and is a different picture from the one the
 standard recommends, for no gain.
 
 **What adjudicates it, and — said plainly — what does not.** `T-REC-T.81` (the
-W3C's copy of CCITT Rec. T.81 (1992), ISO/IEC 10918-1 : 1993) was fetched and
-read **twice**, once out of the text layer and once off `tpdf render`'s pages at
+W3C's copy of CCITT Rec. T.81 (1992), ISO/IEC 10918-1 : 1993) is read
+**twice**, once out of the text layer and once off `tpdf render`'s pages at
 200 dpi, because T.81's tables are typeset with column rules that the text layer
 emits as a literal `1`: Table K.1's first row arrives as `16111016124140151161`
 and is only resolvable into `16 11 10 16 24 40 51 61` against the picture. The
@@ -522,23 +465,14 @@ mid-grey block is `DIFF = 0` then EOB, which K.3 category 0 (`00`) and K.5 0/0
 **But no published DCT vector set adjudicates the coefficients.** ITU-T T.83
 (ISO/IEC 10918-2) is the compliance data published for exactly this, and its own
 clause 4.4 says the data ships *on three diskettes* accompanying the document
-rather than inside it. The ITU's copy returns HTTP 500 and the Recommendation's own
-page says it "is only available through payment"; ISO's returns HTTP 403; the
-one reachable copy is the standards-preview extract, which carries the numbered
-pages 1 to 11 and stops mid-sentence in clause 5.2.1 — and whose own contents
-list puts clause 6's encoder compliance tests on p. 19, Annex B's compliance
-quantisation tables on p. 28 and Annex C's compressed test data on p. 30, every
-one of them past where it stops. The Internet Archive holds nothing. So the
-forward transform is held to **A.3.3's equation recomputed in `f64` in the
+rather than inside it, and the Recommendation is only available through
+payment. So the forward transform is held to **A.3.3's equation recomputed in `f64` in the
 test** — the standard's formula, not the standard's numbers — and that is what
 the test's own doc comment says. Nor does "held to this crate's decoder" help:
 that decoder is adjudicated by nothing third-party either — every fixture in
 `jpeg.rs` is built by that module's own bit writer, and `jpeg_census.rs` counts
 frame types without comparing a pixel — so the round-trip tests here say "round
 trip" and claim nothing else.
-
-**Nothing in this repository calls `jpeg_encode` outside the tests**, on the
-same contract as the two bilevel encoders.
 
 **TIFF** (TIFF 6.0) is the second container decoder, and the argument for it
 being here rather than in a reader is arithmetic: of the seven codings a TIFF
@@ -547,7 +481,7 @@ strip can be in, **six were already written for a `/Filter` name**. Compression
 5 is `lzw.rs`, 7 is `jpeg.rs`, 8 and 32946 are `inflate.rs`, and `Predictor` 2
 is `predictors.rs`'s `/Predictor 2` — Table 10 calls it "TIFF horizontal
 differencing" because that is where PDF took it from. Only compression 32773,
-PackBits (§9), is new, and it is forty lines. What the module adds beyond the
+PackBits (§9), is TIFF's own (`packbits.rs`). What the module adds beyond the
 codecs is the part that is actually TIFF: both byte orders, the image file
 directory with a cycle guard on the `NextIFD` chain, strips and tiles
 (including edge tiles stored full size and padded), `PlanarConfiguration` 2,
@@ -555,8 +489,8 @@ directory with a cycle guard on the `NextIFD` chain, strips and tiles
 `ColorMap` transposed out of p.23's three consecutive arrays into the RGB
 triples every other palette in this engine is.
 
-**The archive row widened it on 26 September 2026**, and each addition is
-its own decision in `tiff.rs`'s module note. `PhotometricInterpretation` 5 with
+**Beyond that baseline**, each addition is its own decision in `tiff.rs`'s
+module note. `PhotometricInterpretation` 5 with
 `InkSet` 1 is read as `TiffColour::Cmyk` — ink amounts with zero as none, which
 is what `/DeviceCMYK` means by a component, so nothing is converted; an Adobe
 inverted CMYK JPEG strip is un-inverted to match. **BigTIFF** is read by the
@@ -573,7 +507,7 @@ range of the data type", so a signed integer is mapped linearly from its type's
 range — an offset by half of it — and a float is read as the intensity itself
 on [0, 1], the range ISO 32000-2 8.6.4 gives a device colour component, and
 clamped; explicit `SMinSampleValue`/`SMaxSampleValue` override either.
-**`PhotometricInterpretation` 8, CIE `L*a*b*`** (§23, 4 October 2026) is read
+**`PhotometricInterpretation` 8, CIE `L*a*b*`** (§23) is read
 at 8 and 16 bits as `TiffColour::Lab` (and `LabAlpha`): `L*` as the file holds
 it and `a*`, `b*` — two's complement in the file — with the top bit flipped,
 which is offset binary and exact. The embed door always decodes it and writes
@@ -591,7 +525,7 @@ to tifffile's files from authored pixels and `cbz_images.rs` holds the page to
 8.6.5.4's arithmetic.
 Samples wider than eight bits leave at sixteen, Table 89's widest. `Predictor`
 3 is Photoshop TIFF Technical Note 3's byte-plane predictor and is undone into
-big-endian samples whatever the file's own order; `Predictor` 2 now reaches 32
+big-endian samples whatever the file's own order; `Predictor` 2 reaches 32
 bits as well. Output is
 [`PngImage`]'s shape deliberately — grey, grey+alpha, RGB or RGBA at 8 or 16
 bits — so a consumer that splits an alpha channel into an `/SMask` learns one
@@ -647,7 +581,7 @@ data (anything from 2 to 256 roots), packs codes least significant bit first
 into 255-byte sub-blocks, and grows the width a code later than `/LZWDecode`
 does. `tiff.rs`'s old-style transcoder repacks LSB-first codes but assumes 256
 roots, so it would mis-size every code of a GIF whose table is not full; the
-dictionary in `gif.rs` is thirty lines and exists once. `gif_decode` returns
+dictionary in `gif.rs` exists once. `gif_decode` returns
 the **first image** — a page is one picture, and the first is what every
 viewer shows before a timer runs — with `Warning::GifFramesIgnored` when there
 are more; §20.c's four interlace passes are put back in row order; the canvas
@@ -753,8 +687,8 @@ the same pixels, never indexed).
 Every one of those six takes plain numbers and a borrowed byte slice and
 returns bytes, which is all ruling 8 asks of a leaf. The parameter names
 `columns`, `rows`, `black_is_1` and `end_of_block` are PDF's, and deliberately:
-`CcittParams` has been public with those names since the decoder landed, and one
-name per concept in a crate beats two.
+`CcittParams` carries those names, and one name per concept in a crate beats
+two.
 
 `png_encode` and `png_decode` are the two filter entry points with a visible
 counterpart on the facade, and the shape is a projection rather than a
@@ -797,29 +731,29 @@ make both enums wrong.
 
 | What | Typed variant | Why (one line) | See |
 | --- | --- | --- | --- |
-| JBIG2 reference that does not resolve: a retained bitmap-coding context (7.4.2) no referred-to segment left behind, a retained context of the wrong shape for the template consuming it, or a selector naming a custom table the segment did not refer to | `Warning::Jbig2VariantSkipped` | **Every one of these is now a file contradicting itself rather than a lineage nobody has started.** SDHUFF, SBHUFF, SDREFAGG, SBREFINE, segment types 40/42/43, `TRANSPOSED`, clause 7.4.13's custom code tables and 7.4.2's retained contexts have all left this row. **The whole symbol lineage decodes** — arithmetic and Huffman, with and without refinement, in either combination, either placement orientation, standard tables or the file's own, adaptive state carried across dictionaries or started fresh, and a non-zero refinement delta through **B.14 and B.15** on both the text region's road and the dictionary's | T.88 7.4.2, 7.4.3.1.6 |
+| JBIG2 reference that does not resolve: a retained bitmap-coding context (7.4.2) no referred-to segment left behind, a retained context of the wrong shape for the template consuming it, or a selector naming a custom table the segment did not refer to | `Warning::Jbig2VariantSkipped` | Each is a file contradicting itself rather than a lineage nobody has started. **The whole symbol lineage decodes** — arithmetic and Huffman, with and without refinement, in either combination, either placement orientation, standard tables or the file's own, adaptive state carried across dictionaries or started fresh, and a non-zero refinement delta through **B.14 and B.15** on both the text region's road and the dictionary's | T.88 7.4.2, 7.4.3.1.6 |
 | JBIG2 text region whose referred-to dictionary is absent or refused | `Warning::Jbig2VariantSkipped` | 7.4.3 numbers symbols across every referred-to dictionary, so drawing it renumbered says something else — refused whole instead | T.88 7.4.3 |
 | JBIG2 dictionary past its symbol or instance budget | `Warning::Jbig2SymbolLimitHit` | `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` are attacker-controlled 32-bit counts; capped before allocation (ruling 1) | [rulings](../rulings.md) |
-| JBIG2 symbol more than four times the page it is composited onto, in width or in height | `Warning::Jbig2SymbolLimitHit` | The three caps above bound counts and totals, and none of them bounds **one** symbol: 105 bytes spent the whole pixel budget on a page of one pixel and timed a fuzz session out. A symbol larger than its page is drawable only by clipping, and `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` refuses one at the symbol rather than after the budget. Charged per dimension, because a symbol one row tall and a page's worth of pixels wide has the page's area and none of its shape. T.88 permits the combination, so the figure is measured rather than taken from the standard: **88 736 corpus symbols in 243 dictionaries, and not one wider or taller than its page** | [verification](../verification.md), [rulings](../rulings.md) |
+| JBIG2 symbol more than four times the page it is composited onto, in width or in height | `Warning::Jbig2SymbolLimitHit` | The three caps above bound counts and totals, and none of them bounds **one** symbol. A symbol larger than its page is drawable only by clipping, and `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE` refuses one at the symbol rather than after the budget. Charged per dimension, because a symbol one row tall and a page's worth of pixels wide has the page's area and none of its shape. T.88 permits the combination, so the figure is set against what `jbig2_census.rs` measures rather than taken from the standard | [verification](../verification.md), [rulings](../rulings.md) |
 | JBIG2 region or page above the output ceiling | `Warning::Jbig2RegionTooLarge` | Width and height are attacker-controlled 32-bit values; refused before allocation (ruling 1) | [rulings](../rulings.md) |
-| JBIG2 decode past sixteen times the pixels its ceiling holds — the output ceiling, or the smaller `Jbig2Params::work_ceiling` its caller names | `Warning::Jbig2BudgetSpent` (`Jbig2Refusal::WorkCap`), its own since October 2026: it was reported as `Jbig2RegionTooLarge`, and nothing it refuses is large | **Every cap above bounds one item, and items multiply**: forty dictionaries each inside `MAX_JBIG2_SYMBOL_PIXELS`, forty regions each inside the ceiling, a symbol placed four million times, a halftone grid stamping a pattern in every cell. 257 bytes on a page of 37 by 56 decided 38 730 symbols — 51 532 206 pixels — out of the 1-bits an arithmetic coder feeds itself past a marker, inside every per-item bound, and timed the fuzz target out. `MAX_JBIG2_WORK_MULTIPLE` is the one bound on the decode: arithmetic decisions, regions made, placements composited and bitmaps copied, counted rather than estimated, against the caller's own ceiling. The decode stops at the segment that runs it out and returns the page it had. **The render path measures it against the image, not against 128 MiB**: the engine's output ceiling is one figure for every stream, and sixteen times it was 17 179 869 184 units, which let 2 078 bytes of spun dictionaries decode for ten seconds unrefused. The engine now names a work ceiling of the image's own `/Width` x `/Height` plus 8 388 608 pixels, twice what one shared `/JBIG2Globals` dictionary at `MAX_JBIG2_SYMBOL_PIXELS` costs in units, so a dictionary that cap admits decodes on any image that names it. Those 2 078 bytes now stop in 1.3 s. No committed fixture, fuzz seed or Annex H stream decodes differently under it: Annex H's whole file spends 5 962 units, and the hungriest seed, the spun dictionary itself, 51 685 820 of the 134 250 880 its 37 by 56 image is given | [verification](../verification.md), [rulings](../rulings.md) |
-| JPX markers SOP and EPH in a header (T.800 A.8) | `Warning::JpxMarkerUnsupported` | **No Table A.2 marker is refused as a capability any more, and these two are refused for where they are rather than for what they are.** A.8 puts both inside the bit stream and tier-2 reads them there; a header is the one place neither has a meaning. **Five markers have left this row, each for its own reason**: CRG, because A.9.1 says it "has no effect on decoding the codestream", so it is parsed, carried and not applied; RGN, because Annex H was implemented; PPM and PPT, because A.7.4 and A.7.5 were; and POC last, on 21 September 2026, because A.6.6's progressions are B.12.2's progression order volumes and tier-2 sequences the packets from them | T.800 A.8.1, A.8.2 |
-| JPX POC field values: a `Ppoc` Table A.16 does not define, a bound outside Table A.32, an `Lpoc` that is not equation (A-6)'s, two POC segments in one header, a tile-part POC with none in the tile's first tile-part header | `Warning::JpxFeatureUnsupported`, `Warning::JpxStructureInvalid` | What is left of POC after the marker was implemented, and the same shape RGN's refusal took: a *value inside* the segment rather than the segment. A volume whose bounds run backwards is not a volume, and clamping one into shape would decode a packet sequence the codestream never described — the same failure as skipping the marker, reached from the other side | T.800 A.6.6, Table A.32, B.12.3 |
-| JPX ROI style: an `Srgn` T.800 Table A.25 reserves | `Warning::JpxFeatureUnsupported` | Table A.25 defines one ROI style — 0, "Implicit ROI (maximum shift)" — and reserves the rest. A reserved style is some other realignment of the coefficients, so running H.1's Maxshift arithmetic over it would put the background at the wrong magnitude and draw a plausible picture. Refused by name rather than stepped over, which is the SOF3/SOF5/SOF6/SOF7 lesson on this page | T.800 A.6.3, Table A.25 |
-| JPX markers Table A.2 does not define (all of ISO/IEC 15444-2) | `Warning::JpxMarkerUnknown` | Part 2 was a non-goal until 9 October 2026 and is roadmap row FI-13 now; an unknown marker cannot be measured past | [ROADMAP](../ROADMAP.md) |
-| JPX coding features: a code-block style **bit** T.800 Table A.19 does not define, an unmappable `colr`, unequal channel depths | `Warning::JpxFeatureUnsupported` | A wrong JPEG 2000 decode is a plausible photograph; refusal beats a blur nobody can distinguish from a bad scan. **Table A.19 has left this row as a capability**: all six code-block styles decode as of 23 September 2026, and what fires for A.19 now is bit 6 or bit 7, which the table reserves — a *value* the standard does not define rather than a capability this build lacks, the same shape as the `Srgn` row above | [ROADMAP](../ROADMAP.md) |
+| JBIG2 decode past sixteen times the pixels its ceiling holds — the output ceiling, or the smaller `Jbig2Params::work_ceiling` its caller names | `Warning::Jbig2BudgetSpent` (`Jbig2Refusal::WorkCap`), its own because nothing it refuses is large | **Every cap above bounds one item, and items multiply**: forty dictionaries each inside `MAX_JBIG2_SYMBOL_PIXELS`, forty regions each inside the ceiling, a symbol placed four million times, a halftone grid stamping a pattern in every cell, or the 1-bits an arithmetic coder feeds itself past a marker. `MAX_JBIG2_WORK_MULTIPLE` is the one bound on the decode: arithmetic decisions, regions made, placements composited and bitmaps copied, counted rather than estimated, against the caller's own ceiling. The decode stops at the segment that runs it out and returns the page it had. **The render path measures it against the image, not against the output ceiling**, which is one figure for every stream: it names a work ceiling of the image's own `/Width` x `/Height` plus 8 388 608 pixels, twice what one shared `/JBIG2Globals` dictionary at `MAX_JBIG2_SYMBOL_PIXELS` costs in units, so a dictionary that cap admits decodes on any image that names it | [verification](../verification.md), [rulings](../rulings.md) |
+| JPX markers SOP and EPH in a header (T.800 A.8) | `Warning::JpxMarkerUnsupported` | **No Table A.2 marker is refused as a capability, and these two are refused for where they are rather than for what they are.** A.8 puts both inside the bit stream and tier-2 reads them there; a header is the one place neither has a meaning. CRG is parsed, carried and not applied, because A.9.1 says it "has no effect on decoding the codestream" | T.800 A.8.1, A.8.2 |
+| JPX POC field values: a `Ppoc` Table A.16 does not define, a bound outside Table A.32, an `Lpoc` that is not equation (A-6)'s, two POC segments in one header, a tile-part POC with none in the tile's first tile-part header | `Warning::JpxFeatureUnsupported`, `Warning::JpxStructureInvalid` | A *value inside* the segment rather than the segment, the same shape as the ROI style row below. A volume whose bounds run backwards is not a volume, and clamping one into shape would decode a packet sequence the codestream never described — the same failure as skipping the marker, reached from the other side | T.800 A.6.6, Table A.32, B.12.3 |
+| JPX ROI style: an `Srgn` T.800 Table A.25 reserves | `Warning::JpxFeatureUnsupported` | Table A.25 defines one ROI style — 0, "Implicit ROI (maximum shift)" — and reserves the rest. A reserved style is some other realignment of the coefficients, so running H.1's Maxshift arithmetic over it would put the background at the wrong magnitude and draw a plausible picture. Refused by name rather than stepped over | T.800 A.6.3, Table A.25 |
+| JPX markers Table A.2 does not define (all of ISO/IEC 15444-2) | `Warning::JpxMarkerUnknown` | Part 2 is roadmap row FI-13; an unknown marker cannot be measured past | [ROADMAP](../ROADMAP.md) |
+| JPX coding features: a code-block style **bit** T.800 Table A.19 does not define, an unmappable `colr`, unequal channel depths | `Warning::JpxFeatureUnsupported` | A wrong JPEG 2000 decode is a plausible photograph; refusal beats a blur nobody can distinguish from a bad scan. All six of Table A.19's code-block styles decode, so what fires for A.19 is bit 6 or bit 7, which the table reserves — a *value* the standard does not define rather than a capability this build lacks, the same shape as the `Srgn` row above | [ROADMAP](../ROADMAP.md) |
 | JPX component precision above 16 bits | `Warning::JpxPrecisionUnsupported` | **A limit, not a gap.** T.800 Table A.11 allows 38; E.1 clamps a coefficient to `2^(R_b + 2)` sample units and a coefficient plane is a Q12 `i32`, so 17 bits is where the plane format runs out — and ISO 32000-1 Table 89 has no `/BitsPerComponent` above 16 to hand a widened sample to. Argued in ROADMAP's Named non-goals | [ROADMAP](../ROADMAP.md) Named non-goals |
 | JPX tile-parts out of order, or a codestream with no complete tile | `Warning::JpxStructureInvalid` | Out of order is a codestream contradicting itself, and reassembling in stream order would produce a picture wrong in a way that looks like compression. A tile *short* of its declared parts is a different failure — a file that stopped — so it is left blank and reported as `JpxTruncated` wherever any tile survives, which is `JxrWarning::TileDroppedAsZero`'s bargain; only a codestream with no whole tile at all is refused | [ROADMAP](../ROADMAP.md) |
 | JPX work/sample/code-block budgets spent | `Warning::JpxBudgetSpent` | The budgets are totals, never refunded — a per-item cap is not a work cap once the structure branches (ruling 1) | [rulings](../rulings.md) |
-| JPEG lossless frames: SOF3, SOF7, SOF11, SOF15 | `JpegError::Lossless` | Annex H's predictive coder shares nothing with the DCT path — no quantisation, no blocks, no transform. Both entropy coders are on this row because the predictor is what is missing either way: `qm.rs` decodes SOF11's and SOF15's decisions perfectly well with nothing to hand them to. Zero in the corpus | [ROADMAP](../ROADMAP.md) |
-| JPEG differential frames: SOF5, SOF6, SOF13, SOF14 | `JpegError::Differential` | Annex J's hierarchical progression, where a frame codes the difference from an upsampled earlier one. Same shape as the row above: the entropy coder is not the gap. Zero in the corpus | [ROADMAP](../ROADMAP.md) |
+| JPEG lossless frames: SOF3, SOF7, SOF11, SOF15 | `JpegError::Lossless` | Annex H's predictive coder shares nothing with the DCT path — no quantisation, no blocks, no transform. Both entropy coders are on this row because the predictor is what is missing either way: `qm.rs` decodes SOF11's and SOF15's decisions perfectly well with nothing to hand them to | [ROADMAP](../ROADMAP.md) |
+| JPEG differential frames: SOF5, SOF6, SOF13, SOF14 | `JpegError::Differential` | Annex J's hierarchical progression, where a frame codes the difference from an upsampled earlier one. Same shape as the row above: the entropy coder is not the gap | [ROADMAP](../ROADMAP.md) |
 | JPEG precision other than 8 or 12 bits | `JpegError::UnsupportedPrecision` | B.2.2 allows 8 in a baseline frame and 8 or 12 elsewhere; anything else is a header this build will not guess at | [ROADMAP](../ROADMAP.md) |
 | TIFF `PhotometricInterpretation` 4 (transparency mask) — **permanent** | `TiffError::UnsupportedPhotometric` | p.37: the image "is used to define an irregularly shaped region of another image in the same TIFF file". It is not a picture; drawn alone it is a black-and-white stencil of one. The comic path skips such a directory rather than paging it | — |
 | TIFF `PhotometricInterpretation` 32803 (colour filter array) — **permanent** | `TiffError::UnsupportedPhotometric` | TIFF/EP's raw sensor mosaic. Turning it into a picture is demosaicing, which is an algorithm chosen, not a format read, and no data adjudicates one choice over another | — |
-| TIFF `PhotometricInterpretation` 6 outside compression 7 | `TiffError::UnsupportedPhotometric` | YCbCr is read only where a JPEG has already undone it: §21's subsampling and `ReferenceBlackWhite` are not decoded here. 8, CIELab, left this row on 4 October 2026 | — |
+| TIFF `PhotometricInterpretation` 6 outside compression 7 | `TiffError::UnsupportedPhotometric` | YCbCr is read only where a JPEG has already undone it: §21's subsampling and `ReferenceBlackWhite` are not decoded here | — |
 | TIFF CIELab at a depth other than 8 or 16, under a signed or float `SampleFormat`, or under a JPEG or JPEG 2000 coding | `TiffError::UnsupportedBitDepth`, `UnsupportedSampleFormat`, `UnsupportedCompression` | §23 defines 8 and 16 bits, and fixes the number lines itself — `L*` unsigned, `a*` and `b*` signed — which one `SampleFormat` cannot say; a coder hands back samples of its own colour model | — |
 | TIFF `PhotometricInterpretation` 5 with `InkSet` other than 1 | `TiffError::UnsupportedInkSet` | §16: separated inks that are not CMYK, which no device space names | — |
-| TIFF `Compression` 6 (old-style JPEG), and the rest | `TiffError::UnsupportedCompression` | Technical Note 2 replaced compression 6 with 7 because TIFF 6.0 §22's tag-by-tag description of a JPEG could not be implemented consistently, and a file that carries only those tags leaves its tables and its stream boundaries to a reader's guess. **Not every such file does**: one whose `JPEGInterchangeFormat` (tag 513) points at a complete interchange-format stream needs no guess, and the existing JPEG decoder could read it as it stands. So it is owed on the ROADMAP rather than refused for good, with no count recorded (ruling 3). *Corrected 2 October 2026, on review*: this row called the refusal permanent and every reader's handling a guess, which overstated both. The rest are named by code, so a refusal says which | [ROADMAP](../ROADMAP.md) |
+| TIFF `Compression` 6 (old-style JPEG), and the rest | `TiffError::UnsupportedCompression` | Technical Note 2 replaced compression 6 with 7 because TIFF 6.0 §22's tag-by-tag description of a JPEG could not be implemented consistently, and a file that carries only those tags leaves its tables and its stream boundaries to a reader's guess. **Not every such file does**: one whose `JPEGInterchangeFormat` (tag 513) points at a complete interchange-format stream needs no guess, and the existing JPEG decoder could read it as it stands. So it is owed on the ROADMAP rather than refused for good (ruling 3). The rest are named by code, so a refusal says which | [ROADMAP](../ROADMAP.md) |
 | TIFF `SampleFormat` outside 1–4, two formats in one image, or signed/float on a palette or a JPEG, JPEG 2000 or fax coding | `TiffError::UnsupportedSampleFormat` | Nothing in the sample path carries two number lines at once, and a coder's output is unsigned whatever the tag says | — |
 | TIFF `Predictor` 3 on non-float samples or 2 on float ones, `PlanarConfiguration` past 2, a `BitsPerSample` its `SampleFormat` cannot carry, two depths in one image | `TiffError::UnsupportedPredictor`, `UnsupportedPlanarConfiguration`, `UnsupportedBitDepth`, `UnequalBitDepths` | Technical Note 3's predictor is defined for floating point only; nothing in the sample path carries two depths at once | — |
 | A magic-43 header whose offset size is not 8 | `TiffError::BigTiff` | BigTIFF is read; a header claiming it with any other offset width is not one | — |
@@ -841,16 +775,16 @@ make both enums wrong.
 | JPEG XR CMYK, CMYKDIRECT, NCOMPONENT and RGBE output formats | `JxrRefusal::UnsupportedColourFormat` | A colour pipeline with no consumer in this engine; a CMYK image read as RGB is a different picture, not a degraded one | [design](../design/jpeg-xr.md) |
 | A Table A.6 GUID this build has no row for | `JxrRefusal::UnknownPixelFormat` | The GUID is what names the channel order, so an unknown one cannot be guessed at | [design](../design/jpeg-xr.md) |
 | JPEG XR packed output depths BD1WHITE1, BD1BLACK1, BD5, BD565, BD10 | `JxrRefusal::PackedOutputBitdepth` | 9.10.8.3 to 9.10.8.6's sub-byte and cross-byte packings | [design](../design/jpeg-xr.md) |
-| JPEG XR interleaved alpha image plane (8.3.18) | `JxrRefusal::InterleavedAlphaPlane` | A.3.2's *separate* plane is what the encoder on this machine emits and what decodes here; the interleaved form has no fixture, and building it against nothing is how a plausible wrong decode gets shipped | [design](../design/jpeg-xr.md) |
+| JPEG XR interleaved alpha image plane (8.3.18) | `JxrRefusal::InterleavedAlphaPlane` | A.3.2's *separate* plane is what the platform encoder emits and what decodes here; the interleaved form has no fixture, and building it against nothing is how a plausible wrong decode gets shipped | [design](../design/jpeg-xr.md) |
 | JPEG XR YUV420, YUV422 and YUVK internal colour formats | `JxrRefusal::SubsampledInternalFormat` | 9.10.3's chroma upsampling and a macroblock geometry that is not the 4:4:4 one this build implements — three whole branches of clauses 8.7, 9.5, 9.6 and 9.8, absent rather than written and untested | [design](../design/jpeg-xr.md) |
 | JPEG XR windowing with a non-zero top or left margin (8.3.13) | `JxrRefusal::WindowedOrigin` | It shifts the whole sample grid off the macroblock origin; the bottom and right margins are ordinary padding and are always handled | [design](../design/jpeg-xr.md) |
 | JPEG XR past `MAX_JXR_SAMPLES`, `MAX_JXR_TILES`, `MAX_JXR_COMPONENTS`, `MAX_JXR_MACROBLOCKS` or the caller's ceiling | `JxrError::TooManySamples`, `TooManyTiles`, `TooManyComponents`, `TooManyMacroblocks`, `ExceedsOutputLimit` | 8.3.23 permits 4096 tile columns, 8.4.12 permits 4111 components and 8.3.21's dimensions are 32-bit, and the standard bounds each factor without bounding the product; the budgets are **totals**, checked before any buffer exists (ruling 1) | [rulings](../rulings.md) |
 
-Every `JxrRefusal` variant is reached by a test in
-`src/jxr/tests/refusals.rs`, for the reason that file's header gives: a
+Every `JxrRefusal` variant is reached by a test in `src/jxr/tests/`, for the
+reason `refusals.rs`'s header gives: a
 published refusal list nothing reaches is a claim rather than a check, and a
-refusal whose condition a later milestone made unreachable should fail a test
-rather than quietly become decoration.
+refusal whose condition becomes unreachable should fail a test rather than
+quietly become decoration.
 
 **JPEG XR damage is a warning, not a refusal.** A tile that will not parse is
 dropped to zero and reported as `JxrWarning::TileDroppedAsZero`, which is
@@ -882,7 +816,7 @@ wants the reason to survive it.
 ## Verified
 
 - `crates/tinker-pdf-filters/tests/vectors.rs` — byte-vector fixtures for
-  every wave-1 decoder, each with recorded provenance: genuine zlib output,
+  the byte filters and predictors, each with recorded provenance: genuine zlib output,
   a libtiff-produced LZW strip, the `-----A---B` example of 7.4.4.2 verbatim.
 - `crates/tinker-pdf-filters/tests/props.rs` — proptest: no panic on
   arbitrary bytes, and no decoder ever exceeds `Limits::max_output`.
@@ -906,13 +840,11 @@ wants the reason to survive it.
 - `crates/tinker-pdf-filters/tests/jpx_reference.rs` — the JPX decoder
   against committed reference decodes: codestreams made with `opj_compress`
   from this repository's own images, lossy references decoded once by
-  `opj_decompress` (OpenJPEG 2.5.0, August 2026), byte-identity pinning
-  container, tier-2, tier-1 context numbering, dequantisation, the 5/3 and
-  the DC level shift in one comparison. **It invokes nothing** — it was named
-  and described as an oracle and never was one, and the CI job that grepped
-  it for a banner it does not print could not pass. Corrected with ruling 13,
-  which keeps the committed decodes as a dated measurement and rules out ever
-  regenerating them as a check.
+  `opj_decompress` (OpenJPEG 2.5.0), byte-identity pinning container,
+  tier-2, tier-1 context numbering, dequantisation, the 5/3 and the DC level
+  shift in one comparison. **It invokes nothing**: ruling 13 keeps the
+  committed decodes as a measurement and rules out ever regenerating them as
+  a check.
 - `crates/tinker-pdf-filters/tests/jpx_annex_j.rs` and
   `jpx_annex_h.rs` — **the two JPX checks the standard itself
   adjudicates.** T.800 Annex J.10 publishes a complete 100-byte codestream,
@@ -929,9 +861,8 @@ wants the reason to survive it.
   the standard adjudicates — it must reproduce J.10.5 from J.10.4 — before it
   is used to predict anything.
 - `crates/tinker-pdf-filters/tests/png_suite.rs` — the PNG decoder **and the
-  encoder** against PngSuite, 176 files in the 2017jul19 release, re-fetched
-  and run in September 2026: all fifteen legal
-  colour-type/depth pairs, and fourteen broken-by-design files that must each
+  encoder** against PngSuite, 176 files in the 2017jul19 release: all fifteen
+  legal colour-type/depth pairs, and fourteen broken-by-design files that must each
   be refused. Runs when `TINKER_PNGSUITE` points at the set, and prints
   `RAN`/`SKIPPED` so a missing corpus never reads as a pass.
 
@@ -944,12 +875,10 @@ wants the reason to survive it.
   without calling `png_decode` at all. Leg two exists because `png/encode.rs`
   filters with the same `predictors.rs` Paeth predictor `png.rs` unfilters
   with, so a defect in it moves both directions together and leg one stays
-  green; the injection matrix measures exactly that, and reversing the
-  tie-break is the case — **all 162 round trips pass**, and what catches it is
-  leg two plus the two decoder tests that compare two third-party files against
-  each other rather than against our own output (the Adam7 twins and the
-  published equivalence classes). Three of 2 014, not one of them a round trip.
-  The container is asserted against clause 5 rather than against the
+  green: what catches one is leg two, and the decoder tests that compare two
+  third-party files against each other rather than against our own output
+  (the Adam7 twins and the published equivalence classes). The container is
+  asserted against clause 5 rather than against the
   reader: the signature, IHDR first with 11.2.2's thirteen bytes, IEND last and
   empty, every chunk's CRC recomputed over its type and its data, and the IDAT
   payload equal to `zlib_compress` of the filtered stream.
@@ -985,8 +914,8 @@ wants the reason to survive it.
   transcribed from the specification text. `mutated_fixtures_never_panic` puts
   the same fixtures through seeded xorshift damage aimed at the directory's
   entry array, so ruling 1 is enforced on stable and not only under
-  `cargo-fuzz`. All **seven** of the TIFF warnings are reached by a test that
-  asserts them, for the reason `jpx`'s refusal suite exists: a variant nothing
+  `cargo-fuzz`. Every TIFF warning is reached by a test that asserts it, for
+  the reason `jpx`'s refusal suite exists: a variant nothing
   can reach is a claim rather than a check.
 - `crates/tinker-pdf-filters/tests/image_fixtures.rs` — the BMP decoder held
   to **pictures a third-party encoder was handed**: `tests/images/make-images.py`
@@ -1021,10 +950,9 @@ wants the reason to survive it.
   to show it is there. **Lossy WebP** has no exact generator input to be held to, and
   its answer is still never another decoder's. **VP8 itself is held to the
   WebM project's published test vectors**: `src/webp/vp8/tests.rs` decodes
-  every key frame of `webmproject/vp8-test-vectors` and compares the MD5 of
-  its I420 planes with the one published beside it — **182 key frames from
-  61 files, 0 failed**, run 2 October 2026 against `8afcf057`. The vectors
-  carry no licence, so they are not committed: `tests/vp8-vectors/fetch.sh`
+  every key frame of `webmproject/vp8-test-vectors` at commit `8afcf057` and
+  compares the MD5 of its I420 planes with the one published beside it. The
+  vectors carry no licence, so they are not committed: `tests/vp8-vectors/fetch.sh`
   fetches that commit into `target/` and checks every file against
   `tests/vp8-vectors/SHA256SUMS`, and CI's `vp8-vectors` job runs it, sets
   `TINKER_VP8_VECTORS_REQUIRED=1` (a missing set is then a failure, and so is
@@ -1032,25 +960,18 @@ wants the reason to survive it.
   `vp8-test-vectors: RAN`. RFC 6386 ends at the planes, so the conversion to
   RGB is held beside them to what it claims: BT.601's limited-range matrix,
   worked out in exact integer arithmetic over all 2^24 inputs, which
-  `yuv_to_rgb` meets to within one level (169 223 channels of 50 331 648 miss
-  by one, none by more); the upsampler's 9:3:3:1 weights, to within one; and
+  `yuv_to_rgb` meets to within one level; the upsampler's 9:3:3:1 weights, to within one; and
   which chroma row and column each pixel takes as nearer, by hand on a 4 x 4
   picture. The Pillow and imagecodecs files — quality 10 at method 6, 55 (a
   filter level of exactly 15), 80 and 100, sizes that crop inside a
   macroblock and a chroma sample, alpha unfiltered and horizontally filtered,
   a two-frame animation — are held to **the recipe they were encoded from, at
-  a stated distance**: a mean squared error per file, about a quarter above
-  what this decoder measured. That bound is coarse on purpose and the test
-  says what it catches, measured by injection — a token read in the wrong
-  context, a prediction from the wrong edge, Cb and Cr swapped, chroma from
-  the wrong row — and what it does not: a decoder that skips the loop filter
-  passes it, and fails 116 of the 182 vector frames. The alpha, lossless at
-  `alpha_quality=100`, is the recipe's exactly. *Corrected 2 October 2026, on
-  review*: these files were first held to libwebp 1.6.0's decode of each,
-  committed as a PNG — an outside program's output as the expected answer,
-  which ruling 13 forbids. The PNGs are deleted; that this decoder's picture
-  matched libwebp's on every pixel of all eight that day is recorded in
-  `tests/images/README.md` as a dated measurement that gates nothing.
+  a stated distance**: a mean squared error bound per file. That bound is
+  coarse on purpose and the test says what it catches — a token read in the
+  wrong context, a prediction from the wrong edge, Cb and Cr swapped, chroma
+  from the wrong row — and what it does not: a decoder that skips the loop
+  filter passes it, and the test vectors are what catch that. The alpha,
+  lossless at `alpha_quality=100`, is the recipe's exactly.
   `src/webp/tests.rs`
   builds VP8L streams bit by bit — literals, a back-reference, one before the
   first pixel, subtract-green, an `ANMF` frame at an offset on its canvas, a
@@ -1067,17 +988,14 @@ wants the reason to survive it.
   does *not* reach is visible too; `src/jpx/tests/refusals.rs` reaches every
   entry of the JPX refusal list, so "the refusals are the feature" is checked,
   not claimed.
-- Fuzzing: fourteen of the 51 fuzz targets drive this crate's decoders —
-  `ascii_filters`, `lzw`, `inflate`, `ccitt`, `jpeg`, `jbig2`, `jpx`, `jxr`,
-  `brotli`, `png`, `bmp`, `gif`, `webp`, `tiff` — and `rar` and `sevenz`
-  borrow its CRC-32. The last is the first target that reaches other decoders
-  through one parser — six of them — because a two-byte `Compression` field is
-  what chooses between them; six of its thirteen committed seeds are written
-  by an `#[ignore]`d test in this crate so those seeds and the fixtures cannot
-  drift.
-- Downstream: the `image`, `jbig2` and `jpx` render fingerprints among the
-  15 in `crates/tinker-pdf/tests/determinism.rs` pin decoded pixels
-  bit-for-bit across targets ([determinism](determinism.md)), and the whole
-  workspace stands at 4 903 passed / 0 failed / 59 ignored
-  (Windows x86_64, 20 September 2026). See [verification](../verification.md) for
-  the full harness.
+- Fuzzing: the `ascii_filters`, `lzw`, `inflate`, `ccitt`, `jpeg`, `jbig2`,
+  `jpx`, `jxr`, `brotli`, `png`, `bmp`, `gif`, `webp` and `tiff` targets
+  drive this crate's decoders, and `rar` and `sevenz` borrow its CRC-32.
+  `tiff` reaches other decoders through one parser, because a two-byte
+  `Compression` field is what chooses between them; some of its committed
+  seeds are written by an `#[ignore]`d test in this crate so those seeds and
+  the fixtures cannot drift.
+- Downstream: the `image`, `jbig2` and `jpx` render fingerprints in
+  `crates/tinker-pdf/tests/determinism.rs` pin decoded pixels bit-for-bit
+  across targets ([determinism](determinism.md)). See
+  [verification](../verification.md) for the full harness.
