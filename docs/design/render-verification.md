@@ -1,17 +1,15 @@
 # Render verification without a second engine
 
-When this is done, a page will be checkable against something other than
-this engine's own opinion of it. Today it is not:
-[verification.md](../verification.md) states the limit — 4 879 tests prove
-the engine agrees with itself, the 5 525-file corpus run proves a bitmap
-came back, and nothing proves the bitmap is *right*.
+This design makes a page checkable against something other than this
+engine's own opinion of it. Without it, the test suite proves the engine
+agrees with itself, the corpus run proves a bitmap came back, and nothing
+proves the bitmap is *right* ([verification.md](../verification.md)).
 
-The design that used to sit here closed that by rendering the same page with
-an external engine and diffing the two. Ruling 13 removed that option, and
-this document is what replaces it. It is worth being blunt about the trade:
-a second engine is a genuinely independent opinion, and nothing here is. The
-mechanisms below are ordered by how far each gets from the engine's own
-reasoning, and the last section names what none of them reach.
+Ruling 13 rules out rendering the same page with another engine and diffing
+the two. It is worth being blunt about the trade: a second engine is a
+genuinely independent opinion, and nothing here is. The mechanisms below are
+ordered by how far each gets from the engine's own reasoning, and the last
+section names what none of them reach.
 
 ## Scope
 
@@ -34,7 +32,7 @@ reasoning, and the last section names what none of them reach.
   not a subprocess, and not "only to record the baseline once".
 - **Correctness adjudication of arbitrary content.** No mechanism here can
   say whether an arbitrary real-world page is drawn the way the world draws
-  it. That claim is retired, not transferred, and the gap section says so.
+  it. That claim is not made, and the gap section says so.
 - **Committed full-page goldens over the corpus.** Hundreds of kilobytes of
   binary per page that no reviewer can assess, for pages nobody chose. The
   goldens here are small, few and deliberate.
@@ -69,28 +67,34 @@ What has a closed form:
   code walks the page.
 - **Blend modes.** ISO 32000-1 11.3.5 publishes each separable mode as an
   arithmetic expression on backdrop and source. `tests/blend_modes.rs`
-  already exercises them; this extends it to per-pixel closed-form
-  comparison over a constructed backdrop.
+  exercises them, and the analytic tier compares them per pixel in closed
+  form over a constructed backdrop.
 - **Image sampling.** A two-by-two checker scaled by an integer factor has
   an exactly known result under nearest-neighbour and known bounds under
   interpolation.
 
-Where they live: coverage and fill-rule cases in `tinker-pdf-raster`, beside
-the arithmetic they check; operator-level cases at the facade in
+Where they live: coverage, fill-rule and stroke cases in
+`tinker-pdf-raster`'s `tests/analytic_coverage.rs`, beside the arithmetic
+they check — among them `a_shallow_edge_keeps_the_slope_the_line_states`,
+which answers to the line's own equation rather than to how an edge is
+stored; operator-level cases at the facade in
 `crates/tinker-pdf/tests/render_analytic.rs`, since those need a content
-stream. Each fixture joins the determinism fingerprints, so it is also a
-target-stability case for free.
-
-Each must catch its own injected defect: perturb the coverage rounding, the
-blend expression, the shading parametric, and count which assertions fire. A
-fixture that catches nothing when its defect is injected is not a fixture.
+stream — both shadings compared per pixel over the whole page, the twelve
+separable modes, integer image scaling — each page held to a least-ink floor
+there. The pages are built by one function each in `tests/render_support/`,
+and the axial, radial, image and blend-grid pages are fingerprints in
+`determinism.rs`, the test the wasm and Linux legs run on their own, so the
+document the equation adjudicates is the document the hash covers.
+`blend_grid_page` lays the twelve modes out as one picture, held to the
+clause cell by cell, because the per-mode fixture builds many documents and
+samples one pixel of each, which cannot be enrolled as a fingerprint.
 
 ### 2. Metamorphic probes — breadth, over documents nobody here wrote
 
 Analytic fixtures are exact but narrow: they cover pages built to be
-provable. The corpus is the opposite — 5 525 real files with no known
-answer. What can still be asserted there is a *relation between two renders*
-of the same file, which needs no ground truth at all:
+provable. The corpus is the opposite — real files with no known answer.
+What can still be asserted there is a *relation between two renders* of the
+same file, which needs no ground truth at all:
 
 - **Rotation.** A page with `/Rotate 90` rendered directly must equal the
   `/Rotate 0` render under a trivial pixel transposition. This catches every
@@ -99,21 +103,22 @@ of the same file, which needs no ground truth at all:
 - **Cropping.** A render of a translated `CropBox` must equal the
   corresponding sub-rectangle of the full render. This is ruling 5's
   tile-equality property, generalised from tiles to the page box and applied
-  corpus-wide rather than to fixtures. *Since September 2026 the property it
-  generalises is itself pinned in-tree*, on fixtures and at tile sizes that do
-  not divide the page: `crates/tinker-pdf/tests/render_regions.rs`. The two are
-  worth keeping apart — this one is breadth over documents nobody here wrote
-  and no known answer, that one is a byte-equality assertion with one measured
-  exception ([rulings](../rulings.md)).
-- **Resolution coherence.** A render at 144 dpi, box-filtered down by two,
-  must agree with the direct 72 dpi render within a budget measured and
+  corpus-wide rather than to fixtures. The property it generalises is pinned
+  in-tree, on fixtures and at tile sizes that do not divide the page:
+  `crates/tinker-pdf/tests/render_regions.rs`. The two are worth keeping
+  apart — this one is breadth over documents nobody here wrote and no known
+  answer, that one is a byte-equality assertion with one named exception
+  ([rulings](../rulings.md)).
+- **Resolution coherence.** A render at twice the scale, box-filtered down
+  by two, must agree with the direct render within a budget measured and
   ratcheted rather than guessed. Sampling-grid and rounding bugs move this;
   a wrong colour does not.
 
-These run as new `tpdf probe` modes driven by `xtask corpus-run`, and are
-recorded as new rows in `corpus/ratchet.json` — counts of files where the
-relation held, never rates, compared by `ratchet::holds` exactly as the pass
-rate is.
+These run as `tpdf probe` modes — `meta rotate`, `meta crop` and
+`meta dpi`, each checked in-process on the first page so no image leaves the
+child — driven by `xtask corpus-run`, and are recorded as rows in
+`corpus/ratchet.json`: per-corpus `compared` and `held` counts, never rates,
+compared by `ratchet::holds` exactly as the pass rate is.
 
 **What they cannot catch, stated because it is why they are second and not
 first:** any defect that commutes with the transformation. A colour
@@ -123,10 +128,15 @@ both rotations, and every one of these probes stays green.
 ### 3. Differential in-tree pairs
 
 Two paths, one source, identical pixels required. `tests/inline_images.rs`
-already does this for inline images against image XObjects and is the model.
-The pairs worth having: a Type 3 glyph against the equivalent path, a tiling
-pattern against its unrolled content, a form XObject against the same
-operators inlined, a shading pattern fill against `sh`.
+does this for inline images against image XObjects, and
+`tests/render_differential.rs` for a Type 3 glyph against the same path, a
+tiling pattern against its unrolled cells, a form XObject against its
+inlined operators, and a shading pattern against `sh` in the same region.
+Each asserts the whole bitmap with no budget, and each half carries an ink
+floor, because two blank pages agree perfectly. The tiling pair's step
+differs from its cell and the shading pattern's `/Matrix` is not the
+identity, since either would collapse the two readings the pair exists to
+part.
 
 Weakest of the four, and honestly so: both sides cross the same rasterizer,
 so only path-specific bugs are reachable. It is cheap, and it is the only
@@ -136,9 +146,11 @@ tier that covers the *plumbing* between two features.
 
 Small committed rasters, one per operator family, read once by a named
 person against the clause they implement, with the reviewer, the date and
-the clause recorded in the fixture's header. This is the tier whose value
-depends entirely on the review actually having happened, so the record of
-the review is part of the fixture rather than part of a commit message.
+the clause recorded in the fixture's header
+(`crates/tinker-pdf/tests/render_goldens.rs`, the rasters in
+`crates/tinker-pdf/tests/goldens/`). This is the tier whose value depends
+entirely on the review actually having happened, so the record of the
+review is part of the fixture rather than part of a commit message.
 
 They catch gross misreadings at review time and every regression afterwards.
 They do not catch what the reviewer's reading shares with the implementer's,
@@ -158,37 +170,45 @@ quietly stopped proving something is not.
 
 ## Milestones
 
-| # | Deliverable | Exit criteria (concrete, testable) | Size |
-| --- | --- | --- | --- |
-| 1 | Analytic coverage and fill-rule fixtures in `tinker-pdf-raster` | **Done.** `tests/analytic_coverage.rs`: expected coverage computed from the sampling grid by an in-test function, byte-equal; the injections on the coverage rounding and on the nonzero rule are each caught, and the rounding one is what the first draft missed. **Extended September 2026**, and it took an outside prompt: every slope in the file was a whole number of units per sub-scanline, so the file could not see that `fill` stored a slope as one — flattening every edge shallower than one pixel of `x` per sixteen of `y` to vertical. `a_shallow_edge_keeps_the_slope_the_line_states` is the fixture that can, and it answers to the line's own equation rather than to how an edge is stored, which is why it is adjudication and not agreement. Ruling 5's tile guard is what asked the question; the file's header now separates the half of that change this tier adjudicates from the half it merely agrees with | S |
-| 2 | Analytic operator fixtures at the facade (`tests/render_analytic.rs`): strokes, axial and radial shadings, separable blend modes, integer image scaling | **Done.** Both shadings are compared per pixel over the whole page, the twelve separable modes over nine pairs, and the injections on the blend expression and on the shading parametric are each caught. Strokes live with the coverage fixtures rather than here, since they need no content stream. The two halves that were owed landed **apart**, and deliberately: the least-ink floor is local to `render_analytic.rs`, where the fixtures are, and the four fingerprints are in `determinism.rs`, because that is the only test the wasm and Linux legs run on their own — a fingerprint anywhere else is not evidence about ruling 4. The pages are built by one function each in `tests/render_support/`, so the document the equation adjudicates is the document the hash covers. The twelve modes needed a thirteenth page for that: the per-mode fixture builds a hundred and eight documents and samples one pixel of each, which cannot be enrolled, so `blend_grid_page` lays the same arithmetic out as one picture and is held to the clause cell by cell | M |
-| 3 | Metamorphic probe modes in `tpdf probe` | **Done.** The probe emits `meta rotate`, `meta crop` and `meta dpi`, each checked in-process so no image leaves the child, on the first page | S |
-| 4 | `corpus-run` rows and ratchet entries for the three relations | **Done.** `corpus/ratchet.json` carries per-corpus `compared` and `held` for each relation and the comparator ratchets both; every budget is recorded with the measurement that set it, and `crop` has none because it was exact on all 119 files measured | M |
-| 5 | Differential in-tree pairs | **Done.** `tests/render_differential.rs`: a Type 3 glyph against the same path, a tiling pattern against its unrolled cells, a form XObject against its inlined operators, a shading pattern against `sh` in the same region. Each asserts the whole bitmap with no budget, and each half carries an ink floor, because two blank pages agree perfectly. Two of the four were insensitive to their own defect in the first draft and the injection matrix is what found it — a step equal to its cell, and an identity pattern `/Matrix`, each collapsing the two readings the pair exists to part | S |
-| 6 | Reviewed goldens per operator family | Each golden's header names the reviewer, the date and the clause; a golden missing any of the three fails a test that reads the headers, in the style of `bounds_ledger.rs` | S |
+1. Analytic coverage and fill-rule fixtures in `tinker-pdf-raster`
+   (`tests/analytic_coverage.rs`): expected coverage computed from the
+   sampling grid by an in-test function, byte-equal.
+2. Analytic operator fixtures at the facade (`tests/render_analytic.rs`):
+   axial and radial shadings, separable blend modes, integer image scaling,
+   their pages fingerprinted in `determinism.rs`.
+3. Metamorphic probe modes in `tpdf probe`: `meta rotate`, `meta crop` and
+   `meta dpi`.
+4. `corpus-run` rows and ratchet entries for the three relations: per-corpus
+   `compared` and `held`, every budget recorded with the measurement that set
+   it.
+5. Differential in-tree pairs (`tests/render_differential.rs`).
+6. Reviewed goldens per operator family. Exit: each golden's header names
+   the reviewer, the date and the clause; a golden missing any of the three
+   fails a test that reads the headers, in the style of `bounds_ledger.rs`.
 
 ## Dependencies
 
-- `tools/pdfcmp` for the dpi-coherence budget only — the metric stays
-  defined in one place. No metric changes.
 - `xtask` plumbing: `ratchet::holds`, `report.rs` serialization,
   `runner.rs`'s per-file timeout discipline, `corpus.rs::pdfs_under`.
-- The five fetched corpora, which ruling 13 keeps: they are inputs, not
+- The fetched corpora, which ruling 13 keeps: they are inputs, not
   adjudicators.
 - `crates/tinker-pdf/tests/determinism.rs` for the fingerprint mechanism the
   analytic fixtures reuse.
 
 ## Risks
 
-The `dpi` budget's own risk — *"set loose enough to catch nothing"* — was
-answered by measuring rather than choosing: over 119 files the relation was
-exact on 118 and over 12% on one, so 2% is a line drawn where no file sits. The
-same measurement gave `rotate` its 1% and gave `crop` none at all.
+Each relation's budget is recorded beside the measurement that set it, in
+`tools/tpdf/src/main.rs`: `dpi` carries `DPI_BUDGET` (2 %); `rotate` carries
+`ROTATE_BUDGET` (10 %), above the measured cost of a page of anti-aliased
+text and below the measured defects, and the same measurement is judged
+again at 3 % as `rotate-tight`, which decides nothing and is ratcheted on
+its own; `crop` carries none, because a crop moves the page box and nothing
+else.
 
 | Risk | Mitigation |
 | --- | --- |
 | Analytic fixtures only cover pages simple enough to have closed forms, and real pages are not | That is why the metamorphic probes exist and why the corpus stays. Neither replaces the other; this design carries both |
-| A metamorphic relation is satisfied by a bug that commutes with it, and the green row reads as coverage | Stated in the design and in the ratchet's own note, the way `ratchet.json`'s note already states its font-policy limit |
-| The dpi-coherence budget is set loose enough to catch nothing | It is recorded with the measurement that set it, and tightened by diffed edits with evidence — never widened to make a run green |
+| A metamorphic relation is satisfied by a bug that commutes with it, and the green row reads as coverage | Stated in the design and in the ratchet's own note, the way `ratchet.json`'s note states its font-policy limit |
+| A budget is set loose enough to catch nothing | It is recorded with the measurement that set it, and tightened by diffed edits with evidence — never widened to make a run green |
 | Goldens are reviewed once, by the person who wrote the code they check | Recorded rather than resolved: the reviewer and the date are in the fixture, so the weight of the review is visible instead of assumed |
-| The whole design is the engine checking itself, and agrees with itself for the same reason it is wrong | Not closed. The analytic tier answers to arithmetic rather than to the engine, and the corpus answers to producers rather than to this project — but the gap section is the honest statement, and it stays in `verification.md` |
+| The whole design is the engine checking itself, and agrees with itself for the same reason it is wrong | The analytic tier answers to arithmetic rather than to the engine, and the corpus answers to producers rather than to this project — but the gap section is the honest statement, and it stays in `verification.md` |

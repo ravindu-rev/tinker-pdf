@@ -84,9 +84,8 @@ one per inline image. Each carries its **samples before any colour
 conversion**: rows from the top, each padded to a byte, `components` values a
 pixel at `bits_per_component` bits, sixteen-bit values big-endian and whole.
 They come from the same functions the renderer's decode calls —
-`stream_samples`, `jpeg_samples`, `jpx_samples` and `inline_samples`, each
-split out of the renderer's path so the two read one set of samples through
-one set of rules, and no render fingerprint moved. Beside them: the colour
+`stream_samples`, `jpeg_samples`, `jpx_samples` and `inline_samples` — so the
+two read one set of samples through one set of rules. Beside them: the colour
 space as the image states it (`ImageSpace`: the three device spaces,
 `CalGray`, `CalRGB` and `Lab` with their parameters, `ICCBased` with its `/N`,
 its `/Alternate` and the profile's bytes, `Indexed` with its base, `hival` and
@@ -94,24 +93,23 @@ palette, `Separation` and `DeviceN` with their colorants' names and
 alternate), `/Decode` as written and not applied, `/ImageMask`, `/Mask` as
 colour-key ranges or a stencil image — decided by what a reference reaches, so
 an indirect `[0 0]` is a colour key as the renderer reads it — `/SMask` as an
-image of its own, the
-current transformation matrix at each drawing, and the object reference. A
-JPEG's samples are the frame's own components (YCbCr and Adobe's inverted
-CMYK already undone by the decoder); a JPEG 2000 image's are the
-codestream's, at its precision, with any opacity channel left out; a fax or
-JBIG2 image's are one bit a pixel in PDF's polarity whatever the dictionary
-claims. An inline image may name a page colour space resource (8.9.7) and
-that is followed; an image XObject's `/ColorSpace` may not (8.6.3), and a
-name other than a device family is reported as `Unreadable`. An image that
-will not decode is still listed, with no samples and `refused` naming why;
-a stream longer than its geometry is cut to it and a shorter one is
-reported short. What a decoder tolerated for an image — a fax row replicated
-from the one above, a JBIG2 segment skipped, a JPEG 2000 codestream cut short
-— is on that image's `warnings`, named as the render's
+image of its own, the current transformation matrix at each drawing, and the
+object reference. A JPEG's samples are the frame's own components (YCbCr and
+Adobe's inverted CMYK already undone by the decoder); a JPEG 2000 image's are
+the codestream's, at its precision, with any opacity channel left out; a fax
+or JBIG2 image's are one bit a pixel in PDF's polarity whatever the
+dictionary claims. An inline image may name a page colour space resource
+(8.9.7) and that is followed; an image XObject's `/ColorSpace` may not
+(8.6.3), and a name other than a device family is reported as `Unreadable`.
+An image that will not decode is still listed, with no samples and `refused`
+naming why; a stream longer than its geometry is cut to it and a shorter one
+is reported short. What a decoder tolerated for an image — a fax row
+replicated from the one above, a JBIG2 segment skipped, a JPEG 2000
+codestream cut short — is on that image's `warnings`, named as the render's
 `RenderWarning::DamagedImage` names it (ruling 10), so a damaged image is not
-listed as a clean one. What is not walked: images inside a tiling pattern's cell, a
-soft-mask group or an annotation appearance, which are not drawings of the
-page's own content.
+listed as a clean one. What is not walked: images inside a tiling pattern's
+cell, a soft-mask group or an annotation appearance, which are not drawings
+of the page's own content.
 
 `tpdf images <file> [--out DIR]` is the same list from the command line, a
 wrapper with no logic of its own (ruling 11): a line per image with its
@@ -141,82 +139,44 @@ An em is the glyph's size on the page, the expansion of its text rendering
 matrix (9.4.4), so a transform that scales one axis more than the other
 widens or narrows a gap against it: the EPUB writer, which reads each line it
 draws back through this device, reads it under the matrix the page draws it
-under ([epub](epub.md), ROADMAP CD-19).
+under ([epub](epub.md)).
+
 Within right-to-left text, where the pen stopped after a glyph is past the
 glyph's box by the spacing 9.4.4 moved it on by — `Tc` after every glyph,
-and `Tw` as well after a word space: a justified line set as one text object
-per font, its spaces in one and its words in another, was cut at every space
-justification stretched past half an em, and an Arabic line cut so read its
-words in the order they were drawn, backwards (ROADMAP K-11); and a line
-letter-spaced by half an em was cut where one text object met the next, so
-that `مُدَّة مُعلِّم.` in monospace at `letter-spacing: 8px` read
-`مُدَّة مُعلِّم .` (review of the K-11 fix). The pen is carried there only
-into a glyph that reads right to left by its own class — a letter of
-`Bidi_Class` `R` or `AL`, or the ARABIC COMMA, the one `CS` of the
+and `Tw` as well after a word space — so a justified or letter-spaced line
+is not cut where its spacing stretched past half an em. The pen is carried
+there only into a glyph that reads right to left by its own class — a letter
+of `Bidi_Class` `R` or `AL`, or the ARABIC COMMA, the one `CS` of the
 right-to-left blocks, which a right-to-left word that ends in one is drawn
 from; not a digit, an Arabic-Indic one (`AN`) included, though it stands in
 the Arabic block, nor the blocks' other punctuation, whose class is `AN`,
-`ET` or `ON` — the ORNATE PARENTHESES `﴿` `﴾` are brackets like `(`, and
-taken in by their block they carried the pen out of a cut `﴿` into the word
-after it, `﴿عوامل عدّة﴾` letter-spaced reading `﴾عوامل عدّة﴿`, and the
-ARABIC PERCENT SIGN joined a justified line whole that read the sign at its
-far end (review of the third review's fix, 22 books in a default build and
-24 with `bundled-fonts`; `tinker-pdf-content`'s `reads_right_to_left`, from
-the vendored `UnicodeData.txt`) — starting where the spacing put it
-give or take a twentieth of an em, after a right-to-left word, or after
-neutrals on a line that holds a right-to-left letter **of its own** and no
-left-to-right one. Every other carry joined pieces that each read right
-alone into a line that fell into ruling 14's limits, in books that conserved
-before: carried everywhere, 29 of the marks probe; 20 of the second review's
-2 880 in a default build, carried after a right-to-left word into a neutral,
-the `(` or `⟨` that opens a Latin run (`שָׁלוֹם עוֹלָם <b>(HDAC)</b>.`
-justified, with no `dir`), after a word of neutrals on a line that held the
-Latin (`שָׁלוֹם - (HDAC) - עוֹלָם`), and a little further than the spacing
-reaches, from one table cell into the next (`td { letter-spacing: 0.5em }`,
-two Hebrew cells read as one word); and 163 of the third review's 9 504 in a
-default build (about 201 with `bundled-fonts`, 128 of them tables), carried
-after a neutral the device had cut from the Latin text it belongs to — a line
-starts afresh at every cut, so an opening `«`, `"`, `#`, `?!` or a table
-cell's `[` began one that held no left-to-right letter and was carried into
-the word after it, `«שָׁלוֹם עוֹלָם»` letter-spaced reading `שָׁלוֹם עוֹלָם«` —
-and, with `bundled-fonts`, into Arabic-Indic digits counted right to left by
-their block, `(١٢٣)` after a Hebrew word reading `٢٣ (١)` (6 books). Those
-carries also read whole books 9297d2d did not, and taking them out takes
-that back: of the books K-11's probe and its three reviews built, 558 in a
-default build (612 with `bundled-fonts`) that 7330cd5 read better than
-9297d2d read as 9297d2d did again, none worse; with the three rules put back
-as 7330cd5 had them, all but 32 (40) read as at 7330cd5, and 163 (195) that
-read right at 9297d2d read wrong. A word is its glyphs since the white
-space before it, a mark taking its base letter's direction, and a word with a
-left-to-right letter anywhere in it is a left-to-right word; a word a cut on
-one baseline interrupted goes on into the next piece where the spacing put
-that piece, give or take the same twentieth of an em, and there counts
-against a carry and never for one: `[ŋ̊ə̃] חו` letter-spaced by half an em
-does not carry the `] ` into the Hebrew, and a table cell's last Hebrew word,
-its cell and the next with no space between, does not carry the next cell's
-`[` into its Hebrew. A gap no spacing accounts for — a table cell's or a
-column's — ends the word as white space does (ROADMAP CD-19): in a
-right-to-left table at `word-spacing: 1em`, `<td>def</td><td>أصبحنا نعرف</td>`,
-no space between the cells and the Arabic cell's first drawn glyph 4.7 em
-right of `def`, the Arabic letters went on in `def`'s left-to-right word, the
-stretched space after them carried nothing, and the device cut the cell in two
-there; ruling 14 rejoined the pieces only because the glyph after the overflow
-font's code-32 letter, moved on by `Tw`, had closed most of the gap between
-them. Ended where the cell starts, the cell's own right-to-left word carries
-the pen across its stretched space as any other does, so the cell is one line
-to the device whether or not a moved glyph closes the gap: on the third
-review's probe, the right-to-left tables at `word-spacing: 1em` that conserve
-go from 20 to 42 of 48 Hebrew ones (40 with `bundled-fonts`) and from 28 to
-36 of 48 Arabic ones, and, measured with this rule alone on 56dfd93, no
-book of K-11's probes that conserved, read whole or was found by search
-there stopped doing so (what the overflow font at `0 Tw`, written after it,
-costs is ROADMAP CD-19's to say). `Tw` is taken after a
-code 32 the font decodes to white space — a two-byte one too, as the
-interpreter moves the pen, though 9.3.3 applies it to a single-byte one
-alone — so the device is carried to where the interpreter drew the next
-glyph; after a code 32 that decodes to anything else, a letter such as the
-overflow font's, the interpreter moves the pen on by `Tw` all the same and
-the device takes no `Tw` from it.
+`ET` or `ON`, such as the ORNATE PARENTHESES `﴿` `﴾`, which are brackets like
+`(` (`tinker-pdf-content`'s `reads_right_to_left`, from the vendored
+`UnicodeData.txt`) — starting where the spacing put it give or take a
+twentieth of an em, after a right-to-left word, or after neutrals on a line
+that holds a right-to-left letter **of its own** and no left-to-right one. It
+is carried nowhere else — not into the `(` that opens a Latin run after a
+right-to-left word, not further than the spacing reaches, and not after a
+neutral the device cut from the Latin text it belongs to — because each such
+carry joins pieces that read right alone into a line that falls into ruling
+14's limits. A word is its glyphs since the
+white space before it, a mark taking its base letter's direction, and a word
+with a left-to-right letter anywhere in it is a left-to-right word; a word a
+cut on one baseline interrupted goes on into the next piece where the
+spacing put that piece, give or take the same twentieth of an em, and there
+counts against a carry and never for one: `[ŋ̊ə̃] חו` letter-spaced by half
+an em does not carry the `] ` into the Hebrew, and a table cell's last
+Hebrew word, its cell and the next with no space between, does not carry the
+next cell's `[` into its Hebrew. A gap no spacing accounts for — a table
+cell's or a column's — ends the word as white space does, so a right-to-left
+cell's own word carries the pen across its stretched space as any other
+does, and the cell is one line to the device whether or not a moved glyph
+closes the gap. `Tw` is taken after a code 32 the font decodes to white
+space — a two-byte one too, as the interpreter moves the pen, though 9.3.3
+applies it to a single-byte one alone — so the device is carried to where the
+interpreter drew the next glyph; after a code 32 that decodes to anything
+else, a letter such as the overflow font's, the interpreter moves the pen on
+by `Tw` all the same and the device takes no `Tw` from it.
 Writing mode and directionality are separate properties: `TextLine::wmode`
 is the font's 9.7.4.3 wmode, `TextLine::rtl` is counted from the characters
 themselves, because vertical Japanese and right-to-left Arabic are not the
@@ -231,40 +191,40 @@ and read back through UAX #9 as an order whose text the algorithm draws as
 the line stands, every answer checked forwards; the paragraph direction is
 P2 read off the drawn line by `Bidi_Class`, the two ends first and the
 majority where they disagree (`crates/tinker-pdf/src/text_order.rs`, through
-`tinker_pdf_shape::bidi::logical_order` and `drawn_direction`). A line with
-no left-to-right character drawn with a right-to-left letter leftmost and
-punctuation that opens nothing rightmost — `חו,` alone in a table cell of a
-left-to-right book, drawn `וח,` — reads as a left-to-right paragraph, the
-comma trailing, where a left-to-right paragraph draws it (the forward check,
-asked before the direction is chosen): the comma tie-break of ruling 14,
-amended 10 October 2026, because both paragraphs draw that line and the
-quoted word is the commoner. Its price is named and pinned: a lone
-right-to-left line that opens with a mark of `Bidi_Class` `CS`, `ON`, `ES`
-or `ET` that is not `Ps` or `Pi` — a dash, a bullet, `*`, `#`, `%`, an
-ellipsis, or a straight or closing-form quotation mark used to open — reads
-with the mark at its end, `— שלום` as `שלום —`. An opening bracket or
-quotation mark (`Ps`, `Pi`) is not trailing punctuation, so `(١) بند` and
-`“שלום` read as typed where `/ToUnicode` names the typed character; where it
-names the mirrored glyph (`»` for `«`, `)` for `(`), the line ends in a
-closing mark and pays like a dash. A European number
-after the mark spares the line too — `(1) פריט`, `— 2026 שלום` and
-`• 5 תפוחים` read as typed, since no left-to-right paragraph draws the
-number next to the mark — but Arabic-Indic digits (`AN`) do not,
-`— ١ بند` reading `١ بند —`, and neither does a number further on,
-`— שלום 5 חו`. A line that draws a bracket pair **facing outward** — its
-closing bracket left of its opening one, which is how a pair at a
-right-to-left level stands where `/ToUnicode` names the typed character —
-reads in the paragraph direction whose reading pairs those brackets, where
-both directions draw the line, the other one's reading pairs more brackets
-in all, and more of its pairs face outward and hug what they enclose (no
-whitespace just inside either bracket): the bracket tie-break of ruling 14,
-amended 10 October 2026 a second time (accepted by the owner on 11 October
-2026), which took `(histone deacetylase). وقد أصبحنا نعرف الآن`, eighteen
-Latin letters to seventeen Arabic ones, from the majority's
-`… .)histone deacetylase(` to as written. A pair facing inward turns
-nothing, since a left-to-right paragraph draws one so and so does a
-right-to-left one whose `/ToUnicode` names the mirrored glyph. And brackets
-that are no pair as typed — a list marker before a parenthesis,
+`tinker_pdf_shape::bidi::logical_order` and `drawn_direction`).
+
+A line with no left-to-right character drawn with a right-to-left letter
+leftmost and punctuation that opens nothing rightmost — `חו,` alone in a
+table cell of a left-to-right book, drawn `וח,` — reads as a left-to-right
+paragraph, the comma trailing, where a left-to-right paragraph draws it (the
+forward check, asked before the direction is chosen): the comma tie-break of
+ruling 14, because both paragraphs draw that line and the quoted word is the
+commoner. Its known limit: a lone right-to-left line that opens with a mark
+of `Bidi_Class` `CS`, `ON`, `ES` or `ET` that is not `Ps` or `Pi` — a dash, a
+bullet, `*`, `#`, `%`, an ellipsis, or a straight or closing-form quotation
+mark used to open — reads with the mark at its end, `— שלום` as `שלום —`. An
+opening bracket or quotation mark (`Ps`, `Pi`) is not trailing punctuation,
+so `(١) بند` and `“שלום` read as typed where `/ToUnicode` names the typed
+character; where it names the mirrored glyph (`»` for `«`, `)` for `(`), the
+line ends in a closing mark and reads like a dash. A European number after
+the mark spares the line too — `(1) פריט`, `— 2026 שלום` and `• 5 תפוחים`
+read as typed, since no left-to-right paragraph draws the number next to the
+mark — but Arabic-Indic digits (`AN`) do not, `— ١ بند` reading `١ بند —`,
+and neither does a number further on, `— שלום 5 חו`.
+
+A line that draws a bracket pair **facing outward** — its closing bracket
+left of its opening one, which is how a pair at a right-to-left level stands
+where `/ToUnicode` names the typed character — reads in the paragraph
+direction whose reading pairs those brackets, where both directions draw the
+line, the other one's reading pairs more brackets in all, and more of its
+pairs face outward and hug what they enclose (no whitespace just inside
+either bracket): the bracket tie-break of ruling 14, so
+`(histone deacetylase). وقد أصبحنا نعرف الآن`, with more Latin letters than
+Arabic ones, reads as written rather than as the majority's
+`… .)histone deacetylase(`. A pair facing inward turns nothing, since a
+left-to-right paragraph draws one so and so does a right-to-left one whose
+`/ToUnicode` names the mirrored glyph. And brackets that are no pair as
+typed — a list marker before a parenthesis,
 `Step 1) open the file (שלום) and 2) close it.`, a smiley, a parenthesis
 wrapped onto the next line — stand facing outward in left-to-right text and
 pair read from the right, but no more of them than as typed, or with the
@@ -274,78 +234,63 @@ have taken its level from the line before evidence: N0 resolves a pair
 enclosing only the other direction's letters by the strong character before
 its opening bracket, on the line above for a pair that opens a line, so an
 English paragraph's line opening with `(הארץ)` after a line that ended in
-Hebrew draws it facing outward at its left end. Such a pair — a bracket at the
-end where a reading in the direction chosen starts, nothing of that
+Hebrew draws it facing outward at its left end. Such a pair — a bracket at
+the end where a reading in the direction chosen starts, nothing of that
 direction inside — counts for neither reading where the line's letters say
 the direction chosen (more of them, and that reading pairs a bracket facing
-outward itself, or at least twice as many and at least eight more): a
-justified English
-paragraph quoting Hebrew in brackets, fifty Latin letters to fifteen Hebrew
-on the line, was turned and read backwards until the third review of the
-K-11 fix, and no line of `BidiCharacterTest.txt` or of the reviews' wrapped
-and sentence lines reads otherwise for it. And where the comma tie-break
-read a line left to right for the sentence's end at its right — read
-leftward, any closing quotation marks (`"`, `'` and the `Pf` ones, `»`, `’`,
-`”` …), then one stop or more: a full stop, a comma, a colon, a semicolon,
-`!`, `?`, the ARABIC COMMA or an ellipsis, so `.`, `...`, `?!`, `…`, `."`
-and `.»` alike, each a mark UAX #14 puts first on a line only after a forced
-break or a space it names (ruling 14) — the line opens just left of the
-stops, and a pair with a bracket there, enclosing no left-to-right letter,
-counts for neither reading: `جميل بيت كبير (نور) يوم.` with no `dir`, broken
-before the bracket, draws `موي )رون(.`, and turned it read its full stop
-first (review of the third review's fix, 32 books in a default build and 29
-with `bundled-fonts`, and a letter-spaced line opening with `(١٬٢٣٤),` that
-the join of split lines read whole for the turn); asked only of the
-rightmost unit, it left `?!`, `...`, `."` and `…` to turn the line (K-11
-review, finding V1, 76 books in a default build and 82 with
-`bundled-fonts`). A closing quotation mark alone ends no sentence, nor does a
-closing bracket. That an ellipsis ends one is the owner's decision (11
-October 2026), and on 12 October 2026 the owner accepted the whole price of
-the rule as built, with its figures known, naming runs of `!` and `?`, a
-closing quotation mark before stops and ellipses (ruling 14 gives each
-figure): a right-to-left line that opens with one of them before a pair,
-`…(نور) يوم` or `?!(نور) يوم` after a `<br/>` or a soft wrap, draws what the
-line with no `dir` draws and reads as that one does, its ending last,
-`نور) يوم(…` (read alone, neither line can see the line above that gave the
-pair its level). A run that mixes the stops, `.!` or `!…`, which the rule
-as built takes as well, reads the same, and the owner's decision does not
-name it: ruling 14 counts its books and leaves to the owner whether they are
-of its price, and ROADMAP CD-19 keeps them.
-As first proposed the tie-break asked neither, and read every such line backwards
-(`.and 2) close it )שלום( open the file )Step 1`; review of the K-11 fix).
-Applying L2 to levels resolved over the drawn line, which
-is what this did first, read `نسبة 50%` back as `نسبة %50`. A visually
-drawn Hebrew word and the same word drawn in reading order with the pen moving left extract the same;
-digits and a percentage inside a right-to-left line keep their own order; a
-line with no right-to-left character is exactly as collected. A line the
-content stream's order cut in pieces is read as one first: `TextDevice` resumes
-a line after an `ET` only where its last glyph stopped, so a right-to-left
-word of several text objects drawn in reading order inside a left-to-right
-line — `a ب<span>ح</span>م b` as an EPUB draws it — came back as three lines on
-one baseline. Consecutive lines of a block that sit on one baseline to half
-an em and meet end to end to within the device's own half-em slack are a
-chain, and a chain any piece of which holds a right-to-left character is
-joined before it is ordered: a piece joins the group before it where either
-holds a right-to-left character, and a chain whose groups are more than one
-is joined whole only where, read whole, ruling 14's bracket tie-break turns
-it. A right-to-left line that opens with `(histone deacetylase)` reaches the
-device as the `(`, the Latin words and the Arabic; the first two hold
-nothing right to left, so the `(` was a group, and a line, of its own and
-the rest a line with no bracket to pair (ROADMAP K-11) — read whole, the
-line draws its pair facing outward and reads as written. A chain whose
-groups read right apart is left in them: `deacetylase). מִלְחָמָה סֵפֶר בַּיִת.`,
-the second line of a bracketed run a line break parted, reads right as its
-groups, `deacetylase` and `). מִלְחָמָה …`, and joined whole fell into the
-limit such a line meets, `.מִלְחָמָה סֵפֶר בַּיִת .)deacetylase` (review of the
-K-11 fix). And a line that overlaps the chain by more than
-half the shorter one's extent is not part of it: that is text
-drawn over itself, a fake bold or a hand-made shadow, and each copy reads back
-whole rather than interleaved with the other. `Page::text_with` with
+outward itself, or at least twice as many and at least eight more), so a
+justified English paragraph quoting Hebrew in brackets keeps its direction.
+
+And where the comma tie-break reads a line left to right for the sentence's
+end at its right — read leftward, any closing quotation marks (`"`, `'` and
+the `Pf` ones, `»`, `’`, `”` …), then one stop or more: a full stop, a
+comma, a colon, a semicolon, `!`, `?`, the ARABIC COMMA or an ellipsis, so
+`.`, `...`, `?!`, `…`, `."` and `.»` alike, each a mark UAX #14 puts first on
+a line only after a forced break or a space it names (ruling 14) — the line
+opens just left of the stops, and a pair with a bracket there, enclosing no
+left-to-right letter, counts for neither reading: `جميل بيت كبير (نور) يوم.`
+with no `dir`, broken before the bracket, draws `موي )رون(.` and reads as
+written. A closing quotation mark alone ends no sentence, nor does a closing
+bracket. The rule's known limit: a right-to-left line that opens with such
+an ending before a pair — a run of `!` and `?`, an ellipsis, a closing
+quotation mark before stops; `…(نور) يوم` or `?!(نور) يوم` after a `<br/>` or
+a soft wrap — draws what the line with no `dir` draws and reads as that one
+does, its ending last, `نور) يوم(…` (read alone, neither line can see the
+line above that gave the pair its level). A run that mixes the stops, `.!`
+or `!…`, which the rule takes as well, reads the same (ROADMAP CD-19).
+
+A visually drawn Hebrew word and the same word drawn in reading order with
+the pen moving left extract the same; digits and a percentage inside a
+right-to-left line keep their own order; a line with no right-to-left
+character is exactly as collected. A line the content stream's order cut in
+pieces is read as one first: `TextDevice` resumes a line after an `ET` only
+where its last glyph stopped, so a right-to-left word of several text
+objects drawn in reading order inside a left-to-right line —
+`a ب<span>ح</span>م b` as an EPUB draws it — reaches `Page::text` as three
+lines on one baseline. Consecutive lines of a block that sit on one baseline
+to half an em and meet end to end to within the device's own half-em slack
+are a chain, and a chain any piece of which holds a right-to-left character
+is joined before it is ordered: a piece joins the group before it where
+either holds a right-to-left character, and a chain whose groups are more
+than one is joined whole only where, read whole, ruling 14's bracket
+tie-break turns it. A right-to-left line that opens with
+`(histone deacetylase)` reaches the device as the `(`, the Latin words and
+the Arabic; the first two hold nothing right to left, so the `(` is a group
+of its own — read whole, the line draws its pair facing outward and reads as
+written. A chain whose groups read right apart is left in them:
+`deacetylase). מִלְחָמָה סֵפֶר בַּיִת.`, the second line of a bracketed run a
+line break parted, reads right as its groups, `deacetylase` and
+`). מִלְחָמָה …`, where joined whole it would fall into the limit such a line
+meets. And a line that overlaps the chain by more than half the shorter
+one's extent is not part of it: that is text drawn over itself, a fake bold
+or a hand-made shadow, and each copy reads back whole rather than
+interleaved with the other. `Page::text_with` with
 `TextOptions::content_order` is the opt-out. Search boxes a match from
 whichever of its ends starts first along the baseline, so a logical-order
-match on a right-to-left line is not boxed inside out. Warnings are deduplicated — a page whose font is unknown says
-so once, not once per glyph — so "this page has no text" and "this page has
-text this build could not decode" stay distinguishable (ruling 2).
+match on a right-to-left line is not boxed inside out. Warnings are
+deduplicated — a page whose font is unknown says so once, not once per
+glyph — so "this page has no text" and "this page has text this build could
+not decode" stay distinguishable (ruling 2).
 
 **The recording device.** `tinker-pdf-content`'s `record.rs` carries a third
 `Device`, beside the text device here and the rasterising one in
@@ -356,8 +301,7 @@ image samples, and a `q`/`Q` pair that changed nothing is still two events —
 so two consumers wanting different scenes build them from one transcript
 rather than having to agree first.
 
-Three decisions are recorded in the module itself, because a later reader
-would otherwise have to re-derive them:
+Three design decisions are recorded in the module itself:
 
 - **The list is flat, with explicit begin and end events, rather than a
   tree.** `q`/`Q` and `BMC`/`EMC` nest independently and may cross, so a tree
@@ -370,71 +314,56 @@ would otherwise have to re-derive them:
   answer derived on demand, because the reverse cannot be undone: a nested
   `/OC` naming a layer that is on, inside one that is off, is hidden, and a
   recorder that stored only "hidden here" could never say which scope hid it.
-- **The state is copied at the call**, which is what the retained-page row's
+- **The state is copied at the call**, which is what the retained page's
   byte-equal replay needs and what a recorder holding one shared handle
   silently loses. `Capture` turns whole categories — and the state copy —
-  off for the two consumers that want only glyphs.
+  off for consumers that want only glyphs.
 
-It exists as a **prerequisite rather than as a capability**, which is why it
-has no [roadmap](../ROADMAP.md) row of its own. Six rows need it and only one
-of them says the words: a retained page (whose exit criterion already read "a
-recording `Device`"), PDF to SVG, structured text serialisation, table
-reconstruction from geometry, inferred reading order for untagged pages, and
-the glyph-usage walk that font subsetting on rewrite drives. Promoting it out
-of the interpreter's test module deleted five ad-hoc recorders that had grown
-there, each keeping what one test needed.
+It is a **prerequisite rather than a capability**, which is why it has no
+[roadmap](../ROADMAP.md) row of its own. Its consumers are the glyph-usage
+walk that font subsetting on rewrite drives, the retained page and the SVG
+writer.
 
-**The first of the six has landed**, and the fit is reported rather than
-assumed. `crates/tinker-pdf/src/subset.rs` is one `interpret` into a
+`crates/tinker-pdf/src/subset.rs` is one `interpret` into a
 `RecordingDevice` and one pass over its events — no second interpreter, no
-device of its own. What did *not* fit is `Capture::GLYPHS`, the preset
-introduced for that consumer, which turns the bracketing events off:
-`Glyph::font_id` is the interned **resource name**, and a resource name is
-scope-relative, so without `BeginForm`/`EndForm` there is no way to say which
-`/F1` a glyph meant and one font's glyphs would be credited to another — which
-drops the glyphs the other font needs. The walk runs under `text` **and**
-`structure` instead. The preset is still right for the other glyph-only
-consumer named above, inferred reading order, which wants glyphs in document
-order and never asks which dictionary a font came from; its name is what is
-one preset short, and that is written down in `subset.rs` rather than fixed
-by renaming a public constant from a row that is about fonts.
+device of its own. It does not run under `Capture::GLYPHS`, the preset that
+turns the bracketing events off: `Glyph::font_id` is the interned **resource
+name**, and a resource name is scope-relative, so without
+`BeginForm`/`EndForm` there is no way to say which `/F1` a glyph meant and
+one font's glyphs would be credited to another — which drops the glyphs the
+other font needs. The walk runs under `text` **and** `structure` instead.
 
-**Structured text serialisation landed without it**, which corrects the count
-above to five. It serialises the `TextPage` the text device already builds —
-a second walk of the content stream would be a second extractor, the failure
-the structured view below is designed against — and the one thing a
-`TextPage` lacked was the font. The subsetter's finding decided where that is
-resolved: a resource name is scope-relative, so the name cannot be looked up
-from `Glyph::font_id` afterwards. The interpreter asks
+**Structured text serialisation does not use the recorder.** It serialises
+the `TextPage` the text device already builds — a second walk of the content
+stream would be a second extractor, the failure the structured view below is
+designed against. Because a resource name is scope-relative, the font cannot
+be looked up from `Glyph::font_id` afterwards: the interpreter asks
 `FontSource::font_name` at each text-showing operator, in the scope that
 operator runs in, and the answer rides on `Glyph::font_name` into
 `TextChar::font` — which `a_forms_own_font_is_the_one_its_text_reports` in
 `crates/tinker-pdf/tests/text_serialize.rs` holds, with a page and a form
 that both call their font `/F0`.
 
-**The retained page has landed, and it is the first consumer that replays.**
-`replay.rs` beside `record.rs` hands a `Device` every call a transcript kept,
-in order and with its state, with no interpreter involved; `Page::display_list`
-records a page once and `DisplayList::render` replays it into the renderer
-at any scale ([rendering](rendering.md)). What the transcript alone could not
-carry is the answer to the three questions a device is asked —
-`begin_form`, `begin_group`, `begin_soft_mask` — because the interpreter acts
-on the answer and the states it records afterwards depend on it. So a
-recorder's answers can now be set a call at a time
-(`RecordingDevice::set_answers`), and the retained page records through
-`tinker-pdf-render`'s `DisplayRecorder`, which asks the renderer's own
-`Admission` before each question. A replay that meets a different answer from
-the one recorded counts it (`Replayed::disagreed`), skips a bracket the device
-declined and closes at once one the recording declined; the module header
-says which of those an interpreter would also have done and which lose
-something. With the replay in the tree, the two designs below that were
-waiting for one — inferred reading order and table reconstruction — no longer
-need a second interpretation per page.
-The SVG writer (`Page::to_svg`) is the second consumer of a replay and the
-first that is not the renderer: it answers the three questions itself —
-every form, a group unless hidden content holds it, never a soft mask — and
-the replay's disagreement handling is what makes declining a mask that the
-recording accepted skip the mask's content rather than paint it.
+**The retained page replays.** `replay.rs` beside `record.rs` hands a
+`Device` every call a transcript kept, in order and with its state, with no
+interpreter involved; `Page::display_list` records a page once and
+`DisplayList::render` replays it into the renderer at any scale
+([rendering](rendering.md)). What the transcript alone cannot carry is the
+answer to the three questions a device is asked — `begin_form`,
+`begin_group`, `begin_soft_mask` — because the interpreter acts on the
+answer and the states it records afterwards depend on it. So a recorder's
+answers can be set a call at a time (`RecordingDevice::set_answers`), and
+the retained page records through `tinker-pdf-render`'s `DisplayRecorder`,
+which asks the renderer's own `Admission` before each question. A replay
+that meets a different answer from the one recorded counts it
+(`Replayed::disagreed`), skips a bracket the device declined and closes at
+once one the recording declined; the module header says which of those an
+interpreter would also have done and which lose something.
+The SVG writer (`Page::to_svg`) also consumes a replay and is not the
+renderer: it answers the three questions itself — every form, a group unless
+hidden content holds it, never a soft mask — and the replay's disagreement
+handling is what makes declining a mask that the recording accepted skip the
+mask's content rather than paint it.
 
 ## API
 
@@ -468,13 +397,12 @@ for warning in &text.warnings {
 ### Search options
 
 `search_with(needle, &SearchOptions)` is `search`'s sibling, and with
-`SearchOptions::default()` it returns `search`'s quads, one for one — `search`
-itself, and its parity pins, are unchanged. Three switches, each off by
-default and each composable with the others:
+`SearchOptions::default()` it returns `search`'s quads, one for one. Three
+switches, each off by default and each composable with the others:
 
 - **`case_sensitive`** — match case exactly. Off, both sides are lower-cased
-  character by character, which is what `search` has always done: it is
-  `str::to_lowercase`, not Unicode case folding, so `ß` does not find `SS`.
+  character by character, as `search` does: it is `str::to_lowercase`, not
+  Unicode case folding, so `ß` does not find `SS`.
 - **`whole_word`** — a match counts only where it begins and ends on a
   **UAX #29 word boundary** of the text searched, the same segmentation
   `TextLine::words()` reports below. `cat` is not found in `concat`, in `scat`,
@@ -493,9 +421,9 @@ default and each composable with the others:
   syllables stay composed, and canonical reordering is not performed.
   `tinker_pdf_content::fold_diacritics` is the folding on its own.
 
-Regular expressions are not an option yet: the tree has no regex engine and
+Regular expressions are not an option: the tree has no regex engine and
 links none, and a hand-rolled linear-time one is [roadmap](../ROADMAP.md) row
-FT-20 since the owner's parity decision of 9 October 2026.
+FT-20.
 
 ```rust
 let options = SearchOptions { whole_word: true, diacritic_insensitive: true, ..Default::default() };
@@ -670,7 +598,7 @@ println!("{} claimed, {} orphaned, {} unmarked",
     structured.matched, structured.orphans, structured.unmarked);
 ```
 
-Three properties are worth stating because each was a decision:
+Each of these properties is a design decision:
 
 - **It is a join, never a second extractor.** `text_for_page` takes the
   `TextPage` `page.text()` already produced. Two extractors would be two
@@ -719,11 +647,11 @@ and what the closure opened and left open is closed when it returns. A
 layer's closure (`optional`) is the same kind of scope, because its `EMC`
 closes whichever sequence is innermost: an element opened outside the layer
 cannot be closed inside it, and one opened inside it and left open is closed
-when it returns — each was otherwise a stream with a stray `EMC` or content
-drawn after the layer still inside it. An
+when it returns — each would otherwise be a stream with a stray `EMC` or
+content drawn after the layer still inside it. An
 element that draws nothing is **kept when it says something** — an `/Alt`,
 a `/Lang`, or `Tag::keep_empty()` for an empty table cell — and dropped
-when it says nothing, as before. `DocumentBuilder::set_language` writes the
+when it says nothing. `DocumentBuilder::set_language` writes the
 catalog's `/Lang`, and `is_language_tag` is the shape check (14.9.2's
 RFC 3066, BCP 47 in 2.0) a caller holding someone else's text makes first.
 `DocumentBuilder::map_role(custom, standard)` writes the structure tree
@@ -783,9 +711,8 @@ open** is a content item of that element: its `/K` gains an `/OBJR`
 14.8.4.4.2's `/Link` element. `link_for(key, …)` does the same for an
 element named by `tagged_keyed`'s key, on any page and whether it is open
 or not, for a layout that measures link rectangles after drawing. A link
-outside every element is written in no structure, as before; one `finish`
-does not write — a dangling named destination — leaves no `/OBJR` and takes
-no key.
+outside every element is written in no structure; one `finish` does not
+write — a dangling named destination — leaves no `/OBJR` and takes no key.
 `Tag::id(bytes)` writes `/ID` and the root's `/IDTree` (14.7.2 Table
 322); an identifier is one element's, so the first in reading order keeps it
 and `DocumentBuilder::duplicate_element_ids()` names the rest before
@@ -797,19 +724,16 @@ spans. The reader hands back the same type — `StructElement::table` — and
 a value Table 349 does not define is read as absent with
 `StructureWarning::AttributeIgnored` naming the element, owner and key.
 Nesting stops one level short of the reader's `MAX_NEST_DEPTH`, because
-`finish` puts every page's elements under one `/Document`; it used to stop
-at the cap itself, and an element nested exactly that deep came back
-orphaned under `DepthCapped` (`opens_past_the_depth_cap_are_refused_and_still_paired`).
+`finish` puts every page's elements under one `/Document`
+(`opens_past_the_depth_cap_are_refused_and_still_paired`).
 Appending to an element costs the same however many kids it already holds:
 where its kids reach, which every resumption after a child and every link
 asks, is kept beside them rather than walked each time, and `finish` finds a
 keyed element's sibling, a `link_for` key's element and where that element's
-kids reach through indexes rather than walks. The walks made an EPUB
-paragraph of 40 000 `<span>`s take 48.7 s to open in a debug build, against
-3.9 s now (`an_element_of_many_kids_costs_its_kids` and
+kids reach through indexes rather than walks
+(`an_element_of_many_kids_costs_its_kids` and
 `a_tree_of_many_keyed_elements_costs_its_elements` count every kid's order
-read and every key compared, in the accessors rather than in the new loops,
-so each walk put back as it was written fails them).
+read and every key compared).
 
 Coordinates are PDF user space, y upward — the space the page's own boxes
 are in; a display transform is the caller's. The `Device` trait, the
@@ -826,12 +750,12 @@ crate has an API of its own; see [architecture](../architecture.md).
 | A code with no `/ToUnicode` entry and no encoding that names it | `TextWarning::UnmappedCode { code }` | the typed vocabulary for a per-code guess; a glyph that decodes to no text at all is dropped from the page rather than invented | 9.10.3 |
 | Form XObject / Type 3 / soft-mask nesting past 16 levels | `MAX_FORM_DEPTH` | recursion is refused rather than allowed to overflow the stack | 8.10 |
 | More than 4 096 open marked-content scopes | `MAX_MARKED_CONTENT_DEPTH` | scopes past the cap go unreported, and unreported means *visible* — a runaway stream must not hide a page | 14.6.2 |
-| Text shaping while **reading** — Arabic joining, ligature substitution | — | the producer positioned every glyph and re-shaping them would be wrong; a ligature extracts as whatever its `/ToUnicode` says. Bidi *reordering* is not in this row any more: ruling 14 puts a right-to-left line into logical order | [design/shaping.md](../design/shaping.md) |
-| L4 mirroring undone in extraction, and the paragraph as a bidi unit | — | ruling 14 resolves each line alone and swaps no character: whether a producer's `/ToUnicode` names a mirrored glyph's character or its shape is not on the page. Alone, a line of a right-to-left paragraph that holds nothing left to right and opens with a mark of `Bidi_Class` `CS`, `ON`, `ES` or `ET` that is not `Ps` or `Pi` — a dash, a bullet, `*`, `#`, `%`, an ellipsis, a straight or closing-form quotation mark used to open; `— שלום` — draws as a quoted word and its trailing mark, and reads `שלום —`: the comma tie-break's price, pinned by `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last`. Not with an opening bracket or quotation mark where `/ToUnicode` names the typed character (`(١) بند`, `“שלום`; `a_right_to_left_line_opening_with_a_bracket_or_quotation_mark_reads_as_typed`) — where it names the mirrored glyph, `»` for `«`, the line pays like a dash — nor with a European number after the mark (`(1) פריט`, `— 2026 שלום`, `• 5 תפוחים`, which no left-to-right paragraph draws; `a_right_to_left_line_opening_with_a_mark_and_a_number_reads_as_typed`); still with Arabic-Indic digits, `— ١ بند` reading `١ بند —`, or a number further on, `— שלום 5 חו`. A mark of several characters reads reversed as well, in the order drawn: `<p dir="rtl">?! שלום</p>` reads `שלום !?`. The same mark styled apart, `<p dir="rtl"><i>?!</i> שלום</p>`, is a run of neutrals of its own, which the EPUB writer draws as typed on such a line so that it reads `שלום ?!`, the mark as typed (`a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_as_typed`): drawn in its level's order, as the review of the K-11 fix found it, it read `שלום !?`, and 51 probe books that conserved in logical order at 9297d2d did not | ruling 14, amended 10 October 2026 |
-| Telling apart two texts UAX #9 draws alike | — | the algorithm is not one-to-one, so no reader can: `logical_order` returns the first order its search reaches that draws the line, and says which (`שלום now 2026`, not `שלום 2026 now`). Of `BidiCharacterTest.txt`'s 91 616 drawn lines, 669 read back as another text the same picture could be, each holding a bracket pair (N0 pairs brackets in logical order, and they are drawn mirrored). The paragraph's direction is such a choice where the line alone cannot make it: with no `dir`, a line with Arabic at both ends and a Latin run in brackets between, `… عوامل عدّة (HDAC). وقد …`, is a left-to-right paragraph's, its pair drawn facing inward — exactly the line a right-to-left paragraph whose `/ToUnicode` names the mirrored glyph draws for `وقد … (HDAC) … عوامل عدّة` — and it reads as that one, `(HDAC).` coming back `.)HDAC(`: both readings draw the line, and ruling 14's bracket tie-break counts only a pair facing outward. Of ROADMAP K-11's probe's 120 dir-less books, 45 of the 48 with a Latin run in the brackets do not conserve, pointed and not, in both builds; in 40 of them reading some of those lines the other way makes the book conserve, and the other 5 also hold a line whose comma its paragraph's next line put at a right-to-left level, which no line read alone recovers. Pinned by `a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_drawn_alike_twin` | ruling 14 |
-| Brackets typed closing before opening, each set against the text between them | — | the price of ruling 14's bracket tie-break (amended 10 October 2026, a second time; accepted by the owner on 11 October 2026): where both paragraph directions draw a line that draws a closing bracket left of an opening one, and the other direction's reading pairs more brackets in all and more of them facing outward and set against what they enclose, that reading is taken — so `x)שלום(y` in a left-to-right paragraph, drawn `x)םולש(y`, reads `y(שלום)x`. No line of `BidiCharacterTest.txt` reads worse for the tie-break, nor any book of the reviews' probes, which hold list markers, smileys, glosses and parentheses a line break parted; of their sentence lines only the 62 of 13 300 written in this shape do, `x)שלום(y and a)עולם(b` — a text typed so is a fragment rather than prose. Pinned by `brackets_typed_closing_first_against_a_word_read_as_the_other_direction_pairs_them` | ruling 14, amended 10 October 2026 |
-| A line holding one bracket of a pair a line break parted, or quotation marks, whose two ends disagree | — | ruling 14 reads a line alone, and BD16 pairs no quotation mark, so the bracket tie-break has no pair to count on such a line: where its ends disagree its majority decides, and where its Latin letters outnumber its right-to-left ones it reads as a left-to-right paragraph's. A right-to-left paragraph's line that holds the second half of a bracketed Latin run, `deacetylase). وقد أصبحنا`, reads `وقد أصبحنا .)deacetylase`; one whose `(see` the line before holds, `[HDAC] here). وقد …`, is read as a text in which `[HDAC]`, drawn facing inward because the paragraph's `see` stood before it, pairs nothing, `HDAC] here[).`; and `“histone deacetylase”` closing a paragraph reads `”histone deacetylase“`. Of the review of ROADMAP K-11's probe of right-to-left paragraphs (2 016 books, Arabic and Hebrew, nine styles, pointed and not), those quoting a Latin run fail 100 of 432 in either build, nested brackets 32 of 144, `(histone deacetylase)` 21 of 144 (25 with `bundled-fonts`) and `(USD 1,234.56)` 6 of 144 — each of them failing at 9297d2d too, where these shapes failed 139, 54, 53 and 30 (154, 56, 59 and 44) — and none of K-11's own probe's right-to-left books. Five of them with `bundled-fonts`, three in a default build, read whole at 7330cd5 and fail again as at 9297d2d since its third review: three because a reader's pen no longer goes on after a line of neutrals alone — `( ` opening a justified line, parted from the right-to-left word after it by its own stretched space (the device paragraph above) — and, with `bundled-fonts`, the sans-serif Hebrew paragraph quoting `(histone deacetylase)` four times, pointed and not, whose ` (` is drawn with its word space first again (`paint::opens_with_its_word_space`): the space falls inside the pair, which then hugs nothing, and the bracket tie-break leaves the line left to right. Reading a line with its block's other lines would be the paragraph as a bidi unit, which the mirroring row names | ruling 14 |
-| Reading order for an **untagged** document | — | `plain_text()` reports lines and blocks in content-stream order and always has — geometry decides only whether two glyphs are one line and two lines one block, and within a line only where it holds a right-to-left character (ruling 14); a structure tree is read when the document carries one, and never invented when it does not. `Page::text_in(ReadingOrder::Inferred)` is the opt-in request, answered by a type of its own — columns found from the whitespace between lines, blocks ordered down each column, a block across the columns read before the ones under it, running heads, feet and page numbers found by their recurring on the pages around and read first and last with their roles, footnotes read after the body in the order of their reference marks, a ruled table read as one block in its own order — and never the default ([design/reading-order.md](../design/reading-order.md)) | 14.8 |
+| Text shaping while **reading** — Arabic joining, ligature substitution | — | the producer positioned every glyph and re-shaping them would be wrong; a ligature extracts as whatever its `/ToUnicode` says. Bidi *reordering* is not refused: ruling 14 puts a right-to-left line into logical order | [design/shaping.md](../design/shaping.md) |
+| L4 mirroring undone in extraction, and the paragraph as a bidi unit | — | ruling 14 resolves each line alone and swaps no character: whether a producer's `/ToUnicode` names a mirrored glyph's character or its shape is not on the page. Alone, a line of a right-to-left paragraph that holds nothing left to right and opens with a mark of `Bidi_Class` `CS`, `ON`, `ES` or `ET` that is not `Ps` or `Pi` — a dash, a bullet, `*`, `#`, `%`, an ellipsis, a straight or closing-form quotation mark used to open; `— שלום` — draws as a quoted word and its trailing mark, and reads `שלום —`: the comma tie-break's known limit, pinned by `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last`. Not with an opening bracket or quotation mark where `/ToUnicode` names the typed character (`(١) بند`, `“שלום`; `a_right_to_left_line_opening_with_a_bracket_or_quotation_mark_reads_as_typed`) — where it names the mirrored glyph, `»` for `«`, the line reads like a dash — nor with a European number after the mark (`(1) פריט`, `— 2026 שלום`, `• 5 תפוחים`, which no left-to-right paragraph draws; `a_right_to_left_line_opening_with_a_mark_and_a_number_reads_as_typed`); still with Arabic-Indic digits, `— ١ بند` reading `١ بند —`, or a number further on, `— שלום 5 חו`. A mark of several characters reads reversed as well, in the order drawn: `<p dir="rtl">?! שלום</p>` reads `שלום !?`. The same mark styled apart, `<p dir="rtl"><i>?!</i> שלום</p>`, is a run of neutrals of its own, which the EPUB writer draws as typed on such a line so that it reads `שלום ?!`, the mark as typed (`a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_as_typed`) | ruling 14 |
+| Telling apart two texts UAX #9 draws alike | — | the algorithm is not one-to-one, so no reader can: `logical_order` returns the first order its search reaches that draws the line, and says which (`שלום now 2026`, not `שלום 2026 now`). Some of `BidiCharacterTest.txt`'s lines, each holding a bracket pair, read back as another text the same picture could be (N0 pairs brackets in logical order, and they are drawn mirrored). The paragraph's direction is such a choice where the line alone cannot make it: with no `dir`, a line with Arabic at both ends and a Latin run in brackets between, `… عوامل عدّة (HDAC). وقد …`, is a left-to-right paragraph's, its pair drawn facing inward — exactly the line a right-to-left paragraph whose `/ToUnicode` names the mirrored glyph draws for `وقد … (HDAC) … عوامل عدّة` — and it reads as that one, `(HDAC).` coming back `.)HDAC(`: both readings draw the line, and ruling 14's bracket tie-break counts only a pair facing outward. Pinned by `a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_drawn_alike_twin` | ruling 14 |
+| Brackets typed closing before opening, each set against the text between them | — | a known limit of ruling 14's bracket tie-break: where both paragraph directions draw a line that draws a closing bracket left of an opening one, and the other direction's reading pairs more brackets in all and more of them facing outward and set against what they enclose, that reading is taken — so `x)שלום(y` in a left-to-right paragraph, drawn `x)םולש(y`, reads `y(שלום)x`, and so does a sentence written in this shape, `x)שלום(y and a)עולם(b`; a text typed so is a fragment rather than prose. Pinned by `brackets_typed_closing_first_against_a_word_read_as_the_other_direction_pairs_them` | ruling 14 |
+| A line holding one bracket of a pair a line break parted, or quotation marks, whose two ends disagree | — | ruling 14 reads a line alone, and BD16 pairs no quotation mark, so the bracket tie-break has no pair to count on such a line: where its ends disagree its majority decides, and where its Latin letters outnumber its right-to-left ones it reads as a left-to-right paragraph's. A right-to-left paragraph's line that holds the second half of a bracketed Latin run, `deacetylase). وقد أصبحنا`, reads `وقد أصبحنا .)deacetylase`; one whose `(see` the line before holds, `[HDAC] here). وقد …`, is read as a text in which `[HDAC]`, drawn facing inward because the paragraph's `see` stood before it, pairs nothing, `HDAC] here[).`; and `“histone deacetylase”` closing a paragraph reads `”histone deacetylase“`. A justified line that opens with `( ` is cut at its stretched space, since the pen is not carried after neutrals alone (the text device above), and its bracket reads apart from its pair; and where the EPUB writer draws a run that opens with a stretched word space, ` (`, with its space first (`paint::opens_with_its_word_space`), the space falls inside the pair, which then hugs nothing, and the bracket tie-break leaves the line left to right. Reading a line with its block's other lines would be the paragraph as a bidi unit, which the mirroring row names | ruling 14 |
+| Reading order for an **untagged** document | — | `plain_text()` reports lines and blocks in content-stream order — geometry decides only whether two glyphs are one line and two lines one block, and within a line only where it holds a right-to-left character (ruling 14); a structure tree is read when the document carries one, and never invented when it does not. `Page::text_in(ReadingOrder::Inferred)` is the opt-in request, answered by a type of its own — columns found from the whitespace between lines, blocks ordered down each column, a block across the columns read before the ones under it, running heads, feet and page numbers found by their recurring on the pages around and read first and last with their roles, footnotes read after the body in the order of their reference marks, a ruled table read as one block in its own order — and never the default ([design/reading-order.md](../design/reading-order.md)) | 14.8 |
 | An `/MCR` whose `/Stm` does not name a content stream | `StructureWarning::ContentStreamNotAStream { element, stream }` | a stream is always indirect (7.3.8), so the value names nothing that could hold a sequence; read as though `/Stm` were absent rather than keyed on an object with no content, which would make the sequence findable nowhere | 14.7.4.2 |
 | An `/MCR` carrying `/StmOwn` without the `/Stm` it qualifies | `StructureWarning::StreamOwnerWithoutStream { element, owner }` | Table 324 permits the owner only beside a stream; an owner alone names the owner of a stream nobody named, so it is dropped | 14.7.4.2 |
 | An `/MCR` with no `/Stm` whose `/MCID` is in no page-stream sequence but in exactly one other stream on the page | `StructureWarning::ContentStreamAssumed { page, mcid }` | a producer that tags content inside a form and omits `/Stm` writes something 14.7.4.2 does not define; where one reading exists it is taken and named, and where two streams share the identifier it is refused, because that is the collision `/Stm` exists to resolve | 14.7.4.2 |
@@ -841,7 +765,7 @@ crate has an API of its own; see [architecture](../architecture.md).
 | A JPEG 2000 image's own opacity channel in extraction | `PageImage::samples` holds the colour channels only | `/SMaskInData` decides what the channel means (8.9.5.4), and a soft mask carried out of the codestream is not an `/SMask` image the type can name; the renderer applies it | 8.9.5.4 |
 | A table attribute with a value Table 349 does not define — a `/Scope` that is not `/Row`, `/Column` or `/Both`, a span below one, a `/Headers` entry that is not a string | `StructureWarning::AttributeIgnored { element, owner, key }` | read as absent rather than guessed at; the element and its other attributes are read as usual, so a table whose headers head nothing stays distinguishable from one that said something this reader could not read | 14.8.5.7 |
 | More than 2^20 `/A`, `/Headers` and `/AF` entries across one structure tree (`MAX_STRUCTURE_VALUES`) | `StructureWarning::ValuesCapped`, once | a per-array cap does not bound them: one array shared by reference among every element is read once per element, 2^38 entries from a file of kilobytes (`shared_header_and_file_arrays_are_retained_within_one_budget`, `a_shared_attribute_array_is_visited_within_the_walks_values_budget`); every element is still read | ruling 1 |
-| More than 64 MiB of strings and names copied out of one structure tree (`MAX_STRUCTURE_BYTES`) | `StructureWarning::BytesCapped { element }`, once; the string reads as absent | one indirect `/NS`, `/ID`, `/Alt` or `/Headers` string may be named from every element and was copied once per mention — a mebibyte `/NS` shared by 2^18 elements is a quarter of a terabyte (`a_shared_namespace_is_copied_within_the_walks_copy_budget`); every element and its type are still read | ruling 1 |
+| More than 64 MiB of strings and names copied out of one structure tree (`MAX_STRUCTURE_BYTES`) | `StructureWarning::BytesCapped { element }`, once; the string reads as absent | one indirect `/NS`, `/ID`, `/Alt` or `/Headers` string may be named from every element and would be copied once per mention — a mebibyte `/NS` shared by 2^18 elements is a quarter of a terabyte (`a_shared_namespace_is_copied_within_the_walks_copy_budget`); every element and its type are still read | ruling 1 |
 | An element `/NS` that is not an indirect reference to a namespace dictionary carrying Table 356's required `/NS` URI | `StructureWarning::NamespaceIgnored { element }` | read as naming no namespace — the default one, after `/RoleMap` — rather than keyed on an object that names nothing; like `AttributeIgnored`, not a fault in the tree's shape, and the PDF/UA census does not count it as one | ISO 32000-2 Table 355 |
 | Which namespace a type lands in after a **bare-name** `/RoleMapNS` value, or after the global `/RoleMap` moves a type that named a namespace | `StructElement::standard_namespace` is `None` | the Arlington model permits the bare name and the errata quote only the `[type ns]` pair and the global map's use for elements in no namespace; neither says which namespace either result is in, and `None` is that, said rather than guessed. The type itself is still resolved | ISO 32000-2 14.8.6.2 |
 | Attributes reached through an element's `/C` and the root's `/ClassMap` | — | `StructElement::table` reads the attribute objects in `/A` only; 14.7.6.2's classes are a second source of the same attributes that no writer here emits and no test here exercises, so it is named rather than half-read | 14.7.6.2 |
@@ -864,8 +788,8 @@ name found through the form's scope; inline images, one naming a page colour
 space resource; a fax, lossless, one bit a sample even where its dictionary
 claims eight, and a damaged fax, as an XObject and inline, whose `warnings`
 are the reasons the render of the same page names; an indirect colour-key
-mask read as the renderer reads it; a JPEG held to the decoder's own output; fifteen hostile
-dictionaries and three hostile inline images listed without a panic; and a
+mask read as the renderer reads it; a JPEG held to the decoder's own output;
+hostile dictionaries and hostile inline images listed without a panic; and a
 deterministic mutation sweep. `hostile_input.rs` and the `render_page` fuzz
 target call `images()` on every page they reach.
 
@@ -885,7 +809,7 @@ Unit tests live beside the code: `crates/tinker-pdf-content/src/tokenizer.rs`
 (every escape form, malformed numbers, arbitrary-byte termination),
 `text.rs` (artifact scopes nest, `ET` continuation versus baseline gaps,
 a justified word space carrying the pen within right-to-left text and
-cutting as before beside a left-to-right word, letter-spacing carrying it
+cutting beside a left-to-right word, letter-spacing carrying it
 into a right-to-left glyph and into nothing else — not a bracket, an angle
 bracket or a dash after a right-to-left word, nor anything after neutrals on
 a line that holds a Latin letter — and only as far as a twentieth of an em,
@@ -908,7 +832,7 @@ formats and the line's words, the comma tie-break — `חו,` and `حوت,` alon
 lines of a left-to-right page, `שלום.` still right to left, a line holding a
 Latin letter out of its reach, a mark and a number opening a right-to-left
 line read as typed, and so an opening bracket or quotation mark, and its
-price, a leading dash read last — the bracket tie-break, a right-to-left
+limit, a leading dash read last — the bracket tie-break, a right-to-left
 line opening with a bracketed Latin run drawn as three pieces, a list marker
 and a wrapped parenthesis in left-to-right text read as typed, and
 every committed `testdata` document and EPUB book unchanged against the
@@ -933,18 +857,13 @@ recorder that shares one handle and reports every event with the last state;
 glyphs and copies no state; the per-event size pinned) and `state.rs` (matrix
 convention, render-mode predicates).
 
-Every test in `interpret.rs` drives `RecordingDevice`. It used to carry five
-devices of its own — `Recorder`, `GroupEvents`, `Painted`, `Scopes` and
-`Images` — and all five are gone with what they asserted unchanged. One
-assertion grew rather than moved: the hidden-image test's device used to
-suppress a hidden image *itself* while its comment claimed it recorded
-"whether it was asked at all", so it proved the weaker of the two. The
-interpreter hands a hidden image to the device inside a hidden scope, and the
-test now says so.
+Every test in `interpret.rs` drives `RecordingDevice`; the hidden-image test
+asserts that the interpreter hands a hidden image to the device inside a
+hidden scope.
 
-`crates/tinker-pdf-content/tests/uax29_conformance.rs` runs every one of
-`WordBreakTest.txt`'s 1 944 cases against the segmenter `words()` calls, and
-all 1 944 agree; the count is pinned, so a truncated file fails.
+`crates/tinker-pdf-content/tests/uax29_conformance.rs` runs every case of
+`WordBreakTest.txt` against the segmenter `words()` calls; the case count is
+pinned, so a truncated file fails.
 
 `serialize.rs`'s unit tests hold each format's escaping to exact strings over
 one hostile string — every C0 control, DEL, NEL, U+2028/U+2029, markup
@@ -971,13 +890,8 @@ still extracted and still not drawn, and a hidden form's text still
 extracts. `tinker_parity.rs` ports Tinker's own `text_and_search.rs`
 assertions verbatim (ruling 12).
 
-Two of the 15 determinism render fingerprints exercise this path directly —
-`text` and `optional` in `crates/tinker-pdf/tests/determinism.rs` — beside
-the 3 document byte-hashes. The `content_tokenizer` and `render_page` fuzz
-targets are among the 24 with committed seed corpora; `hostile_input.rs`
-sweeps the same shapes on stable. Nothing compares this extractor against
-another one: ruling 13 ended that, and the harness that could have driven one
-is deleted. Across the corpus, 5 516 of
-5 525 files rendered every page with 0 crashes, and `cargo test
---workspace` stands at 4 879 passed / 0 failed / 58 ignored across 218 suites
-(Windows x86_64, 14 September 2026).
+The `text` and `optional` determinism render fingerprints in
+`crates/tinker-pdf/tests/determinism.rs` exercise this path directly. The
+`content_tokenizer` and `render_page` fuzz targets have committed seed
+corpora; `hostile_input.rs` sweeps the same shapes on stable. Nothing
+compares this extractor against another one (ruling 13).

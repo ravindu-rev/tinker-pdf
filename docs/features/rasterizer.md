@@ -36,47 +36,32 @@ fill on a page-tall region does the shape's work, not the paper's.
 
 *Every subpath is closed before it is filled* (8.5.3.1), and before it clips
 (8.5.4), which reaches the same `fill`: the segment from a polyline's last point
-back to its first is an edge whether or not the path said `h`. **Until
-September 2026 it was not.** `90 10 m 150 30 l 110 60 l f` painted nothing —
-both stated edges run downward, so every sub-scanline held one crossing and no
-span — and an open triangle whose edges did not happen to run the same way
-painted a wrong shape instead. The `curves` fingerprint in
-[determinism](determinism.md) had that defect baked in and moved when it was
-fixed; instrumenting the filler over all nineteen fingerprinted pages found its
-triangle the only open subpath any of them fills or clips.
-`an_open_subpath_is_closed_before_it_is_filled_or_clipped` holds the fix by
+back to its first is an edge whether or not the path said `h`.
+`an_open_subpath_is_closed_before_it_is_filled_or_clipped` holds it by
 half-plane arithmetic over `f`, `f*`, `W n` and two subpaths.
 
-*What the fixed grid costs, measured rather than asserted.* This paragraph
-used to end "and the difference stays below one 8-bit level at every edge
-angle". It does not, and never did. Measured 15 September 2026 against the
-true area of a half-plane over a sweep of angles and sub-pixel offsets, the
-worst pixel is **14.7 levels of 255** at one degree off horizontal; the error
-sits between 8 and 10 levels from two degrees to forty-five and falls to 1.1
-at eighty-nine. Sixteen sub-scanlines quantise an edge's vertical position to
-a sixteenth of a pixel, and that is what those numbers are. The trade is still
-the right one — a fixed grid is what makes ruling 4's bit-identical output
-possible at all, and a floating-point area integrator would not be — but it is
-a trade, and `SAMPLES` is the knob that buys quality back at a linear cost and
-at the price of re-baselining every fingerprint in the tree.
+*What the fixed grid costs.* Sixteen sub-scanlines quantise an edge's
+vertical position to a sixteenth of a pixel, so against the true area of a
+half-plane a pixel's coverage is not exact to one 8-bit level: the error is
+largest at edges near horizontal and smallest near vertical. A fixed grid is
+what makes ruling 4's bit-identical output possible at all, and a
+floating-point area integrator would not be; `SAMPLES` is the knob that buys
+quality back at a linear cost and at the price of re-baselining every
+fingerprint in the tree.
 
-*An edge carries sixteen more bits than the spans do*, and the reason is
-worth stating because it was got wrong for as long as this file existed. An
-edge's slope is multiplied by the height of the edge and its position is not,
-so the slope needs far more precision. Held at a whole 1/256 unit per
-sub-scanline, a slope is stored as `trunc(slope × 16)`: **every slope
-shallower than one pixel of `x` per sixteen of `y` truncated to zero and the
-edge was drawn vertical**, and every steeper one walked its lower end `h/16`
-pixels off the line over an edge `h` tall. `SUBSTEP_BITS` puts sixteen bits
+*An edge carries sixteen more bits than the spans do.* An edge's slope is
+multiplied by the height of the edge and its position is not, so the slope
+needs far more precision: held at a whole 1/256 unit per sub-scanline, every
+slope shallower than one pixel of `x` per sixteen of `y` would truncate to
+zero and the edge would be drawn vertical. `SUBSTEP_BITS` puts sixteen bits
 under the 1/256 unit, which leaves a page-tall edge under a thousandth of a
 level from the line it states. The reduction back to 1/256 takes the
 **nearest** unit — `+ half, >> bits`, a `floor` of a shifted value — rather
 than truncating toward zero, which is a different operation on the two sides
-of the origin and so quantised a shape differently once it moved across one.
-That is the property a tile rests on (ruling 5), and it is also simply the
-closer answer: a span is linear in the crossing, so the nearest unit is the
-one whose span is nearest the geometry's. Both were found by ruling 5's tile
-guard and both were wrong for a whole page as much as for a tile.
+of the origin and would quantise a shape differently once it moved across
+one. That is the property a tile rests on (ruling 5), and it is also simply
+the closer answer: a span is linear in the crossing, so the nearest unit is
+the one whose span is nearest the geometry's.
 
 **Stroking.** `stroke` expands a path under a `StrokeStyle` pen into an
 outline filled with the non-zero rule, so a stroked edge anti-aliases
@@ -86,9 +71,8 @@ Table 55); dashes follow 8.4.3.6, with an empty or zero-sum array meaning a
 solid line, and a width of zero drawing the thinnest device line — one
 pixel (8.4.3.2). A point repeated has no direction to join or cap along,
 so repeats are dropped before the joins are read — the close of a circle
-of four Béziers and an `h` ends on its start point twice, and until
-October 2026 that lost the join at the start, a notch at the point where
-every such circle begins.
+of four Béziers and an `h` ends on its start point twice, and would
+otherwise lose the join at the start.
 
 **A pen in another space.** `stroke_mapped` is 8.4.3.2 read literally for
 a map that is not a similarity: the path, the width and the dashes are in
@@ -101,36 +85,25 @@ space is cut along the shear on the device. Its `floor` is the device's:
 wherever the mapped pen is thinner than it, the same dashed pieces are also
 mapped first and stroked at the floor, and the union is at least that wide
 every way. Its curves are flattened in the pen's space at the device
-tolerance over the map's largest stretch, honoured however small — `flatten`'s
-floor of a millionth guards a *device* tolerance, and until the review of lane
-8A it was applied here too, so under a stretch past 200 000 a circle's four
-Béziers were flattened at 0.1 of the pen's own units and came out a diamond;
-`dash` flattens at its caller's tolerance the same way. `stretches` gives a map's two singular values, which is how a
+tolerance over the map's largest stretch, honoured however small —
+`flatten`'s floor of a millionth guards a *device* tolerance and does not
+apply in the pen's space; `dash` flattens at its caller's tolerance the same
+way. `stretches` gives a map's two singular values, which is how a
 caller tells a similarity from anything else, and `dash` hands a caller
 the pieces a pattern leaves without stroking them — one at a time, as each
 is cut, and stops cutting when the caller answers `false`: the 100 000-step
 bound is per segment, so forty segments under `[0.01 0.01]` are two million
 pieces, and a caller writing them somewhere bounded pays only for what it
-keeps (until the review of lane 8A it collected them all first). A pattern
-whose every dash has no length — `[0 0.01]` — leaves no piece, and the walk
-now answers that without stepping along the path; until the second review of
-lane 8A it took its 100 000 steps a segment to find nothing, so a caller
-bounding the work by the pieces it is handed had none to stop on: a page of
-two hundred such segments took 1.65 s (debug) to write as SVG and render,
-and now under 10 ms (`dashes_of_no_length_cut_nothing_without_walking_the_line`).
+keeps. A pattern whose every dash has no length — `[0 0.01]` — leaves no
+piece, and the walk answers that without stepping along the path
+(`dashes_of_no_length_cut_nothing_without_walking_the_line`).
 A dash of no length among dashes with length is taken out before the walk
 and the gaps either side of it joined (`without_empty_dashes`; an odd pattern
 is written out twice first, as the walk reads it, and turned to start at its
 first dash with length, its phase moved to match), which leaves every piece
-where it was and costs the walk no step: until the third review of lane 8A
-each entry was a step, so 250 dashes of no length padding one of 0.001 made
-a piece cost 502 steps, the per-segment bound ran out a fifth of the way
-along a thousand-long segment, and a caller bounding its work by the pieces —
-`Page::to_svg`, which has no cancel hook — paid about 21 steps a byte: 800
-segment pairs took 3.7 s (debug) to write 7.5 MB. They now write 15 MB, every
-piece of every segment, in 0.63 s — what `[0.001 2.51]` writes, at its cost
-(`a_dash_of_no_length_costs_no_step_of_the_walk`). A pattern with no dash of
-no length is walked exactly as before.
+where it was and costs the walk no step, so a pattern padded with dashes of
+no length writes what it writes without them, at the same cost
+(`a_dash_of_no_length_costs_no_step_of_the_walk`).
 
 **Hard edges.** `Mask::harden` turns a coverage mask into one that is whole or
 empty at every pixel: at least half becomes 255, less becomes 0. It is what
@@ -185,15 +158,13 @@ every sampled coordinate and every `at` the crate is handed is in **device**
 pixels of the page. Only the index into `Canvas::data` subtracts the origin,
 which is an integer subtraction and cannot round. `Mask::overlap_at`,
 `image_bounds_in`, `Fragments` and `Canvas::composite`/`extract` all read it.
-This is ruling 5's lattice ([rulings](../rulings.md)): until September 2026 a
-region was drawn in a frame of its own, the page's transform less its corner,
-and `fl(u + e)` against `fl(u + e − tx)` put a tile and the page under it an
-ulp apart wherever the exact value sat on one of this crate's grids — a
-shading's colour step, and an edge's first sub-scanline, which `fill` takes as
-`ceil(y × 16)` with nothing to absorb an ulp. One frame makes every coordinate
-one number. The image quad's snap to the 1/256 grid, below, was the earlier
-defence against the same thing and is kept: it is the reason a *cropped* page
-and the page under it agree, which is a different transform and not a region.
+This is ruling 5's lattice ([rulings](../rulings.md)): one frame makes every
+coordinate one number, so a tile and the page under it agree even where the
+exact value sits on one of this crate's grids — a shading's colour step, and
+an edge's first sub-scanline, which `fill` takes as `ceil(y × 16)` with
+nothing to absorb an ulp. The image quad's snap to the 1/256 grid, below, is
+the reason a *cropped* page and the page under it agree, which is a different
+transform and not a region.
 
 **Images.** `draw_image` maps every destination pixel backwards through the
 inverse transform into the samples — a forward map leaves seams and
@@ -208,7 +179,7 @@ a pixel the image half covers takes half the paint. The quad's corners are
 snapped to that 1/256 grid first, because a rectangle placed by a translation
 lands on a grid line far more often than not and `a + (e - t)` need not equal
 `(a + e) - t` to the last bit; without the snap a cropped page and the page
-under it disagreed on 240 pixels.
+under it would disagree.
 
 *Sampling.* Decided per draw by `sampling_for` from the ratio alone, with
 `/Interpolate` (Table 89) the only thing the caller supplies. Above 1:1 the
@@ -221,25 +192,20 @@ what makes a render at twice the scale, box-filtered down, the same picture.
 Past 128:1 that gives way to exact 2x2 box-filter averaging into a `Pyramid` of
 halved levels until the residual is within 4:1, which bounds the cost of the
 one case exact integration does not: the same image drawn many times at
-extreme minification, where the levels are built once and reused. The
-threshold is measured — the worst downscale any draw in the pdfjs corpus asks
-for is 72:1 — and the trade it makes is written up in
-[design/image-edges.md](../design/image-edges.md), because a pyramid is
-quantised to powers of two and therefore *scale-dependent*, which is what the
-`dpi` metamorphic relation had been reporting on strip-built scans.
+extreme minification, where the levels are built once and reused. The trade
+it makes is written up in [design/image-edges.md](../design/image-edges.md),
+because a pyramid is quantised to powers of two and therefore
+*scale-dependent*.
 
 Hard samples are `Area` over the pixel's own footprint rather than one nearest
 tap, and above 1:1 that footprint is *smaller than a sample*: a pixel inside a
 sample reads that sample and nothing else, and only a pixel straddling two
 mixes them. That is the sample's edge anti-aliased, not the image blurred —
 `/Interpolate false` still gets its hard pixels, and a 1:1 blit is still
-byte-preserving. A nearest tap instead quantised every internal sample boundary
+byte-preserving. A nearest tap would quantise every internal sample boundary
 to whole device pixels, which is the same defect as the outer edge one level
 down: a render at twice the scale resolves those boundaries twice as finely, so
-box-filtering it back down could not reproduce the coarser render. Measured on
-a 512-square source, share of pixels disagreeing between a render and the
-box-filtered render at twice the scale: **49.9 % before, 0.00 % after**, at
-every ratio tried.
+box-filtering it back down could not reproduce the coarser render.
 
 *Compositing, and the artefact anti-aliasing creates.* Two images that share an
 edge each cover the pixels along it partly, and compositing them one after the
@@ -258,8 +224,8 @@ blend mode, clip or soft mask, and any other drawing operation. A run survives
 `q`, `Q` and a form boundary, because none of those paints — which matters,
 since real content brackets every image in `q`/`Q` and a run that ended there
 would never hold two of anything. Past `MAX_IMAGE_RUN_PIXELS`, a quarter of
-`MAX_PAGE_PIXELS`, images composite one at a time as before and abutting ones
-conflate again; that is bounded memory rather than a page that will not render.
+`MAX_PAGE_PIXELS`, images composite one at a time and abutting ones conflate;
+that is bounded memory rather than a page that will not render.
 A knockout group composites image by image too, because 11.4.5 gives every
 element its own shape.
 
@@ -271,10 +237,9 @@ floats the accumulation order would decide the last bit. So is the run's
 accumulation, and so is the coverage the quad contributes. The only floats left
 on the path are `sqrt`, division and `round`, which IEEE 754 pins exactly
 (ruling 4). The pyramid belongs to the caller, so an image's lifetime is
-decided where it is known. A stencil's PDF name stayed behind as
-`ImageDraw::tint` (8.9.6.2): the image says where, the caller says what —
-and `ImageDraw::ink` what that colour is in ink, which only a `CmykA8`
-canvas reads.
+decided where it is known. A stencil's colour is `ImageDraw::tint`
+(8.9.6.2): the image says where, the caller says what — and `ImageDraw::ink`
+what that colour is in ink, which only a `CmykA8` canvas reads.
 
 The trade is written down in [design/image-edges.md](../design/image-edges.md).
 
@@ -294,8 +259,7 @@ pixel for pixel and a tile refuses exactly the meshes the page refuses.
 **Cost and cancellation.** A paint costs what it covers: the caller asks for
 a region per shape clipped to the clip's rectangle, every consumer walks the
 mask's rectangle rather than the canvas, and the fill sweeps only the rows a
-shape reaches. Measured on 600 glyphs on US Letter at 300 dpi: 5 997.7 ms to
-18.8 ms (one-time measurement, August 2026). Long operations take a `stop`
+shape reaches. Long operations take a `stop`
 predicate — the render layer's `CancelToken` — asked every sixteenth row of
 a fill or composite and every 1 024 steps of a dash expansion, and what
 comes back on a stop is the partial result, because a half-drawn shape is a
@@ -348,7 +312,7 @@ tiny pattern over a long line cannot generate millions of pieces.
 
 ## Verified
 
-- **95 unit tests inside the crate** (August 2026): `geom.rs` proves a
+- **Unit tests inside the crate**: `geom.rs` proves a
   quadratic flattens point-for-point like its exact cubic equivalent across
   seven curve shapes and five tolerances, and that flattening is
   deterministic; `fill.rs` covers both fill rules, mask algebra and the
@@ -360,20 +324,18 @@ tiny pattern over a long line cannot generate millions of pieces.
   proves shared edges leave no seam; `canvas.rs` covers formats, backdrops
   and bounded compositing.
 - **Determinism fingerprints** (`crates/tinker-pdf/tests/determinism.rs`):
-  of the 19 committed render fingerprints, `text`, `curves`, `shading`,
-  `blend`, `pattern`, `image`, `transparency`, `tiling` and `mesh` exercise
-  this crate directly, each a pixel hash plus dimensions and an ink floor,
-  reproduced byte-for-byte on three measured targets
-  ([determinism](determinism.md)).
+  the render fingerprints `text`, `curves`, `shading`, `blend`, `pattern`,
+  `image`, `transparency`, `tiling` and `mesh` exercise this crate directly,
+  each a pixel hash plus dimensions and an ink floor, reproduced
+  byte-for-byte across targets ([determinism](determinism.md)).
 - **Analytic coverage** (`tinker-pdf-raster/tests/analytic_coverage.rs`):
   every expectation a closed form of the sampling grid, evaluated in the test
   from the path's own equation and compared byte for byte — both fill rules, a
   half-covered edge, a diagonal against the area the line states, and
   `a_shallow_edge_keeps_the_slope_the_line_states`, a parallelogram two pixels
   wide and 256 tall drifting fourteen across, whose slope is 0.875 of a 1/256
-  unit per sub-scanline. That last one is the fixture the truncated slope
-  above had no answer for: it rasterised as a straight vertical bar, fourteen
-  pixels wrong at its lower end. What this tier adjudicates is the
+  unit per sub-scanline — a slope a whole 1/256 unit would truncate to zero
+  (above). What this tier adjudicates is the
   implementation against the *stated sampling model*, which is this crate's
   own contract rather than ISO 32000's — named here because that is a weaker
   claim than a third-party vector and is worth not mistaking for one.
@@ -384,17 +346,15 @@ tiny pattern over a long line cannot generate millions of pieces.
   all fifteen sixteenths, and a corner against the product of its two
   fractions; a 1:1 integer-aligned draw asserted byte-preserving so a coverage
   off-by-one would show as a rim; and the conflation pair — two abutting black
-  strips leaving **63** composited one at a time and **0** as one run, which
-  states the defect and the fix in the same test.
+  strips leaving **63** composited one at a time and **0** as one run.
 - **Integration tests** through the facade: `blend_modes.rs`,
   `stroke_parameters.rs`, `images.rs`, `inline_images.rs`,
   `mesh_shadings.rs` and `transparency_groups.rs` under
   `crates/tinker-pdf/tests/`.
-- **Fuzzing**: the `render_page` target (one of the 24) drives whole
-  documents through the interpreter into this rasterizer under ruling 1;
-  the corpus run renders every page of 5 516 of 5 525 files with 0 crashes
+- **Fuzzing**: the `render_page` target drives whole documents through the
+  interpreter into this rasterizer under ruling 1
   ([verification](../verification.md)).
 - **Cost regression**: `a_small_fill_on_a_large_page_stays_small` (in
   `crates/tinker-pdf-render/src/lib.rs`) asserts on mask pixels *asked for*
-  rather than pixels painted, so a paint that goes back to costing the whole
-  canvas fails it while passing everything else.
+  rather than pixels painted, so a paint that costs the whole canvas fails it
+  while passing everything else.

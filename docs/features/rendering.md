@@ -18,92 +18,82 @@ convert as 8.6.4 says; `/Indexed` reads its palette over any base space
 the alternate space (8.6.6.4, 8.6.6.5); `/Lab` converts through XYZ at the
 D50 white point (8.6.5.4), kept separate because its components are not in
 0..1 and clamping them there renders the whole space black; `a*` and `b*` are
-held to `/Range` in whichever order its pairs come (a backwards pair panicked
-the colour crate until October 2026), and a backwards pair is named —
-`RenderWarning::RepairedColorSpace` with the resource name the space was
-reached by and `LabRangeUnordered`, on a render, every display-list replay and
-a page written as SVG (`an_unordered_lab_range_is_named_wherever_it_is_read`);
-until the third review of lane 8A it was read that way silently. An `ICCBased` space is converted
-through **its own profile** (ICC.1): the header and tag table are read, the
-three `XYZ` columns and three tone curves compile once into fixed-point
-tables, and each colour is a lookup plus an integer matrix multiply, so
-nothing on the pixel path evaluates a transcendental and ruling 4 holds. Grey
-profiles are the same with one curve. A printer profile carries a multi-dimensional lookup table
-instead — `mft1` or `mft2` at an `A2B*` tag, three stages of curve with an
-interpolated grid between them. **v4's `mAB ` reads too**, which is five
-optional stages where v2 has three fixed ones — A curves, a grid whose axes may
-each carry their own point count, M curves, a matrix and B curves, run in that
-order although the header lists their offsets in the reverse. A grey profile
-whose connection space is `Lab` rather than `XYZ` reads as well: its one curve
-gives lightness instead of luminance, and the two differ by 8.6.5.4's cube
-root.
+held to `/Range` in whichever order its pairs come, and a backwards pair is
+named — `RenderWarning::RepairedColorSpace` with the resource name the space
+was reached by and `LabRangeUnordered`, on a render, every display-list replay
+and a page written as SVG
+(`an_unordered_lab_range_is_named_wherever_it_is_read`). An `ICCBased` space
+is converted through **its own profile** (ICC.1): the header and tag table are
+read, the three `XYZ` columns and three tone curves compile once into
+fixed-point tables, and each colour is a lookup plus an integer matrix
+multiply, so nothing on the pixel path evaluates a transcendental and ruling 4
+holds. Grey profiles are the same with one curve. A printer profile carries a
+multi-dimensional lookup table instead — `mft1` or `mft2` at an `A2B*` tag,
+three stages of curve with an interpolated grid between them. **v4's `mAB `
+reads too**, which is five optional stages where v2 has three fixed ones — A
+curves, a grid whose axes may each carry their own point count, M curves, a
+matrix and B curves, run in that order although the header lists their
+offsets in the reverse. A grey profile whose connection space is `Lab` rather
+than `XYZ` reads as well: its one curve gives lightness instead of luminance,
+and the two differ by 8.6.5.4's cube root.
 
-Measured against the corpus's **3 235** real profiles, September 2026:
-**3 229 compile, 99.8 %** — and 682 of the 5 525 files name an `ICCBased` space
-that paints through one, which the corpus report counts as `iccbased`. **The
-six that do not are profiles contradicting themselves**, and the census names
-each: a monitor profile whose data space is `LAB` carrying the `rXYZ` columns a
-matrix applies to linear RGB; one naming a three-channel space no registry
-defines; and a CMYK printer profile with a single `kTRC` and no matrix — one
-curve for four channels of ink. Those are `ColorSpace::Approximated`, read by
-component count, which is the alternate-space reading 8.6.5.5 permits.
+A profile that contradicts itself — a monitor profile whose data space is
+`LAB` carrying the `rXYZ` columns a matrix applies to linear RGB; one naming a
+three-channel space no registry defines; a CMYK printer profile with a single
+`kTRC` and no matrix, one curve for four channels of ink — is
+`ColorSpace::Approximated`, read by component count, which is the
+alternate-space reading 8.6.5.5 permits.
 
 **`CalGray` and `CalRGB` convert through their own parameters** (8.6.5.2,
 8.6.5.3): the components go through `/Gamma`, `/Matrix` takes them into XYZ
 relative to `/WhitePoint`, and the white point is adapted to D50 before the
-sRGB matrix. They were aliased to `DeviceGray` and `DeviceRGB` until September
-2026, which read neither the white point nor the gamma and left *nothing*
-recording that an approximation had happened — unlike an ICC profile this build
-refuses, where `Approximated` says so on the type.
+sRGB matrix.
 
 The adaptation is **von Kries in XYZ**, scaling each axis by the ratio of the
 two whites, and not the Bradford transform baked into the profile path's
 matrix. Named rather than hidden: the two differ on saturated colours far from
 the neutral axis. A bare `/CalGray` or `/CalRGB` *name*, with no parameter
-dictionary behind it, is still the device space — there is nothing else the
-file has said. `/G`, `/RGB` and `/CMYK` are Table 93's inline-image
-abbreviations and are read as the device spaces only where no `/ColorSpace`
-resource has the name: 8.6.8 gives `cs` a device space's own name or a
-resource, and until October 2026 a `/CalGray` registered as `/G` was drawn in
-DeviceGray. A `/Lab` image with no `/Decode` takes Table 90's default —
-`L*` over 0..100, `a*` and `b*` over the space's `/Range` — where it used to
-read every sample as a fraction of one and come out all but black;
-`writer_cie.rs` holds both, with the CIE-based spaces this engine now writes. `[/Pattern base]` carries the underlying space
-of an uncoloured pattern (8.7.3.2), so an `scn`'s components reach the paint.
-Initial colours follow 8.6.8 — CMYK starts at full black ink, not all zeros.
-Out-of-range components clamp rather than wrap.
+dictionary behind it, is the device space — there is nothing else the file
+has said. `/G`, `/RGB` and `/CMYK` are Table 93's inline-image abbreviations
+and are read as the device spaces only where no `/ColorSpace` resource has the
+name: 8.6.8 gives `cs` a device space's own name or a resource. A `/Lab`
+image with no `/Decode` takes Table 90's default — `L*` over 0..100, `a*` and
+`b*` over the space's `/Range`; `writer_cie.rs` holds both, with the
+CIE-based spaces this engine writes. `[/Pattern base]` carries the underlying
+space of an uncoloured pattern (8.7.3.2), so an `scn`'s components reach the
+paint. Initial colours follow 8.6.8 — CMYK starts at full black ink, not all
+zeros. Out-of-range components clamp rather than wrap.
 
-**Default colour spaces** (8.6.5.6), since October 2026 (K-02.2). A scope's
-`/DefaultGray`, `/DefaultRGB` and `/DefaultCMYK` — entries of the
-`/ColorSpace` subdictionary of a page's, a form's, a tiling cell's or an
-appearance stream's resources — stand in for the device space each is named
-for wherever one is selected for painting: `g`/`G`, `rg`/`RG` and `k`/`K`;
-`cs` naming the device space, a `/ColorSpace` entry that is one, Table 93's
-`/G`, `/RGB` and `/CMYK` and a bare `/CalGray` or `/CalRGB` name; `sc`/`scn`
-with no space named, read in the family its count gives; a sampled image's
-`/ColorSpace` and an inline image's `/CS`; a shading's, under `sh` and in a
-shading pattern; an `/Indexed` base, an uncoloured pattern's base, and the
-alternate of a `/Separation` or `/DeviceN` space — not of `/Separation /All`
-or `/None`, which 8.6.6.4 is read as never selecting; a group's `/CS`, and
-with it a luminosity mask's `/BC`. A default is read in the scope the stream's
-other names resolve in: a page's stops at a form or a cell with `/Resources`
-of its own, empty ones included (8.10.1), a form's applies inside it only, and
-a form group's `/CS` is remapped by the scope its contents run in. A Type 3
-glyph and a soft-mask group run in the scope that invokes them, and so do
-their defaults ([design/icc.md](../design/icc.md)). A group keeps only its
-space's shape, which a default cannot change, so remapping its `/CS` moves no
-pixel today; the `/BC` is where it shows. `cs` resets to the device space's
-initial colour carried into the default, so `/DeviceCMYK cs` paints what
-`0 0 0 1 k` paints where an `ICCBased` default's own zeros would be no ink at
-all. A default's own spaces are read as written and never remapped again —
-`/DefaultRGB /DeviceRGB` is a legal default, and no default at all. A `/Lab`,
-`/Indexed` or `/Pattern` default, one with another number of components and
-one that is no colour space is refused: the device space is drawn as it would
-be without it, and the refusal is named (the refusal table). A JPEG or JPEG
-2000 image reads no `/ColorSpace`, so neither a default nor a space named
-directly reaches it, which the design names as outside the row. A scope's
-defaults are read once, on its first device-space question, and the
-interpreter asks once a scope which families remap
+**Default colour spaces** (8.6.5.6). A scope's `/DefaultGray`, `/DefaultRGB`
+and `/DefaultCMYK` — entries of the `/ColorSpace` subdictionary of a page's, a
+form's, a tiling cell's or an appearance stream's resources — stand in for
+the device space each is named for wherever one is selected for painting:
+`g`/`G`, `rg`/`RG` and `k`/`K`; `cs` naming the device space, a `/ColorSpace`
+entry that is one, Table 93's `/G`, `/RGB` and `/CMYK` and a bare `/CalGray`
+or `/CalRGB` name; `sc`/`scn` with no space named, read in the family its
+count gives; a sampled image's `/ColorSpace` and an inline image's `/CS`; a
+shading's, under `sh` and in a shading pattern; an `/Indexed` base, an
+uncoloured pattern's base, and the alternate of a `/Separation` or `/DeviceN`
+space — not of `/Separation /All` or `/None`, which 8.6.6.4 is read as never
+selecting; a group's `/CS`, and with it a luminosity mask's `/BC`. A default
+is read in the scope the stream's other names resolve in: a page's stops at a
+form or a cell with `/Resources` of its own, empty ones included (8.10.1), a
+form's applies inside it only, and a form group's `/CS` is remapped by the
+scope its contents run in. A Type 3 glyph and a soft-mask group run in the
+scope that invokes them, and so do their defaults
+([design/icc.md](../design/icc.md)). A group keeps only its space's shape,
+which a default cannot change, so remapping its `/CS` moves no pixel; the
+`/BC` is where it shows. `cs` resets to the device space's initial colour
+carried into the default, so `/DeviceCMYK cs` paints what `0 0 0 1 k` paints
+where an `ICCBased` default's own zeros would be no ink at all. A default's
+own spaces are read as written and never remapped again — `/DefaultRGB
+/DeviceRGB` is a legal default, and no default at all. A `/Lab`, `/Indexed`
+or `/Pattern` default, one with another number of components and one that is
+no colour space is refused: the device space is drawn as it would be without
+it, and the refusal is named (the refusal table). A JPEG or JPEG 2000 image
+reads no `/ColorSpace`, so neither a default nor a space named directly
+reaches it. A scope's defaults are read once, on its first device-space
+question, and the interpreter asks once a scope which families remap
 (`FontSource::device_defaults`), so a page naming none pays a load and a
 branch per selection and one flag check per device operator.
 `tests/default_spaces.rs` holds every path and scope above to a twin naming
@@ -112,56 +102,37 @@ CalRGB and ICCBased N=3, and ICCBased N=4, each beside the page without its
 default that it must not equal
 (`each_default_space_draws_as_its_substitute_named_directly`).
 
-*Corrected with it, October 2026*: `g`, `rg` and `k` left the space slot
-naming whatever `cs` selected last, so `/CS1 cs 1 sc 0.5 g 0.7 sc` painted
-the `0.7` in `/CS1` where 8.6.8 has `g` select DeviceGray; the slot now holds
-the reading by count, so `sc` reads in the family the operator selected. An
-inline image's `[/I …]` was expanded as Table 93's `/Interpolate` rather than
-Table 94's `/Indexed`, so it painted its indices as grey and `Page::images`
-listed an unreadable `Interpolate` space; a palette written as a literal
-string had any abbreviation in its bytes rewritten; and an inline image naming
-a `/ColorSpace` resource (8.9.7), or an `/Indexed` one over a resource, was
-drawn as DeviceGray while `Page::images` listed the space it names
-(`the_selections_a_default_rides_on_read_what_the_file_names`).
+`g`, `rg` and `k` select their device space, so a following `sc` reads in the
+family the operator selected (8.6.8). An inline image's `[/I …]` is Table
+94's `/Indexed`, a palette written as a literal string is read as its bytes,
+and an inline image naming a `/ColorSpace` resource (8.9.7), or an `/Indexed`
+one over a resource, is drawn in the space it names, as `Page::images` lists
+it (`the_selections_a_default_rides_on_read_what_the_file_names`).
 
 **Functions** (7.10). All four types: sampled (`Function::Sampled`, 7.10.2),
 exponential (`Function::Exponential`, 7.10.3), stitching
 (`Function::Stitching`, 7.10.4) and the PostScript calculator
 (`Function::PostScript`, 7.10.5, bounded on every axis: a 100-entry stack, 32
 levels of `if`/`ifelse`, 65 536 tokens, no loop operator), plus
-`Function::Array` for the arrays a `/Function` entry may hold — an array no
-longer truncates to its first element. *Corrected 3 October 2026*: a
-shading whose **one** `/Function` was a sampled or calculator stream used to
-read as `Function::Identity` — the entry was resolved before the parser that
-reaches a stream through its reference saw it — so it painted its parameter
-as a ramp in the first component, with no warning; every shading in the suite
-stated its function inline or in an array, which never had the defect.
-`tests/shading_functions.rs` holds both stream types to their own colours.
-*Corrected the same day*: a sampled function of **more than one input** —
-a `/DeviceN` tint transform, a type 1 shading's — was read along its first
-input alone, whatever the others said, though its own note called that a
-nearest-sample read; a two-colorant tint painted every tint of the second
-colorant as none of it. It is 7.10.2's multilinear interpolation now, the
+`Function::Array` for the arrays a `/Function` entry may hold. A shading's
+one `/Function` may be a sampled or calculator stream reached through its
+reference; `tests/shading_functions.rs` holds both stream types to their own
+colours. A sampled function of more than one input — a `/DeviceN` tint
+transform, a type 1 shading's — is 7.10.2's multilinear interpolation, the
 first input varying fastest, across up to eight inputs and at the nearest
 sample past that, where 2^m corners a lookup stops being a cost worth paying
-(`a_two_input_sampled_function_shades_across_both_inputs`). One input is the
-arithmetic it always was. A type 1 shading's `/Matrix` is still not read.
-*Corrected on review the same day*: an eight-input table of sixteen-bit
-samples cost about 300 µs an evaluation in a debug build (23 µs optimised),
-and an image in a `/DeviceN` space evaluates its tint transform once a pixel —
-a 256 by 256 picture of 64 colours took 15 s to decode. An evaluation now
-enumerates only the axes the point is strictly inside, reads a byte-aligned
-sample in a few instructions and allocates nothing per call (90 µs debug,
-5 µs optimised, every answer the same to the bit), reads no more than 8 192
-samples whatever `/Range` asks for — past that, the nearest sample, as past
-eight inputs (`one_evaluation_reads_no_more_than_its_budget`) — and an image
-in any space other than the device spaces converts each colour once,
-remembered by its samples in a table of 4 096 slots that never answers one
-colour for another (`an_images_repeated_colour_is_converted_once`,
-`a_device_n_images_pixels_are_each_their_own_tint`): the same picture decodes
-in 0.13 s. A picture of a million distinct colours still costs a million
-evaluations, which is the clause's price, as a calculator's 65 536 tokens a
-pixel has always been.
+(`a_two_input_sampled_function_shades_across_both_inputs`). A type 1
+shading's `/Matrix` is not read. An evaluation enumerates only the axes the
+point is strictly inside, reads a byte-aligned sample in a few instructions,
+allocates nothing per call and reads no more than 8 192 samples whatever
+`/Range` asks for — past that, the nearest sample, as past eight inputs
+(`one_evaluation_reads_no_more_than_its_budget`). An image in any space other
+than the device spaces converts each colour once, remembered by its samples
+in a table of 4 096 slots that never answers one colour for another
+(`an_images_repeated_colour_is_converted_once`,
+`a_device_n_images_pixels_are_each_their_own_tint`). A picture of a million
+distinct colours costs a million evaluations, which is the clause's price, as
+is a calculator's 65 536 tokens a pixel.
 
 **Shadings** (8.7.4.5). Type 1 (function-based), type 2 (axial) and type 3
 (radial) are evaluated per pixel through `Shading::color_at`; the radial
@@ -207,9 +178,7 @@ patterns — because they are asked about the same form, by the same name, at th
 same moment. A form that omits the key falls back to the invoking scope, which
 is what its producer is relying on. An annotation's appearance stream gets the
 same treatment by a different route: it is reached by reference rather than by
-name, so `Page::render` announces it instead of the interpreter, and until it
-did an appearance's images resolved against the page while its text resolved
-against the appearance.
+name, so `Page::render` announces it instead of the interpreter.
 
 **Transparency.** `/Group /S /Transparency` on a form XObject composites as
 a unit (11.6.6), with isolation (11.4.4), knockout (11.4.5) and backdrop
@@ -227,67 +196,52 @@ averages colour values in the group's own space. The four non-separable modes
 so on a CMYK buffer their operands convert to light, blend, and convert back.
 A page-level group decides the format of the page canvas itself and is
 converted for the caller at the end, which is 11.4.7's own last step; a page is
-never handed back in Lab, and in CMYK only when asked for twice, because a
-`Bitmap` says how many components it has and nothing about what they mean. *Lab was handed back until
-September 2026*: `page_format` named `CmykA8` alone, so `format: LabA8` returned
-four bytes of encoded `L*a*b*` while `PixelFormat::LabA8`'s own documentation
-said it was not a page format;
-`a_page_asked_for_in_lab_comes_back_in_rgb` pins the correction.
+never handed back in Lab (`a_page_asked_for_in_lab_comes_back_in_rgb`), and in
+CMYK only when asked for twice, because a `Bitmap` says how many components it
+has and nothing about what they mean.
 
 **CMYK page output** is the one way past that, and it takes two fields rather
 than one: `format: PixelFormat::CmykA8` *and* `RenderOptions::allow_cmyk`, so a
 caller has said they know the bytes are ink. The page composites over ink on a
-canvas that starts with none — which it already did for `format: CmykA8`, and
-then converted — and the buffer comes back as it stands. **A DeviceCMYK
-colour is the document's own ink**: the interpreter keeps the components a
-fill, stroke or glyph colour was set with in DeviceCMYK — `k`, `K`, and
-`sc`/`scn` in a space the resource seam resolves to DeviceCMYK
+canvas that starts with none, and the buffer comes back as it stands. **A
+DeviceCMYK colour is the document's own ink**: the interpreter keeps the
+components a fill, stroke or glyph colour was set with in DeviceCMYK — `k`,
+`K`, and `sc`/`scn` in a space the resource seam resolves to DeviceCMYK
 (`FontSource::resolve_ink`) — beside the light it stands for
 (`GraphicsState::fill_ink`, `stroke_ink`), and a CMYK canvas composites those
 (`Canvas::fill_mask_inked`), so `1 0 0 0 k` arrives as `(255, 0, 0, 0)` and a
 rich black `1 1 1 1 k` as all four inks. A stencil mask is painted in the fill
 colour (8.9.6.2), a flat colour like any fill's, so it is handed the fill's ink
 too (`ImageDraw::ink`, and a run of abutting stencils is kept to one ink and
-composited with it); until the review of lane 8A it took only the light, and
-`0.2 0.4 0.6 0.1 k` under a one-bit mask arrived as `(0, 64, 127, 71)` where a
-path fill of it arrived as `(51, 102, 153, 26)`
-(`a_stencil_mask_paints_the_fill_colour_s_own_ink`). A non-isolated group over
-an ink page starts from the page's own ink and takes that ink out again at
-close (11.4.4, 11.4.7.2); until the second review of lane 8A both steps went
-through light, so a `/Multiply` of `0 1 0 0 k` inside the group over a rich
-black was blended against its pure-`K` spelling and came out `(0, 255, 0,
-255)` where the same fill with no group is the rich black
-(`a_non_isolated_group_over_ink_blends_against_the_page_s_own_ink`). Every other colour is light, which a
-CMYK buffer takes through 8.6.4.4's relation inverted with maximum undercolour
-removal — `1 0 0 rg` arrives as `(0, 255, 255, 0)` — and so is what is not a
-flat colour (an image, a shading) and every space whose components are not
-DeviceCMYK's, ink or not: an ICC CMYK profile, and a `/Separation` or
-`/DeviceN` through its alternate. What is drawn on ink keeps its ink wherever
-it is drawn: a form on the page; a coloured tiling pattern's cell
-(`/PaintType 1`), drawn into a buffer of the page's own format and composited
-component for component, so a `k` inside it arrives as its components and an
-`rg` as light turned to ink, as on the page; and a transparency group that
-composites in ink (no `/CS`, or `/CS /DeviceCMYK`) — one that names
-`/CS /DeviceRGB` composites in light (11.6.6), so its rich black arrives as
-pure `K`. An uncoloured pattern (`/PaintType 2`) paints in the colour its
-`scn` operands gave, which is light even over a DeviceCMYK base:
-`[/Pattern /DeviceCMYK]` with `1 1 1 1 /P0 scn` is pure `K` too
+composited with it; `a_stencil_mask_paints_the_fill_colour_s_own_ink`). A
+non-isolated group over an ink page starts from the page's own ink and takes
+that ink out again at close (11.4.4, 11.4.7.2;
+`a_non_isolated_group_over_ink_blends_against_the_page_s_own_ink`). Every
+other colour is light, which a CMYK buffer takes through 8.6.4.4's relation
+inverted with maximum undercolour removal — `1 0 0 rg` arrives as
+`(0, 255, 255, 0)` — and so is what is not a flat colour (an image, a
+shading) and every space whose components are not DeviceCMYK's, ink or not:
+an ICC CMYK profile, and a `/Separation` or `/DeviceN` through its alternate.
+What is drawn on ink keeps its ink wherever it is drawn: a form on the page; a
+coloured tiling pattern's cell (`/PaintType 1`), drawn into a buffer of the
+page's own format and composited component for component, so a `k` inside it
+arrives as its components and an `rg` as light turned to ink, as on the page;
+and a transparency group that composites in ink (no `/CS`, or
+`/CS /DeviceCMYK`) — one that names `/CS /DeviceRGB` composites in light
+(11.6.6), so its rich black arrives as pure `K`. An uncoloured pattern
+(`/PaintType 2`) paints in the colour its `scn` operands gave, which is light
+even over a DeviceCMYK base: `[/Pattern /DeviceCMYK]` with `1 1 1 1 /P0 scn`
+is pure `K` too
 (`a_pattern_or_group_keeps_a_device_cmyk_colour_s_ink_where_it_is_drawn_on_ink`).
-Until the third review of lane 8A this paragraph and `allow_cmyk`'s doc
-called "a pattern's cell" light, which was true of the uncoloured pattern
-only. *Until October 2026 every
-colour was light*, so the rich black arrived as pure `K` and
-`a_page_asked_for_in_ink_with_the_opt_in_comes_back_in_ink` pinned that as the
-limitation it was; it now pins the four inks, and
-`a_device_cmyk_colour_reaches_an_ink_page_unchanged` holds `k`, `/DeviceCMYK cs
-… sc`, a stroke's `K`, a glyph and an RGB fill to `round(255 × component)`
-byte for byte. `cs` selecting DeviceCMYK now resets the colour to 8.6.8's
-`0 0 0 1` — black, where an all-zeros reset had made it white on every page,
-in light as much as in ink — and since the review of lane 8A `cs` selecting a
-`/Separation` or `/DeviceN` space resets it to the whole colorant, a tint of
-1.0 in every component (8.6.6.4, 8.6.6.5), where zeros had made it none
-(`cs_resets_a_spot_space_to_full_tint`); a `/Lab` space starts at zero, or the
-nearest value a `/Range` that leaves zero out allows (8.6.5.4). `Bitmap::to_png` writes an ink page as the light
+`a_page_asked_for_in_ink_with_the_opt_in_comes_back_in_ink` pins the four
+inks, and `a_device_cmyk_colour_reaches_an_ink_page_unchanged` holds `k`,
+`/DeviceCMYK cs … sc`, a stroke's `K`, a glyph and an RGB fill to
+`round(255 × component)` byte for byte. `cs` selecting DeviceCMYK resets the
+colour to 8.6.8's `0 0 0 1` — black — and `cs` selecting a `/Separation` or
+`/DeviceN` space resets it to the whole colorant, a tint of 1.0 in every
+component (8.6.6.4, 8.6.6.5; `cs_resets_a_spot_space_to_full_tint`); a
+`/Lab` space starts at zero, or the nearest value a `/Range` that leaves zero
+out allows (8.6.5.4). `Bitmap::to_png` writes an ink page as the light
 it stands for — PNG has no CMYK — and where every partly covered or blended
 pixel is one ink and black those bytes are exactly what the same render
 without the switch returns
@@ -296,53 +250,40 @@ where two inks and black share a partial pixel they are not, because
 compositing is linear in whichever components the canvas holds and 8.6.4.4 is
 a product: half a pixel of rich black is a quarter of white over ink and half
 of it over light (`a_rich_black_edge_composited_over_ink_is_not_the_light_edge`).
-**Under a `/DefaultCMYK` the ink stays the document's** — H-135's default
-until the owner decides it: `k`, `K`, `sc`/`scn` in a space selected as
-DeviceCMYK, four components with no space named, and a stencil painted in one
-arrive on an ink page as their own components, byte for byte the page without
-the default, while their light — what a light render paints, and what an ink
-page reads where it needs light, inside a `/CS /DeviceRGB` group — is the
-default's (`an_ink_render_keeps_a_device_cmyk_colour_s_ink_under_default_cmyk`).
+**Under a `/DefaultCMYK` the ink stays the document's** (ROADMAP H-135): `k`,
+`K`, `sc`/`scn` in a space selected as DeviceCMYK, four components with no
+space named, and a stencil painted in one arrive on an ink page as their own
+components, byte for byte the page without the default, while their light —
+what a light render paints, and what an ink page reads where it needs light,
+inside a `/CS /DeviceRGB` group — is the default's
+(`an_ink_render_keeps_a_device_cmyk_colour_s_ink_under_default_cmyk`).
 A light render composites that ink too wherever it composites in ink, which
 is inside a `/DeviceCMYK` group: there `k` under a `/DefaultCMYK` paints what
 the page without the default paints, and not its twin naming the profile, so
-the light render does not paint the default inside such a group — found in
-October 2026 and put to the owner with H-135.
+the light render does not paint the default inside such a group.
 `FontSource::resolve_ink` reads the space as selected and
 `FontSource::resolve_color` the space as substituted; choosing conversion
 instead is one change to the first. It follows that `Bitmap::to_png` writes
 such an ink page as 8.6.4.4's light, which is not that page's light render.
 
-**`/Lab` composites in Lab too**, which was the last space that did not. Its
-components are not in the unit interval — `L*` runs 0..100 and `a`/`b` roughly
-−128..127 — so `LabA8` encodes them into bytes (`L/100`, `(a + 128)/255`,
-`(b + 128)/255`) and 11.3.5's separable formulas apply to *that*. The encoding
-is a choice the clause does not make, and it is stated on the format rather
-than buried: blending in the encoded domain is what makes a `/Lab` group
-composite in Lab rather than in RGB, and it is not the same as blending the
-unencoded values.
+**`/Lab` composites in Lab too.** Its components are not in the unit
+interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`
+encodes them into bytes (`L/100`, `(a + 128)/255`, `(b + 128)/255`) and
+11.3.5's separable formulas apply to *that*. The encoding is a choice the
+clause does not make, and it is stated on the format rather than buried:
+blending in the encoded domain is what makes a `/Lab` group composite in Lab
+rather than in RGB, and it is not the same as blending the unencoded values.
 
-Every space a group can declare now has a buffer, so
-`RenderWarning::UnsupportedGroupSpace` is gone — a variant nothing can reach is
-a claim rather than a check. **No corpus file declares a `/Lab` group**: over
-the 5 525 files of September 2026 it was reported zero times in all three
-recorded bars, so this capability is held by fixtures rather than by demand,
-which the [roadmap](../ROADMAP.md) records. The count of 35 `/DeviceCMYK`
-groups is an earlier measurement over a smaller corpus and is left attributed
-to it rather than restated as current. ExtGState
-`/SMask` works in both kinds — `/Alpha` and `/Luminosity` (11.6.5.2) — with
-`/BC` read in the mask group's own `/Group /CS` and defaulting to black
-(fully masked, the default that does not invert every drop shadow), and
-`/TR` pre-sampled to 256 entries. An absent `/SMask` key leaves the mask in
-force where `/None` removes it (11.6.5.1); `q`/`Q` save and restore the mask
-beside the clip (8.5.4). *Corrected 3 October 2026*: a clip installed while
-a mask was in force used to carry the mask with it, because a clip was built
-by the fill's own coverage function and that multiplies the mask in — so a
-transparency group painted under a mask was masked twice (the interpreter
-installs the form's `/BBox` clip before the group takes the mask; a grey 0.5
-mask kept a quarter) and a clip set under a mask went on masking after
-`/SMask /None`. A clip is now the path times the clip in force and nothing
-else (`tests/soft_mask_clips.rs`). All 16 standard blend modes apply (11.3.5), the
+Every space a group can declare has a buffer. ExtGState `/SMask` works in
+both kinds — `/Alpha` and `/Luminosity` (11.6.5.2) — with `/BC` read in the
+mask group's own `/Group /CS` and defaulting to black (fully masked, the
+default that does not invert every drop shadow), and `/TR` pre-sampled to 256
+entries. An absent `/SMask` key leaves the mask in force where `/None`
+removes it (11.6.5.1); `q`/`Q` save and restore the mask beside the clip
+(8.5.4). A clip is the path times the clip in force and nothing else — a
+mask in force is not multiplied into it, so a group painted under a mask is
+masked once and a clip set under a mask stops masking at `/SMask /None`
+(`tests/soft_mask_clips.rs`). All 16 standard blend modes apply (11.3.5), the
 twelve separable and the four non-separable. Group buffers are a budget, not
 just a depth: nesting caps at 16 and the page as a whole at 2 000 buffers,
 because a soft mask that opens further groups branches rather than descends
@@ -371,8 +312,8 @@ wrongly shown is theirs to ignore. A hidden layer is reported by its `/Name`
 names, the `/Properties` table it sits in and every value read out of the
 group — `/Name`, `/Type`, and a membership dictionary's `/VE` (each operand
 too), `/OCGs` and `/P` — are read where they lie rather than copied at each
-`BDC`, which a long array beside or under any of them made the page's
-sequences times the array (`tests/property_list_work.rs`).
+`BDC`, which would cost the page's sequences times a long array beside or
+under any of them (`tests/property_list_work.rs`).
 
 **Page geometry.** `page_view_transform` applies `/Rotate` (7.7.3.3,
 normalised to quarter turns) and the `/CropBox` origin, so the bitmap is the
@@ -397,23 +338,19 @@ one pipeline and nothing else: the page is drawn through `page_view_transform`
 whatever part of it is asked for, onto a canvas that **stands at the region's
 corner of the page** (`Canvas::origin`), so the same interpreter, the same
 glyphs, the same sampler and a smaller canvas draw the tile, and every
-coordinate they compute is the number the whole page computes. (Until
-September 2026 the region was a translation composed after the page view;
-exact as arithmetic, it rounded an ulp apart from the page and reached a byte
-at some scales — [rulings](../rulings.md) 5 records what that was.) A group's
+coordinate they compute is the number the whole page computes. A group's
 buffer, a soft mask's and a mesh's stand in the same frame, and the few
 decisions taken by rectangle rather than by pixel — which cells of a tiling
 lattice to composite, which neighbours a mesh's fringe reads, whether a
 lattice, a mesh or an image run is within its budget — are taken on
 rectangles the renderer keeps in the page's frame (`Bounds`), so a tile takes
-the page's decision. **One is not, and it is a known gap rather than a
-guarantee:** whether an image *joins* the run held back so abutting images do
-not conflate is decided by overlap with what the run holds over the canvas
-only, so two images that overlap outside a tile and abut inside it are one run
-in the tile and two on the page — measured on a three-image page at 40 pixels
-of one seam column, 63 levels apart at 1× (`render_regions.rs`'s
-`an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`,
-and a ROADMAP row). A region reaching past the page is **intersected**, never
+the page's decision. **One is not, a known gap:** whether an image *joins*
+the run held back so abutting images do not conflate is decided by overlap
+with what the run holds over the canvas only, so two images that overlap
+outside a tile and abut inside it are one run in the tile and two on the page
+(`render_regions.rs`'s
+`an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`;
+ROADMAP RC-21). A region reaching past the page is **intersected**, never
 slid back on, because a moved rectangle returns real pixels from coordinates
 the caller did not name; one that misses entirely comes back with no pixels.
 Both trims are reported as `RenderWarning::RegionClamped`. Ruling 5's
@@ -451,17 +388,13 @@ cancellation might, never more (`display_list.rs`'s
 `a_cancelled_replay_reports_no_font_it_never_reached`,
 `a_region_that_draws_no_cell_reports_nothing_a_cell_met`,
 `every_replay_names_the_images_the_page_draws` and
-`every_replay_names_the_glyph_its_font_could_not_resolve`). Caching the codec failure
-changed one thing for a direct render too: an image drawn twice that will not
-decode used to report its codec the first time and, from the cache, its
-resource name standing in for a codec the second.
+`every_replay_names_the_glyph_its_font_could_not_resolve`).
 
 **A page too large to retain is drawn the direct way.** A recording keeps
 every call with its own copy of the state and the path, so what it holds is
-the interpreter's *work*, and work multiplies through forms: the review of 2
-October 2026 measured a 1 940-byte file of ten forms, each invoking the next
-four times, record 1 310 719 calls at a peak of 635 376 kB, where a direct
-render holds one canvas. So the recording has a budget,
+the interpreter's *work*, and work multiplies through forms: a short file of
+forms each invoking the next several times records without bound, where a
+direct render holds one canvas. So the recording has a budget,
 `tinker_pdf_render::MAX_DISPLAY_LIST_BYTES` (64 MiB), counted by
 `kept_bytes` — each event's size, its state, its path at 56 bytes a segment,
 and every name, string, inline image and mask-group stream it copies. Past
@@ -472,10 +405,8 @@ the interpreter to stop, and the list is **not retained**
 the same output at a direct render's cost, never a partial picture
 (`display_list.rs`'s `a_page_too_large_to_retain_is_drawn_the_direct_way`, at
 the cap's own value, and `the_review_s_fan_out_of_forms_is_not_retained`).
-The cap clears a dense fixed page's list — two thousand elements and forty
-thousand segments, about 3.2 MB — by 21x, and what it bounds is memory: the
-time a fan of forms costs is the interpreter's, which bounds how deep forms
-nest and not how wide they fan.
+What the cap bounds is memory: the time a fan of forms costs is the
+interpreter's, which bounds how deep forms nest and not how wide they fan.
 
 **A page as SVG.** `Page::to_svg` writes SVG 1.1 through a third `Device`
 (`crates/tinker-pdf/src/svg_out.rs`), fed by replaying the page's display list
@@ -501,9 +432,8 @@ parent with `clip-path` on the `<clipPath>`, which is §14.3.5's
 intersection; a clipped stroke under its pen's `transform` sits inside a
 `<g>` that names the clip, because §14.3.5 reads a clip named by the
 `<path>` through that path's own `transform`
-(`a_clipped_stroke_under_its_pen_transform_is_clipped_in_page_space`;
-until the review of lane 8A it was named by the path, and a conforming
-viewer cut the line at a third of the clip's width under `scale(1, 3)`); an image is a PNG `data:` URI of its decoded samples — a
+(`a_clipped_stroke_under_its_pen_transform_is_clipped_in_page_space`); an
+image is a PNG `data:` URI of its decoded samples — a
 stencil in the fill colour, a soft mask as its alpha — on the unit square,
 inside a `<g>` that names its clip because a clip named by the `<image>`
 would be read through the image's own transform; **a picture drawn again is
@@ -520,19 +450,13 @@ that would pass the budget is not written, nothing after it is, the replay is
 told to stop and `SvgWarning::Truncated { limit }` says so; the document is
 well-formed and ends there. A zero-width dashed line under a stretch, written
 as its pieces, stops cutting them once its path data passes what the budget
-has left, so what it holds is the budget and not the pieces: the review of
-lane 8A measured 346 bytes of content (forty segments of `[0.01 0.01]` under
-`scale(1, 3)`) holding 452 679 156 bytes at once under a 1 MiB budget, and it
-now holds 4 201 056 (`svg_dash_memory.rs`). Before both, the review of 2 October 2026 measured
-a 252 112-byte file drawing one 200 x 200 image four hundred times write
-85 550 995 bytes of markup; the same drawing now writes 238 459, and four
-hundred `sh` of a 2 889-byte page whose shading is rasterised write one
-raster and four hundred references. **Text is written as paths**, one
+has left, so what it holds is the budget and not the pieces
+(`svg_dash_memory.rs`). **Text is written as paths**, one
 per glyph, from the outline the renderer draws: SVG 1.1 carries a font only
 as `@font-face` or `<font>`, and the reader this writer is held to reads
 neither, so glyph-positioned `<text>` would look like the page only where the
-viewer happened to have the face. The trade, named: the SVG's text is no
-longer text — not selectable, not searchable. **An axial or radial shading is
+viewer happened to have the face. The trade, named: the SVG's text is not
+text — not selectable, not searchable. **An axial or radial shading is
 a gradient where that is exact** — DeviceRGB or DeviceGray, a piecewise
 linear function whose values stay inside 0 to 1, both ends extended, and for
 a radial one a first circle that is a point strictly inside the second, which
@@ -542,23 +466,18 @@ function-based shading, a CMYK ramp, a tiling pattern, a patterned stroke —
 is **rasterised** through the renderer at `SvgOptions::raster_scale`, clipped
 as the page clips it, and embedded as an image, and each is named
 (`SvgWarning::Rasterised`). The writer never emits a `<mask>`, a `<pattern>`
-or a `<filter>`, the three elements `tinker-pdf-svg` refused when the writer
-was built, so a file it writes is one this repository reads back whole (the
-reader has since learnt `<mask>` and `<pattern>`, so emitting those two is
-now open on the writer's side alone); what would need one is the
-writer's own named refusal (below). What a render of the same page reports —
+or a `<filter>`; what would need one is the writer's own named refusal
+(below). What a render of the same page reports —
 an undecodable image (drawn as the renderer's grey placeholder), a shading or
 pattern this build does not paint, an unreadable font, a hidden layer, an
 empty text clip, a damaged image, and anything the renderer said while
 drawing a rasterised paint — comes through in the renderer's words as
 `SvgWarning::Render(RenderWarning)`.
 
-One place the reader is short of the file, pinned so that a reader which
-learns it fails a test and the paragraph can be updated: `tinker-pdf-svg`
-follows one `clip-path` per element, so it reads the inner clip of a nested
-pair and not their intersection. The file says it correctly. There were two
-until the reader made a `<g>`'s clip a group node of its own: a clipped image
-now reads back clipped, in page space, and
+One place the reader is short of the file, pinned by a test:
+`tinker-pdf-svg` follows one `clip-path` per element, so it reads the inner
+clip of a nested pair and not their intersection. The file says it
+correctly. A clipped image reads back clipped, in page space, and
 `a_clipped_image_is_clipped_in_page_space` asserts the clip as well as the
 placement.
 
@@ -591,28 +510,21 @@ shear the stroke a device shows is wider in one direction than another, and
 8.4.3.6's dashes are measured, and cut square, in the same space. Under a
 similarity — a uniform scale with any rotation or reflection, which is
 nearly every page — that is one device width, the user width times
-`Matrix::expansion`, and `stroke_path` strokes in device space at it, as it
-always has. Under any other map (`user_space_pen` decides, from the map's
-two singular values, and the SVG writer asks the same function) it takes
-the path back to user space, strokes it there with the width, caps, joins,
-miter limit and dashes the content stream gave, and carries the outline out
+`Matrix::expansion`, and `stroke_path` strokes in device space at it. Under
+any other map (`user_space_pen` decides, from the map's two singular values,
+and the SVG writer asks the same function) it takes the path back to user
+space, strokes it there with the width, caps, joins, miter limit and dashes
+the content stream gave, and carries the outline out
 (`tinker_pdf_raster::stroke_mapped`); the thinnest-line floor stays in
 device pixels in every direction. A glyph stroked by text rendering modes
 1, 2, 5 and 6 goes the same way, with the CTM's user space and not the text
-matrix's. **Until October 2026 every stroke was drawn at the one width**,
-so under `scale(1, 3)` a circle stroked two wide was 2√3, about 3.46,
-device units all round where the clause makes it six at its top and two at
-its side, and a dash on a sheared line was cut square on the device;
-`stroke_parameters.rs`'s
+matrix's. `stroke_parameters.rs`'s
 `a_circle_under_scale_1_3_is_six_wide_at_its_top_and_two_at_its_side` and
 `a_dash_on_a_sheared_line_is_sheared` hold the clause's arithmetic in
-pixels, and `the_current_transform_scales_the_line_width`, which had
-asserted the defect as the feature (an `x` scale thickening a horizontal
-line), now asserts that only the `y` scale does. A map that stretches one
-direction more than 10⁹ times another is still stroked at its expansion —
-going back to user space through it would cost the path its position — and
-`appearance.rs`'s squiggly underline, drawn diagonal in the quad's frame to
-stay clear of the old defect, is left as it was drawn.
+pixels, and `the_current_transform_scales_the_line_width` asserts that only
+a `y` scale thickens a horizontal line. A map that stretches one direction
+more than 10⁹ times another is stroked at its expansion — going back to user
+space through it would cost the path its position.
 
 **A page as a layer, and premultiplied alpha.** `RenderOptions::transparent`
 starts the page with nothing on it instead of white — `(0, 0, 0, 0)` where
@@ -645,7 +557,7 @@ it exactly as the page's content does (`/Matrix`, the `/BBox` clip, a group,
 `/OC`, its own resources), and its viewport is its box on the page: `/BBox`
 through `/Matrix` and the page's view transform, rounded outward and trimmed to
 the page. An annotation is painted by the code the page draws every annotation
-with (`annots.rs`, now split into `prepare` and `draw_prepared` so that one
+with (`annots.rs`, split into `prepare` and `draw_prepared` so that one
 piece of code does both), and its viewport is its `/Rect`. `options.region`, if
 set, wins over either. A form is named by its resource name — the only name
 that means "as this page places it"; a form reachable only inside another
@@ -683,7 +595,7 @@ every field a public `u64`) names them: `glyphs_shown`, every glyph the
 interpreter showed the renderer, and `outlines_filled`, every glyph outline it
 painted, both counted by the renderer, a tiling pattern's cell included;
 `font_dictionaries_resolved`, each font a resource scope reads when it is
-built and each lookup of a font dictionary by name — today one a glyph, the
+built and each lookup of a font dictionary by name — one a glyph, the
 interpreter asking whether its font is a Type 3 font, and one more for each
 font with no program of its own when there are substitute faces to ask — a
 `bundled-fonts` build's, or a provider given to the document;
@@ -703,10 +615,9 @@ and never of the machine or the clock. Nothing reads the tally but the door
 that hands it back, so a counted render's pixels and warnings are the
 uncounted one's; and an uncounted render carries no tally at all, so it pays
 one untaken branch a counting site, and the renderer's two additions a glyph,
-which it makes either way. The design, and the doors still to come — text,
-save, merge, image extraction, validation and page lookup — are in
+which it makes either way. The design is in
 [performance](../design/performance.md); the C ABI and the bindings do not
-carry the stats yet ([bindings](bindings.md)).
+carry the stats ([bindings](bindings.md)).
 
 `Page::display_list()` returns a `DisplayList` — the page interpreted once —
 whose `render(&RenderOptions)` returns what `Page::render` returns for the
@@ -737,9 +648,9 @@ group form's resource name, `Truncated { limit }` and
 the blend mode, whose `ExtGState` no device is told: the interpreter hands
 every device the state a `gs` made, never the `gs`.
 The output is the same bytes every time, and nothing on its path calls a
-transcendental, so ruling 4's argument covers it — but no SVG fingerprint is
-committed beside `determinism.rs`'s, so the cross-target claim is argued and
-not yet measured.
+transcendental, so ruling 4's argument covers it; no SVG fingerprint is
+committed beside `determinism.rs`'s, so the cross-target claim is argued
+rather than measured.
 
 `Page::render_form(name, options)` and `Page::render_annotation(index,
 options)` return `Result<Bitmap, RenderPartError>`: one part of the page,
@@ -749,9 +660,9 @@ nothing — a caller who asked for one part is owed the reason rather than a
 white rectangle.
 
 `Bitmap::to_png` writes the page out as a PNG file (ISO/IEC 15948), eight bits
-a component, through `tinker_pdf_filters::png_encode` — which is where the
-zlib stream, the chunk CRC-32 and 9.2's row filters a PNG is made of already
-lived. It is **total over all six `PixelFormat`s**, which matters because a
+a component, through `tinker_pdf_filters::png_encode` — where the zlib
+stream, the chunk CRC-32 and 9.2's row filters a PNG is made of live. It is
+**total over all six `PixelFormat`s**, which matters because a
 page comes back in two of them and the fields are public: `Gray8`, `Rgb8`,
 `GrayA8` and `Rgba8` are colour types 0, 2, 4 and 6 byte for byte, and the two
 PNG has no colour type for are converted rather than relabelled — `CmykA8`
@@ -787,9 +698,9 @@ rows, because the caller this exists for — `pdfcmp` — would score the damage
 a rendering difference. Damage that costs no pixels, an ancillary chunk with a
 bad CRC, is named on `warnings` as `RenderWarning::DamagedImage` with the name
 `PNG`. The decoder's `MAX_PNG_SAMPLES` is the only budget, which leaves one
-asymmetry stated rather than discovered: the largest page this engine renders
-writes a PNG this will not read back, because a reader's budget against a
-thirteen-byte header asking for 2^63 samples is not a writer's.
+asymmetry: the largest page this engine renders writes a PNG this will not
+read back, because a reader's budget against a thirteen-byte header asking for
+2^63 samples is not a writer's.
 
 ```rust
 use tinker_pdf::{Document, RenderOptions, RenderWarning};
@@ -814,8 +725,8 @@ helpers `Page::render` composes, with `region_canvas_in` and
 the region's corner — and `Renderer::with_page_size` telling the renderer how
 large the page around it is. `None` is not a special case in the facade: it
 becomes the region covering the whole page, whose corner is the origin, so a
-tile and a page take one code path and there is no un-tiled spelling left for
-a defect to hide in.
+tile and a page take one code path and there is no un-tiled spelling for a
+defect to hide in.
 
 ## Refused by name
 
@@ -827,7 +738,7 @@ a defect to hide in.
 | A font program that could not be read | `RenderWarning::UnreadableFont` | Its glyphs are not drawn; the rest of the page is | [content and text](content-and-text.md) |
 | A shading that cannot be read into types 1–7 | `RenderWarning::UnsupportedShading` | Reported by type number rather than guessed at | [rulings](../rulings.md) |
 | A pattern whose cell cannot be read, or a lattice past 65 536 positions / 16.7 Mpx / 33.5 Mpx | `RenderWarning::UnsupportedPattern` | Unpainted reads as missing; `/Pattern`'s nominal black reads as content and hides the gap | [rulings](../rulings.md) |
-| A colour space whose parameters no space can mean, read the nearest way that does: a `/Lab` `/Range` pair written backwards, read as the span it covers; and a default colour space 8.6.5.6 does not allow — a `/Lab`, `/Indexed` or `/Pattern` one, one with another number of components than its device space, one that is no colour space — refused, the device space drawn as without it | `RenderWarning::RepairedColorSpace { name, reason }`, `reason` `LabRangeUnordered`; for a default, `name` the default's own (`DefaultRGB`) and `reason` `DefaultSpaceFamily`, `DefaultSpaceComponents` or `DefaultSpaceUnreadable`, once a render | Drawn *and* named (ruling 10). Named where the space is reached through the page's resources or a tiling cell's, as every tolerance the resource layer reports is; **not yet** through a form XObject's or an annotation appearance's own `/Resources`, which keep what they tolerate to themselves — a font a form's own resources cannot resolve goes unreported the same way, measured October 2026 | [rulings](../rulings.md) |
+| A colour space whose parameters no space can mean, read the nearest way that does: a `/Lab` `/Range` pair written backwards, read as the span it covers; and a default colour space 8.6.5.6 does not allow — a `/Lab`, `/Indexed` or `/Pattern` one, one with another number of components than its device space, one that is no colour space — refused, the device space drawn as without it | `RenderWarning::RepairedColorSpace { name, reason }`, `reason` `LabRangeUnordered`; for a default, `name` the default's own (`DefaultRGB`) and `reason` `DefaultSpaceFamily`, `DefaultSpaceComponents` or `DefaultSpaceUnreadable`, once a render | Drawn *and* named (ruling 10). Named where the space is reached through the page's resources or a tiling cell's, as every tolerance the resource layer reports is; **not** through a form XObject's or an annotation appearance's own `/Resources`, which keep what they tolerate to themselves — a font a form's own resources cannot resolve goes unreported the same way | [rulings](../rulings.md) |
 | A layer the default configuration turns off | `RenderWarning::HiddenOptionalContent` | Correct behaviour, reported all the same — the one leniency a reader cannot see | [rulings](../rulings.md) |
 | More than 2 000 transparency-group buffers on one page | `RenderWarning::GroupBudgetSpent` | A budget, not a depth: branching soft-mask recursion stays inside any depth cap | [rulings](../rulings.md) |
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
@@ -836,11 +747,11 @@ a defect to hide in.
 | A PNG read back whose raster stops short of its declared height | `PngReadError::Incomplete`, carrying the decoder's own identifiers | The decoder degrades for a comic page; a file read back to be *compared* would have its missing rows scored as a rendering difference. Every refusal the decoder makes is `PngReadError::Refused` with its own reason | [filters](filters.md) |
 | A form render naming an XObject the page does not have, one that is not a form, or one whose stream cannot be read | `RenderPartError::NoSuchXObject`, `NotAForm { subtype }`, `UnreadableForm` | The page renders what it can; a caller who asked for one form asked about that form, and a blank bitmap is a wrong answer that looks right | — |
 | An annotation render at an index past `/Annots`, or of an entry that draws nothing | `RenderPartError::NoSuchAnnotation { count }`, `AnnotationNotDrawn { why }` with `NotDrawn::{NotADictionary, Hidden, Popup, NoRect, NoAppearance, UnreadableAppearance, Degenerate}` | Every reason `Page::render` skips an annotation silently, named where a caller asked for that one | [document model](document-model.md) |
-| A soft mask, a blend mode other than `Normal`, or a knockout group, on a page written as SVG | `SvgWarning::SoftMaskRefused { group }`, `BlendModeRefused { mode }`, `KnockoutRefused { form }` | SVG 1.1 says the first two only with `<mask>` and `<filter>`'s `feBlend`, which `tinker-pdf-svg` refuses, and the third not at all; what was masked is drawn unmasked, the blend as `Normal`, the group as an ordinary one — a file this repository cannot read back whole is not written | [design/svg.md](../design/svg.md) |
-| A shading no SVG gradient states exactly, a tiling pattern or a patterned stroke, on a page written as SVG | `SvgWarning::Rasterised { what, name }` | Drawn through the renderer at `SvgOptions::raster_scale` and embedded as pixels: a fallback rather than a refusal, named because the file is no longer vectors there. A `<pattern>` would be exact for a tiling pattern; the reader refused it when this writer was built and reads it now, so writing one is open | — |
+| A soft mask, a blend mode other than `Normal`, or a knockout group, on a page written as SVG | `SvgWarning::SoftMaskRefused { group }`, `BlendModeRefused { mode }`, `KnockoutRefused { form }` | SVG 1.1 says the first two only with `<mask>` and `<filter>`'s `feBlend`, and the third not at all; the writer emits neither element — `tinker-pdf-svg` refuses `<filter>` — so what was masked is drawn unmasked, the blend as `Normal`, the group as an ordinary one | [design/svg.md](../design/svg.md) |
+| A shading no SVG gradient states exactly, a tiling pattern or a patterned stroke, on a page written as SVG | `SvgWarning::Rasterised { what, name }` | Drawn through the renderer at `SvgOptions::raster_scale` and embedded as pixels: a fallback rather than a refusal, named because the file is not vectors there. A `<pattern>` would be exact for a tiling pattern; the writer does not emit one | — |
 | A page whose recording would hold more than `MAX_DISPLAY_LIST_BYTES` (64 MiB) | `DisplayList::is_retained()` is false | Not a warning, because nothing is drawn differently: the list keeps no calls and every render and SVG is a direct one, the same output at a direct render's cost. A fan of forms makes a short file record without bound, which a direct render's one canvas never does | `bounds_ledger.rs` |
 | A page whose SVG would pass `MAX_SVG_BYTES` (256 MiB) of elements, or the smaller `SvgOptions::max_bytes` | `SvgWarning::Truncated { limit }` | Markup grows with what the page does rather than with what the file holds, so it has a budget a render's one canvas does not need; what fits is written, the document is well-formed and ends there, and the replay stops | `bounds_ledger.rs` |
-| An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | **6 of the corpus's 3 235 profiles**, September 2026, and `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading, which is what every ICC space got before profiles were read | [ROADMAP](../ROADMAP.md) |
+| An ICC profile whose data space and tags contradict each other | `ColorSpace::Approximated`, stated on the type | `icc_census.rs` names all three shapes. Not a capability gap: a matrix over Lab components, a data space no registry defines, and one tone curve for four channels of ink. The fallback is 8.6.5.5's alternate-space reading | [ROADMAP](../ROADMAP.md) |
 
 ## Verified
 
@@ -854,7 +765,7 @@ a defect to hide in.
   `render_stats_are_none_unless_asked` over the page, a tile, a display list,
   a form and an annotation; `render_stats_count_what_a_generated_page_draws`,
   fourteen glyphs in three fonts and one image drawn twice reporting fourteen
-  glyphs shown, the font resolutions today's code makes, one decode and one
+  glyphs shown, the font resolutions the code makes, one decode and one
   cache hit, with every counter derived from the fixture in the test and the
   bundled build's substitute requests counted where it makes them; one test
   each for a form shown three times over its one kept scope, `render_form`'s
@@ -875,10 +786,7 @@ a defect to hide in.
   `RenderOptions` field that changes what a page's bytes are with its own
   SHA-256, computed as `determinism.rs` computes one and floored by ink the same
   way, beside the claim that the default render is unchanged — the blend grid's
-  default render still hashes to `determinism.rs`'s `analytic_blend` value.
-  Those hashes were recorded on `x86_64-unknown-linux-gnu` on 26 September
-  2026 and have not yet been run on the other three targets, which is the
-  difference between them and the twenty `determinism.rs` carries.
+  default render hashes to `determinism.rs`'s `analytic_blend` value.
   The anti-aliasing switch's exit criterion is
   `with_anti_aliasing_off_every_pixel_is_wholly_covered_or_not_at_all`: text,
   a diagonal fill, a stroked curve, a hairline and a rotated image's edge, each
@@ -909,7 +817,7 @@ a defect to hide in.
   before the operator the page ends on. A soft mask, a blend mode, a knockout group, a mesh and
   a tiling pattern on one page each produce their warning, no refused element
   is written and the reader reports none of its own refusals; the nested
-  clip and the clipped image pin the reader's two shortfalls above; a
+  clip pins the reader's shortfall above and the clipped image its clip; a
   fixed-seed campaign of mutated pages must never panic the writer, and the
   `render_page` fuzz target writes every page it reaches as SVG.
 - The retained page: `determinism.rs`'s
@@ -928,17 +836,16 @@ a defect to hide in.
   `tinker-pdf-content`'s `replay.rs`
   holds a replay into a recorder equal to the recording, and what a replay
   does when the device answers differently.
-- Regions and ruling 5: `crates/tinker-pdf/tests/render_regions.rs`. Sixteen
-  fixtures over four rasterizer paths and the three kinds of canvas that stand
+- Regions and ruling 5: `crates/tinker-pdf/tests/render_regions.rs`. Fixtures
+  over four rasterizer paths and the three kinds of canvas that stand
   somewhere in the page — transparency and soft-mask groups, a tiling
-  pattern's cell, a mesh's buffer — five of them turned and five cropped,
+  pattern's cell, a mesh's buffer — turned and cropped ones among them,
   tiled at 64, 37, 23 and 53 pixels against a 91×131 page at 0.5×, 0.75×, 1×,
   1.5×, 2×, 3× and 4× and down to a one-pixel lattice, each tile asserted
   **byte-equal** to its rectangle of the whole render with no tolerance at any
   scale; a stroked rectangle whose miter corners sit on a sub-scanline, at 1×;
-  ruling 5's one named exception pinned exactly as measured — an image run
-  whose overlap falls outside the tile, 40 pixels at 63 levels — so a change
-  in either direction fails;
+  ruling 5's one named exception — an image run whose overlap falls outside
+  the tile — pinned exactly, so a change in either direction fails;
   plus the trim at the page edge and its warning, a region wholly off the page, and — because tile equality alone is
   satisfied by a *consistent* mistake — two fixtures that assert which quadrant
   of the displayed picture one mark lands in, on a rotated page and on a
@@ -950,16 +857,11 @@ a defect to hide in.
   `a_cancelled_clip_and_text_clip_rasterize_nothing`), `shading.rs`,
   `mesh.rs`, and `tinker-pdf-color`'s tests over conversion, palettes, tint
   transforms and all function types.
-- Determinism: ten of the 19 render fingerprints in
-  `crates/tinker-pdf/tests/determinism.rs` — `text`, `curves`, `shading`,
-  `blend`, `pattern`, `optional`, `image`, `transparency`, `tiling`, `mesh`
-  — pin this device's output bit-for-bit across x86_64 Windows, Linux and
-  `wasm32-wasip1`, each with an ink floor so a fixture that draws nothing
-  fails instead of becoming a baseline ([determinism](determinism.md)).
-- Fuzzing: `render_page` among the 51 fuzz targets renders whole hostile
-  documents; `crates/tinker-pdf/tests/hostile_input.rs` replays the sweep on
-  stable.
-- Corpus, as of September 2026: 5 525 files, 5 516 rendered every page, zero
-  crashes.
-- The workspace stands at 4 879 passed / 0 failed / 58 ignored
-  (Windows x86_64, 14 September 2026). See [verification](../verification.md).
+- Determinism: the render fingerprints `text`, `curves`, `shading`, `blend`,
+  `pattern`, `optional`, `image`, `transparency`, `tiling` and `mesh` in
+  `crates/tinker-pdf/tests/determinism.rs` pin this device's output
+  bit-for-bit across targets, each with an ink floor so a fixture that draws
+  nothing fails instead of becoming a baseline ([determinism](determinism.md)).
+- Fuzzing: the `render_page` fuzz target renders whole hostile documents;
+  `crates/tinker-pdf/tests/hostile_input.rs` replays the sweep on stable. See
+  [verification](../verification.md).
