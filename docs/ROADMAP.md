@@ -14,6 +14,19 @@ Nothing in the roadmap names another engine, viewer, validator or document
 tool, the corpora included, each of which is named by its role. A capability
 is described on its own terms.
 
+## Bugs
+
+Known defects, each with the test that shows it, listed here until a step
+fixes it. A case a row's work cannot fix by the owner's rules is listed here,
+and its row is narrowed to it.
+
+- **Page one of a linearized file, opened from its head, with
+  `bundled-fonts`.** `crates/tinker-pdf/tests/streaming_open.rs`'s
+  `linearized_files_from_the_qpdf_corpus_render_page_one_from_their_heads`
+  fails with `bundled-fonts` where the qpdf corpus is fetched: some files
+  draw a page one other than the buffered open draws. The default build
+  draws the same page, and CI's `test` job, which has no corpus, skips it.
+
 ## Where the steps are
 
 One file per tier, under [roadmap/](roadmap/), named by its rows' prefix.
@@ -87,8 +100,9 @@ a choice inside a step; so is anything a change would cost that works today.
 Take the first step in this list whose **Depends on** is done; a step that
 waits on the owner is passed over until the owner decides.
 
-1. **CD-19**: its steps that wait on no H row; the rest waits on H-149 to
-   H-158.
+1. **CD-19**, by the owner's rules in ruling 14: a step whose figures read
+   no case worse lands without waiting, and one that reads a case worse
+   waits on its H row.
 2. **The MS tier** from where it stands: MS-04.3 to MS-04.8; MS-05.1 after
    MS-04.6; MS-12.1 and MS-12.2; MS-03.1 and MS-02.2; K-02.3, then MS-01.3
    to MS-01.7; P-05.3, then MS-08.2; MS-07.3. Then MS-11, MS-01 to MS-01.8,

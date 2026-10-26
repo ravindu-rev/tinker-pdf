@@ -20,6 +20,11 @@ the options whose price the owner decides.
   today, each with what its measure step prices: the cases it reads better and
   worse in each build, the glyphs it draws over others, and its time in
   release and debug.
+- What decides, by the owner's rules in ruling 14: a change that reads no
+  case worse is taken whatever its time, and a change of the reader where
+  more plain-PDF and conformance lines read better than worse; a case read
+  worse goes to the owner, and a case no change taken reaches is listed in
+  the roadmap's Bugs.
 - The suites every rule and option is priced with:
   `crates/tinker-pdf/tests/epub_fallback.rs`,
   `crates/tinker-pdf/tests/epub_conservation.rs` and
@@ -31,9 +36,8 @@ the options whose price the owner decides.
 
 ## Non-goals
 
-- A form of the read-back that costs time or text. Ruling 14 takes none; a
-  rule or option that costs either goes to the owner with its figures, through
-  the H row its step names, and lands only on the owner's word.
+- Taking a change that reads any case worse: that is the owner's, case by
+  case, through the H row its step names (ruling 14).
 - Another reading of the page: the reader stays ruling 14's, and a line with
   no right-to-left character is untouched (`text_logical_order.rs`'s
   `no_left_to_right_page_moves`).
@@ -143,7 +147,8 @@ half turn (CD-19.27); Left (7), a word search does not find under
 NO-BREAK SPACE holds together (CD-19.32); and Left (5), its findings outside
 ruling 14's rules (CD-19.34). The options whose price the owner decides get
 their figures here from their measure steps: W, WJ and WJC (CD-19.9), D
-(CD-19.10), H1 (CD-19.11), H6 (CD-19.12) and Left (2)'s four (CD-19.13).
+(CD-19.10), H1 (CD-19.11) and H6 (CD-19.12). Left (2) reads in two, as a
+Latin word does, by the owner's decision (CD-19.18).
 
 ## Milestones
 
@@ -158,8 +163,8 @@ Every fix step also passes `epub_fallback.rs`, `epub_conservation.rs` and
    `a_styled_mark_in_a_widened_block_reads_in_order_and_is_pinned_at_what_it_draws_over`,
    renamed for it, asserting each paragraph's verdicts and glyphs over others
    in both builds, and a test for each of the class's other shapes.
-4. CD-19.9 to CD-19.13: the options priced; exit: each option's figures here
-   and in its H row, H-150 to H-154.
+4. CD-19.9 to CD-19.12: the options priced; exit: each option's figures here
+   and in its H row, H-150 to H-153.
 5. CD-19.14: W, WJ or WJC, as the owner chose; exit:
    `epub_fallback.rs`'s
    `a_reading_that_cuts_or_joins_a_word_is_taken_as_935b077_took_it` and
@@ -178,10 +183,9 @@ Every fix step also passes `epub_fallback.rs`, `epub_conservation.rs` and
    the stops does not open a line before a pair, and the mixed runs' rows of
    `a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed`
    holding.
-9. CD-19.18: Left (2)'s option, as the owner chose; exit:
-   `a_word_of_an_overflow_script_an_inline_block_cuts_reads_as_a_latin_word_does`,
-   renamed for the choice, and with option (ii) a `text.rs` test of the join
-   and its guard that a Latin word so cut still reads in two.
+9. CD-19.18: Left (2) as the owner decided, in two as a Latin word reads;
+   exit: `a_word_of_an_overflow_script_an_inline_block_cuts_reads_as_a_latin_word_does`
+   holding that reading in both builds.
 10. CD-19.19 to CD-19.21: Left (3)'s section, its reader rule priced and
     landed; exit: the section, reproduced from `epub_conservation.rs`'s
     `a_dirless_line_with_a_right_to_left_gloss`; then `text.rs` tests of a
@@ -203,18 +207,16 @@ Every fix step also passes `epub_fallback.rs`, `epub_conservation.rs` and
     half-turn rows of that pin holding.
 13. CD-19.30 and CD-19.31: Left (7); exit: the section, reproduced from
     `a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space`;
-    then its rows of that pin finding the word with `bundled-fonts`, or the
-    pin naming H-158.
+    then its rows of that pin finding the word with `bundled-fonts`, or the case in the roadmap's Bugs.
 14. CD-19.32 and CD-19.33: Left (9); exit: the section, reproduced from
     `what_a_line_read_as_typed_finds_is_drawn_only_where_it_reads_closer_on_the_page`;
-    then its rows of that pin conserving with `bundled-fonts`, or the pin
-    naming H-158.
+    then its rows of that pin conserving with `bundled-fonts`, or the case in the roadmap's Bugs.
 15. CD-19.34 to CD-19.36: Left (5)'s findings; exit: the section, reproducing
     each from its pin; then the `'.` rows of
     `a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed`
     holding their structure tree's order, and the span's and the `;`'s rows
     of `a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed`
-    conserving and reading whole, or the pins naming H-158.
+    conserving and reading whole, or the cases in the roadmap's Bugs.
 
 ## Risks
 

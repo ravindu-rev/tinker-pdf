@@ -536,8 +536,14 @@ instead of living in one feature's head.
     `a_styled_mark_after_a_number_a_no_break_space_holds_together_reads_as_typed`
     and
     `a_styled_mark_after_a_number_reads_as_typed_beside_a_letter_the_page_gives_back_otherwise`).
-    No form of the read-back that costs time or text is taken; the others
-    are in ROADMAP CD-19.
+    A change of the read-back that reads CD-19's cases better is taken
+    whatever time it costs. A change of how the reader reads every PDF is
+    taken where more lines of the suites and of Unicode's conformance files
+    read better than worse, and each line it reads worse is recorded here
+    with its figures. A change that reads any case worse is the owner's to
+    take or leave, case by case. A word of Greek, Cyrillic or Armenian that
+    an inline block cuts reads in two, as a Latin word so cut does. A case
+    no change taken reaches is listed in ROADMAP's Bugs.
 
 ## How to add a ruling
 
