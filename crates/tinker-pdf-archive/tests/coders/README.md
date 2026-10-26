@@ -74,7 +74,7 @@ what
 Obtained on Linux x86_64 with CPython 3.11.15, py7zr 1.1.3, liblzma 5.4.5
 (Ubuntu `5.6.1+really5.4.5-1ubuntu0.2`), libbzip2 1.0.8 (Ubuntu
 `1.0.8-5.1build0.1`), pyppmd 1.3.1 and python-zstandard 0.25.0 (its bundled
-libzstd 1.5.7), on 26 September 2026:
+libzstd 1.5.7):
 
 ```
 pip install --user py7zr zstandard
@@ -85,9 +85,6 @@ sh make-bcj2.sh
 python3 make-zstd.py
 ```
 
-`modes.bin` arrived after the other four inputs, from its own seed and its
-own arithmetic, and adding it left their bytes unchanged.
-
 `make-bcj2.sh` needs 7-Zip 26.02's Linux build on the path as `7zz`: the
 `7z2602-linux-x64.tar.xz` asset of the ip7z/7zip GitHub release 26.02,
 SHA-256 `41aaba7b1235304ab5aa0624530c67ae829496cd29e875925271efdccc28c03e`,
@@ -96,7 +93,7 @@ single-threaded, so a rerun writes the same bytes, and it also writes the
 `sevenz/bcj2` seed.
 
 `make-coders.py` pins py7zr's clock to one instant, so a rerun under the same
-versions writes the same bytes; every hash above was measured twice. It also
+versions writes the same bytes. It also
 writes the real-writer seeds in `fuzz/corpus/`: `sevenz/bcj-lzma2` (the same
 filters over `x86.bin`'s first 768 bytes), `sevenz/bzip2`,
 `zip_archive/bzip2-method-12`, and the five bare streams of `bzip2/` —
@@ -107,7 +104,7 @@ behind the three parameter bytes that target reads: order 2 in 2 KiB,
 order 6 in 64 KiB, order 16 in 1 MiB and order 64 in 8 KiB.
 
 `make-zstd.py` reads no clock either, so a rerun under the same zstandard and
-libzstd writes the same bytes; every hash above was measured twice. It writes
+libzstd writes the same bytes. It writes
 the six `zstd/` seeds — libzstd's frames over slices of the inputs, behind
 the target's `0xFF` control byte: level 3, level 19, level 1, a 1 KiB window,
 two frames with a skippable one between and an empty one after, and the empty
@@ -141,8 +138,8 @@ one matters, because the coder is what these files adjudicate.
 - **Zstandard**: python-zstandard is a CPython binding over libzstd itself,
   the reference implementation, so these are the frames the format's
   authors' encoder writes. The ZIP around the method-93 entries is not
-  libzstd's and is not a ZIP writer's either: CPython's `zipfile` learned
-  method 93 in 3.14, so `make-zstd.py` writes the local headers, central
+  libzstd's and is not a ZIP writer's either: CPython's `zipfile` writes
+  method 93 only from 3.14, so `make-zstd.py` writes the local headers, central
   directory and end record itself, from APPNOTE 4.3 — the part of the file
   that is ZIP's, which `tinker-pdf-zip` is already held to by other writers.
 

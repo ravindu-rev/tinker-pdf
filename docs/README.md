@@ -13,7 +13,7 @@ Forward-looking work lives only in the [roadmap](ROADMAP.md) and its
 | [features/filters.md](features/filters.md) | every stream filter and image codec |
 | [features/encryption.md](features/encryption.md) | handlers R2–R6, authenticate, permissions, encrypt-on-save |
 | [features/document-model.md](features/document-model.md) | metadata, page tree, outlines, destinations, trees, attachments, XMP |
-| [features/fonts.md](features/fonts.md) | TrueType/CFF/Type 1/Type 3, CID, 202 CMaps, vertical writing, `FontProvider` |
+| [features/fonts.md](features/fonts.md) | TrueType/CFF/Type 1/Type 3, CID, the predefined CMaps, vertical writing, `FontProvider` |
 | [features/content-and-text.md](features/content-and-text.md) | interpreter, the `Device` seam, text extraction and search |
 | [features/rasterizer.md](features/rasterizer.md) | deterministic AA fill, stroking, clipping, sampling, cancellation |
 | [features/rendering.md](features/rendering.md) | colour, functions, shadings, patterns, transparency, optional content |
@@ -21,7 +21,8 @@ Forward-looking work lives only in the [roadmap](ROADMAP.md) and its
 | [features/editing.md](features/editing.md) | page surgery, annotations, flattening, redaction |
 | [features/forms.md](features/forms.md) | field tree, fill, transactions, calculations |
 | [features/creation.md](features/creation.md) | `DocumentBuilder`: pages, text, images, patterns, outlines |
-| [features/pdfa.md](features/pdfa.md) | ISO 19005: the validator, its coverage as a measured number, and the writer's archival profile |
+| [features/signatures.md](features/signatures.md) | verifying what each signature proves, and signing on an incremental save |
+| [features/pdfa.md](features/pdfa.md) | ISO 19005: the validator, its coverage, and the writer's archival profile |
 | [features/pdfua.md](features/pdfua.md) | ISO 14289: the validator, the findings it decides, and the clauses it abstains on by name |
 | [features/pdfx.md](features/pdfx.md) | ISO 15930: the claim, the 2003 levels' rules from the CGATS notes, and every clause not read, by name |
 | [features/cbz.md](features/cbz.md) | comic archives as documents |
@@ -35,7 +36,7 @@ Forward-looking work lives only in the [roadmap](ROADMAP.md) and its
 | --- | --- |
 | [features/determinism.md](features/determinism.md) | bit-identical output across targets; the fingerprint suite |
 | [rulings.md](rulings.md) | the numbered engineering rulings — these override everything |
-| [verification.md](verification.md) | fuzzing, corpora, ratchets, injection, and what first-party verification cannot prove — the doctrine |
+| [verification.md](verification.md) | how the engine is tested: fuzzing, corpora, ratchets, and what first-party verification cannot prove |
 
 ## Project
 
@@ -46,16 +47,3 @@ Forward-looking work lives only in the [roadmap](ROADMAP.md) and its
 | [roadmap/](roadmap/) | one file per tier, each row with its steps; the acts only a person can do (`H.md`); the hard limits (`NG.md`) |
 | [design/](design/) | one design doc per major roadmap item |
 | [pdf20-deltas.md](pdf20-deltas.md) | ISO 32000-2 deltas against the 1.7 baseline |
-
-## Historical documents
-
-The design and status documents that steered the build — phase plans, gap
-plans, audits, the status ledger — are retired to git history rather than
-kept stale in the tree. Source comments still cite them ("plan 07", "gap 30
-milestone 9", "ruling N"): ruling numbers resolve in [rulings.md](rulings.md)
-(numbering is frozen), and a retired document is recovered with
-
-```bash
-git log --diff-filter=D --oneline -- docs/plans/gaps/30-xps.md
-git show <commit>^:docs/plans/gaps/30-xps.md
-```

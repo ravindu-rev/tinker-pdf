@@ -50,8 +50,8 @@ cargo test -p tinker-pdf-filters --test jxr_fixtures -- --ignored write_fuzz_see
 | --- | --- |
 | `System.Windows.Media.Imaging.WmpBitmapEncoder` | WPF's `PresentationCore` wrapper over the Windows Imaging Component JPEG XR codec (`WMPhoto`). Driven from `make-fixtures.ps1`; needs no elevation and no printer. |
 
-Machine: Windows 11 Pro, build **10.0.26200.0**, x64. Produced **30 August
-2026**. The same provenance discipline as
+Machine: Windows 11 Pro, build **10.0.26200.0**, x64. The same provenance
+discipline as
 [`crates/tinker-pdf/tests/xps/README.md`](../../../tinker-pdf/tests/xps/README.md),
 and for the same reason: a fixture whose origin is not written down is a
 fixture nobody can re-derive.
@@ -81,31 +81,24 @@ a third party's image.
 | Seams | `seam0`, `seam1`, `seam2` | A horizontal ramp, **lossy**, at each overlap mode. Lossy on purpose: a lossless ramp reconstructs exactly whatever the overlap filter does, so the seam property would only be measuring the identity again. |
 | Monotonicity | `quant48`, `quant16`, `quant4` | One source at three quantization parameters, for the weakest of the three checks. |
 
-**Three encoder findings are recorded here because each cost a fixture set,
-and all three are the same failure — a knob that is silently ignored looks
-exactly like a knob that worked.**
+**Three encoder knobs do not do what their names say, and a knob that is
+silently ignored looks exactly like a knob that worked.**
 
-- **`Lossless` does nothing on its own, and this one emptied the whole
-  evidence design.** With `$enc.Lossless = $true` and no `QualityLevel`, the
-  codec encodes at its default QP of 10: the files were *quantized* while the
-  manifest called them lossless, so the lossless identity — the primary leg of
-  everything in `docs/design/jpeg-xr.md` — was comparing a decode against an
-  encode that could never match it, and would have failed forever for a reason
-  that looked like a decoder bug. `QualityLevel = 1` is what actually produces
-  a lossless file, and the script now sets it for every row. Measured, not
-  assumed: the same 48 x 32 grey raster is **1016 bytes** at `Lossless` alone
-  and decodes to within +/-3, and **1378 bytes** at `QualityLevel = 1` and
-  decodes **bit-exact**.
-- `ImageQualityLevel` has **no effect** once `UseCodecOptions` is set. Three
-  fixtures asked for 30 %, 60 % and 90 % of it and came back byte-identical.
-  The quantization fixtures use `QualityLevel` — the codec's own QP, where 1
-  is lossless and larger is coarser.
+- **`Lossless` does nothing on its own.** With `$enc.Lossless = $true` and no
+  `QualityLevel`, the codec encodes at its default QP of 10, so the files are
+  *quantized*, and the lossless identity — the primary leg of everything in
+  `docs/design/jpeg-xr.md` — would compare a decode against an encode that
+  can never match it, failing for a reason that looks like a decoder bug.
+  `QualityLevel = 1` is what produces a lossless file, and the script sets it
+  for every row.
+- `ImageQualityLevel` has **no effect** once `UseCodecOptions` is set. The
+  quantization fixtures use `QualityLevel` — the codec's own QP, where 1 is
+  lossless and larger is coarser.
 - `HorizontalTileSlices` and `VerticalTileSlices` count **slices, not extra
-  slices**: 1 means one slice and leaves `TILING_FLAG` clear. The first
-  fixture set asked for 1 and produced single-tile files whose tile tests all
-  passed vacuously. `src/jxr/tests/fixtures.rs` now asserts the tile count,
-  the overlap mode and the frequency flag actually reached the codestream, so
-  a knob that stops working fails a test instead of quietly emptying a claim.
+  slices**: 1 means one slice and leaves `TILING_FLAG` clear.
+  `src/jxr/tests/fixtures.rs` asserts the tile count, the overlap mode and the
+  frequency flag reached the codestream, so a knob that stops working fails a
+  test instead of quietly emptying a claim.
 
 ## What the set does *not* cover
 

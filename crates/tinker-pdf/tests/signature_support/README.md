@@ -2,19 +2,17 @@
 
 `certificates.tsv` is documented in its own header: expected values for the
 X.509 certificates the fetched corpora carry, produced once by OpenSSL and
-committed as a dated measurement.
+committed as a recorded measurement.
 
 ## The ECDSA-signed documents
 
 `ecdsa-p256.pdf`, `ecdsa-p256-root.der`, `ecdsa-p384.pdf` and
-`ecdsa-p384-root.der` were built once, on **14 September 2026**, by
-`ecdsa-fixtures.py` and **OpenSSL 3.5.5 (27 Jan 2026)**. They exist because
-nothing else here can produce an ECDSA-signed PDF: of the 34 `SignerInfo`s and
-71 certificates in the corpora `corpus/corpora.lock` pins, **not one uses
-ECDSA** — every signer is RSASSA-PKCS1-v1_5 and every certificate is signed
-with RSA. `crates/tinker-pdf/tests/cms_census.rs` measures that, and the
-roadmap's Signatures row names it as the reason the verdict path had no ECDSA
-arm until these files arrived.
+`ecdsa-p384-root.der` were built once by `ecdsa-fixtures.py` and
+**OpenSSL 3.5.5**. They exist because nothing else here can produce an
+ECDSA-signed PDF: **no `SignerInfo` or certificate** in the corpora
+`corpus/corpora.lock` pins uses ECDSA — every signer is RSASSA-PKCS1-v1_5 and
+every certificate is signed with RSA, as
+`crates/tinker-pdf/tests/cms_census.rs` measures.
 
 Each PDF is one page, one invisible signature field, and one
 `/SubFilter /adbe.pkcs7.detached` signature whose `/ByteRange` covers every
@@ -68,9 +66,8 @@ chance of needing that test adjusted. Nothing re-runs the script, and
 
 `signature-fixtures.py` builds the signed documents `tests/signature_shapes.rs`
 holds the verdict to, one per shape the fetched corpora have too few of. It
-was run once per fixture with **OpenSSL 3.0.13 (30 Jan 2024)**, on the date
-given for each, and nothing re-runs it — `cargo xtask oracles` would refuse a
-test that tried. It lays out the same one-page, one-field document
+was run once per fixture with **OpenSSL 3.0.13**, and nothing re-runs it —
+`cargo xtask oracles` would refuse a test that tried. It lays out the same one-page, one-field document
 `ecdsa-fixtures.py` does, computes the `/ByteRange`, and splices OpenSSL's CMS
 into the reservation; what each half of the result is worth is the same split
 the ECDSA section above makes, and `signature_shapes.rs` states it again at the
@@ -82,7 +79,7 @@ python3 crates/tinker-pdf/tests/signature_support/signature-fixtures.py \
     crates/tinker-pdf/tests/signature_support /tmp/sig-work <fixture>...
 ```
 
-### `rsa-pss.pdf` and `rsa-pss-root.der` — 2 October 2026
+### `rsa-pss.pdf` and `rsa-pss-root.der`
 
 `python3 signature-fixtures.py <out> <work> rsa-pss`. A 2048-bit
 `rsaEncryption` root, self-signed with RSASSA-PSS (`-sigopt
@@ -105,7 +102,7 @@ and RSA Laboratories' published vectors in `tinker-pdf-crypto`; this file is
 what carries a PSS signature, a PSS-restricted key and a PSS certificate
 signature that a second implementation produced into a whole document.
 
-### `no-signed-attributes.pdf` and `no-signed-attributes-root.der` — 2 October 2026
+### `no-signed-attributes.pdf` and `no-signed-attributes-root.der`
 
 `python3 signature-fixtures.py <out> <work> no-signed-attributes`. A 2048-bit
 RSA root and a leaf it issues, both PKCS#1 v1.5 with SHA-256, and `openssl cms
@@ -122,7 +119,7 @@ The corpus has exactly one signer of this shape — `bug854315.pdf`'s, per
 `cms_census.rs` — and one is not enough to say the arm is right in both
 directions; this file is the second, and the one whose negatives can be made.
 
-### `pkcs7-sha1.pdf`, `pkcs7-sha1-no-attributes.pdf` and their roots — 2 October 2026
+### `pkcs7-sha1.pdf`, `pkcs7-sha1-no-attributes.pdf` and their roots
 
 `python3 signature-fixtures.py <out> <work> pkcs7-sha1 pkcs7-sha1-no-attributes`.
 Each is its own 2048-bit RSA root and leaf, and `openssl cms -sign -binary
@@ -144,10 +141,10 @@ SHA-256: `ada73945bc127cc41f54bc231f2c8a1a79d31b0efc0f57fd60c8e4b514c82c6c`
 (`pkcs7-sha1-no-attributes-root.der`).
 
 The corpus's only `adbe.pkcs7.sha1` file is a fuzzer's mutation whose
-`/ByteRange` does not bracket its `/Contents`, so it has never reached a CMS
+`/ByteRange` does not bracket its `/Contents`, so it never reaches a CMS
 parser; these two are the only ones that do.
 
-### `cades-general-names.pdf` and its root — 2 October 2026
+### `cades-general-names.pdf` and its root
 
 `python3 signature-fixtures.py <out> <work> cades-general-names`. A 2048-bit
 RSA root and a leaf issued with the extension file `GENERAL_NAMES_EXTENSIONS`
@@ -170,7 +167,7 @@ file, so `signature_shapes.rs` asserts the request read back, encoded by a
 second implementation; it is not this crate's own encoding of a name agreeing
 with its own decoding.
 
-### `signature-timestamp.pdf` and its two roots — 2 October 2026
+### `signature-timestamp.pdf` and its two roots
 
 `python3 signature-fixtures.py <out> <work> signature-timestamp`. A signer
 chain as `rsa_chain` makes it and `openssl cms -sign -binary -md sha256
@@ -192,9 +189,8 @@ SHA-256: `f494d76140328d6daa6242886772e630480da312753ebb3cd736f30a7b81ae06`
 (`signature-timestamp-root.der`, the signer's root) and
 `d9b49457a0937c0ef21520f348a62eda764cb48c005baaff4a0ccee2627121d1`
 (`signature-timestamp-tsa-root.der`, the authority's). The token's `genTime`
-is the moment OpenSSL made it, which the token spells `20261002094730Z`;
-`signature_shapes.rs` finds those digits in the token and pins the time they
-name by its own calendar arithmetic, and holds the token's other fields to the
+is the moment OpenSSL made it; `signature_shapes.rs` finds its digits in the
+token and pins the time they name by its own calendar arithmetic, and holds the token's other fields to the
 TSA configuration `tsa()` wrote rather than to any program's printout of them
 (ruling 13). The outer CMS blob is
 also the `pki_cms` seed `rfc3161-signature-timestamp`.
@@ -204,7 +200,7 @@ and its certificates — is a second implementation's; the splice is this
 script's, and is checked by the outer signature still verifying, since an
 unsigned attribute is outside what that signature covers.
 
-### `document-timestamp.pdf` and its authority's root — 2 October 2026
+### `document-timestamp.pdf` and its authority's root
 
 `python3 signature-fixtures.py <out> <work> document-timestamp`. The same
 one-page layout with the field's value a `/Type /DocTimeStamp` dictionary under
@@ -212,24 +208,23 @@ one-page layout with the field's value a `/Type /DocTimeStamp` dictionary under
 the bare token from `openssl ts -reply -token_out` over SHA-256 of the covered
 bytes, its authority configured with `ess_cert_id_alg = sha256` so the token
 carries RFC 5816's `signingCertificateV2`, the other ESS version from
-`signature-timestamp.pdf`'s. `genTime` is the token's own `20261002095834Z`,
-which `document_timestamp.rs` finds in it and turns into seconds itself.
+`signature-timestamp.pdf`'s. `document_timestamp.rs` finds the token's own
+`genTime` in it and turns it into seconds itself.
 
 SHA-256: `b83122fa89da2a1bbaee6dd29c017bd714e4fcde7c8e3994b1d8849858501f8f`
 (`document-timestamp.pdf`) and
 `56942293dd3e83c156644c028cb4ac71dd89b1d3b7ca1958bc3c37bfc940656d`
 (`document-timestamp-tsa-root.der`).
 
-### `engine-timestamp-token.der` and its authority's root — 2 October 2026
+### `engine-timestamp-token.der` and its authority's root
 
 A token over a document **this engine wrote**. `tests/document_timestamp.rs`
 opens `no-signed-attributes.pdf`, adds a document timestamp in a new invisible
 field `DocumentTimestamp` with an 8 192-byte reservation, and records the
-digest its `Timestamper` is handed: on 2 October 2026 that was
-`47356d50e0ee90aebf1a3cea92dd9ff11fb6171b3dbc731fb1ee1650fafe307e`, the same
-on two runs. `python3 signature-fixtures.py <out> <work>
-engine-timestamp=<that digest>` asked a fresh authority (`ess_cert_id_alg =
-sha256`) for a token over it; `genTime` `Oct  2 09:59:31 2026 GMT`.
+digest its `Timestamper` is handed,
+`47356d50e0ee90aebf1a3cea92dd9ff11fb6171b3dbc731fb1ee1650fafe307e`.
+`python3 signature-fixtures.py <out> <work> engine-timestamp=<that digest>`
+asks a fresh authority (`ess_cert_id_alg = sha256`) for a token over it.
 
 SHA-256: `d46d89731d5614c7448f605af218041aa372651ac20494cc4b6657ac9beb3752`
 (`engine-timestamp-token.der`) and
@@ -238,12 +233,13 @@ SHA-256: `d46d89731d5614c7448f605af218041aa372651ac20494cc4b6657ac9beb3752`
 
 **When this has to be redone.** The engine's output is deterministic (ruling
 4), so the digest only moves if the incremental writer's bytes for this input
-change. If one does, `the_digest_the_engine_hands_its_timestamper_is_the_one_
-the_committed_token_stamps` fails first and prints both digests; if the
+change. If one does,
+`the_digest_the_engine_hands_its_timestamper_is_the_one_the_committed_token_stamps`
+fails first and prints both digests; if the
 change was meant, run the command above with the new one and commit the two
 files it writes.
 
-### `no-signed-attributes-crl.der` and `-ocsp.der` — 2 October 2026
+### `no-signed-attributes-crl.der` and `-ocsp.der`
 
 `python3 signature-fixtures.py <out> <work> validation-data`, in the work
 directory `no-signed-attributes` was built in and straight after it, because
@@ -265,7 +261,7 @@ SHA-256: `989a9e2b23081fe35c3d524c0c4968bf6600bc40a1a257f1a45f356e066f1d76`
 
 `visible-signer-key.der` and `visible-signer.der` are a throwaway 2048-bit RSA
 key (PKCS#1 `RSAPrivateKey`, DER) and the self-signed certificate over it,
-generated once on **26 September 2026** by **OpenSSL 3.0.13 (30 Jan 2024)**:
+generated once by **OpenSSL 3.0.13**:
 
 ```sh
 openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem \
@@ -300,5 +296,4 @@ verifier.
 `crates/tinker-pdf/tests/pubsec_write.rs` seals documents to
 `visible-signer.der`, and its test `Recipient` opens them with this key's
 private exponent. That is RFC 8017 §7.2.2 decryption done in the test,
-because the engine does no private-key operation. Nothing new was generated
-for it.
+because the engine does no private-key operation.

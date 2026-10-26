@@ -1,10 +1,9 @@
-# XPS packages for the rows that left the refusal table, derived
+# XPS packages for features no producer on hand writes, derived
 
-Each `XpsElementDefect` row that closed after tier 4 owes a fixture in the
-conservation sweep, and no producer on hand writes any of the features those
-rows are about — WPF, the XPS object model and Ghostscript write none of
-12.1.5's simulations, no n-channel `ContextColor`, no `ContextColor` gradient
-stop and no per-stop alpha. So these packages are **derived** rather than
+Each of these features has a fixture in the conservation sweep, and no
+producer on hand writes any of them — WPF, the XPS object model and
+Ghostscript write none of 12.1.5's simulations, no n-channel `ContextColor`,
+no `ContextColor` gradient stop and no per-stop alpha. So these packages are **derived** rather than
 produced, and they live here rather than in [`../xps`](../xps/README.md)
 because that directory's first claim is that nothing in this repository wrote
 a byte of anything in it.
@@ -15,7 +14,7 @@ picture, the relationships, the content types and the containers are WPF's
 bytes; the page markup, and where a row needs one a profile part, are this
 repository's.
 
-| File | Bytes | SHA-256 | Row |
+| File | Bytes | SHA-256 | Feature |
 | --- | ---: | --- | --- |
 | `wpf-style-simulations.xps` | 78 764 | `3a31d48215aea021cb0a5853533656cf0f9821ddaa494bf84d279df6d310426a` | 12.1.5's `StyleSimulations` |
 | `wpf-stop-alphas.xps` | 78 925 | `c9ca7d2ddbe3c862c9046da29485ee06c11a34bb210b138d72d62a35b988263f` | 18.3.2's per-stop alpha |
@@ -62,18 +61,17 @@ sRGB itself, from ICC.1 (`Y = v^γ`) and IEC 61966-2-1, without the reader's
 evaluator, and holds the stops and middles beside it to a byte, because the
 engine's conversion answers eight-bit sRGB.
 
-**How they were obtained**, on Linux x86_64 with CPython 3.11.15's `zipfile`,
-on 3 October 2026:
+**How they are made**, on Linux x86_64 with CPython 3.11.15's `zipfile`:
 
 ```
 cd crates/tinker-pdf/tests/xps_rows && python3 make-rows.py
 ```
 
 `make-rows.py` stamps every item with one fixed time, so a rerun under the
-same CPython writes the same bytes; each hash above was measured twice.
+same CPython writes the same bytes.
 
-**How they are checked.** `xps_conservation.rs` sweeps them with the thirteen
-real packages, and each has its row in `../xps/CONSERVATION.tsv`. The census
+**How they are checked.** `xps_conservation.rs` sweeps them with the real
+packages, and each has its row in `../xps/CONSERVATION.tsv`. The census
 reads what each row is about out of the markup with its own scanners — for the
 simulations, `StyleSimulations` and 12.1.5's S5.6 offset written out from the
 clause — and out of the document from the content stream: Table 106's

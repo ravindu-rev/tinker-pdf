@@ -24,21 +24,19 @@ in five. Every piece keeps its source item's compression — the PNG's and
 and `FixedDocument.fdoc` stay whole. **Every byte of every part is WPF's**; only
 the container is this repository's.
 
-**How it was obtained**, on Linux x86_64 with CPython 3.11.15's `zipfile`, on
-26 September 2026:
+**How it is made**, on Linux x86_64 with CPython 3.11.15's `zipfile`:
 
 ```
 cd crates/tinker-pdf/tests/xps_interleaved && python3 make-interleaved.py
 ```
 
 `make-interleaved.py` stamps every item with one fixed time, so a rerun under
-the same CPython writes the same bytes; the hash above was measured twice.
+the same CPython writes the same bytes.
 
-**How it is checked.** `xps_conservation.rs` sweeps it with the thirteen real
-packages — its row in `../xps/CONSERVATION.tsv` is its source package's row, 3
-facts of 3 — and
-`an_interleaved_package_states_the_census_of_the_one_it_was_cut_from` holds the
-two packages to one census and one rendered page, byte for byte. The harness
+**How it is checked.** `xps_conservation.rs` sweeps it with the real
+packages — its row in `../xps/CONSERVATION.tsv` is its source package's row —
+and `an_interleaved_package_states_the_census_of_the_one_it_was_cut_from` holds
+the two packages to one census and one rendered page, byte for byte. The harness
 joins the pieces by its own reading of 7.2.4 rather than by the reader's.
 `xps_opc.rs`'s `hostile_bytes_through_an_interleaved_package_never_panic`
 damages it across its length.

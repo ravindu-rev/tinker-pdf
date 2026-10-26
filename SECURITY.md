@@ -49,51 +49,40 @@ scrutiny, so here is the honest framing:
 - **Scope is document decryption, encryption-on-save, and signature
   verification.** No TLS, no key exchange, no long-term secret storage, no
   protocol implementation.
-- **No private-key operation exists.** The signature code verifies and cannot
-  sign: no key generation, no signing, no PKCS#8 or PKCS#12 parsing. That is
-  what lets `bignum` skip constant-time discipline — every value it handles is
-  published in the document being checked — and it is a boundary a future
-  signing feature would have to cross deliberately, not drift across.
-  The owner crossed it deliberately on 9 October 2026: signing with a private key
-  in the engine is scheduled as [ROADMAP](docs/ROADMAP.md) rows SG-01 to
-  SG-09, and from SG-01 on every secret operand takes a constant-time path.
-  Until SG-01 lands, the sentences above describe the code.
+- **No private-key operation exists.** The signature code verifies; a
+  signature written on save is the CMS blob a caller-supplied `Signer`
+  returns over the digest. There is no key generation and no PKCS#8 or
+  PKCS#12 parsing. That is what lets `bignum` skip constant-time discipline —
+  every value it handles is published in the document being checked. Signing
+  with a private key in the engine is [ROADMAP](docs/ROADMAP.md) rows SG-01
+  to SG-09.
 - **Correctness is checked against published vectors** — RFC 1321 for MD5,
   RFC 6229 for RC4, worked examples for SHA-2, and known-answer tests for AES.
 
-  Stated precisely, because the previous wording here claimed more than was
-  true: for *most* of the cipher and hash primitives the full NIST CAVP suites
-  are **not** wired in, and there is no CBC-AES-256 vector even though that is
-  the mode the fixtures use. AES-256 in CBC is exercised end to end by
-  decrypting a mutool-written R6 fixture and by an independent Python
-  reimplementation of Algorithm 2.B in the test suite, which is real evidence
-  and is not the same thing as CAVP. Wiring the suites is tracked in
-  [`docs/features/encryption.md`](docs/features/encryption.md).
+  Stated precisely: for *most* of the cipher and hash primitives the full
+  NIST CAVP suites are **not** wired in, and there is no CBC-AES-256 vector
+  even though that is the mode the fixtures use. AES-256 in CBC is exercised
+  end to end by decrypting a mutool-written R6 fixture, which is real
+  evidence and is not the same thing as CAVP. Committing the AES and SHA-256
+  suites is [ROADMAP](docs/ROADMAP.md) row P-13.
 
-  **Triple DES is the one cipher that is gated on CAVP**, and it was built that
-  way from the start: 500 known answers across seven committed files, the
-  FIPS 46-3 tables read twice, and a counted-injection campaign recorded in
-  [`docs/design/pubsec.md`](docs/design/pubsec.md) that measures which vectors
-  catch which defect — including the one that caught nothing until a seventh
-  file was committed for it.
+  **Triple DES is the one cipher that is gated on CAVP**: its known answers
+  are committed files, and the FIPS 46-3 tables are read twice.
 
   The *signature* primitives are the other exception, and they are gated on
-  CAVP itself: 360 `SigVer15` vectors for RSA (moduli of 1024 to 4096 bits
-  crossed with SHA-1/256/384/512, 60 valid and 300 that must be refused, 150 of
-  those being forged paddings), 120 `SigVer` vectors and 24 `PKV` points for
-  ECDSA, and RFC 6979's sixteen appendix A.2 signatures. The vector files are
-  committed under `crates/tinker-pdf-crypto/tests/data/cavp/` with their
-  provenance in each file's header.
+  CAVP itself: `SigVer15` vectors for RSA (moduli of 1024 to 4096 bits
+  crossed with SHA-1/256/384/512, valid ones and ones that must be refused,
+  forged paddings among them), `SigVer` vectors and `PKV` points for ECDSA,
+  and RFC 6979's appendix A.2 signatures. The vector files are committed
+  under `crates/tinker-pdf-crypto/tests/data/cavp/` with their provenance in
+  each file's header.
 - **Password comparison is constant-time.**
 
   Decrypt paths **are** fuzzed: `crypt` drives the security handler and
   `crypt_ciphers` the ciphers themselves, both with committed seed corpora.
-  This paragraph said the opposite — "a `tinker-pdf-crypto` fuzz target does
-  not exist" — for as long as the two targets have existed, which is a
-  reminder that a security page is exactly where a stale sentence does the
-  most harm. The `cos_document` target additionally reaches the decryptor for
-  inputs that carry an `/Encrypt` dictionary, and the stable hostile-input
-  sweep authenticates with several passwords against every mutated fixture.
+  The `cos_document` target additionally reaches the decryptor for inputs
+  that carry an `/Encrypt` dictionary, and the stable hostile-input sweep
+  authenticates with several passwords against every mutated fixture.
 - **PDF encryption is weak by design in its older revisions** (RC4-40 exists
   because the spec has it, not because it protects anything), and the format's
   permission flags are advisory — a document that says "printing denied" is

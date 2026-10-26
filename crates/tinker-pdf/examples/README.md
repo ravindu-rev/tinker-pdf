@@ -1,6 +1,6 @@
 # Examples
 
-Seven programs, one per thing this engine is for. Each runs with **no
+One program per thing this engine is for. Each runs with **no
 arguments** — it resolves a committed fixture through `CARGO_MANIFEST_DIR`, so
 it works from any directory — and each takes an optional path to run against
 something of your own:

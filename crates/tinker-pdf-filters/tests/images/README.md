@@ -1,7 +1,6 @@
 # Container images somebody else encoded
 
-The decoders the tier-4 archive row added — BMP, GIF and WebP — and the TIFF
-decoder's additions from its TIFF row are held here to
+The BMP, GIF and WebP decoders, and the TIFF shapes below, are held here to
 pictures this repository **authored** and a **third-party encoder** wrote.
 Ruling 13's rule for a lossless codec is that the expected output is the
 generator's input, never another decoder's output, so the device is the one
@@ -18,17 +17,17 @@ the committed files are the record.
 
 ## What produced them
 
-| Directory | Producer | Command | Date |
-| --- | --- | --- | --- |
-| `bmp/pillow-*.bmp` | **Pillow 12.3.0** (`PIL.BmpImagePlugin`), CPython 3.11.15, Linux x86_64 | `python3 make-images.py` | 26 September 2026 |
-| `bmp/imagecodecs-*.bmp` | **imagecodecs 2026.3.6** (`imagecodecs.bmp_encode`), numpy 2.4.6 | the same script | 26 September 2026 |
-| `bmpsuite/*.bmp` | **bmpsuite 2.8**, Jason Summers' generator, at [`jsummers/bmpsuite`](https://github.com/jsummers/bmpsuite) `555e43a` (2023-11-28) | `make` with gcc 13.3.0, then `make check`, which verified every generated file against upstream's own `checksums` | 26 September 2026 |
-| `gif/pillow-*.gif` | **Pillow 12.3.0** (`PIL.GifImagePlugin`) | `python3 make-images.py` | 26 September 2026 |
-| `gif/omggif-*.gif` | **omggif 1.0.10** (Dean McNamee, MIT, from npm), Node v22.22.2 | `npm install omggif@1.0.10`, then `node make-gif.js` | 26 September 2026 |
-| `webp/pillow-*.webp` | **Pillow 12.3.0** (`PIL.WebPImagePlugin`) over its bundled libwebp 1.6.0 | `python3 make-images.py` | 26 September 2026 (lossless), 2 October 2026 (lossy) |
-| `webp/imagecodecs-*.webp` | **imagecodecs 2026.3.6** (`imagecodecs.webp_encode`) over libwebp 1.6.0 | the same script | the same two days |
-| `tiff/tifffile-*.tif` | **tifffile 2026.3.3** over imagecodecs 2026.3.6 (zlib; JPEG 2000 through OpenJPEG 2.5.4, `level=0`, lossless) | `python3 make-images.py` | 26 September 2026 |
-| `tiff/tifffile-cielab*.tif` | **tifffile 2026.3.3** over imagecodecs 2026.3.6 (zlib), numpy 2.4.6, CPython 3.11.15 | the CIE L\*a\*b\* block of `make-images.py`, run alone so no other file was rewritten | 4 October 2026 |
+| Directory | Producer | Command |
+| --- | --- | --- |
+| `bmp/pillow-*.bmp` | **Pillow 12.3.0** (`PIL.BmpImagePlugin`), CPython 3.11.15, Linux x86_64 | `python3 make-images.py` |
+| `bmp/imagecodecs-*.bmp` | **imagecodecs 2026.3.6** (`imagecodecs.bmp_encode`), numpy 2.4.6 | the same script |
+| `bmpsuite/*.bmp` | **bmpsuite 2.8**, Jason Summers' generator, at [`jsummers/bmpsuite`](https://github.com/jsummers/bmpsuite) `555e43a` | `make` with gcc 13.3.0, then `make check`, which verifies every generated file against upstream's own `checksums` |
+| `gif/pillow-*.gif` | **Pillow 12.3.0** (`PIL.GifImagePlugin`) | `python3 make-images.py` |
+| `gif/omggif-*.gif` | **omggif 1.0.10** (Dean McNamee, MIT, from npm), Node v22.22.2 | `npm install omggif@1.0.10`, then `node make-gif.js` |
+| `webp/pillow-*.webp` | **Pillow 12.3.0** (`PIL.WebPImagePlugin`) over its bundled libwebp 1.6.0 | `python3 make-images.py` |
+| `webp/imagecodecs-*.webp` | **imagecodecs 2026.3.6** (`imagecodecs.webp_encode`) over libwebp 1.6.0 | the same script |
+| `tiff/tifffile-*.tif` | **tifffile 2026.3.3** over imagecodecs 2026.3.6 (zlib; JPEG 2000 through OpenJPEG 2.5.4, `level=0`, lossless) | `python3 make-images.py` |
+| `tiff/tifffile-cielab*.tif` | **tifffile 2026.3.3** over imagecodecs 2026.3.6 (zlib), numpy 2.4.6, CPython 3.11.15 | the CIE L\*a\*b\* block of `make-images.py`, run alone so no other file is rewritten |
 
 Pillow's BMP writer produces `BITMAPINFOHEADER`, `BI_RGB`, bottom-up files at
 1, 8, 24 and 32 bits — and at 32 it puts an RGBA image's alpha into the byte
@@ -53,7 +52,7 @@ It does not interlace, which is why the interlaced file is Pillow's. Every
 test that depends on one of those features reads the descriptor byte that
 says the fixture has it, rather than trusting either encoder's documentation.
 
-tifffile writes each TIFF shape the TIFF row added: CMYK (uncompressed and
+tifffile writes the TIFF shapes: CMYK (uncompressed and
 deflated), signed samples at 8, 16 (big-endian) and 32 bits (with
 `Predictor` 2), IEEE floats at 16 (big-endian), 32 (with `Predictor` 3) and
 64 bits, BigTIFF in both byte orders, JPEG 2000 as one strip and as a padded
@@ -95,7 +94,7 @@ arithmetic beside them. What is left for the files here is the container, the
 `ALPH` chunk and the plumbing between them, and `image_fixtures.rs` holds
 those to **the recipe each file was encoded from, at a stated distance**: a
 mean squared error per file, set about a quarter above what this decoder
-measured, which a decoder that reads a token in the wrong context, predicts
+measures, which a decoder that reads a token in the wrong context, predicts
 from the wrong edge, swaps Cb and Cr or upsamples from the wrong chroma row
 breaks, and which one that skips the loop filter does not — the vectors catch
 that. The alpha, lossless at `alpha_quality=100`, is held to the recipe
@@ -108,16 +107,6 @@ threshold steps), RGBA at `alpha_quality=100` once unfiltered and once at
 method 0, where libwebp chose the horizontal filter, a two-frame animation,
 and imagecodecs' `webp_encode(lossless=False)` over `rgb`. Sizes of 61 x 45
 crop inside a macroblock and inside a chroma sample.
-
-*Corrected 2 October 2026, on review.* These files first came with
-`<name>.libwebp.png` beside each — libwebp 1.6.0's decode of it through Pillow
-12.3.0 — and the test held every pixel to that PNG. That made an outside
-program's output the expected answer, which ruling 13 forbids, so the PNGs are
-deleted and nothing reads them. What they showed is kept as **a dated
-measurement, which gates nothing**: on 2 October 2026, before they were
-deleted, this decoder's picture of all eight lossy files was libwebp's on every
-pixel of every channel. That is a statement about that day's decoder, not a
-check, and nobody re-runs it.
 
 ## bmpsuite, and what it can prove
 
