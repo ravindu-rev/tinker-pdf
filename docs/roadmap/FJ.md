@@ -1,6 +1,6 @@
 # Capability tier — form JavaScript (complete)
 
-[The roadmap](../ROADMAP.md) says how a step runs, what comes next, and which dependencies cross tiers. Each row below keeps its text as it was planned — Item, Today, Exit criterion, Doc, Depends on — and is cut into steps, each one workflow run.
+[The roadmap](../ROADMAP.md) says how a step is worked and what comes next.
 
 The owner's instruction is a **complete** implementation: a complete
 ECMAScript engine in the tree — **the 2025 editions of ECMA-262 and
@@ -26,8 +26,6 @@ FJ-18's coverage check counts it as open work, not as done.
 ## FJ-01 — The engine, milestone 1 — the ES5.1 language
 
 **The engine, milestone 1 — the ES5.1 language**: lexer, parser, compiler and interpreter with explicit stacks (no host recursion); every ES5.1 statement and operator — `try`/`catch`/`finally`, `switch`, `for…in`, labels, `with`, `typeof`, `delete`, `instanceof`, `in`, getters and setters, closures, strict mode, direct and indirect `eval`; objects with prototypes and property descriptors
-
-**Today.** a hand-rolled subset under `ScriptPolicy` (`crates/tinker-pdf-cos/src/script.rs`); `eval`, `try`, `switch`, `for…in`, `typeof`, `delete`, `with`, `class`, `let`/`const`, modules, regular expressions, object literals, prototypes and non-document-scope `function` refused as `ScriptError::Syntax` (`features/forms.md:543`). Until 9 October 2026 this was a decision row — a full engine priced at XL, [design/form-script-policy.md](../design/form-script-policy.md) arguing against running document code by default, and the subset to grow by the corpus count of refused constructs instead — and a narrower production than `NotADefinition` for provably inert document-scope statements waited on a corpus count; that production leaves with the subset when this milestone lands
 
 **Exit criterion.** the ECMAScript conformance suite (test262, BSD-3-Clause, vendored at a pinned commit) runs in `cargo test` through a first-party harness, and **every test of its ES5.1 language directories passes**, except the entries of a committed exclusion list, each an owner ruling under H-35 that names the test and the reason; the harness reports the pass count and the row closes at zero unruled failures
 
@@ -78,24 +76,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-01.41 | measure | The engine's speed row in the benchmark set, as the third of FJ-16's operations: a generated 64 KiB document-level script parsed and compiled through the form path, sized by repetition into MS-04's 20 to 300 ms window, with its baseline entry. *Note:* The operation creates the scripts group's file, with its `[[bench]]` and its entry in `bench.yml`'s matrix, and each machine entry of `baseline.json` names it unmeasured until its figure is recorded the way MS-04 records a new operation's; `cargo xtask baseline` holds the four to each other. | `crates/tinker-pdf/benches/scripts.rs` (new), `crates/tinker-pdf/Cargo.toml`, `crates/tinker-pdf/benches/baseline.json`, `.github/workflows/bench.yml`, `xtask/src/bench.rs` | `cargo xtask baseline` holds the operation in the scripts group with the bench file, the workflow's guard count and `baseline.json` agreeing, and `cargo bench -p tinker-pdf` reports its time; FJ-16 sets the band it is gated to. | FJ-01.40, MS-04 |
 | FJ-01.42 | test | Close the milestone: the harness turns from a floor into a count that reaches its end, asserting that every selected test passes but the entries of `exclusions.txt`, each naming the test, the reason and the owner's H-35 ruling, and failing on an exclusion that now passes; `not-passing.txt` is deleted and the pass count recorded in `docs/features/ecmascript.md`. | `crates/tinker-pdf-script/tests/test262.rs` (new), `crates/tinker-pdf-script/tests/test262/exclusions.txt` (new), `crates/tinker-pdf-script/tests/test262/not-passing.txt` (new), `docs/features/ecmascript.md` (new), `docs/verification.md` | `crates/tinker-pdf-script/tests/test262.rs` `test262_es51_language_passes_to_its_end` prints `RAN test262 es5.1 language: P of N, E excluded by ruling` with P + E = N and no unruled failure, in `cargo test`; an excluded test that passes, or an entry with no ruling, fails it. | FJ-01.34, FJ-01.35, FJ-01.36, H-35 |
 
-**Closes the row:** FJ-01.2 to FJ-01.22 build the ES5.1 language with explicit stacks; FJ-01.23 vendors test262's ES5.1 language selection and runs it in `cargo test` through the first-party harness, and FJ-01.24 counts what each test is refused at; FJ-01.25 to FJ-01.33 build the built-in members and the constructs those tests reach; FJ-01.34 to FJ-01.36 drive the selection to zero; FJ-01.42 turns the harness into the exit as the row states it, every selected test passing but the entries H-35 rules, the pass count reported. FJ-01.37 and FJ-01.41 add the fingerprint and the speed row; FJ-01.38 to FJ-01.40 retire the subset as the Today cell says, the switch after H-148 and H-04.
-
-**The tree at `5297133`, against this row's text:**
-
-- Today lists prototypes and regular expressions among the constructs refused as `ScriptError::Syntax`; `prototype` is not among the subset's reserved words (`crates/tinker-pdf-cos/src/script.rs:1182-1208`), so `x.prototype` is `ScriptError::UnknownMember` (`script.rs:1963`), and a pattern holding a character the subset has no token for, such as the backslash of `/\d/`, is `ScriptError::BadToken` (`script.rs:591-593`); `crates/tinker-pdf-cos/tests/form_document_scripts.rs:286` accepts either variant. `docs/features/forms.md:543` carries the same claim. Both lists also leave out constructs the subset refuses as `Syntax` beside them: `throw`, `do`, `in`, `instanceof`, `void`, `break` and `continue` are reserved words (`script.rs:1190-1202`, refused at `script.rs:1142`), and `new` of anything but `Array` is refused at `script.rs:1133-1136`.
-- The exit's "ES5.1 language directories" do not exist in test262, which files tests by feature rather than by edition, so FJ-01.1 defines the selection and FJ-01.23 holds every vendored test to it; and those tests reach ES5.1 built-ins that FJ-02 names while FJ-02's row depends on FJ-01, so FJ-01.25 to FJ-01.30 build the members FJ-01.24's census finds the selection reaching.
-
 ## FJ-02 — The engine, milestone 2 — the ES5.1 built-ins
 
 **The engine, milestone 2 — the ES5.1 built-ins**: `Object`, `Function` (`apply`, `call`, `bind`), `Array`, `String`, `Number` (`toFixed`, `toPrecision` exact), `Boolean`, `Math` (through `tinker-pdf-math`), `Date` with a host time-zone hook and a caller-supplied clock, `RegExp` (backtracking with backreferences and look-ahead, under a step budget), `JSON`, the `Error` family
 
-**Today.** absent — the owner's parity decision of 9 October 2026; the subset has no built-in library and refuses regular expressions and object literals as `ScriptError::Syntax` (`features/forms.md:543`)
-
 **Exit criterion.** **every test of the conformance suite's ES5.1 built-ins directories passes**, except the entries of a committed exclusion list, each an owner ruling under H-35 that names the test and the reason
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-01
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -114,19 +101,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-02.13 | fix | Drive the built-ins selection to zero: every remaining failure fixed, or proposed with its reason for the exclusion list the owner rules on (H-35). | `crates/tinker-pdf-script/src/builtins/mod.rs` (new), `crates/tinker-pdf-script/data/test262-exclusions.tsv` (new) | The harness lists no failing selected test outside the proposed exclusions, each with its reason. | FJ-02.3, FJ-02.4, FJ-02.5, FJ-02.6, FJ-02.7, FJ-02.10, FJ-02.11, FJ-02.12 |
 | FJ-02.14 | test | Close the milestone: the harness's count reaches its end over the built-ins selection, and number and date formatting join the determinism fingerprint. | `crates/tinker-pdf-script/tests/test262.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | Every selected test passes except the committed exclusion list, each entry an owner ruling under H-35 naming the test and the reason; the fingerprint holds on every K-07 target. | FJ-02.13, H-35, K-07 |
 
-**Closes the row:** FJ-02.3 to FJ-02.13 implement the ES5.1 built-ins and FJ-02.14 passes every test of their directories except the owner-ruled exclusions, which is the row's exit.
-
 ## FJ-03a — The engine, milestone 3 — ECMAScript 2015 syntax, iterators and generators
 
 **The engine, milestone 3 — ECMAScript 2015 syntax, iterators and generators**: `let`/`const` and the temporal dead zone, arrow functions, classes with `super` and `new.target`, template and tagged template literals, destructuring, spread and rest, default parameters, computed and shorthand properties, `for…of`, the iterator protocol, generators, code-point escapes, and modules with a host loader
 
-**Today.** absent — the owner's parity decision of 9 October 2026; the subset refuses `class`, `let`/`const` and modules as `ScriptError::Syntax` (`features/forms.md:543`)
-
 **Exit criterion.** **every conformance-suite test for these features in ECMA-262's 2025 edition passes**, except the entries of a committed exclusion list, each an owner ruling under H-35 that names the test and the reason
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-02
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -148,19 +129,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-03a.16 | fix | Drive every other directory of the selection to zero, or propose exclusions with their reasons. | `crates/tinker-pdf-script/src/interp.rs` (new), `crates/tinker-pdf-script/data/test262-exclusions.tsv` (new) | The harness lists no failing selected test outside the proposed exclusions. | FJ-03a.15 |
 | FJ-03a.17 | test | Close the milestone: the harness's count reaches its end over the selection, and generators and classes join the determinism fingerprint. | `crates/tinker-pdf-script/tests/test262.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | Every selected test passes except the committed exclusion list, each entry an owner ruling under H-35; the fingerprint holds on every K-07 target. | FJ-03a.16, H-35, K-07 |
 
-**Closes the row:** FJ-03a.3 to FJ-03a.16 build the 2015 syntax, iterators, generators, classes and modules, and FJ-03a.17 passes every selected test except the owner-ruled exclusions, which is the row's exit.
-
 ## FJ-03b — Milestone 4 — the 2015 built-ins
 
 **Milestone 4 — the 2015 built-ins**: `Symbol` and the well-known symbols, `Map`, `Set`, `WeakMap`, `WeakSet`, `Proxy` and `Reflect`, `ArrayBuffer`, `DataView` and the typed arrays, `RegExp`'s `u` and `y` flags, and the 2015 additions to `Object`, `Array`, `String`, `Number` and `Math`
 
-**Today.** absent — the owner's parity decision of 9 October 2026; the subset has none of these objects (`features/forms.md:543`)
-
 **Exit criterion.** **every conformance-suite test for these features in ECMA-262's 2025 edition passes**, except the entries of a committed exclusion list, each an owner ruling under H-35 that names the test and the reason
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-03a
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -177,19 +152,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-03b.11 | fix | Drive the selection to zero, or propose exclusions with their reasons. | `crates/tinker-pdf-script/src/builtins/mod.rs` (new), `crates/tinker-pdf-script/data/test262-exclusions.tsv` (new) | No failing selected test remains outside the proposed exclusions. | FJ-03b.5, FJ-03b.6, FJ-03b.8, FJ-03b.9, FJ-03b.10 |
 | FJ-03b.12 | test | Close the milestone: the harness's count reaches its end over the selection; typed-array byte order joins the determinism fingerprint. | `crates/tinker-pdf-script/tests/test262.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | Every selected test passes except the committed exclusion list under H-35; the fingerprint holds on every K-07 target. | FJ-03b.11, H-35, K-07 |
 
-**Closes the row:** FJ-03b.3 to FJ-03b.11 build the 2015 built-ins and FJ-03b.12 passes every selected test except the owner-ruled exclusions, which is the row's exit.
-
 ## FJ-03c — Milestone 5 — `Promise`, `async` and the job queue
 
 **Milestone 5 — `Promise`, `async` and the job queue**: `Promise` and its combinators, `async` functions, async iteration and async generators, top-level `await` in modules, and the job queue driven by the host's loop
 
-**Today.** absent — the owner's parity decision of 9 October 2026; the subset runs one script to completion with no job queue (`crates/tinker-pdf-cos/src/script.rs`)
-
 **Exit criterion.** **every conformance-suite test for these features in ECMA-262's 2025 edition passes**, except the entries of a committed exclusion list, each an owner ruling under H-35 that names the test and the reason; jobs run in the order the specification's host hooks state, on a test host's loop
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-03b
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -203,19 +172,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-03c.8 | fix | Drive the selection to zero, or propose exclusions with their reasons. | `crates/tinker-pdf-script/src/jobs.rs` (new), `crates/tinker-pdf-script/data/test262-exclusions.tsv` (new) | No failing selected test remains outside the proposed exclusions. | FJ-03c.6, FJ-03c.7 |
 | FJ-03c.9 | test | Close the milestone: the harness's count reaches its end over the selection, jobs in the hooks' order on the test host's loop, and a job-order trace in the determinism fingerprint. | `crates/tinker-pdf-script/tests/test262.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | Every selected test passes except the committed exclusion list under H-35; the job-order fingerprint holds on every K-07 target. | FJ-03c.8, H-35, K-07 |
 
-**Closes the row:** FJ-03c.3 to FJ-03c.8 build promises, `async`, async iteration and top-level `await`, and FJ-03c.9 passes every selected test except the owner-ruled exclusions with jobs in the hooks' order, which is the row's exit.
-
 ## FJ-03d — Milestone 6 — the 2016–2020 additions
 
 **Milestone 6 — the 2016–2020 additions**: exponentiation, `Array.prototype.includes`, `Object.values`, `entries` and `getOwnPropertyDescriptors`, string padding, trailing commas, `SharedArrayBuffer` and `Atomics` (one agent unless a host supplies more), object rest and spread, `Promise.prototype.finally`, `RegExp` named groups, look-behind, the `s` flag and Unicode property escapes (from the vendored UCD), `flat` and `flatMap`, `Object.fromEntries`, optional `catch` binding, **`BigInt`**, `globalThis`, optional chaining, nullish coalescing, `Promise.allSettled`, `String.prototype.matchAll`, dynamic `import()` and `import.meta`
 
-**Today.** absent — the owner's parity decision of 9 October 2026; none of these is in the subset's grammar or library (`features/forms.md:543`)
-
 **Exit criterion.** **every conformance-suite test for these features in ECMA-262's 2025 edition passes**, except the entries of a committed exclusion list, each an owner ruling under H-35 that names the test and the reason
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-03c
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -236,19 +199,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-03d.15 | fix | Drive the selection's built-ins directories to zero, or propose exclusions with their reasons. | `crates/tinker-pdf-script/src/builtins/mod.rs` (new), `crates/tinker-pdf-script/data/test262-exclusions.tsv` (new) | No failing built-ins test of the selection remains outside the proposed exclusions. | FJ-03d.6, FJ-03d.7, FJ-03d.9, FJ-03d.12 |
 | FJ-03d.16 | test | Close the milestone: the harness's count reaches its end over the selection, and `BigInt` printing joins the determinism fingerprint. | `crates/tinker-pdf-script/tests/test262.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | Every selected test passes except the committed exclusion list under H-35; the fingerprint holds on every K-07 target. | FJ-03d.14, FJ-03d.15, H-35, K-07 |
 
-**Closes the row:** FJ-03d.3 to FJ-03d.15 build every 2016–2020 addition and FJ-03d.16 passes every selected test except the owner-ruled exclusions, which is the row's exit.
-
 ## FJ-03e — Milestone 7 — the 2021–2025 additions
 
 **Milestone 7 — the 2021–2025 additions**: logical assignment, numeric separators, `Promise.any` and `AggregateError`, **`WeakRef` and `FinalizationRegistry`** (cleanup on the host's turn, deterministic under K-07), `replaceAll`, class fields, private methods and accessors, static blocks, `#x in o`, `at()`, `Object.hasOwn`, error `cause`, `RegExp` match indices, find-last, hashbang comments, symbols as weak keys, change-array-by-copy, **`RegExp`'s `v` flag**, well-formed strings, resizable and transferable `ArrayBuffer`, `Object.groupBy` and `Map.groupBy`, `Promise.withResolvers`, `Atomics.waitAsync`, the `Set` methods, iterator helpers, import attributes and JSON modules, `RegExp` modifiers, duplicate named groups and `RegExp.escape`, `Float16Array` and `Math.f16round`, `Promise.try`
 
-**Today.** absent — the owner's parity decision of 9 October 2026; none of these is in the subset's grammar or library (`features/forms.md:543`)
-
 **Exit criterion.** **every conformance-suite test for these features in ECMA-262's 2025 edition passes**, except the entries of a committed exclusion list, each an owner ruling under H-35 that names the test and the reason
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-03d
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -272,19 +229,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-03e.18 | fix | Drive the selection to zero, language and built-ins, or propose exclusions with their reasons. | `crates/tinker-pdf-script/src/builtins/mod.rs` (new), `crates/tinker-pdf-script/data/test262-exclusions.tsv` (new) | No failing selected test remains outside the proposed exclusions. | FJ-03e.3, FJ-03e.5, FJ-03e.6, FJ-03e.8, FJ-03e.9, FJ-03e.11, FJ-03e.13, FJ-03e.14, FJ-03e.15, FJ-03e.16, FJ-03e.17 |
 | FJ-03e.19 | test | Close the milestone: the harness's count reaches its end over the selection, and finalization order joins the determinism fingerprint. | `crates/tinker-pdf-script/tests/test262.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | Every selected test passes except the committed exclusion list under H-35; the fingerprint holds on every K-07 target. | FJ-03e.18, H-35, K-07 |
 
-**Closes the row:** FJ-03e.3 to FJ-03e.18 build every 2021–2025 addition and FJ-03e.19 passes every selected test except the owner-ruled exclusions, which is the row's exit.
-
 ## FJ-03f — Milestone 8 — ECMA-402 internationalisation
 
 **Milestone 8 — ECMA-402 internationalisation**: `Intl` — `Collator`, `NumberFormat`, `DateTimeFormat`, `PluralRules`, `RelativeTimeFormat`, `ListFormat`, `DisplayNames`, `Locale`, `Segmenter`, `DurationFormat` — and the locale-sensitive `toLocaleString` family, over locale data vendored from the Unicode CLDR as data, under the Unicode licence the allowlist already admits
 
-**Today.** absent — the owner's parity decision of 9 October 2026; dates and numbers are formatted only through the AForm helpers (`features/forms.md:261-290`)
-
 **Exit criterion.** **every test of the conformance suite's `intl402` directory for ECMA-402's 2025 edition passes**, except the entries of a committed exclusion list, each an owner ruling under H-35 that names the test and the reason; or, if the owner excludes `Intl` under H-35, that ruling recorded and `toLocaleString` held to ECMA-262's locale-independent definition
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-03a, H-04 (the locale data's footprint)
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -307,19 +258,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-03f.17 | fix | Drive the `intl402` selection to zero, or propose exclusions with their reasons. | `crates/tinker-pdf-script/src/intl/mod.rs` (new), `crates/tinker-pdf-script/data/test262-exclusions.tsv` (new) | No failing `intl402` test remains outside the proposed exclusions. | FJ-03f.13, FJ-03f.14, FJ-03f.15, FJ-03f.16 |
 | FJ-03f.18 | test | Close the milestone: the harness's count reaches its end over `intl402`, and formatted output for fixed locales joins the determinism fingerprint. | `crates/tinker-pdf-script/tests/test262.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | Every `intl402` test passes except the committed exclusion list under H-35; the fingerprint holds on every K-07 target. | FJ-03f.17, K-07 |
 
-**Closes the row:** FJ-03f.2 closes the row on the owner's exclusion of `Intl`, or FJ-03f.3 to FJ-03f.18 pass every `intl402` test except the owner-ruled exclusions, the row's two exits.
-
 ## FJ-04 — The sandbox's budgets and determinism
 
 **The sandbox's budgets and determinism**: steps, heap bytes, stack depth, string, array and source sizes, per-document isolation, a host-supplied clock and a seeded `Math.random`, no ambient authority; today's caps carried over (64 KiB a script, 4 MiB a read, 256 functions, 4 096 calculating fields) and each a `bounds_ledger.rs` row; every `ScriptError` and every uncaught exception a typed warning carrying the script's object, line and column
 
-**Today.** caps exist for the subset (`OutOfSteps`, `TooDeep`, `TooManyTokens`, `StringTooLong`, `ArrayTooLong`, `TooManyVars`; `features/forms.md:549-551`)
-
 **Exit criterion.** an injection test per budget shows it firing as a typed `ScriptError`, never a panic; the same script under the same host clock yields the same bytes on four targets (K-07); a fixture per error kind reports the position the source puts it at
 
 **Doc:** `design/ecmascript.md` (owed) · **Depends on:** FJ-01
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -328,19 +273,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-04.3 | build | Isolation and determinism: a realm per document, a host-supplied clock, `Math.random` seeded by the host, and no intrinsic that reaches the outside world. | `crates/tinker-pdf-script/src/realm.rs` (new), `crates/tinker-pdf-script/src/builtins/math.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | The same script under the same host clock and seed yields the same bytes on every K-07 target; two documents share no state. | FJ-04.2, K-07.1 |
 | FJ-04.4 | build | Every `ScriptError` and uncaught exception reported as a typed warning carrying the script's object, line and column. | `crates/tinker-pdf-cos/src/script.rs`, `crates/tinker-pdf/tests/script_errors.rs` (new), `docs/features/forms.md` | `script_errors.rs` (new) `each_error_reports_its_position`: a fixture per error kind reports the position the source puts it at. | FJ-04.2 |
 
-**Closes the row:** FJ-04.2 fires every budget as a typed error, FJ-04.3 gives the same bytes on four targets, and FJ-04.4 reports each error's position, which is the row's exit.
-
 ## FJ-05 — Script fuzzing
 
 **Script fuzzing**: grammar-aware targets for the parser, the interpreter, `RegExp` and FormCalc, nightly
 
-**Today.** one byte-mutation target, `form_script` (`fuzz/fuzz_targets/form_script.rs`), drives the subset's lexer, parser and evaluator and checks its budget; no grammar-aware target exists
-
 **Exit criterion.** the new targets nightly at the standard budget, coverage recorded
 
 **Doc:** — · **Depends on:** FJ-01, K-04
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -349,19 +288,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-05.3 | test | The FormCalc target AN-31 adds over the same generation joins this row's set. | `fuzz/fuzz_targets/formcalc.rs` (new) | The FormCalc target runs in the fuzz check beside the three script targets. | AN-31 |
 | FJ-05.4 | ci | The new targets in `fuzz.yml`'s nightly at the standard budget, with their coverage recorded as K-04 records it. | `.github/workflows/fuzz.yml`, `fuzz/coverage.tsv` (new) | A dispatched nightly on `develop` runs every new target to its budget green, and their coverage figures are committed. | FJ-05.2, FJ-05.3, MS-11 |
 
-**Closes the row:** FJ-05.2 and FJ-05.3 add the parser, interpreter, `RegExp` and FormCalc targets, and FJ-05.4 runs them nightly with coverage recorded, which is the row's exit.
-
 ## FJ-06 — The event model and every trigger
 
 **The event model and every trigger**: the whole `event` object (`target`, `source`, `targetName`, `name`, `type`, `value`, `change`, `changeEx`, `selStart`, `selEnd`, `willCommit`, `commitKey`, `keyDown`, `modifier`, `shift`, `fieldFull`, `rc`, `richValue`, `richChange`); application init; document open, will-close, will-save, did-save, will-print, did-print — the catalog actions `WC`, `WS`, `DS`, `WP`, `DP`; page open, close, visible, invisible; field keystroke, format, validate, calculate; mouse up, down, enter, exit; focus and blur; bookmark, link and screen actions; console, batch, menu and external events; `/OpenAction` scripts; action chains
 
-**Today.** calculate and format run by default; keystroke, validate and document scripts run when allowed; the catalog trigger exists and "nothing in this build runs one" (`features/forms.md:569`) — the five catalog actions (`WC`, `WS`, `DS`, `WP`, `DP`) were a decision item of the roadmap waiting on a corpus count until 9 October 2026; no mouse, focus, page or link scripts
-
 **Exit criterion.** every trigger fires in the order the published API reference states, held to person-written expectations (H-70); `event.rc = false` rejects the change in every trigger that honours it
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-02, H-70
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -371,19 +304,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-06.4 | build | Field triggers: keystroke, format, validate, calculate, mouse up, down, enter and exit, focus and blur, with `event.rc = false` rejecting the change wherever the trigger honours it. | `crates/tinker-pdf/src/script_host/triggers.rs` (new), `crates/tinker-pdf/tests/script_events.rs` (new) | `field_triggers_fire_and_rc_rejects`: each fires in order, and a false `rc` rejects the change in every trigger that honours it. | FJ-06.3 |
 | FJ-06.5 | build | Bookmark, link and screen actions, console, batch, menu and external events, and action chains. | `crates/tinker-pdf/src/script_host/triggers.rs` (new), `crates/tinker-pdf/tests/script_events.rs` (new), `docs/features/forms.md` | `the_remaining_triggers_fire_in_order`: each holds to the expectations; chains run in order. | FJ-06.4, AN-20 |
 
-**Closes the row:** FJ-06.3 to FJ-06.5 fire every trigger in the reference's order against person-written expectations, and FJ-06.4 makes `event.rc = false` reject wherever honoured, which is the row's exit.
-
 ## FJ-07 — Calculation order and automatic recalculation
 
 **Calculation order and automatic recalculation**: `/CO` order, a cascade on every committed value change, `calculateNow`, validation before commit and formatting after, a recalculation budget
 
-**Today.** `recalculate()` is explicit; automatic recalculation is "the host's policy" (`features/forms.md:571`)
-
 **Exit criterion.** committed-form fixtures with dependent fields recompute to the values computed in the test after each change; a cycle stops at its budget with a typed error
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-06
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -392,19 +319,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-07.3 | build | Validation before commit and formatting after, in the order the cascade runs. | `crates/tinker-pdf-cos/src/calc.rs`, `crates/tinker-pdf/tests/recalculation.rs` (new) | `validate_then_commit_then_format`: a rejected validation leaves the value uncommitted; formatting runs after each commit. | FJ-07.2 |
 | FJ-07.4 | build | A recalculation budget: a cycle stops at its budget with a typed error, the budget a ledger row. | `crates/tinker-pdf-cos/src/calc.rs`, `crates/tinker-pdf/tests/recalculation.rs` (new), `crates/tinker-pdf/tests/bounds_ledger.rs` | `a_cycle_stops_at_its_budget`: a cyclic form stops with the typed error, and the budget is a ledger row. | FJ-07.2 |
 
-**Closes the row:** FJ-07.2 recomputes dependent fields after each change and FJ-07.4 stops a cycle at its budget, which is the row's exit.
-
 ## FJ-08 — The AForm library, behaviourally exact
 
 **The AForm library, behaviourally exact**: `AFNumber_Format`/`_Keystroke` (separator styles 0–4, negative styles 0–3, currency, prepend), `AFPercent_*`, `AFDate_Format`/`FormatEx`/`Keystroke`/`KeystrokeEx`, `AFTime_*`, `AFSpecial_Format`/`Keystroke`/`KeystrokeEx`, `AFSimple_Calculate` over hierarchical names, `AFRange_Validate`, `AFMergeChange`, `AFParseDateEx`, `AFMakeNumber`, `AFExtractNums`; two-digit years and locale rules
 
-**Today.** five helpers: `AFSimple_Calculate`, `AFNumber_Format`, `AFPercent_Format`, `AFDate_Format`, `AFSpecial_Format` (`features/forms.md:261-290`)
-
 **Exit criterion.** the published API reference's own examples transcribed by a person into expectations (H-70) and held in `cargo test`
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-02, H-70
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -413,19 +334,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-08.3 | build | Dates and times: `AFDate_Format`, `FormatEx`, `Keystroke` and `KeystrokeEx`, `AFTime_*` and `AFParseDateEx`, with two-digit years. | `crates/tinker-pdf/src/script_host/aform.rs` (new), `crates/tinker-pdf/tests/aform.rs` (new) | `date_and_time_examples_hold`: the transcribed examples hold. | FJ-08.2 |
 | FJ-08.4 | build | The rest: `AFSpecial_*`, `AFSimple_Calculate` over hierarchical names, `AFRange_Validate`, `AFMergeChange`, `AFMakeNumber` and `AFExtractNums`. | `crates/tinker-pdf/src/script_host/aform.rs` (new), `crates/tinker-pdf/tests/aform.rs` (new), `docs/features/forms.md` | `the_remaining_examples_hold`: the transcribed examples hold. | FJ-08.2 |
 
-**Closes the row:** FJ-08.2 to FJ-08.4 hold the reference's examples, transcribed by a person, in `cargo test`, which is the row's exit.
-
 ## FJ-09 — `util`, complete
 
 **`util`, complete**: `printf` (every conversion, grouping), `printd` (every format, the numeric forms and the XFA picture mode), `printx`, `scand`, `spansToXML`, `xmlToSpans`, `crackURL`, `stringFromStream`, `streamFromString`, `iconStreamFromIcon`; file reads as host requests
 
-**Today.** absent — the owner's parity decision of 9 October 2026; `util` is not among the subset's objects (`features/forms.md:547`)
-
 **Exit criterion.** the published API reference's own examples transcribed into expectations (H-70) and held in `cargo test`
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-02, H-70
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -434,19 +349,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-09.3 | build | `printd` with every format, the numeric forms and the XFA picture mode (AN-32), and `scand`. | `crates/tinker-pdf/src/script_host/util.rs` (new), `crates/tinker-pdf/tests/script_util.rs` (new) | `printd_and_scand_examples_hold`: the transcribed examples hold. | FJ-09.2, AN-32 |
 | FJ-09.4 | build | `spansToXML`, `xmlToSpans`, `crackURL`, `stringFromStream`, `streamFromString` and `iconStreamFromIcon`, file reads as host requests. | `crates/tinker-pdf/src/script_host/util.rs` (new), `crates/tinker-pdf/tests/script_util.rs` (new), `docs/features/forms.md` | `the_remaining_util_examples_hold`: the transcribed examples hold; a file read reaches the test host as a request. | FJ-09.2 |
 
-**Closes the row:** FJ-09.2 to FJ-09.4 hold the reference's examples, transcribed by a person, in `cargo test`, which is the row's exit.
-
 ## FJ-10 — The `Field` object, complete
 
 **The `Field` object, complete** — every property and method FJ-18's committed list names (today's reading of the published reference: about seventy properties and thirty methods — alignment, border style, button caption, icon and layout, calculation index, character limit, comb, current value indices, default value, display, export values, fill and stroke colour, hidden, highlight, line width, multiple selection, number of items, page, password, print, radios in unison, read-only, rect, required, rich text and value, rotation, submit name, text colour, font and size, user name, value and value as string; `checkThisBox`, `clearItems`, `deleteItemAt`, `getArray`, `getItemAt`, `getLock`/`setLock`, `insertItemAt`, `isBoxChecked`, `setAction`, `setFocus`, `setItems`, the signature methods) — every change regenerating the widget's appearance
 
-**Today.** `getField` and value access inside the subset; `app.*` and `console.*` are inert stubs (`features/forms.md:547`)
-
 **Exit criterion.** every member FJ-18's committed list names for it implemented and held to an expectation (H-70), FJ-18's coverage check reporting no open member of it; a property change followed by save and re-render shows the change (fingerprints)
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-02, AN-14, FJ-18, H-70
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -457,19 +366,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-10.5 | build | Button captions, icons and layout, and the signature methods through AN-17's form layer. | `crates/tinker-pdf/src/script_host/field.rs` (new), `crates/tinker-pdf/tests/script_field.rs` (new) | `button_and_signature_members_hold`: each holds to the expectations. | FJ-10.4, AN-17 |
 | FJ-10.6 | test | Close the object: FJ-18's coverage check reports no open `Field` member. | `crates/tinker-pdf/tests/script_coverage.rs` (new), `docs/features/forms.md` | The coverage check names no open `Field` member. | FJ-10.5 |
 
-**Closes the row:** FJ-10.2 to FJ-10.5 implement every listed `Field` member against expectations with re-rendered changes fingerprinted, and FJ-10.6's coverage check reports none open, which is the row's exit.
-
 ## FJ-11 — The `Doc` object, complete
 
 **The `Doc` object, complete** — every member FJ-18's list names (today's reading: about 150), mapped onto editor operations: annotations, fields, links, scripts, watermarks, outline root, page deletion, extraction, insertion, movement and replacement, FDF/XFDF/text export and import, data objects, icons, word access by page, page boxes, labels, rotations and tab order, template spawning, form submission and reset, flattening; information, metadata, page count and number, dirty state, layout, zoom, security handler
 
-**Today.** document helpers inside the subset (`features/forms.md:261-290`)
-
 **Exit criterion.** every member FJ-18's committed list names for it implemented and held to an expectation (H-70), FJ-18's coverage check reporting no open member of it; each editor-mapped member's result equals the editor operation's
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-10, AN-18, AN-19, FJ-18, H-70
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -481,19 +384,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-11.6 | build | Information, metadata, page count and number, dirty state, layout, zoom, word access by page and the security handler. | `crates/tinker-pdf/src/script_host/doc.rs` (new), `crates/tinker-pdf/tests/script_doc.rs` (new) | `state_members_hold`: each holds to its expectation. | FJ-11.2 |
 | FJ-11.7 | test | Close the object: FJ-18's coverage check reports no open `Doc` member. | `crates/tinker-pdf/tests/script_coverage.rs` (new), `docs/features/forms.md` | The coverage check names no open `Doc` member. | FJ-11.3, FJ-11.4, FJ-11.5, FJ-11.6 |
 
-**Closes the row:** FJ-11.2 to FJ-11.6 implement every listed `Doc` member with editor-mapped results equal to the editor's, and FJ-11.7's coverage check reports none open, which is the row's exit.
-
 ## FJ-12 — The `app` object and host requests
 
 **The `app` object and host requests**: alerts, beeps and responses, timers (`setInterval`, `setTimeOut`, clears) driven by the host's loop, `launchURL`, `openDoc`, `newDoc`, `execMenuItem`, viewer type, version, variation, platform and language, `formsVersion`, the thermometer, pop-up menus, `browseForDoc`, `execDialog`, `mailMsg`, `trustedFunction`, `beginPriv`/`endPriv`, menu and tool-button additions, printer names — every one a typed host request behind FJ-14's gates
 
-**Today.** inert stubs (`features/forms.md:547`)
-
 **Exit criterion.** every `app` member on FJ-18's list implemented; each request reaches a test host with its arguments, and a member a policy denies refuses by name at run time — the gate working, never a member left out
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-14, FJ-17, FJ-18
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -502,19 +399,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-12.3 | build | `launchURL`, `openDoc`, `newDoc`, `execMenuItem`, `mailMsg`, `browseForDoc`, `execDialog`, pop-up menus, the thermometer, menu and tool-button additions and printer names. | `crates/tinker-pdf/src/script_host/app.rs` (new), `crates/tinker-pdf/tests/script_app.rs` (new) | `the_remaining_requests_reach_the_host`: each reaches a test host with its arguments; a denied one refuses by name. | FJ-12.2 |
 | FJ-12.4 | build | Viewer type, version, variation, platform, language and `formsVersion`, `trustedFunction`, `beginPriv` and `endPriv`, closing every `app` member on FJ-18's list. | `crates/tinker-pdf/src/script_host/app.rs` (new), `crates/tinker-pdf/tests/script_app.rs` (new), `docs/features/forms.md` | `every_app_member_is_implemented`: FJ-18's coverage check names no open `app` member. | FJ-12.3 |
 
-**Closes the row:** FJ-12.2 to FJ-12.4 implement every listed `app` member, each request reaching a test host and a denied one refusing by name, which is the row's exit.
-
 ## FJ-13 — The rest of the object model
 
 **The rest of the object model**: `global` with host-stored persistence, `console`, `color` (all), `Icon`/`IconStream`, `Annot` with `setProps`, `OCG`, `Bookmark`, `Template`, `PrintParams`, `Data`, `search`, `Report`, `Thermometer`, `Span`, `Link`, `identity`, `FullScreen`, the dialog description objects `app.execDialog` takes, the security handler, certificate, RDN and signature-info objects; the collaboration, network and database objects — `Collab`, `SOAP`, `Net.HTTP`, `ADBC` with its connection and statement objects — and mail, each implemented as a typed host request behind FJ-14's gates; spelling and speech as host requests; multimedia; the 3D API (AN-11c) and the XFA bridge (AN-30)
 
-**Today.** absent — the owner's parity decision of 9 October 2026; none of these objects is in the subset, whose `app.*` and `console.*` are inert stubs (`features/forms.md:547`)
-
 **Exit criterion.** every member FJ-18's list names for these objects implemented and held to an expectation (H-70); FJ-18's coverage check reports no open member of any object; every I/O member's request reaches a test host
 
 **Doc:** `design/form-scripting-host.md` (owed) · **Depends on:** FJ-11, FJ-14, FJ-18, H-70
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -528,19 +419,13 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-13.8 | build | Spelling, speech and multimedia as host requests, and the 3D API (AN-11c) and XFA bridge (AN-30) reachable from the model. | `crates/tinker-pdf/src/script_host/objects.rs` (new), `crates/tinker-pdf/tests/script_objects.rs` (new) | `the_remaining_objects_hold`: each member holds to its expectation or reaches the test host. | FJ-13.2, AN-11c, AN-30 |
 | FJ-13.9 | test | Close the model: FJ-18's coverage check reports no open member of any object. | `crates/tinker-pdf/tests/script_coverage.rs` (new), `docs/features/forms.md` | The coverage check names no open member. | FJ-13.3, FJ-13.4, FJ-13.5, FJ-13.6, FJ-13.7, FJ-13.8 |
 
-**Closes the row:** FJ-13.2 to FJ-13.8 implement every listed member with I/O as host requests, and FJ-13.9's coverage check reports none open, which is the row's exit.
-
 ## FJ-14 — The security model for document code
 
 **The security model for document code**: privileged and unprivileged contexts, a per-trigger policy, host permission gates for every side effect (URL launch, submission, mail, print, data-object import and export, opening documents), deny by default
 
-**Today.** `ScriptPolicy` with five trigger classes; calculate and format allowed by default "not as a judgement about safety" (`design/form-script-policy.md:56-65`)
-
 **Exit criterion.** a matrix test: every gated member under every policy setting either reaches the host or refuses by name
 
 **Doc:** [design/form-script-policy.md](../design/form-script-policy.md) (amend) · **Depends on:** FJ-06, H-36
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -548,57 +433,39 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-14.2 | build | Privileged and unprivileged contexts and the per-trigger policy. | `crates/tinker-pdf-cos/src/script.rs`, `crates/tinker-pdf/src/script_host/policy.rs` (new), `crates/tinker-pdf/tests/script_policy.rs` (new) | `script_policy.rs` (new) `contexts_and_triggers_follow_the_policy`: privileged calls succeed only in privileged contexts; each trigger runs only as its policy allows. | FJ-14.1, FJ-06 |
 | FJ-14.3 | build | Host gates for every side effect (URL launch, submission, mail, print, data-object import and export, opening documents), denied by default. | `crates/tinker-pdf/src/script_host/policy.rs` (new), `crates/tinker-pdf/tests/script_policy.rs` (new), `docs/features/forms.md` | `every_gated_member_reaches_the_host_or_refuses`: a matrix of every gated member under every policy setting either reaches the host or refuses by name. | FJ-14.2 |
 
-**Closes the row:** FJ-14.3's matrix test shows every gated member under every policy reaching the host or refusing by name, which is the row's exit.
-
 ## FJ-15 — Authoring scripts and actions
 
 **Authoring scripts and actions**: add, remove and list document-level scripts, `/OpenAction`, page and field additional actions, annotation actions; extract every script for review
 
-**Today.** actions read; `sanitise` removes them
-
 **Exit criterion.** each authored script re-read and run; extraction lists every script in a fixture that plants them in each place; `tpdf js` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** AN-20
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | FJ-15.1 | build | Scripts and actions authored: document-level scripts added, removed and listed, `/OpenAction`, page and field additional actions, and annotation actions. | `crates/tinker-pdf-cos/src/edit/docops.rs`, `crates/tinker-pdf-cos/src/edit/annotations.rs`, `crates/tinker-pdf/tests/script_authoring.rs` (new), `docs/features/forms.md` | `script_authoring.rs` (new) `authored_scripts_re_read_and_run`: each authored script re-reads and runs. | AN-20 |
 | FJ-15.2 | build | Every script extracted for review, wherever a document plants one, and `tpdf js`. | `crates/tinker-pdf/src/lib.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/script_authoring.rs` (new) | `extraction_lists_every_script`: a fixture planting scripts in each place lists every one; `tpdf js` runs over `testdata/` fixtures. | FJ-15.1 |
 
-**Closes the row:** FJ-15.1 re-reads and runs authored scripts and FJ-15.2 lists every planted script and runs `tpdf js`, which is the row's exit.
-
 ## FJ-16 — Speed rows for scripts and appearances
 
 **Speed rows for scripts and appearances**: a 500-field calculation cascade after one committed change, 500 field appearances regenerated, and a 64 KiB document script parsed and compiled, in the benchmark set
 
-**Today.** not measured: no bench row exercises a script or a field appearance and no engine exists to measure, so the targets are set at planning from the work each does
-
 **Exit criterion.** bench rows with bands in `baseline.json`; **the cascade ≤ 20 ms, the appearances ≤ 25 ms, the compile ≤ 5 ms**, gated as calibrated targets (tier P) in MS-02's job
 
 **Doc:** — · **Depends on:** MS-04, FJ-07
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | FJ-16.1 | measure | The cascade and appearance rows: a 500-field calculation cascade after one committed change and 500 field appearances regenerated, beside FJ-01.41's compile row, with bands in `baseline.json`. | `crates/tinker-pdf/benches/scripts.rs`, `crates/tinker-pdf/benches/baseline.json` | The three rows run in the benchmark set with their bands recorded. | MS-04, FJ-07, FJ-01.41 |
 | FJ-16.2 | ci | The three rows gated as calibrated targets in MS-02's paired job: the cascade at most 20 ms, the appearances at most 25 ms, the compile at most 5 ms. | `crates/tinker-pdf/benches/baseline.json`, `.github/workflows/ci.yml` | MS-02's job holds the three targets and fails a change that misses one. | FJ-16.1, MS-02 |
 
-**Closes the row:** FJ-16.1 adds the rows with bands and FJ-16.2 gates the three targets in MS-02's job, which is the row's exit.
-
 ## FJ-17 — The script host across the C ABI and every binding
 
 **The script host across the C ABI and every binding**: host requests (alerts, timers, submissions) delivered as queued requests a binding polls, and as callbacks where the binding allows
 
-**Today.** no callback crosses the C ABI (`design/bindings-write.md:51-57`)
-
 **Exit criterion.** `bindings-parity` runs one scripted form in every binding and prints the same field values and the same request log
 
 **Doc:** [design/bindings-write.md](../design/bindings-write.md) (amend) · **Depends on:** SG-09 (the callback design), H-28
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -608,24 +475,16 @@ FJ-18's coverage check counts it as open work, not as done.
 | FJ-17.4 | build | .NET, Go, Ruby and Java, over the C ABI, expose the queue. | `bindings/dotnet`, `bindings/go`, `bindings/ruby`, `bindings/java` | Each binding's test runs the scripted form and prints the field values and request log. | FJ-17.2 |
 | FJ-17.5 | ci | `bindings-parity` runs the scripted form in every binding. | `.github/workflows/ci.yml` | `bindings-parity` prints the same field values and the same request log for every binding, green on `develop`. | FJ-17.3, FJ-17.4, MS-11 |
 
-**Closes the row:** FJ-17.5's `bindings-parity` prints the same field values and request log in every binding, which is the row's exit.
-
 ## FJ-18 — The object model's member list and its coverage check
 
 **The object model's member list and its coverage check**: every object, property, method and event of the published JavaScript API reference, transcribed into a committed table (object, member, kind, the reference's section) and reconciled with ISO 21757-1; a `cargo test` that walks the engine's host objects and fails on any listed member with neither an implementation nor an entry in the expectation set, and on any implemented member the list does not name
 
-**Today.** absent — the owner's parity decision of 9 October 2026; the subset implements `getField`, value access and five AForm helpers and stubs `app.*` and `console.*` (`features/forms.md:261-290, 547`), and no list says what complete is
-
 **Exit criterion.** the list committed with each entry's source section; the coverage check runs in `cargo test` and names every open member — FJ-10…FJ-13 close when it names none
 
 **Doc:** — · **Depends on:** FJ-01, H-102 (ISO 21757-1, for the reconciliation)
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | FJ-18.1 | test | The member list: every object, property, method and event of the published JavaScript API reference transcribed into a committed table of object, member, kind and the reference's section. | `crates/tinker-pdf/tests/data/script_members.tsv` (new) | The table is committed with each entry's source section, and a test checks its shape. | FJ-01.37, FJ-01.40, FJ-01.42 |
 | FJ-18.2 | test | The coverage check: a `cargo test` walking the engine's host objects that fails on a listed member with neither an implementation nor an expectation entry, and on an implemented member the list does not name. | `crates/tinker-pdf/tests/script_coverage.rs` (new) | The check runs in `cargo test` and names every open member. | FJ-18.1 |
 | FJ-18.3 | doc | The list reconciled with ISO 21757-1, each difference recorded. | `crates/tinker-pdf/tests/data/script_members.tsv` (new), `docs/features/forms.md` | Each entry names its ISO 21757-1 clause or the reason it has none, and the differences are recorded in the feature doc. | FJ-18.2, H-102 |
-
-**Closes the row:** FJ-18.1 commits the list with each entry's source section and FJ-18.2 runs the coverage check naming every open member, which is the row's exit; FJ-18.3 reconciles it with ISO 21757-1.

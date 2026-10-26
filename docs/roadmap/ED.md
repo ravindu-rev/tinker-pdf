@@ -1,6 +1,6 @@
 # Capability tier — editing, document operations and creation
 
-[The roadmap](../ROADMAP.md) says how a step runs, what comes next, and which dependencies cross tiers. Each row below keeps its text as it was planned — Item, Today, Exit criterion, Doc, Depends on — and is cut into steps, each one workflow run.
+[The roadmap](../ROADMAP.md) says how a step is worked and what comes next.
 
 Parity here means content edited at the level of page objects and text,
 every page operation an office user reaches for, colour and image
@@ -11,13 +11,9 @@ API and by layout, each held to the strict validator (K-03).
 
 **A page-object editing model**: enumerate a page's objects (text runs, paths, images, shadings, forms, inline images) with their state; change a matrix, colour, blend, dash, text or font; remove, insert, reorder; regenerate the content stream, untouched operators byte-stable where possible
 
-**Today.** `append_content`, and the redaction rewrite path (`cut_stream` in `crates/tinker-pdf/src/redact.rs`, ruling 7), only; content editing "beyond `append_content`" is out of scope (`design/bindings-write.md:47-50`)
-
 **Exit criterion.** an edited page renders as the same page built directly with the builder (fingerprints); a no-op edit leaves the stream byte-identical; every output validates strictly
 
 **Doc:** `design/page-objects.md` (owed) · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -41,26 +37,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-01.18 | test | The editing subsystem's determinism fingerprint (K-07): `determinism.rs` builds a page, applies one edit of each kind (remove, matrix, colour, blend, dash, text, font, insert, reorder, an edit inside a form), saves by rewrite and pins the SHA-256 of the bytes in a new test the `ci.yml` determinism legs, native and `wasm-determinism`, grep by name; the edited page joins `GOLDEN`, so its render is reproduced too. *Note:* K-07's rule: the subsystem's fingerprint lands with it, and its entry in K-07's roster with it. The numbers an edit computes (a composed `cm`, a restored text matrix) are what the byte hash pins. The fixture embeds its face (`curvy_font`), so both builds give one hash. A moved hash is a finding, never an edit. | `crates/tinker-pdf/tests/determinism.rs`, `.github/workflows/ci.yml`, `docs/features/determinism.md` | `determinism.rs` `an_edited_document_is_the_same_bytes_on_every_target` (new) and `rendering_is_stable_across_targets`, with the edited page among its fixtures, hold their committed hashes on linux, windows, macos and `wasm32-wasip1`, read to the end in `ci.yml`'s jobs, whose greps name the new test; the test first asserts the document it hashes (each edit's object read back), so a hash over the wrong document fails. | ED-01.15, MS-11, K-07 |
 | ED-01.19 | measure | The editing speed row in MS-04's write group: a generated 100-page document read, one object recoloured and one removed on every page, and saved incrementally, sized into MS-04's 20-300 ms window, with its baseline entry; then ED-01 leaves the roadmap and `page-objects.md` gains its as-built section. *Note:* MS-04 splits `benches/` by group; the operation goes in the write group's file with its figure recorded as MS-04 records a new operation's. No target is invented here; one is the owner's (H-77). | `crates/tinker-pdf/benches/write.rs`, `crates/tinker-pdf/benches/baseline.json`, `.github/workflows/bench.yml`, `docs/roadmap/ED.md`, `docs/ROADMAP.md`, `docs/design/page-objects.md` | `xtask/src/bench.rs`'s `the_committed_baseline_agrees_with_the_tree` holds the bench file, the workflow's guard count and `baseline.json` to one list with the new operation in it, and `cargo bench -p tinker-pdf` reports its time; `docs/roadmap/ED.md` no longer holds ED-01. | ED-01.17, ED-01.18, MS-04 |
 
-**Closes the row:** ED-01.8 to ED-01.15 build the model on the facade over the content layer of ED-01.2 and ED-01.4 to ED-01.6, and every edit step holds an edited builder page byte-equal in render to the page the builder draws directly (the fingerprint the exit asks for), every saved output to K-03's strict helper and every regenerated stream to ED-01.9's 8.2 harness, while ED-01.9 and ED-01.11 to ED-01.14 show every no-op leaves the editor clean and the stream byte-identical. ED-01.16 guards the work as linear, ED-01.18 pins the subsystem's fingerprint on four targets and ED-01.19 adds its speed row and takes the row out of the roadmap; ED-01.3 repairs, with the new writer, the one rewrite path the tree already has.
-
-**The tree at `5297133`, against this row's text:**
-
-- Ruling 7 (`docs/rulings.md:197-202`) excepts 'the `ContentFilter` rewrite path built for redaction ... which is itself part of the interpreter', but no `ContentFilter` exists (`rg ContentFilter crates` finds nothing): redaction tokenizes on its own in the facade (`crates/tinker-pdf/src/redact.rs:560`, `:4494`), as do `crates/tinker-pdf/src/subset.rs:765` and `crates/tinker-pdf/src/pdfa/content.rs:222`. ED-01 reads operators through the interpreter instead (ED-01.4), so it needs no further exception.
-- The redaction rewrite path the Today cell names is lossy for operators it does not cut: every operand is re-emitted through `write_token` (`crates/tinker-pdf/src/redact.rs:4730-4745`, `:5085`), which writes a name's decoded bytes with no `#xx` escape, and `escape_into` (`:5076`) leaves a 0x0D byte raw inside parentheses, which the tokenizer reads back as 0x0A (`crates/tinker-pdf-content/src/tokenizer.rs:242-248`); `apply` writes the result back whatever was cut (`redact.rs:1214`). ED-01.3 fixes it.
-- `docs/features/editing.md:98` says `append_content` appends operators 'to a page's content array'; `crates/tinker-pdf-cos/src/edit/page_ops.rs:346-373` instead decodes and joins the existing parts and writes one new stream (`q`, the old content, `Q q`, the operators, `Q`) that replaces `/Contents`, so the page's original streams are left unreferenced rather than byte-stable.
-- The tree already enumerates one object kind read-only: `Page::images` (`crates/tinker-pdf/src/images.rs:328`) lists a page's image XObjects and inline images with a transform per drawing (`PageImage::placements`) through the interpreter; the Today cell names only the two writing paths. ED-01.8 holds the model's image objects to it.
-
 ## ED-02 — In-place text editing with reflow
 
 **In-place text editing with reflow**: edit a line or paragraph of existing text, reshape with the subset font where its glyphs exist, extend the subset or fall back otherwise, reflow inside the paragraph box, keep tags and `/ActualText`
 
-**Today.** absent — the owner's parity decision of 9 October 2026; content is changed by `append_content` and redaction's rewrite only (ED-01); `rg -i 'edit_text|replace_text' crates tools` finds nothing
-
 **Exit criterion.** an edited paragraph extracts as the new text, draws within its box, keeps its structure element, and its font subset gains exactly the new glyphs; fixtures per script direction
 
 **Doc:** `design/text-editing.md` (owed) · **Depends on:** ED-01, FT-11, FT-30
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -81,19 +64,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-02.15 | test | A fuzz target editing paragraphs on hostile pages: arbitrary content over fixed resources, an edit applied, and the result re-opened. | `fuzz/fuzz_targets/paragraph_edit.rs` (new), `fuzz/Cargo.toml`, `fuzz/README.md`, `docs/verification.md` | The target builds and runs clean in the fuzz check, its seeds replay in `fuzz-seeds`, and the roster `docs/verification.md` pastes is regenerated so `cargo xtask check` passes. | ED-02.14 |
 | ED-02.16 | measure | The editing operation's speed row and fingerprint: one paragraph edited on each of 100 generated pages, and one edit's saved bytes fingerprinted. | `crates/tinker-pdf/benches/write.rs`, `crates/tinker-pdf/tests/determinism.rs` | The operation runs in the benchmark set with its figure recorded; the fingerprint holds on every K-07 target. | ED-02.14, MS-04, K-07 |
 
-**Closes the row:** ED-02.2 to ED-02.13 edit a paragraph so it extracts as the new text, draws in its box, keeps its structure element and gains exactly the new glyphs, with fixtures per direction (ED-02.11, ED-02.12), which is the row's exit; ED-02.14 to ED-02.16 add the surface, fuzzing, speed row and fingerprint.
-
 ## ED-03 — Template text replacement
 
 **Template text replacement**: placeholders in existing content replaced with font fallback and alignment
 
-**Today.** absent — the owner's parity decision of 9 October 2026; `rg -i 'replace_text|template_text' crates tools` finds nothing
-
 **Exit criterion.** fixtures with placeholders replaced and extracted back; alignment computed in the test
 
 **Doc:** — · **Depends on:** ED-01
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -101,19 +78,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-03.2 | build | Alignment: a value placed at its placeholder's left edge, right edge or centre, its width from the font's metrics. | `crates/tinker-pdf/src/page_objects/placeholders.rs` (new), `crates/tinker-pdf/tests/placeholders.rs` (new) | `replacements_align_as_asked`: each value's drawn extent equals the position the test computes from the font's widths for each alignment. | ED-03.1 |
 | ED-03.3 | build | Font fallback: characters the placeholder's font lacks drawn in a fallback face added to the page's resources, and a fingerprint of one replaced page. | `crates/tinker-pdf/src/page_objects/placeholders.rs` (new), `crates/tinker-pdf/tests/placeholders.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | `replacements_fall_back_for_missing_glyphs`: a Greek and an Arabic value in a Latin subset extract back in both builds; the fingerprint holds on every K-07 target. | ED-03.2, K-07 |
 
-**Closes the row:** ED-03.1 to ED-03.3 replace placeholders with fallback and alignment, extracted back and aligned as the test computes, which is the row's exit.
-
 ## ED-04 — Content-stream cleaning
 
 **Content-stream cleaning**: normalise and pretty-print operators, balance `q`/`Q`, remove top-level state leaks and redundant colour operators, keep marked content; the content-filter pipeline public on the facade
 
-**Today.** the redaction rewrite path (`redact.rs`'s `cut_stream`, ruling 7) is internal
-
 **Exit criterion.** a cleaned page renders byte-identically to the original on every fingerprint fixture and the corpus subset re-run; `q`/`Q` balanced by count
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -124,19 +95,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-04.5 | test | The corpus subset re-run: a census in `corpus.yml` that cleans every page of a pinned subset and compares its render with the original's. | `crates/tinker-pdf/tests/content_clean_census.rs` (new), `.github/workflows/corpus.yml` | The census prints `RAN` and asserts every page of the subset renders byte-identically after cleaning, on a dispatched run on `develop`. | ED-04.4, MS-11, H-03 |
 | ED-04.6 | build | `tpdf clean`, the speed row for cleaning 100 generated pages and a fingerprint of one cleaned page. | `tools/tpdf/src/main.rs`, `crates/tinker-pdf/benches/write.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/editing.md` | A CLI test cleans a fixture to the facade's bytes; the speed row is in the benchmark set; the fingerprint holds on every K-07 target. | ED-04.4, MS-04.8, K-07 |
 
-**Closes the row:** ED-04.2 to ED-04.4 clean a page so it renders byte-identically with `q`/`Q` balanced, ED-04.5 re-runs a corpus subset, and ED-04.1 makes the pipeline public, which is the row's exit.
-
 ## ED-05 — Text to outlines
 
 **Text to outlines**: convert all text to vector paths, Type 3 glyphs flattened
 
-**Today.** absent — the owner's parity decision of 9 October 2026; `rg -i 'text_to_paths|text_to_outlines|outline_text' crates tools` finds nothing
-
 **Exit criterion.** the converted page renders identically and extracts no text
 
 **Doc:** — · **Depends on:** ED-04
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -144,19 +109,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-05.2 | build | Clipping modes (4 to 7) converted to the clip path their glyphs accumulate until `ET`. | `crates/tinker-pdf/src/outline_text.rs` (new), `crates/tinker-pdf/tests/text_to_outlines.rs` (new) | `clipping_text_becomes_a_clip_path`: each clipping mode's fixture renders identically after conversion and extracts no text. | ED-05.1 |
 | ED-05.3 | build | Type 3 glyphs flattened: each glyph's procedure inlined in its font and text matrices, `d0` and `d1` honoured. | `crates/tinker-pdf/src/outline_text.rs` (new), `crates/tinker-pdf/tests/text_to_outlines.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | `type_3_glyphs_flatten`: Type 3 fixtures, coloured and uncoloured, render identically after conversion and extract no text; a converted page is fingerprinted on every K-07 target; in the default and `bundled-fonts` builds. | ED-05.1, K-07 |
 
-**Closes the row:** ED-05.1 to ED-05.3 convert every kind of text to paths so the page renders identically and extracts no text, which is the row's exit.
-
 ## ED-06a — Recolour a document to gray, RGB or CMYK
 
 **Recolour a document to gray, RGB or CMYK** by device-space arithmetic, shadings resampled, output intents optionally removed
 
-**Today.** absent — the owner's parity decision of 9 October 2026; colour is converted for rendering only (`rg -i 'convert_colou?rs|to_grayscale' crates tools` finds nothing)
-
 **Exit criterion.** every colour operator, image and shading converted; the render equals the original render converted in the test (8.6.4's device-space formulas); `tpdf recolour` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** ED-04
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -165,19 +124,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-06a.3 | build | Shadings converted: Type 2 and 3 functions under a linear conversion by converting their endpoints, every other shading resampled into a sampled function in the target space. *Note:* If a resampled shading's render differs from the converted original between samples, the run records the figures and stops for the owner (a price), never widens the comparison. | `crates/tinker-pdf/src/recolour.rs` (new), `crates/tinker-pdf/tests/recolour.rs` (new) | `shadings_convert`: linear-class shadings render equal to the original converted in the test; resampled shadings equal it at every sample point. | ED-06a.1 |
 | ED-06a.4 | build | Output intents optionally removed, `tpdf recolour --to gray\|rgb\|cmyk`, and a fingerprint of one recoloured page. | `tools/tpdf/src/main.rs`, `crates/tinker-pdf/src/recolour.rs` (new), `crates/tinker-pdf/tests/recolour.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | `tpdf recolour` runs over every `testdata/` fixture to the facade's output; with the option the output intents are gone; the fingerprint holds on every K-07 target. | ED-06a.2, ED-06a.3, K-07 |
 
-**Closes the row:** ED-06a.1 to ED-06a.3 convert every colour operator, image and shading by 8.6.4's formulas, checked against the converted render, and ED-06a.4 runs it from `tpdf recolour`, which is the row's exit.
-
 ## ED-06b — ICC-managed colour conversion of documents
 
 **ICC-managed colour conversion of documents**: object classes to gray, sRGB, CMYK or the output intent with rendering intents, black-point compensation, device links, pure-black text kept, spots to process (with aliases), rich black, total-area-coverage reduction
 
-**Today.** absent — the owner's parity decision of 9 October 2026; `tinker-pdf-color` converts for rendering only (`rg -i 'convert_document|output_intent_convert' crates tools` finds nothing)
-
 **Exit criterion.** per conversion, the converted values equal the transform recomputed in the test; TAC under the cap on every pixel of the converted render; `tpdf recolour --profile` runs it on `testdata/` fixtures
 
 **Doc:** `design/colour-conversion.md` (owed) · **Depends on:** RC-01, RC-02, RC-20
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -191,19 +144,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-06b.8 | build | The output intent as a target, and `tpdf recolour --profile`. | `tools/tpdf/src/main.rs`, `crates/tinker-pdf/src/recolour.rs` (new), `docs/features/editing.md` | `tpdf recolour --profile` runs over every `testdata/` fixture to the facade's output; converting to the document's output intent equals the transform to that profile. | ED-06b.7 |
 | ED-06b.9 | measure | The conversion's speed row and fingerprint: 100 generated pages converted to CMYK, and one converted page fingerprinted. | `crates/tinker-pdf/benches/write.rs`, `crates/tinker-pdf/tests/determinism.rs` | The operation runs in the benchmark set with its figure recorded; the fingerprint holds on every K-07 target. | ED-06b.8, MS-04, K-07 |
 
-**Closes the row:** ED-06b.2 to ED-06b.7 convert every object class with values equal to the transform recomputed and coverage under the cap, and ED-06b.8 runs it from `tpdf recolour --profile`, which is the row's exit.
-
 ## ED-07 — Clip, trim and auto-crop
 
 **Clip, trim and auto-crop**: remove content outside a rectangle; keep or exclude relative to a box with margins; crop to content with a tolerance
 
-**Today.** crop and other boundaries settable (`features/editing.md:89-106`); content is never removed
-
 **Exit criterion.** removed objects absent from the stream; the visible render unchanged; auto-crop box equals the bounding box of marks (RC-17); `tpdf trim` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** ED-04
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -212,19 +159,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-07.3 | build | Auto-crop: the crop box set to the bounding box of the page's marks (RC-17), grown by a tolerance. | `crates/tinker-pdf/src/trim.rs` (new), `crates/tinker-pdf/tests/trim.rs` (new) | `auto_crop_takes_the_marks_box`: the crop box equals RC-17's bounding box of marks plus the tolerance on builder pages with known marks. | ED-07.1, RC-17.3, RC-17.4, RC-17.5 |
 | ED-07.4 | build | `tpdf trim` (rectangle, box with margins, auto) and a fingerprint of one trimmed page. | `tools/tpdf/src/writing.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs` | `tpdf trim` runs over every `testdata/` fixture to the facade's output; the fingerprint holds on every K-07 target. | ED-07.2, ED-07.3, K-07 |
 
-**Closes the row:** ED-07.1 to ED-07.3 remove what lies outside, keep or exclude by box, and auto-crop to RC-17's box with the render unchanged, and ED-07.4 runs `tpdf trim`, which is the row's exit.
-
 ## ED-08 — Imposition
 
 **Imposition**: N-up with order and borders, saddle-stitch booklet, grid, cut a page into tiles, poster with overlap and marks
 
-**Today.** absent — the owner's parity decision of 9 October 2026; `rg -i 'imposition|booklet|\bn_up\b' crates tools` finds nothing
-
 **Exit criterion.** each layout's placement matrices recomputed in the test; the imposed sheet renders as the sources placed by those matrices; `tpdf impose` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** ED-10
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -235,19 +176,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-08.5 | build | Posters: tiles with overlap, crop marks and registration marks in the margins. | `crates/tinker-pdf/src/impose.rs` (new), `crates/tinker-pdf/tests/impose.rs` (new) | `posters_overlap_and_mark`: neighbouring tiles share the asked overlap and the marks lie where the test computes them. | ED-08.4 |
 | ED-08.6 | build | `tpdf impose`, a speed row for imposing 100 generated pages 4-up and a fingerprint of one sheet. | `tools/tpdf/src/writing.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/benches/write.rs`, `crates/tinker-pdf/tests/determinism.rs` | `tpdf impose` runs each layout over `testdata/` fixtures to the facade's output; the speed row is in the benchmark set; the fingerprint holds on every K-07 target. | ED-08.3, ED-08.5, MS-04.8, K-07 |
 
-**Closes the row:** ED-08.1 recomputes every layout's matrices and ED-08.2 to ED-08.5 render each layout as the sources placed by them, and ED-08.6 runs `tpdf impose`, which is the row's exit.
-
 ## ED-09 — Page geometry
 
 **Page geometry**: set boxes over page ranges, scale to a paper size, resize and zoom, add margins or bleed, flatten `/Rotate` into content, normalise box origins, read `/UserUnit` everywhere a placement is measured, flatten inherited page attributes
 
-**Today.** boxes settable; `/UserUnit` (PDF 1.6) is not read anywhere, so placements are measured in 1/72 inch — clause (3) of the image-recompression row before 9 October 2026; `features/cbz.md:432` names it as one way an oversized picture could be kept inside Annex C.2's limit (FI-26)
-
 **Exit criterion.** fixtures per operation with renders equal to the twin built directly; a `/UserUnit` page's placements measured in its unit
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -257,19 +192,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-09.4 | fix | `/UserUnit` read where the facade measures a page: its size, its render scale and the boxes it reports. | `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/src/render_part.rs`, `crates/tinker-pdf/tests/page_geometry.rs` | `page_geometry.rs` `user_unit_pages_measure_in_their_unit` (beside the `/Rotate` and `/CropBox` tests there): a page with `/UserUnit 2` reports twice the size, renders at twice the pixels at one dpi, and its boxes in its unit; failing first on today's code. | — |
 | ED-09.5 | fix | `/UserUnit` read where editing places content: stamps, forms imported from pages and ED-09.2's scaling. | `crates/tinker-pdf-cos/src/edit/stamp.rs`, `crates/tinker-pdf/src/geometry.rs` (new), `crates/tinker-pdf/tests/geometry_edits.rs` (new) | `placements_on_user_unit_pages`: a stamp and an imported page land where the test computes in the target's unit; failing first on today's code. | ED-09.4, ED-09.2 |
 
-**Closes the row:** ED-09.1 to ED-09.3 give every geometry operation a fixture rendering as its twin, and ED-09.4 and ED-09.5 measure a `/UserUnit` page's placements in its unit, which is the row's exit.
-
 ## ED-10 — Overlay and underlay with page maps
 
 **Overlay and underlay with page maps**: pages of one document on or under another's, by from/to/repeat maps, as forms, optionally in a layer
 
-**Today.** `import_page_as_form` and `stamp` (`features/editing.md:242-273`), one page at a time
-
 **Exit criterion.** a map applied over generated documents places the expected page on each target, checked by structure and render; `tpdf overlay` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -277,38 +206,26 @@ API and by layout, each held to the strict validator (K-03).
 | ED-10.2 | build | Overlays optionally in a layer: the placed forms wrapped in an optional content group. | `crates/tinker-pdf/src/overlay.rs` (new), `crates/tinker-pdf/tests/page_maps.rs` (new) | `overlays_in_a_layer_toggle`: with the layer off the page renders as before the overlay; on, as with it. | ED-10.1 |
 | ED-10.3 | build | `tpdf overlay` with maps and layers, and a fingerprint of one mapped document. | `tools/tpdf/src/writing.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs` | `tpdf overlay` runs over `testdata/` fixtures to the facade's output; the fingerprint holds on every K-07 target. | ED-10.2, K-07 |
 
-**Closes the row:** ED-10.1 and ED-10.2 place the expected page on each target by structure and render, and ED-10.3 runs `tpdf overlay`, which is the row's exit.
-
 ## ED-11 — One page-range grammar
 
 **One page-range grammar**: ranges, last page, counting from the end, exclusions, odd and even, collation of interleaved duplex scans
 
-**Today.** `--pages` ranges in the CLI
-
 **Exit criterion.** the grammar's every form held to a table of inputs and page lists
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | ED-11.1 | build | One page-range grammar in the facade: ranges, the last page, counting from the end, exclusions, odd and even, and the collation of interleaved duplex scans, with its syntax in the feature doc. | `crates/tinker-pdf/src/page_ranges.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/page_ranges.rs` (new), `docs/features/editing.md` | `page_ranges.rs` (new) `every_form_of_the_grammar`: a table of inputs and page lists covers every form; malformed inputs are typed errors. | — |
 | ED-11.2 | build | The CLI's `--pages` options parsed by the grammar in place of `page_ranges` in `tools/tpdf/src/main.rs`, and a collation command for duplex scans. | `tools/tpdf/src/main.rs`, `tools/tpdf/src/writing.rs` | CLI tests run each form of the grammar through `--pages` and the collation command over two-sided generated scans; every form `page_ranges` accepts selects the pages it did, and the forms it refuses fail first. | ED-11.1 |
 
-**Closes the row:** ED-11.1 holds every form of the grammar to a table of inputs and page lists, which is the row's exit, and ED-11.2 puts it under every `--pages`.
-
 ## ED-12 — Split strategies
 
 **Split strategies**: by page count, by top-level outline items (named after titles), by output size, by blank separator pages, by barcode separator pages
 
-**Today.** split by ranges (`tpdf split`)
-
 **Exit criterion.** each strategy over generated documents yields the expected pieces; blank detection uses RC-17
 
 **Doc:** — · **Depends on:** ED-50 (barcodes)
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -318,19 +235,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-12.4 | build | Split by barcode separator pages: pages whose decoded barcode (ED-50) matches a value start a piece. | `crates/tinker-pdf/src/split.rs` (new), `crates/tinker-pdf/tests/split.rs` (new) | `barcode_separators_split`: generated documents with barcode separator pages split into the expected pieces. | ED-12.1, ED-50 |
 | ED-12.5 | build | `tpdf split --by count\|outline\|size\|blank\|barcode`. | `tools/tpdf/src/writing.rs`, `tools/tpdf/src/main.rs` | CLI tests run each strategy over generated documents to the facade's pieces. | ED-12.2, ED-12.3, ED-12.4 |
 
-**Closes the row:** ED-12.1 to ED-12.4 yield the expected pieces for every strategy, blank detection through RC-17, which is the row's exit.
-
 ## ED-13 — Merge fidelity
 
 **Merge fidelity**: AcroForms merged with a renaming policy (with `/DR` and `/CO`), structure trees merged (parent tree renumbered, role maps, class maps, ID trees, namespaces), outlines per file or merged, named destinations renamed on conflict, page labels, optional content, attachments, output intents, JavaScript name trees, viewer preferences, links retargeted
 
-**Today.** `import_page`; `merge` deduplicates
-
 **Exit criterion.** a merged document of two forms fills both; a merged tagged document passes the PDF/UA checks each source passed; links land on the right pages
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -343,38 +254,26 @@ API and by layout, each held to the strict validator (K-03).
 | ED-13.7 | build | Optional content, output intents and viewer preferences: OCGs and configurations joined, an identical output intent kept once and a differing one warned, the first source's viewer preferences kept. | `crates/tinker-pdf/src/merge.rs` (new), `crates/tinker-pdf/tests/merge.rs` (new) | `layers_intents_and_preferences_merge`: each kind reads back as the design states, the warning typed. | ED-13.2 |
 | ED-13.8 | build | `tpdf merge` takes the renaming policy and the outline mode, and a fingerprint of one merged document. | `tools/tpdf/src/writing.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/editing.md` | CLI tests merge two forms and two tagged documents to the facade's output; the fingerprint holds on every K-07 target. | ED-13.3, ED-13.4, ED-13.5, ED-13.6, ED-13.7, K-07 |
 
-**Closes the row:** ED-13.4 fills both forms, ED-13.5 passes the PDF/UA checks each source passed and ED-13.2 lands links on the right pages, which is the row's exit; ED-13.3, ED-13.6 and ED-13.7 carry the rest of the catalog.
-
 ## ED-14 — Bates numbering
 
 **Bates numbering** across an ordered set of files, with prefix, suffix, digits, placement and a range report, removable
 
-**Today.** absent — the owner's parity decision of 9 October 2026; `rg -i 'bates' crates tools` finds nothing
-
 **Exit criterion.** numbers continuous across files; the report matches; removal restores the render; `tpdf bates` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** ED-15
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | ED-14.1 | build | Bates numbering over an ordered set of documents through ED-15's tokens: prefix, suffix, digits and placement, numbers continuous across files, a range report per file, written as removable artifacts. | `crates/tinker-pdf/src/bates.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/bates.rs` (new), `docs/features/editing.md` | `bates.rs` (new) `numbers_run_on_across_files`: numbers are continuous across three generated files and the report matches each file's first and last. | ED-15 |
 | ED-14.2 | build | Removal, `tpdf bates` and a fingerprint of one numbered page. | `crates/tinker-pdf/src/bates.rs` (new), `tools/tpdf/src/writing.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/bates.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | `removal_restores_the_render`: removing the numbers renders byte-identically to the original; `tpdf bates` runs over `testdata/` fixtures; the fingerprint holds on every K-07 target. | ED-14.1, K-07 |
 
-**Closes the row:** ED-14.1 numbers continuously with a matching report and ED-14.2 removes the numbers and runs `tpdf bates`, which is the row's exit.
-
 ## ED-15 — Headers, footers and page numbers
 
 **Headers, footers and page numbers** from tokens (page n of N, dates, file name, Bates), per range and odd/even, shaped and embedded, written as `/Artifact /Pagination` so PDF/UA stays valid, recorded so they can be updated or removed
 
-**Today.** `stamp` places one form
-
 **Exit criterion.** outputs pass the PDF/UA artifact rules; update and removal restore the original render; `tpdf header-footer` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** ED-45
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -383,38 +282,26 @@ API and by layout, each held to the strict validator (K-03).
 | ED-15.3 | build | Recorded for update and removal: each header and footer marked so it can be found again, replaced with new tokens, or removed. | `crates/tinker-pdf/src/pagination.rs` (new), `crates/tinker-pdf/tests/pagination.rs` (new) | `update_and_removal_restore_the_render`: updating changes only the header text; removing renders byte-identically to the original. | ED-15.2 |
 | ED-15.4 | build | `tpdf header-footer` and a fingerprint of one paginated page. | `tools/tpdf/src/writing.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs` | `tpdf header-footer` runs over `testdata/` fixtures to the facade's output; the fingerprint holds on every K-07 target. | ED-15.3, K-07 |
 
-**Closes the row:** ED-15.2 passes the PDF/UA artifact rules, ED-15.3 restores the render on update and removal and ED-15.4 runs `tpdf header-footer`, which is the row's exit.
-
 ## ED-16 — Watermarks and backgrounds that can be updated or removed
 
 **Watermarks and backgrounds that can be updated or removed**: text, image or page sources, rotation, opacity, front or behind, as a `/Watermark` annotation with `/FixedPrint` or as layered content
 
-**Today.** `stamp`
-
 **Exit criterion.** removal restores the original render; print/view usage honoured (RC-13); `tpdf watermark` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** ED-15
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | ED-16.1 | build | Watermarks and backgrounds from text, image or page sources, with rotation, opacity and front or behind, written as a `/Watermark` annotation with `/FixedPrint` or as layered content, recorded through ED-15's marking so they can be updated or removed. | `crates/tinker-pdf/src/watermark.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/watermark.rs` (new), `docs/features/editing.md` | `watermark.rs` (new) `watermarks_place_and_remove`: each source and placement renders as the test composes it; removal renders byte-identically to the original. | ED-15 |
 | ED-16.2 | build | Print and view usage honoured: a watermark marked for print only or view only drawn by RC-13's usage, and `tpdf watermark`. | `crates/tinker-pdf/src/watermark.rs` (new), `crates/tinker-pdf/tests/watermark.rs` (new), `tools/tpdf/src/writing.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs` | `usage_is_honoured`: a print-only watermark renders under print usage and not view, and the reverse; `tpdf watermark` runs over `testdata/` fixtures; a fingerprint holds on every K-07 target. | ED-16.1, RC-13, K-07 |
 
-**Closes the row:** ED-16.1 removes to the original render and ED-16.2 honours print and view usage and runs `tpdf watermark`, which is the row's exit.
-
 ## ED-17 — Outline styling and document settings
 
 **Outline styling and document settings**: outline item colour and style (`/C`, `/F`) read and written; outline import and export as JSON and text; outlines generated from structure headings or font-size heuristics; `/Lang`, `/PageMode`, `/PageLayout` and `/MarkInfo` set on an existing document
 
-**Today.** outline read and written without `/C` or `/F` (`crates/tinker-pdf-cos/src/outline.rs` reads neither); `/Lang` set by the builder only
-
 **Exit criterion.** fixtures for each key read and written; a generated outline matches the tagged headings of the committed books; `tpdf bookmarks`, `tpdf labels` and `tpdf metadata`, get and set runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -424,38 +311,26 @@ API and by layout, each held to the strict validator (K-03).
 | ED-17.4 | build | Document settings on an existing document: `/Lang`, `/PageMode`, `/PageLayout` and `/MarkInfo` set through `DocumentEditor`. | `crates/tinker-pdf-cos/src/edit/docops.rs`, `crates/tinker-pdf-cos/src/edit/view.rs`, `crates/tinker-pdf/tests/outline_settings.rs` (new) | `settings_round_trip`: each key set on a fixture reads back as written and validates strictly. | — |
 | ED-17.5 | build | `tpdf bookmarks`, `tpdf labels` and `tpdf metadata`, each with get and set. | `tools/tpdf/src/writing.rs`, `tools/tpdf/src/main.rs`, `docs/features/editing.md` | CLI tests get and set each over `testdata/` fixtures and read the result back through the facade. | ED-17.2, ED-17.4 |
 
-**Closes the row:** ED-17.1 and ED-17.4 read and write every key, ED-17.3 matches the committed books' tagged headings, and ED-17.5 runs the three CLI commands, which is the row's exit.
-
 ## ED-18 — A table-of-contents page
 
 **A table-of-contents page** with leaders, page numbers and links generated from the outline
 
-**Today.** absent — the owner's parity decision of 9 October 2026; `rg -i 'table_of_contents|toc_page' crates tools` finds nothing
-
 **Exit criterion.** the generated page's links land on their targets; text extracts as the outline
 
 **Doc:** — · **Depends on:** ED-45
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | ED-18.1 | build | A table-of-contents page generated from the outline: titles shaped through ED-45, indented by level, dot leaders and page numbers, inserted at a given index. | `crates/tinker-pdf/src/toc.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/toc.rs` (new), `docs/features/editing.md` | `toc.rs` (new) `the_contents_page_reads_as_the_outline`: the page's text extracts as the outline's titles and page numbers, in both builds. | ED-45 |
 | ED-18.2 | build | Links on each entry to its target, and the contents spilling onto further pages when long. | `crates/tinker-pdf/src/toc.rs` (new), `crates/tinker-pdf/tests/toc.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | `entries_link_to_their_targets`: every entry's link lands on its outline target, page numbers shifted for the inserted pages; a fingerprint holds on every K-07 target. | ED-18.1, K-07 |
 
-**Closes the row:** ED-18.1 extracts as the outline and ED-18.2 links land on their targets, which is the row's exit.
-
 ## ED-19 — Article threads and page transitions
 
 **Article threads and page transitions**: `/Threads` and beads read, followed and written; `/Trans` and `/Dur` read and written, and transition frames generated for a presenting host
 
-**Today.** absent — the owner's parity decision of 9 October 2026; `/Threads` is read nowhere, and `/Trans` is named only in `sanitise`'s list of the actions that stay (`crates/tinker-pdf-cos/src/edit/sanitise.rs:86, 210`)
-
 **Exit criterion.** fixtures read back to what was written; transition frames equal the 12.4.4 effect computed in the test
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -463,37 +338,25 @@ API and by layout, each held to the strict validator (K-03).
 | ED-19.2 | build | Page transitions: `/Trans` and `/Dur` read and written. | `crates/tinker-pdf-cos/src/edit/page_ops.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/threads.rs` (new) | `transitions_read_back_as_written`: every 12.4.4 style with its parameters reads back as written. | — |
 | ED-19.3 | build | Transition frames for a presenting host: frame n of a transition between two rendered pages, computed as 12.4.4 describes each effect. | `crates/tinker-pdf/src/transitions.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/threads.rs` (new), `docs/features/rendering.md` | `frames_equal_the_effect`: each style's frames equal the effect the test computes from the two renders. | ED-19.2 |
 
-**Closes the row:** ED-19.1 and ED-19.2 read back what they wrote and ED-19.3's frames equal 12.4.4's effect, which is the row's exit.
-
 ## ED-20 — Embedded page thumbnails
 
 **Embedded page thumbnails**: read `/Thumb`, generate, embed, remove
-
-**Today.** `/Thumb` appears only in the linearization rules
 
 **Exit criterion.** a generated thumbnail equals the page rendered at the thumbnail scale
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed; the review runs once all the work is done.*
-
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | ED-20.1 | build | Thumbnails: `/Thumb` read as an image, generated by rendering the page at the thumbnail scale, embedded, and removed. | `crates/tinker-pdf/src/thumbnails.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf-cos/src/edit/page_ops.rs`, `crates/tinker-pdf/tests/thumbnails.rs` (new), `docs/features/editing.md` | `thumbnails.rs` (new) `a_generated_thumbnail_is_the_page_at_its_scale`: the embedded thumbnail's samples equal the page rendered at the thumbnail scale; removal leaves no `/Thumb`. | — |
-
-**Closes the row:** ED-20.1 reads, generates, embeds and removes thumbnails, a generated one equal to the page at its scale, which is the row's exit.
 
 ## ED-21 — Portfolios
 
 **Portfolios**: the `/Collection` schema, item metadata, folders, sort, initial document and view mode read, created, edited and extracted
 
-**Today.** attachments listed and written; `/Collection` not read
-
 **Exit criterion.** a portfolio built and re-read yields its schema, folders and files byte for byte
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -501,19 +364,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-21.2 | build | Portfolios created and edited: schema fields, item metadata, folders and files added, moved and removed. | `crates/tinker-pdf-cos/src/collection.rs` (new), `crates/tinker-pdf-cos/src/edit/docops.rs`, `crates/tinker-pdf/tests/portfolio.rs` (new) | `a_built_portfolio_re_reads_byte_for_byte`: a portfolio built, saved and re-read yields its schema, folders and files byte for byte, and validates strictly. | ED-21.1 |
 | ED-21.3 | build | Extraction of a portfolio's files with their folder paths, from the facade and the CLI. | `crates/tinker-pdf/src/lib.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/portfolio.rs` (new), `docs/features/editing.md` | `files_extract_under_their_folders`: every file extracts byte for byte under its folder path. | ED-21.2 |
 
-**Closes the row:** ED-21.2 builds a portfolio that re-reads byte for byte, read by ED-21.1 and extracted by ED-21.3, which is the row's exit.
-
 ## ED-22 — Document comparison, text
 
 **Document comparison, text**: a word-level diff across documents or revisions with insert, delete, replace, format and move classes, as a report and as annotations
 
-**Today.** absent — the owner's parity decision of 9 October 2026; `rg -i '\btext_diff\b|compare_documents|\bdocument_diff\b' crates tools` finds nothing
-
 **Exit criterion.** generated document pairs with known edits yield exactly those edits; `tpdf compare --text` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -522,19 +379,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-22.3 | build | Revisions as inputs (ED-31's revision N against the current), the report as JSON and text, and the changes written as annotations. | `crates/tinker-pdf/src/compare.rs` (new), `crates/tinker-pdf/tests/compare_text.rs` (new) | `reports_and_annotations`: the report re-reads to the edits; the annotated output marks each change's quads and validates strictly. | ED-22.2, ED-31 |
 | ED-22.4 | build | `tpdf compare --text` and a fingerprint of one report. | `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/content-and-text.md` | `tpdf compare --text` runs over `testdata/` fixture pairs to the facade's report; the fingerprint holds on every K-07 target. | ED-22.3, K-07 |
 
-**Closes the row:** ED-22.1 and ED-22.2 find exactly the known edits in every class and ED-22.4 runs `tpdf compare --text`, which is the row's exit.
-
 ## ED-23 — Document comparison, visual
 
 **Document comparison, visual**: pixel and vector overlay diff with colour coding, thresholds, shifted-page alignment and ignored regions
 
-**Today.** absent — the owner's parity decision of 9 October 2026; `rg -i 'visual_diff|pixel_diff|compare_renders' crates tools` finds nothing
-
 **Exit criterion.** generated pairs with known differences report exactly those regions; identical renders report none; `tpdf compare --visual` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -544,19 +395,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-23.4 | build | A vector overlay diff: the two pages' objects (ED-01) matched by kind and geometry, and added, removed and moved objects reported as regions. | `crates/tinker-pdf/src/compare.rs` (new), `crates/tinker-pdf/tests/compare_visual.rs` (new) | `vector_changes_are_found`: generated pairs with known added, removed and moved paths, images and text runs report exactly those objects' regions. | ED-23.1, ED-01.7, ED-01.17, ED-01.18 |
 | ED-23.5 | build | `tpdf compare --visual` and a fingerprint of one overlay. | `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/rendering.md` | `tpdf compare --visual` runs over `testdata/` fixture pairs to the facade's report; the fingerprint holds on every K-07 target. | ED-23.2, ED-23.3, ED-23.4, K-07 |
 
-**Closes the row:** ED-23.1 to ED-23.4 report exactly the known regions and nothing for identical renders, and ED-23.5 runs `tpdf compare --visual`, which is the row's exit.
-
 ## ED-24 — Optimisation presets and font unification
 
 **Optimisation presets and font unification**: screen, ebook, print and prepress presets; identical-but-differently-subset fonts across merged documents unified; embedded standard-14 programs dropped on request; content minified (number precision, operator coalescing)
 
-**Today.** subsetting on rewrite by default, stream deduplication, image recoding (`SaveOptions::images`)
-
 **Exit criterion.** each preset's output validates and renders within its stated tolerance; unification leaves one program per face; savings recorded on the committed fixtures; `tpdf optimise` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** FT-11
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -567,19 +412,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-24.5 | build | Content minified through ED-04's pipeline: numbers at a stated precision and adjacent operators coalesced. | `crates/tinker-pdf-content/src/filter.rs` (new), `crates/tinker-pdf/tests/optimise.rs` (new) | `minified_content_renders_within_tolerance`: minified fixtures render within the design's tolerance and are smaller by the bytes the test counts. | ED-24.1, ED-04 |
 | ED-24.6 | measure | `tpdf optimise --preset`, the savings on the committed fixtures recorded in the feature doc, and a fingerprint of one preset's output. | `tools/tpdf/src/writing.rs`, `tools/tpdf/src/main.rs`, `docs/features/writing.md`, `crates/tinker-pdf/tests/determinism.rs` | `tpdf optimise` runs every preset over `testdata/` fixtures; the feature doc quotes each preset's measured savings; the fingerprint holds on every K-07 target. | ED-24.2, ED-24.3, ED-24.4, ED-24.5, K-07 |
 
-**Closes the row:** ED-24.2 validates and renders each preset within tolerance, ED-24.3 leaves one program per face, and ED-24.6 records the savings and runs `tpdf optimise`, which is the row's exit.
-
 ## ED-25 — Image recompression remainder
 
 **Image recompression remainder**: (1) images stored through an image codec recoded, once the read side hands their samples in their own colour space; (2) images drawn only by a pattern cell, a Type 3 glyph or a soft mask resampled; average and bicubic resampling and a threshold resolution beside the box filter
 
-**Today.** **Landed for images stored through the general filters** — `tinker_pdf::write::SaveOptions::images`, off by default, recodes per kind and box-filters to a caller's `max_ppi`, held by `crates/tinker-pdf/tests/image_recode.rs` and surfaced by `tpdf`'s writers as `--images`, `--bilevel` and `--max-ppi` ([features/writing.md](../features/writing.md)). **What is left, by name.** (1) An image stored as `DCTDecode`, `JPXDecode`, `CCITTFaxDecode` or `JBIG2Decode` is `UntouchedImageReason::Filter` (`features/writing.md:353`) — its samples *in their own colour space* are the read side's type, and recoding them waits on that rather than on a second decoder here; a photograph is commonly stored as DCT, so this is the part a downsampling caller is likeliest to meet. (2) An image only a tiling pattern's cell, a Type 3 glyph or a soft mask's group draws is recoded but never resampled (`Unplaced`): the walk interprets pages, forms and appearances only. (Clause (3), `/UserUnit`, is ED-09's.) No corpus measurement was taken: the fetched corpora were not in the container where the half landed
-
 **Exit criterion.** as the landed half: lossless codings return the samples written, the page draws the same pixels, JPEG within the bound computed from the caller's table; resampling equals the filter computed in the test; the corpus measurement taken where the corpus is
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -589,19 +428,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-25.4 | build | Average and bicubic resampling and a threshold resolution beside the box filter. | `crates/tinker-pdf/src/recode.rs`, `crates/tinker-pdf/src/write.rs`, `crates/tinker-pdf/tests/image_recode.rs`, `docs/features/writing.md` | `every_filter_equals_its_computation`: each filter's output equals the filter computed in the test; an image under the threshold is left alone. | ED-25.3 |
 | ED-25.5 | measure | The corpus measurement: a census in `corpus.yml` recoding every image of the corpora and recording the bytes saved and each refusal by reason. | `crates/tinker-pdf/tests/image_recode_census.rs` (new), `.github/workflows/corpus.yml`, `docs/features/writing.md` | The census prints `RAN` and its figures on a dispatched run on `develop`, and the feature doc quotes them with the run. | ED-25.2, ED-25.4, MS-11, H-03 |
 
-**Closes the row:** ED-25.2 recodes codec-stored images and ED-25.3 resamples pattern, glyph and mask images, each held as the landed half is, ED-25.4 adds the filters, and ED-25.5 takes the corpus measurement, which is the row's exit.
-
 ## ED-26 — A JPEG 2000 encoder
 
 **A JPEG 2000 encoder** (reversible and irreversible, tiles, layers, progression orders)
 
-**Today.** absent — the owner's parity decision of 9 October 2026; `tinker-pdf-filters` writes PNG, CCITT G4, JBIG2 generic regions and baseline JPEG and no JPEG 2000 (`rg -i 'jpx_encode|encode_jpx' crates tools` finds nothing)
-
 **Exit criterion.** T.800 Annex J.10's published image encodes to J.10's published codestream with J.10's parameters; every other configuration decodes through the in-tree decoder within the bound computed in the test (lossless exactly)
 
 **Doc:** `design/jpx-encoder.md` (owed) · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -621,26 +454,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-26.14 | measure | The encoder's speed rows in MS-04's encode group: a 5/3 and a 9/7 `jpx_encode` of one generated RGB image, sized to MS-04's 20 to 300 ms window, each with its baseline entry and the workflow's guard count. *Note:* No target is invented for them: a target is the owner's (H-77). | `crates/tinker-pdf/benches`, `crates/tinker-pdf/benches/baseline.json`, `.github/workflows/bench.yml`, `docs/verification.md` | `xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree` holds the bench files, `bench.yml`'s guard counts and `baseline.json` to one list per group with both operations in the encode group, and `cargo bench -p tinker-pdf` reports their times, recorded in `docs/verification.md`. | ED-26.13, MS-04 |
 | ED-26.15 | test | Fingerprint the encoder on the four targets: the SHA-256 of a 5/3 and a 9/7 encode of fixed generated images (tiled, layered, in a position progression) pinned in `determinism.rs`, entered in K-07's roster and grepped by the three native legs and `wasm-determinism`. *Note:* It lives in the facade's `determinism.rs` because that file already hashes with `tinker_pdf_crypto::sha2::sha256` and runs on all four legs, and the filters crate has no SHA-256. A hash that differs between targets is a determinism bug, never an edit. | `crates/tinker-pdf/tests/determinism.rs`, `xtask/src/determinism.rs` (new), `.github/workflows/ci.yml`, `docs/features/determinism.md` | `determinism.rs` `jpx_encoding_is_stable_across_targets` (new) passes on linux, windows, macos and `wasm32-wasip1`, in the default and `bundled-fonts` builds, each leg grepping it by name through the roster; the next CI run on `develop` is green on all four. | ED-26.13, K-07, MS-11 |
 
-**Closes the row:** ED-26.5 encodes J.10.5's nine samples under J.10's parameters to J.10's published hundred bytes, the exit's first half, after ED-26.2 to ED-26.4 hold tier-1, the packet headers and the analysis to J.10's published intermediate values; ED-26.6 to ED-26.12 add the irreversible path, the component transforms, tiles, precincts, layers, the five progression orders and the JP2 file, and ED-26.13's sweep decodes every configuration through `jpx_decode`, exactly when reversible and within the bound computed in the test otherwise, the second half; ED-26.14 and ED-26.15 bring the speed rows and the fingerprint.
-
-**The tree at `5297133`, against this row's text:**
-
-- Nothing ships a JPEG 2000 writer, as Today says, but most of one exists as test fixtures that `rg -i 'jpx_encode|encode_jpx'` cannot find because none is named so: the tier-1 encoder `tier1::encoder::encode_code_block` (`crates/tinker-pdf-filters/src/jpx/tier1.rs:983-1145`, `cfg(test)`), the tag-tree encoder `encode_tag_tree_for_test` with its stuffing `BitWriter` (`jpx/tier2.rs:397-507`), the forward RCT written inside `the_inverse_rct_is_exact_over_the_forward_one` (`jpx/tests/colour.rs:140-142`), and the deliberately permissive header and JP2 writer `jpx/tests/writer.rs`.
-- T.800 J.10 adjudicates the encoder stage by stage, not only end to end: J.10.4's coefficients (-26, -22, -30, -32, -19 and 1, 5, 1, 0, transcribed at `crates/tinker-pdf-filters/tests/jpx_annex_h.rs:183`, `:187`) are the 5/3 analysis of J.10.5's nine samples after the level shift (checked here by hand), J.10's two code-blocks carry sixteen and seven passes (`docs/verification.md:1512`), and B.10.7.1's NOTE 1 and B.10.2's worked example print packet-header bits (`jpx/tests/code_block_styles.rs:131-179`; `the_worked_tag_tree_example_reads_back_its_own_leaves`, `jpx/tests/tier2.rs:36`).
-- The only MQ termination in the tree is T.88's FLUSH, which appends `FF AC` (`crates/tinker-pdf-filters/src/mq.rs:597-617`), and the test-only tier-1 encoder ends its code-blocks with it (`jpx/tier1.rs:1143`); J.10's published code-block bytes carry no such marker, so T.800's termination is new work (ED-26.2).
-- The test writer's main header is SIZ, COD, QCD (`jpx/tests/writer.rs:156`), while J.10's codestream is SIZ, QCD, COD (`crates/tinker-pdf-filters/tests/jpx_annex_j.rs`, QCD at octal 00055 and COD at 00066), so the shipped writer takes J.10's order rather than the test writer's.
-
 ## ED-27 — JBIG2 symbol and text-region encoding
 
 **JBIG2 symbol and text-region encoding** (lossless)
 
-**Today.** generic regions only; symbol and text encoding a non-goal of the design until 9 October 2026 (`design/jbig2-symbol-text.md:84-99`)
-
 **Exit criterion.** every output decodes to the input exactly through the in-tree decoder; and T.88 Annex H.1's symbol dictionary and text-region segments reproduced byte for byte by re-encoding, under the same parameters, the symbols and placements they decode to — whose composite page H.1 publishes, though it publishes no symbol bitmap of its own (the design doc's milestone 3 says so)
 
 **Doc:** [design/jbig2-symbol-text.md](../design/jbig2-symbol-text.md) (amend) · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -652,19 +472,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-27.6 | build | The writer uses it: bilevel images recoded to symbol-coded JBIG2 when it is smaller, behind the recoding options and the CLI's `--bilevel`. | `crates/tinker-pdf/src/recode.rs`, `crates/tinker-pdf/tests/image_recode.rs`, `tools/tpdf/src/writing.rs`, `docs/features/writing.md` | `bilevel_images_symbol_code`: a recoded scan decodes to its samples exactly and the page draws the same pixels. | ED-27.5 |
 | ED-27.7 | test | A fuzz target encoding arbitrary bitmaps and decoding them, the encoder's speed row and its fingerprint. | `fuzz/fuzz_targets/jbig2_encode.rs` (new), `fuzz/Cargo.toml`, `fuzz/README.md`, `docs/verification.md`, `crates/tinker-pdf/benches/encode.rs`, `crates/tinker-pdf/tests/determinism.rs` | The target asserts decode equals input and runs clean in the fuzz check, with the roster `docs/verification.md` pastes regenerated; the speed row is in the benchmark set; the fingerprint holds on every K-07 target. | ED-27.6, MS-04.8, K-07 |
 
-**Closes the row:** ED-27.5 decodes every output to its input exactly and ED-27.3 and ED-27.4 reproduce H.1's dictionary and text-region segments byte for byte, which is the row's exit.
-
 ## ED-28 — JPEG encoder breadth
 
 **JPEG encoder breadth**: optimised Huffman tables (Annex K.2), progressive mode, documented table presets for callers who want a named quality
 
-**Today.** `tinker_pdf_filters::jpeg_encode` writes T.81's **baseline** process and only that — sequential DCT, Huffman, 8-bit, one SOF0 frame, one scan; grayscale or T.871's YCbCr with the JFIF APP0, 4:4:4 or 4:2:0 named by the caller and never inferred from the pixels; Annex K's tables, those halved, or the caller's own — with **no 1-to-100 quality number**, because every such scale in circulation is some program's private convention and none is in T.81, T.83 or T.871. Progressive and extended sequential, arithmetic, lossless, hierarchical, 12-bit, four-component CMYK/YCCK and K.2's optimised tables are excluded by name in the module header. The FDCT is held to A.3.3's equation recomputed in `f64` in the test, because no published DCT vector set is reachable (H-98)
-
 **Exit criterion.** K.2's procedure recomputed in the test yields the emitted tables; progressive output decodes to the baseline output's samples exactly
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -673,19 +487,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-28.3 | build | Optimised tables in progressive scans: K.2's procedure per scan over its own symbols, end-of-band runs included. | `crates/tinker-pdf-filters/src/jpeg/encode.rs` | A unit test: each scan's tables equal K.2 recomputed for it, and the output decodes to the baseline samples exactly. | ED-28.2 |
 | ED-28.4 | doc | Named table presets: each a stated scaling of Annex K's tables, documented table by table in the feature doc and taken by name from the save options and the CLI, with no 1-to-100 scale. | `crates/tinker-pdf-filters/src/jpeg/encode.rs`, `crates/tinker-pdf/src/write.rs`, `docs/features/filters.md`, `crates/tinker-pdf/tests/determinism.rs` | A test holds each preset's tables to the ones the feature doc lists; a progressive encode with optimised tables is fingerprinted on every K-07 target. | ED-28.3, K-07 |
 
-**Closes the row:** ED-28.1 and ED-28.3 emit tables equal to K.2 recomputed and ED-28.2 decodes progressive output to the baseline samples exactly, which is the row's exit; ED-28.4 adds the presets. Adjudicating the DCT by T.83's compliance data waits on H-98 and is outside this exit.
-
 ## ED-29 — Undo and redo
 
 **Undo and redo**: a journal of named operations with undo, redo and inspection, a snapshot save, and the journal saved beside the file and reloaded when it matches
 
-**Today.** transactions and checkpoints (`features/editing.md:274`)
-
 **Exit criterion.** every editor operation undone restores the byte-identical previous save; a journal round-trips
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -694,38 +502,26 @@ API and by layout, each held to the strict validator (K-03).
 | ED-29.3 | build | The journal saved beside the file with the identity of the bytes it belongs to, and reloaded only when they match. | `crates/tinker-pdf-cos/src/edit/journal.rs` (new), `crates/tinker-pdf-cos/tests/journal.rs` (new) | `a_journal_round_trips`: a saved journal reloads and undoes as before; against any other bytes it is refused by a typed error. | ED-29.2 |
 | ED-29.4 | test | A property test of random operation sequences: every sequence undone to its start saves byte-identically to the original. | `crates/tinker-pdf-cos/tests/journal.rs` (new) | `random_sequences_undo_to_the_original` runs a fixed number of proptest cases and finds no failure; a counted injection that skips one entry's undo fires it. | ED-29.3 |
 
-**Closes the row:** ED-29.1 restores the byte-identical previous save for every operation and ED-29.3 round-trips the journal, which is the row's exit.
-
 ## ED-30 — The low-level object API
 
 **The low-level object API**: get, set and remove by path (`/Root/AcroForm/NeedAppearances`), deep copy and compare, a graft map that keeps sharing when copying objects between documents
 
-**Today.** object-level get, put and allocate (`features/editing.md:11-88`)
-
 **Exit criterion.** path operations held to fixtures; grafting two pages that share a font copies the font once
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | ED-30.1 | build | Get, set and remove by path on `DocumentEditor`: names and array indices (`/Root/Pages/Kids/0`), references followed, a missing step a typed error. | `crates/tinker-pdf-cos/src/edit/paths.rs` (new), `crates/tinker-pdf-cos/src/edit/mod.rs`, `crates/tinker-pdf-cos/tests/object_paths.rs` (new), `docs/features/editing.md` | `object_paths.rs` (new) `path_operations_hold_to_fixtures`: a table of paths gets, sets and removes as expected, `/Root/AcroForm/NeedAppearances` among them. | — |
 | ED-30.2 | build | Deep copy and comparison with cycles handled, and a graft map reused across copies between two documents so shared objects stay shared. | `crates/tinker-pdf-cos/src/edit/paths.rs` (new), `crates/tinker-pdf-cos/src/edit/page_ops.rs`, `crates/tinker-pdf-cos/tests/object_paths.rs` (new) | `grafting_two_pages_copies_their_font_once`: two pages sharing a font, grafted through one map, copy the font once; deep comparison tells equal and unequal graphs apart, cyclic ones included. | ED-30.1 |
 
-**Closes the row:** ED-30.1 holds path operations to fixtures and ED-30.2 copies a shared font once, which is the row's exit.
-
 ## ED-31 — Revisions
 
 **Revisions**: count incremental revisions with byte ranges, open as of revision N, extract revision N, diff two revisions by value, roll back
 
-**Today.** incremental update with a byte-identical prefix; signatures' `modifications()` compares xref entries
-
 **Exit criterion.** fixtures with known revisions; extracted revision N is byte-equal to its prefix; the value diff lists exactly the changed objects
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -734,19 +530,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-31.3 | build | A value diff of two revisions: objects added, removed and changed by value, compared deeply through ED-30, beyond the cross-reference comparison signatures' `modifications()` makes. | `crates/tinker-pdf-cos/src/revisions.rs` (new), `crates/tinker-pdf-cos/tests/revisions.rs` (new) | `the_value_diff_lists_exactly_the_changed_objects`: fixtures with known edits, including an object rewritten with the same value, list exactly the objects whose values changed. | ED-31.2, ED-30 |
 | ED-31.4 | build | Roll back to revision N, and `tpdf revisions` to list, extract, diff and roll back. | `crates/tinker-pdf/src/lib.rs`, `tools/tpdf/src/main.rs`, `docs/features/editing.md` | A rolled-back save equals revision N's prefix; CLI tests run each subcommand over the revision fixtures. | ED-31.3 |
 
-**Closes the row:** ED-31.1 to ED-31.3 count, extract and diff the known revisions exactly, and ED-31.4 rolls back, which is the row's exit.
-
 ## ED-32 — Check and repair on demand
 
 **Check and repair on demand**: force a repair, a throw-on-repair mode so an edit is never lost to a late repair, a structure-tree check and repair (parents, cycles, spans, table attributes)
 
-**Today.** the leniency ladder repairs during open with typed warnings
-
 **Exit criterion.** a damaged fixture forced through repair before editing keeps every edit; structure-tree repairs held to fixtures with known defects; `tpdf repair` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -754,38 +544,26 @@ API and by layout, each held to the strict validator (K-03).
 | ED-32.2 | build | A structure-tree check and repair: parents that disagree with their children, cycles, spans that do not add up and table attributes, each found and fixed by name. | `crates/tinker-pdf/src/structure.rs`, `crates/tinker-pdf/tests/repair_on_demand.rs` (new) | `structure_repairs_hold_to_known_defects`: fixtures with each known defect are reported and repaired as the test expects, and a sound tree is left byte-identical. | — |
 | ED-32.3 | build | `tpdf repair`, with the structure check as an option. | `tools/tpdf/src/main.rs`, `tools/tpdf/src/writing.rs` | `tpdf repair` runs over `testdata/` fixtures to the facade's output. | ED-32.1, ED-32.2 |
 
-**Closes the row:** ED-32.1 keeps every edit through a forced repair, ED-32.2 repairs known structure defects and ED-32.3 runs `tpdf repair`, which is the row's exit.
-
 ## ED-33 — External streams internalised
 
 **External streams internalised**: a stream with `/F` read through a host resource provider and written inside the file
 
-**Today.** refused as `UntouchedImageReason::Filter` for an external `/F` (`features/writing.md:353`)
-
 **Exit criterion.** an external-stream fixture saved self-contained renders identically
 
 **Doc:** — · **Depends on:** FI-27
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | ED-33.1 | build | External streams internalised on save: a stream's `/F` bytes read through FI-27's host resource provider and written inside the file, with `/FFilter` and `/FDecodeParms` becoming `/Filter` and `/DecodeParms`. | `crates/tinker-pdf-cos/src/write.rs`, `crates/tinker-pdf/src/write.rs`, `crates/tinker-pdf/tests/external_streams.rs` (new), `docs/features/writing.md` | `external_streams.rs` (new) `an_external_stream_saves_self_contained`: the saved fixture has no `/F`, needs no provider, and renders identically; a missing resource is a typed refusal. | FI-27 |
 | ED-33.2 | build | Image recoding takes an internalised stream, retiring the `UntouchedImageReason::Filter` refusal for an external `/F`. | `crates/tinker-pdf/src/recode.rs`, `crates/tinker-pdf/tests/external_streams.rs` (new) | `an_external_image_recodes`: an external image fixture recodes like an internal one; failing first on today's refusal. | ED-33.1 |
 
-**Closes the row:** ED-33.1 saves the external-stream fixture self-contained, rendering identically, which is the row's exit.
-
 ## ED-34 — References to removed pages dropped on save
 
 **References to removed pages dropped on save** (in `tinker-pdf-cos`)
 
-**Today.** `keep_pages` keeps the catalog, and a garbage-collecting rewrite follows it, so a page an outline item, a named destination or a link still names stays in a split piece outside its page tree — page 6 of `outline-3level.pdf` split out carries five page objects (`a_page_the_outline_names_stays_in_a_piece_that_dropped_it`; `features/editing.md:848`); `delete_page` leaves the same references, and structure and `/OpenAction` too. `tpdf split` says it is not a redaction. A limit of the facade's rather than the CLI's, found when the CLI landed
-
 **Exit criterion.** a page dropped by `keep_pages` or `delete_page` no longer reachable from anything the saved document keeps: references to it nulled or pruned on save, the pinned test inverted
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -793,19 +571,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-34.2 | fix | On save, outline items, named destinations and links naming a removed page pruned (an outline item's children lifted to its parent). | `crates/tinker-pdf-cos/src/edit/save.rs`, `crates/tinker-pdf-cos/src/edit/page_ops.rs`, `crates/tinker-pdf-cos/tests/removed_pages.rs` (new), `tools/tpdf/src/writing.rs` | The outline, destination and link cases of `no_removed_page_is_reachable` pass; `a_page_the_outline_names_stays_in_a_piece_that_dropped_it` is inverted, page 6 of `outline-3level.pdf` split out carrying one page object. | ED-34.1 |
 | ED-34.3 | fix | On save, structure elements whose `/Pg` is a removed page pruned with their parent-tree entries, and an `/OpenAction` naming a removed page removed. | `crates/tinker-pdf-cos/src/edit/save.rs`, `crates/tinker-pdf-cos/tests/removed_pages.rs` (new), `docs/features/editing.md` | Every case of `no_removed_page_is_reachable` passes; a tagged split still passes the PDF/UA checks it passed before; the feature doc's limit is removed. | ED-34.2 |
 
-**Closes the row:** ED-34.2 and ED-34.3 leave no removed page reachable and invert the pinned test, which is the row's exit.
-
 ## ED-35 — Type 3 glyph procedures rewritten under redaction
 
 **Type 3 glyph procedures rewritten under redaction** (redaction clause (a))
 
-**Today.** Redaction cuts a Type 3 run in its own glyph space and a glyph at the use whose procedure draws under a rectangle, measured in the enclosing scope and in the font's own `/Resources` (`glyph_procedures`). **Glyph-procedure streams are not rewritten** (`features/editing.md:836`): the exit asked for them rewritten; what was built instead removes the *use* and leaves the procedure, which `subset::apply` — the default save — empties once nothing shown runs it (`subset.rs`'s `type3_fonts`, which walks tiling cells and mask groups and counts a glyph whose procedure this engine could not run), so a procedure some uncovered use still runs keeps the covered words in `/CharProcs`; and what a procedure draws — a form it invokes, a soft mask's group it sets — is not cut either, and emptying the procedure removes neither from the file (a group is measured at every use, one the glyph's own box removed included, and named `PatternOrMask` when it shows text under a rectangle there, whatever removed the use, `a_glyph_whose_procedure_masks_text_under_a_rectangle_is_removed` and `a_covered_glyph_whose_procedure_masks_text_under_a_rectangle_names_the_group` — or when the use's `MAX_PLACEMENTS`-stream budget cut its measurement short, `a_group_after_a_naming_that_spent_the_budget_is_named`, what the budget cut short anywhere else naming the font `UnboundedProcedure`, `a_covered_use_whose_measurement_ran_out_says_so`; a form is not named). That substitute was the implementing lane's choice, argued in `cut_stream`'s doc and the refusal table, and is the owner's to accept or refuse (H-11); until then this criterion is open
-
 **Exit criterion.** glyph-procedure streams rewritten, so the covered words are absent from every procedure stream an uncovered use still runs, and what a procedure draws under a rectangle is cut; or the owner's ruling that removal at the use with `subset::apply`'s emptying suffices
 
 **Doc:** — · **Depends on:** H-11
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -814,19 +586,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-35.3 | build | What a procedure draws under a rectangle cut: a form it invokes and a soft mask group it sets rewritten per use, so the namings `PatternOrMask` and `UnboundedProcedure` remain only where the measurement is genuinely cut short. *Note:* Only if H-11 requires procedures rewritten. | `crates/tinker-pdf/src/redact.rs`, `crates/tinker-pdf/tests/redact_type3.rs` (new) | `what_a_procedure_draws_is_cut`: a procedure's form and mask group under a rectangle lose the covered content; the existing namings tests still pass where the budget runs out. | ED-35.2 |
 | ED-35.4 | test | The row's fixtures in the redaction suite and a fingerprint of one rewritten Type 3 page. *Note:* Only if H-11 requires procedures rewritten. | `crates/tinker-pdf/tests/redact_type3.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | Every glyph-procedure fixture of the refusal table passes with the procedure rewritten; the fingerprint holds on every K-07 target. | ED-35.3, K-07 |
 
-**Closes the row:** ED-35.1 closes the row on the owner's ruling that removal at the use suffices, or ED-35.2 to ED-35.4 rewrite the procedures and cut what they draw, the row's two exits.
-
 ## ED-36a — Image redaction modes
 
 **Image redaction modes**: none; the whole image removed; the pixels under a rectangle blanked and the image recoded losslessly; and removed unless invisible, by a clip-aware estimate of whether the covered part is drawn
 
-**Today.** the whole image is scrubbed (`features/editing.md:822`). The image encoders exist — `tinker-pdf-filters` writes PNG, CCITT G4 and JBIG2 generic regions (15 September 2026) and baseline JPEG (16 September), and the writer calls them only when a save's `SaveOptions::images` names one — so this waits on the decision of when to choose a codec rather than on a codec (H-20)
-
 **Exit criterion.** the blanked region's samples are the fill and every other sample is unchanged; each mode's survivors match fixtures with known clips; `tpdf redact --images <mode>` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** H-20
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -834,19 +600,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-36a.2 | build | The other image modes: none, whole image removed, and removed unless invisible by a clip-aware estimate of whether the covered part is drawn. | `crates/tinker-pdf/src/redact.rs`, `crates/tinker-pdf/tests/redact_images.rs` (new) | `each_image_mode_keeps_its_survivors`: fixtures with known clips keep exactly the images each mode should. | ED-36a.1 |
 | ED-36a.3 | build | `tpdf redact --images <mode>`. | `tools/tpdf/src/main.rs`, `tools/tpdf/src/writing.rs` | `tpdf redact --images` runs each mode over `testdata/` fixtures to the facade's output. | ED-36a.2, ED-36b |
 
-**Closes the row:** ED-36a.1 blanks only the covered samples, ED-36a.2 keeps each mode's survivors and ED-36a.3 runs `tpdf redact --images`, which is the row's exit.
-
 ## ED-36b — Redaction modes for line art and text
 
 **Redaction modes for line art and text**: line art none, remove if covered, remove if touched; text none (marks only) beside the default removal
 
-**Today.** absent — the owner's parity decision of 9 October 2026; redaction removes text and images and leaves line art: the redaction module "does not follow paths" (`features/editing.md:824`)
-
 **Exit criterion.** each mode held to fixtures with known survivors; `tpdf redact --line-art <mode>` and `--text none` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -854,38 +614,26 @@ API and by layout, each held to the strict validator (K-03).
 | ED-36b.2 | build | Text mode none: the redaction marks drawn and the text left, beside the default removal. | `crates/tinker-pdf/src/redact.rs`, `crates/tinker-pdf/tests/redact_line_art.rs` (new) | `text_none_marks_only`: the text extracts as before and the marks are drawn. | ED-36b.1 |
 | ED-36b.3 | build | `tpdf redact`, rectangles from arguments or a file, with `--line-art <mode>` and `--text none`. | `tools/tpdf/src/main.rs`, `tools/tpdf/src/writing.rs` | `tpdf redact` runs each mode over `testdata/` fixtures to the facade's output. | ED-36b.2 |
 
-**Closes the row:** ED-36b.1 and ED-36b.2 hold each mode to known survivors and ED-36b.3 runs it from the CLI, which is the row's exit.
-
 ## ED-36c — A flatten-to-image redaction mode
 
 **A flatten-to-image redaction mode** that leaves no vector or text residue
 
-**Today.** absent — the owner's parity decision of 9 October 2026; `rg -i 'flatten_to_image' crates tools` finds nothing
-
 **Exit criterion.** the output page carries one image and no text, and its render equals the redacted render; `tpdf redact --flatten` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | ED-36c.1 | build | Flatten to image: the redacted page rendered at a stated resolution and its content replaced by that one image. | `crates/tinker-pdf/src/redact.rs`, `crates/tinker-pdf/tests/redact_flatten.rs` (new), `docs/features/editing.md` | `redact_flatten.rs` (new) `a_flattened_page_is_one_image_and_no_text`: the page carries one image and no text or path, and renders equal to the redacted render at that resolution. | — |
 | ED-36c.2 | build | `tpdf redact --flatten` and a fingerprint of one flattened page. | `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs` | `tpdf redact --flatten` runs over `testdata/` fixtures to the facade's output; the fingerprint holds on every K-07 target. | ED-36c.1, ED-36b, K-07 |
 
-**Closes the row:** ED-36c.1 leaves one image and no text, rendering as the redacted page, and ED-36c.2 runs `tpdf redact --flatten`, which is the row's exit.
-
 ## ED-36d — Mark, review, apply
 
 **Mark, review, apply**: `/Redact` annotations created, listed and applied, with overlay text, codes, `/Repeat`, fill and cross-out
 
-**Today.** redaction applies caller rectangles directly
-
 **Exit criterion.** marks round-trip; application equals direct application with the same rectangles plus the overlay; `tpdf redact` by area and by search, marking and applying runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** AN-06
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -893,19 +641,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-36d.2 | build | Applying marks: each `/Redact` applied as the direct redaction of its areas, then its overlay drawn (fill and overlay text, repeated where `/Repeat` asks), and the mark removed. | `crates/tinker-pdf/src/redact.rs`, `crates/tinker-pdf/tests/redact_marks.rs` (new) | `applying_marks_equals_direct_redaction_plus_the_overlay`: the applied page's content and render equal direct redaction with the same rectangles plus the overlay the test draws. | ED-36d.1 |
 | ED-36d.3 | build | `tpdf redact` by area and by search, marking (writing `/Redact` annotations) and applying. | `tools/tpdf/src/main.rs`, `tools/tpdf/src/writing.rs` | CLI tests mark by area and by search, then apply, over `testdata/` fixtures to the facade's output. | ED-36d.2, ED-36b |
 
-**Closes the row:** ED-36d.1 round-trips marks, ED-36d.2 applies them as direct redaction plus the overlay, and ED-36d.3 runs it from the CLI, which is the row's exit.
-
 ## ED-36e — No residue outside the content
 
 **No residue outside the content**: structure elements, `/ActualText`, an annotation's own `/Contents`, field values, outline titles, named destinations and attachments that reference redacted content scrubbed; links and annotations in the area removed
 
-**Today.** an annotation's own text is left when its appearance is cut (`features/editing.md:838`)
-
 **Exit criterion.** fixtures with redacted words planted in each place find none after application (text search and raw-stream search); `tpdf redact`, by default runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -915,38 +657,26 @@ API and by layout, each held to the strict validator (K-03).
 | ED-36e.4 | fix | Document-level residue: outline titles, named destinations and attachments that reference redacted content scrubbed. | `crates/tinker-pdf/src/redact.rs`, `crates/tinker-pdf/tests/redact_residue.rs` (new) | Every case of `no_residue_anywhere` passes. | ED-36e.2, ED-36e.3 |
 | ED-36e.5 | build | The scrub on by default in `tpdf redact`, and a fingerprint of one scrubbed document. | `tools/tpdf/src/writing.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/editing.md` | `tpdf redact` with no option scrubs every place over `testdata/` fixtures; the fingerprint holds on every K-07 target; the feature doc's residue limit is removed. | ED-36e.4, ED-36b, K-07 |
 
-**Closes the row:** ED-36e.2 to ED-36e.4 leave none of the planted words by text or raw-stream search, and ED-36e.5 makes it `tpdf redact`'s default, which is the row's exit.
-
 ## ED-36f — Remove only invisible text
 
 **Remove only invisible text** (render mode 3), the redaction mode for stripping an old OCR layer
 
-**Today.** absent — the owner's parity decision of 9 October 2026; invisible text is shown to the device like any other (`invisible_text_is_still_shown_to_the_device`, `crates/tinker-pdf-content/src/interpret.rs:2519`) and no redaction mode keys on it
-
 **Exit criterion.** fixtures with visible and invisible runs keep exactly the visible; `tpdf redact --invisible-text` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | ED-36f.1 | build | A redaction mode removing only text drawn in render mode 3, on a whole page or inside rectangles. | `crates/tinker-pdf/src/redact.rs`, `crates/tinker-pdf/tests/redact_invisible.rs` (new), `docs/features/editing.md` | `redact_invisible.rs` (new) `only_invisible_text_goes`: fixtures with visible and invisible runs, interleaved in one text object, keep exactly the visible; the render is unchanged. | — |
 | ED-36f.2 | build | `tpdf redact --invisible-text`. | `tools/tpdf/src/main.rs`, `tools/tpdf/src/writing.rs` | `tpdf redact --invisible-text` runs over `testdata/` fixtures to the facade's output. | ED-36f.1, ED-36b |
 
-**Closes the row:** ED-36f.1 keeps exactly the visible text and ED-36f.2 runs `tpdf redact --invisible-text`, which is the row's exit.
-
 ## ED-37 — Write-option parity
 
 **Write-option parity**: decompress everything, recompress already-filtered streams (Flate at a higher effort, Brotli), compression effort, compress only fonts or only images, ASCII-hex armour, pretty and compact object syntax, keep metadata untouched, continue on error, regenerate or keep `/ID`
 
-**Today.** a filtered stream is "handed through untouched" (`features/writing.md:344`); `WriteOptions` carries mode, linearize, version, object streams, compress, encryption, garbage collection, deduplication
-
 **Exit criterion.** each option held to fixtures; outputs validate strictly and render identically; `tpdf linearize` and `tpdf clean` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** FO-18
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -959,19 +689,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-37.7 | build | Continue on error: a stream that fails to decode is written as it was, with a typed warning, instead of failing the save. | `crates/tinker-pdf-cos/src/write.rs`, `crates/tinker-pdf/tests/write_options.rs` (new) | `a_bad_stream_is_kept_and_warned`: a fixture with an undecodable stream saves under decompression with that stream unchanged and the warning raised. | ED-37.1 |
 | ED-37.8 | build | `tpdf linearize`, and the options on it and on `tpdf clean`. | `tools/tpdf/src/main.rs`, `tools/tpdf/src/writing.rs` | CLI tests run each option through both commands over `testdata/` fixtures to the facade's output. | ED-37.3, ED-37.4, ED-37.5, ED-37.6, ED-37.7, ED-04 |
 
-**Closes the row:** ED-37.1 to ED-37.7 hold each option to fixtures, validating strictly and rendering identically, and ED-37.8 runs them from `tpdf linearize` and `tpdf clean`, which is the row's exit.
-
 ## ED-38 — Streaming write
 
 **Streaming write**: finished pages flushed to the sink; memory proportional to the largest object
 
-**Today.** a non-goal of the streaming design until 9 October 2026 (`design/streaming-open.md:47-70`)
-
 **Exit criterion.** a 10 000-page generated document written with peak memory within an MS-05 band independent of page count
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -980,19 +704,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-38.3 | build | The builder's streaming mode: each finished page's own objects flushed, shared resources and the subset fonts written once every page is done. | `crates/tinker-pdf-cos/src/build.rs`, `crates/tinker-pdf-cos/tests/streaming_write.rs` (new), `docs/features/creation.md` | `streamed_documents_match`: generated documents built streaming validate strictly and render identically to their whole builds; a `cfg(test)` count of the objects the builder holds at each page's end stays at that page's own and the shared ones, failing against a builder that keeps every page. | ED-38.2 |
 | ED-38.4 | measure | Peak memory of a streamed 10 000-page generated document, held in an MS-05 band that does not grow with page count. | `crates/tinker-pdf-cos/tests/streaming_write.rs` (new) | The 10 000-page write's peak lies in the same MS-05 band as the 1 000-page write's, and the band is committed. | ED-38.3, MS-05 |
 
-**Closes the row:** ED-38.4 writes a 10 000-page document with peak memory in an MS-05 band independent of page count, on ED-38.2 and ED-38.3's streaming, which is the row's exit.
-
 ## ED-39 — Attachment parity
 
 **Attachment parity**: checksum verification, update, delete, extraction from the CLI, file-attachment annotations embedded and extracted
 
-**Today.** attachments listed and written; `tpdf attach` adds one
-
 **Exit criterion.** each operation round-trips; a corrupted checksum is reported by a typed warning; `tpdf attachments list`, `add`, `remove` and `extract` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1000,19 +718,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-39.2 | build | File-attachment annotations embedded and extracted. | `crates/tinker-pdf-cos/src/edit/annotations.rs`, `crates/tinker-pdf/src/annotations.rs`, `crates/tinker-pdf/tests/attachments.rs` (new) | `file_attachment_annotations_round_trip`: an embedded annotation's file extracts byte for byte and the file validates strictly. | ED-39.1 |
 | ED-39.3 | build | `tpdf attachments list`, `add`, `remove` and `extract`, beside the existing `attach`. | `tools/tpdf/src/main.rs`, `tools/tpdf/src/writing.rs` | CLI tests run each subcommand over `testdata/` fixtures and read the result back through the facade. | ED-39.2 |
 
-**Closes the row:** ED-39.1 and ED-39.2 round-trip each operation with the checksum warning, and ED-39.3 runs the four subcommands, which is the row's exit.
-
 ## ED-40 — Layer authoring breadth
 
 **Layer authoring breadth**: OCMDs with `/VE`, `/Configs`, the UI `/Order`, `/RBGroups`, optional content on annotations, images and existing content
 
-**Today.** `add_layer`, `PageBuilder::optional`, visibility toggled in `/D`
-
 **Exit criterion.** each authored structure re-read and rendered under each configuration as RC-14 decides; `tpdf layers` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** RC-14
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1020,19 +732,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-40.2 | build | Optional content put on annotations, images and existing content (its objects wrapped in marked content naming the group). | `crates/tinker-pdf-cos/src/edit/layers.rs`, `crates/tinker-pdf/tests/layer_authoring.rs` (new) | `layers_on_annotations_images_and_content`: each authored structure renders under each configuration as RC-14 decides. | ED-40.1, RC-14, ED-01.7, ED-01.17, ED-01.18 |
 | ED-40.3 | build | `tpdf layers`: list, add, set visibility and choose a configuration. | `tools/tpdf/src/main.rs`, `tools/tpdf/src/writing.rs` | CLI tests run each subcommand over `testdata/` fixtures to the facade's output. | ED-40.2 |
 
-**Closes the row:** ED-40.1 and ED-40.2 re-read and render each structure under each configuration as RC-14 decides, and ED-40.3 runs `tpdf layers`, which is the row's exit.
-
 ## ED-41 — Images to PDF without re-encoding
 
 **Images to PDF without re-encoding**: JPEG, JPEG 2000, CCITT and JBIG2 passed through; PNG through Flate with predictors (16-bit, palette, alpha to soft mask); multi-page TIFF to pages; resolution to page size; EXIF orientation; PDF/A output
 
-**Today.** the builder deflates every raster it is handed (`features/creation.md:382`); JPEG and PNG IDAT pass through
-
 **Exit criterion.** the image stream bytes equal the input's coded bytes; decoded samples equal the source's
 
 **Doc:** — · **Depends on:** FI-14
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1041,38 +747,26 @@ API and by layout, each held to the strict validator (K-03).
 | ED-41.3 | build | Multi-page TIFF to pages, resolution to page size, and orientation applied as FI-14 reads it. | `crates/tinker-pdf-cos/src/tiff_embed.rs`, `crates/tinker-pdf/tests/image_passthrough.rs` (new) | `tiff_pages_sizes_and_orientation`: a three-page TIFF yields three pages sized from each page's resolution, each oriented as FI-14's tests expect. | ED-41.1, FI-14 |
 | ED-41.4 | build | PDF/A output for images to PDF, and a fingerprint of one converted document. | `crates/tinker-pdf-cos/src/build.rs`, `crates/tinker-pdf/tests/image_passthrough.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | `images_to_pdf_a_validate`: outputs pass the engine's PDF/A validation for the chosen part; the fingerprint holds on every K-07 target. | ED-41.2, ED-41.3, K-07 |
 
-**Closes the row:** ED-41.1 and ED-41.2 keep coded bytes and decoded samples equal to the input's, ED-41.3 maps TIFF pages, resolution and orientation, and ED-41.4 adds PDF/A output, which covers the row's exit.
-
 ## ED-42 — Convert any opened document to PDF and insert its pages
 
 **Convert any opened document to PDF and insert its pages**: EPUB, XPS, CBZ, SVG, HTML, Markdown, FB2 and images inserted into an existing PDF with links
 
-**Today.** each format is synthesised into a real PDF on open; nothing inserts one into another
-
 **Exit criterion.** inserted pages render as the opened document's pages; links retargeted; `tpdf convert --insert` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** ED-13
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | ED-42.1 | build | Any opened document's pages inserted into an existing PDF: the PDF each format is synthesised into on open, merged at an index through ED-13's merge, its links retargeted. | `crates/tinker-pdf/src/merge.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/insert_converted.rs` (new), `docs/features/editing.md` | `insert_converted.rs` (new) `inserted_pages_render_as_the_opened_document`: for EPUB, XPS, CBZ, SVG, HTML, Markdown, FB2 and an image, the inserted pages render as the opened document's pages and its internal links land on the inserted pages. | ED-13 |
 | ED-42.2 | build | `tpdf convert --insert` and a fingerprint of one document with inserted pages. | `tools/tpdf/src/main.rs`, `tools/tpdf/src/writing.rs`, `crates/tinker-pdf/tests/determinism.rs` | `tpdf convert --insert` runs over `testdata/` fixtures of each format to the facade's output; the fingerprint holds on every K-07 target. | ED-42.1, K-07 |
 
-**Closes the row:** ED-42.1 renders inserted pages as the opened document's with links retargeted and ED-42.2 runs `tpdf convert --insert`, which is the row's exit.
-
 ## ED-43 — HTML into a rectangle of an existing page
 
 **HTML into a rectangle of an existing page**, with scaling to fit, rotation, layer and opacity, a positions callback and overflow reporting; a DOM API to change the HTML before layout — create, find, insert, remove and clone elements and text, and set attributes
 
-**Today.** `FromHtml` makes whole documents (`features/creation.md:13-45`)
-
 **Exit criterion.** the placed content renders as the same HTML laid out at that size; overflow reported exactly when content exceeds the box; a DOM edit lays out as the same HTML written with the edit
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1080,19 +774,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-43.2 | build | Overflow reported exactly when the content exceeds the box, and a callback given each element's laid-out rectangle. | `crates/tinker-pdf/src/html.rs`, `crates/tinker-pdf/tests/html_in_a_box.rs` (new) | `overflow_is_reported_exactly`: content sized to fit reports none and one line more reports it; the callback's rectangles equal the layout's. | ED-43.1 |
 | ED-43.3 | build | A DOM API on the parsed tree before layout: create, find, insert, remove and clone elements and text, and set attributes. | `crates/tinker-pdf-layout/src/html/mod.rs` (new), `crates/tinker-pdf/src/html.rs`, `crates/tinker-pdf/tests/html_in_a_box.rs` (new) | `dom_edits_lay_out_as_the_edited_html`: each edit lays out as the same HTML written with the edit. | ED-43.1 |
 
-**Closes the row:** ED-43.1 renders placed HTML as its own layout, ED-43.2 reports overflow exactly and ED-43.3's edits lay out as the edited HTML, which is the row's exit.
-
 ## ED-44 — A programmatic layout API
 
 **A programmatic layout API**: paragraph, division, table, list, image and break with pagination, repeating table headers and footers, row spans, keep-together and keep-with-next, floats, columns, justification and hyphenation
 
-**Today.** "layout on the builder's own methods — by design" (`features/creation.md:385`)
-
 **Exit criterion.** layouts built through the API equal the same content laid out from HTML (reftest pairs); a 10 000-row table streams within an MS-05 band
 
 **Doc:** `design/layout-api.md` (owed) · **Depends on:** FT-15
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1105,19 +793,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-44.7 | measure | A 10 000-row table streamed through the layout API onto ED-38's streaming writer, its peak memory held in an MS-05 band. | `crates/tinker-pdf/src/layout_api.rs` (new), `crates/tinker-pdf/tests/layout_api.rs` (new) | The 10 000-row table's peak lies in the same committed MS-05 band as a 1 000-row table's. | ED-44.4, ED-38, MS-05 |
 | ED-44.8 | measure | The API's speed row and fingerprint, and its feature doc. | `crates/tinker-pdf/benches/layout.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/creation.md` | A 20-page generated layout runs in the benchmark set; its bytes are fingerprinted on every K-07 target. | ED-44.5, ED-44.6, MS-04, K-07 |
 
-**Closes the row:** ED-44.2 to ED-44.6 make every API layout equal its HTML reftest pair and ED-44.7 streams a 10 000-row table within an MS-05 band, which is the row's exit.
-
 ## ED-45 — Shaped text on the builder
 
 **Shaped text on the builder**: text in any font and script shaped, embedded and subset in one call; simple fonts for Latin, Greek and Cyrillic encodings; a non-embedded CJK font with a predefined CMap; a text box filled with alignment and overflow reporting
 
-**Today.** `text` is one byte per character; shaping is `glyph_run`'s (`features/creation.md:383`)
-
 **Exit criterion.** extracted text equals the input in logical order for every committed shaping fixture's script; overflow reported exactly
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1126,74 +808,50 @@ API and by layout, each held to the strict validator (K-03).
 | ED-45.3 | build | A non-embedded CJK font with a predefined CMap, named by registry, ordering and supplement. | `crates/tinker-pdf-cos/src/build.rs`, `crates/tinker-pdf/tests/builder_text.rs` (new) | `cjk_with_a_predefined_cmap`: Japanese, Chinese and Korean text extracts as the input through the vendored CMaps and validates strictly. | ED-45.1 |
 | ED-45.4 | build | A text box filled with alignment (left, right, centred, justified) and overflow reported exactly. | `crates/tinker-pdf-cos/src/build.rs`, `crates/tinker-pdf/tests/builder_text.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | `text_boxes_align_and_report_overflow`: line positions equal the test's for each alignment; overflow is reported exactly when the text exceeds the box; one box's bytes are fingerprinted on every K-07 target; in the default and `bundled-fonts` builds. | ED-45.1, K-07 |
 
-**Closes the row:** ED-45.1 extracts every committed script in logical order and ED-45.4 reports overflow exactly, which is the row's exit; ED-45.2 and ED-45.3 add simple and CJK fonts.
-
 ## ED-46 — Drawing helpers
 
 **Drawing helpers**: lines, polylines, rectangles, circles, ellipses, sectors, Bézier curves, zigzags, with stroke and fill options
-
-**Today.** `fill_rect` and raw content
 
 **Exit criterion.** each helper's path equals the geometry computed in the test
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed; the review runs once all the work is done.*
-
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | ED-46.1 | build | Drawing helpers on the builder: lines, polylines, rectangles, circles and ellipses (Bézier arcs with the stated control-point constant), sectors, Bézier curves and zigzags, with stroke and fill options. | `crates/tinker-pdf-cos/src/build.rs`, `crates/tinker-pdf-cos/tests/drawing_helpers.rs` (new), `docs/features/creation.md` | `drawing_helpers.rs` (new) `each_helper_draws_its_geometry`: each helper's path operators equal the geometry the test computes. | — |
-
-**Closes the row:** ED-46.1 holds each helper's path to the geometry computed in the test, which is the row's exit.
 
 ## ED-47 — Links to non-ASCII targets
 
 **Links to non-ASCII targets**: IRIs percent-encoded to URIs on write
 
-**Today.** refused (`features/creation.md:384`; `PageBuilder::link` returns `false`)
-
 **Exit criterion.** fixtures with non-ASCII targets write the RFC 3987 mapping and read back
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | ED-47.1 | build | IRIs mapped to URIs on write by RFC 3987 3.1 (UTF-8, then percent-encoding), in `PageBuilder::link` and every writer of URI actions. | `crates/tinker-pdf-cos/src/build.rs`, `crates/tinker-pdf-cos/src/edit/annotations.rs`, `crates/tinker-pdf-cos/tests/iri_links.rs` (new), `docs/features/creation.md` | `iri_links.rs` (new) `non_ascii_targets_write_the_rfc_3987_mapping`: fixtures with non-ASCII hosts, paths and queries write the mapping and read back to it; failing first on today's refusal. | — |
 
-**Closes the row:** ED-47.1 writes the RFC 3987 mapping for non-ASCII targets and reads it back, which is the row's exit.
-
 ## ED-48 — An SVG or another document's page placed as vector content
 
 **An SVG or another document's page placed as vector content**: an SVG drawn as a form on a page or used as an image source in the builder
 
-**Today.** SVG opens as its own document only
-
 **Exit criterion.** the placed SVG renders as the opened SVG at that size
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | ED-48.1 | build | An SVG placed as vector content: the page the SVG synthesises into drawn as a form on a builder or editor page at a given size. | `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf-cos/src/edit/stamp.rs`, `crates/tinker-pdf/tests/placed_vectors.rs` (new), `docs/features/creation.md` | `placed_vectors.rs` (new) `a_placed_svg_renders_as_the_opened_svg`: the placed SVG renders as the opened SVG at that size. | — |
 | ED-48.2 | build | Another opened document's page as vector content, and an SVG as an image source in the builder. | `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf-cos/src/build.rs`, `crates/tinker-pdf/tests/placed_vectors.rs` (new) | `placed_pages_render_as_their_source`: a placed page and an SVG image source render as their sources at that size. | ED-48.1 |
 
-**Closes the row:** ED-48.1 renders a placed SVG as the opened SVG at that size, which is the row's exit; ED-48.2 adds other pages and the image source.
-
 ## ED-49 — Vector barcodes
 
 **Vector barcodes**: Code 128 and GS1-128, Code 39 and 93, EAN-13 and 8, UPC-A and E, ITF-14, Codabar, MSI, postal codes, QR (all versions and error-correction levels, Kanji, structured append), Micro QR, rMQR, Data Matrix (ECC 200 and GS1), PDF417 and MicroPDF417, Aztec, MaxiCode, DataBar family, payment QR profiles; quiet zones and human-readable text
 
-**Today.** absent — the owner's parity decision of 9 October 2026; "barcode" appears in two doc comments and no code (`rg -i 'barcode' crates`)
-
 **Exit criterion.** each symbology held to its ISO/IEC specification's worked examples transcribed into tests; the decoder (ED-50) reads every generated symbol back; `tpdf barcode` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1213,19 +871,13 @@ API and by layout, each held to the strict validator (K-03).
 | ED-49.14 | build | Drawing: symbols written as vector paths on a builder page, with quiet zones and human-readable text, and `tpdf barcode`. | `crates/tinker-pdf-cos/src/build.rs`, `crates/tinker-pdf/src/lib.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/barcodes.rs` (new), `docs/features/creation.md` | `barcodes.rs` (new) `symbols_draw_their_modules`: each drawn symbol's rectangles equal its modules at the given scale, quiet zone included; `tpdf barcode` runs each symbology to the facade's output. | ED-49.4, ED-49.5, ED-49.7, ED-49.8, ED-49.9, ED-49.10, ED-49.11, ED-49.12, ED-49.13 |
 | ED-49.15 | test | Every generated symbol read back by ED-50's decoder, and a fingerprint of one page of symbols. | `crates/tinker-pdf/tests/barcodes.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | `every_generated_symbol_reads_back`: each symbology's generated symbols decode to their data; the fingerprint holds on every K-07 target. | ED-49.14, ED-50, K-07 |
 
-**Closes the row:** ED-49.3 to ED-49.13 hold each symbology to its specification's worked examples, ED-49.15 reads every symbol back through ED-50, and ED-49.14 runs `tpdf barcode`, which is the row's exit.
-
 ## ED-50 — Barcode decoding
 
 **Barcode decoding** from pages and images, at any rotation
 
-**Today.** absent — the owner's parity decision of 9 October 2026; no symbology is decoded (ED-49's search)
-
 **Exit criterion.** every symbol generated by ED-49 at every rotation, scale and quiet zone decodes to its input; published worked examples decode; `tpdf barcode --read` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** ED-49
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -1238,23 +890,15 @@ API and by layout, each held to the strict validator (K-03).
 | ED-50.7 | build | Aztec and MaxiCode decoded. | `crates/tinker-pdf-barcode/src/decode/aztec.rs` (new), `crates/tinker-pdf-barcode/src/decode/maxicode.rs` (new) | Unit tests: ED-49's generated symbols at every rotation, scale and quiet zone decode to their input; the worked examples decode. | ED-50.4 |
 | ED-50.8 | build | The surface: symbols with their positions read from a page (rendered at a stated resolution) or an image, and `tpdf barcode --read`. | `crates/tinker-pdf/src/lib.rs`, `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/barcodes.rs` (new), `docs/features/content-and-text.md` | A facade test reads every symbology from generated pages at several rotations; `tpdf barcode --read` runs over `testdata/` fixtures to the facade's output. | ED-50.3, ED-50.5, ED-50.6, ED-50.7 |
 
-**Closes the row:** ED-50.2 to ED-50.7 decode every ED-49 symbol at every rotation, scale and quiet zone, and the published worked examples, and ED-50.8 runs `tpdf barcode --read`, which is the row's exit.
-
 ## ED-51 — Create a document from annotated content-stream text
 
 **Create a document from annotated content-stream text** (media box, rotation, fonts by file or standard name, CJK fonts, images by comment)
-
-**Today.** absent — the owner's parity decision of 9 October 2026; `rg -i 'from_content_text|annotated_content' crates tools` finds nothing
 
 **Exit criterion.** the created document renders as the same content built through the builder; `tpdf create` runs it on `testdata/` fixtures
 
 **Doc:** — · **Depends on:** —
 
-*Steps not yet reviewed; the review runs once all the work is done.*
-
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | ED-51.1 | build | A document from annotated content text: comment directives naming the media box, rotation, fonts by file or standard name, CJK fonts and images, followed by content operators, built into pages through the builder; the directive syntax stated in the feature doc. | `crates/tinker-pdf-cos/src/build_text.rs` (new), `crates/tinker-pdf-cos/src/lib.rs`, `crates/tinker-pdf-cos/tests/build_text.rs` (new), `docs/features/creation.md` | `build_text.rs` (new) `annotated_text_renders_as_its_builder_twin`: each fixture renders as the same content built through the builder; an unknown directive is a typed error naming its line. | — |
 | ED-51.2 | build | `tpdf create` from an annotated text file. | `tools/tpdf/src/main.rs`, `tools/tpdf/src/writing.rs` | `tpdf create` runs over the annotated text fixtures to the facade's output. | ED-51.1 |
-
-**Closes the row:** ED-51.1 renders the created document as its builder twin and ED-51.2 runs `tpdf create`, which is the row's exit.

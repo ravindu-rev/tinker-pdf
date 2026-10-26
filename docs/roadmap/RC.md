@@ -1,6 +1,6 @@
 # Capability tier — rendering and colour
 
-[The roadmap](../ROADMAP.md) says how a step runs, what comes next, and which dependencies cross tiers. Each row below keeps its text as it was planned — Item, Today, Exit criterion, Doc, Depends on — and is cut into steps, each one workflow run.
+[The roadmap](../ROADMAP.md) says how a step is worked and what comes next.
 
 Parity here means every rendering intent, overprint and separations, every
 output colour model and depth, every device-dependent graphics-state key
@@ -11,13 +11,9 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 **Rendering intents**: perceptual, saturation, relative and absolute colorimetric through `ri`, an image's `/Intent` and ExtGState `/RI`, from every ICC table that carries them
 
-**Today.** only relative colorimetric is honoured; a decision item of the roadmap until 9 October 2026, "measured and declined", since no corpus file sets an ExtGState `/RenderingIntent` and five carry `ri` (`design/icc.md:34-36, 307-335`)
-
 **Exit criterion.** per intent, a profile pair whose transform is recomputed in the test from ICC.1's equations (absolute colorimetric's white-point scaling in closed form) agrees with the rendered samples; fixtures and twins per operator path
 
 **Doc:** [design/icc.md](../design/icc.md) (amend) · **Depends on:** K-01
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -30,27 +26,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-01.7 | build | Shadings convert in the intent in force: the renderer's shading and mesh colours (`shading.rs:86`, `:104`, `:114`, `mesh.rs:147-148`) take the state's intent through `ColorSpace::Icc`, so `sh`, a shading-pattern fill and a mesh in an `ICCBased` space paint in it; a page painting a fill, an image and a shading under each intent joins the determinism fingerprints. *Note:* A fingerprint is added, never edited; `docs/features/determinism.md` counts and names the fingerprints (19 today). Inject the shading's intent dropped; count what fires. | `crates/tinker-pdf-render/src/shading.rs`, `crates/tinker-pdf-render/src/mesh.rs`, `crates/tinker-pdf-render/src/lib.rs`, `crates/tinker-pdf/tests/rendering_intents.rs` (new), `crates/tinker-pdf/tests/determinism.rs`, `docs/features/rendering.md`, `docs/features/determinism.md` | `rendering_intents.rs` `each_intent_shades_its_recomputed_transform` (new): an axial, a function-based and a mesh shading in the LUT profile's space agree under each intent with the transform recomputed in the test; twin: a constant-colour axial shading paints its interior as the flat fill in the same intent; `determinism.rs`'s `rendering_is_stable_across_targets` holds the new page's fingerprint on four targets (the `ci.yml` determinism step and `wasm-determinism`). | RC-01.6, MS-11 |
 | RC-01.8 | measure | Bring the capability's speed row into MS-04's benchmark set: `render an ICC page under each rendering intent at 150 dpi`, the RC-01.7 page drawn under all four intents, beside MS-04's ICC-based CMYK image to sRGB. *Note:* The figure is CI's, never a local timing. | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json`, `.github/workflows/bench.yml` | The operation runs in the bench job and its figure is committed as MS-04's set records one; `cargo xtask baseline` passes naming it. | RC-01.7, MS-04 |
 
-**Closes the row:** RC-01.2 to RC-01.4 compile each intent from every source table a profile carries (`A2B*`, `D2B*`), with absolute colorimetric's white scaling in closed form, held in the leaf; RC-01.5 to RC-01.7 carry the intent from `ri`, ExtGState `/RI` and an image's `/Intent` to every flat colour, image and shading, each per intent held to a LUT and a matrix/TRC profile converted to the sRGB output and recomputed in the test, with twins per operator path; RC-01.7 and RC-01.8 add its fingerprint and speed row.
-
-**The tree at `5297133`, against this row's text:**
-
-- The 0 the row quotes counted ExtGState `/RenderingIntent` (`docs/design/icc.md:704`), the key PDF/A's walk still reads (`crates/tinker-pdf/src/pdfa/colour.rs:1764`), while Table 58's key is `/RI`, as the row's Item and K-01's list of keys write it. The count was a one-off recorded in commit 63d07dcd's message with no committed census, so no count of ExtGState `/RI` exists.
-- Nothing outside PDF/A validation reads `/Intent` (`crates/tinker-pdf/src/pdfa/colour.rs:1412`); `docs/design/icc.md:34` puts it on the `ICCBased` stream, where the row names an image's `/Intent`.
-- `docs/design/icc.md:36` cites `interpret.rs:756` for `ri`; at 5297133 `ri` and `i` are a no-op at `crates/tinker-pdf-content/src/interpret.rs:1078`.
-- `Transform::compile` takes the profile alone (`crates/tinker-pdf-color/src/icc.rs:1182`), not the `(&Profile, Intent, Direction)` `docs/design/icc.md:263` planned, and converts only to the built-in sRGB (`XYZ_D50_TO_SRGB`, `crates/tinker-pdf-color/src/lib.rs:311`); no `B2A*` table is read anywhere, so the destination half of 'every ICC table that carries them' waits for an output profile (RC-06, RC-20).
-- `wtpt` is read for grey profiles only (`crates/tinker-pdf-color/src/icc.rs:751`); the matrix/TRC and LUT models keep no media white, which absolute colorimetric needs.
-
 ## RC-02 — Black-point compensation
 
 **Black-point compensation**: ExtGState `/UseBlackPtComp` and a render option, by the published BPC algorithm (ISO 18619)
 
-**Today.** a non-goal of the colour design until 9 October 2026 (`design/icc.md:57-76`)
-
 **Exit criterion.** the algorithm's black-point estimate and scaling recomputed in the test agree with the transform for three profile shapes (matrix/TRC, LUT, v4 `mAB `)
 
 **Doc:** [design/icc.md](../design/icc.md) · **Depends on:** RC-01, H-102 (the standard)
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -60,26 +42,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-02.4 | build | `/UseBlackPtComp`, stored by K-01, and a `RenderOptions` switch select the compensated transform, by RC-02.1's precedence, at every conversion RC-01 wired: the facade's flat colours and images, with its transform and decoded-image caches keyed by compensation, and the renderer's shadings and meshes, told the switch by the facade. *Note:* With the switch at its default and no key, every page renders as it does after RC-01. The fingerprint page sets the key in the document, so `determinism.rs` hashes it under default options. Inject the key ignored, then the switch ignored; count what fires. | `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/src/resources.rs`, `crates/tinker-pdf-render/src/lib.rs`, `crates/tinker-pdf/tests/black_point_compensation.rs` (new), `crates/tinker-pdf/tests/determinism.rs`, `docs/features/rendering.md`, `docs/features/determinism.md` | `black_point_compensation.rs` (new) `the_key_and_the_switch_compensate_as_designed`: a fill, a glyph, an image and a shading in each of the three shapes' spaces render the compensated sRGB the test computes under each `/UseBlackPtComp` value and switch setting, by RC-02.1's precedence; twins: the key set by `gs` and the switch giving the same compensation render byte-identical; both builds; a page carrying the key joins `determinism.rs`'s fingerprints on four targets. | RC-02.2, K-01.2, MS-11 |
 | RC-02.5 | measure | Bring black-point compensation's speed row into MS-04's benchmark set: `render an ICC page with black-point compensation at 150 dpi`, RC-01's intent page drawn with the switch on. *Note:* The figure is CI's, never a local timing. | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json`, `.github/workflows/bench.yml` | The operation runs in the bench job and its figure is committed as MS-04's set records one; `cargo xtask baseline` passes naming it. | RC-02.4, MS-04 |
 
-**Closes the row:** RC-02.2 meets the exit criterion: the black-point estimate and the scaling recomputed in the test agree with the transform for a matrix/TRC, an `mft2` and a v4 `mAB ` profile; RC-02.3 extends the estimate to the printer class, RC-02.4 lands ExtGState `/UseBlackPtComp` and the render option on every conversion RC-01 wired, with twins and a fingerprint, and RC-02.5 adds the speed row.
-
-**The tree at `5297133`, against this row's text:**
-
-- The v4 `mAB ` shape the exit names is read today (`crates/tinker-pdf-color/src/icc.rs:777`, `read_mab` at `:952`; `docs/features/rendering.md:33`), while `docs/design/icc.md:686` (milestone 5) and the module comment at `icc.rs:20-25` still call it refused by name.
-- `/UseBlackPtComp` is a PDF 2.0 key (SD-18's Item lists it) defined in ISO 32000-2, which H-95 obtains; the row names H-102 alone, so RC-02.1 carries both.
-- No code reads a `B2A*` table (`crates/tinker-pdf-color/src/icc.rs:702-704` reads `A2B*` alone) and RC-20 owns the output direction; RC-02.3 waits for RC-20 on the expectation, which RC-02.1 is to confirm against ISO 18619, that a printer profile's black-point estimate goes through one. RC-20 is not in the row's Depends on.
-- Nothing reads `/UseBlackPtComp` today (no match under `crates/`); K-01 stores it in `GraphicsState`.
-
 ## RC-03 — Overprint simulation
 
 **Overprint simulation**: `/OP`, `/op`, `/OPM` honoured on a CMYK-plus-spot composite and then converted to the output space
 
-**Today.** absent — the owner's parity decision of 9 October 2026; a non-goal of the colour design until 9 October 2026 (`design/icc.md:62`); no overprint key reaches the interpreter (K-01)
-
 **Exit criterion.** closed-form fixtures from 11.7.4's rules (each OPM case over each colour-space kind) with twins; a page render agrees with the composite computed in the test; the visual suite pages are H-81
 
 **Doc:** `design/overprint-separations.md` (owed) · **Depends on:** K-01, RC-04
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -92,27 +61,14 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-03.7 | build | Overprint under transparency on the switched-on canvas, as RC-03.1 transcribes 11.7.4: an overprinting paint under constant alpha, a blend mode and a soft mask, and inside isolated, non-isolated and knockout groups, so that what a group leaves unpainted composites onto its parent as the clause says, through RC-03.2's mask carried across group compositing and knockout. *Note:* Render and raster: the group's per-channel record is the leaf's (`Canvas::composite` and `knock_out`, `canvas.rs:553`, `:786`), deciding it is the renderer's. Inject a group's unpainted channels composited as painted; count what fires. | `crates/tinker-pdf-render/src/lib.rs`, `crates/tinker-pdf-raster/src/canvas.rs`, `crates/tinker-pdf/tests/overprint.rs` (new), `docs/features/rendering.md` | `overprint.rs` `overprint_under_transparency_composites_as_designed` (new): an overprinting fill at alpha 0.5, under `/Multiply` and under a soft mask, and inside isolated, non-isolated and knockout groups over a backdrop in every channel, each pixel equal to the composite the test computes from RC-03.1's transcription; twins RC-03.1 names, among them a non-isolated group's content against the same content drawn outside it where the clause makes them equal. | RC-03.6 |
 | RC-03.8 | test | Fingerprints of overprint pages rendered with the switch on (a fill, a glyph, an image, a shading and a group, overprinting process and spot channels) join `determinism.rs`, whose fixture table gains a render-options field so a fixture is hashed with the options it needs. *Note:* A fingerprint is added, never edited: a fixture with default options hashes as before, and `docs/features/determinism.md` counts and names the new ones. The pages are built in `render_support` beside the closed-form ones `overprint.rs` evaluates. | `crates/tinker-pdf/tests/determinism.rs`, `crates/tinker-pdf/tests/render_support/mod.rs`, `docs/features/determinism.md` | `determinism.rs`'s `rendering_is_stable_across_targets` holds the new fingerprints on linux, windows, macos and `wasm32-wasip1` (the `ci.yml` determinism step and `wasm-determinism` job green), and `a_display_list_replays_every_fingerprinted_page_byte_for_byte` replays them with the switch on; in the default and `bundled-fonts` builds. | RC-03.7, MS-11 |
 | RC-03.9 | measure | Bring overprint simulation's speed row into MS-04's benchmark set: `render an overprinted CMYK-plus-spot page at 150 dpi`, one of RC-03.8's pages drawn with the switch on. *Note:* The figure is CI's, never a local timing. | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json`, `.github/workflows/bench.yml` | The operation runs in the bench job and its figure is committed as MS-04's set records one; `cargo xtask baseline` passes naming it. | RC-03.8, MS-04 |
-| RC-03.10 | watch | H-81: the person renders the print-production visual suites' overprint, transparency and spot-colour pages with `tpdf render --overprint` and reads each against what the suite says it shows. *Note:* The suites are not pinned in `corpus/corpora.lock` and stay out of the repository and out of every check: the reading is a dated record a person makes, never a gate (ruling 13). No session fetches them. | `docs/design/overprint-separations.md` | The reading is recorded in `docs/design/overprint-separations.md` with the reader's name, the date, each suite's version and every page read; a page read as wrong is a finding, fixed with its closed-form fixture before the row closes. | RC-03.4, RC-03.7, H-81 |
-
-**Closes the row:** RC-03.5 to RC-03.7 meet the exit's closed-form fixtures: every OPM case over every colour-space kind, for flat colours, sampled sources and under transparency, with twins, each pixel the composite computed in the test, on RC-04's canvas through RC-03.2's channel mask; RC-03.3 converts the composite to the output space and holds a page render to it; RC-03.8 and RC-03.9 add the fingerprints and speed row; RC-03.10 is H-81's reading of the visual suites' pages.
-
-**The tree at `5297133`, against this row's text:**
-
-- No overprint key reaches the interpreter: the `gs` handler reads `/CA`, `/ca`, `/BM` and `/SMask` alone (`crates/tinker-pdf-content/src/interpret.rs:1231-1232`, `crates/tinker-pdf/src/resources.rs:1950-2081`), and nothing under `crates/` reads `/OP`, `/op` or `/OPM`.
-- Ink reaches the device for DeviceCMYK colours alone (`fill_ink`, `crates/tinker-pdf-content/src/state.rs:398-410`); a `/Separation` or `/DeviceN` colour arrives as light through its alternate (`docs/features/rendering.md:263-265`), so the CMYK-plus-spot composite waits on RC-04's colorant path.
-- The print-production visual suites H-81 reads are not pinned in `corpus/corpora.lock`, whose five entries are the corpora the roadmap's preamble counts, so their pages reach H-81's reading only as the person supplies them.
 
 ## RC-04 — Separations and N-channel rendering
 
 **Separations and N-channel rendering**: CMYK plus up to 64 spot plates per page, per-plate behaviour (composite, spot, disabled), a page's spot-colorant inventory, and plates out as images (FO-03, FO-04)
 
-**Today.** five pixel formats, the widest `CmykA8`; no N-channel output (a non-goal of `design/icc.md` until 9 October 2026)
-
 **Exit criterion.** a page with N spots renders N+4 plates whose sums reproduce the composite computed in the test; the colorant inventory matches the resources walked; ≥ 64 plates supported
 
 **Doc:** `design/overprint-separations.md` (owed) · **Depends on:** K-01
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -120,7 +76,7 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-04.2 | build | The page's spot-colorant inventory: a facade query, named as RC-04.1 settles, listing once each spot colorant the page's resource scopes name, through `/ColorSpace` entries, image, shading, pattern and group spaces, `/Indexed` bases and a `/DeviceN`'s names and `/Colorants`, in the page, its forms, tiling patterns, Type 3 fonts, soft-mask groups and annotation appearances, with process names, `/All` and `/None` left out as RC-04.1 reads them. *Note:* Reuse rather than a fourth reader: the scope walk `fontlist.rs` makes (`annotation_resources` and `walk`, `crates/tinker-pdf/src/fontlist.rs:402`, `:474`) and `describe_space` (`crates/tinker-pdf/src/resources.rs:4366`), which already keeps `/Separation` and `/DeviceN` names for `Page::images`. Inject an unwalked scope and an unread `/Colorants`; count what fires. | `crates/tinker-pdf/src/separations.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/src/fontlist.rs`, `crates/tinker-pdf/src/resources.rs`, `crates/tinker-pdf/tests/separations.rs` (new), `fuzz/fuzz_targets/render_page.rs`, `docs/features/rendering.md` | `separations.rs` (new) `the_colorant_inventory_is_every_spot_its_resources_name`: over fixtures putting spots in each scope and space kind, the inventory equals the set the test reads from the fixture's own resource dictionaries, each once, in RC-04.1's order; a spot only an unreachable object names is absent; a resource cycle and a walk past its bound end with what was read (ruling 1); listing adds nothing to `Document::warnings`; the `render_page` fuzz target calls it. | RC-04.1 |
 | RC-04.3 | build | A CMYK-plus-spot format of `Canvas` in `tinker-pdf-raster`, as RC-04.1 shapes it: four process channels and up to the cap of spot channels beside an alpha, at its origin in the page frame (ruling 5); a colorant vector composited through a mask under `Normal` and the separable modes, complemented as `CmykA8` blends ink, scaled by an alpha; every channel the vector does not name knocked out (overprint is RC-03's); one channel read out as an image. *Note:* The compositing word is five bytes today (`crates/tinker-pdf-raster/src/canvas.rs:332-357`, `:1131`); widening it must leave `Rgb8`, `Rgba8` and `CmykA8` as they are, so their time on the bench's render rows is measured in release and debug before and after and any cost goes to the owner before landing, never accepted here. Colorants arrive as channel indices, no PDF name in the leaf (ruling 8). Inject an uncomplemented mode and an un-knocked channel; count what fires. | `crates/tinker-pdf-raster/src/canvas.rs`, `crates/tinker-pdf-raster/src/blend.rs`, `crates/tinker-pdf-raster/src/lib.rs`, `docs/features/rasterizer.md` | `canvas.rs` unit tests (new) `four_process_channels_composite_as_cmyka8_does` (the same masks, inks, alphas and separable modes give C, M, Y, K and alpha byte-identical to a `CmykA8` canvas), `a_paint_knocks_out_the_channels_it_does_not_name`, `sixty_eight_channels_each_keep_their_own_ink` and `a_canvas_past_the_channel_cap_is_refused_by_name`; every existing `canvas.rs` test passes unchanged under `cargo test -p tinker-pdf-raster`. | RC-04.1 |
 | RC-04.4 | build | Transparency on the CMYK-plus-spot format: a group's buffer composited onto its parent's (11.3.6), a non-isolated group adopting its parent's channels as backdrop and taking them out at close as `adopt_backdrop` and `remove_backdrop` do for ink (11.4.4, 11.4.7.2), knockout groups (11.4.5), and the non-separable modes over process and spot plates as RC-04.1 transcribes 11.7.3. *Note:* The twins are `canvas.rs`'s `a_backdrop_of_ink_is_adopted_and_removed_as_that_ink` and `removing_the_backdrop_leaves_what_the_group_painted` (`crates/tinker-pdf-raster/src/canvas.rs:1473`, `:1839`). Inject the backdrop's spot ink left in at close; count what fires. | `crates/tinker-pdf-raster/src/canvas.rs`, `crates/tinker-pdf-raster/src/blend.rs`, `docs/features/rasterizer.md` | `canvas.rs` unit tests `spot_groups_composite_as_cmyk_groups_do` (new): isolated, non-isolated and knockout groups of process ink give the bytes `CmykA8` groups give, backdrop removal included; `a_spot_under_a_non_isolated_group_comes_back_as_it_went_in` (new); `non_separable_modes_reach_spot_channels_as_transcribed` (new) holds RC-04.1's reading; `cargo test -p tinker-pdf-raster` passes. | RC-04.3 |
-| RC-04.5 | build | Colorant names reach the colour model: `ColorSpace::Separation` keeps the names its `/Separation` or `/DeviceN` array gives, `/All` and `/None` told apart, and `parse_space` fills them, with a `/DeviceN`'s attributes (`/Colorants`, `/Process`) read as RC-04.1 settles; nothing a light render draws changes. *Note:* `ColorSpace` derives `PartialEq` (`crates/tinker-pdf-color/src/lib.rs:43`), so two spaces differing only in a name stop comparing equal: each comparison of spaces in the tree is read in this step. Names stay bytes and no COS type enters the leaf (ruling 8). Inject a dropped `/DeviceN` name; count what fires. | `crates/tinker-pdf-color/src/lib.rs`, `crates/tinker-pdf/src/resources.rs`, `docs/features/rendering.md` | `crates/tinker-pdf-color/src/lib.rs` unit test `a_separation_keeps_its_colorant_names` (new) and `resources.rs` unit test `parse_space_and_describe_space_read_the_same_names` (new): a `/Separation`, a `/DeviceN` with attributes, `/All`, `/None` and an `/Indexed` over a `/DeviceN` give the same names in the same order through both readers; `colour_spaces.rs`, `writer_tints.rs` and every `determinism.rs` fingerprint pass unchanged. | RC-04.1, K-02.2 |
+| RC-04.5 | build | Colorant names reach the colour model: `ColorSpace::Separation` keeps the names its `/Separation` or `/DeviceN` array gives, `/All` and `/None` told apart, and `parse_space` fills them, with a `/DeviceN`'s attributes (`/Colorants`, `/Process`) read as RC-04.1 settles; nothing a light render draws changes. *Note:* `ColorSpace` derives `PartialEq` (`crates/tinker-pdf-color/src/lib.rs:43`), so two spaces differing only in a name stop comparing equal: each comparison of spaces in the tree is read in this step. Names stay bytes and no COS type enters the leaf (ruling 8). Inject a dropped `/DeviceN` name; count what fires. | `crates/tinker-pdf-color/src/lib.rs`, `crates/tinker-pdf/src/resources.rs`, `docs/features/rendering.md` | `crates/tinker-pdf-color/src/lib.rs` unit test `a_separation_keeps_its_colorant_names` (new) and `resources.rs` unit test `parse_space_and_describe_space_read_the_same_names` (new): a `/Separation`, a `/DeviceN` with attributes, `/All`, `/None` and an `/Indexed` over a `/DeviceN` give the same names in the same order through both readers; `colour_spaces.rs`, `writer_tints.rs` and every `determinism.rs` fingerprint pass unchanged. | RC-04.1 |
 | RC-04.6 | build | A colour carries its colorants: `FontSource` gains a call generalising `resolve_ink` that answers a colour's colorant tints by name (a `/Separation`'s one, a `/DeviceN`'s each, DeviceCMYK's four process inks) and, for a spot RC-04.1 composites, its alternate's process values; `GraphicsState` keeps them for fill and stroke beside the light and `fill_ink`, and `k`/`K`, `cs`/`CS` and `sc`/`scn` set them. *Note:* A light render must not pay: the call is made only for a device that composites plates, or its cost on the bench's render rows, `q` clones included, is measured in release and debug and put to the owner before landing, never accepted here. After K-01, which edits the same `GraphicsState` (`crates/tinker-pdf-content/src/state.rs:385-439`); RC-01 threads the intent through the same colour arms, and whichever lands second takes the other's form. Inject a `Q` that keeps the inner colorants; count what fires. | `crates/tinker-pdf-content/src/interpret.rs`, `crates/tinker-pdf-content/src/state.rs`, `docs/features/content-and-text.md` | `interpret.rs` unit test `a_colour_carries_the_colorants_its_space_answers` (new), beside `a_device_cmyk_colour_keeps_its_components_beside_its_light`: each operator path records the colorants a test source answers for a `/Separation`, a `/DeviceN` and DeviceCMYK, `cs` resets them to the space's initial tints, `rg` and `g` carry none, and `Q` restores them; `cargo test -p tinker-pdf-content` and every `determinism.rs` fingerprint pass unchanged. | RC-04.1, K-01 |
 | RC-04.7 | build | The page's resources answer the colorant call from RC-04.5's names (DeviceCMYK's process inks, a spot's tints, a composite spot's alternate values, `/All` and `/None` as RC-04.1 reads them, an `/Indexed` base's colorants), and a recorded event counts its colorants in `kept_bytes`, so `MAX_DISPLAY_LIST_BYTES` still bounds what a recording holds. *Note:* `kept_bytes` counts a state's heap parts one by one (`crates/tinker-pdf-render/src/display.rs:102-118`); a field it misses is a recording the 64 MiB bound undercounts. After K-02, which rewrites the same selection paths (`parse_space`, `resolve_ink`) and settles what a `k` colour under `/DefaultCMYK` is on ink, which the process plates inherit. | `crates/tinker-pdf/src/resources.rs`, `crates/tinker-pdf-render/src/display.rs`, `docs/features/rendering.md` | `resources.rs` unit test `the_seam_answers_each_spaces_colorants` (new): DeviceCMYK, a `/Separation`, a `/DeviceN` naming a process colorant, `/All`, `/None`, an `/Indexed` over a `/DeviceN` and a `k` colour under `/DefaultCMYK` answer as RC-04.1 states; `display.rs` unit test `a_recorded_state_counts_its_colorants` (new); `display_list.rs`, `svg_output.rs` and every `determinism.rs` fingerprint pass unchanged. | RC-04.5, RC-04.6, K-02 |
 | RC-04.8 | build | The renderer paints flat colours on plates: a `Renderer` over RC-04.3's canvas format maps each colour's colorants to plates by the render's plate plan (a spot to its plate, a composite spot through its alternate's process values, a disabled one to nothing, `/All` and `/None` as RC-04.1 reads them) for fills, strokes, glyphs, stencil masks and uncoloured patterns, under clips and soft masks as on a light canvas. *Note:* The overprint keys K-01 stores are not applied here; RC-03 applies them on these plates. A soft mask's group renders in its own space and is read as a mask, as on a light page. Inject a composite spot painted on its own plate; count what fires. | `crates/tinker-pdf-render/src/lib.rs`, `docs/features/rendering.md` | `crates/tinker-pdf-render/src/lib.rs` unit tests `a_spot_paint_lands_on_its_plate_and_knocks_out_the_rest` (new): fills, strokes, a glyph and a stencil in a `/Separation`, a `/DeviceN` and DeviceCMYK put exactly their tints, computed in the test, on their plates and none there on the others; `process_plates_draw_as_the_ink_canvas_does` (new): a page in DeviceCMYK, DeviceGray and DeviceRGB draws C, M, Y and K byte-identical to its `CmykA8` render; every light render unchanged; `cargo test -p tinker-pdf-render`. | RC-04.3, RC-04.7 |
@@ -134,28 +90,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-04.16 | test | Fingerprint separations on the four targets: the SHA-256 of every plate of a separations fixture (spots in fills, text, a group, an image, a shading and a mesh) is pinned beside its dimensions, entered in K-07's roster and grepped by the three native legs and `wasm-determinism`. *Note:* A hash that differs between two targets is a determinism bug, never a table edit. The fixture's text is set in an embedded face, so one hash serves both builds. `xtask/src/determinism.rs` is the roster K-07 creates. | `crates/tinker-pdf/tests/separations.rs` (new), `xtask/src/determinism.rs` (new), `.github/workflows/ci.yml`, `docs/features/determinism.md` | `separations.rs` `separations_are_stable_across_targets` (new) passes in the default and `bundled-fonts` builds on linux, windows, macos and `wasm32-wasip1`, each leg grepping it by name through the roster; the next CI run on `develop` is green on all four. | RC-04.12, RC-04.13, RC-04.14, RC-04.15, K-07, MS-11 |
 | RC-04.17 | measure | The separations speed rows in MS-04's render group: the separations fixture's plates at 150 dpi and the 64-spot page's 68 plates at 72 dpi, each operation sized to MS-04's 20 to 300 ms window, with their baseline entries and the workflow's guard count. *Note:* These join the render group's file. The tier sets no target for them and none is invented here: a target is the owner's (H-77). | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json`, `.github/workflows/bench.yml`, `docs/verification.md` | `xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree` holds the bench file, the workflow's guard count and `baseline.json` to one list with both operations in it, and `cargo bench -p tinker-pdf` reports their times, recorded in `docs/verification.md`. | RC-04.12, RC-04.13, RC-04.14, RC-04.15, MS-04 |
 
-**Closes the row:** RC-04.2 lands the colorant inventory, held to the resources the test walks; RC-04.3 to RC-04.14 render a page's N+4 plates on a CMYK-plus-spot canvas through every content class (flat paints, groups and patterns, images, shadings, meshes), each plate composite, spot or disabled and handed out as an image, with RC-04.10 holding the plates' sums to the composite computed in the test; RC-04.15 shows 64 spots as 68 plates under a ledgered cap; RC-04.16 and RC-04.17 bring the fingerprint and the speed rows. H-81's reading of the print-production suites' pages, spot colour among them, is carried by RC-03 and blocks only claims past this exit, which no step here makes.
-
-**The tree at `5297133`, against this row's text:**
-
-- Colorant names are read today by `describe_space` for `Page::images` (`crates/tinker-pdf/src/resources.rs:4366`, `:4470-4494`) and by the PDF/A colour walk, `/Colorants` included (`crates/tinker-pdf/src/pdfa/colour.rs:852-950`), but the render path's `parse_space` keeps only their count (`resources.rs:1385-1426`) in `ColorSpace::Separation` (`crates/tinker-pdf-color/src/lib.rs:62-69`), so nothing that draws knows which spot it is drawing.
-- Ink exists for DeviceCMYK alone: `resolve_ink` answers only that space (`crates/tinker-pdf/src/resources.rs:1910-1931`), so on an ink page a `/Separation` or `/DeviceN` colour, an image and a shading arrive as light turned to ink (`docs/features/rendering.md:260-265`), and `DecodedImage` keeps RGB only (`crates/tinker-pdf-render/src/lib.rs:386-409`).
-- The compositing word is five bytes, four colour channels and an alpha (`encode` and its comment, `crates/tinker-pdf-raster/src/canvas.rs:332-357`; `blend`'s four-wide `blended`, `:1131`), so plates are not one more arm of `encode` as that comment anticipates for a four-channel format; and at `MAX_PAGE_PIXELS` = 2^26 (`crates/tinker-pdf-render/src/lib.rs:3626`) 68 plates and an alpha would take 69 x 2^26 bytes.
-- `/All` and `/None` are not told apart anywhere on the colour path: a `/Separation` of either draws through its alternate and tint transform like any spot, and `form_xobjects.rs`'s `a_form_resolves_names_against_its_own_resources` builds its two answers from two `/All` tint transforms (`crates/tinker-pdf/tests/form_xobjects.rs:210-240`). What 8.6.6.4 makes of the two names is RC-04.1's to read; a change to the light render is outside this row.
-- `PixelFormat` has six variants, not five: `LabA8` is a group buffer that is never a page format (`crates/tinker-pdf-raster/src/canvas.rs:36-50`, `page_format` at `crates/tinker-pdf-render/src/lib.rs:3769-3774`); the row's five are the page formats, `CmykA8` among them only with `RenderOptions::allow_cmyk` (`crates/tinker-pdf/src/lib.rs:589-643`).
-- The row depends on K-01 alone, but K-02's steps rewrite the same colour-selection paths (`parse_space`, `resolve_ink`) and settle what a `k` colour under `/DefaultCMYK` is on an ink render, which the process plates inherit; RC-04.7 depends on K-02 as well as RC-04.6 on K-01.
-
 ## RC-05 — Soft proofing
 
 **Soft proofing**: render through a caller profile or the document's output intent and back to the display space
 
-**Today.** absent — the owner's parity decision of 9 October 2026; a non-goal of the colour design until 9 October 2026 (`design/icc.md:57-76`)
-
 **Exit criterion.** proof transform composed and recomputed in the test agrees with the rendered samples
 
 **Doc:** [design/icc.md](../design/icc.md) · **Depends on:** RC-01
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -166,25 +107,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-05.5 | test | Fingerprint a proofed page on the four targets: the SHA-256 of a page proofed through a LUT CMYK profile and of the same page through its own output intent, pinned in `soft_proof.rs`, entered in K-07's roster and grepped by the three native legs and `wasm-determinism`. *Note:* A hash that differs between two targets is a determinism bug, never a table edit. `xtask/src/determinism.rs` is the roster K-07 creates; `soft_proof.rs` is the file RC-05.3 creates. | `crates/tinker-pdf/tests/soft_proof.rs` (new), `xtask/src/determinism.rs` (new), `.github/workflows/ci.yml`, `docs/features/determinism.md` | `soft_proof.rs` `proofed_pages_are_stable_across_targets` (new) passes on linux, windows, macos and `wasm32-wasip1`, each leg grepping it by name through the roster; the next CI run on `develop` is green on all four. | RC-05.4, K-07, MS-11 |
 | RC-05.6 | measure | The proofing speed row in MS-04's render group: a page of mixed fills and an image at 150 dpi proofed through a LUT CMYK profile, beside the same page unproofed, sized to MS-04's 20 to 300 ms window, with its baseline entry and the workflow's guard count. *Note:* MS-04 splits `benches/` by group and this joins the render group's file. No target is invented for it: a target is the owner's (H-77). | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json`, `.github/workflows/bench.yml`, `docs/verification.md` | `xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree` holds the bench file, the workflow's guard count and `baseline.json` to one list with the operation in it, and `cargo bench -p tinker-pdf` reports its time beside the unproofed render's, both recorded in `docs/verification.md`. | RC-05.4, MS-04 |
 
-**Closes the row:** RC-05.2 composes the proof transform and holds it to the composition recomputed from ICC.1's equations; RC-05.3 and RC-05.4 render through a caller's profile and through the document's output intent, the rendered samples agreeing with the proof transform recomputed in the test, which is the row's exit; RC-05.5 and RC-05.6 bring the fingerprint on four targets and the speed row.
-
-**The tree at `5297133`, against this row's text:**
-
-- The CMM compiles only the input direction: `Profile::parse` reads `A2B1`, `A2B0` or `A2B2` (`crates/tinker-pdf-color/src/icc.rs:691-704`) and `Transform::compile` builds device-to-sRGB (`icc.rs:1182-1251`); no `B2A*` tag is read and no matrix/TRC profile is inverted. A proof needs the proof profile's output direction, which RC-20 names (`B2A*`, `mBA `), while the row depends on RC-01 alone; RC-05.2 depends on both.
-- The document's output intents are already read with their profile by reference, the catalog's and a PDF 2.0 page's own (`Document::output_intents` and `Page::output_intents`, `crates/tinker-pdf/src/output_intents.rs:88`, `:110`; `OutputIntent::destination_profile`), so proofing through the intent needs no new dictionary reader.
-- `docs/design/icc.md:303` places the ICC known-answer tables in `crates/tinker-pdf-color/tests/icc_known_answers.rs`, which is not in the tree: they are unit tests in `crates/tinker-pdf-color/src/icc.rs` (`the_fixed_point_encodings_are_exactly_what_the_format_says`, `:1976`), where RC-05.2's go.
-
 ## RC-06 — More output pixel models
 
 **More output pixel models**: BGR/BGRA, any ICC destination profile, 1-bit monochrome with deterministic halftoning (ordered dither and error diffusion)
 
-**Today.** `Gray8`, `GrayA8`, `Rgb8`, `Rgba8`, `CmykA8` (`features/rasterizer.md:153`)
-
 **Exit criterion.** each format's bytes equal the conversion of the `Rgba8` render computed in the test; halftone fingerprints on all four targets
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -196,26 +125,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-06.6 | test | Halftone fingerprints on the four targets: the SHA-256 of a fixture page (a grey ramp, a shading, an image and text in an embedded face) rendered to 1 bit by ordered dither and by error diffusion, pinned in `render_options.rs`, entered in K-07's roster and grepped by the three native legs and `wasm-determinism`. *Note:* `render_options.rs`'s existing hashes were recorded on one target and are claimed for the other three (`docs/features/determinism.md:71-81`); these are measured on all four from the start. A hash that differs between targets is a determinism bug, never a table edit. `xtask/src/determinism.rs` is the roster K-07 creates. | `crates/tinker-pdf/tests/render_options.rs`, `xtask/src/determinism.rs` (new), `.github/workflows/ci.yml`, `docs/features/determinism.md` | `render_options.rs` `halftones_are_stable_across_targets` (new) passes in the default and `bundled-fonts` builds on linux, windows, macos and `wasm32-wasip1`, each leg grepping it by name through the roster; the next CI run on `develop` is green on all four. | RC-06.3, RC-06.4, K-07, MS-11 |
 | RC-06.7 | measure | The new output models' speed rows in MS-04's render group: a text-and-image page at 150 dpi to `Bgra8` and to a LUT CMYK destination, and at 300 dpi to 1 bit by ordered dither and by error diffusion, each beside the same page's `Rgba8` render and sized to MS-04's 20 to 300 ms window, with baseline entries and the workflow's guard count. *Note:* MS-04 splits `benches/` by group and these join the render group's file. No target is invented for them: a target is the owner's (H-77). | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json`, `.github/workflows/bench.yml`, `docs/verification.md` | `xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree` holds the bench file, the workflow's guard count and `baseline.json` to one list with the four operations in it, and `cargo bench -p tinker-pdf` reports their times beside the `Rgba8` render's, recorded in `docs/verification.md`. | RC-06.2, RC-06.4, RC-06.5, MS-04 |
 
-**Closes the row:** RC-06.2 to RC-06.5 land BGR and BGRA, 1-bit ordered dither, 1-bit error diffusion and ICC destinations, each format's bytes held to the conversion of the `Rgba8` render computed in the test and each tile to its page; RC-06.6 pins the two halftones' fingerprints and reads them on linux, windows, macos and `wasm32-wasip1`, which is the row's exit; RC-06.7 adds the speed rows.
-
-**The tree at `5297133`, against this row's text:**
-
-- `docs/features/rasterizer.md:153` says a `Canvas` stores one of five formats; `PixelFormat` has six, the sixth, `LabA8`, a group buffer that is never a page format (`crates/tinker-pdf-raster/src/canvas.rs:36-50`, `page_format` at `crates/tinker-pdf-render/src/lib.rs:3769-3774`). The row's five are the page formats, `CmykA8` among them only with `RenderOptions::allow_cmyk` (`crates/tinker-pdf/src/lib.rs:589-643`).
-- The row depends on nothing, but an ICC destination needs the CMM's output direction, which the tree does not have (`Profile::parse` reads only `A2B*` tags and `Transform::compile` builds device-to-sRGB, `crates/tinker-pdf-color/src/icc.rs:691-704`, `:1182-1251`) and which RC-20 names (`B2A*`, `mBA `); RC-06.5 depends on RC-20.
-- A non-separable blend reads a three-channel buffer's bytes as red, green and blue in that order (`crates/tinker-pdf-raster/src/canvas.rs:1203-1216`), so a canvas compositing in BGR order would blend `/Hue` to `/Luminosity` on the wrong channels; RC-06.2 converts the finished page instead.
-- The C ABI renders in four formats (`TpdfPixelFormat`, `crates/tinker-pdf-ffi/src/lib.rs:343-353`): neither `CmykA8` today nor any format this row adds reaches the bindings, which SU-12's surface coverage carries.
-
 ## RC-07 — 16 bits per channel
 
 **16 bits per channel** through compositing and output (16-bit PNG, TIFF and PSD via FO rows)
 
-**Today.** "every `PixelFormat` this engine rasters into is eight bits deep" (`features/filters.md:40-42`)
-
 **Exit criterion.** a 16-bit pipeline whose top byte equals today's 8-bit render on every fingerprint fixture, and whose low byte is held by arithmetic fixtures; determinism on four targets
 
 **Doc:** `design/sixteen-bit.md` (owed) · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -236,25 +152,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-07.15 | test | Determinism at 16 bits on the four targets: the nineteen fixtures' 16-bit renders hashed as `determinism.rs` hashes the 8-bit ones and pinned, in a test K-07's roster greps on linux, windows, macos and `wasm32-wasip1`. *Note:* A hash two targets disagree on is a determinism bug, never a table edit (`CONTRIBUTING.md`). The bytes hashed are in the design's byte order, so the order is pinned with them. `xtask/src/determinism.rs` is the roster K-07 creates. | `crates/tinker-pdf/tests/determinism.rs`, `xtask/src/determinism.rs` (new), `.github/workflows/ci.yml`, `docs/features/determinism.md` | `determinism.rs` `sixteen_bit_rendering_is_stable_across_targets` (new) passes in the default and `bundled-fonts` builds on the three native legs and `wasm-determinism`, each grepping it by name through K-07's roster; `cargo xtask check` is green with the roster entry. | RC-07.14, K-07 |
 | RC-07.16 | measure | The 16-bit render's speed rows: MS-04's text page with an embedded face at 150 dpi and its committed transparency fixture, each rendered at 16 bits, join the render group beside their 8-bit operations, and the 8-bit operations' figures before and after this row are recorded. *Note:* MS-04 splits `benches/` by group, and these join the render group's file. No target is invented: the figures are recorded, and a target is the owner's (H-77). | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md` | `cargo xtask baseline` holds the bench files, the workflow's guard count and `baseline.json` to one list with the two 16-bit operations in it (`xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree`), and `cargo bench -p tinker-pdf` reports their times, recorded in `docs/verification.md`. | RC-07.14, MS-04 |
 
-**Closes the row:** RC-07.3 to RC-07.13 carry 16 bits per channel through coverage, compositing, the blend modes, groups and masks, images, meshes, shadings, resolved colour and the facade's `Bitmap`, each holding its low byte to arithmetic fixtures computed in the test; RC-07.14 holds the top byte of every fingerprint fixture's 16-bit render to today's 8-bit render, RC-07.15 pins the 16-bit renders on the four targets, and RC-07.16 adds the speed rows. 16-bit PNG, TIFF and PSD files are FO-05's, FO-03's and FO-04's.
-
-**The tree at `5297133`, against this row's text:**
-
-- The 8-bit arithmetic rounds at every stage — a colour component to `round(255·v)` (`crates/tinker-pdf-color/src/lib.rs:293-298`), coverage to `floor(units / 16)` at the end of `fill` (`crates/tinker-pdf-raster/src/fill.rs`), each product through `mul255` (`crates/tinker-pdf-raster/src/canvas.rs:1054-1057`) — so a value carried at 16 bits does not keep today's byte in its top byte: a component of 0.1981 is 51 at eight bits and 12 982 at sixteen, top byte 50. The exit as written therefore fixes the arithmetic, which is why RC-07.2 prices it and H-140 asks the owner.
-- Every image path narrows to eight bits before the renderer sees it: a JPEG frame of twelve bits (`crates/tinker-pdf-filters/src/jpeg.rs:1290-1294`), a JPEG 2000 codestream above eight bits by its high byte (`crates/tinker-pdf/src/resources.rs:3350-3362`), and `DecodedImage` holds bytes; `Bitmap::from_png` rounds 16-bit samples to eight (`crates/tinker-pdf/src/png_read.rs:172-180`) and `to_png` writes none (`crates/tinker-pdf/src/lib.rs:839-843`).
-- `PixelFormat` has six variants, `LabA8` included (`crates/tinker-pdf-raster/src/canvas.rs:14-54`), where `docs/features/rasterizer.md:152-154` lists five; a `/Lab` or `/DeviceCMYK` group composites in its own format (`crates/tinker-pdf-render/src/lib.rs:3738`), so 16-bit counterparts are owed for those as well as for the four page formats.
-
 ## RC-08 — Device-dependent graphics state applied
 
 **Device-dependent graphics state applied**: transfer functions `/TR` `/TR2`, halftones `/HT` (types 1, 5, 6, 10, 16) on bilevel and screened outputs, black generation and undercolour removal `/BG` `/BG2` `/UCR` `/UCR2`, flatness `/FL`, smoothness `/SM`, stroke adjustment `/SA`, text knockout `/TK`, alpha-is-shape `/AIS`
 
-**Today.** none applied (K-01's finding); `/TR` is read only inside a soft mask (`crates/tinker-pdf/src/resources.rs:2038`)
-
 **Exit criterion.** per key a fixture with the effect computed in the test (a transfer curve, a threshold array's dot pattern, the 11.7.4.3 knockout case, AIS's shape/opacity split)
 
 **Doc:** — · **Depends on:** K-01, RC-06
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -271,27 +175,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-08.11 | test | Fingerprint the device-dependent paths on the four targets: a page under each applied key — transfer, black generation and undercolour removal on ink, flatness, smoothness, stroke adjustment, alpha-is-shape, text knockout, and each halftone type on the 1-bit output — hashed as `determinism.rs` hashes a render and pinned, in a test K-07's roster greps on every leg. *Note:* The spot-function cell and the screened pages are where a platform transcendental would show first; a hash two targets disagree on is a determinism bug, never a table edit. `xtask/src/determinism.rs` is the roster K-07 creates. | `crates/tinker-pdf/tests/device_state.rs` (new), `xtask/src/determinism.rs` (new), `.github/workflows/ci.yml`, `docs/features/determinism.md` | `device_state.rs` `device_dependent_rendering_is_stable_across_targets` (new) passes in the default and `bundled-fonts` builds on the three native legs and `wasm-determinism`, grepped by name through K-07's roster; `cargo xtask check` is green with the roster entry. | RC-08.2, RC-08.4, RC-08.5, RC-08.7, RC-08.10, K-07 |
 | RC-08.12 | measure | The new paths' speed rows in MS-04's render group: a page under a type 1 halftone rendered to 1 bit at 150 dpi, and a page whose fills, images and shadings pass through four transfer functions, each beside the same page without the key. *Note:* No target is invented: the figures are recorded, and a target is the owner's (H-77). A page that sets no device-dependent key must cost what it cost before, which the render group's existing rows show. | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md` | `cargo xtask baseline` holds the bench files, the workflow's guard count and `baseline.json` to one list with the two operations in it (`xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree`), and `cargo bench -p tinker-pdf` reports their times, recorded in `docs/verification.md`. | RC-08.2, RC-08.10, MS-04 |
 
-**Closes the row:** RC-08.2 to RC-08.10 apply every key the row names — transfer, black generation and undercolour removal, flatness, smoothness, stroke adjustment, alpha-is-shape, text knockout, and halftones of types 1, 5, 6, 10 and 16 with `/HTO` on RC-06's 1-bit output — each held to a fixture whose effect the test computes (a transfer curve, a threshold array's dot pattern, the 11.7.4.3 knockout case, AIS's shape/opacity split); RC-08.11 pins them on the four targets and RC-08.12 adds the speed rows.
-
-**The tree at `5297133`, against this row's text:**
-
-- `/TR` is read inside a soft mask at `crates/tinker-pdf/src/resources.rs:2060-2071` at the tip, not `:2038`; the archival validator also reads an ExtGState's `/TR` and `/TR2` (`crates/tinker-pdf/src/pdfa/colour.rs:1456`, `:1465`), to report them, never to apply them.
-- No output in the tree is 1-bit or screened: all six `PixelFormat`s are a byte a channel (`crates/tinker-pdf-raster/src/canvas.rs:14-54`), so every halftone here lands on RC-06's formats, and among this row's dependencies a type 5 halftone's per-colorant screens have only RC-06's grey 1-bit output to land on.
-- The flattening tolerance is a fixed 0.2 device pixels (`crates/tinker-pdf-render/src/lib.rs:810-811`, `:916`); shadings of types 1 to 3 are evaluated per pixel (`crates/tinker-pdf-render/src/shading.rs:70`) while a type 6 or 7 patch is subdivided by device length alone (`crates/tinker-pdf-render/src/mesh.rs:74-80`), which is where `/SM` has something to bound.
-- A knockout element restores the initial backdrop by its coverage and then composites (`crates/tinker-pdf-raster/src/canvas.rs:777-822`, `crates/tinker-pdf-render/src/lib.rs:1326-1339`), carrying one number where the standard separates shape from opacity, as `canvas.rs:785` says; `/AIS` and `/TK` need the two apart.
-- The `Renderer` does not implement `Device::begin_text` (`crates/tinker-pdf-content/src/device.rs:166`), so it cannot yet tell where a text object starts; the display recorder does record it (`crates/tinker-pdf-render/src/display.rs:438`).
-
 ## RC-09 — Bitmap toolbox
 
 **Bitmap toolbox**: gamma, invert (also by luminance), tint, forced colours with fill-to-stroke for high contrast, grayscale, colour-count, unicolour and monochrome tests, scale, subsample, convert
 
-**Today.** `Bitmap` offers `to_png` and raw access (`crates/tinker-pdf/src/lib.rs:859`)
-
 **Exit criterion.** each operation held to its closed form over a committed render
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -303,25 +193,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-09.6 | test | Fingerprint the toolbox and the forced-colour render on the four targets: each operation's output over one golden, and the forced-colour page with and without fill-to-stroke, hashed as `determinism.rs` hashes a render and pinned, in tests K-07's roster greps on every leg. *Note:* Gamma's table is where a platform `powf` would show first; a hash two targets disagree on is a determinism bug, never a table edit. `xtask/src/determinism.rs` is the roster K-07 creates. | `crates/tinker-pdf/tests/bitmap_toolbox.rs` (new), `crates/tinker-pdf/tests/render_options.rs`, `xtask/src/determinism.rs` (new), `.github/workflows/ci.yml`, `docs/features/determinism.md` | `bitmap_toolbox.rs` `the_toolbox_is_stable_across_targets` (new) and `render_options.rs` `forced_colour_output_is_pinned` (new) pass in the default and `bundled-fonts` builds on the three native legs and `wasm-determinism`, grepped by name through K-07's roster; `cargo xtask check` is green. | RC-09.3, RC-09.4, RC-09.5, K-07 |
 | RC-09.7 | measure | Speed rows for the operations with real cost, in MS-04's render group: a 150-dpi render scaled to a half and to two-thirds, and MS-04's text page with an embedded face at 150 dpi in forced colours with fill-to-stroke beside its default render. *Note:* The per-pixel maps are one pass over the bytes and get no row of their own. No target is invented: a target is the owner's (H-77). | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md` | `cargo xtask baseline` holds the bench files, the workflow's guard count and `baseline.json` to one list with the operations in it (`xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree`), and `cargo bench -p tinker-pdf` reports their times, recorded in `docs/verification.md`. | RC-09.3, RC-09.5, MS-04 |
 
-**Closes the row:** RC-09.2 to RC-09.4 give `Bitmap` the per-pixel maps and tests, scale and subsample, and conversion between the six formats, each held to its closed form over the reviewed goldens, and RC-09.5 adds forced colours with fill-to-stroke as a render option held to its coverage and to a twin; RC-09.6 pins them on the four targets and RC-09.7 adds the speed rows.
-
-**The tree at `5297133`, against this row's text:**
-
-- `to_png` is at `crates/tinker-pdf/src/lib.rs:860`; `Bitmap` also has `from_png` (`crates/tinker-pdf/src/png_read.rs:145`) and `components` (`lib.rs:787`), and private premultiply, straighten and ink-or-Lab-to-RGBA conversions (`lib.rs:906`, `:941`, `:983`) that convert can reuse.
-- Forced colours with fill-to-stroke cannot be an operation on a `Bitmap`: a fill turned into a stroke needs the path, which only the renderer holds, so that part of the row is a render option (RC-09.5) and the rest post-processes a `Bitmap`.
-- The facade is not on `cargo xtask libm`'s `PIXEL_PATHS` (`xtask/src/main.rs:871-877`), so a gamma curve computed there with the platform's `powf` would escape the check ruling 4 rests on; the toolbox's arithmetic goes in `tinker-pdf-raster`, which is on it.
-
 ## RC-10 — LCD sub-pixel text and text contrast
 
 **LCD sub-pixel text and text contrast**: RGB/BGR stripe rendering with a filter, a contrast control, kept integer for determinism
 
-**Today.** absent — the owner's parity decision of 9 October 2026; `rg -i '\blcd\b|subpixel_text|subpixel_render' crates tools` finds nothing
-
 **Exit criterion.** stripe coverage equals three-times-horizontal coverage filtered in the test; fingerprints on four targets
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -333,25 +211,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-10.6 | test | LCD text's fingerprints on the four targets: a page of text in the synthetic face rendered in RGB and BGR stripes, at the default contrast and one other, hashed as `determinism.rs` hashes a render and pinned, in a test K-07's roster greps on every leg. *Note:* The face is the fixtures' own, so one hash serves both builds. A hash two targets disagree on is a determinism bug, never a table edit. `xtask/src/determinism.rs` is the roster K-07 creates. | `crates/tinker-pdf/tests/lcd_text.rs` (new), `xtask/src/determinism.rs` (new), `.github/workflows/ci.yml`, `docs/features/determinism.md` | `lcd_text.rs` `lcd_text_is_stable_across_targets` (new) passes in the default and `bundled-fonts` builds on the three native legs and `wasm-determinism`, grepped by name through K-07's roster; `cargo xtask check` is green with the roster entry. | RC-10.5, K-07 |
 | RC-10.7 | measure | LCD text's speed row: MS-04's text page with an embedded face at 150 dpi rendered with RGB stripes, beside the same page in grey, in the render group. *Note:* A stripe glyph fills three times the sub-pixels of a grey one; the figure is recorded, and a target for it is the owner's (H-77). | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md` | `cargo xtask baseline` holds the bench files, the workflow's guard count and `baseline.json` to one list with the operation in it (`xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree`), and `cargo bench -p tinker-pdf` reports its time, recorded in `docs/verification.md`. | RC-10.4, MS-04 |
 
-**Closes the row:** RC-10.2 and RC-10.3 build stripe coverage and its three-coverage composite in the rasterizer, and RC-10.4 renders text with them in RGB or BGR order, the exit's stripe coverage equal to three-times-horizontal coverage filtered in the test held at the raster and through the facade; RC-10.5 adds the contrast control, RC-10.6 pins the fingerprints on the four targets and RC-10.7 adds the speed row.
-
-**The tree at `5297133`, against this row's text:**
-
-- The row's search still finds nothing at `5297133`: `rg -i '\blcd\b|subpixel_text|subpixel_render' crates tools` is empty.
-- Glyphs are painted as paths, each fill through `Renderer::coverage` from `show_glyph` (`crates/tinker-pdf-render/src/lib.rs:2884`), with no glyph cache yet (P-06), so stripe text is a second way of filling a glyph's path rather than a second cache.
-- `Canvas::fill_mask_inked` composites one coverage a pixel (`crates/tinker-pdf-raster/src/canvas.rs:379-439`) and `Mask` holds one byte a pixel (`crates/tinker-pdf-raster/src/fill.rs:54-65`), so three coverages a pixel need a mask and a composite of their own.
-
 ## RC-11 — Anti-aliasing levels
 
 **Anti-aliasing levels**: 0–8 bits separately for graphics and text; centre-of-pixel and any-part-of-pixel rules for non-anti-aliased output; a minimum line width
 
-**Today.** anti-aliasing on or off (`RenderOptions::antialias`)
-
 **Exit criterion.** coverage at each level equals the 8-bit coverage quantised in the test; the two pixel rules held to analytic shapes; dropout-free hairlines at the minimum width
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -363,25 +229,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-11.6 | build | A minimum line width: `RenderOptions` gains the thinnest stroke in device pixels, replacing `Renderer::thinnest`'s fixed floors with the design's default at each level and rule, so the defaults draw what they draw today; and the levels, rules and widths take their pinned hashes on the four targets. *Note:* Today's floors are 0.8 px, 0.6 px for a stroked glyph and 1 px without anti-aliasing (`crates/tinker-pdf-render/src/lib.rs:1057-1063`, `:2840`, `:3016`). A floor in device pixels for every stroke, in the page frame, so ruling 5 holds. A hash two targets disagree on is a determinism bug, never a table edit. | `crates/tinker-pdf-render/src/lib.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/render_options.rs`, `xtask/src/determinism.rs` (new), `.github/workflows/ci.yml`, `docs/features/rendering.md`, `docs/features/determinism.md` | `render_options.rs` (new) `a_hairline_at_the_minimum_width_drops_out_nowhere`: zero-width strokes at the slopes `a_hard_edged_hairline_leaves_no_column_it_crosses_empty` sweeps, at several phases, leave no column (row, past one in one) they cross empty at every level and rule; `levels_rules_and_widths_are_pinned` (new) passes in both builds on the three native legs and `wasm-determinism` through K-07's roster. | RC-11.5, K-07 |
 | RC-11.7 | measure | The new coverage paths' speed rows in MS-04's render group: its page of 5 000 paths at 150 dpi under the centre and any-part rules and at a 4-bit graphics level, and its text page with an embedded face at 150 dpi at a 4-bit text level, each beside the default render. *Note:* The any-part rule walks each edge's extent per row as well as the samples, which is the one new cost; no target is invented, and a target is the owner's (H-77). | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md` | `cargo xtask baseline` holds the bench files, the workflow's guard count and `baseline.json` to one list with the operations in it (`xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree`), and `cargo bench -p tinker-pdf` reports their times, recorded in `docs/verification.md`. | RC-11.5, MS-04 |
 
-**Closes the row:** RC-11.2 quantises coverage to 0-8 bits, RC-11.3 and RC-11.4 add the centre-of-pixel and any-part-of-pixel rules held to analytic shapes, RC-11.5 hands a level for graphics, one for text and the rule to every coverage site with each level's coverage equal to the 8-bit coverage quantised in the test, and RC-11.6 makes the minimum line width an option whose hairlines drop out nowhere and pins the fingerprints; RC-11.7 adds the speed rows.
-
-**The tree at `5297133`, against this row's text:**
-
-- Hard edges are one threshold, `Mask::harden`'s half coverage (`crates/tinker-pdf-raster/src/fill.rs:188-192`), which is neither of the row's two rules; it is applied at four sites — `Renderer::coverage` (`crates/tinker-pdf-render/src/lib.rs:2122`), a mesh's silhouette (`:1786`), an image's edge (`:2305`, `crates/tinker-pdf-raster/src/image.rs:732-733`) and a tiling cell (`lib.rs:2023`, `crates/tinker-pdf/src/resources.rs:2304`) — each of which must take a level and a rule.
-- A minimum line width exists only as fixed floors: 0.8 px, 0.6 px for a stroked glyph and 1 px without anti-aliasing (`crates/tinker-pdf-render/src/lib.rs:1057-1063`, `:2840`, `:3016`).
-- The filler samples sixteen sub-scanlines a row (`crates/tinker-pdf-raster/src/fill.rs:34`), so a shape lying wholly between two of them gets no coverage at all; the any-part-of-pixel rule needs each edge's extent over the row as well.
-
 ## RC-12 — Per-class render controls
 
 **Per-class render controls**: text only, no text, cull paths, images, shadings or clips, force black text or vectors, skip image decoding for a layout-only pass, cull to rectangles; the hints "do not interpolate images" and "do not cache"
 
-**Today.** `annotations` on or off only
-
 **Exit criterion.** each class culled leaves exactly the recorded events of the others (checked against `display_list`); with the no-interpolation hint an `/Interpolate` image draws as one without it, and with the no-cache hint the counted cache hits are zero
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -393,27 +247,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-12.6 | build | The no-cache hint on `RenderOptions`: a render that carries it neither reads nor fills the caches RC-12.1 names (decoded images, glyph outlines, ICC transforms, font programs), on a direct render and on a display-list replay, whose list keeps its caches as they were; the form-scope cache, which bounds the work of a page invoking one form many times, stays in force as RC-12.1 settles. *Note:* The hits are MS-01's tally; where it does not yet count one of these caches, this step adds it. A cache P-16 adds later honours the same hint. Both builds, since the page draws glyphs. | `crates/tinker-pdf/src/resources.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/src/display.rs`, `crates/tinker-pdf/tests/display_list.rs`, `docs/features/rendering.md` | `display_list.rs` `with_the_no_cache_hint_no_cache_is_hit` (new): a page drawing one image four times, one glyph forty times and one ICC-based space twice, rendered directly and from a display list with the hint, counts zero cache hits in `Bitmap::stats()` where the same renders without it count hits (failing first), and both give the pixels and warnings of the render without the hint. | RC-12.5, MS-01.8 |
 | RC-12.7 | measure | The controls' speed rows in MS-04's render group: a layout-only render of the JPEG page at 300 dpi, and the 300-dpi text page culled to one 256-pixel rectangle, each paired with the planning baseline's whole render of the same page. *Note:* Head-side operations sized 20-300 ms, as MS-04 requires. The row gives no target and none is invented here: the measured figures are recorded, and a target for them is the owner's (H-77). | `crates/tinker-pdf/benches`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md` | `cargo xtask baseline` holds the bench file, the workflow's guard count and `baseline.json` to one list with the two operations in it (`xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree`), and their first paired ratios against `61adcde`, taken by MS-02's job, are recorded in `docs/verification.md`. | RC-12.4, RC-12.5, MS-02, MS-04 |
 
-**Closes the row:** RC-12.2 and RC-12.3 cull each class and force black on every render path, each culled render checked against the display list's events less that class, the exit's first clause; RC-12.4 lands the layout-only pass and the no-interpolation hint, under which an `/Interpolate` image draws as its twin without the key; RC-12.5 culls to rectangles; RC-12.6's no-cache render counts zero cache hits; RC-12.7 brings the speed rows.
-
-**The tree at `5297133`, against this row's text:**
-
-- A Type 3 glyph reaches a device as the paints of its procedure, inside the text object and with no `show_glyph` (`crates/tinker-pdf-content/src/interpret.rs:1914-1951`), so the text class cannot be read off glyph calls alone.
-- A display list's events are crate-private (`DisplayList::content`, `crates/tinker-pdf/src/display.rs:229`), so the exit's check against `display_list` is a facade unit test.
-- The renderer takes `/Interpolate` from each decode (`crates/tinker-pdf-render/src/lib.rs:2298`) with no switch over it.
-- `PageResources` keeps five caches (`crates/tinker-pdf/src/resources.rs:66-112`): font programs, decoded images (up to 256, `:2428`), ICC transforms, glyph outlines and form scopes; a direct render builds them fresh, a display list shares them across renders (`for_one_render`, `:706-732`), and the form-scope cache is what keeps a page invoking one form many times from rebuilding its scope each time (`:91-103`).
-- Today's 'annotations on or off only' is so for classes, though `RenderOptions` carries five other switches (`region`, `allow_cmyk`, `antialias`, `transparent`, `premultiplied`, `crates/tinker-pdf/src/lib.rs:532-724`), none of them per class.
-
 ## RC-13 — Usage and flags
 
 **Usage and flags**: render for View, Print or Export usage (optional content `/Usage`); annotation `/Print`, `/NoView`, `/Hidden`, `/NoZoom`, `/NoRotate` honoured; page contents, annotations and widgets rendered separately; widgets without highlight when printing
 
-**Today.** `RenderOptions::annotations`; `render_annotation` renders one
-
 **Exit criterion.** fixtures per flag and usage with twins; a print-usage render of an OCMD with `/Print` usage
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -423,27 +263,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-13.4 | build | `/NoZoom` and `/NoRotate` placed at render time (12.5.3): `RenderOptions` gains a magnification beside `scale` (1 unless the caller states one, so no render changes unasked); a `/NoZoom` appearance keeps its size at magnification 1 and a `/NoRotate` one stays upright on a turned page, each about the corner of `/Rect`, as the page displays it, that RC-13.1 quotes 12.5.3 as keeping fixed; a display list re-places such an annotation at each replay, and `render_annotation`'s viewport follows the placed box. *Note:* The placement is computed in the page frame from the magnification and `/Rotate`, never from a tile (ruling 5). `/NoRotate` moves the pixels of turned pages that carry it, a correction RC-13.1's risks name; no fingerprint fixture carries the flag. Both builds where the fixtures draw text. | `crates/tinker-pdf/src/annots.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/src/display.rs`, `crates/tinker-pdf/src/render_part.rs`, `crates/tinker-pdf/tests/annotation_appearances.rs`, `crates/tinker-pdf/tests/render_regions.rs`, `crates/tinker-pdf/tests/render_options.rs`, `.github/workflows/ci.yml`, `docs/features/rendering.md` | `annotation_appearances.rs` `no_zoom_and_no_rotate_keep_their_fixed_corner` (new): at magnifications 0.5, 1 and 2 and `/Rotate` 0, 90, 180 and 270, each flagged annotation equals its twin, an unflagged one whose `/Rect` and `/Matrix` are written as the placement the flag gives there, byte for byte, directly and from a display list; `render_regions.rs` tiles a `/NoZoom` page at four tile sizes byte-equal to the page; `render_options.rs` pins one such page's fingerprint through K-07's roster. | RC-13.3, K-07 |
 | RC-13.5 | build | Page content, annotations and widgets rendered separately: `RenderOptions` gains switches for the page's content and for widget annotations beside `annotations`, which still means no annotation of any kind when off, so no caller's render changes; a direct render and a display list draw only what is on; a widget draws the normal appearance of its `/AS` state in every usage, with no highlight in print usage. *Note:* No field highlight exists to suppress (row finding): AN-15's highlight colour must be drawn in view usage only, and this step's print test is the guard for it once AN-15 lands. `to_svg` keeps its own `annotations` switch. If SU-12's coverage check has landed, the new fields are projected or named in `docs/features/bindings.md`'s refusal table. | `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/src/annots.rs`, `crates/tinker-pdf/src/display.rs`, `crates/tinker-pdf/tests/render_parts.rs`, `docs/features/rendering.md` | `render_parts.rs` `content_annotations_and_widgets_render_separately` (new): a page with content, a markup annotation and two widgets, under each of the seven non-empty combinations of content, markup annotations and widgets, equals its twin (the page with the excluded parts deleted from its content stream or `/Annots`) byte for byte, directly and from a display list; each widget's print render equals its view render; `render_options.rs`'s `the_default_is_unchanged` passes unmodified. | RC-13.4 |
 
-**Closes the row:** RC-13.2 renders for View, Print or Export usage through `/AS` and the groups' `/Usage`, with the exit's print-usage render of an OCMD with `/Print` usage and a `/D` twin per usage; RC-13.3 honours `/Hidden`, `/NoView` and `/Print` by usage (with `/Invisible` and an annotation's `/OC`, the same decision); RC-13.4 places `/NoZoom` and `/NoRotate`; RC-13.5 renders content, annotations and widgets separately and widgets without highlight in print usage; every flag and usage has its fixture and twin. No speed row: these choose what draws and add no operation of their own to time.
-
-**The tree at `5297133`, against this row's text:**
-
-- `annots::prepare` hides an annotation on `/Hidden` or `/NoView` only (`crates/tinker-pdf/src/annots.rs:25-27`, `:171-175`); `/Print`, `/NoZoom`, `/NoRotate` and `/Invisible` are read nowhere on the drawing path, though `AnnotationFlags` exposes every bit (`crates/tinker-pdf/src/annotations.rs:304-392`).
-- An annotation's `/OC` is read nowhere: the only `/OC` the renderer reads is an XObject's (`crates/tinker-pdf/src/resources.rs:2099-2107`), so an annotation in a layer the configuration turns off is drawn.
-- No field highlight is drawn anywhere: an annotation is drawn only from its appearance stream (`crates/tinker-pdf/src/annots.rs:253-286`); the highlight colour is AN-15's, so a print render has no highlight to suppress until AN-15 lands.
-- `/Usage` and `/AS` are read nowhere in rendering: `OptionalContent::bind` reads `/D`'s `/BaseState`, `/ON` and `/OFF` only (`crates/tinker-pdf/src/optional.rs:64-112`); `/AS` is read only by the PDF/UA rule that forbids it (`crates/tinker-pdf/src/pdfua/syntax.rs:113-160`).
-- A display list records annotations through the same `prepare` (`crates/tinker-pdf/src/annots.rs:82-110`), so what it keeps today is already filtered for view usage.
-
 ## RC-14 — Optional-content configuration at render time
 
 **Optional-content configuration at render time**: choose an alternate `/Configs` entry, override a layer per render, honour `/AS` auto-state (zoom, language, user, print/view/export events), `/RBGroups`, `/Locked`, and expose the `/Order` UI tree
 
-**Today.** rendering reads the default `/D` only; visibility changes only by editing `/D` (`features/rendering.md:357-369`)
-
 **Exit criterion.** fixtures per configuration and auto-state category with twins written as the equivalent `/D`
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -453,26 +279,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-14.4 | build | The auto-state categories RC-13 does not apply: `/Zoom` decides a group by the render's magnification against its `/Usage /Zoom` `/min` and `/max`, `/Language` by the caller's languages against `/Usage /Language` `/Lang` and `/Preferred`, and `/User` by the caller's user name and type against `/Usage /User`, each for the events RC-13 applies, as RC-14.1 reads 8.11.4.4; a category or usage entry this build cannot read leaves its group as configured. *Note:* The magnification is the one RC-13 adds beside `scale`; nothing here reads the host's locale or user, only what `RenderOptions` names. Language tags are compared as RC-14.1 states. | `crates/tinker-pdf/src/optional.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/optional_content.rs`, `docs/features/rendering.md` | `optional_content.rs` `each_auto_state_category_renders_as_its_d_twin` (new): per category and event, groups either side of each boundary (a magnification below, at and above `/min` and `/max`; a preferred, a matching and an unmatched language; a matching and an unmatched user of each type) render byte-equal to their twins with `/D` written as the resulting states; a malformed usage dictionary leaves its group as configured. | RC-14.3, RC-13 |
 | RC-14.5 | build | `Document::layer_tree` returns a configuration's `/Order` (8.11.4.3) as a tree: each node a group (its reference, `/Name` and state under that configuration) or a label (a text string, placed as RC-14.1 reads 8.11.4.3), a nested array's entries as its children, bounded in depth and size, with a cycle or an entry that is no group read as RC-14.1 settles and never a panic; the `render_page` fuzz target walks every configuration's tree. *Note:* Read only: writing `/Order` is ED-40's. The builder already writes `/Order` (`crates/tinker-pdf-cos/src/build.rs:8877`), which is what the facade test reads back. If SU-12's coverage check has landed, the new API is projected or named in `docs/features/bindings.md`'s refusal table. | `crates/tinker-pdf/src/layers.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/facade_read.rs`, `fuzz/fuzz_targets/render_page.rs`, `docs/features/document-model.md` | `layers.rs` `the_order_tree_is_the_configurations_own` (new): nested labels and groups, a group listed twice, an array nested past the bound, an `/Order` containing itself, a configuration without `/Order` and one whose `/Order` names an unlisted group, each give its known tree; `facade_read.rs` reads a builder-written document's tree back in the order the builder wrote it. | RC-14.2 |
 
-**Closes the row:** RC-14.2 chooses a `/Configs` entry per render, RC-14.3 overrides a layer with `/RBGroups` and `/Locked` honoured, RC-14.4 applies the zoom, language and user auto-state categories (the print, view and export events are RC-13's, which these steps build on), and RC-14.5 exposes the `/Order` tree; each configuration and auto-state category has its fixture with a twin written as the equivalent `/D`, which is the row's exit. No speed row: a configuration is a bind per render and adds no operation of its own to time.
-
-**The tree at `5297133`, against this row's text:**
-
-- `OptionalContent::bind` reads `/D`'s `/BaseState`, `/ON` and `/OFF` only (`crates/tinker-pdf/src/optional.rs:64-112`); `/Configs`, `/AS`, `/RBGroups`, `/Locked`, `/Order`, `/Intent` and `/ListMode` are read nowhere on the rendering path (the PDF/UA rule reads `/Configs` and `/AS` only to report them, `crates/tinker-pdf/src/pdfua/syntax.rs:113-160`).
-- The configuration is bound once per resource object, not once per render: `PageResources::new` and `from_dict` each call `OptionalContent::bind` (`crates/tinker-pdf/src/resources.rs:814`, `:934`), so every form scope, tiling cell and appearance binds `/D` again; `features/rendering.md:357-358`'s 'resolved once at bind' holds per scope.
-- A display list keeps each scope's visibility as it was recorded (`MarkedScope::visible`, `crates/tinker-pdf-content/src/record.rs:222-231`), and the renderer's admission answers depend on hidden content (`crates/tinker-pdf/src/display.rs:22-31`), so a list is tied to the configuration it was recorded under.
-- `/Intent` (8.11.2.1, 8.11.4.3) is read nowhere either, and the row does not name it; RC-14.1 places it in or out of scope.
-
 ## RC-15 — Resumable progressive rendering
 
 **Resumable progressive rendering** with progress reporting: start, pause co-operatively on a budget, continue from where it stopped, present the partial result
 
-**Today.** `CancelToken` aborts
-
 **Exit criterion.** a render paused at every k-th event and resumed is byte-identical to an uninterrupted render, for every fingerprint fixture
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -482,25 +295,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-15.4 | build | Progressive rendering on the facade: a `DisplayList` (and a `Page`, through its list) starts a render that owns its resources and a `Renderer` over them (a constructor taking the page scope as an `Arc`, the `Scope::Owned` the renderer already keeps for pushed scopes), steps it on a budget of events through RC-15.2's cursor, reports progress as events done of the list's total, hands back RC-15.3's partial result, and finishes through the same end of `render_layer_with` a direct render takes. *Note:* `render_layer_with` is split into its beginning and its end so a direct render, a replay and a progressive render share one pipeline (ruling 5). Both builds, since the fixtures draw text. If SU-12's coverage check has landed, the new API is projected or named in `docs/features/bindings.md`'s refusal table. | `crates/tinker-pdf/src/display.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf-render/src/lib.rs`, `crates/tinker-pdf/tests/determinism.rs`, `.github/workflows/ci.yml`, `docs/features/rendering.md` | `determinism.rs` `a_render_paused_every_k_events_is_the_direct_render` (new): every fingerprint fixture, with budgets of 1, 2, 3, 7 and 64 events and a partial result taken at every pause, finishes byte-identical to the direct render in pixels, size, format and warnings, with and without annotations, each step advancing its progress by exactly the budget until the last reaches the list's length, and a list that is not retained finishes in one step; grepped on four targets through K-07's roster. | RC-15.2, RC-15.3, K-07, RC-12.3 |
 | RC-15.5 | measure | The progressive render's speed row in MS-04's render group: the 150-dpi text page drawn from its display list in budgets of 256 events with a partial result at every pause, paired with the planning baseline's direct render of the same page. *Note:* Sized 20-300 ms on the head side, as MS-04 requires. The row gives no target for the cost of pausing, so the figure is recorded and a target is the owner's (H-77). | `crates/tinker-pdf/benches`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md` | `cargo xtask baseline` holds the bench file, the workflow's guard count and `baseline.json` to one list with the operation in it (`xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree`), and its first paired ratio against `61adcde`, taken by MS-02's job, is recorded in `docs/verification.md`. | RC-15.4, MS-02, MS-04 |
 
-**Closes the row:** RC-15.2 makes a replay resumable, RC-15.3 gives a partial result that disturbs nothing, and RC-15.4 puts start, pause on a budget, resume, progress and the partial result on the facade, with the exit's test over every fingerprint fixture paused at every k-th event; RC-15.5 brings the speed row.
-
-**The tree at `5297133`, against this row's text:**
-
-- `CancelToken` only stops a render (`crates/tinker-pdf-render/src/lib.rs:111-137`), and `replay` runs a slice of events to its end with no cursor to resume from (`crates/tinker-pdf-content/src/replay.rs:74`).
-- `Renderer` borrows its page scope for its whole life (`Scope::Borrowed`, `crates/tinker-pdf-render/src/lib.rs:727-743`, `:906`) though it already owns the scopes pushed for appearances (`Scope::Owned`), so a render that outlives one call needs only its page scope owned.
-- `render_layer_with` builds the canvas, runs the paint to completion and converts at the end in one function (`crates/tinker-pdf/src/lib.rs:2345-2499`), so a render that returns between steps needs it split.
-
 ## RC-16 — Banded rendering into streaming writers
 
 **Banded rendering into streaming writers**, so a page of any size renders in bounded memory
 
-**Today.** regions render byte-equal to the page (ruling 5); no writer consumes bands
-
 **Exit criterion.** a 300-dpi page rendered in bands to PNG (FO-05) and to PNM (FO-01) equals the whole-page file byte for byte, with peak memory ≤ one band plus writer state (MS-05)
 
 **Doc:** — · **Depends on:** P-04
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -511,27 +312,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-16.5 | build | A banded render is held to its bands and not to `MAX_PAGE_PIXELS`: it renders at the asked scale whatever the page's area, up to PNG's 2^31-1 pixels a side, each band a region of the unclamped page through the one pipeline (a switch `Page::scales` honours for banded output only, as RC-16.1 settles); `Page::render`, regions and `Page::pixel_size` keep the clamp. *Note:* `Page::render` keeps the clamp, so no page that renders today renders differently; only the banded path leaves it, and its time is the caller's to spend, which RC-16.1's risks name. | `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/banded_output.rs` (new), `docs/features/rendering.md` | `banded_output.rs` `a_page_past_the_pixel_cap_renders_in_bands_at_the_asked_scale` (new): a page of pixel-aligned rectangles at a scale whose area passes `MAX_PAGE_PIXELS` writes a PNG header of the asked size and no `PageScaledDown`, every band's rows equal to the values computed in the test from the rectangles, through a sink that checks each band and keeps none; a page under the cap is unchanged. | RC-16.3 |
 | RC-16.6 | measure | The banded output's numbers: MS-05's probe gains its 300-dpi page in 256-row bands to PNG and to Netpbm, and the page past the cap in bands to PNG, each held to a committed band at or under one band's bytes plus RC-16.1's writer state, over the probe's open-only baseline; MS-04's render group gains the 300-dpi text page in 256-row bands to PNG, paired with the planning baseline's whole-page render and `to_png`. *Note:* A band set at a measured figure, never an invented one; the bound it must sit under is the row's (one band plus writer state). A peak over the bound is a finding against RC-16.3, not a wider band. | `crates/tinker-pdf/benches`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md`, `docs/features/rendering.md` | MS-05's peak-memory test holds each case at its band on linux, with its figure and the bound it sits under recorded in `docs/verification.md`; `xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree` holds the new operation, and its first paired ratio against `61adcde`, taken by MS-02's job, is recorded there. | RC-16.3, RC-16.4, RC-16.5, MS-05, MS-04, MS-02 |
 
-**Closes the row:** RC-16.2 and RC-16.3 render a page in bands into a streaming PNG writer whose file equals the whole page's, RC-16.4 does the same through FO-01's Netpbm writer, RC-16.5 lets a banded page of any size render past the pixel cap, and RC-16.6 holds the peak to one band plus writer state under MS-05 and brings the speed row. The PNG options FO-05 adds go into the one writer RC-16.2 makes, so they reach banded output with no step here.
-
-**The tree at `5297133`, against this row's text:**
-
-- `png_encode` filters the whole raster into one buffer and compresses it in one call (`crates/tinker-pdf-filters/src/png/encode.rs:135-186`), and `Bitmap::to_png` hands it the whole bitmap (`crates/tinker-pdf/src/lib.rs:860-897`); streaming the rows is P-04's.
-- No Netpbm writer exists (a search for `pnm`, `ppm` and `pgm` in `crates` and `tools` finds only the PPMd archive coder), so the exit's PNM leg waits for FO-01, which itself depends on RC-06; the row's Depends on names only P-04.
-- The exit names FO-05 for PNG, and FO-05 depends on P-04 and RC-07; its options are added to the one PNG writer, so the banded PNG is held here at today's options and inherits FO-05's through that writer.
-- `MAX_PAGE_PIXELS` (`crates/tinker-pdf-render/src/lib.rs:3626`) scales down every page render, regions included (`Page::scales`, `crates/tinker-pdf/src/lib.rs:2255-2266`), so 'a page of any size' needs the banded path to leave it.
-- MS-05's per-operation peak-memory test does not exist yet (its Today), so the exit's memory bound waits for it.
-
 ## RC-17 — Page analysis
 
 **Page analysis**: colour-or-gray detection with thresholds, the bounding box of all marks, "uses transparency" and "uses overprint", per-render statistics
 
-**Today.** absent — the owner's parity decision of 9 October 2026; no page-analysis query exists (`rg -i 'uses_transparency|uses_overprint|is_gray' crates tools` finds nothing; the only bounding box of marks is a test's own `ink_bounds` helper in `page_geometry.rs`)
-
 **Exit criterion.** each answer held to fixtures with a known answer, and to the recorded events for the bounding box
 
 **Doc:** — · **Depends on:** MS-01
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -542,25 +329,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-17.5 | build | Per-render statistics beside MS-01's tally on `Bitmap::stats()`: the calls a render drew by class (glyphs, fills, strokes, clips, images, shadings, groups, soft masks), the calls optional content hid, and the images it decoded with their sample counts, counted by the renderer as it draws, so a display-list replay counts what a direct render counts. *Note:* Counted, never timed: no clock enters the statistics (`bounds_ledger.rs` bans `Instant::now` in tests). Counted injections: a hidden call counted as drawn, a replay counting twice. | `crates/tinker-pdf-render/src/lib.rs`, `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/page_analysis.rs` (new), `docs/features/rendering.md` | `page_analysis.rs` `the_statistics_count_what_the_render_drew` (new): a page of known counts of each class, some hidden and some clipped away, reports exactly those counts, directly and from a display list at two scales, failing first against MS-01's tally alone. | RC-17.2, MS-01.8 |
 | RC-17.6 | measure | The analysis's speed rows in MS-04's analysis group: the bounding box, transparency and overprint answers for the 150-dpi text page from its display list, and the grey test at 72 dpi, each paired with the planning baseline's render of the same page. *Note:* The row gives no target, so the figures are recorded and a target is the owner's (H-77). | `crates/tinker-pdf/benches`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md` | `cargo xtask baseline` holds the bench file, the workflow's guard count and `baseline.json` to one list with the two operations in it (`xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree`), and their first paired ratios against `61adcde`, taken by MS-02's job, are recorded in `docs/verification.md`. | RC-17.2, RC-17.3, RC-17.4, MS-02, MS-04 |
 
-**Closes the row:** RC-17.2 answers the bounding box of all marks, held to known fixtures and recomputed from the recorded events, and 'uses transparency'; RC-17.3 'uses overprint' over K-01's keys; RC-17.4 the grey test at its thresholds; RC-17.5 the per-render statistics on MS-01's surface; each answer is held to fixtures with a known answer, which is the exit; RC-17.6 brings the speed rows.
-
-**The tree at `5297133`, against this row's text:**
-
-- Three test files carry their own `ink_bounds` helper, not one: `crates/tinker-pdf/tests/page_geometry.rs:49`, `optional_content.rs:61` and `vertical_metrics.rs:305`.
-- One static reading of transparency already exists, shared by PDF/A-1 and PDF/X: a page or form group, a soft mask in a graphics state or on an XObject, a blend mode other than the two that do not blend, and a constant alpha below one (`crates/tinker-pdf/src/pdfa/colour.rs:1484-1501`).
-- No overprint key reaches the graphics state (`GraphicsState`, `crates/tinker-pdf-content/src/state.rs:385-438`), so 'uses overprint' waits for K-01, which stores `/OP`, `/op` and `/OPM`; the row's Depends on names only MS-01.
-
 ## RC-18 — A serialisable drawing-command stream for hosts
 
 **A serialisable drawing-command stream for hosts**: paths, glyph runs with font references, images, clips, groups and blends in a versioned binary form that bindings replay to their platform's 2D canvas, and custom devices written in a binding
 
-**Today.** the `Device` trait is Rust-only; `display_list` and `to_svg` exist
-
 **Exit criterion.** the stream replayed through the engine's own rasteriser is byte-identical to a direct render for every fingerprint fixture; the format round-trips through each binding
 
 **Doc:** — · **Depends on:** SU-12
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -575,26 +350,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-18.9 | test | A `command-stream` parity script on every surface at once: the facade's `write_parity.rs`, the wheel, the npm package and the .NET, Go, Ruby and Java parity programs each decode and re-encode the streams of the parity document's pages through their own types and print `READ sha256=` of the bytes, and `xtask/src/parity.rs` records the one answer. *Note:* One commit for every surface, because a recorded script that one surface does not print is a failure of that surface (`xtask/src/parity.rs`'s absent line). A surface that drops or reorders a field prints another hash. | `crates/tinker-pdf/examples/write_parity.rs`, `xtask/src/parity.rs`, `bindings/python/tests/write_parity.py`, `bindings/js/tests/write_parity.mjs`, `bindings/dotnet/tests/Smoke/Program.cs`, `bindings/go/cmd/parity/main.go`, `bindings/ruby/test/write_parity.rb`, `bindings/java/test/WriteParity.java` | `cargo xtask bindings-parity --require-all` prints the recorded `command-stream` hash from every surface with none absent, and SU-12's `cargo xtask bindings-coverage` passes with every stream item projected and no refusal line left for it. | RC-18.6, RC-18.7, RC-18.8 |
 | RC-18.10 | measure | The stream's speed rows in MS-04's render group: writing the 150-dpi text page's command stream, and rendering that page at 150 dpi from its parsed stream, each paired with the planning baseline's direct render of the same page. *Note:* The row gives no target, so the figures are recorded and a target is the owner's (H-77). | `crates/tinker-pdf/benches`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md` | `cargo xtask baseline` holds the bench file, the workflow's guard count and `baseline.json` to one list with the two operations in it (`xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree`), and their first paired ratios against `61adcde`, taken by MS-02's job, are recorded in `docs/verification.md`. | RC-18.4, MS-02, MS-04 |
 
-**Closes the row:** RC-18.2 to RC-18.4 make the versioned stream and replay it through the engine's own rasteriser byte-identical to a direct render for every fingerprint fixture, the exit's first half; RC-18.5 to RC-18.8 carry it through the C ABI and every binding SU-12 names, each with a device interface for custom devices and a canvas replay example where its platform has a 2D canvas, and RC-18.9 round-trips the format through every surface under one recorded hash, the exit's second half; RC-18.10 brings the speed rows.
-
-**The tree at `5297133`, against this row's text:**
-
-- The `Device` trait is Rust-only (`crates/tinker-pdf-content/src/device.rs:159`) and a display list's events are crate-private (`crates/tinker-pdf/src/display.rs:229`); `to_svg` is the one serialised drawing form and it rasterises what SVG 1.1 cannot state (`docs/features/rendering.md:535-548`), so it cannot replay byte-identically.
-- A render resolves resources by name through `GlyphSource` as it draws, and a tiling cell by interpreting the cell at the render's own geometry (`crates/tinker-pdf-render/src/lib.rs:331-373`, `:413-484`), so a stream that replays byte-identically carries those answers and each cell's own commands, not pixels.
-- No callback crosses the C ABI (`docs/design/bindings-write.md:51-57`, H-28), and ruling 11 lets a binding add no logic of its own (`docs/rulings.md:261-264`), which is why a custom device in a binding reads the decoded stream and a canvas replay is an example.
-- `cargo xtask bindings-parity` fails a surface that prints no line for a recorded script (`xtask/src/parity.rs:17-25`), so the stream's parity script lands on every surface in one step.
-
 ## RC-19 — A first-party sRGB profile
 
 **A first-party sRGB profile**: the engine's own ICC profile built by `build.rs` from IEC 61966-2-1's published primaries, white point and transfer function, used as the default RGB space and as PDF/A conversion's default output intent
 
-**Today.** no bundled profile: the ICC's own files carry no SPDX identifier, so `cargo xtask vendor` cannot admit them (NG-03), and which device an archival document's colours are for is still the caller's statement ([design/pdfa.md](../design/pdfa.md)); a named non-goal of the roadmap until 9 October 2026, narrowed by this row to the ICC's files
-
 **Exit criterion.** the generated profile's colorant matrix and TRC recomputed from the standard's numbers in the test; the profile parses and validates through `tinker-pdf-color`
 
 **Doc:** — · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -604,25 +366,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-19.4 | doc | The record moves with the profile: THIRDPARTY.md's 'No ICC profile' paragraph, `ArchivalProfile`'s type note in `tinker-pdf-cos/src/build.rs`, `design/pdfa.md`'s output-intent paragraph and licence risk row, `features/pdfa.md`'s example and `DestinationProfileMissing` row, `features/fonts.md:913`, the CMAP-3 reason in `tinker-pdf-shape/tests/text_rendering.rs` and `features/rendering.md` say a first-party profile is computed from IEC 61966-2-1 and handed out, while the ICC's own files stay refused (NG-03). *Note:* Text only. The CMAP-3 skip keeps its subject, the Mac encoding table with no admissible licence, and drops only its comparison to a profile the repository now builds. | `THIRDPARTY.md`, `crates/tinker-pdf-cos/src/build.rs`, `docs/design/pdfa.md`, `docs/features/pdfa.md`, `docs/features/fonts.md`, `crates/tinker-pdf-shape/tests/text_rendering.rs`, `docs/features/rendering.md` | `cargo doc --workspace --no-deps` builds with no broken intra-doc link; `rg -n -i 'bundled sRGB\|vendored default\|No ICC profile' THIRDPARTY.md docs crates` finds only sentences that name NG-03's files or RC-19's profile; `features/pdfa.md`'s example states `tinker_pdf::SRGB_PROFILE`; `cargo test -p tinker-pdf-shape --test text_rendering` passes. | RC-19.3 |
 | RC-19.5 | test | Fingerprint the profile's bytes on the four targets: `determinism.rs` pins the SHA-256 of `tinker_pdf::SRGB_PROFILE`, entered in K-07's roster so the three native legs and `wasm-determinism` grep it, which holds `build.rs`'s arithmetic to one answer on every build host. *Note:* No speed row: the profile is a constant and nothing runs per page. A hash that differs between build hosts is a determinism bug in `build.rs`, never a table edit. | `crates/tinker-pdf/tests/determinism.rs`, `xtask/src/determinism.rs` (new), `.github/workflows/ci.yml`, `docs/features/determinism.md` | `determinism.rs` `the_first_party_srgb_profile_is_one_byte_string_on_every_target` (new) passes on linux, windows, macos and `wasm32-wasip1`, grepped by name through K-07's roster; a one-byte change to the profile's `desc` text fails it; `docs/features/determinism.md` lists it. | RC-19.2, K-07 |
 
-**Closes the row:** RC-19.2 meets the exit criterion: its test recomputes the colorant matrix and the TRC from IEC 61966-2-1's numbers and holds the bytes `build.rs` writes to them, and the profile parses, compiles to the identity and carries the header and tags RC-19.1 lists, all through `tinker-pdf-color`. RC-19.3 lands the two uses the Item names as far as the tree has them (an archival destination and a `/DefaultRGB` the PDF/A rules admit, ready for SD-02's conversion to add by default), RC-19.4 moves the record and RC-19.5 fingerprints the bytes.
-
-**The tree at `5297133`, against this row's text:**
-
-- `tinker-pdf-color` has no profile validator: `Profile::parse` is a transform builder, which is why 6.2.2's profile conformance is a staged rule (`crates/tinker-pdf/src/pdfa.rs:699-712`, SD-01's to land); RC-19's 'validates' is held by RC-19.2's header and tag checks and by the in-tree PDF/A rules in RC-19.3.
-- PDF/A conversion does not exist at 5297133: SD-02, which lists RC-19, is the row that adds an output intent to a converted document, so RC-19 hands the profile out and proves it admissible, and SD-02 makes it the default.
-- The old refusal is still recorded as current in THIRDPARTY.md:1156-1182, `ArchivalProfile`'s type note (`crates/tinker-pdf-cos/src/build.rs:4840-4856`), `docs/design/pdfa.md:184-203` and `:1314`, `docs/features/pdfa.md:146` and `:169`, `docs/features/fonts.md:913` and the CMAP-3 reason in `crates/tinker-pdf-shape/tests/text_rendering.rs:120-132`.
-
 ## RC-20 — ICC engine completion
 
 **ICC engine completion**: v4 in both directions (`B2A*`, `mBA `) for output, named-colour tags, device links, gamut tags, and reading v5 (iccMAX) profiles
 
-**Today.** 3 229 of 3 235 corpus profiles compile; output direction, named colour, device links, gamut mapping and v5 were non-goals until 9 October 2026 (`design/icc.md:57-76`)
-
 **Exit criterion.** each tag type held to a fixture whose transform is recomputed in the test; the corpus compile count ratcheted toward 3 235
 
 **Doc:** [design/icc.md](../design/icc.md) (amend) · **Depends on:** —
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -643,28 +393,13 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-20.15 | measure | Speed rows for what the facade now does through these profiles: MS-04's render group gains 'an ICC-based image to sRGB through a v5 multi-process profile' beside its 'an ICC-based CMYK image to sRGB', held by MS-02's paired gate; the output transform, links and named colours bring theirs with the rows that put them behind the facade (RC-05, ED-06b, P-22). *Note:* The row lands in the render group's file under the name above. | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json` | The operation is in the benchmark set, its page generated in the bench and sized 20–300 ms; `cargo xtask baseline` holds the bench file, the guard count and `baseline.json` to one list; MS-02's paired job is green on the pull request that adds it. | RC-20.14, MS-04, MS-02 |
 | RC-20.16 | measure | Ratchet the corpus figure: dispatch `corpus.yml` on `develop` after RC-20.12, read `icc-reality`'s compile count and refused shapes and the census lines RC-20.2 added, raise `COMPILED` and narrow `REFUSED_SHAPES` to them, and quote the figures, with what each remaining refusal is, in `design/icc.md` and `features/rendering.md`. *Note:* A figure from CI's corpus job only; no corpus is fetched locally. A count that fell is a regression to find, never a floor to lower. The report artifact expires after 14 days (`corpus.yml:244`), so the figures are copied into the commit. | `crates/tinker-pdf/tests/icc_census.rs`, `docs/design/icc.md`, `docs/features/rendering.md` | The dispatched run is green at 'Hold every corpus census' with the raised floor and its run id is in the commit; `features/rendering.md`'s '3 229 compile' paragraph and its refusal-table row for self-contradicting profiles carry the run's figures and date. | RC-20.2, RC-20.12, MS-11 |
 
-**Closes the row:** Each tag type the Item names is held to a fixture whose transform is recomputed in the test: output through `B2A*` in `mft1`/`mft2` (RC-20.5) and `mBA ` (RC-20.6) beside matrix/TRC and grey inverted (RC-20.4), device links (RC-20.7), `gamt` (RC-20.8), `ncl2` (RC-20.9), and v5's multi-process, calculator and spectral constructs (RC-20.10 to RC-20.12). RC-20.3 is the one mechanism that can teach the parser a refused corpus profile, RC-20.2 makes the census a ratchet, and RC-20.16 raises it toward 3 235 from CI's run.
-
-**The tree at `5297133`, against this row's text:**
-
-- `docs/design/icc.md:686` (milestone 5) says v4 `mAB ` 'is three tags and refused by name', as do `icc.rs`'s module doc (`crates/tinker-pdf-color/src/icc.rs:21-25`), `Model::Lut`'s doc (`:370-375`) and the doc of `a_v4_lookup_table_reads_and_its_inverse_is_refused_by_name` (`:2219`); `read_mab` reads it (`:952`, since 93bf5157) and `crates/tinker-pdf/tests/icc_census.rs:378-381` counts it among the compiled.
-- The comment at `crates/tinker-pdf-color/src/icc.rs:683-685` says 'a lookup table first, where there is one', but the branch under it takes the table only when the profile has neither matrix nor grey tags (`:686`), so a profile whose matrix or grey branch refuses it never reaches an `A2B*` table it carries.
-- `Lut::to_rgb` decodes every Lab-PCS table with v2's legacy 16-bit scale (`crates/tinker-pdf-color/src/icc.rs:536-550`), `mAB ` tables included, while its own comment says v4's encoding is not that one; which encoding `mAB ` and `mBA ` use is RC-20.1's to read from ICC.1 and RC-20.6's to hold.
-- `tinker-pdf-color`'s crate doc still says 'ICC profiles are honoured only by their component count' and calls a profile parser 'a named later capability' (`crates/tinker-pdf-color/src/lib.rs:9-13`); `crates/tinker-pdf/src/pdfa.rs:705-712`, `crates/tinker-pdf/src/pdfa/colour.rs:26-28` and `:541-543`, and `docs/design/pdfa.md:1284-1286` give a v4 profile whose only route to the connection space is an `mAB ` tag as one `Profile::parse` refuses.
-- The six refused corpus profiles are known only by class, data space and connection space (`crates/tinker-pdf/tests/icc_census.rs:397-401`); whether any carries an `A2B*` table its matrix or grey branch hides is not recorded, which is why RC-20.2 prints their tags and RC-20.16 reads them.
-- `crates/tinker-pdf-color/tests/icc_known_answers.rs`, which `docs/design/icc.md:303` names as the known-answer tables' home, does not exist: the colour crate has no `tests/` directory and its known answers are unit tests in `icc.rs`.
-
 ## RC-21 — A tile byte-equal to the page when an image run's overlap falls outside it
 
 **A tile byte-equal to the page when an image run's overlap falls outside it**
 
-**Today.** Ruling 5's guard (`crates/tinker-pdf/tests/render_regions.rs`) holds sixteen fixtures — text, shadings, an image, strokes, groups, soft masks, a tiling lattice and a mesh, turned and cropped — byte-equal tile by tile at 0.5× to 4× and down to a one-pixel lattice, since the tile stopped having a frame of its own (26 September 2026). **One decision is still the canvas's**: whether an image joins the run held back so that abutting images do not conflate is decided by overlap with the fragments the run holds over the canvas only. Two images that overlap outside a tile and abut inside it are one run in the tile and two on the page, and the seam conflates on the page only. Measured 2 October 2026 on three one-sample images over a 100×100 page (the first and third abutting at `x = 40.5`, the third overlapping the second below the tile): the tile over the top half differs from the page on **40 pixels, all of column 40, by 63 levels at 1×**, pinned exactly by `an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`. This row was deleted on 26 September with the image-run case named in ruling 5 as having no fixture; a review built one, so the row came back, narrowed to the case. Holding the run's coverage over the page frame rather than the canvas reaches it, at the cost of every tile walking every image of a run over the whole page — the trade this row has to make rather than a fix slip in
-
 **Exit criterion.** whether a draw joins a run is decided in the page's frame without a tile paying the page's image work, and that pin becomes a byte-equality assertion
 
 **Doc:** — · **Depends on:** H-15 (the speed/exactness trade)
-
-*Steps not yet reviewed; the review runs once all the work is done.*
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
@@ -673,11 +408,3 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-21.3 | measure | Price each mechanism before H-15 is decided: a `#[cfg(test)]` counter on `Renderer` beside `mask_pixels` counts the pixels the run-membership question reads, a test-only shadow of each mechanism answers that question in the page's frame beside the canvas's answer, and an `#[ignore]` probe renders RC-21.2's pages and a generated 300-dpi page of abutting strips tiled as four bands and at 64 pixels, printing per mechanism the pixels read, members scanned and bytes held per tile, the tiles whose answer changes, and the time against today's in release and debug. *Note:* The shadows decide nothing the render uses, so every pin and fingerprint is unchanged; RC-21.4 promotes the mechanism H-15 takes and deletes the others. The row's whole-page mechanism is priced as the reference H-15 names. A time is a ratio to today's on one quiet machine, never a baseline; the table is re-taken after RC-21.4 lands. | `crates/tinker-pdf-render/src/lib.rs`, `docs/design/image-edges.md` | `tinker-pdf-render` `a_run_reads_only_the_band_where_a_draw_meets_it` (new, not ignored) pins today's counted reads on abutting strips and fails under an injection that asks the overlap of the whole draw; `price_of_deciding_runs_in_the_page_frame` (new, `#[ignore]`, prints `RAN`) regenerates the table committed to `image-edges.md`, release and debug, quoted with its machine; H-15 is decided from that table. | RC-21.2 |
 | RC-21.4 | fix | Land the mechanism H-15 takes, as RC-21.3 priced it: whether a draw joins the run is answered in the page's frame (`ImageRun` holding what that mechanism needs of the members outside the canvas, `run_would_overlap` answering for the page), so every shape of RC-21.2's class tiles byte-equal; the shapes join `fixtures()`, the pins become byte-equality assertions, and ruling 5's open exception is closed with its date. *Note:* Blocked by H-15: until the owner takes a mechanism, the pins stand (its default); the whole-page one does not meet this row's exit, which forbids a tile the page's image work. A whole-page render is unchanged by construction, its canvas being its frame, so a moved `determinism.rs` fingerprint is a finding. The probe is re-run on the landed code and its figures replace the shadow's in `image-edges.md`. | `crates/tinker-pdf-render/src/lib.rs`, `crates/tinker-pdf-raster/src/image.rs`, `crates/tinker-pdf/tests/render_regions.rs`, `docs/rulings.md`, `docs/features/rendering.md`, `docs/design/image-edges.md` | The class, joined to `fixtures()`, passes `every_tile_is_byte_equal_to_the_page_under_it`, the scale and one-pixel lattices and `a_display_list_tiles_as_the_page_does` in the default and `--features bundled-fonts` builds, failing on the code before; `an_image_run_that_overlaps_only_outside_a_tile_tiles_as_the_page_does` (the pin, renamed) asserts equality; `tinker-pdf-render` `a_tile_reads_only_the_bands_its_runs_meet` (new) bounds a tile's counted reads by RC-21.1's bands and fails under an injection that walks members whole. | RC-21.3, H-15 |
 | RC-21.5 | measure | Hold the price H-15 accepted on every pull request: MS-04's render group gains 'a 300-dpi page of abutting image strips in four bands' beside its 'one 300-dpi page in four bands', so MS-02's paired gate fails a change that makes a tile pay more than RC-21.4 does. *Note:* The row lands in the render group's file under the name above. | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json` | The operation is in the benchmark set, its page generated in the bench and sized 20–300 ms; `cargo xtask baseline` holds the bench file, the guard count and `baseline.json` to one list; MS-02's paired job is green on the pull request that adds it. | RC-21.4, MS-04, MS-02 |
-
-**Closes the row:** RC-21.4 meets the exit: whether a draw joins a run is answered in the page's frame by the mechanism H-15 took, its counted guard shows a tile reads only the bands where draws meet the run rather than the page's image work, and `an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception` becomes a byte-equality assertion with the rest of the class RC-21.2 pinned. RC-21.1 states the mechanisms, RC-21.3 prices them for H-15, and RC-21.5 keeps the accepted price in the paired gate.
-
-**The tree at `5297133`, against this row's text:**
-
-- The class is wider than 'overlap outside, abut inside': a draw wholly outside the tile has no rectangle on the canvas, so `run_would_overlap` answers no (`crates/tinker-pdf-render/src/lib.rs:2348-2350`) and a draw that overlaps a run member outside the tile ends the page's run and not the tile's.
-- The run's budget is already decided in the page's frame (`frame_area`, `crates/tinker-pdf-render/src/lib.rs:2257-2260`), while its fragments are allocated over the canvas (`:2319-2320`) and its covered rectangle grows from the draw's on-canvas rectangle only (`:2252`, `:2328-2334`): the overlap question is the one decision left to the canvas, as the row says.
-- The coverage the overlap question reads includes each sample's own alpha (`accumulate_image` adds coverage times the sample's alpha, `crates/tinker-pdf-raster/src/image.rs:626-642`), so answering it outside the tile needs a soft-masked member's alpha there, not only its rectangle: a cost RC-21.1 has to state and RC-21.3 to price.
