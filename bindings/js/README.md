@@ -10,9 +10,6 @@ wasm-pack build --release --target web --out-dir pkg bindings/js
 
 ## ESM only, one build, `--target web`
 
-Gap 26 lists "no decision recorded about the ESM/CJS split" as one of its
-absences. This is the decision.
-
 **The package is ESM and there is no CommonJS build.** `package.json` carries
 `"type": "module"` and one entry point, built with wasm-pack's `web` target.
 
@@ -25,10 +22,10 @@ engine that can diverge, and ruling 11's whole point is that a binding has no
 behaviour of its own to diverge *with*. One of them would get less use and
 would break quietly.
 
-The `web` target was chosen over `bundler` for the same reason the demo exists:
-it loads from a plain `<script type="module">` with no build step at all, which
-is what a page renders a PDF from. `bundler` needs webpack or vite in front of
-it.
+The `web` target is used rather than `bundler` for the same reason the demo
+exists: it loads from a plain `<script type="module">` with no build step at
+all, which is what a page renders a PDF from. `bundler` needs webpack or vite
+in front of it.
 
 **Node runs the same file.** Node ≥ 18 executes ESM natively, and the one thing
 the `web` target does that Node cannot follow — `fetch` on the `file:` URL of
@@ -44,12 +41,11 @@ await init({ module_or_path: readFileSync('node_modules/tinker-pdf-js/tinker_pdf
 One argument, not a second build. `bindings/js/tests/node_smoke.mjs` is that
 call, run against an actually-`npm install`ed tarball.
 
-The package is named **`tinker-pdf-js`**, after the crate. Plan 13 sketched
-`@tinker/pdf`; wasm-pack derives the npm name and version from `Cargo.toml`, so
-taking the derived one means the npm version cannot drift from the workspace —
-a hand-edited `package.json` would be a fifth manifest for `cargo xtask
-versions` to police, and the file is regenerated on every build anyway. Plan 13
-is amended.
+The package is named **`tinker-pdf-js`**, after the crate. wasm-pack derives
+the npm name and version from `Cargo.toml`, so taking the derived one means the
+npm version cannot drift from the workspace — a hand-edited `package.json`
+would be one more manifest for `cargo xtask versions` to police, and the file
+is regenerated on every build anyway.
 
 ## The one footgun, and why it has the long name
 
@@ -67,7 +63,6 @@ other view anybody is holding. It does not throw, and it does not happen on
 every call — only when an allocation crosses a page boundary — so a page that
 holds a view across one render will work for months and then not.
 
-This is observed behaviour, not a warning written from memory.
 `node_smoke.mjs` renders a page, takes a view, renders the same page at four
 times the scale, and asserts the view's length has become 0. If wasm-bindgen or
 the engine ever changes that, the test fails and this paragraph is what needs
@@ -118,7 +113,7 @@ is at the front, and page one renders without a byte of the tail being fetched.
 
 ## The browser demo
 
-Plan 13's exit criterion for this binding: a page that renders an uploaded PDF.
+A page that renders an uploaded PDF.
 
 ```bash
 wasm-pack build --release --target web --out-dir pkg bindings/js
@@ -145,18 +140,16 @@ node verify.mjs ../../../testdata/simple-text.pdf /path/to/face.ttf
 It renders **twice** — blank without a face, inked with one — reads the ink
 back off the canvas with `getImageData` rather than trusting the status line,
 and checks the ink's *bounding box* is the shape of a line of text rather than
-a full-page smear or one stray pixel. Observed on Windows: 2385 non-white
-pixels in a box of 108,130–412,155 on an 893×1263 canvas.
+a full-page smear or one stray pixel.
 
 Playwright is build tooling (rule 1's documented exception) and is installed on
 demand; `demo/package.json` is `"private": true` and is never published.
 
 ## Size
 
-The `.wasm` is 2.03 MB, **1.40 MB gzipped**, with `cmap-predefined` on — that
-is the default, and it carries all 202 of Adobe's predefined CMaps. Plan 13's
-budget is 2.5 MB gzipped. Turning the feature off is
-`--no-default-features`, and it is the switch a host that renders no CJK
+`cmap-predefined` is on by default, and it carries all of Adobe's predefined
+CMaps. `release.yml` gates the gzipped `.wasm` at 2.5 MiB. Turning the feature
+off is `--no-default-features`, and it is the switch a host that renders no CJK
 reaches for.
 
 ## Writing, and proving it is the same engine
@@ -166,15 +159,15 @@ cd <a directory where the tarball has been npm install'ed>
 node <repo>/bindings/js/tests/write_parity.mjs <repo>/testdata/form-fields.pdf
 ```
 
-Thirteen scripts with every input pinned — nine that write a document (fill a
+Scripts with every input pinned — those that write a document (fill a
 form and save incrementally; build a document from pages, a font and an image;
 the document operations; a sanitise; two saves with every write option set;
-form fields; the builder's graphics resources; tagged writing) and four that
+form fields; the builder's graphics resources; tagged writing) and those that
 write down what a sanitise reported, what the read surface and the signature
 verdicts say, and what form data says, all listed in
 [docs/features/bindings.md](../../docs/features/bindings.md) —
-printing one
-`WROTE sha256=<hex>` or `READ sha256=<hex>` line each. The same thirteen run against the facade in Rust,
+print one
+`WROTE sha256=<hex>` or `READ sha256=<hex>` line each. The same scripts run against the facade in Rust,
 through the wheel, the NuGet package and the Go, Ruby and Java bindings, and
 `cargo xtask bindings-parity` requires every one to be byte-identical.
 
@@ -193,17 +186,17 @@ catch (e) { editor.restore(mark); throw e; }
 finally { mark.free(); }
 ```
 
-Wrapping those three lines in a shipped helper was the alternative and was
-rejected: it would be the first logic this binding carries, and ruling 11's
-whole point is that there is none to diverge with. `restore` is idempotent, so
-a `finally` that runs after its own `catch` is safe.
+There is no shipped helper around those three lines: it would be the first
+logic this binding carries, and ruling 11's whole point is that there is none
+to diverge with. `restore` is idempotent, so a `finally` that runs after its
+own `catch` is safe.
 
 `save` returns a **copy**. `viewUnsafeUntilNextAllocation` is the only aliasing
 view on this surface, and a write API that handed one back would hand it back
 at exactly the moment the caller is about to allocate again.
 
-## Nothing has been published
+## Nothing is published
 
-`npm install tinker-pdf-js` does not work and is not meant to yet. The pipeline
-exists and has been exercised as a dry run; the facade is not frozen until
-0.1.0 ([`docs/architecture.md`](../../docs/architecture.md)).
+`npm install tinker-pdf-js` does not work: nothing is published. The pipeline
+runs as a dry run; the facade does not freeze before 0.1.0
+([`docs/architecture.md`](../../docs/architecture.md)).

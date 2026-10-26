@@ -17,7 +17,7 @@ formats, so it is opened once and asked what it is: an XPS package is
 recognised by ECMA-388 E.3's three steps, an EPUB by OCF's
 `META-INF/container.xml`, and anything else falls through to the comic-archive
 path — each synthesised into a real document with a real catalog and page
-tree. **A tar, a 7z and a RAR 5 open too** (tier 4), through
+tree. **A tar, a 7z and a RAR 5 open too**, through
 `tinker-pdf-archive`; a RAR 4 is refused by its own signature, and a RAR 5
 entry this build cannot decompress is a placeholder page rather than a refused
 archive. The signatures are tested at a
@@ -26,17 +26,16 @@ unaffected. See [cbz](cbz.md), [xps](xps.md) and [epub](epub.md); a
 reflowable book additionally takes `OpenOptions`, because its page count is a
 function of the page box the caller passes, not a property of the file.
 
-**One-file documents that are not PDFs** open too (tier 5's formats row),
+**One-file documents that are not PDFs** open too,
 through `tinker_pdf::standalone`: a **standalone SVG**, a **bare image** and a
-**loose XHTML file**. Each had a reader in the tree and was refused as
-not-a-PDF because nothing asked. The sniff comes after the containers and
+**loose XHTML file**. The sniff comes after the containers and
 before the PDF parser, and a PDF always wins it — anything with `%PDF-` in its
 first 4 096 bytes, which is where the COS parser itself looks for a header
 (`tinker_pdf_cos::limits::MAX_HEADER_SCAN`), is a PDF, so a polyglot and a PDF
 with junk in front stay PDFs wherever the parser would have opened them as one.
 (7.5.2 names no window; Acrobat's implementation note says 1 024 bytes, and a
-sniff that used it turned a PDF behind 1 500 bytes of junk that began like a
-JPEG or an SVG into a synthesised placeholder.) Past that, an image is told
+sniff using that window would turn a PDF behind 1 500 bytes of junk that begins
+like a JPEG or an SVG into a synthesised placeholder.) Past that, an image is told
 by its magic at offset zero (JPEG, PNG, TIFF, JPEG 2000, GIF, WebP, AVIF — the
 comic path's own classifier, less BMP's two-byte signature) and a markup
 document by its root element once the prolog is walked: byte-order mark, white
@@ -86,7 +85,7 @@ are read again (§13.2.3.4), which is how a `<meta>` past the first kilobyte
 is read. The encodings decoded are UTF-8, UTF-16 and the Encoding Standard's
 twenty-eight single-byte encodings; a multi-byte one named in a `<meta>` or a
 declaration is `MarkupDefect::EncodingNotDecoded`, over the guess. html5lib's
-encoding tests, vendored beside its trees, hold it: **82 of 82**. **An XHTML
+encoding tests, vendored beside its trees, hold it. **An XHTML
 file whose XML declaration names a single-byte encoding is read in it** — as
 XML when it is well-formed, as an FB2 is — and one that gives another of the
 standard's labels for UTF-8 or UTF-16, such as `unicode-1-1-utf-8` or XML's
@@ -107,11 +106,10 @@ with `EncodingNotDecoded` whatever its bytes are, as a
 (`a_loose_file_xml_cannot_read_is_read_in_the_encoding_it_names`).
 Scripting is disabled, always — nothing
 here runs a script — so a `<noscript>`'s content is markup and is drawn. It is
-held to html5lib's own suite, vendored: **1 779 of the 1 784
-tree-construction tests** that run with scripting disabled build exactly the
-suite's tree, the five that do not are named with their reasons, and **every
-one of the 7 028 tokenizer runs** a Rust string can express emits exactly the
-suite's tokens. An element the adoption agency nests past the XML reader's
+held to html5lib's own suite, vendored: every tree-construction test that runs
+with scripting disabled builds exactly the suite's tree but those named with
+their reasons, and every tokenizer run a Rust string can express emits exactly
+the suite's tokens. An element the adoption agency nests past the XML reader's
 depth cap keeps its text in the deepest element the cap allows
 (`MarkupDefect::TooDeep`), because every reader after this one was written
 against that cap. A file opened from its bytes has nothing
@@ -121,8 +119,8 @@ reference is **missing and named** (`StylesheetUnresolved`, `ImageNotDrawn`,
 `Svg { warning: ImportUnresolved }`); RFC 2397's `data:` URL carries its own
 bytes and resolves. A streamed open of one is whole-file, as a container's is, and
 its wider sniff is read only when the first kilobyte holds no PDF header, so
-a streamed PDF whose header is in that kilobyte makes the reads it always
-made; one with more junk in front costs one read of the 4 096-byte head the
+a streamed PDF whose header is in that kilobyte costs no extra read; one with
+more junk in front costs one read of the 4 096-byte head the
 parser searches anyway.
 
 **An FB2 opens like a loose XHTML file** — a root named `FictionBook`,
@@ -153,8 +151,8 @@ book means by its curly quotes.
 **Markdown opens by name, not by sniff.** `Document::open_markdown(bytes,
 &OpenOptions)` reads the bytes as UTF-8 (each malformed sequence U+FFFD,
 counted), translates them with `tinker_pdf::markdown` — a hand-written
-CommonMark 0.31.2 reader held to the specification's own 652 examples, 651 of
-which it passes exactly — into an XHTML document, and lays that out as a loose
+CommonMark 0.31.2 reader held to the specification's own examples — into an
+XHTML document, and lays that out as a loose
 XHTML file is, its first heading as `/Title`. It is a separate entry point
 because Markdown has no signature: a sniff that called text Markdown would turn
 every file that is not a PDF into a document of its own bytes, where `open`
@@ -239,12 +237,12 @@ table that disagrees with the first-page section, or names a range whose
 leading object is not a page leaf carrying its own `/MediaBox` and
 `/Resources`, or whose runs do not begin one after another, gets
 `WarningKind::LinearizedHintsUnusable` or `LinearizedPageHintRejected` and the
-page tree walk instead. Page one of the
-60-page fixture costs **29,696 bytes of 1,631,075**, page 31 costs **37,888**,
-and neither reads the main cross-reference table at `/T`; `main_table_fetched`
-and `whole_file_fetched` are the observables that say so. What still costs the
-tail is declared: the page *count*, `xref()`, a repair rescan, a save, and a
-signature's byte range each fetch and warn first. See
+page tree walk instead. On the linearized fixture neither page one nor page 31
+reads the main cross-reference table at `/T`, each within a byte budget
+`streaming_open.rs` commits. What still costs the tail: the page *count* and `xref()` fetch the
+main table, and a repair rescan, a save and a signature's byte range fetch the
+whole file; `main_table_fetched` and `whole_file_fetched` are the observables
+that say so, and a repair also warns `WholeFileFetched`. See
 [design/streaming-open.md](../design/streaming-open.md).
 
 **Encryption at open.** An encrypted document opens perfectly well; the
@@ -326,12 +324,12 @@ exceed it routinely — declared in one place,
 | Zero bytes | `OpenError::Empty` | Almost always a caller's bug — a path that did not exist — and telling that apart from a bad file matters | `crates/tinker-pdf/src/lib.rs` |
 | Nothing PDF-shaped | `OpenError::NotAPdf` | Not one indirect object found, even after a full rescan | `CosDocument::open` → `OpenError::NoObjects` |
 | A RAR 4 | `OpenError::UnsupportedArchive(ArchiveRefusal::NotAZip)` | Recognised by its own signature and refused as *that version*; no producer here can write one to hold a decoder to | [cbz](cbz.md), [design/comic-archives.md](../design/comic-archives.md) |
-| Customizable `<select>`'s `<selectedcontent>` copy of the selected `<option>` | the `<selectedcontent>` element is built, empty | the copy is a DOM behaviour the parser triggers when an `<option>` is popped, and it needs the option *selectedness* algorithm and the `selected` attribute's dirtiness, which a tree builder does not have. html5lib's `webkit02.dat` #45–#48 are the four tests it fails, by name | `crates/tinker-pdf-xml/tests/html5lib.rs` |
-| An HTML tag, attribute or DOCTYPE name past 1 024 bytes, more than 256 attributes on one element (a tag's, or an `<html>` or `<body>` that later tags' attributes are merged into), nesting past 256, more than a million tokens, nodes and copied attributes, more than 1 024 entries in the list of active formatting elements, or more than 64 MiB of attributes copied onto reopened formatting elements | the parse stops there, `MarkupDefect::Truncated`, the tree so far kept | `tinker-pdf-xml`'s four caps, which the HTML parser shares with the XML reader, and two of HTML's own (`MAX_HTML_ACTIVE_FORMATTING`, `MAX_HTML_CLONE_BYTES`). The token cap counts every node the tree builder creates and every attribute a clone copies, because reopening formatting elements makes a few bytes ask for hundreds; the clone cap bounds how long those copies are, since one long attribute value reopened by every paragraph after it asked for 1 700 times the input. html5lib's `tests1.dat` #77, an attribute name of 1 100 characters, is the one suite test a cap stops | `crates/tinker-pdf-xml/src/limits.rs` |
+| Customizable `<select>`'s `<selectedcontent>` copy of the selected `<option>` | the `<selectedcontent>` element is built, empty | the copy is a DOM behaviour the parser triggers when an `<option>` is popped, and it needs the option *selectedness* algorithm and the `selected` attribute's dirtiness, which a tree builder does not have. html5lib's `webkit02.dat` #45–#48 are the tests it fails, named in `NOT_PASSING` | `crates/tinker-pdf-xml/tests/html5lib.rs` |
+| An HTML tag, attribute or DOCTYPE name past 1 024 bytes, more than 256 attributes on one element (a tag's, or an `<html>` or `<body>` that later tags' attributes are merged into), nesting past 256, more than a million tokens, nodes and copied attributes, more than 1 024 entries in the list of active formatting elements, or more than 64 MiB of attributes copied onto reopened formatting elements | the parse stops there, `MarkupDefect::Truncated`, the tree so far kept | `tinker-pdf-xml`'s four caps, which the HTML parser shares with the XML reader, and two of HTML's own (`MAX_HTML_ACTIVE_FORMATTING`, `MAX_HTML_CLONE_BYTES`). The token cap counts every node the tree builder creates and every attribute a clone copies, because reopening formatting elements makes a few bytes ask for hundreds; the clone cap bounds how long those copies are, since one long attribute value can be reopened by every paragraph after it. html5lib's `tests1.dat` #77, an attribute name of 1 100 characters, is the one suite test a cap stops | `crates/tinker-pdf-xml/src/limits.rs` |
 | A `<meta charset>` naming a multi-byte legacy encoding — Shift_JIS, GBK, Big5, EUC-KR — in loose HTML | `MarkupDefect::EncodingNotDecoded`; read as UTF-8 if the bytes are UTF-8 and windows-1252 if not | `tinker_pdf_xml::encoding` decodes the single-byte family and no multi-byte one; what is left of the FB2 row is the same work | [ROADMAP](../ROADMAP.md) |
-| Scripts in HTML, and html5lib's `#script-on` tests | never run; `<noscript>` is drawn | there is no script engine yet, and until there is, the tree a parser with scripting enabled builds is not this build's | [ROADMAP](../ROADMAP.md) CD-12 |
+| Scripts in HTML, and html5lib's `#script-on` tests | never run; `<noscript>` is drawn | nothing runs an HTML document's scripts, so the tree a parser with scripting enabled builds is not this build's | [ROADMAP](../ROADMAP.md) CD-12 |
 | Raw HTML in Markdown | `ArchiveWarning::Translation { defect: TranslationDefect::RawHtmlAsText, .. }` | set as the text it is: CommonMark passes it through, and a tag that is not well-formed XML would stop the XML reader and lose the rest of the document. Every character still reaches the page | `crates/tinker-pdf/src/markdown.rs` |
-| A named character reference outside XHTML 1.0's 253, in Markdown | the reference stays literal | CommonMark resolves HTML's 2 231 names; this repository vendors XHTML 1.0's sets (W3C) and not HTML's list, so `&HilbertSpace;` is text. The one CommonMark example of 652 the reader fails | [THIRDPARTY.md](../../THIRDPARTY.md) |
+| A named character reference outside XHTML 1.0's 253, in Markdown | the reference stays literal | CommonMark resolves HTML's 2 231 names; this repository vendors XHTML 1.0's sets (W3C) and not HTML's list, so `&HilbertSpace;` is text. CommonMark's example 25 is the example this costs | [THIRDPARTY.md](../../THIRDPARTY.md) |
 | Markdown containers past 100 deep, inlines nested past the 202 elements that bounds a document to, references past their copy budget | `TranslationDefect::{NestingTooDeep, ReferenceBudgetSpent}` | read as the text they then are — a too-deep emphasis or link keeps its text and loses its element, so the XML reader's depth cap is never what stops a document and nothing after a deep nest is lost; the two caps are `bounds_ledger.rs` rows. A reference is the one construct whose output is not bounded by its input, so its copies are held to 100 KiB or the document's own length, cmark's rule | `crates/tinker-pdf/src/markdown.rs` |
 | An FB2 in a multi-byte legacy encoding — GBK, gb18030, Big5, EUC-JP, ISO-2022-JP, Shift_JIS, EUC-KR | one empty page and `ArchiveWarning::Markup(Truncated)` | `tinker-pdf-xml` decodes UTF-8, UTF-16 and the Encoding Standard's single-byte encodings and refuses the rest by name, and a book set in the wrong letters would be worse than one not set. Each is a state machine over an index of thousands of rows; what is left of the FB2 row | [ROADMAP](../ROADMAP.md) |
 | A byte an FB2's declared single-byte encoding leaves unmapped | `ArchiveWarning::Translation { defect: TranslationDefect::UnmappedByte, count }` | U+FFFD, the Encoding Standard's own *replacement* error mode; windows-1253's 0xAA is one | `crates/tinker-pdf/src/fb2.rs` |
@@ -352,20 +350,17 @@ exceed it routinely — declared in one place,
 
 ## Verified
 
-As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
-58 ignored, Windows x86_64), and the parts that cover opening are named
-([verification](../verification.md)):
+The tests that cover opening ([verification](../verification.md)):
 
 - **`crates/tinker-pdf-cos/tests/corrupt.rs`** — the ladder on damage built
   byte by byte: truncated tails, junk before `%PDF-`, lying offsets, dead
   `startxref`, each asserting the exact rung and the exact warning.
 - **`crates/tinker-pdf-cos/tests/strict_validator.rs`** — the ladder read
   from the other side. `validate` opens a file with every leniency counted as
-  a defect and walks the cross-reference sections out of the bytes, which is
-  how two repairs nobody could see were found: an entry whose offset points a
-  few bytes *before* its object, and one whose generation the table invented.
-  Both open at `Trust` with no warning, because the reader lexes forward for
-  the first and normalises the second.
+  a defect and walks the cross-reference sections out of the bytes, so it
+  sees two repairs that open at `Trust` with no warning: an entry whose offset
+  points a few bytes *before* its object, and one whose generation the table
+  invented — the reader lexes forward for the first and normalises the second.
 - **`crates/tinker-pdf-cos/tests/document.rs`, `object_grammar.rs`,
   `proptest_lexer.rs`, `proptest_document.rs`** — the grammar, the store and
   property-tested round-trips for string and name escaping.
@@ -377,11 +372,11 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   values by ruling 12, which is why the enum stays `Copy + PartialEq + Eq`.
 - **Fuzzing** — `cos_document` (the whole file parser, every ladder rung
   reachable from arbitrary bytes, plus a bounded page-tree walk) and
-  `cos_object` are two of the 51 fuzz targets, run briefly in CI on every
+  `cos_object` are fuzz targets, run briefly in CI on every
   commit over committed seed corpora.
-- **Corpus** — 5 525 files, 5 516 of them rendered every page, 0 crashes
-  (August 2026), in the ratcheted corpus run
-  ([verification](../verification.md)); the canonical fixtures in
+- **Corpus** — the ratcheted corpus run
+  ([verification](../verification.md)) opens and renders the fetched corpora;
+  the canonical fixtures in
   `crates/tinker-pdf-cos/tests/document.rs` are mutool-written and must open
   at `Trust` with an empty warning list.
 - **`crates/tinker-pdf/tests/streaming_open.rs`** — what a streamed open
@@ -392,11 +387,10 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   not a page, a hint stream the section places elsewhere — and each asserts the
   same page comes out, off the page tree, with the leniency named — and a
   fourth, a page length of zero, which is the one hint that could hand back the
-  page before it. Over the fetched qpdf corpus: 43 files open from their heads
-  and 41 draw the page one the page tree draws (the two exceptions are named,
-  and are files the walk cannot answer for at all); 29 of the 43 have a page
-  two, **every one of the 29 draws the page the main table draws**, and 20
-  reach it without that table.
+  page before it. Over the fetched qpdf corpus, a file that opens from its head
+  draws the page one the page tree draws, but for the files
+  `PAGE_ONE_ONLY_FROM_THE_HEAD` names, which the walk cannot answer for at
+  all; and **every one with a page two draws the page the main table draws**.
 - **`crates/tinker-pdf/tests/standalone.rs`** — a standalone SVG, a bare image
   and a loose XHTML file through `Document::open`: an SVG's page at the size
   its root states with its pixels and its text, a loose XHTML file **pixel for
@@ -410,12 +404,12 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   undeclared windows-1252 page read in it, an XHTML file declaring
   windows-1251 read in it whether or not it is well-formed
   (`a_loose_xhtml_file_is_read_in_the_single_byte_encoding_it_declares`), and a
-  streamed open the same document. It also holds the defect the row found in
-  the streaming sniff: the container window was one `read`, a source that
-  answers in pieces gave it one byte of `PK\x03\x04`, and a comic archive
-  streamed from one was `NotAPdf`. The sniff's own walk and the two decoders
+  streamed open the same document. It also holds the streaming sniff to a
+  source that answers in pieces: the container window is read until whole, so
+  a comic archive streamed from one opens as a comic. The sniff's own walk and
+  the two decoders
   are unit tests in `src/standalone.rs`, held to RFC 4648 §10's vectors and
-  RFC 2397 §4's examples; `hostile_input.rs` sweeps all seven kinds damaged,
+  RFC 2397 §4's examples; `hostile_input.rs` sweeps every kind damaged,
   buffered and streamed; `fuzz/fuzz_targets/standalone.rs` is the deep
   version.
 - **`crates/tinker-pdf/tests/fb2.rs`** — an FB2 written from FictionBook
@@ -435,14 +429,14 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
 - **`crates/tinker-pdf-xml/tests/html5lib.rs`** and
   **`crates/tinker-pdf-xml/src/html/suite.rs`** — the HTML parser held to
   html5lib's tree-construction and tokenizer tests, vendored at the last
-  commit that holds both (THIRDPARTY.md), compared exactly: **1 779 of 1 784**
-  trees, the five that do not pass named as a list rather than counted, and
-  **7 028 of 7 028** tokenizer runs (four runs holding a lone surrogate, which
-  a Rust string cannot, are not attempted, and nor are `xmlViolation.test`'s
-  four, counted by name, which expect a parser coercing its output to an XML
-  infoset, §13.2.9), and **82 of 82** encoding tests, through `parse_bytes`'s
-  prescan and change of encoding. `tests/html.rs` beside them
-  crosses each of the six caps at its shipped value — the token cap by
+  commit that holds both (THIRDPARTY.md), compared exactly: every tree but
+  those `NOT_PASSING` names as a list with their reasons, every tokenizer run
+  (runs holding a lone surrogate, which a Rust string cannot, are not
+  attempted, and nor are `xmlViolation.test`'s, counted by name, which expect
+  a parser coercing its output to an XML infoset, §13.2.9), and every encoding
+  test, through `parse_bytes`'s prescan and change of encoding. `tests/html.rs`
+  beside them
+  crosses each cap at its shipped value — the token cap by
   reopened formatting elements, fifty kilobytes asking for a million nodes,
   and by the attributes they copy; the attribute cap by merged `<html>` and
   `<body>` tags; the clone cap by one hundred-kilobyte value reopened seven
@@ -458,12 +452,13 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
   `mutated_tag_soup_never_panics_the_html_parser` and
   `fuzz/fuzz_targets/html.rs` hold the tree to being a tree.
 - **`crates/tinker-pdf/tests/commonmark_spec.rs`** — the Markdown reader held
-  to CommonMark 0.31.2's 652 examples, compared exactly, over a `spec.txt`
+  to CommonMark 0.31.2's examples, compared exactly, over a `spec.txt`
   fetched at its pinned tag and SHA-256 by `tests/commonmark/fetch-spec.sh`
-  (CC-BY-SA 4.0, so never committed); it also asserts it reads the same 652
-  the tag's `spec_tests.py --dump-tests` writes as `spec.json`, by a recorded
-  fingerprint. **651 pass**, measured 2 October 2026, and every section but
-  the entity one is held whole; the `commonmark-spec` CI job greps its `RAN`
+  (CC-BY-SA 4.0, so never committed); it also asserts it reads the same
+  examples the tag's `spec_tests.py --dump-tests` writes as `spec.json`, by a
+  recorded fingerprint. It holds a counted floor of exact passes (`PASSING`)
+  and every section but the entity one whole (`WHOLE_SECTIONS`); the
+  `commonmark-spec` CI job greps its `RAN`
   banner. `tests/markdown.rs` runs on every `cargo test`: reader answers worked
   out from the rules, a Markdown document pixel for pixel the XHTML it
   translates to, raw HTML and malformed UTF-8 counted, and both caps fired.
@@ -473,6 +468,6 @@ As of 14 September 2026, `cargo test --workspace` runs 4 879 tests (0 failed,
 - **`crates/tinker-pdf/tests/streaming_determinism.rs`** — ruling 4 over a byte
   source. Every fixture, linearized ones included, renders identically from a
   buffer, from a slice source and from one answering a byte at a time.
-- **Determinism** — the 15 render fingerprints and 3 document byte-hashes all
-  pass through `Document::open` first, so a change to opening moves them
-  ([determinism](determinism.md)).
+- **Determinism** — the render fingerprints and document byte-hashes of
+  `determinism.rs` all pass through `Document::open` first, so a change to
+  opening moves them ([determinism](determinism.md)).

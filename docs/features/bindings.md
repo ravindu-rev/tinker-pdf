@@ -2,7 +2,7 @@
 
 Seven surfaces over one facade: a C ABI; Python and JavaScript/WebAssembly
 directly over the facade; and .NET, Go, Ruby and Java over the C ABI — with
-Swift beside them as source nobody has compiled yet. Ruling 11 ([rulings.md](../rulings.md)) is the whole design — **the
+Swift beside them as source that has never been compiled. Ruling 11 ([rulings.md](../rulings.md)) is the whole design — **the
 facade is the only public surface**; a binding projects it 1:1 and adds no
 logic, caching or defaults of its own. If a binding needs behaviour, the
 facade grows it first, and then every binding has it.
@@ -22,19 +22,16 @@ the handle is freed. Every call returns a `TpdfStatus` (`Ok`, `BadArgument`,
 `ScriptRefused`, `StreamUnreadable`, `FormDataRefused`) and
 `tpdf_last_error_message` carries the detail. Those numbers *are* the ABI —
 a C caller compares them against literals and the .NET binding against an
-`int` — so 0–7 are frozen, `NoSuchSignature` was **appended** at 8 rather
-than inserted, the write surface's five were appended at 9–13, and
-streaming's, the script policy's, the read surface's and the forms surface's
-one each at 14, 15, 16 and 17. Two unit tests pin them: one names all
-eighteen individually, and
-one holds the list
-and its length, so a variant added without a line is caught by the count
-rather than by somebody remembering. A third pins every discriminant of the
-six signature enums and the three write ones, because those are transcribed
-by hand into `bindings/dotnet/TinkerPdf.cs`.
+`int` — so they count from 0 in the order listed, each keeps its number, and
+a new status is appended rather than inserted. Unit tests pin them: one names
+every status's number, and one holds the list and its length, so a variant
+added without a line is caught by the count rather than by somebody
+remembering. Another pins every discriminant of the signature enums and the
+write ones, because those are transcribed by hand into
+`bindings/dotnet/TinkerPdf.cs`.
 
-**Every enum a caller hands over is an `int`, and is checked.** The
-seventeen enums a caller supplies — `TpdfPixelFormat`, `TpdfWriteMode`,
+**Every enum a caller hands over is an `int`, and is checked.** The enums a
+caller supplies — `TpdfPixelFormat`, `TpdfWriteMode`,
 `TpdfDestKind`, `TpdfTargetKind`, `TpdfImageKind`, `TpdfInfoKey`,
 `TpdfTrapped`, `TpdfLabelStyle`, `TpdfPageBoundary`, `TpdfSanitiseList`,
 `TpdfFieldValueKind`, `TpdfBlendMode`, `TpdfSoftMask`, `TpdfMaskKind`,
@@ -45,10 +42,8 @@ message naming the enum and the number, exactly as a null pointer is. The
 reason is Rust's, not C's: a `#[repr(C)] enum` holding a number it does not
 declare is undefined behaviour the moment it exists, before any `match`
 could refuse it, and Ruby and Go pass whatever integer their caller gives
-them. Before this, `Document#info(8)` from Ruby read past the end of a jump
-table and the process died in `tpdf_document_info` (review of lane 7C).
-Enums only the engine writes — the status, out pointers, fields of a struct
-it fills — keep their enum type, since every value written is declared.
+them. Enums only the engine writes — the status, out pointers, fields of a
+struct it fills — keep their enum type, since every value written is declared.
 Two details follow from "checked" rather than invented: a field the call
 does not read is not judged (a blend mode whose `has_blend_mode` is 0, a
 mask kind under a soft mask that is not a group), and
@@ -65,27 +60,23 @@ in one handle is the same data race it would be in Rust, and no C ABI can
 stop it. One handle per thread, or the caller's own lock; freeing stays safe
 from any thread.
 
-**Two hundred and eighteen functions**, counted from the committed
-header, October 2026 — eighteen open and render, two streaming, five
-validating, fifty-five writing, thirteen running form scripts
-(`tpdf_editor_recalculate` and the nine calls of its report,
-`tpdf_editor_formatted_value`, `_keystroke` and `_validate`), thirty reading
-signatures, thirty-four on the read surface, sixteen document operations,
-twenty-two on the forms surface, thirteen of the builder's graphics
-resources and ten of tagged writing.
-The fifty-five are the write surface below and the five are the strict
-validator it leans on
+**The functions** fall into groups: open and render, streaming,
+validating, writing, running form scripts (`tpdf_editor_recalculate` and the
+calls of its report, `tpdf_editor_formatted_value`, `_keystroke` and
+`_validate`), reading signatures, the read surface, document operations, the
+forms surface, the builder's graphics resources and tagged writing.
+Validating is the strict validator the write surface leans on
 (`tpdf_document_validate`, `tpdf_defects_count`, `tpdf_defect_rule`,
 `tpdf_defect_message`, `tpdf_defects_free` — an owned `TpdfDefects` on the
-`TpdfSignatures` pattern, so it outlives the document). Eighteen open and
-render: `tpdf_version`,
+`TpdfSignatures` pattern, so it outlives the document). Open and render:
+`tpdf_version`,
 `tpdf_last_error_message`, `tpdf_document_open` / `_free` / `_page_count` /
 `_is_encrypted` / `_authenticate` (returning a `TpdfAuthLevel` of `None`,
 `User` or `Owner`) / `_may_print` / `_set_fonts`, `tpdf_page_size` /
 `_text` / `_render`, `tpdf_string_free`, and `tpdf_bitmap_width` /
 `_height` / `_stride` / `_data` / `_free`.
 
-**Two are the streaming seam** (Annex F): `tpdf_document_open_streaming`,
+**The streaming seam** (Annex F): `tpdf_document_open_streaming`,
 which takes a `TpdfSourceVtable` of `len` / `read` / `free` plus an opaque
 context, and `tpdf_document_is_streamed`. Function pointers rather than a
 struct carrying data, because a vtable is what every host language already
@@ -100,10 +91,9 @@ nothing on either side can check it. And a `read` that refuses gives
 `TpdfStatus::SourceMiss` rather than `NotAPdf`, with the range named in
 `tpdf_last_error_message` — the two demand opposite responses, since a host
 told "not a PDF" stops and a host told this fetches and calls again.
-Collapsing them, which the facade did until this projection needed the
-distinction, makes the seam unusable for the thing it exists for.
+Collapsing them would make the seam unusable for the thing it exists for.
 
-Thirty read signatures (12.8). Reading only: the signing side is not
+**Reading signatures** (12.8). Reading only: the signing side is not
 projected and is not coming here, because a `Signer` is a host callback
 and callbacks across this boundary are `design/bindings-write.md`'s to own.
 `tpdf_document_signatures` hands back an opaque `TpdfSignatures` on the
@@ -128,8 +118,8 @@ because the facade's `Option<i64>` has no C spelling — and returns
 There is no `is_valid` and there will not be one: the four questions are
 four `#[repr(C)]` enums, and `NotChecked` is not `Differs`.
 
-**The read surface beyond pages: thirty-four functions** in
-`src/read.rs`, each one facade call. `tpdf_document_info` takes a
+**The read surface beyond pages** is in `src/read.rs`, each function one
+facade call. `tpdf_document_info` takes a
 `TpdfInfoKey` for the eight `/Info` text entries, `tpdf_document_trapped`
 answers a `TpdfTrapped` whose `Absent` is the key missing and whose `Unknown`
 is the document saying `/Unknown` — the facade's `Option<Trapped>` carries
@@ -138,24 +128,13 @@ both and a three-arm enum would merge them — and `_pdf_version` and
 `tpdf_document_page_labels` → `TpdfPageLabels` with
 `tpdf_page_labels_count`, `tpdf_page_label_text` and `tpdf_page_labels_free`,
 because the facade answers `page_labels()` — every label at once, the number
-tree walked and each range numbered for the whole document — and the
-per-index `tpdf_document_page_label` it replaced (October 2026, deferred
-from the review of lane 7C) built all of them to hand back one, so the Go,
-Ruby, Java and .NET read surfaces, which read labels page by page, cost the
-page count squared. Now one walk builds the handle and every indexed read is
-a lookup; a document with no labels is an empty handle rather than a null
-per page, and an index past the end is `BadArgument` like every other list.
-`the_page_label_handle_holds_its_own_copy_of_every_label` frees the
-document before reading the first of 300 labels and holds every read to
-the facade's; that the handle is one walk is read off
-`tpdf_document_page_labels`, which makes one `page_labels` call, and is not
-counted by a test. Go's `PageLabels()`, Ruby's `page_labels`, Java's
+tree walked and each range numbered for the whole document — so one walk
+builds the handle and every indexed read is a lookup. A document with no
+labels is an empty handle, and an index past the end is `BadArgument` like
+every other list. Go's `PageLabels()`, Ruby's `page_labels`, Java's
 `pageLabels()` and .NET's `ReadPageLabels()` (a `PageLabels` with `Count`
-and `Label(index)`) each make the one walk — the .NET one written and
-**never compiled**: this lane's container had no .NET SDK, and
-`cargo xtask bindings-parity` skipped it;
-Python's `page_labels()` and JavaScript's `pageLabels()` call the facade
-directly and always did. The outline, a
+and `Label(index)`) each make the one walk; Python's `page_labels()` and
+JavaScript's `pageLabels()` call the facade directly. The outline, a
 page's links, the attachments and the warnings cross as owned handles on the
 `TpdfSignatures` pattern — `TpdfOutline`, `TpdfLinks`, `TpdfAttachments`,
 `TpdfWarnings`, each with `_count`, index accessors and `_free` — so each
@@ -176,16 +155,16 @@ its offset, its object, its stable slug and the facade's sentence.
 
 Two answers are kept apart throughout, as they are on the signature surface:
 **null on `Ok` is the document not saying**, and an index past the end is
-`BadArgument`. The one new status is `StreamUnreadable`, appended at 16: an
+`BadArgument`. The read surface's own status is `StreamUnreadable` (16): an
 attachment whose `/EF` stream is named and does not decode is not the same
 answer as one that names no stream, and the engine's reason, with the object,
 is in `tpdf_last_error_message`. The bytes come from `CosDocument::
 stream_decoded` on the stream reference `Attachment` hands back — the route
-the facade's own documentation names — so no accessor was added to the facade
-for it.
+the facade's own documentation names — so the facade needs no accessor of its
+own for it.
 
-**The document operations: sixteen functions** in `src/docops.rs`, each
-one `DocumentEditor` call. `tpdf_editor_set_page_labels` takes an array of
+**The document operations** are in `src/docops.rs`, each function one
+`DocumentEditor` call. `tpdf_editor_set_page_labels` takes an array of
 `TpdfPageLabelRange` (a `TpdfLabelStyle` and a nullable prefix);
 `tpdf_editor_attach_file` a `TpdfEmbeddedFile` of pointers and a length, its
 dates a `TpdfDate` of eight `int32_t`s — every field that wide so a
@@ -213,9 +192,9 @@ was. Where the facade answers `Result`, its refusal's own sentence crosses
 with `EditRefused`; where it answers `bool` or `Option`, the call and its
 argument are named, as for every other edit. `set_viewer_preferences` is not
 here: `ViewerPreferences` is eighteen optional entries, five enums and a list
-of page ranges, a sub-surface of its own, and stays owed.
+of page ranges, a sub-surface of its own, and is owed.
 
-Python's `Editor` gains the same as `set_page_labels([(first, style, prefix,
+Python's `Editor` has the same as `set_page_labels([(first, style, prefix,
 start)])`, `attach_file(...)` returning `(number, generation)`,
 `set_outline`, `set_title` to `set_producer`, `set_creation_date` and
 `set_modification_date` over `(year, month, day, hour, minute, second,
@@ -231,7 +210,7 @@ the report's lists as plain objects. .NET has them over the C ABI as
 `SetTrapped`, `SetXmpMetadata`, `SetPageBoundary` and its siblings,
 `Sanitise(SanitiseOptions)` and `Document.PageBox`.
 
-**The forms surface: twenty-two functions** in `src/forms.rs`, each one
+**The forms surface** is in `src/forms.rs`, each function one
 facade call. `DocumentEditor::add_field` takes a `NewField` whose kind has
 four arms with four payloads, so it crosses as four functions —
 `tpdf_editor_add_text_field` (a nullable value and a `/MaxLen` behind a
@@ -254,7 +233,7 @@ document's field tree), `tpdf_form_data_read_fdf` and `_read_xfdf`, or
 the field) read it; `_free` releases it; and `tpdf_editor_apply_form_data`
 applies it through `form_data::apply`, with `tpdf_editor_fill_field`'s three
 outcomes — a status means nothing was written, `Ok` hands back a
-`TpdfFillReport`. One status is appended: `FormDataRefused` = 17, for a file
+`TpdfFillReport`. Its status is `FormDataRefused` (17), for a file
 the reader will not read in the format asked for, or a value XML 1.0 cannot
 carry, distinct from `NotAPdf` because an FDF never claimed to be a PDF.
 Python has them as `Editor.add_text_field(name, page, rect, value=,
@@ -270,8 +249,8 @@ values)`, `add_field`, `source`, `warnings` as `(kind, what, field)`,
 is a signing target, and signing is a host callback this surface does not
 take (below).
 
-**The builder's graphics resources: thirteen functions** in
-`src/graphics.rs`, each one `DocumentBuilder` or `PageBuilder` call.
+**The builder's graphics resources** are in
+`src/graphics.rs`, each function one `DocumentBuilder` or `PageBuilder` call.
 `tpdf_builder_new_with_version` declares a version (each part a `u32` no
 wider than a byte, so a hand-written binding has no narrow integer to
 pass), `tpdf_builder_clear_image_resources` stops later pages inheriting the
@@ -304,7 +283,7 @@ JavaScript the same in camelCase with a `PdfExtGState` built by setters;
 patterns are not here: a `Shading` carries a `Function`, which is recursive
 and has a PostScript calculator arm, and is a sub-surface of its own.
 
-**Tagged writing: ten functions** in `src/tagging.rs`, `PageBuilder::tagged`
+**Tagged writing** is in `src/tagging.rs`, `PageBuilder::tagged`
 spelled without its closure. A `TpdfTag` is an owned `Tag` built a property
 at a time — `tpdf_tag_new` with the structure type, `tpdf_tag_set_text` over
 a `TpdfTagText` (`/T`, `/Lang`, `/Alt`, `/ActualText`, `/E`),
@@ -325,16 +304,14 @@ the C ABI. A tag's table attributes, namespace and associated files, and
 `continue_at`, `map_role_in`, `add_namespace` and `duplicate_element_ids`,
 are not here: each takes or returns a shape of its own.
 
-**The write surface: fifty-five functions, and the shape they had to be
-given.** The facade has exported `DocumentEditor` and `DocumentBuilder` since
-gap 26, so what stood between the read surface and this one was never
-capability. It was *shape*: `DocumentEditor::transaction(|tx| ..)` and
+**The write surface, and its shape.** What separates it from the read
+surface is shape, not capability: `DocumentEditor::transaction(|tx| ..)` and
 `DocumentBuilder::add_page(w, h, |page| ..)` take closures, and a closure does
-not cross this boundary. Ruling 11 answers that — the facade grows the
-closure-free equivalent first, and then the C ABI is a mechanical wrapping of
-a Rust API that already exists. So the facade gained
-`DocumentEditor::checkpoint` / `restore` and `DocumentBuilder::begin_page` /
-`push_page`, with both closure APIs reimplemented as callers of them
+not cross this boundary. Ruling 11 answers that — the facade carries the
+closure-free equivalent, and the C ABI is a mechanical wrapping of a Rust API
+that already exists: `DocumentEditor::checkpoint` / `restore` and
+`DocumentBuilder::begin_page` / `push_page`, with both closure APIs
+implemented as callers of them
 ([design/bindings-write.md](../design/bindings-write.md)).
 
 *A checkpoint is a value, not an open transaction.* That is what makes it safe
@@ -363,7 +340,7 @@ document first is legal and the .NET `SafeHandle`s need no parent-child
 keep-alive; a test asserts exactly that rather than leaving it inferred.
 
 *Consuming calls are a double-free factory,* and that is the design problem
-this surface actually had. `DocumentBuilder::finish(self)` and `push_page` and
+this surface has. `DocumentBuilder::finish(self)` and `push_page` and
 the outline's `add_child` consume in Rust; a C caller has a pointer, and a
 pointer that has been "consumed" is one the caller will still free and may
 still use. So a consumable handle boxes an `Option`: the consuming call takes
@@ -391,7 +368,7 @@ and `tpdf_fill_report_defect` the `TpdfWidgetDefect` — not only
 *Two flat `#[repr(C)]` option structs.* `TpdfWriteOptions` maps `WriteOptions`
 field for field **but one**, with the booleans and the version pair widened to
 integers so a hand-written P/Invoke has no packing to guess at. The one is
-`deduplicate_streams`: the struct does not carry it yet, because a field added
+`deduplicate_streams`: the struct does not carry it, because a field added
 there is a layout change the header and every binding pin, so a C caller's save
 crosses with it at its default, off — owed to the [roadmap](../ROADMAP.md)'s
 bindings row. And
@@ -441,8 +418,8 @@ every enum the facade answers with is its arm's name, and every arm's payload
 check was not made, the subject a chain names, a short key's bits — a sibling
 attribute, which the C ABI cannot carry (a C enum has no payload) and a Python
 object can. A `Signature` also carries `/Contents`, `/M`, `/ContactInfo`,
-`/Filter`, `/FieldMDP` and its lenient-read warnings, which the C ABI still
-owes. One wheel per
+`/Filter`, `/FieldMDP` and its lenient-read warnings, which the C ABI does
+not. One wheel per
 platform, not per interpreter: `abi3-py39`, and the release workflow
 asserts the `abi3` tag is in the filename.
 
@@ -458,10 +435,10 @@ as in Python — `at` a number of seconds, truncated as `Math.trunc` does, and
 NaN, an infinity or a number past 2^63 thrown back rather than judged as the
 epoch or the end of time; an attachment's declared `size` is a `BigInt`, the
 facade's `i64` exactly, since the document writes that number and nothing
-bounds it at 2^53 (both review of lane 7C);
+bounds it at 2^53;
 `bitmap.data()` copies, `bitmap.viewUnsafeUntilNextAllocation()` aliases
 wasm linear memory and silently becomes zero-length when a later allocation
-grows the memory — observed, not hypothesised: `node_smoke.mjs` renders,
+grows the memory — `node_smoke.mjs` renders,
 takes a view, renders larger and asserts the view's length is 0. The
 dangerous call has the warning in its name. **ESM only, `--target web`**:
 the `nodejs` target's CommonJS loads the `.wasm` with a synchronous read a
@@ -469,9 +446,8 @@ browser cannot do, so a dual package would be two builds of the engine that
 can diverge, and ruling 11's point is that a binding has nothing to diverge
 *with*. Node ≥ 18 runs the same file by handing `init` the bytes. The
 package is `tinker-pdf-js`, name and version derived from `Cargo.toml` so
-`cargo xtask versions` has no fifth manifest to police. The `.wasm` is
-6.76 MB, 3.28 MB gzipped (9 October 2026; 1.40 MB gzipped on 8 September),
-**over** `release.yml`'s 2.5 MiB gzipped gate, with all 202 predefined CMaps in; `cmap-predefined`
+`cargo xtask versions` has no extra manifest to police. `release.yml` gates
+the gzipped `.wasm` at 2.5 MiB, with every predefined CMap in; `cmap-predefined`
 off is the switch for a host that renders no CJK.
 
 **.NET** (`bindings/dotnet`, C# over the C ABI). Every native handle lives
@@ -500,8 +476,9 @@ handle closed by its owner's `Close`/`close` (safe twice), and every string
 and byte array handed back a copy that outlives its handle. None decides a
 default: a save takes the options `tpdf_write_options_init` filled in, a
 view the engine's own `tpdf_destination_init_fit`, and an encrypted save the
-caller's 48 bytes of entropy. Go and Java call **all 221 functions**; Ruby
-calls 220. Each has the parity program (below) and a smoke program that
+caller's 48 bytes of entropy. Go and Java call every function the header
+declares; Ruby every one but `tpdf_document_open_streaming` (below). Each has
+the parity program (below) and a smoke program that
 renders blank-then-inked and then calls, once each, every declaration the
 parity program does not reach — authentication against the two encrypted
 fixtures, the editor's page operations, fields, checkpoint and restore, the
@@ -512,11 +489,8 @@ so a declaration transcribed wrongly fails there rather than in a caller.
 **Every arm of every enum is held to the header, not only the arms a script
 uses.** The parity scripts send most enums across by one arm — the graphics
 script one blend mode, one mask kind, one device space, one tiling type —
-so a wrong number for any other arm passed `bindings-parity` and every
-smoke: the reviewer set Ruby's `SoftMask::ABSENT` to 1, which writes
-`/SMask /None` on every graphics state left without a mask, and the
-recorded *graphics* hash still printed (review of lane 7C). Go and Swift now
-name the header's own constants (`SoftMaskAbsent SoftMask =
+so a wrong number for any other arm would pass `bindings-parity` and every
+smoke. Go and Swift name the header's own constants (`SoftMaskAbsent SoftMask =
 C.TPDF_SOFT_MASK_ABSENT`), so the compiler checks each number; Ruby and
 .NET write the numbers out and Java passes `ordinal()`, so its declaration
 order is the number. `crates/tinker-pdf-ffi/tests/binding_enums.rs` reads
@@ -524,20 +498,13 @@ the committed header and the four bindings' sources as text and holds every
 enum each carries to the header's: the same arms, none missing and none
 extra, each with the header's number — Java's by position, Go's by the
 constant it names, which must be its own arm and never a literal — and
-Swift's six statuses each to its own constant. The two enums no binding
+Swift's statuses each to its own constant. The two enums no binding
 keeps as a table, `TpdfTargetKind` and `TpdfSanitiseList`, are a literal 0
 or 1 at the one place each crosses, and both arms of each cross in a parity
 script. Python and JavaScript name arms by string over the facade, so no
-number crosses there; the same file holds each of their 237 string-to-arm
+number crosses there; the same file holds each of their string-to-arm
 lines, both directions, to the rule that the string is the arm's own name
 (the page boundaries' `"trim"` for `TrimBox` the one stated exception).
-Counted injections, October 2026: Ruby's `SoftMask::ABSENT = 1` fires
-**1**, an arm dropped from Ruby's `LabelStyle` **1**, Java's `SoftMask`
-reordered **1**, .NET's `BlendMode.Screen = 3` **1**, Go's `SoftMaskAbsent`
-wired to `NONE` **2** and written as a literal 0 **2**, Swift's
-`badArgument` wired to `NOT_A_PDF` **1**, Python's `"screen"` wired to
-`Overlay` **1**, JavaScript's `Sha1Digest` spoken as `"sha1-signature"`
-**1**.
 
 - **Go** is cgo, and the only one of the three that compiles against the
   header rather than transcribing it, so cgo lays out every struct and
@@ -563,8 +530,8 @@ wired to `NONE` **2** and written as a literal 0 **2**, Swift's
   written to the part of it that is the same in JDK 21 — where it is a
   preview API, compiled with `--enable-preview --release 21` and run with
   `--enable-preview` — and JDK 22, where it is final and **Java 22 and later
-  drop the flag**. Only 21 was available to verify on, so the 22 claim rests
-  on the API's documented equivalence, not on a run; `cargo xtask
+  drop the flag**. CI runs JDK 21, so the 22 claim rests on the API's
+  documented equivalence, not on a run; `cargo xtask
   bindings-parity` reads `javac -version` and picks the flags. Every downcall
   in `Native.java` is generated from the header, one line each; structs are
   written field by field at the offsets `layout.rs` pins; streaming is three
@@ -572,15 +539,15 @@ wired to `NONE` **2** and written as a literal 0 **2**, Swift's
   `--enable-native-access=ALL-UNNAMED` silences the restricted-method
   warning, and the library is `-Dtinkerpdf.library=` or `TINKER_PDF_LIB`.
 
-**Swift** (`bindings/swift`) is **unverified source**: no Swift toolchain was
-available, so it has never been compiled. It is a SwiftPM package whose
+**Swift** (`bindings/swift`) is **unverified source**: it has never been
+compiled. It is a SwiftPM package whose
 `CTinkerPdf` module imports the committed header through a shim (not a
 copy, which would be a second transcription to drift), a `TinkerPdf` target
 covering the core — open, text, render, validate, authenticate, the form
-fill and save, the builder, 49 of the 221 functions — and a `Smoke`
+fill and save, the builder — and a `Smoke`
 executable written to the same blank-then-inked pattern. It has no parity
 program, is not in `bindings-parity` and has no CI job; the read surface,
-document operations, signatures and streaming are owed, and so is the first
+document operations, signatures and streaming are owed, and so is a first
 build.
 
 **`set_fonts` everywhere.** The engine bundles no faces and reads no font
@@ -590,22 +557,14 @@ across every surface, and every smoke test renders *twice* — blank
 without a face, inked with one — because "a bitmap of the right size came
 back" passes on a build whose renderer does nothing at all.
 
-**Write parity is byte identity, and it is measured.** Two scripts with every
+**Write parity is byte identity.** Two scripts with every
 input pinned — *fill-and-save* opens `testdata/form-fields.pdf`, fills its
 damaged field, its undamaged control field, a checkbox and a radio group and
 saves incrementally; *build-a-document* registers a base font and an image,
 draws two pages through `begin_page`/`push_page`, sets `/Info` and an outline
-and finishes — run on all four surfaces. On windows/x86_64, August 2026, all
-four printed the same two hashes:
-
-```text
-fill-and-save    59f1efce6e4e5bfa8915fdee31e43f629e6373512de8040bf8e6404b7fe78af3
-build-a-document 1dbb7ace2a5787016efa257ab8c3efdb6ceae1b339f8597266ad47c5828dac62
-```
-
-That is the write-side analogue of the read side's 1 190 inked pixels, and it
-is the evidence for ruling 11: surfaces disagreeing would mean one of them
-added something. The image both scripts draw is computed from a formula rather
+and finishes — run on every surface, and every surface must print the same
+hash. That is the evidence for ruling 11: surfaces disagreeing would mean one
+of them added something. The image both scripts draw is computed from a formula rather
 than read from a file, so every language produces the same 64 bytes with no
 fixture between them — a parity suite whose surfaces read the same *file*
 proves only that they can read a file.
@@ -619,12 +578,6 @@ sets a trim box and a bleed box and replaces the outline, then saves;
 saves again, and writes its report down as *sanitise-report* — removed
 entries with their holders and paths, deleted objects — so what went is
 compared as well as what is left.
-
-```text
-document-ops     a8c436d092a929ce9ddfbc53b5fe1f48f7ff2141d23148a7b1e003a4dfb445e9
-sanitise         f6f9cedc25ac039b7b45d4baf8507ca38610228a8c3867ed3898b72ec239451d
-sanitise-report  a73b92e55800b856cb0f46107d89ce26d51ca9f8c941e536790305255d26300f
-```
 
 **And read parity is text identity.** A further script, *read-surface*, opens
 three documents — `testdata/outline-3level.pdf` with five bytes in front of
@@ -640,20 +593,8 @@ byte for byte in `crates/tinker-pdf/examples/write_parity.rs`: strings and
 byte strings as hex, numbers as the sixteen hex digits of their IEEE 754 bits,
 because every language formats `1.5` differently and a parity check that
 tolerated "close" in a coordinate would be measuring the formatters. Each
-surface prints `READ sha256=` of it. On linux/x86_64, October 2026, the
-facade, the wheel and the npm package printed
-
-```text
-read-surface     c02151fc924133fe2864d1b05bc57e5eaafaddab86f0be2b2088549fd91af5c0
-signatures       c3490eb5f9a5c893893494bf0c51269ef718f915051053d6b30ff7ae7c1ad2ff
-```
-
-and the .NET leg is written to print every one of them too (its build is
-unverified here: no .NET SDK on the machine that wrote it). *read-surface*
-first read `be7deb04…`; it moved to the hash above when it gained the
-document-ops artefact and the boundaries, which is the one recorded update a
-legitimate change costs. *signatures* is the fourth script:
-it opens three documents the signature tests commit — an ECDSA P-256
+surface prints `READ sha256=` of it. *signatures* opens three documents the
+signature tests commit — an ECDSA P-256
 signature, an `adbe.pkcs7.sha1` one and an RFC 3161 document timestamp —
 and a fourth made from the first, and writes down every signature as read
 and every verdict twice, anchored to the document's own root (or to nothing,
@@ -661,20 +602,17 @@ for the timestamp, which is what reaches `no-anchors`), judged at no instant
 and at the epoch. The fourth, `ecdsa-p256-altered`, is `ecdsa-p256.pdf` with
 the first `verdict path` in its bytes changed to `verdict PATH` — inside the
 signed range and the same length — so it is the one verdict whose document
-digest (`differs`) and signature check (`verified`) disagree. *signatures*
-first read `e2f5e33c…` without it, and every surface agreed with it while a
-Ruby binding that read those two answers from each other's accessor agreed
-too: the Ruby injection campaign found that, and the altered document is
-what closes it. Only what the C ABI carries goes into the text, so every
+digest (`differs`) and signature check (`verified`) disagree, and a surface
+that read those two answers from each other's accessor disagrees with the
+rest. Only what the C ABI carries goes into the text, so every
 surface can produce it; the payloads Python and JavaScript carry besides are
 asserted in their own scripts against what the fixtures are known to be.
 
-**And the options a save takes.** Every script above saves with the defaults
+**And the options a save takes.** The scripts above save with the defaults
 but the mode, so a surface that dropped linearization, the version, object
-streams, compression or garbage collection on the way to the engine agreed
-with every surface that did not — which the Go binding's injection campaign
-showed by inverting garbage collection and changing nothing. Two more scripts
-close it: *save-options* opens the document-ops artefact, deletes page 1 and
+streams, compression or garbage collection on the way to the engine would
+agree with every surface that did not. Two more scripts cover them:
+*save-options* opens the document-ops artefact, deletes page 1 and
 appends `0 0 m 100 100 l S` to page 0 (something for garbage collection to
 drop and an unencoded stream for compression to compress), then saves a
 rewrite declaring PDF 2.0 with object streams, compression and garbage
@@ -685,11 +623,6 @@ off is the same bytes — so a single save would not see two of the options.
 Encryption is the one left to the smoke programs, which reopen an encrypted
 save with its password, because the artefact would need the password to be
 validated here.
-
-```text
-save-options     652c7cd32149a0f6fd06e921fa9762e2c8411aa09fbfc732ea6a2c991e369704
-save-linearized  e64bffa59ffbc7a4b7335abdc634bc567a615d9f29e23ef1673c51e07f3ac7fc
-```
 
 **And the forms surface, both halves.** *forms* opens the form fixture and,
 through one editor, creates a field of every kind `add_field` makes — a text
@@ -708,12 +641,7 @@ value's shape and strings, every warning, and the hashes of the data written
 back as FDF and as XFDF (`refused` for the last); and last, that bytes which
 are neither format are refused by each reader. The altered FDF is there for
 the reason the altered signed document is: without it, a surface that
-spelled one of those three warnings as another agreed with every surface.
-
-```text
-forms            84b2daef81a1d6342fec8052971b25ea6ab82a366cd3afcd068c490806f1bc3b
-form-data        f81ce8279205bd2ce3058b3d2f5e0fd4347ef4e00300e367d1a54c873ad2aa51
-```
+spelled one of those three warnings as another would agree with every surface.
 
 *graphics* builds a two-page document declaring PDF 2.0 with every one of
 the builder's graphics resources used: a standard font under a named
@@ -721,12 +649,8 @@ encoding drawn by code with both spacings, an isolated grey transparency
 group with a matrix and a plain form, a graphics state with both alphas, a
 blend mode and a luminosity soft mask over the group with a backdrop and a
 second that only turns the mask off, a tiling pattern with a matrix filling
-and stroking, a bleed box, and an image the second page no longer names
-once the list is cleared.
-
-```text
-graphics         8bf69d84af79241a94e6770e315ce79dfa9cf1d6f85052af122444c3b94dac5f
-```
+and stroking, a bleed box, and an image the second page does not name, the
+list being cleared before it.
 
 *tagged* builds a two-page tagged document through `open_tag` and
 `close_tag`: the catalog's `/Lang`, a custom type mapped to `H1` with a
@@ -738,33 +662,23 @@ read them the other way round); a close with nothing open is refused on
 every surface and changes
 nothing.
 
-```text
-tagged           ca75ed2bff10974b46fcc9a55a77fd0b75411085b37a5f263c1559b4d3fba29f
-```
-
-On linux/x86_64, October 2026, the facade, the wheel, the npm package and the
-Go, Ruby and Java bindings printed all thirteen recorded hashes; the .NET leg
-prints them too and was not run.
-
 `cargo xtask bindings-parity` is the gate, and it is built around two different
 failures. A **mismatch** is the one everybody thinks of. An **absent line** —
 a surface that ran, exited zero and printed no `WROTE sha256=` at all — is the
 one that gets shipped, because a script that silently does nothing looks
 exactly like a passing one; both exit non-zero. A surface whose artefact is not
 installed on the machine is **SKIPPED**, by name and with the reason, and the
-run says how many ran and how many did not: retired ruling 9 left that
-discipline behind it and ruling 13 restates it, so a job that quietly found no
-interpreter cannot pass. `--require-all` turns every skip into a failure, and
-that is what `ci.yml`'s `bindings-parity` job passes after building and
-installing every artefact and setting up Go, Ruby and JDK 21. The three
-bindings over the C ABI are skipped, by name, when the release library is not
-built or their toolchain is not on `PATH`; Java's compile is a step that must
-succeed first, so a binding that does not compile fails rather than skips.
+run says how many ran and how many did not (ruling 13), so a job that quietly
+found no interpreter cannot pass. `--require-all` turns every skip into a
+failure, and that is what `ci.yml`'s `bindings-parity` job passes after
+building and installing every artefact and setting up Go, Ruby and JDK 21. The
+three bindings over the C ABI are skipped, by name, when the release library is
+not built or their toolchain is not on `PATH`; Java's compile is a step that
+must succeed first, so a binding that does not compile fails rather than skips.
 The Go surface runs with the library search path set to `target/release`
 alone, because under `cargo run` it otherwise holds `target/debug/deps`, where
-a test build had left an older `libtinker_pdf_ffi` — the loader prefers the
-search path to the program's run path, and the parity program died with exit
-status 127 on the first symbol the stale library lacked.
+a test build can leave an older `libtinker_pdf_ffi`, and the loader prefers the
+search path to the program's run path.
 
 **Agreement is not enough, and this is what makes it enough.** Seven
 byte-identical outputs tell you nothing if all seven are wrong. So every surface
@@ -776,7 +690,7 @@ handle on the C ABI, `Document.validate()` in Python and JavaScript,
 first-party, and that is precisely why it can be a gate here rather than an
 external step somebody might not have installed.
 
-The recorded hashes live in `xtask/src/parity.rs` rather than beside the three
+The recorded hashes live in `xtask/src/parity.rs` rather than beside the
 synthesised-document hashes in `crates/tinker-pdf/tests/determinism.rs`. Those
 are a *rendering* claim's fingerprints, moved only by the renderer or the
 synthesiser, and interleaving a bindings hash among them would make a writer
@@ -788,55 +702,31 @@ legitimate writer change is one recorded update instead of seven flaky suites.
 release` walks wheel, npm package, NuGet package and crates in an order
 computed from the manifests. The dry run is the default and `--execute` is
 the flag that publishes, because a half-published release cannot be
-retracted from crates.io. On Windows/x86_64 all four were built, installed
-and rendered through, each producing the same **1 190 inked pixels** — the
-evidence they are projections of one engine. **Nothing has been published
-to any registry**, deliberately: the facade does not freeze until 0.1.0 and
-a published package invites dependence on an API that is explicitly
-unstable. The exercise found three defects nothing else could — a crate
-excluding the CMap registry its own `build.rs` requires, workspace
-dependencies without `version` beside `path`, and the managed-only NuGet
-package above.
+retracted from crates.io. **Nothing is published to any registry**: the
+facade does not freeze before 0.1.0, and a published package invites
+dependence on an API that is explicitly unstable. In `release.yml` a tag
+builds every artefact and publishes none — publishing needs a
+`workflow_dispatch` carrying `publish: true` — and a final job counts the
+three abi3 wheels, the npm package's `.wasm` and the `.nupkg` and fails unless
+all are there.
 
-**And ten of the fifteen crates had never been in it.** `cargo publish
---dry-run` resolves dependencies against the live index, and nothing named
-`tinker-pdf-*` has ever been published there, so every crate above the five
-leaves failed with `no matching package named tinker-pdf-crypto` — which reads
-exactly like a broken manifest and is not one. The dry run's answer was to
-report those steps as unprovable and carry on, so "the pipeline has been
-exercised end to end" covered a third of it.
+`cargo publish --dry-run` resolves dependencies against the live index, and
+nothing named `tinker-pdf-*` is published there, so every crate above the
+leaves fails a plain dry run with `no matching package named
+tinker-pdf-crypto` — which reads exactly like a broken manifest and is not
+one — and the plain dry run reports those steps as unprovable.
 
-`cargo run -p xtask -- release --local-registry` closes that. Each crate's
+`cargo run -p xtask -- release --local-registry` proves them. Each crate's
 registry dependencies are patched at `target/package/<name>-<version>/` — the
 unpacked archive the previous step left behind — so every crate is *verified
 against the same bytes its dependents would download*, which is nearer to a
 real publish than building against this checkout would be. The patch set is
 everything published before that crate: one level deep is not enough, because a
 packaged dependency has registry dependencies of its own, and the whole
-workspace is too much, because nothing is packaged when the first crate runs.
-Both were tried, and both failures are written into the test that pins the
-width. The whole pipeline now reports **23 of 24 steps run, 0 unprovable** —
-the one skip is `dotnet nuget push`, which has no harmless form.
-
-**Observed, on one tag, 24 August 2026.**
-[Run 32690957039](https://github.com/ravindu-rev/tinker-pdf/actions/runs/32690957039)
-at `bf1630b`: thirteen jobs, twelve green and `publish` skipped, which is what
-a tag push is supposed to do — publishing needs a deliberate
-`workflow_dispatch` carrying `publish: true` and a tag cannot reach it. The
-`crates` job packaged and verified all fifteen crates on Linux, reporting `15
-step(s) ran, 0 skipped, 0 unprovable`. The collector counted what came out:
-
-```
-wheels=3 (abi3=3) wasm=1 nupkg=1
-RELEASE-ARTEFACTS: ALL FOUR PRESENT
-```
-
-Three abi3 wheels — `manylinux_2_17_x86_64`, `win_amd64`, `macosx_11_0_arm64`
-— one npm package carrying `tinker_pdf_js_bg.wasm`, one `TinkerPdf.0.0.1.nupkg`
-with all three native libraries staged into it, and the browser demo built.
-Until this run every Linux and macOS leg in `release.yml` was configuration
-nobody had watched, and "one tag produces all four" was a claim rather than a
-measurement. **Nothing was published, and nothing has been.**
+workspace is too much, because nothing is packaged when the first crate runs;
+`each_crate_is_patched_against_the_ones_before_it` in `xtask/src/release.rs`
+pins the width. Under it nothing is unprovable, and the one step skipped is
+`dotnet nuget push`, which has no harmless form.
 
 ## API
 
@@ -1021,10 +911,10 @@ nothing — it spawns nothing (ruling 13) — and CI's `bindings` job regenerate
 the header and fails on any difference, which is what catches a signature that
 moved under an unchanged name. The .NET binding's P/Invoke declarations and
 the Ruby binding's `extern` lines are worked transcriptions of it, the Java
-binding's downcalls were generated from it, Go compiles against it and Swift
+binding's downcalls are generated from it, Go compiles against it and Swift
 imports it as a module. What a transcription cannot see from the header is a
 struct's padding, so `tests/layout.rs` pins the size and every field offset of
-the fourteen structs a binding packs by hand.
+every struct a binding packs by hand.
 
 Each of the first three bindings' READMEs ([js](../../bindings/js/README.md),
 [python](../../bindings/python/README.md),
@@ -1038,23 +928,23 @@ packaged.
 | What | How it shows | Why | See |
 | --- | --- | --- | --- |
 | `ImageData::Compressed` | `TpdfImageKind` has `Jpeg`, `Rgb8` and `Gray8` and no fourth arm | it carries a `CompressedImage` whose colour space holds a palette slice and whose filter holds its own parameters, so projecting it is a sub-surface rather than a struct. It exists for the CBZ synthesiser, which must not decode 200 pages at open — an engine-internal path with no host at the other end. A host holding already-compressed bytes has `Jpeg`, which is the same idea for the one codec hosts actually hold bytes in | [creation](creation.md) |
-| A tag's `table`, `namespace` and `associated_file`; `PageBuilder::continue_at`; `DocumentBuilder`'s `map_role_in`, `add_namespace` and `duplicate_element_ids` | not projected (`PageBuilder::tagged` **is**, since October 2026, as the `open_tag`/`close_tag` pair, with a tag's text properties, identifier, key and keep-empty flag, `set_language` and `map_role`) | owed rather than refused: each takes or returns a shape of its own — `TableAttributes` with its header lists and spans, a `NamespaceId` handle a builder issues, a `NewAssociatedFile`, a list of identifiers | [creation](creation.md) |
-| The rest of `PageBuilder` — `glyphs`, `text_pieces`, `shading` — and `DocumentBuilder`'s `add_cid_font`, `glyph_run`, `add_shading`, `add_shading_pattern` | not projected (the graphics states, forms, tiling patterns, named fonts, encoded text, bleed box, version and `clear_image_resources` **are**, since October 2026) | owed rather than refused: `glyphs` and `glyph_run` draw `Glyph`s through a composite font (and `text_pieces` takes them beside a simple font's codes, in `TextPiece`s), which `add_cid_font` registers from a font program, and `add_shading` takes a `Shading` built on a `Function` — recursive, with a PostScript calculator arm — a sub-surface of its own. `tpdf_page_builder_raw` is the escape hatch that keeps them reachable in the meantime | [ROADMAP.md](../ROADMAP.md) |
-| `DocumentEditor`'s `import_page`, `keep_pages`, `flatten_annotations`, `add_annotation`, `reset_form`, `set_field_values`, `set_calculated_values` | not projected (`recalculate` **is** projected, as `tpdf_editor_recalculate`, and this row listed it by mistake) | the same: owed, each with a shape of its own — a second document, a slice of indices, a `Dict`, a `Recalculation` — and none named by the milestones | [ROADMAP.md](../ROADMAP.md) |
-| The graphics-writing surface added in September 2026: `Target::Named` and both `add_named_destination`s; `DocumentBuilder::add_layer`, `PageBuilder::optional` and `DocumentEditor::set_layer_visible`; `add_separation_color_space`, `add_device_n_color_space`, `set_fill_tint` / `set_stroke_tint` and `ImageColorSpace::Tint`; `DocumentEditor`'s `stamp`, `add_resource`, `add_form` and `import_page_as_form`; `Page::images` | not projected | owed rather than refused: each takes or returns a shape of its own — a `LayerId` handle, a `Function::Calculator` program, `DeviceNAttributes`, a `StampPlacement` and a form reference, a `PageImage` with its samples, masks and placements — and `optional` takes a closure, so it needs a closure-free pair on the page handle as `tagged` does. Ruling 11 makes each a debt the day it reached the facade | [ROADMAP.md](../ROADMAP.md) |
-| The device-independent colour writers: `add_icc_color_space` with `set_fill_icc` / `set_stroke_icc` and `ImageColorSpace::Icc`, and the CIE writer added in October 2026 — `CieSpace`, `DocumentBuilder::add_cie_color_space`, `PageBuilder::set_fill_cie` / `set_stroke_cie`, `ImageColorSpace::Cie` and `ImageColorSpace::Lab` | not projected | owed rather than refused: `CieSpace` is an enum whose three arms each carry their own parameters — a white and a black point, one gamma or three, a column-by-column matrix, an `a*`/`b*` range — which a C enum has no room for, so it needs a struct of its own; the setters take a component slice whose length the registered space decides, as `set_fill_tint` does; and the image arms are colour spaces of `ImageData::Compressed`, as `ImageColorSpace::Tint` is. Ruling 11 makes each a debt the day it reached the facade | [ROADMAP.md](../ROADMAP.md) |
-| Signing: `save_signed`, `Signer` | no `tpdf_*` entry point takes a callback | a signer is a host callback, and callbacks across the C ABI were a non-goal of the write design until 9 October 2026; in-engine keys, deferred two-phase signing and a signing callback are a roadmap row | [ROADMAP](../ROADMAP.md) SG-09 (design/bindings-write.md) |
+| A tag's `table`, `namespace` and `associated_file`; `PageBuilder::continue_at`; `DocumentBuilder`'s `map_role_in`, `add_namespace` and `duplicate_element_ids` | not projected (`PageBuilder::tagged` **is**, as the `open_tag`/`close_tag` pair, with a tag's text properties, identifier, key and keep-empty flag, `set_language` and `map_role`) | owed rather than refused: each takes or returns a shape of its own — `TableAttributes` with its header lists and spans, a `NamespaceId` handle a builder issues, a `NewAssociatedFile`, a list of identifiers | [creation](creation.md) |
+| The rest of `PageBuilder` — `glyphs`, `text_pieces`, `shading` — and `DocumentBuilder`'s `add_cid_font`, `glyph_run`, `add_shading`, `add_shading_pattern` | not projected (the graphics states, forms, tiling patterns, named fonts, encoded text, bleed box, version and `clear_image_resources` **are**) | owed rather than refused: `glyphs` and `glyph_run` draw `Glyph`s through a composite font (and `text_pieces` takes them beside a simple font's codes, in `TextPiece`s), which `add_cid_font` registers from a font program, and `add_shading` takes a `Shading` built on a `Function` — recursive, with a PostScript calculator arm — a sub-surface of its own. `tpdf_page_builder_raw` is the escape hatch that keeps them reachable in the meantime | [ROADMAP.md](../ROADMAP.md) |
+| `DocumentEditor`'s `import_page`, `keep_pages`, `flatten_annotations`, `add_annotation`, `reset_form`, `set_field_values`, `set_calculated_values` | not projected (`recalculate` **is** projected, as `tpdf_editor_recalculate`) | the same: owed, each with a shape of its own — a second document, a slice of indices, a `Dict`, a `Recalculation` | [ROADMAP.md](../ROADMAP.md) |
+| The graphics-writing surface: `Target::Named` and both `add_named_destination`s; `DocumentBuilder::add_layer`, `PageBuilder::optional` and `DocumentEditor::set_layer_visible`; `add_separation_color_space`, `add_device_n_color_space`, `set_fill_tint` / `set_stroke_tint` and `ImageColorSpace::Tint`; `DocumentEditor`'s `stamp`, `add_resource`, `add_form` and `import_page_as_form`; `Page::images` | not projected | owed rather than refused: each takes or returns a shape of its own — a `LayerId` handle, a `Function::Calculator` program, `DeviceNAttributes`, a `StampPlacement` and a form reference, a `PageImage` with its samples, masks and placements — and `optional` takes a closure, so it needs a closure-free pair on the page handle as `tagged` does. Ruling 11 makes each a debt | [ROADMAP.md](../ROADMAP.md) |
+| The device-independent colour writers: `add_icc_color_space` with `set_fill_icc` / `set_stroke_icc` and `ImageColorSpace::Icc`, and the CIE writer — `CieSpace`, `DocumentBuilder::add_cie_color_space`, `PageBuilder::set_fill_cie` / `set_stroke_cie`, `ImageColorSpace::Cie` and `ImageColorSpace::Lab` | not projected | owed rather than refused: `CieSpace` is an enum whose three arms each carry their own parameters — a white and a black point, one gamma or three, a column-by-column matrix, an `a*`/`b*` range — which a C enum has no room for, so it needs a struct of its own; the setters take a component slice whose length the registered space decides, as `set_fill_tint` does; and the image arms are colour spaces of `ImageData::Compressed`, as `ImageColorSpace::Tint` is. Ruling 11 makes each a debt | [ROADMAP.md](../ROADMAP.md) |
+| Signing: `save_signed`, `Signer` | no `tpdf_*` entry point takes a callback | a signer is a host callback; in-engine keys, deferred two-phase signing and a signing callback are a roadmap row | [ROADMAP](../ROADMAP.md) SG-09 (design/bindings-write.md) |
 | The payloads inside a signature enum — which revision, which defect, whose certificate, how many bits | the enum arm crosses, the payload does not | a C enum has no payload, and a struct invented here to carry one would be this crate spelling something the facade already spells (ruling 11) | [signatures](../design/signatures.md) |
-| A signature's `/Contents` blob, `/M`, `/ContactInfo`, `/Filter` and its lenient-read warnings on the C ABI (Python and JavaScript carry them), and `Signature::modifications` everywhere | not projected | owed rather than refused: each is a shape of its own — raw bytes, a date, a list of changed objects — rather than another string or enum, and none is named by the milestone | [signatures](../design/signatures.md) |
-| The signature and public-key surface added in October 2026: `DocumentEditor::save_timestamped` with `Timestamper` and `TimestampRequest`; `add_validation_data` with `ValidationData`; `Document::security_store` with `SecurityStore` and `SecurityStoreWarning`; `PublicKeyEncryption::seal` and `DocumentEditor::save_sealed`; `Verdict::timestamps` with `TimestampVerdict`; `Signature::validation_key` | not projected | owed rather than refused. `Timestamper` is a host callback, which the write design keeps off the C ABI as it keeps `Signer`, and `seal` takes an `EntropySource`, which is another; the rest take or return shapes of their own — lists of DER blobs, a store of object references, a per-token verdict with its own enums. Ruling 11 makes each a debt the day it reached the facade | [ROADMAP.md](../ROADMAP.md) |
-| Counted work: `RenderOptions::stats`, `Bitmap::stats` and `Stats`, added in October 2026 | not projected; `tpdf_page_render` and every binding's render count nothing and hand back no stats | owed rather than refused: the C ABI's render takes a scale and a format rather than the options, so asking needs an entry point of its own, and `Stats` is `#[non_exhaustive]` and gains a counter with each row that counts one, so a struct carrying it across needs a layout that can grow. Ruling 11 makes it a debt the day it reached the facade | [performance](../design/performance.md) |
-| `DocumentEditor::check_save` and `check_decrypt` with `SaveRefusal`, added in October 2026 | not projected; a save through the C ABI or a binding writes what it is asked to, so a rewrite of an encrypted input asking for no encryption writes it decrypted, as the facade's own `save` does | owed rather than refused: each is a question asked before a write, answered by an enum one arm of which carries a `Permissions`. Whether the save doors themselves refuse is the owner's decision in the ROADMAP's CLI row; if they come to, every surface that saves through them refuses with them | [encryption](encryption.md) |
+| A signature's `/Contents` blob, `/M`, `/ContactInfo`, `/Filter` and its lenient-read warnings on the C ABI (Python and JavaScript carry them), and `Signature::modifications` everywhere | not projected | owed rather than refused: each is a shape of its own — raw bytes, a date, a list of changed objects — rather than another string or enum | [signatures](../design/signatures.md) |
+| The signature and public-key surface: `DocumentEditor::save_timestamped` with `Timestamper` and `TimestampRequest`; `add_validation_data` with `ValidationData`; `Document::security_store` with `SecurityStore` and `SecurityStoreWarning`; `PublicKeyEncryption::seal` and `DocumentEditor::save_sealed`; `Verdict::timestamps` with `TimestampVerdict`; `Signature::validation_key` | not projected | owed rather than refused. `Timestamper` is a host callback, which the write design keeps off the C ABI as it keeps `Signer`, and `seal` takes an `EntropySource`, which is another; the rest take or return shapes of their own — lists of DER blobs, a store of object references, a per-token verdict with its own enums. Ruling 11 makes each a debt | [ROADMAP.md](../ROADMAP.md) |
+| Counted work: `RenderOptions::stats`, `Bitmap::stats` and `Stats` | not projected; `tpdf_page_render` and every binding's render count nothing and hand back no stats | owed rather than refused: the C ABI's render takes a scale and a format rather than the options, so asking needs an entry point of its own, and `Stats` is `#[non_exhaustive]` and gains a counter with each row that counts one, so a struct carrying it across needs a layout that can grow. Ruling 11 makes it a debt | [performance](../design/performance.md) |
+| `DocumentEditor::check_save` and `check_decrypt` with `SaveRefusal` | not projected; a save through the C ABI or a binding writes what it is asked to, so a rewrite of an encrypted input asking for no encryption writes it decrypted, as the facade's own `save` does | owed rather than refused: each is a question asked before a write, answered by an enum one arm of which carries a `Permissions`. Whether the save doors themselves refuse is an open question on the ROADMAP; if they do, every surface that saves through them refuses with them | [encryption](encryption.md) |
 | CommonJS build | none; ESM only | two builds of the engine can diverge; a CommonJS entry that re-exports the one ESM build cannot | [ROADMAP](../ROADMAP.md) SU-14 |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |
-| Streaming in Ruby | `TinkerPdf::Document` has no streaming open; the other 220 functions are there | `tpdf_document_open_streaming` takes its vtable **by value**, and Fiddle passes no struct by value; and the engine calls `read` from whatever thread is working, where a Ruby block would run without the GVL. A by-pointer variant on the C ABI would answer the first and not the second | [opening](opening.md) |
-| Swift beyond its core | 49 of 221 functions, no parity program, no CI | written without a toolchain; widening unverified source would only widen what nobody has run | [ROADMAP.md](../ROADMAP.md) |
-| Published packages | `pip install` / `npm install` / `dotnet add package` do not work yet, and Go, Ruby, Java and Swift have no package at all | the facade is unstable until 0.1.0 | [ROADMAP.md](../ROADMAP.md) |
+| Streaming in Ruby | `TinkerPdf::Document` has no streaming open; every other function is there | `tpdf_document_open_streaming` takes its vtable **by value**, and Fiddle passes no struct by value; and the engine calls `read` from whatever thread is working, where a Ruby block would run without the GVL. A by-pointer variant on the C ABI would answer the first and not the second | [opening](opening.md) |
+| Swift beyond its core | the core only, no parity program, no CI | never compiled; widening unverified source would only widen what nobody has run | [ROADMAP.md](../ROADMAP.md) |
+| Published packages | `pip install` / `npm install` / `dotnet add package` do not work, and Go, Ruby, Java and Swift have no package at all | the facade is unstable before 0.1.0 | [ROADMAP.md](../ROADMAP.md) |
 
 ## Verified
 
@@ -1083,8 +973,7 @@ packaged.
   destination kinds with NaN as null; a double `finish` and a double
   `push_page` returning `SpentHandle` and naming the call that spent the
   handle; an abandoned page leaving the document byte-identical; and a null on
-  every one of the fifty-five entry points with every new `tpdf_*_free`
-  accepting null.
+  every entry point, with every `tpdf_*_free` accepting null.
 - The signature surface is pinned by an **equality with the facade**, which
   is what makes it a projection rather than a second implementation: a
   fixture signed twice through `DocumentEditor::save_signed` with a stub
@@ -1102,8 +991,7 @@ packaged.
   failing, an anchor that is not a certificate refused and not kept, the
   instant ignored unless the flag says otherwise, and signatures outliving
   the document they came from. The crate type-checks in CI on every commit (the bindings
-  and fuzz crates are outside the workspace, so CI checks them explicitly —
-  four fuzz targets once failed to compile for months because nothing did).
+  and fuzz crates are outside the workspace, so CI checks them explicitly).
 - Smoke tests run against an *installed* artifact, never the source tree:
   `bindings/python/tests/wheel_smoke.py` against a `pip install`ed wheel,
   `bindings/js/tests/node_smoke.mjs` against an `npm install`ed tarball,
@@ -1115,7 +1003,7 @@ packaged.
   argument, each printing `WROTE sha256=<hex>` per script, and
   `crates/tinker-pdf/examples/write_parity.rs` doing the same against the
   facade. `release.yml` greps for those lines on every platform its smoke jobs
-  already cover, so a package that shipped a read-only `cdylib` fails its own
+  cover, so a package that shipped a read-only `cdylib` fails its own
   release pipeline. Each also asserts the leg its language can express and the
   others cannot: the Python context manager and the .NET
   callback-`Transaction` restore on an exception, and the JavaScript three
@@ -1136,19 +1024,10 @@ packaged.
   warning's offset, object, slug and sentence must agree. Around them: an
   index past each list's end is `BadArgument`, a page past the end is
   `NoSuchPage`, the attachments handle reads bytes after its document is
-  freed, a null handle is refused on all thirty-four entry points and every
-  new free accepts null, and the four new enums' numbers are pinned. Counted
-  injections, October 2026: a `/FitH` top written into the view's left edge
-  fires **1** test (the outline equality); the first warning dropped fires
-  **1** (the warnings equality); a Python warning offset off by one, and the
-  JavaScript link rectangle's first two numbers swapped, each fail
-  `bindings-parity` on their surface's `read-surface` hash. The page-label
-  handle, October 2026: its count answered one short fires **2** tests (the
-  equality and the 300-page handle) and fails `read-surface` on Go, Ruby and
-  Java; a document with no labels answered with an empty label per page
-  fires **1** (the shifted fixture's empty handle) and fails the same three
-  hashes. The hashes themselves did not move: the scripts read the same
-  labels through one walk and print the same text.
+  freed, `the_page_label_handle_holds_its_own_copy_of_every_label` frees the
+  document before reading the first of 300 labels and holds every read to the
+  facade's, a null handle is refused on every entry point and every
+  free accepts null, and the enums' numbers are pinned.
 - **The document operations are pinned by byte equality with the facade**
   (`src/docops/tests.rs`): every operation made through the C ABI and the
   same operations against `DocumentEditor` save the same bytes, which the
@@ -1162,13 +1041,7 @@ packaged.
   key to the text setter and the reverse, `Absent` to `set_trapped`, a
   rectangle with no area, a page past the end) writing nothing and naming
   why; a spent outline entry refused on a second `set_outline`; null on every
-  one of the sixteen entry points; the five new enums' numbers and
-  `TpdfDate`'s 32 bytes pinned. Counted injections, October 2026: the
-  roman-lower label style written upper fires **1** (the byte equality); the
-  sanitise report's holder flag inverted fires **1** (the report equality);
-  Python's date with hour and minute swapped, and JavaScript's trim box
-  written as a bleed box, each fail `bindings-parity` on their surface's
-  *document-ops*, *sanitise* and *read-surface* hashes.
+  entry point; the enums' numbers and `TpdfDate`'s 32 bytes pinned.
 - **The forms surface is pinned by byte equality with the facade**
   (`src/forms/tests.rs`): a field of every kind created through the C ABI
   and through `DocumentEditor::add_field` saves the same bytes; a document's
@@ -1182,23 +1055,11 @@ packaged.
   with no buttons) writing nothing and naming why; bytes that are neither
   format, and a value XML
   cannot carry, refused as `FormDataRefused` with the reader's sentence;
-  null and out-of-range on every one of the twenty-two entry points; the two
-  new enums' numbers pinned; and `TpdfRadioButton`'s 48 bytes in
-  `tests/layout.rs`. Counted injections, October 2026: a check box starting
-  the other way round fires **1** (the byte equality); `TreeCut` and
-  `ValueUnreadable` crossing as each other fired **0** until the warnings
-  test gained the FDF that reaches every arm, and fires **1** with it; and
-  eight defects in the bindings' own code, each failing `bindings-parity` on
-  that surface alone — Go's `/MaxLen` dropped and a radio button's top edge
-  crossing as its bottom (*forms*), Ruby's check box crossing unticked
-  (*forms*, *form-data*) and a warning's key and field crossing as each other
-  (*form-data*), Java's state read back as text (*form-data*) and combo and
-  editable crossing as each other (the list box refused, so no line at all),
-  Python's `tree-cut` spelled `value-unreadable` (*form-data*) and
-  JavaScript's `maxLen` dropped (*forms*): **8 of 8 caught**.
+  null and out-of-range on every entry point; the enums' numbers pinned; and
+  `TpdfRadioButton`'s 48 bytes in `tests/layout.rs`.
 - **The builder's graphics resources are pinned by byte equality with the
   facade** (`src/graphics/tests.rs`): a document using every one of the
-  thirteen calls builds the same bytes through the C ABI and through
+  calls builds the same bytes through the C ABI and through
   `DocumentBuilder`, declares 2.0 and passes the strict validator; an
   initialised `TpdfExtGState` registers exactly `ExtGState::default()`; each
   refusal (a version part past a byte, names and widths that disagree, a
@@ -1206,16 +1067,7 @@ packaged.
   degenerate box, a zero step, four page calls naming nothing) writes
   nothing, so the finished document equals the facade's built from the
   calls that were taken; null on every entry point and a spent builder are
-  refused; the five enums' numbers and both structs' layouts are pinned.
-  Counted injections, October 2026: the stroking alpha crossing as the fill
-  alpha fires **1** (the byte equality); the initialised fill alpha written
-  as 0 fires **2** (the default equality and the byte equality);
-  no-distortion tiling as constant spacing fires **1**; and five defects in
-  the bindings' own code, each failing `bindings-parity` on that surface's
-  *graphics* hash alone — Go's matrix crossing reversed, Ruby's isolated and
-  knockout flags crossing as each other, Java's character and word spacing
-  crossing as each other, Python's `no-distortion` spelled as faster tiling,
-  JavaScript's stroking alpha dropped: **5 of 5 caught**.
+  refused; the enums' numbers and both structs' layouts are pinned.
 - **Tagged writing is pinned by byte equality with the facade**
   (`src/tagging/tests.rs`): the *tagged* script's document built through the
   C ABI equals the facade's, passes the strict validator and reads back
@@ -1223,70 +1075,24 @@ packaged.
   keyed halves; a refused role mapping, a close with nothing open and the
   opens past the depth the reader walks write nothing, so the document
   equals the facade's built from the calls that were taken; null on every
-  entry point is refused; `TpdfTagText`'s numbers are pinned. Counted
-  injections, October 2026: alternate text written as actual text fires
-  **1** (the byte equality); a close with nothing open answering `Ok` fires
-  **2** (the refusal test and the byte equality); a key that loses its order
-  fired **0** while the script drew its keyed halves in reading order, so
-  every surface's script now draws them out of it — the recorded hash moved
-  from `bcaf91ec…` to `ca75ed2b…` for that reason and no other — and it
-  fires **1**. Six defects in the bindings' own code, each failing
-  `bindings-parity` on that surface's *tagged* hash alone — Go's key
-  crossing as its order, Ruby's `ALT` transcribed as `ACTUAL_TEXT` and
-  Ruby's key losing its order, Java's language dropped, Python's language
-  written as the title, JavaScript's `keepEmpty` keeping nothing: **6 of 6
-  caught**.
+  entry point is refused; `TpdfTagText`'s numbers are pinned.
 - **Signatures in Python and JavaScript** are held by the *signatures*
   script's hash, equal to the facade's, and by an assertion leg in each
   script for what only those two carry: an anchor that is not a certificate
   refused and not kept, the anchor's and recognised subfilter's names, DER in
   `/Contents`, one `SignerInfo`, the anchor subject the chain names, an
   `outside-validity` weakness naming a subject when judged at the epoch, and
-  `no-anchors` with no subject and no trust when nothing is trusted. Counted
-  injections, October 2026: Python's chain dropping the anchor's subject
-  fails its assertion leg; Python's whole-file coverage named `revision`, and
-  JavaScript's `sha1-digest` renamed, each fail `bindings-parity` on their
-  surface's *signatures* hash.
-- `cargo xtask bindings-parity` compares all four against the recorded answer
-  in `xtask/src/parity.rs`. Its counted injections, run August 2026: a wrong
-  recorded hash is reported by **all four** surfaces with both the written and
-  the expected value; a surface whose print statement is disabled — so it runs,
-  exits zero and produces no evidence — fails on **2 assertions**, one per
-  script, with the "printed no `WROTE sha256=` line" message rather than
-  passing quietly. Skips were exercised too: pointing it at a missing
-  interpreter and a missing `node_modules` reports both by name with the
-  command that would fix each, exits 0 without them, and exits non-zero under
-  `--require-all`.
-- **Go, Ruby and Java** are held by the parity programs — all thirteen hashes,
-  equal to the facade's, on linux/x86_64 with Go 1.24, Ruby 3.3 (Fiddle 1.1)
-  and OpenJDK 21, October 2026 — and by smoke programs that render
+  `no-anchors` with no subject and no trust when nothing is trusted.
+- `cargo xtask bindings-parity` compares every surface against the recorded
+  answer in `xtask/src/parity.rs`.
+- **Go, Ruby and Java** are held by the parity programs — every recorded hash,
+  equal to the facade's — and by smoke programs that render
   blank-then-inked and then call every declaration the parity programs do
-  not: Go and Java all 221 functions, Ruby 220. Counted injections, each one
-  defect in a binding's own code and never in its script, each failing
-  `bindings-parity` on that surface and no other — **12 of 12 caught**: Go's
-  null view number crossing as 0 rather than NaN (*read-surface*), an
-  attachment size read as absent (*read-surface*), garbage collection
-  crossing inverted (*save-options*, *save-linearized*) and the minor version
-  crossing as 7 (both save scripts); Ruby's URI target packed as a page
-  (*read-surface*), a removed entry losing its holder (*sanitise-report*),
-  the digest and signature-check accessors swapped (*signatures*), and
-  object streams and linearization crossing in each other's place
-  (*save-options*, which then printed exactly *save-linearized*'s hash);
-  Java's destination dropping its page reference (*read-surface*), the trim
-  box written as the bleed box (*document-ops* and everything downstream of
-  it), compression dropped (*save-options*) and the incremental mode saved as
-  a rewrite (*fill-and-save*). The first run of the campaign caught 7 of 9:
-  the digest/check swap and garbage collection were invisible to every
-  script, which is what the altered signed document and the two save scripts
-  were added for. `crates/tinker-pdf-ffi/tests/layout.rs` pins the fourteen
-  hand-packed structs; counted injections: `TpdfDate`'s hour declared before
-  its day, `TpdfWriteOptions`' compression before its object streams, and
-  `TpdfPageLabelRange` aligned to 16 each fail **1** test. The Swift package
+  not. `crates/tinker-pdf-ffi/tests/layout.rs` pins the
+  hand-packed structs. The Swift package
   has never been compiled.
 - `bindings/js/demo/verify.mjs` drives the browser demo in headless
   Chromium and checks the ink's bounding box is the shape of a line of
   text rather than a smear or a stray pixel.
 - The release workflow asserts the `abi3` wheel tag and greps the `.nupkg`
-  for all three RIDs, and it has run end to end once, on a tag, on 24 August
-  2026: every Linux and macOS leg green and nothing published
-  ([verification](../verification.md)).
+  for all three RIDs ([verification](../verification.md)).

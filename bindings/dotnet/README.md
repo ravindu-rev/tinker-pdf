@@ -69,7 +69,7 @@ The smoke project takes a `PackageReference` on `TinkerPdf` from a local
 folder feed — **not** a `ProjectReference`. A project reference resolves the
 managed assembly and finds the cdylib wherever cargo left it, so it passes on
 a package that carries no native library at all, which is the one failure this
-milestone is about. Its `nuget.config` clears the source list before adding the
+smoke exists to catch. Its `nuget.config` clears the source list before adding the
 folder, so a restore that cannot find the local package fails rather than
 quietly taking something of the same name from nuget.org.
 
@@ -86,23 +86,23 @@ dotnet run --project bindings/dotnet/tests/Smoke -c Release -- \
   testdata/simple-text.pdf C:/Windows/Fonts/arial.ttf testdata/form-fields.pdf
 ```
 
-Thirteen scripts with every input pinned — nine that write a document (fill a
+Scripts with every input pinned — those that write a document (fill a
 form and save incrementally; build a document from pages, a font and an image;
 the document operations; a sanitise; two saves with every write option set;
-form fields; the builder's graphics resources; tagged writing) and four that
+form fields; the builder's graphics resources; tagged writing) and those that
 write down what a sanitise reported, what the read surface and the signature
 verdicts say, and what form data says, all listed in
 [docs/features/bindings.md](../../docs/features/bindings.md) —
-printing one
-`DOTNET-SMOKE: WROTE sha256=<hex>` or `READ sha256=<hex>` line each. The same thirteen run against the
+print one
+`DOTNET-SMOKE: WROTE sha256=<hex>` or `READ sha256=<hex>` line each. The same scripts run against the
 facade in Rust, through the wheel, the npm package and the Go, Ruby and Java
 bindings, and `cargo xtask bindings-parity` requires every one to be
 byte-identical.
 
-Six more `SafeHandle`s carry the write surface — `Editor`, `Checkpoint`,
-`Buffer`, `Builder`, `PageBuilder`, `OutlineEntry` — on exactly the pattern
-`DocumentHandle` and `BitmapHandle` already follow. Three things about them are
-asserted by the smoke rather than left as documentation:
+The write surface's native handles — `Editor`, `Checkpoint`,
+`Buffer`, `Builder`, `PageBuilder`, `OutlineEntry` — are `SafeHandle`s on
+exactly the pattern `DocumentHandle` and `BitmapHandle` follow. Three things
+about them are asserted by the smoke rather than left as documentation:
 
 - **The editor outlives the document.** The engine's editor holds its own
   reference to the shared object store, so the smoke disposes the `Document`
@@ -122,8 +122,8 @@ comparing strings to make the one distinction that matters:
 `Status.NoSuchField` means your form changed and `Status.ValueRefused` means
 your data is wrong, and those are different bugs in different places.
 
-## Nothing has been published
+## Nothing is published
 
-`dotnet add package TinkerPdf` does not work and is not meant to yet. The
-pipeline exists and has been exercised as a dry run; the facade is not frozen
-until 0.1.0 ([`docs/architecture.md`](../../docs/architecture.md)).
+`dotnet add package TinkerPdf` does not work: nothing is published. The
+pipeline runs as a dry run; the facade does not freeze before 0.1.0
+([`docs/architecture.md`](../../docs/architecture.md)).

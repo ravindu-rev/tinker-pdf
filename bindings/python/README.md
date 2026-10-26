@@ -12,8 +12,8 @@ print(doc.page_count, doc.page_text(0))
 
 # The engine bundles no font faces and reads no font directories, so a
 # document that embeds none extracts its text perfectly and draws none of it.
-# This is the call that fixes that, and it is the same seam in all four
-# languages.
+# This is the call that fixes that, and it is the same seam on every
+# surface.
 doc.set_fonts(open("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "rb").read())
 
 bitmap = doc.render(0, dpi=150.0)
@@ -49,7 +49,7 @@ Run it against a `pip install`ed wheel, never against the source tree. It
 asserts the render **twice** — blank without a face, inked with one — because
 `testdata/simple-text.pdf` embeds no font program and this engine bundles no
 faces, so "a bitmap of the right size came back" passes on a build whose
-renderer does nothing at all. That is PRE-A's failure, one ecosystem out.
+renderer does nothing at all.
 
 ## Writing, and proving it is the same engine
 
@@ -57,15 +57,15 @@ renderer does nothing at all. That is PRE-A's failure, one ecosystem out.
 python bindings/python/tests/write_parity.py testdata/form-fields.pdf
 ```
 
-Thirteen scripts with every input pinned — nine that write a document (fill a
+Scripts with every input pinned — those that write a document (fill a
 form and save incrementally; build a document from pages, a font and an image;
 the document operations; a sanitise; two saves with every write option set;
-form fields; the builder's graphics resources; tagged writing) and four that
+form fields; the builder's graphics resources; tagged writing) and those that
 write down what a sanitise reported, what the read surface and the signature
 verdicts say, and what form data says, all listed in
 [docs/features/bindings.md](../../docs/features/bindings.md) —
-printing one
-`WROTE sha256=<hex>` or `READ sha256=<hex>` line each. The same thirteen run against the facade in Rust,
+print one
+`WROTE sha256=<hex>` or `READ sha256=<hex>` line each. The same scripts run against the facade in Rust,
 through the npm package, the NuGet package and the Go, Ruby and Java bindings,
 and `cargo xtask bindings-parity` requires every one to be byte-identical.
 Ruling 11 is what makes that the right test: a binding projects the facade 1:1
@@ -94,9 +94,9 @@ were left showing what they showed before. `save` takes no defaults of its own
 an encrypted save is 48 caller-supplied bytes, because this binding does not
 invent randomness.
 
-## Nothing has been published
+## Nothing is published
 
-`pip install tinker-pdf` does not work and is not meant to yet. The pipeline
-exists and has been exercised as a dry run; the facade is not frozen until
-0.1.0 ([`docs/architecture.md`](../../docs/architecture.md)), and until then the
-version number says what the API is worth depending on.
+`pip install tinker-pdf` does not work: nothing is published. The pipeline
+runs as a dry run; the facade does not freeze before 0.1.0
+([`docs/architecture.md`](../../docs/architecture.md)), and the version number
+says what the API is worth depending on.
