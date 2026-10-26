@@ -99,27 +99,49 @@ over its neighbour's; the block widened by `scaleX(2)` is displaced as well as
 painted past its box; and with neither transformed nothing is drawn over
 anything.
 
-The same fragments are drawn where the text is not in every reordered line:
-an inline box's background and border (`draw_page_tagged`'s `draw_box`) and
-its outline (`draw_outlines`). And `visual_lines` orders runs alone, so a
-replaced element set inline (`LayoutPage::replaced`) takes no part in its
-line's order.
+The same fragments place an inline block's background, border and outline
+(`draw_page_tagged`'s `draw_box`, `draw_outlines`), so in a reordered line
+they stand where the block's text is not. Layout makes no fragment for an
+inline box that is not atomic, so a span's text moves with nothing beside it
+to move. An atomic inline that does not touch its neighbours, a picture or a
+block with padding, a border, a margin or a width past its text, ends its
+line for `paint::same_line`, and each half is ordered alone: a right-to-left
+line holding a picture keeps its halves in left-to-right order.
 
 **The rule.** An atomic inline (an inline block or a replaced element) is one
 unit of its line's order: UAX #9 reads it as U+FFFC OBJECT REPLACEMENT
 CHARACTER, a neutral (`css-writing-modes-3` §2.4). `visual_lines` moves the
-unit whole, its box fragment and every run set in it by the same distance, so
-its transform's origin, background, border and outline stand where its text
-is drawn; its own runs are ordered inside it, as the paragraph of their own
-they are. The line's extent does not change, so neither does its alignment.
-An inline box whose text L2 parts, a styled span across a level boundary, has
-its fragment cut where its runs part, one piece for each place its text is
-drawn.
+unit whole, its box fragment and every run, picture and clip set in it by the
+same distance, so its transform's origin, background, border and outline
+stand where its text is drawn; its own runs are ordered inside it, as the
+paragraph of their own they are, in the block's own `direction`. The line's
+extent does not change, so neither does its alignment. Which elements are
+atomic inlines, and which runs and fragments each holds, is layout's to
+record on the page, each atomic inline's anchor and margin box: the page does
+not mark one, an unpainted inline block has no fragment, and two table cells
+on one baseline look like a block on a line.
 
 **What stays.** What a transform paints past its box is CSS's own (non-goal):
-the widened block still paints over its neighbours, and the case's `apart`
-verdict counts that. CD-19.8 holds each paragraph at the glyphs over others it
-then draws, which its transforms alone ask for.
+scaled about its own text, the widened block paints over both its
+neighbours, more glyphs than it set over others about a misplaced origin,
+every one its transform's own, and the case's `apart` verdict counts them.
+And a block's own text is a paragraph of its own in the block's `direction`:
+in a paragraph with no `dir`, left to right, so a block's trailing `?!` is
+drawn right of its word, and a reader of the whole line reads it before the
+word. CD-19.8 holds each paragraph at the glyphs over others it then draws.
+
+**What the prototype found.** With the box tree marking the atomic inlines and
+a U+FFFC standing in for each in its line's text, the rule reads many of
+`epub_fallback.rs`'s cases better in both builds and none of
+`epub_conservation.rs`'s otherwise, and no suite's time moves past its noise.
+It reads some worse: Left (10)'s paragraphs turned a quarter, whose widened
+block now stands over the line's last word, and squeezed blocks holding a
+styled `?!`, read reversed as above. Every inline block's decoration and
+transform stands around its own text, an inline picture is ordered with its
+words, and nothing on a line with no right-to-left character moves. H-149's
+row holds the figures. Taken from the box tree, the rule misses an atomic
+inline its margin sets apart at its line's end and an empty unpainted one, and
+orders no line of atomic inlines alone; recorded by layout, it would not.
 
 **What CD-19.7 measures**, with the rule prototyped against the landed
 `paint.rs`, in the default and `bundled-fonts` builds:
@@ -133,8 +155,8 @@ then draws, which its transforms alone ask for.
 - Left (10)'s glyphs over others, paragraph by paragraph, and how many of them
   its transforms alone ask for;
 - the class's other shapes, which CD-19.8's tests hold: a background, a border
-  and an outline on an inline block and on a span in a reordered line, an
-  inline image in one, a block rotated and a block skewed, each in a
+  and an outline on an inline block in a reordered line, an inline image in
+  one, a block rotated and a block skewed, each in a
   right-to-left paragraph and in one with no `dir`, and the same with no
   right-to-left character, which moves nothing;
 - the suites' time in release and debug, against the tree without the rule.
@@ -400,6 +422,6 @@ Every fix step also passes `epub_fallback.rs`, `epub_conservation.rs` and
 |---|---|
 | An atomic inline read as U+FFFC gives its neighbours other levels, and a line reads otherwise | CD-19.7 compares every case in both builds before anything lands, and anything read worse is a price for H-149 |
 | Moving a box moves what else reads its fragment: a link's rectangle, a clip, a figure's tag | Every reader of `LayoutPage::boxes` and `LayoutPage::replaced` moves with it, and CD-19.8 tests each |
-| A span's fragment cut where L2 parts its text draws a border's ends at each cut | A piece keeps only the edges its box has where the box itself starts or ends, and CD-19.8 tests a bordered span across a level boundary |
+| Which elements are atomic inlines is decided twice, by layout and by the writer, and the two drift | Layout records each atomic inline on its page, its anchor and margin box, and the writer reads that record (CD-19.8) |
 | A left-to-right page moves | `visual_lines` touches no line without a right-to-left character; `no_left_to_right_page_moves` and the determinism fingerprints hold that |
 | A block's own transform still paints over its neighbours, so `apart` never holds for Left (10) | CD-19.8 pins each paragraph at the glyphs over others its transforms ask for, and CD-19's exit counts only the others |
