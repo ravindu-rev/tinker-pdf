@@ -20,8 +20,9 @@ order, and prints one line per gate; name gates to run only those
 its first compiler errors and the lines it had to print and did not. It
 needs Python 3; the build does not.
 
-Test binaries built with full debug info are large: on a machine short of
-disk, run the gates with `CARGO_PROFILE_DEV_DEBUG=0`.
+Test binaries built with full debug info, and cargo's incremental state, are
+large: on a machine short of disk, run the gates with
+`CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0`.
 
 One build step is not `rustc`: `tinker-pdf-font/build.rs` compiles Adobe's
 vendored CMap registry (`THIRDPARTY.md`) into static tables. It reads a
