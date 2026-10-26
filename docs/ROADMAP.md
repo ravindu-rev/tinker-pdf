@@ -26,6 +26,10 @@ and its row is narrowed to it.
   fails with `bundled-fonts` where the qpdf corpus is fetched: some files
   draw a page one other than the buffered open draws. The default build
   draws the same page, and CI's `test` job, which has no corpus, skips it.
+- **A line of a right-to-left paragraph read alone.** The reader puts each
+  line in logical order by itself, so a line of an Arabic paragraph that
+  opens with `25٪` reads `25 ٪يوم`, where its paragraph would keep the sign
+  with its number. FT-37 resolves a paragraph across its lines.
 
 ## Where the steps are
 
