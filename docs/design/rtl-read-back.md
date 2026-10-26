@@ -39,8 +39,10 @@ the options whose price the owner decides.
 - Taking a change that reads any case worse: that is the owner's, case by
   case, through the H row its step names (ruling 14).
 - Another reading of the page: the reader stays ruling 14's, and a line with
-  no right-to-left character is untouched (`text_logical_order.rs`'s
-  `no_left_to_right_page_moves`).
+  no right-to-left character is untouched. `text_logical_order.rs`'s
+  `no_left_to_right_page_moves` holds that for ruling 14's reordering; it
+  reads both its sides through `TextDevice`, so a change of `TextDevice`
+  holds it by its own condition and `text.rs`'s tests.
 - An outside program deciding whether a reading is right (ruling 13).
 - What a transform itself paints over other content. CSS Transforms 1 applies
   a transform to the rendering and leaves layout as it is, so a block widened
@@ -137,15 +139,189 @@ then draws, which its transforms alone ask for.
   right-to-left character, which moves nothing;
 - the suites' time in release and debug, against the tree without the rule.
 
+### Left (3): a word space styled apart across a two-em stretch
+
+**The case.** `epub_conservation.rs`'s
+`a_dirless_line_with_a_right_to_left_gloss`, its Left (3) row:
+`<p>αλφα <b>βήτα</b> ספר בית xyz.</p>` in a Hebrew book at
+`word-spacing: 2em`, left to right with no `dir`. Both builds read it
+`αλφα \nβήτα \n.xyz ספר בית`, found and apart only: pinned so in a default
+build, held to `found apart` with `bundled-fonts`.
+
+**Which code decides it.** Traced through `TextDevice::show_glyph`, alike in
+both builds. Every word space is a standard face's code 32 that `Tw` moves on
+two ems past its box, and the one between `βήτα` and the gloss is a run of
+its own, styled apart from the bold word and at the paragraph's level. The
+device cuts the line after the two spaces that end a text object, at `β` and
+at `ת`, the gloss's first drawn glyph, though each starts where `Tw` left the
+pen (`Stretch::reaches`): past the half em of slack within which it resumes
+a line an `ET` closed, only `Stretch::carries` crosses a stretch, and it
+refuses both, the word before each gap and a letter of the line being left
+to right. The piece `תיב רפס xyz.` has a Hebrew letter at its left end and a
+Latin one at its right, so `bidi.rs`'s `first_strong_drawn` reads it by its
+majority as right to left, `.xyz ספר בית`; `text_order`'s rejoin joins only
+within the same half em. Nothing `Fonts::search` tries within
+`READINGS_PER_LINE` reads otherwise: the lone space leaves the two ems after
+its box, or with `Cut::Carried` before it, and with `Cut::Centered` an em
+either side, twice the slack, after a line holding no word and so no
+`Stretch`. So the stretch's width does not decide: the carry crosses any
+width the spacing accounts for, and refuses this one by its directions.
+
+**The rule.** A cut at a word space's stretch is mended once the piece after
+it ends. The cut is one `show_glyph` makes for the slack alone (not for a
+turn, another baseline or a jump back), after a code 32 that decodes to
+white space and that `Tw` moved on, which `Stretch` records, where the next
+glyph starts at the stretched pen within `STRETCH_ROUNDING` and is not
+carried; the line it starts is marked as the rest of the one before. When
+that line ends, as the next starts or in `TextDevice::finish`, it is
+appended to the line before where the two hold a right-to-left glyph of
+their own (`PendingLine::holds_rtl`) and the leftmost and rightmost of their
+glyphs that read either way (`Strong`, kept as glyphs arrive) both read left
+to right, so that ruling 14 reads the joined line by its ends, left to right
+(`first_strong_drawn`'s first arm). Left (3) then reads
+`αλφα \nβήτα ספר בית xyz.`, `αλφα` apart since it and `βήτα` hold no
+right-to-left glyph, as the Armenian row at `12px` reads with every verdict
+holding. The mend waits for the line's far end, which the gap does not show:
+taken there, `αλφα <b>βήτα</b> ספר בית` is one line with a Hebrew right end,
+read by its majority, the join the carry refuses.
+
+**What it must not join.** Two table cells, two columns, words a plain PDF
+sets apart: each is placed by padding and `border-spacing`, a gutter, a `Td`
+or a `Tm`, not where `Tw` left the pen, and `Stretch::reaches` refuses a gap
+further than `STRETCH_ROUNDING` from it, as for the carry. A joined line
+with a right-to-left glyph at either end, which `first_strong_drawn` reads by
+its majority or from the right: `The word` before a longer Arabic phrase,
+`שלום abcdef <b>עולם</b>` with no `dir`. And left-to-right text, collected
+exactly as now.
+
+**What must not change.** `Stretch::carries`, the slack, `text_order`'s
+rejoin, the read-back's drawings, and every `text.rs` test as written: each
+line `a_justified_word_space_beside_left_to_right_text_cuts_as_before` cuts
+has a right-to-left glyph at one end or holds none. Its `a b` row holds
+left-to-right text here; `no_left_to_right_page_moves` reads both its sides
+through `TextDevice` and cannot see a change in it.
+
+**What CD-19.20 measures**, in both builds, for this section and H-155's row:
+
+- each case whose verdicts change, better or worse, by its `CASE` line:
+  `cargo test -p tinker-pdf --test epub_fallback -- --nocapture` and
+  `cargo test -p tinker-pdf --test epub_conservation -- --nocapture`, each
+  again with `--features bundled-fonts`, and
+  `cargo test -p tinker-pdf-shape --test bidi_conformance`;
+- plain PDFs: `cargo test -p tinker-pdf --test text_logical_order` in both
+  builds, and each line whose text changes in the documents and books
+  `no_left_to_right_page_moves` reads;
+- `cargo test -p tinker-pdf-content`, and each test it fails;
+- the suites' time in release and debug, against the tree without the rule.
+
+**CD-19.21's exit tests**, where the owner takes it: in `text.rs`, a line
+cut at a stretched word space after `a` and mended with a `ב c` set at the
+stretched pen, Left (3)'s three pieces read as `x` and `y ב z`, and the
+guards that a `ב c` cell set `2px` past or short of the stretched pen, and
+`ג` after `א b`, Hebrew at both ends, each stay a line apart; Left (3)'s row
+of `a_dirless_line_with_a_right_to_left_gloss` held to
+`cons logical whole found apart` in both builds, beside Cyrillic and
+Armenian rows at `2em`; and `epub_fallback.rs`, `epub_conservation.rs` and
+`bidi_conformance.rs` passing in both builds.
+
+### Left (6): a line under a half turn
+
+**The case.** `epub_fallback.rs`'s
+`a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on`:
+three sentences of `25٪ <b>W</b> ١٢٣ … 2010،` in an Arabic paragraph turned
+by `rotate(180deg)` at `word-spacing: 1em`. In both builds it reads in
+logical order, is found and draws nothing over anything, but does not
+conserve or read whole: its fourth line, opening with `25٪`, reads `25` alone,
+then `يوم٪`.
+
+**`TextDevice` measures a horizontal line on the page's axes.** `show_glyph`
+keeps `PendingLine::pen` as `x1.max(x0)`, the right edge of the glyph's box,
+and a new line's as `anchor.0`; keeps a `Stretch` where
+`corner(advance + spacing, 0.0).0` is past it; hands `Stretch::carries` and
+`Stretch::reaches` the origin's `x`; asks `origin.0 > line.pen + slack` once
+`end_text` has closed the line (`disjoint`) and
+`anchor.0 + expected_gap < line.origin.0` (`backwards`); and `far` reads the
+page's `y`. A half turn runs the line to the page's left: `line.pen` is where
+the last glyph starts, no stretch is kept, a text object's end parts a glyph
+gone back along the line past half an em and none gone on, and `backwards`
+cuts one gone on past three ems and none gone back. `turned`, the thresholds,
+`far` and `finish`'s blocks read a half turn as no turn. `text_order` already
+measures along each line's baseline, and the writer's models of the reader
+(`page_lines`, `parted`) measure where a turn counts for nothing
+(`along_the_line`): the rules draw the line as unturned, and it is read
+otherwise.
+
+**Why no drawing tried reads it right.** Traced in both builds: the fourth
+line's `25` is a text object and the next goes back past half an em, so every
+drawing `Fonts::search` reads on the page reads `25` apart, an em's stretch
+from the rest, which `rejoin_split_lines` does not bridge; in the runs' own
+space the rules' drawing reads `25 ٪يوم`, `Search::Letters` and no drawing
+found, so the rules' drawing is kept.
+
+**The rule.** A horizontal line is measured in its own frame: `u`, its
+`direction` over its length, and `n`, `u` turned a quarter; a point's place
+is its dot product with `u` along the line, with `n` across it. `line.pen` is
+the furthest place of the glyph's quad's corners, a new line's pen its
+anchor's, `Stretch::pen` that of `corner(advance + spacing, 0.0)`, kept where
+past `line.pen`; `disjoint`, `backwards`, `carried` and `spaced` take places
+along the line and `far` across it, each glyph in the frame of the line it
+continues or starts. `turned`, the thresholds, vertical lines and `finish`
+stay; a direction of no finite, non-zero length takes the page's axes.
+
+**What must not change.** A line whose direction is `(a, 0)` with `a > 0`,
+every unturned line and every one under a positive scale, takes the page's
+`x` and `y` themselves, not a dot product: its lines, characters and order,
+bit for bit. Quads, origins, `text_order` and `paint.rs` do not change.
+
+**What the rule reaches.** Prototyped in both builds, it reads a half-turned
+line as the line unturned, character for character, but where a comparison
+lies exactly on its threshold, which the turned sums can resolve otherwise.
+So Left (6) conserves, and its fourth line reads `25 ٪يوم`, as unturned, in
+every drawing tried, searched on past its letters or not: the writer draws
+the sign left of the digits, `AN` after the paragraph's Arabic (UAX #9's W2),
+and read alone the line opens with one European number, `25٪` (W5), the
+limit `text_order.rs` names, a line resolved on its own. A turned row that
+reads whole where its unturned twin does not reads as the twin: the
+punctuation shape under `rotate(12deg)`, `كتاب?!`; and the one-sentence row
+keeps its reading only by a tie of `backwards`, its first `2` exactly three
+ems back from `كتاب`'s last letter: resolved as flat, its word space drawn
+alone is dropped, and it reads `كتاب25٪`, as its twin is pinned. A Latin line
+under a quarter turn, cut today wherever a glyph stands over half an em up
+the page from the last (`far`), and left so by `text_order`, reads whole.
+
+**What CD-19.28 measures**, with the rule prototyped on `text.rs` as CD-19.21
+leaves it, in the default and `bundled-fonts` builds:
+
+- each case whose verdicts change, by its `CASE` line, and each turned row
+  against its paragraph unturned, with the tie behind any that differs:
+  `cargo test -p tinker-pdf --test epub_fallback -- --nocapture` and
+  `cargo test -p tinker-pdf --test epub_conservation -- --nocapture`, each
+  again with `--features bundled-fonts`, and
+  `cargo test -p tinker-pdf-shape --test bidi_conformance`, which reads no
+  `TextDevice`;
+- the plain PDFs: `cargo test -p tinker-pdf --test text_logical_order`, again
+  with `--features bundled-fonts`, `cargo test -p tinker-pdf-content`, and
+  each line that changes in a document `no_left_to_right_page_moves` walks;
+- the suites' time in release and debug, against the tree without the rule.
+
+**What CD-19.29's tests hold.** `text.rs`'s
+`a_line_under_a_half_turn_is_continued_and_cut_as_it_is_unturned`: the
+glyphs of the tests that hold where a line is cut, `justified`'s and
+`objects_spaced`'s among them, drawn under a half and a quarter turn at
+coordinates exact in binary, read into the same lines, characters and order;
+and `an_unturned_line_reads_as_before`: gaps exactly on each threshold, under
+the identity, a shift and `scaleX(2)`, cut and continued as the page's `x`
+decides. In the pin, each half-turn row beside a new unturned twin holds what
+the twin holds, Left (6)'s `cons logical found apart`, and a row read worse
+holds what the owner takes on H-157.
+
 ### The other cases
 
-Each gets its section from its design step: Left (3), a word space styled
-apart across a two-em stretch (CD-19.19); Left (4), the lines the reader reads
-from the right whatever the writer draws (CD-19.22); Left (6), a line under a
-half turn (CD-19.27); Left (7), a word search does not find under
-`scaleX(0.5)` (CD-19.30); Left (9), a comma read apart after a number a
-NO-BREAK SPACE holds together (CD-19.32); and Left (5), its findings outside
-ruling 14's rules (CD-19.34). The options whose price the owner decides get
+Each gets its section from its design step: Left (4), the lines the reader
+reads from the right whatever the writer draws (CD-19.22); Left (7), a word
+search does not find under `scaleX(0.5)` (CD-19.30); Left (9), a comma read
+apart after a number a NO-BREAK SPACE holds together (CD-19.32); and
+Left (5), its findings outside ruling 14's rules (CD-19.34). The options whose price the owner decides get
 their figures here from their measure steps: W, WJ and WJC (CD-19.9), D
 (CD-19.10), H1 (CD-19.11) and H6 (CD-19.12). Left (2) reads in two, as a
 Latin word does, by the owner's decision (CD-19.18).
@@ -204,7 +380,7 @@ Every fix step also passes `epub_fallback.rs`, `epub_conservation.rs` and
     `a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on`;
     then `text.rs` tests of a line under a half turn continued and cut as it
     is unturned, and that an unturned line reads as before, with the
-    half-turn rows of that pin holding.
+    half-turn rows of that pin holding what their unturned twins hold.
 13. CD-19.30 and CD-19.31: Left (7); exit: the section, reproduced from
     `a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space`;
     then its rows of that pin finding the word with `bundled-fonts`, or the case in the roadmap's Bugs.
