@@ -12,7 +12,7 @@ rulings, which override everything. The owner is Ravindu Wijegunawardhana.
   [docs/roadmap/](docs/roadmap/) are the only plan. Keep no plan, handoff or
   progress file anywhere else.
 - Take what the owner asks for, or the next step in the roadmap's order of
-  work. Find a step with `grep -n '| CD-19.3 |' docs/roadmap/CD.md` and read
+  work. Find a step with `grep -n '| CD-19.1 |' docs/roadmap/CD.md` and read
   only the lines and the code it points to.
 
 ## How a change is made

@@ -735,8 +735,8 @@ places.
 - **Every pull request**, H-111's default: head the merge commit the event
   checks out, base that commit's first parent, the target branch's tip it was
   made on, so the pair is the pull request's change and nothing else.
-- **Every push to `develop`**: H-01 sends every change to `develop` with no
-  pull request, so this is the trigger that reaches one. Base is the tip the
+- **Every push to `develop`**: every change goes to `develop` with no pull
+  request, so this is the trigger that reaches one. Base is the tip the
   push replaced (`github.event.before`) and head the push's tip, so a push of
   several commits is judged as one change.
 - **A dispatch for A/A runs**, base and head both the dispatched revision,
@@ -746,7 +746,7 @@ places.
   there dispatches every other job in it as well unless each is told not to
   run on it; a workflow of its own needs no such line.
 - **Not** on `main`, whose pushes are the owner's merges of commits already
-  judged on `develop` (H-01), and not on a schedule: `bench.yml`'s weekly run
+  judged on `develop`, and not on a schedule: `bench.yml`'s weekly run
   is unchanged.
 
 No run cancels another: each push's run is the one that judges it, as
@@ -1834,7 +1834,7 @@ report's `slowest_page` names the page that cost a file most.
 | A run that times fewer files or pages reads as a faster one | Files and pages timed are held to the fewest of the five; a killed child's spans are dropped, and its timeout is already the pass rate's regression |
 | One run's figure ratchets the bar onto a fast host | Only five runs set figures; `--record` carries them and writes none; a faster figure is a note |
 | A re-pinned corpus, a new runner size or another dpi changes what is measured | Each is refused by name — `time.total`, `time_runs.jobs`, `time_runs.dpi` — until five runs re-measure, so a re-pin costs five runs before the job is green again |
-| A P row's speed-up leaves its corpora's bands slack | The bar is a backstop against the catastrophic; re-measuring is five more runs under H-03, never `--record`; MS-02's floors are what a speed-up raises |
+| A P row's speed-up leaves its corpora's bands slack | The bar is a backstop against the catastrophic; re-measuring is five more runs, never `--record`; MS-02's floors are what a speed-up raises |
 | The clocks cost the child time | Two clock reads and one line a page |
 | A probe that starts using threads changes what neighbours cost | The engine spawns none, and P-15's pool will run serially unless asked; a row that gives the probe threads re-measures the time block |
 | A corpus's percentiles are one long document's | Said above for verapdf; the report keeps each file's sum and slowest page, so a moved percentile is followed to its file |

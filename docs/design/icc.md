@@ -650,8 +650,8 @@ time and shift every colour. It is read by profiles that need to recover the
   milestone 8.
 - [H-135](../roadmap/H.md), an open question, for milestone 9, which builds
   its default: an ink render keeps a `k` colour's own components under
-  `/DefaultCMYK`. Milestone 12's corpus run depends on MS-11 and H-03, as
-  K-02.5 lists them.
+  `/DefaultCMYK`. Milestone 12's corpus run depends on MS-11, as K-02.5
+  lists it.
 
 ## Risks
 

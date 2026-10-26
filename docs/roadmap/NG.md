@@ -132,12 +132,12 @@ names what would move it.
   validator abstains by name and a person judges (H-62).
 - **NG-14 — The other refusals the tree marks permanent**, which are answers
   rather than gaps: a run whose font is not in scope or whose text matrix is
-  not finite cannot be measured for redaction (`features/editing.md:820-821`),
+  not finite cannot be measured for redaction (`features/editing.md`),
   because with no metrics no glyph can be placed and a position that is not
   a number cannot be compared with a rectangle; the redaction bounds
   `MAX_PLACEMENTS`, `MAX_FORM_COPY_BYTES` and 4 096 `Do`s a stream, each
   named; an XML internal subset and an undeclared entity in EPUB content
-  (`features/epub.md:561-562`), because the internal subset is where every
+  (`features/epub.md`), because the internal subset is where every
   entity bomb lives, EPUB 3.3 §3.9 forbids one in a content document, and
   XML 1.0's *Entity Declared* constraint governs the other; and `local()`
-  font sources (`features/epub.md:600`, NG-08).
+  font sources (`features/epub.md`, NG-08).
