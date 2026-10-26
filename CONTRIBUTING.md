@@ -126,46 +126,6 @@ each one workflow run with its own exit ([docs/ROADMAP.md](docs/ROADMAP.md),
 "What a step is"). Build to the step's exit, and treat the row's steps — a
 design doc's milestones — as the commit boundary set.
 
-**Two ways a counted injection lies, and both have happened here.**
-
-A campaign reports how many assertions fire when a defect is put back, *including
-when the answer is zero*, because a plausible break that fires nothing means the
-suite does not test what it claims. That only works if the harness is measuring
-what it thinks it is:
-
-- **`--no-fail-fast` belongs before `-p`, not after `--`.** Everything after
-  `--` goes to the *test binary*, which does not know the flag and rejects it —
-  so the run produces no `failures:` block, a harness that scrapes for one finds
-  nothing, and every injection reports zero. A whole six-defect campaign read as
-  six zeros for this reason before anybody noticed the shape of the answer.
-  Write `cargo test --no-fail-fast -p <crate>`.
-- **A campaign whose subject can skip must force it to run.** An oracle that
-  needs a fetched corpus or an external file exits 0 when it is absent, so an
-  injection against it fires nothing and reads as a suite that does not care.
-  Set whatever the suite's own "required" switch is — for the EPUB corpus that
-  is `TINKER_EPUB_CORPUS_REQUIRED=1`, and the path it is given must be
-  absolute, because a test binary's working directory is its crate root.
-- **Setting the "required" switch does not make an `#[ignore]`d test run.**
-  Most corpus suites here are `#[ignore]`d so that `cargo test` stays
-  independent of fetched data, and `TINKER_CORPUS_REQUIRED` is read *inside the
-  test body*. Without `-- --ignored` the body never executes: the run exits 0,
-  prints no banner, and reads exactly like a pass. Write
-  `cargo test -p tinker-pdf --test jpx_attribution -- --ignored --nocapture`
-  and then grep your own output for the `RAN` line. The two switches answer
-  different questions — `--ignored` decides whether the test runs at all, and
-  `TINKER_CORPUS_REQUIRED` decides whether a missing corpus is a failure once
-  it has.
-- **A campaign that dies mid-run leaves the source injected.** The harness
-  mutates a file in place and restores it, so an interruption between those
-  two steps leaves a deliberate defect in the tree looking like ordinary
-  work. One campaign here crashed on a Windows codepage decode after four
-  injections and lost two counts. Check `git status` and re-run the suite
-  before trusting anything a partial campaign reported, and treat a count
-  from a run that did not finish as absent rather than as zero.
-
-A row of zeros is a result about the harness at least as often as about the
-suite. Check the instrument before believing it.
-
 Warnings are data, not log lines: every leniency the engine performs emits a
 typed, object-addressed warning (ruling 10), so "it opened" and "it opened
 cleanly" stay distinguishable. Nothing in a library crate prints.

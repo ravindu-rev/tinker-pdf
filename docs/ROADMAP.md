@@ -51,17 +51,8 @@ XL ≈ 5–8, and that is too big for the way the work runs now: one workflow
 run takes one piece of work and lands it (AGENTS.md, the owner on 23
 October 2026). So each row is cut into **steps**, each one run's worth,
 under the row's own text, which stays as it was written; "What a step is",
-below, says what one holds. The rows at the front of the order of work
-were cut first, on 23 and 24 October 2026, and an independent pass reviewed
-sixteen of those cuts against the code (CD-19, FJ-01, K-01…K-09 and
-P-10…P-14). On 24 October 2026 four more independent reviewers took the
-thirteen rows the order of work reaches next (MS-01, MS-02, MS-04, MS-05,
-MS-06, MS-11, P-01…P-06 and P-27), and a fifth checked their corrections:
-twenty-nine reviewed rows in all. The rest were cut in the session, tier by tier and without
-workflows (the owner, 24 October 2026), and every row now has its steps;
-"Where the rows are" counts each tier's. A cut row no independent pass has
-reviewed says so; its review, like every review, runs once all the work is
-done ("How a step runs", 4). Every cut was
+below, says what one holds. Every row was cut on 23 and 24 October 2026
+and now has its steps; "Where the rows are" counts each tier's. Every cut was
 made against the code at `5297133`, and where a row's text and that tree
 disagree, the row says so under its steps. Every number and every `file:line`
 pointer in a row was read from the tree on 9 October 2026, or carries its own
@@ -145,7 +136,7 @@ A step is the unit of work: one workflow run takes it, lands it on
 
 | Kind | What the step lands | Its exit is |
 | --- | --- | --- |
-| `design` | a design doc in [design/](design/), or a section of one: scope, non-goals, design, milestones with concrete exit tests, risks, in that order | the doc section exists, names each later step's exit test, and is reviewed |
+| `design` | a design doc in [design/](design/), or a section of one: scope, non-goals, design, milestones with concrete exit tests, risks, in that order | the doc section exists and names each later step's exit test |
 | `build` | new capability: code and its tests | named tests, failing first |
 | `fix` | corrected behaviour | the failing test that shows the defect, then passing |
 | `test` | conformance data, fixtures, a harness, a suite, transcribed annex vectors — no engine change | the suite runs and prints its `RAN` banner where it can skip |
@@ -177,11 +168,8 @@ owner's standing instructions behind each of these.
    `test` job, run by `python3 -I tools/gates.py`, which prints a line per
    gate and keeps each log.
 4. **No review inside a run.** A run does its step's implementation and
-   its tests, and nothing more. Review and verification run once, when all
-   the work is done: a fresh review of the work, each rule's counted
-   injection ([CONTRIBUTING.md](../CONTRIBUTING.md), "Working an item"),
-   and every finding reproduced before it is fixed (the owner, 25 October
-   2026).
+   its tests, and nothing more; review and verification run once, when all
+   the work is done (the owner, 25 October 2026).
 5. **Stop for a price.** When the step would cost anything that used to
    work, the run records the figures and stops; the owner decides, through
    an H row, and their decision goes into [rulings.md](rulings.md).

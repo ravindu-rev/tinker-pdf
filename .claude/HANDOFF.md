@@ -2,8 +2,7 @@
 
 Written 23 October 2026, when round 6 of ROADMAP CD-19 landed on `develop`,
 and brought up to date on 24 October 2026, when the roadmap was cut into
-steps, the roadmap sweep landed, and each step came to be reviewed by the
-run that takes it. The next session starts here: read
+steps and the roadmap sweep landed. The next session starts here: read
 this, then [AGENTS.md](../AGENTS.md), then continue with "Next, in this
 order" below. When this note is out of date, rewrite it or delete it in the
 same commit that moves the work on.
@@ -17,26 +16,17 @@ same commit that moves the work on.
   limits in `docs/roadmap/NG.md`. Every row ID is unchanged, so every
   reference to one still holds.
 - **How far the cut got.** Every row is cut; the roadmap's "Where the rows
-  are" counts each tier's rows and steps. 29 rows are reviewed against the
-  code: the pilot's 16 (CD-19, FJ-01, K-01…K-09, P-10…P-14), and the 13 the
-  order of work reaches next (MS-01, MS-02, MS-04, MS-05, MS-06, MS-11,
-  P-01…P-06, P-27), by four independent reviewers on 24 October 2026 with a
-  fifth checking their corrections. Every other row says its steps are not
-  yet reviewed.
+  are" counts each tier's rows and steps.
 - **Implementation first** (the owner, 25 October 2026: "each time a
   completion should only do the implementation and the test case writing,
   we can do a review and verififaction once all the things are done", and
   "no more workflow implementaions only multi agents"). A run reads
   `tools/roadmap/brief.py <STEP>`, never a whole tier file, builds the step
   and its tests, and runs the gates through `tools/gates.py`, a line per
-  gate with each log kept. No review of the step or the change, no
-  verifying agent and no counted injections inside a run: those run once,
-  when all the work is done. This replaces 24 October's review of each step
-  when it is taken, which had replaced that day's separate review of the
-  430 unreviewed rows; a review of MS-03, MS-07 to MS-10, MS-12 and MS-13
-  begun under the first was stopped before it wrote anything (AGENTS.md,
-  "How work runs").
-- **What that review changed** beyond its rows: MS-01 gained a closing
+  gate with each log kept. No review, no verifying agent and no counted
+  injections inside a run, and no step's exit asks for one (26 October
+  2026; AGENTS.md, "How work runs").
+- **What the cut's review changed** beyond its rows: MS-01 gained a closing
   step, MS-01.9, that reads every guard green after the P rows that land
   them, so the 49 steps that needed MS-01's tally now wait on MS-01.8, not
   the whole row (as cut, MS-01 could never close); and an ordering was
@@ -60,6 +50,10 @@ same commit that moves the work on.
     and nothing more; review and verification run once, when all the work
     is done; never a workflow, several agents only where the work splits
     into independent parts (below).
+  - 26 October 2026: the instructions carry nothing for reviewers or
+    verifiers: AGENTS.md, CONTRIBUTING.md and ROADMAP.md lost theirs, and
+    216 step exits lost "and is reviewed" or "reviewed by a single
+    subagent".
 - **Signing on the Linux machine.** Its key is `SHA256:6fQ5We1x…`, not the
   one that signed the history before (`SHA256:TsJhk…`). GitHub marks a
   commit verified only when its key is registered on the owner's account as
@@ -228,18 +222,14 @@ to CD-19.37, H-149 to H-158), in the order "Next" gives.
 
 ## Next, in this order
 
-1. **ROADMAP's "Order of work"**, step by step:
-   - CD-19.1 to CD-19.7: the design doc for what is left, the kit's fixes,
-     the timing runner, the `ride=` ratchet, the review hunts' classes,
-     `plan_key` by place, and Left (10)'s guard prototyped and priced;
-   - the owner's word on Left (10) (H-149), then CD-19.8;
-   - the options rebuilt on the landed code and re-timed (CD-19.9 to
-     CD-19.13), the owner's choices (H-150 to H-154), CD-19.14 to CD-19.18,
-     and the rest of CD-19 in its order;
-   - then MS-11 and K-06, K-01 and K-02, MS-01 (to MS-01.8),
-     MS-04, MS-05, MS-06 and MS-02, P-01 to P-05, and the tiers.
-2. **Review and verification, once all the work is done** ("How a step
-   runs", 4): a fresh review of the work, the counted injections, and each
-   finding reproduced before it is fixed. Until then the sweep holds every
-   roadmap change to the classes the reviews found; it reads names, paths
-   and dependencies, not whether a step is right.
+**ROADMAP's "Order of work"**, step by step:
+
+- CD-19.1 to CD-19.7: the design doc for what is left, the kit's fixes,
+  the timing runner, the `ride=` ratchet, the review hunts' classes,
+  `plan_key` by place, and Left (10)'s guard prototyped and priced;
+- the owner's word on Left (10) (H-149), then CD-19.8;
+- the options rebuilt on the landed code and re-timed (CD-19.9 to
+  CD-19.13), the owner's choices (H-150 to H-154), CD-19.14 to CD-19.18,
+  and the rest of CD-19 in its order;
+- then MS-11 and K-06, K-01 and K-02, MS-01 (to MS-01.8),
+  MS-04, MS-05, MS-06 and MS-02, P-01 to P-05, and the tiers.

@@ -136,7 +136,7 @@ reconstruction — each a typed report before it is a removal.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SE-07.1 | design | Amend `docs/design/pubsec.md` with every recipient shape and content cipher, permissions per recipient, envelope `/P`, password with recipients, and sealed incremental saves. | `docs/design/pubsec.md` | The amended doc names SE-07.2 to SE-07.6's exit tests and is reviewed. | SG-05 |
+| SE-07.1 | design | Amend `docs/design/pubsec.md` with every recipient shape and content cipher, permissions per recipient, envelope `/P`, password with recipients, and sealed incremental saves. | `docs/design/pubsec.md` | The amended doc names SE-07.2 to SE-07.6's exit tests. | SG-05 |
 | SE-07.2 | build | AES-192 and RC2 content ciphers in enveloped data. | `crates/tinker-pdf-pki/src/enveloped.rs`, `crates/tinker-pdf-crypto/src/aes.rs` | NIST's AES-192 vectors and RFC 2268's RC2 vectors pass; envelopes generated once outside (dated, bytes only) open; failing first on today's refusal. | SE-07.1, H-106 |
 | SE-07.3 | build | Key-agreement recipients (ECDH, RFC 5753) and sealing to EC keys. *Note:* Added with the signing work, as H-29's default has it: the recipient's private scalar is multiplied on SG-02.3's constant-time path. | `crates/tinker-pdf-pki/src/enveloped.rs`, `crates/tinker-pdf-pki/src/seal.rs` | RFC 5753's structures, transcribed, open and are written; envelopes generated once outside open. | SE-07.2, SG-02.3 |
 | SE-07.4 | build | Key-encryption-key and password recipients with AES key wrap, and RSA-OAEP key transport. | `crates/tinker-pdf-pki/src/enveloped.rs`, `crates/tinker-pdf-crypto/src/aes.rs` | RFC 5652's structures open and are written; NIST's key-wrap and OAEP vectors pass. | SE-07.2 |
@@ -273,7 +273,7 @@ reconstruction — each a typed report before it is a removal.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SE-14.1 | design | Amend `docs/design/comic-archives.md` with each encryption scheme, the password seam H-25 decides and multi-volume sets. | `docs/design/comic-archives.md` | The amended doc names SE-14.2 to SE-14.5's exit tests and is reviewed. | H-25 |
+| SE-14.1 | design | Amend `docs/design/comic-archives.md` with each encryption scheme, the password seam H-25 decides and multi-volume sets. | `docs/design/comic-archives.md` | The amended doc names SE-14.2 to SE-14.5's exit tests. | H-25 |
 | SE-14.2 | build | ZipCrypto and AES in ZIP (AE-1 and AE-2) through the password seam. | `crates/tinker-pdf-zip/src/lib.rs`, `crates/tinker-pdf-archive/src/lib.rs` | Each scheme holds to its published format description; fixtures generated once by an outside archiver (dated, bytes only) open with their passwords. | SE-14.1, H-106 |
 | SE-14.3 | build | 7z AES-256. | `crates/tinker-pdf-archive/src/lib.rs` | The scheme holds to its format description; a fixture generated once outside opens with its password. | SE-14.2 |
 | SE-14.4 | build | RAR 5 encryption of stored entries. | `crates/tinker-pdf-archive/src/lib.rs` | The scheme holds to its format description; a fixture generated once outside opens with its password. | SE-14.2 |

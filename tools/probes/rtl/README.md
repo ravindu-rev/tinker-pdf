@@ -550,7 +550,7 @@ python3 -I tools/probes/rtl/scripts/inject.py run . /tmp/rtl/inj --build bundled
 ```
 
 A count comes from the bytes on disk and from every test binary a run
-started, or it is absent, not zero (CONTRIBUTING.md, "Working an item").
+started, or it is absent, not zero.
 Cargo calls a crate fresh by file times, so a tree whose files are older than
 a target's last build (another tree's injected one, in a shared target) would
 run that build: round 6's review saw a control fire 1 and, rebuilt, 0. So

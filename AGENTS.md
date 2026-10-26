@@ -86,7 +86,9 @@ what comes next.
     change, no verifying agent, no counted injections, no re-measuring of
     docs ("we spend too much tokens to verify and review documents etc so
     no more that"). Review and verification run once, when all the work
-    is done; each finding is reproduced there before it is fixed.
+    is done, and the repository's instructions carry nothing for them
+    (the owner, 26 October 2026: "remove all instructions that are meant
+    for reviewers, verifyers etc we seem to lose too much tokes").
   - Never a workflow (the owner, 25 October 2026: "no more workflow
     implementaions only multi agents"). Several agents only where the work
     splits into parts independent of each other; agents that change files
@@ -152,11 +154,6 @@ test.
   Neighbouring shapes that must *not* change get guard tests too.
 - **Failing first.** Each new test is shown to fail on the code before the
   fix, and the commit message says so.
-- **Counted injections**, in the verification that runs once all the work
-  is done ("How work runs"). Each rule a change adds is put back broken at
-  least once, and the count of tests that fire is recorded. See
-  CONTRIBUTING.md, "Working an item": a row of zeros is a result about the
-  harness as often as about the suite.
 - **Both builds** wherever fonts or text are involved: the default build and
   `--features bundled-fonts`.
 - **Exploratory probes are committed too.** A probe family that found
@@ -171,8 +168,6 @@ test.
 
 ## Reporting
 
-- **Re-measure before reporting.** Check that every run finished: the exit
-  status, the done marker, and row counts matching the baseline. A truncated
-  run is not a pass.
-- **Say plainly what is not done**, with the numbers. A row that cannot close
-  is narrowed in the roadmap, not deleted.
+- **Say plainly what is not done**, with the numbers. A run that did not
+  finish is not a pass. A row that cannot close is narrowed in the roadmap,
+  not deleted.
