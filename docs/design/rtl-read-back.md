@@ -98,9 +98,7 @@ as a line of its own, which the comma tie-break reads left to right, its
 trailing `?!` after its word. And on a line under a matrix that turns its
 baseline, a right-to-left run's words may be written in reading order
 (`Cut::Reading`), and where nothing reads the line's letters in order the
-drawing that reads most of its runs in order is taken (`Fonts::search_closer`):
-`TextDevice` asks whether a glyph continues a line along the page's `x` and
-`y`, and under a quarter turn parts a word-spaced line at every space.
+drawing that reads most of its runs in order is taken (`Fonts::search_closer`).
 
 **What stays.** What a transform paints past its box is CSS's own (non-goal):
 scaled about its own text, the widened block paints over both its neighbours,
@@ -229,105 +227,85 @@ Armenian rows at `2em`; and `epub_fallback.rs`, `epub_conservation.rs` and
 **The case.** `epub_fallback.rs`'s
 `a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on`:
 three sentences of `25٪ <b>W</b> ١٢٣ … 2010،` in an Arabic paragraph turned
-by `rotate(180deg)` at `word-spacing: 1em`. In both builds it reads in
-logical order, is found and draws nothing over anything, but does not
-conserve or read whole: its fourth line, opening with `25٪`, reads `25` alone,
-then `يوم٪`.
+by `rotate(180deg)` at `word-spacing: 1em`. `TextDevice` measured a
+horizontal line on the page's axes: the pen at the right edge of a glyph's
+box, a `Stretch` kept only where the spacing moved the pen rightwards, a
+text object's end resumed within half an em of the pen along the page's `x`
+(`disjoint`), a glyph three ems left of the last cut off (`backwards`), and
+one half an em off the baseline along the page's `y` (`far`). A half turn
+runs a line to the page's left, so the pen stood where its last glyph
+started, no stretch was kept, a text object's end parted a glyph gone back
+along the line past half an em and none gone on, and `backwards` cut one gone
+on past three ems; a quarter turn set every glyph half an em up the page from
+the last. The writer's models of the reader measure where a turn counts for
+nothing (`paint::along_the_line`), so the rules drew the line as unturned and
+it was read otherwise: its fourth line, opening with `25٪`, read `25` alone,
+then `يوم٪`, and the paragraph did not conserve.
 
-**`TextDevice` measures a horizontal line on the page's axes.** `show_glyph`
-keeps `PendingLine::pen` as `x1.max(x0)`, the right edge of the glyph's box,
-and a new line's as `anchor.0`; keeps a `Stretch` where
-`corner(advance + spacing, 0.0).0` is past it; hands `Stretch::carries` and
-`Stretch::reaches` the origin's `x`; asks `origin.0 > line.pen + slack` once
-`end_text` has closed the line (`disjoint`) and
-`anchor.0 + expected_gap < line.origin.0` (`backwards`); and `far` reads the
-page's `y`. A half turn runs the line to the page's left: `line.pen` is where
-the last glyph starts, no stretch is kept, a text object's end parts a glyph
-gone back along the line past half an em and none gone on, and `backwards`
-cuts one gone on past three ems and none gone back. `turned`, the thresholds,
-`far` and `finish`'s blocks read a half turn as no turn. `text_order` already
-measures along each line's baseline, and the writer's models of the reader
-(`page_lines`, `parted`) measure where a turn counts for nothing
-(`along_the_line`): the rules draw the line as unturned, and it is read
-otherwise.
+**The rule, as landed.** A horizontal line is measured in its own frame
+(`text.rs`'s `Frame`): `u`, its first glyph's direction over its length, and
+`n`, `u` turned a quarter; a point's place along the line is its dot product
+with `u`, and across it its dot product with `n`. `PendingLine::pen` is the
+furthest place of a glyph's corners, a new line's pen its anchor's, and a
+`Stretch`'s pen that of `corner(advance + spacing, 0)`, kept where it is past
+the pen; `disjoint`, `backwards`, `carried` and `spaced` take places along
+the line and `far` across it, each glyph in the frame of the line it
+continues; and the ends Left (3)'s mend compares (`End`) are the nearest
+places of their glyphs' corners. The rest of a line (`PendingLine::rest`)
+takes the frame of the line it is the rest of, so that `mends` compares the
+two lines' ends on one axis: a glyph drawn mirrored is not `turned`, and
+measured in a frame of its own the rest would be compared on the opposite
+one. `turned`, the thresholds, vertical lines and `finish` are as they were.
+A line whose direction is `(a, 0)` with `a > 0` — every unturned line and
+every one under a positive scale — takes the page's `x` and `y` themselves,
+not a dot product, so its lines, characters and order are those the page's
+axes give, to the bit; so does a vertical line, and one whose direction has
+no finite, non-zero length. Quads, origins, `text_order` and the writer's
+rules do not change; what the writer draws changes only where its read-back
+reads a turned line otherwise.
 
-**Why no drawing tried reads it right.** Traced in both builds: the fourth
-line's `25` is a text object and the next goes back past half an em, so every
-drawing `Fonts::search` reads on the page reads `25` apart, an em's stretch
-from the rest, which `rejoin_split_lines` does not bridge; in the runs' own
-space the rules' drawing reads `25 ٪يوم`, `Search::Letters` and no drawing
-found, so the rules' drawing is kept.
+**What it reads.** A turned line reads as the line unturned, character for
+character, but where a gap lies exactly on a threshold, which the turned sums
+can resolve otherwise. Left (6) conserves, as its twin does. One such
+sentence under a half turn reads whole and its twin does not, by such a tie:
+its first `2` stands exactly three ems back from the word before it, which
+the turned sums put past `backwards`'s threshold and the page's `x` does not,
+so under the turn the writer draws its first word space with its word, and a
+reader reads it; unturned, the space is drawn alone, dropped as a line of
+white space, and the line reads `كتاب25٪`. Rows that conserved, read whole
+or found every word only because a reader cut a turned line on the page's
+axes read as their twins: the punctuation shape under `rotate(12deg)`, whose
+climbing baseline was cut every half an em up the page, reads as its twin
+and not whole, the owner's price on H-157; and the squeezed Hebrew blocks of
+`a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space`,
+turned a quarter and three quarters, conserve, hold their order and find
+every word, as unturned, in both builds. A Latin line under a quarter turn
+reads whole. No committed document holds turned text, so no plain PDF's text
+changes, and no glyph moves.
 
-**The rule.** A horizontal line is measured in its own frame: `u`, its
-`direction` over its length, and `n`, `u` turned a quarter; a point's place
-is its dot product with `u` along the line, with `n` across it. `line.pen` is
-the furthest place of the glyph's quad's corners, a new line's pen its
-anchor's, `Stretch::pen` that of `corner(advance + spacing, 0.0)`, kept where
-past `line.pen`; `disjoint`, `backwards`, `carried` and `spaced` take places
-along the line and `far` across it, each glyph in the frame of the line it
-continues or starts. `turned`, the thresholds, vertical lines and `finish`
-stay; a direction of no finite, non-zero length takes the page's axes.
+**What remains.** The line that opens with `25٪` is read alone, `25 ٪يوم`,
+turned or not: the writer draws the sign left of the digits, `AN` after the
+paragraph's Arabic (UAX #9's W2), and read alone the line opens with one
+European number, `25٪` (W5), where its paragraph would keep the sign with its
+number. So the paragraph does not read whole. ROADMAP's Bugs list holds it,
+and FT-37 resolves a paragraph across its lines.
 
-**What must not change.** A line whose direction is `(a, 0)` with `a > 0`,
-every unturned line and every one under a positive scale, takes the page's
-`x` and `y` themselves, not a dot product: its lines, characters and order,
-bit for bit. Quads, origins, `text_order` and `paint.rs` do not change.
-
-**What the rule reaches.** Prototyped in both builds, it reads a half-turned
-line as the line unturned, character for character, but where a comparison
-lies exactly on its threshold, which the turned sums can resolve otherwise.
-So Left (6) conserves, and its fourth line reads `25 ٪يوم`, as unturned, in
-every drawing tried, searched on past its letters or not: the writer draws
-the sign left of the digits, `AN` after the paragraph's Arabic (UAX #9's W2),
-and read alone the line opens with one European number, `25٪` (W5), the
-limit `text_order.rs` names, a line resolved on its own. A turned row that
-reads whole where its unturned twin does not reads as the twin: the
-punctuation shape under `rotate(12deg)`, `كتاب?!`; and the one-sentence row
-keeps its reading only by a tie of `backwards`, its first `2` exactly three
-ems back from `كتاب`'s last letter: resolved as flat, its word space drawn
-alone is dropped, and it reads `كتاب25٪`, as its twin is pinned. A Latin line
-under a quarter turn, cut today wherever a glyph stands over half an em up
-the page from the last (`far`), and left so by `text_order`, reads whole.
-
-**What the prototype found.** Built as stated on `text.rs` as CD-19.21 leaves
-it, each line's frame fixed by its first glyph, the rest of a line in the
-frame of the line it is the rest of, and the mend's ends measured along the
-line, it reads every turned line the suites and their probes hold as its
-unturned twin but the two half-turned rows the `backwards` tie decides, and
-no committed document, none of which holds turned text, reads otherwise.
-Left (6) conserves. Rows that conserved or were found only because `far`, on
-the page's `y`, cut a quarter-turned line at nearly every glyph read as their
-twins and so lose those verdicts: Left (10)'s paragraphs turned a quarter,
-and with `bundled-fonts` the squeezed Hebrew blocks turned a quarter and
-three quarters; and the punctuation shape under `rotate(12deg)` loses
-`whole`, as its twin reads. No glyph moves, and no time moves past the noise.
-H-157's row holds the figures.
-
-**What CD-19.28 measures**, with the rule prototyped on `text.rs` as CD-19.21
-leaves it, in the default and `bundled-fonts` builds:
-
-- each case whose verdicts change, by its `CASE` line, and each turned row
-  against its paragraph unturned, with the tie behind any that differs:
-  `cargo test -p tinker-pdf --test epub_fallback -- --nocapture` and
-  `cargo test -p tinker-pdf --test epub_conservation -- --nocapture`, each
-  again with `--features bundled-fonts`, and
-  `cargo test -p tinker-pdf-shape --test bidi_conformance`, which reads no
-  `TextDevice`;
-- the plain PDFs: `cargo test -p tinker-pdf --test text_logical_order`, again
-  with `--features bundled-fonts`, `cargo test -p tinker-pdf-content`, and
-  each line that changes in a document `no_left_to_right_page_moves` walks;
-- the suites' time in release and debug, against the tree without the rule.
-
-**What CD-19.29's tests hold.** `text.rs`'s
+**What holds it.** `text.rs`'s
 `a_line_under_a_half_turn_is_continued_and_cut_as_it_is_unturned`: the
 glyphs of the tests that hold where a line is cut, `justified`'s and
 `objects_spaced`'s among them, drawn under a half and a quarter turn at
-coordinates exact in binary, read into the same lines, characters and order;
-and `an_unturned_line_reads_as_before`: gaps exactly on each threshold, under
-the identity, a shift and `scaleX(2)`, cut and continued as the page's `x`
-decides. In the pin, each half-turn row beside a new unturned twin holds what
-the twin holds, Left (6)'s `cons logical found apart`, and a row read worse
-holds what the owner takes on H-157.
+places exact in binary, read into the same lines, characters and order; and
+`an_unturned_line_reads_as_before`: each threshold met exactly — a text
+object's end resumed half an em past the pen, a glyph three ems back and one
+half an em up the page, a word space's stretch carried and mended within a
+twentieth of an em — under the identity, a shift and `scaleX(2)`, continued at
+the tie and cut past it, as the page's `x` and `y` decide. In
+`a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on`,
+each half-turn row and the `rotate(12deg)` row beside its unturned twin, each
+held to what it reads, the three sentences and their twin pinned at
+`cons logical found apart`; and the turned rows of
+`a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space`, held
+to what they read unturned.
 
 ### The other cases
 

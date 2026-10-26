@@ -1409,13 +1409,11 @@ impl<'a> Fonts<'a> {
                 found => found,
             };
             // And where still nothing reads the line's letters in order under
-            // a matrix that turns its baseline off the page's `x` axis — where
-            // `TextDevice`, which asks whether a glyph continues a line along
-            // the page's own `x` and `y`, parts the line at its word spaces
-            // into pieces it keeps in the order drawn — a drawing that reads
-            // more of its runs with their own characters in order on the page
-            // is drawn ([`Fonts::search_closer`]): a right-to-left run's words
-            // written in reading order ([`Cut::Reading`]).
+            // a matrix that turns its baseline off the page's `x` axis, a
+            // drawing that reads more of its runs with their own characters
+            // in order on the page is drawn ([`Fonts::search_closer`]): a
+            // right-to-left run's words written in reading order
+            // ([`Cut::Reading`]).
             let turned = matrices.iter().any(|matrix| matrix[1] != 0.0);
             let found = match found {
                 None if nothing && turned => {

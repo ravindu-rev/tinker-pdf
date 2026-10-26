@@ -3648,11 +3648,21 @@ fn signs_and_numbers(sentences: usize) -> String {
 /// instead, and with `bundled-fonts` the Hebrew book read `!?` at 05cea0b.
 ///
 /// `25٪ <b>W</b>` in Arabic under `scaleX(1.4)`, which conserved at 56dfd93
-/// and not since round 5, reads right again. Under a half turn at
-/// `word-spacing: 1em` three such sentences conserved at 56dfd93 only because
-/// the overflow font's moved glyphs drew the bold word apart around its sign;
-/// at `0 Tw` no drawing the read-back tries reads the line right (ROADMAP
-/// CD-19, Left (6)), pinned. A line the rules' drawing reads on the page with
+/// and not since round 5, reads right again. A reader measures a turned line
+/// along its own baseline and across it, as an upright one (`TextDevice`;
+/// `docs/design/rtl-read-back.md`, Left (6)), so each turned row reads as its
+/// paragraph unturned, set beside it, but where a gap lies exactly on a
+/// threshold. Three such sentences under a half turn at `word-spacing: 1em`
+/// conserve, as unturned, and their line that opens with `25٪` is read alone,
+/// `25 ٪يوم` (ROADMAP's Bugs, FT-37), pinned with its twin. One such sentence
+/// turned reads whole and its twin does not, by a tie: its first `2` stands
+/// exactly three ems back from the word before it, which the turned sums put
+/// past that threshold and the page's `x` does not, so turned its first word
+/// space is drawn with its word, and unturned it is drawn alone and dropped,
+/// `كتاب25٪`. The sweep's punctuation shape under `rotate(12deg)` read whole
+/// only while a reader measured it on the page's axes and cut it wherever its
+/// baseline climbed half an em; it reads as its twin now, and not whole: the
+/// owner's price (H-157). A line the rules' drawing reads on the page with
 /// its letters in order and not its words is searched in its runs' own space
 /// too, and what that finds is drawn only where it reads the line's words
 /// right on the page (`paint::Fonts::reads_whole`): taken as found, it turned
@@ -3697,13 +3707,21 @@ fn a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on() {
             right,
         ),
         Case::both(
-            "three such sentences under a half turn at 1em (V1, conserved at 56dfd93 only; Left (6))",
+            "three such sentences under a half turn at 1em (Left (6), as unturned; the 25٪ line read alone)",
             "ar",
             "p { margin: 0 30%; transform: rotate(180deg); word-spacing: 1em }",
             format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(3)),
-            Expect::Pinned("logical found apart"),
+            Expect::Pinned("cons logical found apart"),
         ),
-        Case::both("one under a half turn at 1em (guard)", "ar", "p { margin: 0 30%; transform: rotate(180deg); word-spacing: 1em }", format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(1)), right),
+        Case::both(
+            "the same unturned (Left (6)'s twin)",
+            "ar",
+            "p { margin: 0 30%; word-spacing: 1em }",
+            format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(3)),
+            Expect::Pinned("cons logical found apart"),
+        ),
+        Case::both("one under a half turn at 1em (guard; whole by the tie of a glyph three ems back)", "ar", "p { margin: 0 30%; transform: rotate(180deg); word-spacing: 1em }", format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(1)), right),
+        Case::both("the same unturned (the guard's twin)", "ar", "p { margin: 0 30%; word-spacing: 1em }", format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(1)), Expect::Pinned("cons logical found apart")),
         Case::both("Hebrew prose under scaleX(3), letter-spaced by 0.3em (the rules, f6 sweep)", "he", "p { margin: 0 30%; transform: scaleX(3); letter-spacing: 0.3em }", prose(&HE), Expect::Holds("cons logical found")),
         Case::both("Arabic prose under scaleX(3), letter-spaced by 0.3em (the rules, f6 sweep)", "ar", "p { margin: 0 30%; transform: scaleX(3); letter-spacing: 0.3em }", prose(&AR), Expect::Holds("cons logical found")),
         Case::both("no transform (control)", "he", "p { word-spacing: 0.6em }", he, Expect::Holds("cons logical found apart")),
@@ -3731,11 +3749,12 @@ fn a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on() {
             HE,
             Expect::Holds("cons logical whole found"),
         ),
+        // As its twin below reads it, and not whole: the owner's price (H-157).
         (
             "p { margin: 0 30%; transform: rotate(12deg); word-spacing: 0.6em }",
             "ar",
             AR,
-            right,
+            Expect::Holds("cons logical found apart"),
         ),
     ] {
         cases.push(Case::both(
@@ -3746,6 +3765,13 @@ fn a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on() {
             expect,
         ));
     }
+    cases.push(Case::both(
+        "the punctuation shape at 0.6em unturned (the rotate(12deg) row's twin)",
+        "ar",
+        "p { margin: 0 30%; word-spacing: 0.6em }",
+        format!("<p dir=\"rtl\">{}</p>", styled_marks(&AR)),
+        Expect::Holds("cons logical found apart"),
+    ));
     // With no `dir`, where the rules' drawing reads a line's letters in order
     // on the page and not its words: what a search in the runs' own space
     // finds turned the third `?!` for a reading in which it joined its word,
@@ -4386,11 +4412,10 @@ fn squeezed_blocks(words: &[&'static str; 12]) -> String {
 /// 56dfd93 and lost it at 935b077, which drew what its search found in the
 /// runs' space; that drawing reads no closer on the page. Turned so, or
 /// three quarters (`rotate(270deg)`), which lost the order at 05cea0b too,
-/// a reader parts the line at every word space and keeps the pieces in the
-/// order drawn, and the paragraph holds its order where a right-to-left
-/// run's words are written in reading order (`paint::Cut::Reading`), the
-/// drawing that reads most of the line's runs in order on the page
-/// (`paint::Fonts::search_closer`). Each inline block is one unit of its
+/// a reader measures each line along its own baseline (`TextDevice`), and
+/// the paragraph reads as it reads unturned, character for character: it
+/// conserves, holds its order, finds every word and draws no glyph over
+/// another, in both builds. Each inline block is one unit of its
 /// line's order, scaled about its own text (`paint::visual_lines`), and with
 /// `bundled-fonts` the paragraph at `0.6em`, pinned, conserves, holds its
 /// order, finds every word and draws no glyph over another.
@@ -4416,21 +4441,19 @@ fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
             Expect::Holds("logical found"),
             Expect::Holds("found"),
         ),
-        Case::each(
-            "the same at 0.6em turned a quarter (f6 sweep, as at 9297d2d and 56dfd93)",
+        Case::both(
+            "the same at 0.6em turned a quarter, as unturned (f6 sweep)",
             "he",
             "p { margin: 0 30%; transform: rotate(90deg); word-spacing: 0.6em } .w { transform: none }",
             body.clone(),
-            Expect::Holds("logical"),
-            Expect::Holds("found"),
+            Expect::Holds("cons logical found apart"),
         ),
-        Case::each(
-            "the same turned three quarters",
+        Case::both(
+            "the same turned three quarters, as unturned",
             "he",
             "p { margin: 0 30%; transform: rotate(270deg); word-spacing: 0.6em } .w { transform: none }",
             body,
-            Expect::Holds("logical"),
-            Expect::Holds("found"),
+            Expect::Holds("cons logical found apart"),
         ),
     ]);
 }

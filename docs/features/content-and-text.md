@@ -141,6 +141,22 @@ widens or narrows a gap against it: the EPUB writer, which reads each line it
 draws back through this device, reads it under the matrix the page draws it
 under ([epub](epub.md)).
 
+A horizontal line is measured along its own baseline (`text.rs`'s `Frame`):
+along its first glyph's direction, and across it at a quarter turn from it.
+Where the pen stands after a glyph is the furthest of its box's corners along
+the line, and where the spacing left it the same; whether a glyph after a
+text object's end resumes the line within half an em, stands three ems back,
+or is carried across a stretch is asked along the line, and whether it
+leaves the baseline by half an em across it. So a line under a half turn or
+a quarter turn is continued and cut as it would be upright, but for a gap
+that lies exactly on a threshold, which a turn's sums can round the other
+way. A line whose direction is the page's `x` — every upright line, and every
+one under a positive scale — is measured on the page's `x` and `y`
+themselves, not by a dot product, so its lines are exactly those the page's
+axes give; so is a vertical line, and one whose direction has no length. The
+rest of a line cut at a word space's stretch, below, is measured along the
+line it is the rest of.
+
 Within right-to-left text, where the pen stopped after a glyph is past the
 glyph's box by the spacing 9.4.4 moved it on by — `Tc` after every glyph,
 and `Tw` as well after a word space — so a justified or letter-spaced line
@@ -828,7 +844,11 @@ cutting beside a left-to-right word, letter-spacing carrying it
 into a right-to-left glyph and into nothing else — not a bracket, an angle
 bracket or a dash after a right-to-left word, nor anything after neutrals on
 a line that holds a Latin letter — and only as far as a twentieth of an em,
-a word taken whole across a cut, search hit geometry,
+a word taken whole across a cut, a cut at a word space's stretch mended and
+kept, the glyphs of each of those under a half and a quarter turn read into
+the lines they make upright, and every threshold met exactly on an upright
+line, under the identity, a shift and `scaleX(2)`, decided as the page's `x`
+and `y` decide, search hit geometry,
 wmode/rtl separation, non-finite glyphs dropped),
 `crates/tinker-pdf/src/text_order.rs` (ruling 14 on hand-built lines: a
 visual Hebrew line, one already in reading order, a mark on either side of

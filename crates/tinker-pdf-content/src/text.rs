@@ -401,9 +401,15 @@ struct PendingLine {
     /// The baseline direction, used to decide whether a glyph continues the
     /// line or starts a new one.
     direction: (f64, f64),
+    /// The axes the line is measured on ([`Frame`]): its first glyph's
+    /// direction's, or, for the rest of a line ([`Self::rest`]), the frame of
+    /// the line it is the rest of, so that [`mends`] compares the two lines'
+    /// ends on one axis.
+    frame: Frame,
     origin: (f64, f64),
-    /// Where the last glyph's box ended along the baseline, which is where the
-    /// pen would be if the run continued.
+    /// Where the last glyph's box ended along the line — the furthest place
+    /// of its corners ([`Frame::along`]) — which is where the pen would be if
+    /// the run continued.
     pen: f64,
     /// Where `Tc`, and after a word space `Tw`, left the pen, past
     /// [`Self::pen`], after the last glyph of a horizontal line that holds a
@@ -712,7 +718,7 @@ const STRETCH_ROUNDING: f64 = 0.05;
 /// reads by its majority.
 #[derive(Clone, Copy, Debug)]
 struct Stretch {
-    /// Where the pen stood after the glyph, along the baseline.
+    /// Where the pen stood after the glyph, along the line ([`Frame::along`]).
     pen: f64,
     /// Whether the glyph was a word space that `Tw` moved the pen on past:
     /// a code 32 that decodes to white space, under a `Tw` above zero.
@@ -752,9 +758,9 @@ impl Stretch {
 }
 
 /// A glyph of a line that reads either way ([`Strong`]), and where its box
-/// starts along the page's `x` axis — the baseline of every line a word
-/// space's stretch cuts, since a [`Stretch`] is kept only where the pen
-/// moves on rightwards.
+/// starts along the line: the nearest place of its corners in the line's
+/// [`Frame`], which the rest of a line shares with the line it is the rest
+/// of.
 #[derive(Clone, Copy, Debug)]
 struct End {
     at: f64,
@@ -798,6 +804,84 @@ fn mends(before: &PendingLine, rest: &PendingLine) -> bool {
         && End::joined(before.ends, rest.ends).is_some_and(|(left, right)| {
             left.strong == Strong::LeftToRight && right.strong == Strong::LeftToRight
         })
+}
+
+/// **The axes a horizontal line is measured on** (ROADMAP CD-19, Left (6)):
+/// `u`, the line's direction over its length, and `n`, `u` turned a quarter
+/// anticlockwise. A point's place along the line is its dot product with
+/// `u`, and across it its dot product with `n`.
+///
+/// Measured on the page's axes, a line under a half turn runs to the page's
+/// left: its pen stood where its last glyph started, no [`Stretch`] was kept,
+/// a text object's end parted a glyph gone back along the line past half an
+/// em and none gone on, and `backwards` cut one gone on past three ems and
+/// none gone back — `25٪ <b>W</b> ١٢٣ … 2010،` in an Arabic paragraph turned
+/// by `rotate(180deg)` at `word-spacing: 1em` read `25` alone. Measured in
+/// its own frame, it is continued and cut as it is unturned.
+///
+/// A line whose direction is `(a, 0)` with `a > 0` — every unturned line and
+/// every one under a positive scale — takes the page's `x` and `y`
+/// themselves, not a dot product, so that its lines, characters and order are
+/// what they were to the bit; so does a vertical line, and one whose
+/// direction has no finite, non-zero length.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Frame {
+    /// The page's own `x` and `y`.
+    Page,
+    /// `u`, a unit vector along the line.
+    Along((f64, f64)),
+}
+
+impl Frame {
+    /// The frame of a line of `wmode` whose first glyph runs along
+    /// `direction`, the first column of its transform. Its length is the
+    /// square root of the sum of squares, which IEEE 754 rounds correctly and
+    /// so alike on every target (ruling 4), where `hypot` is rounded as each
+    /// platform's library rounds it; a direction too long or too short for
+    /// its squares to be finite and above zero takes the page's axes.
+    fn of(wmode: WritingMode, (a, b): (f64, f64)) -> Frame {
+        if wmode == WritingMode::Vertical || (a > 0.0 && b == 0.0) {
+            return Frame::Page;
+        }
+        let length = (a * a + b * b).sqrt();
+        if length.is_finite() && length > 0.0 {
+            Frame::Along((a / length, b / length))
+        } else {
+            Frame::Page
+        }
+    }
+
+    /// A point's place along the line.
+    fn along(self, (x, y): (f64, f64)) -> f64 {
+        match self {
+            Frame::Page => x,
+            Frame::Along((ux, uy)) => x * ux + y * uy,
+        }
+    }
+
+    /// A point's place across the line, along `n`.
+    fn across(self, (x, y): (f64, f64)) -> f64 {
+        match self {
+            Frame::Page => y,
+            Frame::Along((ux, uy)) => y * ux - x * uy,
+        }
+    }
+
+    /// Where a glyph's box starts and ends along the line: the nearest and
+    /// the furthest places of its corners. `bounds` is the quad's
+    /// [`Quad::bounds`], which the page's axes read as they always have.
+    fn extent(self, quad: &Quad, (x0, _, x1, _): (f64, f64, f64, f64)) -> (f64, f64) {
+        match self {
+            Frame::Page => (x0, x1.max(x0)),
+            Frame::Along(_) => [quad.ll, quad.lr, quad.ul, quad.ur].into_iter().fold(
+                (f64::INFINITY, f64::NEG_INFINITY),
+                |(lo, hi), corner| {
+                    let at = self.along(corner);
+                    (lo.min(at), hi.max(at))
+                },
+            ),
+        }
+    }
 }
 
 /// Whether a character is in one of the right-to-left scripts' blocks — the
@@ -998,18 +1082,23 @@ impl Device for TextDevice {
             Some(line) => {
                 let same_font = line.font_id == glyph.font_id;
                 // A glyph continues the line when it runs the same way and sits
-                // near where the previous one ended.
+                // near where the previous one ended — measured horizontally in
+                // the line's own frame ([`Frame`]): along it and across it.
+                let frame = line.frame;
                 let turned =
                     (line.direction.0 * direction.1 - line.direction.1 * direction.0).abs() > 0.01;
                 let expected_gap = size.max(1.0) * 3.0;
                 let far = match wmode {
                     WritingMode::Horizontal => {
-                        (anchor.1 - line.origin.1).abs() > size.max(1.0) * 0.5
+                        (frame.across(anchor) - frame.across(line.origin)).abs()
+                            > size.max(1.0) * 0.5
                     }
                     WritingMode::Vertical => (anchor.0 - line.origin.0).abs() > size.max(1.0) * 0.5,
                 };
                 let backwards = match wmode {
-                    WritingMode::Horizontal => anchor.0 + expected_gap < line.origin.0,
+                    WritingMode::Horizontal => {
+                        frame.along(anchor) + expected_gap < frame.along(line.origin)
+                    }
                     WritingMode::Vertical => anchor.1 - expected_gap > line.origin.1,
                 };
                 // A line that an `ET` closed is resumed only where the last one
@@ -1017,14 +1106,15 @@ impl Device for TextDevice {
                 // column: two cells of a table row sit on one baseline and are
                 // two lines, and a paragraph that changed font mid-word is one.
                 let slack = size.max(1.0) * 0.5;
+                let along = frame.along(origin);
                 let carried = wmode == WritingMode::Horizontal
                     && line.stretched.is_some_and(|stretch| {
-                        stretch.carries(line, strong(&glyph.text), origin.0, size)
+                        stretch.carries(line, strong(&glyph.text), along, size)
                     });
                 let disjoint = line.closed
                     && !carried
                     && match wmode {
-                        WritingMode::Horizontal => origin.0 > line.pen + slack,
+                        WritingMode::Horizontal => along > line.pen + slack,
                         WritingMode::Vertical => origin.1 < line.pen - slack,
                     };
                 let elsewhere = turned || far || backwards || (line.wmode != wmode && !same_font);
@@ -1038,7 +1128,7 @@ impl Device for TextDevice {
                 let spaced = wmode == WritingMode::Horizontal
                     && line
                         .stretched
-                        .is_some_and(|stretch| stretch.reaches(origin.0, size));
+                        .is_some_and(|stretch| stretch.reaches(along, size));
                 let word = if elsewhere || !line.in_word || (disjoint && !spaced) {
                     None
                 } else {
@@ -1057,14 +1147,21 @@ impl Device for TextDevice {
         };
 
         if starts_new_line {
+            // The rest of a line is measured in the frame of the line it is
+            // the rest of ([`PendingLine::frame`]).
+            let frame = match &self.current {
+                Some(before) if rest => before.frame,
+                _ => Frame::of(wmode, direction),
+            };
             self.flush();
             self.current = Some(PendingLine {
                 chars: Vec::new(),
                 wmode,
                 direction,
+                frame,
                 origin: anchor,
                 pen: match wmode {
-                    WritingMode::Horizontal => anchor.0,
+                    WritingMode::Horizontal => frame.along(anchor),
                     WritingMode::Vertical => anchor.1,
                 },
                 font_id: glyph.font_id,
@@ -1084,10 +1181,11 @@ impl Device for TextDevice {
             line.origin = anchor;
             line.font_id = glyph.font_id;
             line.closed = false;
-            let (x0, y0, x1, y1) = quad.bounds();
+            let bounds = quad.bounds();
+            let (nearest, furthest) = line.frame.extent(&quad, bounds);
             line.pen = match wmode {
-                WritingMode::Horizontal => x1.max(x0),
-                WritingMode::Vertical => y0.min(y1),
+                WritingMode::Horizontal => furthest,
+                WritingMode::Vertical => bounds.1.min(bounds.3),
             };
             let blank = glyph.text.chars().all(char::is_whitespace);
             // The word this glyph is in, taken whole: `(HDAC).` holds a
@@ -1106,7 +1204,7 @@ impl Device for TextDevice {
                 line.holds_rtl |= rtl;
                 if own != Strong::Neither {
                     let end = End {
-                        at: x0,
+                        at: nearest,
                         strong: own,
                     };
                     line.ends = End::joined(line.ends, Some((end, end)));
@@ -1131,7 +1229,7 @@ impl Device for TextDevice {
                         0.0
                     };
                     let spacing = (state.text.char_spacing + tw) / glyph.size;
-                    let at = corner(advance + spacing, 0.0).0;
+                    let at = line.frame.along(corner(advance + spacing, 0.0));
                     (at.is_finite() && at > line.pen).then_some(Stretch {
                         pen: at,
                         word_space: tw > 0.0,
@@ -1758,6 +1856,427 @@ mod tests {
         );
         let latin: &[(&str, f64)] = &[("b", 18.0), (" ", 23.0), ("c", 36.0)];
         assert_eq!(objects_spaced(&[a, latin], 0.0, 8.0), ["a ", "b c"]);
+    }
+
+    /// The texts of the lines `device` collected.
+    fn read_lines(device: TextDevice) -> Vec<String> {
+        device
+            .finish()
+            .lines()
+            .iter()
+            .map(|line| line.text.clone())
+            .collect()
+    }
+
+    /// The lines of a page whose text objects are `objects`, each glyph
+    /// `(text, x, y)` drawn at `(x, y)` in text space under `page`, under `Tc`
+    /// of `char_spacing` and `Tw` of `word_spacing`.
+    fn objects_under(
+        objects: &[Vec<(&str, f64, f64)>],
+        char_spacing: f64,
+        word_spacing: f64,
+        page: &Matrix,
+    ) -> Vec<String> {
+        let mut device = TextDevice::new();
+        let mut state = GraphicsState::new(Matrix::IDENTITY);
+        state.text.char_spacing = char_spacing;
+        state.text.word_spacing = word_spacing;
+        for object in objects {
+            for (text, x, y) in object {
+                let mut shown = glyph(text, *x, *y, 10.0);
+                shown.transform = shown.transform.then(page);
+                device.show_glyph(&shown, &state);
+            }
+            device.end_text();
+        }
+        read_lines(device)
+    }
+
+    /// A page's text objects, each its glyphs `(text, x, y)`.
+    type Objects = Vec<Vec<(&'static str, f64, f64)>>;
+
+    /// `objects`, each glyph on the baseline `y = 700`.
+    fn on_700(objects: &[&[(&'static str, f64)]]) -> Objects {
+        objects
+            .iter()
+            .map(|object| object.iter().map(|(text, x)| (*text, *x, 700.0)).collect())
+            .collect()
+    }
+
+    /// Each of `pieces` a text object of its own, as [`justified`] draws them.
+    fn each_alone(pieces: &[(&'static str, f64)]) -> Objects {
+        pieces
+            .iter()
+            .map(|(text, x)| vec![(*text, *x, 700.0)])
+            .collect()
+    }
+
+    /// **A line under a half turn is continued and cut as it is unturned**
+    /// (ROADMAP CD-19, Left (6)). The glyphs of the tests above that hold
+    /// where a line is cut — a text object's end resumed and a gap kept, a
+    /// stretched word space and letter-spacing carried and refused, a word
+    /// taken whole across a cut, a cut at a word space's stretch mended and
+    /// kept — and a new baseline and glyphs gone back past three ems and
+    /// within them, drawn under a half turn and under a quarter turn at
+    /// places exact in binary, read into the same lines, characters and order
+    /// as unturned: each line is measured along its own baseline and across
+    /// it ([`Frame`]). Measured on the page's `x` and `y`, a half turn's pen
+    /// stood where its last glyph started, so a text object's end parted
+    /// none of these gaps, and a quarter turn's every glyph stood half an em
+    /// up the page from the one before.
+    #[test]
+    fn a_line_under_a_half_turn_is_continued_and_cut_as_it_is_unturned() {
+        let (alef, bet, gimel) = ("\u{5D0}", "\u{5D1}", "\u{5D2}");
+        let mut sets: Vec<(f64, f64, Objects)> = vec![
+            (
+                0.0,
+                0.0,
+                on_700(&[
+                    &[("A", 0.0), ("B", 5.0)],
+                    &[("C", 10.0), ("D", 15.0)],
+                    &[("E", 20.0), ("F", 25.0)],
+                ]),
+            ),
+            (0.0, 0.0, on_700(&[&[("A", 0.0)], &[("B", 200.0)]])),
+            (0.0, 0.0, vec![vec![("A", 0.0, 700.0), ("B", 0.0, 680.0)]]),
+            (0.0, 0.0, on_700(&[&[("a", 100.0)], &[("b", 60.0)]])),
+            (0.0, 0.0, on_700(&[&[("a", 100.0), ("b", 75.0)]])),
+            (
+                0.0,
+                8.0,
+                on_700(&[
+                    &[(alef, 0.0), (" ", 5.0), ("(", 18.0), (" ", 23.0)],
+                    &[(bet, 36.0)],
+                ]),
+            ),
+            (
+                0.0,
+                8.0,
+                on_700(&[
+                    &[("o", 0.0), ("\u{302}", 5.0)],
+                    &[(" ", 10.0)],
+                    &[(bet, 23.0)],
+                ]),
+            ),
+            (
+                6.0,
+                0.0,
+                on_700(&[&[(alef, 0.0), (" ", 11.0), (".", 22.0)], &[(bet, 33.0)]]),
+            ),
+            (
+                0.0,
+                0.0,
+                on_700(&[&[(alef, 0.0), (" ", 11.0), (".", 22.0)], &[(bet, 33.0)]]),
+            ),
+            (
+                6.0,
+                0.0,
+                on_700(&[&[(alef, 0.0)], &[(" ", 11.0), ("x", 16.0)]]),
+            ),
+            (
+                6.0,
+                0.0,
+                on_700(&[&[("a", 0.0)], &[("]", 11.0), (" ", 16.0)], &[(bet, 27.0)]]),
+            ),
+            (
+                0.0,
+                8.0,
+                on_700(&[
+                    &[("a", 0.0), (" ", 5.0), ("-", 10.0), (" ", 15.0)],
+                    &[(bet, 28.0)],
+                ]),
+            ),
+            (
+                0.0,
+                8.0,
+                on_700(&[
+                    &[(alef, 0.0), (" ", 5.0), ("-", 10.0), (" ", 15.0)],
+                    &[(bet, 28.0)],
+                ]),
+            ),
+            (
+                0.0,
+                8.0,
+                on_700(&[
+                    &[("a", 0.0), (" ", 5.0), (alef, 10.0), (" ", 15.0)],
+                    &[(bet, 28.0)],
+                ]),
+            ),
+            (
+                0.0,
+                8.0,
+                on_700(&[&[("?", 0.0), ("!", 5.0), (" ", 10.0)], &[(bet, 23.0)]]),
+            ),
+            (
+                6.0,
+                0.0,
+                on_700(&[&[(alef, 0.0)], &[("[", 11.0)], &[(bet, 22.0)]]),
+            ),
+            (
+                1.0,
+                8.0,
+                on_700(&[&[("a", 0.0)], &[(alef, 10.5), (" ", 15.5)], &[(bet, 29.5)]]),
+            ),
+            (
+                6.0,
+                8.0,
+                on_700(&[&[("a", 0.0)], &[(alef, 11.0), (" ", 22.0)], &[(bet, 41.0)]]),
+            ),
+            (
+                0.0,
+                8.0,
+                on_700(&[
+                    &[("a", 0.0), (" ", 5.0)],
+                    &[(bet, 18.0), (" ", 23.0), ("c", 36.0)],
+                ]),
+            ),
+            (
+                0.0,
+                0.0,
+                on_700(&[
+                    &[("a", 0.0), (" ", 5.0)],
+                    &[(bet, 18.0), (" ", 23.0), ("c", 36.0)],
+                ]),
+            ),
+            (
+                0.0,
+                8.0,
+                on_700(&[
+                    &[("x", 0.0), (" ", 5.0)],
+                    &[("y", 18.0), (" ", 23.0)],
+                    &[(bet, 36.0), (" ", 41.0), ("z", 54.0)],
+                ]),
+            ),
+            (
+                0.0,
+                8.0,
+                on_700(&[
+                    &[(alef, 0.0), (" ", 5.0), ("b", 18.0), (" ", 23.0)],
+                    &[(gimel, 36.0)],
+                ]),
+            ),
+            (
+                0.0,
+                8.0,
+                on_700(&[
+                    &[("a", 0.0), (" ", 5.0)],
+                    &[("b", 18.0), (" ", 23.0), ("c", 36.0)],
+                ]),
+            ),
+        ];
+        for word_spacing in [8.0, 0.0] {
+            sets.push((
+                0.0,
+                word_spacing,
+                each_alone(&[(alef, 0.0), (" ", 5.0), (bet, 18.0)]),
+            ));
+        }
+        for (first, second) in [
+            ("\u{750}", "\u{751}"),
+            ("\u{7CA}", "\u{7CB}"),
+            ("\u{1E900}", "\u{1E901}"),
+        ] {
+            sets.push((
+                0.0,
+                8.0,
+                each_alone(&[(first, 0.0), (" ", 5.0), (second, 18.0)]),
+            ));
+        }
+        for (before, after) in [("a", bet), (alef, "b"), ("a", "b"), ("\u{301}", bet)] {
+            sets.push((
+                0.0,
+                8.0,
+                each_alone(&[(before, 0.0), (" ", 5.0), (after, 18.0)]),
+            ));
+        }
+        for opening in ["(", "\u{27E8}", "-", "\u{661}", "\u{6F1}", "1"] {
+            sets.push((
+                0.0,
+                8.0,
+                each_alone(&[(alef, 0.0), (" ", 5.0), (opening, 18.0)]),
+            ));
+        }
+        sets.push((
+            0.0,
+            8.0,
+            each_alone(&[("\u{627}", 0.0), (" ", 5.0), ("\u{60C}", 18.0)]),
+        ));
+        sets.push((0.0, 8.0, each_alone(&[(" ", 5.0), (bet, 18.0)])));
+        for first in ["a", alef] {
+            sets.push((
+                0.0,
+                8.0,
+                each_alone(&[(first, 0.0), (".", 5.0), (" ", 10.0), (bet, 23.0)]),
+            ));
+        }
+        sets.push((
+            0.0,
+            8.0,
+            each_alone(&[("a", 0.0), (alef, 13.0), (" ", 18.0), (bet, 31.0)]),
+        ));
+        sets.push((
+            1.0,
+            8.0,
+            each_alone(&[(alef, 0.0), (" ", 6.0), (bet, 20.0)]),
+        ));
+        for (first, second) in [(alef, "."), ("a", "b"), (alef, "b"), ("a", bet)] {
+            sets.push((6.0, 0.0, each_alone(&[(first, 0.0), (second, 11.0)])));
+        }
+        for opening in ["\u{AB}", "\"", "(", "#"] {
+            sets.push((6.0, 0.0, each_alone(&[(opening, 0.0), (bet, 11.0)])));
+        }
+        for at in [11.0, 11.25, 10.75, 14.0, 12.0] {
+            sets.push((6.0, 0.0, each_alone(&[(alef, 0.0), (bet, at)])));
+        }
+        for at in [20.0, 16.0] {
+            sets.push((
+                0.0,
+                8.0,
+                on_700(&[
+                    &[("a", 0.0), (" ", 5.0)],
+                    &[(bet, at), (" ", at + 5.0), ("c", at + 18.0)],
+                ]),
+            ));
+        }
+        let half = Matrix {
+            a: -1.0,
+            b: 0.0,
+            c: 0.0,
+            d: -1.0,
+            e: 1024.0,
+            f: 1400.0,
+        };
+        let quarter = Matrix {
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
+            e: 800.0,
+            f: 0.0,
+        };
+        for (char_spacing, word_spacing, objects) in &sets {
+            let flat = objects_under(objects, *char_spacing, *word_spacing, &Matrix::IDENTITY);
+            for (turn, page) in [("a half turn", &half), ("a quarter turn", &quarter)] {
+                assert_eq!(
+                    objects_under(objects, *char_spacing, *word_spacing, page),
+                    flat,
+                    "{objects:?} under {turn}, Tc {char_spacing}, Tw {word_spacing}"
+                );
+            }
+        }
+        // A loop over nothing would pass: every set is here, and most of
+        // them are more than one line.
+        assert_eq!(sets.len(), 59);
+        let cut = sets
+            .iter()
+            .filter(|(tc, tw, objects)| {
+                objects_under(objects, *tc, *tw, &Matrix::IDENTITY).len() > 1
+            })
+            .count();
+        assert_eq!(cut, 41);
+    }
+
+    /// The lines of a page whose text objects are `objects`, each glyph
+    /// `(text, x, y)` set at `(x, y)` on the page, its transform `linear`
+    /// scaled by a size of 10, under `Tw` of `word_spacing`.
+    fn placed(
+        objects: &[Vec<(&str, f64, f64)>],
+        linear: &Matrix,
+        word_spacing: f64,
+    ) -> Vec<String> {
+        let mut device = TextDevice::new();
+        let mut state = GraphicsState::new(Matrix::IDENTITY);
+        state.text.word_spacing = word_spacing;
+        let sized = Matrix::scale(10.0, 10.0).then(linear);
+        for object in objects {
+            for (text, x, y) in object {
+                let mut shown = glyph(text, *x, *y, 10.0);
+                shown.transform = Matrix {
+                    e: *x,
+                    f: *y,
+                    ..sized
+                };
+                device.show_glyph(&shown, &state);
+            }
+            device.end_text();
+        }
+        read_lines(device)
+    }
+
+    /// **An unturned line reads as before**: a line whose direction is
+    /// `(a, 0)` with `a > 0` is measured on the page's `x` and `y`
+    /// themselves, not by a dot product ([`Frame`]). Each threshold a line is
+    /// cut at, met exactly — a text object's end resumed half an em past the
+    /// pen, a glyph three ems back, a glyph half an em up the page, a word
+    /// space's stretch carried and mended within a twentieth of an em — under
+    /// the identity, a shift and `scaleX(2)`, continues the line, and passed,
+    /// cuts it, as the page's `x` and `y` decide: each place below is the sum
+    /// the device itself makes, so a tie is a tie in its own arithmetic.
+    #[test]
+    fn an_unturned_line_reads_as_before() {
+        let (alef, bet) = ("\u{5D0}", "\u{5D1}");
+        for (name, linear, (x0, y0)) in [
+            ("the identity", Matrix::IDENTITY, (0.0, 0.0)),
+            ("a shift", Matrix::IDENTITY, (64.5, -32.25)),
+            ("scaleX(2)", Matrix::scale(2.0, 1.0), (-35.0, 0.0)),
+        ] {
+            let sized = Matrix::scale(10.0, 10.0).then(&linear);
+            let em = sized.expansion().max(1.0);
+            let (slack, back, rounding) = (em * 0.5, em * 3.0, em * STRETCH_ROUNDING);
+            // Where a glyph set at `x` ends, and where a word space set at `x`
+            // under `Tw` of 7.5 leaves the pen.
+            let end = |x: f64| Matrix { e: x, ..sized }.apply(0.5, 0.0).0;
+            let stretch = |x: f64| Matrix { e: x, ..sized }.apply(1.25, 0.0).0;
+            for past in [false, true] {
+                let lines = |tie: Vec<String>, cut: Vec<String>| if past { cut } else { tie };
+                let by = if past { 1.0 } else { 0.0 };
+                let resumed = vec![vec![("a", x0, y0)], vec![("b", end(x0) + slack + by, y0)]];
+                assert_eq!(
+                    placed(&resumed, &linear, 0.0),
+                    lines(vec!["ab".into()], vec!["a".into(), "b".into()]),
+                    "{name}: a text object's end resumed half an em past the pen, past {past}"
+                );
+                let jumped = vec![vec![("a", x0 + back + by, y0)], vec![("b", x0, y0)]];
+                assert_eq!(
+                    placed(&jumped, &linear, 0.0),
+                    lines(vec!["ab".into()], vec!["a".into(), "b".into()]),
+                    "{name}: a glyph three ems back, past {past}"
+                );
+                let raised = vec![vec![("a", x0, y0), ("b", end(x0), y0 + slack + by)]];
+                assert_eq!(
+                    placed(&raised, &linear, 0.0),
+                    lines(vec!["ab".into()], vec!["a".into(), "b".into()]),
+                    "{name}: a glyph half an em up the page, past {past}"
+                );
+                let reach = if past { 2.0 * rounding } else { rounding };
+                let carried = vec![
+                    vec![(alef, x0, y0)],
+                    vec![(" ", end(x0), y0)],
+                    vec![(bet, stretch(end(x0)) + reach, y0)],
+                ];
+                assert_eq!(
+                    placed(&carried, &linear, 7.5),
+                    lines(
+                        vec![format!("{alef} {bet}")],
+                        vec![format!("{alef} "), bet.to_string()]
+                    ),
+                    "{name}: a word space's stretch carried, past {past}"
+                );
+                let at = stretch(end(x0)) + reach;
+                let mended = vec![
+                    vec![("a", x0, y0), (" ", end(x0), y0)],
+                    vec![(bet, at, y0), (" ", end(at), y0), ("c", end(end(at)), y0)],
+                ];
+                assert_eq!(
+                    placed(&mended, &linear, 7.5),
+                    lines(
+                        vec![format!("a {bet} c")],
+                        vec!["a ".into(), format!("{bet} c")]
+                    ),
+                    "{name}: a cut at a word space's stretch mended, past {past}"
+                );
+            }
+        }
     }
 
     #[test]

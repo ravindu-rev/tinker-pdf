@@ -401,12 +401,10 @@ its baseline, which nothing tried reads with its letters in order, is searched
 again the same way, up to as many readings, for the first drawing that reads
 it closer to the order written than the rules' drawing — more of its runs with
 their own characters in order, or as many and more pairs of its words — and
-sets no more glyphs over others (`paint::Fonts::search_closer`): `TextDevice`
-asks whether a glyph continues a line along the page's own `x` and `y`, so
-under a quarter turn it parts a word-spaced line at every space and keeps the
-pieces in the order drawn. Any other line the rules read right, or that no
-drawing tried reads right, is drawn by the rules; a line with a run in a face
-of the book's own is not read back, since that face is shaped
+sets no more glyphs over others (`paint::Fonts::search_closer`). Any other
+line the rules read right, or that no drawing tried reads right, is drawn by
+the rules; a line with a run in a face of the book's own is not read back,
+since that face is shaped
 (`neutrals_a_reader_reads_with_the_word_beside_them_are_drawn_for_that_reading`,
 `a_line_a_reader_cuts_where_it_is_spaced_apart_is_drawn_to_read_whole`).
 
@@ -478,12 +476,12 @@ the line's words, searching on past a reading of the rules' drawing that runs
 two words together or cuts one, and reading each drawing once are not done.
 These lines no drawing tried reads right, and they are drawn by the rules:
 
-- `25٪ <b>W</b>` in an Arabic paragraph turned by `rotate(180deg)` at
-  `word-spacing: 1em`, since `TextDevice` asks whether a glyph continues a
-  line along the page's `x`, which a half turn runs the other way; and, with
-  `bundled-fonts`, `W 1 234، <b>W</b> W.` in Hebrew, the number's halves a
-  NO-BREAK SPACE apart, under `scaleX(2)` at `word-spacing: 0.6em`, which
-  reads its comma apart;
+- `25٪ <b>W</b>` in an Arabic paragraph at `word-spacing: 1em`, turned by
+  `rotate(180deg)` or not, whose line that opens with `25٪` a reader reads
+  alone, `25 ٪يوم` (ROADMAP's Bugs, FT-37); and, with `bundled-fonts`,
+  `W 1 234، <b>W</b> W.` in Hebrew, the number's halves a NO-BREAK SPACE
+  apart, under `scaleX(2)` at `word-spacing: 0.6em`, which reads its comma
+  apart;
 - a Hebrew paragraph with no `dir` that ends a number and a stop,
   `בראשית. אור ٦٠.` at `word-spacing: 0.5em`, whose stop abuts the
   right-to-left run and is read first, since the comma tie-break asks for a
