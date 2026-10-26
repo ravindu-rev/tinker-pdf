@@ -18,9 +18,6 @@ do not say. Every gate runs, so one run reports every failure; `--first`
 stops at the first. Exits 1 when a gate fails, 2 for a gate that does not
 exist. It runs cargo and nothing else, and changes nothing but its logs and
 cargo's own target directory.
-
-`gatescheck.py` beside this file holds each rule that reads a log or runs a
-gate to a synthetic log or a fake run.
 """
 import argparse
 import os
