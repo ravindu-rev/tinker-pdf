@@ -1376,8 +1376,8 @@ fn a_dirless_line_opening_with_a_bracket_pair_reads_its_closing_quotes_and_stops
 // ---- the cases the reviews found -------------------------------------------
 //
 // Every book a finding of the K-11 and CD-19 reviews named is a row of the
-// test of its mechanism, here and in `epub_fallback.rs`, read as the
-// right-to-left probe kit reads a book (`epub_support::reading`). A case that
+// test of its mechanism, here and in `epub_fallback.rs`, read as
+// `epub_support::reading` reads a book. A case that
 // was fixed is held to its right reading (`Expect::Holds`); a case still open
 // is pinned at what it reads today (`Expect::Pinned`) and says which ROADMAP
 // row leaves it, so that it fails when the limit closes and the row moves.

@@ -1,26 +1,15 @@
-//! What a reader gets back from one book, read as the right-to-left probe
-//! kit reads it (`tools/probes/rtl`), and the cases that hold a book to it.
-//!
-//! The reviews of K-11 and CD-19 found their findings as books: a style, a
-//! body, and what the book read at one tree and at another. Each such book is
-//! a [`Case`] here, in the test file of its mechanism, so that the next round
-//! starts from the repository and not from a verifier's scratch file
-//! (AGENTS.md, "A test for every case"). A case's reading is five verdicts:
+//! What a reader gets back from one book, and the cases that hold a book to
+//! it. Each case is a [`Case`] in the test file of its mechanism: a style, a
+//! body, and what the book reads. A case's reading is five verdicts:
 //!
 //! - `cons`: the pages conserve the source's text in content order
 //!   ([`conservation`]);
 //! - `logical`: and in the structure tree's order
 //!   ([`conservation_in_logical_order`]);
 //! - `whole`: every block's text, white space aside, is a run of the pages'
-//!   plain text (the kit's `text=1`);
-//! - `found`: every word of two letters or more is found by search (the kit's
-//!   `search=a/b` with `a == b`);
-//! - `apart`: no glyph is drawn over another on its baseline (the kit's
-//!   `overlap=a/b` with `b == 0`).
-//!
-//! The text, the words and the overprint are the kit's own definitions; the
-//! suites under `tests/rtl_probes/` read their books with these same
-//! functions.
+//!   plain text;
+//! - `found`: every word of two letters or more is found by search;
+//! - `apart`: no glyph is drawn over another on its baseline.
 
 use super::book::styled_book;
 use super::conservation::{conservation, conservation_in_logical_order};
@@ -160,7 +149,7 @@ pub fn tokens(segs: &[String]) -> Vec<String> {
     out
 }
 
-/// The word lists the kit's books are made of: the hunt's Arabic, Hebrew
+/// The word lists the books are made of: the hunt's Arabic, Hebrew
 /// and pointed Hebrew, the own and code probes' Arabic, and the Hebrew with
 /// Arabic-Indic, Persian and European digits of the round-5 hunt.
 pub const AR: [&str; 12] = [
@@ -230,7 +219,7 @@ pub const HEN: [&str; 12] = [
     "٦٠",
 ];
 
-/// `n` sentences, the `k`th made by `f(3 * k)`, as the kit repeats one.
+/// `n` sentences, the `k`th made by `f(3 * k)`.
 pub fn rep(n: usize, f: impl Fn(usize) -> String) -> String {
     (0..n).map(|k| f(k * 3)).collect::<Vec<_>>().join(" ")
 }
@@ -317,7 +306,7 @@ pub fn read(language: &str, style: &str, body: &str) -> Reading {
     }
 }
 
-/// The kit's count of glyphs drawn over another: the glyphs of a page drawn
+/// The count of glyphs drawn over another: the glyphs of a page drawn
 /// in content order, marks aside, sorted along each baseline, and each one
 /// that starts more than a fiftieth of its size before the one left of it
 /// ends.

@@ -4530,7 +4530,7 @@ impl Overprint {
     /// baseline, as a reader of the page sees them: by their boxes, rows of
     /// one baseline, a glyph over another where it starts more than a
     /// fiftieth of its size inside the one left of it. The box is the
-    /// glyph's quad's bounds, as the probe kit counts overprint, so under a
+    /// glyph's quad's bounds, so under a
     /// skew a slanted glyph's box reaches over its neighbour's where nothing
     /// is drawn over anything (V7 of round 6's review): every drawing tried
     /// is counted so, the rules' among them.

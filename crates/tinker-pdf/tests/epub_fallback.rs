@@ -2842,8 +2842,8 @@ fn a_standard_14_hebrew_word_alone_on_its_line_is_drawn_right_to_left() {
 //
 // Every book a finding of the K-11 and CD-19 reviews named about what the
 // writer draws is a row of the test of its mechanism here; the reader's are
-// in `epub_conservation.rs`. Read as the right-to-left probe kit reads a book
-// (`epub_support::reading`): a case that was fixed is held to its right
+// in `epub_conservation.rs`. Read as `epub_support::reading` reads a
+// book: a case that was fixed is held to its right
 // reading (`Expect::Holds`), a case still open is pinned at what it reads
 // today (`Expect::Pinned`) and says which ROADMAP row leaves it, so that it
 // fails when the limit closes and the row moves.
@@ -4618,8 +4618,8 @@ fn a_line_a_reader_cuts_on_the_page_under_a_transform_is_searched_in_its_runs_sp
 /// 935b077. Read back under the page's matrix, a drawing that read the
 /// line's letters right in the runs' space drew two, and was taken: a
 /// glyph more over another under word spacing. The read-back counts the
-/// glyphs each drawing sets over another as the kit does
-/// (`paint::drawn_over`) and takes none that sets more than the rules'.
+/// glyphs each drawing sets over another
+/// (`paint::Overprint`) and takes none that sets more than the rules'.
 #[test]
 fn a_drawing_that_sets_more_glyphs_over_others_than_the_rules_is_not_taken() {
     let body = format!("<div class=\"w\"><p>{}</p></div>", squeezed_blocks(&AR));
@@ -4640,8 +4640,8 @@ fn a_drawing_that_sets_more_glyphs_over_others_than_the_rules_is_not_taken() {
     );
 }
 
-/// **Two cells are read back as a reader parts them on the page** (round 6's
-/// lane F, the edges of V1's class: the kit's `zz_f6_ems` sweep).
+/// **Two cells are read back as a reader parts them on the page** (the edges
+/// of V1's class).
 ///
 /// The read-back reads together the runs a reader reads as one line
 /// (`paint::page_lines`), and a gap between two runs parts them where it is

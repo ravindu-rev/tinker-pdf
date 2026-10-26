@@ -1,4 +1,0 @@
-# zz_fv_shape at 9297d2d, lines: zz_fv_shape uses bidi::drawn_reading, which 9297d2d does not have
-error[E0432]: unresolved import `tinker_pdf_shape::bidi::drawn_reading`
-error: could not compile `tinker-pdf-shape` (test "zz_fv_shape") due to 1 previous error
-exit 101

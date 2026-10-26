@@ -1,6 +1,0 @@
-# zz_k11rv_bidi at 9297d2d, lines
-Running tests/zz_k11rv_bidi.rs
-BCT-AUTO ran=91616 typed=48366 drawn=91599
-WRAPPED total=2235 ok=1674
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
-exit 0
