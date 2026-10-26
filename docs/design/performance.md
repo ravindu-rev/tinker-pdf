@@ -1380,7 +1380,7 @@ owner's under H-163 all the same.
 **layout** — a book opens at the default box, 432 × 648 pt (`OpenOptions`,
 `crates/tinker-pdf/src/lib.rs:1128-1154`), which is the seven's box too; a
 container's synthesised PDF is `doc.cos().bytes()`
-(`crates/tinker-pdf-cos/src/doc.rs:867`), opened again from those bytes.
+(`crates/tinker-pdf-cos/src/doc.rs:1029`), opened again from those bytes.
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |

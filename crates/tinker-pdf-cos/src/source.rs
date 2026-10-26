@@ -380,6 +380,48 @@ impl Backing {
         }
     }
 
+    /// The bytes of `range`, clamped to the document, read for the caller
+    /// alone and kept by nothing.
+    ///
+    /// Straight from the source on the chunked arm: no chunk is published and
+    /// none is consulted, so a pass that touches every object's header, which
+    /// is what the windowed verdict is, leaves the cache holding what it held
+    /// before. What it read is the caller's, and gone when the caller drops
+    /// it.
+    pub(crate) fn read_transient(&self, range: Range<u64>) -> Result<Vec<u8>, SourceMiss> {
+        match self {
+            Backing::Whole(bytes) => Ok(clamped(bytes, &range).to_vec()),
+            Backing::Chunked(cache) => {
+                let start = range.start.min(cache.len);
+                let end = range.end.min(cache.len).max(start);
+                cache.gather(start, end)
+            }
+        }
+    }
+
+    /// How many bytes this backing holds: the buffer, or every cached chunk
+    /// and the whole-file copy beside them.
+    ///
+    /// The instrument for "kept by nothing", which a byte counter over the
+    /// source cannot see: a read that went to the source and was then cached
+    /// costs the same transport as one that was dropped.
+    #[cfg(test)]
+    pub(crate) fn retained(&self) -> u64 {
+        match self {
+            Backing::Whole(bytes) => bytes.len() as u64,
+            Backing::Chunked(cache) => {
+                let chunks: u64 = cache
+                    .chunks
+                    .read_lock()
+                    .values()
+                    .map(|chunk| chunk.len() as u64)
+                    .sum();
+                let whole = cache.whole.get().map_or(0, |bytes| bytes.len() as u64);
+                chunks.saturating_add(whole)
+            }
+        }
+    }
+
     /// This backing as bytes a windowed reader can walk.
     ///
     /// The whole-buffer arm borrows rather than copies, which is what keeps a
@@ -414,11 +456,30 @@ impl ChunkCache {
         let start = index.saturating_mul(CHUNK_SIZE).min(self.len);
         let end = start.saturating_add(CHUNK_SIZE).min(self.len);
 
-        // The loop is the whole point of a source being allowed to answer
-        // short: bytes are gathered until the chunk is whole, so a source that
-        // answers one byte at a time yields the same chunk as one that answers
-        // all of it. Nothing is cached until it is complete.
-        let mut bytes = Vec::with_capacity((end - start) as usize);
+        // Nothing is cached until it is complete.
+        let chunk: Arc<[u8]> = Arc::from(self.gather(start, end)?);
+        let mut chunks = self.chunks.write_lock();
+        // Another thread may have fetched the same chunk meanwhile. Both read
+        // the same bytes, so whichever is already there wins and this one is
+        // dropped, exactly as the slot store resolves the same race.
+        Ok(Arc::clone(
+            chunks.entry(index).or_insert_with(|| Arc::clone(&chunk)),
+        ))
+    }
+
+    /// The bytes of `start..end`, which lies inside the document, asked of the
+    /// source until it has answered all of them.
+    ///
+    /// The loop is the whole point of a source being allowed to answer short:
+    /// bytes are gathered until the range is whole, so a source that answers
+    /// one byte at a time yields the same bytes as one that answers all of
+    /// them.
+    fn gather(&self, start: u64, end: u64) -> Result<Vec<u8>, SourceMiss> {
+        // The length is the host's claim, so what is reserved ahead of the
+        // bytes is bounded and the rest grows as they arrive (ruling 1).
+        const RESERVE: usize = 1 << 20;
+        let want = usize::try_from(end.saturating_sub(start)).unwrap_or(usize::MAX);
+        let mut bytes = Vec::with_capacity(want.min(RESERVE));
         let mut at = start;
         while at < end {
             let got = self.source.read(at..end)?;
@@ -431,16 +492,8 @@ impl ChunkCache {
             at = at.saturating_add(got.len() as u64).min(end);
             bytes.extend_from_slice(&got);
         }
-        bytes.truncate((end - start) as usize);
-
-        let chunk: Arc<[u8]> = Arc::from(bytes);
-        let mut chunks = self.chunks.write_lock();
-        // Another thread may have fetched the same chunk meanwhile. Both read
-        // the same bytes, so whichever is already there wins and this one is
-        // dropped, exactly as the slot store resolves the same race.
-        Ok(Arc::clone(
-            chunks.entry(index).or_insert_with(|| Arc::clone(&chunk)),
-        ))
+        bytes.truncate(want);
+        Ok(bytes)
     }
 
     fn window(&self, range: Range<u64>) -> Result<Arc<[u8]>, SourceMiss> {

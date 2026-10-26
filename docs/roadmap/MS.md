@@ -289,7 +289,7 @@ held to, and the censuses no corpus run has fed.
 **The tree at `5297133`, against this row's text:**
 
 - Requests are already counted, though nothing bounds them: `CountingSource::reads()` (`crates/tinker-pdf-cos/src/source.rs:190-194`) is every read that reached the source, and outside its own unit tests the one assertion on it is `reads() > 0` (`crates/tinker-pdf/tests/streaming_determinism.rs:264`).
-- By the code's arithmetic page one costs eight requests today, over the row's six: the chunk cache reads one 4 KiB chunk a request (`crates/tinker-pdf-cos/src/source.rs:410-463`), `/E` 28 222 ends in the seventh chunk, and the facade first reads 1 024 bytes straight from the source to sniff for a container (`CONTAINER_SNIFF`, `crates/tinker-pdf/src/lib.rs:207`, read at `:1558`), which chunk 0 then fetches again; 7 x 4 096 + 1 024 is exactly `LINEARIZED_PAGE_ONE_BUDGET`'s 29 696, the figure `docs/design/streaming-open.md`'s Measured table records.
+- By the code's arithmetic page one costs eight requests today, over the row's six: the chunk cache reads one 4 KiB chunk a request (`crates/tinker-pdf-cos/src/source.rs:452-516`), `/E` 28 222 ends in the seventh chunk, and the facade first reads 1 024 bytes straight from the source to sniff for a container (`CONTAINER_SNIFF`, `crates/tinker-pdf/src/lib.rs:207`, read at `:1558`), which chunk 0 then fetches again; 7 x 4 096 + 1 024 is exactly `LINEARIZED_PAGE_ONE_BUDGET`'s 29 696, the figure `docs/design/streaming-open.md`'s Measured table records.
 
 ## MS-09 — Thread-scaling ratchet
 

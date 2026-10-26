@@ -318,9 +318,10 @@ pub struct CosDocument {
     ///
     /// Behind a lock because a streamed document builds it *lazily*: the
     /// eager validation that decides on one at open is the step a streaming
-    /// open defers, so the decision moves to the first read that finds an
-    /// entry lying. The values a caller sees are the same either way, which is
-    /// the property that matters; what differs is when the fetch happens.
+    /// open defers, so the decision moves to the first read the table cannot
+    /// place, and is made from the verdict that validation reaches. The values
+    /// a caller sees are the same either way, which is the property that
+    /// matters; what differs is when the fetch happens.
     scan: RwLock<Option<Arc<ScanIndex>>>,
     warnings: Mutex<WarningSink>,
     pub(crate) stream_ranges: RwLock<HashMap<u32, Range<u64>>>,
@@ -334,6 +335,16 @@ pub struct CosDocument {
     security: RwLock<Security>,
     encrypt: Option<EncryptParams>,
     ladder: LadderLevel,
+    /// 7.5.2's header shift, which every offset the file states is measured
+    /// against. A buffered open rewrites each shifted entry when it validates;
+    /// a streamed one keeps them as stated, and this is what its verdict and
+    /// its reads are measured by instead.
+    shift: u64,
+    /// The ladder level a buffered open of the same bytes decides, once a
+    /// streamed document has worked it out through windows. Kept because the
+    /// bytes cannot change under it, and only once known: a verdict a missed
+    /// read cut short is no verdict.
+    verdict: OnceLock<LadderLevel>,
 }
 
 /// The state a successful authentication installs.
@@ -567,6 +578,8 @@ impl CosDocument {
             }),
             encrypt: None,
             ladder,
+            shift,
+            verdict: OnceLock::new(),
         };
         doc.absorb(sink);
         if ladder == LadderLevel::Rescan {
@@ -702,43 +715,192 @@ impl CosDocument {
     /// [`CosDocument::ladder_level`] on a streamed document is **provisional**:
     /// it reflects the bytes read so far, because the pass that probes every
     /// type-1 entry against its `N G obj` header is the one open-time step
-    /// that touches everywhere. This fetches the whole source, runs exactly
-    /// that pass, and returns the answer a buffered open would have given.
-    /// Both are documented observables rather than moods.
+    /// that touches everywhere. This runs exactly that pass over the merged
+    /// table and returns the answer a buffered open would have given. Both are
+    /// documented observables rather than moods.
+    ///
+    /// The pass reads each header through a window straight from the source,
+    /// one read for each run of offsets that fits in
+    /// [`limits::VALIDATION_WINDOW`], and keeps none of them: the chunk cache
+    /// holds afterwards what it held before, nothing is fetched whole, and the
+    /// pass warns nothing. On Annex F's head-only path the main table is
+    /// fetched first, into the cache, as [`CosDocument::xref`] fetches it,
+    /// because the buffered open's verdict counts its entries too. The answer
+    /// is kept once it is known; a source that could not supply a window
+    /// leaves the provisional level, and the next call asks again.
     ///
     /// Reads nothing and returns [`CosDocument::ladder_level`] for a document
-    /// opened from a buffer, where the eager pass already ran.
+    /// opened from a buffer, where the eager pass already ran, and for one a
+    /// rescan rebuilt at open, which no failure can move further down.
     ///
-    /// The values a caller reads do not depend on whether this was called: an
-    /// entry that lies is repaired at first use either way. What this decides
-    /// is the *verdict*, which a caller checking "did it open cleanly" needs
-    /// and a caller rendering a page does not.
+    /// The values a caller reads do not depend on whether this was called:
+    /// the first read that needs the verdict, one the table cannot place,
+    /// works it out itself. What this decides is the *verdict*, which a caller
+    /// checking "did it open cleanly" needs and a caller rendering a page does
+    /// not.
     pub fn complete_validation(&self) -> LadderLevel {
+        self.verdict().unwrap_or(self.ladder)
+    }
+
+    /// Whether this document answers as a buffered open of the same bytes
+    /// would.
+    ///
+    /// True for a document opened from a buffer. For a streamed one, true
+    /// exactly when none of the three ways the two can part has happened
+    /// (`docs/design/streaming-open.md`, *One rule for every path open*):
+    ///
+    /// - it did not open on Annex F's head-only path, which builds a page out
+    ///   of the page's own dictionary where a buffered open walks the tree
+    ///   ([`CosDocument::first_page_end`] is `None`);
+    /// - it has warned nothing, because what a streamed open warns where a
+    ///   buffered one does not is warned at open or by a whole-file fetch, and
+    ///   a shifted header, which only a buffered open reconciles entry by
+    ///   entry, is warned too;
+    /// - its verdict, [`CosDocument::complete_validation`], is
+    ///   [`LadderLevel::Trust`], because a buffered open that patched or
+    ///   rescanned answers from the table and the warnings its repair made.
+    ///
+    /// A host that can read the whole file asks this straight after a
+    /// streamed open, keeps the document when it is true and reads the file
+    /// whole when it is not. Asking costs the verdict's windows and nothing
+    /// else, and a source that could not supply them answers false.
+    pub fn answers_as_buffered(&self) -> bool {
         if !self.buffer.is_streamed() {
-            return self.ladder;
+            return true;
         }
-        let mut sink = WarningSink::new();
-        let Some(buffer) = fetch_whole(&self.buffer, &mut sink) else {
-            self.absorb(sink);
-            return self.ladder;
-        };
-        self.absorb(sink);
-        // The header scan warned at open if it had anything to say; a second
-        // sink keeps it from saying it twice.
-        let mut scratch = WarningSink::new();
-        let shift = xref::header_shift(&buffer, &mut scratch);
-        let mut table = self.xref.clone();
-        let validation = validate(&buffer, &mut table, shift);
-        if validation.failures.is_empty() {
-            return self.ladder;
+        self.linearized.is_none()
+            && self.warnings.lock_safe().is_empty()
+            && self.verdict() == Ok(LadderLevel::Trust)
+    }
+
+    /// The ladder level a buffered open of these bytes decides: the one it
+    /// opened on, for a buffered document and a rescanned one, and otherwise
+    /// the eager probe's, reached through windows and kept once known.
+    ///
+    /// The eager pass fails an entry when no offset 7.5.2 allows it, the
+    /// shifted one first, holds a header that names it, and this counts the
+    /// same failures from the same candidates: each is paired with its entry,
+    /// the pairs are probed in file order, and an entry passes at the first
+    /// header that names it.
+    fn verdict(&self) -> Result<LadderLevel, SourceMiss> {
+        if !self.buffer.is_streamed() || self.ladder == LadderLevel::Rescan {
+            return Ok(self.ladder);
         }
-        if validation.failures.len() >= limits::LADDER_RESCAN_MIN_FAILURES
-            && validation.failures.len() * 2 > validation.offsets
-        {
+        if let Some(level) = self.verdict.get() {
+            return Ok(*level);
+        }
+        let table = self.xref();
+        let len = self.buffer.len();
+        let mut nums = Vec::new();
+        let mut probes: Vec<(u64, usize)> = Vec::new();
+        for (num, entry) in table.iter() {
+            let XrefEntry::Offset { offset, .. } = entry else {
+                continue;
+            };
+            let index = nums.len();
+            nums.push(num);
+            probes.extend(
+                xref::offset_candidates(len, offset, self.shift)
+                    .into_iter()
+                    .map(|at| (at, index)),
+            );
+        }
+        probes.sort_unstable();
+        let mut passed = vec![false; nums.len()];
+        self.headers_through_windows(&probes, |index, header| {
+            if let (Some(header), Some(&num), Some(pass)) =
+                (header, nums.get(index), passed.get_mut(index))
+            {
+                *pass |= header.num == num;
+            }
+        })?;
+        let failures = passed.iter().filter(|pass| !**pass).count();
+        let level = if failures == 0 {
+            self.ladder
+        } else if failures >= limits::LADDER_RESCAN_MIN_FAILURES && failures * 2 > nums.len() {
             LadderLevel::Rescan
         } else {
             self.ladder.max(LadderLevel::Patch)
+        };
+        Ok(*self.verdict.get_or_init(|| level))
+    }
+
+    /// Hands `seen` the `N G obj` header at each probe's offset, as
+    /// [`xref::object_header_at`] finds it in the whole file, with the probe's
+    /// index. The probes are sorted by offset, and every offset lies inside
+    /// the document.
+    ///
+    /// Each run of probes that fits in [`limits::VALIDATION_WINDOW`] is one
+    /// read, from the first offset to [`limits::HEADER_PROBE_WINDOW`] past the
+    /// last, so neighbours share a read and the bytes between distant ones are
+    /// never asked for. A header whose lexing runs into the end of what is
+    /// held, short of the document's end, doubles the window until the lexing
+    /// stops inside it; what a grown window holds serves the runs it reaches,
+    /// so no byte is read twice. Every read goes straight to the source and is
+    /// dropped by the next run: the chunk cache never sees one.
+    fn headers_through_windows(
+        &self,
+        probes: &[(u64, usize)],
+        mut seen: impl FnMut(usize, Option<ObjRef>),
+    ) -> Result<(), SourceMiss> {
+        let len = self.buffer.len();
+        let reach = |at: u64| at.saturating_add(limits::HEADER_PROBE_WINDOW).min(len);
+        // The bytes `base..base + held.len()` of the document.
+        let mut held: Vec<u8> = Vec::new();
+        let mut base = 0u64;
+        let mut next = 0usize;
+        while let Some(&(start, _)) = probes.get(next) {
+            let mut end = reach(start);
+            let mut count = 1usize;
+            while let Some(&(at, _)) = probes.get(next + count) {
+                if reach(at).saturating_sub(start) > limits::VALIDATION_WINDOW {
+                    break;
+                }
+                end = reach(at);
+                count += 1;
+            }
+            let held_end = base.saturating_add(held.len() as u64);
+            if (base..=held_end).contains(&start) {
+                // A window an earlier probe grew reaches this run. What it
+                // holds before the run is done with.
+                let done = usize::try_from(start.saturating_sub(base)).unwrap_or(usize::MAX);
+                held.drain(..done.min(held.len()));
+                if end > held_end {
+                    held.extend(self.buffer.read_transient(held_end..end)?);
+                }
+            } else {
+                held = self.buffer.read_transient(start..end)?;
+            }
+            base = start;
+            let mut last: Option<(u64, Option<ObjRef>)> = None;
+            for &(at, index) in probes.get(next..next + count).unwrap_or_default() {
+                let header = match last {
+                    Some((before, header)) if before == at => header,
+                    _ => loop {
+                        let (header, stop) =
+                            xref::object_header_within(&held, at.saturating_sub(base));
+                        let held_end = base.saturating_add(held.len() as u64);
+                        if stop < held.len() as u64 || held_end >= len {
+                            break header;
+                        }
+                        let more = (held.len() as u64).max(limits::HEADER_PROBE_WINDOW);
+                        let grown = self
+                            .buffer
+                            .read_transient(held_end..held_end.saturating_add(more).min(len))?;
+                        if grown.is_empty() {
+                            // Inside the document a read is whole or a miss,
+                            // so this is the end of the bytes, not a stall.
+                            break header;
+                        }
+                        held.extend(grown);
+                    },
+                };
+                last = Some((at, header));
+                seen(index, header);
+            }
+            next += count;
         }
+        Ok(())
     }
 
     /// Everything this layer had to tolerate, in the order it happened.
@@ -1542,7 +1704,12 @@ impl CosDocument {
         }
         // Level 2 at read time: an entry that was good at open but is not the
         // object it claimed, or a type-2 entry whose container fell over.
-        if let Some(hit) = self.repair_index(sink).and_then(|scan| scan.get(num)) {
+        let scan = if self.scanner_may_answer(entry, ctx) {
+            self.repair_index(sink)
+        } else {
+            None
+        };
+        if let Some(hit) = scan.and_then(|scan| scan.get(num)) {
             if let Some(object) = self.parse_at(num, hit.offset, ctx, sink) {
                 sink.warn_at(
                     hit.offset,
@@ -1574,16 +1741,54 @@ impl CosDocument {
         (offset < end).then_some(end)
     }
 
+    /// Whether the repair scanner may answer for an object the table could
+    /// not place, as it would in a buffered open of the same bytes.
+    ///
+    /// A buffered open has a scanner exactly when its verdict is not `Trust`,
+    /// and its `repair_index` answers from what the open built. So a streamed
+    /// document asks only when its verdict is not `Trust` either, working the
+    /// verdict out through windows if nothing has yet: a free entry whose old
+    /// body is still in the file, or a number with no entry, then reads as the
+    /// null 7.3.10 makes it, as it does buffered, rather than fetching the
+    /// whole file to find a body no table names.
+    ///
+    /// One shape keeps the scanner whatever the verdict: a type-1 entry of a
+    /// file whose header is not at byte 0. The walker keeps each entry as the
+    /// file states it, from the header (7.5.2); a buffered open's validation
+    /// moves it to where its object is, and a streamed one reads it where it
+    /// is stated, misses its header, and finds the object through the scanner
+    /// instead, as it always has. A shifted file decides `Trust`, so gating
+    /// this on the verdict would read every object it has as null.
+    ///
+    /// A verdict the source could not supply the bytes for is a miss for this
+    /// load, which is then not published, and the next read asks again.
+    fn scanner_may_answer(&self, entry: Option<XrefEntry>, ctx: &mut ResolveCtx) -> bool {
+        if !self.buffer.is_streamed() {
+            return true;
+        }
+        if self.shift > 0 && matches!(entry, Some(XrefEntry::Offset { .. })) {
+            return true;
+        }
+        match self.verdict() {
+            Ok(level) => level != LadderLevel::Trust,
+            Err(_) => {
+                ctx.note_miss();
+                false
+            }
+        }
+    }
+
     /// The repair scanner's index, built on first need for a streamed
     /// document.
     ///
     /// A document opened from a buffer decided at open whether it needed one,
     /// because the eager offset probe ran then. A streamed document deferred
-    /// that probe, so the same decision is made here, at the first read that
-    /// finds an entry lying about its object -- which is exactly the condition
-    /// the eager pass was looking for. The values a caller reads are therefore
-    /// the same on both paths; what differs is when the whole source is
-    /// fetched, and that is warned about rather than hidden (ruling 10).
+    /// that probe, so the same decision is made at the first read the table
+    /// cannot place, by [`CosDocument::scanner_may_answer`] from the verdict
+    /// the probe reaches -- which is exactly the condition the eager pass was
+    /// looking for. The values a caller reads are therefore the same on both
+    /// paths; what differs is when the whole source is fetched, and that is
+    /// warned about rather than hidden (ruling 10).
     ///
     /// Never built for a buffered document: one that reached here with no
     /// index is one the eager pass found nothing wrong with, and inventing a
@@ -2221,5 +2426,646 @@ mod tests {
             }),
             "the entry that was already there is the entry that stays"
         );
+    }
+
+    // ---- the windowed verdict, the scanner's gate, and the predicate -------
+
+    /// A classic-table document written by hand, so a test can say what its
+    /// table claims about each object and where the bytes really are.
+    #[derive(Clone, Default)]
+    struct Fixture {
+        /// Bytes before `%PDF-` (7.5.2).
+        prefix: &'static [u8],
+        /// Object bodies, numbered from 1. Object 1 is the catalog.
+        bodies: Vec<String>,
+        /// A comment of this many bytes before every object, so that objects
+        /// can sit chunks or windows apart.
+        pad: usize,
+        /// Objects whose entry states where the comment before them starts
+        /// rather than where their header does.
+        lead: Vec<u32>,
+        /// Objects whose entry is free while their body stays in place.
+        free: Vec<u32>,
+        /// `(n, m)`: object `n`'s entry states where object `m` is.
+        lies: Vec<(u32, u32)>,
+        /// Objects whose entry states an offset past the end of the file.
+        beyond: Vec<u32>,
+        /// Bodies written after the tabled ones and named by no entry,
+        /// numbered on from them.
+        orphans: Vec<String>,
+        /// `startxref` misspelt, so no reader finds the table.
+        hide_startxref: bool,
+    }
+
+    impl Fixture {
+        /// A catalog, an empty page tree and `extra` more objects, each
+        /// tabled where it is.
+        fn honest(extra: &[&str]) -> Fixture {
+            let mut bodies = vec![
+                "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+                "<< /Type /Pages /Count 0 /Kids [] >>".to_string(),
+            ];
+            bodies.extend(extra.iter().map(|body| (*body).to_string()));
+            Fixture {
+                bodies,
+                ..Fixture::default()
+            }
+        }
+
+        fn bytes(&self) -> Vec<u8> {
+            let mut out = self.prefix.to_vec();
+            let header = out.len();
+            out.extend_from_slice(b"%PDF-1.7\n");
+            let mut heads = Vec::new();
+            let mut leads = Vec::new();
+            for (index, body) in self.bodies.iter().chain(&self.orphans).enumerate() {
+                leads.push((out.len() - header) as u64);
+                if self.pad > 0 {
+                    out.push(b'%');
+                    out.extend(std::iter::repeat_n(b'.', self.pad));
+                    out.push(b'\n');
+                }
+                heads.push((out.len() - header) as u64);
+                out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", index + 1).as_bytes());
+            }
+            let xref_at = out.len() - header;
+            let count = self.bodies.len();
+            out.extend_from_slice(
+                format!("xref\n0 {}\n0000000000 65535 f \n", count + 1).as_bytes(),
+            );
+            for index in 0..count {
+                let num = u32::try_from(index + 1).expect("a small fixture");
+                if self.free.contains(&num) {
+                    out.extend_from_slice(b"0000000000 00001 f \n");
+                    continue;
+                }
+                let lie = self.lies.iter().find(|(n, _)| *n == num);
+                let at = match lie {
+                    _ if self.beyond.contains(&num) => 9_999_999_999,
+                    Some(&(_, other)) => heads[other as usize - 1],
+                    None if self.lead.contains(&num) => leads[index],
+                    None => heads[index],
+                };
+                out.extend_from_slice(format!("{at:010} 00000 n \n").as_bytes());
+            }
+            let keyword = if self.hide_startxref {
+                "startxrEf"
+            } else {
+                "startxref"
+            };
+            out.extend_from_slice(
+                format!(
+                    "trailer\n<< /Size {} /Root 1 0 R >>\n{keyword}\n{xref_at}\n%%EOF\n",
+                    count + 1
+                )
+                .as_bytes(),
+            );
+            out
+        }
+    }
+
+    fn buffered(bytes: &[u8]) -> CosDocument {
+        CosDocument::open(bytes.to_vec()).expect("it opens from a buffer")
+    }
+
+    fn streamed(bytes: &[u8]) -> CosDocument {
+        CosDocument::open_source(Arc::new(crate::SliceSource::new(bytes.to_vec())))
+            .expect("it opens from a source")
+    }
+
+    /// Over the most hostile source that conforms, which answers every read
+    /// one byte at a time.
+    fn shredded(bytes: &[u8]) -> CosDocument {
+        CosDocument::open_source(Arc::new(crate::ShreddedSource::new(
+            crate::SliceSource::new(bytes.to_vec()),
+        )))
+        .expect("it opens from a shredded source")
+    }
+
+    /// A linearized file of `pages` pages, as this crate's writer lays one out
+    /// (Annex F).
+    fn linearized(pages: usize) -> Vec<u8> {
+        let mut builder = crate::DocumentBuilder::new();
+        for _ in 0..pages {
+            builder.add_page(200.0, 100.0, |page| page.raw(b"0 0 10 10 re f"));
+        }
+        let doc = Arc::new(CosDocument::open(builder.finish()).expect("it opens"));
+        crate::DocumentEditor::new(doc).save(&crate::WriteOptions {
+            mode: crate::WriteMode::Rewrite,
+            linearize: true,
+            // A container would hold the first page's objects in the same blob
+            // as everything else, and there would be no head to open from.
+            object_streams: false,
+            ..crate::WriteOptions::default()
+        })
+    }
+
+    /// [`linearized`], with one entry of its main table, the table at `/T`
+    /// that a head-only open never reads, stating where another object is.
+    fn linearized_with_a_lying_main_entry() -> Vec<u8> {
+        let mut bytes = linearized(3);
+        let whole = buffered(&bytes);
+        let head = streamed(&bytes);
+        assert!(
+            head.first_page_end().is_some(),
+            "the head-only path engages"
+        );
+        // An object only the main table places.
+        let (num, offset) = whole
+            .xref()
+            .iter()
+            .find_map(|(num, entry)| match entry {
+                XrefEntry::Offset { offset, .. } if head.xref.get(num).is_none() => {
+                    Some((num, offset))
+                }
+                _ => None,
+            })
+            .expect("the main table places objects the first-page section does not");
+        let elsewhere = whole
+            .xref()
+            .iter()
+            .find_map(|(other, entry)| match entry {
+                XrefEntry::Offset { offset, .. } if other != num => Some(offset),
+                _ => None,
+            })
+            .expect("another object");
+        let table = rfind_from(&bytes, b"\nxref\n", 0).expect("a classic main table");
+        let trailer = find_from(&bytes, b"trailer", table).expect("its trailer");
+        let at = find_from(&bytes, format!("{offset:010} ").as_bytes(), table)
+            .filter(|at| *at < trailer)
+            .expect("the main table states it");
+        bytes[at..at + 10].copy_from_slice(format!("{elsewhere:010}").as_bytes());
+        bytes
+    }
+
+    /// A streamed document's verdict is the ladder level a buffered open of
+    /// the same bytes reaches, however its tables are damaged and whichever
+    /// table states an entry.
+    ///
+    /// Each row is a shape of the probe. A shifted header has two candidate
+    /// offsets per entry; a lying entry, one past the end and four lying of six
+    /// are the failures it counts; objects windows apart are read apart; and an
+    /// entry stating the comment before its header makes a probe outgrow its
+    /// first window, since the lexer skips the comment before it reads `N G
+    /// obj`. The last row is the merged table: a linearized file opened from
+    /// its head reads one cross-reference section at open, and the entry that
+    /// lies is in the other.
+    #[test]
+    fn windowed_validation_decides_what_the_buffered_open_decided() {
+        let honest = Fixture::honest(&["(three)", "(four)", "(five)", "(six)"]);
+        let rows: Vec<(&str, Vec<u8>, LadderLevel)> = vec![
+            ("clean", honest.bytes(), LadderLevel::Trust),
+            (
+                "shifted header",
+                Fixture {
+                    prefix: b"leading junk\n",
+                    ..honest.clone()
+                }
+                .bytes(),
+                LadderLevel::Trust,
+            ),
+            (
+                "patched",
+                Fixture {
+                    lies: vec![(4, 3)],
+                    ..honest.clone()
+                }
+                .bytes(),
+                LadderLevel::Patch,
+            ),
+            (
+                "rescanned",
+                Fixture {
+                    hide_startxref: true,
+                    ..honest.clone()
+                }
+                .bytes(),
+                LadderLevel::Rescan,
+            ),
+            (
+                "rescanned for its failures",
+                Fixture {
+                    lies: vec![(3, 4), (4, 5), (5, 6), (6, 3)],
+                    ..honest.clone()
+                }
+                .bytes(),
+                LadderLevel::Rescan,
+            ),
+            (
+                "an entry past the end of the file",
+                Fixture {
+                    beyond: vec![5],
+                    ..honest.clone()
+                }
+                .bytes(),
+                LadderLevel::Patch,
+            ),
+            (
+                "objects windows apart",
+                Fixture {
+                    pad: limits::VALIDATION_WINDOW as usize,
+                    ..honest.clone()
+                }
+                .bytes(),
+                LadderLevel::Trust,
+            ),
+            (
+                "objects windows apart, one lying",
+                Fixture {
+                    pad: limits::VALIDATION_WINDOW as usize,
+                    lies: vec![(6, 3)],
+                    ..honest.clone()
+                }
+                .bytes(),
+                LadderLevel::Patch,
+            ),
+            (
+                "headers behind comments longer than a probe",
+                Fixture {
+                    pad: 3 * limits::HEADER_PROBE_WINDOW as usize,
+                    lead: vec![2, 3, 4, 5, 6],
+                    ..honest.clone()
+                }
+                .bytes(),
+                LadderLevel::Trust,
+            ),
+            (
+                "headers behind comments, shifted",
+                Fixture {
+                    prefix: b"leading junk\n",
+                    pad: 3 * limits::HEADER_PROBE_WINDOW as usize,
+                    lead: vec![2, 3, 4, 5, 6],
+                    ..honest.clone()
+                }
+                .bytes(),
+                LadderLevel::Trust,
+            ),
+            (
+                "a linearized file whose main table lies, opened from its head",
+                linearized_with_a_lying_main_entry(),
+                LadderLevel::Patch,
+            ),
+        ];
+        for (name, bytes, level) in rows {
+            let whole = buffered(&bytes);
+            assert_eq!(
+                whole.ladder_level(),
+                level,
+                "{name}: the fixture's own level"
+            );
+            for (how, doc) in [
+                ("streamed", streamed(&bytes)),
+                ("shredded", shredded(&bytes)),
+            ] {
+                assert_eq!(
+                    doc.complete_validation(),
+                    level,
+                    "{name}, {how}: the verdict a buffered open reached"
+                );
+                assert_eq!(
+                    doc.complete_validation(),
+                    level,
+                    "{name}, {how}: and the same verdict when asked again"
+                );
+            }
+        }
+    }
+
+    /// The verdict is reached through windows nothing keeps.
+    ///
+    /// The chunk cache holds what the open read, the head and the tail, and
+    /// the same after the call; the probes between them were read, which the
+    /// count of source reads shows, and dropped.
+    #[test]
+    fn validation_keeps_no_byte_it_read() {
+        let honest = Fixture {
+            pad: 3 * crate::CHUNK_SIZE as usize,
+            ..Fixture::honest(&["(three)", "(four)", "(five)", "(six)"])
+        };
+        let lying = Fixture {
+            lies: vec![(4, 3)],
+            ..honest.clone()
+        };
+        for (name, bytes, level) in [
+            ("clean", honest.bytes(), LadderLevel::Trust),
+            ("patched", lying.bytes(), LadderLevel::Patch),
+        ] {
+            let source = Arc::new(crate::CountingSource::new(crate::SliceSource::new(
+                bytes.clone(),
+            )));
+            let doc = CosDocument::open_source(Arc::clone(&source) as Arc<dyn ByteSource>)
+                .expect("it opens");
+            let held = doc.buffer.retained();
+            assert!(
+                held < bytes.len() as u64,
+                "{name}: the open read part of the file"
+            );
+            let reads = source.reads();
+            assert_eq!(doc.complete_validation(), level, "{name}: the verdict");
+            assert!(source.reads() > reads, "{name}: the probes read the source");
+            assert_eq!(
+                doc.buffer.retained(),
+                held,
+                "{name}: and the cache holds what it held before"
+            );
+            assert!(
+                !doc.whole_file_fetched(),
+                "{name}: nothing fetched the file"
+            );
+            assert!(
+                !doc.warnings()
+                    .iter()
+                    .any(|w| w.kind == WarningKind::WholeFileFetched),
+                "{name}: and nothing says it did"
+            );
+        }
+    }
+
+    /// An entry the table cannot place reads as a buffered open reads it.
+    ///
+    /// Over a clean file a buffered open has no repair scanner, so a free
+    /// entry and a number with no entry read as null (7.3.10), even where the
+    /// file still holds a body under that number. Over a patched file it has
+    /// one, and both read what it finds. Each row opens its own streamed
+    /// document, so no row's fetch is another's.
+    #[test]
+    fn a_free_or_absent_entry_reads_as_the_buffered_open_reads_it() {
+        let clean = Fixture {
+            free: vec![3],
+            orphans: vec!["(orphan)".to_string()],
+            ..Fixture::honest(&["(resurrected)", "(four)"])
+        };
+        let patched = Fixture {
+            lies: vec![(4, 2)],
+            ..clean.clone()
+        };
+        let resurrected = Object::String(crate::PdfString::literal(b"resurrected".to_vec()));
+        let orphan = Object::String(crate::PdfString::literal(b"orphan".to_vec()));
+        let rows = [
+            (
+                "clean",
+                "a free entry, its old body in place",
+                &clean,
+                3,
+                Object::Null,
+            ),
+            (
+                "clean",
+                "a number with no entry, a body under it",
+                &clean,
+                5,
+                Object::Null,
+            ),
+            (
+                "clean",
+                "a number with no entry and no body",
+                &clean,
+                9,
+                Object::Null,
+            ),
+            (
+                "patched",
+                "a free entry, its old body in place",
+                &patched,
+                3,
+                resurrected,
+            ),
+            (
+                "patched",
+                "a number with no entry, a body under it",
+                &patched,
+                5,
+                orphan,
+            ),
+            (
+                "patched",
+                "a number with no entry and no body",
+                &patched,
+                9,
+                Object::Null,
+            ),
+        ];
+        for (file, shape, fixture, num, want) in rows {
+            let bytes = fixture.bytes();
+            let whole = buffered(&bytes);
+            let read = whole.get(ObjRef::new(num, 0)).expect("it reads");
+            assert_eq!(*read, want, "{file}, {shape}: what a buffered open reads");
+            for (how, doc) in [
+                ("streamed", streamed(&bytes)),
+                ("shredded", shredded(&bytes)),
+            ] {
+                let got = doc.get(ObjRef::new(num, 0)).expect("it reads");
+                assert_eq!(*got, *read, "{file}, {shape}, {how}: the same value");
+                if file == "clean" {
+                    assert!(
+                        !doc.whole_file_fetched(),
+                        "{file}, {shape}, {how}: and no fetch of the file to find it"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A streamed document answers as buffered only when none of the three
+    /// ways the two can part has happened, and a buffered one always does.
+    ///
+    /// Each row that answers no is parted by exactly one of them, which the
+    /// row states and the test reads back, so a predicate that lost any one
+    /// condition answers yes for that row and fails here. The linearized
+    /// file opened from its head warns nothing and decides `Trust`; one byte
+    /// after it is an update to `/L`, warned at open, as a shifted header is;
+    /// and the patched file warns nothing until a read reaches its entry.
+    #[test]
+    fn a_document_answers_as_buffered_only_when_nothing_could_part_them() {
+        let honest = Fixture::honest(&["(three)", "(four)"]);
+        let patched = Fixture {
+            lies: vec![(4, 3)],
+            ..honest.clone()
+        }
+        .bytes();
+        let shifted = Fixture {
+            prefix: b"leading junk\n",
+            ..honest.clone()
+        }
+        .bytes();
+        let mut updated = linearized(2);
+        updated.push(b'\n');
+        // (the row, the document, its answer, and what parts it: opened from
+        // the head, warned at open, its verdict)
+        let rows = [
+            ("buffered", buffered(&honest.bytes()), true, None),
+            ("buffered and patched", buffered(&patched), true, None),
+            (
+                "streamed",
+                streamed(&honest.bytes()),
+                true,
+                Some((false, false, LadderLevel::Trust)),
+            ),
+            (
+                "streamed from a linearized head",
+                streamed(&linearized(2)),
+                false,
+                Some((true, false, LadderLevel::Trust)),
+            ),
+            (
+                "streamed, a linearized file one byte longer than its /L",
+                streamed(&updated),
+                false,
+                Some((false, true, LadderLevel::Trust)),
+            ),
+            (
+                "streamed behind leading junk",
+                streamed(&shifted),
+                false,
+                Some((false, true, LadderLevel::Trust)),
+            ),
+            (
+                "streamed and patched",
+                streamed(&patched),
+                false,
+                Some((false, false, LadderLevel::Patch)),
+            ),
+        ];
+        for (name, doc, answer, parts) in rows {
+            let held = doc.buffer.retained();
+            assert_eq!(doc.answers_as_buffered(), answer, "{name}");
+            assert_eq!(
+                doc.answers_as_buffered(),
+                answer,
+                "{name}: and the same when asked again"
+            );
+            let Some((head, warned, verdict)) = parts else {
+                assert!(!doc.is_streamed(), "{name}");
+                continue;
+            };
+            assert!(doc.is_streamed(), "{name}");
+            assert_eq!(
+                doc.buffer.retained(),
+                held,
+                "{name}: asking kept nothing it read"
+            );
+            assert!(!doc.whole_file_fetched(), "{name}: nor fetched the file");
+            assert_eq!(
+                doc.first_page_end().is_some(),
+                head,
+                "{name}: the head path"
+            );
+            assert_eq!(!doc.warnings().is_empty(), warned, "{name}: warned at open");
+            assert_eq!(doc.complete_validation(), verdict, "{name}: the verdict");
+        }
+    }
+
+    /// What the windowed probe finds at each of `offsets`, sorted, each asked
+    /// for `times` over so that equal offsets meet in one run.
+    fn through_windows(doc: &CosDocument, offsets: &[u64], times: usize) -> Vec<Option<ObjRef>> {
+        let probes: Vec<(u64, usize)> = offsets
+            .iter()
+            .enumerate()
+            .flat_map(|(index, at)| std::iter::repeat_n((*at, index), times))
+            .collect();
+        let mut got = vec![None; offsets.len()];
+        let mut asked = 0usize;
+        doc.headers_through_windows(&probes, |index, header| {
+            got[index] = header;
+            asked += 1;
+        })
+        .expect("a slice source has every byte");
+        assert_eq!(asked, probes.len(), "one answer for every probe");
+        got
+    }
+
+    /// A window reads each header as the whole file does, wherever its edges
+    /// fall.
+    ///
+    /// The verdict rests on this, so the fixture holds every shape that runs
+    /// into an edge: a comment and a run of white space longer than a probe, a
+    /// comment longer than a whole coalesced read, numbers and keywords a cut
+    /// would shorten, `<<` and `>>`, names with escapes, strings with nested
+    /// parentheses, headers that are not headers. It is several coalesced
+    /// reads long. Every offset is probed together, so runs coalesce and a
+    /// grown window is carried into the next run; every offset alone, so each
+    /// probe starts from a window of [`limits::HEADER_PROBE_WINDOW`] bytes and
+    /// grows from there; a sparse set, which starts runs inside the comment a
+    /// grown window holds; and the last bytes, where a window reaches the end
+    /// of the document.
+    #[test]
+    fn a_window_reads_each_header_as_the_whole_file_does() {
+        let fragments = [
+            "12 0 obj ",
+            "12 0 objx ",
+            "4294967296 0 obj ",
+            "7 65536 obj ",
+            "-3 0 obj ",
+            "0000000012 00000 obj\n",
+            "12\n0\nobj<<",
+            "12 0 obj<</A 1>>",
+            "% a comment that runs on for longer than one probe reads, up to its line end\n",
+            "                                                                         ",
+            "(a (nested) string 1 0 obj) ",
+            "<< /Name#41#4 1 0 R >> ",
+            "<4142> ",
+            "endobj ",
+            "3.5 0 obj ",
+            "+4 0 obj ",
+            "9 0 obj%\n",
+            "\r\n\t\x0c",
+        ];
+        let mut body = String::new();
+        for index in 0.. {
+            if body.len() >= 3 * limits::VALIDATION_WINDOW as usize {
+                break;
+            }
+            body.push_str(fragments[index % fragments.len()]);
+            if index % 7 == 0 {
+                body.push_str(&format!("{index} 0 obj "));
+            }
+        }
+        let dense_end = body.len() as u64;
+        // A comment longer than one coalesced read, which only growth sees
+        // past, and a header behind it.
+        body.push('%');
+        body.push_str(&".".repeat(limits::VALIDATION_WINDOW as usize + 100));
+        body.push_str("\n 5 0 obj ");
+        let bytes = Fixture::honest(&[&body]).bytes();
+        let len = bytes.len() as u64;
+        let whole = |offsets: &[u64]| -> Vec<Option<ObjRef>> {
+            offsets
+                .iter()
+                .map(|at| xref::object_header_at(&bytes, *at))
+                .collect()
+        };
+        let dense: Vec<u64> = (0..dense_end.min(len)).collect();
+        let sparse: Vec<u64> = (0..len).step_by(1009).collect();
+        let tail: Vec<u64> = (len.saturating_sub(300)..len).collect();
+        assert!(
+            whole(&dense).iter().filter(|h| h.is_some()).count() > 1000,
+            "the fixture is full of headers"
+        );
+        for (how, doc) in [
+            ("streamed", streamed(&bytes)),
+            ("shredded", shredded(&bytes)),
+        ] {
+            let held = doc.buffer.retained();
+            for (set, offsets) in [
+                ("every offset", &dense),
+                ("sparse", &sparse),
+                ("the tail", &tail),
+            ] {
+                for times in [1, 2] {
+                    assert!(
+                        through_windows(&doc, offsets, times) == whole(offsets),
+                        "{how}, {set}, asked {times} times: a header read differently"
+                    );
+                }
+            }
+            for at in &dense {
+                assert_eq!(
+                    through_windows(&doc, &[*at], 1),
+                    whole(&[*at]),
+                    "{how}, alone at {at}: a header read differently"
+                );
+            }
+            assert_eq!(doc.buffer.retained(), held, "{how}: and nothing kept");
+        }
     }
 }

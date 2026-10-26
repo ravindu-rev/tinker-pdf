@@ -202,14 +202,36 @@ pub(crate) struct XrefBuild {
 /// per cross-reference entry when the document opens.
 pub(crate) fn object_header_at(buf: &[u8], offset: u64) -> Option<ObjRef> {
     let mut scratch = WarningSink::new();
+    header_tokens(&mut Lexer::at(buf, offset), &mut scratch)
+}
+
+/// [`object_header_at`], and where in `buf` its lexing stopped.
+///
+/// The second number is what lets a window of a document stand in for the
+/// whole of it. Nothing the lexer decides turns on a byte past the offset it
+/// stops at, so a decision that stopped short of the window's end is the
+/// decision the whole buffer gives, and one that ran into the end, a number or
+/// a keyword cut short, a comment or a run of white space with no end in
+/// sight, is not a decision yet.
+pub(crate) fn object_header_within(buf: &[u8], offset: u64) -> (Option<ObjRef>, u64) {
+    let mut scratch = WarningSink::new();
     let mut lexer = Lexer::at(buf, offset);
-    let TokenKind::Int(num) = lexer.next_token(&mut scratch).kind else {
+    let header = header_tokens(&mut lexer, &mut scratch);
+    (header, lexer.offset())
+}
+
+/// The three tokens both read, inlined into each: the buffered open's
+/// validation calls [`object_header_at`] once per entry, and this keeps a call
+/// per entry out of that loop.
+#[inline(always)]
+fn header_tokens(lexer: &mut Lexer<'_>, scratch: &mut WarningSink) -> Option<ObjRef> {
+    let TokenKind::Int(num) = lexer.next_token(scratch).kind else {
         return None;
     };
-    let TokenKind::Int(gen) = lexer.next_token(&mut scratch).kind else {
+    let TokenKind::Int(gen) = lexer.next_token(scratch).kind else {
         return None;
     };
-    if lexer.next_token(&mut scratch).kind != TokenKind::Keyword(Keyword::Obj) {
+    if lexer.next_token(scratch).kind != TokenKind::Keyword(Keyword::Obj) {
         return None;
     }
     Some(ObjRef::new(
@@ -1143,6 +1165,51 @@ mod tests {
         assert_eq!(be(&[0x01], 0, 0), 0);
         // Past the row reads as zero rather than panicking.
         assert_eq!(be(&[0x01], 0, 4), 0x01000000);
+    }
+
+    /// A header decided short of a window's end is the whole buffer's, at
+    /// every offset and wherever the window is cut.
+    ///
+    /// The windowed verdict trusts a probe only when its lexing stopped inside
+    /// the window, and grows the window otherwise. So for every offset and
+    /// every cut after it, a lexing that stopped before the cut must have
+    /// found what the whole buffer finds: a number or a keyword cut short,
+    /// `<` before `<`, `>` before `>`, a `#` escape, a comment or white space
+    /// with no end yet, are each a lexing that ran into the cut.
+    #[test]
+    fn a_header_decided_inside_a_window_is_the_whole_buffers() {
+        let buf: &[u8] = b"12 0 obj 12 0 objx 4294967296 0 obj 7 65536 obj -3 0 obj \
+            0000000012 00000 obj\n12\n0\nobj<< 12 0 obj<</A 1>> 12 0 obj>> \
+            % a comment\n 13 0 obj (a (nested) 1 0 obj) <</N#41#4 1 0 R>> \
+            <4142> 14 0 obj<4142> 3.5 0 obj +4 0 obj 9 0 obj%\n\r\n\t\x0c 15 0 obj";
+        let mut decided = 0usize;
+        let mut whole_found = 0usize;
+        for at in 0..buf.len() {
+            let whole = object_header_at(buf, at as u64);
+            whole_found += usize::from(whole.is_some());
+            for cut in at + 1..=buf.len() {
+                let (header, stop) = object_header_within(&buf[..cut], at as u64);
+                if stop < cut as u64 {
+                    decided += 1;
+                    assert_eq!(
+                        header,
+                        whole,
+                        "at {at}, cut at {cut}: {:?}",
+                        String::from_utf8_lossy(&buf[at..cut])
+                    );
+                }
+            }
+            assert_eq!(
+                object_header_within(buf, at as u64).0,
+                whole,
+                "and the whole buffer is its own window, at {at}"
+            );
+        }
+        assert!(decided > 1000, "most cuts decide something: {decided}");
+        assert!(
+            whole_found >= 10,
+            "the buffer is full of headers: {whole_found}"
+        );
     }
 
     #[test]

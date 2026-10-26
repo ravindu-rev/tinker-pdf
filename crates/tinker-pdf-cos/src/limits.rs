@@ -154,6 +154,28 @@ pub const HEAD_SECTION_WINDOW: u64 = 1024;
 /// cache already holds what the shorter attempt read.
 pub const XREF_SECTION_WINDOW: u64 = 8192;
 
+/// Bytes read after one object header's offset when a streamed document
+/// decides its ladder.
+///
+/// `4294967295 65535 obj` and the byte that ends it are twenty-one, so an
+/// honest header is decided inside this. A header behind white space or a
+/// comment, or a token that runs on, makes the window double until the lexing
+/// stops inside it, so the window is what a probe *costs* and never what a
+/// header may be.
+pub const HEADER_PROBE_WINDOW: u64 = 32;
+
+/// The longest read that headers near one another share when a streamed
+/// document decides its ladder.
+///
+/// The windowed verdict sorts every offset it probes and reads each run of
+/// them that fits in this many bytes as one range, so a file of many small
+/// objects costs a read per run rather than per object, and one whose objects
+/// sit between megabytes of image data costs a read per header and none of the
+/// data. Nothing it reads is kept. A run's read is bounded by this; only a
+/// header whose lexing runs past the bytes read grows them, by doubling, until
+/// the lexing stops inside.
+pub const VALIDATION_WINDOW: u64 = 64 * 1024;
+
 /// Bytes at the start of the buffer searched for the `%PDF-` header (7.5.2).
 /// A header found past byte 0 means every stored offset is short by exactly
 /// that much, which is the most common corruption in the wild.

@@ -336,7 +336,7 @@ it.
 
 **AVIF** (AV1 intra decoding) in archives, as a bare image and in EPUB and HTML
 
-**Today.** AVIF needs a codec: `PageDefect::UnsupportedFormat(Avif)` (`features/cbz.md:431`; `features/opening.md:337`), priced L by the archives row this replaces. Every CBZ fixture is in the tree, so there is no corpus count. Everything else that row named has left it — Zstandard as ZIP method 93 (a hand-rolled RFC 8878 decoder held to Appendix A and to the format project's golden files), 7z's BCJ2 and BCJ filters and PPMd coder, bzip2 as ZIP method 12 and 7z coder `040202`, ZIP method 14, JPEG 2000 pages, BMP and GIF, and WebP lossless and lossy (the lossy planes held to the WebM project's published VP8 test vectors, fetched pinned by commit and SHA-256 and run by CI's `vp8-vectors` job) — each recorded with its tests in [features/cbz.md](../features/cbz.md) and [features/filters.md](../features/filters.md); what those decoders still refuse by name is FI-25's
+**Today.** AVIF needs a codec: `PageDefect::UnsupportedFormat(Avif)` (`features/cbz.md:431`; `features/opening.md:341`), priced L by the archives row this replaces. Every CBZ fixture is in the tree, so there is no corpus count. Everything else that row named has left it — Zstandard as ZIP method 93 (a hand-rolled RFC 8878 decoder held to Appendix A and to the format project's golden files), 7z's BCJ2 and BCJ filters and PPMd coder, bzip2 as ZIP method 12 and 7z coder `040202`, ZIP method 14, JPEG 2000 pages, BMP and GIF, and WebP lossless and lossy (the lossy planes held to the WebM project's published VP8 test vectors, fetched pinned by commit and SHA-256 and run by CI's `vp8-vectors` job) — each recorded with its tests in [features/cbz.md](../features/cbz.md) and [features/filters.md](../features/filters.md); what those decoders still refuse by name is FI-25's
 
 **Exit criterion.** the AV1 conformance streams for intra-only profiles decode to their reference outputs; re-priced in the design doc
 
@@ -757,7 +757,7 @@ it.
 
 **Customizable `<select>`'s `<selectedcontent>`**
 
-**Today.** Loose HTML that is not XML is read by `tinker_pdf_xml::html`, a hand-written WHATWG §13.2.5 tokenizer and §13.2.6 tree builder held to html5lib's suite vendored at `9329e64` (MIT, THIRDPARTY.md): **1 779 of the 1 784 tree-construction tests** that run with scripting disabled (`tests/html5lib.rs`, the five that do not pass named as a list), **7 028 of 7 028 tokenizer runs** (`src/html/suite.rs`; four lone-surrogate runs a Rust string cannot hold not attempted), and since 9 October 2026 **82 of 82 encoding tests**. **What is left** is the four tests of customizable `<select>`'s `<selectedcontent>` (`webkit02.dat` #45–#48): the element is built empty (`features/opening.md:325`), where the DOM makes a copy of the selected option when the parser pops an `<option>`, which needs the option selectedness algorithm; `tests1.dat` #77 fails on the shared 1 024-byte name cap, which is kept. Not attempted, by name: html5lib's `#script-on` tests (CD-12), its `scripted/` directory, and the standard's new processing instructions, which the vendored suite predates
+**Today.** Loose HTML that is not XML is read by `tinker_pdf_xml::html`, a hand-written WHATWG §13.2.5 tokenizer and §13.2.6 tree builder held to html5lib's suite vendored at `9329e64` (MIT, THIRDPARTY.md): **1 779 of the 1 784 tree-construction tests** that run with scripting disabled (`tests/html5lib.rs`, the five that do not pass named as a list), **7 028 of 7 028 tokenizer runs** (`src/html/suite.rs`; four lone-surrogate runs a Rust string cannot hold not attempted), and since 9 October 2026 **82 of 82 encoding tests**. **What is left** is the four tests of customizable `<select>`'s `<selectedcontent>` (`webkit02.dat` #45–#48): the element is built empty (`features/opening.md:329`), where the DOM makes a copy of the selected option when the parser pops an `<option>`, which needs the option selectedness algorithm; `tests1.dat` #77 fails on the shared 1 024-byte name cap, which is kept. Not attempted, by name: html5lib's `#script-on` tests (CD-12), its `scripted/` directory, and the standard's new processing instructions, which the vendored suite predates
 
 **Exit criterion.** the selectedness algorithm and the copy; those four tests pass
 
@@ -796,7 +796,7 @@ it.
 
 **Sniffing refusals**: a bare BMP, an SVG or HTML root past byte 4 096
 
-**Today.** `OpenError::NotAPdf` (`features/opening.md:335-336`)
+**Today.** `OpenError::NotAPdf` (`features/opening.md:339-340`)
 
 **Exit criterion.** each opens; a PDF header in the first 4 096 bytes still wins
 
@@ -854,7 +854,7 @@ it.
 
 **A host resource provider** for what a loose file names beside itself and for an EPUB's remote resources (the engine still does no I/O)
 
-**Today.** `StylesheetUnresolved`, `ImageNotDrawn { Unresolved }` and their kin (`features/opening.md:338`); `remote-resources` tallied as `UnimplementedFeature` ([features/epub.md](../features/epub.md))
+**Today.** `StylesheetUnresolved`, `ImageNotDrawn { Unresolved }` and their kin (`features/opening.md:342`); `remote-resources` tallied as `UnimplementedFeature` ([features/epub.md](../features/epub.md))
 
 **Exit criterion.** a test provider supplies the resources and the page draws as its self-contained twin
 

@@ -296,7 +296,11 @@ chunk cache reads in, and four observables a caller measures a streamed open
 by: `is_streamed()`, `first_page_end()` (Annex F's `/E`, `None` unless the
 head-only path engaged), `main_table_fetched()` and `whole_file_fetched()`.
 `complete_validation()` runs the eager offset probe a streamed open defers and
-returns the ladder level a buffered open would have reported.
+returns the ladder level a buffered open would have reported, reading each
+header through a window it keeps none of rather than fetching the file, and
+`CosDocument::answers_as_buffered()` says whether a streamed document answers
+as that open would: not opened on Annex F's head-only path, nothing warned, and
+that level `Trust`.
 
 ```rust
 let bytes = std::fs::read("report.pdf")?;

@@ -265,7 +265,7 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 **Scripted content documents**: `<script>` in EPUB, HTML and SVG content run by the in-tree engine against a DOM subset before layout, deny-by-default as form scripts are
 
-**Today.** never run; "no script engine, by design" (`features/opening.md:328`), so `<noscript>` is drawn; EPUB scripting and SVG's `<script>` and SMIL were named non-goals of the roadmap until 9 October 2026 (SMIL stays a limit, NG-11)
+**Today.** never run; "no script engine, by design" (`features/opening.md:332`), so `<noscript>` is drawn; EPUB scripting and SVG's `<script>` and SMIL were named non-goals of the roadmap until 9 October 2026 (SMIL stays a limit, NG-11)
 
 **Exit criterion.** html5lib's `#script-on` tree-construction tests pass; scripted fixtures draw their post-script DOM; budgets as FJ-04
 

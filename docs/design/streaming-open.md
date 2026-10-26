@@ -163,6 +163,9 @@ read a wrong value the first arrival baked in.
 - **Eager validation.** `ladder_level()` on a streamed document reflects
   the bytes read so far; a new completion call fetches and validates all,
   giving the eager answer. Both are documented observables, not moods.
+  *Amended, 25 October 2026*: since P-05.2 the completion call fetches nothing
+  whole. It probes each header through a window it keeps none of
+  (*The windowed verdict and the gate, as built*, below).
 - **`bytes()`**, incremental save, signatures, and a `WriteOptions::linearize`
   re-save: whole-file by contract, declared the same way.
 - **Containers** (`cbz::container` sniff): whole-file, declared.
@@ -384,13 +387,17 @@ of them showed on a fixture this repository wrote.
 
 - `ladder_level()` is **provisional** until `complete_validation()`, which
   fetches the source and runs the eager offset probe the open deferred.
+  *Amended, 25 October 2026*: since P-05.2 it runs that probe over the merged
+  table through windows it keeps none of, and warns nothing.
 - The repair index is built at the first read that finds an entry lying, rather
   than at open. The *values* are the same on both paths -- that is asserted --
   and the fetch is declared with `WarningKind::WholeFileFetched`.
   *Corrected, 25 October 2026*: it is built at the first read the table cannot
   answer, which includes a free or an absent entry, and over a free entry whose
   old body is still in the file the two paths read different values. P-05.2
-  gates it on the verdict; see *The read that disagrees today*, below.
+  gates it on the verdict; see *The read that disagrees today*, below. The gate
+  leaves one shape as it was, a type-1 entry of a file with a header shift,
+  which *The windowed verdict and the gate, as built* says why.
 - `Revision::byte_range.end` is the document's end rather than the byte past
   `%%EOF` when the marker is more than 8 KiB past the section, which on the
   head path it always is.
@@ -490,10 +497,15 @@ This section fixes what is counted before anything is built on the count.
 `a_linearized_file_renders_page_one_without_touching_its_tail` already does
 (`streaming_open.rs:337-338`), so every read anything in the engine makes is one
 the counter sees. Two readers make them, and only two: the chunk cache, whose
-one read is in `ChunkCache::chunk` (`source.rs:424`), and the facade's `filled`
+one read is in `ChunkCache::chunk` (`source.rs:485`), and the facade's `filled`
 (`crates/tinker-pdf/src/lib.rs:1313-1326`), through which the facade sniffs for
 a container (`lib.rs:1529`). A file whose first kilobyte holds no `%PDF-` adds
 the standalone sniff's wider read (`lib.rs:1538-1541`); neither fixture does.
+*Amended, 25 October 2026*: since P-05.2 the read at `source.rs:485` is in
+`ChunkCache::gather`, which `ChunkCache::chunk` calls and so does
+`Backing::read_transient`, the windowed verdict's read, which keeps nothing; a
+page render that asks for no verdict and reads no entry its table cannot place
+makes none of those.
 
 `SliceSource` answers every range whole (`source.rs:144-146`), so over it one
 read is one range a host would ask its transport for -- an HTTP range request,
@@ -501,7 +513,7 @@ a positioned read. That is the request MS-08 counts, and three things follow
 from it.
 
 - A source that answers short is asked again by the loops that read it
-  (`source.rs:423-433`, `lib.rs:1317-1324`), and every ask is a request. That
+  (`source.rs:484-494`, `lib.rs:1317-1324`), and every ask is a request. That
   count is honest about such a source and is not the guard's: over
   `ShreddedSource` a chunk is 4,096 requests by design.
 - A read that misses is not recorded. `CountingSource::read` returns the miss
@@ -513,8 +525,8 @@ from it.
 
 #### One read per run of missing chunks
 
-`ChunkCache::window` (`source.rs:446-463`) takes the chunks from `first` to
-`last` (`:452-453`) and asks `ChunkCache::chunk` (`:409-444`) for each in turn,
+`ChunkCache::window` (`source.rs:499-516`) takes the chunks from `first` to
+`last` (`:505-506`) and asks `ChunkCache::chunk` (`:452-468`) for each in turn,
 and `chunk` fetches a missing one with a read of its own, so a window over *k*
 missing chunks is *k* requests. MS-08.2 makes it one request a run:
 
@@ -543,8 +555,8 @@ The facade reads the first 1,024 bytes (`CONTAINER_SNIFF`, `lib.rs:200-206`)
 straight from the source before it knows what it is opening (`lib.rs:1529`): a
 container or a standalone file, either of which is then fetched whole
 (`lib.rs:1542-1549`), or a PDF. Only a PDF gets a chunk cache, built inside
-`CosDocument::open_source` (`crates/tinker-pdf-cos/src/doc.rs:387-389`, called
-at `lib.rs:1551`), and its head window then fetches chunk 0 (`doc.rs:399`) --
+`CosDocument::open_source` (`crates/tinker-pdf-cos/src/doc.rs:398-400`, called
+at `lib.rs:1551`), and its head window then fetches chunk 0 (`doc.rs:410`) --
 the sniff's kilobyte again. The sniff stays a request, and both bounds count
 it: the linearized page's 29,696 bytes are 7 x 4,096 + 1,024, and its 6
 requests include the sniff.
@@ -570,7 +582,7 @@ prototype of the coalescing, applied and then removed, counted the three and
 read the same 29,696 bytes.
 
 The guard holds the page to the row's figures: at most 29,696 bytes and 6
-requests, `main_table_fetched()` false (`doc.rs:670-672`), and no read touching
+requests, `main_table_fetched()` false (`doc.rs:683-685`), and no read touching
 the table at `/T`.
 
 #### The unlinearized bound, and its three terms
@@ -584,21 +596,21 @@ bytes_read() <= |T ∪ X ∪ P| + 4,096 x reads()
 ```
 
 where T, X and P are byte ranges the test derives from a buffered open of the
-same bytes (`CosDocument::open`, `doc.rs:370-372`). They are never typed in, so
+same bytes (`CosDocument::open`, `doc.rs:381-383`). They are never typed in, so
 a writer change that moves the twin's layout moves its bound with it.
 
 - **T, the `startxref` probe's tail window**: the window `xref::startxref`
-  (`crates/tinker-pdf-cos/src/xref.rs:242-273`) finds the keyword in -- the last
+  (`crates/tinker-pdf-cos/src/xref.rs:264-295`) finds the keyword in -- the last
   `STARTXREF_SCAN` bytes, 1,024 (`limits.rs:105-106`), or, when the keyword is
   not in them, the last `STARTXREF_SCAN_MAX`, 64 KiB (`limits.rs:108-110`). The
   test finds the keyword in the buffered bytes and takes the window that holds
   it.
 - **X, the cross-reference section `startxref` names, through its trailer**:
-  from `CosDocument::last_startxref()` (`doc.rs:894-898`), where the `xref`
+  from `CosDocument::last_startxref()` (`doc.rs:1056-1060`), where the `xref`
   keyword is, to the byte after the trailer dictionary's `>>`. That is where
   `parse_object_at` (`crates/tinker-pdf-cos/src/parse.rs:48-60`) stops on the
   dictionary after the `trailer` keyword, the parse the walker itself makes
-  (`xref.rs:535-541`). The `startxref` line and the `%%EOF` after it are T's.
+  (`xref.rs:557-563`). The `startxref` line and the `%%EOF` after it are T's.
   One section, because the twin is one revision.
 - **P, page one's objects**, each from its `N G obj` header, at the offset the
   buffered table states, to the end of its `endobj`:
@@ -638,7 +650,7 @@ today: the sniff, chunk 0, the two chunks the tail window straddles, and the
 content stream's eight chunks a read each. The section and the three small
 objects lie in chunks already held. With the prototype it costs 5 requests and
 the same bytes -- the sniff, the head, the tail run, the content stream's first
-kilobyte (its object window, `doc.rs:1619-1632`, alone in chunk 1) and its
+kilobyte (its object window, `doc.rs:1824-1837`, alone in chunk 1) and its
 data -- inside a bound of 30,227 + 5 x 4,096 = 50,707. No read carries more than
 3,494 bytes outside the terms.
 
@@ -830,18 +842,18 @@ more:
   the reader, the disk failed) is `SourceMiss::at` its range
   (`source.rs:50-61`). The engine's own loops already take an empty answer
   inside the length for a miss rather than an end of file
-  (`source.rs:424-429`).
+  (`source.rs:485-490`).
 - **The whole-file read** is the same read over `0..len`: one buffer of the
   file's length, filled in place, handed to `Document::open` as an
   `Arc<[u8]>`, which the facade keeps without a copy
   (`crates/tinker-pdf/src/lib.rs:1394-1398`,
-  `crates/tinker-pdf-cos/src/doc.rs:370-372`).
+  `crates/tinker-pdf-cos/src/doc.rs:381-383`).
 
 #### A miss, to a host that cannot fetch
 
 The engine never turns a miss into a value. A load that missed reads as null for
 that call and is not published, so the next call asks again
-(`doc.rs:1520-1527`), and an open that missed is `OpenError::SourceUnavailable`
+(`doc.rs:1682-1689`), and an open that missed is `OpenError::SourceUnavailable`
 (`crates/tinker-pdf/src/lib.rs:1037`, `:1552-1554`). That is right for a host
 that goes and fetches the range, and wrong for one with nowhere to fetch it
 from: a CLI that printed a page count after a failed read would print the count
@@ -879,7 +891,7 @@ streamed one, exactly when three things hold. Each is a way the two can part
 that nothing at open would otherwise show.
 
 - **It did not open on Annex F's head-only path** (`first_page_end()` is
-  `None`, `doc.rs:647-649`). That path builds page one from `/O`, and later
+  `None`, `doc.rs:660-662`). That path builds page one from `/O`, and later
   pages from the hint tables, out of the page's own dictionary
   (`crates/tinker-pdf-cos/src/pages.rs:431-461`, `:477-484`), and declines only
   for a missing `/MediaBox` or `/Resources` (`:446`): two of the four attributes
@@ -896,21 +908,22 @@ that nothing at open would otherwise show.
   scan's and the cross-reference walk's, which a buffered open warns the same
   from the same functions, and the source's own. Five kinds are raised only
   where a streamed document does what a buffered one does not, by Annex F's
-  fast path (`doc.rs:421-428`) or by a whole-file fetch (`doc.rs:1861`):
+  fast path (`doc.rs:432-439`) or by a whole-file fetch (`doc.rs:2066`):
   `LinearizedLengthMismatch` and `LinearizedParametersUnusable` at open
-  (`doc.rs:2005`, `:2020`, `:2055`, `:2085`), the two hint-table kinds for a
-  page past the first (`doc.rs:1142-1265`, `:1361`; `pages.rs:481`), and
-  `WholeFileFetched` (`doc.rs:1867`). Rather than classify them, the rule reads
+  (`doc.rs:2210`, `:2225`, `:2260`, `:2290`), the two hint-table kinds for a
+  page past the first (`doc.rs:1304-1427`, `:1523`; `pages.rs:481`), and
+  `WholeFileFetched` (`doc.rs:2072`). Rather than classify them, the rule reads
   any document that has warned anything whole. The one other warning at open
-  that would matter, `HeaderNotAtStart` (`crates/tinker-pdf-cos/src/xref.rs:232`),
+  that would matter, `HeaderNotAtStart` (`crates/tinker-pdf-cos/src/xref.rs:254`),
   goes the same way: a buffered open rewrites every shifted entry
-  (`doc.rs:2101-2127`), where a streamed one reads each at the offset its table
-  states (`doc.rs:1677-1687`) and so repairs it at first read through the whole
+  (`doc.rs:2306-2332`), where a streamed one reads each at the offset its table
+  states (`doc.rs:1882-1892`) and so repairs it at first read through the whole
   file, which `crates/tinker-pdf/tests/streaming_open.rs:1300-1312` pins for a
   linearized head.
 - **Its completed verdict is `Trust`.** `complete_validation`
-  (`doc.rs:716-742`) decides the ladder a buffered open would have, and after
-  P-05.2 it does so through windows it keeps none of, over the merged table.
+  (`doc.rs:741-743`) decides the ladder a buffered open would have, and after
+  P-05.2 it does so through windows it keeps none of, over the merged table
+  (`doc.rs:785-826`, the windows at `:841-904`).
   `Patch` or `Rescan` means a buffered open repairs at open, and the answers
   must come from that open's table and warnings.
 
@@ -927,7 +940,7 @@ A buffered open of the same bytes then warns nothing at open either: its header
 scan and its walk are the same functions over the same bytes, and its eager
 validation found no failure, which is what `Trust` means. With no header shift
 the only offset it tries for an entry is the stated one
-(`xref.rs:918-930`), so the only thing its validation rewrites is a generation
+(`xref.rs:940-952`), so the only thing its validation rewrites is a generation
 the object's own header states, and both documents read every object from the
 same offset through the same parse, which reads the same over a window as over
 the whole buffer (`crates/tinker-pdf/tests/streaming_determinism.rs:8-14` holds
@@ -944,10 +957,11 @@ costs today, read once instead of twice.
 
 `load_uncached` asks the repair scanner for any object its table cannot place:
 a type-1 entry that does not parse as the object it names, and also an entry
-that is free or absent (`doc.rs:1532-1557`, the ask at `:1545`). `repair_index`
+that is free or absent (`doc.rs:1694-1727`, the ask, gated since P-05.2, at
+`:1708`). `repair_index`
 builds that scanner for any streamed document by fetching the whole file
-(`doc.rs:1591-1603`), where a buffered document has one only when its open had
-to repair (`doc.rs:476-545`). So on a streamed document
+(`doc.rs:1796-1808`), where a buffered document has one only when its open had
+to repair (`doc.rs:487-556`). So on a streamed document
 whose verdict is `Trust` a reference to a free or absent object costs the whole
 file, and a free object whose old body is still in the file is read back. A
 probe for this section, over a clean file whose object 3 is free in its table
@@ -974,7 +988,7 @@ buffered open's, value for value.
 | `info`; `check` with no verdict flag | on demand, by the rule | they print the ladder and the warnings, which the rule keeps a buffered open's |
 | `text`, `render`, `fields`, `fonts`, `images`, `outline` | on demand, by the rule | they print values only (`main.rs:959-1414`, `tools/tpdf/src/images.rs`) |
 | `check --strict`, `--pdfa`, `--pdfua`, `--pdfx` | whole | the strict and PDF/A passes read the file's bytes whole through `CosDocument::bytes()` (`crates/tinker-pdf-cos/src/validate.rs:774`, `crates/tinker-pdf/src/pdfa/syntax.rs:148`); the strict pass reports the ladder as it stands (`validate.rs:891-895`) and counts every warning kind but two as a defect (`validate.rs:851-856`); and `check` opens a file once for every flag (`main.rs:1659-1660`) |
-| `objects` | whole | it prints the table's offsets and generations (`main.rs:1445-1468`), which a buffered open's validation rewrites from each object's own header (`doc.rs:2101-2127`) and a streamed open never rewrites |
+| `objects` | whole | it prints the table's offsets and generations (`main.rs:1445-1468`), which a buffered open's validation rewrites from each object's own header (`doc.rs:2306-2332`) and a streamed open never rewrites |
 | `probe` | whole | its record is the corpus ratchet's input |
 | `merge`, `split`, `rotate`, `encrypt`, `decrypt`, `attach`, `stamp`, `sanitise` | whole | every write is a rewrite (`tools/tpdf/src/writing.rs:30-38`) that reads every object it keeps, which on demand is the whole file in pieces |
 
@@ -988,7 +1002,7 @@ is `Trust`, as `ladder_level()` is.
 | | A file whose validation needs repair | A file whose streamed open raises the source's own warnings |
 |---|---|---|
 | Its shape | a type-1 entry pointing into another object (`a_damaged_document`, `crates/tinker-pdf-cos/tests/streaming.rs:194-207`) | a linearized file with bytes after it (`a_length_that_is_not_the_file_falls_back_to_the_generic_path`, `streaming_open.rs:495-526`), or a parameter dictionary without `/E`, `/T` or `/O` |
-| A buffered open | ladder `Patch`; `ObjectHeaderMismatch` and `ObjectRepaired` at open (`doc.rs:510-545`) | ladder `Trust`; no warning |
+| A buffered open | ladder `Patch`; `ObjectHeaderMismatch` and `ObjectRepaired` at open (`doc.rs:521-556`) | ladder `Trust`; no warning |
 | A streamed open, with P-05.2 | provisional `Trust`, verdict `Patch`; nothing warned until a read reaches the entry, then `ObjectHeaderMismatch`, `WholeFileFetched`, `ObjectRepaired` | `LinearizedLengthMismatch`, or `LinearizedParametersUnusable`, at open; verdict `Trust` |
 | The rule | the verdict is not `Trust`: whole | it warned: whole |
 | `tpdf info` | today's lines: `ladder      Patch`, then `warnings    2` over `ObjectHeaderMismatch` and `ObjectRepaired` | today's lines, for that fixture `ladder      Trust` and no `warnings` line |
@@ -997,14 +1011,19 @@ is `Trust`, as `ladder_level()` is.
 
 The third kind the step names, `WholeFileFetched`, is never all a streamed open
 raises at open: there it comes with `DocumentRescanned`, when the tables cannot
-be used (`doc.rs:476-509`), which is the left-hand column at `Rescan`. After
-open only `fetch_whole` raises it (`doc.rs:1860-1869`), and it has four callers:
-the two repairs at open, `complete_validation` and `repair_index` (`doc.rs:482`,
-`:512`, `:721`, `:1598`). On a document the rule keeps, none of them can run once
+be used (`doc.rs:487-520`), which is the left-hand column at `Rescan`. After
+open only `fetch_whole` raises it (`doc.rs:2065-2074`), and it has four callers:
+the two repairs at open, `complete_validation` and `repair_index` (`doc.rs:493`,
+`:523`, `:1803`, and `complete_validation`'s, which P-05.2 removed). On a
+document the rule keeps, none of them can run once
 P-05.2 has landed: the verdict is `Trust`, the scanner's ask is gated, and
 validation keeps the file out of its reads. So a binding's `warnings()` on a
 document it kept streamed gains only what that document's reads tolerate, which
-a buffered document's same reads tolerate the same way.
+a buffered document's same reads tolerate the same way. *As built*:
+`complete_validation` no longer calls `fetch_whole` at all, and the one shape
+the gate leaves ungated, a type-1 entry of a file with a header shift, never
+meets a kept document, which warned nothing and so warned no
+`HeaderNotAtStart`.
 
 #### One copy, and what a slice costs
 
@@ -1012,8 +1031,8 @@ a buffered document's same reads tolerate the same way.
   source for the whole range, keeps an answer of the whole length as the
   document's buffer, gathers a short one into a buffer of the document's length
   filled in place, and empties the chunk map, where today every chunk stays
-  beside a joined copy (`source.rs:446-475`) and the join itself is a `Vec`
-  copied into an `Arc` (`:454-462`). The file source keeps no bytes of its own,
+  beside a joined copy (`source.rs:499-528`) and the join itself is a `Vec`
+  copied into an `Arc` (`:507-515`). The file source keeps no bytes of its own,
   so the process holds the file once. A `SliceSource` keeps its own, so a
   streamed open over one holds them twice after a whole-file fetch; no host that
   owns a file uses one.
@@ -1021,7 +1040,7 @@ a buffered document's same reads tolerate the same way.
   `Document::open` takes `impl Into<Arc<[u8]>>` and converts once
   (`lib.rs:1394-1398`): a slice is copied into a new `Arc`, so is a `Vec`, both
   existing for the moment of the copy, and an `Arc` is kept as it is
-  (`doc.rs:370-372`). The surfaces that take bytes copy a borrowed slice into a
+  (`doc.rs:381-383`). The surfaces that take bytes copy a borrowed slice into a
   `Vec` first, which the facade then copies again
   (`crates/tinker-pdf-ffi/src/lib.rs:647`, `bindings/python/src/lib.rs:99`,
   `bindings/js/src/lib.rs:192`); P-05.6 builds the `Arc` straight from the
@@ -1055,6 +1074,72 @@ a buffered document's same reads tolerate the same way.
   above, is 4,896 to 5,284 KiB, about half the band; the test binary's is
   MS-05.3's to record.
 
+#### The windowed verdict and the gate, as built
+
+*25 October 2026, P-05.2.*
+
+- **The probe.** `complete_validation` pairs every candidate offset of every
+  type-1 entry of the merged table with its entry, through the same
+  `xref::offset_candidates` the buffered `validate` tries, the shifted offset
+  first, sorts the pairs by offset and reads them in runs. A run is one read,
+  from its first offset to `HEADER_PROBE_WINDOW` (32 bytes) past its last, and
+  holds every offset whose probe ends within `VALIDATION_WINDOW` (64 KiB) of its
+  first (`limits.rs`). Each header is lexed in the window by the three tokens
+  `object_header_at` reads, through `xref::object_header_within`, which also
+  says where the lexing stopped. A lexing that ran into the window's end short
+  of the document's, behind a comment or white space or in a token that runs
+  on, doubles the window until it stops inside, and the bytes a grown window
+  holds serve the runs it reaches, so no byte is read twice. The reads go
+  straight to the source through `Backing::read_transient` and are dropped with
+  the run, so the chunk cache holds what it held, nothing is fetched whole and
+  the pass warns nothing. An entry passes when some candidate's header names
+  it, which is when the buffered pass finds one, and the level follows from the
+  failures by the rule it always did.
+- **Kept once known.** The verdict is memoized on the document. A window the
+  source could not supply ends the pass with nothing kept: `complete_validation`
+  returns the provisional level, and the next call asks again.
+- **The gate.** `load_uncached` asks the scanner only when
+  `scanner_may_answer` agrees: always on a buffered document, whose
+  `repair_index` answers from what its open built, and on a streamed one when
+  the verdict is not `Trust`, worked out at that read if nothing has asked yet.
+  A verdict cut short by a miss is a miss for the load, which is then not
+  published.
+- **Where the step and the code part.** The step gates every ask on the
+  verdict. The code keeps one ask ungated: a type-1 entry of a file whose header
+  is not at byte 0. The walker keeps every entry as the file states it, from the
+  header (it shifts only where a section starts), and only the buffered
+  validation moves an entry to its shifted offset; a streamed document reads
+  each where it is stated, misses its header, and has always found the object
+  through the scanner (*Bytes before `%PDF-`*, above). A shifted file decides
+  `Trust`, so gating that ask on the verdict would read every object of such a
+  file as null, and `a_linearized_file_behind_leading_junk_still_opens_from_its_head`
+  would fail. A shifted file's free and absent entries are gated like any
+  other's, and the rule reads a shifted file whole anyway, since it warned
+  `HeaderNotAtStart`.
+- **The predicate.** `CosDocument::answers_as_buffered` asks the three
+  conditions in order of cost: `first_page_end()` is `None`, nothing is warned,
+  and the verdict is `Trust`. A verdict the source could not supply answers
+  false.
+- **Measured** on this machine, which other work kept at a load of 5 to 8 on
+  its 9 cores, the base and this change built and run alternately. The verdict
+  alone, on a fresh streamed open: over a 23,000,719-byte file of one image,
+  14.01 ms to 0.005 ms in release, the median of six runs' medians of 20
+  rounds, and 42.45 ms to 0.015 ms in debug, of four runs of 5, its reads 5,614
+  of 22,994,944 bytes to 2 of 329; over 20,000 small objects in 1,658,037
+  bytes, 2.79 ms to 2.18 ms in release and 17.0 ms to 17.9 ms in debug, inside
+  the noise, 306 reads to 20 of about the same bytes, since the objects are
+  packed; over 5,000 small objects in 408,031 bytes, 0.87 ms to 0.67 ms and
+  5.34 ms to 5.05 ms, 74 reads to 5. A buffered and a streamed open are
+  unchanged inside the noise: over the 20,000 objects the least of six runs of
+  40 rounds is 3.241 ms to 3.278 ms buffered and 4.013 ms to 3.975 ms streamed
+  in release, and over the image file the least of eight runs of 2,000
+  buffered opens is 9.18 µs to 9.40 µs. A free entry read straight after a
+  streamed open costs 85.7 ms to 0.006 ms over the image file in release and
+  397 ms to 0.020 ms in debug, and over the 20,000 objects, once in release,
+  15,292 ms to 1.66 ms, the old figure being the repair scanner's index
+  (*Risks*, below) and its value the free entry's old body where the new one is
+  `Null`.
+
 ### Milestones
 
 | Step | Deliverable | Exit criteria (concrete, testable) | Size (S/M/L/XL) |
@@ -1082,11 +1167,12 @@ MS-08.2 follows P-05.3, which changes the same chunk cache.
 | Linearized files are read whole by every path open, so the row's gain stops at the files that are not | It is today's cost, not a price on anything that works; the fix of the head path drops the condition in the same commit |
 | A clean file is read whole because its open raised some harmless warning | Whole is today's cost, read once; the predicate stays three observables rather than a list of kinds that would rot as kinds are added |
 | The streamed branch parts from a buffered open in a way none of the three conditions sees | The equality is asserted, not argued: P-05.4 over a damaged, a shifted-header, a linearized-then-updated and a linearized fixture, P-05.7 and P-05.8 over the two files above, and P-05.2's predicate test with an injection for each condition |
-| A local read fails after open in a binding, and a call reads that range as absent | The source never answers short of a failure, so absent means an I/O error, and the next call reads again (`doc.rs:1520-1527`); the CLI, which can, fails the file instead |
+| A local read fails after open in a binding, and a call reads that range as absent | The source never answers short of a failure, so absent means an I/O error, and the next call reads again (`doc.rs:1682-1689`); the CLI, which can, fails the file instead |
 | The file changes under the reader | Appended bytes are never read, since the length is fixed; a truncation is a miss; a rewrite in place reads whatever is there at each read, as a buffered read of a file being rewritten does at its one read, and every parse of it is ruling 1's untrusted input |
 | The windowed verdict costs a read per run of nearby object headers, so a file of many small objects pays close to one read of itself at open | Kept by nothing, against today's whole-file read kept for the life of the document; the 23 MB file has a handful of objects, and a figure that moves names the change |
 | The test binary's own resident floor, which nothing here has measured, leaves the 10 MB band less room than `tpdf`'s 5 MB does | MS-05.3 records the case from two runs before P-05.9 holds it; a floor over the band is a finding about the probe, not a reason to widen the band |
-| `CosDocument::bytes()` materialises a streamed document through `Backing::whole` (`source.rs:400-405`, `:477-485`) rather than `fetch_whole`, so a save, a signature's byte range or a verdict over one pulls the whole file without the `WholeFileFetched` that *What stays whole-file, and says so* promises | Not this row's: P-05's hosts read whole for every verdict flag and every writing command, so none of them meets it; named for the row that owns ruling 10's declarations |
+| `CosDocument::bytes()` materialises a streamed document through `Backing::whole` (`source.rs:442-447`, `:530-538`) rather than `fetch_whole`, so a save, a signature's byte range or a verdict over one pulls the whole file without the `WholeFileFetched` that *What stays whole-file, and says so* promises | Not this row's: P-05's hosts read whole for every verdict flag and every writing command, so none of them meets it; named for the row that owns ruling 10's declarations |
+| The repair scanner's index takes time quadratic in a file's objects: `ScanIndex::build` looks for the next `trailer` from every object it finds, which on a file with one trailer at its end is a search to the end each time. Measured on this tree in release, a buffered open of 1,658,037 bytes of 20,000 small objects with one lying entry takes 13,049 ms, and before P-05.2 a free entry read straight after a streamed open of the same objects, one entry freed, took 15,292 ms (*The windowed verdict and the gate, as built*) | Not this row's, and P-05.2 makes it rarer: a streamed document builds the index only when a buffered open of the same bytes would, and the rule reads every such file whole, where it pays what a buffered open pays. Named, 25 October 2026, for the row that owns the scanner |
 
 ## Dependencies
 
