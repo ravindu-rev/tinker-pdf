@@ -3573,8 +3573,9 @@ fn a_cell_or_a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whol
 /// word so cut does at every tree, and a Greek one with no word spacing
 /// (pinned with them). With `bundled-fonts` the Greek and Cyrillic words read
 /// as at every tree, and the Armenian one as in a default build. A padded
-/// inline span, not a block, keeps the word whole (held). Whether these
-/// scripts should read otherwise than Latin is the owner's to say. And a
+/// inline span, not a block, keeps the word whole (held). These scripts read
+/// as Latin does, in two, by the owner's decision (ruling 14), and each case
+/// is held at exactly that reading. And a
 /// pre-existing one the hunt found: the writer draws no Adlam letter in
 /// either build, at any tree (pinned; ROADMAP CD-19, "Read so at every
 /// tree").

@@ -474,9 +474,6 @@ These lines no drawing tried reads right, and they are drawn by the rules:
   right-to-left letter at the line's left end; and so is the stop of a line
   whose left end is a closing bracket, `W <b>W</b> W <i>W</i>, (W).` with no
   `dir`, letter-spaced or under a transform;
-- a word of an overflow script that an inline block cuts,
-  `αλφα<span style="display: inline-block; width: 1em"> </span>βήτα` at
-  `word-spacing: 0.6em`, read in two as a Latin word so cut is;
 - a word space styled apart across a stretch of two ems,
   `αλφα <b>βήτα</b> ספר בית xyz.` at `word-spacing: 2em`, whose stretch no
   placement of a space parts into halves a reader resumes a line across;
@@ -494,6 +491,10 @@ These lines no drawing tried reads right, and they are drawn by the rules:
 - and a line whose right drawing comes after the read-back's budget: a
   right-to-left paragraph after a generated `§ ` at `word-spacing: 0.6em` or
   `1em`, and a `<bdi>` of Latin with Hebrew in it.
+
+A word of Greek, Cyrillic or Armenian that an inline block cuts,
+`αλφα<span style="display: inline-block; width: 1em"> </span>βήτα`, reads in
+two, as a Latin word so cut does ([ruling 14](../rulings.md)).
 
 A glyph is drawn over another where a negative `letter-spacing` sets it
 there, which layout itself does; where a `transform` paints a box past its
