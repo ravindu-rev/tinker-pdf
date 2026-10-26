@@ -79,6 +79,7 @@ pub mod validate;
 pub mod viewer;
 pub mod warn;
 pub mod webp_embed;
+pub mod work;
 pub mod write;
 pub mod xref;
 
@@ -172,5 +173,6 @@ pub use viewer::{
 };
 pub use warn::{Warning, WarningKind, WarningSink};
 pub use webp_embed::webp_image;
+pub use work::{Counter, Stats, Work};
 pub use write::{Encryption, ObjectSet, StreamData, WriteMode, WriteOptions, Written};
 pub use xref::{Revision, XrefEntry, XrefTable};

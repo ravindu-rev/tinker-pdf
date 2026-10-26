@@ -242,6 +242,7 @@ fn ink_and_lab_come_back_as_the_light_that_was_written() {
         ],
         warnings: Vec::new(),
         premultiplied: false,
+        stats: None,
     };
     let read = Bitmap::from_png(&cmyk.to_png().expect("a picture")).expect("it reads");
     assert_eq!(read.format, PixelFormat::Rgba8, "ink comes back as light");
@@ -259,6 +260,7 @@ fn ink_and_lab_come_back_as_the_light_that_was_written() {
         data: vec![255, 128, 128, 200],
         warnings: Vec::new(),
         premultiplied: false,
+        stats: None,
     };
     let read = Bitmap::from_png(&lab.to_png().expect("a picture")).expect("it reads");
     assert_eq!(read.format, PixelFormat::Rgba8);

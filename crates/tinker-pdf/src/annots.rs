@@ -20,6 +20,7 @@ use tinker_pdf_render::{DisplayRecorder, Renderer};
 use crate::fonts::FontProvider;
 use crate::render_part::NotDrawn;
 use crate::resources::PageResources;
+use crate::stats::Work;
 
 /// 12.5.3: the flags that keep an annotation off the page.
 const HIDDEN: i64 = 1 << 1;
@@ -50,15 +51,17 @@ impl AppearanceDevice for Renderer<'_, PageResources> {
     }
 }
 
-/// Draws every visible annotation of a page.
+/// Draws every visible annotation of a page, counting the scopes each
+/// appearance builds into `work` when the render is counting.
 pub(crate) fn draw(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
     provider: Option<&Arc<dyn FontProvider>>,
     device: &mut impl AppearanceDevice,
+    work: Option<&Arc<Work>>,
 ) {
     each_appearance(doc, page, |appearance| {
-        draw_prepared(doc, appearance, provider, device);
+        draw_prepared(doc, appearance, provider, device, work);
     });
 }
 
@@ -245,24 +248,32 @@ pub(crate) fn prepare(doc: &Arc<CosDocument>, annotation: &Dict) -> Result<Appea
     })
 }
 
-/// Draws a prepared appearance through `device`.
+/// Draws a prepared appearance through `device`, its two scopes counting into
+/// `work` when the render is counting.
 pub(crate) fn draw_prepared(
     doc: &Arc<CosDocument>,
     appearance: &Appearance,
     provider: Option<&Arc<dyn FontProvider>>,
     device: &mut impl AppearanceDevice,
+    work: Option<&Arc<Work>>,
 ) {
-    let resources = PageResources::from_dict(doc, appearance.resources.clone(), provider);
+    let resources = PageResources::from_dict_counted(
+        doc,
+        appearance.resources.clone(),
+        provider,
+        work.cloned(),
+    );
 
     // 12.5.5: the appearance is a form XObject reached by reference, so there
     // is no name for the interpreter to announce and the caller announces it
     // instead. Both seams have to change: the device resolves images,
     // shadings and patterns, and an appearance that names one the page does
     // not define is the ordinary case, not the odd one.
-    device.push_scope(Arc::new(PageResources::from_dict(
+    device.push_scope(Arc::new(PageResources::from_dict_counted(
         doc,
         appearance.resources.clone(),
         provider,
+        work.cloned(),
     )));
     interpret(
         &appearance.content,

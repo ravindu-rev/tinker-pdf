@@ -23,6 +23,8 @@ use std::sync::Arc;
 
 use tinker_pdf_cos::{CosDocument, Dict, Font, Object};
 
+use crate::stats::{self, Counter, Work};
+
 /// What is known about a font that needs substituting.
 ///
 /// Everything here comes from the font dictionary and its descriptor, so a
@@ -211,8 +213,17 @@ impl FontProvider for SimpleFontProvider {
 }
 
 /// Reads the font dictionary a resource name selects, for building a request.
+///
+/// Counted as a font dictionary resolved into `work` when the operation is
+/// counting, found or not: the lookup is the step.
 #[must_use]
-pub(crate) fn font_dict(doc: &CosDocument, resources: &Dict, name: &[u8]) -> Option<Dict> {
+pub(crate) fn font_dict(
+    doc: &CosDocument,
+    resources: &Dict,
+    name: &[u8],
+    work: Option<&Work>,
+) -> Option<Dict> {
+    stats::count(work, Counter::FontDictionariesResolved);
     let fonts = doc.resolve_key(resources, doc.intern(b"Font"));
     let dict = fonts.as_dict()?;
     doc.resolve_key(dict, doc.intern(name)).as_dict().cloned()

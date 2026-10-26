@@ -25,6 +25,7 @@ use tinker_pdf_render::{
 
 use crate::fonts::{self, FontProvider, FontRequest};
 use crate::optional::OptionalContent;
+use crate::stats::{self, Counter, Work};
 
 /// Extracted glyph outlines, keyed by font identity and character code.
 ///
@@ -200,6 +201,16 @@ pub struct PageResources {
     /// page that marks every drawing operator would otherwise walk
     /// `/OCProperties` thousands of times for one constant.
     optional: Arc<OptionalContent>,
+    /// The tally of the operation these resources serve, when it is counting
+    /// (`docs/design/performance.md`): the fonts this scope resolves, the
+    /// image decoders it runs and every lookup in its caches count into it.
+    ///
+    /// `None` for every operation nobody asked about, and then every counting
+    /// site below tests it and does nothing else. A scope this one makes
+    /// inherits it; a scope a cache keeps does not, because the cache outlives
+    /// the operation, and is handed to each asker bound to the asker's
+    /// ([`PageResources::bind`]).
+    work: Option<Arc<Work>>,
 }
 
 /// Applies `/Decode [1 0]` to already-decoded samples.
@@ -544,6 +555,16 @@ impl PageResources {
     /// it, as that render's own decode would have.
     #[must_use]
     pub(crate) fn for_one_render(&self) -> PageResources {
+        self.for_one_render_counted(None)
+    }
+
+    /// [`PageResources::for_one_render`], counting into `work`: a counted
+    /// render's resources over a retained page's caches, and a kept scope
+    /// handed to a counting asker ([`PageResources::bind`]). Building it reads
+    /// nothing — the fonts were resolved when the kept scope was — so it counts
+    /// nothing itself.
+    #[must_use]
+    pub(crate) fn for_one_render_counted(&self, work: Option<Arc<Work>>) -> PageResources {
         PageResources {
             doc: Arc::clone(&self.doc),
             fonts: self.fonts.clone(),
@@ -557,7 +578,31 @@ impl PageResources {
             unresolved: Mutex::new(None),
             provider: self.provider.clone(),
             optional: Arc::clone(&self.optional),
+            work,
         }
+    }
+
+    /// A scope a cache keeps, for an asker in this scope's operation: the kept
+    /// scope itself when the operation is not counting, which is what every
+    /// uncounted render gets, and when it is, the kept scope over its own
+    /// caches counting into this one's tally — so a hit stays a hit, and two
+    /// renders holding one kept scope at once count into their own tallies.
+    pub(crate) fn bind(&self, kept: &Arc<PageResources>) -> Arc<PageResources> {
+        match &self.work {
+            None => Arc::clone(kept),
+            Some(work) => Arc::new(kept.for_one_render_counted(Some(Arc::clone(work)))),
+        }
+    }
+
+    /// The tally these resources count into, when their operation is
+    /// counting.
+    pub(crate) fn work(&self) -> Option<&Arc<Work>> {
+        self.work.as_ref()
+    }
+
+    /// Counts one step of `counter` into the tally, when there is one.
+    fn count(&self, counter: Counter) {
+        stats::count(self.work.as_deref(), counter);
     }
 
     /// Adds fonts some other pass over the same content could not resolve —
@@ -576,6 +621,18 @@ impl PageResources {
         page: &cos_pages::Page,
         provider: Option<&Arc<dyn FontProvider>>,
     ) -> PageResources {
+        PageResources::new_counted(doc, page, provider, None)
+    }
+
+    /// [`PageResources::new`] for an operation counting into `work`: each
+    /// font the dictionary resolves counts, and the scope carries the tally.
+    #[must_use]
+    pub(crate) fn new_counted(
+        doc: &Arc<CosDocument>,
+        page: &cos_pages::Page,
+        provider: Option<&Arc<dyn FontProvider>>,
+        work: Option<Arc<Work>>,
+    ) -> PageResources {
         let mut fonts = HashMap::new();
         let mut font_ids = HashMap::new();
         let mut resources = None;
@@ -583,6 +640,7 @@ impl PageResources {
         if let Some(dict) = page.resources.as_ref() {
             resources = Some(dict.clone());
             for (name, font) in cos_font::from_resources(doc, dict) {
+                stats::count(work.as_deref(), Counter::FontDictionariesResolved);
                 if let Some(bytes) = doc.name_bytes(name) {
                     let key = bytes.to_vec();
                     let id = u64::from(name.id());
@@ -605,6 +663,7 @@ impl PageResources {
             unresolved: Mutex::new(None),
             provider: provider.cloned(),
             optional: Arc::new(OptionalContent::bind(doc)),
+            work,
         }
     }
 
@@ -625,9 +684,11 @@ impl PageResources {
         let key = (reference.num, reference.gen);
         if let Ok(cache) = self.caches.icc.lock() {
             if let Some(found) = cache.get(&key) {
+                self.count(Counter::IccTransformHits);
                 return found.clone();
             }
         }
+        self.count(Counter::IccTransformMisses);
         let compiled = self
             .doc
             .stream_decoded(reference)
@@ -684,10 +745,23 @@ impl PageResources {
         dict: Dict,
         provider: Option<&Arc<dyn FontProvider>>,
     ) -> PageResources {
+        PageResources::from_dict_counted(doc, dict, provider, None)
+    }
+
+    /// [`PageResources::from_dict`] for an operation counting into `work`, as
+    /// [`PageResources::new_counted`] is for a page's.
+    #[must_use]
+    pub(crate) fn from_dict_counted(
+        doc: &Arc<CosDocument>,
+        dict: Dict,
+        provider: Option<&Arc<dyn FontProvider>>,
+        work: Option<Arc<Work>>,
+    ) -> PageResources {
         let mut fonts = HashMap::new();
         let mut font_ids = HashMap::new();
 
         for (name, font) in cos_font::from_resources(doc, &dict) {
+            stats::count(work.as_deref(), Counter::FontDictionariesResolved);
             if let Some(bytes) = doc.name_bytes(name) {
                 let key = bytes.to_vec();
                 let id = u64::from(name.id());
@@ -709,6 +783,7 @@ impl PageResources {
             unresolved: Mutex::new(None),
             provider: provider.cloned(),
             optional: Arc::new(OptionalContent::bind(doc)),
+            work,
         }
     }
 
@@ -859,14 +934,16 @@ impl PageResources {
         let key = (u64::from(reference.num) << 16) | u64::from(reference.gen);
         if let Ok(cache) = self.caches.form_scopes.lock() {
             if let Some(hit) = cache.get(&key) {
-                return hit.clone();
+                self.count(Counter::FormScopeHits);
+                return hit.as_ref().map(|kept| self.bind(kept));
             }
         }
+        self.count(Counter::FormScopeMisses);
         let built = self.build_form_resources(&dict);
         if let Ok(mut cache) = self.caches.form_scopes.lock() {
             cache.insert(key, built.clone());
         }
-        built
+        built.as_ref().map(|kept| self.bind(kept))
     }
 
     fn build_form_resources(&self, dict: &Dict) -> Option<Arc<PageResources>> {
@@ -883,11 +960,16 @@ impl PageResources {
             .resolve_key(dict, self.doc.intern(b"Resources"))
             .as_dict()
             .cloned()?;
-        Some(Arc::new(PageResources::from_dict(
+        // Its fonts count into the asker's tally, but the scope is kept
+        // without one: the cache outlives this operation.
+        let mut kept = PageResources::from_dict_counted(
             &self.doc,
             own,
             self.provider.as_ref(),
-        )))
+            self.work.clone(),
+        );
+        kept.work = None;
+        Some(Arc::new(kept))
     }
 
     /// Whether this scope's `/XObject` dictionary names `name` and, if it
@@ -1329,6 +1411,7 @@ fn program_for(
     resources: &Dict,
     font: &cos_font::Font,
     provider: Option<&dyn FontProvider>,
+    work: Option<&Work>,
 ) -> Option<Arc<Vec<u8>>> {
     if let Some(embedded) = embedded_program(doc, name, resources) {
         return Some(Arc::new(embedded));
@@ -1338,7 +1421,7 @@ fn program_for(
     if !fonts::is_substitutable(font) {
         return None;
     }
-    let dict = fonts::font_dict(doc, resources, name)?;
+    let dict = fonts::font_dict(doc, resources, name, work)?;
     provider.substitute(&FontRequest::read(doc, &dict))
 }
 
@@ -1425,7 +1508,12 @@ impl FontSource for PageResources {
     fn type3_glyph(&self, font: &[u8], code: u32) -> Option<(Vec<u8>, Matrix)> {
         // 9.6.5: only a Type 3 font has glyph procedures. Every other kind
         // returns None here, which leaves the ordinary outline path untouched.
-        let dict = fonts::font_dict(&self.doc, self.resources.as_ref()?, font)?;
+        let dict = fonts::font_dict(
+            &self.doc,
+            self.resources.as_ref()?,
+            font,
+            self.work.as_deref(),
+        )?;
         let subtype = dict
             .get_name(self.doc.intern(b"Subtype"))
             .and_then(|n| self.doc.name_bytes(n))?;
@@ -1759,6 +1847,7 @@ impl GlyphSource for PageResources {
     fn outline(&self, font_id: u64, code: u32) -> Option<Outline> {
         if let Ok(cache) = self.caches.outlines.read() {
             if let Some((hit, unresolved)) = cache.get(&(font_id, code)) {
+                self.count(Counter::GlyphOutlineHits);
                 // What the extraction reported, reported again: this render
                 // met the glyph too, and a render of its own would have.
                 if let Some(name) = unresolved {
@@ -1767,6 +1856,7 @@ impl GlyphSource for PageResources {
                 return hit.as_ref().map(|o| (**o).clone());
             }
         }
+        self.count(Counter::GlyphOutlineMisses);
 
         if let Ok(mut marker) = self.unresolved.lock() {
             *marker = None;
@@ -1865,7 +1955,12 @@ impl GlyphSource for PageResources {
         let nested;
         let resources: &PageResources = match own {
             Some(dict) => {
-                nested = PageResources::from_dict(&self.doc, dict, self.provider.as_ref());
+                nested = PageResources::from_dict_counted(
+                    &self.doc,
+                    dict,
+                    self.provider.as_ref(),
+                    self.work.clone(),
+                );
                 &nested
             }
             // Falling back to the page's is what a producer that omits the key
@@ -1904,7 +1999,9 @@ impl GlyphSource for PageResources {
         renderer.clip_path(&box_path, &state, false);
 
         tinker_pdf_content::interpret(&content, Matrix::IDENTITY, &mut renderer, resources);
-        let (mut canvas, warnings) = renderer.finish();
+        let (mut canvas, warnings, counts) = renderer.finish_counted();
+        // The cell's renderer is one of this render's own, so what it drew is.
+        stats::add_render(self.work.as_deref(), counts);
 
         // 8.7.3.3: `PaintType 2`. The cell is a shape and the colour comes
         // from the `SCN` operands, so whatever the content stream said about
@@ -1951,12 +2048,15 @@ impl GlyphSource for PageResources {
             return Ok(None);
         };
 
+        // Never cached, so every inline image is a decoder run.
+        self.count(Counter::ImagesDecoded);
         self.decode_inline(dict, data).map(Some)
     }
 
     fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
         if let Ok(cache) = self.caches.images.lock() {
             if let Some(hit) = cache.get(name) {
+                self.count(Counter::ImageHits);
                 // What the decode said, said again: a render that meets the
                 // image here met it as surely as the one that decoded it.
                 for entry in &hit.damage {
@@ -1972,6 +2072,8 @@ impl GlyphSource for PageResources {
             }
         }
 
+        self.count(Counter::ImageMisses);
+        self.count(Counter::ImagesDecoded);
         let label = String::from_utf8_lossy(name).into_owned();
         let decoded = self.decode_image(name);
         // The damage this decode reported: every entry under this name, which
@@ -2310,9 +2412,11 @@ impl PageResources {
     fn program(&self, font_id: u64) -> Option<Arc<Vec<u8>>> {
         if let Ok(cache) = self.caches.programs.lock() {
             if let Some(hit) = cache.get(&font_id) {
+                self.count(Counter::FontProgramHits);
                 return hit.clone();
             }
         }
+        self.count(Counter::FontProgramMisses);
         let name = self
             .font_ids
             .iter()
@@ -2321,7 +2425,14 @@ impl PageResources {
         let built = name.as_ref().and_then(|name| {
             let font = self.fonts.get(name)?;
             let resources = self.resources.as_ref()?;
-            program_for(&self.doc, name, resources, font, self.provider.as_deref())
+            program_for(
+                &self.doc,
+                name,
+                resources,
+                font,
+                self.provider.as_deref(),
+                self.work.as_deref(),
+            )
         });
         if let Ok(mut cache) = self.caches.programs.lock() {
             cache.insert(font_id, built.clone());

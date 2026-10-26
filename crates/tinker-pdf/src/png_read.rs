@@ -204,6 +204,7 @@ impl Bitmap {
             data,
             warnings,
             premultiplied: false,
+            stats: None,
         })
     }
 }

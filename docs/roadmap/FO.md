@@ -29,7 +29,7 @@ preflight — that the standards tier's conversions need.
 
 **JPEG raster output** and image-to-buffer helpers (data URIs)
 
-**Today.** absent — the owner's parity decision of 9 October 2026; `Bitmap` offers `to_png` only (`crates/tinker-pdf/src/lib.rs:831`); the baseline JPEG encoder exists and only image recompression calls it (`crates/tinker-pdf/src/recode.rs:1277`)
+**Today.** absent — the owner's parity decision of 9 October 2026; `Bitmap` offers `to_png` only (`crates/tinker-pdf/src/lib.rs:859`); the baseline JPEG encoder exists and only image recompression calls it (`crates/tinker-pdf/src/recode.rs:1277`)
 
 **Exit criterion.** outputs decode through the in-tree decoder within the bound computed from the caller's tables
 
@@ -430,7 +430,7 @@ preflight — that the standards tier's conversions need.
 
 **SVG output, complete**: soft masks, non-Normal blend modes and knockout groups expressed rather than refused; shadings and patterns as SVG gradients and patterns where exact; text as text or as paths; images reused
 
-**Today.** `SvgWarning::SoftMaskRefused`, `BlendModeRefused`, `KnockoutRefused`, `Rasterised` (`features/rendering.md:737-738`)
+**Today.** `SvgWarning::SoftMaskRefused`, `BlendModeRefused`, `KnockoutRefused`, `Rasterised` (`features/rendering.md:772-773`)
 
 **Exit criterion.** the SVG re-opened through the in-tree SVG reader renders within the stated tolerance of the page for every fingerprint fixture
 

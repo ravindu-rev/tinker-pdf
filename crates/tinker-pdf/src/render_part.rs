@@ -178,8 +178,15 @@ impl Page {
         options: &RenderOptions,
     ) -> Result<Bitmap, RenderPartError> {
         let text = || String::from_utf8_lossy(name).into_owned();
-        let resources =
-            crate::resources::PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
+        // One tally for the whole door, this scope's reading of the name
+        // included: it is work the door does before the render starts.
+        let work = crate::stats::tally(options.stats);
+        let resources = crate::resources::PageResources::new_counted(
+            &self.doc,
+            &self.inner,
+            self.fonts.as_ref(),
+            work.clone(),
+        );
         let subtype = resources
             .xobject_subtype(name)
             .ok_or_else(|| RenderPartError::NoSuchXObject { name: text() })?;
@@ -203,9 +210,11 @@ impl Page {
         let mut content = b"/".to_vec();
         content.extend_from_slice(&escaped(name));
         content.extend_from_slice(b" Do");
-        Ok(self.render_layer(options, frame, |renderer, resources| {
-            interpret(&content, Matrix::IDENTITY, renderer, resources);
-        }))
+        Ok(
+            self.render_layer_counted(options, frame, work, |renderer, resources| {
+                interpret(&content, Matrix::IDENTITY, renderer, resources);
+            }),
+        )
     }
 
     /// One of the page's annotations, rendered on its own over the page's
@@ -249,9 +258,17 @@ impl Page {
 
         let appearance = annots::prepare(&self.doc, &dict).map_err(not_drawn)?;
         let rect = appearance.rect();
-        Ok(self.render_layer(options, Some(rect), |renderer, _| {
-            annots::draw_prepared(&self.doc, &appearance, self.fonts.as_ref(), renderer);
-        }))
+        Ok(
+            self.render_layer(options, Some(rect), |renderer, resources| {
+                annots::draw_prepared(
+                    &self.doc,
+                    &appearance,
+                    self.fonts.as_ref(),
+                    renderer,
+                    resources.work(),
+                );
+            }),
+        )
     }
 
     /// The page's `/Annots` array, resolved, or nothing.

@@ -45,6 +45,7 @@ fn packed(width: u32, height: u32, format: PixelFormat, data: Vec<u8>) -> Bitmap
         data,
         warnings: Vec::new(),
         premultiplied: false,
+        stats: None,
     }
 }
 
@@ -269,6 +270,7 @@ fn a_padded_bitmap_writes_only_its_pixels() {
         data,
         warnings: Vec::new(),
         premultiplied: false,
+        stats: None,
     };
     assert_eq!(decode(&padded).data, vec![1, 2, 3, 4, 5, 6]);
     // And the file is the same file the unpadded twin produces, byte for byte.
@@ -294,6 +296,7 @@ fn a_bitmap_that_is_not_a_picture_declines_to_be_one() {
         data: vec![0; 47],
         warnings: Vec::new(),
         premultiplied: false,
+        stats: None,
     };
     assert_eq!(short.to_png(), None, "a raster that stops short");
 
@@ -305,6 +308,7 @@ fn a_bitmap_that_is_not_a_picture_declines_to_be_one() {
         data: vec![0; 64],
         warnings: Vec::new(),
         premultiplied: false,
+        stats: None,
     };
     assert_eq!(overlapping.to_png(), None, "a stride narrower than a row");
 
@@ -318,6 +322,7 @@ fn a_bitmap_that_is_not_a_picture_declines_to_be_one() {
         data: vec![0; 30],
         warnings: Vec::new(),
         premultiplied: false,
+        stats: None,
     };
     assert_eq!(short_cmyk.to_png(), None);
 

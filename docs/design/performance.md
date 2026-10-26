@@ -260,9 +260,9 @@ can refuse, and a tally is only added to.
 | --- | --- | --- |
 | A page lookup: `pages::at` and the walk under it (`pages.rs:488-499`) | a `Work` on the door's stack, passed as `Option<&Work>` down `at`, `collect_upto` and `walk`, and to the linearized and hinted paths | MS-01.4 |
 | A render: `Page::render` (`crates/tinker-pdf/src/lib.rs:2247`), `Page::render_form` and `Page::render_annotation` (`crates/tinker-pdf/src/render_part.rs:175`, `:230`), `DisplayList::render` (`display.rs:181`) | the render's `PageResources` holds it — built with it by `Page::render_layer` (`lib.rs:2269-2280`), handed it by `for_one_render` for a display list (`resources.rs:546`); `annots::draw` takes it for the appearances it draws; the page's content decode, made before the scope exists (`lib.rs:2248`), takes it too | MS-01.2, and MS-01.5 for decodes |
-| A scope a scope makes: a pattern cell's, a mask group's or a form's own (`resources.rs:750-764`, `:1858-1868`) | inherits its maker's | MS-01.2 |
+| A scope a scope makes: a pattern cell's and a form's own in a render (`resources.rs:1858-1868`, `:872-890`); and `own_scope`'s — a pattern cell's, a mask group's or a form's in the save's font walk, which only `subset.rs` calls (`resources.rs:750-764`) | inherits its maker's | MS-01.2; MS-01.3 for `own_scope`, which no render reaches |
 | A scope a cache keeps: a form's, in `form_scopes` (`resources.rs:856-869`) | kept without one, and handed out bound to the asker's, its caches shared so a hit stays a hit — a kept scope outlives the render that built it, and two renders of one display list may hold it at once | MS-01.2 |
-| The renderer | its own plain counts, handed back with `finish` and added by the door | MS-01.2 |
+| The renderer | its own plain counts, handed back by `finish_counted`, `finish`'s sibling, and added by the door | MS-01.2 |
 | Text and image extraction | as a render: the content decode and the `PageResources` the door builds (`lib.rs:2533-2540`, `crates/tinker-pdf/src/images.rs:328-339`) | MS-01.3 |
 | Validation | `pdfa::validate`, `pdfua::validate` and `pdfx::validate` take it, so their page walks (`crates/tinker-pdf/src/pdfa/content.rs:90`) and their decodes count | MS-01.3 |
 | An editor | `DocumentEditor` holds it from `count_work` until it is dropped. Its own page and object operations count into it in cos — `page_refs`'s walk (`crates/tinker-pdf-cos/src/edit/page_ops.rs:16-24`), `import_page`'s `pages::collect(source)` (`:185`), its overlay's decodes (`edit/overlay.rs:48`) — and the facade's passes over it count into it too: a save's image and font passes (`crates/tinker-pdf/src/write.rs:337`; `subset.rs:553` builds a scope a page), a redaction. A rolled-back transaction keeps its counts: the work was done | MS-01.3, and MS-01.4 for its walks |
@@ -459,7 +459,9 @@ it. Each step's own review corrects its text against this when it is taken.
   `tinker-pdf-content` changes for it. It adds `DocumentEditor::count_work`
   (`crates/tinker-pdf-cos/src/edit/mod.rs`), gives
   `tools/tpdf/src/writing.rs:564`'s `SaveOptions` a base, and binds the scopes
-  the save's font pass builds (`subset.rs:553`, `:560`).
+  the save's font pass builds (`subset.rs:553`, `:560`), with the ones its walk
+  makes through `own_scope` (`resources.rs:750-764`), which MS-01.2 left
+  uncounted because no render reaches it.
 - **MS-01.4** counts the editor's walks as well as the facade's
   (`edit/page_ops.rs:16-24`, `:185`), and moves MS-01.3's `page_walks` count
   from the facade's call sites into `collect_upto`, so a walk counts once

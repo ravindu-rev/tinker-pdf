@@ -182,7 +182,9 @@ impl DisplayList {
         if !self.retained {
             return self.page.render(options);
         }
-        let resources = self.resources.for_one_render();
+        let resources = self
+            .resources
+            .for_one_render_counted(crate::stats::tally(options.stats));
         self.page
             .render_layer_with(options, None, &resources, |renderer, resources| {
                 let replayed = replay(&self.content, renderer);
@@ -195,7 +197,7 @@ impl DisplayList {
                 }
                 if options.annotations {
                     for annotation in &self.annotations {
-                        renderer.push_resources(Arc::clone(&annotation.scope));
+                        renderer.push_resources(resources.bind(&annotation.scope));
                         replay(&annotation.events, renderer);
                         renderer.pop_resources();
                     }

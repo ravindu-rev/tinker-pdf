@@ -53,6 +53,7 @@ mod resources;
 pub mod shaping;
 pub mod signature;
 pub mod standalone;
+mod stats;
 pub mod structure;
 pub mod subset;
 mod svg_out;
@@ -223,6 +224,9 @@ pub use images::{ImageMask, ImageSpace, PageImage, SampleCodec};
 pub use png_read::PngReadError;
 /// Why [`Page::render_form`] or [`Page::render_annotation`] drew nothing.
 pub use render_part::{NotDrawn, RenderPartError};
+/// What an operation counted, when it was asked to: [`Bitmap::stats`], for a
+/// render whose [`RenderOptions::stats`] was on.
+pub use stats::Stats;
 /// A page written as SVG 1.1: [`Page::to_svg`], and what it could not say.
 pub use svg_out::{Rasterised, Svg, SvgOptions, SvgWarning, MAX_SVG_BYTES};
 /// Writing: creation, editing and saving.
@@ -700,6 +704,23 @@ pub struct RenderOptions {
     /// same precision premultiplying lost: multiplying the PNG's samples by
     /// their alpha again gives back the premultiplied bytes exactly.
     pub premultiplied: bool,
+    /// Whether the render counts the work it does and hands the count back as
+    /// [`Bitmap::stats`]. Off by default.
+    ///
+    /// On, the render carries a tally through its resource scopes and its
+    /// renderer and reads it out at the end: glyphs shown and outlines
+    /// painted, font dictionaries read, images decoded, and the hits and
+    /// misses of the five caches a page's resources keep ([`Stats`]). A count
+    /// is a property of the page, these options and this build, never of the
+    /// machine or the clock, which is what lets a test hold an operation to
+    /// the work its input calls for.
+    ///
+    /// **It changes nothing else.** Nothing reads the tally but the door that
+    /// hands it back, so the pixels and the warnings are the ones the same
+    /// render returns with it off; and off, there is no tally, and a render
+    /// that did not ask pays one untaken branch at each place that would
+    /// count, beside the two additions a glyph the renderer makes either way.
+    pub stats: bool,
 }
 
 impl Default for RenderOptions {
@@ -714,6 +735,7 @@ impl Default for RenderOptions {
             antialias: true,
             transparent: false,
             premultiplied: false,
+            stats: false,
         }
     }
 }
@@ -751,6 +773,12 @@ pub struct Bitmap {
     /// arise, and for every bitmap [`Bitmap::from_png`] reads, because PNG's
     /// alpha is straight.
     pub premultiplied: bool,
+    /// What the render counted, when [`RenderOptions::stats`] asked it to:
+    /// the steps of every kind [`Stats`] names that this render took.
+    ///
+    /// `None` when it was not asked, and for every bitmap made any other way
+    /// — [`Bitmap::from_png`]'s, and one a caller builds by hand.
+    pub stats: Option<Stats>,
 }
 
 impl Bitmap {
@@ -938,6 +966,7 @@ impl Bitmap {
             data,
             warnings: Vec::new(),
             premultiplied: false,
+            stats: None,
         })
     }
 
@@ -2251,7 +2280,13 @@ impl Page {
             if options.annotations {
                 // After the content, because an annotation sits on top of the
                 // page rather than under it.
-                annots::draw(&self.doc, &self.inner, self.fonts.as_ref(), renderer);
+                annots::draw(
+                    &self.doc,
+                    &self.inner,
+                    self.fonts.as_ref(),
+                    renderer,
+                    resources.work(),
+                );
             }
         })
     }
@@ -2275,13 +2310,38 @@ impl Page {
             &resources::PageResources,
         ),
     ) -> Bitmap {
-        let resources = resources::PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
+        self.render_layer_counted(options, frame, stats::tally(options.stats), paint)
+    }
+
+    /// [`Page::render_layer`] counting into `work`, the tally a door made
+    /// when [`RenderOptions::stats`] asked for one — given here rather than
+    /// made here for the door that counts scopes of its own before the render
+    /// ([`Page::render_form`]'s).
+    pub(crate) fn render_layer_counted(
+        &self,
+        options: &RenderOptions,
+        frame: Option<(f64, f64, f64, f64)>,
+        work: Option<Arc<stats::Work>>,
+        paint: impl FnOnce(
+            &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
+            &resources::PageResources,
+        ),
+    ) -> Bitmap {
+        let resources = resources::PageResources::new_counted(
+            &self.doc,
+            &self.inner,
+            self.fonts.as_ref(),
+            work,
+        );
         self.render_layer_with(options, frame, &resources, paint)
     }
 
     /// [`Page::render_layer`] over resources the caller keeps — a
     /// [`DisplayList`], whose decoded images, glyph outlines and nested
     /// scopes outlive one render so the next one does not pay for them again.
+    ///
+    /// The render counts into the tally `resources` carry, which they carry
+    /// exactly when `options.stats` asked, and hands it back on the bitmap.
     pub(crate) fn render_layer_with(
         &self,
         options: &RenderOptions,
@@ -2366,7 +2426,8 @@ impl Page {
             renderer = renderer.with_cancel(cancel.clone());
         }
         paint(&mut renderer, resources);
-        let (canvas, mut warnings) = renderer.finish();
+        let (canvas, mut warnings, counts) = renderer.finish_counted();
+        stats::add_render(resources.work().map(|work| &**work), counts);
         // A glyph a font could not name is reported here rather than by the
         // renderer, which counts only the glyphs it was handed nothing for.
         // `.notdef` *is* an outline, so drawing it — which is what the spec
@@ -2429,6 +2490,7 @@ impl Page {
             data: canvas.data,
             warnings,
             premultiplied: false,
+            stats: resources.work().map(|work| work.stats()),
         };
         if options.premultiplied {
             bitmap.premultiply();

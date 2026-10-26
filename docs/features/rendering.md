@@ -601,10 +601,45 @@ default), `region` (an optional `PixelRegion`, `None` for the whole page) and
 `allow_cmyk` (off; with `format: CmykA8`, hands the page back as ink rather than
 light), `antialias` (on; off makes every pixel of every shape whole or
 empty), `transparent` (off; on starts a page whose format has alpha with
-nothing painted rather than white) and `premultiplied` (off) — and returns a
-`Bitmap`: `width`, `height`, `format`, `stride`, `data`, `warnings`, the
-`Vec<RenderWarning>` that carries every named degradation, and `premultiplied`,
-which says whether `data` is. Rendering never fails; it degrades and reports.
+nothing painted rather than white), `premultiplied` (off) and `stats` (off;
+on counts the render's work, below) — and returns a `Bitmap`: `width`,
+`height`, `format`, `stride`, `data`, `warnings`, the `Vec<RenderWarning>`
+that carries every named degradation, `premultiplied`, which says whether
+`data` is, and `stats`, what the render counted when it was asked to.
+Rendering never fails; it degrades and reports.
+
+**Counted work.** With `RenderOptions::stats` on, a render counts the steps it
+takes and hands them back as `Bitmap::stats`, an `Option<Stats>` that is
+`None` whenever it was not asked — and for a bitmap `Bitmap::from_png` reads
+or a caller builds. `Stats` (`Copy`, `Default`, `Eq`, `#[non_exhaustive]`,
+every field a public `u64`) names them: `glyphs_shown`, every glyph the
+interpreter showed the renderer, and `outlines_filled`, every glyph outline it
+painted, both counted by the renderer, a tiling pattern's cell included;
+`font_dictionaries_resolved`, each font a resource scope reads when it is
+built and each lookup of a font dictionary by name — today one a glyph, the
+interpreter asking whether its font is a Type 3 font, and one more for each
+font with no program of its own when there are substitute faces to ask — a
+`bundled-fonts` build's, or a provider given to the document;
+`images_decoded`, an image XObject's decode on a cache miss and every inline
+image's; and a `_hits` and a `_misses` for each of the five caches a page's
+resources keep — `font_program`, `image`, `icc_transform`, `glyph_outline` and
+`form_scope`. `Stats::work()` totals the step counts, and two `Stats` add with
+`+`. Every render door counts the same way: `Page::render`,
+`Page::render_form` (the scope it reads the form's name in included),
+`Page::render_annotation` (both of the appearance's scopes) and
+`DisplayList::render`, which counts through the resources the list keeps, so a
+second replay finds what the first decoded and says so. Each render counts
+into a tally of its own, so two at once — of one page, or of one display list
+from two threads — never mix. A count is a property of the page, the options
+and the build — a region that misses a patterned fill draws no cell for it —
+and never of the machine or the clock. Nothing reads the tally but the door
+that hands it back, so a counted render's pixels and warnings are the
+uncounted one's; and an uncounted render carries no tally at all, so it pays
+one untaken branch a counting site, and the renderer's two additions a glyph,
+which it makes either way. The design, and the doors still to come — text,
+save, merge, image extraction, validation and page lookup — are in
+[performance](../design/performance.md); the C ABI and the bindings do not
+carry the stats yet ([bindings](bindings.md)).
 
 `Page::display_list()` returns a `DisplayList` — the page interpreted once —
 whose `render(&RenderOptions)` returns what `Page::render` returns for the
@@ -748,6 +783,21 @@ a defect to hide in.
   `text_render_modes.rs`, `images.rs`, `inline_images.rs`,
   `stroke_parameters.rs`, `form_xobjects.rs`, `page_geometry.rs`,
   `annotation_appearances.rs` — each asserting pixels, not absence of error.
+- Counted work: `crates/tinker-pdf/tests/stats.rs`.
+  `render_stats_are_none_unless_asked` over the page, a tile, a display list,
+  a form and an annotation; `render_stats_count_what_a_generated_page_draws`,
+  fourteen glyphs in three fonts and one image drawn twice reporting fourteen
+  glyphs shown, the font resolutions today's code makes, one decode and one
+  cache hit, with every counter derived from the fixture in the test and the
+  bundled build's substitute requests counted where it makes them; one test
+  each for a form shown three times over its one kept scope, `render_form`'s
+  scope of its own, an ICC profile two images share, inline images, a tiling
+  pattern's cell, an annotation's two scopes, a display list's replays of its
+  page and of its annotations, and two renders at once, of the page and of its
+  display list, each counting only its own; and `stats_do_not_change_a_pixel`,
+  the page, every tile of a lattice over it, two replays, the form and the
+  annotation with stats on and off, byte for byte and warning for warning at
+  two scales. Each runs in the default and the `bundled-fonts` builds.
 - Parts: `crates/tinker-pdf/tests/render_parts.rs` holds a form — one with
   text, a fill cut by its `/BBox` and a curve, one with a `/Matrix` and a name
   that needs escaping — and an annotation drawn at its own `/Rect` and one

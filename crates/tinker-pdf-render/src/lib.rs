@@ -736,6 +736,25 @@ impl<G> core::ops::Deref for Scope<'_, G> {
     }
 }
 
+/// What one renderer counted: the renderer's part of the counted-work tally
+/// (`docs/design/performance.md`), handed back by [`Renderer::finish_counted`].
+///
+/// Plain numbers the renderer keeps whether or not anyone asked, as it keeps
+/// its count of glyphs nothing was drawn for: two additions a glyph cost less
+/// than asking. This crate has no edge to the one the tally lives in, so the
+/// caller adds them to it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RenderCounts {
+    /// Glyphs the interpreter showed this renderer: every
+    /// [`Device::show_glyph`] call, whether or not anything was drawn for it.
+    pub glyphs_shown: u64,
+    /// Glyph outlines this renderer built into a path and painted — filled,
+    /// stroked or both, once a glyph. A glyph with no outline, an empty one
+    /// and one a clipping-only mode adds to the clip are not.
+    pub outlines_filled: u64,
+}
+
 /// The rasterizing device.
 pub struct Renderer<'g, G: GlyphSource> {
     canvas: Canvas,
@@ -788,6 +807,8 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// See [`Renderer::with_antialias`].
     antialias: bool,
     missing_fonts: u32,
+    /// Glyphs shown and outlines painted, for [`Renderer::finish_counted`].
+    counts: RenderCounts,
     /// Glyph outlines accumulated by text clipping modes 4–7, applied at `ET`.
     text_clip: Option<Path>,
     /// Whether any glyph in this text object *selected* a clipping mode,
@@ -889,6 +910,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             tolerance: 0.2,
             antialias: true,
             missing_fonts: 0,
+            counts: RenderCounts::default(),
             text_clip: None,
             text_clip_requested: false,
             run: None,
@@ -1117,6 +1139,15 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             run.ink,
             Some(&stop),
         );
+    }
+
+    /// [`Renderer::finish`], and what the render counted: the glyphs it was
+    /// shown and the outlines it painted, for a caller keeping a tally.
+    #[must_use]
+    pub fn finish_counted(self) -> (Canvas, Vec<RenderWarning>, RenderCounts) {
+        let counts = self.counts;
+        let (canvas, warnings) = self.finish();
+        (canvas, warnings, counts)
     }
 
     /// The canvas and everything the render had to tolerate.
@@ -2845,6 +2876,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     }
 
     fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
+        self.counts.glyphs_shown = self.counts.glyphs_shown.saturating_add(1);
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
         self.flush_run();
@@ -2933,6 +2965,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 }
                 Segment::Close => path.close(),
             }
+        }
+        if mode.paints() {
+            self.counts.outlines_filled = self.counts.outlines_filled.saturating_add(1);
         }
 
         // 9.3.6, Table 106: the mode decides which of fill, stroke and clip

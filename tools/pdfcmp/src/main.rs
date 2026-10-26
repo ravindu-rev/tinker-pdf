@@ -638,6 +638,7 @@ mod tests {
             data,
             warnings: Vec::new(),
             premultiplied: false,
+            stats: None,
         }
     }
 

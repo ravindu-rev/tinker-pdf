@@ -193,7 +193,7 @@ that stated them now point at those rows.
 | Tables across pages; nested tables; CSV/JSON export | `design/table-reconstruction.md:44-64` | FT-32 |
 | `object-fit`/`object-position`; `::first-line`; `max-height` on non-clipping boxes | `design/epub-layout.md:57-74`; `features/epub.md:580, 593` | CD-15, CD-02 |
 | `@page` honoured over the caller's box | the EPUB layout row ("waits on the owner") | CD-02, CD-16; the ruling → H-13 |
-| A CommonJS build | `features/bindings.md:1051` | SU-14 |
+| A CommonJS build | `features/bindings.md:1052` | SU-14 |
 | Published packages before 0.1.0 | the packages row ("by decision") | SU-17; H-113, H-114 |
 | `/Launch` and other actions never executed | `features/document-model.md:433` | AN-20 (typed host requests; the engine still launches nothing — NG-08) |
 | JBIG2 symbol and text encoding; colour palettes; the amendments; random access | `design/jbig2-symbol-text.md:75-102` | ED-27, FI-16, OC-12 |

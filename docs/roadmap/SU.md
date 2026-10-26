@@ -308,7 +308,7 @@ is checked for breaks and documented by examples that run.
 
 **Binding ergonomics**: typed exceptions, Promise-returning APIs and a worker helper in JavaScript, cancellation and progress everywhere, stream adapters (file-like objects, Node streams, .NET `Stream`, Java `InputStream`) over `ByteSource`, and a CommonJS entry that re-exports the one ESM build
 
-**Today.** ESM only; a CommonJS build refused because "two builds of the engine can diverge" (`features/bindings.md:1051`)
+**Today.** ESM only; a CommonJS build refused because "two builds of the engine can diverge" (`features/bindings.md:1052`)
 
 **Exit criterion.** each binding's test suite exercises each shape; the CommonJS entry loads the same wasm bytes as the ESM one (hash checked)
 

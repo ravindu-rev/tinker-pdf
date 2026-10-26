@@ -358,7 +358,13 @@ impl DisplayList {
             let content = cos_pages::content_bytes(&page.doc, &page.inner);
             interpret(&content, Matrix::IDENTITY, &mut writer, &resources);
             if options.annotations {
-                annots::draw(&page.doc, &page.inner, page.fonts.as_ref(), &mut writer);
+                annots::draw(
+                    &page.doc,
+                    &page.inner,
+                    page.fonts.as_ref(),
+                    &mut writer,
+                    None,
+                );
             }
             return writer.finish_with(&resources, width, height);
         }
