@@ -12,7 +12,7 @@ identity:
 1. `RASTERS` in [`../jxr_fixtures.rs`](../jxr_fixtures.rs) authors a raster
    from integer arithmetic in this repository.
 2. `make-fixtures.ps1` hands those bytes to `WmpBitmapEncoder` with
-   `Lossless = true` and commits what comes back.
+   `Lossless = true` and `QualityLevel = 1` and commits what comes back.
 3. The decoder must return the raster from step 1, **bit for bit**.
 
 The pixels going in are ours, so step 3 compares against a value this
