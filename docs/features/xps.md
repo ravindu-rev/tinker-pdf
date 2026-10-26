@@ -23,9 +23,9 @@ through to the [CBZ](cbz.md) path as E.3 says; a fixed representation that
 is *there and will not resolve* is `ArchiveRefusal::UnreadablePackage`,
 because paging a broken XPS's images as a comic would be the original
 defect in a smaller hat. The content type does not discriminate the dialect
-— measured: Windows' OpenXPS output carries Table D-4's `xps-` strings byte
-for byte — so the namespace is the only discriminator, on elements and on
-relationship types, and a package mixing the two is accepted.
+— Windows' OpenXPS output carries Table D-4's `xps-` strings byte for byte —
+so the namespace is the only discriminator, on elements and on relationship
+types, and a package mixing the two is accepted.
 
 **The package layer** (`opc`): OPC part naming with 7.2.3.5's
 case-insensitive comparison (`.ODTTF` against `odttf` is real), content
@@ -51,7 +51,7 @@ Every parse is bounded by `Limits` (depth, attribute count, text length).
 An XPS part is read in the strict mode, `Doctype::Refuse` (ECMA-388 9.3.2
 [M2.71] forbids DTD content outright), so the XHTML named-reference table the
 relaxed mode consults for an EPUB never applies to one: `&nbsp;` in a fixed
-page is `Error::UnknownEntity` exactly as before.
+page is `Error::UnknownEntity`.
 
 **Markup to content stream** (`markup`, `geometry`, `brush`, `paint`). One
 XPS unit is 1/96 inch (18.1) against PDF's 1/72, so a page opens with one
@@ -93,8 +93,8 @@ comes to; the default, `SRgbLinearInterpolation`, is the shading's own. `Content
 form `",53"` — and a `FontUri`. Fonts are ODTTF-obfuscated (9.1.7.3): the
 key is the part's GUID, sixteen bytes reversed, XORed over the first 32
 bytes; the de-obfuscated program is asserted byte-for-byte against a real
-file's known sfnt header. Because XPS addresses every glyph by index, the
-writer gained Type 0 / CIDFontType2 with `/Identity-H` for this format.
+file's known sfnt header. Because XPS addresses every glyph by index, a run
+is written through Type 0 / CIDFontType2 with `/Identity-H`.
 12.1's `IsSideways` turns the run a quarter turn and runs its baseline
 **down** the page, which is 18.1's own text matrix with its two axes
 exchanged — the glyphs, their advances and their order are unchanged, and
@@ -115,15 +115,12 @@ translucent emboldened run is drawn into a transparency group so the band
 where stroke and fill overlap is composited once.
 
 **Images** pass through. A PNG or JPEG resource part reaches the page as
-the bytes it is ([creation](creation.md), `ImageData::Compressed`); a page
-whose decoded raster would be 17.2 MB costs 0.2 MB above baseline to
-synthesise, measured rather than argued. **9.1.5's TIFF joins them**, and
-mostly passes through as well: four of TIFF 6.0's codings already have a
+the bytes it is ([creation](creation.md), `ImageData::Compressed`). 9.1.5's
+TIFF mostly passes through as well: four of TIFF 6.0's codings already have a
 `/Filter` name, so a single-strip file of any of them is placed rather than
 decoded ([filters](filters.md)). A resolution stated in the directory's
 `XResolution`, `YResolution` and `ResolutionUnit` becomes the part's dpi,
-where 13.4.1's 96 stands in when the file states none — which is the first
-consumer those three tags have had.
+where 13.4.1's 96 stands in when the file states none.
 
 **Everything owed is owed at the element.** A page that cannot be read is a
 placeholder page that keeps its number, carrying an `XpsPageDefect`; an
@@ -153,16 +150,16 @@ the page synthesis.
 
 | What | Typed variant | Why | See |
 | --- | --- | --- | --- |
-| A `ContextColor` whose `nCLR` profile has more than eight channels, or no table this build evaluates | `XpsElementDefect::ColourProfileChannels` | ECMA-388 15.2.5 names `2CLR` through `8CLR`, and a `/DeviceN`'s tint transform is the profile evaluated, which needs a table to evaluate. **Painted grey**, rather than in a colour picked by dropping components. **The `nCLR` profiles `/ICCBased` cannot state left this row** on 3 October 2026 — `2CLR`, and `5CLR` to `8CLR`; `3CLR` and `4CLR` were never on it, being `/ICCBased` under `/N 3` and `/N 4` (`a_three_or_four_channel_n_clr_profile_stays_icc_based`, *corrected on review* where this said two to eight): each is an 8.6.6.5 `/DeviceN` of one colorant a channel, named for the profile (`6CLR.1` …), its tint transform `tinker-pdf-color`'s transform run over a grid as fine as 16 384 points allow and written as a sampled function into `/DeviceRGB`, the components reaching `scn` unchanged; `tests/xps_rows/wpf-n-channel.xps` is in the conservation sweep (5 facts of 5) | [ICC](../design/icc.md) |
+| A `ContextColor` whose `nCLR` profile has more than eight channels, or no table this build evaluates | `XpsElementDefect::ColourProfileChannels` | ECMA-388 15.2.5 names `2CLR` through `8CLR`, and a `/DeviceN`'s tint transform is the profile evaluated, which needs a table to evaluate. **Painted grey**, rather than in a colour picked by dropping components. An `nCLR` profile `/ICCBased` cannot state — `2CLR`, and `5CLR` to `8CLR` — is an 8.6.6.5 `/DeviceN` of one colorant a channel, named for the profile (`6CLR.1` …), its tint transform `tinker-pdf-color`'s transform run over a grid as fine as 16 384 points allow and written as a sampled function into `/DeviceRGB`, the components reaching `scn` unchanged; `3CLR` and `4CLR` are `/ICCBased` under `/N 3` and `/N 4` (`a_three_or_four_channel_n_clr_profile_stays_icc_based`). `tests/xps_rows/wpf-n-channel.xps` is in the conservation sweep | [ICC](../design/icc.md) |
 | A `ContextColor` whose profile part is missing, is not a profile, or names a data space ICC.1 does not | `XpsElementDefect::ColourProfileUnresolved` | **Still painted**, in 8.6.5.5's default-`/Alternate` reading of the components — one channel grey, three RGB, four CMYK. Not an invention: that is what a reader does with an `/ICCBased` stream it cannot use, and the numbers are the file's | [ICC](../design/icc.md) |
-| A `ContextColor` **gradient stop** whose profile this build cannot evaluate | `XpsElementDefect::BrushApproximated` | 8.7.4.5's shading names one colour space for the whole function, so a stop cannot carry one of its own; it takes 8.6.5.5's alternate reading and the brush says it reached the page and not exactly. **A stop whose profile evaluates left this row** on 3 October 2026: it is converted to sRGB through `tinker-pdf-color`'s transform — 18.3.1.2's *"convert the color values to sRGB first"*, and this build's choice where no stop is sRGB, since no print ticket is read — and blended in the brush's mode; `tests/xps_rows/wpf-context-stops.xps` is in the conservation sweep (3 facts of 3) | — |
-| An image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | a part neither the content type nor the magic bytes name is not one to guess at. **JPEG XR left this row**: 9.1.5.1's format now decodes and draws, so all four of 9.1.5's formats reach the page and the pre-emptive refusal loop that used to sit in front of both identification rules is gone | [filters](filters.md) |
+| A `ContextColor` **gradient stop** whose profile this build cannot evaluate | `XpsElementDefect::BrushApproximated` | 8.7.4.5's shading names one colour space for the whole function, so a stop cannot carry one of its own; it takes 8.6.5.5's alternate reading and the brush says it reached the page and not exactly. A stop whose profile evaluates is converted to sRGB through `tinker-pdf-color`'s transform — 18.3.1.2's *"convert the color values to sRGB first"*, and this build's choice where no stop is sRGB, since no print ticket is read — and blended in the brush's mode; `tests/xps_rows/wpf-context-stops.xps` is in the conservation sweep | — |
+| An image part no rule identifies | `XpsElementDefect::ImageFormatUnsupported` | a part neither the content type nor the magic bytes name is not one to guess at. All four of 9.1.5's formats, JPEG XR among them, reach the page | [filters](filters.md) |
 | A content type and magic bytes that disagree about two formats this build draws | `XpsElementDefect::ImageMediaTypeMismatch` | **the picture is drawn**, from the format its bytes name, because a decoder reads bytes — so this is a leniency and not a refusal, and what is lost is the producer's statement about the part. It rides the *success* side, on `Image::lenience`, because `Images::get` returns a `Result` whose `Err` is a refusal and a refusal here would lose a picture the package plainly holds; `State::tile` pushes it into `paint.rs`'s `defects`, where `warn` deduplicates it — set once per part, read once per use. Silence from one rule is not disagreement with it, so a part with no content type or no recognised signature owes nothing. Neither does one whose bytes then fail to decode: that is `ImageUnreadable`. Pinned by `a_content_type_that_disagrees_with_the_bytes_is_drawn_from_the_bytes_and_named` and, for the deduplication, `one_mis_declared_part_used_twice_is_named_once` | [rulings](../rulings.md) ruling 10 |
 | A wrapper around an `ImageSource` that is **not** `{ColorConvertedBitmap picture profile}` | `XpsElementDefect::ImageProfileUnsupported` | the references inside a wrapper cannot be told apart: one with three of them is not this wrapper, and reading its first two would draw a picture in a profile the file never paired it with. `{ColorConvertedBitmap …}` itself is **read** — the picture drawn, the profile embedded as the `/ICCBased` space its samples are values in | [ICC](../design/icc.md) |
-| A `StyleSimulations` value 12.1.5 does not name | `XpsElementDefect::GlyphsStyleSimulated` | reported; the run is drawn as designed. **The four values 12.1.5 names left this row** on 3 October 2026, once ECMA-388's text was read: each is drawn as the clause states it, and `tests/xps_rows/wpf-style-simulations.xps` is in the conservation sweep (5 facts of 5) | [ROADMAP](../ROADMAP.md) |
-| A `ColorInterpolationMode` value 18.3.1.2 does not name | `XpsElementDefect::BrushApproximated` | blended as the default, in sRGB, and named. **`ScRgbLinearInterpolation` left this row** on 3 October 2026: each interval is the stops' linear light blended and re-encoded, written as a 256-sample type 0 function of the sRGB it comes to (within 0.0018 of the curve, under half an eight-bit step), with the alpha left linear, and `tests/xps_rows/wpf-colour-interpolation.xps` is in the conservation sweep (6 facts of 6). **Gradient stops with differing alphas left this row** on 3 October 2026: the alphas are a second `/DeviceGray` shading over the colours' own geometry, read back as a `/Luminosity` soft mask inside a transparency group of its own — so an element's `OpacityMask` composes with it rather than being replaced — and `tests/xps_rows/wpf-stop-alphas.xps` is in the conservation sweep (4 facts of 4) | — |
+| A `StyleSimulations` value 12.1.5 does not name | `XpsElementDefect::GlyphsStyleSimulated` | reported; the run is drawn as designed. The four values 12.1.5 names are each drawn as the clause states it, and `tests/xps_rows/wpf-style-simulations.xps` is in the conservation sweep | [ROADMAP](../ROADMAP.md) |
+| A `ColorInterpolationMode` value 18.3.1.2 does not name | `XpsElementDefect::BrushApproximated` | blended as the default, in sRGB, and named. `ScRgbLinearInterpolation` blends each interval's stops in linear light and re-encodes them, written as a 256-sample type 0 function of the sRGB it comes to (within 0.0018 of the curve, under half an eight-bit step), with the alpha left linear (`tests/xps_rows/wpf-colour-interpolation.xps`). Gradient stops with differing alphas are a second `/DeviceGray` shading over the colours' own geometry, read back as a `/Luminosity` soft mask inside a transparency group of its own — so an element's `OpacityMask` composes with it rather than being replaced (`tests/xps_rows/wpf-stop-alphas.xps`); both are in the conservation sweep | — |
 | Unknown element | `XpsElementDefect::ElementUnknown` | drawn around, never silently skipped | — |
-| Broken fixed representation, interleaved pieces that do not assemble into a part, invalid or ambiguous part names, no fixed pages | `ArchiveRefusal::{UnreadablePackage, Interleaved, InvalidPartName, AmbiguousPartNames, NoFixedPages}` | a package that *is* an XPS and is broken is refused, not paged as a comic. **Interleaving itself left this row**: pieces that assemble are joined, and `wpf-image-and-text-pieces.xps` is in the conservation sweep | [cbz](cbz.md) |
+| Broken fixed representation, interleaved pieces that do not assemble into a part, invalid or ambiguous part names, no fixed pages | `ArchiveRefusal::{UnreadablePackage, Interleaved, InvalidPartName, AmbiguousPartNames, NoFixedPages}` | a package that *is* an XPS and is broken is refused, not paged as a comic | [cbz](cbz.md) |
 | Page-level defects | `XpsPageDefect::{SourceUnresolved, DocumentUnresolved, Unreadable, ContentUnreadable, SizeUnusable, MediaTypeMismatch, PageBoxUnusable}` | the page becomes a placeholder that keeps its number | — |
 | Signatures, print tickets, 3D, story fragments | not read | parts the spine does not reach are ignored | [ROADMAP](../ROADMAP.md) CD-13 |
 
@@ -194,55 +191,46 @@ bitstreams, which are not freely licensed.
 | `SHIFT_BITS`, `TRIM_FLEXBITS`, more than one QP per tile | Every fixture carries the value at which each of these does nothing, so the code paths run only in their degenerate form |
 | A damaged codestream's **values** | `fuzz_jxr` proves a damaged file does not panic and that a dropped tile is reported; it does not check that what survives is what a conformant decoder would produce |
 
-**What *is* checked, so that the list above is read in proportion**: fifteen
-committed fixtures — eight pixel formats, all three overlap modes, both tiled
-layouts, both frequency-mode layouts and both alpha formats — decode
-**bit-for-bit** to rasters this repository authored, through a Windows encoder
-that supplied bytes and never judged them.
+**What *is* checked, so that the list above is read in proportion**: committed
+fixtures across pixel formats, all three overlap modes, both tiled layouts,
+both frequency-mode layouts and both alpha formats decode **bit-for-bit** to
+rasters this repository authored, through a Windows encoder that supplied
+bytes and never judged them.
 
-**What the corpus is**: thirteen committed packages from **three serialisers
-and two vendors** — six WPF `.xps`, two XPSOM `.oxps`, and five written by
-Ghostscript 10.07.1's `xpswrite` device over PDFs this repository's own
-`DocumentBuilder` wrote. The third producer shares no code, no vendor and no
-lineage with the first two, and it earned its place: fifteen of the thirty
-things recorded in `crates/tinker-pdf/tests/xps/README.md` came from it, and
-three of them contradict something the eight Microsoft files had made look like
-a rule — `[Content_Types].xml` is not always last, colours come in three
-spellings and not two, and abbreviated geometry does too. One of its packages,
-`gs-images.xps`, was refused at two elements and excluded from the conservation
-sweep for it; its image parts are `image/tiff` reached through
-`{ColorConvertedBitmap …}` naming an ICC profile part, and **it joined the sweep
-on 14 September 2026** when that wrapper was read.
+**What the corpus is**: committed packages from **three serialisers and two
+vendors** — WPF `.xps`, XPSOM `.oxps`, and Ghostscript 10.07.1's `xpswrite`
+device over PDFs this repository's own `DocumentBuilder` wrote. The third
+producer shares no code, no vendor and no lineage with the first two, and
+what it does contradicts things the Microsoft files alone would make look like
+rules: `[Content_Types].xml` is not always last, colours come in three
+spellings and not two, and abbreviated geometry does too. `gs-images.xps`'s
+image parts are `image/tiff` reached through `{ColorConvertedBitmap …}`
+naming an ICC profile part.
 
 ## Verified
 
-- **Thirteen genuine packages** in `crates/tinker-pdf/tests/xps/` — six WPF
-  `.xps` (`System.Windows.Xps.Packaging`, .NET Framework 4.8), two XPSOM
-  `.oxps` (`XpsServices.dll` 10.0.26100) and five from Ghostscript 10.07.1's
-  `xpswrite` device. The first eight were obtained *before* any reader existed
-  so the reader could be measured against files it did not write; the five came
-  later, from a second vendor, over source PDFs `DocumentBuilder` wrote.
-  Twelve render with nothing owed and the thirteenth is refused at exactly two
-  elements, by name. `INVENTORY.tsv` is recomputed through `tinker-pdf-zip` on
-  every `cargo test`, so .NET's ZIP reader and this one must agree about all 82
-  rows. **Thirty** things real files did that ECMA-388 does not say are
-  recorded in that README.
-- **The Ghostscript half regenerates byte for byte**, which nothing else in this
-  repository's fixture corpora does: `xpswrite` stamps a fixed ZIP timestamp,
-  stores every entry, and derives its one relationship `Id` from the content, so
-  a deterministic writer on the way in gives an auditable corpus on the way out.
-  `tests/xps_corpus_source.rs` holds the input half of that with a test that
-  runs on every `cargo test`.
+- **Genuine packages** in `crates/tinker-pdf/tests/xps/` — WPF `.xps`
+  (`System.Windows.Xps.Packaging`, .NET Framework 4.8), XPSOM `.oxps`
+  (`XpsServices.dll` 10.0.26100) and Ghostscript 10.07.1's `xpswrite` device
+  over source PDFs `DocumentBuilder` wrote — files this reader did not write.
+  `INVENTORY.tsv` is recomputed through `tinker-pdf-zip` on every
+  `cargo test`, so .NET's ZIP reader and this one must agree about every row.
+  The things real files do that ECMA-388 does not say are recorded in that
+  directory's README.
+- **The Ghostscript half regenerates byte for byte**: `xpswrite` stamps a
+  fixed ZIP timestamp, stores every entry, and derives its one relationship
+  `Id` from the content, so a deterministic writer on the way in gives an
+  auditable corpus on the way out. `tests/xps_corpus_source.rs` holds the
+  input half of that with a test that runs on every `cargo test`.
 - `tests/xps.rs`, `xps_spine.rs` (a package whose storage, name and markup
   orders differ), `xps_opc.rs`, `xps_markup.rs`, `xps_glyphs.rs`
   (de-obfuscation asserted byte-for-byte), `xps_images.rs`,
-  `xps_memory.rs` (synthesis cost measured), `xml_real_packages.rs`.
+  `xps_memory.rs` (synthesis cost), `xml_real_packages.rs`.
 - `xps_validated.rs`: every synthesised PDF is held to the strict validator,
   in every write mode, and its gradients, transparency groups, boxes and
   composite fonts are read back out of the dictionaries — the entries this
-  engine's own typed readers supply a default for. It replaces the qpdf oracle
-  ruling 13 retired; what left with it is that a reader nobody here wrote
-  accepts the file.
+  engine's own typed readers supply a default for. What it cannot show is that
+  a reader nobody here wrote accepts the file.
 - `xps_conservation.rs`: what the markup states is what the document has, in
   order, at the place 18.1 puts it — page sizes, fills and their colours,
   gradient geometry and stops, image pixel counts and rectangles, tiling
@@ -251,25 +239,16 @@ on 14 September 2026** when that wrapper was read.
   which reach for `tinker-pdf-zip` and nothing above it: not the XML parser
   this reader parses with, not the image decoders that give a picture its pixel
   count, not `geometry`'s reader of 11.2.3, and not 18.1's scale and flip,
-  written out from the clause. **All thirteen packages conserve every fact** and
-  the census is recorded in `tests/xps/CONSERVATION.tsv`, with a fourteenth
-  row for `tests/xps_interleaved/wpf-image-and-text-pieces.xps` — one of the
-  thirteen cut into OPC pieces, whose census and rendered page must equal its
-  source's; the harness joins its pieces by its own reading of 7.2.4. Twelve did until 14
-  September 2026: `gs-images.xps` stated two pictures this build refused at the
-  element, and its divergence was pinned by a test of its own until the
-  `{ColorConvertedBitmap}` wrapper was read. Bringing it in needed two fixes to
-  the census as well as the engine — it could not measure a TIFF's dimensions,
-  and it read a transform only in its attribute spelling — and both were
-  invisible until a package needed them. It replaces
-  `xps_mutool.rs`, which compared a second reader's device trace of the package
-  against its trace of the document. **What left with that oracle is that two
-  independent programs read one package and agree**, and no assertion here
-  reproduces it: reader, harness and reviewer share one reading of ECMA-388, so
-  a consistent misreading of it now survives
-  ([verification](../verification.md), [ROADMAP](../ROADMAP.md)).
+  written out from the clause. Every package conserves every fact, and the
+  census is recorded in `tests/xps/CONSERVATION.tsv`, with a row for
+  `tests/xps_interleaved/wpf-image-and-text-pieces.xps` — one of the packages
+  cut into OPC pieces, whose census and rendered page must equal its source's;
+  the harness joins its pieces by its own reading of 7.2.4. **No assertion here
+  shows that two independent programs read one package and agree**: reader and
+  harness share one reading of ECMA-388, so a consistent misreading of it
+  survives ([verification](../verification.md), [ROADMAP](../ROADMAP.md)).
 - The `xps` determinism fingerprint and the fixed-document byte-hash
-  ([determinism](determinism.md)) — the first fixture whose input this
-  repository did not author.
+  ([determinism](determinism.md)) — a fixture whose input this repository did
+  not author.
 - Fuzz targets `xml` and `zip_archive`; the `bounds_ledger.rs` rows for
   every XPS cap, measured against the real packages.
