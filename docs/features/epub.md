@@ -102,6 +102,11 @@ takes, and the one that keeps a narrowed picture from being squashed rather
 than scaled. The intrinsic size is three values (a width, a height, a ratio)
 and never the bytes: `css-images-3` §4 distinguishes all three and the leaf
 crate holds no decoder ([design/epub-layout.md](../design/epub-layout.md)).
+An atomic inline-level box — an inline block, an `inline-flex`, a picture set
+inline — is not white space to `css-text-3` §4.1.1's collapsing: the space
+after one does not follow the one before it and is not at a line's start, so
+a word either side of an inline block or a picture keeps its space
+(`Collapser::passed_atomic`).
 Line breaking is **UAX #14** over vendored Unicode 17.0.0 data, checked
 against every case of Unicode's own `LineBreakTest.txt`
 (`tinker-pdf-layout/tests/uax14_conformance.rs`). Advances come from the face

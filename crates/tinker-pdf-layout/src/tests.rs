@@ -3884,6 +3884,103 @@ fn an_auto_width_inline_block_shrinks_to_fit() {
     assert_eq!(xs(&laid, 0), vec![0.0, 10.0, 40.0]);
 }
 
+/// A paragraph, left to right or right to left, of `children`.
+fn paragraph_of(rtl: bool, children: Vec<BoxNode>) -> BoxNode {
+    let mut style = block();
+    if rtl {
+        style.direction = Direction::Rtl;
+    }
+    BoxNode::element(style, children)
+}
+
+/// `css-text-3` §4.1.1 beside an atomic inline: the box is not white space,
+/// so a space after it does not follow the one before it, and both are kept.
+/// The collapser never saw the box, and the space after it was collapsed
+/// into the one before it: `book <inline-block>jazz</inline-block> student`
+/// read `book jazzstudent`, left to right and right to left alike.
+#[test]
+fn the_space_after_an_inline_block_is_kept() {
+    for rtl in [false, true] {
+        let tree = paragraph_of(
+            rtl,
+            vec![text("book "), inline_block(None, "jazz"), text(" student")],
+        );
+        let laid = run(&tree, 400.0, 400.0);
+        assert_eq!(page_text(&laid, 0), "book jazz student", "rtl {rtl}");
+        // In logical order on the line: the box five letters past the word
+        // before it, and the space after it where its four letters end.
+        let at = xs(&laid, 0);
+        assert_eq!(at.len(), 3, "rtl {rtl}");
+        assert!(close(at[1] - at[0], 50.0), "rtl {rtl}: {at:?}");
+        assert!(close(at[2] - at[1], 40.0), "rtl {rtl}: {at:?}");
+    }
+}
+
+/// The same after a picture set inline: the space after it is set, where the
+/// picture ends.
+#[test]
+fn the_space_after_an_inline_picture_is_kept() {
+    for rtl in [false, true] {
+        let mut style = base();
+        style.display = Display::Inline;
+        let picture = BoxNode::replaced(style, Intrinsic::raster(20.0, 10.0));
+        let tree = paragraph_of(rtl, vec![text("book "), picture, text(" student")]);
+        let laid = run(&tree, 400.0, 400.0);
+        assert_eq!(page_text(&laid, 0), "book  student", "rtl {rtl}");
+        let fragment = only_replaced(&laid, 0);
+        let after = &laid.pages[0].runs[1];
+        assert_eq!(after.text, " student", "rtl {rtl}");
+        assert!(close(after.x, fragment.x + 20.0), "rtl {rtl}");
+    }
+}
+
+/// And the spaces §4.1.1 collapses beside an atomic inline still collapse:
+/// two before the box are one, and so are two after it; a space at the
+/// start of the paragraph is removed, and the box after it makes the space
+/// that follows the box no line's first.
+#[test]
+fn spaces_beside_an_atomic_inline_collapse_where_css_collapses_them() {
+    for rtl in [false, true] {
+        let tree = paragraph_of(
+            rtl,
+            vec![
+                text("book  "),
+                inline_block(None, "jazz"),
+                text("   student"),
+            ],
+        );
+        assert_eq!(
+            page_text(&run(&tree, 400.0, 400.0), 0),
+            "book jazz student",
+            "rtl {rtl}"
+        );
+        let tree = paragraph_of(
+            rtl,
+            vec![
+                BoxNode::element(base(), vec![text("book ")]),
+                BoxNode::element(base(), vec![text(" ")]),
+                inline_block(None, "jazz"),
+                BoxNode::element(base(), vec![text(" ")]),
+                text(" student"),
+            ],
+        );
+        assert_eq!(
+            page_text(&run(&tree, 400.0, 400.0), 0),
+            "book jazz student",
+            "rtl {rtl}"
+        );
+        let tree = paragraph_of(
+            rtl,
+            vec![text(" "), inline_block(None, "jazz"), text(" student")],
+        );
+        assert_eq!(
+            page_text(&run(&tree, 400.0, 400.0), 0),
+            "jazz student",
+            "rtl {rtl}"
+        );
+    }
+}
+
 /// §10.8.1: an inline-block's baseline is the baseline of its **last** line
 /// box.
 ///

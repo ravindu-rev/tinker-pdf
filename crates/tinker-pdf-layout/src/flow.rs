@@ -2322,7 +2322,12 @@ impl<M: Metrics> Builder<'_, M> {
             // block-level, so it arrives in an inline formatting context — and
             // this is where that context can give it a place on a line instead
             // of pouring its text into one.
-            return self.atomic_inline(node, &style, out, depth, content_width);
+            let placed = self.atomic_inline(node, &style, out, depth, content_width);
+            // `css-text-3` §4.1.1: the box is not white space, so a space
+            // after it does not follow the one before it, and is no line's
+            // first ([`Collapser::passed_atomic`]).
+            collapser.passed_atomic();
+            return placed;
         }
         match &node.content {
             // Unreachable: the line above takes every replaced element, whether

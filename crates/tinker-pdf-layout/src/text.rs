@@ -125,6 +125,17 @@ impl Collapser {
         case::transform(&collapsed, transform, &mut self.case)
     }
 
+    /// An atomic inline-level box set between two runs (CSS 2.2 §9.2.2): it
+    /// is not white space, so a collapsible space after it does not follow
+    /// the one before it, and a space after it is not at a line's start
+    /// (§4.1.1). `a <img/> b` keeps both its spaces; without this the second
+    /// followed the first across the picture and was collapsed away, and the
+    /// word after an inline block ran into it.
+    pub fn passed_atomic(&mut self) {
+        self.pending = false;
+        self.started = true;
+    }
+
     /// One text run through phase I.
     pub fn push(&mut self, source: &str, white_space: WhiteSpace) -> String {
         let mut out = String::with_capacity(source.len());
