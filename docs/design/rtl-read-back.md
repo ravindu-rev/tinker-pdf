@@ -435,14 +435,149 @@ planning a run's drawings before they are read costs less than the readings
 it saves on these suites. D reads two cases worse in each build, so ruling 14
 leaves it to the owner, case by case (H-151).
 
+### H1: the comma tie-break at a number or a closing bracket
+
+**What decides it.** The comma tie-break reads a line that holds
+right-to-left letters and no `L` as left to right where its leftmost unit
+that draws something is a strong `R` or `AL` character and its rightmost
+closing punctuation, and a left-to-right paragraph draws it
+(`bidi::drawn_direction`, `trailing_punctuation`). A left-to-right paragraph
+whose right-to-left run ends in a number draws the number leftmost, and one
+whose run ends in a bracket pair draws the closing bracket there:
+`<p>בראשית. אור ٦٠.</p>`, with no `dir` or with `dir="ltr"`, is drawn
+`٦٠ רוא .תישארב.`, and `בראשית (אלהים).` after a `<br/>` is drawn
+`)םיהלא( תישארב.`. The tie-break takes neither, so each is read right to left
+with its stop first, `.בראשית. אור ٦٠`: Left (1), which
+`epub_conservation.rs`'s
+`a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop` pins.
+
+**The option.** H1: the tie-break's left end may also be a number, `EN` or
+`AN`, or a closing bracket (`Bidi_Paired_Bracket_Type` `Close`). The right
+end, the line with no `L` and the check that a left-to-right paragraph draws
+the line stay as they are.
+
+**What CD-19.11 measures**, H1 prototyped in `trailing_punctuation` on the
+landed code, in both builds, for this section and H-152's row:
+
+- each case whose verdicts change, better or worse, by its `CASE` line, in
+  `epub_fallback.rs` and `epub_conservation.rs`;
+- each test whose outcome H1 changes, in those suites and in
+  `text_logical_order.rs`, `bidi_conformance.rs`,
+  `cargo test -p tinker-pdf --lib` (`text_order.rs`, and the readings
+  `epub::tests` counts) and `cargo test -p tinker-pdf-shape --lib`
+  (`bidi.rs`);
+- every line of Unicode's two conformance files read as the reader reads a
+  drawn line (`bidi::drawn_reading`), and whether it reads back to the text
+  typed: each visual order `BidiCharacterTest.txt` states, 91 616 lines, and
+  each class sequence of `BidiTest.txt`, a character standing for each
+  class, drawn by `order_units` in each paragraph direction the file lists,
+  222 960 drawings; those holding a character X9 removes aside;
+- each line that holds a right-to-left character in the committed `testdata`
+  documents and books, as `Page::text` reads it;
+- the time of `epub_fallback.rs`, `epub_conservation.rs` and
+  `text_logical_order.rs`, one test at a time (`--test-threads=1`), in
+  release and debug: H1's ratio to the tree without it in the same round,
+  the median over seven rounds in debug and fifteen in release.
+
+**What H1 reads.** It sets no glyph over another the tree does not, and
+release reads every case as debug does.
+
+| Option | `epub_fallback.rs`, default (232 cases) | with `bundled-fonts` (235) | `epub_conservation.rs` (119), default | with `bundled-fonts` |
+|---|---|---|---|---|
+| H1 | 1 better, 1 worse | 1 better | 17 better, 21 worse | 17 better, 22 worse |
+
+Better, in both builds, the lines whose left end is a number or a closing
+bracket. All fifteen of Left (1)'s — the paragraphs with no `dir` or with
+`dir="ltr"` ending `٦٠.`, `60.` or `٦٠:` at `word-spacing: 0.5em`, and the
+letter-spaced lines ending `(אלהים).`, `٦٠.` and, in Arabic, `(أصبحنا).` —
+conserve and read whole, but for the justified monospace paragraph, with no
+`dir` and with `dir="ltr"`, which in a default build conserves and does not
+read whole, and with `bundled-fonts`, where it conserved already, reads
+whole. V3's touching right-to-left table cells with no `dir`, in Hebrew and
+in Arabic, ending `(ספר).` and `(جميل).`, conserve and read whole
+(`a_dirless_line_with_a_right_to_left_gloss`), and so does Left (5)'s Arabic
+paragraph whose inline `word-spacing: 1em` span cuts a word, its last line's
+stop read last (`epub_fallback.rs`'s
+`a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed`).
+Beside the `CASE` lines, the second of two right-to-left table cells under
+`scaleX(2)` at `word-spacing: 1em` reads `בית (גדול).`, and in Arabic
+`بيت (كبير).`, which the tree reads with the stop first, `.בית(גדול)` and
+`.بيت(كبير)`, and with `bundled-fonts` the Hebrew in three lines, `בית`,
+`(גדול)` and `.`
+(`two_cells_are_read_back_as_a_reader_parts_them_on_the_page`); and a line
+of styled neutrals ending `٦٠.` reads right in its rules' drawing, read back
+once against the tree's 128, and 129 times against 256 under `scaleX(2)`
+(`epub::tests`' `a_line_of_units_the_read_back_has_read_is_not_searched_again`).
+
+Worse, the lines H1 brings into ruling 14's price: a right-to-left line that
+opens with stops before a bracket pair, which the tree reads right where a
+reader reads it in two at a wide space after the pair, the part's left end
+the pair's closing bracket. H1 reads that part left to right, and the
+bracket tie-break then passes over its pair, whose bracket stands just left
+of the stops, where ruling 14 takes such a line to open: `?!(בראשית)` reads
+`)בראשית(?!`, its brackets the other way round and its stops last, as the
+price reads it. In both builds that is
+`a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed`'s
+twelve rows of `…`, `?!`, `!!`, `.`, `.!` and `!…` before a styled pair after
+a `<br/>` at `word-spacing: 0.6em`, in Arabic and Hebrew, and its nine of
+`!?` and `?!` before styled `()`, `[]` and `{}` at `0.6em` and `1em`, each of
+which conserved and read whole; and, beside the `CASE` lines, the same
+shapes in
+`neutrals_a_reader_reads_with_the_word_beside_them_are_drawn_for_that_reading`,
+each of its rows read in turn: `!?(أصبحنا)` and `.!(جميل)` at `0.6em` and
+`?!(בראשית)` at `1em`. With `bundled-fonts` the soft-wrapped `".(עולם)` reads
+`)עולם(."` too, and in a default build the letter-spaced, justified
+`?!{בראשית}` after a `<br/>` reads `}בראשית{?!`
+(`a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed`,
+and the last row of the neutrals' test).
+
+The tests H1 fails are those pins: `epub_conservation.rs`'s
+`a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop`,
+`a_dirless_line_with_a_right_to_left_gloss` and
+`a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed`;
+`epub_fallback.rs`'s
+`a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed`,
+`two_cells_are_read_back_as_a_reader_parts_them_on_the_page` and
+`neutrals_a_reader_reads_with_the_word_beside_them_are_drawn_for_that_reading`;
+and `a_line_of_units_the_read_back_has_read_is_not_searched_again`, whose
+counts it lowers. `text_logical_order.rs`, `text_order.rs`, `bidi.rs` and
+`bidi_conformance.rs` pass as they do, and the committed documents and books
+hold no line with a right-to-left character, so none of their lines reads
+otherwise.
+
+**The conformance files.** Read as a drawn line is, H1 reads 509 of
+`BidiCharacterTest.txt`'s lines better and 143 worse, and 737 of
+`BidiTest.txt`'s drawings better and 1 183 worse: 1 246 better and 1 326
+worse in all. Every line it reads better is of a left-to-right paragraph and
+every line worse of a right-to-left one, read as its left-to-right twin: the
+comma tie-break's price, which ruling 14 records — a right-to-left line that
+opens with a mark the tie-break takes reads with that mark at its end —
+reaches the lines that end in a number or a closing bracket, so
+`— שלום 2026` reads `שלום 2026 —` and `— שלום (עולם)` reads
+`שלום (עולם) —`.
+
+**What it costs.** Over the three suites, one test at a time, the median
+ratio to the tree, with the rounds out of all that ran slower:
+
+| Option | debug, default | debug, `bundled-fonts` | release, default | release, `bundled-fonts` |
+|---|---|---|---|---|
+| H1 | 0.98 (3 of 7) | 0.96 (2 of 7) | 1.00 (7 of 15) | 0.97 (5 of 15) |
+
+The tree's own rounds spread over an interquartile range of 2 to 8 per cent
+of their median, so H1 costs no time past the noise: it asks one more class
+of a line's left end, reads one more line of the tie-break's shape back, and
+a line its rules' drawing now reads right is not searched. H1 reads cases
+worse in each build, and more of the conformance files' lines worse than
+better, so ruling 14 leaves it to the owner (H-152).
+
 ### The other cases
 
 Each gets its section from its design step: Left (4), the lines the reader
 reads from the right whatever the writer draws (CD-19.22); Left (9), a comma read
 apart after a number a NO-BREAK SPACE holds together (CD-19.32); and
 Left (5), its findings outside ruling 14's rules (CD-19.34). The options whose price the owner decides get
-their figures here from their measure steps: D (CD-19.10) above, H1
-(CD-19.11) and H6 (CD-19.12). Left (2) reads in two, as a
+their figures here from their measure steps: D (CD-19.10) and H1
+(CD-19.11) above, and H6 (CD-19.12). Left (2) reads in two, as a
 Latin word does, by the owner's decision (CD-19.18).
 
 ## Milestones
