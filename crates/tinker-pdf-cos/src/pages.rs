@@ -421,20 +421,30 @@ pub fn count(doc: &CosDocument) -> u32 {
     }
 }
 
-/// One page built from one object with nothing inherited, or nothing.
+/// One page built from one object and the ancestors the head already holds,
+/// or nothing.
 ///
 /// The page is built by [`leaf`], the same function the tree walk uses, which
 /// is only sound when the object is a leaf carrying its own `/MediaBox` and
 /// `/Resources`. When it is not, this declines and the walk runs, because a
 /// page laid out at US Letter because its ancestor was not fetched is the
-/// wrong page rather than a cheaper one.
+/// wrong page rather than a cheaper one. Its `/Rotate` and `/CropBox` are
+/// inherited as the walk inherits them (7.7.3.4), from every ancestor along
+/// `/Parent` that is placed without the tail ([`ancestors_in_the_head`]).
 fn page_alone(doc: &CosDocument, reference: ObjRef, index: u32) -> Option<Page> {
     let object = doc.get(reference).ok()?;
     // Not a dictionary at all is the common way for this to be the wrong
     // object: a run's leading object read a few bytes late is its content
     // stream, and a stream is not a page.
     let dict = object.as_dict()?;
-    let inherited = Inherited::default().extend(dict, doc);
+    let inherited = ancestors_in_the_head(doc, dict)
+        .iter()
+        .rev()
+        .filter_map(|ancestor| ancestor.as_dict())
+        .fold(Inherited::default(), |inherited, ancestor| {
+            inherited.extend(ancestor, doc)
+        })
+        .extend(dict, doc);
     // One test rather than two, because two were each other's shadow: a page
     // with no `/MediaBox` key resolves to no media box, so whichever ran first
     // declined and removing either alone changed nothing a test could see.
@@ -447,6 +457,37 @@ fn page_alone(doc: &CosDocument, reference: ObjRef, index: u32) -> Option<Page> 
         return None;
     }
     Some(leaf(reference, index, inherited, doc))
+}
+
+/// The ancestors of the page `dict`, nearest first, along `/Parent`, as far
+/// as each is placed without the tail
+/// ([`CosDocument::placed_without_the_tail`]).
+///
+/// Annex F lays a file out so that page one needs only the head, and a
+/// layout is free to leave the page tree in the tail: an ancestor the head
+/// does not place stops the climb rather than costing the tail, so a page
+/// built here inherits what a reader holding the head can know, and a file
+/// whose ancestors are all in the head, as this engine's own linearizer
+/// writes them, reads its page as the tree walk does. A cycle or a chain
+/// deeper than the walk's own limit stops it too.
+fn ancestors_in_the_head(doc: &CosDocument, dict: &Dict) -> Vec<std::sync::Arc<Object>> {
+    let mut chain = Vec::new();
+    let mut seen = HashSet::new();
+    let mut parent = dict.get_ref(Name::PARENT);
+    while let Some(reference) = parent {
+        if chain.len() > limits::MAX_NEST_DEPTH as usize
+            || !seen.insert(reference.num)
+            || !doc.placed_without_the_tail(reference.num)
+        {
+            break;
+        }
+        let Ok(object) = doc.get(reference) else {
+            break;
+        };
+        parent = object.as_dict().and_then(|node| node.get_ref(Name::PARENT));
+        chain.push(object);
+    }
+    chain
 }
 
 /// Page one of a linearized document, from `/O` (F.3.3, Table F.1).

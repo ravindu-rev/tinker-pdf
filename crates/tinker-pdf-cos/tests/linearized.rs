@@ -14,8 +14,8 @@
 use std::sync::Arc;
 
 use tinker_pdf_cos::{
-    pages, AuthLevel, CosDocument, DocumentBuilder, DocumentEditor, Encryption, ObjRef, Object,
-    WriteMode, WriteOptions,
+    pages, AuthLevel, CosDocument, Dict, DocumentBuilder, DocumentEditor, Encryption, Name, ObjRef,
+    Object, SliceSource, WriteMode, WriteOptions,
 };
 
 /// The password every encrypted fixture here opens with.
@@ -1252,4 +1252,53 @@ fn compression_applies_to_a_linearized_file() {
         squeezed.len() as u64,
         "with /L still describing the file it is in"
     );
+}
+
+/// **Page one read from the head inherits what its ancestors set** (7.7.3.4):
+/// a page tree root carrying `/Rotate 90` and a `/CropBox` gives them to the
+/// first page on the head-only open as on the full open, and the head-only
+/// open reads them from the head, the page tree being in part 4, without
+/// fetching the main table.
+#[test]
+fn the_first_page_read_from_the_head_inherits_its_rotation_and_crop_box() {
+    let doc = document(3);
+    let root = doc.trailer().get_ref(Name::ROOT).expect("a catalog");
+    let mut editor = DocumentEditor::new(Arc::clone(&doc));
+    let pages_ref = editor
+        .get(root)
+        .and_then(|catalog| catalog.as_dict().and_then(|c| c.get_ref(Name::PAGES)))
+        .expect("a page tree");
+    let mut tree: Dict = editor
+        .get(pages_ref)
+        .and_then(|tree| tree.as_dict().cloned())
+        .expect("a page tree dictionary");
+    tree.insert(editor.intern(b"Rotate"), Object::Int(90));
+    tree.insert(
+        editor.intern(b"CropBox"),
+        Object::Array([10, 10, 190, 90].into_iter().map(Object::Int).collect()),
+    );
+    editor.put(pages_ref, Object::Dict(tree));
+    let bytes = editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        linearize: true,
+        object_streams: false,
+        ..WriteOptions::default()
+    });
+
+    let full = CosDocument::open(bytes.clone()).expect("it opens");
+    let head = CosDocument::open_source(Arc::new(SliceSource::new(bytes))).expect("it opens");
+    assert!(
+        head.first_page_end().is_some(),
+        "the head-only path engages"
+    );
+    let walked = pages::at(&full, 0).expect("page one");
+    let alone = pages::at(&head, 0).expect("page one from the head");
+    assert_eq!(walked.rotation, 90, "the full open inherits the rotation");
+    assert_eq!(
+        alone.rotation, walked.rotation,
+        "and the head-only open too"
+    );
+    assert_eq!(alone.crop_box, walked.crop_box, "and the crop box");
+    assert_eq!(alone.media_box, walked.media_box);
+    assert!(!head.main_table_fetched(), "page one is read from the head");
 }

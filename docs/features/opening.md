@@ -229,7 +229,10 @@ file opens from its head alone: the first-page cross-reference section is
 parsed where it sits, `/O` names page one's page object so the page tree — whose
 root a linearized file may leave in the tail, and qpdf's linearizer does — is
 not walked, and **the page offset hint table places every page after it**.
-Table F.4 item 2 locates a page by accumulating the lengths of the pages before
+Page one, and each page the tables place, inherits `/Rotate` and `/CropBox`
+(7.7.3.4) from every ancestor along `/Parent` that the head places, as the tree
+walk inherits them; an ancestor the head does not place stops the climb rather
+than costing the tail. Table F.4 item 2 locates a page by accumulating the lengths of the pages before
 it; what the tables supply is that byte range and nothing else, because the
 objects inside it are read from the file's own `N G obj` headers and each one
 still passes `parse_at`'s header check. Hints accelerate, they never decide: a

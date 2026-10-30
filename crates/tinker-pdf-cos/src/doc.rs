@@ -684,6 +684,20 @@ impl CosDocument {
         self.linearized.is_none() || self.completed.get().is_some()
     }
 
+    /// Whether object `num` is placed without fetching the main
+    /// cross-reference table: by the first-page table, by a hint table a page
+    /// already read, or because the main table is in hand (or the document
+    /// did not open on Annex F's head-only path, where every table is).
+    ///
+    /// What a head-only read asks before it follows a reference that the
+    /// layout may have left in the tail, so that following it costs no tail
+    /// read it did not decide to spend.
+    pub(crate) fn placed_without_the_tail(&self, num: u32) -> bool {
+        self.main_table_fetched()
+            || self.xref.get(num).is_some()
+            || self.hinted.read_lock().contains_key(&num)
+    }
+
     /// Whether Annex F's hint tables have been read and are in use.
     ///
     /// False until something asks for a page other than the first, and false
