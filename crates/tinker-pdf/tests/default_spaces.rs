@@ -7,11 +7,11 @@
 //! and the same page naming the default's space directly, compared byte for
 //! byte. Beside each, a page it must **not** equal — the first without its
 //! default, as a rule — because two twins that agree because neither applied
-//! anything prove nothing. That is also why every image here is sampled: a
-//! JPEG reads no `/ColorSpace` at all, so a twin over one passes with nothing
-//! applied (a named non-goal of the design).
+//! anything prove nothing. A JPEG's and a JPEG 2000 image's `/ColorSpace` is
+//! read as a sampled image's is, so both are paths here like any other.
 
 use tinker_pdf::{Bitmap, Document, ImageSpace, PixelFormat, RenderOptions, RenderWarning};
+use tinker_pdf_filters::{jpeg_encode, JpegOptions, JpegSource, JpegSourceColour};
 
 // ---- Profiles -------------------------------------------------------------
 
@@ -505,6 +505,96 @@ fn inline_image(family: Family, twin: Option<&str>) -> Option<Page> {
     })
 }
 
+/// The family's four pixels, as bytes.
+fn sample_bytes(family: Family) -> Vec<u8> {
+    family
+        .samples()
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII"), 16).expect("hex"))
+        .collect()
+}
+
+/// The family's four pixels as a JPEG, which holds grey and RGB; the encoder
+/// writes no CMYK.
+fn jpeg(family: Family) -> Option<Vec<u8>> {
+    let colour = match family {
+        Family::Gray => JpegSourceColour::Gray,
+        Family::Rgb => JpegSourceColour::Rgb,
+        Family::Cmyk => return None,
+    };
+    let data = sample_bytes(family);
+    let source = JpegSource {
+        width: 4,
+        height: 1,
+        colour,
+        stride: data.len(),
+        data: &data,
+    };
+    Some(jpeg_encode(&source, &JpegOptions::default()).expect("four pixels encode"))
+}
+
+fn jpeg_image(family: Family, twin: Option<&str>) -> Option<Page> {
+    let space = twin.map_or_else(|| format!("/{}", family.device()), str::to_string);
+    let image = stream(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width 4 /Height 1 /ColorSpace {space} \
+             /BitsPerComponent 8 /Filter /DCTDecode"
+        ),
+        &jpeg(family)?,
+    );
+    Some(
+        Page::new("q 40 0 0 40 0 0 cm /Im0 Do Q")
+            .resources("/XObject << /Im0 10 0 R >>")
+            .object(10, image),
+    )
+}
+
+fn inline_jpeg(family: Family, twin: Option<&str>) -> Option<Page> {
+    let hex: String = jpeg(family)?
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect();
+    let image = |space: &str| {
+        format!("q 40 0 0 40 0 0 cm BI /W 4 /H 1 /CS {space} /BPC 8 /F [/AHx /DCT] ID {hex}> EI Q")
+    };
+    Some(match twin {
+        None => Page::new(image(&format!("/{}", family.abbreviation()))),
+        Some(space) => Page::new(image("/CS0")).spaces(format!("/CS0 {space}")),
+    })
+}
+
+/// A codestream from the JPEG 2000 decoder's own fixtures: its grey ramp, or
+/// its colour image; it has none in CMYK.
+fn jpx_image(family: Family, twin: Option<&str>) -> Option<Page> {
+    let fixture = match family {
+        Family::Gray => "r1-2.jp2",
+        Family::Rgb => "c1-2.jp2",
+        Family::Cmyk => return None,
+    };
+    let codestream = std::fs::read(
+        std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tinker-pdf-filters/tests/jpx"
+        ))
+        .join(fixture),
+    )
+    .expect("the decoder's fixture");
+    let space = twin.map_or_else(|| format!("/{}", family.device()), str::to_string);
+    let image = stream(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width 32 /Height 24 /ColorSpace {space} \
+             /Filter /JPXDecode"
+        ),
+        &codestream,
+    );
+    Some(
+        Page::new("q 40 0 0 40 0 0 cm /Im0 Do Q")
+            .resources("/XObject << /Im0 10 0 R >>")
+            .object(10, image),
+    )
+}
+
 /// An axial shading in `space`, from the family's colour to its second.
 fn axial(family: Family, space: &str) -> String {
     format!(
@@ -587,7 +677,7 @@ fn device_n_alternate(family: Family, twin: Option<&str>) -> Option<Page> {
     )
 }
 
-const PATHS: [(&str, Path); 15] = [
+const PATHS: [(&str, Path); 18] = [
     ("the operators", operators),
     ("cs naming the device space", cs_device),
     ("a /ColorSpace entry that is the device space", cs_entry),
@@ -597,6 +687,9 @@ const PATHS: [(&str, Path); 15] = [
     ("a sampled image", sampled_image),
     ("an /Indexed image's base", indexed_image),
     ("an inline image", inline_image),
+    ("a JPEG image", jpeg_image),
+    ("an inline JPEG image", inline_jpeg),
+    ("a JPEG 2000 image", jpx_image),
     ("a shading under sh", shading),
     ("a shading pattern", shading_pattern),
     ("an /Indexed base", indexed_base),
@@ -1072,10 +1165,10 @@ fn each_default_space_draws_as_its_substitute_named_directly() {
     initial_colour_cases(&mut cases);
     refusal_cases(&mut cases);
     unselected_alternate_cases(&mut cases);
-    // 14 paths for CMYK and 15 for the rest, under five substitutes; seven
+    // 14 paths for CMYK and 18 for the rest, under five substitutes; seven
     // scope cases and six for CMYK; five initial colours, ten refusals and
     // guards, and two unselected alternates under each substitute.
-    assert_eq!(cases.len(), 74 + 34 + 5 + 10 + 10, "the table lost a row");
+    assert_eq!(cases.len(), 86 + 34 + 5 + 10 + 10, "the table lost a row");
     check_all(&cases);
 }
 

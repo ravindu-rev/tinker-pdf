@@ -225,3 +225,180 @@ fn image_mask_with_jpx_is_refused_rather_than_stencilled() {
         bitmap.warnings
     );
 }
+
+/// A one-page document drawing the image XObject `/Im0` over the whole 20 by
+/// 20 page: its dictionary's `keys` beside `/Subtype /Image`, and `data` its
+/// stream.
+fn page_with_image(keys: &str, data: &[u8]) -> Vec<u8> {
+    let mut file = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20]\n\
+   /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 27 >>\nstream\nq 20 0 0 20 0 0 cm /Im0 Do Q\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Image {keys} /Length {} >>\nstream\n",
+        data.len()
+    )
+    .into_bytes();
+    file.extend_from_slice(data);
+    file.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n");
+    file
+}
+
+/// A one-page document whose content stream is `content`.
+fn page_with_content(content: &[u8]) -> Vec<u8> {
+    let mut file = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20]\n\
+   /Resources << >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n",
+        content.len()
+    )
+    .into_bytes();
+    file.extend_from_slice(content);
+    file.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n");
+    file
+}
+
+fn render(pdf: Vec<u8>) -> tinker_pdf::Bitmap {
+    Document::open(pdf)
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default())
+}
+
+/// The first image the first page draws, as `Page::images` decodes it.
+fn first_image(pdf: Vec<u8>) -> tinker_pdf::PageImage {
+    Document::open(pdf)
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .images()
+        .first()
+        .expect("an image")
+        .clone()
+}
+
+/// A spot colour whose tints run from white to red (8.6.6.4).
+const SPOT: &str = "[/Separation /Spot /DeviceRGB << /FunctionType 2 /Domain [0 1] \
+                    /C0 [1 1 1] /C1 [1 0 0] /N 1 >>]";
+
+/// A CIE L*a*b* space, which reads no component as a device space does
+/// (8.6.5.4).
+const LAB: &str = "[/Lab << /WhitePoint [0.9505 1 1.089] /Range [-100 100 -100 100] >>]";
+
+/// A palette of 256 entries, red below index 128 and blue from it (8.6.6.3).
+fn palette() -> String {
+    let entries: String = (0..256)
+        .map(|index| if index < 128 { "FF0000" } else { "0000FF" })
+        .collect();
+    format!("[/Indexed /DeviceRGB 255 <{entries}>]")
+}
+
+/// 7.4.9: a `/ColorSpace` in the image dictionary overrides the codestream's
+/// own colour specification, so the grey ramp drawn under a spot colour or a
+/// palette, and the colour image under `/Lab`, are drawn in those spaces.
+///
+/// Each is held to its twin: the codestream's own samples, as `Page::images`
+/// lists them, written as a plain sampled image at the codestream's size and
+/// in the same space, which must draw the same bytes. And each must differ
+/// from the codestream drawn in its own colour, or the twins agreeing would
+/// prove nothing.
+#[test]
+fn a_jpx_image_draws_in_the_space_its_dictionary_names() {
+    let palette = palette();
+    for (fixture, space) in [
+        ("r1-2.jp2", SPOT),
+        ("r1-2.jp2", &*palette),
+        ("c1-2.jp2", LAB),
+    ] {
+        let own = page_with_jpx(&codestream(fixture), "");
+        let image = first_image(own.clone());
+        assert_eq!(image.refused, None, "{fixture} decodes");
+        let drawn = render(page_with_jpx(
+            &codestream(fixture),
+            &format!(" /ColorSpace {space}"),
+        ));
+        let twin = render(page_with_image(
+            &format!(
+                "/Width {} /Height {} /ColorSpace {space} /BitsPerComponent {}",
+                image.width, image.height, image.bits_per_component
+            ),
+            &image.samples,
+        ));
+
+        assert_eq!(
+            drawn.data, twin.data,
+            "{fixture} under {space}: the codestream drew otherwise than its own samples \
+             draw in that space"
+        );
+        assert_ne!(
+            drawn.data,
+            render(own).data,
+            "{fixture} under {space}: drawn in the codestream's own colour"
+        );
+        assert!(
+            drawn.warnings.is_empty(),
+            "{fixture} under {space}: {:?}",
+            drawn.warnings
+        );
+    }
+}
+
+/// An inline JPEG 2000 image goes through the same entry point, its space
+/// read as an inline image's is (8.9.7).
+#[test]
+fn an_inline_jpx_image_draws_in_the_space_its_dictionary_names() {
+    let inline = |filter: &str, data: &[u8]| {
+        let hex: String = data.iter().map(|byte| format!("{byte:02X}")).collect();
+        page_with_content(
+            format!(
+                "q 20 0 0 20 0 0 cm BI /W 32 /H 24 /CS {} /BPC 8 /F {filter} ID {hex}> EI Q",
+                palette()
+            )
+            .as_bytes(),
+        )
+    };
+    // 8.9.7 abbreviates no JPXDecode, so the filter is written in full.
+    let jpx = inline("[/AHx /JPXDecode]", &codestream("r1-2.jp2"));
+    let image = first_image(jpx.clone());
+    assert_eq!(image.refused, None, "the inline codestream decodes");
+    assert_eq!(image.samples.len(), 32 * 24, "the ramp's own samples");
+    let drawn = render(jpx);
+    let twin = render(inline("/AHx", &image.samples));
+
+    assert_eq!(
+        drawn.data, twin.data,
+        "the inline codestream drew otherwise than its samples"
+    );
+    assert!(drawn.warnings.is_empty(), "{:?}", drawn.warnings);
+}
+
+/// A space of another number of components than the codestream gives cannot
+/// hold its samples: it is refused and named under the image's name, and the
+/// codestream drawn in its own colour (ruling 10).
+#[test]
+fn a_jpx_image_whose_space_cannot_hold_its_samples_keeps_its_own_colour() {
+    let refused = render(page_with_jpx(
+        &codestream("c1-2.jp2"),
+        " /ColorSpace /DeviceGray",
+    ));
+
+    assert_eq!(
+        refused.data,
+        render(page_with_jpx(&codestream("c1-2.jp2"), "")).data,
+        "drawn in the codestream's own colour"
+    );
+    assert_eq!(
+        refused.warnings,
+        vec![tinker_pdf::RenderWarning::RepairedColorSpace {
+            name: "Im0".to_string(),
+            reason: "ImageSpaceComponents".to_string(),
+        }],
+        "and the refusal named"
+    );
+}

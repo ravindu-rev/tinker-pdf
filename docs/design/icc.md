@@ -60,13 +60,6 @@ open of this design — the refused profiles — is listed in the
 - **A bare `/CalGray` or `/CalRGB` name.** `parse_space` reads both arrays'
   white point, gamma and matrix (8.6.5.2–8.6.5.3); a bare name, which carries
   no parameters, is drawn as its device space.
-- **For default colour spaces, a JPEG or JPEG 2000 image's colour.** Such an
-  image is drawn in the colour its codestream carries and never reads its
-  `/ColorSpace`: an image XObject, and an inline one, returns before the space
-  is read. Neither a default nor a space named directly reaches it — the gap
-  P-22's notes record for an ICC-based CMYK JPEG. Closing it moves every
-  profiled JPEG a document draws, which is a row's own question rather than
-  K-02's.
 - **For default colour spaces, the scope a Type 3 glyph or a soft-mask group
   runs in.** Both run in the scope that invokes them rather than in their own
   `/Resources` (see [the scope a default is read in](#the-scope-a-default-is-read-in)).
@@ -317,8 +310,8 @@ Two other clauses reach it:
 | An `/Indexed` base | yes | 8.6.5.6 |
 | `[/Pattern base]`'s base | yes, in the scope whose `cs` selected it | 8.6.5.6 |
 | A `/Separation` or `/DeviceN` alternate | when selected — which, as this section reads 8.6.6.4, `/All` and `/None` never are; the engine selects it for every other colorant, since no render paints one on a plate of its own | 8.6.5.6 |
-| An image XObject's `/ColorSpace` | yes; **a JPEG or JPEG 2000 image is drawn without reading it** | 8.6.5.6 |
-| An inline image's `/CS` | yes, after `expand_inline_abbreviations`; **an inline JPEG or JPEG 2000 is drawn without reading it** | 8.6.5.6, 8.9.7 |
+| An image XObject's `/ColorSpace` | yes, a JPEG's and a JPEG 2000 image's among them | 8.6.5.6 |
+| An inline image's `/CS` | yes, after `expand_inline_abbreviations`, an inline JPEG's and JPEG 2000 image's among them | 8.6.5.6, 8.9.7 |
 | A shading's `/ColorSpace`, under `sh` and in a shading pattern, and its `/Background` with it | yes | 8.6.5.6 |
 | A transparency group's `/CS`, a form's and the page's | yes | 11.6.6 |
 | A luminosity soft mask's `/BC` | yes, through `/G`'s `/CS` | 11.6.5.2, 11.6.6 |
@@ -519,8 +512,7 @@ K-02.3, designed here:
   own placements. An inline image is its own entry.
 - **A JPEG or JPEG 2000 image reports its substitute like any other.**
   Extraction describes the space the standard puts the samples in, which is
-  the default's, though the renderer reads neither space (the non-goal
-  above).
+  the default's and the one the renderer draws them in.
 - **A refused default replaces nothing**, and an image in its family names
   the refusal in `warnings`, as it names a decoder's leniency (ruling 10). A
   soft-mask image and a stencil have nothing substituted.
@@ -564,10 +556,9 @@ selections a default rides on, with no default anywhere:
 - **An inline image may name a `/ColorSpace` resource** (8.9.7), and draws in
   that space.
 
-A JPEG or JPEG 2000 image reads no `/ColorSpace` (the non-goal above). A
-default cannot reach it, and nor can the space its twin names directly, so a
-twin comparison over a JPEG passes with neither applied; the twins in
-`default_spaces.rs` use sampled images for that reason.
+A JPEG or JPEG 2000 image reads its `/ColorSpace` as a sampled image does,
+so `default_spaces.rs` holds both to twins like every other path, in grey and
+RGB, the families the encoder and the decoder's fixtures have.
 
 ## Milestones
 
@@ -667,4 +658,4 @@ time and shift every colour. It is read by profiles that need to recover the
 | A page's default stops at a form with `/Resources` of its own, where a reader that carries defaults inward draws the substitute | The clause's words are followed ("the current resource dictionary"; 8.10.1); the census counts the files where the two readings part, and roadmap row K-02.5 commits its first figures |
 | The device operators, the most frequent in a content stream, start paying for the seam | A scope's defaults are read once and the interpreter branches on a field it holds |
 | H-135 is decided for conversion | One change to `resolve_ink`; `an_ink_render_keeps_a_device_cmyk_colour_s_ink_under_default_cmyk` names the contract it holds, so the change shows where it lands |
-| A twin comparison over a JPEG passes with nothing applied and is taken for proof | The twins use sampled images, and the JPEG path is a named non-goal |
+| A twin comparison passes with nothing applied and is taken for proof | Every twin is paired with the page without its default, which it must not equal |

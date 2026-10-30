@@ -111,7 +111,7 @@ waits on the owner is passed over until the owner decides.
    MS-04, MS-05, MS-06 and MS-02, in that order. MS-01.9 closes MS-01 once
    the P rows that land its guards have.
 2. **K-06** (the `jbig2` fuzz target), **K-01** (the external graphics
-   state) and **K-02** (default colour spaces), then **K-12 to K-14**.
+   state) and **K-02** (default colour spaces).
 3. **P-01 to P-05** and **P-28**.
 
 Then the capability tiers in the order of the table above, with signatures'

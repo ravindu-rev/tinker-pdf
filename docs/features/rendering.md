@@ -71,8 +71,8 @@ the device space each is named for wherever one is selected for painting:
 `g`/`G`, `rg`/`RG` and `k`/`K`; `cs` naming the device space, a `/ColorSpace`
 entry that is one, Table 93's `/G`, `/RGB` and `/CMYK` and a bare `/CalGray`
 or `/CalRGB` name; `sc`/`scn` with no space named, read in the family its
-count gives; a sampled image's `/ColorSpace` and an inline image's `/CS`; a
-shading's, under `sh` and in a shading pattern; an `/Indexed` base, an
+count gives; a sampled image's `/ColorSpace`, a JPEG's and a JPEG 2000
+image's among them, and an inline image's `/CS`; a shading's, under `sh` and in a shading pattern; an `/Indexed` base, an
 uncoloured pattern's base, and the alternate of a `/Separation` or `/DeviceN`
 space — not of `/Separation /All` or `/None`, which 8.6.6.4 is read as never
 selecting; a group's `/CS`, and with it a luminosity mask's `/BC`. A default
@@ -90,9 +90,9 @@ own spaces are read as written and never remapped again — `/DefaultRGB
 /DeviceRGB` is a legal default, and no default at all. A `/Lab`, `/Indexed`
 or `/Pattern` default, one with another number of components and one that is
 no colour space is refused: the device space is drawn as it would be without
-it, and the refusal is named (the refusal table). A JPEG or JPEG 2000 image
-reads no `/ColorSpace`, so neither a default nor a space named directly
-reaches it. A scope's defaults are read once, on its first device-space
+it, and the refusal is named (the refusal table). A JPEG 2000 codestream
+with no `/ColorSpace` over it carries its own colour, which selects no
+device space and is not remapped. A scope's defaults are read once, on its first device-space
 question, and the interpreter asks once a scope which families remap
 (`FontSource::device_defaults`), so a page naming none pays a load and a
 branch per selection and one flag check per device operator.
@@ -169,6 +169,22 @@ box pyramid that bounds the footprint ([rasterizer](rasterizer.md)). A codec thi
 does not decode draws a placeholder and is named; an image that decoded with
 damage tolerated is drawn *and* reported, so a half-decoded fax stays
 distinguishable from a blank one.
+
+**JPEG and JPEG 2000 images** are drawn in the `/ColorSpace` their
+dictionary names (8.9.5) — a codestream's own colour specification gives way
+to it (7.4.9) — and their samples are read through the space as a sampled
+image's are, so the same samples written as a stream in the same space draw
+the same bytes. A JPEG's samples take `/Decode` first; a codestream's take
+none (8.9.5.4), at its own precision, eight bits or sixteen. With no space
+named, or with the device space of the samples' own count named, the image
+is drawn in the codec's own colour: one component grey, three RGB, four
+CMYK, a codestream's colour specification read for nothing more. A space of
+another number of components than the samples cannot hold them; it is
+refused and named, and the codec's own colour drawn (the refusal table).
+`images.rs` and `jpx_images.rs` hold each to its twin
+(`a_jpeg_draws_in_the_space_its_dictionary_names`,
+`a_jpx_image_draws_in_the_space_its_dictionary_names` and their inline
+twins).
 
 **Form XObjects.** A form's own `/Resources` are consulted (8.10.1), so a form
 pasted in from another document resolves its names in the dictionary it brought
@@ -738,7 +754,7 @@ defect to hide in.
 | A font program that could not be read | `RenderWarning::UnreadableFont` | Its glyphs are not drawn; the rest of the page is | [content and text](content-and-text.md) |
 | A shading that cannot be read into types 1–7 | `RenderWarning::UnsupportedShading` | Reported by type number rather than guessed at | [rulings](../rulings.md) |
 | A pattern whose cell cannot be read, or a lattice past 65 536 positions / 16.7 Mpx / 33.5 Mpx | `RenderWarning::UnsupportedPattern` | Unpainted reads as missing; `/Pattern`'s nominal black reads as content and hides the gap | [rulings](../rulings.md) |
-| A colour space whose parameters no space can mean, read the nearest way that does: a `/Lab` `/Range` pair written backwards, read as the span it covers; and a default colour space 8.6.5.6 does not allow — a `/Lab`, `/Indexed` or `/Pattern` one, one with another number of components than its device space, one that is no colour space — refused, the device space drawn as without it | `RenderWarning::RepairedColorSpace { name, reason }`, `reason` `LabRangeUnordered`; for a default, `name` the default's own (`DefaultRGB`) and `reason` `DefaultSpaceFamily`, `DefaultSpaceComponents` or `DefaultSpaceUnreadable`, once a render | Drawn *and* named (ruling 10). Named where the space is reached through the page's resources or a tiling cell's, as every tolerance the resource layer reports is; **not** through a form XObject's or an annotation appearance's own `/Resources`, which keep what they tolerate to themselves — a font a form's own resources cannot resolve goes unreported the same way | [rulings](../rulings.md) |
+| A colour space whose parameters no space can mean, read the nearest way that does: a `/Lab` `/Range` pair written backwards, read as the span it covers; and a default colour space 8.6.5.6 does not allow — a `/Lab`, `/Indexed` or `/Pattern` one, one with another number of components than its device space, one that is no colour space — refused, the device space drawn as without it; and a JPEG's or JPEG 2000 image's `/ColorSpace` with another number of components than its samples, refused, the image drawn in the codec's own colour | `RenderWarning::RepairedColorSpace { name, reason }`, `reason` `LabRangeUnordered`; for a default, `name` the default's own (`DefaultRGB`) and `reason` `DefaultSpaceFamily`, `DefaultSpaceComponents` or `DefaultSpaceUnreadable`; for such an image, `name` the image's (`inline` for an inline one) and `reason` `ImageSpaceComponents`; once a render | Drawn *and* named (ruling 10). Named where the space is reached through the page's resources or a tiling cell's, as every tolerance the resource layer reports is; **not** through a form XObject's or an annotation appearance's own `/Resources`, which keep what they tolerate to themselves — a font a form's own resources cannot resolve goes unreported the same way | [rulings](../rulings.md) |
 | A layer the default configuration turns off | `RenderWarning::HiddenOptionalContent` | Correct behaviour, reported all the same — the one leniency a reader cannot see | [rulings](../rulings.md) |
 | More than 2 000 transparency-group buffers on one page | `RenderWarning::GroupBudgetSpent` | A budget, not a depth: branching soft-mask recursion stays inside any depth cap | [rulings](../rulings.md) |
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |

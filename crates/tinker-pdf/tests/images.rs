@@ -565,3 +565,170 @@ fn a_decode_array_inverts_a_jpeg_too() {
         "and the inverted one is light: {inverted:?}"
     );
 }
+
+/// A one-page document drawing the image XObject `/Im0` over the whole 20 by
+/// 20 page: its dictionary's `keys` beside `/Subtype /Image`, and `data` its
+/// stream.
+fn page_with_image(keys: &str, data: &[u8]) -> Vec<u8> {
+    let mut file = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 20 20]\n\
+   /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 27 >>\nstream\nq 20 0 0 20 0 0 cm /Im0 Do Q\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Image {keys} /Length {} >>\nstream\n",
+        data.len()
+    )
+    .into_bytes();
+    file.extend_from_slice(data);
+    file.extend_from_slice(b"\nendstream\nendobj\ntrailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n");
+    file
+}
+
+/// A spot colour whose tints run from white to red, so a sample's tint is
+/// told from its grey by the green and blue it takes away (8.6.6.4).
+const SPOT: &str = "[/Separation /Spot /DeviceRGB << /FunctionType 2 /Domain [0 1] \
+                    /C0 [1 1 1] /C1 [1 0 0] /N 1 >>]";
+
+/// A palette of 256 entries, red below index 128 and blue from it (8.6.6.3).
+fn palette() -> String {
+    let entries: String = (0..256)
+        .map(|index| if index < 128 { "FF0000" } else { "0000FF" })
+        .collect();
+    format!("[/Indexed /DeviceRGB 255 <{entries}>]")
+}
+
+/// The samples of the first image a document's first page draws, as
+/// `Page::images` decodes them.
+fn first_image_samples(file: Vec<u8>) -> Vec<u8> {
+    Document::open(file)
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .images()
+        .first()
+        .expect("an image")
+        .samples
+        .clone()
+}
+
+/// 8.9.5: a JPEG is drawn in the `/ColorSpace` its dictionary names, not in
+/// the colour its frame alone gives — here a spot colour's tints, with and
+/// without `/Decode`, and a palette.
+///
+/// Each is held to its twin: the JPEG's own samples, as `Page::images` lists
+/// them, written as a plain sampled image in the same space, which must draw
+/// the same bytes. And each must differ from the JPEG drawn in grey, because
+/// two twins that agree since neither read the space prove nothing.
+#[test]
+fn a_jpeg_draws_in_the_space_its_dictionary_names() {
+    let jpeg = progressive_jpeg();
+    let dct = |space: &str, decode: &str| {
+        page_with_image(
+            &format!(
+                "/Width 8 /Height 8 /ColorSpace {space} /BitsPerComponent 8 {decode} \
+                 /Filter /DCTDecode"
+            ),
+            &jpeg,
+        )
+    };
+    let samples = first_image_samples(dct("/DeviceGray", ""));
+    assert_eq!(samples.len(), 64, "a byte a sample of the 8 by 8 frame");
+    let grey = render(dct("/DeviceGray", ""));
+
+    let palette = palette();
+    for (space, decode) in [(SPOT, ""), (SPOT, "/Decode [1 0]"), (&*palette, "")] {
+        let drawn = render(dct(space, decode));
+        let twin = render(page_with_image(
+            &format!("/Width 8 /Height 8 /ColorSpace {space} /BitsPerComponent 8 {decode}"),
+            &samples,
+        ));
+        assert_eq!(
+            drawn.data, twin.data,
+            "{space} {decode}: the JPEG drew otherwise than its own samples draw in that space"
+        );
+        assert_ne!(drawn.data, grey.data, "{space} {decode}: drawn as grey");
+        assert!(
+            drawn.warnings.is_empty(),
+            "{space} {decode}: {:?}",
+            drawn.warnings
+        );
+    }
+
+    // What the spaces make of a dark grey near 32: a light tint of the spot
+    // colour, a deep one once `/Decode` reverses the sample, and the palette's
+    // red.
+    let (r, g, b) = pixel(&render(dct(SPOT, "")), 10, 10);
+    assert!(
+        r == 255 && g > 200 && g == b,
+        "a light tint: ({r}, {g}, {b})"
+    );
+    let (r, g, b) = pixel(&render(dct(SPOT, "/Decode [1 0]")), 10, 10);
+    assert!(r == 255 && g < 60 && g == b, "a deep tint: ({r}, {g}, {b})");
+    assert_eq!(
+        pixel(&render(dct(&palette, "")), 10, 10),
+        (255, 0, 0),
+        "the palette's red"
+    );
+}
+
+/// An inline JPEG goes through the same entry point, its space read as an
+/// inline image's is (8.9.7): a palette over it draws as the same samples
+/// inline in the same space.
+#[test]
+fn an_inline_jpeg_draws_in_the_space_its_dictionary_names() {
+    let inline = |filter: &str, data: &[u8]| {
+        let hex: String = data.iter().map(|byte| format!("{byte:02X}")).collect();
+        page_with_content(
+            format!(
+                "q 20 0 0 20 0 0 cm BI /W 8 /H 8 /CS {} /BPC 8 /F {filter} ID {hex}> EI Q",
+                palette()
+            )
+            .as_bytes(),
+        )
+    };
+    let jpeg = inline("[/AHx /DCT]", &progressive_jpeg());
+    let samples = first_image_samples(jpeg.clone());
+    assert_eq!(samples.len(), 64, "the inline JPEG's own samples");
+    let drawn = render(jpeg);
+    let twin = render(inline("/AHx", &samples));
+
+    assert_eq!(
+        drawn.data, twin.data,
+        "the inline JPEG drew otherwise than its samples"
+    );
+    assert_eq!(pixel(&drawn, 10, 10), (255, 0, 0), "the palette's red");
+    assert!(drawn.warnings.is_empty(), "{:?}", drawn.warnings);
+}
+
+/// A space of another number of components than the JPEG's frame cannot hold
+/// its samples: it is refused and named under the image's name, and the JPEG
+/// is drawn in its own colour (ruling 10).
+#[test]
+fn a_jpeg_whose_space_cannot_hold_its_samples_keeps_its_own_colour() {
+    let jpeg = progressive_jpeg();
+    let dct = |space: &str| {
+        page_with_image(
+            &format!(
+                "/Width 8 /Height 8 /ColorSpace {space} /BitsPerComponent 8 /Filter /DCTDecode"
+            ),
+            &jpeg,
+        )
+    };
+    let refused = render(dct("/DeviceRGB"));
+
+    assert_eq!(
+        refused.data,
+        render(dct("/DeviceGray")).data,
+        "drawn in the frame's own grey"
+    );
+    assert_eq!(
+        refused.warnings,
+        vec![tinker_pdf::RenderWarning::RepairedColorSpace {
+            name: "Im0".to_string(),
+            reason: "ImageSpaceComponents".to_string(),
+        }],
+        "and the refusal named"
+    );
+}

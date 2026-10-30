@@ -189,7 +189,10 @@ pub enum RenderWarning {
     /// without it: `DefaultSpaceFamily` for a `/Lab`, `/Indexed` or
     /// `/Pattern` one, `DefaultSpaceComponents` for one with another number
     /// of components than its device space, `DefaultSpaceUnreadable` for one
-    /// that is no colour space.
+    /// that is no colour space — or, under a JPEG's or a JPEG 2000 image's
+    /// name, `ImageSpaceComponents`: a `/ColorSpace` with another number of
+    /// components than the codec's samples, refused and the image drawn in
+    /// the codec's own colour.
     ///
     /// Reported once per name and repair, wherever the facade reports what
     /// its resources tolerated — a space read through the page's resources

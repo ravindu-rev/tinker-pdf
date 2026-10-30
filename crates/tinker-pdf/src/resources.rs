@@ -326,43 +326,80 @@ pub(crate) enum InlineSamples {
     Jpx(Vec<u8>),
 }
 
-/// A JPEG's pixels, ready to blit (7.4.8).
-///
-/// Shared by the XObject path and the inline one so the two differ in nothing
-/// but where the still-coded bytes came from — the ceiling, the colour
-/// conversion and the `/Decode` reversal included.
-///
-/// A JPEG carries its own dimensions and its own colour, so it never joins the
-/// generic sample loop; `/Decode` therefore has to be applied to the converted
-/// output rather than to raw samples, which is what
-/// [`invert_if_decode_reverses`] is for.
-fn jpeg_image(
-    raw: &[u8],
-    decode: &[(f64, f64)],
-    interpolate: bool,
-) -> Result<DecodedImage, String> {
-    let image = jpeg_samples(raw)?;
-    let mut rgb = jpeg_to_rgb(&image);
-    invert_if_decode_reverses(decode, &mut rgb);
-    Ok(DecodedImage {
-        width: image.width,
-        height: image.height,
-        rgb,
-        alpha: Vec::new(),
-        stencil: false,
-        interpolate,
-    })
-}
-
 /// A JPEG's samples, decoded and **not** converted: one byte a component, in
 /// the components the frame carries — YCbCr already turned into RGB and an
 /// Adobe-inverted CMYK already turned back into ink values, which are the
 /// decoder's to undo, and nothing else (7.4.8).
 ///
-/// The one decode both [`jpeg_image`] and [`crate::Page::images`] make, under
-/// the one ceiling.
+/// The one decode both [`PageResources::jpeg_image`] and
+/// [`crate::Page::images`] make, under the one ceiling.
 fn jpeg_samples(raw: &[u8]) -> Result<tinker_pdf_filters::JpegImage, String> {
     jpeg_decode(raw, 1 << 28).map_err(|e| format!("{e:?}"))
+}
+
+/// How many components a decoded JPEG's samples have a pixel.
+fn jpeg_components(color: JpegColor) -> u8 {
+    match color {
+        JpegColor::Gray => 1,
+        JpegColor::Rgb => 3,
+        JpegColor::Cmyk | JpegColor::CmykInverted => 4,
+    }
+}
+
+/// A codec's samples drawn in the space its image's dictionary names (8.9.5).
+///
+/// `pixels` pixels of `space.components()` values of `bpc` bits, eight or
+/// sixteen, interleaved: the layout a JPEG's samples and a JPEG 2000
+/// codestream's already have, and a stream's once its rows are whole bytes
+/// (8.9.3). Each value is read through `decode`, or Table 90's default, and
+/// each pixel through [`ColorSpace::to_rgb`], exactly as the sample loop reads
+/// a stream's — so a codec's samples and the same samples written as a stream
+/// in the same space draw the same bytes.
+fn samples_in_space(
+    space: &ColorSpace,
+    samples: &[u8],
+    pixels: usize,
+    bpc: u32,
+    decode: &[(f64, f64)],
+) -> Vec<u8> {
+    let n = space.components();
+    let max = ((1u32 << bpc.min(16)) - 1) as f64;
+    let indexed = matches!(space, ColorSpace::Indexed { .. });
+    let mut remembered = Remembered::for_image(space, n, bpc);
+    let mut rgb = Vec::with_capacity(pixels.saturating_mul(3));
+    let mut components = Vec::with_capacity(n);
+    for pixel in 0..pixels {
+        components.clear();
+        let mut key = 0u128;
+        for c in 0..n {
+            let at = pixel * n + c;
+            let value = match bpc {
+                8 => u32::from(samples.get(at).copied().unwrap_or(0)),
+                _ => read_bits(samples, at * bpc as usize, bpc),
+            };
+            key = Remembered::key(key, c, value);
+            // An indexed space's component is the index itself, and its
+            // `/Decode` maps the index range rather than a fraction of one.
+            let raw = if indexed {
+                f64::from(value)
+            } else {
+                f64::from(value) / max
+            };
+            components.push(
+                match decode.get(c).copied().or_else(|| default_decode(space, c)) {
+                    Some((dmin, dmax)) if indexed => dmin + raw * (dmax - dmin) / max.max(1.0),
+                    Some((dmin, dmax)) => dmin + raw * (dmax - dmin),
+                    None => raw,
+                },
+            );
+        }
+        let (r, g, b) = match remembered.as_mut() {
+            Some(table) => table.convert(key, || space.to_rgb(&components)),
+            None => space.to_rgb(&components),
+        };
+        rgb.extend_from_slice(&[r, g, b]);
+    }
+    rgb
 }
 
 /// What a JBIG2 image's decode is allowed to cost, as the pixels
@@ -3300,7 +3337,84 @@ impl PageResources {
         Some(samples)
     }
 
-    /// A JPEG 2000 image's pixels, ready to blit (8.9.5.4).
+    /// The space a JPEG's or a JPEG 2000 image's samples are drawn in, of
+    /// `components` a pixel: the `/ColorSpace` its dictionary names, read as
+    /// `named` (8.9.5) — for a codestream, over its own colour specification
+    /// (7.4.9) — or `None` for the codec's own colour.
+    ///
+    /// The codec's own colour stands where the dictionary names no space this
+    /// reads, and where it names the device space of the samples' own count,
+    /// which is the space the codec's own conversion draws. A space of
+    /// another count cannot hold the samples: it is refused and named under
+    /// the image's own name, and the codec's own colour drawn (ruling 10).
+    fn codec_space(
+        &self,
+        named: Option<ColorSpace>,
+        components: usize,
+        name: &[u8],
+    ) -> Option<ColorSpace> {
+        let space = named?;
+        if space.components() != components {
+            self.note_repaired_space((
+                String::from_utf8_lossy(name).into_owned(),
+                "ImageSpaceComponents".to_string(),
+            ));
+            return None;
+        }
+        let own = matches!(
+            space,
+            ColorSpace::DeviceGray | ColorSpace::DeviceRgb | ColorSpace::DeviceCmyk
+        );
+        (!own).then_some(space)
+    }
+
+    /// A JPEG's pixels, ready to blit (7.4.8), in `named`, the space its
+    /// dictionary's `/ColorSpace` was read as.
+    ///
+    /// Shared by the XObject path and the inline one so the two differ in
+    /// nothing but where the still-coded bytes came from and the scope their
+    /// space is read in — the ceiling, the colour conversion and `/Decode`
+    /// included.
+    ///
+    /// A JPEG carries its own dimensions and its own components, so it never
+    /// joins the generic sample loop. Drawn in its dictionary's space, its
+    /// samples take `/Decode` before the space, as the loop's do
+    /// ([`samples_in_space`]); drawn in its own colour, `/Decode` is applied
+    /// to the converted output instead, which is what
+    /// [`invert_if_decode_reverses`] is for.
+    fn jpeg_image(
+        &self,
+        raw: &[u8],
+        decode: &[(f64, f64)],
+        interpolate: bool,
+        named: Option<ColorSpace>,
+        name: &[u8],
+    ) -> Result<DecodedImage, String> {
+        let image = jpeg_samples(raw)?;
+        let components = usize::from(jpeg_components(image.color));
+        let rgb = match self.codec_space(named, components, name) {
+            Some(space) => {
+                let pixels = (image.width as usize) * (image.height as usize);
+                samples_in_space(&space, &image.data, pixels, 8, decode)
+            }
+            None => {
+                let mut rgb = jpeg_to_rgb(&image);
+                invert_if_decode_reverses(decode, &mut rgb);
+                rgb
+            }
+        };
+        Ok(DecodedImage {
+            width: image.width,
+            height: image.height,
+            rgb,
+            alpha: Vec::new(),
+            stencil: false,
+            interpolate,
+        })
+    }
+
+    /// A JPEG 2000 image's pixels, ready to blit (8.9.5.4), in `named`, the
+    /// space its dictionary's `/ColorSpace` was read as.
     ///
     /// **One entry point, and both the XObject path and the inline path go
     /// through it.** That is not tidiness: gap 16 changed the CCITT decoder's
@@ -3320,21 +3434,27 @@ impl PageResources {
     ///   file whose dictionary disagrees must not shift its samples, which is why
     ///   this never reads the key.
     /// - **`/ColorSpace` overrides** the codestream's when present, and the
-    ///   codestream's applies when it is absent. Note the ordering trap M6 found:
-    ///   a palette makes the *output* channel count differ from `Csiz`, so it is
-    ///   the output count a `/ColorSpace` must agree with.
+    ///   codestream's applies when it is absent ([`Self::codec_space`]). Note
+    ///   the ordering trap M6 found: a palette makes the *output* channel count
+    ///   differ from `Csiz`, so it is the output count a `/ColorSpace` must
+    ///   agree with.
     /// - **`/Decode` is ignored**, unlike every other image filter here.
     /// - **`/ImageMask` shall not be combined with JPXDecode**, so a file that
     ///   does is refused by name rather than rendered as a stencil of something.
     /// - **`/SMaskInData`** decides what happens to the codestream's *own*
     ///   opacity channel, which the filters crate has already separated out.
     fn jpx_image(
+        &self,
         raw: &[u8],
-        smask_in_data: i64,
-        image_mask: bool,
+        dict: &Dict,
         interpolate: bool,
-        warnings: &mut Vec<tinker_pdf_filters::Warning>,
+        named: Option<ColorSpace>,
+        name: &[u8],
     ) -> Result<DecodedImage, String> {
+        let smask_in_data = dict.get_int(self.doc.intern(b"SMaskInData")).unwrap_or(0);
+        let image_mask = dict
+            .get_bool(self.doc.intern(b"ImageMask"))
+            .unwrap_or(false);
         if image_mask {
             // 8.9.6.2 makes a stencil one bit per sample with no colour space;
             // 8.9.5.4 forbids the combination outright. Refusing by name beats
@@ -3342,54 +3462,23 @@ impl PageResources {
             return Err("JPXDecode with /ImageMask".to_string());
         }
 
-        let image = Self::jpx_samples(raw, warnings)?;
+        let mut warnings = Vec::new();
+        let decoded = Self::jpx_samples(raw, &mut warnings);
+        for warning in &warnings {
+            self.report_damaged_image(name, *warning);
+        }
+        let image = decoded?;
 
         let count = (image.width as usize) * (image.height as usize);
-        let mut rgb = Vec::with_capacity(count * 3);
-
-        // 16-bit samples arrive big-endian; the renderer wants eight, and taking
-        // the high byte is a truncation the clause permits rather than a rounding
-        // decision worth inventing.
-        let sample = |i: usize, channel: usize| -> u8 {
-            let per = usize::from(image.components);
-            let at = i * per + channel;
-            if image.precision > 8 {
-                image.samples.get(at * 2).copied().unwrap_or(0)
-            } else {
-                image.samples.get(at).copied().unwrap_or(0)
+        let mut rgb = match self.codec_space(named, usize::from(image.components), name) {
+            // 8.9.5.4 ignores `/Decode`, so none is applied, and a sixteen-bit
+            // codestream is read at its own precision.
+            Some(space) => {
+                let bits = if image.precision > 8 { 16 } else { 8 };
+                samples_in_space(&space, &image.samples, count, bits, &[])
             }
+            None => Self::jpx_own_colour(&image, count)?,
         };
-
-        for i in 0..count {
-            match image.components {
-                1 => {
-                    let g = sample(i, 0);
-                    rgb.extend_from_slice(&[g, g, g]);
-                }
-                3 => rgb.extend_from_slice(&[sample(i, 0), sample(i, 1), sample(i, 2)]),
-                4 => {
-                    // CMYK, and the conversion is the naive one the colour crate
-                    // uses elsewhere rather than a second opinion about ink.
-                    let (c, m, y, k) = (
-                        f64::from(sample(i, 0)) / 255.0,
-                        f64::from(sample(i, 1)) / 255.0,
-                        f64::from(sample(i, 2)) / 255.0,
-                        f64::from(sample(i, 3)) / 255.0,
-                    );
-                    let to = |v: f64| {
-                        #[allow(clippy::cast_possible_truncation, reason = "clamped to 0..=255")]
-                        #[allow(clippy::cast_sign_loss, reason = "clamped to 0..=255")]
-                        {
-                            ((1.0 - (v + k).min(1.0)) * 255.0).clamp(0.0, 255.0) as u8
-                        }
-                    };
-                    rgb.extend_from_slice(&[to(c), to(m), to(y)]);
-                }
-                other => {
-                    return Err(format!("JPXDecode with {other} components"));
-                }
-            }
-        }
 
         // `/SMaskInData` (Table 89): 0 means ignore any opacity the codestream
         // carries, 1 means it is present and unpremultiplied, 2 means present and
@@ -3441,6 +3530,59 @@ impl PageResources {
             stencil: false,
             interpolate,
         })
+    }
+
+    /// A JPEG 2000 image's samples in the codestream's own colour, by how
+    /// many components it has: one is grey, three RGB and four CMYK, the
+    /// codestream's colour specification read for nothing more (7.4.9).
+    fn jpx_own_colour(
+        image: &tinker_pdf_filters::JpxImage,
+        count: usize,
+    ) -> Result<Vec<u8>, String> {
+        let mut rgb = Vec::with_capacity(count * 3);
+
+        // 16-bit samples arrive big-endian; the renderer wants eight, and taking
+        // the high byte is a truncation the clause permits rather than a rounding
+        // decision worth inventing.
+        let sample = |i: usize, channel: usize| -> u8 {
+            let per = usize::from(image.components);
+            let at = i * per + channel;
+            if image.precision > 8 {
+                image.samples.get(at * 2).copied().unwrap_or(0)
+            } else {
+                image.samples.get(at).copied().unwrap_or(0)
+            }
+        };
+
+        for i in 0..count {
+            match image.components {
+                1 => {
+                    let g = sample(i, 0);
+                    rgb.extend_from_slice(&[g, g, g]);
+                }
+                3 => rgb.extend_from_slice(&[sample(i, 0), sample(i, 1), sample(i, 2)]),
+                4 => {
+                    // CMYK, and the conversion is the naive one the colour crate
+                    // uses elsewhere rather than a second opinion about ink.
+                    let (c, m, y, k) = (
+                        f64::from(sample(i, 0)) / 255.0,
+                        f64::from(sample(i, 1)) / 255.0,
+                        f64::from(sample(i, 2)) / 255.0,
+                        f64::from(sample(i, 3)) / 255.0,
+                    );
+                    let to = |v: f64| {
+                        #[allow(clippy::cast_possible_truncation, reason = "clamped to 0..=255")]
+                        #[allow(clippy::cast_sign_loss, reason = "clamped to 0..=255")]
+                        {
+                            ((1.0 - (v + k).min(1.0)) * 255.0).clamp(0.0, 255.0) as u8
+                        }
+                    };
+                    rgb.extend_from_slice(&[to(c), to(m), to(y)]);
+                }
+                other => return Err(format!("JPXDecode with {other} components")),
+            }
+        }
+        Ok(rgb)
     }
 
     /// The final filter a stream dictionary names (7.4), which decides how
@@ -3618,7 +3760,8 @@ impl PageResources {
                 .doc
                 .stream_image_input(reference)
                 .map_err(|_| "DCTDecode".to_string())?;
-            return jpeg_image(&raw, &decode, interpolate);
+            let named = self.image_space(&dict, name);
+            return self.jpeg_image(&raw, &decode, interpolate, named, name);
         }
         if matches!(last_filter.as_deref(), Some(b"JPXDecode")) {
             // Like a JPEG and unlike a fax, a JPX codestream carries its own
@@ -3629,17 +3772,8 @@ impl PageResources {
                 .doc
                 .stream_image_input(reference)
                 .map_err(|_| "JPXDecode".to_string())?;
-            let smask_in_data = dict.get_int(self.doc.intern(b"SMaskInData")).unwrap_or(0);
-            let mut warnings = Vec::new();
-            let image_mask = dict
-                .get_bool(self.doc.intern(b"ImageMask"))
-                .unwrap_or(false);
-            let decoded =
-                Self::jpx_image(&raw, smask_in_data, image_mask, interpolate, &mut warnings);
-            for warning in &warnings {
-                self.report_damaged_image(name, *warning);
-            }
-            return decoded;
+            let named = self.image_space(&dict, name);
+            return self.jpx_image(&raw, &dict, interpolate, named, name);
         }
 
         let (data, bpc) = self.stream_samples(
@@ -3650,9 +3784,8 @@ impl PageResources {
             name,
         )?;
 
-        let space = self.doc.resolve_key(&dict, self.doc.intern(b"ColorSpace"));
         let space = self
-            .parse_space(&space, 0, name)
+            .image_space(&dict, name)
             .unwrap_or(ColorSpace::DeviceGray);
         let n = space.components();
 
@@ -3974,7 +4107,10 @@ impl PageResources {
             // The same decoder, through the same helper, as an image XObject:
             // a JPEG returns its own dimensions and its own colour, so it does
             // not join the sample loop below.
-            InlineSamples::Jpeg(data) => return jpeg_image(&data, &decode, interpolate),
+            InlineSamples::Jpeg(data) => {
+                let named = self.inline_space(dict);
+                return self.jpeg_image(&data, &decode, interpolate, named, INLINE_NAME.as_bytes());
+            }
             InlineSamples::Jpx(data) => {
                 // The same entry point the XObject path takes, for the same
                 // reason gap 16 gave the fax one and gap 08 was reordered
@@ -3982,39 +4118,15 @@ impl PageResources {
                 // signature, so nothing in the build could notice it drifting
                 // from 8.9.5.4's rules about which of the dictionary's claims
                 // survive a codestream that describes itself.
-                let smask_in_data = dict.get_int(self.doc.intern(b"SMaskInData")).unwrap_or(0);
-                let image_mask = dict
-                    .get_bool(self.doc.intern(b"ImageMask"))
-                    .unwrap_or(false);
-                let mut jpx_warnings = Vec::new();
-                let decoded = Self::jpx_image(
-                    &data,
-                    smask_in_data,
-                    image_mask,
-                    interpolate,
-                    &mut jpx_warnings,
-                );
-                for warning in &jpx_warnings {
-                    self.report_damaged_image(INLINE_NAME.as_bytes(), *warning);
-                }
-                return decoded;
+                let named = self.inline_space(dict);
+                return self.jpx_image(&data, dict, interpolate, named, INLINE_NAME.as_bytes());
             }
         };
         // 7.4.6: fax output is one bit per pixel whatever the dictionary
         // claims, exactly as on the XObject path.
         let bpc = if fax { 1 } else { bpc };
 
-        // 8.9.7: a device space, a `/ColorSpace` resource by name, or an
-        // `/Indexed` array over one of those — each remapped as an image
-        // XObject's space is (8.6.5.6).
-        let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
-        let inline = Reading {
-            inline: true,
-            ..self.painted()
-        };
-        let space = self
-            .read_space(&space, 0, INLINE_NAME.as_bytes(), inline)
-            .unwrap_or(ColorSpace::DeviceGray);
+        let space = self.inline_space(dict).unwrap_or(ColorSpace::DeviceGray);
         let n = if is_mask { 1 } else { space.components() };
 
         let row_bytes = ((width as usize) * n * (bpc as usize)).div_ceil(8);
@@ -4074,6 +4186,25 @@ impl PageResources {
             stencil: is_mask,
             interpolate,
         })
+    }
+
+    /// The `/ColorSpace` an image XObject's dictionary names, read as a space
+    /// painted in (8.9.5, 8.6.5.6), or `None` where it names none this reads.
+    fn image_space(&self, dict: &Dict, name: &[u8]) -> Option<ColorSpace> {
+        let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
+        self.parse_space(&space, 0, name)
+    }
+
+    /// An inline image's `/ColorSpace` (8.9.7): a device space, a
+    /// `/ColorSpace` resource by name, or an `/Indexed` array over one of
+    /// those — each remapped as an image XObject's space is (8.6.5.6).
+    fn inline_space(&self, dict: &Dict) -> Option<ColorSpace> {
+        let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
+        let inline = Reading {
+            inline: true,
+            ..self.painted()
+        };
+        self.read_space(&space, 0, INLINE_NAME.as_bytes(), inline)
     }
 
     /// The `/SMask` of an image, decoded (11.6.5.3).
@@ -4572,11 +4703,7 @@ fn take_samples(image: &mut crate::PageImage, mut data: Vec<u8>, bits: u32) {
 fn take_jpeg(image: &mut crate::PageImage, jpeg: tinker_pdf_filters::JpegImage) {
     image.width = jpeg.width;
     image.height = jpeg.height;
-    image.components = match jpeg.color {
-        JpegColor::Gray => 1,
-        JpegColor::Rgb => 3,
-        JpegColor::Cmyk | JpegColor::CmykInverted => 4,
-    };
+    image.components = jpeg_components(jpeg.color);
     take_samples(image, jpeg.data, 8);
 }
 

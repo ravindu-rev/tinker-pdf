@@ -76,9 +76,8 @@
 //!   cell's are ignored (9.6.5, 8.7.3.3), and a group's `/CS` and a soft
 //!   mask's `/BC` paint nothing.
 //! - **Counted as the standard reads them, where the engine does not.** A
-//!   JPEG's or JPEG 2000's `/ColorSpace`, which the renderer never reads (the
-//!   design's non-goal), and a Type 3 font's or a soft-mask group's own
-//!   `/Resources`, which the engine's scopes do not read.
+//!   Type 3 font's or a soft-mask group's own `/Resources`, which the
+//!   engine's scopes do not read.
 //! - **A Type 3 font is read whole**: every `/CharProcs` entry, not only the
 //!   codes the text shows.
 //! - **A default is an entry**, whatever its value; a `null` one is absent
