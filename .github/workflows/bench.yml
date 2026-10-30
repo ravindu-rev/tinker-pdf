@@ -75,11 +75,13 @@ jobs:
           - group: render
             count: 3
           - group: write
-            count: 1
+            count: 12
           - group: layout
             count: 1
           - group: calibration
             count: 1
+          - group: analysis
+            count: 8
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

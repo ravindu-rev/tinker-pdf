@@ -77,7 +77,29 @@
       "group": "write",
       "operations": [
         { "name": "rewrite a document", "unit": "pages",
-          "per_iteration": 3, "calls": 1 }
+          "per_iteration": 3, "calls": 1 },
+        { "name": "rewrite 100 pages", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "rewrite 1000 pages", "unit": "pages",
+          "per_iteration": 1000, "calls": 1 },
+        { "name": "rewrite 3000 pages", "unit": "pages",
+          "per_iteration": 3000, "calls": 1 },
+        { "name": "rewrite 100 pages into object streams", "unit": "pages",
+          "per_iteration": 1000, "calls": 10 },
+        { "name": "rewrite 100 pages linearized", "unit": "pages",
+          "per_iteration": 700, "calls": 7 },
+        { "name": "subset-on-save of 100 pages", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "merge 4 x 100 pages", "unit": "pages",
+          "per_iteration": 400, "calls": 1 },
+        { "name": "AES-256-CBC decrypt 23 MB", "unit": "bytes",
+          "per_iteration": 23229599, "calls": 1 },
+        { "name": "AES-256-CBC encrypt 23 MB", "unit": "bytes",
+          "per_iteration": 23229599, "calls": 1 },
+        { "name": "edit an annotation, save, reopen, 1000 pages", "unit": "pages",
+          "per_iteration": 13000, "calls": 13 },
+        { "name": "edit an annotation, save, reopen, 10 pages", "unit": "pages",
+          "per_iteration": 10, "calls": 1 }
       ]
     },
     {
@@ -91,6 +113,27 @@
       "group": "calibration",
       "operations": [
         { "name": "text of 100 dense pages", "unit": "pages",
+          "per_iteration": 100, "calls": 1 }
+      ]
+    },
+    {
+      "group": "analysis",
+      "operations": [
+        { "name": "text of the 100 report pages", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "redact a rectangle on each of 100 pages", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "reading order inferred over 100 pages", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "tables inferred over 100 pages", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "text of the 100 claiming pages", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "PDF-A validation of 100 pages", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "PDF-UA validation of 100 pages", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "PDF-X validation of 100 pages", "unit": "pages",
           "per_iteration": 100, "calls": 1 }
       ]
     }
@@ -121,7 +164,26 @@
         "text/search a phrase over 100 pages from scratch",
         "text/search 100 pages' prebuilt text",
         "text/search 100 pages' prebuilt text, whole words, unaccented",
-        "calibration/text of 100 dense pages"
+        "calibration/text of 100 dense pages",
+        "write/rewrite 100 pages",
+        "write/rewrite 1000 pages",
+        "write/rewrite 3000 pages",
+        "write/rewrite 100 pages into object streams",
+        "write/rewrite 100 pages linearized",
+        "write/subset-on-save of 100 pages",
+        "write/merge 4 x 100 pages",
+        "write/AES-256-CBC decrypt 23 MB",
+        "write/AES-256-CBC encrypt 23 MB",
+        "write/edit an annotation, save, reopen, 1000 pages",
+        "write/edit an annotation, save, reopen, 10 pages",
+        "analysis/text of the 100 report pages",
+        "analysis/redact a rectangle on each of 100 pages",
+        "analysis/reading order inferred over 100 pages",
+        "analysis/tables inferred over 100 pages",
+        "analysis/text of the 100 claiming pages",
+        "analysis/PDF-A validation of 100 pages",
+        "analysis/PDF-UA validation of 100 pages",
+        "analysis/PDF-X validation of 100 pages"
       ],
       "operations": [
         {

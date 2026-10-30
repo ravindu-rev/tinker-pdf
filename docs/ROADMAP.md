@@ -105,7 +105,7 @@ a choice inside a step; so is anything a change would cost that works today.
 Take the first step in this list whose **Depends on** is done; a step that
 waits on the owner is passed over until the owner decides.
 
-1. **The MS tier** from where it stands: MS-04.4 to MS-04.8; MS-05.1 after
+1. **The MS tier** from where it stands: MS-04.5 to MS-04.8; MS-05.1 after
    MS-04.6; MS-12.1 and MS-12.2; MS-03.1 and MS-02.2; K-02.3, then MS-01.3
    to MS-01.7; P-05.3, then MS-08.2; MS-07.3. Then MS-11, MS-01 to MS-01.8,
    MS-04, MS-05, MS-06 and MS-02, in that order. MS-01.9 closes MS-01 once

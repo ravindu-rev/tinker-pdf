@@ -15,8 +15,13 @@
 use std::sync::{Arc, OnceLock};
 
 use tinker_pdf::{
-    DeviceSpace, Document, DocumentBuilder, Encryption, Function, ImageData, Shading, WriteOptions,
+    ArchivalLevel, ArchivalPart, ArchivalProfile, DeviceSpace, Document, DocumentBuilder,
+    Encryption, Function, ImageData, PageBuilder, Shading, WriteMode, WriteOptions,
 };
+use tinker_pdf_cos::edit::annot::{self, Color};
+use tinker_pdf_cos::pages::Rect;
+use tinker_pdf_cos::write::StreamData;
+use tinker_pdf_cos::{Dict, ObjRef, Object};
 
 /// Three A4 pages of forty lines each in standard-14 Helvetica, unembedded.
 ///
@@ -398,4 +403,304 @@ pub fn aes_file() -> Arc<[u8]> {
         assert_eq!(doc.page_count(), plain.page_count());
         file
     }))
+}
+
+/// The text of one column of a report page: `lines` lines of about 44
+/// characters, drawn from [`WORDS`] as [`dense`]'s lines are.
+fn column_lines(words: &mut Seeded, lines: usize) -> Vec<String> {
+    (0..lines)
+        .map(|_| {
+            let mut text = String::new();
+            while text.chars().count() < 44 {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(WORDS[words.below(WORDS.len())]);
+            }
+            text
+        })
+        .collect()
+}
+
+/// The cells of a report page's one table: a header row and four rows of
+/// three cells, the figures by seed.
+fn table_cells(words: &mut Seeded, page: usize) -> [[String; 3]; 5] {
+    let mut row = |at: usize| {
+        [
+            format!("Item {}", page * 4 + at),
+            format!("{}", words.below(9000) + 1000),
+            format!("{}.{:02}", words.below(90) + 10, words.below(100)),
+        ]
+    };
+    let rows = [row(1), row(2), row(3), row(4)];
+    let [a, b, c, d] = rows;
+    [
+        ["Item".to_string(), "Units".to_string(), "Share".to_string()],
+        a,
+        b,
+        c,
+        d,
+    ]
+}
+
+/// The operators that rule a table of `rows` rows of 18 pt and three
+/// columns of `widths`, its top left corner at `(x, top)`: every row's and
+/// every column's edge, so the table reads off its rules.
+fn table_rules(x: f64, top: f64, widths: [f64; 3], rows: usize) -> Vec<u8> {
+    let width: f64 = widths.iter().sum();
+    let bottom = top - 18.0 * rows as f64;
+    let mut rules = b"q 0.5 w\n".to_vec();
+    for row in 0..=rows {
+        let y = top - 18.0 * row as f64;
+        rules.extend_from_slice(format!("{x} {y} m {} {y} l S\n", x + width).as_bytes());
+    }
+    let mut at = x;
+    for edge in 0..=3 {
+        rules.extend_from_slice(format!("{at} {top} m {at} {bottom} l S\n").as_bytes());
+        if let Some(step) = widths.get(edge) {
+            at += step;
+        }
+    }
+    rules.extend_from_slice(b"Q");
+    rules
+}
+
+/// One line of `text` in the embedded face `F0`.
+fn line(page: &mut PageBuilder, size: f64, x: f64, y: f64, text: &str) {
+    page.encoded_text(b"F0", size, x, y, (0.0, 0.0), &win_ansi(text), text);
+}
+
+/// One report page: a running head, two columns of 52 lines of body text,
+/// one ruled table of a header and four rows below them, a running foot
+/// and the page number, in the embedded face `F0`. A tagged page puts each
+/// piece in its element — the head an `H1`, each column and the foot a
+/// `P`, the table a `Table` — and an untagged one draws the same.
+fn report_page(page: &mut PageBuilder, number: usize, words: &mut Seeded, tagged: bool) {
+    let put = |page: &mut PageBuilder, tag: &[u8], draw: &dyn Fn(&mut PageBuilder)| {
+        if tagged {
+            page.tagged(tag, |page| draw(page));
+        } else {
+            draw(page);
+        }
+    };
+    let head = format!("Annual report, section {number}");
+    put(page, b"H1", &|page| line(page, 11.0, 50.0, 806.0, &head));
+    for x in [50.0, 310.0] {
+        let lines = column_lines(words, 52);
+        put(page, b"P", &|page| {
+            for (at, text) in lines.iter().enumerate() {
+                line(page, 9.0, x, 780.0 - 11.0 * at as f64, text);
+            }
+        });
+    }
+    let cells = table_cells(words, number);
+    let widths = [180.0, 120.0, 120.0];
+    put(page, b"Table", &|page| {
+        page.raw(&table_rules(80.0, 190.0, widths, cells.len()));
+        for (row, cells) in cells.iter().enumerate() {
+            let y = 190.0 - 18.0 * row as f64 - 13.0;
+            let mut x = 84.0;
+            for (cell, width) in cells.iter().zip(widths) {
+                line(page, 9.0, x, y, cell);
+                x += width;
+            }
+        }
+    });
+    let foot = format!("Bench report, page {number}");
+    put(page, b"P", &|page| line(page, 8.0, 50.0, 30.0, &foot));
+}
+
+/// `pages` report pages, untagged: two columns of body text in Liberation
+/// Serif Regular embedded, a running head and foot, a page number and one
+/// ruled table each.
+pub fn report(pages: usize) -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    assert!(
+        builder.add_embedded_font(b"F0", b"LiberationSerif", &serif()),
+        "the face is embedded"
+    );
+    let mut words = Seeded::new(7);
+    for number in 1..=pages {
+        builder.add_page(595.0, 842.0, |page| {
+            report_page(page, number, &mut words, false)
+        });
+    }
+    builder.finish()
+}
+
+/// The CMYK output profile the fuzz corpus commits, which the claiming
+/// pages name as their destination.
+fn cmyk_profile() -> Vec<u8> {
+    let path = format!(
+        "{}/../../fuzz/corpus/icc_profile/cmyk-lut.icc",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::read(&path).unwrap_or_else(|error| panic!("the committed profile {path}: {error}"))
+}
+
+/// [`report`]'s pages tagged under PDF/A-2b, and claiming PDF/UA-1 and
+/// PDF/X-1a:2003 beside it, so each validator runs its rules rather than
+/// reporting no claim.
+///
+/// The archival builder writes the PDF/A identification and its
+/// `GTS_PDFA1` intent over `cmyk-lut.icc`; the editor then adds what no
+/// profile writes: a `GTS_PDFX` intent naming the same destination, and
+/// `pdfuaid:part` in the metadata packet.
+pub fn claiming(pages: usize) -> Vec<u8> {
+    let mut builder = DocumentBuilder::archival(ArchivalProfile {
+        part: ArchivalPart::Two,
+        level: Some(ArchivalLevel::B),
+        destination_profile: cmyk_profile(),
+        destination_space: DeviceSpace::Cmyk,
+        output_condition: "Custom".to_string(),
+        language: Some("en".to_string()),
+    });
+    assert!(
+        builder.add_embedded_font(b"F0", b"LiberationSerif", &serif()),
+        "the face is embedded"
+    );
+    assert!(builder.set_info(b"Title", "Bench report"));
+    assert!(builder.set_info(b"GTS_PDFXVersion", "PDF/X-1a:2003"));
+    let mut words = Seeded::new(7);
+    for number in 1..=pages {
+        builder.add_page(595.0, 842.0, |page| {
+            report_page(page, number, &mut words, true)
+        });
+    }
+    let archived = builder
+        .finish_archival()
+        .unwrap_or_else(|refusal| panic!("the archival profile refused it: {refusal:?}"));
+
+    let doc = Document::open(archived).expect("the archived file opens");
+    let mut editor = doc.editor();
+    let root = doc
+        .cos()
+        .trailer()
+        .get_ref(editor.intern(b"Root"))
+        .expect("a catalog");
+    let Some(Object::Dict(mut catalog)) = editor.get(root) else {
+        panic!("the catalog is a dictionary");
+    };
+    let key = editor.intern(b"OutputIntents");
+    let Some(Object::Array(mut intents)) = catalog.get(key).cloned() else {
+        panic!("the archival builder writes an output intent");
+    };
+    let first = match intents.first() {
+        Some(Object::Ref(at)) => editor.get(*at),
+        other => other.cloned(),
+    };
+    let Some(Object::Dict(mut pdfx)) = first else {
+        panic!("the output intent is a dictionary");
+    };
+    pdfx.insert(
+        editor.intern(b"S"),
+        Object::Name(editor.intern(b"GTS_PDFX")),
+    );
+    intents.push(Object::Dict(pdfx));
+    catalog.insert(key, Object::Array(intents));
+    editor.put(root, Object::Dict(catalog));
+
+    let packet = String::from_utf8(doc.xmp_metadata().expect("the archival packet"))
+        .expect("the packet is UTF-8");
+    let claimed = packet.replacen(
+        "<rdf:Description ",
+        "<rdf:Description xmlns:pdfuaid=\"http://www.aiim.org/pdfua/ns/id/\" \
+         pdfuaid:part=\"1\" ",
+        1,
+    );
+    assert_ne!(claimed, packet, "the packet has a description to claim in");
+    // The packet is not checked against `/Info`, whose `GTS_PDFXVersion`
+    // it has no property for, which is what the sync answer says.
+    let _unchecked = editor
+        .set_xmp_metadata(claimed.as_bytes())
+        .expect("the catalog takes the packet");
+    editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        ..WriteOptions::default()
+    })
+}
+
+/// `base` with one 100 by 100 pt square annotation on its first page, its
+/// appearance synthesized, saved as a rewrite.
+pub fn annotated(base: &[u8]) -> Vec<u8> {
+    let doc = Document::open(base.to_vec()).expect("the base opens");
+    let mut editor = doc.editor();
+    let square = annot::square(
+        editor.document(),
+        Rect {
+            x0: 100.0,
+            y0: 600.0,
+            x1: 200.0,
+            y1: 700.0,
+        },
+        Color {
+            r: 0.8,
+            g: 0.1,
+            b: 0.1,
+        },
+        2.0,
+    );
+    editor
+        .add_annotation(0, square)
+        .expect("the first page takes the annotation");
+    editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        ..WriteOptions::default()
+    })
+}
+
+/// The normal appearance stream of the first annotation on `doc`'s first
+/// page, which [`annotated`] gave its square.
+pub fn first_appearance(doc: &Document) -> ObjRef {
+    let editor = doc.editor();
+    let dict = |object: Option<Object>| match object {
+        Some(Object::Dict(dict)) => dict,
+        Some(Object::Ref(at)) => match editor.get(at) {
+            Some(Object::Dict(dict)) => dict,
+            _ => panic!("a dictionary"),
+        },
+        _ => panic!("a dictionary"),
+    };
+    let page = dict(editor.get(editor.page_refs()[0]));
+    let annots = match page.get(editor.intern(b"Annots")) {
+        Some(Object::Array(annots)) => annots.clone(),
+        Some(Object::Ref(at)) => match editor.get(*at) {
+            Some(Object::Array(annots)) => annots,
+            _ => panic!("an array of annotations"),
+        },
+        _ => panic!("the first page has annotations"),
+    };
+    let square = dict(annots.first().cloned());
+    let appearance = dict(square.get(editor.intern(b"AP")).cloned());
+    appearance
+        .get_ref(editor.intern(b"N"))
+        .expect("a normal appearance stream")
+}
+
+/// A replacement for [`annotated`]'s square's appearance: its 100 by 100 pt
+/// box filled in `grey`, named in `doc`'s own name table.
+pub fn square_appearance(doc: &Document, grey: f64) -> StreamData {
+    let names = doc.cos();
+    let mut dict = Dict::new();
+    dict.insert(
+        names.intern(b"Type"),
+        Object::Name(names.intern(b"XObject")),
+    );
+    dict.insert(
+        names.intern(b"Subtype"),
+        Object::Name(names.intern(b"Form")),
+    );
+    dict.insert(
+        names.intern(b"BBox"),
+        Object::Array(vec![
+            Object::Int(0),
+            Object::Int(0),
+            Object::Int(100),
+            Object::Int(100),
+        ]),
+    );
+    StreamData {
+        dict,
+        data: format!("{grey} g 0 0 100 100 re f").into_bytes(),
+    }
 }

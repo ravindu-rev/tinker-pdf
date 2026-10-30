@@ -1075,14 +1075,14 @@ text of the document the operation reads, so all six stay inside the group.
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `analysis/text of the 100 report pages` | pages · 100 | `report(100)` | the relations' denominator; floor 1 | above, expected | MS-04.4 |
-| `analysis/redact a rectangle on each of 100 pages` | pages · 100 | `report(100)`, `redact::apply` on every page of one editor (`crates/tinker-pdf/src/redact.rs:1106`), unsaved: saving is the write group's | not measured; ≤ 1.5 × text | above, expected | MS-04.4 |
-| `analysis/reading order inferred over 100 pages` | pages · 100 | `report(100)`, `Document::inferred_orders` (`crates/tinker-pdf/src/reading_order.rs:484`); the document is untagged, so the default options infer (`:173-176`) | not measured; ≤ 1.5 × text | above, expected | MS-04.4 |
-| `analysis/tables inferred over 100 pages` | pages · 100 | `report(100)`, `Page::tables(TableSource::Inferred)` (`crates/tinker-pdf/src/tables.rs:448`) | not measured; ≤ 1.5 × text | above, expected | MS-04.4 |
-| `analysis/text of the 100 claiming pages` | pages · 100 | `claiming(100)` | the validators' denominator; floor 1 | above, expected | MS-04.4 |
-| `analysis/PDF-A validation of 100 pages` | pages · 100 | `claiming(100)`, `validate_pdfa` (`lib.rs:1990`) | not measured; ≤ 3 × text | above, expected | MS-04.4 |
-| `analysis/PDF-UA validation of 100 pages` | pages · 100 | `validate_pdfua` (`:2020`) | not measured; ≤ 3 × text | above, expected | MS-04.4 |
-| `analysis/PDF-X validation of 100 pages` | pages · 100 | `validate_pdfx` (`:2043`) | not measured; ≤ 3 × text | above, expected | MS-04.4 |
+| `analysis/text of the 100 report pages` | pages · 100 | `report(100)` | the relations' denominator; floor 1 | above, expected | built |
+| `analysis/redact a rectangle on each of 100 pages` | pages · 100 | `report(100)`, `redact::apply` on every page of one editor (`crates/tinker-pdf/src/redact.rs:1106`), unsaved: saving is the write group's | not measured; ≤ 1.5 × text | above, expected | built |
+| `analysis/reading order inferred over 100 pages` | pages · 100 | `report(100)`, `Document::inferred_orders` (`crates/tinker-pdf/src/reading_order.rs:484`); the document is untagged, so the default options infer (`:173-176`) | not measured; ≤ 1.5 × text | above, expected | built |
+| `analysis/tables inferred over 100 pages` | pages · 100 | `report(100)`, `Page::tables(TableSource::Inferred)` (`crates/tinker-pdf/src/tables.rs:448`) | not measured; ≤ 1.5 × text | above, expected | built |
+| `analysis/text of the 100 claiming pages` | pages · 100 | `claiming(100)` | the validators' denominator; floor 1 | above, expected | built |
+| `analysis/PDF-A validation of 100 pages` | pages · 100 | `claiming(100)`, `validate_pdfa` (`lib.rs:1990`) | not measured; ≤ 3 × text | above, expected | built |
+| `analysis/PDF-UA validation of 100 pages` | pages · 100 | `validate_pdfua` (`:2020`) | not measured; ≤ 3 × text | above, expected | built |
+| `analysis/PDF-X validation of 100 pages` | pages · 100 | `validate_pdfx` (`:2043`) | not measured; ≤ 3 × text | above, expected | built |
 
 **render** — a page render is `Page::render` (`lib.rs:2247`) at
 `RenderOptions::at_dpi` (`:724`); "the text page" is `dense(1, 0)`'s page.
@@ -1154,17 +1154,17 @@ text of the document the operation reads, so all six stay inside the group.
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `write/rewrite 100 pages` | pages · 100 a call | `small(100)` | twin; floor 1 | unmeasured | MS-04.4 |
-| `write/rewrite 1000 pages` | pages · 1 000 | `small(1000)` | twin (CLI 668); floor 1 | above | MS-04.4 |
-| `write/rewrite 3000 pages` | pages · 3 000 | `small(3000)` | 5 480 → 40; 137× | above | MS-04.4 |
-| `write/rewrite 100 pages into object streams` | pages · 10 × 100 | `small(100)`, `object_streams` (`crates/tinker-pdf-cos/src/write.rs:120`) | 2.6; held | ×10 | MS-04.4 |
-| `write/rewrite 100 pages linearized` | pages · 7 × 100 | `small(100)`, `linearize` (`:112`) | 3.7; held | ×7 | MS-04.4 |
-| `write/subset-on-save of 100 pages` | pages · 100 | `dense(100, 0)`, `SaveOptions::default()`: a rewrite, fonts subset (`crates/tinker-pdf/src/write.rs:144-157`) | twin (in-process 1 305); floor 1 | above | MS-04.4 |
-| `write/merge 4 x 100 pages` | pages · 400 | `dense(100, 0..3)`: pages imported with `import_page`, saved with stream deduplication and `FontPolicy::Keep` | 2 855 → 25; 114× | above | MS-04.4 |
-| `write/AES-256-CBC decrypt 23 MB` | bytes · the file | `image_file()`'s bytes, encrypted once, `cbc_decrypt_with_iv_prefix` (`crates/tinker-pdf-crypto/src/aes.rs:238`) | 32 → 150 MB/s (about 719 → 153); 4.68× | above | MS-04.4 |
-| `write/AES-256-CBC encrypt 23 MB` | bytes · the file | the same plain bytes, `cbc_encrypt_with_iv_prefix` (`:289`) | 57 → 80 MB/s (about 404 → 288); 1.4× | above | MS-04.4 |
-| `write/edit an annotation, save, reopen, 1000 pages` | pages · 13 × 1 000 | `annotated(small(1000))`: the appearance replaced (`DocumentEditor::put_stream`, `edit/mod.rs:395`), saved under `WriteMode::Incremental`, the bytes reopened | not measured → ≤ 2 plus output bytes; relation ≤ 2 × the 10-page one | unmeasured, ×13 | MS-04.4 |
-| `write/edit an annotation, save, reopen, 10 pages` | pages · 10 a call | `annotated(small(10))` | the relation's other side | unmeasured | MS-04.4 |
+| `write/rewrite 100 pages` | pages · 100 a call | `small(100)` | twin; floor 1 | unmeasured | built |
+| `write/rewrite 1000 pages` | pages · 1 000 | `small(1000)` | twin (CLI 668); floor 1 | above | built |
+| `write/rewrite 3000 pages` | pages · 3 000 | `small(3000)` | 5 480 → 40; 137× | above | built |
+| `write/rewrite 100 pages into object streams` | pages · 10 × 100 | `small(100)`, `object_streams` (`crates/tinker-pdf-cos/src/write.rs:120`) | 2.6; held | ×10 | built |
+| `write/rewrite 100 pages linearized` | pages · 7 × 100 | `small(100)`, `linearize` (`:112`) | 3.7; held | ×7 | built |
+| `write/subset-on-save of 100 pages` | pages · 100 | `dense(100, 0)`, `SaveOptions::default()`: a rewrite, fonts subset (`crates/tinker-pdf/src/write.rs:144-157`) | twin (in-process 1 305); floor 1 | above | built |
+| `write/merge 4 x 100 pages` | pages · 400 | `dense(100, 0..3)`: pages imported with `import_page`, saved with stream deduplication and `FontPolicy::Keep` | 2 855 → 25; 114× | above | built |
+| `write/AES-256-CBC decrypt 23 MB` | bytes · the file | `image_file()`'s bytes, encrypted once, `cbc_decrypt_with_iv_prefix` (`crates/tinker-pdf-crypto/src/aes.rs:238`) | 32 → 150 MB/s (about 719 → 153); 4.68× | above | built |
+| `write/AES-256-CBC encrypt 23 MB` | bytes · the file | the same plain bytes, `cbc_encrypt_with_iv_prefix` (`:289`) | 57 → 80 MB/s (about 404 → 288); 1.4× | above | built |
+| `write/edit an annotation, save, reopen, 1000 pages` | pages · 13 × 1 000 | `annotated(small(1000))`: the appearance replaced (`DocumentEditor::put_stream`, `edit/mod.rs:395`), saved under `WriteMode::Incremental`, the bytes reopened | not measured → ≤ 2 plus output bytes; relation ≤ 2 × the 10-page one | unmeasured, ×13 | built |
+| `write/edit an annotation, save, reopen, 10 pages` | pages · 10 a call | `annotated(small(10))` | the relation's other side | unmeasured | built |
 | `write/rewrite 100 pages, CLI` | pages · 4 × 100 | `tpdf merge`, one input | 14.8 → 8; 1.85× | ×4 | MS-04.8 |
 | `write/rewrite 1000 pages, CLI` | pages · 1 000 | `tpdf merge`, one input | 668 → 60; 11.1× | above | MS-04.8 |
 | `write/subset-on-save of 100 pages, CLI` | pages · 100 | `tpdf merge --font-policy subset` | 1 208 → 120; 10× | above | MS-04.8 |
