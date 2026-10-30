@@ -769,6 +769,20 @@ repository's own, so it hosts and adjudicates nothing. `bench.yml` builds the
 release `tpdf` before it measures, and `cargo test --benches` needs a debug
 one built first.
 
+**A bench binary also counts.** Started with
+`TINKER_BENCH_COUNT=<group>/<name>` and `TINKER_BENCH_ITERATIONS=<n>`, it builds
+that operation's inputs alone, runs its routine exactly `n` times outside
+criterion's sampler and prints `count-mode: RAN <group>/<name> <n>`; an
+operation of another group, or an iteration count missing or no number, fails
+by name. It reads no clock, so an instruction count of the process is a
+property of the code and the input, and a run of `n + 1` less a run of `n` is
+one iteration's. Every operation is declared through the harness's
+`Group::operation`, so each runs both ways, and `cargo xtask baseline` refuses
+a group file that reaches criterion's own `bench_function` or
+`benchmark_group` — all but `calibration.rs`, which is frozen and runs under
+criterion alone; its input and call are the text group's
+`text of 100 dense pages`, which count mode runs.
+
 **The comparison is `cargo xtask bench-check --machine NAME`, and it exists
 because criterion's own cannot fail.** `cargo bench -- --baseline` compares
 perfectly well and **never exits non-zero when it loses**: the only failure path

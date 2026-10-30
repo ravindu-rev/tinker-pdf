@@ -7,40 +7,40 @@
 
 mod support;
 
+use std::cell::LazyCell;
 use std::hint::black_box;
 use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
+use criterion::{criterion_group, criterion_main, Criterion};
 use support::cli::{self, Cli};
-use support::{inputs, Per};
+use support::{inputs, Group, Per};
 use tinker_pdf::Document;
 
 fn open(c: &mut Criterion) {
-    let text = inputs::three_pages();
-    let image = inputs::image_file();
-    let aes = inputs::aes_file();
-    let small_3000 = small(3000);
-    let small_10000 = small(10000);
+    let small_3000 = LazyCell::new(|| small(3000));
+    let small_10000 = LazyCell::new(|| small(10000));
 
-    let mut group = c.benchmark_group("open");
-    group.sampling_mode(SamplingMode::Flat);
+    let mut group = Group::new(c, "open");
 
-    group.bench_function("open the AES-256 file", |b| {
-        b.iter(|| {
+    group.operation("open the AES-256 file", |op| {
+        let aes = inputs::aes_file();
+        op.iter(|| {
             let doc = Document::open(Arc::clone(&aes)).expect("it opens");
             doc.authenticate("").expect("the empty password opens it");
             black_box(doc.page_count())
         });
     });
 
-    group.throughput(Per::Bytes(text.len() as u64).throughput());
-    group.bench_function("open a 3-page document", |b| {
-        b.iter(|| black_box(Document::open(text.clone()).expect("it opens")));
+    group.operation("open a 3-page document", |op| {
+        let text = inputs::three_pages();
+        op.per(Per::Bytes(text.len() as u64));
+        op.iter(|| black_box(Document::open(text.clone()).expect("it opens")));
     });
 
-    group.throughput(Per::Bytes(image.len() as u64).throughput());
-    group.bench_function("open and count the 23 MB image file", |b| {
-        b.iter(|| {
+    group.operation("open and count the 23 MB image file", |op| {
+        let image = inputs::image_file();
+        op.per(Per::Bytes(image.len() as u64));
+        op.iter(|| {
             black_box(
                 Document::open(Arc::clone(&image))
                     .expect("it opens")
@@ -49,36 +49,36 @@ fn open(c: &mut Criterion) {
         });
     });
 
-    group.throughput(Per::Pages(3000).throughput());
-    group.bench_function("every page's size, 3000 pages", |b| {
-        b.iter(|| black_box(every_page_size(&small_3000)));
+    group.operation("every page's size, 3000 pages", |op| {
+        op.per(Per::Pages(3000));
+        op.iter(|| black_box(every_page_size(&small_3000)));
     });
 
-    group.throughput(Per::Pages(10000).throughput());
-    group.bench_function("every page's size, 10000 pages", |b| {
-        b.iter(|| black_box(every_page_size(&small_10000)));
+    group.operation("every page's size, 10000 pages", |op| {
+        op.per(Per::Pages(10000));
+        op.iter(|| black_box(every_page_size(&small_10000)));
     });
 
     // The image file through the CLI, five children an iteration: tier P's
     // figure includes the process.
-    let image_pdf = cli::fixture("image.pdf", || image.to_vec());
-    let info = Cli::new("open-image-info");
-    group
-        .throughput(Per::Bytes(5 * image.len() as u64).throughput())
-        .bench_function("open and count the 23 MB image file, CLI", |b| {
-            b.iter(|| {
-                for _ in 0..5 {
-                    info.run(&[&"info", &image_pdf]);
-                }
-            });
+    group.operation("open and count the 23 MB image file, CLI", |op| {
+        let image = inputs::image_file();
+        let image_pdf = cli::fixture("image.pdf", || image.to_vec());
+        let info = Cli::new("open-image-info");
+        op.per(Per::Bytes(5 * image.len() as u64));
+        op.iter(|| {
+            for _ in 0..5 {
+                info.run(&[&"info", &image_pdf]);
+            }
         });
-    let pages = Document::open(Arc::clone(&image))
-        .expect("it opens")
-        .page_count();
-    assert!(
-        info.stdout().contains(&format!("  pages       {pages}\n")),
-        "tpdf info counts the image file's {pages} pages"
-    );
+        let pages = Document::open(Arc::clone(&image))
+            .expect("it opens")
+            .page_count();
+        assert!(
+            info.stdout().contains(&format!("  pages       {pages}\n")),
+            "tpdf info counts the image file's {pages} pages"
+        );
+    });
 
     group.finish();
 }

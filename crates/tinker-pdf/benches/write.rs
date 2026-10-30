@@ -6,11 +6,12 @@
 
 mod support;
 
+use std::cell::LazyCell;
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
+use criterion::{criterion_group, criterion_main, Criterion};
 use support::cli::{self, Cli};
-use support::{inputs, Per};
+use support::{inputs, Group, Per};
 use tinker_pdf::write::{self, FontPolicy, ImagePolicy, SaveOptions};
 use tinker_pdf::{Document, WriteMode, WriteOptions};
 
@@ -38,17 +39,27 @@ fn saved_reopens(doc: &Document, options: &WriteOptions) {
 }
 
 fn write(c: &mut Criterion) {
-    let doc = Document::open(inputs::three_pages()).expect("it opens");
+    let small_100 = LazyCell::new(|| {
+        let doc = small(100);
+        saved_reopens(&doc, &rewrite());
+        doc
+    });
+    let small_1000 = LazyCell::new(|| {
+        let doc = small(1000);
+        saved_reopens(&doc, &rewrite());
+        doc
+    });
+    let image = LazyCell::new(inputs::image_file);
 
-    let mut group = c.benchmark_group("write");
-    group.sampling_mode(SamplingMode::Flat);
+    let mut group = Group::new(c, "write");
 
     // A rewrite reads every object the file has (`edit/save.rs`'s walk of
     // the cross-reference table), so its first iteration leaves the document
     // as warm as any earlier read of it would have.
-    group.throughput(Per::Pages(u64::from(doc.page_count())).throughput());
-    group.bench_function("rewrite a document", |b| {
-        b.iter(|| {
+    group.operation("rewrite a document", |op| {
+        let doc = Document::open(inputs::three_pages()).expect("it opens");
+        op.per(Per::Pages(u64::from(doc.page_count())));
+        op.iter(|| {
             black_box(doc.editor().save(&WriteOptions {
                 mode: WriteMode::Rewrite,
                 ..WriteOptions::default()
@@ -56,48 +67,44 @@ fn write(c: &mut Criterion) {
         });
     });
 
-    let small_100 = small(100);
-    let small_1000 = small(1000);
-    let small_3000 = small(3000);
-    for doc in [&small_100, &small_1000, &small_3000] {
-        saved_reopens(doc, &rewrite());
-    }
-    group.throughput(Per::Pages(100).throughput());
-    group.bench_function("rewrite 100 pages", |b| {
-        b.iter(|| black_box(small_100.editor().save(&rewrite())));
+    group.operation("rewrite 100 pages", |op| {
+        op.per(Per::Pages(100));
+        op.iter(|| black_box(small_100.editor().save(&rewrite())));
     });
-    group.throughput(Per::Pages(1000).throughput());
-    group.bench_function("rewrite 1000 pages", |b| {
-        b.iter(|| black_box(small_1000.editor().save(&rewrite())));
+    group.operation("rewrite 1000 pages", |op| {
+        op.per(Per::Pages(1000));
+        op.iter(|| black_box(small_1000.editor().save(&rewrite())));
     });
-    group.throughput(Per::Pages(3000).throughput());
-    group.bench_function("rewrite 3000 pages", |b| {
-        b.iter(|| black_box(small_3000.editor().save(&rewrite())));
+    group.operation("rewrite 3000 pages", |op| {
+        let small_3000 = small(3000);
+        saved_reopens(&small_3000, &rewrite());
+        op.per(Per::Pages(3000));
+        op.iter(|| black_box(small_3000.editor().save(&rewrite())));
     });
 
     // Ten and seven saves an iteration, which brings each inside the set's
     // window; the unit counts every page each one wrote.
-    let streams = WriteOptions {
-        object_streams: true,
-        ..rewrite()
-    };
-    let linear = WriteOptions {
-        linearize: true,
-        ..rewrite()
-    };
-    saved_reopens(&small_100, &streams);
-    saved_reopens(&small_100, &linear);
-    group.throughput(Per::Pages(10 * 100).throughput());
-    group.bench_function("rewrite 100 pages into object streams", |b| {
-        b.iter(|| {
+    group.operation("rewrite 100 pages into object streams", |op| {
+        let streams = WriteOptions {
+            object_streams: true,
+            ..rewrite()
+        };
+        saved_reopens(&small_100, &streams);
+        op.per(Per::Pages(10 * 100));
+        op.iter(|| {
             for _ in 0..10 {
                 black_box(small_100.editor().save(&streams));
             }
         });
     });
-    group.throughput(Per::Pages(7 * 100).throughput());
-    group.bench_function("rewrite 100 pages linearized", |b| {
-        b.iter(|| {
+    group.operation("rewrite 100 pages linearized", |op| {
+        let linear = WriteOptions {
+            linearize: true,
+            ..rewrite()
+        };
+        saved_reopens(&small_100, &linear);
+        op.per(Per::Pages(7 * 100));
+        op.iter(|| {
             for _ in 0..7 {
                 black_box(small_100.editor().save(&linear));
             }
@@ -106,85 +113,90 @@ fn write(c: &mut Criterion) {
 
     // The facade's door with its default policies: a rewrite, every
     // embedded program cut to what the pages draw.
-    let dense = Document::open(inputs::dense(100, 0)).expect("the dense pages open");
-    let subset = SaveOptions {
-        write: rewrite(),
-        ..SaveOptions::default()
-    };
-    let saved = write::save(&mut dense.editor(), &subset).bytes;
-    assert!(
-        saved.len() < inputs::dense(100, 0).len(),
-        "the subset file is smaller than the whole face's"
-    );
-    assert_eq!(Document::open(saved).expect("it reopens").page_count(), 100);
-    group.throughput(Per::Pages(100).throughput());
-    group.bench_function("subset-on-save of 100 pages", |b| {
-        b.iter(|| black_box(write::save(&mut dense.editor(), &subset)));
+    group.operation("subset-on-save of 100 pages", |op| {
+        let dense = Document::open(inputs::dense(100, 0)).expect("the dense pages open");
+        let subset = SaveOptions {
+            write: rewrite(),
+            ..SaveOptions::default()
+        };
+        let saved = write::save(&mut dense.editor(), &subset).bytes;
+        assert!(
+            saved.len() < inputs::dense(100, 0).len(),
+            "the subset file is smaller than the whole face's"
+        );
+        assert_eq!(Document::open(saved).expect("it reopens").page_count(), 100);
+        op.per(Per::Pages(100));
+        op.iter(|| black_box(write::save(&mut dense.editor(), &subset)));
     });
 
     // `tpdf merge`'s shape: the first file's editor, every page of the
     // others imported after its own, saved with stream deduplication and
     // the programs kept as they are.
-    let parts: Vec<Document> = (0..4)
-        .map(|seed| Document::open(inputs::dense(100, seed)).expect("a part opens"))
-        .collect();
-    let merged = SaveOptions {
-        write: WriteOptions {
-            deduplicate_streams: true,
-            ..rewrite()
-        },
-        fonts: FontPolicy::Keep,
-        images: ImagePolicy::Keep,
-    };
-    let merge = || {
-        let mut editor = parts[0].editor();
-        for part in &parts[1..] {
-            for page in 0..part.page_count() {
-                let at = editor.page_refs().len() as u32;
-                editor
-                    .import_page(part.cos(), page, at)
-                    .expect("the page imports");
+    group.operation("merge 4 x 100 pages", |op| {
+        let parts: Vec<Document> = (0..4)
+            .map(|seed| Document::open(inputs::dense(100, seed)).expect("a part opens"))
+            .collect();
+        let merged = SaveOptions {
+            write: WriteOptions {
+                deduplicate_streams: true,
+                ..rewrite()
+            },
+            fonts: FontPolicy::Keep,
+            images: ImagePolicy::Keep,
+        };
+        let merge = || {
+            let mut editor = parts[0].editor();
+            for part in &parts[1..] {
+                for page in 0..part.page_count() {
+                    let at = editor.page_refs().len() as u32;
+                    editor
+                        .import_page(part.cos(), page, at)
+                        .expect("the page imports");
+                }
             }
-        }
-        write::save(&mut editor, &merged).bytes
-    };
-    assert_eq!(
-        Document::open(merge())
-            .expect("the merge reopens")
-            .page_count(),
-        400
-    );
-    group.throughput(Per::Pages(400).throughput());
-    group.bench_function("merge 4 x 100 pages", |b| {
-        b.iter(|| black_box(merge()));
+            write::save(&mut editor, &merged).bytes
+        };
+        assert_eq!(
+            Document::open(merge())
+                .expect("the merge reopens")
+                .page_count(),
+            400
+        );
+        op.per(Per::Pages(400));
+        op.iter(|| black_box(merge()));
     });
 
     // Tier P's pair, through the crypto crate's own CBC: the image file's
     // bytes encrypted once, then each direction timed over them.
-    let plain = inputs::image_file();
     let key = [0x42u8; 32];
     let iv = [0x24u8; 16];
-    let sealed = tinker_pdf_crypto::aes::cbc_encrypt_with_iv_prefix(&key, &iv, &plain)
-        .expect("a 256-bit key encrypts");
-    let (opened, notes) = tinker_pdf_crypto::aes::cbc_decrypt_with_iv_prefix(&key, &sealed);
-    assert!(notes.is_empty(), "a clean decrypt: {notes:?}");
-    assert_eq!(
-        &opened[..],
-        &plain[..],
-        "the decrypted bytes are the plain ones"
-    );
-    group.throughput(Per::Bytes(plain.len() as u64).throughput());
-    group.bench_function("AES-256-CBC decrypt 23 MB", |b| {
-        b.iter(|| {
+    let sealed = LazyCell::new(|| {
+        let sealed = tinker_pdf_crypto::aes::cbc_encrypt_with_iv_prefix(&key, &iv, &image)
+            .expect("a 256-bit key encrypts");
+        let (opened, notes) = tinker_pdf_crypto::aes::cbc_decrypt_with_iv_prefix(&key, &sealed);
+        assert!(notes.is_empty(), "a clean decrypt: {notes:?}");
+        assert_eq!(
+            &opened[..],
+            &image[..],
+            "the decrypted bytes are the plain ones"
+        );
+        sealed
+    });
+    group.operation("AES-256-CBC decrypt 23 MB", |op| {
+        op.per(Per::Bytes(image.len() as u64));
+        op.iter(|| {
             black_box(tinker_pdf_crypto::aes::cbc_decrypt_with_iv_prefix(
                 &key, &sealed,
             ))
         });
     });
-    group.bench_function("AES-256-CBC encrypt 23 MB", |b| {
-        b.iter(|| {
+    group.operation("AES-256-CBC encrypt 23 MB", |op| {
+        // The decrypt's check, that the key and the IV give the bytes back.
+        LazyCell::force(&sealed);
+        op.per(Per::Bytes(image.len() as u64));
+        op.iter(|| {
             black_box(tinker_pdf_crypto::aes::cbc_encrypt_with_iv_prefix(
-                &key, &iv, &plain,
+                &key, &iv, &image,
             ))
         });
     });
@@ -192,12 +204,6 @@ fn write(c: &mut Criterion) {
     // One annotation's appearance replaced, the change appended as an
     // incremental update, and the bytes reopened: thirteen times an
     // iteration over a thousand pages, once over ten.
-    let large = Document::open(inputs::annotated(&inputs::small(1000))).expect("it opens");
-    let short = Document::open(inputs::annotated(&inputs::small(10))).expect("it opens");
-    let (large_form, short_form) = (
-        inputs::first_appearance(&large),
-        inputs::first_appearance(&short),
-    );
     let edit = |doc: &Document, form| {
         let mut editor = doc.editor();
         editor.put_stream(form, inputs::square_appearance(doc, 0.2));
@@ -207,19 +213,23 @@ fn write(c: &mut Criterion) {
         });
         Document::open(bytes).expect("the update reopens")
     };
-    assert_eq!(edit(&large, large_form).page_count(), 1000);
-    assert_eq!(edit(&short, short_form).page_count(), 10);
-    group.throughput(Per::Pages(13 * 1000).throughput());
-    group.bench_function("edit an annotation, save, reopen, 1000 pages", |b| {
-        b.iter(|| {
+    group.operation("edit an annotation, save, reopen, 1000 pages", |op| {
+        let large = Document::open(inputs::annotated(&inputs::small(1000))).expect("it opens");
+        let large_form = inputs::first_appearance(&large);
+        assert_eq!(edit(&large, large_form).page_count(), 1000);
+        op.per(Per::Pages(13 * 1000));
+        op.iter(|| {
             for _ in 0..13 {
                 black_box(edit(&large, large_form));
             }
         });
     });
-    group.throughput(Per::Pages(10).throughput());
-    group.bench_function("edit an annotation, save, reopen, 10 pages", |b| {
-        b.iter(|| black_box(edit(&short, short_form)));
+    group.operation("edit an annotation, save, reopen, 10 pages", |op| {
+        let short = Document::open(inputs::annotated(&inputs::small(10))).expect("it opens");
+        let short_form = inputs::first_appearance(&short);
+        assert_eq!(edit(&short, short_form).page_count(), 10);
+        op.per(Per::Pages(10));
+        op.iter(|| black_box(edit(&short, short_form)));
     });
 
     // ---- through the CLI -----------------------------------------------
@@ -229,129 +239,124 @@ fn write(c: &mut Criterion) {
     // writing command subsets by default, so each names its policy: `keep`
     // but for subset-on-save, so that each figure times one pass.
 
-    let small_100_pdf = cli::fixture("small-100.pdf", || inputs::small(100));
-    let small_1000_pdf = cli::fixture("small-1000.pdf", || inputs::small(1000));
-    let dense_pdf = cli::fixture("dense-100.pdf", || inputs::dense(100, 0));
-    let parts_pdf: Vec<_> = (0..4)
-        .map(|seed| {
-            cli::fixture(&format!("dense-100-{seed}.pdf"), || {
-                inputs::dense(100, seed)
+    group.operation("rewrite 100 pages, CLI", |op| {
+        let small_100_pdf = cli::fixture("small-100.pdf", || inputs::small(100));
+        let rewrite_100 = Cli::new("write-rewrite-100");
+        let out_100 = rewrite_100.out("out.pdf");
+        op.per(Per::Pages(4 * 100));
+        op.iter(|| {
+            for _ in 0..4 {
+                rewrite_100.run(&[
+                    &"merge",
+                    &small_100_pdf,
+                    &"--out",
+                    &out_100,
+                    &"--font-policy",
+                    &"keep",
+                ]);
+            }
+        });
+        assert_eq!(reopened(&out_100), 100, "the rewrite's pages");
+    });
+    group.operation("rewrite 1000 pages, CLI", |op| {
+        let small_1000_pdf = cli::fixture("small-1000.pdf", || inputs::small(1000));
+        let rewrite_1000 = Cli::new("write-rewrite-1000");
+        let out_1000 = rewrite_1000.out("out.pdf");
+        op.per(Per::Pages(1000));
+        op.iter(|| {
+            rewrite_1000.run(&[
+                &"merge",
+                &small_1000_pdf,
+                &"--out",
+                &out_1000,
+                &"--font-policy",
+                &"keep",
+            ])
+        });
+        assert_eq!(reopened(&out_1000), 1000, "the rewrite's pages");
+    });
+    group.operation("subset-on-save of 100 pages, CLI", |op| {
+        let dense_pdf = cli::fixture("dense-100.pdf", || inputs::dense(100, 0));
+        let subset_cli = Cli::new("write-subset-100");
+        let out_subset = subset_cli.out("out.pdf");
+        op.per(Per::Pages(100));
+        op.iter(|| {
+            subset_cli.run(&[
+                &"merge",
+                &dense_pdf,
+                &"--out",
+                &out_subset,
+                &"--font-policy",
+                &"subset",
+            ])
+        });
+        assert_eq!(reopened(&out_subset), 100, "the subset file's pages");
+        assert!(
+            std::fs::metadata(&out_subset)
+                .expect("the subset file")
+                .len()
+                < std::fs::metadata(&dense_pdf).expect("the dense file").len(),
+            "the subset file is smaller than the whole face's"
+        );
+    });
+    group.operation("merge 4 x 100 pages, CLI", |op| {
+        let parts_pdf: Vec<_> = (0..4)
+            .map(|seed| {
+                cli::fixture(&format!("dense-100-{seed}.pdf"), || {
+                    inputs::dense(100, seed)
+                })
             })
-        })
-        .collect();
-    let image = inputs::image_file();
-    let image_pdf = cli::fixture("image.pdf", || image.to_vec());
-    // A figure must not depend on `/dev/urandom`.
-    let entropy = cli::fixture("entropy", || vec![0x5A; 48]);
-
-    let rewrite_100 = Cli::new("write-rewrite-100");
-    let out_100 = rewrite_100.out("out.pdf");
-    group
-        .throughput(Per::Pages(4 * 100).throughput())
-        .bench_function("rewrite 100 pages, CLI", |b| {
-            b.iter(|| {
-                for _ in 0..4 {
-                    rewrite_100.run(&[
-                        &"merge",
-                        &small_100_pdf,
-                        &"--out",
-                        &out_100,
-                        &"--font-policy",
-                        &"keep",
-                    ]);
-                }
-            });
+            .collect();
+        let merge_cli = Cli::new("write-merge-4x100");
+        let out_merge = merge_cli.out("out.pdf");
+        op.per(Per::Pages(400));
+        op.iter(|| {
+            merge_cli.run(&[
+                &"merge",
+                &parts_pdf[0],
+                &parts_pdf[1],
+                &parts_pdf[2],
+                &parts_pdf[3],
+                &"--out",
+                &out_merge,
+                &"--font-policy",
+                &"keep",
+            ])
         });
-    assert_eq!(reopened(&out_100), 100, "the rewrite's pages");
-    let rewrite_1000 = Cli::new("write-rewrite-1000");
-    let out_1000 = rewrite_1000.out("out.pdf");
-    group
-        .throughput(Per::Pages(1000).throughput())
-        .bench_function("rewrite 1000 pages, CLI", |b| {
-            b.iter(|| {
-                rewrite_1000.run(&[
-                    &"merge",
-                    &small_1000_pdf,
-                    &"--out",
-                    &out_1000,
-                    &"--font-policy",
-                    &"keep",
-                ])
-            });
+        assert_eq!(reopened(&out_merge), 400, "the merge's pages");
+    });
+    group.operation("encrypt the 23 MB image file, CLI", |op| {
+        let image_pdf = cli::fixture("image.pdf", || image.to_vec());
+        // A figure must not depend on `/dev/urandom`.
+        let entropy = cli::fixture("entropy", || vec![0x5A; 48]);
+        let encrypt = Cli::new("write-encrypt-image");
+        let out_encrypted = encrypt.out("out.pdf");
+        op.per(Per::Bytes(image.len() as u64));
+        op.iter(|| {
+            encrypt.run(&[
+                &"encrypt",
+                &image_pdf,
+                &"--out",
+                &out_encrypted,
+                &"--entropy",
+                &entropy,
+                &"--font-policy",
+                &"keep",
+            ])
         });
-    assert_eq!(reopened(&out_1000), 1000, "the rewrite's pages");
-    let subset_cli = Cli::new("write-subset-100");
-    let out_subset = subset_cli.out("out.pdf");
-    group
-        .throughput(Per::Pages(100).throughput())
-        .bench_function("subset-on-save of 100 pages, CLI", |b| {
-            b.iter(|| {
-                subset_cli.run(&[
-                    &"merge",
-                    &dense_pdf,
-                    &"--out",
-                    &out_subset,
-                    &"--font-policy",
-                    &"subset",
-                ])
-            });
-        });
-    assert_eq!(reopened(&out_subset), 100, "the subset file's pages");
-    assert!(
-        std::fs::metadata(&out_subset)
-            .expect("the subset file")
-            .len()
-            < std::fs::metadata(&dense_pdf).expect("the dense file").len(),
-        "the subset file is smaller than the whole face's"
-    );
-    let merge_cli = Cli::new("write-merge-4x100");
-    let out_merge = merge_cli.out("out.pdf");
-    group
-        .throughput(Per::Pages(400).throughput())
-        .bench_function("merge 4 x 100 pages, CLI", |b| {
-            b.iter(|| {
-                merge_cli.run(&[
-                    &"merge",
-                    &parts_pdf[0],
-                    &parts_pdf[1],
-                    &parts_pdf[2],
-                    &parts_pdf[3],
-                    &"--out",
-                    &out_merge,
-                    &"--font-policy",
-                    &"keep",
-                ])
-            });
-        });
-    assert_eq!(reopened(&out_merge), 400, "the merge's pages");
-    let encrypt = Cli::new("write-encrypt-image");
-    let out_encrypted = encrypt.out("out.pdf");
-    group
-        .throughput(Per::Bytes(image.len() as u64).throughput())
-        .bench_function("encrypt the 23 MB image file, CLI", |b| {
-            b.iter(|| {
-                encrypt.run(&[
-                    &"encrypt",
-                    &image_pdf,
-                    &"--out",
-                    &out_encrypted,
-                    &"--entropy",
-                    &entropy,
-                    &"--font-policy",
-                    &"keep",
-                ])
-            });
-        });
-    let sealed = Document::open(std::fs::read(&out_encrypted).expect("the encrypted file"))
-        .expect("the encrypted file opens");
-    sealed
-        .authenticate("")
-        .expect("the encrypted file authenticates with the empty password");
-    assert_eq!(
-        sealed.page_count(),
-        Document::open(image).expect("it opens").page_count(),
-        "the encrypted file's pages"
-    );
+        let sealed = Document::open(std::fs::read(&out_encrypted).expect("the encrypted file"))
+            .expect("the encrypted file opens");
+        sealed
+            .authenticate("")
+            .expect("the encrypted file authenticates with the empty password");
+        assert_eq!(
+            sealed.page_count(),
+            Document::open(image.clone())
+                .expect("it opens")
+                .page_count(),
+            "the encrypted file's pages"
+        );
+    });
 
     group.finish();
 }

@@ -3,96 +3,104 @@
 //! The harness, the sampling and the rules every name here keeps are
 //! `support/mod.rs`'s; `baseline.json`'s `text` list names these operations
 //! in this order. Each input is asserted to be what its operation reads
-//! before anything is timed: its pages, its face embedded, its text holding
-//! what each search finds.
+//! before that operation is timed: its pages, its face embedded, its text
+//! holding what each search finds.
 
 mod support;
 
+use std::cell::LazyCell;
 use std::hint::black_box;
 use std::sync::Arc;
 
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
+use criterion::{criterion_group, criterion_main, Criterion};
 use support::cli::{self, Cli};
-use support::{inputs, Per};
+use support::{inputs, Group, Per};
 use tinker_pdf::{Document, SearchOptions, TextFormat, TextPage, TextWriter};
 
 fn text(c: &mut Criterion) {
-    let doc = Document::open(inputs::three_pages()).expect("it opens");
-    let page = doc.page(0).expect("a page");
-
-    let dense = pages(inputs::dense(100, 0), 100);
-    let held = Document::open(Arc::clone(&dense)).expect("it opens");
-    assert!(
-        held.fonts()
-            .iter()
-            .any(|font| font.name == "LiberationSerif" && font.program.is_some()),
-        "the dense pages embed their face"
-    );
-    let prebuilt: Vec<TextPage> = held.pages().iter().map(|page| page.text()).collect();
+    let dense = LazyCell::new(|| {
+        let dense = pages(inputs::dense(100, 0), 100);
+        let held = Document::open(Arc::clone(&dense)).expect("it opens");
+        assert!(
+            held.fonts()
+                .iter()
+                .any(|font| font.name == "LiberationSerif" && font.program.is_some()),
+            "the dense pages embed their face"
+        );
+        dense
+    });
     let unaccented = SearchOptions {
         whole_word: true,
         diacritic_insensitive: true,
         ..SearchOptions::default()
     };
-    for (index, text) in prebuilt.iter().enumerate() {
+    let prebuilt = LazyCell::new(|| {
+        let held = Document::open(Arc::clone(&dense)).expect("it opens");
+        let prebuilt: Vec<TextPage> = held.pages().iter().map(|page| page.text()).collect();
+        for (index, text) in prebuilt.iter().enumerate() {
+            assert!(
+                text.plain_text().contains(inputs::PHRASE),
+                "dense page {index} does not read its phrase"
+            );
+            assert!(
+                !text.search(inputs::PHRASE).is_empty(),
+                "the phrase is not found on dense page {index}"
+            );
+            assert!(
+                !text.search_with(inputs::UNACCENTED, &unaccented).is_empty(),
+                "`{}` is not found, whole and unaccented, on dense page {index}",
+                inputs::UNACCENTED
+            );
+        }
+        prebuilt
+    });
+    let small_1000 = LazyCell::new(|| pages(inputs::small(1000), 1000));
+    let small_10000 = LazyCell::new(|| pages(inputs::small(10000), 10000));
+    let dense_pdf = LazyCell::new(|| cli::fixture("dense-100.pdf", || dense.to_vec()));
+
+    let mut group = Group::new(c, "text");
+
+    group.operation("extract a page of text", |op| {
+        let doc = Document::open(inputs::three_pages()).expect("it opens");
+        let page = doc.page(0).expect("a page");
+        op.per(Per::Pages(1));
+        op.iter(|| black_box(page.text().plain_text()));
+    });
+
+    group.operation("text of 100 dense pages", |op| {
+        op.per(Per::Pages(100));
+        op.iter(|| black_box(every_page_text(&dense)));
+    });
+
+    group.operation("text of 100 standard-14 pages", |op| {
+        let producer = pages(inputs::producer(100), 100);
+        let standard = Document::open(Arc::clone(&producer)).expect("it opens");
         assert!(
-            text.plain_text().contains(inputs::PHRASE),
-            "dense page {index} does not read its phrase"
+            standard
+                .page(0)
+                .expect("a page")
+                .text()
+                .plain_text()
+                .contains(inputs::PHRASE),
+            "the standard-14 pages do not read their phrase"
         );
-        assert!(
-            !text.search(inputs::PHRASE).is_empty(),
-            "the phrase is not found on dense page {index}"
-        );
-        assert!(
-            !text.search_with(inputs::UNACCENTED, &unaccented).is_empty(),
-            "`{}` is not found, whole and unaccented, on dense page {index}",
-            inputs::UNACCENTED
-        );
-    }
-    let producer = pages(inputs::producer(100), 100);
-    let standard = Document::open(Arc::clone(&producer)).expect("it opens");
-    assert!(
-        standard
-            .page(0)
-            .expect("a page")
-            .text()
-            .plain_text()
-            .contains(inputs::PHRASE),
-        "the standard-14 pages do not read their phrase"
-    );
-    let small_1000 = pages(inputs::small(1000), 1000);
-    let small_10000 = pages(inputs::small(10000), 10000);
-
-    let mut group = c.benchmark_group("text");
-    group.sampling_mode(SamplingMode::Flat);
-
-    group.throughput(Per::Pages(1).throughput());
-    group.bench_function("extract a page of text", |b| {
-        b.iter(|| black_box(page.text().plain_text()));
+        op.per(Per::Pages(100));
+        op.iter(|| black_box(every_page_text(&producer)));
     });
 
-    group.throughput(Per::Pages(100).throughput());
-    group.bench_function("text of 100 dense pages", |b| {
-        b.iter(|| black_box(every_page_text(&dense)));
+    group.operation("text of 1000 small pages", |op| {
+        op.per(Per::Pages(1000));
+        op.iter(|| black_box(every_page_text(&small_1000)));
     });
 
-    group.bench_function("text of 100 standard-14 pages", |b| {
-        b.iter(|| black_box(every_page_text(&producer)));
+    group.operation("text of 10000 small pages", |op| {
+        op.per(Per::Pages(10000));
+        op.iter(|| black_box(every_page_text(&small_10000)));
     });
 
-    group.throughput(Per::Pages(1000).throughput());
-    group.bench_function("text of 1000 small pages", |b| {
-        b.iter(|| black_box(every_page_text(&small_1000)));
-    });
-
-    group.throughput(Per::Pages(10000).throughput());
-    group.bench_function("text of 10000 small pages", |b| {
-        b.iter(|| black_box(every_page_text(&small_10000)));
-    });
-
-    group.throughput(Per::Pages(100).throughput());
-    group.bench_function("structured JSON of 100 pages", |b| {
-        b.iter(|| {
+    group.operation("structured JSON of 100 pages", |op| {
+        op.per(Per::Pages(100));
+        op.iter(|| {
             let doc = Document::open(Arc::clone(&dense)).expect("it opens");
             let mut writer = TextWriter::new(TextFormat::Json);
             let mut written = 0usize;
@@ -107,8 +115,9 @@ fn text(c: &mut Criterion) {
         });
     });
 
-    group.bench_function("search a phrase over 100 pages from scratch", |b| {
-        b.iter(|| {
+    group.operation("search a phrase over 100 pages from scratch", |op| {
+        op.per(Per::Pages(100));
+        op.iter(|| {
             let doc = Document::open(Arc::clone(&dense)).expect("it opens");
             let mut hits = 0usize;
             for index in 0..doc.page_count() {
@@ -120,12 +129,12 @@ fn text(c: &mut Criterion) {
         });
     });
 
-    group.throughput(Per::Pages(500).throughput());
-    group.bench_function("search 100 pages' prebuilt text", |b| {
-        b.iter(|| {
+    group.operation("search 100 pages' prebuilt text", |op| {
+        op.per(Per::Pages(500));
+        op.iter(|| {
             let mut hits = 0usize;
             for _ in 0..5 {
-                for text in &prebuilt {
+                for text in prebuilt.iter() {
                     hits += text.search(inputs::PHRASE).len();
                 }
             }
@@ -133,14 +142,14 @@ fn text(c: &mut Criterion) {
         });
     });
 
-    group.throughput(Per::Pages(300).throughput());
-    group.bench_function(
+    group.operation(
         "search 100 pages' prebuilt text, whole words, unaccented",
-        |b| {
-            b.iter(|| {
+        |op| {
+            op.per(Per::Pages(300));
+            op.iter(|| {
                 let mut hits = 0usize;
                 for _ in 0..3 {
-                    for text in &prebuilt {
+                    for text in prebuilt.iter() {
                         hits += text.search_with(inputs::UNACCENTED, &unaccented).len();
                     }
                 }
@@ -151,48 +160,43 @@ fn text(c: &mut Criterion) {
 
     // The same text through the CLI, one child an iteration: plain text with
     // a form feed after every page, and the structured text as JSON.
-    let dense_pdf = cli::fixture("dense-100.pdf", || dense.to_vec());
-    let small_1000_pdf = cli::fixture("small-1000.pdf", || small_1000.to_vec());
-    let small_10000_pdf = cli::fixture("small-10000.pdf", || small_10000.to_vec());
-    let dense_text = Cli::new("text-dense-100");
-    group
-        .throughput(Per::Pages(100).throughput())
-        .bench_function("text of 100 dense pages, CLI", |b| {
-            b.iter(|| dense_text.run(&[&"text", &dense_pdf]));
-        });
-    assert_eq!(dense_text.stdout().matches('\u{c}').count(), 100);
-    assert_eq!(
-        dense_text.stdout().matches(inputs::PHRASE).count(),
-        100,
-        "every dense page's phrase"
-    );
-    let small_text = Cli::new("text-small-1000");
-    group
-        .throughput(Per::Pages(1000).throughput())
-        .bench_function("text of 1000 small pages, CLI", |b| {
-            b.iter(|| small_text.run(&[&"text", &small_1000_pdf]));
-        });
-    assert_eq!(small_text.stdout().matches('\u{c}').count(), 1000);
-    let more_text = Cli::new("text-small-10000");
-    group
-        .throughput(Per::Pages(10000).throughput())
-        .bench_function("text of 10000 small pages, CLI", |b| {
-            b.iter(|| more_text.run(&[&"text", &small_10000_pdf]));
-        });
-    assert_eq!(more_text.stdout().matches('\u{c}').count(), 10000);
-    let json = Cli::new("text-json-100");
-    group
-        .throughput(Per::Pages(100).throughput())
-        .bench_function("structured JSON of 100 pages, CLI", |b| {
-            b.iter(|| json.run(&[&"text", &dense_pdf, &"--json"]));
-        });
-    let written = json.stdout();
-    assert!(written.starts_with("{\"format\":\"tinker-pdf/text\""));
-    assert_eq!(
-        written.matches("{\"index\":").count(),
-        100,
-        "the JSON's pages"
-    );
+    group.operation("text of 100 dense pages, CLI", |op| {
+        let dense_text = Cli::new("text-dense-100");
+        op.per(Per::Pages(100));
+        op.iter(|| dense_text.run(&[&"text", &*dense_pdf]));
+        assert_eq!(dense_text.stdout().matches('\u{c}').count(), 100);
+        assert_eq!(
+            dense_text.stdout().matches(inputs::PHRASE).count(),
+            100,
+            "every dense page's phrase"
+        );
+    });
+    group.operation("text of 1000 small pages, CLI", |op| {
+        let small_1000_pdf = cli::fixture("small-1000.pdf", || small_1000.to_vec());
+        let small_text = Cli::new("text-small-1000");
+        op.per(Per::Pages(1000));
+        op.iter(|| small_text.run(&[&"text", &small_1000_pdf]));
+        assert_eq!(small_text.stdout().matches('\u{c}').count(), 1000);
+    });
+    group.operation("text of 10000 small pages, CLI", |op| {
+        let small_10000_pdf = cli::fixture("small-10000.pdf", || small_10000.to_vec());
+        let more_text = Cli::new("text-small-10000");
+        op.per(Per::Pages(10000));
+        op.iter(|| more_text.run(&[&"text", &small_10000_pdf]));
+        assert_eq!(more_text.stdout().matches('\u{c}').count(), 10000);
+    });
+    group.operation("structured JSON of 100 pages, CLI", |op| {
+        let json = Cli::new("text-json-100");
+        op.per(Per::Pages(100));
+        op.iter(|| json.run(&[&"text", &*dense_pdf, &"--json"]));
+        let written = json.stdout();
+        assert!(written.starts_with("{\"format\":\"tinker-pdf/text\""));
+        assert_eq!(
+            written.matches("{\"index\":").count(),
+            100,
+            "the JSON's pages"
+        );
+    });
 
     group.finish();
 }

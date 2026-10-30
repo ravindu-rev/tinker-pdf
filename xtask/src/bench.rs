@@ -150,7 +150,7 @@ impl Unit {
 /// One operation of a group's list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Listed {
-    /// Its name inside the group, as its file passes it to `bench_function`.
+    /// Its name inside the group, as its file passes it to `operation`.
     pub name: String,
     /// What an iteration processes.
     pub unit: Unit,
@@ -752,11 +752,18 @@ pub fn compare(
 /// as far as its escape, which [`rewritten`] then refuses.
 #[must_use]
 pub fn literals_passed_to(source: &str, method: &str) -> Vec<String> {
-    let needle = format!(".{method}(");
+    literals_after(source, &format!(".{method}("))
+}
+
+/// Every string literal that follows `prefix` in `source`, whitespace between
+/// the two allowed: the reader [`literals_passed_to`] is, for a call that is
+/// no method's, such as [`GROUP_OPENED`].
+#[must_use]
+pub fn literals_after(source: &str, prefix: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = source;
-    while let Some(at) = rest.find(&needle) {
-        rest = rest[at + needle.len()..].trim_start();
+    while let Some(at) = rest.find(prefix) {
+        rest = rest[at + prefix.len()..].trim_start();
         let Some(literal) = rest.strip_prefix('"') else {
             continue;
         };
@@ -766,6 +773,20 @@ pub fn literals_passed_to(source: &str, method: &str) -> Vec<String> {
     }
     out
 }
+
+/// How a group file opens its group: the harness's own, whose operations run
+/// under criterion and in count mode alike (`benches/support/mod.rs`).
+pub const GROUP_OPENED: &str = "Group::new(c, ";
+
+/// The groups whose files are frozen, and so keep criterion's own
+/// `benchmark_group` and `bench_function` and run under criterion alone.
+///
+/// `calibration` is the one: its file is the same input and call as the text
+/// group's `text of 100 dense pages`, kept apart so that nothing a later row
+/// adds can move it, and a change to it re-states every calibrated target,
+/// which is the owner's (H-77, `docs/design/performance.md`). Count mode
+/// counts that input and call as the text group's operation.
+pub const FROZEN: &[&str] = &["calibration"];
 
 /// Each entry of `bench.yml`'s matrix: its `group`, and the `count` under it
 /// — how many criterion lines that group's job insists on seeing.
@@ -925,23 +946,46 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
                 continue;
             }
         };
-        let opened = literals_passed_to(&source, "benchmark_group");
+        // A frozen file keeps criterion's own calls; every other one opens
+        // the harness's group and declares each operation through it, since
+        // count mode runs only what `Group::operation` declares.
+        let frozen = FROZEN.contains(&target.as_str());
+        let opened = if frozen {
+            literals_passed_to(&source, "benchmark_group")
+        } else {
+            literals_after(&source, GROUP_OPENED)
+        };
         if opened.is_empty() {
             problems.push(format!(
-                "`{file}` opens no group; a group file opens one criterion group, \
-                 named for its group, so every id it records is `{target}/<name>`"
+                "`{file}` opens no group; a group file opens one group, named for \
+                 its group, so every id it records is `{target}/<name>`"
             ));
         }
         for other in once(&opened) {
             if other != target {
                 problems.push(format!(
-                    "`{file}` opens `{other}`; a group file opens one criterion \
-                     group, named for its group, so every id it records is \
-                     `{target}/<name>`"
+                    "`{file}` opens `{other}`; a group file opens one group, named \
+                     for its group, so every id it records is `{target}/<name>`"
                 ));
             }
         }
-        let names = literals_passed_to(&source, "bench_function");
+        if !frozen {
+            for call in ["benchmark_group", "bench_function"] {
+                if source.contains(&format!(".{call}(")) {
+                    problems.push(format!(
+                        "`{file}` calls criterion's `{call}` itself, and count mode \
+                         runs only what `Group::operation` declares: open the group \
+                         with `{GROUP_OPENED}\"{target}\")` and declare each \
+                         operation through `operation`"
+                    ));
+                }
+            }
+        }
+        let names = if frozen {
+            literals_passed_to(&source, "bench_function")
+        } else {
+            literals_passed_to(&source, "operation")
+        };
         if names.is_empty() {
             problems.push(format!(
                 "`{file}` names no operation; a benchmark file with nothing in it \
@@ -1676,8 +1720,8 @@ harness = false
     const OPEN_RS: &str = r#"mod support;
 
 fn open(c: &mut Criterion) {
-    let mut group = c.benchmark_group("open");
-    group.bench_function("open a 3-page document", |b| {});
+    let mut group = Group::new(c, "open");
+    group.operation("open a 3-page document", |op| {});
     group.finish();
 }
 "#;
@@ -1687,11 +1731,11 @@ fn open(c: &mut Criterion) {
     const RENDER_RS: &str = r#"mod support;
 
 fn render(c: &mut Criterion) {
-    let mut group = c.benchmark_group("render");
-    group.bench_function("render text at 150 dpi", |b| {});
-    group.bench_function(
+    let mut group = Group::new(c, "render");
+    group.operation("render text at 150 dpi", |op| {});
+    group.operation(
         "render a full-page axial shading at 150 dpi",
-        |b| {},
+        |op| {},
     );
     group.finish();
 }
@@ -1843,6 +1887,73 @@ fn render(c: &mut Criterion) {
         assert_eq!(Tree::agreeing().problems("agrees"), Vec::<String>::new());
     }
 
+    /// Count mode runs what `Group::operation` declares and nothing else, so
+    /// its table is the names each group file hands `operation`. In the tree
+    /// that table is every group's list, name for name and in order, but the
+    /// frozen group's, whose file declares nothing through it; and a group
+    /// file that reaches criterion's own `bench_function` or
+    /// `benchmark_group` is refused, by the call.
+    #[test]
+    fn every_operation_runs_in_count_mode() {
+        let root = repo_root();
+        let text = std::fs::read_to_string(root.join(BASELINE_PATH)).expect("the committed file");
+        let lists = groups(&text, BASELINE_PATH).expect("it parses");
+        let mut counted = 0;
+        for list in &lists {
+            let file = format!("{BENCH_DIR}/{}.rs", list.name);
+            let source = std::fs::read_to_string(root.join(&file)).expect("the group's file");
+            let declared = literals_passed_to(&source, "operation");
+            if FROZEN.contains(&list.name.as_str()) {
+                assert!(
+                    declared.is_empty(),
+                    "{file} is frozen and declares nothing through `operation`: {declared:?}"
+                );
+                continue;
+            }
+            let listed: Vec<&str> = list.operations.iter().map(|op| op.name.as_str()).collect();
+            assert_eq!(
+                declared, listed,
+                "{file}: count mode's operations and its list"
+            );
+            assert_eq!(
+                literals_after(&source, GROUP_OPENED),
+                std::slice::from_ref(&list.name)
+            );
+            assert!(
+                !source.contains(".bench_function(") && !source.contains(".benchmark_group("),
+                "{file} reaches criterion past count mode"
+            );
+            counted += declared.len();
+        }
+        assert!(counted > 0, "count mode runs no operation");
+
+        refuses(
+            "count-mode",
+            &[
+                (
+                    "an operation benchmarked through criterion's own call",
+                    |tree| {
+                        let source = tree.file("render.rs");
+                        *source = source.replace(
+                            "group.operation(\"render text at 150 dpi\", |op| {});",
+                            "group.bench_function(\"render text at 150 dpi\", |b| {});",
+                        );
+                    },
+                    "calls criterion's `bench_function` itself",
+                ),
+                (
+                    "a group opened through criterion's own call",
+                    |tree| {
+                        let source = tree.file("open.rs");
+                        *source = source
+                            .replace("Group::new(c, \"open\")", "c.benchmark_group(\"open\")");
+                    },
+                    "calls criterion's `benchmark_group` itself",
+                ),
+            ],
+        );
+    }
+
     /// A group file and its list in `baseline.json` carry one list of names,
     /// and a `[[bench]]` declares each file: every way the three can part.
     #[test]
@@ -1856,8 +1967,8 @@ fn render(c: &mut Criterion) {
                         let source = tree.file("render.rs");
                         *source = source.replace(
                             "    group.finish();",
-                            "    group.bench_function(\"fill 300 anti-aliased paths at 150 dpi\", \
-                             |b| {});\n    group.finish();",
+                            "    group.operation(\"fill 300 anti-aliased paths at 150 dpi\", \
+                             |op| {});\n    group.finish();",
                         );
                         tree.workflow = tree.workflow.replace("count: 2", "count: 3");
                     },
@@ -1868,7 +1979,7 @@ fn render(c: &mut Criterion) {
                     |tree| {
                         let source = tree.file("render.rs");
                         *source = source.replace(
-                            "    group.bench_function(\"render text at 150 dpi\", |b| {});\n",
+                            "    group.operation(\"render text at 150 dpi\", |op| {});\n",
                             "",
                         );
                         tree.workflow = tree.workflow.replace("count: 2", "count: 1");
@@ -1899,7 +2010,7 @@ fn render(c: &mut Criterion) {
                         let source = tree.file("open.rs");
                         *source = source.replace(
                             "    group.finish();",
-                            "    group.bench_function(\"open a 3-page document\", |b| {});\n    \
+                            "    group.operation(\"open a 3-page document\", |op| {});\n    \
                              group.finish();",
                         );
                         tree.workflow = tree.workflow.replace("count: 1", "count: 2");
@@ -1911,8 +2022,8 @@ fn render(c: &mut Criterion) {
                     |tree| {
                         tree.files.push((
                             "text.rs".to_string(),
-                            "let mut group = c.benchmark_group(\"text\");\n\
-                             group.bench_function(\"extract a page of text\", |b| {});\n"
+                            "let mut group = Group::new(c, \"text\");\n\
+                             group.operation(\"extract a page of text\", |op| {});\n"
                                 .to_string(),
                         ));
                     },
@@ -1925,8 +2036,8 @@ fn render(c: &mut Criterion) {
                             .push_str("\n[[bench]]\nname = \"text\"\nharness = false\n");
                         tree.files.push((
                             "text.rs".to_string(),
-                            "let mut group = c.benchmark_group(\"text\");\n\
-                             group.bench_function(\"extract a page of text\", |b| {});\n"
+                            "let mut group = Group::new(c, \"text\");\n\
+                             group.operation(\"extract a page of text\", |op| {});\n"
                                 .to_string(),
                         ));
                         tree.workflow = tree.workflow.replace(
@@ -1964,8 +2075,8 @@ fn render(c: &mut Criterion) {
                     "a group file opening a group of another name",
                     |tree| {
                         let source = tree.file("open.rs");
-                        *source = source
-                            .replace("benchmark_group(\"open\")", "benchmark_group(\"opening\")");
+                        *source =
+                            source.replace("Group::new(c, \"open\")", "Group::new(c, \"opening\")");
                     },
                     "opens `opening`",
                 ),
@@ -1974,7 +2085,7 @@ fn render(c: &mut Criterion) {
                     |tree| {
                         let source = tree.file("open.rs");
                         *source = source.replace(
-                            "let mut group = c.benchmark_group(\"open\");",
+                            "let mut group = Group::new(c, \"open\");",
                             "let mut group = c;",
                         );
                     },

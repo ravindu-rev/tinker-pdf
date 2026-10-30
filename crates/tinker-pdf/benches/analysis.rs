@@ -8,10 +8,11 @@
 
 mod support;
 
+use std::cell::LazyCell;
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
-use support::{inputs, Per};
+use criterion::{criterion_group, criterion_main, Criterion};
+use support::{inputs, Group, Per};
 use tinker_pdf::redact::{self, Redaction};
 use tinker_pdf::{Document, InferenceOptions, PageTables, Rect, TableSource};
 
@@ -24,43 +25,53 @@ fn text_of(doc: &Document) -> usize {
 }
 
 fn analysis(c: &mut Criterion) {
-    let report = Document::open(inputs::report(100)).expect("the report opens");
-    assert_eq!(report.page_count(), 100);
-    let claiming = Document::open(inputs::claiming(100)).expect("the claiming file opens");
-    assert_eq!(claiming.page_count(), 100);
+    let report = LazyCell::new(|| {
+        let report = Document::open(inputs::report(100)).expect("the report opens");
+        assert_eq!(report.page_count(), 100);
+        report
+    });
+    // Each validator reads the claim it is given, so each runs its rules.
+    let claiming = LazyCell::new(|| {
+        let claiming = Document::open(inputs::claiming(100)).expect("the claiming file opens");
+        assert_eq!(claiming.page_count(), 100);
+        assert!(claiming.validate_pdfa().flavour.is_some(), "a PDF/A claim");
+        assert!(claiming.validate_pdfua().part.is_some(), "a PDF/UA claim");
+        assert!(claiming.validate_pdfx().claim.is_some(), "a PDF/X claim");
+        claiming
+    });
 
-    let mut group = c.benchmark_group("analysis");
-    group.sampling_mode(SamplingMode::Flat);
-    group.throughput(Per::Pages(100).throughput());
+    let mut group = Group::new(c, "analysis");
 
-    group.bench_function("text of the 100 report pages", |b| {
-        b.iter(|| black_box(text_of(&report)));
+    group.operation("text of the 100 report pages", |op| {
+        op.per(Per::Pages(100));
+        op.iter(|| black_box(text_of(&report)));
     });
 
     // The rectangle over each page's running head, so every page has text
     // to cut; the editor is not saved, which is the write group's.
-    let head = Redaction {
-        area: Rect {
-            x0: 40.0,
-            y0: 796.0,
-            x1: 555.0,
-            y1: 822.0,
-        },
-        mark: true,
-    };
-    let cut: usize = {
-        let mut editor = report.editor();
-        (0..100)
-            .map(|page| {
-                redact::apply(&mut editor, page, std::slice::from_ref(&head))
-                    .expect("the page exists")
-                    .glyphs
-            })
-            .sum()
-    };
-    assert!(cut >= 100, "the redaction removed the text under it: {cut}");
-    group.bench_function("redact a rectangle on each of 100 pages", |b| {
-        b.iter(|| {
+    group.operation("redact a rectangle on each of 100 pages", |op| {
+        let head = Redaction {
+            area: Rect {
+                x0: 40.0,
+                y0: 796.0,
+                x1: 555.0,
+                y1: 822.0,
+            },
+            mark: true,
+        };
+        let cut: usize = {
+            let mut editor = report.editor();
+            (0..100)
+                .map(|page| {
+                    redact::apply(&mut editor, page, std::slice::from_ref(&head))
+                        .expect("the page exists")
+                        .glyphs
+                })
+                .sum()
+        };
+        assert!(cut >= 100, "the redaction removed the text under it: {cut}");
+        op.per(Per::Pages(100));
+        op.iter(|| {
             let mut editor = report.editor();
             for page in 0..100 {
                 black_box(redact::apply(
@@ -72,45 +83,47 @@ fn analysis(c: &mut Criterion) {
         });
     });
 
-    let options = InferenceOptions::default();
-    assert_eq!(report.inferred_orders(0..100, &options).len(), 100);
-    group.bench_function("reading order inferred over 100 pages", |b| {
-        b.iter(|| black_box(report.inferred_orders(0..100, &options)));
+    group.operation("reading order inferred over 100 pages", |op| {
+        let options = InferenceOptions::default();
+        assert_eq!(report.inferred_orders(0..100, &options).len(), 100);
+        op.per(Per::Pages(100));
+        op.iter(|| black_box(report.inferred_orders(0..100, &options)));
     });
 
-    assert!(
-        report
-            .pages()
-            .into_iter()
-            .all(|page| match page.tables(TableSource::Inferred) {
-                PageTables::Inferred(found) => !found.tables.is_empty(),
-                PageTables::Stated(stated) => !stated.is_empty(),
-            }),
-        "every report page's table is found"
-    );
-    group.bench_function("tables inferred over 100 pages", |b| {
-        b.iter(|| {
+    group.operation("tables inferred over 100 pages", |op| {
+        assert!(
+            report
+                .pages()
+                .into_iter()
+                .all(|page| match page.tables(TableSource::Inferred) {
+                    PageTables::Inferred(found) => !found.tables.is_empty(),
+                    PageTables::Stated(stated) => !stated.is_empty(),
+                }),
+            "every report page's table is found"
+        );
+        op.per(Per::Pages(100));
+        op.iter(|| {
             for page in report.pages() {
                 black_box(page.tables(TableSource::Inferred));
             }
         });
     });
 
-    // Each validator reads the claim it is given, so each runs its rules.
-    assert!(claiming.validate_pdfa().flavour.is_some(), "a PDF/A claim");
-    assert!(claiming.validate_pdfua().part.is_some(), "a PDF/UA claim");
-    assert!(claiming.validate_pdfx().claim.is_some(), "a PDF/X claim");
-    group.bench_function("text of the 100 claiming pages", |b| {
-        b.iter(|| black_box(text_of(&claiming)));
+    group.operation("text of the 100 claiming pages", |op| {
+        op.per(Per::Pages(100));
+        op.iter(|| black_box(text_of(&claiming)));
     });
-    group.bench_function("PDF-A validation of 100 pages", |b| {
-        b.iter(|| black_box(claiming.validate_pdfa()));
+    group.operation("PDF-A validation of 100 pages", |op| {
+        op.per(Per::Pages(100));
+        op.iter(|| black_box(claiming.validate_pdfa()));
     });
-    group.bench_function("PDF-UA validation of 100 pages", |b| {
-        b.iter(|| black_box(claiming.validate_pdfua()));
+    group.operation("PDF-UA validation of 100 pages", |op| {
+        op.per(Per::Pages(100));
+        op.iter(|| black_box(claiming.validate_pdfua()));
     });
-    group.bench_function("PDF-X validation of 100 pages", |b| {
-        b.iter(|| black_box(claiming.validate_pdfx()));
+    group.operation("PDF-X validation of 100 pages", |op| {
+        op.per(Per::Pages(100));
+        op.iter(|| black_box(claiming.validate_pdfx()));
     });
 
     group.finish();

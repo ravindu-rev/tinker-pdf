@@ -908,7 +908,7 @@ to it in the commit that adds the capability.
 ```text
 crates/tinker-pdf/benches/
   support/mod.rs     the harness: each group's sampling, the iteration shapes,
-                     the fixture directory, what an operation declares
+                     what an operation declares, and count mode
   support/inputs.rs  every generator, and the two level-6 byte counts
   support/cli.rs     the one spawner: this revision's tpdf, as a child
   open.rs  text.rs  analysis.rs  render.rs  encode.rs  decode.rs  write.rs
@@ -944,8 +944,9 @@ written through `raw`.
 
 #### An operation: its id, its unit and its iteration
 
-**The id** is criterion's, `<group>/<name>`: the group file opens a
-`benchmark_group` named for its group and names each operation in it.
+**The id** is criterion's, `<group>/<name>`: the group file opens its group,
+`Group::new(c, "<group>")`, named for its group, and names each operation in
+it through `Group::operation`.
 `bench.rs` keys every estimate by the directory criterion wrote it under
 (`xtask/src/bench.rs:359-385`), and criterion 0.5.1 makes each part of that
 path filename-safe — it replaces `?`, `"`, `/`, `\`, `*`, `<`, `>`, `:`, `|`
@@ -963,7 +964,8 @@ P-26's CFF target in outlines a second), or none, for an operation whose input
 is none of these — a private-key operation, a shaped paragraph — which
 reports milliseconds alone. Criterion keeps a group's throughput from one
 operation to the next and has no call that clears it, so a group declares its
-unitless operations first: the AES-256 open opens the open group. A render's pixels are its bitmap's; a decode's
+unitless operations first: the AES-256 open opens the open group, and
+`Group::operation` refuses an operation with no unit after one with a unit. A render's pixels are its bitmap's; a decode's
 are the image's; the ICC conversion's are the image's, because tier P states
 that target in the image's Mpixel/s.
 
@@ -976,8 +978,8 @@ operation measures.
   its document every time, so that a cache a later row keeps on the document —
   P-16's — cannot turn a first render into a warm one unnoticed. An open is
   lazy, and small beside 20 ms.
-- **Over prebuilt state**, built once before the loop when the operation's
-  name says it starts from it: prebuilt text, a recorded display list, a
+- **Over prebuilt state**, built once before the loop, the first time an
+  operation reads it, when the operation's name says it starts from it: prebuilt text, a recorded display list, a
   rendered bitmap, a decoder's input. The second render and the re-rendered
   annotation build theirs per iteration, untimed, through criterion's
   `iter_batched`.
@@ -987,6 +989,30 @@ operation measures.
   confirmed at MS-04.10. A relation compares per-call figures, an iteration's
   mean over its `calls`, so each side of one keeps its own.
 - **A child.** A CLI operation runs `tpdf` once a call (below).
+
+Each input is built in a `LazyCell` the first time an operation reads it, and
+checked there, so criterion, which runs every operation, builds every input,
+and count mode builds only what its one operation reads.
+
+#### Count mode
+
+A bench binary started with `TINKER_BENCH_COUNT=<group>/<name>` and
+`TINKER_BENCH_ITERATIONS=<n>` runs that operation's routine exactly `n`
+times outside criterion's sampler, prints
+`count-mode: RAN <group>/<name> <n>` and exits; an operation that is none of
+its group's, or an iteration count missing or no number, fails by name.
+Criterion's sampler chooses its iteration count from the clock, so a count of
+an ordinary run would count a different amount of work each time; count mode
+reads no clock, so the instructions the process executes are a property of
+the code and the input, and a run of `n + 1` less a run of `n` is one
+iteration's, start-up and the inputs' construction cancelled. An operation
+whose iterations each take an untimed input (`iter_batched`) counts that
+setup with it, since nothing outside the process can tell their instructions
+apart. Every operation is declared through `Group::operation`, which runs it
+either way, and `cargo xtask baseline` refuses a group file that calls
+criterion's `bench_function` or `benchmark_group` itself. `calibration.rs` is
+the exception: frozen, it keeps criterion's calls and has no count mode, and
+its input and call are `text/text of 100 dense pages`, which count mode runs.
 
 #### The inputs
 
