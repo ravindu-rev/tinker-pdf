@@ -433,13 +433,18 @@ order on the page than the rules' drawing: read as its font gives it back,
 `1 234` is two numbers to UAX #9, which no drawing puts back together, and
 the styled `?!` after it in `W W <b>1 234</b> <i>?!</i> W.` reads as typed by
 that second search ([ruling 14](../rulings.md)). A reading is held to the
-line's letters in order, white space aside (`paint::Read::Letters`): a
-drawing tried that reads them so is taken, though a reader cut a word of it
-or ran two together, and a line whose rules' drawing reads them so is
-searched no further on the page. Under a transform, a line the rules' drawing
-reads on the page with its letters in order and not its words is searched in
-its runs' own space too, and what that finds is drawn only where it reads the
-words right on the page (`paint::Fonts::reads_whole`). Where nothing tried
+line's words: the first drawing tried that reads them is drawn; one that
+reads the line's letters in order, white space aside, and not its words — a
+word cut where a reader parts the spacing, or two run together
+(`paint::Read::Letters`) — is drawn only where none reads the words; and a
+line whose rules' drawing reads so is searched on, its rules' drawing kept
+where nothing reads the words. A letter-spaced line, which a reader parts at
+its spacing whatever is drawn, spends the whole budget so, a time ruling 14
+takes for the words the search reads elsewhere. Under a transform, a line the
+rules' drawing reads on the page with its letters in order and not its words,
+which nothing tried there reads with its words, is searched in its runs' own
+space too, and what that finds is drawn only where it reads the words right
+on the page (`paint::Fonts::reads_whole`). Where nothing tried
 reads a line right on the page under a transform — glyphs the transform sets
 over others, whose letters no drawing reads in order — the line is searched
 again in its runs' own space, and what that finds is drawn only where, read
@@ -467,14 +472,13 @@ has searched is not searched again (`text_order::Readings`)
 `a_drawing_that_sets_more_glyphs_over_others_than_the_rules_is_not_taken`,
 `two_cells_are_read_back_as_a_reader_parts_them_on_the_page`, and in
 `epub::tests`,
-`a_line_whose_rules_drawing_reads_its_letters_in_order_is_read_back_once`,
+`a_line_whose_rules_drawing_reads_its_letters_in_order_is_searched_for_its_words`,
 `a_line_of_units_the_read_back_has_read_is_not_searched_again` and
 `a_run_is_drawn_from_its_plan_by_its_place_in_the_page`).
 
-**What the read-back leaves** (ROADMAP CD-19). Holding each drawing tried to
-the line's words, searching on past a reading of the rules' drawing that runs
-two words together or cuts one, and reading each drawing once are not done.
-These lines no drawing tried reads right, and they are drawn by the rules:
+**What the read-back leaves** (ROADMAP CD-19). Reading each drawing once is
+not done. These lines no drawing tried reads right, and they are drawn by the
+rules:
 
 - `25٪ <b>W</b>` in an Arabic paragraph at `word-spacing: 1em`, turned by
   `rotate(180deg)` or not, whose line that opens with `25٪` a reader reads
@@ -493,8 +497,7 @@ These lines no drawing tried reads right, and they are drawn by the rules:
   placement of a space parts into halves a reader resumes a line across;
 - a run of `.!` or `!…` opening a right-to-left line before a styled pair;
 - a paragraph of Arabic with no `dir` whose inline `word-spacing: 1em` span
-  cuts a word, and a `;` glued to an Arabic word, letter-spaced by `0.25em`
-  and justified, which conserves and does not read whole;
+  cuts a word;
 - lines the reader reads from the right whatever the writer draws — a Latin
   gloss before a bracketed right-to-left word, table cells (two right-to-left
   cells with no `dir` touching, or a cell `(ספר) בית` alone on its line), an

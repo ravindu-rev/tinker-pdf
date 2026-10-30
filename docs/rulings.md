@@ -524,9 +524,19 @@ instead of living in one feature's head.
     on the page it is drawn on, and draws it otherwise where that reads it
     right. Each run is planned once a page for each drawing a reading tries
     it in, and a line of units a reading puts in logical order is searched
-    for its reading once a page (`text_order::Readings`). Under a transform, a line whose rules' drawing
-    reads on the page with its letters in order and not its words is read
-    again in its runs' own space. Where reading each glyph back as the
+    for its reading once a page (`text_order::Readings`). A reading is held
+    to the line's words: a drawing whose reading cuts a word where a reader
+    parts the spacing, or runs two together, is drawn only where no drawing
+    tried reads the words, and a line whose rules' drawing reads so is
+    searched on for one that does (H-150). The owner's rules took the time
+    that costs: a letter-spaced line, which a reader parts at its spacing
+    whatever is drawn, is read back in the whole budget, 128 readings against
+    one, and over `epub_fallback.rs` and `epub_conservation.rs` the read-back
+    takes 1.09 to 1.14 times the time in release and 1.11 to 1.14 in debug of
+    one that held a reading to the letters. Under a transform, a line whose
+    rules' drawing reads on the page with its letters in order and not its
+    words, which nothing tried there reads with its words, is read again in
+    its runs' own space. Where reading each glyph back as the
     page's font gives it back finds nothing — in `W W <b>1 234</b> <i>?!</i>
     W.`, the number's halves a NO-BREAK SPACE apart, a reader reads that
     space by its glyph name and UAX #9 then reads two numbers — the line is
@@ -546,9 +556,7 @@ instead of living in one feature's head.
     no change taken reaches is listed in ROADMAP's Bugs. A line turned on the
     page is read along its own baseline, as it reads unturned; the owner took
     the price, that a paragraph read whole only where a turn cut its lines
-    otherwise reads as its twin: the punctuation shape in a right-to-left
-    Arabic paragraph at `word-spacing: 0.6em` under `rotate(12deg)` no longer
-    reads whole.
+    otherwise reads as its twin, whatever its twin reads.
 
 ## How to add a ruling
 

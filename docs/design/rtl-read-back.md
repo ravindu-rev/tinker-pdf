@@ -275,8 +275,8 @@ reader reads it; unturned, the space is drawn alone, dropped as a line of
 white space, and the line reads `كتاب25٪`. Rows that conserved, read whole
 or found every word only because a reader cut a turned line on the page's
 axes read as their twins: the punctuation shape under `rotate(12deg)`, whose
-climbing baseline was cut every half an em up the page, reads as its twin
-and not whole, the owner's price on H-157; and the squeezed Hebrew blocks of
+climbing baseline was cut every half an em up the page, reads as its twin,
+which a reading held to its words reads whole; and the squeezed Hebrew blocks of
 `a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space`,
 turned a quarter and three quarters, conserve, hold their order and find
 every word, as unturned, in both builds. A Latin line under a quarter turn
@@ -307,120 +307,57 @@ held to what it reads, the three sentences and their twin pinned at
 `a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space`, held
 to what they read unturned.
 
-### W, WJ and WJC: a reading held to the line's words
+### A reading held to the line's words
 
-**What decides it.** `Fonts::search` holds a reading to the line's letters in
-order, white space aside (`Read::Letters`): a drawing tried that reads them so
-is taken, though a reader cut a word of it at the spacing or ran two
-together, and a line whose rules' drawing reads them so is searched no
-further. `epub_fallback.rs`'s
-`a_reading_that_cuts_or_joins_a_word_is_taken_as_935b077_took_it` and
-`two_cells_are_read_back_as_a_reader_parts_them_on_the_page` pin what that
-reads; `epub::tests`'
-`a_line_whose_rules_drawing_reads_its_letters_in_order_is_read_back_once` and
-`a_line_of_units_the_read_back_has_read_is_not_searched_again` hold what it
-costs, by count.
+**The rule, as landed.** `Fonts::search` holds a reading to the line's
+words. A drawing tried that reads them is taken; one that reads the letters
+in order and not the words, a word cut where a reader parts the spacing or
+two run together (`Read::Letters`), is kept while the search goes on, within
+the same 128 readings, and drawn only where none reads the words; and a line
+whose rules' drawing reads it so is searched on the same way, the rules'
+drawing kept where nothing reads the words (`Search::Letters`). No drawing is
+taken that sets more glyphs over others than the rules'. Of the options
+CD-19.9 priced, holding each drawing tried to the words (W), searching on
+where the rules' drawing runs two words together (WJ) and where it cuts one
+(WJC), this is WJC, which reads every case the other two read better and
+more, and none worse: the owner's rules took it (ruling 14, H-150).
 
-**The options**, each holding a reading further to the words:
+**What it reads.** In both builds it reads whole Left (5)'s punctuation shape
+at `word-spacing: 0.6em`, flat and under `rotate(12deg)`, and at
+`line-height: 0.6`; Left (5)'s Arabic line with `;` glued to a word,
+letter-spaced and justified; Left (4)'s Persian digits, `٢٠١٠. ۴۵` in a
+letter-spaced, word-spaced and justified right-to-left Hebrew paragraph; the
+lines whose rules' drawing a reader reads with a number run into the word
+before it, `كتاب25٪`; `25٪ <b>W</b>` with no `dir` and `﴾٢٥﴿ <b>W</b>` at
+`0.75em` and `1em`; a styled `?!` glued to a Hebrew word; styled `.`, `...`
+and `!!` glued to a word; and the first of two right-to-left table cells under
+`scaleX(2)` on one line. With `bundled-fonts` it reads whole, too, the
+dir-less Hebrew paragraph of inline blocks squeezed by `scaleX(0.5)` at
+`0.6em`, flat and turned a quarter and three quarters. It reads no case
+worse in either build and sets no glyph over another.
 
-- W: each drawing tried is held to the line's words. One that reads the
-  letters in order and not the words is kept while the search goes on, within
-  the same 128 readings, for one that reads the words, and is drawn only where
-  none does.
-- WJ: W, and a line whose rules' drawing runs two of its words together is
-  searched on for a drawing that reads its words; where none does, the line
-  is drawn as it is without the option.
-- WJC: WJ, and so is a line whose rules' drawing cuts a word at the spacing.
+**What it costs.** A line no drawing reads with its words spends the whole
+budget: a letter-spaced line, which a reader parts at its spacing whatever is
+drawn, is read back 128 times, and 256 under a transform, where it is read
+again in its runs' own space. Over `epub_fallback.rs` and
+`epub_conservation.rs`, one test at a time, the read-back takes 1.09 to 1.14
+times the time in release, and 1.11 to 1.14 in debug, of one that held a
+reading to the letters. Ruling 14 records the price.
 
-None takes a drawing that sets more glyphs over others than the rules'.
-
-**What CD-19.9 measures**, each option prototyped in `Fonts::search` on the
-landed `paint.rs`, in both builds, for this section and H-150's row:
-
-- each case whose verdicts change, better or worse, by its `CASE` line:
-  `cargo test -p tinker-pdf --test epub_fallback -- --nocapture` and
-  `cargo test -p tinker-pdf --test epub_conservation -- --nocapture`, each
-  again with `--features bundled-fonts`, and
-  `cargo test -p tinker-pdf-shape --test bidi_conformance`;
-- each test whose outcome an option changes, in those suites and in
-  `cargo test -p tinker-pdf --lib epub::`, with the readings `epub::tests`
-  counts (`paint::READINGS`);
-- the time of `epub_fallback.rs` and `epub_conservation.rs`, one test at a
-  time (`--test-threads=1`), in release and debug: each option's ratio to the
-  tree without it in the same round, the median over seven rounds in debug
-  and fifteen in release.
-
-**What the options read.** None reads a case worse in either build, sets a
-glyph over another, or reaches `bidi_conformance.rs`, whose crate does not
-depend on the writer: each case an option changes gains `whole` and loses no
-verdict, and release reads every case as debug does.
-
-| Option | `epub_fallback.rs`, default (232 cases) | with `bundled-fonts` (235) | `epub_conservation.rs` (119), each build |
-|---|---|---|---|
-| W | 12 better | 8 better | none changes |
-| WJ | 21 better | 17 better | 1 better |
-| WJC | 21 better | 20 better | 1 better |
-
-W reads whole Left (5)'s punctuation shape at `word-spacing: 0.6em`, flat and
-under `rotate(12deg)`, the row whose loss ruling 14 records as a price, and
-at `line-height: 0.6`; `25٪ <b>W</b>` at `1em` with no `dir`;
-`﴾٢٥﴿ <b>W</b>` at `0.75em` and `1em`, and after a break in Hebrew; Arabic
-`!!` styled apart and glued to a word at `1em`; and, in a default build, a
-styled `?!` glued to a Hebrew word at `0.6em`, flat, under `scale(2)` and in
-the transform test's two controls. WJ adds the lines whose rules' drawing runs
-a number into the word before it, `كتاب25٪` (a sign after European digits
-before a bold word at `1em`, one sentence and two, and the `scaleY(2)`
-guard's unturned twin); a styled `.` or `...` glued to a word at `0.6em`;
-styled `!!` and `...` glued to a word, at `0.5em` justified in monospace and
-at `1em`; Left (5)'s Arabic line with `;` glued to a word, letter-spaced and
-justified; and in `epub_conservation.rs`, Left (4)'s Persian digits,
-`٢٠١٠. ۴۵` in a letter-spaced, word-spaced and justified right-to-left Hebrew
-paragraph. WJC adds, with `bundled-fonts`, the dir-less Hebrew paragraph of
-inline blocks squeezed by `scaleX(0.5)` at `0.6em`, flat and turned a quarter
-and three quarters, and in both builds reads the first of two right-to-left
-table cells under `scaleX(2)` on one line, where
-`two_cells_are_read_back_as_a_reader_parts_them_on_the_page` pins each of its
-words on a line of its own. Eight more cases under WJ and WJC, six of
-`epub_fallback.rs` and two of `epub_conservation.rs`, and one under W, read
-closer to their words with their verdicts unchanged: a word space comes back
-beside a styled neutral or a number, or a stop to its number.
-
-The tests each option fails are pins of today's reading that a case read
-better trips, and the counts above: under W,
-`a_reading_that_cuts_or_joins_a_word_is_taken_as_935b077_took_it`; under WJ,
-that, `a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on`,
-`a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed` and
-`a_line_whose_rules_drawing_reads_its_letters_in_order_is_read_back_once`, and
-in a default build `epub_conservation.rs`'s
-`a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop` and
-`a_line_of_units_the_read_back_has_read_is_not_searched_again`; under WJC,
-those, the last in both builds,
-`two_cells_are_read_back_as_a_reader_parts_them_on_the_page`, and with
-`bundled-fonts`
-`a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space`.
-
-**What they cost.** Each option reads on where the tree stops at the first
-reading of the letters in order. By `epub::tests`' counts, W reads both
-pinned lines once, as the tree does; WJ reads the line whose rules' drawing
-runs two words together twice, and in a default build a line of styled
-neutrals under word spacing and `scaleX(2)` 256 times against 129; WJC reads
-the letter-spaced line 128 times against once, the whole budget, since no
-drawing of it reads its words. Over the two suites, one test at a time, the
-median ratio to the tree, with the rounds out of all that ran slower:
-
-| Option | debug, default | debug, `bundled-fonts` | release, default | release, `bundled-fonts` |
-|---|---|---|---|---|
-| W | 1.04 (6 of 7) | 1.02 (4 of 7) | 1.04 (11 of 15) | 1.03 (10 of 15) |
-| WJ | 1.08 (6 of 7) | 1.06 (7 of 7) | 1.07 (14 of 15) | 1.07 (14 of 15) |
-| WJC | 1.14 (7 of 7) | 1.11 (7 of 7) | 1.14 (14 of 15) | 1.09 (14 of 15) |
-
-The tree's own rounds spread over an interquartile range of 4.5 to 6.8 per
-cent of their median, so W's time is inside the noise, and WJ's and WJC's
-are past it in release, where nearly every round runs slower; `epub_fallback.rs`
-alone takes WJC 1.16 times as long in release with a default build. Ruling 14
-takes a change of the read-back that reads CD-19's cases better whatever time
-it costs, and none of the three reads a case worse: the owner's rules take
-WJC, which reads every case W and WJ read better and more (H-150).
+**What holds it.** `epub_fallback.rs`'s
+`a_reading_that_cuts_or_joins_a_word_is_searched_past_for_the_lines_words`,
+and the cases it reads right in
+`a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on`,
+`a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed`,
+`a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading`,
+`a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space` and
+`two_cells_are_read_back_as_a_reader_parts_them_on_the_page`;
+`epub_conservation.rs`'s
+`a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop`; and
+`epub::tests`'
+`a_line_whose_rules_drawing_reads_its_letters_in_order_is_searched_for_its_words`
+and `a_line_of_units_the_read_back_has_read_is_not_searched_again`, which
+hold its readings by count.
 
 ### D: each distinct drawing of a line read once
 
@@ -442,9 +379,21 @@ are of the drawings left. The budget, the order of the drawings and the bound
 on glyphs over others stay as they are.
 
 **What CD-19.10 measures**, D prototyped in `Fonts::search` on the landed
-`paint.rs`, in both builds, for this section and H-151's row: the cases, the
-tests and their readings, and the time, by the commands and rounds the
-section above names.
+`paint.rs` before a reading was held to the line's words, in both builds,
+for this section and H-151's row:
+
+- each case whose verdicts change, better or worse, by its `CASE` line:
+  `cargo test -p tinker-pdf --test epub_fallback -- --nocapture` and
+  `cargo test -p tinker-pdf --test epub_conservation -- --nocapture`, each
+  again with `--features bundled-fonts`, and
+  `cargo test -p tinker-pdf-shape --test bidi_conformance`;
+- each test whose outcome D changes, in those suites and in
+  `cargo test -p tinker-pdf --lib epub::`, with the readings `epub::tests`
+  counts (`paint::READINGS`);
+- the time of `epub_fallback.rs` and `epub_conservation.rs`, one test at a
+  time (`--test-threads=1`), in release and debug: D's ratio to the tree
+  without it in the same round, the median over seven rounds in debug and
+  fifteen in release.
 
 **What D reads.** It sets no glyph over another the tree does not, reads
 `epub_conservation.rs` as the tree does, and does not reach
@@ -492,8 +441,8 @@ Each gets its section from its design step: Left (4), the lines the reader
 reads from the right whatever the writer draws (CD-19.22); Left (9), a comma read
 apart after a number a NO-BREAK SPACE holds together (CD-19.32); and
 Left (5), its findings outside ruling 14's rules (CD-19.34). The options whose price the owner decides get
-their figures here from their measure steps: W, WJ and WJC (CD-19.9) and D
-(CD-19.10) above, H1 (CD-19.11) and H6 (CD-19.12). Left (2) reads in two, as a
+their figures here from their measure steps: D (CD-19.10) above, H1
+(CD-19.11) and H6 (CD-19.12). Left (2) reads in two, as a
 Latin word does, by the owner's decision (CD-19.18).
 
 ## Milestones
@@ -511,12 +460,11 @@ Every fix step also passes `epub_fallback.rs`, `epub_conservation.rs` and
    and a test for each of the class's other shapes.
 4. CD-19.9 to CD-19.12: the options priced; exit: each option's figures here
    and in its H row, H-150 to H-153.
-5. CD-19.14: W, WJ or WJC, as the owner chose; exit:
-   `epub_fallback.rs`'s
-   `a_reading_that_cuts_or_joins_a_word_is_taken_as_935b077_took_it` and
-   `epub::tests`'
-   `a_line_whose_rules_drawing_reads_its_letters_in_order_is_read_back_once`
-   holding the new readings, or the pins citing the owner's word.
+5. CD-19.14: WJC, as the owner's rules took it; exit: `epub_fallback.rs`'s
+   `a_reading_that_cuts_or_joins_a_word_is_searched_past_for_the_lines_words`
+   and `epub::tests`'
+   `a_line_whose_rules_drawing_reads_its_letters_in_order_is_searched_for_its_words`
+   holding the new readings.
 6. CD-19.15: D, as the owner chose; exit:
    `a_line_whose_right_drawing_lies_past_the_budget_is_drawn_by_the_rules`,
    renamed for it, holding Left (8)'s lines read right, or the pin citing the
