@@ -1533,11 +1533,10 @@ fn price_book(words: &[&'static str], lead: usize, mark: &str, open: &str, close
 ///   owner's decision named. With `bundled-fonts` the soft-wrapped `".`
 ///   reads right.
 /// - H6 and PRICE-RESIDUAL, a run of stops before a styled pair after a
-///   `<br/>`: with no spacing, `…`, `?!` and `!!` pay the price, and the
-///   mixed runs `.!` and `!…` read as they do, which the decision does not
-///   name: whether they are of its price is the owner's to say (ROADMAP
-///   CD-19, Left (5)); a lone `.`, the price's control, reads as at 9297d2d
-///   and 56dfd93 (it conserved at 94e3bb5 alone); all six pinned.
+///   `<br/>`: with no spacing, `…`, `?!` and `!!` pay the price, and a lone
+///   `.`, the price's control, reads as at 9297d2d and 56dfd93 (it conserved
+///   at 94e3bb5 alone), the four pinned; a run that mixes the stops, `.!` or
+///   `!…`, ends no sentence (ruling 14) and reads as typed, held.
 ///   At `word-spacing: 0.6em` all six read right, and so do the `!?` and `?!`
 ///   books before styled brackets at `0.6em` and `1em` that lost their
 ///   structure tree's order where the overflow font at 0 Tw met the rule,
@@ -1651,13 +1650,19 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
                 s(4),
                 s(11)
             );
-            cases.push(Case::both(
-                "a run of stops opening a line after a break, no spacing (H6, PRICE-RESIDUAL)",
-                language,
-                "",
-                body.clone(),
-                Expect::Pinned("logical found apart"),
-            ));
+            // A run that mixes the stops ends no sentence, and reads as typed.
+            let (what, expect) = if matches!(mark, ".!" | "!…") {
+                (
+                    "a run that mixes the stops opening a line after a break, no spacing (H6)",
+                    Expect::Holds("cons logical whole found apart"),
+                )
+            } else {
+                (
+                    "a run of stops opening a line after a break, no spacing (H6, PRICE-RESIDUAL)",
+                    Expect::Pinned("logical found apart"),
+                )
+            };
+            cases.push(Case::both(what, language, "", body.clone(), expect));
             cases.push(Case::both(
                 "a run of stops opening a line after a break, word-spaced (H6, PRICE-RESIDUAL)",
                 language,

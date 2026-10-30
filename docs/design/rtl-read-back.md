@@ -570,69 +570,40 @@ a line its rules' drawing now reads right is not searched. H1 reads cases
 worse in each build, and more of the conformance files' lines worse than
 better, so ruling 14 leaves it to the owner (H-152).
 
-### H6: a run that mixes the stops ends no sentence
+### A run that mixes the stops ends no sentence
 
-**What decides it.** Where the comma tie-break reads a line left to right and
-the line ends a sentence — read leftward from its right end, any closing
+**The rule, as landed.** Where the comma tie-break reads a line left to right
+and the line ends a sentence — read leftward from its right end, any closing
 quotation marks, then one stop or more — the bracket tie-break passes over a
 pair with a bracket just left of the stops, whose level a left-to-right
 paragraph took from the line above (`OpenedBefore::before_its_punctuation`).
-A right-to-left paragraph whose line opens with those stops before a pair,
-after a `<br/>`, draws the same line and reads as that one, its stops last:
-ruling 14's price, whose figures count runs of `!` and `?`, closing quotation
-marks before stops and ellipses. A run that mixes the stops of UAX #14's
-classes, `EX` (`!`, `?`), `IS` (the full stop, the comma, the colon, the
-semicolon and the ARABIC COMMA) and `IN` (the ellipses), is a run of stops
-too: `<p dir="rtl">كتاب عوامل<br/>.!<b>(</b>جميل<b>)</b> بيت نعرف</p>` reads
-its second line `جميل) بيت نعرف(.!`, and so does `!…`, in Arabic and Hebrew:
-Left (5)'s mixed runs, which `epub_conservation.rs`'s
-`a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed`
-pins.
+A run's stops are of one of UAX #14's classes, `EX` (`!`, `?`), `IS` (the
+full stop, the comma, the colon, the semicolon and the ARABIC COMMA) or `IN`
+(the ellipses), and a run that mixes them, `.!` or `!…`, ends no sentence
+(`bidi::Stop`): the pair just left of it is not passed over, and the bracket
+tie-break weighs it as on any other line. Of the options CD-19.12 priced this
+is H6, which the owner took (H-153).
 
-**The option.** H6: a run of stops of more than one of those classes ends no
-sentence, so the pair just left of it is not passed over, and the bracket
-tie-break weighs it as on any other line. A run of one class, `.`, `...`,
-`?!`, `!!` or `…`, and the closing quotation marks before it, stay as they
-are.
+**What it reads.** In both builds Left (5)'s mixed runs, `.!` and `!…` before
+a styled pair after a `<br/>`, in Arabic and Hebrew, conserve and read whole:
+`<p dir="rtl">كتاب عوامل<br/>.!<b>(</b>جميل<b>)</b> بيت نعرف</p>` reads its
+second line `.!(جميل) بيت نعرف`. No case reads worse, no glyph is set over
+another, and no line of Unicode's conformance files, read as a drawn line
+is, reads otherwise. A run of one class, `.`, `...`, `?!`, `!!` or `…`,
+still ends a sentence, and its right-to-left line reads as ruling 14's price
+reads it.
 
-**What CD-19.12 measures**, H6 prototyped in `before_its_punctuation` on the
-landed code, in both builds, what CD-19.11 measures of H1, for this section
-and H-153's row.
+**What it costs.** A line of a paragraph with no `dir` that ends a pair, a
+word and the same run read the other way, `(نور) يوم!.`, broken before the
+pair, draws the right-to-left line's picture and reads as it does, its run
+first; the suites hold no such line. Over `epub_fallback.rs`,
+`epub_conservation.rs` and `text_logical_order.rs`, one test at a time, it
+takes 0.98 to 1.02 of the time without it in release and debug, within the
+noise.
 
-**What H6 reads.** It sets no glyph over another the tree does not, and
-release reads every case as debug does.
-
-| Option | `epub_fallback.rs`, each build | `epub_conservation.rs` (119), each build |
-|---|---|---|
-| H6 | none changes | 4 better |
-
-Better, in both builds: Left (5)'s mixed runs, `.!` and `!…` before a styled
-pair after a `<br/>`, in Arabic and Hebrew, conserve and read whole,
-`.!(جميل) بيت نعرف`. The test H6 fails is their pin,
+**What holds it.** `bidi.rs`'s `a_run_that_mixes_the_stops_ends_no_sentence`,
+and the mixed runs' rows of `epub_conservation.rs`'s
 `a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed`.
-`epub_fallback.rs`, each row of
-`neutrals_a_reader_reads_with_the_word_beside_them_are_drawn_for_that_reading`
-read in turn, `text_logical_order.rs`, `text_order.rs`, `epub::tests`,
-`bidi.rs` and `bidi_conformance.rs` pass as they do; no line of Unicode's
-conformance files, read as a drawn line is, reads otherwise, nor any of the
-committed documents and books. The pair H6 no longer passes over is the one
-ruling 14 passes over for a line of a paragraph with no `dir` that ends a
-pair, a word and a sentence's stops, `(نور) يوم.`, broken before the pair;
-no such line in the suites ends a run that mixes the stops, so they measure
-nothing H6 reads there.
-
-**What it costs.** Over the three suites, one test at a time, the median
-ratio to the tree, with the rounds out of all that ran slower:
-
-| Option | debug, default | debug, `bundled-fonts` | release, default | release, `bundled-fonts` |
-|---|---|---|---|---|
-| H6 | 1.01 (5 of 7) | 0.98 (3 of 7) | 1.02 (11 of 15) | 1.00 (8 of 15) |
-
-That is the tree's time within its own spread, 2 to 8 per cent of its
-median: H6 asks one more thing of a run of stops the tie-break reads already.
-H6 reads four cases better and none worse in each build, and moves no
-plain-PDF or conformance line, better or worse, where H-153's rule asks for
-more of those read better than worse: the owner decides (H-153).
 
 ### The other cases
 
@@ -640,8 +611,8 @@ Each gets its section from its design step: Left (4), the lines the reader
 reads from the right whatever the writer draws (CD-19.22); Left (9), a comma read
 apart after a number a NO-BREAK SPACE holds together (CD-19.32); and
 Left (5), its findings outside ruling 14's rules (CD-19.34). The options whose price the owner decides get
-their figures here from their measure steps: D (CD-19.10), H1
-(CD-19.11) and H6 (CD-19.12) above. Left (2) reads in two, as a
+their figures here from their measure steps: D (CD-19.10) and H1
+(CD-19.11) above. Left (2) reads in two, as a
 Latin word does, by the owner's decision (CD-19.18).
 
 ## Milestones

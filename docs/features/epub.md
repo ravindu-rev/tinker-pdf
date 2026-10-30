@@ -495,7 +495,6 @@ rules:
 - a word space styled apart across a stretch of two ems,
   `αλφα <b>βήτα</b> ספר בית xyz.` at `word-spacing: 2em`, whose stretch no
   placement of a space parts into halves a reader resumes a line across;
-- a run of `.!` or `!…` opening a right-to-left line before a styled pair;
 - a paragraph of Arabic with no `dir` whose inline `word-spacing: 1em` span
   cuts a word;
 - lines the reader reads from the right whatever the writer draws — a Latin

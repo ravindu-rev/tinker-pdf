@@ -274,10 +274,11 @@ justified English paragraph quoting Hebrew in brackets keeps its direction.
 
 And where the comma tie-break reads a line left to right for the sentence's
 end at its right — read leftward, any closing quotation marks (`"`, `'` and
-the `Pf` ones, `»`, `’`, `”` …), then one stop or more: a full stop, a
-comma, a colon, a semicolon, `!`, `?`, the ARABIC COMMA or an ellipsis, so
-`.`, `...`, `?!`, `…`, `."` and `.»` alike, each a mark UAX #14 puts first on
-a line only after a forced break or a space it names (ruling 14) — the line
+the `Pf` ones, `»`, `’`, `”` …), then one stop or more of one of UAX #14's
+classes: a full stop, a comma, a colon, a semicolon or the ARABIC COMMA
+(`IS`), `!` or `?` (`EX`), or an ellipsis (`IN`), so `.`, `...`, `?!`, `…`,
+`."` and `.»` alike, each a mark UAX #14 puts first on a line only after a
+forced break or a space it names (ruling 14) — the line
 opens just left of the stops, and a pair with a bracket there, enclosing no
 left-to-right letter, counts for neither reading: `جميل بيت كبير (نور) يوم.`
 with no `dir`, broken before the bracket, draws `موي )رون(.` and reads as
@@ -287,8 +288,11 @@ an ending before a pair — a run of `!` and `?`, an ellipsis, a closing
 quotation mark before stops; `…(نور) يوم` or `?!(نور) يوم` after a `<br/>` or
 a soft wrap — draws what the line with no `dir` draws and reads as that one
 does, its ending last, `نور) يوم(…` (read alone, neither line can see the
-line above that gave the pair its level). A run that mixes the stops, `.!`
-or `!…`, which the rule takes as well, reads the same (ROADMAP CD-19).
+line above that gave the pair its level). A run that mixes the classes,
+`.!` or `!…`, ends no sentence: a right-to-left line that opens with one
+before a pair reads as typed, and a line with no `dir` that ends a pair, a
+word and the same run read the other way, `(نور) يوم!.`, broken before the
+pair, draws that line and reads as it does, its run first.
 
 A visually drawn Hebrew word and the same word drawn in reading order with
 the pen moving left extract the same; digits and a percentage inside a

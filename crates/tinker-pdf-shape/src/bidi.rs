@@ -916,10 +916,10 @@ struct OpenedBefore {
 }
 
 /// The stops [`OpenedBefore::before_its_punctuation`] reads as a sentence's
-/// end at a line's right, one of them or a run, so `...`, `?!` and `!!` as
-/// well as `.`: those of the comma tie-break's classes (each `CS` or `ON`)
-/// that UAX #14 puts at a line's start only after a forced break, or after a
-/// space in the one case each names.
+/// end at a line's right, one of them or a run of one class, so `...`, `?!`
+/// and `!!` as well as `.`: those of the comma tie-break's classes (each `CS`
+/// or `ON`) that UAX #14 puts at a line's start only after a forced break, or
+/// after a space in the one case each names, each with its class there.
 ///
 /// - Its `EX`, `!` and `?`: no line breaks before one, even after a space
 ///   (LB13, `× EX`).
@@ -938,9 +938,48 @@ struct OpenedBefore {
 /// with one before a bracket pair, `…(W) W` after a forced break, draws what
 /// a line of a paragraph with no `dir` ending `(W) W…` draws, and reads as
 /// that.
-const ENDS_A_LINE: [char; 11] = [
-    '.', ',', ':', ';', '!', '?', '\u{060C}', '\u{2024}', '\u{2025}', '\u{2026}', '\u{FE19}',
+///
+/// A run that mixes the classes, `.!` or `!…`, ends no sentence (ruling 14):
+/// a right-to-left line that opens with one before a pair after a forced
+/// break reads as typed, and a line of a paragraph with no `dir` that ends a
+/// pair, a word and the same run read the other way, `(W) W!.`, broken before
+/// the pair, draws the same and reads as that one, its run first.
+const ENDS_A_LINE: [(char, Stop); 11] = [
+    ('.', Stop::Is),
+    (',', Stop::Is),
+    (':', Stop::Is),
+    (';', Stop::Is),
+    ('!', Stop::Ex),
+    ('?', Stop::Ex),
+    ('\u{060C}', Stop::Is),
+    ('\u{2024}', Stop::In),
+    ('\u{2025}', Stop::In),
+    ('\u{2026}', Stop::In),
+    ('\u{FE19}', Stop::In),
 ];
+
+/// A stop's class in UAX #14 ([`ENDS_A_LINE`]): a run of stops ends a
+/// sentence only where all of them are of one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stop {
+    /// `EX`, `!` and `?`.
+    Ex,
+    /// `IS`, the full stop, the comma, the colon, the semicolon and the
+    /// ARABIC COMMA.
+    Is,
+    /// `IN`, the ellipses.
+    In,
+}
+
+impl Stop {
+    /// `c`'s class, or `None` for a character that is no stop.
+    fn of(c: char) -> Option<Stop> {
+        ENDS_A_LINE
+            .iter()
+            .find(|(stop, _)| *stop == c)
+            .map(|(_, class)| *class)
+    }
+}
 
 /// The closing quotation marks [`OpenedBefore::before_its_punctuation`] reads
 /// past right of a line's stops, so that `."`, `.»` and `.”` end a sentence
@@ -997,9 +1036,10 @@ impl OpenedBefore {
     /// The line's [`OpenedBefore`] where the comma tie-break chose left to
     /// right ([`first_strong_drawn`]) for a line that ends a sentence: read
     /// leftward from its right end, any closing quotation marks
-    /// ([`CLOSES_A_QUOTE`]), then one stop or more ([`ENDS_A_LINE`]) — `.`,
-    /// `...`, `?!`, `…`, `."` or `.»` — or `None`, where [`OpenedBefore::of`]
-    /// decides as for any other line.
+    /// ([`CLOSES_A_QUOTE`]), then one stop or more, all of one class
+    /// ([`ENDS_A_LINE`]) — `.`, `...`, `?!`, `…`, `."` or `.»` — or `None`,
+    /// where [`OpenedBefore::of`] decides as for any other line: a run that
+    /// mixes the classes, `.!` or `!…`, ends no sentence.
     ///
     /// A left-to-right paragraph drew such a line as right-to-left text with
     /// its sentence's end after it, so the line opens where that text does,
@@ -1048,12 +1088,16 @@ impl OpenedBefore {
             .next_if(|(_, c)| CLOSES_A_QUOTE.contains(c))
             .is_some()
         {}
-        let mut stops = 0usize;
-        while drawing.next_if(|(_, c)| ENDS_A_LINE.contains(c)).is_some() {
-            stops += 1;
+        let mut run: Option<Stop> = None;
+        while let Some((_, c)) = drawing.next_if(|(_, c)| Stop::of(*c).is_some()) {
+            let class = Stop::of(c);
+            if run.is_some() && run != class {
+                return None;
+            }
+            run = class;
         }
         let (edge, _) = drawing.next()?;
-        (stops > 0).then_some(OpenedBefore { edge, ltr: true })
+        run.map(|_| OpenedBefore { edge, ltr: true })
     }
 
     /// Whether a pair drawn with its brackets at `open` and `close` has one
@@ -2677,6 +2721,47 @@ mod tests {
             let units = chars(line);
             let units: Vec<&str> = units.iter().map(String::as_str).collect();
             assert_eq!(drawn_direction(&units), rtl, "{line:?}");
+        }
+    }
+
+    /// **A run that mixes the stops ends no sentence** — ruling 14, H-153.
+    /// A right-to-left line that opens with `.!` or `!…` before a pair,
+    /// `.!(نور) يوم` after a forced break, is drawn `موي )رون(!.`: the comma
+    /// tie-break reads it left to right, and with no sentence's end at its
+    /// right to pass the pair over, the bracket tie-break reads it from the
+    /// right, as typed. A run of one class, `.`, `...`, `?!` or `…`, still
+    /// ends one, and that line reads as the line with no `dir` drawn alike
+    /// does, its stops last: the price ruling 14 records.
+    #[test]
+    fn a_run_that_mixes_the_stops_ends_no_sentence() {
+        let rtl = BaseDirection::RightToLeft;
+        let words = "(\u{646}\u{648}\u{631}) \u{64A}\u{648}\u{645}";
+        for (run, as_typed) in [
+            (".!", true),
+            ("!\u{2026}", true),
+            ("?.", true),
+            ("\u{2026}!", true),
+            (".", false),
+            ("...", false),
+            ("?!", false),
+            ("\u{2026}", false),
+        ] {
+            let typed = format!("{run}{words}");
+            let units = chars(&typed);
+            let units: Vec<&str> = units.iter().map(String::as_str).collect();
+            let drawn: Vec<&str> = order_units(&units, rtl)
+                .into_iter()
+                .map(|at| units[at])
+                .collect();
+            let read = drawn_reading(&drawn);
+            assert_eq!(read.turned_by_brackets, as_typed, "{typed:?}");
+            let text = read_in(&drawn, &read.order);
+            if as_typed {
+                assert_eq!(read.direction, rtl, "{typed:?}");
+                assert_eq!(text, typed);
+            } else {
+                assert_ne!(text, typed, "{typed:?} reads its stops last");
+            }
         }
     }
 

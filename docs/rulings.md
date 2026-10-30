@@ -427,8 +427,11 @@ instead of living in one feature's head.
     the line opens just left of the stops: a pair with a bracket there,
     enclosing no left-to-right letter, is passed over too. The stops are the
     full stop, the comma, the colon, the semicolon, `!`, `?`, the ARABIC
-    COMMA and the ellipses U+2024, U+2025, U+2026 and U+FE19, one or a run
-    (`.`, `...`, `?!`); the closing quotation marks are `"`, `'` and the ten
+    COMMA and the ellipses U+2024, U+2025, U+2026 and U+FE19, one or a run of
+    one of UAX #14's classes (`.`, `...`, `?!`): `EX`, `!` and `?`; `IS`, the
+    full stop, the comma, the colon, the semicolon and the ARABIC COMMA; and
+    `IN`, the ellipses. A run that mixes the classes, `.!` or `!…`, ends no
+    sentence (H-153). The closing quotation marks are `"`, `'` and the ten
     of `General_Category` `Pf` (`»`, `’`, `”`, `›`, U+2E03, U+2E05, U+2E0A,
     U+2E0D, U+2E1D and U+2E21), so that `."`, `.»` and `.”` end a sentence
     as `.` does. A closing quotation mark alone ends none, nor does a
@@ -477,10 +480,13 @@ instead of living in one feature's head.
     their order, but a closing quotation mark before the stops comes back
     after them there too: the line's `".` reads `."`. A soft wrap after a
     space can put `"`, `'`, `”…` or an ellipsis first on a line, and such a
-    line can read the same way. A run that mixes the stops, `.!` or `!…`, is
-    a run of stops and reads the same way, and a `'.` line where the
-    overflow font at `0 Tw` meets this rule can lose its structure tree's
-    order; both are open in ROADMAP CD-19.
+    line can read the same way. A right-to-left line that opens with a run
+    that mixes the stops, `.!(نور) يوم` after a `<br/>`, ends no sentence and
+    reads as typed; a line of a paragraph with no `dir` that ends a pair, a
+    word and the same run read the other way, `(نور) يوم!.`, broken before the
+    pair, draws that line and reads as it does, its run first. A `'.` line
+    where the overflow font at `0 Tw` meets this rule can lose its structure
+    tree's order; it is open in ROADMAP CD-19.
 
     *What it leaves.* A pair facing inward — a left-to-right paragraph with
     no `dir` whose line has Arabic at both ends and a Latin run in brackets
@@ -504,9 +510,10 @@ instead of living in one feature's head.
     `brackets_typed_closing_first_against_a_word_read_as_the_other_direction_pairs_them`
     (what it reads otherwise),
     `a_pair_the_line_above_resolved_turns_no_line`,
-    `a_pair_before_a_full_stop_the_line_above_resolved_turns_no_line` and
-    `a_pair_before_closing_quotes_and_several_stops_turns_no_line` (a
-    sentence's end); `text_logical_order.rs`:
+    `a_pair_before_a_full_stop_the_line_above_resolved_turns_no_line`,
+    `a_pair_before_closing_quotes_and_several_stops_turns_no_line` and
+    `a_run_that_mixes_the_stops_ends_no_sentence` (a sentence's end);
+    `text_logical_order.rs`:
     `a_right_to_left_line_opening_with_a_bracketed_latin_run_reads_as_written`
     and
     `a_list_marker_and_a_wrapped_parenthesis_in_left_to_right_text_read_as_typed`;
