@@ -73,7 +73,7 @@ jobs:
           - group: text
             count: 9
           - group: render
-            count: 3
+            count: 21
           - group: write
             count: 12
           - group: layout

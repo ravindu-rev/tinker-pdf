@@ -1089,26 +1089,26 @@ text of the document the operation reads, so all six stay inside the group.
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `render/the text page at 72 dpi` | pixels · 5 × 595×842 | `dense(1, 0)` | 54 → 6; 9× | ×5 | MS-04.5 |
-| `render/the text page at 150 dpi` | pixels · 2 × 1240×1755 | `dense(1, 0)` | 88 → 15; 5.86× | ×2 | MS-04.5 |
-| `render/the text page at 300 dpi` | pixels · 2480×3509 | `dense(1, 0)` | 171 → 35; 4.88× | in | MS-04.5 |
-| `render/record the text page's display list` | pages · 21 | `Page::display_list` (`crates/tinker-pdf/src/display.rs:129`) | 6.3 → 1.2; 5.25× | ×21 | MS-04.5 |
-| `render/5000 paths at 150 dpi` | pixels · 1240×1755 | `paths(5000)` | 1 326 → 450; 2.94× | above, and at target | MS-04.5 |
-| `render/5000 paths at 300 dpi` | pixels · 2480×3509 | `paths(5000)` | 3 434 → 1 100; 3.12× | above, and at target | MS-04.5 |
-| `render/the 2000 stroked curves alone at 150 dpi` | pixels · 1240×1755 | `curves(2000)` | not measured apart; as the page; 2.94×, paired with the baseline's same curves | above, expected | MS-04.5 |
+| `render/the text page at 72 dpi` | pixels · 5 × 595×842 | `dense(1, 0)` | 54 → 6; 9× | ×5 | built |
+| `render/the text page at 150 dpi` | pixels · 2 × 1240×1755 | `dense(1, 0)` | 88 → 15; 5.86× | ×2 | built |
+| `render/the text page at 300 dpi` | pixels · 2480×3509 | `dense(1, 0)` | 171 → 35; 4.88× | in | built |
+| `render/record the text page's display list` | pages · 21 | `Page::display_list` (`crates/tinker-pdf/src/display.rs:129`) | 6.3 → 1.2; 5.25× | ×21 | built |
+| `render/5000 paths at 150 dpi` | pixels · 1240×1755 | `paths(5000)` | 1 326 → 450; 2.94× | above, and at target | built |
+| `render/5000 paths at 300 dpi` | pixels · 2480×3509 | `paths(5000)` | 3 434 → 1 100; 3.12× | above, and at target | built |
+| `render/the 2000 stroked curves alone at 150 dpi` | pixels · 1240×1755 | `curves(2000)` | not measured apart; as the page; 2.94×, paired with the baseline's same curves | above, expected | built |
 | `render/300 triangles at 150 dpi` | pixels · 2 × 1240×1755 | `triangles()` | 44 → 20; 2.2× | ×2 | MS-04.10 renames the seven's |
 | `render/a full-page axial shading at 150 dpi` | pixels · 1240×1755 | `axial()` | 124–170 → 25; 4.96× | in | MS-04.10 renames the seven's |
-| `render/a full-page axial shading at 300 dpi` | pixels · 2480×3509 | `axial()` | 674 → 90; 7.48× | above | MS-04.5 |
-| `render/the mesh shadings fixture at 150 dpi` | pixels · 7 bitmaps | `fuzz/corpus/render_page/mesh-shadings.pdf` | 18.1 → 4; 4.52× | ×7 | MS-04.5 |
-| `render/the mesh shadings fixture at 300 dpi` | pixels · 3 bitmaps | the same | 43.1 → 10; 4.31× | ×3 | MS-04.5 |
-| `render/the transparency fixture at 150 dpi` | pixels · 9 bitmaps | `fuzz/corpus/render_page/transparency.pdf` | 8.4 → 3; 2.8× | ×9 | MS-04.5 |
-| `render/a page tiled by one pattern fill at 150 dpi` | pixels · 1240×1755 a call | `tiling(1)` | not measured; relation: 50 fills ≤ 1.2 × one; counted | unmeasured | MS-04.5 |
-| `render/a page tiled by 50 pattern fills at 150 dpi` | pixels · 1240×1755 a call | `tiling(50)` | the same relation | unmeasured | MS-04.5 |
-| `render/the 300-dpi text page in 4 bands on 4 threads` | pixels · 3 × 2480×3509 | `dense(1, 0)`, four `RenderOptions::region` bands (`lib.rs:584`), one scoped thread each | relation ≥ 3 × the 1-thread speed (`the text page at 300 dpi`) | ×3 | MS-04.5 |
-| `render/100 text pages at 150 dpi on 1 thread` | pages · 100 | `dense(100, 0)` | 11.4 → 60 pages/s (8 772 → 1 667); 5.26× | above, and at target | MS-04.5 |
-| `render/100 text pages at 150 dpi on 4 threads` | pages · 100 | the same, on `std::thread::scope` over owned pages, as `crates/tinker-pdf/examples/parallel.rs:87` does | 43 → 200 pages/s (2 326 → 500); 4.65×; relation ≥ 3.33 × 1 thread | above, and at target | MS-04.5 |
-| `render/the annotated text page at 150 dpi` | pixels · 2 × 1240×1755 | `annotated(dense(1, 0))` | the next one's full-page render; floor 1 | ×2 | MS-04.5 |
-| `render/re-render a changed 100x100 pt annotation` | pixels · 3 × 1240×1755 | the same, its appearance replaced, saved and reopened untimed; today the whole page re-renders | relation ≤ 10 % of the full-page render | ×3 today; under 20 at its bound | MS-04.5 |
+| `render/a full-page axial shading at 300 dpi` | pixels · 2480×3509 | `axial()` | 674 → 90; 7.48× | above | built |
+| `render/the mesh shadings fixture at 150 dpi` | pixels · 7 bitmaps | `fuzz/corpus/render_page/mesh-shadings.pdf` | 18.1 → 4; 4.52× | ×7 | built |
+| `render/the mesh shadings fixture at 300 dpi` | pixels · 3 bitmaps | the same | 43.1 → 10; 4.31× | ×3 | built |
+| `render/the transparency fixture at 150 dpi` | pixels · 9 bitmaps | `fuzz/corpus/render_page/transparency.pdf` | 8.4 → 3; 2.8× | ×9 | built |
+| `render/a page tiled by one pattern fill at 150 dpi` | pixels · 1240×1755 a call | `tiling(1)` | not measured; relation: 50 fills ≤ 1.2 × one; counted | unmeasured | built |
+| `render/a page tiled by 50 pattern fills at 150 dpi` | pixels · 1240×1755 a call | `tiling(50)` | the same relation | unmeasured | built |
+| `render/the 300-dpi text page in 4 bands on 4 threads` | pixels · 3 × 2480×3509 | `dense(1, 0)`, four `RenderOptions::region` bands (`lib.rs:584`), one scoped thread each | relation ≥ 3 × the 1-thread speed (`the text page at 300 dpi`) | ×3 | built |
+| `render/100 text pages at 150 dpi on 1 thread` | pages · 100 | `dense(100, 0)` | 11.4 → 60 pages/s (8 772 → 1 667); 5.26× | above, and at target | built |
+| `render/100 text pages at 150 dpi on 4 threads` | pages · 100 | the same, on `std::thread::scope` over owned pages, as `crates/tinker-pdf/examples/parallel.rs:87` does | 43 → 200 pages/s (2 326 → 500); 4.65×; relation ≥ 3.33 × 1 thread | above, and at target | built |
+| `render/the annotated text page at 150 dpi` | pixels · 2 × 1240×1755 | `annotated(dense(1, 0))` | the next one's full-page render; floor 1 | ×2 | built |
+| `render/re-render a changed 100x100 pt annotation` | pixels · 3 × 1240×1755 | the same, its appearance replaced, saved and reopened untimed; today the whole page re-renders | relation ≤ 10 % of the full-page render | ×3 today; under 20 at its bound | built |
 | `render/replay the Flate RGB image page at 150 dpi` | pixels · 1240×1755 | `flate_page()`'s display list, recorded once; its renders share the decoded image (`resources.rs:532-546`) | 350 → 40; 8.75× | above | MS-04.6 |
 | `render/an ICC-based CMYK image to sRGB at 300 dpi` | pixels · 2480×3508, the image's | `cmyk_page()`, drawn at the image's own resolution so each sample is converted once | not measured → ≥ 100 Mpixel/s (≤ 87); calibrated | unmeasured | MS-04.6 |
 | `render/the JPEG page at 72 dpi` | pixels · 595×842 | `jpeg_page()` | 652 → 35; 18.6× | above | MS-04.6 |

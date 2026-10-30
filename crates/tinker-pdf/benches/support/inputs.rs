@@ -16,7 +16,8 @@ use std::sync::{Arc, OnceLock};
 
 use tinker_pdf::{
     ArchivalLevel, ArchivalPart, ArchivalProfile, DeviceSpace, Document, DocumentBuilder,
-    Encryption, Function, ImageData, PageBuilder, Shading, WriteMode, WriteOptions,
+    Encryption, Function, ImageData, PageBuilder, Shading, TilingPattern, TilingType, WriteMode,
+    WriteOptions,
 };
 use tinker_pdf_cos::edit::annot::{self, Color};
 use tinker_pdf_cos::pages::Rect;
@@ -703,4 +704,124 @@ pub fn square_appearance(doc: &Document, grey: f64) -> StreamData {
         dict,
         data: format!("{grey} g 0 0 100 100 re f").into_bytes(),
     }
+}
+
+/// `count` filled shapes at fractional coordinates, as [`triangles`] draws
+/// them: a triangle and a closed cubic curve in turn, each its own colour.
+fn filled(count: usize) -> String {
+    let mut content = String::with_capacity(count * 96);
+    for index in 0..count {
+        let step = index as f64;
+        let x = 20.0 + (step * 37.0) % 520.0;
+        let y = 20.0 + (step * 61.0) % 760.0;
+        let size = 18.0 + (step * 7.0) % 44.0;
+        let shade = 0.15 + (step % 17.0) / 20.0;
+        content.push_str(&format!(
+            "{shade:.3} {:.3} {:.3} rg {x:.2} {y:.2} m ",
+            1.0 - shade,
+            (step % 11.0) / 11.0
+        ));
+        if index % 2 == 0 {
+            content.push_str(&format!(
+                "{:.2} {:.2} l {:.2} {:.2} l h f\n",
+                x + size * 0.93,
+                y + size * 0.37,
+                x + size * 0.41,
+                y + size,
+            ));
+        } else {
+            content.push_str(&format!(
+                "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c {:.2} {:.2} {:.2} {:.2} {x:.2} {y:.2} c h f\n",
+                x + size * 0.81,
+                y - size * 0.23,
+                x + size * 1.07,
+                y + size * 0.69,
+                x + size * 0.47,
+                y + size * 0.93,
+                x - size * 0.19,
+                y + size * 1.11,
+                x - size * 0.31,
+                y + size * 0.29,
+            ));
+        }
+    }
+    content
+}
+
+/// `count` stroked cubic curves, 0.5 to 4 pt wide, through each of the nine
+/// pairs of line cap and line join in turn, every fifth one dashed (8.4.3).
+fn stroked(count: usize) -> String {
+    let mut content = String::with_capacity(count * 128);
+    for index in 0..count {
+        let step = index as f64;
+        let x = 30.0 + (step * 53.0) % 500.0;
+        let y = 30.0 + (step * 29.0) % 760.0;
+        let reach = 24.0 + (step * 13.0) % 60.0;
+        let width = 0.5 * (1 + index % 8) as f64;
+        let (cap, join) = ((index % 9) / 3, index % 3);
+        let dash = if index % 5 == 0 { "[6 3] 0" } else { "[] 0" };
+        content.push_str(&format!(
+            "{width:.1} w {cap} J {join} j {dash} d {:.3} {:.3} {:.3} RG \
+             {x:.2} {y:.2} m {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c S\n",
+            (step % 13.0) / 13.0,
+            0.2 + (step % 7.0) / 9.0,
+            1.0 - (step % 5.0) / 6.0,
+            x + reach * 0.31,
+            y + reach * 0.97,
+            x + reach * 0.83,
+            y - reach * 0.41,
+            x + reach,
+            y + reach * 0.53,
+        ));
+    }
+    content
+}
+
+/// One A4 page of raw content.
+fn raw_page(content: &str) -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    builder.add_page(595.0, 842.0, |page| page.raw(content.as_bytes()));
+    builder.finish()
+}
+
+/// `count` paths over one A4 page: three fifths filled polygons and closed
+/// curves, as [`triangles`] draws them, and two fifths stroked cubic curves,
+/// as [`curves`] draws them.
+pub fn paths(count: usize) -> Vec<u8> {
+    let curves = count * 2 / 5;
+    raw_page(&(filled(count - curves) + &stroked(curves)))
+}
+
+/// `count` stroked cubic curves alone over one A4 page, 0.5 to 4 pt wide,
+/// each cap and join in turn and every fifth dashed: [`paths`]'s curves.
+pub fn curves(count: usize) -> Vec<u8> {
+    raw_page(&stroked(count))
+}
+
+/// One tiling pattern filling an A4 page, in one rectangle or in `fills`
+/// strips that together cover what the one rectangle covers.
+pub fn tiling(fills: usize) -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    let cell = b"0.9 0.3 0.1 rg 2 2 12 12 re f 0.1 0.4 0.8 rg 10 10 m 18 10 l 14 18 l h f";
+    assert!(builder.add_tiling_pattern(
+        b"P0",
+        &TilingPattern {
+            bbox: [0.0, 0.0, 20.0, 20.0],
+            x_step: 20.0,
+            y_step: 20.0,
+            matrix: None,
+            tiling_type: TilingType::ConstantSpacing,
+            content: cell,
+        }
+    ));
+    builder.add_page(595.0, 842.0, |page| {
+        assert!(page.set_fill_pattern(b"P0"));
+        let strip = 842.0 / fills as f64;
+        let mut rectangles = String::new();
+        for at in 0..fills {
+            rectangles.push_str(&format!("0 {:.4} 595 {strip:.4} re f\n", strip * at as f64));
+        }
+        page.raw(rectangles.as_bytes());
+    });
+    builder.finish()
 }
