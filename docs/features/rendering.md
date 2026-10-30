@@ -100,7 +100,14 @@ branch per selection and one flag check per device operator.
 the substitute directly, byte for byte, under CalGray and ICCBased N=1,
 CalRGB and ICCBased N=3, and ICCBased N=4, each beside the page without its
 default that it must not equal
-(`each_default_space_draws_as_its_substitute_named_directly`).
+(`each_default_space_draws_as_its_substitute_named_directly`). `to_svg`
+writes the interpreter's colour and decodes images and shadings as the
+renderer does, so every path writes its twin's markup
+(`a_default_space_page_writes_the_svg_its_twin_writes`), and `Page::images`
+reports, beside the space an image states, the space a default puts in for
+it, by the same rules
+(`an_extracted_image_names_the_space_its_samples_are_in`; content-and-text,
+"Image extraction").
 
 `g`, `rg` and `k` select their device space, so a following `sc` reads in the
 family the operator selected (8.6.8). An inline image's `[/I …]` is Table

@@ -79,37 +79,45 @@ DCT (progressive included), CCITT — one image path, not two.
 **Image extraction.** `Page::images()` runs the page through the same
 interpreter with a fourth device, which follows form scopes the way the
 renderer's does, and returns one `PageImage` per image XObject the page's
-content draws — once, however often it is drawn, with every placement — and
-one per inline image. Each carries its **samples before any colour
-conversion**: rows from the top, each padded to a byte, `components` values a
-pixel at `bits_per_component` bits, sixteen-bit values big-endian and whole.
-They come from the same functions the renderer's decode calls —
+content draws — once for each space it is drawn in, however often, with every
+placement — and one per inline image. Each carries its **samples before any
+colour conversion**: rows from the top, each padded to a byte, `components`
+values a pixel at `bits_per_component` bits, sixteen-bit values big-endian and
+whole. They come from the same functions the renderer's decode calls —
 `stream_samples`, `jpeg_samples`, `jpx_samples` and `inline_samples` — so the
 two read one set of samples through one set of rules. Beside them: the colour
-space as the image states it (`ImageSpace`: the three device spaces,
-`CalGray`, `CalRGB` and `Lab` with their parameters, `ICCBased` with its `/N`,
-its `/Alternate` and the profile's bytes, `Indexed` with its base, `hival` and
-palette, `Separation` and `DeviceN` with their colorants' names and
-alternate), `/Decode` as written and not applied, `/ImageMask`, `/Mask` as
-colour-key ranges or a stencil image — decided by what a reference reaches, so
-an indirect `[0 0]` is a colour key as the renderer reads it — `/SMask` as an
-image of its own, the current transformation matrix at each drawing, and the
-object reference. A JPEG's samples are the frame's own components (YCbCr and
-Adobe's inverted CMYK already undone by the decoder); a JPEG 2000 image's are
-the codestream's, at its precision, with any opacity channel left out; a fax
-or JBIG2 image's are one bit a pixel in PDF's polarity whatever the
-dictionary claims. An inline image may name a page colour space resource
-(8.9.7) and that is followed; an image XObject's `/ColorSpace` may not
-(8.6.3), and a name other than a device family is reported as `Unreadable`.
-An image that will not decode is still listed, with no samples and `refused`
-naming why; a stream longer than its geometry is cut to it and a shorter one
-is reported short. What a decoder tolerated for an image — a fax row
-replicated from the one above, a JBIG2 segment skipped, a JPEG 2000
-codestream cut short — is on that image's `warnings`, named as the render's
-`RenderWarning::DamagedImage` names it (ruling 10), so a damaged image is not
-listed as a clean one. What is not walked: images inside a tiling pattern's
-cell, a soft-mask group or an annotation appearance, which are not drawings
-of the page's own content.
+space as the image states it (`ImageSpace`: the three device spaces, `CalGray`,
+`CalRGB` and `Lab` with their parameters, `ICCBased` with its `/N`, its
+`/Alternate` and the profile's bytes, `Indexed` with its base, `hival` and
+palette, `Separation` and `DeviceN` with their colorants' names and alternate),
+`/Decode` as written and not applied, `/ImageMask`, `/Mask` as colour-key
+ranges or a stencil image — decided by what a reference reaches, so an indirect
+`[0 0]` is a colour key as the renderer reads it — `/SMask` as an image of its
+own, the current transformation matrix at each drawing, and the object
+reference. Beside the stated space, `substituted_space` is the space the
+drawing's scope puts in for it (8.6.5.6): the stated space with each device
+space in it the scope remaps replaced by its default, read by the renderer's
+rules — an `/Indexed` base and a selected separation's alternate, not an
+`ICCBased` space's `/Alternate` — and `None` where nothing was replaced, a
+stencil, a mask and a soft mask included; `sample_space()` answers whichever
+the samples are in. An XObject one scope draws under a default and another
+without one is listed once for each space, and a default its scope refused puts
+nothing in and is named in the `warnings` of an image drawn in its family. A
+JPEG's samples are the frame's own components (YCbCr and Adobe's inverted CMYK
+already undone by the decoder); a JPEG 2000 image's are the codestream's, at
+its precision, with any opacity channel left out; a fax or JBIG2 image's are
+one bit a pixel in PDF's polarity whatever the dictionary claims. An inline
+image may name a page colour space resource (8.9.7) and that is followed; an
+image XObject's `/ColorSpace` may not (8.6.3), and a name other than a device
+family is reported as `Unreadable`. An image that will not decode is still
+listed, with no samples and `refused` naming why; a stream longer than its
+geometry is cut to it and a shorter one is reported short. What a decoder
+tolerated for an image — a fax row replicated from the one above, a JBIG2
+segment skipped, a JPEG 2000 codestream cut short — is on that image's
+`warnings`, named as the render's `RenderWarning::DamagedImage` names it
+(ruling 10), so a damaged image is not listed as a clean one. What is not
+walked: images inside a tiling pattern's cell, a soft-mask group or an
+annotation appearance, which are not drawings of the page's own content.
 
 `tpdf images <file> [--out DIR]` is the same list from the command line, a
 wrapper with no logic of its own (ruling 11): a line per image with its

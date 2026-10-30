@@ -1375,6 +1375,181 @@ fn the_selections_a_default_rides_on_read_what_the_file_names() {
     );
 }
 
+// ---- Extraction and SVG ------------------------------------------------------
+
+/// The painting paths that draw an image, each one image a page.
+const IMAGE_PATHS: [(&str, Path); 6] = [
+    ("a sampled image", sampled_image),
+    ("an /Indexed image", indexed_image),
+    ("an inline image", inline_image),
+    ("a JPEG image", jpeg_image),
+    ("an inline JPEG image", inline_jpeg),
+    ("a JPEG 2000 image", jpx_image),
+];
+
+fn images(document: &Document) -> Vec<tinker_pdf::PageImage> {
+    document.page(0).expect("a page").images()
+}
+
+/// **An extracted image names the space its samples are in** (K-02.3): an
+/// image under each default keeps the space it states and reports the one
+/// put in for it, its twin naming that space directly reports the same
+/// `sample_space`, and the page without the default reports nothing put in;
+/// one XObject drawn on a page under a default and in a form without one is
+/// two entries, each with its own placements; and a refused default puts
+/// nothing in and is named in the warnings of an image in its family alone.
+#[test]
+fn an_extracted_image_names_the_space_its_samples_are_in() {
+    let mut wrong = Vec::new();
+    let mut compared = 0;
+    for substitute in &SUBSTITUTES {
+        for (path, build) in IMAGE_PATHS {
+            let family = substitute.family;
+            let (Some(device), Some(twin)) =
+                (build(family, None), build(family, Some(substitute.space)))
+            else {
+                continue;
+            };
+            let case = format!("{path} under /{} {}", family.key(), substitute.label);
+            compared += 1;
+            let under = images(&device.document(&substitute.default()));
+            let without = images(&device.document(""));
+            let direct = images(&twin.document(""));
+            let ([under], [without], [direct]) = (&under[..], &without[..], &direct[..]) else {
+                wrong.push(format!(
+                    "{case}: {} {} {} entries, where each page draws one image",
+                    under.len(),
+                    without.len(),
+                    direct.len()
+                ));
+                continue;
+            };
+            if under.color_space != without.color_space {
+                wrong.push(format!(
+                    "{case}: states {:?} where the page without the default states {:?}",
+                    under.color_space, without.color_space
+                ));
+            }
+            if under.substituted_space.is_none() {
+                wrong.push(format!("{case}: reports nothing put in"));
+            }
+            if under.sample_space() != direct.sample_space() {
+                wrong.push(format!(
+                    "{case}: samples in {:?} where its twin's are in {:?}",
+                    under.sample_space(),
+                    direct.sample_space()
+                ));
+            }
+            if without.substituted_space.is_some() || direct.substituted_space.is_some() {
+                wrong.push(format!("{case}: a page with no default reports one put in"));
+            }
+            if under.samples != without.samples || !under.warnings.is_empty() {
+                wrong.push(format!(
+                    "{case}: other samples, or warnings {:?}",
+                    under.warnings
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    // Six image paths in grey and RGB under two substitutes each, and the
+    // three with a CMYK image under one.
+    assert_eq!(compared, 27, "image pages compared");
+
+    // One XObject, drawn twice on a page under /DefaultRGB and once in a form
+    // whose own resources name no default.
+    let image = sampled_image(Family::Rgb, None)
+        .expect("an RGB image")
+        .objects
+        .remove(0)
+        .1;
+    let page = Page::new("q 40 0 0 40 0 0 cm /Im0 Do Q q 20 0 0 20 0 0 cm /Im0 Do Q /Fm0 Do")
+        .resources("/XObject << /Im0 10 0 R /Fm0 12 0 R >>")
+        .object(10, image)
+        .object(
+            12,
+            form(
+                "/Resources << /XObject << /Im0 10 0 R >> >>",
+                "q 10 0 0 10 0 0 cm /Im0 Do Q",
+            ),
+        );
+    let rgb = &SUBSTITUTES[3];
+    let listed = images(&page.document(&rgb.default()));
+    assert_eq!(listed.len(), 2, "one entry for each space");
+    assert_eq!(listed[0].placements.len(), 2, "the page's two drawings");
+    assert!(listed[0].substituted_space.is_some());
+    assert_eq!(listed[1].placements.len(), 1, "the form's drawing");
+    assert_eq!(listed[1].substituted_space, None);
+    assert_eq!(listed[1].sample_space(), Some(&ImageSpace::DeviceRgb));
+    assert_eq!(listed[0].reference, listed[1].reference);
+    let plain = images(&page.document(""));
+    assert_eq!(plain.len(), 1, "with no default the XObject is one entry");
+    assert_eq!(plain[0].placements.len(), 3);
+
+    // A refused default puts nothing in, and an image in its family, or over
+    // it, names the refusal; an image in another family does not.
+    let lab = "/DefaultRGB [/Lab << /WhitePoint [0.9505 1 1.089] >>]";
+    for (case, page, named) in [
+        ("an RGB image", sampled_image(Family::Rgb, None), true),
+        (
+            "an /Indexed image over RGB",
+            indexed_image(Family::Rgb, None),
+            true,
+        ),
+        ("an inline RGB image", inline_image(Family::Rgb, None), true),
+        ("a grey image", sampled_image(Family::Gray, None), false),
+    ] {
+        let listed = images(&page.expect("a page").document(lab));
+        let [image] = &listed[..] else {
+            panic!("{case}: {} entries", listed.len());
+        };
+        assert_eq!(image.substituted_space, None, "{case}");
+        let want: &[&str] = if named { &["DefaultSpaceFamily"] } else { &[] };
+        assert_eq!(image.warnings, want, "{case}");
+    }
+}
+
+/// **A default-space page writes the SVG its twin writes** (K-02.3):
+/// `to_svg` writes the interpreter's colour and decodes images and shadings
+/// as the renderer does, so every painting path under each default writes
+/// the markup its twin naming the substitute writes, and not the markup of
+/// the page without the default.
+#[test]
+fn a_default_space_page_writes_the_svg_its_twin_writes() {
+    let svg = |document: &Document| {
+        document
+            .page(0)
+            .expect("a page")
+            .to_svg(&tinker_pdf::SvgOptions::default())
+            .markup
+    };
+    let mut wrong = Vec::new();
+    let mut compared = 0;
+    for substitute in &SUBSTITUTES {
+        for (path, build) in PATHS {
+            let family = substitute.family;
+            let (Some(device), Some(twin)) =
+                (build(family, None), build(family, Some(substitute.space)))
+            else {
+                continue;
+            };
+            let case = format!("{path} under /{} {}", family.key(), substitute.label);
+            let under = svg(&device.document(&substitute.default()));
+            if under != svg(&twin.document("")) {
+                wrong.push(format!("{case}: not its twin's markup"));
+            }
+            if under == svg(&device.document("")) {
+                wrong.push(format!(
+                    "{case}: the markup of the page without the default"
+                ));
+            }
+            compared += 1;
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    assert!(compared > 60, "{compared} pages compared");
+}
+
 // ---- An ink render ---------------------------------------------------------
 
 /// The ink an ink render put at `(x, y)`.

@@ -30,6 +30,16 @@
 //! follows form scopes the way the renderer's does. An image drawn by a
 //! tiling pattern's cell, a soft-mask group or an annotation's appearance is
 //! not a drawing of *this page's content* and is not listed.
+//!
+//! # The space as stated and the space as painted
+//!
+//! A scope's `/DefaultGray`, `/DefaultRGB` and `/DefaultCMYK` (8.6.5.6) put a
+//! space in for each device space an image states, and the renderer draws
+//! the samples in it. [`PageImage::color_space`] stays the stated space and
+//! [`PageImage::substituted_space`] says what was put in, read by the same
+//! rules the renderer's painted reading follows, so an XObject one page draws
+//! under a default and a form draws without one is two entries, one for each
+//! space.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -86,8 +96,19 @@ pub struct PageImage {
     pub components: u8,
     /// The colour space, as the image states it — `None` for a stencil mask
     /// (8.9.6.2), which has none, and for a JPEG 2000 image whose dictionary
-    /// leaves the space to the codestream (8.9.5.4).
+    /// leaves the space to the codestream (8.9.5.4). Where the drawing's
+    /// scope puts a default space in for a device space in it,
+    /// [`Self::substituted_space`] says what the samples are drawn in.
     pub color_space: Option<ImageSpace>,
+    /// The stated space with each device space in it that the drawing's
+    /// scope remaps (8.6.5.6) replaced by the scope's default, described as
+    /// any space is: an image in `[/Indexed /DeviceRGB …]` under a
+    /// `/DefaultRGB [/ICCBased …]` is `Indexed` over that profile. `None`
+    /// where nothing was replaced — a scope with no default, an image in no
+    /// device space, a refused default, a stencil, a mask and a soft mask —
+    /// so a page with no default lists exactly what it lists without one.
+    /// [`Self::sample_space`] answers whichever the samples are in.
+    pub substituted_space: Option<ImageSpace>,
     /// `/Decode` as written, one `(min, max)` a component, or empty when the
     /// dictionary has none (8.9.5.2). Not applied to the samples.
     pub decode: Vec<(f64, f64)>,
@@ -118,8 +139,24 @@ pub struct PageImage {
     /// page is rendered, and each once. Empty for a clean decode (ruling 10):
     /// an image decoded with a leniency is listed with its samples, and this
     /// is what tells it from one that needed none. A mask's own warnings are
-    /// on the mask.
+    /// on the mask. After them, why a default the image's scope refused for a
+    /// device space it is drawn in was refused, as
+    /// [`crate::RenderWarning::RepairedColorSpace`]'s `reason` names it
+    /// (`DefaultSpaceFamily`, `DefaultSpaceComponents`,
+    /// `DefaultSpaceUnreadable`): the samples are then in the device space.
     pub warnings: Vec<String>,
+}
+
+impl PageImage {
+    /// The space the samples are drawn in: [`Self::substituted_space`] where
+    /// the drawing's scope put a default in, [`Self::color_space`]
+    /// otherwise.
+    #[must_use]
+    pub fn sample_space(&self) -> Option<&ImageSpace> {
+        self.substituted_space
+            .as_ref()
+            .or(self.color_space.as_ref())
+    }
 }
 
 /// Which decoder produced a [`PageImage`]'s samples.
@@ -260,9 +297,10 @@ struct Collector {
     scope: Arc<PageResources>,
     outer: Vec<Option<Arc<PageResources>>>,
     images: Vec<PageImage>,
-    /// Where each XObject already listed sits in `images`, so one drawn twice
-    /// gains a placement rather than a second decode.
-    listed: BTreeMap<ObjRef, usize>,
+    /// Where each XObject already listed sits in `images`, one entry for each
+    /// space a scope drew it in, so one drawn twice in one space gains a
+    /// placement rather than a second decode.
+    listed: BTreeMap<ObjRef, Vec<usize>>,
 }
 
 impl Device for Collector {
@@ -282,19 +320,24 @@ impl Device for Collector {
         let Some((dict, reference)) = self.scope.xobject(&image.name) else {
             return;
         };
-        if let Some(found) = self
-            .listed
-            .get(&reference)
-            .and_then(|at| self.images.get_mut(*at))
-        {
-            found.placements.push(placement);
+        let space = self.scope.image_substitute(&dict);
+        let seen = self.listed.get(&reference).and_then(|at| {
+            at.iter()
+                .copied()
+                .find(|at| self.images[*at].substituted_space == space)
+        });
+        if let Some(at) = seen {
+            self.images[at].placements.push(placement);
             return;
         }
         let Some(mut found) = self.scope.extract_image(&dict, reference, &image.name) else {
             return;
         };
         found.placements.push(placement);
-        self.listed.insert(reference, self.images.len());
+        self.listed
+            .entry(reference)
+            .or_default()
+            .push(self.images.len());
         self.images.push(found);
     }
 
@@ -317,9 +360,11 @@ impl Page {
     /// with its samples as decoded and the colour space they are in.
     ///
     /// An image XObject drawn several times is listed once with every
-    /// placement; each inline image is its own entry. Images inside form
-    /// XObjects are included, found through the form's own resources. See
-    /// [`PageImage`] for what the samples are and are not.
+    /// placement — once for each space it is drawn in, where a scope puts a
+    /// default space in for it and another does not; each inline image is its
+    /// own entry. Images inside form XObjects are included, found through the
+    /// form's own resources. See [`PageImage`] for what the samples are and
+    /// are not.
     ///
     /// An image the page's configuration hides — an `/OC` it is drawn under,
     /// or its own — is listed like any other: the list is of what the page's

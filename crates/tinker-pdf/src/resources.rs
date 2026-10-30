@@ -124,6 +124,10 @@ struct Defaults {
     gray: Option<ColorSpace>,
     rgb: Option<ColorSpace>,
     cmyk: Option<ColorSpace>,
+    /// Why each family's default was refused, gray, RGB and CMYK in that
+    /// order, as `RepairedColorSpace`'s `reason` names it: what an image
+    /// drawn in that family says it fell back from (`Page::images`).
+    refused: [Option<&'static str>; 3],
 }
 
 impl Defaults {
@@ -136,6 +140,35 @@ impl Defaults {
             _ => None,
         }
     }
+
+    /// Why this scope refused `device`'s default, if it named one it
+    /// refused.
+    fn refusal(&self, device: &ColorSpace) -> Option<&'static str> {
+        match device {
+            ColorSpace::DeviceGray => self.refused[0],
+            ColorSpace::DeviceRgb => self.refused[1],
+            ColorSpace::DeviceCmyk => self.refused[2],
+            _ => None,
+        }
+    }
+
+    /// Whether this scope puts nothing in and refuses nothing: the scope of
+    /// almost every page, which an extraction then asks nothing more.
+    fn is_inert(&self) -> bool {
+        self.gray.is_none()
+            && self.rgb.is_none()
+            && self.cmyk.is_none()
+            && self.refused.iter().all(Option::is_none)
+    }
+}
+
+/// What describing an image's space as painted met (8.6.5.6): whether a
+/// device space in it was put in as the scope's default, and why any default
+/// a device space in it fell back from was refused.
+#[derive(Default)]
+struct Painting {
+    replaced: bool,
+    refused: Vec<String>,
 }
 
 /// How [`PageResources::read_space`] reads a colour space.
@@ -1310,10 +1343,18 @@ impl PageResources {
                     ColorSpace::DeviceRgb => defaults.rgb = default,
                     _ => defaults.cmyk = default,
                 },
-                Err(reason) => self.note_repaired_space((
-                    String::from_utf8_lossy(key).into_owned(),
-                    reason.to_string(),
-                )),
+                Err(reason) => {
+                    let at = match device {
+                        ColorSpace::DeviceGray => 0,
+                        ColorSpace::DeviceRgb => 1,
+                        _ => 2,
+                    };
+                    defaults.refused[at] = Some(reason);
+                    self.note_repaired_space((
+                        String::from_utf8_lossy(key).into_owned(),
+                        reason.to_string(),
+                    ));
+                }
             }
         }
         defaults
@@ -4262,6 +4303,13 @@ impl PageResources {
             dict.get(self.doc.intern(b"ColorSpace"))
                 .map(|space| self.describe_space(space, false, 0))
         };
+        // A mask's and a soft mask's samples are opacity, never colour, so
+        // no default is put in for them (11.6.5.3).
+        let (substituted, refusals) = if depth == 0 {
+            self.painted_image_space(dict, false)
+        } else {
+            (None, Vec::new())
+        };
         let mut image = crate::PageImage {
             reference: Some(reference),
             name: name.to_vec(),
@@ -4270,6 +4318,7 @@ impl PageResources {
             bits_per_component: bpc as u8,
             components: components_of(stencil, space.as_ref()),
             color_space: space,
+            substituted_space: substituted,
             decode: self.decode_array(dict),
             stencil,
             samples: Vec::new(),
@@ -4328,6 +4377,7 @@ impl PageResources {
             }
         });
         image.warnings = warnings;
+        name_refusals(&mut image, refusals);
 
         if depth == 0 {
             let mask_key = self.doc.intern(b"Mask");
@@ -4386,6 +4436,7 @@ impl PageResources {
             dict.get(self.doc.intern(b"ColorSpace"))
                 .map(|space| self.describe_space(space, true, 0))
         };
+        let (substituted, refusals) = self.painted_image_space(dict, true);
         let mut image = crate::PageImage {
             reference: None,
             name: Vec::new(),
@@ -4394,6 +4445,7 @@ impl PageResources {
             bits_per_component: bpc as u8,
             components: components_of(stencil, space.as_ref()),
             color_space: space,
+            substituted_space: substituted,
             decode: self.decode_array(dict),
             stencil,
             samples: Vec::new(),
@@ -4437,6 +4489,7 @@ impl PageResources {
                 Err(why) => image.refused = Some(why),
             });
         image.warnings = warnings;
+        name_refusals(&mut image, refusals);
         // 8.9.7: an inline image's `/Mask` can only be the colour-key array,
         // since there is nothing inline a reference could name.
         if dict.get(self.doc.intern(b"Mask")).is_some() {
@@ -4495,6 +4548,71 @@ impl PageResources {
     /// dictionary may not (8.6.3). Depth-capped like the renderer's own
     /// parser, since an `/Indexed` base and a tint alternate are spaces too.
     fn describe_space(&self, object: &Object, inline: bool, depth: u32) -> crate::ImageSpace {
+        self.describe(object, inline, depth, None)
+    }
+
+    /// An image's `/ColorSpace` in `dict` as this scope paints it: the stated
+    /// space with each device space in it the scope remaps put in as its
+    /// default (8.6.5.6), or `None` where nothing was put in, so a page with
+    /// no default lists what it listed before; and why each default a device
+    /// space in it fell back from was refused. A stencil mask has no space.
+    fn painted_image_space(
+        &self,
+        dict: &Dict,
+        inline: bool,
+    ) -> (Option<crate::ImageSpace>, Vec<String>) {
+        let (_, _, stencil, _) = self.geometry(dict);
+        let Some(space) = dict
+            .get(self.doc.intern(b"ColorSpace"))
+            .filter(|_| !stencil)
+        else {
+            return (None, Vec::new());
+        };
+        if self.defaults().is_inert() {
+            return (None, Vec::new());
+        }
+        let mut painting = Painting::default();
+        let described = self.describe(space, inline, 0, Some(&mut painting));
+        (painting.replaced.then_some(described), painting.refused)
+    }
+
+    /// What `Page::images` compares to tell one drawing of an image XObject
+    /// from another: the space this scope paints it in where it puts a
+    /// default in, so one XObject drawn in two spaces is two entries.
+    pub(crate) fn image_substitute(&self, dict: &Dict) -> Option<crate::ImageSpace> {
+        self.painted_image_space(dict, false).0
+    }
+
+    /// The entry this scope's `/ColorSpace` names `device`'s default by, as
+    /// written.
+    fn default_entry(&self, device: &ColorSpace) -> Option<Object> {
+        let key: &[u8] = match device {
+            ColorSpace::DeviceGray => b"DefaultGray",
+            ColorSpace::DeviceRgb => b"DefaultRGB",
+            ColorSpace::DeviceCmyk => b"DefaultCMYK",
+            _ => return None,
+        };
+        let resources = self.resources.as_ref()?;
+        let table = self
+            .doc
+            .resolve_key(resources, self.doc.intern(b"ColorSpace"));
+        table.as_dict()?.get(self.doc.intern(key)).cloned()
+    }
+
+    /// The one describer, as stated or, with `painting`, as this scope paints
+    /// it: where the renderer's painted reading puts a default in for a device
+    /// space — the space itself, an `/Indexed` base, a separation's alternate
+    /// but under `/All` or `/None`, a resource an inline image names — the
+    /// default is described as written, never remapped again. An `ICCBased`
+    /// space's `/Alternate` is described as stated, since the samples are in
+    /// the profile.
+    fn describe(
+        &self,
+        object: &Object,
+        inline: bool,
+        depth: u32,
+        mut painting: Option<&mut Painting>,
+    ) -> crate::ImageSpace {
         use crate::ImageSpace;
         let unreadable = |family: &[u8]| ImageSpace::Unreadable {
             family: family.to_vec(),
@@ -4508,10 +4626,38 @@ impl PageResources {
             let Some(bytes) = self.doc.name_bytes(name) else {
                 return unreadable(b"");
             };
+            // The renderer reads a bare `/CalGray` and `/CalRGB` as the
+            // device space, so the default it puts in is the space the samples
+            // are drawn in; as stated they stay what nothing describes.
+            let device = match bytes.as_ref() {
+                b"DeviceGray" | b"G" => Some((ColorSpace::DeviceGray, ImageSpace::DeviceGray)),
+                b"DeviceRGB" | b"RGB" => Some((ColorSpace::DeviceRgb, ImageSpace::DeviceRgb)),
+                b"DeviceCMYK" | b"CMYK" => Some((ColorSpace::DeviceCmyk, ImageSpace::DeviceCmyk)),
+                b"CalGray" if painting.is_some() => {
+                    Some((ColorSpace::DeviceGray, unreadable(b"CalGray")))
+                }
+                b"CalRGB" if painting.is_some() => {
+                    Some((ColorSpace::DeviceRgb, unreadable(b"CalRGB")))
+                }
+                _ => None,
+            };
+            if let Some((device, stated)) = device {
+                if let Some(painting) = painting {
+                    let defaults = self.defaults();
+                    if defaults.for_device(&device).is_some() {
+                        if let Some(entry) = self.default_entry(&device) {
+                            painting.replaced = true;
+                            return self.describe(&entry, false, depth + 1, None);
+                        }
+                    } else if let Some(reason) = defaults.refusal(&device) {
+                        if !painting.refused.iter().any(|seen| seen == reason) {
+                            painting.refused.push(reason.to_string());
+                        }
+                    }
+                }
+                return stated;
+            }
             return match bytes.as_ref() {
-                b"DeviceGray" | b"G" => ImageSpace::DeviceGray,
-                b"DeviceRGB" | b"RGB" => ImageSpace::DeviceRgb,
-                b"DeviceCMYK" | b"CMYK" => ImageSpace::DeviceCmyk,
                 other if inline => {
                     let entry = self.resources.as_ref().and_then(|resources| {
                         let table = self
@@ -4522,7 +4668,7 @@ impl PageResources {
                     match entry {
                         // A resource entry is the space itself, so it is read
                         // as an XObject's would be: it cannot name another.
-                        Some(entry) => self.describe_space(&entry, false, depth + 1),
+                        Some(entry) => self.describe(&entry, false, depth + 1, painting),
                         None => unreadable(other),
                     }
                 }
@@ -4561,7 +4707,7 @@ impl PageResources {
                     .clamp(0, 255) as u8;
                 let alternate = dict
                     .and_then(|d| d.get(self.doc.intern(b"Alternate")))
-                    .map(|a| Box::new(self.describe_space(a, inline, depth + 1)));
+                    .map(|a| Box::new(self.describe(a, inline, depth + 1, None)));
                 let profile = stream
                     .and_then(|r| self.doc.stream_decoded(r).ok())
                     .unwrap_or_default();
@@ -4574,7 +4720,7 @@ impl PageResources {
             b"Indexed" | b"I" => {
                 let base = items.get(1).map_or_else(
                     || unreadable(b""),
-                    |b| self.describe_space(b, inline, depth + 1),
+                    |b| self.describe(b, inline, depth + 1, painting.as_deref_mut()),
                 );
                 let high = items
                     .get(2)
@@ -4598,18 +4744,28 @@ impl PageResources {
                     lookup,
                 }
             }
-            b"Separation" => ImageSpace::Separation {
-                colorant: items
+            b"Separation" => {
+                let colorant = items
                     .get(1)
                     .and_then(|o| self.doc.resolve(o).as_name())
                     .and_then(|n| self.doc.name_bytes(n))
                     .map(|b| b.to_vec())
-                    .unwrap_or_default(),
-                alternate: Box::new(items.get(2).map_or_else(
+                    .unwrap_or_default();
+                // 8.6.6.4's `/All` and `/None` never select their alternate,
+                // so the renderer puts no default in for it, and nor does this.
+                let selects = !matches!(colorant.as_slice(), b"All" | b"None");
+                let alternate = items.get(2).map_or_else(
                     || unreadable(b""),
-                    |a| self.describe_space(a, inline, depth + 1),
-                )),
-            },
+                    |a| {
+                        let painting = painting.as_deref_mut().filter(|_| selects);
+                        self.describe(a, inline, depth + 1, painting)
+                    },
+                );
+                ImageSpace::Separation {
+                    colorant,
+                    alternate: Box::new(alternate),
+                }
+            }
             b"DeviceN" => ImageSpace::DeviceN {
                 colorants: items
                     .get(1)
@@ -4632,7 +4788,7 @@ impl PageResources {
                     .unwrap_or_default(),
                 alternate: Box::new(items.get(2).map_or_else(
                     || unreadable(b""),
-                    |a| self.describe_space(a, inline, depth + 1),
+                    |a| self.describe(a, inline, depth + 1, painting),
                 )),
             },
             b"CalGray" => {
@@ -4670,6 +4826,16 @@ impl PageResources {
                 }
             }
             other => unreadable(other),
+        }
+    }
+}
+
+/// Adds to an image's warnings why each default it fell back from was
+/// refused, each once and after what its decoder tolerated (ruling 10).
+fn name_refusals(image: &mut crate::PageImage, refusals: Vec<String>) {
+    for reason in refusals {
+        if !image.warnings.contains(&reason) {
+            image.warnings.push(reason);
         }
     }
 }

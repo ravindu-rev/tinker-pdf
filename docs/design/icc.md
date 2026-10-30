@@ -239,8 +239,8 @@ reads a space (`crates/tinker-pdf/tests/default_spaces.rs`), and
 `crates/tinker-pdf/tests/default_space_census.rs` counts them by scope; the
 PDF/A and PDF/X validators read them on their own walk
 (`crates/tinker-pdf/src/pdfa/colour.rs`, `crates/tinker-pdf/src/pdfx/print.rs`).
-Reporting the substitute in extraction is roadmap row K-02.3, and the
-census's first figures K-02.5. This section transcribes what the standard
+Extraction reports the substitute beside the space an image states (below),
+and the census's first figures are roadmap row K-02.5. This section transcribes what the standard
 says, maps every selection it remaps and every scope a default is read in,
 and settles what the K-02 rows build.
 
@@ -493,8 +493,7 @@ default:
 
 `Page::images` reports the space an image states (`PageImage::color_space`,
 `crates/tinker-pdf/src/images.rs`): a `/DeviceRGB` image is `DeviceRgb` under
-any default. Reporting the space its samples are in beside it is roadmap row
-K-02.3, designed here:
+any default. Beside it, it reports the space its samples are in:
 
 - **`PageImage::substituted_space`** is the stated space with each device
   space in it that the scope remaps replaced by the default, described as
@@ -504,7 +503,7 @@ K-02.3, designed here:
   a page with no default lists exactly what it lists without one.
   `PageImage::sample_space` answers the space the samples are in — the
   substituted one where there is one, the stated one otherwise — and is what
-  K-02.3's twins compare.
+  `an_extracted_image_names_the_space_its_samples_are_in`'s twins compare.
 - **One entry per image and space.** `Collector` lists an XObject once, by
   its reference, with every placement. Under defaults one XObject can be drawn
   in two spaces — on a page with a `/DefaultRGB` and in a form whose own
@@ -519,7 +518,8 @@ K-02.3, designed here:
 - **`to_svg` follows the render with no change of its own.** It writes the
   interpreter's `fill_color` (`crates/tinker-pdf/src/svg_out.rs`) and decodes
   images and shadings through the `GlyphSource` calls the renderer makes, so
-  the substitution reaches it; K-02.3's SVG test holds that.
+  the substitution reaches it, which
+  `a_default_space_page_writes_the_svg_its_twin_writes` holds.
 
 #### Read once a scope, so a page with none pays nothing per operator
 
