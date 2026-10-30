@@ -15,7 +15,10 @@ These are given; this document states each boundary, not the argument.
 - **Everything hand-rolled.** All document logic and all primitives are
   ours. The only exemption is dev/build/binding tooling that never ships in
   a user's artifact and never touches document bytes at runtime: `proptest`,
-  `criterion`, `cargo-fuzz`, `PyO3`, `wasm-bindgen`, `maturin`, `csbindgen`.
+  `criterion`, `cargo-fuzz`, `PyO3`, `wasm-bindgen`, `maturin`, `csbindgen`,
+  and cachegrind, the host instruction counter `bench.yml`'s count job runs
+  the benchmark set under, admitted as H-16's default admits it: it executes
+  the bench and judges no document.
   Anything else — including "just a small helper" like a hash or a
   bit-reader — is out, and `cargo-deny` fails the build on such crates by
   name (`deny.toml`). The policy lives in CI, not in review vigilance.

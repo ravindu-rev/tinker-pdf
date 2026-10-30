@@ -85,7 +85,8 @@ you are looking at.
 1. **Everything is hand-rolled.** No third-party crate implements any part
    of parsing, filters, crypto, fonts, colour, layout or rasterization. Dev,
    build and binding tooling (proptest, criterion, cargo-fuzz, PyO3,
-   wasm-bindgen, maturin, csbindgen) is exempt and never ships inside the
+   wasm-bindgen, maturin, csbindgen, and cachegrind, the instruction counter
+   `bench.yml`'s count job runs) is exempt and never ships inside the
    engine. A new dependency on anything else needs a
    [docs/architecture.md](docs/architecture.md) amendment first — the
    boundary is defined there.

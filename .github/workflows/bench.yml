@@ -40,6 +40,13 @@ on:
     # measurement of `main`.
     - cron: '0 5 * * 1'
   workflow_dispatch:
+    inputs:
+      count:
+        description: >-
+          Count each operation's instructions under cachegrind instead of
+          timing it (the `count` job below)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -54,6 +61,9 @@ jobs:
   # dispatch's wall time is its slowest job, and a relation between two
   # operations is measured inside one group, on one host.
   bench:
+    # A schedule has no inputs, so it always times; a dispatch times unless
+    # it asked to count.
+    if: ${{ !inputs.count }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -178,5 +188,107 @@ jobs:
           path: |
             bench.log
             target/criterion/
+          if-no-files-found: warn
+          retention-days: 90
+
+  # Instructions counted rather than time measured (MS-12), on dispatch
+  # alone. Each operation's count mode (`benches/support/mod.rs`) runs under
+  # cachegrind, the host instruction counter H-16's default admits as dev
+  # tooling: it executes the bench and judges no document (ruling 13). A
+  # clock-free count is a property of the code and the input, so the figure
+  # is one revision's on any host; what it measures is how far two runs of
+  # one revision still part, which is the noise a 1 % gate must clear.
+  #
+  # Each operation is counted at 1 and at 2 iterations, and the second less
+  # the first is one iteration's instructions with start-up and the inputs'
+  # construction cancelled -- a warm iteration, as criterion's are, since the
+  # first one pays what a process pays once. The pair is counted twice, so a
+  # job counts the set as often as a gate counting a base and a head would.
+  # `calibration` has no count mode: its file is frozen (H-77), and its input
+  # and call are `text/text of 100 dense pages`, counted here.
+  count:
+    if: ${{ inputs.count }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [open, text, render, write, layout, analysis, encode, decode, sign, fonts]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install the counter
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valgrind
+          valgrind --version
+
+      # The bench binary in the profile `cargo bench` builds, and the release
+      # `tpdf` its CLI operations take from beside it.
+      - name: Build
+        run: |
+          set -o pipefail
+          cargo build --release -p tpdf
+          cargo bench -p tinker-pdf --bench ${{ matrix.group }} --no-run 2>&1 | tee build.log
+          grep -oE 'target/release/deps/${{ matrix.group }}-[0-9a-f]+' build.log | head -n 1 > bench-binary
+          test -x "$(cat bench-binary)"
+
+      # Every process of a run is counted, `tpdf`'s children with the bench's
+      # own, each writing its own log. A run that does not exit 0 or print
+      # its `RAN` line, or a process with no count, fails the job: a count
+      # of nothing is the silent pass every guard here exists to stop.
+      - name: Count
+        env:
+          GROUP: ${{ matrix.group }}
+        run: |
+          python3 -I - <<'EOF'
+          import json, os, pathlib, re, subprocess, tempfile, time
+
+          group = os.environ["GROUP"]
+          binary = pathlib.Path("bench-binary").read_text().strip()
+          lists = json.loads(pathlib.Path("crates/tinker-pdf/benches/baseline.json").read_text())
+          names = [op["name"] for op in next(g for g in lists["groups"] if g["group"] == group)["operations"]]
+          refs = re.compile(r"I\s+refs:\s+([\d,]+)")
+
+          def count(name, iterations):
+              with tempfile.TemporaryDirectory() as logs:
+                  run = subprocess.run(
+                      ["valgrind", "--tool=cachegrind", "--cache-sim=no",
+                       "--cachegrind-out-file=/dev/null", "--trace-children=yes",
+                       f"--log-file={logs}/%p.log", binary],
+                      env=dict(os.environ, TINKER_BENCH_COUNT=f"{group}/{name}",
+                               TINKER_BENCH_ITERATIONS=str(iterations)),
+                      capture_output=True, text=True)
+                  if run.returncode != 0 or f"count-mode: RAN {group}/{name} {iterations}" not in run.stdout:
+                      raise SystemExit(f"{group}/{name} at {iterations}: exit {run.returncode}\n{run.stdout}{run.stderr}")
+                  found = [refs.search(log.read_text()) for log in sorted(pathlib.Path(logs).glob("*.log"))]
+                  if not found or not all(found):
+                      raise SystemExit(f"{group}/{name} at {iterations}: a process wrote no instruction count")
+                  return sum(int(match.group(1).replace(",", "")) for match in found)
+
+          rows = ["id\tfirst\tsecond\tspread_percent\tseconds"]
+          started = time.monotonic()
+          for name in names:
+              began = time.monotonic()
+              per = [count(name, 2) - count(name, 1) for _ in range(2)]
+              low, high = min(per), max(per)
+              spread = (high - low) / low * 100 if low > 0 else float("inf")
+              line = f"{group}/{name}\t{per[0]}\t{per[1]}\t{spread:.4f}\t{time.monotonic() - began:.0f}"
+              print(line, flush=True)
+              rows.append(line)
+          pathlib.Path("counts.tsv").write_text("\n".join(rows) + "\n")
+          print(f"count-job: {group}, {len(names)} operations, {time.monotonic() - started:.0f} s")
+          EOF
+
+      - name: Keep the counts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: count-${{ matrix.group }}
+          path: |
+            counts.tsv
+            build.log
           if-no-files-found: warn
           retention-days: 90
