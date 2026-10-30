@@ -403,21 +403,29 @@ line (`paint::Fonts::declared_of`): read back off the line, a
 right-to-left line that opens with stops before a styled pair,
 `?!(<b>בראשית</b>) עולם`, would be drawn another way, which the reader,
 reading the direction declared, reads `(!?בראשית) עולם`
-(`a_line_is_read_back_in_the_direction_its_structure_declares`). A line under a matrix that turns
-its baseline, which nothing tried reads with its letters in order, is searched
-again the same way, up to as many readings, for the first drawing that reads
-it closer to the order written than the rules' drawing — more of its runs with
-their own characters in order, or as many and more pairs of its words — and
-sets no more glyphs over others (`paint::Fonts::search_closer`). Any other
-line the rules read right, or that no drawing tried reads right, is drawn by
-the rules; a line with a run in a face of the book's own is not read back,
-since that face is shaped
+(`a_line_is_read_back_in_the_direction_its_structure_declares`).
+
+**A line no drawing tried reads right states its text** (14.9.4): it is
+drawn by the rules, its runs and whatever is drawn between them inside a
+`/Span` whose `/ActualText` is the text they draw, as typed — the characters
+the page's fonts give back something for (`paint::Fonts::stated`,
+`PageBuilder::begin_stated`). The sequence open where the span begins is
+closed before it and continued inside it, and so again where it ends, so
+each run keeps its element and the span holds whole sequences; the lines of
+one span are one where two lines' runs interleave, a float's set in the
+middle of a line. The reader reads the span's text in place of its glyphs,
+each character on the glyph that draws it, on whichever line that is
+([content-and-text](content-and-text.md)), and a line with no other drawing
+to try is read once, for whether it states its text. A line the rules read
+right is drawn by the rules, and states nothing; a line with a run in a face
+of the book's own is not read back, since that face is shaped
 (`neutrals_a_reader_reads_with_the_word_beside_them_are_drawn_for_that_reading`,
-`a_line_a_reader_cuts_where_it_is_spaced_apart_is_drawn_to_read_whole`).
+`a_line_a_reader_cuts_where_it_is_spaced_apart_is_drawn_to_read_whole`,
+`a_line_no_drawing_reads_right_states_its_text_round_its_runs_sequences`).
 
 **Each line is read back on the page it is drawn on**
 (`paint::OnPage::matrix`, `paint::along_the_line`, `paint::Segment::read_as`,
-`paint::Given`, `paint::Words`, `paint::Read::Letters`). The page draws a run
+`paint::Words`, `paint::Read::Letters`). The page draws a run
 under the `cm` its CSS `transform` writes (`paint::OnPage::open`), and a
 reader's thresholds are in the glyphs' size on the page: a transform that
 scales one axis more than the other widens or narrows every gap against it.
@@ -433,13 +441,9 @@ back: a standard face draws a NO-BREAK SPACE at `WinAnsiEncoding`'s `0xA0`,
 which a reader reads by its glyph name as a space, and the overflow font
 names no letter of the supplementary planes, so an Adlam word is spaces to a
 reader, and a styled `?!` between two of them is drawn as typed, not turned
-for letters the page does not have. Where nothing tried reads such a line
-right, it is searched again with each glyph read as typed, and what that
-finds is drawn only where it reads more of the line's pairs of letters in
-order on the page than the rules' drawing: read as its font gives it back,
-`1 234` is two numbers to UAX #9, which no drawing puts back together, and
-the styled `?!` after it in `W W <b>1 234</b> <i>?!</i> W.` reads as typed by
-that second search ([ruling 14](../rulings.md)). A reading is held to the
+for letters the page does not have. Read as its font gives it back, `1 234`
+is two numbers to UAX #9, which no drawing puts back together, and a line
+nothing tried reads right so states its text, as typed. A reading is held to the
 line's words: the first drawing tried that reads them is drawn; one that
 reads the line's letters in order, white space aside, and not its words — a
 word cut where a reader parts the spacing, or two run together
@@ -451,12 +455,7 @@ takes for the words the search reads elsewhere. Under a transform, a line the
 rules' drawing reads on the page with its letters in order and not its words,
 which nothing tried there reads with its words, is searched in its runs' own
 space too, and what that finds is drawn only where it reads the words right
-on the page (`paint::Fonts::reads_whole`). Where nothing tried
-reads a line right on the page under a transform — glyphs the transform sets
-over others, whose letters no drawing reads in order — the line is searched
-again in its runs' own space, and what that finds is drawn only where, read
-back on the page, it holds more of the text's pairs of letters in order than
-the rules' drawing does there (`paint::Fonts::reads_closer`). And no drawing
+on the page (`paint::Fonts::reads_whole`). And no drawing
 that sets more glyphs over others than the rules' is taken
 (`paint::Overprint`, which counts a glyph over another by its box, so that
 under a skew a slanted glyph's box reaches over its neighbour's where nothing
@@ -492,7 +491,7 @@ records
 `a_run_is_drawn_from_its_plan_by_its_place_in_the_page`).
 
 **What the read-back leaves** (ROADMAP CD-19). These lines no drawing tried
-reads right, and they are drawn by the rules:
+reads right, and they are drawn by the rules and state their text:
 
 - `25٪ <b>W</b>` in an Arabic paragraph at `word-spacing: 1em`, turned by
   `rotate(180deg)` or not, whose line that opens with `25٪` a reader reads

@@ -2777,17 +2777,17 @@ fn searches_to_open(book: Vec<u8>) -> (usize, usize) {
 /// (`text_order`'s `drawn_reading`), made for every line a reader parts off
 /// it: a letter-spaced line is parted at every text object, into lines of a
 /// word or two. A letter-spaced line, which no drawing reads with its
-/// words, is read in every drawing the budget allows, and under a transform
-/// in its runs' own space too: the same lines of units, met again and again.
-/// A line's reading is a function of its units alone, so the page's
+/// words, is read in every drawing the budget allows, under a transform as
+/// without one, and states its text: the same lines of units, met again and
+/// again. A line's reading is a function of its units alone, so the page's
 /// read-back keeps each it found (`text_order::Readings`) and searches none
-/// again: not a line read again in its runs' own space, a pair of words a
-/// line repeats, a line another line of the page repeats, nor the line of
-/// units every drawing a search tries reads alike. Each is held to how often
-/// it is read back (a guard: what is read does not change; the line of
-/// styled neutrals, each of its distinct drawings and their pairs read once,
-/// within the budget) and to the lines of units it may search. Held by
-/// count, as
+/// again: not a pair of words a line repeats, a line another line of the
+/// page repeats, nor the line of units every drawing a search tries reads
+/// alike. Each is held to how often it is read back (a guard: what is read
+/// does not change; the line of styled neutrals under a transform, each of
+/// its distinct drawings and their pairs read once, within the budget, and
+/// without one read right at once in the direction its paragraph declares)
+/// and to the lines of units it may search. Held by count, as
 /// [`a_line_whose_rules_drawing_reads_its_letters_in_order_is_searched_for_its_words`]
 /// holds the readings, not by a clock.
 #[test]
@@ -2824,10 +2824,10 @@ fn a_line_of_units_the_read_back_has_read_is_not_searched_again() {
     // the most lines of units it may search.
     let rows = [
         (
-            "the line under scaleX(2), read on the page and in its runs' own space",
+            "the line under scaleX(2), read on the page",
             scaled,
             line.clone(),
-            256,
+            128,
             searched,
         ),
         (
@@ -2845,17 +2845,17 @@ fn a_line_of_units_the_read_back_has_read_is_not_searched_again() {
             searched,
         ),
         (
-            "a line of styled neutrals under word spacing, searched over its distinct drawings",
+            "a line of styled neutrals under word spacing, read in its declared direction",
             "p { word-spacing: 0.5em; white-space: nowrap }",
             neutrals.clone(),
-            93,
+            1,
             127,
         ),
         (
-            "the same under scaleX(2), searched on the page and in its runs' own space",
+            "the same under scaleX(2), searched over its distinct drawings",
             "p { word-spacing: 0.5em; white-space: nowrap; transform: scaleX(2) }",
             neutrals,
-            186,
+            93,
             128,
         ),
     ];
@@ -3022,4 +3022,87 @@ fn a_line_is_read_back_in_the_direction_its_structure_declares() {
     let doc = crate::Document::open(book).expect("opens");
     let text = doc.page(0).expect("a page").text().plain_text();
     assert_eq!(text, "?!(בראשית) עולם\n");
+}
+
+// ---- The stated line ----------------------------------------------------------
+
+/// **A line no drawing reads right states its text** (14.9.4, H-152): drawn
+/// by the rules inside one `/Span` whose `/ActualText` is the text its runs
+/// draw, as typed, round the sequences its runs are drawn in, each in its
+/// own element's. A letter-spaced line, which a reader parts at its spacing
+/// whatever is drawn, `٦٠.` reading `٦٠ .`, reads as typed; and a line a
+/// drawing reads right states nothing.
+#[test]
+fn a_line_no_drawing_reads_right_states_its_text_round_its_runs_sequences() {
+    let book = stored_book(
+        "he",
+        "p.spaced { letter-spacing: 0.6em; white-space: nowrap }",
+        concat!(
+            r#"<p class="spaced">בראשית <b>ברא</b> ٦٠.</p>"#,
+            r#"<p dir="rtl">שלום עולם.</p>"#,
+        ),
+    );
+    let doc = crate::Document::open(book).expect("opens");
+    let page = doc.page(0).expect("a page");
+    let text = page.text();
+    assert_eq!(
+        text.stated,
+        ["בראשית ברא ٦٠."],
+        "one span, stating the spaced line"
+    );
+    assert_eq!(text.plain_text(), "בראשית ברא ٦٠.\nשלום עולם.\n");
+
+    // The span holds whole sequences, and the line's runs are drawn in two,
+    // its paragraph's and its `<b>`'s.
+    let cos = doc.cos();
+    let content =
+        tinker_pdf_cos::pages::content_bytes(cos, &tinker_pdf_cos::pages::collect(cos)[0]);
+    let content = String::from_utf8_lossy(&content);
+    let tokens: Vec<&str> = content.split_whitespace().collect();
+    let stating = |token: &str| token.contains("/ActualText");
+    let opened = tokens
+        .iter()
+        .position(|token| stating(token))
+        .expect("the span");
+    assert_eq!(tokens.iter().filter(|token| stating(token)).count(), 1);
+    let (mut depth, mut sequences, mut closed) = (0usize, 0usize, None);
+    for (at, token) in tokens.iter().enumerate().skip(opened) {
+        match *token {
+            "BDC" | "BMC" => {
+                depth += 1;
+                if tokens.get(at.saturating_sub(2)) == Some(&"<</MCID") {
+                    sequences += 1;
+                }
+            }
+            "EMC" => {
+                depth -= 1;
+                if depth == 0 {
+                    closed = Some(at);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(closed.is_some(), "the span is closed");
+    assert!(
+        sequences >= 2,
+        "{sequences} sequences inside the span, its runs' elements' each"
+    );
+
+    // Each element reads its own text through the structure tree.
+    let tree = doc.structure().expect("tagged");
+    let structured = tree.text_for_page(0, &text);
+    let texts: Vec<(&str, &str)> = structured
+        .nodes
+        .iter()
+        .map(|node| (node.raw_type.as_str(), node.text.trim()))
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|(kind, text)| *kind == "b" && *text == "ברא"),
+        "{texts:?}"
+    );
+    assert_eq!(structured.unmarked, 0);
 }

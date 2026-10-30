@@ -2215,6 +2215,13 @@ pub struct PageBuilder {
     /// `AF1`, ... Taken when the sequence opens, so a sequence its closure
     /// opens inside it is named after it and never with it.
     next_marked_file: usize,
+    /// Each [`PageBuilder::begin_stated`] span not yet ended, outermost
+    /// first: whether it was written, or refused and ends writing nothing.
+    stated: Vec<bool>,
+    /// The version the document declares, which a text string this page
+    /// writes into its content is encoded for (7.9.2.2). Copied at
+    /// [`DocumentBuilder::begin_page`], as `page_intents` is.
+    version: (u8, u8),
 }
 
 /// One structure element under construction, and what it claims.
@@ -3217,6 +3224,59 @@ impl PageBuilder {
         true
     }
 
+    /// Begins a marked-content sequence that states `text` as what everything
+    /// drawn in it stands for, `/Span << /ActualText … >> BDC` (14.9.4): a
+    /// reader reads `text` in place of the glyphs, so a line whose glyphs
+    /// read otherwise by where they stand reads as `text`. Ended by
+    /// [`PageBuilder::end_stated`].
+    ///
+    /// **The span is no structure element**, and may begin inside one element
+    /// and end inside another — a line's first glyph in a paragraph's
+    /// sequence and its last in a span of it. Marked content nests (14.6), so
+    /// the sequence open when it begins is closed before it and continued
+    /// inside it in a fresh one, and so again when it ends: whatever is drawn
+    /// in it keeps the elements it is drawn in, each in sequences of its own.
+    /// Refused, writing nothing, inside a [`PageBuilder::optional`] or
+    /// [`PageBuilder::with_associated_files`] scope, whose sequence this does
+    /// not close; its `end_stated` ends nothing. A span still open when the
+    /// page is pushed is ended on it.
+    pub fn begin_stated(&mut self, text: &str) -> bool {
+        if self.optional_depth > 0 {
+            self.stated.push(false);
+            return false;
+        }
+        let open = !self.tag_stack.is_empty();
+        if open {
+            self.close_marked();
+        }
+        self.content.extend_from_slice(b"/Span <</ActualText ");
+        crate::write::write_string(&mut self.content, &encode_text_string(text, self.version));
+        self.content.extend_from_slice(b">> BDC\n");
+        self.stated.push(true);
+        if open {
+            self.resume_parent();
+        }
+        true
+    }
+
+    /// Ends the innermost span [`PageBuilder::begin_stated`] began, closing
+    /// the sequence open inside it and continuing it after. Returns false,
+    /// writing nothing, where no span is open or the one open was refused.
+    pub fn end_stated(&mut self) -> bool {
+        if !self.stated.pop().unwrap_or(false) {
+            return false;
+        }
+        let open = !self.tag_stack.is_empty();
+        if open {
+            self.close_marked();
+        }
+        self.content.extend_from_slice(b"EMC\n");
+        if open {
+            self.resume_parent();
+        }
+        true
+    }
+
     /// Closes the innermost open element and hands it to its parent, or to
     /// the page's roots.
     fn close_top(&mut self) {
@@ -3261,6 +3321,13 @@ impl PageBuilder {
         self.floor = (0, 0);
         while !self.tag_stack.is_empty() {
             self.close_top();
+        }
+        // A span still open is ended on its page, round sequences that are
+        // all closed now (`PageBuilder::begin_stated`).
+        for written in std::mem::take(&mut self.stated).into_iter().rev() {
+            if written {
+                self.content.extend_from_slice(b"EMC\n");
+            }
         }
         (carried, std::mem::take(&mut self.refused_opens))
     }
@@ -7735,6 +7802,8 @@ impl DocumentBuilder {
             associated: Vec::new(),
             marked_files: Vec::new(),
             next_marked_file: 0,
+            stated: Vec::new(),
+            version: self.declared_version(),
         };
         page.reopen(&self.carried, self.carried_refused);
         page

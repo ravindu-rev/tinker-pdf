@@ -879,6 +879,47 @@ fn a_span_across_two_lines_states_its_text_on_the_first() {
     assert_eq!(lines, ["waseon", "b"]);
 }
 
+/// **A span's text stands on its glyphs on every line they are on**: read on
+/// the first line, each of its characters keeps the sequence, the font and
+/// the place of the glyph that draws it, on the second line as on the
+/// first, so that a structure tree reads each element's own text and search
+/// boxes each character where it is drawn.
+#[test]
+fn a_span_across_two_lines_keeps_each_characters_own_glyph() {
+    let bytes = stated_page(
+        2,
+        &[
+            Item::Open(stating("seon")),
+            sequence(0),
+            Item::Run(0, vec![('s', 0.0), ('e', ADVANCE)]),
+            Item::Close,
+            sequence(1),
+            Item::Run(1, visual("on")),
+            Item::Close,
+            Item::Close,
+        ],
+    );
+    let doc = Document::open(bytes).expect("opens");
+    let text = doc.page(0).expect("a page").text();
+    let lines = text.lines();
+    assert_eq!(lines.len(), 1, "the second line reads nothing");
+    let placed: Vec<(String, Option<u32>, bool)> = lines[0]
+        .chars
+        .iter()
+        .map(|c| (c.text.clone(), c.mcid, c.quad.ll.1 < 120.0))
+        .collect();
+    let expect = |text: &str, mcid: u32, below: bool| (text.to_owned(), Some(mcid), below);
+    assert_eq!(
+        placed,
+        [
+            expect("s", 0, false),
+            expect("e", 0, false),
+            expect("o", 1, true),
+            expect("n", 1, true),
+        ]
+    );
+}
+
 /// **A span whose list carries an `/MCID` states its text too**, and each
 /// character keeps the sequence it was drawn in.
 #[test]

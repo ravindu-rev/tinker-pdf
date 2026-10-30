@@ -167,7 +167,7 @@ impl Default for WriteOptions {
 }
 
 /// Escapes and writes a literal string (7.3.4.2).
-fn write_string(out: &mut Vec<u8>, s: &PdfString) {
+pub(crate) fn write_string(out: &mut Vec<u8>, s: &PdfString) {
     if s.hex {
         out.push(b'<');
         for byte in &s.bytes {

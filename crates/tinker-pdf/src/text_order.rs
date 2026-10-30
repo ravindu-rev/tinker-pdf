@@ -215,15 +215,22 @@ fn in_logical_order(
 ) -> usize {
     let mut changed = 0usize;
     let TextPage { blocks, stated, .. } = page;
+    let stated: &[String] = stated;
     let mut reads: Vec<Vec<Option<Read>>> = Vec::with_capacity(blocks.len());
     for block in blocks.iter_mut() {
         let (joined, read) = rejoin_split_lines(&mut block.lines);
         changed += joined;
         reads.push(read);
     }
-    if !stated.is_empty() {
-        keep_stated_on_first_line(blocks, Some(&mut reads));
-    }
+    let elsewhere = if stated.is_empty() {
+        BTreeMap::new()
+    } else {
+        keep_stated_on_first_line(blocks, Some(&mut reads))
+    };
+    let stated = Stated {
+        texts: stated,
+        elsewhere: Some(&elsewhere),
+    };
     for (block, mut read) in blocks.iter_mut().zip(reads) {
         for (at, line) in block.lines.iter_mut().enumerate() {
             let read = read.get_mut(at).and_then(Option::take);
@@ -251,7 +258,11 @@ pub(crate) fn state_in_content_order(page: &mut TextPage) {
     if stated.is_empty() {
         return;
     }
-    keep_stated_on_first_line(blocks, None);
+    let elsewhere = keep_stated_on_first_line(blocks, None);
+    let stated = Stated {
+        texts: stated,
+        elsewhere: Some(&elsewhere),
+    };
     for line in blocks.iter_mut().flat_map(|block| block.lines.iter_mut()) {
         state_in_place(line, stated);
     }
@@ -260,20 +271,30 @@ pub(crate) fn state_in_content_order(page: &mut TextPage) {
 /// Drops each `/ActualText` span's glyphs from every line after the first the
 /// page reads them on, where its text will stand; a line or a block left with
 /// nothing goes, and so does its entry in `reads`. A line that loses glyphs
-/// so is read again rather than as `reads` found it.
+/// so is read again rather than as `reads` found it. Returns the glyphs
+/// dropped, by span, in the order the page reads them, which its text stands
+/// on as on the glyphs the first line keeps ([`Stated::glyphs`]).
 fn keep_stated_on_first_line(
     blocks: &mut Vec<TextBlock>,
     mut reads: Option<&mut Vec<Vec<Option<Read>>>>,
-) {
+) -> BTreeMap<u32, Vec<TextChar>> {
     let mut placed: BTreeSet<u32> = BTreeSet::new();
+    let mut dropped: BTreeMap<u32, Vec<TextChar>> = BTreeMap::new();
     for (b, block) in blocks.iter_mut().enumerate() {
         let mut at = 0usize;
         while at < block.lines.len() {
             let line = &mut block.lines[at];
             let here: BTreeSet<u32> = line.chars.iter().filter_map(|c| c.stated).collect();
             if here.iter().any(|span| placed.contains(span)) {
-                line.chars
-                    .retain(|c| c.stated.is_none_or(|span| !placed.contains(&span)));
+                let (gone, kept): (Vec<TextChar>, Vec<TextChar>) = std::mem::take(&mut line.chars)
+                    .into_iter()
+                    .partition(|c| c.stated.is_some_and(|span| placed.contains(&span)));
+                line.chars = kept;
+                for c in gone {
+                    if let Some(span) = c.stated {
+                        dropped.entry(span).or_default().push(c);
+                    }
+                }
                 line.text = line.chars.iter().map(|c| c.text.as_str()).collect();
                 if let Some(quad) = line.chars.iter().map(|c| c.quad).reduce(enclose) {
                     line.quad = quad;
@@ -314,13 +335,56 @@ fn keep_stated_on_first_line(
         }
         keep
     });
+    dropped
+}
+
+/// What a page states for its glyphs (14.9.4): each span's text
+/// (`TextPage::stated`), and each span's glyphs [`keep_stated_on_first_line`]
+/// dropped from the lines after the first the page reads it on.
+#[derive(Clone, Copy, Debug, Default)]
+struct Stated<'a> {
+    /// Each span's text, by its index.
+    texts: &'a [String],
+    /// Each span's glyphs on lines after its first.
+    elsewhere: Option<&'a BTreeMap<u32, Vec<TextChar>>>,
+}
+
+impl<'a> Stated<'a> {
+    /// Span `span`'s text, or nothing where the page records none.
+    fn text(self, span: u32) -> &'a str {
+        self.texts
+            .get(usize::try_from(span).unwrap_or(usize::MAX))
+            .map_or("", String::as_str)
+    }
+
+    /// The glyphs span `span`'s text stands on ([`stated_chars`]): `here`,
+    /// those of a line it is read on, and then those on the lines after,
+    /// where it reads nothing, so that each character keeps the sequence,
+    /// the font and the place of the glyph that draws it wherever that is.
+    fn glyphs<'g>(
+        self,
+        span: u32,
+        here: impl IntoIterator<Item = &'g TextChar>,
+    ) -> Vec<&'g TextChar>
+    where
+        'a: 'g,
+    {
+        here.into_iter()
+            .chain(
+                self.elsewhere
+                    .and_then(|elsewhere| elsewhere.get(&span))
+                    .into_iter()
+                    .flatten(),
+            )
+            .collect()
+    }
 }
 
 /// Puts each span `line` holds in its text, at the span's first glyph in the
 /// line's order, and leaves the line's other characters where they are: on a
 /// line in the content stream's order, and on one ruling 14 does not reorder.
 /// Returns whether it put any.
-fn state_in_place(line: &mut TextLine, stated: &[String]) -> bool {
+fn state_in_place(line: &mut TextLine, stated: Stated<'_>) -> bool {
     let mut spans: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
     for (at, c) in line.chars.iter().enumerate() {
         if let Some(span) = c.stated {
@@ -337,9 +401,8 @@ fn state_in_place(line: &mut TextLine, stated: &[String]) -> bool {
             None => out.push(c.clone()),
             Some(span) => {
                 if let Some(held) = spans.get(&span).filter(|held| held.first() == Some(&at)) {
-                    let glyphs: Vec<&TextChar> =
-                        held.iter().filter_map(|k| chars.get(*k)).collect();
-                    out.extend(stated_chars(stated_text(stated, span), &glyphs, span));
+                    let glyphs = stated.glyphs(span, held.iter().filter_map(|k| chars.get(*k)));
+                    out.extend(stated_chars(stated.text(span), &glyphs, span));
                 }
             }
         }
@@ -347,13 +410,6 @@ fn state_in_place(line: &mut TextLine, stated: &[String]) -> bool {
     line.chars = out;
     line.text = line.chars.iter().map(|c| c.text.as_str()).collect();
     true
-}
-
-/// Span `span`'s text, or nothing where the page records none.
-fn stated_text(stated: &[String], span: u32) -> &str {
-    stated
-        .get(usize::try_from(span).unwrap_or(usize::MAX))
-        .map_or("", String::as_str)
 }
 
 /// The longest glyph text, in characters, [`stated_chars`] asks for at each
@@ -1136,7 +1192,7 @@ fn drawn_units(chars: &[TextChar]) -> Units {
 fn logical_line(
     line: &mut TextLine,
     read: Option<Read>,
-    stated: &[String],
+    stated: Stated<'_>,
     declared: Option<BaseDirection>,
 ) -> bool {
     logical_line_reading(line, read, stated, declared, |visual| {
@@ -1149,7 +1205,7 @@ fn logical_line(
 fn logical_line_reading(
     line: &mut TextLine,
     read: Option<Read>,
-    stated: &[String],
+    stated: Stated<'_>,
     declared: Option<BaseDirection>,
     reading_of: impl FnOnce(&[&str]) -> DrawnReading,
 ) -> bool {
@@ -1165,9 +1221,8 @@ fn logical_line_reading(
         .and_then(|c| c.stated)
         .filter(|span| line.chars.iter().all(|c| c.stated == Some(*span)));
     if let Some(span) = whole {
-        let text = stated_text(stated, span);
-        let glyphs: Vec<&TextChar> = line.chars.iter().collect();
-        line.chars = stated_chars(text, &glyphs, span);
+        let glyphs = stated.glyphs(span, &line.chars);
+        line.chars = stated_chars(stated.text(span), &glyphs, span);
         line.text = line.chars.iter().map(|c| c.text.as_str()).collect();
         line.rtl = declared.map_or_else(
             || first_strong_rtl(&line.text),
@@ -1211,8 +1266,8 @@ fn logical_line_reading(
                 Some(span) => {
                     let mut at = cluster.clone();
                     at.sort_unstable();
-                    let glyphs: Vec<&TextChar> = at.iter().filter_map(|k| chars.get(*k)).collect();
-                    out.extend(stated_chars(stated_text(stated, span), &glyphs, span));
+                    let glyphs = stated.glyphs(span, at.iter().filter_map(|k| chars.get(*k)));
+                    out.extend(stated_chars(stated.text(span), &glyphs, span));
                 }
                 None => out.extend(cluster.iter().filter_map(|at| chars.get(*at)).cloned()),
             }
@@ -1292,7 +1347,7 @@ mod tests {
             vec![ch(GIMEL, 0.0, 5.0), ch(BET, 5.0, 5.0), ch(ALEF, 10.0, 5.0)],
             true,
         );
-        assert!(logical_line(&mut l, None, &[], None));
+        assert!(logical_line(&mut l, None, Stated::default(), None));
         assert_eq!(l.text, format!("{ALEF}{BET}{GIMEL}"));
     }
 
@@ -1304,7 +1359,7 @@ mod tests {
             true,
         );
         assert!(
-            !logical_line(&mut l, None, &[], None),
+            !logical_line(&mut l, None, Stated::default(), None),
             "nothing should have moved"
         );
         assert_eq!(l.text, format!("{ALEF}{BET}{GIMEL}"));
@@ -1329,7 +1384,7 @@ mod tests {
         ];
         for chars in [after, before] {
             let mut l = line(chars, true);
-            logical_line(&mut l, None, &[], None);
+            logical_line(&mut l, None, Stated::default(), None);
             assert_eq!(l.text, format!("{ALEF}{BET}{QAMATS}{GIMEL}"));
         }
     }
@@ -1348,7 +1403,7 @@ mod tests {
             ],
             true,
         );
-        logical_line(&mut l, None, &[], None);
+        logical_line(&mut l, None, Stated::default(), None);
         assert_eq!(l.text, format!("{ALEF}{BET} 12"));
     }
 
@@ -1357,7 +1412,7 @@ mod tests {
         // Out of order on purpose: a line with no right-to-left character is
         // left as collected, even where its geometry disagrees with its order.
         let mut l = line(vec![ch("b", 5.0, 5.0), ch("a", 0.0, 5.0)], false);
-        assert!(!logical_line(&mut l, None, &[], None));
+        assert!(!logical_line(&mut l, None, Stated::default(), None));
         assert_eq!(l.text, "ba");
     }
 
@@ -1378,7 +1433,7 @@ mod tests {
             ],
             true,
         );
-        assert!(logical_line(&mut l, None, &[], None));
+        assert!(logical_line(&mut l, None, Stated::default(), None));
         assert_eq!(l.text, format!("a {ALEF}{BET}{GIMEL} b"));
         assert!(!l.rtl, "the line was read left to right");
     }
@@ -1399,7 +1454,7 @@ mod tests {
             ],
             true,
         );
-        assert!(logical_line(&mut quoted, None, &[], None));
+        assert!(logical_line(&mut quoted, None, Stated::default(), None));
         assert_eq!(quoted.text, format!("{ALEF}{BET}{GIMEL},"));
         assert!(!quoted.rtl, "the line was read left to right");
 
@@ -1412,7 +1467,7 @@ mod tests {
             ],
             false,
         );
-        assert!(logical_line(&mut own, None, &[], None));
+        assert!(logical_line(&mut own, None, Stated::default(), None));
         assert_eq!(own.text, format!("{ALEF}{BET}{GIMEL},"));
         assert!(own.rtl, "the line was read right to left");
     }
@@ -1427,7 +1482,7 @@ mod tests {
             .map(|(i, t)| ch(t, i as f64 * 5.0, 5.0))
             .collect();
         let mut l = line(drawn, false);
-        logical_line(&mut l, None, &[], None);
+        logical_line(&mut l, None, Stated::default(), None);
         assert_eq!(l.text, typed);
         assert!(l.rtl);
     }
@@ -1439,7 +1494,7 @@ mod tests {
             .chain(std::iter::once(ch(ALEF, 0.0, 5.0)))
             .collect();
         let mut l = line(chars, true);
-        logical_line(&mut l, None, &[], None);
+        logical_line(&mut l, None, Stated::default(), None);
         assert_eq!(l.chars.len(), 20_001, "no character may be lost");
     }
 
@@ -1827,7 +1882,7 @@ mod tests {
         ];
         let whole = join(pieces.clone());
         let mut read_whole = whole.clone();
-        logical_line(&mut read_whole, None, &[], None);
+        logical_line(&mut read_whole, None, Stated::default(), None);
         assert!(
             !read_whole.text.starts_with(')'),
             "read whole, the `)` does not open the line: {:?}",

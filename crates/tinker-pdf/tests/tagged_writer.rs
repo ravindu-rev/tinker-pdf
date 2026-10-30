@@ -936,6 +936,63 @@ fn a_writing_mode_is_written_alone_and_beside_table_attributes() {
     assert_eq!(owners(&only(&doc, "P")), ["LayoutRlTb"]);
 }
 
+/// A stated span (14.9.4) is no structure element: begun inside one element
+/// and ended inside another, it closes the sequence open at each end and
+/// continues it inside and after, so each element keeps what is drawn in it
+/// in sequences of its own and the span holds them whole; a reader reads
+/// the span's text in place of its glyphs, each character on the glyph of
+/// its own element. Refused inside an optional-content scope, whose
+/// sequence it does not close, and ended where the page is pushed with one
+/// still open.
+#[test]
+fn a_stated_span_holds_whole_sequences_of_the_elements_drawn_in_it() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    let layer = builder.add_layer("Notes", true).expect("a layer");
+    builder.add_page(300.0, 200.0, |page| {
+        page.tagged(b"P", |page| {
+            page.text(b"F1", 12.0, 20.0, 170.0, "before");
+            assert!(page.begin_stated("two one"));
+            page.text(b"F1", 12.0, 20.0, 150.0, "two ");
+            page.tagged(b"Span", |page| {
+                page.text(b"F1", 12.0, 60.0, 150.0, "one");
+                assert!(page.end_stated());
+            });
+            page.text(b"F1", 12.0, 20.0, 130.0, "after");
+        });
+        page.tagged(b"P", |page| {
+            assert!(page.optional(layer, |page| {
+                assert!(!page.begin_stated("refused"));
+                page.text(b"F1", 12.0, 20.0, 110.0, "noted");
+                assert!(!page.end_stated());
+            }));
+        });
+    });
+    builder.add_page(300.0, 200.0, |page| {
+        page.tagged(b"P", |page| {
+            assert!(page.begin_stated("left open"));
+            page.text(b"F1", 12.0, 20.0, 170.0, "nepo tfel");
+        });
+    });
+    let bytes = builder.finish();
+    structurally_clean(bytes.clone());
+    let doc = Document::open(bytes).expect("opens");
+    let first = doc.page(0).expect("a page").text();
+    assert_eq!(first.stated, ["two one"]);
+    assert_eq!(first.plain_text(), "before\ntwo one\nafter\nnoted\n");
+    let tree = doc.structure().expect("a tree");
+    let structured = tree.text_for_page(0, &first);
+    let texts: Vec<(&str, &str)> = structured
+        .nodes
+        .iter()
+        .map(|node| (node.standard_type.as_str(), node.text.trim()))
+        .collect();
+    assert!(texts.contains(&("Span", "one")), "{texts:?}");
+    assert_eq!(structured.unmarked, 0, "nothing drawn outside a sequence");
+    let second = doc.page(1).expect("a page").text();
+    assert_eq!(second.plain_text(), "left open\n");
+}
+
 /// An identifier is one element's. The first in reading order keeps it, a
 /// later one is written without it, and `duplicate_element_ids` says so
 /// before the document is finished — while the two halves of one keyed

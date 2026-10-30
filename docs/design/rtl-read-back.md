@@ -100,8 +100,8 @@ block before it: a reader then reads a block set more than half an em apart
 as a line of its own, which the comma tie-break reads left to right, its
 trailing `?!` after its word. And on a line under a matrix that turns its
 baseline, a right-to-left run's words may be written in reading order
-(`Cut::Reading`), and where nothing reads the line's letters in order the
-drawing that reads most of its runs in order is taken (`Fonts::search_closer`).
+(`Cut::Reading`), and a line nothing tried reads right is drawn by the rules
+and states its text (`Fonts::stated`).
 
 **What stays.** What a transform paints past its box is CSS's own (non-goal):
 scaled about its own text, the widened block paints over both its neighbours,
@@ -459,7 +459,8 @@ the reader takes each where it is said.
    puts its text on the first of them the page reads. Each character of the text
    stands on a glyph of the span that draws it — the first not yet taken, in
    the order the content stream drew them, whose text the text continues
-   with — and takes its quad, `/MCID`, stream and font, so that search finds
+   with, on whichever line it stands — and takes its quad, `/MCID`, stream
+   and font, so that search finds
    the text where it is drawn and the structure tree's order holds; a
    character no glyph draws takes the span's box. `/ActualText` on a
    structure element stays the structured view's: an element can span lines
@@ -483,11 +484,14 @@ A PDF that says neither reads as ruling 14 reads it, to the byte.
 2. The read-back reads each line every run of which is declared alike in
    that direction, as the reader will (`Fonts::read_back`,
    `Fonts::declared_of`), and a line no drawing reads right
-   is drawn by the rules and stated: inside a `/Span` whose `/ActualText` is
-   the text of the runs drawn in it, in reading order, as typed. The open
-   sequence is closed before the span and reopened inside it, and closed and
-   reopened after it, so every run keeps its element and the structure
-   tree its order. A stated line reads as typed.
+   is drawn by the rules and stated (`Fonts::stated`,
+   `PageBuilder::begin_stated`): inside a `/Span` whose `/ActualText` is
+   the text of the runs drawn in it, in reading order, as typed, one span
+   where two lines' runs interleave; a line with no other drawing to try is
+   read once for it. The open sequence is closed before the span and
+   reopened inside it, and closed and reopened after it, so every run keeps
+   its element and the structure tree its order. A stated line reads as
+   typed.
 
 **What it closes.** In the writer's own books, Left (1), which its declared
 direction reads left to right; the prices ruling 14 records for a line read

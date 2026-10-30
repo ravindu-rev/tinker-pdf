@@ -365,15 +365,17 @@ first glyph; and a span whose glyphs stand on several lines puts its text on
 the first of them the page reads, its glyphs on the others reading nothing.
 Each character of the text stands on a glyph of the span that draws it —
 the first not yet taken, in the order the content stream drew them, whose
-text the text continues with — with that glyph's quad, `/MCID`, stream and
-font, so search finds the text where it is drawn and a structure tree's
-order holds; a character no glyph draws stands on the span's box. An
+text the text continues with, on whichever line it stands — with that
+glyph's quad, `/MCID`, stream and font, so search finds the text where it is
+drawn and a structure tree's order holds; a character no glyph draws stands
+on the span's box. An
 `/ActualText` on a structure element stays the structured view's: an
 element can span lines and pages, where a line has no place for it.
 (`text_logical_order.rs`'s `a_line_a_span_states_whole_reads_as_its_text`,
 `a_span_inside_a_left_to_right_line_stands_where_its_glyphs_do`,
 `a_span_inside_a_right_to_left_line_is_one_unit_of_its_order`,
-`a_span_across_two_lines_states_its_text_on_the_first` and
+`a_span_across_two_lines_states_its_text_on_the_first`,
+`a_span_across_two_lines_keeps_each_characters_own_glyph` and
 `a_span_with_an_mcid_states_its_text_in_its_sequence`; `tagged_pdf.rs`'s
 `actual_text_on_a_property_list_replaces_its_own_sequence`.) Search boxes a match from
 whichever of its ends starts first along the baseline, so a logical-order
