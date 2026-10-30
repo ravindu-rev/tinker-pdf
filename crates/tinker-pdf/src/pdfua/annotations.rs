@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tinker_pdf_cos::{decode_text_string, pages, CosDocument, Dict, ObjRef, Object, Rect};
+use tinker_pdf_cos::{decode_text_string, CosDocument, Dict, ObjRef, Object, Rect};
 
 use super::structure::MAX_FINDINGS_PER_RULE;
 use super::{clauses, UaRaw};
@@ -118,8 +118,7 @@ pub(super) fn rules(
     let mut judged: BTreeSet<ObjRef> = BTreeSet::new();
     let mut entries = 0usize;
 
-    crate::stats::walked(work);
-    for page in pages::collect_upto(doc, MAX_PAGES) {
+    for page in crate::stats::pages_upto(doc, MAX_PAGES, work) {
         if reported.full() {
             break;
         }

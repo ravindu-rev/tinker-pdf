@@ -164,8 +164,9 @@ packet header rule's and parts 1 to 3's predefined-schema rule's; the
 structure tree's binding, at level A; the width rule's and the embedding
 rules' walks of every content stream; and the colour group's operator scan and
 group spaces, parts 2 to 4's blending spaces, part 1's transparency rule and
-part 4's page-level output intent. The width rule's scope counts the fonts it
-reads and the glyph it selects for each distinct code with a stated width.
+part 4's page-level output intent; `page_nodes_visited` counts the nodes each
+walk reads. The width rule's scope counts the fonts it reads and the glyph it
+selects for each distinct code with a stated width.
 
 ## Refused by name
 

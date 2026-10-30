@@ -254,6 +254,14 @@ plus `DestKind`, a registered name or a URI for `PageBuilder::link` and
 `OutlineEntry`, so a write followed by a read is an equality, not a
 translation.
 
+`page_counted(index)` is `page(index)` with a `Stats` of what finding the page
+did ([rendering](rendering.md) names the counters): one walk of the page tree,
+which reads every node until it has `index + 1` pages and stops before the
+next — a lookup past the last page reads them all and finds nothing — or, on a
+linearized file, the page its first-page entry or its hint tables name and
+each ancestor read with it, and no walk. It counts that lookup alone, so two
+threads' lookups on one document never mix.
+
 ```rust
 let doc = tinker_pdf::Document::open(bytes)?;
 let meta = doc.metadata();

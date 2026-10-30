@@ -10,6 +10,7 @@ use crate::limits;
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
 use crate::warn::WarningKind;
+use crate::work::{Counter, Work};
 use std::collections::HashSet;
 
 /// A rectangle in PDF units, normalized so the corners are ordered.
@@ -263,6 +264,19 @@ pub fn collect(doc: &CosDocument) -> Vec<Page> {
     collect_upto(doc, limits::MAX_PAGES)
 }
 
+/// [`collect`], counting into `work` when the operation is counting.
+#[must_use]
+pub fn collect_counted(doc: &CosDocument, work: Option<&Work>) -> Vec<Page> {
+    collect_upto_counted(doc, limits::MAX_PAGES, work)
+}
+
+/// Adds one step of `counter` to `work`, when the operation is counting.
+fn tally(work: Option<&Work>, counter: Counter) {
+    if let Some(work) = work {
+        work.add(counter, 1);
+    }
+}
+
 /// The first `limit` pages in document order.
 ///
 /// The same walk, stopped early: same order, same cycle guard, same inherited
@@ -277,11 +291,21 @@ pub fn collect(doc: &CosDocument) -> Vec<Page> {
 /// document that simply has more pages than the caller asked for does not.
 #[must_use]
 pub fn collect_upto(doc: &CosDocument, limit: usize) -> Vec<Page> {
+    collect_upto_counted(doc, limit, None)
+}
+
+/// [`collect_upto`], counting into `work` when the operation is counting: one
+/// walk of the page tree ([`Counter::PageWalks`]), and each node of it the
+/// walk reads ([`Counter::PageNodesVisited`]) — a node it stops before, having
+/// gathered `limit` pages, is not read and not counted.
+#[must_use]
+pub fn collect_upto_counted(doc: &CosDocument, limit: usize, work: Option<&Work>) -> Vec<Page> {
     let mut pages = Vec::new();
     let mut visited = HashSet::new();
     if limit == 0 {
         return pages;
     }
+    tally(work, Counter::PageWalks);
 
     let Some(root) = doc.catalog() else {
         return pages;
@@ -298,10 +322,12 @@ pub fn collect_upto(doc: &CosDocument, limit: usize) -> Vec<Page> {
         limit,
         &mut visited,
         &mut pages,
+        work,
     );
     pages
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk(
     doc: &CosDocument,
     node: ObjRef,
@@ -310,6 +336,7 @@ fn walk(
     limit: usize,
     visited: &mut HashSet<u32>,
     out: &mut Vec<Page>,
+    work: Option<&Work>,
 ) {
     if out.len() >= limit {
         // The caller has what it asked for. Not truncation, so not a warning.
@@ -326,6 +353,8 @@ fn walk(
         return;
     }
 
+    // Read: one node, whatever it turns out to hold.
+    tally(work, Counter::PageNodesVisited);
     let Ok(object) = doc.get(node) else {
         return;
     };
@@ -339,7 +368,16 @@ fn walk(
         Some(kids) => {
             let kids: Vec<ObjRef> = kids.iter().filter_map(Object::as_objref).collect();
             for kid in kids {
-                walk(doc, kid, inherited.clone(), depth + 1, limit, visited, out);
+                walk(
+                    doc,
+                    kid,
+                    inherited.clone(),
+                    depth + 1,
+                    limit,
+                    visited,
+                    out,
+                    work,
+                );
             }
         }
         // 7.7.3.3: a node without /Kids is a leaf, whatever its /Type says —
@@ -431,13 +469,19 @@ pub fn count(doc: &CosDocument) -> u32 {
 /// wrong page rather than a cheaper one. Its `/Rotate` and `/CropBox` are
 /// inherited as the walk inherits them (7.7.3.4), from every ancestor along
 /// `/Parent` that is placed without the tail ([`ancestors_in_the_head`]).
-fn page_alone(doc: &CosDocument, reference: ObjRef, index: u32) -> Option<Page> {
+fn page_alone(
+    doc: &CosDocument,
+    reference: ObjRef,
+    index: u32,
+    work: Option<&Work>,
+) -> Option<Page> {
+    tally(work, Counter::PageNodesVisited);
     let object = doc.get(reference).ok()?;
     // Not a dictionary at all is the common way for this to be the wrong
     // object: a run's leading object read a few bytes late is its content
     // stream, and a stream is not a page.
     let dict = object.as_dict()?;
-    let inherited = ancestors_in_the_head(doc, dict)
+    let inherited = ancestors_in_the_head(doc, dict, work)
         .iter()
         .rev()
         .filter_map(|ancestor| ancestor.as_dict())
@@ -470,7 +514,11 @@ fn page_alone(doc: &CosDocument, reference: ObjRef, index: u32) -> Option<Page> 
 /// whose ancestors are all in the head, as this engine's own linearizer
 /// writes them, reads its page as the tree walk does. A cycle or a chain
 /// deeper than the walk's own limit stops it too.
-fn ancestors_in_the_head(doc: &CosDocument, dict: &Dict) -> Vec<std::sync::Arc<Object>> {
+fn ancestors_in_the_head(
+    doc: &CosDocument,
+    dict: &Dict,
+    work: Option<&Work>,
+) -> Vec<std::sync::Arc<Object>> {
     let mut chain = Vec::new();
     let mut seen = HashSet::new();
     let mut parent = dict.get_ref(Name::PARENT);
@@ -481,6 +529,7 @@ fn ancestors_in_the_head(doc: &CosDocument, dict: &Dict) -> Vec<std::sync::Arc<O
         {
             break;
         }
+        tally(work, Counter::PageNodesVisited);
         let Ok(object) = doc.get(reference) else {
             break;
         };
@@ -497,8 +546,8 @@ fn ancestors_in_the_head(doc: &CosDocument, dict: &Dict) -> Vec<std::sync::Arc<O
 /// linearized file is free to leave the page tree root in the tail and qpdf's
 /// linearizer does, so a page-one render that insisted on walking the tree
 /// would fetch the end of every such file to draw the front of it.
-fn linearized_first_page(doc: &CosDocument) -> Option<Page> {
-    page_alone(doc, ObjRef::new(doc.first_page_object()?, 0), 0)
+fn linearized_first_page(doc: &CosDocument, work: Option<&Work>) -> Option<Page> {
+    page_alone(doc, ObjRef::new(doc.first_page_object()?, 0), 0, work)
 }
 
 /// Page `index` of a linearized document, from Annex F's page offset hint
@@ -515,9 +564,9 @@ fn linearized_first_page(doc: &CosDocument) -> Option<Page> {
 /// leaf with its own `/MediaBox` and `/Resources`; anything else declines with
 /// a typed warning naming what was found, and the tree walk runs. Hints
 /// accelerate and never decide (`docs/design/streaming-open.md`).
-fn hinted_page(doc: &CosDocument, index: u32) -> Option<Page> {
+fn hinted_page(doc: &CosDocument, index: u32, work: Option<&Work>) -> Option<Page> {
     let reference = doc.hinted_page_object(index)?;
-    let page = page_alone(doc, reference, index);
+    let page = page_alone(doc, reference, index, work);
     if page.is_none() {
         doc.warn_object(reference, WarningKind::LinearizedPageHintRejected);
     }
@@ -527,15 +576,26 @@ fn hinted_page(doc: &CosDocument, index: u32) -> Option<Page> {
 /// Convenience: the page at `index`, if it exists.
 #[must_use]
 pub fn at(doc: &CosDocument, index: u32) -> Option<Page> {
+    at_counted(doc, index, None)
+}
+
+/// [`at`], counting into `work` when the operation is counting: the objects a
+/// linearized file's first-page entry or its hint tables read, or the walk
+/// that gathers `index + 1` pages — which a page past the last one walks to
+/// its end.
+#[must_use]
+pub fn at_counted(doc: &CosDocument, index: u32, work: Option<&Work>) -> Option<Page> {
     if index == 0 {
-        if let Some(page) = linearized_first_page(doc) {
+        if let Some(page) = linearized_first_page(doc, work) {
             return Some(page);
         }
-    } else if let Some(page) = hinted_page(doc, index) {
+    } else if let Some(page) = hinted_page(doc, index, work) {
         return Some(page);
     }
     let wanted = (index as usize).checked_add(1)?;
-    collect_upto(doc, wanted).into_iter().nth(index as usize)
+    collect_upto_counted(doc, wanted, work)
+        .into_iter()
+        .nth(index as usize)
 }
 
 /// The `/Contents` streams of a page, in order.

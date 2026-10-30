@@ -94,8 +94,7 @@ pub(crate) fn walk(
         streams: MAX_STREAMS,
         visited: BTreeSet::new(),
     };
-    crate::stats::walked(work);
-    for page in pages::collect_upto(doc, MAX_PAGES) {
+    for page in crate::stats::pages_upto(doc, MAX_PAGES, work) {
         let resources = page.resources.clone();
         let content = pages::content_bytes(doc, &page);
         walker.stream(&content, page.reference, resources.as_ref(), 0, 0.0, visit);

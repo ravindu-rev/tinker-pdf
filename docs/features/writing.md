@@ -340,10 +340,11 @@ image pass's walk, which it makes only to find placements for `max_ppi`.
 `DocumentEditor::count_work()` makes an editor hold one tally from then until
 it is dropped, which both passes count into whether or not the save was asked,
 and a save asked on that editor reports all of it — so a merge, which is pages
-imported and then saved, reads its stats from the save. An import counts
-nothing itself, and a rolled-back transaction keeps what was counted. A
-counted save writes the same bytes and reports the same passes as an uncounted
-one.
+imported and then saved, reads its stats from the save. An import counts its
+walk of its source's page tree, the editor its walks of its own until an edit
+first sets its page order, and a rolled-back transaction keeps what was
+counted. A counted save writes the same bytes and reports the same passes as
+an uncounted one.
 
 ## Refused by name
 

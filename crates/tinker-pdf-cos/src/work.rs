@@ -20,8 +20,8 @@
 //!
 //! It lives here, in the lowest crate with an operation context, although what
 //! is counted so far is counted above it — glyphs by the renderer, font
-//! dictionaries and cache lookups by the facade's resource scopes, page walks
-//! where the facade makes them. One ledger an operation carries through every
+//! dictionaries and cache lookups by the facade's resource scopes; only the
+//! page walk is counted here. One ledger an operation carries through every
 //! context is the reason, and each counter says which layer counts it. The
 //! editor is the context this crate gives it: a [`crate::DocumentEditor`]
 //! asked to count holds one tally, which the passes over it count into.
@@ -102,10 +102,19 @@ pub struct Stats {
     /// Walks of the page tree from its root: each listing of a document's
     /// pages, whatever it found.
     ///
-    /// Counted by the facade where it walks: each validator rule that reads
-    /// every page, the structure tree's binding, and a save's image and font
-    /// passes. The walks an editor makes of its own pages are not counted.
+    /// Counted by this crate's walk itself, for whichever operation makes it:
+    /// a page lookup the hints cannot answer, each validator rule that reads
+    /// every page, the structure tree's binding, a save's image and font
+    /// passes, and an editor's own page operations — its page order, read
+    /// until it is first changed, and an import's walk of its source.
     pub page_walks: u64,
+    /// Nodes of the page tree read: each `/Pages` node and each leaf a walk
+    /// reads, and each object a lookup of one page reads through a linearized
+    /// file's first-page entry or its hint tables — the page, and each
+    /// ancestor read with it.
+    ///
+    /// Counted by this crate's page walk and lookup.
+    pub page_nodes_visited: u64,
 }
 
 /// One kind of step a [`Work`] counts: a [`Stats`] field, by name.
@@ -144,6 +153,8 @@ pub enum Counter {
     FormScopeMisses,
     /// [`Stats::page_walks`].
     PageWalks,
+    /// [`Stats::page_nodes_visited`].
+    PageNodesVisited,
 }
 
 impl Stats {
@@ -172,6 +183,7 @@ impl Stats {
             self.form_scope_hits,
             self.form_scope_misses,
             self.page_walks,
+            self.page_nodes_visited,
         ]
         .into_iter()
         .fold(0u64, u64::saturating_add)
@@ -195,6 +207,7 @@ impl Stats {
             Counter::FormScopeHits => &mut self.form_scope_hits,
             Counter::FormScopeMisses => &mut self.form_scope_misses,
             Counter::PageWalks => &mut self.page_walks,
+            Counter::PageNodesVisited => &mut self.page_nodes_visited,
         }
     }
 }
@@ -237,6 +250,9 @@ impl Add for Stats {
                 .form_scope_misses
                 .saturating_add(other.form_scope_misses),
             page_walks: self.page_walks.saturating_add(other.page_walks),
+            page_nodes_visited: self
+                .page_nodes_visited
+                .saturating_add(other.page_nodes_visited),
         }
     }
 }
@@ -291,7 +307,7 @@ mod tests {
     use super::*;
 
     /// Every counter, so a test of one property covers them all.
-    const ALL: [Counter; 15] = [
+    const ALL: [Counter; 16] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::FontDictionariesResolved,
@@ -307,6 +323,7 @@ mod tests {
         Counter::FormScopeHits,
         Counter::FormScopeMisses,
         Counter::PageWalks,
+        Counter::PageNodesVisited,
     ];
 
     #[test]

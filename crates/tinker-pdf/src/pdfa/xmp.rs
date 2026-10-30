@@ -35,7 +35,7 @@
 
 use std::sync::Arc;
 
-use tinker_pdf_cos::{decode_text_string, pages, parse_date, CosDocument, Date, Dict, ObjRef};
+use tinker_pdf_cos::{decode_text_string, parse_date, CosDocument, Date, Dict, ObjRef};
 use tinker_pdf_xml::{Event, Name, Source};
 
 use super::xmp_extension::Extensions;
@@ -1132,8 +1132,7 @@ fn pseudo_attributes(value: &str) -> Vec<&str> {
 /// reached through the page that owns it.
 fn page_packets(doc: &CosDocument, work: Option<&Arc<Work>>) -> Vec<(ObjRef, Vec<u8>)> {
     let mut packets = Vec::new();
-    crate::stats::walked(work);
-    for page in pages::collect_upto(doc, MAX_PAGES) {
+    for page in crate::stats::pages_upto(doc, MAX_PAGES, work) {
         let Ok(dict) = doc.get(page.reference) else {
             continue;
         };

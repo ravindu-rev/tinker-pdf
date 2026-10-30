@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use tinker_pdf_cos::{pages, CosDocument, Dict, ObjRef, Object, Rect, XrefEntry};
+use tinker_pdf_cos::{CosDocument, Dict, ObjRef, Object, Rect, XrefEntry};
 
 use super::{clauses, info, XRaw};
 use crate::pdfa::FindingKind;
@@ -65,8 +65,7 @@ pub(super) fn rules(doc: &CosDocument, work: Option<&std::sync::Arc<Work>>, out:
     filters(doc, out);
     let mut boxes_reported = 0;
     let mut annotations = AnnotationWalk::default();
-    crate::stats::walked(work);
-    for page in pages::collect_upto(doc, MAX_PAGES) {
+    for page in crate::stats::pages_upto(doc, MAX_PAGES, work) {
         let Ok(object) = doc.get(page.reference) else {
             continue;
         };

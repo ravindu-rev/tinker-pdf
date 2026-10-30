@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 pub use tinker_pdf_cos::Stats;
+use tinker_pdf_cos::{pages as cos_pages, CosDocument};
 pub(crate) use tinker_pdf_cos::{Counter, Work};
 use tinker_pdf_render::RenderCounts;
 
@@ -31,11 +32,19 @@ pub(crate) fn count(work: Option<&Work>, counter: Counter) {
     }
 }
 
-/// Counts one walk of the page tree from its root, when the operation is
-/// counting. Called where the facade walks, before the walk: the walk is the
-/// step, whatever it finds.
-pub(crate) fn walked(work: Option<&Arc<Work>>) {
-    count(work.map(|work| &**work), Counter::PageWalks);
+/// Every page of `doc`, by a walk counted into `work` when the operation is
+/// counting: the walk, and each node of the tree it reads.
+pub(crate) fn pages(doc: &CosDocument, work: Option<&Arc<Work>>) -> Vec<cos_pages::Page> {
+    cos_pages::collect_counted(doc, work.map(|work| &**work))
+}
+
+/// [`pages`], stopped at `limit` pages.
+pub(crate) fn pages_upto(
+    doc: &CosDocument,
+    limit: usize,
+    work: Option<&Arc<Work>>,
+) -> Vec<cos_pages::Page> {
+    cos_pages::collect_upto_counted(doc, limit, work.map(|work| &**work))
 }
 
 /// Adds what a renderer counted — its glyphs shown and outlines painted — to

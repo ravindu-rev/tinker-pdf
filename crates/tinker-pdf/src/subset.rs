@@ -566,8 +566,7 @@ impl Usage {
 fn collect(doc: &Arc<CosDocument>, work: Option<&Arc<Work>>) -> Usage {
     let mut usage = Usage::default();
 
-    crate::stats::walked(work);
-    for page in cos_pages::collect(doc) {
+    for page in crate::stats::pages(doc, work) {
         let resources = Arc::new(PageResources::new_counted(doc, &page, None, work.cloned()));
         let content = cos_pages::content_bytes(doc, &page);
         walk(&mut usage, doc, &content, resources);

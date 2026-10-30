@@ -551,8 +551,7 @@ fn walk(view: &Arc<CosDocument>, work: Option<&Arc<crate::stats::Work>>) -> Plac
         found: Arc::clone(&found),
         placements: BTreeMap::new(),
     };
-    crate::stats::walked(work);
-    for page in cos_pages::collect(view) {
+    for page in crate::stats::pages(view, work) {
         let scope = Scope {
             doc: Arc::clone(view),
             resources: page.resources.clone(),

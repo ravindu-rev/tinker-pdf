@@ -1801,11 +1801,32 @@ impl Document {
     /// One page by zero-based index.
     #[must_use]
     pub fn page(&self, index: u32) -> Option<Page> {
+        self.page_at(index, None)
+    }
+
+    /// [`Document::page`], counting: the page, and what finding it did
+    /// ([`Stats`]) — the objects a linearized file's first-page entry or its
+    /// hint tables read, or the walk of the page tree that gathers `index + 1`
+    /// pages and each node it reads. A lookup past the last page walks the
+    /// whole tree and finds nothing.
+    ///
+    /// Counted for this lookup alone, never on the document, which many
+    /// threads may read at once.
+    #[must_use]
+    pub fn page_counted(&self, index: u32) -> (Option<Page>, Stats) {
+        let work = stats::Work::new();
+        let page = self.page_at(index, Some(&work));
+        (page, work.stats())
+    }
+
+    /// One page by zero-based index, counting into `work` when the lookup is
+    /// counting.
+    fn page_at(&self, index: u32, work: Option<&stats::Work>) -> Option<Page> {
         // Through the bounded walk rather than `pages()`, which collects every
         // page: on a streamed document opened through Annex F's head-only
         // path, the rest of the page tree is the rest of the file, and asking
         // for page one would spend all of it.
-        let inner = cos_pages::at(&self.inner, index)?;
+        let inner = cos_pages::at_counted(&self.inner, index, work)?;
         Some(Page {
             doc: Arc::clone(&self.inner),
             inner,

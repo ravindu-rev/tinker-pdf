@@ -30,8 +30,8 @@ use std::sync::Arc;
 
 use tinker_pdf_content::{PlainText, PlainTextOptions, TextChar, TextPage};
 use tinker_pdf_cos::{
-    limits, number_tree, number_tree_lookup, pages as cos_pages, CosDocument, Dict, Name, ObjRef,
-    Object, PDF_1_7_NAMESPACE,
+    limits, number_tree, number_tree_lookup, CosDocument, Dict, Name, ObjRef, Object,
+    PDF_1_7_NAMESPACE,
 };
 
 use crate::copies::{decodes_to_nothing, value, Copies};
@@ -747,8 +747,7 @@ pub(crate) fn bind_counted(
             .unwrap_or(false)
     };
 
-    crate::stats::walked(work);
-    let all = cos_pages::collect(doc);
+    let all = crate::stats::pages(doc, work);
     let page_count = u32::try_from(all.len()).unwrap_or(u32::MAX);
     let pages: BTreeMap<ObjRef, u32> = all
         .into_iter()

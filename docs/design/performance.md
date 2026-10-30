@@ -204,8 +204,8 @@ already carries it.
 | `font_dictionaries_resolved` | a font dictionary read: each font `cos_font::from_resources` returns when a scope is built (`crates/tinker-pdf/src/resources.rs:585`), and each `fonts::font_dict` lookup (`crates/tinker-pdf/src/fonts.rs:215`), which `type3_glyph` makes for every glyph (`resources.rs:1428`) | the facade's scopes | built |
 | `images_decoded` | an image decoder run: an image XObject's cache miss, and every inline image, which is never cached (`resources.rs:222-224`); in an image extraction, each entry it lists and every inline image | the facade's scopes | built |
 | a `_hits` and a `_misses` for each of the five caches `Caches` holds — font programs, images, ICC transforms, glyph outlines, form scopes (`resources.rs:63-101`) | a lookup that found an entry, a cached `None` included, or one that did not | the facade's scopes | built |
-| `page_walks` | a walk of the page tree from its root | the facade's call sites, then `collect_upto` itself from MS-01.4 | built |
-| `page_nodes_visited` | a `/Pages` tree node a lookup or a walk read, leaves included, and the one object the linearized or hinted first-page path reads (`pages.rs:459`, `:477`) | cos's page walk | MS-01.4 |
+| `page_walks` | a walk of the page tree from its root | `collect_upto` itself, for every caller | built |
+| `page_nodes_visited` | a `/Pages` tree node a lookup or a walk read, leaves included, and the page object the linearized or hinted path reads with each ancestor the head holds (`page_alone` and `ancestors_in_the_head` in `pages.rs`) | cos's page walk | built |
 | `streams_decoded` | a run of a stream's filter chain, whatever it returned | cos's two filter-chain entry points and every `Resolve` view | MS-01.5 |
 | `most_decodes_of_one_stream` | the most runs any one stream had in the operation — a maximum, the quantity A5 holds to one | the same | MS-01.5 |
 | `bytes_decoded` | a byte a filter chain returned — a quantity | the same | MS-01.5 |
@@ -234,14 +234,14 @@ can refuse, and a tally is only added to.
 
 | Context | How it carries the tally | Step |
 | --- | --- | --- |
-| A page lookup: `pages::at` and the walk under it (`pages.rs:488-499`) | a `Work` on the door's stack, passed as `Option<&Work>` down `at`, `collect_upto` and `walk`, and to the linearized and hinted paths | MS-01.4 |
+| A page lookup: `pages::at` and the walk under it (`pages.rs:488-499`) | a `Work` on the door's stack, passed as `Option<&Work>` down `at`, `collect_upto` and `walk`, and to the linearized and hinted paths | built |
 | A render: `Page::render` (`crates/tinker-pdf/src/lib.rs:2247`), `Page::render_form` and `Page::render_annotation` (`crates/tinker-pdf/src/render_part.rs:175`, `:230`), `DisplayList::render` (`display.rs:181`) | the render's `PageResources` holds it — built with it by `Page::render_layer` (`lib.rs:2269-2280`), handed it by `for_one_render` for a display list (`resources.rs:546`); `annots::draw` takes it for the appearances it draws; the page's content decode, made before the scope exists (`lib.rs:2248`), takes it too | built; MS-01.5 for decodes |
 | A scope a scope makes: a pattern cell's and a form's own in a render (`resources.rs:1858-1868`, `:872-890`); and `own_scope`'s — a pattern cell's, a mask group's or a form's in the save's font walk, which only `subset.rs` calls (`resources.rs:750-764`) | inherits its maker's | built |
 | A scope a cache keeps: a form's, in `form_scopes` (`resources.rs:856-869`) | kept without one, and handed out bound to the asker's, its caches shared so a hit stays a hit — a kept scope outlives the render that built it, and two renders of one display list may hold it at once | built |
 | The renderer | its own plain counts, handed back by `finish_counted`, `finish`'s sibling, and added by the door | built |
 | Text and image extraction | as a render: the content decode and the `PageResources` the door builds (`lib.rs:2533-2540`, `crates/tinker-pdf/src/images.rs:328-339`) | built |
 | Validation | `pdfa::validate`, `pdfua::validate` and `pdfx::validate` take it, so their page walks (`crates/tinker-pdf/src/pdfa/content.rs:90`) and their decodes count | built; MS-01.5 for decodes |
-| An editor | `DocumentEditor` holds it from `count_work` until it is dropped. Its own page and object operations count into it in cos — `page_refs`'s walk (`crates/tinker-pdf-cos/src/edit/page_ops.rs:16-24`), `import_page`'s `pages::collect(source)` (`:185`), its overlay's decodes (`edit/overlay.rs:48`) — and the facade's passes over it count into it too: a save's image and font passes (`crates/tinker-pdf/src/write.rs:337`; `subset.rs:553` builds a scope a page), a redaction. A rolled-back transaction keeps its counts: the work was done | built; MS-01.4 for its walks, MS-01.5 for its decodes |
+| An editor | `DocumentEditor` holds it from `count_work` until it is dropped. Its own page and object operations count into it in cos — `page_refs`'s walk (`crates/tinker-pdf-cos/src/edit/page_ops.rs:16-24`), `import_page`'s `pages::collect(source)` (`:185`), its overlay's decodes (`edit/overlay.rs:48`) — and the facade's passes over it count into it too: a save's image and font passes (`crates/tinker-pdf/src/write.rs:337`; `subset.rs:553` builds a scope a page), a redaction. A rolled-back transaction keeps its counts: the work was done | built; MS-01.5 for its decodes |
 | A save | the editor's tally if it is counting, and one of the save's own if not; the serializer counts into whichever the save carries | built; MS-01.5 for the writer's decodes |
 | A stream decode | `CosDocument::stream_decoded` and `stream_image_input` gain siblings that take `Option<&Work>`, and `Resolve` a counting view — a `Resolve` over any `Resolve` and a `&Work`, whose `stream_decoded` runs the inner one's and counts it — so code already written against the trait counts when handed the view, as a font's CMap reads are (`font::from_resources_in`, `crates/tinker-pdf-cos/src/font.rs:1110`; `read_cmap`, `:601-602`). The uncounted entry points delegate with `None`, so no caller outside an operation changes | MS-01.5 |
 
@@ -282,7 +282,7 @@ tree — or a list, or a verdict whose fields other code compares.
 | merge: pages imported, then saved | `DocumentEditor::count_work(&mut self)` before the first import, and `SaveOptions::stats` | `Saved::stats`: everything the editor counted since `count_work`, the save's own work included | built |
 | image extraction, the decode door | `Page::images_counted(&self)` | `(Vec<PageImage>, Stats)` | built |
 | validation | `Document::validate_pdfa_counted(&self, PdfACoverage)`, and `validate_pdfua_counted` and `validate_pdfx_counted` alike | `(verdict, Stats)` | built |
-| page lookup, the document door | `Document::page_counted(&self, index: u32)` | `(Option<Page>, Stats)` | MS-01.4 |
+| page lookup, the document door | `Document::page_counted(&self, index: u32)` | `(Option<Page>, Stats)` | built |
 
 `Bitmap::stats` is a public field rather than a method: a method needs a field
 the caller cannot see, and one private field would stop every hand-built

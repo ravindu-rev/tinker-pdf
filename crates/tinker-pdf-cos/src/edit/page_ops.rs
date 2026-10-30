@@ -16,7 +16,7 @@ impl DocumentEditor {
     pub fn page_refs(&self) -> Vec<ObjRef> {
         match &self.page_order {
             Some(order) => order.clone(),
-            None => pages::collect(&self.doc)
+            None => pages::collect_counted(&self.doc, self.work.as_deref())
                 .into_iter()
                 .map(|p| p.reference)
                 .collect(),
@@ -182,7 +182,7 @@ impl DocumentEditor {
             return None;
         }
 
-        let pages = pages::collect(source);
+        let pages = pages::collect_counted(source, self.work.as_deref());
         let from = pages.get(page as usize)?;
 
         // The page's own dictionary, minus the entries that describe where it
@@ -401,7 +401,7 @@ impl DocumentEditor {
     /// The media box of a page, for callers placing things on it.
     #[must_use]
     pub fn page_box(&self, index: u32) -> Option<Rect> {
-        pages::collect(&self.doc)
+        pages::collect_counted(&self.doc, self.work.as_deref())
             .get(index as usize)
             .map(|p| p.media_box)
     }

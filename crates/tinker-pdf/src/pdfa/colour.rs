@@ -51,7 +51,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use tinker_pdf_color::icc;
-use tinker_pdf_cos::{pages, CosDocument, Dict, ObjRef, Object};
+use tinker_pdf_cos::{CosDocument, Dict, ObjRef, Object};
 
 use super::{clauses, content, FindingKind, Flavour, Machinery, Part, Raw, RuleGroup};
 use crate::stats::Work;
@@ -593,8 +593,7 @@ fn header_defects(
 /// The destination profile of a part 4 page-level output intent, if there is
 /// one.
 fn page_destination(doc: &CosDocument, work: Option<&Arc<Work>>) -> Destination {
-    crate::stats::walked(work);
-    for page in pages::collect_upto(doc, MAX_PAGES) {
+    for page in crate::stats::pages_upto(doc, MAX_PAGES, work) {
         let Ok(object) = doc.get(page.reference) else {
             continue;
         };
@@ -1016,8 +1015,7 @@ fn image_space(doc: &CosDocument, dict: &Dict, at: ObjRef, used: &mut Used) {
 /// fixture that shows the difference between the two readings.
 fn gather_group_spaces(doc: &CosDocument, work: Option<&Arc<Work>>, used: &mut Used) {
     let mut dicts: Vec<Dict> = Vec::new();
-    crate::stats::walked(work);
-    for page in pages::collect_upto(doc, MAX_PAGES) {
+    for page in crate::stats::pages_upto(doc, MAX_PAGES, work) {
         if let Some(dict) = doc
             .get(page.reference)
             .ok()
@@ -1514,8 +1512,7 @@ pub(crate) fn transparency(
     work: Option<&Arc<Work>>,
     out: &mut Vec<Raw>,
 ) {
-    crate::stats::walked(work);
-    for page in pages::collect_upto(doc, MAX_PAGES) {
+    for page in crate::stats::pages_upto(doc, MAX_PAGES, work) {
         let Ok(object) = doc.get(page.reference) else {
             continue;
         };
@@ -1693,8 +1690,7 @@ pub(crate) fn transparency(
 /// that looks load-bearing and is not is worse than no line.
 fn gather_blending_spaces(doc: &CosDocument, work: Option<&Arc<Work>>, used: &mut Used) {
     let mut dicts: Vec<(Dict, Option<ObjRef>)> = Vec::new();
-    crate::stats::walked(work);
-    for page in pages::collect_upto(doc, MAX_PAGES) {
+    for page in crate::stats::pages_upto(doc, MAX_PAGES, work) {
         if let Some(dict) = doc
             .get(page.reference)
             .ok()

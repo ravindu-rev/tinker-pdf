@@ -37,16 +37,22 @@
 //!   over a scope of its own, as text extraction does; the image pass walks
 //!   it only to find placements for a resolution limit;
 //! - each validator rule that reads every page walks the page tree for
-//!   itself.
+//!   itself;
+//! - a walk of the page tree reads every node until it has the pages it
+//!   wants, and stops before the next; an editor walks its own tree for its
+//!   page order until an edit first sets it, and an import walks its
+//!   source's.
 
 mod render_support;
+
+use std::sync::Arc;
 
 use tinker_pdf::write::{
     save, BilevelCodec, ContinuousCodec, ImagePolicy, ImageRecoding, SaveOptions, Saved,
 };
 use tinker_pdf::{
-    Bitmap, Document, Page, PdfACoverage, PdfUaCoverage, PdfXCoverage, PixelRegion, RenderOptions,
-    Stats, TextOptions,
+    Bitmap, Document, DocumentBuilder, Page, PdfACoverage, PdfUaCoverage, PdfXCoverage,
+    PixelRegion, RenderOptions, SliceSource, Stats, TextOptions, WriteMode, WriteOptions,
 };
 
 /// Whether this build carries the bundled faces, which answer for a font with
@@ -962,7 +968,9 @@ fn save_stats_are_none_unless_asked() {
         let counted = save(&mut document.editor(), &asked);
         same_save(&counted, &plain, what);
         let mut expected = Stats::default();
+        // Each walk reads the root and the one page.
         expected.page_walks = 1 + image_walks;
+        expected.page_nodes_visited = 2 * expected.page_walks;
         expected.font_dictionaries_resolved = SHOWN.len() as u64 + shown();
         // `F1` is the one font that is an object, the others written into the
         // resource dictionary: the first glyph it shows reads its program and
@@ -1051,9 +1059,9 @@ fn merge(parts: &[Document], counting: bool, options: &SaveOptions) -> Saved {
 }
 
 /// A merge is pages imported and then saved, and it reads its stats from the
-/// save: what was counted over the editor since `count_work`, which is the
-/// save's passes — an import counts nothing. A counted merge writes the bytes
-/// an uncounted one writes.
+/// save: what was counted over the editor since `count_work` — each import's
+/// walk of its source, the editor's walks of its own tree, and the save's
+/// passes. A counted merge writes the bytes an uncounted one writes.
 #[test]
 fn a_merge_reads_its_stats_from_the_save() {
     let parts: Vec<Document> = (0..4)
@@ -1068,15 +1076,25 @@ fn a_merge_reads_its_stats_from_the_save() {
     for (what, counting) in [("a counting editor", true), ("a save of its own", false)] {
         let counted = merge(&parts, counting, &asked);
         same_save(&counted, &plain, what);
+        // The editor reads its page order from its tree, a root of no kids,
+        // until the first import sets it: for the loop's question before that
+        // import, for the import's own bound check, and when it inserts. Each
+        // import walks its source, the root and ten pages.
+        let (editor_walks, editor_nodes) = if counting {
+            (3 + 40, 3 + 40 * 11)
+        } else {
+            (0, 0)
+        };
         let shown: u64 = (0..4)
             .flat_map(|part| (0..10).map(move |page| part_line(part, page).len() as u64))
             .sum();
         let mut expected = Stats::default();
-        // The font pass walks the merged tree once; each of the forty pages'
-        // scopes reads its one font, and each glyph its font's dictionary;
-        // each scope reads the face's program at its first glyph and finds it
-        // at the rest.
-        expected.page_walks = 1;
+        // The font pass walks the merged tree once, its root and forty pages;
+        // each page's scope reads its one font, and each glyph its font's
+        // dictionary; each scope reads the face's program at its first glyph
+        // and finds it at the rest.
+        expected.page_walks = editor_walks + 1;
+        expected.page_nodes_visited = editor_nodes + 41;
         expected.font_dictionaries_resolved = 40 + shown;
         expected.font_program_misses = 40;
         expected.font_program_hits = shown - 40;
@@ -1131,13 +1149,15 @@ fn claiming_page(pdfx: bool) -> Vec<u8> {
 }
 
 /// What a validation of [`claiming_page`] counts: `walks` walks of the page
-/// tree, and, for one that ran PDF/A's width rule, that rule's scope over the
+/// tree, two nodes each, and, for one that ran PDF/A's width rule, that rule's scope over the
 /// page's resources — which reads their one font — and the glyph it selects
 /// for each distinct code with a stated width, the first reading the face's
 /// program and the rest finding it.
 fn walked(walks: u64, widths: bool) -> Stats {
     let mut expected = Stats::default();
+    // Each walk reads the root and the one page.
     expected.page_walks = walks;
+    expected.page_nodes_visited = 2 * walks;
     if widths {
         let mut codes: Vec<u8> = CLAIMING_LINE.bytes().collect();
         codes.sort_unstable();
@@ -1228,4 +1248,150 @@ fn validation_stats_count_its_page_walks() {
     let unclaimed = Document::open(claiming_page(false)).expect("the fixture opens");
     let (_, stats) = unclaimed.validate_pdfx_counted(PdfXCoverage::IMPLEMENTED);
     assert_eq!(stats, Stats::default());
+}
+
+/// A page tree `depth` levels of `fan_out` kids under its root, every level
+/// full, whose leaves are its `fan_out^depth` pages, one content stream among
+/// them all.
+fn balanced(depth: u32, fan_out: usize) -> Vec<u8> {
+    // 1 the catalog, then the tree breadth first from 2, its root, and the
+    // content stream last.
+    let mut levels: Vec<Vec<usize>> = vec![vec![2]];
+    let mut next = 3;
+    for _ in 0..depth {
+        let width = levels[levels.len() - 1].len() * fan_out;
+        levels.push((next..next + width).collect());
+        next += width;
+    }
+    let content = next;
+    let mut objects = vec![object("<< /Type /Catalog /Pages 2 0 R >>")];
+    for (level, nodes) in levels.iter().enumerate() {
+        for at in 0..nodes.len() {
+            let parent = match level {
+                0 => String::new(),
+                _ => format!(" /Parent {} 0 R", levels[level - 1][at / fan_out]),
+            };
+            if level as u32 == depth {
+                objects.push(object(&format!(
+                    "<< /Type /Page{parent} /MediaBox [0 0 200 100] /Resources << >>\n\
+                     /Contents {content} 0 R >>"
+                )));
+            } else {
+                let kids: Vec<String> = levels[level + 1][at * fan_out..(at + 1) * fan_out]
+                    .iter()
+                    .map(|kid| format!("{kid} 0 R"))
+                    .collect();
+                objects.push(object(&format!(
+                    "<< /Type /Pages{parent} /Kids [{}] /Count {} >>",
+                    kids.join(" "),
+                    fan_out.pow(depth - level as u32)
+                )));
+            }
+        }
+    }
+    objects.push(stream("", b"0 0 10 10 re f"));
+    pdf(&objects)
+}
+
+/// The nodes a walk of [`balanced`] reads to gather `wanted` pages: on each
+/// level, every node whose subtree starts before the last page wanted, and
+/// at most the level's every node — a walk stops before the next sibling and
+/// reads it not at all.
+fn nodes_to_gather(depth: u32, fan_out: u64, wanted: u64) -> u64 {
+    (0..=depth)
+        .map(|level| {
+            wanted
+                .div_ceil(fan_out.pow(depth - level))
+                .min(fan_out.pow(level))
+        })
+        .sum()
+}
+
+/// A document of `pages` pages, saved linearized by this engine.
+fn linearized(pages: usize) -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    for _ in 0..pages {
+        builder.add_page(200.0, 100.0, |page| {
+            page.raw(b"0 0 10 10 re f");
+        });
+    }
+    let base = Document::open(builder.finish()).expect("it opens");
+    base.editor().save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        linearize: true,
+        object_streams: false,
+        ..WriteOptions::default()
+    })
+}
+
+/// How many ancestors page `index` of `document` has along `/Parent`.
+fn ancestors(document: &Document, index: u32) -> u64 {
+    let cos = document.cos();
+    let parent = cos.intern(b"Parent");
+    let mut at = tinker_pdf_cos::pages::at(cos, index)
+        .expect("a page")
+        .reference;
+    let mut count = 0;
+    while let Some(next) = cos
+        .get(at)
+        .ok()
+        .and_then(|object| object.as_dict().and_then(|dict| dict.get_ref(parent)))
+    {
+        count += 1;
+        at = next;
+    }
+    count
+}
+
+/// `page(i)` reads the nodes today's walk visits to gather `i + 1` pages —
+/// a lookup past the last page reads them all and finds nothing — in one walk
+/// of the tree; and on a streamed linearized file, the first page and a page
+/// the hint tables place are read from the head, each with its ancestors,
+/// without a walk.
+#[test]
+fn page_lookup_counts_the_nodes_it_visits() {
+    for (depth, fan_out) in [(1, 5), (2, 10), (3, 4)] {
+        let document = Document::open(balanced(depth, fan_out)).expect("the tree opens");
+        let pages = (fan_out as u64).pow(depth);
+        let fan = fan_out as u64;
+        for index in [0, 1, fan - 1, fan, pages - 1, pages] {
+            let index = index as u32;
+            let (page, stats) = document.page_counted(index);
+            assert_eq!(
+                page.as_ref().map(Page::index),
+                document.page(index).as_ref().map(Page::index),
+                "depth {depth}, fan-out {fan_out}: page {index}"
+            );
+            assert_eq!(
+                page.is_some(),
+                u64::from(index) < pages,
+                "page {index} of {pages}"
+            );
+            let mut expected = Stats::default();
+            expected.page_walks = 1;
+            expected.page_nodes_visited = nodes_to_gather(depth, fan, u64::from(index) + 1);
+            assert_eq!(
+                stats, expected,
+                "depth {depth}, fan-out {fan_out}: page {index}"
+            );
+        }
+    }
+
+    let bytes = linearized(5);
+    let whole = Document::open(bytes.clone()).expect("it opens");
+    let streamed =
+        Document::open_streaming(Arc::new(SliceSource::new(bytes))).expect("it opens streamed");
+    assert!(
+        streamed.first_page_end().is_some(),
+        "the linearized path engaged"
+    );
+    // The page the first-page entry or the hint tables name, and each of its
+    // ancestors, which this engine's linearizer places in the head with it.
+    for index in [0, 3] {
+        let (page, stats) = streamed.page_counted(index);
+        assert_eq!(page.map(|page| page.index()), Some(index));
+        let mut expected = Stats::default();
+        expected.page_nodes_visited = 1 + ancestors(&whole, index);
+        assert_eq!(stats, expected, "streamed page {index}");
+    }
 }

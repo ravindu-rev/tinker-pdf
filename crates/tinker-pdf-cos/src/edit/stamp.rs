@@ -345,7 +345,7 @@ impl DocumentEditor {
         page: u32,
         matrix: Option<[f64; 6]>,
     ) -> Option<ObjRef> {
-        let pages = pages::collect(source);
+        let pages = pages::collect_counted(source, self.work.as_deref());
         let from = pages.get(page as usize)?;
         let crop = from.crop_box;
         let bbox = [crop.x0, crop.y0, crop.x1, crop.y1];
