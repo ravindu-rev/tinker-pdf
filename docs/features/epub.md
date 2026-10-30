@@ -396,7 +396,14 @@ the end of its stretch, against the glyph after it, so that its box does not
 reach what is drawn before the slice (`paint::Cut::Hugged`); and, a
 right-to-left run of more than one word, each word a text object written in
 reading order, every glyph where the rules draw it (`paint::Cut::Reading`).
-The first that reads the line right is drawn. A line under a matrix that turns
+The first that reads the line right is drawn. A line every run of which
+that draws something its elements declare alike (above, tagged output) is
+read in that direction, as the reader will read it, and others off the
+line (`paint::Fonts::declared_of`): read back off the line, a
+right-to-left line that opens with stops before a styled pair,
+`?!(<b>בראשית</b>) עולם`, would be drawn another way, which the reader,
+reading the direction declared, reads `(!?בראשית) עולם`
+(`a_line_is_read_back_in_the_direction_its_structure_declares`). A line under a matrix that turns
 its baseline, which nothing tried reads with its letters in order, is searched
 again the same way, up to as many readings, for the first drawing that reads
 it closer to the order written than the rules' drawing — more of its runs with
@@ -974,6 +981,25 @@ with the XML leaf's event reader:
   `every_table_attribute_is_carried_from_the_source` resolves every cell's
   headers both ways — by `id` in the source, through `element_by_id` in the
   tree — and compares the header cells' text.
+- **A paragraph's direction is its elements' `/WritingMode`** (ISO 32000-2
+  §14.8.5.4.2): an element a painted run under which holds a right-to-left
+  character, and every painted run under which is set in a paragraph of one
+  direction, declares it in a Layout attribute object, `/LrTb` or `/RlTb`
+  (`tagging::writing_modes`) — the paragraph's `direction`, or for one whose
+  `unicode-bidi: plaintext` leaves it to UAX #9's P2 and P3, what they find
+  over the whole paragraph (`paint::split_at_levels`). Beside a cell's Table
+  attributes it is the second object of an `/A` array. Decided over the
+  whole content document, so an element's halves on two pages declare
+  alike; an element whose runs are set in paragraphs of both directions
+  declares nothing, so whatever reaches a run, its element's or inherited,
+  is its own paragraph's direction; and one with no right-to-left character
+  declares nothing either, so a book with none is written as before. The
+  reader reads a line every character of which is declared alike in that
+  direction ([content-and-text](content-and-text.md)), so Left (1)'s
+  `<p>בראשית. אור ٦٠.</p>`, which read off its line reads its stop first,
+  reads as typed
+  (`each_element_holding_right_to_left_text_declares_its_paragraphs_direction`,
+  `mixed_directions_declare_nothing_and_plaintext_declares_what_p2_finds`).
 
 **The PDF/UA census runs over this output** (`pdfua.rs`,
 `this_engines_own_epub_output_is_censused_and_what_remains_is_named`): the

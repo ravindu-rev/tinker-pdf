@@ -699,6 +699,10 @@ struct Chapter {
     svg: Option<tinker_pdf_svg::Scene>,
     /// The pages this chapter's text needed, or empty for a placeholder.
     pages: Vec<LayoutPage>,
+    /// The base direction UAX #9's P2 and P3 found for each bidi paragraph
+    /// of `pages` whose container leaves it to them, by its number
+    /// (`paint::split_at_levels`): the direction its elements declare.
+    bases: BTreeMap<usize, bool>,
     /// The index of this chapter's first page in the whole document.
     first_page: usize,
 }
@@ -942,6 +946,7 @@ pub fn synthesise(
             reading,
             svg: scene,
             pages: Vec::new(),
+            bases: BTreeMap::new(),
             first_page: 0,
         });
     }
@@ -1465,6 +1470,7 @@ pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
         reading,
         svg: scene,
         pages: Vec::new(),
+        bases: BTreeMap::new(),
         first_page: 0,
     }];
 
@@ -1661,7 +1667,8 @@ fn write_chapters<R: read::Resources + ?Sized>(
                     paint::hyphenate(&mut page.runs);
                 }
                 let atomics = paint::Atomics::of(&reading.tree, &chapter.pages);
-                paint::split_at_levels(&mut chapter.pages, &metrics, &atomics);
+                let (_, bases) = paint::split_at_levels(&mut chapter.pages, &metrics, &atomics);
+                chapter.bases = bases;
                 for page in &mut chapter.pages {
                     paint::visual_lines(page, &atomics);
                 }
@@ -1920,6 +1927,13 @@ fn write_chapters<R: read::Resources + ?Sized>(
             .as_ref()
             .map(|reading| tagging::table_cells(&reading.dom, &chapter.pages, &pictures[spine_at]))
             .unwrap_or_default();
+        // The direction each element declares, over the whole chapter, so
+        // both halves of an element broken over a page declare alike.
+        let modes = chapter
+            .reading
+            .as_ref()
+            .map(|reading| tagging::writing_modes(&reading.dom, &chapter.pages, &chapter.bases))
+            .unwrap_or_default();
         let path = chapter.path.as_deref().unwrap_or(chapter.name.as_str());
         let (roles, unmapped) = chapter
             .reading
@@ -1945,6 +1959,7 @@ fn write_chapters<R: read::Resources + ?Sized>(
             path,
             cells: &cells,
             roles: &roles,
+            modes: &modes,
         });
         for (offset, laid) in chapter.pages.iter().enumerate() {
             let index = chapter.first_page + offset;

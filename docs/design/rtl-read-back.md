@@ -469,13 +469,20 @@ A PDF that says neither reads as ruling 14 reads it, to the byte.
 
 **The writer's rules.**
 
-1. Every structure element whose runs hold a right-to-left character
-   declares its paragraph's direction (`TextRun::paragraph_rtl`),
+1. Every structure element a run under which holds a right-to-left
+   character, and every run under which is set in a paragraph of one
+   direction, declares it (`TextRun::paragraph_rtl`, or what P2 and P3 find
+   over the paragraph where `unicode-bidi: plaintext` leaves it to them),
    `/WritingMode /LrTb` or `/RlTb`, beside its Table attributes where it has
-   them; an element holding no right-to-left character declares nothing, so
-   a book with no right-to-left text is written as before, byte for byte.
-2. The read-back reads each line in the direction its element declares, as
-   the reader will (`Fonts::read_back`), and a line no drawing reads right
+   them, decided over the whole content document so an element's halves
+   declare alike (`tagging::writing_modes`). An element whose runs are set
+   in paragraphs of both directions declares nothing, so whatever reaches a
+   run, its element's or inherited, is its own paragraph's direction; an
+   element holding no right-to-left character declares nothing either, so a
+   book with no right-to-left text is written as before, byte for byte.
+2. The read-back reads each line every run of which is declared alike in
+   that direction, as the reader will (`Fonts::read_back`,
+   `Fonts::declared_of`), and a line no drawing reads right
    is drawn by the rules and stated: inside a `/Span` whose `/ActualText` is
    the text of the runs drawn in it, in reading order, as typed. The open
    sequence is closed before the span and reopened inside it, and closed and

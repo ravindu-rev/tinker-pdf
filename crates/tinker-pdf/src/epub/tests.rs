@@ -2877,3 +2877,149 @@ fn a_line_of_units_the_read_back_has_read_is_not_searched_again() {
         wrong.join("\n")
     );
 }
+
+// ---- The declared direction ---------------------------------------------------
+
+/// Each element of `book`'s structure tree, in the tree's order: its
+/// standard type, and the owner of each attribute object its `/A` holds,
+/// a Layout one's with its `/WritingMode` (`Layout:RlTb`).
+fn attribute_owners(book: Vec<u8>) -> Vec<(String, Vec<String>)> {
+    use tinker_pdf_cos::Object;
+    let doc = crate::Document::open(book).expect("opens");
+    let cos = doc.cos();
+    let name = |object: &Object| {
+        object
+            .as_name()
+            .and_then(|name| cos.name_bytes(name))
+            .map(|name| String::from_utf8_lossy(&name).into_owned())
+    };
+    let tree = doc.structure().expect("tagged");
+    tree.elements()
+        .iter()
+        .map(|element| {
+            let dict = element.reference.and_then(|at| cos.get(at).ok());
+            let value = dict
+                .as_deref()
+                .and_then(Object::as_dict)
+                .map(|dict| cos.resolve_key(dict, cos.intern(b"A")));
+            let objects = match value.as_deref() {
+                Some(Object::Array(items)) => items.iter().map(|item| cos.resolve(item)).collect(),
+                Some(Object::Dict(_)) => value.into_iter().collect(),
+                _ => Vec::new(),
+            };
+            let owners = objects
+                .iter()
+                .filter_map(|object| object.as_dict())
+                .map(|attributes| {
+                    let owner = name(&cos.resolve_key(attributes, cos.intern(b"O")));
+                    let mode = name(&cos.resolve_key(attributes, cos.intern(b"WritingMode")));
+                    match (owner, mode) {
+                        (Some(owner), Some(mode)) => format!("{owner}:{mode}"),
+                        (owner, _) => owner.unwrap_or_default(),
+                    }
+                })
+                .collect();
+            (element.standard_type.clone(), owners)
+        })
+        .collect()
+}
+
+/// **Each element whose runs hold a right-to-left character declares its
+/// paragraph's direction** (ISO 32000-2 §14.8.5.4.2, H-152): an Arabic
+/// paragraph with `dir="rtl"` `/RlTb`; Left (1)'s Hebrew paragraph with no
+/// `dir`, drawn `٦٠ רוא .תישארב.` as a right-to-left paragraph draws
+/// `.בראשית. אור ٦٠`, `/LrTb`, so that it reads as typed, its stop last; a
+/// header cell holding Hebrew, its row and its table `/LrTb`, the cell's
+/// Table attributes beside the Layout ones; and a Latin paragraph and a
+/// Latin cell nothing.
+#[test]
+fn each_element_holding_right_to_left_text_declares_its_paragraphs_direction() {
+    let book = stored_book(
+        "he",
+        "",
+        concat!(
+            r#"<p dir="rtl">مرحبا بالعالم.</p>"#,
+            "<p>Plain words.</p>",
+            "<p>בראשית. אור ٦٠.</p>",
+            r#"<table><tr><th scope="col">שם</th><td>Words</td></tr></table>"#,
+        ),
+    );
+    let owners: Vec<(String, Vec<String>)> = attribute_owners(book.clone());
+    let expect = |kind: &str, owners: &[&str]| {
+        (
+            kind.to_string(),
+            owners.iter().map(|owner| (*owner).to_string()).collect(),
+        )
+    };
+    assert_eq!(
+        owners,
+        [
+            expect("Document", &[]),
+            expect("P", &["Layout:RlTb"]),
+            expect("P", &[]),
+            expect("P", &["Layout:LrTb"]),
+            expect("Table", &["Layout:LrTb"]),
+            expect("TR", &["Layout:LrTb"]),
+            expect("TH", &["Table", "Layout:LrTb"]),
+            expect("TD", &[]),
+        ]
+    );
+    let doc = crate::Document::open(book).expect("opens");
+    let text = doc.page(0).expect("a page").text().plain_text();
+    for typed in ["مرحبا بالعالم.", "Plain words.", "בראשית. אור ٦٠.", "שם"]
+    {
+        assert!(text.contains(typed), "{typed:?} in {text:?}");
+    }
+}
+
+/// **An element whose runs are set in paragraphs of both directions
+/// declares nothing**, and each paragraph its own: a `<div>` holding a
+/// right-to-left paragraph and a left-to-right one that holds Hebrew. And a
+/// paragraph whose `unicode-bidi: plaintext` leaves its direction to P2 and
+/// P3 declares the one they find: right to left for one opening with
+/// Hebrew, left to right for one opening with Latin.
+#[test]
+fn mixed_directions_declare_nothing_and_plaintext_declares_what_p2_finds() {
+    let book = stored_book(
+        "he",
+        "p.plain { unicode-bidi: plaintext }",
+        concat!(
+            r#"<div><p dir="rtl">مرحبا.</p><p>Hello שלום.</p></div>"#,
+            r#"<p class="plain">שלום world.</p>"#,
+            r#"<p class="plain">Hello שלום.</p>"#,
+        ),
+    );
+    let owners: Vec<(String, Vec<String>)> = attribute_owners(book);
+    let expect = |kind: &str, owners: &[&str]| {
+        (
+            kind.to_string(),
+            owners.iter().map(|owner| (*owner).to_string()).collect(),
+        )
+    };
+    assert_eq!(
+        owners,
+        [
+            expect("Document", &[]),
+            expect("Div", &[]),
+            expect("P", &["Layout:RlTb"]),
+            expect("P", &["Layout:LrTb"]),
+            expect("P", &["Layout:RlTb"]),
+            expect("P", &["Layout:LrTb"]),
+        ]
+    );
+}
+
+/// **The read-back reads a line in the direction its structure declares**,
+/// as the reader will (`paint::Fonts::read_back`). A right-to-left line
+/// that opens with stops before a styled pair, `?!(<b>בראשית</b>) עולם`, read
+/// off the line alone reads its stops after the pair, and the drawing a
+/// read-back reading it so finds for it reads `(!?בראשית) עולם` in the
+/// direction its paragraph declares; read back in that direction, the
+/// rules' drawing reads as typed, and is the one drawn.
+#[test]
+fn a_line_is_read_back_in_the_direction_its_structure_declares() {
+    let book = stored_book("he", "", r#"<p dir="rtl">?!(<b>בראשית</b>) עולם</p>"#);
+    let doc = crate::Document::open(book).expect("opens");
+    let text = doc.page(0).expect("a page").text().plain_text();
+    assert_eq!(text, "?!(בראשית) עולם\n");
+}

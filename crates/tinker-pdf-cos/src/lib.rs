@@ -98,11 +98,11 @@ pub use build::{
     ArchivalLevel, ArchivalPart, ArchivalProfile, ArchivalRefusal, BlendMode, CalculatorOp,
     CieSpace, CompressedImage, DeviceNAttributes, DeviceSpace, DocumentBuilder, EmbeddedWhole,
     ExtGState, FileRelationship, FormXObject, Function, Glyph, ImageColorSpace, ImageData,
-    ImageFilter, LayerId, MaskKind, NamespaceId, NewAssociatedFile, NewOutputIntent, OutlineEntry,
-    PageBuilder, PieceText, PlacedGlyph, Shading, ShadingPattern, SoftMask, StateMask,
-    SubsetRefusal, TableAttributes, TableScope, Tag, Target, TextPiece, TilingPattern, TilingType,
-    TransparencyGroup, MATHML_NAMESPACE, PDF_1_7_NAMESPACE, PDF_2_0_NAMESPACE,
-    STANDARD_STRUCTURE_TYPES,
+    ImageFilter, LayerId, LayoutWritingMode, MaskKind, NamespaceId, NewAssociatedFile,
+    NewOutputIntent, OutlineEntry, PageBuilder, PieceText, PlacedGlyph, Shading, ShadingPattern,
+    SoftMask, StateMask, SubsetRefusal, TableAttributes, TableScope, Tag, Target, TextPiece,
+    TilingPattern, TilingType, TransparencyGroup, MATHML_NAMESPACE, PDF_1_7_NAMESPACE,
+    PDF_2_0_NAMESPACE, STANDARD_STRUCTURE_TYPES,
 };
 // `calc::keystroke` and `calc::validate` are deliberately *not* re-exported
 // here: this root already has a `validate`, which is the strict structural

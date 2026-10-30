@@ -114,7 +114,9 @@ use tinker_pdf_shape::Tag;
 use tinker_pdf_svg::transform::{concat, invert, rotation, IDENTITY};
 
 use super::read::PX_TO_PT;
-use super::tagging::{ancestry, draw_figure, figure_orders, table_cells, tag_runs, Tagging};
+use super::tagging::{
+    ancestry, draw_figure, figure_orders, table_cells, tag_runs, writing_modes, Tagging,
+};
 use super::typeface::FaceSet;
 use super::xhtml::Dom;
 // `Placed` and not `tinker_pdf_layout::metrics::PlacedGlyph`, which is
@@ -978,6 +980,12 @@ pub struct Fonts<'a> {
     /// for once a page however often a reading meets the units again. See
     /// [`Fonts::read_back`].
     readings: RefCell<crate::text_order::Readings>,
+    /// The direction the page being drawn's structure declares for each
+    /// run's characters, `true` for right to left, where it declares one
+    /// ([`super::tagging::Tagging::declared`]): what the reader reads a line
+    /// in where every run of it is declared alike. See
+    /// [`Fonts::set_readings_tagged`].
+    declared: RefCell<BTreeMap<RunKey, bool>>,
     /// Characters drawn in a face that has no glyph for them.
     uncovered: usize,
 }
@@ -1001,6 +1009,7 @@ impl<'a> Fonts<'a> {
             plans: RefCell::new(BTreeMap::new()),
             overflow_reads: RefCell::new(BTreeMap::new()),
             readings: RefCell::new(crate::text_order::Readings::default()),
+            declared: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -1227,10 +1236,30 @@ impl<'a> Fonts<'a> {
     /// drawn, among them — and ruling 14 takes that time for the words it
     /// reads.
     pub fn set_readings(&self, runs: &[TextRun], frame: &Frame, effects: &OnPage<'_>) {
+        self.set_readings_tagged(runs, frame, effects, None);
+    }
+
+    /// [`Fonts::set_readings`], for a page tagged into `tagging`'s structure,
+    /// which declares the direction of what it draws: each line every run
+    /// of which is declared alike is read back in that direction, as the
+    /// reader will read it ([`Fonts::read_back`]).
+    pub(crate) fn set_readings_tagged(
+        &self,
+        runs: &[TextRun],
+        frame: &Frame,
+        effects: &OnPage<'_>,
+        tagging: Option<&super::tagging::Tagging<'_>>,
+    ) {
         let painted: Vec<&TextRun> = runs
             .iter()
             .filter(|run| run.painted && !run.generated)
             .collect();
+        *self.declared.borrow_mut() = tagging.map_or_else(BTreeMap::new, |tagging| {
+            painted
+                .iter()
+                .filter_map(|run| tagging.declared(run).map(|rtl| (run_key(run), rtl)))
+                .collect()
+        });
         let order: BTreeMap<RunKey, usize> = painted
             .iter()
             .enumerate()
@@ -1910,10 +1939,13 @@ impl<'a> Fonts<'a> {
         }
         let mut page = device.finish();
         let over = Overprint::of(&page);
+        let declared = self
+            .declared_of(line)
+            .map(crate::text_order::Declared::Every);
         crate::text_order::into_logical_order_knowing(
             &mut page,
             &mut self.readings.borrow_mut(),
-            None,
+            declared,
         );
         Some((
             page.blocks
@@ -1924,6 +1956,26 @@ impl<'a> Fonts<'a> {
                 .join("\n"),
             over,
         ))
+    }
+
+    /// The direction the reader reads `line` in where the page's structure
+    /// declares one for it ([`Fonts::declared`]): every run of it that draws
+    /// something declared, and all alike, as the reader asks of every
+    /// character of a line that draws something.
+    fn declared_of(&self, line: &[&TextRun]) -> Option<BaseDirection> {
+        let declared = self.declared.borrow();
+        let mut found = None;
+        for run in line.iter().filter(|run| !run.text.trim().is_empty()) {
+            let rtl = *declared.get(&run_key(run))?;
+            if found.is_some_and(|seen| seen != rtl) {
+                return None;
+            }
+            found = Some(rtl);
+        }
+        found.map(|rtl| match rtl {
+            true => BaseDirection::RightToLeft,
+            false => BaseDirection::LeftToRight,
+        })
     }
 
     /// The context [`Fonts::set_contexts`] recorded for `run`.
@@ -3770,6 +3822,7 @@ pub fn draw_page(
     let pages = std::slice::from_ref(laid);
     let figures = figure_orders(dom, pages);
     let cells = table_cells(dom, pages, pictures);
+    let modes = writing_modes(dom, pages, &BTreeMap::new());
     let none = std::collections::BTreeSet::new();
     let tagging = Tagging {
         dom,
@@ -3780,6 +3833,7 @@ pub fn draw_page(
         path: "",
         cells: &cells,
         roles: &std::collections::BTreeSet::new(),
+        modes: &modes,
     };
     draw_page_tagged(
         builder,
@@ -3811,7 +3865,7 @@ pub(crate) fn draw_page_tagged(
     // What each run is shaped against, from its neighbours on the page, and
     // how each line holding a right-to-left character reads back.
     fonts.set_contexts(&laid.runs, effects);
-    fonts.set_readings(&laid.runs, frame, effects);
+    fonts.set_readings_tagged(&laid.runs, frame, effects, tagging);
     for (index, fragment) in laid.boxes.iter().enumerate() {
         let opened = effects.open(page, fragment.anchor, false);
         draw_box(page, fragment, frame, effects.background(index), effects);
@@ -5816,16 +5870,18 @@ fn set_objects(page: &mut LayoutPage, atomics: &Atomics) {
 /// [`visual_lines`] takes the stand-ins off again.
 ///
 /// A line with no right-to-left character is not touched. Returns how many
-/// runs were cut.
+/// runs were cut, and the base direction P2 and P3 found for each bidi
+/// paragraph whose container leaves it to them ([`plaintext_bases`]).
 pub fn split_at_levels(
     pages: &mut [LayoutPage],
     metrics: &BookMetrics<'_>,
     atomics: &Atomics,
-) -> usize {
+) -> (usize, BTreeMap<usize, bool>) {
     for page in pages.iter_mut() {
         set_objects(page, atomics);
     }
     let (resolved, places) = paragraphs(pages);
+    let bases = plaintext_bases(pages, &resolved);
     let mut cut = 0usize;
     for (page, places) in pages.iter_mut().zip(places) {
         let taken = std::mem::take(&mut page.runs);
@@ -5850,7 +5906,27 @@ pub fn split_at_levels(
         }
         cut += split_line(&mut line, &at, &resolved, metrics, &mut page.runs, None);
     }
-    cut
+    (cut, bases)
+}
+
+/// The base direction UAX #9's P2 and P3 found for each bidi paragraph of
+/// `resolved` whose container leaves it to them, `unicode-bidi: plaintext`
+/// ([`TextRun::paragraph_rtl`] `None`), by its number ([`TextRun::paragraph`]):
+/// `true` for right to left. The paragraph's direction the structure tree
+/// declares ([`super::tagging::writing_modes`]).
+fn plaintext_bases(
+    pages: &[LayoutPage],
+    resolved: &BTreeMap<usize, Paragraph>,
+) -> BTreeMap<usize, bool> {
+    pages
+        .iter()
+        .flat_map(|page| &page.runs)
+        .filter(|run| run.paragraph_rtl.is_none())
+        .filter_map(|run| {
+            let paragraph = resolved.get(&run.paragraph)?;
+            Some((run.paragraph, paragraph.base_level().is_rtl()))
+        })
+        .collect()
 }
 
 /// [`split_at_levels`] over a page that holds a stand-in: each line is one
@@ -6008,7 +6084,7 @@ fn closer(e: &Embedding) -> char {
 
 /// Whether `c` is a character whose own class reads right to left, or opens
 /// a right-to-left embedding, override or isolate.
-fn opens_right_to_left(c: char) -> bool {
+pub(super) fn opens_right_to_left(c: char) -> bool {
     matches!(
         bidi_class(c),
         BidiClass::R | BidiClass::AL | BidiClass::RLE | BidiClass::RLO | BidiClass::RLI

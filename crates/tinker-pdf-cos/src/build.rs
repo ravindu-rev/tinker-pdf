@@ -2618,6 +2618,8 @@ struct ElementProps {
     id: Option<Vec<u8>>,
     /// The `/Table` owner's attributes (14.8.5.7).
     table: Option<TableAttributes>,
+    /// The Layout owner's `/WritingMode` (ISO 32000-2 §14.8.5.4.2).
+    writing_mode: Option<LayoutWritingMode>,
     /// `/NS` (ISO 32000-2 Table 355): the namespace the element's type is in.
     namespace: Option<NamespaceId>,
     /// `/AF` (ISO 32000-2 14.13): files associated with the element.
@@ -2636,6 +2638,7 @@ impl ElementProps {
             expansion,
             id,
             table,
+            writing_mode,
             namespace,
             files,
         } = other;
@@ -2649,13 +2652,15 @@ impl ElementProps {
         fill(&mut self.expansion, expansion);
         fill(&mut self.id, id);
         fill(&mut self.table, table);
+        fill(&mut self.writing_mode, writing_mode);
         fill(&mut self.namespace, namespace);
     }
 
     /// Whether these say something about the element's content, which keeps
     /// an element that drew nothing. A namespace does not: it says what the
     /// element's *type* means, and an empty `/section` in a namespace is as
-    /// empty as an empty `/Span` in none.
+    /// empty as an empty `/Span` in none. Nor does a writing mode, which
+    /// says how the content is written where there is some.
     fn says_something(&self) -> bool {
         let ElementProps {
             title,
@@ -2665,6 +2670,7 @@ impl ElementProps {
             expansion,
             id,
             table,
+            writing_mode: _,
             namespace: _,
             files,
         } = self;
@@ -2776,6 +2782,16 @@ impl Tag {
         self
     }
 
+    /// The Layout owner's `/WritingMode` (ISO 32000-2 §14.8.5.4.2): the
+    /// direction the element's lines are written in, which its descendants
+    /// inherit where they state none. Written as an attribute object of its
+    /// own, beside the Table attributes where the element has them.
+    #[must_use]
+    pub fn writing_mode(mut self, mode: LayoutWritingMode) -> Tag {
+        self.props.writing_mode = Some(mode);
+        self
+    }
+
     /// `/NS` (ISO 32000-2 Table 355): puts the element's type in `namespace`,
     /// so that `/S /section` means the `section` of that namespace — which
     /// [`DocumentBuilder::map_role_in`] can then map to what it stands for.
@@ -2869,6 +2885,28 @@ impl TableAttributes {
             && self.summary.is_none()
             && self.row_span.unwrap_or(0) == 0
             && self.col_span.unwrap_or(0) == 0
+    }
+}
+
+/// The Layout owner's `/WritingMode` (ISO 32000-2 §14.8.5.4.2, Table 378):
+/// the direction an element's lines are written in, and the lines stacked
+/// top to bottom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayoutWritingMode {
+    /// `/LrTb`: each line left to right.
+    LrTb,
+    /// `/RlTb`: each line right to left.
+    RlTb,
+}
+
+impl LayoutWritingMode {
+    /// The name Table 378 spells it with.
+    #[must_use]
+    pub fn name(self) -> &'static [u8] {
+        match self {
+            LayoutWritingMode::LrTb => b"LrTb",
+            LayoutWritingMode::RlTb => b"RlTb",
+        }
     }
 }
 
@@ -8057,6 +8095,7 @@ impl DocumentBuilder {
             expansion,
             id: _,
             table,
+            writing_mode,
             namespace,
             files: _,
         } = props;
@@ -8069,11 +8108,23 @@ impl DocumentBuilder {
         {
             element.insert(self.names.intern(b"NS"), Object::Ref(*reference));
         }
+        // 14.7.6.1: one attribute object in `/A`, or an array of them where
+        // the element states two owners' attributes.
+        let mut attributes = Vec::new();
         if let Some(table) = table.as_ref().filter(|table| !table.is_empty()) {
-            element.insert(
-                self.names.intern(b"A"),
-                Object::Dict(self.table_attributes(table, version)),
-            );
+            attributes.push(Object::Dict(self.table_attributes(table, version)));
+        }
+        if let Some(mode) = writing_mode {
+            attributes.push(Object::Dict(self.layout_attributes(*mode)));
+        }
+        match <[Object; 1]>::try_from(attributes) {
+            Ok([one]) => {
+                element.insert(self.names.intern(b"A"), one);
+            }
+            Err(both) if !both.is_empty() => {
+                element.insert(self.names.intern(b"A"), Object::Array(both));
+            }
+            Err(_) => {}
         }
         for (key, value) in [
             (&b"T"[..], title),
@@ -8089,6 +8140,22 @@ impl DocumentBuilder {
                 );
             }
         }
+    }
+
+    /// One attribute object whose owner is `/Layout`, stating the element's
+    /// `/WritingMode` (ISO 32000-2 §14.8.5.4.2), written directly in `/A` as
+    /// [`DocumentBuilder::table_attributes`]'s is.
+    fn layout_attributes(&self, mode: LayoutWritingMode) -> Dict {
+        let mut owner = Dict::new();
+        owner.insert(
+            self.names.intern(b"O"),
+            Object::Name(self.names.intern(b"Layout")),
+        );
+        owner.insert(
+            self.names.intern(b"WritingMode"),
+            Object::Name(self.names.intern(mode.name())),
+        );
+        owner
     }
 
     /// One attribute object whose owner is `/Table` (14.7.6.1, 14.8.5.7).

@@ -863,6 +863,79 @@ fn table_attributes_are_written_and_each_header_resolves() {
     assert_eq!(keys, [b"price".to_vec(), b"year".to_vec()]);
 }
 
+/// The Layout owner's `/WritingMode` (ISO 32000-2 §14.8.5.4.2) is an
+/// attribute object of its own: alone in a paragraph's `/A`, and beside a
+/// header cell's Table attributes in an array, which still read back as
+/// the cell's. The halves of a keyed element take the one either states.
+#[test]
+fn a_writing_mode_is_written_alone_and_beside_table_attributes() {
+    use tinker_pdf::LayoutWritingMode;
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    for at in 0..2u64 {
+        builder.add_page(300.0, 200.0, |page| {
+            let paragraph = Tag::new(b"P").keyed(1, 0);
+            let paragraph = match at {
+                0 => paragraph,
+                _ => paragraph.writing_mode(LayoutWritingMode::RlTb),
+            };
+            page.tagged_with(&paragraph, |page| {
+                page.text(b"F1", 12.0, 20.0, 170.0, "halves");
+            });
+            if at == 0 {
+                let scope = table_attributes(|t| t.scope = Some(TableScope::Row));
+                let cell = Tag::new(b"TH")
+                    .table(scope)
+                    .writing_mode(LayoutWritingMode::LrTb);
+                page.tagged_with(&Tag::new(b"Table"), |page| {
+                    page.tagged(b"TR", |page| {
+                        page.tagged_with(&cell, |page| {
+                            page.text(b"F1", 12.0, 20.0, 150.0, "cell");
+                        });
+                    });
+                });
+            }
+        });
+    }
+    let bytes = builder.finish();
+    structurally_clean(bytes.clone());
+    let doc = Document::open(bytes).expect("opens");
+    let header = only(&doc, "TH");
+    assert_eq!(
+        header.table.as_ref().and_then(|t| t.scope),
+        Some(TableScope::Row)
+    );
+    let cos = doc.cos();
+    let owners = |element: &StructElement| -> Vec<String> {
+        let dict = cos
+            .get(element.reference.expect("indirect"))
+            .expect("loads");
+        let value = cos.resolve_key(dict.as_dict().expect("a dictionary"), cos.intern(b"A"));
+        let objects: Vec<_> = match value.as_array() {
+            Some(items) => items.iter().map(|item| cos.resolve(item)).collect(),
+            None => vec![value.clone()],
+        };
+        let name = |object: &tinker_pdf::Object| {
+            object
+                .as_name()
+                .and_then(|name| cos.name_bytes(name))
+                .map(|name| String::from_utf8_lossy(&name).into_owned())
+                .unwrap_or_default()
+        };
+        objects
+            .iter()
+            .filter_map(|object| object.as_dict())
+            .map(|attributes| {
+                let owner = name(&cos.resolve_key(attributes, cos.intern(b"O")));
+                let mode = name(&cos.resolve_key(attributes, cos.intern(b"WritingMode")));
+                format!("{owner}{mode}")
+            })
+            .collect()
+    };
+    assert_eq!(owners(&header), ["Table", "LayoutLrTb"]);
+    assert_eq!(owners(&only(&doc, "P")), ["LayoutRlTb"]);
+}
+
 /// An identifier is one element's. The first in reading order keeps it, a
 /// later one is written without it, and `duplicate_element_ids` says so
 /// before the document is finished — while the two halves of one keyed

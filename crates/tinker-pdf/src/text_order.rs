@@ -139,11 +139,15 @@ pub struct TextOptions {
 
 /// What a page says of the direction its lines are read in (ISO 32000-2
 /// §14.8.5.4.2): each marked sequence's, by `(stream, /MCID)`, where its
-/// structure element declares one (`structure::declared_directions`).
+/// structure element declares one (`structure::declared_directions`); or one
+/// for every line, the EPUB read-back's, which reads one drawn line whose
+/// every run its structure declares alike.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Declared<'a> {
     /// Each sequence's, where its element declares one.
     BySequence(&'a BTreeMap<(u64, u32), BaseDirection>),
+    /// One for every line.
+    Every(BaseDirection),
 }
 
 impl Declared<'_> {
@@ -151,6 +155,7 @@ impl Declared<'_> {
     /// that draws something belongs to a sequence declaring, where all agree.
     fn of(self, chars: &[TextChar]) -> Option<BaseDirection> {
         match self {
+            Declared::Every(direction) => Some(direction),
             Declared::BySequence(declared) => {
                 let mut found = None;
                 for c in chars.iter().filter(|c| !c.text.trim().is_empty()) {

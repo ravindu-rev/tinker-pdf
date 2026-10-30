@@ -17,11 +17,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tinker_pdf_cos::build::{DocumentBuilder, PageBuilder, TableAttributes, TableScope, Tag};
+use tinker_pdf_cos::build::{
+    DocumentBuilder, LayoutWritingMode, PageBuilder, TableAttributes, TableScope, Tag,
+};
 use tinker_pdf_cos::{is_language_tag, is_standard_structure_type};
 use tinker_pdf_layout::{Page as LayoutPage, ReplacedFragment, TextRun};
 
-use super::paint::{artifact_or_run, draw_replaced, Effects, Fonts, Frame, OnPage};
+use super::paint::{
+    artifact_or_run, draw_replaced, opens_right_to_left, Effects, Fonts, Frame, OnPage,
+};
 use super::xhtml::Dom;
 
 /// What one content document's pages are tagged from.
@@ -51,6 +55,61 @@ pub(crate) struct Tagging<'a> {
     /// The element names written as themselves and role-mapped. See
     /// [`register_roles`].
     pub roles: &'a BTreeSet<String>,
+    /// The direction each element declares, `true` for right to left. See
+    /// [`writing_modes`].
+    pub modes: &'a BTreeMap<usize, bool>,
+}
+
+/// The direction each element of a content document declares as its
+/// `/WritingMode` (ISO 32000-2 §14.8.5.4.2), `true` for right to left: its
+/// paragraph's, for an element a painted run under which holds a
+/// right-to-left character and every painted run under which is set in a
+/// paragraph of that one direction (`TextRun::paragraph_rtl`, or the base
+/// P2 and P3 found where the container leaves it to them, `bases`, by
+/// paragraph). Decided over every page of the content document, so the
+/// halves of an element on two pages declare alike.
+///
+/// **One direction or none.** A declaration reaches every character drawn
+/// in the element's sequences and in its descendants' that declare none, and
+/// the reader reads a line in the direction every character of it declares
+/// (`text_order::Declared`). An element whose runs are set in paragraphs of
+/// both directions, or in one P2 and P3 left unresolved, declares nothing,
+/// so whatever reaches a run is its own paragraph's direction. An element
+/// holding no right-to-left character declares nothing either, and a
+/// content document with none is written as before, byte for byte.
+pub(crate) fn writing_modes(
+    dom: &Dom,
+    pages: &[LayoutPage],
+    bases: &BTreeMap<usize, bool>,
+) -> BTreeMap<usize, bool> {
+    /// What an element's runs say: whether one holds a right-to-left
+    /// character, and their paragraphs' one direction, where they agree.
+    struct Seen {
+        rtl: bool,
+        direction: Option<bool>,
+    }
+    let mut seen: BTreeMap<usize, Seen> = BTreeMap::new();
+    for run in pages
+        .iter()
+        .flat_map(|page| &page.runs)
+        .filter(|run| run.painted && !run.generated)
+    {
+        let direction = run
+            .paragraph_rtl
+            .or_else(|| bases.get(&run.paragraph).copied());
+        let rtl = run.text.chars().any(opens_right_to_left);
+        for element in ancestry(dom, run.anchor) {
+            let at = seen.entry(element).or_insert(Seen { rtl, direction });
+            at.rtl |= rtl;
+            if at.direction != direction {
+                at.direction = None;
+            }
+        }
+    }
+    seen.into_iter()
+        .filter(|(_, at)| at.rtl)
+        .filter_map(|(element, at)| at.direction.map(|rtl| (element, rtl)))
+        .collect()
 }
 
 /// Every `<th>` and `<td>` of a content document that carries an `id` **and
@@ -211,7 +270,28 @@ impl Tagging<'_> {
         if let Some(language) = self.language(element, level) {
             tag = tag.lang(language);
         }
+        if let Some(&rtl) = self.modes.get(&element) {
+            tag = tag.writing_mode(match rtl {
+                true => LayoutWritingMode::RlTb,
+                false => LayoutWritingMode::LrTb,
+            });
+        }
         self.table(tag, element)
+    }
+
+    /// The direction the reader finds declared for `run`'s characters, `true`
+    /// for right to left: the first element of its chain, from its own
+    /// outwards, that declares one ([`writing_modes`]), as the reader
+    /// inherits a `/WritingMode` along `/P`. `None` for a run no element
+    /// holds, an artifact, or one whose every element declares nothing.
+    pub(crate) fn declared(&self, run: &TextRun) -> Option<bool> {
+        if run.generated {
+            return None;
+        }
+        ancestry(self.dom, run.anchor)
+            .iter()
+            .rev()
+            .find_map(|element| self.modes.get(element).copied())
     }
 
     /// A cell's identifier and a table's or cell's Table 349 attributes, from
