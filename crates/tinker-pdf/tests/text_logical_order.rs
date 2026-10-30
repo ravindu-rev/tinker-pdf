@@ -940,6 +940,34 @@ fn a_span_with_an_mcid_states_its_text_in_its_sequence() {
     assert!(text.lines()[0].chars.iter().all(|c| c.mcid == Some(0)));
 }
 
+/// **A right-to-left word a span states keeps each letter on the glyph that
+/// draws it, a letter it repeats too**: the text stands on the span's glyphs
+/// in the order its line reads them, not the order the content stream drew
+/// them in, so the first of two SHINs drawn left to right stands on the one
+/// at the right, and each character reads from the right as the word does.
+#[test]
+fn a_right_to_left_word_a_span_states_keeps_each_letter_on_its_own_glyph() {
+    let word = "\u{5E9}\u{5DC}\u{5D5}\u{5E9}";
+    let bytes = stated_page(
+        1,
+        &[
+            Item::Open(stating(word)),
+            Item::Run(0, visual(&reversed(word))),
+            Item::Close,
+        ],
+    );
+    let doc = Document::open(bytes).expect("opens");
+    let text = doc.page(0).expect("a page").text();
+    let lines = text.lines();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].text, word);
+    let starts: Vec<f64> = lines[0].chars.iter().map(|c| c.quad.bounds().0).collect();
+    assert!(
+        starts.windows(2).all(|pair| pair[1] < pair[0]),
+        "each letter stands on its own glyph, from the right: {starts:?}"
+    );
+}
+
 /// [`stated_page`]'s `/Span` holding the marked-content sequence `/MCID
 /// mcid` of the stream it is drawn in (14.7.4.2).
 fn sequence(mcid: u32) -> Item {

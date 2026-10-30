@@ -808,29 +808,58 @@ fn a_bracketed_run_and_its_full_stop_in_right_to_left_text_read_as_written() {
 }
 
 /// **A dir-less paragraph's line with Arabic at both ends and a Latin run in
-/// brackets between reads as the other text UAX #9 draws alike** — a limit of
-/// ruling 14 (`content-and-text.md`'s "Telling apart two texts UAX #9 draws
-/// alike"), pinned so that a change to it is noticed.
+/// brackets between reads as written where its page declares its direction,
+/// and as the other text UAX #9 draws alike where it does not** — a limit of
+/// ruling 14 for a page that declares nothing (`content-and-text.md`'s
+/// "Telling apart two texts UAX #9 draws alike"), pinned so that a change to
+/// it is noticed.
 ///
 /// With no `dir`, `… عوامل عدّة (HDAC). وقد …` is a left-to-right paragraph:
 /// the pair is at its level, drawn facing inward, `(HDAC)`, with the Arabic
 /// either side reversed. A right-to-left paragraph whose `/ToUnicode` names
 /// the mirrored glyph draws `وقد … (HDAC) … عوامل عدّة` as exactly that line,
-/// and nothing on the page says which drew it: both readings draw the line
+/// and nothing on the line says which drew it: both readings draw the line
 /// (UAX #9 forwards, asserted here), and the bracket tie-break counts only a
-/// pair facing outward. Both ends of the line are Arabic, so it reads as the
-/// right-to-left paragraph: `(HDAC).` comes back `.)HDAC(`. K-11's probe has
-/// 45 of these 120 dir-less books, every one with a Latin run in the
-/// brackets, each pointed and not, in both builds.
+/// pair facing outward. The EPUB writer's page says it: the paragraph's
+/// element declares `/WritingMode /LrTb`, and the book conserves. Taken off
+/// its structure tree, the page declares nothing; both ends of the line are
+/// Arabic, so it reads as the right-to-left paragraph: `(HDAC).` comes back
+/// `.)HDAC(`.
 #[test]
 fn a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_drawn_alike_twin() {
+    use tinker_pdf::{Dict, Object, WriteOptions};
     use tinker_pdf_shape::bidi::{logical_order, order_units, BaseDirection};
     let text = unpointed(&bracketed_paragraph("HDAC", 1));
     let bytes = epub_support::book::styled_book("ar", "", &format!("<p>{text}</p>"));
-    let doc = Document::open(bytes.clone()).expect("the book opens");
+    let book = Document::open(bytes.clone()).expect("the book opens");
     assert!(
-        !conservation::conservation_in_logical_order(&bytes, &doc).holds(),
-        "the dir-less line now reads as written: drop this limit from content-and-text.md"
+        conservation::conservation_in_logical_order(&bytes, &book).holds(),
+        "the book reads as written in the direction its paragraph declares"
+    );
+    // The same page with no structure tree, so nothing declares the line's
+    // direction.
+    let mut editor = book.editor();
+    let root = book
+        .cos()
+        .trailer()
+        .get_ref(tinker_pdf_cos::Name::ROOT)
+        .expect("a catalog");
+    let catalog = editor
+        .get(root)
+        .and_then(|catalog| catalog.as_dict().cloned())
+        .expect("a catalog dictionary");
+    let tree = editor.intern(b"StructTreeRoot");
+    let mut kept = Dict::new();
+    for (key, value) in catalog.iter() {
+        if *key != tree {
+            kept.insert(*key, value.clone());
+        }
+    }
+    editor.put(root, Object::Dict(kept));
+    let doc = Document::open(editor.save(&WriteOptions::default())).expect("the page opens");
+    assert!(
+        doc.structure().is_none(),
+        "nothing declares the line's direction"
     );
     let page = doc.page(0).expect("a page");
     let page_text = page.text();
@@ -1378,9 +1407,9 @@ fn a_dirless_line_opening_with_a_bracket_pair_reads_its_closing_quotes_and_stops
 // Every book a finding of the K-11 and CD-19 reviews named is a row of the
 // test of its mechanism, here and in `epub_fallback.rs`, read as
 // `epub_support::reading` reads a book. A case that
-// was fixed is held to its right reading (`Expect::Holds`); a case still open
-// is pinned at what it reads today (`Expect::Pinned`) and says which ROADMAP
-// row leaves it, so that it fails when the limit closes and the row moves.
+// was fixed is held to its right reading (`Expect::Holds`); a case a limit
+// leaves is pinned at what it reads today (`Expect::Pinned`) and says which
+// limit, so that it fails when the limit closes.
 
 /// **A case holds what it says and a pin holds exactly that** — the
 /// harness the cases below rely on (`epub_support::reading::meets`).
@@ -1453,49 +1482,49 @@ const NARROW: &str = "p { margin: 0 42% }";
 /// `ET`; counted so, it joined a justified line whole, styled or not and
 /// whatever letter is the overflow font's code 32. Guillemets, which round
 /// 4's own rule covered, guard the shape. And `٪٥٠` opening a wrapped line of
-/// a justified paragraph, styled or not, reads its sign at the line's far
-/// end, `٥٠ يوم بيت كبير٪`, at every tree since 9297d2d: pinned (ROADMAP
-/// CD-19, "Read so at every tree").
+/// a justified paragraph, styled or not, read its sign at the line's far
+/// end, `٥٠ يوم بيت كبير٪`, at every tree since 9297d2d; in its declared
+/// direction it reads as typed (held).
 #[test]
 fn a_neutral_the_pen_could_carry_into_a_word_reads_where_it_was_typed() {
     let percent = "<p dir=\"rtl\">الطالب ﴿جميل﴾. جميل <b>٪</b>٥٠ بيت <i>٫</i> كبير ﴿نور﴾.</p>";
     check(&[
-        Case::both("ornate, ar, letter-spaced (code F1)", "ar", LETTER_SPACED, "<p><i>\u{FD3F}</i>عوامل عدّة<i>\u{FD3E}</i></p>", Expect::Holds("cons logical found apart")),
-        Case::both("ornate, he, letter-spaced (code F1)", "he", LETTER_SPACED, "<p><i>\u{FD3F}</i>שָׁלוֹם עוֹלָם<i>\u{FD3E}</i></p>", Expect::Holds("cons logical found apart")),
+        Case::both("ornate, ar, letter-spaced (code F1)", "ar", LETTER_SPACED, "<p><i>\u{FD3F}</i>عوامل عدّة<i>\u{FD3E}</i></p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("ornate, he, letter-spaced (code F1)", "he", LETTER_SPACED, "<p><i>\u{FD3F}</i>שָׁלוֹם עוֹלָם<i>\u{FD3E}</i></p>", Expect::Holds("cons logical whole found apart")),
         Case::both(
             "ornate, an English sentence quoting Hebrew (code F1)",
             "en",
             LETTER_SPACED,
-            "<p>The verse \u{FD3F}שָׁלוֹם עוֹלָם\u{FD3E} and the words \u{FD3F}<i>מִלְחָמָה</i>\u{FD3E} are quoted in this English sentence here.</p>", Expect::Holds("cons logical found apart")),
+            "<p>The verse \u{FD3F}שָׁלוֹם עוֹלָם\u{FD3E} and the words \u{FD3F}<i>מִלְחָמָה</i>\u{FD3E} are quoted in this English sentence here.</p>", Expect::Holds("cons logical whole found apart")),
         Case::both("ornate, ar, word-spaced (code F1)", "ar", WORD_SPACED, "<p>عوامل \u{FD3F}HDAC\u{FD3E} عدّة وقد.</p>", Expect::Holds("cons logical whole found apart")),
         Case::both(
             "ornate, ar, table cells (code F1)",
             "ar",
             LETTER_SPACED,
-            "<table style=\"border-spacing: 0\"><tr><td>عوامل</td><td>\u{FD3F}عدّة\u{FD3E}</td><td>وقد</td></tr><tr><td>\u{FD3F}أصبحنا\u{FD3E}</td><td>نعرف</td><td>x</td></tr></table>", Expect::Holds("cons logical found apart")),
-        Case::both("guillemets, ar, letter-spaced (guard)", "ar", LETTER_SPACED, "<p><i>«</i>عوامل عدّة<i>»</i></p>", Expect::Holds("cons logical found apart")),
-        Case::both("guillemets, he, letter-spaced (guard)", "he", LETTER_SPACED, "<p><i>«</i>שָׁלוֹם עוֹלָם<i>»</i></p>", Expect::Holds("cons logical found apart")),
-        Case::both("ARABIC PERCENT SIGN styled, justified (hunt H5)", "ar", JUSTIFIED, percent, Expect::Holds("cons logical found apart")),
+            "<table style=\"border-spacing: 0\"><tr><td>عوامل</td><td>\u{FD3F}عدّة\u{FD3E}</td><td>وقد</td></tr><tr><td>\u{FD3F}أصبحنا\u{FD3E}</td><td>نعرف</td><td>x</td></tr></table>", Expect::Holds("cons logical whole found apart")),
+        Case::both("guillemets, ar, letter-spaced (guard)", "ar", LETTER_SPACED, "<p><i>«</i>عوامل عدّة<i>»</i></p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("guillemets, he, letter-spaced (guard)", "he", LETTER_SPACED, "<p><i>«</i>שָׁלוֹם עוֹלָם<i>»</i></p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("ARABIC PERCENT SIGN styled, justified (hunt H5)", "ar", JUSTIFIED, percent, Expect::Holds("cons logical whole found apart")),
         Case::both(
             "ARABIC PERCENT SIGN unstyled, justified (hunt H5)",
             "ar",
             JUSTIFIED,
-            "<p dir=\"rtl\">الطالب ﴿جميل﴾. جميل ٪٥٠ بيت ٫ كبير ﴿نور﴾.</p>", Expect::Holds("cons logical found apart")),
+            "<p dir=\"rtl\">الطالب ﴿جميل﴾. جميل ٪٥٠ بيت ٫ كبير ﴿نور﴾.</p>", Expect::Holds("cons logical whole found apart")),
         Case::both(
             "ARABIC PERCENT SIGN styled, justified, BEH at code 32 (hunt H5)",
             "ar",
             JUSTIFIED,
-            format!("<p><b>ب</b></p>{percent}"), Expect::Holds("cons logical found apart")),
+            format!("<p><b>ب</b></p>{percent}"), Expect::Holds("cons logical whole found apart")),
         Case::both(
             "ARABIC PERCENT SIGN styled, opening a justified line (as at every tree)",
             "ar",
             JUSTIFIED,
-            "<p dir=\"rtl\">جميل بيت كبير نور <b>٪</b>٥٠ يوم بيت كبير</p>", Expect::Pinned("logical found apart")),
+            "<p dir=\"rtl\">جميل بيت كبير نور <b>٪</b>٥٠ يوم بيت كبير</p>", Expect::Holds("cons logical whole found apart")),
         Case::both(
             "ARABIC PERCENT SIGN unstyled, opening a justified line (as at every tree)",
             "ar",
             JUSTIFIED,
-            "<p dir=\"rtl\">جميل بيت كبير نور ٪٥٠ يوم بيت كبير</p>", Expect::Pinned("found apart")),
+            "<p dir=\"rtl\">جميل بيت كبير نور ٪٥٠ يوم بيت كبير</p>", Expect::Holds("cons logical whole found apart")),
     ]);
 }
 
@@ -1520,35 +1549,33 @@ fn price_book(words: &[&'static str], lead: usize, mark: &str, open: &str, close
 /// - The K-11 round-4 review's hunt H2 and code F2, fixed by 56dfd93: a
 ///   dir-less `(W) W.` line with the brackets styled apart, `[ ]` and `?`
 ///   too, and `(١٬٢٣٤),` opening a letter-spaced line, read their stop first.
-///   The right-to-left paragraph guards the shape. The unstyled `(W) W.`,
-///   read `نور) يوم(.`, and `(١٢٣),` are K-11's own dir-less limit, read so at
-///   every tree since 9297d2d, pinned (ROADMAP CD-19, "Read so at every
-///   tree").
+///   The right-to-left paragraph guards the shape. The unstyled `(W) W.`
+///   and `(١٢٣),`, K-11's own dir-less limit on a page that declares
+///   nothing, `نور) يوم(.`, read as typed in their declared direction (held).
 /// - The fix's verification, V1, fixed by acf944b: the same line ending in
 ///   several stops or closing quotation marks.
 /// - CR2 and F6 of the review of CD-19's fix: a right-to-left line that opens
 ///   with `?!`, `!!`, `".` or `'.` before a pair, after a `<br/>` or a soft
-///   wrap, reads as the dir-less line does — ruling 14's price, which the
-///   owner accepted on 12 October 2026; pinned, with the ellipsis the
-///   owner's decision named. With `bundled-fonts` the soft-wrapped `".`
-///   reads right.
+///   wrap, reads as the dir-less line does on a page that declares nothing —
+///   ruling 14's price — and as typed in its declared direction, the
+///   ellipsis the owner's decision named among them (held).
 /// - H6 and PRICE-RESIDUAL, a run of stops before a styled pair after a
-///   `<br/>`: with no spacing, `…`, `?!` and `!!` pay the price, and a lone
-///   `.`, the price's control, reads as at 9297d2d and 56dfd93 (it conserved
-///   at 94e3bb5 alone), the four pinned; a run that mixes the stops, `.!` or
-///   `!…`, ends no sentence (ruling 14) and reads as typed, held.
+///   `<br/>`: with no spacing, `…`, `?!` and `!!`, which pay the price on a
+///   page that declares nothing, and a lone `.`, the price's control, read
+///   as typed in their declared direction (held); a run that mixes the
+///   stops, `.!` or `!…`, ends no sentence (ruling 14) and reads as typed,
+///   held.
 ///   At `word-spacing: 0.6em` all six read right, and so do the `!?` and `?!`
 ///   books before styled brackets at `0.6em` and `1em` that lost their
 ///   structure tree's order where the overflow font at 0 Tw met the rule,
-///   fixed by 935b077's read-back (held); the three `'.` books at `0.5em`
-///   that hold it no more (Left (5)) are pinned.
+///   fixed by 935b077's read-back (held); and the three `'.` books at
+///   `0.5em` (Left (5)) hold it in their declared direction.
 /// - Confirm F3 of the review of CD-19's fix: two bracket pairs ending in
 ///   the ARABIC COMMA in pointed Hebrew, letter-spaced and justified, with
-///   `bundled-fonts` (Left (4)), pinned; a default build reads them as at
-///   every tree.
+///   `bundled-fonts` (Left (4)), held in both builds.
 /// - H2-7d of the second review: `(abc ברא) אלהים؟`, ending in a stop outside
-///   the rule's, which K-11's reader reads from the right since 56dfd93
-///   (Left (4)), pinned.
+///   the rule's, which K-11's reader reads from the right on a page that
+///   declares nothing (Left (4)), held in its declared direction.
 #[test]
 fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
     let hebrew = if cfg!(feature = "bundled-fonts") {
@@ -1557,27 +1584,27 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
         "שלום עולם ספר"
     };
     let mut cases = vec![
-        Case::both("dir-less (W) W. styled, ar (hunt H2)", "ar", NARROW, "<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم.</p>", Expect::Holds("logical found apart")),
-        Case::both("dir-less (W) W. styled, he (hunt H2)", "he", NARROW, format!("<p>{hebrew} <b>(</b>בית<b>)</b> יום.</p>"), Expect::Holds("logical found apart")),
-        Case::both("dir-less [W] W. styled, ar (hunt H2)", "ar", NARROW, "<p>جميل بيت كبير <b>[</b>نور<b>]</b> يوم.</p>", Expect::Holds("logical found apart")),
-        Case::both("dir-less (W) W? styled, ar (hunt H2)", "ar", NARROW, "<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم?</p>", Expect::Holds("logical found apart")),
+        Case::both("dir-less (W) W. styled, ar (hunt H2)", "ar", NARROW, "<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم.</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("dir-less (W) W. styled, he (hunt H2)", "he", NARROW, format!("<p>{hebrew} <b>(</b>בית<b>)</b> יום.</p>"), Expect::Holds("cons logical whole found apart")),
+        Case::both("dir-less [W] W. styled, ar (hunt H2)", "ar", NARROW, "<p>جميل بيت كبير <b>[</b>نور<b>]</b> يوم.</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("dir-less (W) W? styled, ar (hunt H2)", "ar", NARROW, "<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم?</p>", Expect::Holds("cons logical whole found apart")),
         Case::both("right-to-left (W) W. styled, ar (guard)", "ar", NARROW, "<p dir=\"rtl\">جميل بيت كبير <b>(</b>نور<b>)</b> يوم.</p>", Expect::Holds("cons logical whole found apart")),
         Case::both(
             "direction: rtl (W) W. styled, ar (guard)",
             "ar",
             NARROW,
             "<div style=\"direction: rtl\"><p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم.</p></div>", Expect::Holds("cons logical whole found apart")),
-        Case::both("dir-less (W) W. unstyled, ar (K-11's dir-less limit, as at every tree)", "ar", NARROW, "<p>جميل بيت كبير (نور) يوم.</p>", Expect::Pinned("found apart")),
+        Case::both("dir-less (W) W. unstyled, ar (K-11's dir-less limit, as at every tree)", "ar", NARROW, "<p>جميل بيت كبير (نور) يوم.</p>", Expect::Holds("cons logical whole found apart")),
         Case::both(
             "dir-less (١٬٢٣٤), opening a letter-spaced line (code F2)",
             "ar",
             "p, li, td { letter-spacing: 0.5em }",
-            "<p>عوامل عدّة وقد (١٬٢٣٤), أصبحنا نعرف الآن الموادّ. عدّة وقد أصبحنا (١٬٢٣٤), نعرف الآن الموادّ تكبح. وقد أصبحنا نعرف (١٬٢٣٤), الآن الموادّ تكبح عوامل. </p>", Expect::Holds("cons logical found apart")),
+            "<p>عوامل عدّة وقد (١٬٢٣٤), أصبحنا نعرف الآن الموادّ. عدّة وقد أصبحنا (١٬٢٣٤), نعرف الآن الموادّ تكبح. وقد أصبحنا نعرف (١٬٢٣٤), الآن الموادّ تكبح عوامل. </p>", Expect::Holds("cons logical whole found apart")),
         Case::both(
             "dir-less (١٢٣), opening a letter-spaced line (K-11's dir-less limit, as at every tree)",
             "ar",
             "p, li, td { letter-spacing: 0.5em }",
-            "<p>عوامل عدّة وقد (١٢٣), أصبحنا نعرف الآن الموادّ. عدّة وقد أصبحنا (١٢٣), نعرف الآن الموادّ تكبح. وقد أصبحنا نعرف (١٢٣), الآن الموادّ تكبح عوامل. </p>", Expect::Pinned("found apart")),
+            "<p>عوامل عدّة وقد (١٢٣), أصبحنا نعرف الآن الموادّ. عدّة وقد أصبحنا (١٢٣), نعرف الآن الموادّ تكبح. وقد أصبحنا نعرف (١٢٣), الآن الموادّ تكبح عوامل. </p>", Expect::Holds("cons logical whole found apart")),
     ];
     for end in ["...", "?!", "!!", "!?", ".\"", ".»", "…", ".”"] {
         cases.push(Case::both(
@@ -1585,14 +1612,14 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
             "ar",
             NARROW,
             format!("<p>كتاب مدرسة الطالب <b>(</b>جميل<b>)</b> بيت{end}</p>"),
-            Expect::Holds("logical found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ));
         cases.push(Case::both(
             "dir-less (W) W ending several marks, he (V1)",
             "he",
             NARROW,
             format!("<p>{hebrew} <b>(</b>בית<b>)</b> יום{end}</p>"),
-            Expect::Holds("logical found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ));
     }
     let wide = "p { margin: 0 30% }";
@@ -1628,7 +1655,7 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
             language,
             wide,
             body,
-            Expect::Pinned("found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ));
     }
     cases.push(Case::each(
@@ -1636,7 +1663,7 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
         "he",
         NARROW,
         "<p dir=\"rtl\">אלהים הארץ שלום \".(עולם) מלחמה ספר. עולם מלחמה ספר \".(בית) גדול אור.</p>",
-        Expect::Pinned("found apart"),
+        Expect::Holds("cons logical whole found apart"),
         Expect::Holds("cons logical whole found apart"),
     ));
     for (language, words) in [("ar", AR), ("he", HE)] {
@@ -1659,7 +1686,7 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
             } else {
                 (
                     "a run of stops opening a line after a break, no spacing (H6, PRICE-RESIDUAL)",
-                    Expect::Pinned("logical found apart"),
+                    Expect::Holds("cons logical whole found apart"),
                 )
             };
             cases.push(Case::both(what, language, "", body.clone(), expect));
@@ -1703,7 +1730,7 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
             AR,
             13,
             "'.",
-            Expect::Pinned("found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
     ] {
         for (open, close) in [("(", ")"), ("[", "]"), ("{", "}")] {
@@ -1733,8 +1760,8 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
             "he",
             "p { letter-spacing: 0.5em; text-align: justify; margin: 0 25% }",
             format!("<p>{two}</p>"),
-            Expect::Holds("found apart"),
-            Expect::Pinned("found apart"),
+            Expect::Holds("cons logical whole found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ));
     }
     for end in ["؟", "\u{6D4}", "\u{5C3}"] {
@@ -1743,23 +1770,24 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
             "he",
             "p { word-spacing: 0.6em }",
             format!("<p>(abc ברא) אלהים{end}</p>"),
-            Expect::Pinned("found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ));
     }
     check(&cases);
 }
 
 /// **A left-to-right Hebrew paragraph that ends a number and a stop** —
-/// ROADMAP CD-19, Left (1), pinned; H1 of the review of CD-19's fix.
+/// Left (1), read in its declared direction; H1 of the review of CD-19's fix.
 ///
 /// `<p>בראשית. אור ٦٠.</p>` at `word-spacing: 0.5em`, in a default build: the
 /// glyph CD-19's code-32 move put a word spacing right left a gap before the
 /// final stop, which read alone; written at 0 Tw, the stop abuts the
 /// right-to-left run, ruling 14's rejoin joins them, and the comma
 /// tie-break, which asks for a strong right-to-left character at the line's
-/// left end, does not take a line that opens with a number, so the stop is
-/// read first. 56 books conserved at 56dfd93, 53 at 9297d2d too; a change to
-/// the tie-break is the owner's to make. With `bundled-fonts` the stand-in
+/// left end, does not take a line that opens with a number, so on a page
+/// that declares nothing the stop is read first. The paragraph's element
+/// declares `/LrTb`, so the line is read left to right and conserves, in
+/// both builds (held). With `bundled-fonts` the stand-in
 /// draws the Hebrew, and these books are found by search with no glyph drawn
 /// over another, as at every tree since 94e3bb5 (held). Without the number
 /// the line reads right, in a default build a gain over both trees since
@@ -1772,8 +1800,9 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
 /// 6's hunt is the same tie-break at a closing bracket, which it refuses as
 /// it does a number: `<p>שלום.<br/>בראשית (אלהים).</p>` letter-spaced, a
 /// number at spacings the review did not name, and with `bundled-fonts`
-/// Arabic, each conserving at 9297d2d and 56dfd93 and lost since e7ca679
-/// wrote the overflow font at `0 Tw` (pinned).
+/// Arabic, each conserving at 9297d2d and 56dfd93, lost since e7ca679
+/// wrote the overflow font at `0 Tw`, and read in their declared direction
+/// now (held).
 #[test]
 fn a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop() {
     let worded = "p { word-spacing: 0.5em }";
@@ -1795,39 +1824,39 @@ fn a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop() {
             "he",
             worded,
             "<p>ש</p><p>בראשית. אור ٦٠.</p>",
-            Expect::Pinned("found apart"),
-            Expect::Holds("found apart"),
+            Expect::Holds("cons logical whole found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::each(
             "ש, then a dir=ltr paragraph ending ٦٠.",
             "he",
             worded,
             "<p>ש</p><p dir=\"ltr\">בראשית. אור ٦٠.</p>",
-            Expect::Pinned("found apart"),
-            Expect::Holds("found apart"),
+            Expect::Holds("cons logical whole found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::each(
             "ש, then a dir-less paragraph ending 60.",
             "he",
             worded,
             "<p>ש</p><p>בראשית. אור 60.</p>",
-            Expect::Pinned("found apart"),
-            Expect::Holds("found apart"),
+            Expect::Holds("cons logical whole found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::each(
             "ש, then a dir-less paragraph ending ٦٠:",
             "he",
             worded,
             "<p>ש</p><p>בראשית. אור ٦٠:</p>",
-            Expect::Pinned("found apart"),
-            Expect::Holds("found apart"),
+            Expect::Holds("cons logical whole found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::both(
             "a dir-less paragraph ending ٦٠., its own first letter at code 32",
             "he",
             worded,
             "<p>בראשית. אור ٦٠.</p>",
-            Expect::Holds("found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::both(
             "ש, then a dir-less paragraph ending no number (control)",
@@ -1841,8 +1870,8 @@ fn a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop() {
             "he",
             "p, td { word-spacing: 0.5em }",
             "<p>ש</p><p>בראשית ברא. אור גדול 60.</p>",
-            Expect::Pinned("found apart"),
-            Expect::Holds("found apart"),
+            Expect::Holds("cons logical whole found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
     ];
     for attr in ["", " dir=\"ltr\""] {
@@ -1851,22 +1880,22 @@ fn a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop() {
             "he",
             "p { word-spacing: 0.5em; margin: 0 20% } td { word-spacing: 0.6em }",
             format!("<p>ש</p><p{attr}>בראשית ברא. אור גדול ٦٠.</p>"),
-            Expect::Pinned("found apart"),
-            Expect::Holds("found apart"),
+            Expect::Holds("cons logical whole found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ));
         cases.push(Case::each(
             "ofscripts hen/prose/nat",
             "he",
             "p { word-spacing: 0.5em; margin: 0 20% }",
             format!("<p{attr}>{prose}</p>"),
-            Expect::Pinned("found apart"),
-            Expect::Holds("found apart"),
+            Expect::Holds("cons logical whole found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ));
         cases.push(Case::each(
             "ofscripts hen/prose/nat, monospace, justified (conserved at 56dfd93 only)",
             "he",
             "body { font-family: monospace } p { word-spacing: 0.5em; text-align: justify; margin: 0 25% }",
-            format!("<p{attr}>{prose}</p>"), Expect::Pinned("found apart"), Expect::Holds("cons logical found apart")));
+            format!("<p{attr}>{prose}</p>"), Expect::Holds("cons logical whole found apart"), Expect::Holds("cons logical whole found apart")));
     }
     cases.push(Case::each(
         "ofscripts hen/prose/out/rtl, letter-spaced and justified (H4(2))",
@@ -1898,21 +1927,28 @@ fn a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop() {
             "<p>كتاب <b>مدرسة</b> الطالب <i>جميل</i>, (بيت). جميل <b>بيت</b> كبير <i>نور</i>, (يوم). نور <b>يوم</b> عوامل <i>وقد</i>, (أصبحنا).</p>",
         ),
     ] {
-        cases.push(Case::both(what, language, style, body, Expect::Pinned("found apart")));
+        cases.push(Case::both(
+            what,
+            language,
+            style,
+            body,
+            Expect::Holds("cons logical whole found apart"),
+        ));
     }
     check(&cases);
 }
 
-/// **A dir-less line K-11's reader reads from the right** — ROADMAP CD-19,
-/// Left (3) and (4), pinned; H2-2 and H2-7 of the second review of CD-19's
-/// fix.
+/// **A dir-less line K-11's reader reads from the right** on a page that
+/// declares nothing — Left (3) and (4), held; H2-2 and H2-7 of the second
+/// review of CD-19's fix.
 ///
 /// Since 56dfd93 K-11's carry joins the right-to-left word after a
 /// bracketed gloss to the line, and the line, mostly right to left, is read
 /// from the right whatever the writer draws: a Latin gloss before a
 /// bracketed Arabic word at `0.5em` and at `12px`, a table cell ending a dash
 /// before a `(ספר) בית` cell, and in a default build a bold Greek word before
-/// a bracketed Hebrew one in a spanned cell (Left (4)), pinned. A styled
+/// a bracketed Hebrew one in a spanned cell (Left (4)), each read in its
+/// declared direction now (held). A styled
 /// Latin, Greek, Cyrillic or Armenian word before a gloss was fixed at
 /// `12px` by 935b077's read-back, which centres the word space styled apart
 /// in its stretch (held); before a bare gloss and a Latin tail at `2em`,
@@ -1923,24 +1959,25 @@ fn a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop() {
 /// nothing left to right and whose left end is the second cell's `)`, so the
 /// comma tie-break does not take it and the stop is read first: they
 /// conserved at 9297d2d, and since 56dfd93, whose content stream is 9297d2d's
-/// byte for byte, they read from the right (Left (4)), pinned.
+/// byte for byte, they read from the right (Left (4)); each cell declares
+/// its direction now, and they conserve (held).
 #[test]
 fn a_dirless_line_with_a_right_to_left_gloss() {
     let px12 = "p { word-spacing: 12px }";
     check(&[
         Case::both("a Latin gloss, styled, before (ספר) בית (H2-7a)", "he", px12, "<p>abc <b>def</b> (ספר) בית</p>", Expect::Holds("cons logical whole found apart")),
-        Case::both("a Latin gloss before (كتاب) بيت (H2-7a)", "ar", "p { word-spacing: 0.5em }", "<p>abc def (كتاب) بيت</p>", Expect::Pinned("found apart")),
-        Case::both("a Latin gloss before (كتاب) بيت at 12px (H2-7a)", "ar", px12, "<p>abc def (كتاب) بيت</p>", Expect::Pinned("found apart")),
+        Case::both("a Latin gloss before (كتاب) بيت (H2-7a)", "ar", "p { word-spacing: 0.5em }", "<p>abc def (كتاب) بيت</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("a Latin gloss before (كتاب) بيت at 12px (H2-7a)", "ar", px12, "<p>abc def (كتاب) بيت</p>", Expect::Holds("cons logical whole found apart")),
         Case::both(
             "a cell ending a dash before a (ספר) בית cell (H2-7b)",
             "he",
             "td { word-spacing: 12px }",
-            "<table><tr><td>abc —</td><td>(ספר) בית</td></tr></table>", Expect::Pinned("found apart")),
+            "<table><tr><td>abc —</td><td>(ספר) בית</td></tr></table>", Expect::Holds("cons logical whole found apart")),
         Case::each(
             "a bold Greek word before a (ספר) בית cell, spanned (H2-7b)",
             "he",
             "td, th, caption, div { word-spacing: 12px } table { border-spacing: 2px }",
-            "<table><tr><td colspan=\"2\">αλφα <b>βήτα</b> (ספר) בית</td></tr><tr><td>αλφα <b>βήτα</b></td><td>(ספר) בית</td></tr></table>", Expect::Pinned("whole found apart"), Expect::Holds("whole found apart")),
+            "<table><tr><td colspan=\"2\">αλφα <b>βήτα</b> (ספר) בית</td></tr><tr><td>αλφα <b>βήτα</b></td><td>(ספר) בית</td></tr></table>", Expect::Holds("cons logical whole found apart"), Expect::Holds("cons logical whole found apart")),
         Case::both("a bold Greek word before (ספר) בית (H2-2)", "he", px12, "<p>αλφα <b>βήτα</b> (ספר) בית</p>", Expect::Holds("cons logical whole found apart")),
         Case::both("a bold Cyrillic word before (ספר) בית (H2-2)", "he", px12, "<p>книга <b>дом</b> (ספר) בית</p>", Expect::Holds("cons logical whole found apart")),
         Case::both("a bold Greek word before (كتاب) بيت (H2-2)", "ar", px12, "<p>αλφα <b>βήτα</b> (كتاب) بيت</p>", Expect::Holds("cons logical whole found apart")),
@@ -1962,15 +1999,15 @@ fn a_dirless_line_with_a_right_to_left_gloss() {
             "he",
             "table { border-spacing: 0 } td, th { padding: 0 } td, th { word-spacing: 1em }",
             "<table><tr><td><b>שלום</b> <i>עולם</i>،</td><td>מלחמה <i>(</i>ספר<i>)</i>.</td></tr></table>",
-            Expect::Pinned("logical found apart"),
-            Expect::Holds("cons logical found apart"),
+            Expect::Holds("cons logical whole found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::both(
             "two touching right-to-left cells, no dir, Arabic (V3)",
             "ar",
             "table { border-spacing: 0 } td, th { padding: 0 } td, th { word-spacing: 1em }",
             "<table><tr><td><b>كتاب</b> <i>مدرسة</i>،</td><td>الطالب <i>(</i>جميل<i>)</i>.</td></tr></table>",
-            Expect::Pinned("logical found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
     ]);
 }

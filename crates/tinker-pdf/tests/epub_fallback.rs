@@ -882,27 +882,31 @@ fn a_standard_14_accent_drawn_apart_from_its_letter_keeps_to_it() {
     }
 }
 
-/// **A mark styled apart from its letter in a right-to-left run is drawn
-/// where the pen stands, and read with the glyph drawn before it — the
-/// known limit `epub.md`'s `direction` row names, pinned so that ending it
-/// is noticed.**
+/// **A mark styled apart from its letter in a right-to-left run reads with
+/// its letter.**
 ///
 /// `<b>ח</b>ָו`: the QAMATS opens the second run and rides on nothing in
-/// it. L2 draws it at that run's right end, which is where its letter
-/// starts, but ruling 14 pairs a mark only with a neighbour in the content
-/// stream, and the stream wrote the bold run before this one, beside its
-/// other end: the mark is read with the VAV drawn just before it, as it was
-/// before October 2026, in both builds. When this fails because the line
-/// reads `א חָו ב.`, the limit is gone: drop it from `epub.md` and make this
-/// the test that the line reads as written.
+/// it. L2 draws it where the pen stands, at that run's right end, where its
+/// letter's run meets it, and the content stream wrote the bold run first,
+/// beside that run's other end: no drawing the writer tries reads the mark
+/// with its letter, so the line is stated, drawn inside a `/Span` whose
+/// `/ActualText` is the line as typed, and the page reads that text.
 #[test]
-fn a_standard_14_right_to_left_mark_styled_apart_rides_on_nothing() {
+fn a_standard_14_right_to_left_mark_styled_apart_reads_with_its_letter() {
     let body = "<p dir=\"rtl\">\u{5D0} <b>\u{5D7}</b>\u{5B8}\u{5D5} \u{5D1}.</p>";
-    let doc = Document::open(styled_book("he", "", body)).expect("the book opens");
-    let text = doc.page(0).expect("a page").text().plain_text();
+    let bytes = styled_book("he", "", body);
+    let doc = Document::open(bytes.clone()).expect("the book opens");
+    reads_as_written(&bytes, &doc, "\u{5D0} \u{5D7}\u{5B8}\u{5D5} \u{5D1}.");
+    let cos = doc.cos();
+    let pages = tinker_pdf_cos::pages::collect(cos);
+    let content = String::from_utf8_lossy(&tinker_pdf_cos::pages::content_bytes(
+        cos,
+        pages.first().expect("a page"),
+    ))
+    .into_owned();
     assert!(
-        text.contains("\u{5D0} \u{5D7}\u{5D5}\u{5B8} \u{5D1}."),
-        "the known limit no longer reads the QAMATS with the VAV: {text:?}"
+        content.contains("/ActualText <FEFF05D0002005D705B805D5002005D1002E>"),
+        "the line is not stated: {content}"
     );
 }
 
@@ -1452,28 +1456,20 @@ fn a_standard_14_right_to_left_line_at_exactly_half_an_em_reads_whole() {
 }
 
 /// **A pointed word is as wide as the same word unpointed, so its paragraph
-/// breaks its lines where the unpointed paragraph does — and a line break
-/// that moved so into one of ruling 14's named limits reads as the
-/// unpointed paragraph does: class B of the marks fix's round 4, a known
-/// consequence pinned so that a change to it is noticed.**
+/// breaks its lines where the unpointed paragraph does, and each of its
+/// lines reads as written.**
 ///
 /// `css-text-3` §10.2 spaces a letter and its marks once (bf081ca); at
 /// cd407d5 each decomposed accent of `cafe\u{301} na\u{308}ive …` was spaced
 /// like a letter and, in a default build, as wide as a space besides, so the
 /// pointed words were wider and broke this justified, half-em-spaced
-/// right-to-left paragraph elsewhere — and it conserved. Now its lines are
-/// the unpointed paragraph's, and its last line, `Nguyen q o חו.`, is a
-/// left-to-right run and then, drawn more than three ems left of where it
-/// ended, a right-to-left word with its full stop: `TextDevice` cuts them
-/// into two lines, and ruling 14 reads the two pieces of a right-to-left
-/// paragraph in the order they are drawn (`epub.md`'s `direction` row), the
-/// full stop and word first. The unpointed paragraph reads the same, in either build, at
-/// cd407d5 and now. On the round-4 probe, 3 of a default build's 15 books
-/// that conserve at cd407d5 and do not now are this class: this one, and
-/// `CANTILLATED` and `كتب` fourteen times in a right-to-left paragraph at
-/// `1em` (sans-serif) and at `0.5001em` (monospace), every word a piece of
-/// its own, read in drawn order as `שלם كتب` fourteen times is; none with
-/// `bundled-fonts`.
+/// right-to-left paragraph elsewhere. Now its lines are the unpointed
+/// paragraph's, and its last line, `Nguyen q o חו.`, is a left-to-right run
+/// and then, drawn more than three ems left of where it ended, a
+/// right-to-left word with its full stop: `TextDevice` cuts them into two
+/// lines, and the paragraph's declared direction reads the two pieces in
+/// its order (ruling 14), the run first: both paragraphs conserve, in either
+/// build.
 #[test]
 fn a_narrower_pointed_word_breaks_its_line_where_the_unpointed_word_does() {
     let style = "p { text-align: justify; letter-spacing: 0.5em; margin: 0 20% }";
@@ -1502,10 +1498,15 @@ fn a_narrower_pointed_word_breaks_its_line_where_the_unpointed_word_does() {
     );
     assert_eq!(
         plain.1,
-        format!("{HET_VAV}\ncafe naive\n.{HET_VAV} Nguyen q o\n"),
-        "ruling 14 now reads the last line as written: drop class B from epub.md"
+        format!("{HET_VAV}\ncafe naive\nNguyen q o {HET_VAV}.\n"),
+        "the last line does not read as written"
     );
-    assert_eq!((pointed.0, plain.0), (false, false));
+    assert!(
+        pointed.0 && plain.0,
+        "the paragraph does not conserve: pointed {}, plain {}",
+        pointed.0,
+        plain.0
+    );
 }
 
 /// **A letter-spaced book with no mark in it is written byte for byte as at
@@ -1667,49 +1668,33 @@ fn a_run_of_neutrals_in_an_embedding_with_no_right_to_left_letter_reads_as_typed
 }
 
 /// **A run of neutrals of its own that opens a right-to-left line with
-/// nothing left to right on it is drawn as typed, and reads as typed** — the
-/// comma tie-break's price, not widened (review of the K-11 fix).
+/// nothing left to right on it reads as typed, styled apart or not.**
 ///
 /// `<p dir="rtl"><i>?!</i> שלום</p>`: UAX #9 draws the `?!` at the line's
 /// right end, `?` rightmost. The line is ruling 14's comma tie-break's shape
 /// — a right-to-left letter leftmost, closing punctuation rightmost, nothing
-/// left to right — and a left-to-right paragraph draws it too, so it is read
-/// as one, the punctuation trailing in the order drawn. Drawn in its level's
-/// order, as K-11's fix first drew every such run on a line holding a
-/// right-to-left letter, the run read `!?`: 51 probe books that conserved in
-/// logical order at 9297d2d did not. The writer asks the reader's own
-/// question of the line it draws (`drawn_direction`), and resolves the line
-/// alone in the direction the answer gives: read left to right, the `?!` is
-/// at level 0 there, not 1, so it is drawn as typed, as before K-11, and the
-/// run reads `?!` within its own structure element. The same line in one run
-/// is a slice of a right-to-left run, drawn in L2's order, and pays the price
-/// the owner accepted, `שלום !?` (`content-and-text.md`).
+/// left to right — which a page that declares nothing reads left to right.
+/// The paragraph declares its direction, so the page reads the line from the
+/// right: the run is drawn in its level's order and reads `?!`, at the
+/// line's start, as typed. The same line in one run reads the same.
 #[test]
 fn a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_as_typed() {
-    let body = format!("<p dir=\"rtl\"><i>?!</i> {SHALOM}</p>");
-    let bytes = styled_book("he", "", &body);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
-    let (question, bang) = (drawn_at(&doc, "?"), drawn_at(&doc, "!"));
-    assert!(
-        question < bang,
-        "{body}: the run is drawn in its level's order: ? at {question}, ! at {bang}"
-    );
-    let text = doc.page(0).expect("a page").text().plain_text();
-    assert!(text.contains(&format!("{SHALOM} ?!")), "{body}: {text:?}");
-    let logical = conservation_in_logical_order(&bytes, &doc);
-    assert!(logical.holds(), "{body}: {text:?} {logical:?}");
-
-    // In one run: the price.
-    let body = format!("<p dir=\"rtl\">?! {SHALOM}</p>");
-    let bytes = styled_book("he", "", &body);
-    let doc = Document::open(bytes.clone()).expect("the book opens");
-    let (question, bang) = (drawn_at(&doc, "?"), drawn_at(&doc, "!"));
-    assert!(
-        bang < question,
-        "{body}: the run is drawn in its level's order, ? rightmost: ? at {question}, ! at {bang}"
-    );
-    let text = doc.page(0).expect("a page").text().plain_text();
-    assert!(text.contains(&format!("{SHALOM} !?")), "{body}: {text:?}");
+    for body in [
+        format!("<p dir=\"rtl\"><i>?!</i> {SHALOM}</p>"),
+        format!("<p dir=\"rtl\">?! {SHALOM}</p>"),
+    ] {
+        let bytes = styled_book("he", "", &body);
+        let doc = Document::open(bytes.clone()).expect("the book opens");
+        let (question, bang) = (drawn_at(&doc, "?"), drawn_at(&doc, "!"));
+        assert!(
+            bang < question,
+            "{body}: the run is drawn in its level's order, ? rightmost: ? at {question}, ! at {bang}"
+        );
+        let text = doc.page(0).expect("a page").text().plain_text();
+        assert!(text.contains(&format!("?! {SHALOM}")), "{body}: {text:?}");
+        let logical = conservation_in_logical_order(&bytes, &doc);
+        assert!(logical.holds(), "{body}: {text:?} {logical:?}");
+    }
 }
 
 /// **A run of neutrals whose level order a reader of the page cannot undo is
@@ -2869,8 +2854,7 @@ const MONO_JUSTIFIED: &str =
 ///   letter on the line above; a reader of the line alone takes it as
 ///   European). Hebrew, a `<br/>` instead of the wrap, and an Arabic-Indic
 ///   number guard it. `$5` and `#5`, the sign before the number, read `5$`
-///   and `5#` at every tree since 9297d2d, pinned (ROADMAP CD-19, "Read so
-///   at every tree").
+///   and `5#` at every tree since 9297d2d, and read as typed now (held).
 /// - The fix's verification, V3, fixed by ff6d650: `٥٪ <b>W</b>` at
 ///   `word-spacing: 0.5em` read the sign after the next word.
 /// - The review of CD-19's fix, H3 and H4(1), and the second review's H2-4,
@@ -2879,13 +2863,14 @@ const MONO_JUSTIFIED: &str =
 ///   ornate parentheses round Arabic-Indic digits before a bold word, a `₪`
 ///   in a justified list item, `25، <b><i>W</i></b>` and `25٪ <b>W</b>` in a
 ///   right-to-left table's cell with the sign before the number; fixed by
-///   935b077's read-back, but for `25، <b>W</b>` in a dir-less table's cell
-///   (ROADMAP CD-19, Left (4)), pinned.
+///   935b077's read-back, and `25، <b>W</b>` in a dir-less table's cell by
+///   the cell's declared direction.
 /// - The confirm review's F3: the witness of the "glyphs read alike either
 ///   way round" condition, and the books of its survey.
 /// - The second review's fix: `5°<i>W</i>.` at `0.5em`, which lost the
-///   structure tree's order 9297d2d and 56dfd93 held, outside the Left
-///   list's scope, pinned.
+///   structure tree's order 9297d2d and 56dfd93 held: a right-to-left
+///   paragraph, which declares its direction, reads in order; with no `dir`,
+///   pinned, outside the Left list's scope.
 #[test]
 fn a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading() {
     let mut cases = Vec::new();
@@ -2895,7 +2880,7 @@ fn a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading() {
             "ar",
             SANS_NARROW,
             format!("<p dir=\"rtl\">جميل بيت كبير نور {sign} يوم</p>"),
-            Expect::Holds("cons logical found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ));
     }
     for sign in ["٥%", "٥٪"] {
@@ -2913,12 +2898,12 @@ fn a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading() {
             "ar",
             SANS_NARROW,
             format!("<p dir=\"rtl\">جميل بيت كبير نور {sign} يوم</p>"),
-            Expect::Pinned("found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ));
     }
     cases.extend([
-        Case::both("a sign after a number opening a wrapped Persian line (hunt H1)", "fa", SANS_NARROW, "<p dir=\"rtl\">جميل بيت كبير نور 5% يوم</p>", Expect::Holds("cons logical found apart")),
-        Case::both("a sign after a number opening a wrapped dir-less line (hunt H1)", "ar", SANS_NARROW, "<p>جميل بيت كبير نور 5% يوم</p>", Expect::Holds("cons logical found apart")),
+        Case::both("a sign after a number opening a wrapped Persian line (hunt H1)", "fa", SANS_NARROW, "<p dir=\"rtl\">جميل بيت كبير نور 5% يوم</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("a sign after a number opening a wrapped dir-less line (hunt H1)", "ar", SANS_NARROW, "<p>جميل بيت كبير نور 5% يوم</p>", Expect::Holds("cons logical whole found apart")),
         Case::both("a sign after a number opening a Hebrew line (guard)", "he", SANS_NARROW, "<p dir=\"rtl\">שלום עולם ספר בית 5% יום</p>", Expect::Holds("cons logical whole found apart")),
         Case::both("a sign after a number after a break (guard)", "ar", SANS_NARROW, "<p dir=\"rtl\">جميل بيت كبير نور<br/>5% يوم</p>", Expect::Holds("cons logical whole found apart")),
         Case::both(
@@ -2969,7 +2954,7 @@ fn a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading() {
                     style,
                     format!("<p{attr}>שלום בראשית {sign} <b>עולם</b> מלחמה.</p>"),
                     Expect::Holds("cons logical whole found apart"),
-                    Expect::Holds("cons logical found apart"),
+                    Expect::Holds("cons logical whole found apart"),
                 ));
             }
         }
@@ -2984,12 +2969,12 @@ fn a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading() {
             "25، <b>W</b> in a dir-less table cell, ar (H2-7c of the fix, Left (4))",
             "ar",
             "p, li, td { word-spacing: 16px; letter-spacing: 1px }",
-            "<div><table><tr><td>كتاب 25، <b>مدرسة</b></td><td>25، الطالب</td></tr></table></div>", Expect::Pinned("found apart")),
+            "<div><table><tr><td>كتاب 25، <b>مدرسة</b></td><td>25، الطالب</td></tr></table></div>", Expect::Holds("cons logical whole found apart")),
         Case::both(
             "25، <b>W</b> in a dir-less table cell, he (H2-7c of the fix, Left (4))",
             "he",
             "p, li, td { word-spacing: 16px; letter-spacing: 1px }",
-            "<div><table><tr><td>שלום 25، <b>עולם</b></td><td>25، מלחמה</td></tr></table></div>", Expect::Pinned("found apart")),
+            "<div><table><tr><td>שלום 25، <b>עולם</b></td><td>25، מלחמה</td></tr></table></div>", Expect::Holds("cons logical whole found apart")),
         Case::both(
             "25٪ <b>W</b> in a table cell (H2-7e)",
             "ar",
@@ -3025,7 +3010,7 @@ fn a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading() {
             "ar",
             "p { word-spacing: 1em }",
             "<p dir=\"rtl\">عوامل<i> #1</i> عدّة</p>",
-            Expect::Holds("cons logical found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::both(
             "a word-spaced ` ?!` slice, monospace, he (confirm F3)",
@@ -3047,13 +3032,19 @@ fn a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading() {
             s(i + 9)
         )
     });
-    for attr in [" dir=\"rtl\"", ""] {
+    for (attr, expect) in [
+        (
+            " dir=\"rtl\"",
+            Expect::Holds("cons logical whole found apart"),
+        ),
+        ("", Expect::Pinned("cons whole found apart")),
+    ] {
         cases.push(Case::both(
             "5°<i>W</i>. word-spaced (fv_extra m/ar/n4/glued)",
             "ar",
             "p { word-spacing: 0.5em; margin: 0 20% }",
             format!("<p{attr}>{glued}</p>"),
-            Expect::Pinned("found apart"),
+            expect,
         ));
     }
     check(&cases);
@@ -3078,8 +3069,8 @@ fn a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading() {
 ///   the inside of a spaced slice and 935b077's read-back, the `?!` glued to
 ///   a word at `0.5em`, which no tree before 935b077 read right, among them,
 ///   and `;` glued to a word, letter-spaced and justified, a reading held to
-///   its words (H-150); but for an inline `word-spacing` span cutting a word
-///   (ROADMAP CD-19, Left (5)), pinned.
+///   its words (H-150); and an inline `word-spacing` span cutting a word
+///   (Left (5)) reads right too (held).
 ///   H2-6, a letter-spaced dir-less Arabic line with Cyrillic words, was
 ///   `bundled-fonts`' (fixed). A default build read it, and its Greek twin,
 ///   from the right at every tree since 9297d2d, `.مدرسة ,книга дом свет
@@ -3260,7 +3251,7 @@ fn a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed() {
         LS05_JUSTIFIED,
         "<p dir=\"rtl\">אור יום<br/>?!<b>{</b>בראשית<b>}</b> ברא אלהים</p>",
         Expect::Holds("cons logical whole found apart"),
-        Expect::Holds("cons logical found apart"),
+        Expect::Holds("cons logical whole found apart"),
     ));
     let midws = rep(6, |i| {
         let cut: Vec<char> = ar(i).chars().collect();
@@ -3279,7 +3270,7 @@ fn a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed() {
         "ar",
         "",
         format!("<p>{midws}</p>"),
-        Expect::Pinned("found apart"),
+        Expect::Holds("cons logical whole found apart"),
     ));
     let s8 = |i: usize| word(&AR8, i);
     let long_neutral = format!(
@@ -3328,7 +3319,7 @@ fn a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed() {
             "ar",
             LS055_JUSTIFIED,
             format!("<p>{text}</p>"),
-            Expect::Holds("cons logical found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ));
     }
     let greek: String = (0..3)
@@ -3349,7 +3340,7 @@ fn a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed() {
         "ar",
         LS055_JUSTIFIED,
         format!("<p>{greek}</p>"),
-        Expect::Holds("cons logical found apart"),
+        Expect::Holds("cons logical whole found apart"),
     ));
     let h8 = |i: usize| HEP[i % 8];
     let own = (0..5)
@@ -3370,8 +3361,8 @@ fn a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed() {
         "he",
         MONO_JUSTIFIED,
         format!("<p>{own}</p>"),
-        Expect::Holds("cons logical found apart"),
-        Expect::Holds("logical found apart"),
+        Expect::Holds("cons logical whole found apart"),
+        Expect::Holds("cons logical whole found apart"),
     ));
     let soft = rep(2, |i| {
         format!(
@@ -3466,11 +3457,9 @@ fn a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed() {
 ///   e7ca679's 0 Tw already).
 /// - R1-TABLECOST of its verification, fixed by 935b077: a dir-less table's
 ///   `abc (x).` cell touching a right-to-left one read the row as a
-///   right-to-left line. Its cost, a Latin or Greek cell's row whose
-///   structure tree read in order only at ce0b3de, through the join that fix
-///   took back, and which no tree conserved, is pinned (outside the Left
-///   list's scope); in a default build the Greek row letter-spaced by
-///   `0.1em` reads in order since c7e9b89 (held).
+///   right-to-left line. A Latin or Greek cell's row touching an Arabic one
+///   reads in order and conserves too, in both builds: the Arabic cell's
+///   paragraph declares its direction and the page reads its line in it.
 /// - CR3 of the review of CD-19's fix: the right-to-left table whose
 ///   `أصبحنا نعرف` cells 9297d2d and 56dfd93 read `أصبحنان عرف` finds both
 ///   words since e7ca679.
@@ -3513,29 +3502,24 @@ fn a_cell_or_a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whol
             Expect::Holds("cons logical whole found apart"),
         ),
     ];
-    let cost = Expect::Pinned("whole found apart");
-    for (style, greek) in [
-        ("table { border-spacing: 0 } td { padding: 0; word-spacing: 1em }", cost),
-        (
-            "table { border-spacing: 0 } td { padding: 0; letter-spacing: 0.1em; word-spacing: 0.5em }",
-            Expect::Holds("logical whole found apart"),
-        ),
+    for style in [
+        "table { border-spacing: 0 } td { padding: 0; word-spacing: 1em }",
+        "table { border-spacing: 0 } td { padding: 0; letter-spacing: 0.1em; word-spacing: 0.5em }",
     ] {
         for (language, cell) in [("ar", "أصبحنا نعرف"), ("he", "ספר בית")] {
             cases.push(Case::both(
                 "an abc (x). cell touching a right-to-left one (R1-TABLECOST)",
                 language,
                 style,
-                format!("<table><tr><td>abc (x).</td><td>{cell}</td></tr><tr><td>{cell}</td><td>abc (x).</td></tr></table>"), Expect::Holds("whole found apart")));
+                format!("<table><tr><td>abc (x).</td><td>{cell}</td></tr><tr><td>{cell}</td><td>abc (x).</td></tr></table>"), Expect::Holds("cons logical whole found apart")));
         }
-        for (before, default) in [("abc def", cost), ("αλφα βήτα", greek)] {
-            cases.push(Case::each(
+        for before in ["abc def", "αλφα βήτα"] {
+            cases.push(Case::both(
                 "a Latin or Greek cell touching an Arabic one (R1-TABLECOST's cost)",
                 "ar",
                 style,
                 format!("<table><tr><td>{before}</td><td>أصبحنا نعرف</td></tr><tr><td>أصبحنا نعرف</td><td>{before}</td></tr></table>"),
-                default,
-                cost,
+                Expect::Holds("cons logical whole found apart"),
             ));
         }
     }
@@ -3578,8 +3562,7 @@ fn a_cell_or_a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whol
 /// as Latin does, in two, by the owner's decision (ruling 14), and each case
 /// is held at exactly that reading. And a
 /// pre-existing one the hunt found: the writer draws no Adlam letter in
-/// either build, at any tree (pinned; ROADMAP CD-19, "Read so at every
-/// tree").
+/// either build, at any tree (pinned).
 #[test]
 fn a_word_of_an_overflow_script_an_inline_block_cuts_reads_as_a_latin_word_does() {
     let block = "<span style=\"display: inline-block; width: 1em\"></span>";
@@ -3696,9 +3679,9 @@ fn a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on() {
         Case::both("a styled ?! glued to a Hebrew word under scaleX(2) at 0.6em (V1)", "he", "p { transform: scaleX(2); word-spacing: 0.6em }", he, right),
         Case::both("the same at 1em (V1)", "he", "p { transform: scaleX(2); word-spacing: 1em }", he, right),
         Case::both("the same under scaleX(1.4) at 1em (V1)", "he", "p { transform: scaleX(1.4); word-spacing: 1em }", he, right),
-        Case::both("the same with no dir (V1)", "he", "p { transform: scaleX(2); word-spacing: 0.6em }", "<p>שלום <b>?!</b> עולם.</p>", Expect::Holds("cons logical found apart")),
+        Case::both("the same with no dir (V1)", "he", "p { transform: scaleX(2); word-spacing: 0.6em }", "<p>שלום <b>?!</b> עולם.</p>", Expect::Holds("cons logical whole found apart")),
         Case::both("a styled ?! glued to an Arabic word under scaleX(2) (V1)", "ar", "p { transform: scaleX(2); word-spacing: 0.6em }", ar, right),
-        Case::both("the same with no dir (V1's class, in either build)", "ar", "p { transform: scaleX(2); word-spacing: 0.6em }", "<p>كتاب <b>?!</b> مدرسة.</p>", Expect::Holds("cons logical found apart")),
+        Case::both("the same with no dir (V1's class, in either build)", "ar", "p { transform: scaleX(2); word-spacing: 0.6em }", "<p>كتاب <b>?!</b> مدرسة.</p>", Expect::Holds("cons logical whole found apart")),
         Case::both(
             "a sign after European digits before a bold word under scaleX(1.4) (V1, since round 5)",
             "ar",
@@ -3711,19 +3694,19 @@ fn a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on() {
             "ar",
             "p { margin: 0 30%; transform: rotate(180deg); word-spacing: 1em }",
             format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(3)),
-            Expect::Pinned("cons logical found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::both(
             "the same unturned (Left (6)'s twin)",
             "ar",
             "p { margin: 0 30%; word-spacing: 1em }",
             format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(3)),
-            Expect::Pinned("cons logical found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::both("one under a half turn at 1em (guard; whole by the tie of a glyph three ems back)", "ar", "p { margin: 0 30%; transform: rotate(180deg); word-spacing: 1em }", format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(1)), right),
         Case::both("the same unturned (the guard's twin)", "ar", "p { margin: 0 30%; word-spacing: 1em }", format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(1)), right),
-        Case::both("Hebrew prose under scaleX(3), letter-spaced by 0.3em (the rules, f6 sweep)", "he", "p { margin: 0 30%; transform: scaleX(3); letter-spacing: 0.3em }", prose(&HE), Expect::Holds("cons logical found")),
-        Case::both("Arabic prose under scaleX(3), letter-spaced by 0.3em (the rules, f6 sweep)", "ar", "p { margin: 0 30%; transform: scaleX(3); letter-spacing: 0.3em }", prose(&AR), Expect::Holds("cons logical found")),
+        Case::both("Hebrew prose under scaleX(3), letter-spaced by 0.3em (the rules, f6 sweep)", "he", "p { margin: 0 30%; transform: scaleX(3); letter-spacing: 0.3em }", prose(&HE), Expect::Holds("cons logical whole found apart")),
+        Case::both("Arabic prose under scaleX(3), letter-spaced by 0.3em (the rules, f6 sweep)", "ar", "p { margin: 0 30%; transform: scaleX(3); letter-spacing: 0.3em }", prose(&AR), Expect::Holds("cons logical whole found apart")),
         Case::both("no transform (control)", "he", "p { word-spacing: 0.6em }", he, right),
         Case::both("scale(2), both axes alike (control)", "he", "p { transform: scale(2); word-spacing: 0.6em }", he, right),
         Case::both("scaleY(2), the gaps narrower against the glyphs (V1 with bundled-fonts)", "he", "p { transform: scaleY(2); word-spacing: 0.6em }", he, right),
@@ -3789,7 +3772,7 @@ fn a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on() {
             "he",
             style,
             format!("<div class=\"w\"><p>{}</p></div>", styled_marks(&HE)),
-            Expect::Holds("cons logical found"),
+            Expect::Holds("cons logical whole found apart"),
         ));
     }
     check(&cases);
@@ -3824,7 +3807,7 @@ fn a_line_is_read_back_as_the_pages_fonts_give_its_characters_back() {
             "p { word-spacing: 1em }",
             format!("<p>{comma}</p>"),
             Expect::Neither,
-            Expect::Holds("cons logical found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::each(
             "the same, right to left (bundled-fonts)",
@@ -3832,7 +3815,7 @@ fn a_line_is_read_back_as_the_pages_fonts_give_its_characters_back() {
             "p { word-spacing: 1em }",
             format!("<p dir=\"rtl\">{comma}</p>"),
             Expect::Neither,
-            Expect::Holds("cons logical found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::each(
             "the same with no dir, letter-spaced and justified (bundled-fonts)",
@@ -3840,14 +3823,14 @@ fn a_line_is_read_back_as_the_pages_fonts_give_its_characters_back() {
             "p { letter-spacing: 0.1em; word-spacing: 0.5em; text-align: justify; margin: 0 30% }",
             format!("<p>{comma}</p>"),
             Expect::Neither,
-            Expect::Holds("cons logical found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::both(
             "a bold 1\u{a0}234 in a dir-less Arabic line (guard)",
             "ar",
             ws,
             "<p>كتاب مدرسة <b>1\u{a0}234</b> الطالب، جميل بيت.</p>",
-            Expect::Holds("cons logical found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::both(
             "the same, right to left (guard)",
@@ -3861,7 +3844,7 @@ fn a_line_is_read_back_as_the_pages_fonts_give_its_characters_back() {
             "he",
             ws,
             "<p>שלום עולם <b>1\u{a0}234</b> מלחמה، ספר בית.</p>",
-            Expect::Holds("cons logical found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::both(
             "the same, right to left (guard)",
@@ -3886,21 +3869,29 @@ fn a_line_is_read_back_as_the_pages_fonts_give_its_characters_back() {
 /// The overflow font names no letter of the supplementary planes in its
 /// `/Differences` (`space`, for a character with no glyph name), so a reader
 /// of the page reads an Adlam word drawn in it as spaces: the writer draws no
-/// Adlam letter, in either build, at any tree (pinned above; ROADMAP CD-19,
-/// "Read so at every tree"). Read back as typed, a styled `?!` between two
+/// Adlam letter, in either build, at any tree (pinned above). Read back as
+/// typed, a styled `?!` between two
 /// Adlam words was turned for a line of right-to-left letters the page does
 /// not have, and read `!?`, as at 05cea0b in either build. Read back as the
 /// overflow font gives each character back (`paint::Fonts::read_as`), the
-/// line holds no right-to-left letter a reader reads, and the `?!` reads as
-/// typed. The letters, spaces on the page, are no part of what is held: the
-/// marks are, in the order a reader reads them.
+/// line holds no right-to-left letter a reader reads, and in a right-to-left
+/// paragraph the `?!` reads as typed: the letters, spaces on the page, are no
+/// part of what is held there, the marks are, in the order a reader reads
+/// them. With no `dir` no drawing tried reads the line right, so it is
+/// stated (`paint::Fonts::stated`), and the page reads it as typed, its
+/// Adlam letters too.
 #[test]
 fn a_styled_mark_between_letters_the_page_gives_back_as_spaces_reads_as_typed() {
     let adlam = "\u{1E900}\u{1E923}\u{1E924}\u{1E922} <b>?!</b> \u{1E906}\u{1E935}\u{1E924}\u{1E922} 25\u{66A}.";
+    let typed = adlam.replace("<b>", "").replace("</b>", "");
     let mut wrong = Vec::new();
-    for (what, body) in [
-        ("right to left", format!("<p dir=\"rtl\">{adlam}</p>")),
-        ("with no dir", format!("<p>{adlam}</p>")),
+    for (what, body, stated) in [
+        (
+            "right to left",
+            format!("<p dir=\"rtl\">{adlam}</p>"),
+            false,
+        ),
+        ("with no dir", format!("<p>{adlam}</p>"), true),
     ] {
         let reading = read("ff", "p { word-spacing: 0.6em }", &body);
         let marks: String = reading
@@ -3908,7 +3899,12 @@ fn a_styled_mark_between_letters_the_page_gives_back_as_spaces_reads_as_typed() 
             .chars()
             .filter(|c| !c.is_whitespace())
             .collect();
-        if marks != "?!25\u{66A}." {
+        let read = if stated {
+            reading.text.trim_end() == typed
+        } else {
+            marks == "?!25\u{66A}."
+        };
+        if !read {
             wrong.push(format!("{what}: {:?}", reading.text));
         }
     }
@@ -3919,35 +3915,19 @@ fn a_styled_mark_between_letters_the_page_gives_back_as_spaces_reads_as_typed() 
     );
 }
 
-/// **A styled `?!` after a number whose halves a NO-BREAK SPACE holds
-/// together reads as typed** (round 6's lane F; the owner declined the text
-/// price of reading the page's fonts back, 17 October 2026).
+/// **A styled `?!` beside a number whose halves a NO-BREAK SPACE holds
+/// together reads as typed** (round 6's lane F).
 ///
 /// A standard face draws a NO-BREAK SPACE at `WinAnsiEncoding`'s 0xA0, which
 /// a reader of the page reads as a word space (`paint::Segment::read_as`). So
 /// read back, `<b>1 234</b>` is two numbers to UAX #9, and a reader of a
 /// right-to-left line reads them right to left, `234 1`, in every drawing
-/// tried, since no drawing puts a number's halves back together: no drawing
-/// read the line's letters in order, nothing was found, and the rules'
-/// drawing was kept, which a reader reads with the styled `?!` after the
-/// number turned, `!?`. 05cea0b read the line back as typed, the number one,
-/// and drew the `?!` in its level's order, which the page reads as typed.
-/// Where nothing tried reads a line right as the page's fonts give it back,
-/// and they give a character of it back otherwise than typed, the line is
-/// searched again read as typed, and what that finds is drawn where it reads
-/// closer to the line on the page than the rules' drawing
-/// (`paint::Fonts::set_readings`): the page reads `234 1 ?!`.
-///
-/// At `word-spacing: 0.6em`, `1em` and `12px`, the second sentence's `?!` read
-/// `!?` where 05cea0b read it as typed (12 books in a default build, 7 with
-/// `bundled-fonts`); under `scaleY(2)` both did, where 05cea0b turned the
-/// first. Each row reads every `?!` as typed now, in either build; the rows
-/// that read so at b6a622b2 too (5 with `bundled-fonts`) are guards.
-///
-/// With `bundled-fonts`, the `?!` before the number, `<b>?!</b> W 1 234`,
-/// under `scaleY(2)` read `!?` twice, as at 05cea0b, and reads as typed now;
-/// in a default build its second `?!` reads `!?`, as at 05cea0b and
-/// b6a622b2, pinned.
+/// tried, since no drawing puts a number's halves back together. A line no
+/// drawing tried reads right is stated (`paint::Fonts::stated`): drawn by
+/// the rules inside a `/Span` whose `/ActualText` is the line as typed, which
+/// the page reads. Every `?!` reads as typed, after the number at
+/// `word-spacing: 0.6em`, `1em` and `12px` and under `scaleY(2)`, and before
+/// it, `<b>?!</b> W 1 234`, under `scaleY(2)`, in either build.
 #[test]
 fn a_styled_mark_after_a_number_a_no_break_space_holds_together_reads_as_typed() {
     let scaled = "p { transform: scaleY(2); word-spacing: 0.6em }";
@@ -3986,14 +3966,7 @@ fn a_styled_mark_after_a_number_a_no_break_space_holds_together_reads_as_typed()
     });
     for (what, attr) in [("right to left", " dir=\"rtl\""), ("with no dir", "")] {
         let reading = read("he", scaled, &format!("<p{attr}>{before}</p>"));
-        let (typed, turned) = if cfg!(feature = "bundled-fonts") {
-            (2, 0)
-        } else {
-            (1, 1)
-        };
-        if reading.text.matches("?!").count() != typed
-            || reading.text.matches("!?").count() != turned
-        {
+        if reading.text.matches("?!").count() != 2 {
             wrong.push(format!(
                 "he {what} ?! before 1\u{a0}234 {scaled}: {:?}",
                 reading.text
@@ -4007,23 +3980,21 @@ fn a_styled_mark_after_a_number_a_no_break_space_holds_together_reads_as_typed()
     );
 }
 
-/// **What a line read back as typed finds is drawn only where it reads
-/// closer to the line on the page** (round 6's lane F, the guards of the
-/// search above).
+/// **A line the page's fonts give back otherwise than typed reads its
+/// numbers and marks as typed** (round 6's lane F).
 ///
-/// A drawing that reads a line right as typed is no better than a guess on
-/// the page, whose fonts give some of its characters back otherwise, and is
-/// drawn only where it reads more of the line's pairs of letters in order on
-/// the page than the rules' drawing (`paint::Fonts::reads_closer`). Taken
-/// unchecked, `1 234٪` in a right-to-left Arabic line at
-/// `word-spacing: 0.6em` read `234 1٪`, 05cea0b's text, where the rules'
-/// `234 ٪1` holds the sign after the 4; a styled `?!` between Adlam words
-/// with no `dir`, letter-spaced and justified, read `!?`; and with
-/// `bundled-fonts` a dir-less Hebrew line of `1 234،` under `scaleX(2)` read
-/// `234 1،` and lost the structure tree's order. Each reads as at b6a622b2,
-/// in either build.
+/// A standard face gives a NO-BREAK SPACE back as a word space, and the
+/// overflow font an Adlam letter as a space (`paint::Segment::read_as`), so a
+/// drawing that reads such a line right as typed reads it otherwise on the
+/// page. A line no drawing tried reads right as the page gives it back
+/// states its text (`paint::Fonts::stated`): `1 234٪` in a right-to-left
+/// Arabic line at `word-spacing: 0.6em` reads as typed, its number one; a
+/// styled `?!` between Adlam words with no `dir`, letter-spaced and
+/// justified, reads `?!`; and a dir-less Hebrew line of `1 234،` under
+/// `scaleX(2)` conserves, holds its order, reads whole, is found and draws no
+/// glyph over another, in either build.
 #[test]
-fn what_a_line_read_as_typed_finds_is_drawn_only_where_it_reads_closer_on_the_page() {
+fn a_line_the_page_gives_back_otherwise_than_typed_reads_as_typed() {
     let mut wrong = Vec::new();
     let percent = rep(2, |i| {
         format!(
@@ -4038,7 +4009,7 @@ fn what_a_line_read_as_typed_finds_is_drawn_only_where_it_reads_closer_on_the_pa
         "p { word-spacing: 0.6em }",
         &format!("<p dir=\"rtl\">{percent}</p>"),
     );
-    if reading.text.matches("234 \u{66a}1").count() != 2 {
+    if reading.text.matches("1\u{a0}234\u{66a}").count() != 2 {
         wrong.push(format!("1\u{a0}234\u{66a} at 0.6em: {:?}", reading.text));
     }
     let adlam = rep(2, |i| {
@@ -4061,7 +4032,7 @@ fn what_a_line_read_as_typed_finds_is_drawn_only_where_it_reads_closer_on_the_pa
     }
     assert!(
         wrong.is_empty(),
-        "a line read as typed was drawn as it found it:\n{}",
+        "a line the page gives back otherwise read otherwise:\n{}",
         wrong.join("\n")
     );
     let comma = rep(2, |i| {
@@ -4072,43 +4043,30 @@ fn what_a_line_read_as_typed_finds_is_drawn_only_where_it_reads_closer_on_the_pa
             word(&HE, i + 2)
         )
     });
-    check(&[Case::each(
+    check(&[Case::both(
         "a dir-less Hebrew line of 1\u{a0}234\u{60c} under scaleX(2) at 0.6em",
         "he",
         "p { transform: scaleX(2); word-spacing: 0.6em }",
         format!("<p>{comma}</p>"),
-        Expect::Holds("found apart"),
-        Expect::Holds("cons logical found apart"),
+        Expect::Holds("cons logical whole found apart"),
     )]);
 }
 
 /// **A styled `?!` after a number a NO-BREAK SPACE holds together reads as
 /// typed beside a letter the page's fonts give back otherwise** (round 6's
-/// lane F, the sweep of the search read as typed, in either build).
+/// lane F, in either build).
 ///
-/// Where nothing tried reads a line right as the page's fonts give it back,
-/// the line is searched again with each glyph read as typed, and each drawing
-/// is held to the line's words as typed (`paint::Fonts::set_readings`), not
-/// to its words as the fonts give them back. The two differ beside an Adlam
-/// letter, which the overflow font names `space` and a reader of the page
-/// reads as a word space. Held to the words as the fonts give them back, a
-/// drawing read as typed reads letters the words do not have, so nothing is
-/// found, and the styled `?!` after `<b>1 234</b>` is drawn by the rules,
-/// which a reader reads `!?`, as at b6a622b2. Held to the words as typed, it
-/// reads as typed, as at 05cea0b, and under `scaleY(2)` too, where 05cea0b
-/// turned one `?!` or both.
+/// The overflow font names an Adlam letter `space`, and a reader of the page
+/// reads it as a word space, so a drawing that reads such a line right as
+/// typed reads letters the page does not give back. A line no drawing tried
+/// reads right as the page's fonts give it back states its text
+/// (`paint::Fonts::stated`), and reads as typed.
 ///
 /// Rows: an Adlam word before the number, Adlam letters glued to the word
 /// before it, an Adlam word after the `?!`, and a SOFT HYPHEN inside the word
 /// before it. Each comes in Hebrew and in Arabic, right to left and with no
 /// `dir`, at `word-spacing: 0.6em`, `1em` and `12px` and under `scaleY(2)`:
-/// 64 books. Each reads both `?!` as typed, in either build. At b6a622b2, 52
-/// of them read a `!?` in a default build and 39 with `bundled-fonts`. At
-/// 05cea0b, 16 do (20 with `bundled-fonts`). Held to the words as the fonts
-/// give them back, 36 do in a default build, every Adlam row but the unscaled
-/// ones with the Adlam word after the `?!`, and 28 with `bundled-fonts`. The
-/// SOFT HYPHEN rows read as typed either way: they hold the search read as
-/// typed itself, which b6a622b2 did not make.
+/// 64 books. Each reads both `?!` as typed, in either build.
 #[test]
 fn a_styled_mark_after_a_number_reads_as_typed_beside_a_letter_the_page_gives_back_otherwise() {
     let adlam = "\u{1e900}\u{1e923}\u{1e924}\u{1e922}";
@@ -4242,7 +4200,7 @@ fn each_run_is_written_as_the_read_back_planned_it_though_two_share_a_place() {
             "he",
             "",
             format!("<p>{}</p>", embed(&HE)),
-            Expect::Holds("found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::each(
             "the same at word-spacing: 1em",
@@ -4250,7 +4208,7 @@ fn each_run_is_written_as_the_read_back_planned_it_though_two_share_a_place() {
             "p { word-spacing: 1em; margin: 0 20% }",
             format!("<p>{}</p>", embed(&HE)),
             Expect::Holds("cons logical whole found apart"),
-            Expect::Holds("found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::each(
             "Arabic with LRE and RLE embeddings, no dir, at word-spacing: 1em",
@@ -4258,7 +4216,7 @@ fn each_run_is_written_as_the_read_back_planned_it_though_two_share_a_place() {
             "p { word-spacing: 1em; margin: 0 20% }",
             format!("<p>{}</p>", embed(&AR)),
             Expect::Holds("cons logical whole found apart"),
-            Expect::Holds("found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
         Case::each(
             "Hebrew with ZERO WIDTH JOINERs at a word space, justified",
@@ -4266,15 +4224,15 @@ fn each_run_is_written_as_the_read_back_planned_it_though_two_share_a_place() {
             "p { text-align: justify; margin: 0 30% }",
             format!("<p>{joiners}</p>"),
             Expect::Holds("cons logical whole apart"),
-            Expect::Holds("whole apart"),
+            Expect::Holds("cons logical whole apart"),
         ),
         Case::each(
             "Arabic numbers each closed by a LEFT-TO-RIGHT MARK, right to left",
             "ar",
             "",
             format!("<p dir=\"rtl\">{marks}</p>"),
-            Expect::Holds("found apart"),
-            Expect::Holds("whole found"),
+            Expect::Holds("cons logical whole found apart"),
+            Expect::Holds("cons logical whole found apart"),
         ),
     ]);
 }
@@ -4320,7 +4278,7 @@ fn a_reading_that_cuts_or_joins_a_word_is_searched_past_for_the_lines_words() {
             "ar",
             "p { margin: 0 30%; transform: scaleY(2); letter-spacing: 0.1em; word-spacing: 0.5em; text-align: justify }",
             format!("<p dir=\"rtl\">{}</p>", signs_and_numbers(3)),
-            Expect::Holds("cons logical whole found"),
+            Expect::Holds("cons logical whole found apart"),
         ),
     ]);
 }
@@ -4362,8 +4320,8 @@ fn a_line_whose_right_drawing_lies_past_the_budget_is_reached_by_reading_each_dr
             "<p dir=\"rtl\">יום <bdi>The word שלום means עולם in <i>מלחמה</i>. The word שלום means עולם in <i>מלחמה</i>.</bdi> בראשית.</p>",
             Expect::Holds("cons logical whole found apart"),
         ),
-        Case::both("a justified Arabic paragraph at line-height 0.4, no dir (the price of reading each drawing once)", "ar", tight, format!("<p>{}</p>", styled_marks(&AR)), Expect::Pinned("found apart")),
-        Case::both("the same, right to left (the price of reading each drawing once)", "ar", tight, format!("<p dir=\"rtl\">{}</p>", styled_marks(&AR)), Expect::Pinned("found apart")),
+        Case::both("a justified Arabic paragraph at line-height 0.4, no dir (the price of reading each drawing once)", "ar", tight, format!("<p>{}</p>", styled_marks(&AR)), Expect::Pinned("cons logical found apart")),
+        Case::both("the same, right to left (the price of reading each drawing once)", "ar", tight, format!("<p dir=\"rtl\">{}</p>", styled_marks(&AR)), Expect::Pinned("cons logical found apart")),
     ]);
 }
 
@@ -4392,61 +4350,49 @@ fn squeezed_blocks(words: &[&'static str; 12]) -> String {
 /// shape), and on such a line no drawing the read-back tries reads the
 /// letters in order on the page. Searched on the page alone, the line was
 /// drawn by the rules, and a Hebrew paragraph with no `dir` at
-/// `word-spacing: 0.6em` or `1em` lost its structure tree's order, which it
-/// holds at 935b077 in a default build: there the read-back, in the runs'
-/// space, had found a drawing that reads right in it, and that drawing
-/// reads the logical order right on the page as well
-/// (`paint::Fonts::set_readings`). What that search finds is drawn only
-/// where it reads closer to the line on the page than the rules' drawing
-/// (`paint::Fonts::reads_closer`): turned a quarter (`rotate(90deg)`) at
-/// `0.6em`, the paragraph held its structure tree's order at 9297d2d and
-/// 56dfd93 and lost it at 935b077, which drew what its search found in the
-/// runs' space; that drawing reads no closer on the page. Turned so, or
-/// three quarters (`rotate(270deg)`), which lost the order at 05cea0b too,
-/// a reader measures each line along its own baseline (`TextDevice`), and
-/// the paragraph reads as it reads unturned, character for character: it
-/// conserves, holds its order, finds every word and draws no glyph over
-/// another, in both builds. Each inline block is one unit of its
-/// line's order, scaled about its own text (`paint::visual_lines`), and with
-/// `bundled-fonts` the paragraph at `0.6em`, flat and turned a quarter or
-/// three quarters, conserves, holds its order, reads whole, finds every word
-/// and draws no glyph over another, its reading held to its words (H-150).
+/// `word-spacing: 0.6em` or `1em` lost its structure tree's order. Such a
+/// line is searched in its runs' own space too, and what that search finds
+/// is drawn where it reads the line's words right on the page
+/// (`paint::Fonts::reads_whole`); a line nothing reads right states its text
+/// (`paint::Fonts::stated`). Turned a quarter (`rotate(90deg)`) or three
+/// quarters (`rotate(270deg)`), a reader measures each line along its own
+/// baseline (`TextDevice`), and the paragraph reads as it reads unturned.
+/// Each inline block is one unit of its line's order, scaled about its own
+/// text (`paint::visual_lines`), and each paragraph, flat or turned,
+/// conserves, holds its order, reads whole, finds every word and draws no
+/// glyph over another, in both builds.
 #[test]
 fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
     let at_06 = "p { margin: 0 30%; transform: none; word-spacing: 0.6em } .w { transform: none }";
     let at_1 = "p { margin: 0 30%; transform: none; word-spacing: 1em } .w { transform: none }";
     let body = format!("<div class=\"w\"><p>{}</p></div>", squeezed_blocks(&HE));
     check(&[
-        Case::each(
-            "a dir-less Hebrew paragraph with inline blocks under scaleX(0.5) at 0.6em (guard; pinned with bundled-fonts)",
+        Case::both(
+            "a dir-less Hebrew paragraph with inline blocks under scaleX(0.5) at 0.6em (guard)",
             "he",
             at_06,
             body.clone(),
-            Expect::Holds("logical"),
             Expect::Holds("cons logical whole found apart"),
         ),
-        Case::each(
+        Case::both(
             "the same at 1em (guard)",
             "he",
             at_1,
             body.clone(),
-            Expect::Holds("logical whole found"),
-            Expect::Holds("found"),
+            Expect::Holds("cons logical whole found apart"),
         ),
-        Case::each(
+        Case::both(
             "the same at 0.6em turned a quarter, as unturned (f6 sweep)",
             "he",
             "p { margin: 0 30%; transform: rotate(90deg); word-spacing: 0.6em } .w { transform: none }",
             body.clone(),
-            Expect::Holds("cons logical found apart"),
             Expect::Holds("cons logical whole found apart"),
         ),
-        Case::each(
+        Case::both(
             "the same turned three quarters, as unturned",
             "he",
             "p { margin: 0 30%; transform: rotate(270deg); word-spacing: 0.6em } .w { transform: none }",
             body,
-            Expect::Holds("cons logical found apart"),
             Expect::Holds("cons logical whole found apart"),
         ),
     ]);
@@ -4467,26 +4413,19 @@ fn marked_blocks(words: &[&'static str; 12], sx: &str) -> String {
     })
 }
 
-/// **A drawing found in the runs' own space is drawn where it reads more of
-/// the line's runs in their own order on the page than the rules' drawing**
-/// (round 6's review), cases.
+/// **A styled `?!` in a squeezed inline block reads in its order** (round
+/// 6's review), cases.
 ///
 /// A styled `?!` in an inline block squeezed by `scaleX(0.6)`, `0.7` or
 /// `0.8`, in a Hebrew or Arabic paragraph with no `dir` at
 /// `word-spacing: 0.5em` or `0.55em`, under no transform or `scaleX(2)`: no
 /// drawing the read-back tries reads the line's letters in order on the
 /// page, and in the runs' own space its search finds one
-/// (`paint::Fonts::set_readings`). On the page that drawing reads the `?!`
-/// in its order with a letter of the next word between them, where the
-/// rules' drawing turns it about, and the two keep as many of the text's
-/// pairs of letters side by side, or the rules' more
-/// (`paint::Words::pairs_in`). Held to the pairs alone, the rules' drawing
-/// was kept, and paragraphs whose structure tree's order 935b077 held, by
-/// drawing what its search found, lost it. What the search finds is drawn
-/// now where it reads more of the line's runs with their own characters in
-/// order, as a reader of the structure tree reads each element's text
-/// (`paint::Fonts::reads_closer`), and where as many, more pairs. Each of
-/// the 24 paragraphs holds its order, in both builds.
+/// (`paint::Fonts::set_readings`), which is drawn where it reads the line's
+/// words right on the page (`paint::Fonts::reads_whole`); a line nothing
+/// reads right states its text (`paint::Fonts::stated`). Each of the 24
+/// paragraphs conserves, holds its order, reads whole, finds every word and
+/// draws no glyph over another, in both builds.
 #[test]
 fn a_styled_mark_in_a_squeezed_block_reads_in_its_order_where_the_runs_space_drawing_holds_it() {
     let mut cases = Vec::new();
@@ -4503,7 +4442,7 @@ fn a_styled_mark_in_a_squeezed_block_reads_in_its_order_where_the_runs_space_dra
                     lang,
                     style,
                     format!("<div class=\"w\"><p>{}</p></div>", marked_blocks(words, sx)),
-                    Expect::Holds("logical"),
+                    Expect::Holds("cons logical whole found apart"),
                 ));
             }
         }
@@ -4541,8 +4480,9 @@ fn widened_and_squeezed(words: &[&'static str; 12], sx: &str) -> String {
 /// as CSS paints it — 8 a paragraph at `0.5em`, 7 at `0.55em`, 1 turned a
 /// quarter. Scaled about a box its text was not drawn at, as before, the
 /// two drew 13, 8 or 4 by how far the squeezed block was squeezed. Each
-/// paragraph reads in logical order, conserves and finds every word, the
-/// same in both builds, and is pinned at its verdicts and its count.
+/// paragraph reads in logical order, conserves, reads every word whole and
+/// finds it, the same in both builds, and is pinned at its verdicts and its
+/// count.
 #[test]
 fn a_styled_mark_in_a_widened_block_reads_in_order_with_its_block_scaled_about_its_own_text() {
     const STYLES: [&str; 6] = [
@@ -4564,7 +4504,7 @@ fn a_styled_mark_in_a_widened_block_reads_in_order_with_its_block_scaled_about_i
                 "ar",
                 style,
                 format!("<div class=\"w\"><p>{}</p></div>", widened_and_squeezed(&AR, sx)),
-                Expect::Drawing("cons logical found", over),
+                Expect::Drawing("cons logical whole found", over),
             ));
         }
     }
@@ -4645,65 +4585,60 @@ fn a_drawing_that_sets_more_glyphs_over_others_than_the_rules_is_not_taken() {
     );
 }
 
-/// **Two cells are read back as a reader parts them on the page** (the edges
-/// of V1's class).
+/// **Two cells are read back as a reader parts them on the page, and read
+/// as typed** (the edges of V1's class).
 ///
 /// The read-back reads together the runs a reader reads as one line
 /// (`paint::page_lines`), and a gap between two runs parts them where it is
 /// wide in a reader's ems on the page (`paint::along_the_line`). Under
 /// `scaleX(0.5)` a Latin cell `abc (x).` and a right-to-left one `10px` apart
 /// at `word-spacing: 1em` are one line to a reader and two in their runs'
-/// ems: read back as two, the right-to-left cell was drawn whole and the
-/// reader read the row from the right, `שלום עולם.abc (x)`, as 935b077 drew
-/// such a row when its cells touched. Read back as a reader reads it, the
-/// row holds two paragraphs' text, and the right-to-left cell is left in
-/// pieces (`paint::sharing_a_line`): its two words are not read together
-/// before the Latin cell.
+/// ems, and the page reads the row in order, the right-to-left cell whole
+/// after the Latin one, in either build.
 ///
-/// Under `scaleX(2)` or `scaleX(3)` two right-to-left cells `6px` or `8px`
-/// apart are parted on the page and not in their runs, and each is read back
-/// alone; the first cell reads on one line: the rules' drawing reads its
-/// letters in order with its words parted (`paint::Read::Letters`), and the
-/// read-back searches on to a drawing that reads its words (H-150, pinned at
-/// what each cell reads).
+/// Under `scaleX(2)` two right-to-left cells `6px` apart are parted on the
+/// page and not in their runs, and each is read back alone: each reads as
+/// typed on a line of its own, the second's full stop after its bracket, in
+/// either build.
 #[test]
 fn two_cells_are_read_back_as_a_reader_parts_them_on_the_page() {
     let mut wrong = Vec::new();
-    for (language, cells, whole) in [
-        ("he", "<td>abc (x).</td><td>שלום עולם</td>", "שלום עולם"),
-        ("ar", "<td>abc (x).</td><td>كتاب مدرسة</td>", "كتاب مدرسة"),
+    for (language, cells, typed) in [
+        (
+            "he",
+            "<td>abc (x).</td><td>שלום עולם</td>",
+            "abc (x).שלום עולם\n",
+        ),
+        (
+            "ar",
+            "<td>abc (x).</td><td>كتاب مدرسة</td>",
+            "abc (x).كتاب مدرسة\n",
+        ),
     ] {
         let style =
             "table { border-spacing: 10px; transform: scaleX(0.5) } td { padding: 0; word-spacing: 1em }";
         let reading = read(language, style, &format!("<table><tr>{cells}</tr></table>"));
-        if reading.text.contains(whole) {
+        if reading.text != typed {
             wrong.push(format!("{language}, {style}: {:?}", reading.text));
         }
     }
-    for (language, cells, pinned) in [
+    for (language, cells, typed) in [
         (
             "he",
             "<td><b>מלחמה</b> ספר\u{60C}</td><td>בית <i>(</i>גדול<i>)</i>.</td>",
-            if cfg!(feature = "bundled-fonts") {
-                "מלחמה ספר\u{60C}\nבית\n(גדול)\n.\n"
-            } else {
-                "מלחמה ספר\u{60C}\n.בית(גדול)\n"
-            },
+            "מלחמה ספר\u{60C}\nבית (גדול).\n",
         ),
         (
             "ar",
             "<td><b>الطالب</b> جميل\u{60C}</td><td>بيت <i>(</i>كبير<i>)</i>.</td>",
-            "الطالب جميل\u{60C}\n.بيت(كبير)\n",
+            "الطالب جميل\u{60C}\nبيت (كبير).\n",
         ),
     ] {
         let style =
             "table { border-spacing: 6px; transform: scaleX(2) } td { padding: 0; word-spacing: 1em }";
         let reading = read(language, style, &format!("<table><tr>{cells}</tr></table>"));
-        if reading.text != pinned {
-            wrong.push(format!(
-                "{language}, {style} (pinned {pinned:?}): {:?}",
-                reading.text
-            ));
+        if reading.text != typed {
+            wrong.push(format!("{language}, {style}: {:?}", reading.text));
         }
     }
     assert!(

@@ -1195,12 +1195,12 @@ impl<'a> Fonts<'a> {
     /// neutrals in the other order ([`Drawing::level_order`]), or its slice
     /// cut otherwise into text objects ([`Cut`]); then two runs at a time,
     /// within [`READINGS_PER_LINE`] ([`Fonts::search`]). The first drawing
-    /// that reads the line's words is the one drawn. Where none does, the
-    /// first that reads its letters in order, a word cut where a reader
-    /// parts the spacing or two run together ([`Read::Letters`]), is drawn,
-    /// unless the rules' drawing reads the letters so too, and is kept; and
-    /// none is drawn that sets more glyphs over others than the rules'
-    /// ([`Overprint`]). Under a transform, a line the rules' drawing reads
+    /// that reads the line's words is the one drawn, and none that sets more
+    /// glyphs over others than the rules' ([`Overprint`]); one that reads
+    /// its letters in order and not its words, a word cut where a reader
+    /// parts the spacing or two run together ([`Read::Letters`]), is kept
+    /// while the search goes on, where the rules' drawing does not read the
+    /// letters so. Under a transform, a line the rules' drawing reads
     /// there with its letters in order and not its words, which nothing
     /// tried reads with its words, is searched in its runs' own space too, as
     /// 935b077 searched every line under a transform, and what that finds is
@@ -4634,10 +4634,17 @@ impl Overprint {
     /// glyph's quad's bounds, so under a
     /// skew a slanted glyph's box reaches over its neighbour's where nothing
     /// is drawn over anything (V7 of round 6's review): every drawing tried
-    /// is counted so, the rules' among them.
+    /// is counted so, the rules' among them. Two boxes that start at one
+    /// place are taken narrower first, so a glyph of no width at a letter's
+    /// edge, a joiner's or an embedding's, stands over nothing whichever
+    /// order the reading lists them in.
     fn count(self) -> usize {
         let Overprint(mut boxes) = self;
-        boxes.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        boxes.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then(a.1.total_cmp(&b.1))
+                .then(a.2.total_cmp(&b.2))
+        });
         boxes
             .windows(2)
             .filter(|pair| pair[0].0 == pair[1].0 && pair[1].1 < pair[0].2 - 0.02 * pair[1].3)
@@ -5971,8 +5978,11 @@ fn undoes_its_levels(c: char) -> bool {
 ///   the line alone as a left-to-right paragraph's, its `?!` is at level 0,
 ///   not 1, and drawn `!?` in its paragraph's level order it read back
 ///   `שלום !?` where as typed it reads `שלום ?!` — the price the comma
-///   tie-break costs the line in one run, which ruling 14 accepted, and no
-///   more. The direction is the one
+///   tie-break costs the line in one run on a page that declares no
+///   direction, and no more. A tagged page declares the paragraph's, and the
+///   read-back reads the line from the right as the reader will
+///   ([`Fonts::set_readings_tagged`]), so the run is drawn in its level's
+///   order there, which reads as typed. The direction is the one
 ///   the reader reads the line in, not its paragraph's: resolved in a
 ///   paragraph's with no `dir` — left to right, for a line with Arabic at
 ///   both ends that a reader reads from the right — the `). ` after a
@@ -7573,7 +7583,8 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// `x<b>e</b>\u{301}x` beside a right-to-left word reading `xex\u{301}`. In a
 /// right-to-left run the letter is drawn to the right of the slice, by a run
 /// the content stream may have written earlier, and the mark is drawn where
-/// the pen stands: a known limit `epub.md` names.
+/// the pen stands; a line no drawing then reads with the mark on its letter
+/// is stated ([`Fonts::stated`]).
 ///
 /// Returns where the pen ended, in layout pixels.
 #[expect(

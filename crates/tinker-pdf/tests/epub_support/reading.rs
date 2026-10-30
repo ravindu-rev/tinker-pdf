@@ -326,7 +326,14 @@ fn drawn_over(drawn: &tinker_pdf::TextPage) -> usize {
             boxes.push((baseline, x0, x1, c.size));
         }
     }
-    boxes.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    // Two boxes that start at one place are taken narrower first, so a
+    // glyph of no width at a letter's edge, a joiner's or an embedding's,
+    // stands over nothing whichever order the reading lists them in.
+    boxes.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.total_cmp(&b.1))
+            .then(a.2.total_cmp(&b.2))
+    });
     boxes
         .windows(2)
         .filter(|pair| pair[0].0 == pair[1].0 && pair[1].1 < pair[0].2 - 0.02 * pair[1].3)

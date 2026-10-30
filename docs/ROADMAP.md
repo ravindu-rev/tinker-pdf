@@ -28,8 +28,9 @@ and its row is narrowed to it.
   draws the same page, and CI's `test` job, which has no corpus, skips it.
 - **A line of a right-to-left paragraph read alone.** The reader puts each
   line in logical order by itself, so a line of an Arabic paragraph that
-  opens with `25٪` reads `25 ٪يوم`, where its paragraph would keep the sign
-  with its number. FT-37 resolves a paragraph across its lines.
+  opens with `25٪`, on a page that does not state its text, reads
+  `25 ٪يوم`, where its paragraph would keep the sign with its number. FT-37
+  resolves a paragraph across its lines.
 
 ## Where the steps are
 
@@ -104,17 +105,14 @@ a choice inside a step; so is anything a change would cost that works today.
 Take the first step in this list whose **Depends on** is done; a step that
 waits on the owner is passed over until the owner decides.
 
-1. **CD-19**, by the owner's rules in ruling 14: a step whose figures read
-   no case worse lands without waiting, and one that reads a case worse
-   waits on its H row.
-2. **The MS tier** from where it stands: MS-04.3 to MS-04.8; MS-05.1 after
+1. **The MS tier** from where it stands: MS-04.3 to MS-04.8; MS-05.1 after
    MS-04.6; MS-12.1 and MS-12.2; MS-03.1 and MS-02.2; K-02.3, then MS-01.3
    to MS-01.7; P-05.3, then MS-08.2; MS-07.3. Then MS-11, MS-01 to MS-01.8,
    MS-04, MS-05, MS-06 and MS-02, in that order. MS-01.9 closes MS-01 once
    the P rows that land its guards have.
-3. **K-06** (the `jbig2` fuzz target), **K-01** (the external graphics
+2. **K-06** (the `jbig2` fuzz target), **K-01** (the external graphics
    state) and **K-02** (default colour spaces), then **K-12 to K-14**.
-4. **P-01 to P-05** and **P-28**.
+3. **P-01 to P-05** and **P-28**.
 
 Then the capability tiers in the order of the table above, with signatures'
 SG-01…SG-09 and form JavaScript's FJ-01…FJ-04 started as soon as their

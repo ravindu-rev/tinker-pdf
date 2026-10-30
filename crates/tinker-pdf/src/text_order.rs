@@ -272,14 +272,15 @@ pub(crate) fn state_in_content_order(page: &mut TextPage) {
 /// page reads them on, where its text will stand; a line or a block left with
 /// nothing goes, and so does its entry in `reads`. A line that loses glyphs
 /// so is read again rather than as `reads` found it. Returns the glyphs
-/// dropped, by span, in the order the page reads them, which its text stands
-/// on as on the glyphs the first line keeps ([`Stated::glyphs`]).
+/// dropped, by span, a line's at a time in the order the page reads its
+/// lines, which its text stands on as on the glyphs the first line keeps
+/// ([`Stated::glyphs`]).
 fn keep_stated_on_first_line(
     blocks: &mut Vec<TextBlock>,
     mut reads: Option<&mut Vec<Vec<Option<Read>>>>,
-) -> BTreeMap<u32, Vec<TextChar>> {
+) -> BTreeMap<u32, Vec<Vec<TextChar>>> {
     let mut placed: BTreeSet<u32> = BTreeSet::new();
-    let mut dropped: BTreeMap<u32, Vec<TextChar>> = BTreeMap::new();
+    let mut dropped: BTreeMap<u32, Vec<Vec<TextChar>>> = BTreeMap::new();
     for (b, block) in blocks.iter_mut().enumerate() {
         let mut at = 0usize;
         while at < block.lines.len() {
@@ -290,10 +291,14 @@ fn keep_stated_on_first_line(
                     .into_iter()
                     .partition(|c| c.stated.is_some_and(|span| placed.contains(&span)));
                 line.chars = kept;
+                let mut here: BTreeMap<u32, Vec<TextChar>> = BTreeMap::new();
                 for c in gone {
                     if let Some(span) = c.stated {
-                        dropped.entry(span).or_default().push(c);
+                        here.entry(span).or_default().push(c);
                     }
+                }
+                for (span, glyphs) in here {
+                    dropped.entry(span).or_default().push(glyphs);
                 }
                 line.text = line.chars.iter().map(|c| c.text.as_str()).collect();
                 if let Some(quad) = line.chars.iter().map(|c| c.quad).reduce(enclose) {
@@ -345,8 +350,8 @@ fn keep_stated_on_first_line(
 struct Stated<'a> {
     /// Each span's text, by its index.
     texts: &'a [String],
-    /// Each span's glyphs on lines after its first.
-    elsewhere: Option<&'a BTreeMap<u32, Vec<TextChar>>>,
+    /// Each span's glyphs on lines after its first, a line's at a time.
+    elsewhere: Option<&'a BTreeMap<u32, Vec<Vec<TextChar>>>>,
 }
 
 impl<'a> Stated<'a> {
@@ -358,26 +363,61 @@ impl<'a> Stated<'a> {
     }
 
     /// The glyphs span `span`'s text stands on ([`stated_chars`]): `here`,
-    /// those of a line it is read on, and then those on the lines after,
+    /// those of the line it is read on, and then those on each line after,
     /// where it reads nothing, so that each character keeps the sequence,
-    /// the font and the place of the glyph that draws it wherever that is.
+    /// the font and the place of the glyph that draws it wherever that is;
+    /// each line's in the order a line of them reads in `direction`
+    /// ([`read_in`]), or as drawn where there is none, a vertical line's.
     fn glyphs<'g>(
         self,
         span: u32,
-        here: impl IntoIterator<Item = &'g TextChar>,
+        here: Vec<&'g TextChar>,
+        direction: Option<BaseDirection>,
     ) -> Vec<&'g TextChar>
     where
         'a: 'g,
     {
-        here.into_iter()
-            .chain(
-                self.elsewhere
-                    .and_then(|elsewhere| elsewhere.get(&span))
-                    .into_iter()
-                    .flatten(),
-            )
-            .collect()
+        let mut glyphs = read_in(here, direction);
+        for line in self
+            .elsewhere
+            .and_then(|elsewhere| elsewhere.get(&span))
+            .into_iter()
+            .flatten()
+        {
+            glyphs.extend(read_in(line.iter().collect(), direction));
+        }
+        glyphs
     }
+}
+
+/// `glyphs` in the order a line of them reads in `direction` (ruling 14,
+/// [`logical_order`]), or as drawn where there is none: what a span's text
+/// stands on in order ([`stated_chars`]), so that a character the text
+/// repeats stands on the glyph that draws it in its place, where the order
+/// the content stream drew them in hands a right-to-left word's first mark
+/// the glyph of its last.
+fn read_in(glyphs: Vec<&TextChar>, direction: Option<BaseDirection>) -> Vec<&TextChar> {
+    let Some(direction) = direction.filter(|_| glyphs.len() > 1) else {
+        return glyphs;
+    };
+    let owned: Vec<TextChar> = glyphs.iter().map(|glyph| (*glyph).clone()).collect();
+    let units = drawn_units(&owned);
+    let visual: Vec<&str> = units.texts.iter().map(String::as_str).collect();
+    logical_order(&visual, direction)
+        .iter()
+        .filter_map(|unit| units.clusters.get(*unit))
+        .flat_map(|cluster| cluster.iter().filter_map(|at| glyphs.get(*at).copied()))
+        .collect()
+}
+
+/// The direction a stated text is read in: the one its line is declared in,
+/// or else P2's, its first strong character's.
+fn stated_direction(text: &str, declared: Option<BaseDirection>) -> BaseDirection {
+    declared.unwrap_or(if first_strong_rtl(text) {
+        BaseDirection::RightToLeft
+    } else {
+        BaseDirection::LeftToRight
+    })
 }
 
 /// Puts each span `line` holds in its text, at the span's first glyph in the
@@ -401,8 +441,12 @@ fn state_in_place(line: &mut TextLine, stated: Stated<'_>) -> bool {
             None => out.push(c.clone()),
             Some(span) => {
                 if let Some(held) = spans.get(&span).filter(|held| held.first() == Some(&at)) {
-                    let glyphs = stated.glyphs(span, held.iter().filter_map(|k| chars.get(*k)));
-                    out.extend(stated_chars(stated.text(span), &glyphs, span));
+                    let text = stated.text(span);
+                    let direction = (line.wmode == WritingMode::Horizontal)
+                        .then(|| stated_direction(text, None));
+                    let here = held.iter().filter_map(|k| chars.get(*k)).collect();
+                    let glyphs = stated.glyphs(span, here, direction);
+                    out.extend(stated_chars(text, &glyphs, span));
                 }
             }
         }
@@ -1221,8 +1265,11 @@ fn logical_line_reading(
         .and_then(|c| c.stated)
         .filter(|span| line.chars.iter().all(|c| c.stated == Some(*span)));
     if let Some(span) = whole {
-        let glyphs = stated.glyphs(span, &line.chars);
-        line.chars = stated_chars(stated.text(span), &glyphs, span);
+        let text = stated.text(span);
+        let direction = stated_direction(text, declared);
+        let glyphs = stated.glyphs(span, line.chars.iter().collect(), Some(direction));
+        let chars = stated_chars(text, &glyphs, span);
+        line.chars = chars;
         line.text = line.chars.iter().map(|c| c.text.as_str()).collect();
         line.rtl = declared.map_or_else(
             || first_strong_rtl(&line.text),
@@ -1266,7 +1313,8 @@ fn logical_line_reading(
                 Some(span) => {
                     let mut at = cluster.clone();
                     at.sort_unstable();
-                    let glyphs = stated.glyphs(span, at.iter().filter_map(|k| chars.get(*k)));
+                    let here = at.iter().filter_map(|k| chars.get(*k)).collect();
+                    let glyphs = stated.glyphs(span, here, Some(reading.direction));
                     out.extend(stated_chars(stated.text(span), &glyphs, span));
                 }
                 None => out.extend(cluster.iter().filter_map(|at| chars.get(*at)).cloned()),

@@ -1,20 +1,19 @@
 # Right-to-left read-back
 
-*For [ROADMAP](../ROADMAP.md) row CD-19.* The EPUB writer draws a line that
+*For [ROADMAP](../ROADMAP.md) row FT-37.* The EPUB writer draws a line that
 holds a right-to-left character so that a reader of the page reads it back in
 logical order, and reads each such line back on the page it is drawn on to
 choose how it is drawn ([features/epub.md](../features/epub.md), "Each line is
-read back on the page it is drawn on"; [ruling 14](../rulings.md)). CD-19
-lists the cases that still do not conserve, do not read whole, are not found
-by search, or draw a glyph over another. This doc has a design section for
-each case, added by the design step that takes it: the case reproduced from
-the test that pins it, the code that decides it, and the rule that fixes it or
-the options whose price the owner decides.
+read back on the page it is drawn on"; [ruling 14](../rulings.md)). This doc
+has a design section for each case that did not conserve, read whole, was not
+found by search, or drew a glyph over another: the case reproduced from the
+test that pins it, the code that decides it, and the rule that fixed it or
+the options whose price the owner decided.
 
 ## Scope
 
-- CD-19's open cases, Left (1) to Left (10), each reproduced from its pinning
-  test in the default and `bundled-fonts` builds.
+- The cases Left (1) to Left (10), each reproduced from its pinning test in
+  the default and `bundled-fonts` builds.
 - For each, the mechanism, named by the code that decides it, and either a
   rule with its exit test or the options that would cost something that works
   today, each with what its measure step prices: the cases it reads better and
@@ -457,10 +456,11 @@ the reader takes each where it is said.
    the line's order, read as U+FFFC OBJECT REPLACEMENT CHARACTER is, and
    stands for its text there; a span whose glyphs stand on several lines
    puts its text on the first of them the page reads. Each character of the text
-   stands on a glyph of the span that draws it — the first not yet taken, in
-   the order the content stream drew them, whose text the text continues
-   with, on whichever line it stands — and takes its quad, `/MCID`, stream
-   and font, so that search finds
+   stands on a glyph of the span that draws it — the first not yet taken
+   whose text the text continues with, each line's glyphs in the order a
+   line of them reads in the text's direction, the line it is read on first
+   (`text_order::read_in`) — and takes its quad, `/MCID`, stream and font,
+   so that search finds
    the text where it is drawn and the structure tree's order holds; a
    character no glyph draws takes the span's box. `/ActualText` on a
    structure element stays the structured view's: an element can span lines
@@ -493,15 +493,14 @@ A PDF that says neither reads as ruling 14 reads it, to the byte.
    its element and the structure tree its order. A stated line reads as
    typed.
 
-**What it closes.** In the writer's own books, Left (1), which its declared
-direction reads left to right; the prices ruling 14 records for a line read
-alone — a right-to-left line that opens with a dash, an ellipsis or a
-closing quotation mark, and one that opens with stops before a bracket pair
-— which their declared direction reads as typed; and every line no drawing
-reads right, stated: Left (4)'s, Left (5)'s findings, Left (9)'s comma and
-the price of reading each drawing once. In other PDFs, a tagged PDF that
-declares its directions reads in them, and one that states its text reads
-it.
+**What it closes.** In the writer's own books, every case open before it, in
+both builds: Left (1), Left (4)'s lines, Left (5)'s findings and Left (9)'s
+comma each conserve, read whole, are found and draw no glyph over another;
+and the prices ruling 14 records for a line read alone — a right-to-left line
+that opens with a dash, an ellipsis, a closing quotation mark or a run of
+neutrals, and one that opens with stops before a bracket pair — read as
+typed in their declared direction. In other PDFs, a tagged PDF that declares
+its directions reads in them, and one that states its text reads it.
 
 **What it costs.** A PDF from another producer that carries `/ActualText` on
 marked content reads that text in `Page::text` as well as in the structured
@@ -511,7 +510,25 @@ The lookup reads one entry of the parent tree a stream, found by its
 `/Limits`, and each element once, for a page with a block that holds
 right-to-left text. The writer's output grows by an attribute on each
 element that holds right-to-left text and a span around each stated line.
-What the suites read and what it costs in time is CD-19.45's to measure.
+
+Measured over `epub_fallback.rs` and `epub_conservation.rs` in both builds
+against the reader and writer before it, each case's `CASE` line compared: no
+case reads worse, and no glyph more is drawn over another. In a default build
+99 of the first suite's 232 cases and 77 of the second's 119 read better;
+with `bundled-fonts`, 94 of 235 and 76 of 119. 75 cases of both builds read
+the same characters in the same order, their white space otherwise: in 40 a line
+breaks where it did not, and in 12 a break goes. A line its declared
+direction reads right is drawn by the rules, and a reader parts a word space
+stretched past half an em before a left-to-right letter there as it parts a
+Latin line's, `abc <b>def</b> (ספר) בית` at `word-spacing: 12px` reading on
+two lines as `abc <b>def</b> ghi jkl` does; before, a reading off the line
+read the pieces in the wrong direction and the read-back drew the line
+another way. The committed documents read as before, character for
+character, in either order; `text_logical_order.rs`, `bidi_conformance.rs`,
+`tagged_pdf.rs` and `pdfua.rs` pass in both builds. Timed a test at a time,
+the two trees interleaved, seven rounds in release and five in debug, the two
+suites take 1.001 times the time in release, each suite 0.99 to 1.01, and
+1.016 in debug, each 0.95 to 1.03.
 
 **The steps.** CD-19.41, the reader's stated text in `tinker-pdf-content`'s
 `TextDevice` and in `text_order`; CD-19.42, the reader's declared direction
@@ -557,12 +574,11 @@ and the mixed runs' rows of `epub_conservation.rs`'s
 
 ### The other cases
 
-Each gets its section from its design step: Left (4), the lines the reader
-reads from the right whatever the writer draws (CD-19.22); Left (9), a comma read
-apart after a number a NO-BREAK SPACE holds together (CD-19.32); and
-Left (5), its findings outside ruling 14's rules (CD-19.34). The options whose price the owner decides get
-their figures here from their measure steps, D's and H6's as landed above. Left (2) reads in two, as a
-Latin word does, by the owner's decision (CD-19.18).
+Left (4), the lines the reader read from the right whatever the writer drew;
+Left (9), a comma read apart after a number a NO-BREAK SPACE holds together;
+and Left (5), its findings outside ruling 14's other rules, are closed by the
+page saying how it reads (above). Left (2) reads in two, as a Latin word
+does, by the owner's decision (CD-19.18).
 
 ## Milestones
 
@@ -605,13 +621,13 @@ Every fix step also passes `epub_fallback.rs`, `epub_conservation.rs` and
     line resumed across a stretch its spacing accounts for and of two table
     cells set apart staying two lines, and Left (3)'s rows of that pin
     holding.
-11. CD-19.22 to CD-19.25: Left (4)'s section, its rules priced and landed;
-    exit: the section, reproducing each shape from its pin; then, for each
-    rule taken, a `bidi.rs`, `text_order.rs` or `text.rs` test with its guard,
-    the rows it reaches of `a_dirless_line_with_a_right_to_left_gloss`,
-    `a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed`
-    and `a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading`
-    holding, and `no_left_to_right_page_moves` passing.
+11. Left (4), Left (5) and Left (9), closed by milestone 7; exit: their rows
+    of `a_dirless_line_with_a_right_to_left_gloss`,
+    `a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed`,
+    `a_neutral_beside_a_number_or_a_styled_word_is_drawn_for_its_lines_reading`,
+    `a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed`
+    and `a_line_the_page_gives_back_otherwise_than_typed_reads_as_typed`
+    holding every verdict in both builds.
 12. CD-19.27 to CD-19.29: Left (6)'s section, its reader priced and landed;
     exit: the section, reproduced from
     `a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on`;
@@ -621,15 +637,6 @@ Every fix step also passes `epub_fallback.rs`, `epub_conservation.rs` and
 13. CD-19.30 and CD-19.31: Left (7), reached by CD-19.8, which finds its word
     with `bundled-fonts` in
     `a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space`.
-14. CD-19.32 and CD-19.33: Left (9); exit: the section, reproduced from
-    `what_a_line_read_as_typed_finds_is_drawn_only_where_it_reads_closer_on_the_page`;
-    then its rows of that pin conserving with `bundled-fonts`, or the case in the roadmap's Bugs.
-15. CD-19.34 to CD-19.36: Left (5)'s findings; exit: the section, reproducing
-    each from its pin; then the `'.` rows of
-    `a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed`
-    holding their structure tree's order, and the span's and the `;`'s rows
-    of `a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed`
-    conserving and reading whole, or the cases in the roadmap's Bugs.
 
 ## Risks
 

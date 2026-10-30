@@ -2785,7 +2785,8 @@ fn searches_to_open(book: Vec<u8>) -> (usize, usize) {
 /// page repeats, nor the line of units every drawing a search tries reads
 /// alike. Each is held to how often it is read back (a guard: what is read
 /// does not change; the line of styled neutrals under a transform, each of
-/// its distinct drawings and their pairs read once, within the budget, and
+/// its distinct drawings and their pairs read once, within the budget, which
+/// is 93 readings in a default build and 94 with `bundled-fonts`, and
 /// without one read right at once in the direction its paragraph declares)
 /// and to the lines of units it may search. Held by count, as
 /// [`a_line_whose_rules_drawing_reads_its_letters_in_order_is_searched_for_its_words`]
@@ -2855,7 +2856,13 @@ fn a_line_of_units_the_read_back_has_read_is_not_searched_again() {
             "the same under scaleX(2), searched over its distinct drawings",
             "p { word-spacing: 0.5em; white-space: nowrap; transform: scaleX(2) }",
             neutrals,
-            93,
+            // The stand-in draws one more of the line's drawings distinctly
+            // than the overflow font does.
+            if cfg!(feature = "bundled-fonts") {
+                94
+            } else {
+                93
+            },
             128,
         ),
     ];

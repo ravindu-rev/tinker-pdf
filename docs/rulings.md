@@ -245,7 +245,10 @@ instead of living in one feature's head.
     line's levels, and rules W2, W5, W7 and N1 read neighbours, so the drawn
     line resolves to other levels — `نسبة 50%` is drawn with the `%` on the
     number's left, and read that way it comes back as `نسبة %50`. The
-    paragraph direction is P2 read off the drawn line, by `Bidi_Class`: a
+    paragraph direction is the one the page declares for the line, where it
+    declares one, and the text the page states for its glyphs is read in
+    their place (*What a page says*, below). Elsewhere the paragraph
+    direction is P2 read off the drawn line, by `Bidi_Class`: a
     left-to-right paragraph draws its first strong character leftmost and a
     right-to-left one rightmost, so the two ends decide, and the majority
     only where they disagree — with the two tie-breaks below.
@@ -347,11 +350,10 @@ instead of living in one feature's head.
     Arabic-Indic digits, which are `AN` and untouched by W7, so `— ١ بند`
     reads `١ بند —`; and a number that is not next to the mark,
     `— שלום 5 חו`, which reads `שלום 5 חו —`. All of it is pinned by name,
-    so that a change to it is a visible one. **The EPUB writer does not
-    widen it**: a run of neutrals styled apart that opens such a line,
-    `<p dir="rtl"><i>?!</i> שלום</p>`, is drawn as typed, so that it reads
-    `שלום ?!`, the mark as typed; drawn in its level's order it would read
-    `שלום !?` (`epub_fallback.rs`'s
+    so that a change to it is a visible one. **The EPUB writer's book does
+    not pay it**: it declares each right-to-left paragraph's direction, so
+    `<p dir="rtl">?! שלום</p>` reads `?! שלום`, as typed, the mark styled
+    apart or not (`epub_fallback.rs`'s
     `a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_as_typed`).
 
     *The tests that hold it.* `text_logical_order.rs`:
@@ -484,9 +486,9 @@ instead of living in one feature's head.
     that mixes the stops, `.!(نور) يوم` after a `<br/>`, ends no sentence and
     reads as typed; a line of a paragraph with no `dir` that ends a pair, a
     word and the same run read the other way, `(نور) يوم!.`, broken before the
-    pair, draws that line and reads as it does, its run first. A `'.` line
-    where the overflow font at `0 Tw` meets this rule can lose its structure
-    tree's order; it is open in ROADMAP CD-19.
+    pair, draws that line and reads as it does, its run first. The EPUB
+    writer's book declares each paragraph's direction where it holds
+    right-to-left text, and reads such lines as typed.
 
     *What it leaves.* A pair facing inward — a left-to-right paragraph with
     no `dir` whose line has Arabic at both ends and a Latin run in brackets
@@ -526,16 +528,100 @@ instead of living in one feature's head.
     `a_dirless_line_opening_with_a_bracket_pair_reads_its_closing_quotes_and_stops_last`
     (a sentence's end).
 
+    **What a page says** (H-152). A page can say two things its drawn line
+    cannot, and `Page::text` takes each where it is said. A line every
+    character of which that draws something belongs to marked-content
+    sequences whose structure elements declare one horizontal
+    `/WritingMode` (ISO 32000-2 §14.8.5.4.2) — `/LrTb` or `/LrBt` left to
+    right, `/RlTb` or `/RlBt` right to left — in their `/A` attribute
+    objects or the `/ClassMap` classes their `/C` names, or inherited from
+    an ancestor along `/P`, is read in that direction: `logical_order` for
+    it, no direction read off the line and no tie-break asked. A line with a
+    character no element claims, or in sequences that declare two
+    directions or none, is read off the line; a vertical mode declares
+    nothing. And an `/ActualText` on a marked-content property list (14.9.4)
+    replaces the glyphs it encloses in every output that reads `Page::text`:
+    a line one span holds reads as its text, in the line's declared
+    direction or else its first strong character's; a span holding part of
+    a line is one unit of the line's order and stands for its text there;
+    and each character of the text stands on the glyph of the span that
+    draws it, in the order the line reads its glyphs. A page that says
+    neither reads as the rest of this ruling reads it, to the byte, and the
+    lines each *What it reads otherwise* and *What it leaves* names are such
+    a page's.
+
+    The EPUB writer says both. Each structure element a run under which
+    holds a right-to-left character, and every run under which is set in a
+    paragraph of one direction, declares that direction, `/LrTb` or
+    `/RlTb`; the read-back reads each line every run of which is declared
+    alike in that direction, as the reader will; and a line no drawing tried
+    reads right is drawn by the rules inside a `/Span` whose `/ActualText`
+    is its text as typed, the sequence open there closed before the span
+    and reopened inside it, so that the line reads as typed and each run
+    keeps its element. A book with no right-to-left text is written as
+    before, byte for byte.
+
+    *Why.* UAX #9 draws two typed texts alike, and nothing on such a line
+    says which drew it, so a rule over the drawn line moves a hole rather
+    than closing it: one that read a dir-less Hebrew paragraph's stop last
+    read 21 of `epub_conservation.rs`'s cases worse in a default build and
+    22 with `bundled-fonts`, and of Unicode's conformance files 1 246 lines
+    better and 1 326 worse. A page that says how it reads needs no guess.
+
+    *What it costs.* Over `epub_fallback.rs` and `epub_conservation.rs`,
+    each case compared with the reader and writer before it, no case reads
+    worse in either build and none draws a glyph more over another: in a
+    default build 99 of the first's 232 cases and 77 of the second's 119
+    read better, and with `bundled-fonts` 94 of 235 and 76 of 119; the
+    design doc's Left (1), Left (4), Left (5) and Left (9) conserve, read
+    whole, are found and draw no glyph over another. 75 cases of both builds
+    read the same characters in the same order with their white space
+    otherwise: a line its declared direction reads right is drawn by the
+    rules, and where a reader parts a word space stretched past half an em
+    before a left-to-right letter it parts that line as it parts a Latin
+    one, so in 40 cases a line breaks where it did not, and in 12 a break
+    goes.
+    The two suites take 1.00 times the time in release and 1.02 in debug,
+    each suite within 0.95 to 1.03. The committed documents read as before,
+    in either order, and `text_logical_order.rs`, `bidi_conformance.rs`,
+    `tagged_pdf.rs` and `pdfua.rs` pass in both builds. A PDF from another
+    producer that carries `/ActualText` on marked content reads that text in
+    `Page::text`, and one whose declared direction its text contradicts
+    reads in the declared one.
+
+    *The tests that hold it.* `text_logical_order.rs`:
+    `a_line_a_span_states_whole_reads_as_its_text`,
+    `a_span_inside_a_right_to_left_line_is_one_unit_of_its_order`,
+    `a_span_across_two_lines_keeps_each_characters_own_glyph`,
+    `a_right_to_left_word_a_span_states_keeps_each_letter_on_its_own_glyph`,
+    `a_line_its_element_declares_left_to_right_reads_its_stop_last`,
+    `a_writing_mode_inherited_or_stated_by_a_class_holds`,
+    `a_line_declared_in_part_or_two_ways_or_vertically_reads_as_before` and
+    `a_line_the_stream_split_reads_in_its_declared_direction`;
+    `tagged_pdf.rs`'s
+    `actual_text_on_a_property_list_replaces_its_own_sequence`;
+    `tagged_writer.rs`'s
+    `a_writing_mode_is_written_alone_and_beside_table_attributes` and
+    `a_stated_span_holds_whole_sequences_of_the_elements_drawn_in_it`;
+    `epub::tests`'
+    `each_element_holding_right_to_left_text_declares_its_paragraphs_direction`,
+    `mixed_directions_declare_nothing_and_plaintext_declares_what_p2_finds`,
+    `a_line_is_read_back_in_the_direction_its_structure_declares` and
+    `a_line_no_drawing_reads_right_states_its_text_round_its_runs_sequences`;
+    and `epub_conservation.rs`'s
+    `a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_drawn_alike_twin`,
+    which reads one page with its structure tree and without.
+
     **The EPUB writer's read-back.** The EPUB writer reads each line that
     holds a right-to-left character back as a reader of the page reads it,
     on the page it is drawn on, and draws it otherwise where that reads it
     right. Each run is planned once a page for each drawing a reading tries
     it in, and a line of units a reading puts in logical order is searched
     for its reading once a page (`text_order::Readings`). A reading is held
-    to the line's words: a drawing whose reading cuts a word where a reader
-    parts the spacing, or runs two together, is drawn only where no drawing
-    tried reads the words, and a line whose rules' drawing reads so is
-    searched on for one that does (H-150). The owner's rules took the time
+    to the line's words: a line whose rules' drawing reads it with a word
+    cut where a reader parts the spacing, or two run together, is searched
+    on for a drawing that reads the words (H-150), and a line no drawing
+    tried reads with its words states its text (*What a page says*). The owner's rules took the time
     that costs: a letter-spaced line, which a reader parts at its spacing
     whatever is drawn, is read back in the whole budget, 128 readings against
     one, and over `epub_fallback.rs` and `epub_conservation.rs` the read-back
@@ -550,18 +636,18 @@ instead of living in one feature's head.
     next line on the page. Under a transform, a line whose
     rules' drawing reads on the page with its letters in order and not its
     words, which nothing tried there reads with its words, is read again in
-    its runs' own space. Where reading each glyph back as the
-    page's font gives it back finds nothing — in `W W <b>1 234</b> <i>?!</i>
-    W.`, the number's halves a NO-BREAK SPACE apart, a reader reads that
-    space by its glyph name and UAX #9 then reads two numbers — the line is
-    searched again with each glyph read as typed, and what that finds is
-    drawn only where it reads more of the line's pairs of letters in order on
-    the page (`epub_fallback.rs`'s
-    `a_styled_mark_after_a_number_a_no_break_space_holds_together_reads_as_typed`
-    and
-    `a_styled_mark_after_a_number_reads_as_typed_beside_a_letter_the_page_gives_back_otherwise`).
-    A change of the read-back that reads CD-19's cases better is taken
-    whatever time it costs. A change of how the reader reads every PDF is
+    its runs' own space, and what that finds is drawn where it reads the
+    words right on the page. Where reading each glyph back as the page's
+    font gives it back finds no drawing that reads the line right — in
+    `W W <b>1 234</b> <i>?!</i> W.`, the number's halves a NO-BREAK SPACE
+    apart, a reader reads that space by its glyph name and UAX #9 then reads
+    two numbers — the line states its text and reads as typed
+    (`epub_fallback.rs`'s
+    `a_styled_mark_after_a_number_a_no_break_space_holds_together_reads_as_typed`,
+    `a_styled_mark_after_a_number_reads_as_typed_beside_a_letter_the_page_gives_back_otherwise`
+    and `a_line_the_page_gives_back_otherwise_than_typed_reads_as_typed`).
+    A change of the read-back that reads the cases of `epub_fallback.rs` and
+    `epub_conservation.rs` better is taken whatever time it costs. A change of how the reader reads every PDF is
     taken where more lines of the suites and of Unicode's conformance files
     read better than worse, and each line it reads worse is recorded here
     with its figures. A change that reads any case worse is the owner's to

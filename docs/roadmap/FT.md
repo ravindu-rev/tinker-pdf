@@ -858,7 +858,7 @@ list, each held to first-party evidence.
 
 **A right-to-left paragraph read across its lines**, as UAX #9 resolves a paragraph before it breaks it into lines, so that a weak or neutral character at a line's start takes its level from the paragraph and not from the line alone
 
-**Today.** The reader puts each line in logical order by itself (`crates/tinker-pdf/src/text_order.rs`; ruling 14 names it among what the reader does not undo): a line of an Arabic paragraph that opens with `25٪` reads `25 ٪يوم`, since alone it opens with a European number and UAX #9's W5 gives the sign to it. `epub_fallback.rs`'s `a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on` holds that line, turned a half turn, and it reads the same unturned.
+**Today.** The reader puts each line in logical order by itself (`crates/tinker-pdf/src/text_order.rs`; ruling 14 names it among what the reader does not undo): a line of an Arabic paragraph that opens with `25٪` reads `25 ٪يوم`, since alone it opens with a European number and UAX #9's W5 gives the sign to it, wherever the page does not state the line's text. The EPUB writer states it (ruling 14), so `epub_fallback.rs`'s `a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on` reads that line whole, turned a half turn and unturned; a page that does not state it reads it so.
 
 **Exit criterion.** consecutive lines a page sets as one paragraph are resolved together before each is read in logical order, so that the line opening `25٪` conserves and reads whole in the default and `bundled-fonts` builds; no line with no right-to-left character moves (`text_logical_order.rs`'s `no_left_to_right_page_moves`), and `bidi_conformance.rs` holds
 

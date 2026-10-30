@@ -529,7 +529,7 @@ What it does:
   9.3.3 moves every glyph after a single-byte code 32 by `Tw`, so written at
   the run's word spacing it would draw them a word spacing off where layout
   put them, over the next glyph under `word-spacing` or justification, with
-  marks or none (ROADMAP CD-19, [epub.md](epub.md)). A run that ends on a mark
+  marks or none ([epub.md](epub.md)). A run that ends on a mark
   is cut past half an em and a millionth of spacing; after a simple font's
   letter alone, past half an em or at it by a last place, and after a
   stand-in's, within half a thousandth of an em of it by its `/W`'s rounding.
