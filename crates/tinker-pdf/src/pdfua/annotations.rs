@@ -31,6 +31,7 @@ use tinker_pdf_cos::{decode_text_string, pages, CosDocument, Dict, ObjRef, Objec
 use super::structure::MAX_FINDINGS_PER_RULE;
 use super::{clauses, UaRaw};
 use crate::pdfa::FindingKind;
+use crate::stats::Work;
 use crate::structure::{StructKid, StructureTree};
 
 /// How many pages the group visits.
@@ -89,7 +90,12 @@ struct Enclosing {
 }
 
 /// Runs the group over every page, given the tree when there is one.
-pub(super) fn rules(doc: &CosDocument, tree: Option<&StructureTree>, out: &mut Vec<UaRaw>) {
+pub(super) fn rules(
+    doc: &CosDocument,
+    tree: Option<&StructureTree>,
+    work: Option<&std::sync::Arc<Work>>,
+    out: &mut Vec<UaRaw>,
+) {
     let mut enclosing: BTreeMap<ObjRef, Enclosing> = BTreeMap::new();
     if let Some(tree) = tree {
         for element in tree.elements() {
@@ -112,6 +118,7 @@ pub(super) fn rules(doc: &CosDocument, tree: Option<&StructureTree>, out: &mut V
     let mut judged: BTreeSet<ObjRef> = BTreeSet::new();
     let mut entries = 0usize;
 
+    crate::stats::walked(work);
     for page in pages::collect_upto(doc, MAX_PAGES) {
         if reported.full() {
             break;

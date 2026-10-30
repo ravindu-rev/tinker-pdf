@@ -20,9 +20,11 @@
 //!
 //! It lives here, in the lowest crate with an operation context, although what
 //! is counted so far is counted above it — glyphs by the renderer, font
-//! dictionaries and cache lookups by the facade's resource scopes. One ledger an
-//! operation carries through every context is the reason, and each counter
-//! says which layer counts it.
+//! dictionaries and cache lookups by the facade's resource scopes, page walks
+//! where the facade makes them. One ledger an operation carries through every
+//! context is the reason, and each counter says which layer counts it. The
+//! editor is the context this crate gives it: a [`crate::DocumentEditor`]
+//! asked to count holds one tally, which the passes over it count into.
 
 use std::ops::{Add, AddAssign};
 use std::sync::Mutex;
@@ -62,8 +64,10 @@ pub struct Stats {
     ///
     /// Counted by the facade's resource scopes.
     pub font_dictionaries_resolved: u64,
-    /// Image decoders run: an image XObject's on a cache miss, and every
-    /// inline image's, which is never cached.
+    /// Image decoders run. In a render, an image XObject's on a cache miss,
+    /// and every inline image's, which is never cached; in an image
+    /// extraction, one for each entry it lists — an image's masks part of
+    /// its decode — and every inline image's.
     ///
     /// Counted by the facade's resource scopes.
     pub images_decoded: u64,
@@ -95,6 +99,13 @@ pub struct Stats {
     pub form_scope_hits: u64,
     /// Lookups of a form XObject's resource scope that had to build it.
     pub form_scope_misses: u64,
+    /// Walks of the page tree from its root: each listing of a document's
+    /// pages, whatever it found.
+    ///
+    /// Counted by the facade where it walks: each validator rule that reads
+    /// every page, the structure tree's binding, and a save's image and font
+    /// passes. The walks an editor makes of its own pages are not counted.
+    pub page_walks: u64,
 }
 
 /// One kind of step a [`Work`] counts: a [`Stats`] field, by name.
@@ -131,6 +142,8 @@ pub enum Counter {
     FormScopeHits,
     /// [`Stats::form_scope_misses`].
     FormScopeMisses,
+    /// [`Stats::page_walks`].
+    PageWalks,
 }
 
 impl Stats {
@@ -158,6 +171,7 @@ impl Stats {
             self.glyph_outline_misses,
             self.form_scope_hits,
             self.form_scope_misses,
+            self.page_walks,
         ]
         .into_iter()
         .fold(0u64, u64::saturating_add)
@@ -180,6 +194,7 @@ impl Stats {
             Counter::GlyphOutlineMisses => &mut self.glyph_outline_misses,
             Counter::FormScopeHits => &mut self.form_scope_hits,
             Counter::FormScopeMisses => &mut self.form_scope_misses,
+            Counter::PageWalks => &mut self.page_walks,
         }
     }
 }
@@ -221,6 +236,7 @@ impl Add for Stats {
             form_scope_misses: self
                 .form_scope_misses
                 .saturating_add(other.form_scope_misses),
+            page_walks: self.page_walks.saturating_add(other.page_walks),
         }
     }
 }
@@ -275,7 +291,7 @@ mod tests {
     use super::*;
 
     /// Every counter, so a test of one property covers them all.
-    const ALL: [Counter; 14] = [
+    const ALL: [Counter; 15] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::FontDictionariesResolved,
@@ -290,6 +306,7 @@ mod tests {
         Counter::GlyphOutlineMisses,
         Counter::FormScopeHits,
         Counter::FormScopeMisses,
+        Counter::PageWalks,
     ];
 
     #[test]

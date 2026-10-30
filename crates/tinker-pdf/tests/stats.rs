@@ -1,8 +1,11 @@
-//! Counted work through the render door (MS-01.2, `docs/design/performance.md`).
+//! Counted work through every door (`docs/design/performance.md`): a render,
+//! a page's text and its images, a save and a merge's save, and the PDF/A,
+//! PDF/UA and PDF/X validators.
 //!
-//! A render asked for its stats hands back what it did, counted where the work
-//! is done — the resource scopes the page builds, the caches they keep and the
-//! renderer — and a render not asked hands back none and draws the same bytes.
+//! A door asked for its stats hands back what it did, counted where the work
+//! is done — the resource scopes it builds, the caches they keep, the
+//! renderer, the walks of the page tree — and a door not asked hands back none
+//! and produces the same bytes.
 //!
 //! **Every expected count is derived here** from what the fixture holds and
 //! what today's code does with it, and the reason is written beside each
@@ -24,11 +27,27 @@
 //! - `Do` on a form asks for its scope twice, the interpreter and the
 //!   renderer each, and a form's scope is built once and kept;
 //! - an image XObject is decoded once a page and kept, an inline image every
-//!   time, and a sampled image's decode reads its colour space once.
+//!   time, and a sampled image's decode reads its colour space once;
+//! - text and image extraction interpret the page as a render does, over a
+//!   scope with no font provider, so no substitute is asked for in either
+//!   build and nothing is drawn: no glyph is shown to a renderer, no outline
+//!   is extracted, and an image is decoded by the extraction, once for each
+//!   entry it lists, never by a cache;
+//! - a save's font pass walks the page tree once and interprets every page
+//!   over a scope of its own, as text extraction does; the image pass walks
+//!   it only to find placements for a resolution limit;
+//! - each validator rule that reads every page walks the page tree for
+//!   itself.
 
 mod render_support;
 
-use tinker_pdf::{Bitmap, Document, Page, PixelRegion, RenderOptions, Stats};
+use tinker_pdf::write::{
+    save, BilevelCodec, ContinuousCodec, ImagePolicy, ImageRecoding, SaveOptions, Saved,
+};
+use tinker_pdf::{
+    Bitmap, Document, Page, PdfACoverage, PdfUaCoverage, PdfXCoverage, PixelRegion, RenderOptions,
+    Stats, TextOptions,
+};
 
 /// Whether this build carries the bundled faces, which answer for a font with
 /// no program of its own.
@@ -37,6 +56,11 @@ const BUNDLED: bool = cfg!(feature = "bundled-fonts");
 /// A PDF of `objects`, numbered from 1 in order, with a cross-reference table
 /// so that it opens without repair.
 fn pdf(objects: &[Vec<u8>]) -> Vec<u8> {
+    pdf_trailing(objects, "")
+}
+
+/// [`pdf`], with `extra` entries in its trailer.
+fn pdf_trailing(objects: &[Vec<u8>], extra: &str) -> Vec<u8> {
     let mut out = b"%PDF-1.7\n".to_vec();
     let mut offsets = Vec::new();
     for (index, body) in objects.iter().enumerate() {
@@ -54,7 +78,7 @@ fn pdf(objects: &[Vec<u8>]) -> Vec<u8> {
     }
     out.extend_from_slice(
         format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            "trailer\n<< /Size {} /Root 1 0 R{extra} >>\nstartxref\n{xref}\n%%EOF\n",
             objects.len() + 1
         )
         .as_bytes(),
@@ -772,4 +796,436 @@ fn two_renders_at_once_count_apart() {
         });
         assert_eq!(together, [alone, alone], "{what}: two at once");
     }
+}
+
+/// How many glyphs `SHOWN` shows: one a byte, the space included.
+fn shown() -> u64 {
+    SHOWN.iter().map(|(_, text)| text.len() as u64).sum()
+}
+
+/// A page's text, as extraction reports it, for comparing a counted
+/// extraction with an uncounted one: every field, to the bit.
+fn text_of(page: &tinker_pdf::TextPage) -> String {
+    format!("{page:?}")
+}
+
+/// Text extraction counts what its scope reads: each font the page's
+/// resources name when the scope is built, the font dictionary each glyph
+/// reads to ask whether it is a Type 3 font, and each form's scope the
+/// interpreter asks for. Nothing is drawn, so nothing else counts. The text
+/// is the uncounted text, in either order.
+#[test]
+fn text_stats_count_font_resolutions() {
+    let (document, index) = first_page(glyphs_and_an_image_page());
+    let page = document.page(index).expect("a page");
+    let content_order = TextOptions {
+        content_order: true,
+    };
+    for options in [TextOptions::default(), content_order] {
+        let (text, stats) = page.text_counted(&options);
+        assert_eq!(
+            text_of(&text),
+            text_of(&page.text_with(&options)),
+            "{options:?}: counting changed the text"
+        );
+        let mut expected = Stats::default();
+        // Three fonts read when the scope is built, and one lookup a glyph.
+        // The image is drawn twice and decoded by nobody.
+        expected.font_dictionaries_resolved = SHOWN.len() as u64 + shown();
+        assert_eq!(stats, expected, "{options:?}");
+    }
+
+    let (document, index) = first_page(form_page());
+    let page = document.page(index).expect("a page");
+    let (text, stats) = page.text_counted(&TextOptions::default());
+    assert_eq!(text_of(&text), text_of(&page.text()));
+    let shown = 3 * FORM_TEXT.len() as u64;
+    let mut expected = Stats::default();
+    // The page's scope reads its one font, the form's scope its own one once,
+    // and every glyph its font's dictionary.
+    expected.font_dictionaries_resolved = 1 + 1 + shown;
+    // Only the interpreter asks for the form's scope at each `Do`; the first
+    // ask builds it.
+    expected.form_scope_misses = 1;
+    expected.form_scope_hits = 3 - 1;
+    assert_eq!(stats, expected);
+}
+
+/// The images [`images_page`] draws: `Im1` three times, once inside a form
+/// with no resources of its own, and `Im2`, which has a soft mask, once.
+const IMAGE_XOBJECTS: [(&str, u64); 2] = [("Im1", 3), ("Im2", 1)];
+
+/// How many inline images [`images_page`] draws.
+const INLINE_IMAGES: u64 = 2;
+
+/// A page of two image XObjects — `Im1` drawn twice on the page and once in a
+/// form that keeps the page's scope, `Im2` soft-masked — and two inline
+/// images.
+fn images_page() -> Vec<u8> {
+    let inline = "BI /W 2 /H 2 /CS /RGB /BPC 8 /F /AHx ID 000000FFFFFFFFFFFF000000> EI";
+    let mut content = String::new();
+    content.push_str("q 20 0 0 20 10 10 cm /Im1 Do Q\nq 20 0 0 20 40 10 cm /Im2 Do Q\n");
+    content.push_str("q 20 0 0 20 70 10 cm /Im1 Do Q\nq 1 0 0 1 100 10 cm /Fm1 Do Q\n");
+    for at in 0..INLINE_IMAGES {
+        content.push_str(&format!("q 20 0 0 20 {} 60 cm {inline} Q\n", 10 + at * 30));
+    }
+    let mut masked = image("/DeviceRGB");
+    let at = masked
+        .windows(9)
+        .position(|w| w == b"/Length 1")
+        .expect("the image's dictionary");
+    masked.splice(at..at, b"/SMask 11 0 R ".iter().copied());
+    fixture(
+        "/XObject << /Im1 8 0 R /Im2 9 0 R /Fm1 10 0 R >>",
+        "",
+        &content,
+        vec![
+            image("/DeviceRGB"),
+            masked,
+            stream(
+                "/Type /XObject /Subtype /Form /BBox [0 0 30 30]",
+                b"q 20 0 0 20 5 5 cm /Im1 Do Q",
+            ),
+            image("/DeviceGray"),
+        ],
+    )
+}
+
+/// Image extraction counts a decoder run for each entry it lists — an image
+/// XObject once however often it is drawn in one space, its soft mask part of
+/// its decode — and for each inline image, which is its own entry; and the
+/// form's scope, which the interpreter and the extraction each ask for. The
+/// list is the uncounted list.
+#[test]
+fn image_stats_count_the_decodes_made() {
+    let (document, index) = first_page(images_page());
+    let page = document.page(index).expect("a page");
+    let (images, stats) = page.images_counted();
+    assert_eq!(images, page.images(), "counting changed the list");
+    let listed = IMAGE_XOBJECTS.len() as u64 + INLINE_IMAGES;
+    assert_eq!(images.len() as u64, listed);
+    for (name, drawn) in IMAGE_XOBJECTS {
+        let entry = images
+            .iter()
+            .find(|image| image.name == name.as_bytes())
+            .unwrap_or_else(|| panic!("{name} is listed"));
+        assert_eq!(entry.placements.len() as u64, drawn, "{name}");
+    }
+    assert!(
+        images.iter().any(|image| image.soft_mask.is_some()),
+        "Im2's soft mask is described"
+    );
+    let mut expected = Stats::default();
+    expected.images_decoded = listed;
+    // The form brings no resources, so it draws in the page's scope: the
+    // interpreter's ask records that, and the extraction's at the form's
+    // start finds it recorded.
+    expected.form_scope_misses = 1;
+    expected.form_scope_hits = 1;
+    assert_eq!(stats, expected);
+}
+
+/// A save not asked hands back no stats, a counting editor's included, and a
+/// save asked writes the same bytes and reports the same passes. What it
+/// counts is its passes': the font pass walks the page tree, reads each
+/// page's fonts and each glyph's font dictionary, and selects a glyph in the
+/// program of each glyph a font that is an object shows; the image pass walks
+/// the tree when a resolution limit asks it to find placements.
+#[test]
+fn save_stats_are_none_unless_asked() {
+    let document = Document::open(glyphs_and_an_image_page()).expect("the fixture opens");
+    let plain = SaveOptions::default();
+    assert!(!plain.stats, "stats are off by default");
+    let downsampling = ImagePolicy::Recode(
+        ImageRecoding::new(ContinuousCodec::Keep, BilevelCodec::Keep).with_max_ppi(72.0),
+    );
+    for (what, images, image_walks) in [
+        ("the default passes", ImagePolicy::Keep, 0),
+        ("a resolution limit", downsampling, 1),
+    ] {
+        let unasked = SaveOptions {
+            images,
+            ..SaveOptions::default()
+        };
+        let asked = SaveOptions {
+            stats: true,
+            ..unasked.clone()
+        };
+        let plain = save(&mut document.editor(), &unasked);
+        assert_eq!(plain.stats, None, "{what}: stats nobody asked for");
+        let mut editor = document.editor();
+        editor.count_work();
+        let quiet = save(&mut editor, &unasked);
+        assert_eq!(quiet.stats, None, "{what}: a counting editor, not asked");
+        same_save(&quiet, &plain, what);
+
+        let counted = save(&mut document.editor(), &asked);
+        same_save(&counted, &plain, what);
+        let mut expected = Stats::default();
+        expected.page_walks = 1 + image_walks;
+        expected.font_dictionaries_resolved = SHOWN.len() as u64 + shown();
+        // `F1` is the one font that is an object, the others written into the
+        // resource dictionary: the first glyph it shows reads its program and
+        // the rest find it.
+        let embedded = SHOWN[0].1.len() as u64;
+        expected.font_program_misses = 1;
+        expected.font_program_hits = embedded - 1;
+        assert_eq!(counted.stats, Some(expected), "{what}");
+    }
+}
+
+/// Two saves are the same save but for their stats.
+#[track_caller]
+fn same_save(counted: &Saved, plain: &Saved, what: &str) {
+    assert!(counted.bytes == plain.bytes, "{what}: the bytes differ");
+    assert_eq!(counted.fonts, plain.fonts, "{what}: the font pass differs");
+    assert_eq!(
+        counted.images, plain.images,
+        "{what}: the image pass differs"
+    );
+}
+
+/// The text page `page` of part `part` shows.
+fn part_line(part: usize, page: usize) -> String {
+    format!("Page {page} of part {part}")
+}
+
+/// A document of ten pages, each with resources of its own naming the
+/// embedded face, showing [`part_line`].
+fn part(part: usize) -> Vec<u8> {
+    const PAGES: usize = 10;
+    // 1 the catalog, 2 the page tree, 3 to 5 the face, then each page and its
+    // content.
+    let kids: Vec<String> = (0..PAGES).map(|at| format!("{} 0 R", 6 + 2 * at)).collect();
+    let mut objects = vec![
+        object("<< /Type /Catalog /Pages 2 0 R >>"),
+        object(&format!(
+            "<< /Type /Pages /Count {PAGES} /Kids [{}] >>",
+            kids.join(" ")
+        )),
+        object(&format!(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /Curvy /FirstChar 32 /LastChar 126\n\
+             /Widths [320{}] /Encoding /WinAnsiEncoding /FontDescriptor 4 0 R >>",
+            " 640".repeat(94)
+        )),
+        object(
+            "<< /Type /FontDescriptor /FontName /Curvy /Flags 32 /FontBBox [0 0 1000 1000]\n\
+             /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /FontFile2 5 0 R >>",
+        ),
+        stream("", &render_support::curvy_font()),
+    ];
+    for at in 0..PAGES {
+        objects.push(object(&format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
+             /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
+            7 + 2 * at
+        )));
+        objects.push(stream(
+            "",
+            format!("BT /F1 12 Tf 10 50 Td ({}) Tj ET", part_line(part, at)).as_bytes(),
+        ));
+    }
+    pdf(&objects)
+}
+
+/// Four parts' pages imported into a document of none, and saved.
+fn merge(parts: &[Document], counting: bool, options: &SaveOptions) -> Saved {
+    let empty = pdf(&[
+        object("<< /Type /Catalog /Pages 2 0 R >>"),
+        object("<< /Type /Pages /Count 0 /Kids [] >>"),
+    ]);
+    let mut editor = Document::open(empty).expect("the base opens").editor();
+    if counting {
+        editor.count_work();
+    }
+    for part in parts {
+        for page in 0..part.page_count() {
+            let at = editor.page_refs().len() as u32;
+            editor
+                .import_page(part.cos(), page, at)
+                .expect("the page imports");
+        }
+    }
+    assert_eq!(editor.page_refs().len(), 40, "every page imported");
+    save(&mut editor, options)
+}
+
+/// A merge is pages imported and then saved, and it reads its stats from the
+/// save: what was counted over the editor since `count_work`, which is the
+/// save's passes — an import counts nothing. A counted merge writes the bytes
+/// an uncounted one writes.
+#[test]
+fn a_merge_reads_its_stats_from_the_save() {
+    let parts: Vec<Document> = (0..4)
+        .map(|at| Document::open(part(at)).expect("a part opens"))
+        .collect();
+    let asked = SaveOptions {
+        stats: true,
+        ..SaveOptions::default()
+    };
+    let plain = merge(&parts, false, &SaveOptions::default());
+    assert_eq!(plain.stats, None);
+    for (what, counting) in [("a counting editor", true), ("a save of its own", false)] {
+        let counted = merge(&parts, counting, &asked);
+        same_save(&counted, &plain, what);
+        let shown: u64 = (0..4)
+            .flat_map(|part| (0..10).map(move |page| part_line(part, page).len() as u64))
+            .sum();
+        let mut expected = Stats::default();
+        // The font pass walks the merged tree once; each of the forty pages'
+        // scopes reads its one font, and each glyph its font's dictionary;
+        // each scope reads the face's program at its first glyph and finds it
+        // at the rest.
+        expected.page_walks = 1;
+        expected.font_dictionaries_resolved = 40 + shown;
+        expected.font_program_misses = 40;
+        expected.font_program_hits = shown - 40;
+        assert_eq!(counted.stats, Some(expected), "{what}");
+    }
+}
+
+/// The line [`claiming_page`] shows in the embedded face: six glyphs, six
+/// distinct codes, each with a width its dictionary states.
+const CLAIMING_LINE: &str = "Curvy!";
+
+/// A tagged page of [`CLAIMING_LINE`], under a structure tree with no
+/// elements, claiming PDF/A-2a and PDF/UA-1 in its XMP packet, and
+/// PDF/X-1a:2003 in `/Info` when `pdfx` is set.
+fn claiming_page(pdfx: bool) -> Vec<u8> {
+    let packet = r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF
+ xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/"
+ xmlns:pdfuaid="http://www.aiim.org/pdfua/ns/id/"
+ pdfaid:part="2" pdfaid:conformance="A" pdfuaid:part="1"/>
+</rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#;
+    let objects = vec![
+        object(
+            "<< /Type /Catalog /Pages 2 0 R /Metadata 8 0 R /StructTreeRoot 9 0 R\n\
+             /MarkInfo << /Marked true >> /Lang (en-GB) >>",
+        ),
+        object("<< /Type /Pages /Count 1 /Kids [3 0 R] >>"),
+        object(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
+             /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        ),
+        stream(
+            "",
+            format!("BT /F1 12 Tf 10 50 Td ({CLAIMING_LINE}) Tj ET").as_bytes(),
+        ),
+        object(&format!(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /Curvy /FirstChar 32 /LastChar 126\n\
+             /Widths [320{}] /Encoding /WinAnsiEncoding /FontDescriptor 6 0 R >>",
+            " 640".repeat(94)
+        )),
+        object(
+            "<< /Type /FontDescriptor /FontName /Curvy /Flags 32 /FontBBox [0 0 1000 1000]\n\
+             /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /FontFile2 7 0 R >>",
+        ),
+        stream("", &render_support::curvy_font()),
+        stream("/Type /Metadata /Subtype /XML", packet.as_bytes()),
+        object("<< /Type /StructTreeRoot >>"),
+        object("<< /Title (Counted) /GTS_PDFXVersion (PDF/X-1a:2003) >>"),
+    ];
+    pdf_trailing(&objects, if pdfx { " /Info 10 0 R" } else { "" })
+}
+
+/// What a validation of [`claiming_page`] counts: `walks` walks of the page
+/// tree, and, for one that ran PDF/A's width rule, that rule's scope over the
+/// page's resources — which reads their one font — and the glyph it selects
+/// for each distinct code with a stated width, the first reading the face's
+/// program and the rest finding it.
+fn walked(walks: u64, widths: bool) -> Stats {
+    let mut expected = Stats::default();
+    expected.page_walks = walks;
+    if widths {
+        let mut codes: Vec<u8> = CLAIMING_LINE.bytes().collect();
+        codes.sort_unstable();
+        codes.dedup();
+        expected.font_dictionaries_resolved = 1;
+        expected.font_program_misses = 1;
+        expected.font_program_hits = codes.len() as u64 - 1;
+    }
+    expected
+}
+
+/// Each validator rule that reads every page walks the page tree itself, and
+/// a validation counts every walk its rules made — the width rule's scope
+/// over the page's one font too. The verdict is the uncounted verdict.
+#[test]
+fn validation_stats_count_its_page_walks() {
+    let document = Document::open(claiming_page(true)).expect("the fixture opens");
+
+    // PDF/A-2a. Metadata: the packet header rule reads every page's packet,
+    // and part 2's predefined-schema rule reads them again. Structure: level
+    // A binds the structure tree, which maps every page. Fonts: the width
+    // rule and the embedding rules each walk every content stream. Colour:
+    // the scan of every operator, the transparency groups' spaces, and part
+    // 2's blending spaces; the page-level output intent is part 4's and the
+    // transparency rule part 1's.
+    let colour = PdfACoverage {
+        colour: true,
+        ..PdfACoverage::default()
+    };
+    let groups = [
+        ("syntax", PdfACoverage::SYNTAX, walked(0, false)),
+        ("metadata", PdfACoverage::METADATA, walked(2, false)),
+        ("structure", PdfACoverage::STRUCTURE, walked(1, false)),
+        ("fonts", PdfACoverage::FONTS, walked(2, true)),
+        ("colour", colour, walked(3, false)),
+        ("every group", PdfACoverage::IMPLEMENTED, walked(8, true)),
+    ];
+    for (what, coverage, expected) in groups {
+        let (verdict, stats) = document.validate_pdfa_counted(coverage);
+        assert_eq!(
+            verdict,
+            document.validate_pdfa_with(coverage),
+            "PDF/A {what}"
+        );
+        assert_eq!(stats, expected, "PDF/A {what}");
+    }
+
+    // PDF/UA-1. Structure: binding the tree, and part 1's annotation rule
+    // reading every page's annotations. Fonts: PDF/A's width and embedding
+    // rules, and the `/ToUnicode` rule's walk of every content stream.
+    let groups = [
+        ("syntax", PdfUaCoverage::SYNTAX, walked(0, false)),
+        ("metadata", PdfUaCoverage::METADATA, walked(0, false)),
+        ("structure", PdfUaCoverage::STRUCTURE, walked(2, false)),
+        ("fonts", PdfUaCoverage::FONTS, walked(3, true)),
+        ("every group", PdfUaCoverage::IMPLEMENTED, walked(5, true)),
+    ];
+    for (what, coverage, expected) in groups {
+        let (verdict, stats) = document.validate_pdfua_counted(coverage);
+        assert_eq!(
+            verdict,
+            document.validate_pdfua_with(coverage),
+            "PDF/UA {what}"
+        );
+        assert_eq!(stats, expected, "PDF/UA {what}");
+    }
+
+    // PDF/X-1a:2003. Syntax: the boxes and annotations of every page. Print:
+    // PDF/A's operator scan and its transparency rule. Fonts: the embedding
+    // rule.
+    let groups = [
+        ("syntax", PdfXCoverage::SYNTAX, walked(1, false)),
+        ("print", PdfXCoverage::PRINT, walked(2, false)),
+        ("fonts", PdfXCoverage::FONTS, walked(1, false)),
+        ("every group", PdfXCoverage::IMPLEMENTED, walked(4, false)),
+    ];
+    for (what, coverage, expected) in groups {
+        let (verdict, stats) = document.validate_pdfx_counted(coverage);
+        assert_eq!(
+            verdict,
+            document.validate_pdfx_with(coverage),
+            "PDF/X {what}"
+        );
+        assert_eq!(stats, expected, "PDF/X {what}");
+    }
+
+    // A file that claims no PDF/X level is not judged, so nothing walks.
+    let unclaimed = Document::open(claiming_page(false)).expect("the fixture opens");
+    let (_, stats) = unclaimed.validate_pdfx_counted(PdfXCoverage::IMPLEMENTED);
+    assert_eq!(stats, Stats::default());
 }

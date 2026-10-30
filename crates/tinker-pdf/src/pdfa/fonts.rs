@@ -63,6 +63,7 @@ use tinker_pdf_cos::{CosDocument, Dict, ObjRef, Object};
 use super::content;
 
 use super::{clauses, FindingKind, Flavour, Level, Machinery, Part, Raw, RuleGroup};
+use crate::stats::Work;
 
 /// How many font programs are parsed in one document.
 const MAX_PROGRAM_PARSES: usize = 4096;
@@ -92,12 +93,13 @@ pub(super) fn rules(
     doc: &Arc<CosDocument>,
     machinery: &Machinery,
     flavour: Option<Flavour>,
+    work: Option<&Arc<Work>>,
     out: &mut Vec<Raw>,
 ) {
     if !machinery.reach(RuleGroup::Fonts) {
         return;
     }
-    run(doc, flavour, out);
+    run(doc, flavour, work, out);
 }
 
 /// The font rules, once the group has been reached for.
@@ -106,10 +108,15 @@ pub(super) fn rules(
 /// fonts under ISO 14289's numbering (`docs/design/pdfua.md`, "one rule, two
 /// standards"), runs them behind its own counted reach rather than counting
 /// a second one.
-pub(crate) fn run(doc: &Arc<CosDocument>, flavour: Option<Flavour>, out: &mut Vec<Raw>) {
-    widths(doc, out);
+pub(crate) fn run(
+    doc: &Arc<CosDocument>,
+    flavour: Option<Flavour>,
+    work: Option<&Arc<Work>>,
+    out: &mut Vec<Raw>,
+) {
+    widths(doc, work, out);
     let mut budget = MAX_PROGRAM_PARSES;
-    for reference in usage(doc) {
+    for reference in usage(doc, work) {
         let Ok(object) = doc.get(reference) else {
             continue;
         };
@@ -130,9 +137,9 @@ pub(crate) fn run(doc: &Arc<CosDocument>, flavour: Option<Flavour>, out: &mut Ve
 /// a composite font's program is its descendant's, and a `/FontFile3 null` is
 /// a key present and a program absent. A zero parse budget is what keeps the
 /// programs closed.
-pub(crate) fn embedding(doc: &CosDocument, out: &mut Vec<Raw>) {
+pub(crate) fn embedding(doc: &CosDocument, work: Option<&Arc<Work>>, out: &mut Vec<Raw>) {
     let mut budget = 0usize;
-    for reference in usage(doc) {
+    for reference in usage(doc, work) {
         let Ok(object) = doc.get(reference) else {
             continue;
         };
@@ -181,9 +188,9 @@ pub(crate) fn embedding(doc: &CosDocument, out: &mut Vec<Raw>) {
 /// is the visitor over it. Returned as an ordered set so the findings come out
 /// in object-number order whatever order the pages happened to reach them in —
 /// a verdict is compared by tests and read by people, and both want it stable.
-pub(crate) fn usage(doc: &CosDocument) -> BTreeSet<ObjRef> {
+pub(crate) fn usage(doc: &CosDocument, work: Option<&Arc<Work>>) -> BTreeSet<ObjRef> {
     let mut rendered = BTreeSet::new();
-    content::walk(doc, &mut |op| {
+    content::walk(doc, work, &mut |op| {
         if !matches!(op.operator, b"Tj" | b"TJ" | b"'" | b"\"") {
             return;
         }
@@ -844,9 +851,9 @@ struct Drawn {
 /// `widthFromDictionary == null` exempts. A Type 1 program, whose charstrings
 /// are addressed by name rather than by a glyph index, is not judged; nor is
 /// a Type 3 font, which has no program.
-fn widths(doc: &Arc<CosDocument>, out: &mut Vec<Raw>) {
+fn widths(doc: &Arc<CosDocument>, work: Option<&Arc<Work>>, out: &mut Vec<Raw>) {
     let mut drawn: BTreeMap<ObjRef, Drawn> = BTreeMap::new();
-    content::walk(doc, &mut |op| {
+    content::walk(doc, work, &mut |op| {
         if !matches!(op.operator, b"Tj" | b"TJ" | b"'" | b"\"")
             || op.mode == content::RENDER_MODE_INVISIBLE
         {
@@ -865,7 +872,12 @@ fn widths(doc: &Arc<CosDocument>, out: &mut Vec<Raw>) {
             drawn.insert(
                 reference,
                 Drawn {
-                    scope: crate::resources::PageResources::from_dict(doc, resources.clone(), None),
+                    scope: crate::resources::PageResources::from_dict_counted(
+                        doc,
+                        resources.clone(),
+                        None,
+                        work.cloned(),
+                    ),
                     name: name.to_vec(),
                     codes: BTreeSet::new(),
                 },

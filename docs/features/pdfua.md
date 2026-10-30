@@ -121,7 +121,15 @@ let staged = verdict
     .count();
 // The structure group alone, which reads no font program.
 let tree_only = document.validate_pdfua_with(PdfUaCoverage::STRUCTURE);
+// The same verdict, and what reaching it did.
+let (verdict, stats) = document.validate_pdfua_counted(PdfUaCoverage::STRUCTURE);
 ```
+
+`validate_pdfua_counted` returns `validate_pdfua_with`'s verdict and a `Stats`
+counted as [pdfa](pdfa.md)'s is: a walk of the page tree for the structure
+tree's binding, for part 1's annotation rule, and for each of the font group's
+three walks of every content stream — PDF/A's width and embedding rules and
+the `/ToUnicode` rule — with the width rule's scope.
 
 `tpdf check --pdfua` prints the claimed part, every finding with its clause,
 the groups that ran, and how many clauses were abstained on in each class; it

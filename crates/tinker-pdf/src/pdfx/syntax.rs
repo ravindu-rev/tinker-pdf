@@ -12,6 +12,7 @@ use tinker_pdf_cos::{pages, CosDocument, Dict, ObjRef, Object, Rect, XrefEntry};
 
 use super::{clauses, info, XRaw};
 use crate::pdfa::FindingKind;
+use crate::stats::Work;
 
 /// How many objects the filter sweep visits, so a damaged cross-reference
 /// table cannot turn a validation into a sweep (ruling 1) — the bound the
@@ -49,7 +50,7 @@ const MAX_ANNOTATION_ENTRIES: usize = 1 << 18;
 
 /// Runs every syntax rule. The level is not an argument: every rule here
 /// runs under both 2003 levels, and the clause table numbers it.
-pub(super) fn rules(doc: &CosDocument, out: &mut Vec<XRaw>) {
+pub(super) fn rules(doc: &CosDocument, work: Option<&std::sync::Arc<Work>>, out: &mut Vec<XRaw>) {
     // AN 2.11: "None of the PDF/X standards covered by these application
     // notes permit the use of PDF-based encryption." A file-level finding,
     // as ISO 19005's is.
@@ -64,6 +65,7 @@ pub(super) fn rules(doc: &CosDocument, out: &mut Vec<XRaw>) {
     filters(doc, out);
     let mut boxes_reported = 0;
     let mut annotations = AnnotationWalk::default();
+    crate::stats::walked(work);
     for page in pages::collect_upto(doc, MAX_PAGES) {
         let Ok(object) = doc.get(page.reference) else {
             continue;

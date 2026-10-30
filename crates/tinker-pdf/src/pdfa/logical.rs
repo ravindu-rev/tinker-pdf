@@ -57,6 +57,7 @@
 use tinker_pdf_cos::{decode_text_string, CosDocument, Dict, ObjRef};
 
 use super::{clauses, FindingKind, Flavour, Level, Machinery, Part, Raw, RuleGroup};
+use crate::stats::Work;
 use crate::structure::StructureTree;
 use crate::Document;
 
@@ -92,6 +93,7 @@ pub(super) fn rules(
     document: &Document,
     machinery: &Machinery,
     flavour: Option<Flavour>,
+    work: Option<&std::sync::Arc<Work>>,
     out: &mut Vec<Raw>,
 ) {
     if !machinery.reach(RuleGroup::Structure) {
@@ -118,7 +120,7 @@ pub(super) fn rules(
 
     // `bind` returns `None` for exactly one reason a rule cares about — the
     // catalog names no `/StructTreeRoot` — which is what 6.8.3.3 is about.
-    let Some(tree) = crate::structure::bind(doc) else {
+    let Some(tree) = crate::structure::bind_counted(doc, work) else {
         out.push(Raw::file(
             clauses::STRUCTURE_HIERARCHY,
             FindingKind::StructureTreeMissing,

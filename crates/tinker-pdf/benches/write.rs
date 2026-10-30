@@ -143,6 +143,7 @@ fn write(c: &mut Criterion) {
             },
             fonts: FontPolicy::Keep,
             images: ImagePolicy::Keep,
+            ..SaveOptions::default()
         };
         let merge = || {
             let mut editor = parts[0].editor();

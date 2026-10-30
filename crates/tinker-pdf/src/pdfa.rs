@@ -42,10 +42,12 @@
 
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::sync::Arc;
 
 use tinker_pdf_cos::ObjRef;
 use tinker_pdf_xml::{Event, Source};
 
+use crate::stats::Work;
 use crate::Document;
 
 mod annotations;
@@ -2247,8 +2249,11 @@ impl Verdict {
 /// group numbers its clauses by the part and a rule that does not know which
 /// standard it is enforcing is not enforcing one. Only the findings *about the
 /// claim itself* belong to the metadata group.
-pub(crate) fn validate(document: &Document, groups: Coverage) -> Verdict {
-    validate_counting(document, groups).0
+///
+/// `work` is the validation door's tally, when it is counting: every walk of
+/// the page tree a rule makes counts into it.
+pub(crate) fn validate(document: &Document, groups: Coverage, work: Option<&Arc<Work>>) -> Verdict {
+    validate_counting(document, groups, work).0
 }
 
 /// [`validate`], also returning what each group's machinery was reached for.
@@ -2261,6 +2266,7 @@ pub(crate) fn validate(document: &Document, groups: Coverage) -> Verdict {
 pub(crate) fn validate_counting(
     document: &Document,
     groups: Coverage,
+    work: Option<&Arc<Work>>,
 ) -> (Verdict, (u32, u32, u32)) {
     let machinery = Machinery::new(groups);
     let mut raw: Vec<Raw> = Vec::new();
@@ -2290,7 +2296,7 @@ pub(crate) fn validate_counting(
     // granted.
     if groups.structure {
         structure::rules(&document.inner, &machinery, flavour, &mut raw);
-        logical::rules(document, &machinery, flavour, &mut raw);
+        logical::rules(document, &machinery, flavour, work, &mut raw);
     }
     // Guarded at the call site rather than inside, and that is the laziness
     // requirement rather than a style: [`Machinery::reach`] records the *ask*
@@ -2302,13 +2308,13 @@ pub(crate) fn validate_counting(
     // tests, `a_syntax_only_sweep_never_reaches_for_a_font_program`, which is
     // the only test that reads the counter for a group it did not ask for.
     if groups.fonts {
-        fonts::rules(&document.inner, &machinery, flavour, &mut raw);
+        fonts::rules(&document.inner, &machinery, flavour, work, &mut raw);
     }
     if groups.colour {
-        colour::rules(&document.inner, &machinery, flavour, &mut raw);
+        colour::rules(&document.inner, &machinery, flavour, work, &mut raw);
     }
     if groups.metadata {
-        xmp::rules(document, &machinery, flavour, &mut raw);
+        xmp::rules(document, &machinery, flavour, work, &mut raw);
     }
 
     let part = flavour.map(|f| f.part);
@@ -2801,7 +2807,8 @@ mod tests {
     #[test]
     fn a_syntax_only_sweep_never_reaches_for_a_font_program() {
         let document = document_with_a_font_program();
-        let (verdict, (metadata, fonts, colour)) = validate_counting(&document, Coverage::SYNTAX);
+        let (verdict, (metadata, fonts, colour)) =
+            validate_counting(&document, Coverage::SYNTAX, None);
 
         assert_eq!(fonts, 0, "the syntax group parsed a font program");
         assert_eq!(colour, 0, "the syntax group read a colour profile");
@@ -2822,7 +2829,8 @@ mod tests {
     #[test]
     fn the_full_request_reaches_each_group_it_asked_for_once() {
         let document = document_with_a_font_program();
-        let (_, (metadata, fonts, colour)) = validate_counting(&document, Coverage::IMPLEMENTED);
+        let (_, (metadata, fonts, colour)) =
+            validate_counting(&document, Coverage::IMPLEMENTED, None);
         assert_eq!(
             metadata, 2,
             "once for the claim and once for the properties"
@@ -2849,12 +2857,12 @@ mod tests {
     fn coverage_reports_the_request_and_the_counters_agree_with_it() {
         let document = document_with_a_font_program();
         assert!(Coverage::IMPLEMENTED.is_complete());
-        let (verdict, _) = validate_counting(&document, Coverage::IMPLEMENTED);
+        let (verdict, _) = validate_counting(&document, Coverage::IMPLEMENTED, None);
         assert!(verdict.coverage.is_complete());
 
         // One group at a time: asking for fonts alone leaves the colour
         // counter at zero and does not claim colour ran.
-        let (verdict, (_, fonts, colour)) = validate_counting(&document, Coverage::FONTS);
+        let (verdict, (_, fonts, colour)) = validate_counting(&document, Coverage::FONTS, None);
         assert_eq!((fonts, colour), (1, 0));
         assert!(verdict.coverage.fonts);
         assert!(!verdict.coverage.colour);

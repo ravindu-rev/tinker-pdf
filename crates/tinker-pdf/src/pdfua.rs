@@ -51,6 +51,7 @@
 use tinker_pdf_xml::{Event, Name, Source};
 
 use crate::pdfa::{Clause, ConformanceFinding, FindingKind, Machinery, RuleGroup};
+use crate::stats::Work;
 use crate::Document;
 
 mod annotations;
@@ -768,8 +769,14 @@ impl UaRaw {
 }
 
 /// Validates `document` against the part of ISO 14289 it claims.
-pub(crate) fn validate(document: &Document, groups: Coverage) -> Verdict {
-    validate_counting(document, groups).0
+///
+/// `work` is the validation door's tally, when it is counting.
+pub(crate) fn validate(
+    document: &Document,
+    groups: Coverage,
+    work: Option<&std::sync::Arc<Work>>,
+) -> Verdict {
+    validate_counting(document, groups, work).0
 }
 
 /// [`validate`], also returning what each group's machinery was reached for:
@@ -777,6 +784,7 @@ pub(crate) fn validate(document: &Document, groups: Coverage) -> Verdict {
 pub(crate) fn validate_counting(
     document: &Document,
     groups: Coverage,
+    work: Option<&std::sync::Arc<Work>>,
 ) -> (Verdict, (u32, u32, u32)) {
     let machinery = Machinery::new(crate::pdfa::Coverage {
         metadata: groups.metadata,
@@ -802,10 +810,10 @@ pub(crate) fn validate_counting(
         syntax::rules(&document.inner, numbering, &mut raw);
     }
     if groups.structure {
-        structure::rules(document, &machinery, numbering, &mut raw);
+        structure::rules(document, &machinery, numbering, work, &mut raw);
     }
     if groups.fonts {
-        fonts::rules(&document.inner, &machinery, numbering, &mut raw);
+        fonts::rules(&document.inner, &machinery, numbering, work, &mut raw);
     }
 
     let findings = raw
@@ -1109,13 +1117,14 @@ mod tests {
         });
         let doc = crate::Document::open(builder.finish()).expect("the fixture opens");
 
-        let (verdict, (metadata, fonts, colour)) = validate_counting(&doc, Coverage::STRUCTURE);
+        let (verdict, (metadata, fonts, colour)) =
+            validate_counting(&doc, Coverage::STRUCTURE, None);
         assert_eq!(fonts, 0, "a structure sweep reached for the font group");
         assert_eq!(colour, 0, "PDF/UA has no colour group to reach for");
         assert_eq!(metadata, 1, "the claim is read, and counted");
         assert!(!verdict.coverage.fonts);
 
-        let (_, (_, fonts, colour)) = validate_counting(&doc, Coverage::IMPLEMENTED);
+        let (_, (_, fonts, colour)) = validate_counting(&doc, Coverage::IMPLEMENTED, None);
         assert_eq!((fonts, colour), (1, 0));
     }
 

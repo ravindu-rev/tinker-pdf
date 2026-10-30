@@ -48,6 +48,7 @@ use tinker_pdf_content::{interpret, Device, FontSource, GraphicsState, ImageRef,
 use tinker_pdf_cos::{pages as cos_pages, ObjRef};
 
 use crate::resources::PageResources;
+use crate::stats::{Stats, Work};
 use crate::Page;
 
 /// One image a page draws (8.9), with its samples and the space they are in.
@@ -371,8 +372,33 @@ impl Page {
     /// content draws, not of what a viewer shows.
     #[must_use]
     pub fn images(&self) -> Vec<PageImage> {
+        self.images_in(None)
+    }
+
+    /// [`Page::images`], counting: the page's images, and what extracting
+    /// them did ([`Stats`]) — an image decoder run for each entry listed and
+    /// for each inline image, the font dictionaries the page's scope
+    /// resolved, and each form's scope asked for.
+    ///
+    /// A counted sibling, because [`Page::images`] takes nothing to ask
+    /// with. The list is the one [`Page::images`] returns, to the byte.
+    #[must_use]
+    pub fn images_counted(&self) -> (Vec<PageImage>, Stats) {
+        let work = Arc::new(Work::new());
+        let images = self.images_in(Some(&work));
+        (images, work.stats())
+    }
+
+    /// The images this page draws, counting into `work` when the operation
+    /// is counting.
+    fn images_in(&self, work: Option<&Arc<Work>>) -> Vec<PageImage> {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
-        let resources = Arc::new(PageResources::new(&self.doc, &self.inner, None));
+        let resources = Arc::new(PageResources::new_counted(
+            &self.doc,
+            &self.inner,
+            None,
+            work.cloned(),
+        ));
         let mut collector = Collector {
             scope: Arc::clone(&resources),
             outer: Vec::new(),

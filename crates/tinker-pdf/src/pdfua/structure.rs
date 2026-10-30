@@ -17,6 +17,7 @@ use tinker_pdf_cos::{decode_text_string, ObjRef, STANDARD_STRUCTURE_TYPES};
 use super::{clauses, UaPart, UaRaw};
 use crate::pdfa::logical::{language_is_well_formed, LanguageGrammar};
 use crate::pdfa::{FindingKind, Machinery, RuleGroup};
+use crate::stats::Work;
 use crate::structure::{StructElement, StructKid, StructureTree, StructureWarning};
 use crate::Document;
 
@@ -34,6 +35,7 @@ pub(super) fn rules(
     document: &Document,
     machinery: &Machinery,
     part: UaPart,
+    work: Option<&std::sync::Arc<Work>>,
     out: &mut Vec<UaRaw>,
 ) {
     if !machinery.reach(RuleGroup::Structure) {
@@ -42,18 +44,18 @@ pub(super) fn rules(
     // The catalog's `/Lang` is read whether or not there is a tree: a file
     // with no structure at all still states, or fails to state, a language.
     catalog_language(document, part, out);
-    let Some(tree) = crate::structure::bind(&document.inner) else {
+    let Some(tree) = crate::structure::bind_counted(&document.inner, work) else {
         out.push(UaRaw::file(
             clauses::STRUCTURE_HIERARCHY,
             FindingKind::StructureTreeMissing,
         ));
         if part == UaPart::One {
-            super::annotations::rules(&document.inner, None, out);
+            super::annotations::rules(&document.inner, None, work, out);
         }
         return;
     };
     if part == UaPart::One {
-        super::annotations::rules(&document.inner, Some(&tree), out);
+        super::annotations::rules(&document.inner, Some(&tree), work, out);
     }
     if !tree.marked {
         out.push(UaRaw::file(clauses::MARKED, FindingKind::NotMarkedAsTagged));

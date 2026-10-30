@@ -20,6 +20,7 @@ use std::sync::Arc;
 use crate::doc::CosDocument;
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
+use crate::work::Work;
 use crate::write::{StreamData, Written};
 
 pub mod annot;
@@ -117,14 +118,22 @@ pub struct DocumentEditor {
     /// — whose objects arrive as plaintext, since the source was
     /// authenticated to read them. [`DocumentEditor::check_save`] reads it.
     encrypted_source: bool,
+    /// The tally [`DocumentEditor::count_work`] started, which every pass
+    /// over this editor counts into until it is dropped.
+    ///
+    /// **Not restored by a rollback**: a rolled-back edit's work was done,
+    /// and a count is of work done, not of what was kept.
+    work: Option<Arc<Work>>,
 }
 
 /// Everything a rollback restores: an editor's state, taken as a value.
 ///
 /// Exhaustive by construction: [`DocumentEditor`] holds these six fields and
-/// one more -- the `Arc<CosDocument>` it overlays, which is immutable and
-/// therefore has nothing to restore. A field added to the editor without being
-/// added here is a silent hole in every transaction, which is why the two
+/// two more -- the `Arc<CosDocument>` it overlays, which is immutable and
+/// therefore has nothing to restore, and the tally
+/// [`DocumentEditor::count_work`] starts, which a rollback keeps because the
+/// work it counted was done. A field added to the editor without being added
+/// here is a silent hole in every transaction, which is why the two
 /// declarations sit next to each other.
 ///
 /// **A value, not an open transaction.** This is what
@@ -184,7 +193,33 @@ impl DocumentEditor {
             page_order: None,
             trailer: Dict::new(),
             encrypted_source: false,
+            work: None,
         }
+    }
+
+    /// Counts the work done over this editor from now until it is dropped,
+    /// into one tally: what the passes the facade runs over it count — a
+    /// save's image and font passes — which a save asked for its stats hands
+    /// back whole. The editor's own operations count nothing into it.
+    ///
+    /// For an operation made of several calls on one editor, a merge's
+    /// imports and its save: called before the first, the save reports
+    /// everything counted since. Calling it again keeps the tally it has. A
+    /// count changes nothing an edit or a save produces.
+    pub fn count_work(&mut self) {
+        if self.work.is_none() {
+            self.work = Some(Arc::new(Work::new()));
+        }
+    }
+
+    /// The tally this editor counts into, from [`DocumentEditor::count_work`]
+    /// on; `None` when nobody asked it to count.
+    ///
+    /// For a pass over the editor to count into the same tally as the
+    /// editor's own work, as the facade's save passes do.
+    #[must_use]
+    pub fn work(&self) -> Option<&Arc<Work>> {
+        self.work.as_ref()
     }
 
     /// The document being edited.

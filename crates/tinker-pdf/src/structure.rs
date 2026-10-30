@@ -723,6 +723,15 @@ pub struct StructuredNode {
 ///
 /// `None` when there is none, which is most documents.
 pub(crate) fn bind(doc: &Arc<CosDocument>) -> Option<StructureTree> {
+    bind_counted(doc, None)
+}
+
+/// [`bind`], counting its walk of the page tree into `work` when the
+/// operation is counting.
+pub(crate) fn bind_counted(
+    doc: &Arc<CosDocument>,
+    work: Option<&Arc<crate::stats::Work>>,
+) -> Option<StructureTree> {
     let catalog = doc.catalog()?;
     let root = doc.resolve_key(&catalog, doc.intern(b"StructTreeRoot"));
     let root = root.as_dict()?;
@@ -738,6 +747,7 @@ pub(crate) fn bind(doc: &Arc<CosDocument>) -> Option<StructureTree> {
             .unwrap_or(false)
     };
 
+    crate::stats::walked(work);
     let all = cos_pages::collect(doc);
     let page_count = u32::try_from(all.len()).unwrap_or(u32::MAX);
     let pages: BTreeMap<ObjRef, u32> = all

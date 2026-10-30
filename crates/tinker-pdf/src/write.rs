@@ -133,6 +133,7 @@ pub use crate::recode::{
     BilevelCodec, ContinuousCodec, ImageCoding, ImagePolicy, ImageRecoding, ImageReport,
     JpegTables, Recoded, UntouchedImage, UntouchedImageReason,
 };
+use crate::stats::{self, Stats};
 use crate::subset::{self, SubsetReport};
 
 /// What a save does to the document's embedded font programs.
@@ -166,7 +167,7 @@ pub enum FontPolicy {
 /// Options for [`save`].
 ///
 /// [`WriteOptions`] verbatim, plus the two decisions it cannot make (see this
-/// module's documentation).
+/// module's documentation), and whether to count what the save does.
 #[derive(Clone, Debug, Default)]
 pub struct SaveOptions {
     /// How the bytes are laid out: mode, version, linearization, object
@@ -177,6 +178,15 @@ pub struct SaveOptions {
     /// What happens to the image XObjects, before the fonts. [`ImagePolicy::Keep`]
     /// — the default — leaves every image stream as the file stored it.
     pub images: ImagePolicy,
+    /// Count what the save does and hand it back as [`Saved::stats`]: the
+    /// image and font passes' walks of the page tree, and the font
+    /// dictionaries and forms' scopes the font pass reads. On an editor
+    /// [`DocumentEditor::count_work`] asked to count, the count is
+    /// everything counted over the editor since, this save included.
+    ///
+    /// Off by default. A counted save writes the same bytes and reports the
+    /// same passes as an uncounted one.
+    pub stats: bool,
 }
 
 /// What the image pass did, reported by [`save`]: [`SubsetOutcome`]'s three
@@ -299,6 +309,9 @@ pub struct Saved {
     pub fonts: SubsetOutcome,
     /// What [`SaveOptions::images`] asked for, and what came of it.
     pub images: ImageOutcome,
+    /// What [`SaveOptions::stats`] asked to be counted: `None` unless it
+    /// asked.
+    pub stats: Option<Stats>,
 }
 
 /// Saves a document, subsetting its embedded fonts unless asked not to.
@@ -335,6 +348,13 @@ pub struct Saved {
 /// and the glyphs that redaction removed are glyphs it drops. Run the other
 /// way round it would keep exactly what the redaction was for.
 pub fn save(editor: &mut DocumentEditor, options: &SaveOptions) -> Saved {
+    // The editor's tally when it is counting, so that a merge's save reports
+    // what was counted over the editor since `count_work`; the save's own
+    // when it is not and the caller asked. Either way both passes count.
+    let work = editor
+        .work()
+        .cloned()
+        .or_else(|| stats::tally(options.stats));
     // Images first: the font pass reads content streams, and nothing this
     // pass writes is one, so the order is free — and this way a later reader
     // of this function meets the passes in the order `SaveOptions` lists
@@ -342,7 +362,7 @@ pub fn save(editor: &mut DocumentEditor, options: &SaveOptions) -> Saved {
     let images = match &options.images {
         ImagePolicy::Keep => ImageOutcome::Kept,
         ImagePolicy::Recode(recoding) => {
-            let report = crate::recode::apply(editor, recoding);
+            let report = crate::recode::apply(editor, recoding, work.as_ref());
             match options.write.mode {
                 WriteMode::Rewrite => ImageOutcome::Recoded(report),
                 WriteMode::Incremental => ImageOutcome::RecodedButTheOriginalsRemain(report),
@@ -352,7 +372,7 @@ pub fn save(editor: &mut DocumentEditor, options: &SaveOptions) -> Saved {
     let fonts = match options.fonts {
         FontPolicy::Keep => SubsetOutcome::Kept,
         FontPolicy::Subset => {
-            let report = subset::apply(editor);
+            let report = subset::apply_counting(editor, work.as_ref());
             match options.write.mode {
                 WriteMode::Rewrite => SubsetOutcome::Cut(report),
                 // 7.5.6: the original bytes are the output's prefix, the
@@ -369,6 +389,7 @@ pub fn save(editor: &mut DocumentEditor, options: &SaveOptions) -> Saved {
         bytes: editor.save(&options.write),
         fonts,
         images,
+        stats: work.filter(|_| options.stats).map(|work| work.stats()),
     }
 }
 

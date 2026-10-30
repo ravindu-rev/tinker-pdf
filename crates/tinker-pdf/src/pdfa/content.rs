@@ -26,7 +26,9 @@
 
 use std::collections::BTreeSet;
 
+use std::sync::Arc;
 use tinker_pdf_content::{Token, Tokenizer};
+
 use tinker_pdf_cos::{pages, CosDocument, Dict, ObjRef, Object};
 
 /// How many pages the walk visits.
@@ -80,13 +82,19 @@ impl Op<'_> {
 }
 
 /// Calls `visit` for every operator of every content stream the document
-/// renders.
-pub(crate) fn walk(doc: &CosDocument, visit: &mut impl FnMut(&Op<'_>)) {
+/// renders: one walk of the page tree, counted into `work` when the
+/// validation is counting.
+pub(crate) fn walk(
+    doc: &CosDocument,
+    work: Option<&Arc<crate::stats::Work>>,
+    visit: &mut impl FnMut(&Op<'_>),
+) {
     let mut walker = Walker {
         doc,
         streams: MAX_STREAMS,
         visited: BTreeSet::new(),
     };
+    crate::stats::walked(work);
     for page in pages::collect_upto(doc, MAX_PAGES) {
         let resources = page.resources.clone();
         let content = pages::content_bytes(doc, &page);

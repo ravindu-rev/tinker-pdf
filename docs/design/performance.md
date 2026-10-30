@@ -154,8 +154,8 @@ are.
 
 Nothing reads a `Work` but a door turning it into `Stats`. That is the whole of
 why a counted operation's output cannot differ from an uncounted one's, and
-`stats_do_not_change_a_pixel` (`tests/stats.rs`) and MS-01.3's byte-identity
-checks hold it.
+`stats_do_not_change_a_pixel` (`tests/stats.rs`) and the other doors' checks
+beside it hold it.
 
 **Home.** `tinker-pdf-cos`, because it is the lowest crate with an operation
 context and three of the contexts the tally rides are in it: the page walk
@@ -202,9 +202,9 @@ already carries it.
 | `glyphs_shown` | a glyph the interpreter showed the renderer (`Device::show_glyph`, `crates/tinker-pdf-render/src/lib.rs:2847`) | the renderer | built |
 | `outlines_filled` | a glyph outline the renderer built into a path and painted | the renderer | built |
 | `font_dictionaries_resolved` | a font dictionary read: each font `cos_font::from_resources` returns when a scope is built (`crates/tinker-pdf/src/resources.rs:585`), and each `fonts::font_dict` lookup (`crates/tinker-pdf/src/fonts.rs:215`), which `type3_glyph` makes for every glyph (`resources.rs:1428`) | the facade's scopes | built |
-| `images_decoded` | an image decoder run: an image XObject's cache miss, and every inline image, which is never cached (`resources.rs:222-224`) | the facade's scopes | built |
+| `images_decoded` | an image decoder run: an image XObject's cache miss, and every inline image, which is never cached (`resources.rs:222-224`); in an image extraction, each entry it lists and every inline image | the facade's scopes | built |
 | a `_hits` and a `_misses` for each of the five caches `Caches` holds — font programs, images, ICC transforms, glyph outlines, form scopes (`resources.rs:63-101`) | a lookup that found an entry, a cached `None` included, or one that did not | the facade's scopes | built |
-| `page_walks` | a walk of the page tree from its root | the facade's call sites, then `collect_upto` itself from MS-01.4 | MS-01.3 |
+| `page_walks` | a walk of the page tree from its root | the facade's call sites, then `collect_upto` itself from MS-01.4 | built |
 | `page_nodes_visited` | a `/Pages` tree node a lookup or a walk read, leaves included, and the one object the linearized or hinted first-page path reads (`pages.rs:459`, `:477`) | cos's page walk | MS-01.4 |
 | `streams_decoded` | a run of a stream's filter chain, whatever it returned | cos's two filter-chain entry points and every `Resolve` view | MS-01.5 |
 | `most_decodes_of_one_stream` | the most runs any one stream had in the operation — a maximum, the quantity A5 holds to one | the same | MS-01.5 |
@@ -236,13 +236,13 @@ can refuse, and a tally is only added to.
 | --- | --- | --- |
 | A page lookup: `pages::at` and the walk under it (`pages.rs:488-499`) | a `Work` on the door's stack, passed as `Option<&Work>` down `at`, `collect_upto` and `walk`, and to the linearized and hinted paths | MS-01.4 |
 | A render: `Page::render` (`crates/tinker-pdf/src/lib.rs:2247`), `Page::render_form` and `Page::render_annotation` (`crates/tinker-pdf/src/render_part.rs:175`, `:230`), `DisplayList::render` (`display.rs:181`) | the render's `PageResources` holds it — built with it by `Page::render_layer` (`lib.rs:2269-2280`), handed it by `for_one_render` for a display list (`resources.rs:546`); `annots::draw` takes it for the appearances it draws; the page's content decode, made before the scope exists (`lib.rs:2248`), takes it too | built; MS-01.5 for decodes |
-| A scope a scope makes: a pattern cell's and a form's own in a render (`resources.rs:1858-1868`, `:872-890`); and `own_scope`'s — a pattern cell's, a mask group's or a form's in the save's font walk, which only `subset.rs` calls (`resources.rs:750-764`) | inherits its maker's | built; MS-01.3 for `own_scope`, which no render reaches |
+| A scope a scope makes: a pattern cell's and a form's own in a render (`resources.rs:1858-1868`, `:872-890`); and `own_scope`'s — a pattern cell's, a mask group's or a form's in the save's font walk, which only `subset.rs` calls (`resources.rs:750-764`) | inherits its maker's | built |
 | A scope a cache keeps: a form's, in `form_scopes` (`resources.rs:856-869`) | kept without one, and handed out bound to the asker's, its caches shared so a hit stays a hit — a kept scope outlives the render that built it, and two renders of one display list may hold it at once | built |
 | The renderer | its own plain counts, handed back by `finish_counted`, `finish`'s sibling, and added by the door | built |
-| Text and image extraction | as a render: the content decode and the `PageResources` the door builds (`lib.rs:2533-2540`, `crates/tinker-pdf/src/images.rs:328-339`) | MS-01.3 |
-| Validation | `pdfa::validate`, `pdfua::validate` and `pdfx::validate` take it, so their page walks (`crates/tinker-pdf/src/pdfa/content.rs:90`) and their decodes count | MS-01.3 |
-| An editor | `DocumentEditor` holds it from `count_work` until it is dropped. Its own page and object operations count into it in cos — `page_refs`'s walk (`crates/tinker-pdf-cos/src/edit/page_ops.rs:16-24`), `import_page`'s `pages::collect(source)` (`:185`), its overlay's decodes (`edit/overlay.rs:48`) — and the facade's passes over it count into it too: a save's image and font passes (`crates/tinker-pdf/src/write.rs:337`; `subset.rs:553` builds a scope a page), a redaction. A rolled-back transaction keeps its counts: the work was done | MS-01.3, and MS-01.4 for its walks |
-| A save | the editor's tally if it is counting, and one of the save's own if not; the serializer counts into whichever the save carries | MS-01.3, and MS-01.5 for the writer's decodes |
+| Text and image extraction | as a render: the content decode and the `PageResources` the door builds (`lib.rs:2533-2540`, `crates/tinker-pdf/src/images.rs:328-339`) | built |
+| Validation | `pdfa::validate`, `pdfua::validate` and `pdfx::validate` take it, so their page walks (`crates/tinker-pdf/src/pdfa/content.rs:90`) and their decodes count | built; MS-01.5 for decodes |
+| An editor | `DocumentEditor` holds it from `count_work` until it is dropped. Its own page and object operations count into it in cos — `page_refs`'s walk (`crates/tinker-pdf-cos/src/edit/page_ops.rs:16-24`), `import_page`'s `pages::collect(source)` (`:185`), its overlay's decodes (`edit/overlay.rs:48`) — and the facade's passes over it count into it too: a save's image and font passes (`crates/tinker-pdf/src/write.rs:337`; `subset.rs:553` builds a scope a page), a redaction. A rolled-back transaction keeps its counts: the work was done | built; MS-01.4 for its walks, MS-01.5 for its decodes |
+| A save | the editor's tally if it is counting, and one of the save's own if not; the serializer counts into whichever the save carries | built; MS-01.5 for the writer's decodes |
 | A stream decode | `CosDocument::stream_decoded` and `stream_image_input` gain siblings that take `Option<&Work>`, and `Resolve` a counting view — a `Resolve` over any `Resolve` and a `&Work`, whose `stream_decoded` runs the inner one's and counts it — so code already written against the trait counts when handed the view, as a font's CMap reads are (`font::from_resources_in`, `crates/tinker-pdf-cos/src/font.rs:1110`; `read_cmap`, `:601-602`). The uncounted entry points delegate with `None`, so no caller outside an operation changes | MS-01.5 |
 
 **Threads.** One `Work` per operation, never per document. Counts sum, so an
@@ -260,10 +260,9 @@ Two rules decide each door's shape, and the tree decides which applies.
 **The ask.** A door whose options value every caller builds from a base takes
 a flag on it, off by default: `RenderOptions::stats` and `SaveOptions::stats`.
 Every `RenderOptions` literal in the tree but its own `Default`
-(`lib.rs:705-718`) names a base, and so does every `SaveOptions` literal but
-`tools/tpdf/src/writing.rs:564`, which gains one in MS-01.3. A door with no
-options value, or one whose callers write it out whole, gets a counted sibling
-instead. `TextOptions` is written out whole by its callers, so a field on it
+(`lib.rs:705-718`) names a base, and so does every `SaveOptions` literal. A
+door with no options value, or one whose callers write it out whole, gets a
+counted sibling instead. `TextOptions` is written out whole by its callers, so a field on it
 breaks every one of them, which is the constraint FT-17.1 is already designing
 around (`text_order.rs:128`).
 `Document::page` and `Page::images` take no options at all, and the validators
@@ -278,18 +277,18 @@ tree — or a list, or a verdict whose fields other code compares.
 | Door | Asked by | Answered by | Step |
 | --- | --- | --- | --- |
 | render: `Page::render`, `render_form`, `render_annotation`, `DisplayList::render` | `RenderOptions::stats: bool` | `Bitmap::stats: Option<Stats>` | built |
-| text | `Page::text_counted(&self, &TextOptions)` | `(TextPage, Stats)` | MS-01.3 |
-| save: `write::save` | `SaveOptions::stats: bool` | `Saved::stats: Option<Stats>` | MS-01.3 |
-| merge: pages imported, then saved | `DocumentEditor::count_work(&mut self)` before the first import, and `SaveOptions::stats` | `Saved::stats`: everything the editor counted since `count_work`, the save's own work included | MS-01.3 |
-| image extraction, the decode door | `Page::images_counted(&self)` | `(Vec<PageImage>, Stats)` | MS-01.3 |
-| validation | `Document::validate_pdfa_counted(&self, PdfACoverage)`, and `validate_pdfua_counted` and `validate_pdfx_counted` alike | `(verdict, Stats)` | MS-01.3 |
+| text | `Page::text_counted(&self, &TextOptions)` | `(TextPage, Stats)` | built |
+| save: `write::save` | `SaveOptions::stats: bool` | `Saved::stats: Option<Stats>` | built |
+| merge: pages imported, then saved | `DocumentEditor::count_work(&mut self)` before the first import, and `SaveOptions::stats` | `Saved::stats`: everything the editor counted since `count_work`, the save's own work included | built |
+| image extraction, the decode door | `Page::images_counted(&self)` | `(Vec<PageImage>, Stats)` | built |
+| validation | `Document::validate_pdfa_counted(&self, PdfACoverage)`, and `validate_pdfua_counted` and `validate_pdfx_counted` alike | `(verdict, Stats)` | built |
 | page lookup, the document door | `Document::page_counted(&self, index: u32)` | `(Option<Page>, Stats)` | MS-01.4 |
 
 `Bitmap::stats` is a public field rather than a method: a method needs a field
 the caller cannot see, and one private field would stop every hand-built
 `Bitmap` compiling, where a public one asks each of them for `stats: None`;
 nothing in the C ABI or the bindings builds one. `Saved::stats` joins `Saved`'s
-other public fields; its one literal is the facade's own (`write.rs:368`).
+other public fields; its one literal is the facade's own (`write.rs:388`).
 
 The other doors that walk or decode — `Document::pages`,
 `Document::page_count` and the rest — gain counted siblings in the rows that
@@ -437,7 +436,7 @@ binary per entry, as MS-01.7 settles the counting allocator.
 | Risk | Mitigation |
 | --- | --- |
 | A count drifts from the work it names: a site moves, a path is added that does not count, a refactor counts twice | Every count is checked against a figure the test derives from its fixture |
-| Counting changes what an operation does | Nothing reads a `Work` but a door; a kept scope handed out bound shares its caches, so a hit stays a hit; `stats_do_not_change_a_pixel` (pages and tiles) and MS-01.3's byte-identity checks hold it |
+| Counting changes what an operation does | Nothing reads a `Work` but a door; a kept scope handed out bound shares its caches, so a hit stays a hit; `stats_do_not_change_a_pixel` (pages and tiles) and the other doors' byte-identity checks hold it |
 | Off is not free | An uncounted operation carries `None`: no lock, no allocation, one tested `Option` a site; MS-02's floors of 1 hold every operation to the baseline once that job exists |
 | Two threads' counts mix | One `Work` an operation, never on `Document`, in a global or in a thread-local; an operation's own workers add to one total in any order |
 | Hits and misses depend on interleaving when threads share a cache | Guards and pins read serial runs; A9 compares pixels and warnings, not counts; P-15.6's single-flight fills make a shared cache's counts deterministic and its test reads them |

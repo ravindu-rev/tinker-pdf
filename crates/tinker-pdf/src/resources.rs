@@ -1042,8 +1042,9 @@ impl PageResources {
 
     /// The scope a stream's own `/Resources` makes: a tiling pattern's, a
     /// mask group's or a form's, built as [`PageResources::from_dict`]
-    /// builds any. `None` when the stream has none, and its names resolve
-    /// where it was painted (8.7.3.2, 8.10.1).
+    /// builds any and counting into this scope's tally. `None` when the
+    /// stream has none, and its names resolve where it was painted (8.7.3.2,
+    /// 8.10.1).
     pub(crate) fn own_scope(&self, stream: ObjRef) -> Option<PageResources> {
         let object = self.doc.get(stream).ok()?;
         let own = self
@@ -1051,10 +1052,11 @@ impl PageResources {
             .resolve_key(object.as_dict()?, Name::RESOURCES)
             .as_dict()?
             .clone();
-        Some(PageResources::from_dict(
+        Some(PageResources::from_dict_counted(
             &self.doc,
             own,
             self.provider.as_ref(),
+            self.work.clone(),
         ))
     }
 
@@ -4284,6 +4286,9 @@ impl PageResources {
         if subtype.as_deref() != Some(b"Image".as_slice()) {
             return None;
         }
+        // One decoder run an entry listed, its masks part of it, as a
+        // render's decode of the image is one.
+        self.count(Counter::ImagesDecoded);
         Some(self.extract_at(dict, reference, name, 0))
     }
 
@@ -4428,6 +4433,8 @@ impl PageResources {
         let mut sink = tinker_pdf_cos::WarningSink::new();
         let parsed = tinker_pdf_cos::parse_object_at(&text, 0, self.doc.names_table(), &mut sink);
         let dict = parsed.object.as_dict()?;
+        // Every inline image is a decoder run, as in a render.
+        self.count(Counter::ImagesDecoded);
 
         let (width, height, stencil, bpc) = self.geometry(dict);
         let space = if stencil {

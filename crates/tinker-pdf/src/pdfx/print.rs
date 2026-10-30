@@ -21,6 +21,7 @@ use tinker_pdf_cos::{CosDocument, ObjRef};
 use super::{clauses, XFlavour, XRaw};
 use crate::pdfa::colour::{self, Used};
 use crate::pdfa::{fonts as pdfa_fonts, FindingKind, Machinery, RuleGroup};
+use crate::stats::Work;
 
 /// How many output intents are read.
 const MAX_INTENTS: usize = 64;
@@ -33,13 +34,14 @@ pub(super) fn rules(
     doc: &CosDocument,
     machinery: &Machinery,
     flavour: XFlavour,
+    work: Option<&std::sync::Arc<Work>>,
     out: &mut Vec<XRaw>,
 ) -> bool {
     if !machinery.reach(RuleGroup::Colour) {
         return false;
     }
     let mut used = Used::default();
-    colour::scan(doc, &mut used);
+    colour::scan(doc, work, &mut used);
     let intent = output_intent(doc, out);
     device_rgb(&intent, &used, out);
     if flavour == XFlavour::X3_2003 {
@@ -49,7 +51,7 @@ pub(super) fn rules(
     // AN 2.25, through ISO 19005-1 6.4's own rule: the same five constructs,
     // the same reading of "used", renumbered.
     let mut raw = Vec::new();
-    colour::transparency(doc, &used, &mut raw);
+    colour::transparency(doc, &used, work, &mut raw);
     out.extend(raw.into_iter().map(|raw| XRaw {
         rule: clauses::TRANSPARENCY,
         object: raw.object,
@@ -68,12 +70,17 @@ pub(super) fn rules(
 /// notes as quoted do not say whether such a font is used. The reading errs
 /// towards silence, the direction a validator with no false-negative bar
 /// should err in, and `super::STAGED` names it.
-pub(super) fn fonts(doc: &CosDocument, machinery: &Machinery, out: &mut Vec<XRaw>) -> bool {
+pub(super) fn fonts(
+    doc: &CosDocument,
+    machinery: &Machinery,
+    work: Option<&std::sync::Arc<Work>>,
+    out: &mut Vec<XRaw>,
+) -> bool {
     if !machinery.reach(RuleGroup::Fonts) {
         return false;
     }
     let mut raw = Vec::new();
-    pdfa_fonts::embedding(doc, &mut raw);
+    pdfa_fonts::embedding(doc, work, &mut raw);
     out.extend(raw.into_iter().filter_map(|raw| {
         matches!(raw.kind, FindingKind::FontNotEmbedded { .. }).then_some(XRaw {
             rule: clauses::FONTS,

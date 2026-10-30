@@ -240,6 +240,7 @@ use tinker_pdf_cos::{
 };
 
 use crate::resources::PageResources;
+use crate::stats::Work;
 
 /// How many objects the font sweep will look at.
 ///
@@ -468,14 +469,29 @@ impl SubsetReport {
 /// be real. An incremental save appends, leaving the original program's bytes
 /// in the file where anyone scanning it finds them — the same caveat
 /// [`crate::redact`] carries, for the same reason.
+///
+/// On an editor [`DocumentEditor::count_work`] asked to count, the walk counts
+/// into its tally: the page tree's walk, and the font dictionaries and forms'
+/// scopes each page's scope reads.
 pub fn apply(editor: &mut DocumentEditor) -> SubsetReport {
+    let work = editor.work().cloned();
+    apply_counting(editor, work.as_ref())
+}
+
+/// [`apply`], counting into `work` when the operation is counting: the save
+/// door's tally, which is the editor's when it is counting and the save's own
+/// when it is not.
+pub(crate) fn apply_counting(
+    editor: &mut DocumentEditor,
+    work: Option<&Arc<Work>>,
+) -> SubsetReport {
     // Everything the walk reads, it reads from the view and nothing else: the
     // view's names are its own table's, and a name from it looked up in a
     // dictionary the editor holds would find nothing (or the wrong thing).
     // What crosses back is object numbers and glyph ids, which the view
     // shares with the editor by construction.
     let usage = match editor.view() {
-        Ok(view) => collect(&view),
+        Ok(view) => collect(&view, work),
         Err(_) => Usage::default(),
     };
     let doc = editor.shared_document();
@@ -545,12 +561,14 @@ impl Usage {
 /// Walks every content stream the document draws and records what it showed.
 ///
 /// `doc` is the editor's view ([`apply`]), so every page, stream and
-/// resource here is the editor's.
-fn collect(doc: &Arc<CosDocument>) -> Usage {
+/// resource here is the editor's. Every scope counts into `work` when the
+/// save is counting, and so does the walk of the page tree.
+fn collect(doc: &Arc<CosDocument>, work: Option<&Arc<Work>>) -> Usage {
     let mut usage = Usage::default();
 
+    crate::stats::walked(work);
     for page in cos_pages::collect(doc) {
-        let resources = Arc::new(PageResources::new(doc, &page, None));
+        let resources = Arc::new(PageResources::new_counted(doc, &page, None, work.cloned()));
         let content = cos_pages::content_bytes(doc, &page);
         walk(&mut usage, doc, &content, resources);
 
@@ -558,7 +576,12 @@ fn collect(doc: &Arc<CosDocument>) -> Usage {
             let Ok(content) = doc.stream_decoded(appearance.stream) else {
                 continue;
             };
-            let resources = Arc::new(PageResources::from_dict(doc, appearance.resources, None));
+            let resources = Arc::new(PageResources::from_dict_counted(
+                doc,
+                appearance.resources,
+                None,
+                work.cloned(),
+            ));
             walk(&mut usage, doc, &content, resources);
         }
     }

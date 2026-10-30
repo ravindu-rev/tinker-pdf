@@ -336,6 +336,7 @@ fn perform(case: &str, dir: &Path) {
                 },
                 fonts: FontPolicy::Keep,
                 images: ImagePolicy::Keep,
+                ..SaveOptions::default()
             };
             black_box(write::save(&mut editor, &options).bytes);
         }

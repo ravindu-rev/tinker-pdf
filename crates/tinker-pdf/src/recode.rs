@@ -359,7 +359,14 @@ impl ImageReport {
 }
 
 /// Runs the pass over every image the editor's document holds.
-pub(crate) fn apply(editor: &mut DocumentEditor, recoding: &ImageRecoding) -> ImageReport {
+///
+/// `work` is the save door's tally, when it is counting: the walk that finds
+/// each image's placements counts into it.
+pub(crate) fn apply(
+    editor: &mut DocumentEditor,
+    recoding: &ImageRecoding,
+    work: Option<&Arc<crate::stats::Work>>,
+) -> ImageReport {
     // The editor's own objects resolve in the view, so an image or a page it
     // added is swept and walked like one the file had. A view that will not
     // open is a defect in the writer or the reader rather than in the input;
@@ -367,7 +374,7 @@ pub(crate) fn apply(editor: &mut DocumentEditor, recoding: &ImageRecoding) -> Im
     let view = editor.view().unwrap_or_else(|_| editor.shared_document());
     let max_ppi = recoding.max_ppi.filter(|ppi| ppi.is_finite() && *ppi > 0.0);
     let placements = if max_ppi.is_some() {
-        walk(&view)
+        walk(&view, work)
     } else {
         BTreeMap::new()
     };
@@ -537,13 +544,14 @@ type Placements = BTreeMap<u32, Shortest>;
 
 /// Interprets every page and every annotation appearance, recording each
 /// image's placements.
-fn walk(view: &Arc<CosDocument>) -> Placements {
+fn walk(view: &Arc<CosDocument>, work: Option<&Arc<crate::stats::Work>>) -> Placements {
     let found: Arc<Mutex<Option<ObjRef>>> = Arc::new(Mutex::new(None));
     let forms: Arc<Mutex<HashMap<u32, Arc<Vec<u8>>>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut device = Placer {
         found: Arc::clone(&found),
         placements: BTreeMap::new(),
     };
+    crate::stats::walked(work);
     for page in cos_pages::collect(view) {
         let scope = Scope {
             doc: Arc::clone(view),

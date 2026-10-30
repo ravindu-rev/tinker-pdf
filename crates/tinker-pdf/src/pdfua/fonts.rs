@@ -44,6 +44,7 @@ use tinker_pdf_cos::{CosDocument, ObjRef, Object};
 use super::{clauses, UaClauses, UaPart, UaRaw};
 use crate::pdfa::FindingKind;
 use crate::pdfa::{content, Flavour, Level, Machinery, Part, RuleGroup};
+use crate::stats::Work;
 
 /// How many bytes of drawn strings the `/ToUnicode` value check holds
 /// before it splits them into codes and lets them go, each string charged
@@ -85,6 +86,7 @@ pub(super) fn rules(
     doc: &std::sync::Arc<CosDocument>,
     machinery: &Machinery,
     _part: UaPart,
+    work: Option<&std::sync::Arc<Work>>,
     out: &mut Vec<UaRaw>,
 ) {
     if !machinery.reach(RuleGroup::Fonts) {
@@ -92,7 +94,7 @@ pub(super) fn rules(
     }
 
     let mut shared = Vec::new();
-    crate::pdfa::fonts::run(doc, Some(SHARED_READING), &mut shared);
+    crate::pdfa::fonts::run(doc, Some(SHARED_READING), work, &mut shared);
     for raw in shared {
         if let Some(rule) = ua_clause_of(&raw.kind) {
             out.push(UaRaw {
@@ -103,7 +105,7 @@ pub(super) fn rules(
         }
     }
 
-    for (reference, codes) in &drawn_codes(doc) {
+    for (reference, codes) in &drawn_codes(doc, work) {
         if let Some(codes) = codes {
             unicode_values(doc, *reference, codes, out);
         }
@@ -140,9 +142,12 @@ pub(super) fn ua_clause_of(kind: &FindingKind) -> Option<UaClauses> {
 /// veraPDF's statement of 7.21.7-2 says the requirement holds "regardless of
 /// their rendering mode usage". Invisible OCR text is exactly the text a
 /// screen reader reads.
-fn drawn_codes(doc: &CosDocument) -> BTreeMap<ObjRef, Option<Codes>> {
+fn drawn_codes(
+    doc: &CosDocument,
+    work: Option<&std::sync::Arc<Work>>,
+) -> BTreeMap<ObjRef, Option<Codes>> {
     let mut drawn = Drawn::default();
-    content::walk(doc, &mut |op| {
+    content::walk(doc, work, &mut |op| {
         if !matches!(op.operator, b"Tj" | b"TJ" | b"'" | b"\"") {
             return;
         }

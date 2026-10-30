@@ -48,11 +48,13 @@
 //!   requirement rather than a rule: **2** tests.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use tinker_pdf_color::icc;
 use tinker_pdf_cos::{pages, CosDocument, Dict, ObjRef, Object};
 
 use super::{clauses, content, FindingKind, Flavour, Machinery, Part, Raw, RuleGroup};
+use crate::stats::Work;
 
 /// How many pages the `/Group` sweep visits.
 const MAX_PAGES: usize = 1 << 14;
@@ -97,19 +99,20 @@ pub(super) fn rules(
     doc: &CosDocument,
     machinery: &Machinery,
     flavour: Option<Flavour>,
+    work: Option<&Arc<Work>>,
     out: &mut Vec<Raw>,
 ) {
     if !machinery.reach(RuleGroup::Colour) {
         return;
     }
     let part = flavour.map(|f| f.part);
-    let destination = output_intents(doc, part, out);
+    let destination = output_intents(doc, part, work, out);
     let mut used = Used::default();
-    scan(doc, &mut used);
+    scan(doc, work, &mut used);
     gather_state_intents(doc, &mut used);
-    gather_group_spaces(doc, &mut used);
+    gather_group_spaces(doc, work, &mut used);
     if part.is_some() && part != Some(Part::One) {
-        gather_blending_spaces(doc, &mut used);
+        gather_blending_spaces(doc, work, &mut used);
     }
     device_spaces(&destination, &used, out);
     if part == Some(Part::One) {
@@ -120,7 +123,7 @@ pub(super) fn rules(
     xobject_entries(doc, &used, out);
     transfer_functions(doc, &used, out);
     if part == Some(Part::One) {
-        transparency(doc, &used, out);
+        transparency(doc, &used, work, out);
     }
     undefined_operators(&used, out);
     if part.is_some() && part != Some(Part::One) {
@@ -405,14 +408,19 @@ enum Destination {
 /// 3. if there is more than one such entry, **they all name the same
 ///    profile** — a file with two answers to "what device is this for" has
 ///    given none.
-fn output_intents(doc: &CosDocument, part: Option<Part>, out: &mut Vec<Raw>) -> Destination {
+fn output_intents(
+    doc: &CosDocument,
+    part: Option<Part>,
+    work: Option<&Arc<Work>>,
+    out: &mut Vec<Raw>,
+) -> Destination {
     // Part 4's page-level fallback is applied at every exit, not only at the
     // end: the first version returned early when the catalog carried no
     // `/OutputIntents` at all, which is exactly the shape of the file the
     // fallback exists for. Three conforming fixtures were reported for it.
     let page_level = || {
         if part == Some(Part::Four) {
-            page_destination(doc)
+            page_destination(doc, work)
         } else {
             Destination::Absent
         }
@@ -584,7 +592,8 @@ fn header_defects(
 
 /// The destination profile of a part 4 page-level output intent, if there is
 /// one.
-fn page_destination(doc: &CosDocument) -> Destination {
+fn page_destination(doc: &CosDocument, work: Option<&Arc<Work>>) -> Destination {
+    crate::stats::walked(work);
     for page in pages::collect_upto(doc, MAX_PAGES) {
         let Ok(object) = doc.get(page.reference) else {
             continue;
@@ -715,8 +724,8 @@ pub(crate) const DEVICE_RGB: &str = "DeviceRGB";
 const DEVICE_CMYK: &str = "DeviceCMYK";
 
 /// One walk, filling [`Used`].
-pub(crate) fn scan(doc: &CosDocument, used: &mut Used) {
-    content::walk(doc, &mut |op| {
+pub(crate) fn scan(doc: &CosDocument, work: Option<&Arc<Work>>, used: &mut Used) {
+    content::walk(doc, work, &mut |op| {
         if !DEFINED_OPERATORS.contains(&op.operator)
             && (used.undefined.len() < MAX_UNDEFINED_OPERATORS
                 || used.undefined.contains_key(op.operator))
@@ -1005,8 +1014,9 @@ fn image_space(doc: &CosDocument, dict: &Dict, at: ObjRef, used: &mut Used) {
 /// should err in when it cannot tell — and `6-2-4-3-t04-pass-i.pdf`, whose
 /// page group is `DeviceRGB` and whose form group is `ICCBased` CMYK, is the
 /// fixture that shows the difference between the two readings.
-fn gather_group_spaces(doc: &CosDocument, used: &mut Used) {
+fn gather_group_spaces(doc: &CosDocument, work: Option<&Arc<Work>>, used: &mut Used) {
     let mut dicts: Vec<Dict> = Vec::new();
+    crate::stats::walked(work);
     for page in pages::collect_upto(doc, MAX_PAGES) {
         if let Some(dict) = doc
             .get(page.reference)
@@ -1498,7 +1508,13 @@ fn transfer_functions(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
 /// `pub(crate)` because the 2003 PDF/X levels forbid transparency outright as
 /// well (`crate::pdfx`), and one reading of "no transparency" is better than
 /// two that drift.
-pub(crate) fn transparency(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
+pub(crate) fn transparency(
+    doc: &CosDocument,
+    used: &Used,
+    work: Option<&Arc<Work>>,
+    out: &mut Vec<Raw>,
+) {
+    crate::stats::walked(work);
     for page in pages::collect_upto(doc, MAX_PAGES) {
         let Ok(object) = doc.get(page.reference) else {
             continue;
@@ -1675,8 +1691,9 @@ pub(crate) fn transparency(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
 /// that helper's own definition — so removing the guard failed nothing,
 /// because nothing it guarded against could happen. Both are gone. A line
 /// that looks load-bearing and is not is worse than no line.
-fn gather_blending_spaces(doc: &CosDocument, used: &mut Used) {
+fn gather_blending_spaces(doc: &CosDocument, work: Option<&Arc<Work>>, used: &mut Used) {
     let mut dicts: Vec<(Dict, Option<ObjRef>)> = Vec::new();
+    crate::stats::walked(work);
     for page in pages::collect_upto(doc, MAX_PAGES) {
         if let Some(dict) = doc
             .get(page.reference)

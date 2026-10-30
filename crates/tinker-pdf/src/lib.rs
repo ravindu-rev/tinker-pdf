@@ -2018,7 +2018,7 @@ impl Document {
     /// should read both.
     #[must_use]
     pub fn validate_pdfa(&self) -> PdfAVerdict {
-        pdfa::validate(self, PdfACoverage::IMPLEMENTED)
+        pdfa::validate(self, PdfACoverage::IMPLEMENTED, None)
     }
 
     /// [`Document::validate_pdfa`], running only the rule groups in `groups`.
@@ -2035,7 +2035,22 @@ impl Document {
     /// happened, never what was requested.
     #[must_use]
     pub fn validate_pdfa_with(&self, groups: PdfACoverage) -> PdfAVerdict {
-        pdfa::validate(self, groups)
+        pdfa::validate(self, groups, None)
+    }
+
+    /// [`Document::validate_pdfa_with`], counting: the verdict, and what
+    /// reaching it did ([`Stats`]) — each walk of the page tree a rule made,
+    /// and the font dictionaries the width rule's scopes resolved.
+    ///
+    /// A counted sibling rather than a flag, because the groups are all a
+    /// validation is asked with and the verdict reports them back as what
+    /// ran. The verdict is the one [`Document::validate_pdfa_with`] returns
+    /// for the same groups.
+    #[must_use]
+    pub fn validate_pdfa_counted(&self, groups: PdfACoverage) -> (PdfAVerdict, Stats) {
+        let work = Arc::new(stats::Work::new());
+        let verdict = pdfa::validate(self, groups, Some(&work));
+        (verdict, work.stats())
     }
 
     /// What this build makes of the document's PDF/UA claim (ISO 14289).
@@ -2048,14 +2063,24 @@ impl Document {
     /// a judgement about meaning no reader makes (`docs/design/pdfua.md`).
     #[must_use]
     pub fn validate_pdfua(&self) -> PdfUaVerdict {
-        pdfua::validate(self, PdfUaCoverage::IMPLEMENTED)
+        pdfua::validate(self, PdfUaCoverage::IMPLEMENTED, None)
     }
 
     /// [`Document::validate_pdfua`], running only the rule groups in
     /// `groups`; the verdict's own `coverage` says which ran.
     #[must_use]
     pub fn validate_pdfua_with(&self, groups: PdfUaCoverage) -> PdfUaVerdict {
-        pdfua::validate(self, groups)
+        pdfua::validate(self, groups, None)
+    }
+
+    /// [`Document::validate_pdfua_with`], counting, as
+    /// [`Document::validate_pdfa_counted`] counts: the verdict and what
+    /// reaching it did ([`Stats`]).
+    #[must_use]
+    pub fn validate_pdfua_counted(&self, groups: PdfUaCoverage) -> (PdfUaVerdict, Stats) {
+        let work = Arc::new(stats::Work::new());
+        let verdict = pdfua::validate(self, groups, Some(&work));
+        (verdict, work.stats())
     }
 
     /// What this build makes of the document's PDF/X claim (ISO 15930).
@@ -2071,14 +2096,24 @@ impl Document {
     /// not judged.
     #[must_use]
     pub fn validate_pdfx(&self) -> PdfXVerdict {
-        pdfx::validate(self, PdfXCoverage::IMPLEMENTED)
+        pdfx::validate(self, PdfXCoverage::IMPLEMENTED, None)
     }
 
     /// [`Document::validate_pdfx`], running only the rule groups in
     /// `groups`; the verdict's own `coverage` says which ran.
     #[must_use]
     pub fn validate_pdfx_with(&self, groups: PdfXCoverage) -> PdfXVerdict {
-        pdfx::validate(self, groups)
+        pdfx::validate(self, groups, None)
+    }
+
+    /// [`Document::validate_pdfx_with`], counting, as
+    /// [`Document::validate_pdfa_counted`] counts: the verdict and what
+    /// reaching it did ([`Stats`]).
+    #[must_use]
+    pub fn validate_pdfx_counted(&self, groups: PdfXCoverage) -> (PdfXVerdict, Stats) {
+        let work = Arc::new(stats::Work::new());
+        let verdict = pdfx::validate(self, groups, Some(&work));
+        (verdict, work.stats())
     }
 
     /// The strictest certification any signature in this document declares
@@ -2586,7 +2621,28 @@ impl Page {
     /// property list stands where the glyphs it encloses do (14.9.4).
     #[must_use]
     pub fn text_with(&self, options: &TextOptions) -> TextPage {
-        let mut page = self.text_in_content_order();
+        self.text_ordered(options, None)
+    }
+
+    /// [`Page::text_with`], counting: the page's text, and what extracting it
+    /// did ([`Stats`]) — the font dictionaries the page's scope resolved, the
+    /// lookup of its font's dictionary each glyph made, and each form's scope
+    /// asked for.
+    ///
+    /// A counted sibling rather than a flag, because [`TextOptions`] is
+    /// written out whole by its callers. The text is the one
+    /// [`Page::text_with`] returns for the same options, to the byte.
+    #[must_use]
+    pub fn text_counted(&self, options: &TextOptions) -> (TextPage, Stats) {
+        let work = Arc::new(stats::Work::new());
+        let page = self.text_ordered(options, Some(&work));
+        (page, work.stats())
+    }
+
+    /// The page's text, ordered as `options` asks, counting into `work` when
+    /// the operation is counting.
+    fn text_ordered(&self, options: &TextOptions, work: Option<&Arc<stats::Work>>) -> TextPage {
+        let mut page = self.text_in_content_order(work);
         if options.content_order {
             text_order::state_in_content_order(&mut page);
         } else {
@@ -2606,11 +2662,12 @@ impl Page {
     }
 
     /// What the content stream showed, in the order it showed it.
-    fn text_in_content_order(&self) -> TextPage {
+    fn text_in_content_order(&self, work: Option<&Arc<stats::Work>>) -> TextPage {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
         // Text extraction needs no glyph outlines — the widths come from the
         // font dictionary — so no provider is consulted here.
-        let resources = resources::PageResources::new(&self.doc, &self.inner, None);
+        let resources =
+            resources::PageResources::new_counted(&self.doc, &self.inner, None, work.cloned());
 
         let mut device = TextDevice::new();
         // Text is reported in PDF user space, y upward, which is the space the

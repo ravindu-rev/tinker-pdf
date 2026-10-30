@@ -101,7 +101,15 @@ let unread = verdict
     .count();
 // The object graph alone, which reaches for no walk and no font.
 let syntax_only = document.validate_pdfx_with(PdfXCoverage::SYNTAX);
+// The same verdict, and what reaching it did.
+let (verdict, stats) = document.validate_pdfx_counted(PdfXCoverage::IMPLEMENTED);
 ```
+
+`validate_pdfx_counted` returns `validate_pdfx_with`'s verdict and a `Stats`
+counted as [pdfa](pdfa.md)'s is: a walk of the page tree for the syntax
+group's boxes and annotations, two for the print group — PDF/A's operator scan
+and its transparency rule — and one for the embedding rule. A file claiming no
+level it validates is not judged, and walks nothing.
 
 `tpdf check --pdfx` prints the claimed level, every finding with its clause,
 the groups that ran and how many clauses were abstained on in each class; it

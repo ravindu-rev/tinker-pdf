@@ -64,6 +64,7 @@
 use tinker_pdf_cos::{decode_text_string, CosDocument, Dict, ObjRef, Object};
 
 use crate::pdfa::{Clause, ConformanceFinding, FindingKind, Machinery, RuleGroup};
+use crate::stats::Work;
 use crate::Document;
 
 mod print;
@@ -844,8 +845,14 @@ pub(crate) struct XRaw {
 }
 
 /// Validates `document` against the PDF/X level it claims.
-pub(crate) fn validate(document: &Document, groups: Coverage) -> Verdict {
-    validate_counting(document, groups).0
+///
+/// `work` is the validation door's tally, when it is counting.
+pub(crate) fn validate(
+    document: &Document,
+    groups: Coverage,
+    work: Option<&std::sync::Arc<Work>>,
+) -> Verdict {
+    validate_counting(document, groups, work).0
 }
 
 /// [`validate`], also returning what each group's machinery was reached for:
@@ -854,6 +861,7 @@ pub(crate) fn validate(document: &Document, groups: Coverage) -> Verdict {
 pub(crate) fn validate_counting(
     document: &Document,
     groups: Coverage,
+    work: Option<&std::sync::Arc<Work>>,
 ) -> (Verdict, (u32, u32, u32)) {
     let machinery = Machinery::new(crate::pdfa::Coverage {
         metadata: false,
@@ -870,14 +878,14 @@ pub(crate) fn validate_counting(
     let mut coverage = Coverage::default();
     if let Some(level) = flavour.filter(|f| f.is_validated()) {
         if machinery.reach(RuleGroup::Syntax) {
-            syntax::rules(doc, &mut raw);
+            syntax::rules(doc, work, &mut raw);
             coverage.syntax = true;
         }
         if groups.print {
-            coverage.print = print::rules(doc, &machinery, level, &mut raw);
+            coverage.print = print::rules(doc, &machinery, level, work, &mut raw);
         }
         if groups.fonts {
-            coverage.fonts = print::fonts(doc, &machinery, &mut raw);
+            coverage.fonts = print::fonts(doc, &machinery, work, &mut raw);
         }
     }
 
@@ -1026,19 +1034,20 @@ mod tests {
     #[test]
     fn a_pdfx_claim_is_read_without_an_xml_parse() {
         let doc = claiming(Some("PDF/X-1a:2003"), None);
-        let (verdict, (metadata, fonts, colour)) = validate_counting(&doc, Coverage::SYNTAX);
+        let (verdict, (metadata, fonts, colour)) = validate_counting(&doc, Coverage::SYNTAX, None);
         assert_eq!(verdict.flavour, Some(XFlavour::X1a2003));
         assert_eq!(metadata, 0, "a PDF/X claim parsed XML");
         assert_eq!((fonts, colour), (0, 0), "a syntax sweep reached further");
         assert_eq!(verdict.coverage, Coverage::SYNTAX);
 
-        let (verdict, (metadata, fonts, colour)) = validate_counting(&doc, Coverage::IMPLEMENTED);
+        let (verdict, (metadata, fonts, colour)) =
+            validate_counting(&doc, Coverage::IMPLEMENTED, None);
         assert_eq!((metadata, fonts, colour), (0, 1, 1));
         assert!(verdict.coverage.is_complete());
 
         // An unvalidated level reaches for nothing at all.
         let x4 = claiming(Some("PDF/X-4"), None);
-        let (verdict, reaches) = validate_counting(&x4, Coverage::IMPLEMENTED);
+        let (verdict, reaches) = validate_counting(&x4, Coverage::IMPLEMENTED, None);
         assert_eq!(reaches, (0, 0, 0));
         assert_eq!(verdict.coverage, Coverage::default());
     }

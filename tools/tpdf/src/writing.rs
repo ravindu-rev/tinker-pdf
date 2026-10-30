@@ -565,6 +565,7 @@ fn save_to(
             write,
             fonts: options.font_policy,
             images: image_policy(options)?,
+            ..SaveOptions::default()
         },
     );
     std::fs::write(out, &saved.bytes).map_err(|e| format!("writing {out}: {e}"))?;

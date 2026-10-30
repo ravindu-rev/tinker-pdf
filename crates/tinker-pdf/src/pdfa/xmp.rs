@@ -33,6 +33,8 @@
 //! read would report every conforming file that uses one — which is why they
 //! arrived in one commit.
 
+use std::sync::Arc;
+
 use tinker_pdf_cos::{decode_text_string, pages, parse_date, CosDocument, Date, Dict, ObjRef};
 use tinker_pdf_xml::{Event, Name, Source};
 
@@ -40,6 +42,7 @@ use super::xmp_extension::Extensions;
 use super::xmp_schemas::Written;
 use super::{clauses, FindingKind, Flavour, Machinery, Part, Raw, RuleGroup};
 
+use crate::stats::Work;
 use crate::Document;
 
 /// The Dublin Core namespace.
@@ -158,6 +161,7 @@ pub(super) fn rules(
     document: &Document,
     machinery: &Machinery,
     flavour: Option<Flavour>,
+    work: Option<&Arc<Work>>,
     out: &mut Vec<Raw>,
 ) {
     // The ask is recorded before anything is built, which is what makes the
@@ -174,7 +178,7 @@ pub(super) fn rules(
     // read for properties: the header is an instruction ahead of the first
     // element, and a packet whose body does not parse still has one.
     packet_header(&packet, None, out);
-    for (reference, page) in page_packets(&document.inner) {
+    for (reference, page) in page_packets(&document.inner, work) {
         packet_header(&page, Some(reference), out);
     }
 
@@ -192,7 +196,7 @@ pub(super) fn rules(
     if let Some(part) = flavour.map(|f| f.part) {
         if part_carries_the_predefined_schema_rule(part) {
             schema_value_types(&packet, part, out);
-            predefined_schema_membership(document, &packet, part, out);
+            predefined_schema_membership(document, &packet, part, work, out);
         }
     }
 
@@ -1025,11 +1029,12 @@ fn predefined_schema_membership(
     document: &Document,
     catalog: &[u8],
     part: Part,
+    work: Option<&Arc<Work>>,
     out: &mut Vec<Raw>,
 ) {
     let main = super::xmp_extension::read(catalog);
     judge_packet(catalog, None, &main, &main, part, out);
-    for (reference, packet) in page_packets(&document.inner) {
+    for (reference, packet) in page_packets(&document.inner, work) {
         let current = super::xmp_extension::read(&packet);
         judge_packet(&packet, Some(reference), &current, &main, part, out);
     }
@@ -1125,8 +1130,9 @@ fn pseudo_attributes(value: &str) -> Vec<&str> {
 /// The page's reference rather than the stream's, because ruling 10 asks a
 /// finding to name an object a reader can find, and a metadata stream is
 /// reached through the page that owns it.
-fn page_packets(doc: &CosDocument) -> Vec<(ObjRef, Vec<u8>)> {
+fn page_packets(doc: &CosDocument, work: Option<&Arc<Work>>) -> Vec<(ObjRef, Vec<u8>)> {
     let mut packets = Vec::new();
+    crate::stats::walked(work);
     for page in pages::collect_upto(doc, MAX_PAGES) {
         let Ok(dict) = doc.get(page.reference) else {
             continue;

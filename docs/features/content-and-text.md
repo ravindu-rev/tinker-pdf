@@ -485,6 +485,21 @@ box each, and `TextWriter` serialises pages as JSON, XML or HTML.
 `Page::images()` returns `Vec<PageImage>`; `ImageSpace`, `ImageMask` and
 `SampleCodec` are the types it is built from, all `#[non_exhaustive]`.
 
+**Counted work.** `Page::text_counted(&TextOptions)` returns what
+`Page::text_with` returns for the same options, to the byte, with a `Stats` of
+what extracting it did ([rendering](rendering.md) names the counters): the
+fonts the page's scope reads when it is built, the lookup of its font's
+dictionary each glyph makes, and each form's scope the interpreter asks for,
+over a scope with no font provider, so a build's bundled faces change nothing.
+`Page::images_counted()` returns `Page::images()`'s list with the same:
+`images_decoded` is one decoder run for each entry listed, an image's masks
+part of its decode, and one for each inline image, and a form's scope is asked
+for twice, by the interpreter and by the extraction at the form's start.
+Nothing is drawn, so no glyph is shown and no outline is read. Each is a
+counted sibling rather than a flag because `TextOptions` is written out whole
+by its callers and `Page::images` takes nothing to ask with; the design is in
+[performance](../design/performance.md).
+
 ```rust
 let doc = tinker_pdf::Document::open(bytes)?;
 let page = &doc.pages()[0];

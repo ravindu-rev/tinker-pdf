@@ -625,20 +625,21 @@ font with no program of its own when there are substitute faces to ask — a
 `images_decoded`, an image XObject's decode on a cache miss and every inline
 image's; and a `_hits` and a `_misses` for each of the five caches a page's
 resources keep — `font_program`, `image`, `icc_transform`, `glyph_outline` and
-`form_scope`. `Stats::work()` totals the step counts, and two `Stats` add with
-`+`. Every render door counts the same way: `Page::render`,
-`Page::render_form` (the scope it reads the form's name in included),
-`Page::render_annotation` (both of the appearance's scopes) and
-`DisplayList::render`, which counts through the resources the list keeps, so a
-second replay finds what the first decoded and says so. Each render counts
-into a tally of its own, so two at once — of one page, or of one display list
-from two threads — never mix. A count is a property of the page, the options
-and the build — a region that misses a patterned fill draws no cell for it —
-and never of the machine or the clock. Nothing reads the tally but the door
-that hands it back, so a counted render's pixels and warnings are the
-uncounted one's; and an uncounted render carries no tally at all, so it pays
-one untaken branch a counting site, and the renderer's two additions a glyph,
-which it makes either way. The design is in
+`form_scope`; and `page_walks`, each walk of the page tree from its root,
+which no render makes and the validators and a save do. `Stats::work()` totals
+the step counts, and two `Stats` add with `+`. Every render door counts the
+same way: `Page::render`, `Page::render_form` (the scope it reads the form's
+name in included), `Page::render_annotation` (both of the appearance's scopes)
+and `DisplayList::render`, which counts through the resources the list keeps,
+so a second replay finds what the first decoded and says so. Each render
+counts into a tally of its own, so two at once — of one page, or of one
+display list from two threads — never mix. A count is a property of the page,
+the options and the build — a region that misses a patterned fill draws no
+cell for it — and never of the machine or the clock. Nothing reads the tally
+but the door that hands it back, so a counted render's pixels and warnings are
+the uncounted one's; and an uncounted render carries no tally at all, so it
+pays one untaken branch a counting site, and the renderer's two additions a
+glyph, which it makes either way. The design is in
 [performance](../design/performance.md); the C ABI and the bindings do not
 carry the stats ([bindings](bindings.md)).
 

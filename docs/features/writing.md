@@ -204,9 +204,9 @@ as it arrived. `tinker_pdf::write::save(&mut editor, &SaveOptions) -> Saved` is
 the facade's, and it runs `subset::apply` first **unless asked not to** —
 cutting every embedded program down to the glyphs the document still draws
 ([fonts](fonts.md), [editing](editing.md)). `SaveOptions` is `WriteOptions`
-verbatim plus one field, `fonts: FontPolicy`, whose default is
-`FontPolicy::Subset`; `FontPolicy::Keep` is the other value and there is no
-third.
+verbatim plus `fonts: FontPolicy`, whose default is `FontPolicy::Subset` —
+`FontPolicy::Keep` is the other value and there is no third — `images`, below,
+and `stats`, which counts the save's work.
 
 ```rust
 use tinker_pdf::write::{save, SaveOptions};
@@ -329,6 +329,21 @@ meaning `ImagePolicy::Keep`. `--images jpeg` needs `--jpeg-tables FILE`, the
 two tables as 128 bytes in natural order, because this door takes the
 caller's tables and the CLI chooses none (ruling 11); the report is printed an
 image a line.
+
+**Counted work, on the same door.** `SaveOptions::stats` (off) asks the save
+to count what it does, and `Saved::stats` hands it back: an `Option<Stats>`
+that is `None` unless asked ([rendering](rendering.md) names the counters). A
+save counts its passes: the font pass's walk of the page tree, the fonts each
+page's scope reads, each glyph's font-dictionary lookup, each glyph it selects
+in the program of a font that is an object and each form's scope; and the
+image pass's walk, which it makes only to find placements for `max_ppi`.
+`DocumentEditor::count_work()` makes an editor hold one tally from then until
+it is dropped, which both passes count into whether or not the save was asked,
+and a save asked on that editor reports all of it — so a merge, which is pages
+imported and then saved, reads its stats from the save. An import counts
+nothing itself, and a rolled-back transaction keeps what was counted. A
+counted save writes the same bytes and reports the same passes as an uncounted
+one.
 
 ## Refused by name
 

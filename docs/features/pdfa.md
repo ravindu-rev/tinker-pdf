@@ -138,6 +138,8 @@ if verdict.findings.is_empty() && verdict.coverage.is_complete() {
 }
 // The cheap sweep, which parses no font program and no ICC profile.
 let syntax = document.validate_pdfa_with(PdfACoverage::SYNTAX);
+// The same verdict, and what reaching it did.
+let (verdict, stats) = document.validate_pdfa_counted(PdfACoverage::IMPLEMENTED);
 
 // Writing.
 let mut builder = DocumentBuilder::archival(ArchivalProfile {
@@ -154,6 +156,16 @@ let bytes = builder.finish_archival()?;
 
 `tpdf check --pdfa` runs the same validator over files on the command line and
 exits by verdict.
+
+`validate_pdfa_counted` returns `validate_pdfa_with`'s verdict and a `Stats`
+([rendering](rendering.md) names the counters). Each rule that reads every
+page walks the page tree for itself, and `page_walks` counts each walk: the
+packet header rule's and parts 1 to 3's predefined-schema rule's; the
+structure tree's binding, at level A; the width rule's and the embedding
+rules' walks of every content stream; and the colour group's operator scan and
+group spaces, parts 2 to 4's blending spaces, part 1's transparency rule and
+part 4's page-level output intent. The width rule's scope counts the fonts it
+reads and the glyph it selects for each distinct code with a stated width.
 
 ## Refused by name
 
