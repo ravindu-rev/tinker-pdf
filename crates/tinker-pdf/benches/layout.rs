@@ -15,6 +15,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, Bencher, Criterion, SamplingMode};
+use support::cli::Cli;
 use support::{inputs, Per};
 use tinker_pdf::{Document, DocumentBuilder, FromHtml, OpenOptions, RenderOptions};
 
@@ -434,7 +435,138 @@ fn layout(c: &mut Criterion) {
             b.iter(|| black_box(open_and_render(&cbz_pdfs)));
         });
 
+    // Each committed book's every page through the CLI, read from where it
+    // is committed: a PNG a page, as `tpdf render` writes them.
+    let (cli, out) = book_cli("calibre-book-cover");
+    group
+        .throughput(Per::Pages(calibre_book_cover.pages).throughput())
+        .bench_function(
+            "render every page of calibre-book-cover.epub at 72 dpi, CLI",
+            |b| {
+                b.iter(|| render_book(&cli, "calibre-book-cover", &out));
+            },
+        );
+    assert_book_pngs(&cli, &out, "calibre-book-cover", calibre_book_cover.pages);
+    let (cli, out) = book_cli("calibre-book-nocover");
+    group
+        .throughput(Per::Pages(calibre_book_nocover.pages).throughput())
+        .bench_function(
+            "render every page of calibre-book-nocover.epub at 72 dpi, CLI",
+            |b| {
+                b.iter(|| render_book(&cli, "calibre-book-nocover", &out));
+            },
+        );
+    assert_book_pngs(
+        &cli,
+        &out,
+        "calibre-book-nocover",
+        calibre_book_nocover.pages,
+    );
+    let (cli, out) = book_cli("calibre-embedded-font");
+    group
+        .throughput(Per::Pages(calibre_embedded_font.pages).throughput())
+        .bench_function(
+            "render every page of calibre-embedded-font.epub at 72 dpi, CLI",
+            |b| {
+                b.iter(|| render_book(&cli, "calibre-embedded-font", &out));
+            },
+        );
+    assert_book_pngs(
+        &cli,
+        &out,
+        "calibre-embedded-font",
+        calibre_embedded_font.pages,
+    );
+    let (cli, out) = book_cli("kcc-fixed-layout");
+    group
+        .throughput(Per::Pages(kcc_fixed_layout.pages).throughput())
+        .bench_function(
+            "render every page of kcc-fixed-layout.epub at 72 dpi, CLI",
+            |b| {
+                b.iter(|| render_book(&cli, "kcc-fixed-layout", &out));
+            },
+        );
+    assert_book_pngs(&cli, &out, "kcc-fixed-layout", kcc_fixed_layout.pages);
+    let (cli, out) = book_cli("pandoc-book-cover");
+    group
+        .throughput(Per::Pages(pandoc_book_cover.pages).throughput())
+        .bench_function(
+            "render every page of pandoc-book-cover.epub at 72 dpi, CLI",
+            |b| {
+                b.iter(|| render_book(&cli, "pandoc-book-cover", &out));
+            },
+        );
+    assert_book_pngs(&cli, &out, "pandoc-book-cover", pandoc_book_cover.pages);
+    let (cli, out) = book_cli("pandoc-book-epub2");
+    group
+        .throughput(Per::Pages(pandoc_book_epub2.pages).throughput())
+        .bench_function(
+            "render every page of pandoc-book-epub2.epub at 72 dpi, CLI",
+            |b| {
+                b.iter(|| render_book(&cli, "pandoc-book-epub2", &out));
+            },
+        );
+    assert_book_pngs(&cli, &out, "pandoc-book-epub2", pandoc_book_epub2.pages);
+    let (cli, out) = book_cli("pandoc-book-nocover");
+    group
+        .throughput(Per::Pages(pandoc_book_nocover.pages).throughput())
+        .bench_function(
+            "render every page of pandoc-book-nocover.epub at 72 dpi, CLI",
+            |b| {
+                b.iter(|| render_book(&cli, "pandoc-book-nocover", &out));
+            },
+        );
+    assert_book_pngs(&cli, &out, "pandoc-book-nocover", pandoc_book_nocover.pages);
+    let (cli, out) = book_cli("pandoc-embedded-font");
+    group
+        .throughput(Per::Pages(pandoc_embedded_font.pages).throughput())
+        .bench_function(
+            "render every page of pandoc-embedded-font.epub at 72 dpi, CLI",
+            |b| {
+                b.iter(|| render_book(&cli, "pandoc-embedded-font", &out));
+            },
+        );
+    assert_book_pngs(
+        &cli,
+        &out,
+        "pandoc-embedded-font",
+        pandoc_embedded_font.pages,
+    );
+    let (cli, out) = book_cli("pandoc-plates");
+    group
+        .throughput(Per::Pages(pandoc_plates.pages).throughput())
+        .bench_function(
+            "render every page of pandoc-plates.epub at 72 dpi, CLI",
+            |b| {
+                b.iter(|| render_book(&cli, "pandoc-plates", &out));
+            },
+        );
+    assert_book_pngs(&cli, &out, "pandoc-plates", pandoc_plates.pages);
+
     group.finish();
+}
+
+/// The CLI runner for one book's render, and the directory its PNGs go to.
+fn book_cli(book: &str) -> (Cli, std::path::PathBuf) {
+    let cli = Cli::new(&format!("layout-render-{book}"));
+    let out = cli.out("png");
+    (cli, out)
+}
+
+/// `tpdf render` over the committed `book` at 72 dpi.
+fn render_book(cli: &Cli, book: &str, out: &std::path::Path) {
+    let path = inputs::committed_book_path(&format!("{book}.epub"));
+    cli.run(&[&"render", &path, &"--out", &out, &"--dpi", &"72"]);
+}
+
+/// The render wrote one PNG for each of the book's `pages`, in order.
+fn assert_book_pngs(cli: &Cli, out: &std::path::Path, book: &str, pages: u64) {
+    let pngs = cli.pngs(out);
+    assert_eq!(pngs.len() as u64, pages, "{book}: a PNG a page");
+    for (at, (name, width, height)) in pngs.iter().enumerate() {
+        assert_eq!(name, &format!("{book}-{:04}.png", at + 1));
+        assert!(*width > 0 && *height > 0, "{name} has pixels");
+    }
 }
 
 criterion_group! {

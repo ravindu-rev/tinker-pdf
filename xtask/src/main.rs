@@ -1040,6 +1040,14 @@ const SPAWNERS: &[(&str, &str)] = &[
          the answer only decides whether to refuse the run",
     ),
     (
+        "crates/tinker-pdf/benches/support/cli.rs",
+        "PERMANENT: runs `tpdf`, built from this revision beside the bench \
+         binary, as the child of the benchmark set's CLI-marked operations, \
+         whose figures include the process. It hosts this repository's own \
+         binary and adjudicates nothing: every check on what the child wrote \
+         is the bench's own",
+    ),
+    (
         "xtask/src/parity.rs",
         "PERMANENT: spawns `cargo`, `python`, `node` and `dotnet` as *hosts* \
          for this repository's own code. Each loads this engine — as a cargo \

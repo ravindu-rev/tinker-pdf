@@ -122,11 +122,20 @@ pub fn triangles() -> Vec<u8> {
     builder.finish()
 }
 
+/// Where one of the books committed under `crates/tinker-pdf/tests/epub/`
+/// is, by its file name.
+pub fn committed_book_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/epub")
+        .join(name)
+}
+
 /// One of the books committed under `crates/tinker-pdf/tests/epub/`, by its
 /// file name.
 pub fn committed_book(name: &str) -> Vec<u8> {
-    let path = format!("{}/tests/epub/{name}", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read(&path).unwrap_or_else(|error| panic!("the committed book {path}: {error}"))
+    let path = committed_book_path(name);
+    std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("the committed book {}: {error}", path.display()))
 }
 
 /// The integer stream every seeded input draws from: SplitMix64, so an input

@@ -12,6 +12,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
+use support::cli::{self, Cli};
 use support::{inputs, Per};
 use tinker_pdf::{Document, SearchOptions, TextFormat, TextPage, TextWriter};
 
@@ -146,6 +147,51 @@ fn text(c: &mut Criterion) {
                 black_box(hits)
             });
         },
+    );
+
+    // The same text through the CLI, one child an iteration: plain text with
+    // a form feed after every page, and the structured text as JSON.
+    let dense_pdf = cli::fixture("dense-100.pdf", || dense.to_vec());
+    let small_1000_pdf = cli::fixture("small-1000.pdf", || small_1000.to_vec());
+    let small_10000_pdf = cli::fixture("small-10000.pdf", || small_10000.to_vec());
+    let dense_text = Cli::new("text-dense-100");
+    group
+        .throughput(Per::Pages(100).throughput())
+        .bench_function("text of 100 dense pages, CLI", |b| {
+            b.iter(|| dense_text.run(&[&"text", &dense_pdf]));
+        });
+    assert_eq!(dense_text.stdout().matches('\u{c}').count(), 100);
+    assert_eq!(
+        dense_text.stdout().matches(inputs::PHRASE).count(),
+        100,
+        "every dense page's phrase"
+    );
+    let small_text = Cli::new("text-small-1000");
+    group
+        .throughput(Per::Pages(1000).throughput())
+        .bench_function("text of 1000 small pages, CLI", |b| {
+            b.iter(|| small_text.run(&[&"text", &small_1000_pdf]));
+        });
+    assert_eq!(small_text.stdout().matches('\u{c}').count(), 1000);
+    let more_text = Cli::new("text-small-10000");
+    group
+        .throughput(Per::Pages(10000).throughput())
+        .bench_function("text of 10000 small pages, CLI", |b| {
+            b.iter(|| more_text.run(&[&"text", &small_10000_pdf]));
+        });
+    assert_eq!(more_text.stdout().matches('\u{c}').count(), 10000);
+    let json = Cli::new("text-json-100");
+    group
+        .throughput(Per::Pages(100).throughput())
+        .bench_function("structured JSON of 100 pages, CLI", |b| {
+            b.iter(|| json.run(&[&"text", &dense_pdf, &"--json"]));
+        });
+    let written = json.stdout();
+    assert!(written.starts_with("{\"format\":\"tinker-pdf/text\""));
+    assert_eq!(
+        written.matches("{\"index\":").count(),
+        100,
+        "the JSON's pages"
     );
 
     group.finish();

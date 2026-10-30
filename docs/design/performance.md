@@ -1051,7 +1051,7 @@ only where n × today's figure stays at or under 300 ms.
 | `open/open the AES-256 file` | none | `aes_file()`, authenticated with the empty password (`lib.rs:1722`) and counted | the Item's; floor 1 | unmeasured | built |
 | `open/every page's size, 3000 pages` | pages · 3 000 | `small(3000)`, `page(i)` then `Page::size` (`lib.rs:1773`, `:2198`) for every i | 2 569 → 3; 856× | crosses | built |
 | `open/every page's size, 10000 pages` | pages · 10 000 | `small(10000)` | Θ(n²), about 28 500 from the 3 000-page figure → 10; relation ≤ 3.6 × 3 000 | crosses | built |
-| `open/open and count the 23 MB image file, CLI` | bytes · 5 files | `tpdf info` | 36 → 6; 6× | ×5 | MS-04.8 |
+| `open/open and count the 23 MB image file, CLI` | bytes · 5 files | `tpdf info` | 36 → 6; 6× | ×5 | built |
 
 **text**
 
@@ -1065,10 +1065,10 @@ only where n × today's figure stays at or under 300 ms.
 | `text/search a phrase over 100 pages from scratch` | pages · 100 | `dense(100, 0)`, `TextPage::search` (`crates/tinker-pdf-content/src/text.rs:265`) | 722 → 110; 6.56× | above | built |
 | `text/search 100 pages' prebuilt text` | pages · 500 | the 100 `TextPage`s, built once | 36 → 6; 6× | ×5 | built |
 | `text/search 100 pages' prebuilt text, whole words, unaccented` | pages · 300 | the same, `search_with` whole-word and diacritic-insensitive (`search.rs:43-50`, `:108`) | 77 → 12; 6.41× | ×3 | built |
-| `text/text of 100 dense pages, CLI` | pages · 100 | `tpdf text` | 678 → 130; 5.21× | above | MS-04.8 |
-| `text/text of 1000 small pages, CLI` | pages · 1 000 | `tpdf text` | 350 → 15; 23.3× | crosses | MS-04.8 |
-| `text/text of 10000 small pages, CLI` | pages · 10 000 | `tpdf text` | 36 000 → 150; relation ≤ 11 × 1 000 | above | MS-04.8 |
-| `text/structured JSON of 100 pages, CLI` | pages · 100 | `tpdf text --json` | 1 926 → 200; 9.63× | above | MS-04.8 |
+| `text/text of 100 dense pages, CLI` | pages · 100 | `tpdf text` | 678 → 130; 5.21× | above | built |
+| `text/text of 1000 small pages, CLI` | pages · 1 000 | `tpdf text` | 350 → 15; 23.3× | crosses | built |
+| `text/text of 10000 small pages, CLI` | pages · 10 000 | `tpdf text` | 36 000 → 150; relation ≤ 11 × 1 000 | above | built |
+| `text/structured JSON of 100 pages, CLI` | pages · 100 | `tpdf text --json` | 1 926 → 200; 9.63× | above | built |
 
 **analysis** — every relation's "text of the same pages" is the group's own
 text of the document the operation reads, so all six stay inside the group.
@@ -1118,10 +1118,10 @@ text of the document the operation reads, so all six stay inside the group.
 | `render/the G4 scan page at 150 dpi` | pixels · 1240×1755 | `g4_page()` | 641 → 50; 12.8× | above | built |
 | `render/the JBIG2 scan page at 150 dpi` | pixels · 1240×1755 | `jbig2_page()` | 875 → 80; 10.9× | above | built |
 | `render/the Flate RGB image page at 72 dpi` | pixels · 595×842 | `flate_page()` | 924 → 230; 4.01× | above | built |
-| `render/the text page to PNG at 150 dpi, CLI` | pixels · 1240×1755 | `tpdf render` | 402 → 70; 5.74× | above | MS-04.8 |
-| `render/the text page to PNG at 300 dpi, CLI` | pixels · 2480×3509 | `tpdf render` | 1 180 → 200; 5.9× | above | MS-04.8 |
-| `render/20 pages to PNG at 150 dpi, 1 job, CLI` | pages · 20 | `tpdf render --jobs 1` | 6 847 → 1 300; 5.26× | above, and at target | MS-04.8 |
-| `render/20 pages to PNG at 150 dpi, 4 jobs, CLI` | pages · 20 | `tpdf render --jobs 4` | 1 743 → 400; 4.35× | above, and at target | MS-04.8 |
+| `render/the text page to PNG at 150 dpi, CLI` | pixels · 1240×1755 | `tpdf render` | 402 → 70; 5.74× | above | built |
+| `render/the text page to PNG at 300 dpi, CLI` | pixels · 2480×3509 | `tpdf render` | 1 180 → 200; 5.9× | above | built |
+| `render/20 pages to PNG at 150 dpi, 1 job, CLI` | pages · 20 | `tpdf render --jobs 1` | 6 847 → 1 300; 5.26× | above, and at target | built |
+| `render/20 pages to PNG at 150 dpi, 4 jobs, CLI` | pages · 20 | `tpdf render --jobs 4` | 1 743 → 400; 4.35× | above, and at target | built |
 
 **encode**
 
@@ -1165,11 +1165,11 @@ text of the document the operation reads, so all six stay inside the group.
 | `write/AES-256-CBC encrypt 23 MB` | bytes · the file | the same plain bytes, `cbc_encrypt_with_iv_prefix` (`:289`) | 57 → 80 MB/s (about 404 → 288); 1.4× | above | built |
 | `write/edit an annotation, save, reopen, 1000 pages` | pages · 13 × 1 000 | `annotated(small(1000))`: the appearance replaced (`DocumentEditor::put_stream`, `edit/mod.rs:395`), saved under `WriteMode::Incremental`, the bytes reopened | not measured → ≤ 2 plus output bytes; relation ≤ 2 × the 10-page one | unmeasured, ×13 | built |
 | `write/edit an annotation, save, reopen, 10 pages` | pages · 10 a call | `annotated(small(10))` | the relation's other side | unmeasured | built |
-| `write/rewrite 100 pages, CLI` | pages · 4 × 100 | `tpdf merge`, one input | 14.8 → 8; 1.85× | ×4 | MS-04.8 |
-| `write/rewrite 1000 pages, CLI` | pages · 1 000 | `tpdf merge`, one input | 668 → 60; 11.1× | above | MS-04.8 |
-| `write/subset-on-save of 100 pages, CLI` | pages · 100 | `tpdf merge --font-policy subset` | 1 208 → 120; 10× | above | MS-04.8 |
-| `write/merge 4 x 100 pages, CLI` | pages · 400 | `tpdf merge`, four inputs | 1 008 → 40; 25.2× | above | MS-04.8 |
-| `write/encrypt the 23 MB image file, CLI` | bytes · the file | `tpdf encrypt` | 770 → 150; 5.13× | above | MS-04.8 |
+| `write/rewrite 100 pages, CLI` | pages · 4 × 100 | `tpdf merge`, one input | 14.8 → 8; 1.85× | ×4 | built |
+| `write/rewrite 1000 pages, CLI` | pages · 1 000 | `tpdf merge`, one input | 668 → 60; 11.1× | above | built |
+| `write/subset-on-save of 100 pages, CLI` | pages · 100 | `tpdf merge --font-policy subset` | 1 208 → 120; 10× | above | built |
+| `write/merge 4 x 100 pages, CLI` | pages · 400 | `tpdf merge`, four inputs | 1 008 → 40; 25.2× | above | built |
+| `write/encrypt the 23 MB image file, CLI` | bytes · the file | `tpdf encrypt` | 770 → 150; 5.13× | above | built |
 
 The merge keeps fonts because its target leaves no room for a subset pass —
 40 ms for 400 pages where subset-on-save's is 120 ms for 100 — and
@@ -1207,7 +1207,7 @@ container's synthesised PDF is `doc.cos().bytes()`
 | `layout/render each XPS fixture's synthesised PDF` | pages · 19 a call | the same | its other side | unmeasured | built |
 | `layout/open each CBZ fixture, render page 1` | pages · 9 a call | every committed `.cbz` | the same relation | unmeasured | built |
 | `layout/render each CBZ fixture's synthesised PDF` | pages · 9 a call | the same | its other side | unmeasured | built |
-| `layout/render every page of <book> at 72 dpi, CLI`, nine | pages · the book's | `tpdf render` | 84–130 → 40; 2.1× | in | MS-04.8 |
+| `layout/render every page of <book> at 72 dpi, CLI`, nine | pages · the book's | `tpdf render` | 84–130 → 40; 2.1× | in | built |
 
 The nine books are `calibre-book-cover`, `calibre-book-nocover`,
 `calibre-embedded-font`, `kcc-fixed-layout`, `pandoc-book-cover`,
@@ -1360,7 +1360,7 @@ its policy: `keep` everywhere but subset-on-save, so that each figure times
 one pass. `--entropy` names a file of 48 fixed bytes, because a figure must
 not depend on `/dev/urandom`. The child is this repository's binary, built
 from the same checkout in the same job, so the helper's `SPAWNERS` row says it
-hosts this engine and adjudicates nothing (MS-04.8).
+hosts this engine and adjudicates nothing.
 
 #### `baseline.json`'s lists
 

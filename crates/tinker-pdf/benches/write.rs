@@ -9,6 +9,7 @@ mod support;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
+use support::cli::{self, Cli};
 use support::{inputs, Per};
 use tinker_pdf::write::{self, FontPolicy, ImagePolicy, SaveOptions};
 use tinker_pdf::{Document, WriteMode, WriteOptions};
@@ -221,7 +222,145 @@ fn write(c: &mut Criterion) {
         b.iter(|| black_box(edit(&short, short_form)));
     });
 
+    // ---- through the CLI -----------------------------------------------
+    //
+    // `tpdf` has no rewrite command: `merge` given one input writes it again
+    // under a rewrite with stream deduplication and nothing else. Every
+    // writing command subsets by default, so each names its policy: `keep`
+    // but for subset-on-save, so that each figure times one pass.
+
+    let small_100_pdf = cli::fixture("small-100.pdf", || inputs::small(100));
+    let small_1000_pdf = cli::fixture("small-1000.pdf", || inputs::small(1000));
+    let dense_pdf = cli::fixture("dense-100.pdf", || inputs::dense(100, 0));
+    let parts_pdf: Vec<_> = (0..4)
+        .map(|seed| {
+            cli::fixture(&format!("dense-100-{seed}.pdf"), || {
+                inputs::dense(100, seed)
+            })
+        })
+        .collect();
+    let image = inputs::image_file();
+    let image_pdf = cli::fixture("image.pdf", || image.to_vec());
+    // A figure must not depend on `/dev/urandom`.
+    let entropy = cli::fixture("entropy", || vec![0x5A; 48]);
+
+    let rewrite_100 = Cli::new("write-rewrite-100");
+    let out_100 = rewrite_100.out("out.pdf");
+    group
+        .throughput(Per::Pages(4 * 100).throughput())
+        .bench_function("rewrite 100 pages, CLI", |b| {
+            b.iter(|| {
+                for _ in 0..4 {
+                    rewrite_100.run(&[
+                        &"merge",
+                        &small_100_pdf,
+                        &"--out",
+                        &out_100,
+                        &"--font-policy",
+                        &"keep",
+                    ]);
+                }
+            });
+        });
+    assert_eq!(reopened(&out_100), 100, "the rewrite's pages");
+    let rewrite_1000 = Cli::new("write-rewrite-1000");
+    let out_1000 = rewrite_1000.out("out.pdf");
+    group
+        .throughput(Per::Pages(1000).throughput())
+        .bench_function("rewrite 1000 pages, CLI", |b| {
+            b.iter(|| {
+                rewrite_1000.run(&[
+                    &"merge",
+                    &small_1000_pdf,
+                    &"--out",
+                    &out_1000,
+                    &"--font-policy",
+                    &"keep",
+                ])
+            });
+        });
+    assert_eq!(reopened(&out_1000), 1000, "the rewrite's pages");
+    let subset_cli = Cli::new("write-subset-100");
+    let out_subset = subset_cli.out("out.pdf");
+    group
+        .throughput(Per::Pages(100).throughput())
+        .bench_function("subset-on-save of 100 pages, CLI", |b| {
+            b.iter(|| {
+                subset_cli.run(&[
+                    &"merge",
+                    &dense_pdf,
+                    &"--out",
+                    &out_subset,
+                    &"--font-policy",
+                    &"subset",
+                ])
+            });
+        });
+    assert_eq!(reopened(&out_subset), 100, "the subset file's pages");
+    assert!(
+        std::fs::metadata(&out_subset)
+            .expect("the subset file")
+            .len()
+            < std::fs::metadata(&dense_pdf).expect("the dense file").len(),
+        "the subset file is smaller than the whole face's"
+    );
+    let merge_cli = Cli::new("write-merge-4x100");
+    let out_merge = merge_cli.out("out.pdf");
+    group
+        .throughput(Per::Pages(400).throughput())
+        .bench_function("merge 4 x 100 pages, CLI", |b| {
+            b.iter(|| {
+                merge_cli.run(&[
+                    &"merge",
+                    &parts_pdf[0],
+                    &parts_pdf[1],
+                    &parts_pdf[2],
+                    &parts_pdf[3],
+                    &"--out",
+                    &out_merge,
+                    &"--font-policy",
+                    &"keep",
+                ])
+            });
+        });
+    assert_eq!(reopened(&out_merge), 400, "the merge's pages");
+    let encrypt = Cli::new("write-encrypt-image");
+    let out_encrypted = encrypt.out("out.pdf");
+    group
+        .throughput(Per::Bytes(image.len() as u64).throughput())
+        .bench_function("encrypt the 23 MB image file, CLI", |b| {
+            b.iter(|| {
+                encrypt.run(&[
+                    &"encrypt",
+                    &image_pdf,
+                    &"--out",
+                    &out_encrypted,
+                    &"--entropy",
+                    &entropy,
+                    &"--font-policy",
+                    &"keep",
+                ])
+            });
+        });
+    let sealed = Document::open(std::fs::read(&out_encrypted).expect("the encrypted file"))
+        .expect("the encrypted file opens");
+    sealed
+        .authenticate("")
+        .expect("the encrypted file authenticates with the empty password");
+    assert_eq!(
+        sealed.page_count(),
+        Document::open(image).expect("it opens").page_count(),
+        "the encrypted file's pages"
+    );
+
     group.finish();
+}
+
+/// The page count of the file a command wrote at `path`, reopened.
+fn reopened(path: &std::path::Path) -> u32 {
+    Document::open(std::fs::read(path).expect("the written file"))
+        .expect("the written file reopens")
+        .page_count()
 }
 
 criterion_group! {

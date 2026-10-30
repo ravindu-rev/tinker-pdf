@@ -36,7 +36,9 @@
         { "name": "every page's size, 3000 pages", "unit": "pages",
           "per_iteration": 3000, "calls": 1 },
         { "name": "every page's size, 10000 pages", "unit": "pages",
-          "per_iteration": 10000, "calls": 1 }
+          "per_iteration": 10000, "calls": 1 },
+        { "name": "open and count the 23 MB image file, CLI", "unit": "bytes",
+          "per_iteration": 116147995, "calls": 5 }
       ]
     },
     {
@@ -59,7 +61,15 @@
         { "name": "search 100 pages' prebuilt text", "unit": "pages",
           "per_iteration": 500, "calls": 5 },
         { "name": "search 100 pages' prebuilt text, whole words, unaccented",
-          "unit": "pages", "per_iteration": 300, "calls": 3 }
+          "unit": "pages", "per_iteration": 300, "calls": 3 },
+        { "name": "text of 100 dense pages, CLI", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "text of 1000 small pages, CLI", "unit": "pages",
+          "per_iteration": 1000, "calls": 1 },
+        { "name": "text of 10000 small pages, CLI", "unit": "pages",
+          "per_iteration": 10000, "calls": 1 },
+        { "name": "structured JSON of 100 pages, CLI", "unit": "pages",
+          "per_iteration": 100, "calls": 1 }
       ]
     },
     {
@@ -124,7 +134,15 @@
         { "name": "the JBIG2 scan page at 150 dpi", "unit": "pixels",
           "per_iteration": 2176200, "calls": 1 },
         { "name": "the Flate RGB image page at 72 dpi", "unit": "pixels",
-          "per_iteration": 500990, "calls": 1 }
+          "per_iteration": 500990, "calls": 1 },
+        { "name": "the text page to PNG at 150 dpi, CLI", "unit": "pixels",
+          "per_iteration": 2176200, "calls": 1 },
+        { "name": "the text page to PNG at 300 dpi, CLI", "unit": "pixels",
+          "per_iteration": 8702320, "calls": 1 },
+        { "name": "20 pages to PNG at 150 dpi, 1 job, CLI", "unit": "pages",
+          "per_iteration": 20, "calls": 1 },
+        { "name": "20 pages to PNG at 150 dpi, 4 jobs, CLI", "unit": "pages",
+          "per_iteration": 20, "calls": 1 }
       ]
     },
     {
@@ -153,7 +171,17 @@
         { "name": "edit an annotation, save, reopen, 1000 pages", "unit": "pages",
           "per_iteration": 13000, "calls": 13 },
         { "name": "edit an annotation, save, reopen, 10 pages", "unit": "pages",
-          "per_iteration": 10, "calls": 1 }
+          "per_iteration": 10, "calls": 1 },
+        { "name": "rewrite 100 pages, CLI", "unit": "pages",
+          "per_iteration": 400, "calls": 4 },
+        { "name": "rewrite 1000 pages, CLI", "unit": "pages",
+          "per_iteration": 1000, "calls": 1 },
+        { "name": "subset-on-save of 100 pages, CLI", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "merge 4 x 100 pages, CLI", "unit": "pages",
+          "per_iteration": 400, "calls": 1 },
+        { "name": "encrypt the 23 MB image file, CLI", "unit": "bytes",
+          "per_iteration": 23229599, "calls": 1 }
       ]
     },
     {
@@ -220,7 +248,25 @@
         { "name": "open each CBZ fixture, render page 1", "unit": "pages",
           "per_iteration": 9, "calls": 1 },
         { "name": "render each CBZ fixture's synthesised PDF", "unit": "pages",
-          "per_iteration": 9, "calls": 1 }
+          "per_iteration": 9, "calls": 1 },
+        { "name": "render every page of calibre-book-cover.epub at 72 dpi, CLI", "unit": "pages",
+          "per_iteration": 5, "calls": 1 },
+        { "name": "render every page of calibre-book-nocover.epub at 72 dpi, CLI", "unit": "pages",
+          "per_iteration": 4, "calls": 1 },
+        { "name": "render every page of calibre-embedded-font.epub at 72 dpi, CLI", "unit": "pages",
+          "per_iteration": 2, "calls": 1 },
+        { "name": "render every page of kcc-fixed-layout.epub at 72 dpi, CLI", "unit": "pages",
+          "per_iteration": 6, "calls": 1 },
+        { "name": "render every page of pandoc-book-cover.epub at 72 dpi, CLI", "unit": "pages",
+          "per_iteration": 7, "calls": 1 },
+        { "name": "render every page of pandoc-book-epub2.epub at 72 dpi, CLI", "unit": "pages",
+          "per_iteration": 7, "calls": 1 },
+        { "name": "render every page of pandoc-book-nocover.epub at 72 dpi, CLI", "unit": "pages",
+          "per_iteration": 6, "calls": 1 },
+        { "name": "render every page of pandoc-embedded-font.epub at 72 dpi, CLI", "unit": "pages",
+          "per_iteration": 4, "calls": 1 },
+        { "name": "render every page of pandoc-plates.epub at 72 dpi, CLI", "unit": "pages",
+          "per_iteration": 5, "calls": 1 }
       ]
     },
     {
@@ -443,7 +489,30 @@
         "fonts/outlines of Liberation Serif Regular",
         "fonts/outlines of Liberation Sans Regular",
         "fonts/outlines of Liberation Mono Regular",
-        "fonts/outlines of every committed CFF program"
+        "fonts/outlines of every committed CFF program",
+        "open/open and count the 23 MB image file, CLI",
+        "text/text of 100 dense pages, CLI",
+        "text/text of 1000 small pages, CLI",
+        "text/text of 10000 small pages, CLI",
+        "text/structured JSON of 100 pages, CLI",
+        "render/the text page to PNG at 150 dpi, CLI",
+        "render/the text page to PNG at 300 dpi, CLI",
+        "render/20 pages to PNG at 150 dpi, 1 job, CLI",
+        "render/20 pages to PNG at 150 dpi, 4 jobs, CLI",
+        "write/rewrite 100 pages, CLI",
+        "write/rewrite 1000 pages, CLI",
+        "write/subset-on-save of 100 pages, CLI",
+        "write/merge 4 x 100 pages, CLI",
+        "write/encrypt the 23 MB image file, CLI",
+        "layout/render every page of calibre-book-cover.epub at 72 dpi, CLI",
+        "layout/render every page of calibre-book-nocover.epub at 72 dpi, CLI",
+        "layout/render every page of calibre-embedded-font.epub at 72 dpi, CLI",
+        "layout/render every page of kcc-fixed-layout.epub at 72 dpi, CLI",
+        "layout/render every page of pandoc-book-cover.epub at 72 dpi, CLI",
+        "layout/render every page of pandoc-book-epub2.epub at 72 dpi, CLI",
+        "layout/render every page of pandoc-book-nocover.epub at 72 dpi, CLI",
+        "layout/render every page of pandoc-embedded-font.epub at 72 dpi, CLI",
+        "layout/render every page of pandoc-plates.epub at 72 dpi, CLI"
       ],
       "operations": [
         {

@@ -69,15 +69,15 @@ jobs:
         # this job.
         include:
           - group: open
-            count: 5
+            count: 6
           - group: text
-            count: 9
+            count: 13
           - group: render
-            count: 30
+            count: 34
           - group: write
-            count: 12
+            count: 17
           - group: layout
-            count: 31
+            count: 40
           - group: calibration
             count: 1
           - group: analysis
@@ -94,6 +94,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+
+      # The CLI-marked operations run `tpdf` as a child, and
+      # `benches/support/cli.rs` takes the one beside the bench binary's
+      # profile directory, so this checkout's release binary is built first.
+      # It shares the release library `cargo bench` builds, so what this adds
+      # is `tpdf`'s own crate.
+      - name: Build tpdf
+        run: cargo build --release -p tpdf
 
       # `--release` is implied by `cargo bench`, but the profile is worth
       # naming: a debug-profile benchmark measures the absence of inlining.

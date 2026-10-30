@@ -11,6 +11,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, Criterion, SamplingMode};
+use support::cli::{self, Cli};
 use support::{inputs, Per};
 use tinker_pdf::Document;
 
@@ -57,6 +58,27 @@ fn open(c: &mut Criterion) {
     group.bench_function("every page's size, 10000 pages", |b| {
         b.iter(|| black_box(every_page_size(&small_10000)));
     });
+
+    // The image file through the CLI, five children an iteration: tier P's
+    // figure includes the process.
+    let image_pdf = cli::fixture("image.pdf", || image.to_vec());
+    let info = Cli::new("open-image-info");
+    group
+        .throughput(Per::Bytes(5 * image.len() as u64).throughput())
+        .bench_function("open and count the 23 MB image file, CLI", |b| {
+            b.iter(|| {
+                for _ in 0..5 {
+                    info.run(&[&"info", &image_pdf]);
+                }
+            });
+        });
+    let pages = Document::open(Arc::clone(&image))
+        .expect("it opens")
+        .page_count();
+    assert!(
+        info.stdout().contains(&format!("  pages       {pages}\n")),
+        "tpdf info counts the image file's {pages} pages"
+    );
 
     group.finish();
 }

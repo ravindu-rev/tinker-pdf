@@ -756,6 +756,17 @@ cargo bench -p tinker-pdf -- --baseline before
 
 and `--bench <group>` narrows either to one group's file.
 
+Twenty-three operations time `tpdf` itself: tier P marks them CLI, their
+figures include the process, and `tpdf` has no library half.
+`benches/support/cli.rs` runs this revision's binary from beside the bench
+binary's profile directory, one child per call, its output kept in the
+operation's own directory and its exit status checked every time, and the
+operation's assertions read what that child wrote. It is the one file under
+`benches/` that `cargo xtask oracles` lets start a program: the child is this
+repository's own, so it hosts and adjudicates nothing. `bench.yml` builds the
+release `tpdf` before it measures, and `cargo test --benches` needs a debug
+one built first.
+
 **The comparison is `cargo xtask bench-check --machine NAME`, and it exists
 because criterion's own cannot fail.** `cargo bench -- --baseline` compares
 perfectly well and **never exits non-zero when it loses**: the only failure path

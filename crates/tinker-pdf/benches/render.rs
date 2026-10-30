@@ -10,6 +10,7 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingMode};
+use support::cli::{self, Cli};
 use support::{inputs, Per};
 use tinker_pdf::{
     Bitmap, Document, Page, PixelRegion, RenderOptions, RenderWarning, SampleCodec, WriteMode,
@@ -414,6 +415,83 @@ fn render(c: &mut Criterion) {
     group.bench_function("the Flate RGB image page at 72 dpi", |b| {
         b.iter(|| black_box(flate_page.render(&RenderOptions::at_dpi(72.0))));
     });
+
+    // ---- through the CLI: the PNGs `tpdf render` writes ------------------
+
+    let text_pdf = cli::fixture("dense-1.pdf", || inputs::dense(1, 0));
+    let twenty_pdf = cli::fixture("dense-20.pdf", || inputs::dense(20, 0));
+    let at_150 = Cli::new("render-text-150");
+    let out_150 = at_150.out("png");
+    group
+        .throughput(Per::Pixels(1240 * 1755).throughput())
+        .bench_function("the text page to PNG at 150 dpi, CLI", |b| {
+            b.iter(|| at_150.run(&[&"render", &text_pdf, &"--out", &out_150, &"--dpi", &"150"]));
+        });
+    assert_eq!(
+        at_150.pngs(&out_150),
+        [("dense-1-0001.png".to_string(), 1240, 1755)],
+        "one PNG, the page at 150 dpi"
+    );
+    let at_300 = Cli::new("render-text-300");
+    let out_300 = at_300.out("png");
+    group
+        .throughput(Per::Pixels(2480 * 3509).throughput())
+        .bench_function("the text page to PNG at 300 dpi, CLI", |b| {
+            b.iter(|| at_300.run(&[&"render", &text_pdf, &"--out", &out_300, &"--dpi", &"300"]));
+        });
+    assert_eq!(
+        at_300.pngs(&out_300),
+        [("dense-1-0001.png".to_string(), 2480, 3509)],
+        "one PNG, the page at 300 dpi"
+    );
+    let serial = Cli::new("render-20-jobs-1");
+    let out_serial = serial.out("png");
+    group
+        .throughput(Per::Pages(20).throughput())
+        .bench_function("20 pages to PNG at 150 dpi, 1 job, CLI", |b| {
+            b.iter(|| {
+                serial.run(&[
+                    &"render",
+                    &twenty_pdf,
+                    &"--out",
+                    &out_serial,
+                    &"--dpi",
+                    &"150",
+                    &"--jobs",
+                    &"1",
+                ])
+            });
+        });
+    let parallel = Cli::new("render-20-jobs-4");
+    let out_parallel = parallel.out("png");
+    group
+        .throughput(Per::Pages(20).throughput())
+        .bench_function("20 pages to PNG at 150 dpi, 4 jobs, CLI", |b| {
+            b.iter(|| {
+                parallel.run(&[
+                    &"render",
+                    &twenty_pdf,
+                    &"--out",
+                    &out_parallel,
+                    &"--dpi",
+                    &"150",
+                    &"--jobs",
+                    &"4",
+                ])
+            });
+        });
+    for (cli, out) in [(&serial, &out_serial), (&parallel, &out_parallel)] {
+        let pngs = cli.pngs(out);
+        assert_eq!(pngs.len(), 20, "a PNG a page");
+        for (at, (name, width, height)) in pngs.iter().enumerate() {
+            assert_eq!(name, &format!("dense-20-{:04}.png", at + 1));
+            assert_eq!(
+                (*width, *height),
+                (1240, 1755),
+                "{name} is the page at 150 dpi"
+            );
+        }
+    }
 
     group.finish();
 }

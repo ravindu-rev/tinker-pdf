@@ -916,10 +916,11 @@ same way.
 #### How the 6x floor and the 10 MB band reach the path
 
 - **MS-04's operation** is tier P's "Open and count a 23 MB file, CLI"
-  (`docs/roadmap/P.md`), which MS-04.8 runs as the release `tpdf` of the same
-  revision, a child per iteration, over a file the generator wrote once. Its
-  command line is MS-04.1's to write, and this section fixes it: `tpdf info
-  FILE` over an unlinearized file, so that P-05.4 opens it on demand and the
+  (`docs/roadmap/P.md`), which the open group runs as the release `tpdf` of
+  the same revision, a child per iteration, over a file the generator wrote
+  once (`open/open and count the 23 MB image file, CLI`). Its command line is
+  the one this section fixes: `tpdf info FILE` over an unlinearized file, so
+  that P-05.4 opens it on demand and the
   rule keeps it streamed. Its time is then the process, the open, the windowed
   verdict, the page tree's walk for the count and page one: the work P-05.9's
   6x floor holds against the planning baseline. A linearized file, `probe` or a

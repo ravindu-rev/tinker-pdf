@@ -69,6 +69,7 @@
     reason = "shared by every group file; each uses a different subset"
 )]
 
+pub mod cli;
 pub mod inputs;
 
 use std::time::Duration;
