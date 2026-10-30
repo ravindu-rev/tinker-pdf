@@ -1018,8 +1018,8 @@ target computes the same bytes) and through the tree's own writers elsewhere.
 | `triangles()`, `axial()` | the render group's 300 triangles and full-page axial shading | `support/inputs.rs` | "300 triangles", "full-page axial shading" |
 | `tiling(fills)` | one tiling pattern (`add_tiling_pattern`, `build.rs:6276`) filling an A4 page in one rectangle, or in 50 strips that together cover what the one covers | the builder | "a page filled by one tiling pattern 50 times / once" |
 | `annotated(base)` | `base` with one 100×100 pt square annotation on its first page, appearance included (`DocumentEditor::add_annotation`, `crates/tinker-pdf-cos/src/edit/annotations.rs:214`; `annot::square`, `edit/annot.rs:84`) | the editor | "a changed 100×100 pt annotation", "a 1 000-page file", "a 10-page one" |
-| `book(chapters)` | an EPUB of one paragraph a chapter, Liberation Serif embedded through `@font-face` so its glyphs are drawn in both builds | `tests/epub_support`'s OCF writer (`crates/tinker-pdf/tests/epub_support/mod.rs:543`), by path | "a generated 1 000-chapter book", "100 chapters" |
-| `html_report()`, `markdown()` | 20 pages each at the default page box: headings, paragraphs and tables | `FromHtml` (`crates/tinker-pdf/src/html.rs:181`); CommonMark for `Document::open_markdown` (`crates/tinker-pdf/src/lib.rs:1472`) | "a generated 20-page HTML report / 20-page Markdown document" |
+| `book(chapters)` | an EPUB of a heading and one paragraph of about 600 characters a chapter, each chapter a page at the default box, Liberation Serif embedded through `@font-face` in the one stylesheet every chapter links so its glyphs are drawn in both builds | `tests/epub_support`'s OCF writer (`crates/tinker-pdf/tests/epub_support/mod.rs:543`), by path | "a generated 1 000-chapter book", "100 chapters" |
+| `html_report()`, `markdown()` | 20 pages each at the default page box. The report is 20 sections, each a heading, two paragraphs and a ruled table of six rows on a page of its own; the Markdown is 20 sections, each a heading, three paragraphs and a list of five items, in one flow, CommonMark having no table | `FromHtml` (`crates/tinker-pdf/src/html.rs:181`); CommonMark for `Document::open_markdown` (`crates/tinker-pdf/src/lib.rs:1472`) | "a generated 20-page HTML report / 20-page Markdown document" |
 | `message()` | 10 000 000 seeded bytes, and their RSA-2048 PKCS #1 v1.5 signature made in the bench with `pss-vect.txt`'s Example 10 key (`crates/tinker-pdf-crypto/tests/data/pkcs1/pss-vect.txt`) through `Modulus::pow` (`crates/tinker-pdf-crypto/src/bignum.rs:468`) | `inputs.rs` | "over 10 MB" |
 | committed | the nine books (`crates/tinker-pdf/tests/epub/`); the mesh and transparency fixtures (`fuzz/corpus/render_page/`); every `.svg` in `crates/tinker-pdf-svg/tests/fixtures/` (17), every `.xps` and `.oxps` under `crates/tinker-pdf/tests/` (19) and every `.cbz` in `crates/tinker-pdf/tests/cbz/` (9); the three Liberation Regular faces; the four bare CFF programs in `fuzz/corpus/cff/` and the `CFF ` tables of the 189 committed OpenType files (185 in `crates/tinker-pdf-shape/data/aots/fonts/`, three text-rendering-tests faces and `fuzz/corpus/sfnt/opentype-cff.otf`); `TestShapeAran.ttf`; `data/`'s three codestreams; the vendored Devanagari face | read by path | as named |
 
@@ -1182,9 +1182,9 @@ owner's under H-163 all the same.
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `sign/RSA-2048 private-key operation` | none · 13 calls | Example 10's modulus and private exponent, `Modulus::pow` | 6.0 → 2; 3×, paired with the baseline's `pow` | ×13 | MS-04.7 |
-| `sign/verify an RSA-2048 signature over 10 MB` | bytes · 10 000 000 | `message()`, digest and public operation (`RsaPublicKey`, `crates/tinker-pdf-crypto/src/rsa.rs:256`) | about 38 → 30; 1.26× | in | MS-04.7 |
-| `sign/SHA-256 of 10 MB` | bytes · 10 000 000 | `message()`, `sha256` (`crates/tinker-pdf-crypto/src/sha2.rs:473`) | 262 → 350 MB/s (38.2 → 28.6); 1.33× | in | MS-04.7 |
+| `sign/RSA-2048 private-key operation` | none · 13 calls | Example 10's modulus and private exponent, `Modulus::pow` | 6.0 → 2; 3×, paired with the baseline's `pow` | ×13 | built |
+| `sign/verify an RSA-2048 signature over 10 MB` | bytes · 10 000 000 | `message()`, digest and public operation (`RsaPublicKey`, `crates/tinker-pdf-crypto/src/rsa.rs:256`) | about 38 → 30; 1.26× | in | built |
+| `sign/SHA-256 of 10 MB` | bytes · 10 000 000 | `message()`, `sha256` (`crates/tinker-pdf-crypto/src/sha2.rs:473`) | 262 → 350 MB/s (38.2 → 28.6); 1.33× | in | built |
 
 **layout** — a book opens at the default box, 432 × 648 pt (`OpenOptions`,
 `crates/tinker-pdf/src/lib.rs:1128-1154`), which is the seven's box too; a
@@ -1193,20 +1193,20 @@ container's synthesised PDF is `doc.cos().bytes()`
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `layout/open and paginate <book> at 432x648 pt`, one for each of the nine | pages · 4 × the book's | each committed book | 17–22 → 8; 2.12× | ×4 | MS-04.7 |
-| `layout/render every page of <book> at 72 dpi`, nine | pages · the book's | the same | twin (CLI 84–130); floor 1 | in | MS-04.7 |
-| `layout/open and paginate the 1000-chapter book` | pages · its count | `book(1000)` | not measured → ≥ 1 000 pages/s; calibrated; relation ≤ 11 × 100 chapters | above, and at target | MS-04.7 |
-| `layout/render the 1000-chapter book at 72 dpi` | pages · its count | `book(1000)` | not measured → ≥ 300 pages/s; calibrated; the same relation | above, and at target | MS-04.7 |
-| `layout/open and paginate the 100-chapter book` | pages · its count a call | `book(100)` | the relation's other side | unmeasured | MS-04.7 |
-| `layout/render the 100-chapter book at 72 dpi` | pages · its count | `book(100)` | the relation's other side; 333 at 300 pages/s | above, and at target | MS-04.7 |
-| `layout/the 20-page HTML report to PDF` | pages · 20 | `html_report()`, laid out and finished | not measured → ≤ 60; calibrated | unmeasured | MS-04.7 |
-| `layout/the 20-page Markdown document to PDF` | pages · 20 | `markdown()` | not measured → ≤ 50; calibrated | unmeasured | MS-04.7 |
-| `layout/open each SVG fixture, render page 1` | pages · 17 a call | every committed `.svg`, its first page at 72 dpi | not measured; relation ≤ 1.5 × its synthesised PDF | unmeasured | MS-04.7 |
-| `layout/render each SVG fixture's synthesised PDF` | pages · 17 a call | each one's synthesised PDF, opened from bytes | the relation's other side | unmeasured | MS-04.7 |
-| `layout/open each XPS fixture, render page 1` | pages · 19 a call | every committed `.xps` and `.oxps` | the same relation | unmeasured | MS-04.7 |
-| `layout/render each XPS fixture's synthesised PDF` | pages · 19 a call | the same | its other side | unmeasured | MS-04.7 |
-| `layout/open each CBZ fixture, render page 1` | pages · 9 a call | every committed `.cbz` | the same relation | unmeasured | MS-04.7 |
-| `layout/render each CBZ fixture's synthesised PDF` | pages · 9 a call | the same | its other side | unmeasured | MS-04.7 |
+| `layout/open and paginate <book> at 432x648 pt`, one for each of the nine | pages · 4 × the book's | each committed book | 17–22 → 8; 2.12× | ×4 | built |
+| `layout/render every page of <book> at 72 dpi`, nine | pages · the book's | the same | twin (CLI 84–130); floor 1 | in | built |
+| `layout/open and paginate the 1000-chapter book` | pages · its count | `book(1000)` | not measured → ≥ 1 000 pages/s; calibrated; relation ≤ 11 × 100 chapters | above, and at target | built |
+| `layout/render the 1000-chapter book at 72 dpi` | pages · its count | `book(1000)` | not measured → ≥ 300 pages/s; calibrated; the same relation | above, and at target | built |
+| `layout/open and paginate the 100-chapter book` | pages · its count a call | `book(100)` | the relation's other side | unmeasured | built |
+| `layout/render the 100-chapter book at 72 dpi` | pages · its count | `book(100)` | the relation's other side; 333 at 300 pages/s | above, and at target | built |
+| `layout/the 20-page HTML report to PDF` | pages · 20 | `html_report()`, laid out and finished | not measured → ≤ 60; calibrated | unmeasured | built |
+| `layout/the 20-page Markdown document to PDF` | pages · 20 | `markdown()` | not measured → ≤ 50; calibrated | unmeasured | built |
+| `layout/open each SVG fixture, render page 1` | pages · 17 a call | every committed `.svg`, its first page at 72 dpi | not measured; relation ≤ 1.5 × its synthesised PDF | unmeasured | built |
+| `layout/render each SVG fixture's synthesised PDF` | pages · 17 a call | each one's synthesised PDF, opened from bytes | the relation's other side | unmeasured | built |
+| `layout/open each XPS fixture, render page 1` | pages · 19 a call | every committed `.xps` and `.oxps` | the same relation | unmeasured | built |
+| `layout/render each XPS fixture's synthesised PDF` | pages · 19 a call | the same | its other side | unmeasured | built |
+| `layout/open each CBZ fixture, render page 1` | pages · 9 a call | every committed `.cbz` | the same relation | unmeasured | built |
+| `layout/render each CBZ fixture's synthesised PDF` | pages · 9 a call | the same | its other side | unmeasured | built |
 | `layout/render every page of <book> at 72 dpi, CLI`, nine | pages · the book's | `tpdf render` | 84–130 → 40; 2.1× | in | MS-04.8 |
 
 The nine books are `calibre-book-cover`, `calibre-book-nocover`,
@@ -1217,8 +1217,10 @@ The nine books are `calibre-book-cover`, `calibre-book-nocover`,
 bytes. The containers are timed a format at a time, every fixture of the
 format in one iteration, so the relation holds for each format's set: one
 operation a fixture would be 90 operations and about seven minutes of the
-layout job. A fixture the facade refuses is named by the generator and left
-out, never timed as a failure.
+layout job. A fixture the facade refused would be named in its generator's
+list of those left out and never timed as a failure. The facade opens all 45,
+each renders its first page from the container and from its synthesised PDF,
+and the group's setup asserts the three counts.
 
 **fonts** — `Sfnt::parse` and `glyf::outline`
 (`crates/tinker-pdf-font/src/sfnt.rs:46`, `glyf.rs:67`), `Cff::parse` and
@@ -1228,18 +1230,19 @@ caller makes one (`crates/tinker-pdf-shape/src/shape.rs:270`, `:426`;
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `fonts/outlines of Liberation Serif Regular` | outlines · 12 × 2 602 | the face, parsed and every glyph outlined | 2.1; held | ×12 | MS-04.7 |
-| `fonts/outlines of Liberation Sans Regular` | outlines · 9 × 2 620 | the same | 3.0; held | ×9 | MS-04.7 |
-| `fonts/outlines of Liberation Mono Regular` | outlines · 14 × 2 423 | the same | 1.8; held | ×14 | MS-04.7 |
-| `fonts/outlines of every committed CFF program` | outlines · 2 × every program's | the 193 programs | not measured → ≥ 1 M outlines a second; calibrated | unmeasured, ×2 | MS-04.7 |
-| `fonts/shape 1000 characters of Latin` | none · 125 calls | Liberation Serif Regular | not measured → ≤ 0.2; calibrated | unmeasured, ×125 | MS-04.7 |
-| `fonts/shape 1000 characters of Arabic` | none · 50 calls | `TestShapeAran.ttf` | not measured → ≤ 0.5; calibrated | unmeasured, ×50 | MS-04.7 |
-| `fonts/shape 1000 characters of Devanagari` | none · 42 calls | the vendored face | not measured → ≤ 0.6; calibrated | unmeasured, ×42 | MS-04.7 |
+| `fonts/outlines of Liberation Serif Regular` | outlines · 12 × 2 602 | the face, parsed and every glyph outlined | 2.1; held | ×12 | built |
+| `fonts/outlines of Liberation Sans Regular` | outlines · 9 × 2 620 | the same | 3.0; held | ×9 | built |
+| `fonts/outlines of Liberation Mono Regular` | outlines · 14 × 2 423 | the same | 1.8; held | ×14 | built |
+| `fonts/outlines of every committed CFF program` | outlines · 2 × every program's | the 193 programs | not measured → ≥ 1 M outlines a second; calibrated | unmeasured, ×2 | built |
+| `fonts/shape 1000 characters of Latin` | none · 125 calls | Liberation Serif Regular | not measured → ≤ 0.2; calibrated | unmeasured, ×125 | built |
+| `fonts/shape 1000 characters of Arabic` | none · 50 calls | `TestShapeAran.ttf` | not measured → ≤ 0.5; calibrated | unmeasured, ×50 | built |
+| `fonts/shape 1000 characters of Devanagari` | none · 42 calls | the vendored face | not measured → ≤ 0.6; calibrated | unmeasured, ×42 | built |
 
-A walk of the 193 programs' `CharStrings` indexes counts 18 529 glyphs in the
-192 that parse as plain CFF; the 193rd, `fuzz/corpus/sfnt/opentype-cff.otf`,
-is a fuzz seed MS-04.7 counts through the parser. At a million a second that
-is under 19 ms, so `calls` 2.
+The 192 programs that parse as plain CFF hold 18 529 glyphs, and every one
+outlines; the 193rd, `fuzz/corpus/sfnt/opentype-cff.otf`, is a fuzz seed
+whose table the parser refuses, so it costs its refusal and adds no outline,
+and the group's setup asserts all three counts. At a million outlines a
+second the 18 529 take under 19 ms, so `calls` 2.
 
 **scripts** and **OCR** have no operation of MS-04's own; their rows create
 their files (below). **calibration** holds one:

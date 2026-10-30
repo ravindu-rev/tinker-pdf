@@ -30,6 +30,7 @@ fails the same allowlist a crate licence would.
 | `crates/tinker-pdf-shape/data/aots` | [adobe-type-tools/aots](https://github.com/adobe-type-tools/aots) at `d256691` (2025-11-29), fonts via [harfbuzz/harfbuzz](https://github.com/harfbuzz/harfbuzz) `test/shape/data/aots/fonts` at `e0d7060` (2021-08-12) | `Apache-2.0` |
 | `crates/tinker-pdf-shape/data/ucd` | [The Unicode Character Database](https://www.unicode.org/Public/17.0.0/ucd/), version 17.0.0 (2025-07-29) | `Unicode-3.0` |
 | `crates/tinker-pdf-shape/data/text-rendering-tests` | [unicode-org/text-rendering-tests](https://github.com/unicode-org/text-rendering-tests) at `26cfb96` (2026-08-24) | `Unicode-3.0` |
+| `crates/tinker-pdf-shape/data/devanagari` | [notofonts/devanagari](https://github.com/notofonts/devanagari), release `NotoSansDevanagari-v2.007` (2026-09-08), its unhinted TrueType Regular as [notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io) publishes it | `OFL-1.1` |
 | `crates/tinker-pdf-xml/data/xhtml-entities` | XHTML 1.0's three entity sets as XHTML Modularization 1.1 (2010-07-29) publishes them, from [w3c/markup-validator](https://github.com/w3c/markup-validator) `htdocs/sgml-lib/REC-xhtml-modularization-20100729/` at `724a15b` (fetched 2026-09-26) | `W3C` |
 | `crates/tinker-pdf-content/data/ucd` | The Unicode Character Database, version 17.0.0, via [unicode-org/unicodetools](https://github.com/unicode-org/unicodetools) `unicodetools/data/ucd/17.0.0` at `0509b4b` (fetched 2026-09-26) | `Unicode-3.0` |
 | `crates/tinker-pdf-archive/data/zstd-golden` | [facebook/zstd](https://github.com/facebook/zstd) `tests/golden-decompression/` and `tests/golden-decompression-errors/`, branch `dev` as served on 2026-09-26 (no commit could be resolved; pinned by SHA-256 below) | `BSD-3-Clause` |
@@ -522,6 +523,41 @@ Upstream's README states that *"the contents of this repository are governed by
 the Unicode Terms of Use and are released under LICENSE"*, and that LICENSE is
 the Unicode License v3, the same `Unicode-3.0` the UCD carries and `deny.toml`
 already allows. Its text is reproduced above.
+
+### `crates/tinker-pdf-shape/data/devanagari`
+
+One face, **Noto Sans Devanagari Regular** at version 2.007: the face the
+benchmark set's fonts group shapes its Devanagari paragraph in
+(`docs/design/performance.md`, "Fixtures the tree cannot write"). Nothing else
+the tree commits covers the script — aots and text-rendering-tests have no
+Devanagari section — so without it `fonts/shape 1000 characters of
+Devanagari` would have nothing to shape. It sits beside the crate's other
+script faces, and the Kannada and Balinese ones text-rendering-tests names
+are Noto's too.
+
+| File | What it is |
+| --- | --- |
+| `NotoSansDevanagari-Regular.ttf` | The release's unhinted TrueType Regular: 845 glyphs in `glyf` outlines, with `GDEF`, `GSUB` and `GPOS`; 184 228 bytes |
+| `LICENSE` | Upstream's `OFL.txt` at the release's commit, verbatim |
+
+Fetched as notofonts.github.io publishes the release's build, at
+`fonts/NotoSansDevanagari/unhinted/ttf/NotoSansDevanagari-Regular.ttf`. Its
+`name` table reads `Version 2.007`, the release's own, and its SHA-256 is
+
+```text
+9c7d935139ea6a1e6ad9dbac4f6d27ece1e04bca8123c8888d00a0f9df4724cd
+```
+
+**Nothing here is compiled into a binary.** No build script reads the
+directory and no `include_bytes!` names it: the benchmarks read the face by
+path. It is published with the crate because every tree under a crate's
+`data/` is (`xtask`'s `a_crate_that_vendors_data_publishes_it`). That is a
+redistribution of the bytes themselves, the Liberation faces' case: the OFL
+lets a font travel with any software as long as it is not sold by itself, and
+clause 2 requires its copyright notice and licence to travel with it, which
+they do — the notice in the face's own `name` table and at the head of
+`LICENSE`, the licence in `LICENSE` in full. The licence names no reserved
+font name. `deny.toml` already allows `OFL-1.1`.
 
 ### `crates/tinker-pdf-xml/data/xhtml-entities`
 

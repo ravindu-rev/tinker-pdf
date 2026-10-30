@@ -18,14 +18,24 @@ use tinker_pdf::write::{self, SaveOptions};
 use tinker_pdf::{
     ArchivalLevel, ArchivalPart, ArchivalProfile, BilevelCodec, CcittParams, CompressedImage,
     ContinuousCodec, DeviceSpace, Document, DocumentBuilder, Encryption, Function, ImageColorSpace,
-    ImageData, ImageFilter, ImagePolicy, ImageRecoding, PageBuilder, RenderOptions, Shading,
-    TilingPattern, TilingType, WriteMode, WriteOptions,
+    ImageData, ImageFilter, ImagePolicy, ImageRecoding, OpenOptions, PageBox, PageBuilder,
+    RenderOptions, Shading, TilingPattern, TilingType, WriteMode, WriteOptions,
 };
 use tinker_pdf_cos::edit::annot::{self, Color};
 use tinker_pdf_cos::pages::Rect;
 use tinker_pdf_cos::write::StreamData;
 use tinker_pdf_cos::{Dict, ObjRef, Object};
+use tinker_pdf_crypto::bignum::{Modulus, Uint};
+use tinker_pdf_crypto::rsa::{DigestAlgorithm, RSA_LIMBS};
 use tinker_pdf_crypto::sha2::sha256;
+use tinker_pdf_font::Sfnt;
+
+/// The tests' EPUB support, for its OCF writer: the generated books go
+/// through the same writer as the tests' own.
+#[path = "../../tests/epub_support/mod.rs"]
+mod epub_support;
+
+use epub_support::{ocf_zip, OcfEntry, OCF_MEDIA_TYPE};
 
 /// Three A4 pages of forty lines each in standard-14 Helvetica, unembedded.
 ///
@@ -1220,4 +1230,565 @@ pub fn near_blank() -> Vec<u8> {
         page.text(b"F0", 11.0, 72.0, 780.0, "A page with one line on it.");
     });
     builder.finish()
+}
+
+/// A 2048-bit RSA key, big-endian: `pss-vect.txt`'s Example 10, from the
+/// copy `tinker-pdf-crypto`'s own tests read
+/// (`crates/tinker-pdf-crypto/tests/data/pkcs1/pss-vect.txt`).
+pub struct RsaKey {
+    /// `n`.
+    pub modulus: Vec<u8>,
+    /// `e`.
+    pub public_exponent: Vec<u8>,
+    /// `d`.
+    pub private_exponent: Vec<u8>,
+}
+
+/// Example 10's key, read from its block's private-key section, where
+/// `Modulus` is `n`, `Public exponent` is `e` and `Exponent` is `d` — the
+/// label the public-key section above it gives `e`.
+pub fn example_10() -> RsaKey {
+    let path = format!(
+        "{}/../tinker-pdf-crypto/tests/data/pkcs1/pss-vect.txt",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("the committed vectors {path}: {error}"));
+    let block = text.split("# Example 10:").nth(1).expect("Example 10");
+    let private = block
+        .split("# Private key")
+        .nth(1)
+        .expect("its private key");
+    let field = |label: &str| -> Vec<u8> {
+        let after = private
+            .split(&format!("# {label}:"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("Example 10's {label}"));
+        let digits: String = after
+            .lines()
+            .skip(1)
+            .take_while(|line| !line.trim_start().starts_with('#'))
+            .flat_map(str::split_whitespace)
+            .collect();
+        (0..digits.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&digits[at..at + 2], 16).expect("hex octets"))
+            .collect()
+    };
+    RsaKey {
+        modulus: field("Modulus"),
+        public_exponent: field("Public exponent"),
+        private_exponent: field("Exponent"),
+    }
+}
+
+/// The bytes [`message`] signs: 10 MB.
+pub const MESSAGE_BYTES: usize = 10_000_000;
+
+/// [`MESSAGE_BYTES`] seeded bytes, and their RSA-2048 PKCS #1 v1.5 signature
+/// under [`example_10`] with SHA-256, made here: the crypto crate has no
+/// signing path, so the signature is [`pkcs1_encoded`]'s representative
+/// through [`rsa_private`].
+pub fn message() -> (Vec<u8>, Vec<u8>) {
+    let mut seed = Seeded::new(17);
+    let mut bytes = Vec::with_capacity(MESSAGE_BYTES + 8);
+    while bytes.len() < MESSAGE_BYTES {
+        bytes.extend_from_slice(&seed.next().to_le_bytes());
+    }
+    bytes.truncate(MESSAGE_BYTES);
+    let key = example_10();
+    let signature = rsa_private(&key, &pkcs1_encoded(&key, &bytes));
+    (bytes, signature)
+}
+
+/// RFC 8017 §9.2's EMSA-PKCS1-v1_5 encoding of `message`'s SHA-256 digest at
+/// the key's length: `0x00 0x01`, `0xff` padding, `0x00`, then the digest's
+/// `DigestInfo`.
+pub fn pkcs1_encoded(key: &RsaKey, message: &[u8]) -> Vec<u8> {
+    let prefix = DigestAlgorithm::Sha256.digest_info_prefix();
+    let digest = sha256(message);
+    let length = key.modulus.len();
+    let at = length - prefix.len() - digest.len();
+    let mut encoded = vec![0xff; length];
+    encoded[0] = 0x00;
+    encoded[1] = 0x01;
+    encoded[at - 1] = 0x00;
+    encoded[at..at + prefix.len()].copy_from_slice(prefix);
+    encoded[at + prefix.len()..].copy_from_slice(&digest);
+    encoded
+}
+
+/// The key's modulus, its private exponent and `representative` as the
+/// crypto crate's integers: what the private-key operation, `Modulus::pow`
+/// with `d`, takes.
+pub fn private_operands(
+    key: &RsaKey,
+    representative: &[u8],
+) -> (Modulus<RSA_LIMBS>, Uint<RSA_LIMBS>, Uint<RSA_LIMBS>) {
+    let n = Uint::from_be_bytes(&key.modulus).expect("n fits");
+    let modulus = Modulus::new(n).expect("n is an odd modulus");
+    let d = Uint::from_be_bytes(&key.private_exponent).expect("d fits");
+    let m = Uint::from_be_bytes(representative).expect("the representative fits");
+    (modulus, d, m)
+}
+
+/// `representative ^ d mod n`, written out at the modulus's length: the
+/// private-key operation, through the one modular power the crypto crate has.
+pub fn rsa_private(key: &RsaKey, representative: &[u8]) -> Vec<u8> {
+    let (modulus, d, m) = private_operands(key, representative);
+    let mut out = vec![0u8; key.modulus.len()];
+    assert!(modulus.pow(&m, &d).to_be_bytes(&mut out), "s is below n");
+    out
+}
+
+/// `META-INF/container.xml` for a book whose package document is
+/// `EPUB/content.opf`.
+const CONTAINER_XML: &str = concat!(
+    r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+    r#"<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">"#,
+    r#"<rootfiles><rootfile full-path="EPUB/content.opf" media-type="application/oebps-package+xml"/>"#,
+    r#"</rootfiles></container>"#
+);
+
+/// About 600 characters of [`WORDS`] in sentences: one chapter's paragraph,
+/// which a 432 × 648 pt page holds whole.
+fn paragraph(words: &mut Seeded) -> String {
+    let mut text = String::new();
+    let mut start = true;
+    while text.chars().count() < 600 {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        let word = WORDS[words.below(WORDS.len())];
+        if start {
+            let mut chars = word.chars();
+            if let Some(first) = chars.next() {
+                text.extend(first.to_uppercase());
+                text.push_str(chars.as_str());
+            }
+            start = false;
+        } else {
+            text.push_str(word);
+        }
+        if words.below(10) == 0 {
+            text.push('.');
+            start = true;
+        }
+    }
+    text.push('.');
+    text
+}
+
+/// A book of `chapters` chapters, each one XHTML file holding a heading and
+/// one [`paragraph`], all set in Liberation Serif Regular embedded through
+/// `@font-face` in the one stylesheet every chapter links, so its glyphs are
+/// drawn in both builds. Each chapter starts a page and fits on it, so the
+/// book is `chapters` pages long at the default box. Written through
+/// `tests/epub_support`'s OCF writer, the one the tests' generated books use.
+pub fn book(chapters: usize) -> Vec<u8> {
+    let mut words = Seeded::new(chapters as u64);
+    let mut manifest = String::new();
+    let mut spine = String::new();
+    let mut entries = vec![
+        OcfEntry::stored("mimetype", OCF_MEDIA_TYPE),
+        OcfEntry::deflated("META-INF/container.xml", CONTAINER_XML.as_bytes()),
+    ];
+    for chapter in 1..=chapters {
+        manifest.push_str(&format!(
+            r#"<item id="c{chapter}" href="c{chapter}.xhtml" media-type="application/xhtml+xml"/>"#
+        ));
+        spine.push_str(&format!(r#"<itemref idref="c{chapter}"/>"#));
+    }
+    let package = format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id">"#,
+            r#"<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">"#,
+            r#"<dc:identifier id="pub-id">urn:uuid:1f0c2c1e-0000-4000-8000-0000000000b0</dc:identifier>"#,
+            r#"<dc:title>A Book of {chapters} Chapters</dc:title>"#,
+            r#"<dc:language>en</dc:language>"#,
+            r#"</metadata><manifest>"#,
+            r#"<item id="css" href="book.css" media-type="text/css"/>"#,
+            r#"<item id="serif" href="serif.ttf" media-type="font/ttf"/>"#,
+            r#"{manifest}</manifest><spine>{spine}</spine></package>"#
+        ),
+        chapters = chapters,
+        manifest = manifest,
+        spine = spine
+    );
+    entries.push(OcfEntry::deflated("EPUB/content.opf", package.as_bytes()));
+    let stylesheet = concat!(
+        r#"@font-face { font-family: "Book Serif"; src: url(serif.ttf) format("truetype"); } "#,
+        r#"body { font-family: "Book Serif"; }"#
+    );
+    entries.push(OcfEntry::deflated("EPUB/book.css", stylesheet.as_bytes()));
+    entries.push(OcfEntry::deflated("EPUB/serif.ttf", &serif()));
+    for chapter in 1..=chapters {
+        let body = paragraph(&mut words);
+        let xhtml = format!(
+            concat!(
+                r#"<?xml version="1.0" encoding="utf-8"?>"#,
+                r#"<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en"><head>"#,
+                r#"<title>Chapter {chapter}</title>"#,
+                r#"<link rel="stylesheet" type="text/css" href="book.css"/>"#,
+                r#"</head><body><h2>Chapter {chapter}</h2><p>{body}</p></body></html>"#
+            ),
+            chapter = chapter,
+            body = body
+        );
+        entries.push(OcfEntry::deflated(
+            &format!("EPUB/c{chapter}.xhtml"),
+            xhtml.as_bytes(),
+        ));
+    }
+    let directory: Vec<usize> = (0..entries.len()).collect();
+    ocf_zip(&entries, &directory)
+}
+
+/// How many sections [`html_report`] and [`markdown`] hold: what lays out
+/// into their 20 pages at the default box.
+const REPORT_SECTIONS: usize = 20;
+
+/// A report of [`REPORT_SECTIONS`] sections in XHTML, each a heading, two
+/// paragraphs and a ruled table of six rows on a page of its own — a forced
+/// break before every section but the first, and each about four fifths of a
+/// page long — so it lays out into 20 pages at the default box: the
+/// HTML-to-PDF operation's input.
+pub fn html_report() -> String {
+    let mut words = Seeded::new(20);
+    let mut body = String::new();
+    for section in 1..=REPORT_SECTIONS {
+        body.push_str(&format!(
+            r#"<div class="section"><h2>Section {section}</h2>"#
+        ));
+        for _ in 0..2 {
+            body.push_str(&format!("<p>{}</p>", paragraph(&mut words)));
+        }
+        body.push_str("<table><tr><th>Item</th><th>Count</th><th>Note</th></tr>");
+        for row in 1..=5 {
+            let note = WORDS[words.below(WORDS.len())];
+            let count = words.below(1000);
+            body.push_str(&format!(
+                "<tr><td>{section}.{row}</td><td>{count}</td><td>{note}</td></tr>"
+            ));
+        }
+        body.push_str("</table></div>");
+    }
+    format!(
+        concat!(
+            r#"<?xml version="1.0" encoding="utf-8"?>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en"><head><title>A Report</title>"#,
+            r#"<style>.section + .section {{ page-break-before: always }} "#,
+            r#"table {{ border-collapse: collapse; margin: 6pt 0 }} "#,
+            r#"td, th {{ border: 0.5pt solid black; padding: 2pt 6pt }}</style>"#,
+            r#"</head><body>{body}</body></html>"#
+        ),
+        body = body
+    )
+}
+
+/// The page box the HTML report is laid out in: the default box a book opens
+/// at, which is the one Markdown is laid out in too.
+pub fn default_box() -> PageBox {
+    let (width, height) = OpenOptions::default().page;
+    PageBox::new(width, height)
+}
+
+/// A CommonMark document of [`REPORT_SECTIONS`] sections, each a heading,
+/// three paragraphs and a list of five items, which lays out into 20 pages
+/// at the default box. CommonMark has no table, so a list stands where the
+/// report's table does.
+pub fn markdown() -> String {
+    let mut words = Seeded::new(21);
+    let mut text = String::new();
+    for section in 1..=REPORT_SECTIONS {
+        text.push_str(&format!("## Section {section}\n\n"));
+        for _ in 0..3 {
+            text.push_str(&paragraph(&mut words));
+            text.push_str("\n\n");
+        }
+        for item in 1..=5 {
+            let note = WORDS[words.below(WORDS.len())];
+            text.push_str(&format!("- Item {section}.{item}: {note}\n"));
+        }
+        text.push('\n');
+    }
+    text
+}
+
+/// One committed fixture: its file name and its bytes.
+pub struct Fixture {
+    /// The file name, which the operations' assertions name it by.
+    pub name: String,
+    /// Its bytes.
+    pub bytes: Arc<[u8]>,
+}
+
+/// Every file under `dir` (relative to this crate, searched to every depth)
+/// whose extension is one of `extensions`, in name order, except those
+/// `left_out` names: a fixture the facade refuses is left out by name,
+/// never timed as a failure.
+fn fixtures(dir: &str, extensions: &[&str], left_out: &[&str]) -> Vec<Fixture> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let entries = std::fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("the fixture directory {}: {error}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut paths = Vec::new();
+    walk(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(dir),
+        &mut paths,
+    );
+    let mut out: Vec<Fixture> = paths
+        .into_iter()
+        .filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extensions.contains(&extension))
+        })
+        .map(|path| Fixture {
+            name: path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("a UTF-8 file name")
+                .to_string(),
+            bytes: std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("the fixture {}: {error}", path.display()))
+                .into(),
+        })
+        .filter(|fixture| !left_out.contains(&fixture.name.as_str()))
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Every committed SVG fixture the facade opens.
+pub fn svg_fixtures() -> Vec<Fixture> {
+    fixtures("../tinker-pdf-svg/tests/fixtures", &["svg"], &[])
+}
+
+/// Every committed XPS and OpenXPS package.
+pub fn xps_fixtures() -> Vec<Fixture> {
+    fixtures("tests", &["xps", "oxps"], &[])
+}
+
+/// Every committed `.cbz`.
+pub fn cbz_fixtures() -> Vec<Fixture> {
+    fixtures("tests/cbz", &["cbz"], &[])
+}
+
+/// One of the three Liberation faces the fonts group outlines, by file name.
+pub fn liberation(name: &str) -> Vec<u8> {
+    let path = format!(
+        "{}/../tinker-pdf-font/data/liberation/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::read(&path).unwrap_or_else(|error| panic!("the committed face {path}: {error}"))
+}
+
+/// A face under `tinker-pdf-shape/data/`, by its path there.
+pub fn shape_face(path: &str) -> Vec<u8> {
+    let path = format!(
+        "{}/../tinker-pdf-shape/data/{path}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::read(&path).unwrap_or_else(|error| panic!("the committed face {path}: {error}"))
+}
+
+/// Every committed CFF program, by file name: the four bare ones the `cff`
+/// fuzz target seeds with, and the `CFF ` table of every committed OpenType
+/// face — aots's 185, text-rendering-tests' three and the `sfnt` target's
+/// `opentype-cff.otf`.
+pub fn cff_programs() -> Vec<(String, Vec<u8>)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut out = Vec::new();
+    let mut read = |dir: &str, extension: &str, whole: bool| {
+        let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(root.join(dir))
+            .unwrap_or_else(|error| panic!("the font directory {dir}: {error}"))
+            .map(|entry| entry.expect("a directory entry").path())
+            .filter(|path| path.extension().is_some_and(|e| e == extension))
+            .collect();
+        names.sort();
+        for path in names {
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("the font {}: {error}", path.display()));
+            let program = if whole {
+                bytes
+            } else {
+                let face = Sfnt::parse(&bytes)
+                    .unwrap_or_else(|| panic!("{} is an OpenType face", path.display()));
+                face.table(u32::from_be_bytes(*b"CFF "))
+                    .unwrap_or_else(|| panic!("{} has a CFF table", path.display()))
+                    .to_vec()
+            };
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("a UTF-8 file name")
+                .to_string();
+            out.push((name, program));
+        }
+    };
+    read("../../fuzz/corpus/cff", "cff", true);
+    read("../tinker-pdf-shape/data/aots/fonts", "otf", false);
+    read(
+        "../tinker-pdf-shape/data/text-rendering-tests/fonts",
+        "otf",
+        false,
+    );
+    read("../../fuzz/corpus/sfnt", "otf", false);
+    out
+}
+
+/// Urdu words in the seventeen letters `TestShapeAran.ttf`, a Nasta'liq test
+/// face, maps: with the space between them, every character it maps.
+const URDU: [&str; 36] = [
+    "نستعلیق",
+    "خط",
+    "فن",
+    "طوطی",
+    "تختی",
+    "نقل",
+    "قسط",
+    "کل",
+    "پتا",
+    "ٹکٹ",
+    "ڈاک",
+    "سال",
+    "نیا",
+    "تو",
+    "کا",
+    "کی",
+    "کو",
+    "تک",
+    "خوف",
+    "عقل",
+    "طاقت",
+    "قانون",
+    "انسان",
+    "سوال",
+    "خیال",
+    "نئی",
+    "کئی",
+    "پانی",
+    "تیل",
+    "ستون",
+    "عینک",
+    "لوٹا",
+    "ڈنڈا",
+    "پیاس",
+    "لیکن",
+    "فائل",
+];
+
+/// Hindi words with the script's conjuncts, a reph, nuktas, candrabindus and
+/// every vowel sign's position.
+const HINDI: [&str; 67] = [
+    "भारत",
+    "हिन्दी",
+    "भाषा",
+    "नमस्ते",
+    "दुनिया",
+    "किताब",
+    "पानी",
+    "विद्यालय",
+    "प्रश्न",
+    "उत्तर",
+    "स्वतंत्रता",
+    "क्षेत्र",
+    "ज्ञान",
+    "श्रम",
+    "राष्ट्र",
+    "संस्कृति",
+    "धर्म",
+    "कर्म",
+    "सूर्य",
+    "चंद्रमा",
+    "पृथ्वी",
+    "आकाश",
+    "समुद्र",
+    "पर्वत",
+    "नदी",
+    "वृक्ष",
+    "फूल",
+    "पत्ता",
+    "हवा",
+    "आग",
+    "शिक्षा",
+    "विज्ञान",
+    "इतिहास",
+    "भूगोल",
+    "गणित",
+    "साहित्य",
+    "कविता",
+    "कहानी",
+    "उपन्यास",
+    "लेखक",
+    "पाठक",
+    "मित्र",
+    "परिवार",
+    "माँ",
+    "पिता",
+    "बच्चा",
+    "घर",
+    "गाँव",
+    "शहर",
+    "सड़क",
+    "ज़मीन",
+    "क़लम",
+    "ख़बर",
+    "और",
+    "है",
+    "में",
+    "से",
+    "का",
+    "की",
+    "के",
+    "को",
+    "पर",
+    "यह",
+    "वह",
+    "हम",
+    "तुम",
+    "आप",
+];
+
+/// 1 000 characters of `words` drawn from `seed`, a space between each and,
+/// every eighth word or so, `stop` after one.
+fn thousand(words: &[&str], stop: Option<char>, seed: u64) -> String {
+    let mut seeded = Seeded::new(seed);
+    let mut text = String::new();
+    while text.chars().count() < 1000 {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(words[seeded.below(words.len())]);
+        if let Some(stop) = stop.filter(|_| seeded.below(8) == 0) {
+            text.push(stop);
+        }
+    }
+    text.chars().take(1000).collect()
+}
+
+/// 1 000 characters of Latin, from [`WORDS`].
+pub fn latin_paragraph() -> String {
+    thousand(&WORDS, Some('.'), 1)
+}
+
+/// 1 000 characters of Urdu in Arabic script, from [`URDU`]: no punctuation,
+/// since the face maps none.
+pub fn arabic_paragraph() -> String {
+    thousand(&URDU, None, 2)
+}
+
+/// 1 000 characters of Hindi in Devanagari, from [`HINDI`], with danda.
+pub fn devanagari_paragraph() -> String {
+    thousand(&HINDI, Some('।'), 3)
 }

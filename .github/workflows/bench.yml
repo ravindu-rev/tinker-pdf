@@ -77,7 +77,7 @@ jobs:
           - group: write
             count: 12
           - group: layout
-            count: 1
+            count: 31
           - group: calibration
             count: 1
           - group: analysis
@@ -86,6 +86,10 @@ jobs:
             count: 4
           - group: decode
             count: 9
+          - group: sign
+            count: 3
+          - group: fonts
+            count: 7
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

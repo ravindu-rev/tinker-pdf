@@ -91,6 +91,14 @@ pub fn config() -> Criterion {
         .measurement_time(Duration::from_secs(3))
 }
 
+/// The sampling of the sign, fonts and scripts groups: thirty samples over
+/// [`config`]'s times. Their operations are sized near 25 ms by their
+/// targets, and at 100 ms or less thirty samples fit the three seconds ten
+/// would take, so the closer reading costs nothing.
+pub fn fine_config() -> Criterion {
+    config().sample_size(30)
+}
+
 /// What one iteration of an operation processes, in the unit its list in
 /// `baseline.json` gives it.
 ///

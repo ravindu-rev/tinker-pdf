@@ -150,3 +150,11 @@ harness = false
 [[bench]]
 name = "decode"
 harness = false
+
+[[bench]]
+name = "sign"
+harness = false
+
+[[bench]]
+name = "fonts"
+harness = false

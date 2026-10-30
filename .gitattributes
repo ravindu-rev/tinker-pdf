@@ -86,7 +86,9 @@ crates/tinker-pdf-font/data/** -text linguist-vendored
 crates/tinker-pdf-layout/data/** -text linguist-vendored
 
 # Adobe's aots conformance corpus (design/shaping.md milestone 1,
-# THIRDPARTY.md). `-text` for the two reasons above and one that is sharper
+# THIRDPARTY.md), and the shape crate's other trees beside it: the UCD,
+# text-rendering-tests and the Devanagari face the benchmarks' fonts group
+# shapes. `-text` for the two reasons above and one that is sharper
 # here: a `.otf` is a table directory whose entries carry byte offsets and
 # lengths, so a single rewritten line ending moves every table after it and
 # the face stops parsing. Nothing in this tree names `*.otf` binary, and
