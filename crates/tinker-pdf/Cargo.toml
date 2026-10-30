@@ -142,3 +142,11 @@ harness = false
 [[bench]]
 name = "analysis"
 harness = false
+
+[[bench]]
+name = "encode"
+harness = false
+
+[[bench]]
+name = "decode"
+harness = false

@@ -1109,15 +1109,15 @@ text of the document the operation reads, so all six stay inside the group.
 | `render/100 text pages at 150 dpi on 4 threads` | pages · 100 | the same, on `std::thread::scope` over owned pages, as `crates/tinker-pdf/examples/parallel.rs:87` does | 43 → 200 pages/s (2 326 → 500); 4.65×; relation ≥ 3.33 × 1 thread | above, and at target | built |
 | `render/the annotated text page at 150 dpi` | pixels · 2 × 1240×1755 | `annotated(dense(1, 0))` | the next one's full-page render; floor 1 | ×2 | built |
 | `render/re-render a changed 100x100 pt annotation` | pixels · 3 × 1240×1755 | the same, its appearance replaced, saved and reopened untimed; today the whole page re-renders | relation ≤ 10 % of the full-page render | ×3 today; under 20 at its bound | built |
-| `render/replay the Flate RGB image page at 150 dpi` | pixels · 1240×1755 | `flate_page()`'s display list, recorded once; its renders share the decoded image (`resources.rs:532-546`) | 350 → 40; 8.75× | above | MS-04.6 |
-| `render/an ICC-based CMYK image to sRGB at 300 dpi` | pixels · 2480×3508, the image's | `cmyk_page()`, drawn at the image's own resolution so each sample is converted once | not measured → ≥ 100 Mpixel/s (≤ 87); calibrated | unmeasured | MS-04.6 |
-| `render/the JPEG page at 72 dpi` | pixels · 595×842 | `jpeg_page()` | 652 → 35; 18.6× | above | MS-04.6 |
-| `render/the JPEG page at 300 dpi` | pixels · 2480×3509 | `jpeg_page()` | 1 585 → 150; 10.5× | above | MS-04.6 |
-| `render/a second render of the JPEG page at 300 dpi` | pixels · 2480×3509 | `jpeg_page()`, after the same `Page` rendered at 72 dpi, untimed | not measured; relation ≤ 30 % of the first (`the JPEG page at 300 dpi`) | above, expected | MS-04.6 |
-| `render/the JPEG 2000 page at 72 dpi` | pixels · 595×842 | `jpx_page()` | 2 753 → 250; 11× | above | MS-04.6 |
-| `render/the G4 scan page at 150 dpi` | pixels · 1240×1755 | `g4_page()` | 641 → 50; 12.8× | above | MS-04.6 |
-| `render/the JBIG2 scan page at 150 dpi` | pixels · 1240×1755 | `jbig2_page()` | 875 → 80; 10.9× | above | MS-04.6 |
-| `render/the Flate RGB image page at 72 dpi` | pixels · 595×842 | `flate_page()` | 924 → 230; 4.01× | above | MS-04.6 |
+| `render/replay the Flate RGB image page at 150 dpi` | pixels · 1240×1755 | `flate_page()`'s display list, recorded once; its renders share the decoded image (`resources.rs:532-546`) | 350 → 40; 8.75× | above | built |
+| `render/an ICC-based CMYK image to sRGB at 300 dpi` | pixels · 2480×3508, the image's | `cmyk_page()`, drawn at the image's own resolution so each sample is converted once | not measured → ≥ 100 Mpixel/s (≤ 87); calibrated | unmeasured | built |
+| `render/the JPEG page at 72 dpi` | pixels · 595×842 | `jpeg_page()` | 652 → 35; 18.6× | above | built |
+| `render/the JPEG page at 300 dpi` | pixels · 2480×3509 | `jpeg_page()` | 1 585 → 150; 10.5× | above | built |
+| `render/a second render of the JPEG page at 300 dpi` | pixels · 2480×3509 | `jpeg_page()`, after the same `Page` rendered at 72 dpi, untimed | not measured; relation ≤ 30 % of the first (`the JPEG page at 300 dpi`) | above, expected | built |
+| `render/the JPEG 2000 page at 72 dpi` | pixels · 595×842 | `jpx_page()` | 2 753 → 250; 11× | above | built |
+| `render/the G4 scan page at 150 dpi` | pixels · 1240×1755 | `g4_page()` | 641 → 50; 12.8× | above | built |
+| `render/the JBIG2 scan page at 150 dpi` | pixels · 1240×1755 | `jbig2_page()` | 875 → 80; 10.9× | above | built |
+| `render/the Flate RGB image page at 72 dpi` | pixels · 595×842 | `flate_page()` | 924 → 230; 4.01× | above | built |
 | `render/the text page to PNG at 150 dpi, CLI` | pixels · 1240×1755 | `tpdf render` | 402 → 70; 5.74× | above | MS-04.8 |
 | `render/the text page to PNG at 300 dpi, CLI` | pixels · 2480×3509 | `tpdf render` | 1 180 → 200; 5.9× | above | MS-04.8 |
 | `render/20 pages to PNG at 150 dpi, 1 job, CLI` | pages · 20 | `tpdf render --jobs 1` | 6 847 → 1 300; 5.26× | above, and at target | MS-04.8 |
@@ -1127,25 +1127,25 @@ text of the document the operation reads, so all six stay inside the group.
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `encode/PNG of the 1240x1755 text page` | pixels · 1240×1755 | the text page's 150-dpi bitmap, rendered once, `Bitmap::to_png` (`lib.rs:832`) | 269 → 40; 6.72× | in | MS-04.6 |
-| `encode/PNG of the near-blank page` | pixels · 2 × 1240×1755 | a 150-dpi bitmap of a page holding one line | 145 → 15; 9.66× | ×2, at 290 today | MS-04.6 |
-| `encode/deflate page-like data` | bytes · 6 528 600 | `page_like()`, `deflate` (`deflate.rs:200`) | 40 → 120 MB/s (163 → 54); 3×; size ≤ 1.02 × level 6's, exact | in | MS-04.6 |
-| `encode/deflate photo-like data` | bytes · 6 528 600 | `photo_like()` | 28 → 40 MB/s (233 → 163); 1.4×; size likewise | in | MS-04.6 |
+| `encode/PNG of the 1240x1755 text page` | pixels · 1240×1755 | the text page's 150-dpi bitmap, rendered once, `Bitmap::to_png` (`lib.rs:832`) | 269 → 40; 6.72× | in | built |
+| `encode/PNG of the near-blank page` | pixels · 2 × 1240×1755 | a 150-dpi bitmap of a page holding one line | 145 → 15; 9.66× | ×2, at 290 today | built |
+| `encode/deflate page-like data` | bytes · 6 528 600 | `page_like()`, `deflate` (`deflate.rs:200`) | 40 → 120 MB/s (163 → 54); 3×; size ≤ 1.02 × level 6's, exact | in | built |
+| `encode/deflate photo-like data` | bytes · 6 528 600 | `photo_like()` | 28 → 40 MB/s (233 → 163); 1.4×; size likewise | in | built |
 
 **decode** — each through its `tinker-pdf-filters` entry point
 (`crates/tinker-pdf-filters/src/lib.rs:70-93`, `:721`, `:738`).
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `decode/inflate page-like data` | bytes out · 2 × 6 528 600 | `deflate(page_like())` | 279 → 500 MB/s (23.4 → 13.1 a call); 1.79× | ×2 | MS-04.6 |
-| `decode/inflate near-incompressible data` | bytes out · 6 528 600 | `deflate(noise())` | 141 → 150 MB/s (46.3 → 43.5); 1.06× | in | MS-04.6 |
-| `decode/LZW decode page-like data` | bytes out · 6 528 600 | `lzw(page_like())` | not measured → ≥ 200 MB/s (≤ 32.6); calibrated | unmeasured | MS-04.6 |
-| `decode/baseline JPEG 2480x3508` | pixels · 2480×3508 | `baseline_jpeg()` | 446 → 60; 7.43× | above | MS-04.6 |
-| `decode/progressive JPEG 2480x3508` | pixels · 2480×3508 | `data/progressive-2480x3508.jpg` | 458 → 120; 3.81× | above | MS-04.6 |
-| `decode/irreversible JPEG 2000 2480x3508` | pixels · 2480×3508 | `data/irreversible-2480x3508.jp2` | 2 566 → 1 000; 2.56× | above, and at target | MS-04.6 |
-| `decode/reversible JPEG 2000 2480x3508` | pixels · 2480×3508 | `data/reversible-2480x3508.jp2` | 6 516 → 2 700; 2.41× | above, and at target | MS-04.6 |
-| `decode/decode the JBIG2 generic page` | pixels · `scan()`'s | `jbig2_generic_encode(scan())` (`jbig2/encode.rs:251`) | 255 → 60; 4.25× | in | MS-04.6 |
-| `decode/decode the CCITT G4 page` | pixels · `scan()`'s | `ccitt_g4_encode(scan())` | 46 → 25; 1.84× | in | MS-04.6 |
+| `decode/inflate page-like data` | bytes out · 2 × 6 528 600 | `deflate(page_like())` | 279 → 500 MB/s (23.4 → 13.1 a call); 1.79× | ×2 | built |
+| `decode/inflate near-incompressible data` | bytes out · 6 528 600 | `deflate(noise())` | 141 → 150 MB/s (46.3 → 43.5); 1.06× | in | built |
+| `decode/LZW decode page-like data` | bytes out · 6 528 600 | `lzw(page_like())` | not measured → ≥ 200 MB/s (≤ 32.6); calibrated | unmeasured | built |
+| `decode/baseline JPEG 2480x3508` | pixels · 2480×3508 | `baseline_jpeg()` | 446 → 60; 7.43× | above | built |
+| `decode/progressive JPEG 2480x3508` | pixels · 2480×3508 | `data/progressive-2480x3508.jpg` | 458 → 120; 3.81× | above | built |
+| `decode/irreversible JPEG 2000 2480x3508` | pixels · 2480×3508 | `data/irreversible-2480x3508.jp2` | 2 566 → 1 000; 2.56× | above, and at target | built |
+| `decode/reversible JPEG 2000 2480x3508` | pixels · 2480×3508 | `data/reversible-2480x3508.jp2` | 6 516 → 2 700; 2.41× | above, and at target | built |
+| `decode/decode the JBIG2 generic page` | pixels · `scan()`'s | `jbig2_generic_encode(scan())` (`jbig2/encode.rs:251`) | 255 → 60; 4.25× | in | built |
+| `decode/decode the CCITT G4 page` | pixels · `scan()`'s | `ccitt_g4_encode(scan())` | 46 → 25; 1.84× | in | built |
 
 **write** — a rewrite is the editor's save under `WriteMode::Rewrite`, as
 `write/rewrite a document`'s is (`benches/write.rs`); merge and subset-on-save go through
@@ -1308,12 +1308,12 @@ every check on the result is first-party. It is the device
   one and round-trips it, and nothing is committed.
 
 `crates/tinker-pdf/benches/data/README.md` records, for each committed file,
-its bytes and SHA-256, the producer and its version, the command, the date,
-and the SHA-256 of the input it was made from; the file names say what each
+its bytes and SHA-256, how it was coded and the SHA-256 of the input it was
+made from, and never the program that made it; the file names say what each
 is (`progressive-2480x3508.jpg`, `irreversible-2480x3508.jp2`,
 `reversible-2480x3508.jp2`), and `.jpg` and `.jp2` are already binary
-(`.gitattributes:13-14`). These are megabytes each, the lossless one most, far
-larger than any committed JPEG 2000 file or progressive JPEG, and MS-04.6
+(`.gitattributes:13-14`). The lossless codestream is the largest, at eleven
+megabytes far larger than any other committed JPEG 2000 file, and the README
 states each one's size.
 
 #### The CLI operations
@@ -1546,7 +1546,7 @@ to.
 | Tier P's figures are the planning machine's, so the budget and the window's list are predictions | MS-04.9's dispatch measures the list H-163 is decided on, and an operation outside that it missed goes to H-163 before MS-04.10 commits any figure |
 | A repetition count and its committed `per_iteration` drift apart | Criterion's recorded `Throughput` is checked against the list on every run |
 | A CLI operation times a failed child, or a stale `tpdf` | The exit status is checked on every call and a failure panics the bench; `tpdf` is resolved beside the bench binary and built from the same checkout in the same job |
-| The committed codestreams grow the repository and come from a program this project does not own | Three files with their bytes, digests and commands recorded; their decodes are checked first-party, the reversible one against the generator's input and the progressive one against the baseline decode |
+| The committed codestreams grow the repository and come from a program this project does not own | Three files with their bytes, digests, coding and sources recorded; their decodes are checked first-party, the reversible one against the generator's input and the progressive one against the baseline decode |
 | A format's aggregate hides one container fixture's regression | Every fixture is opened and rendered in the operation and asserted in test mode; a figure for each fixture would take ninety operations, which a row that needs one adds |
 | The calibration operation moves | Its file is frozen; a change re-states every calibrated target, which is the owner's (H-77) |
 | A row's speed-up takes an operation under 20 ms | The row raises its `calls` in the commit that raises its floor, with the figure re-measured under H-109, or names it for H-163; the four that cross the window are listed above |

@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingMode};
 use support::{inputs, Per};
 use tinker_pdf::{
-    Bitmap, Document, Page, PixelRegion, RenderOptions, RenderWarning, WriteMode, WriteOptions,
+    Bitmap, Document, Page, PixelRegion, RenderOptions, RenderWarning, SampleCodec, WriteMode,
+    WriteOptions,
 };
 
 /// `page` at `dpi`, `times` times: the unit is every bitmap's pixels.
@@ -43,6 +44,29 @@ fn inked(bitmap: &Bitmap) -> usize {
         .flat_map(|row| row.chunks(n).take(bitmap.width as usize))
         .filter(|pixel| pixel.iter().take(3).any(|&v| v < 128))
         .count()
+}
+
+/// `bytes`' first page, its one image decoded whole by `codec` and drawn
+/// with no image reported damaged or unsupported.
+fn image_page(bytes: Vec<u8>, codec: SampleCodec) -> Page {
+    let page = Document::open(bytes)
+        .expect("the image page opens")
+        .page(0)
+        .expect("a page");
+    let images = page.images();
+    assert_eq!(images.len(), 1, "one image");
+    assert_eq!(images[0].codec, codec, "the image is the codec's");
+    assert_eq!(images[0].refused, None, "the image decodes");
+    let drawn = page.render(&RenderOptions::at_dpi(72.0));
+    assert!(
+        !drawn.warnings.iter().any(|w| matches!(
+            w,
+            RenderWarning::UnsupportedImage { .. } | RenderWarning::DamagedImage { .. }
+        )),
+        "the image drew: {:?}",
+        drawn.warnings
+    );
+    page
 }
 
 /// `page` at `dpi` in four horizontal bands, each rendered on its own scoped
@@ -325,6 +349,70 @@ fn render(c: &mut Criterion) {
             },
             BatchSize::PerIteration,
         );
+    });
+
+    // ---- the image pages ----------------------------------------------------
+
+    let flate_page = image_page(inputs::flate_page(), SampleCodec::Stream);
+    let cmyk_page = image_page(inputs::cmyk_page(), SampleCodec::Stream);
+    let jpeg_bytes = inputs::jpeg_page();
+    let jpeg_page = image_page(jpeg_bytes.clone(), SampleCodec::Dct);
+    let jpx_page = image_page(inputs::jpx_page(), SampleCodec::Jpx);
+    let g4_page = image_page(inputs::g4_page(), SampleCodec::CcittFax);
+    let jbig2_page = image_page(inputs::jbig2_page(), SampleCodec::Jbig2);
+
+    // The display list is recorded once and its renders share the decoded
+    // image, so what is timed is the replay.
+    let replayed = flate_page.display_list();
+    group.throughput(renders(&flate_page, 150.0, 1).throughput());
+    group.bench_function("replay the Flate RGB image page at 150 dpi", |b| {
+        b.iter(|| black_box(replayed.render(&RenderOptions::at_dpi(150.0))));
+    });
+    // Drawn at the image's own resolution, so each sample is converted once:
+    // the unit is the image's samples.
+    let (width, height) = inputs::SCAN;
+    group.throughput(Per::Pixels(u64::from(width) * u64::from(height)).throughput());
+    group.bench_function("an ICC-based CMYK image to sRGB at 300 dpi", |b| {
+        b.iter(|| black_box(cmyk_page.render(&RenderOptions::at_dpi(300.0))));
+    });
+    group.throughput(renders(&jpeg_page, 72.0, 1).throughput());
+    group.bench_function("the JPEG page at 72 dpi", |b| {
+        b.iter(|| black_box(jpeg_page.render(&RenderOptions::at_dpi(72.0))));
+    });
+    group.throughput(renders(&jpeg_page, 300.0, 1).throughput());
+    group.bench_function("the JPEG page at 300 dpi", |b| {
+        b.iter(|| black_box(jpeg_page.render(&RenderOptions::at_dpi(300.0))));
+    });
+    // The page opened afresh and drawn once at 72 dpi, untimed, so the timed
+    // render at 300 dpi is the second the page sees.
+    group.bench_function("a second render of the JPEG page at 300 dpi", |b| {
+        b.iter_batched(
+            || {
+                let page = Document::open(jpeg_bytes.clone())
+                    .expect("it opens")
+                    .page(0)
+                    .expect("a page");
+                black_box(page.render(&RenderOptions::at_dpi(72.0)));
+                page
+            },
+            |page| black_box(page.render(&RenderOptions::at_dpi(300.0))),
+            BatchSize::PerIteration,
+        );
+    });
+    group.throughput(renders(&jpx_page, 72.0, 1).throughput());
+    group.bench_function("the JPEG 2000 page at 72 dpi", |b| {
+        b.iter(|| black_box(jpx_page.render(&RenderOptions::at_dpi(72.0))));
+    });
+    group.throughput(renders(&g4_page, 150.0, 1).throughput());
+    group.bench_function("the G4 scan page at 150 dpi", |b| {
+        b.iter(|| black_box(g4_page.render(&RenderOptions::at_dpi(150.0))));
+    });
+    group.bench_function("the JBIG2 scan page at 150 dpi", |b| {
+        b.iter(|| black_box(jbig2_page.render(&RenderOptions::at_dpi(150.0))));
+    });
+    group.throughput(renders(&flate_page, 72.0, 1).throughput());
+    group.bench_function("the Flate RGB image page at 72 dpi", |b| {
+        b.iter(|| black_box(flate_page.render(&RenderOptions::at_dpi(72.0))));
     });
 
     group.finish();

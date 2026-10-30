@@ -106,7 +106,25 @@
         { "name": "the annotated text page at 150 dpi", "unit": "pixels",
           "per_iteration": 4352400, "calls": 2 },
         { "name": "re-render a changed 100x100 pt annotation", "unit": "pixels",
-          "per_iteration": 6528600, "calls": 3 }
+          "per_iteration": 6528600, "calls": 3 },
+        { "name": "replay the Flate RGB image page at 150 dpi", "unit": "pixels",
+          "per_iteration": 2176200, "calls": 1 },
+        { "name": "an ICC-based CMYK image to sRGB at 300 dpi", "unit": "pixels",
+          "per_iteration": 8699840, "calls": 1 },
+        { "name": "the JPEG page at 72 dpi", "unit": "pixels",
+          "per_iteration": 500990, "calls": 1 },
+        { "name": "the JPEG page at 300 dpi", "unit": "pixels",
+          "per_iteration": 8702320, "calls": 1 },
+        { "name": "a second render of the JPEG page at 300 dpi", "unit": "pixels",
+          "per_iteration": 8702320, "calls": 1 },
+        { "name": "the JPEG 2000 page at 72 dpi", "unit": "pixels",
+          "per_iteration": 500990, "calls": 1 },
+        { "name": "the G4 scan page at 150 dpi", "unit": "pixels",
+          "per_iteration": 2176200, "calls": 1 },
+        { "name": "the JBIG2 scan page at 150 dpi", "unit": "pixels",
+          "per_iteration": 2176200, "calls": 1 },
+        { "name": "the Flate RGB image page at 72 dpi", "unit": "pixels",
+          "per_iteration": 500990, "calls": 1 }
       ]
     },
     {
@@ -171,6 +189,42 @@
           "per_iteration": 100, "calls": 1 },
         { "name": "PDF-X validation of 100 pages", "unit": "pages",
           "per_iteration": 100, "calls": 1 }
+      ]
+    },
+    {
+      "group": "encode",
+      "operations": [
+        { "name": "PNG of the 1240x1755 text page", "unit": "pixels",
+          "per_iteration": 2176200, "calls": 1 },
+        { "name": "PNG of the near-blank page", "unit": "pixels",
+          "per_iteration": 4352400, "calls": 2 },
+        { "name": "deflate page-like data", "unit": "bytes",
+          "per_iteration": 6528600, "calls": 1 },
+        { "name": "deflate photo-like data", "unit": "bytes",
+          "per_iteration": 6528600, "calls": 1 }
+      ]
+    },
+    {
+      "group": "decode",
+      "operations": [
+        { "name": "inflate page-like data", "unit": "bytes",
+          "per_iteration": 13057200, "calls": 2 },
+        { "name": "inflate near-incompressible data", "unit": "bytes",
+          "per_iteration": 6528600, "calls": 1 },
+        { "name": "LZW decode page-like data", "unit": "bytes",
+          "per_iteration": 6528600, "calls": 1 },
+        { "name": "baseline JPEG 2480x3508", "unit": "pixels",
+          "per_iteration": 8699840, "calls": 1 },
+        { "name": "progressive JPEG 2480x3508", "unit": "pixels",
+          "per_iteration": 8699840, "calls": 1 },
+        { "name": "irreversible JPEG 2000 2480x3508", "unit": "pixels",
+          "per_iteration": 8699840, "calls": 1 },
+        { "name": "reversible JPEG 2000 2480x3508", "unit": "pixels",
+          "per_iteration": 8699840, "calls": 1 },
+        { "name": "decode the JBIG2 generic page", "unit": "pixels",
+          "per_iteration": 8702320, "calls": 1 },
+        { "name": "decode the CCITT G4 page", "unit": "pixels",
+          "per_iteration": 8702320, "calls": 1 }
       ]
     }
   ],
@@ -237,7 +291,29 @@
         "analysis/text of the 100 claiming pages",
         "analysis/PDF-A validation of 100 pages",
         "analysis/PDF-UA validation of 100 pages",
-        "analysis/PDF-X validation of 100 pages"
+        "analysis/PDF-X validation of 100 pages",
+        "render/replay the Flate RGB image page at 150 dpi",
+        "render/an ICC-based CMYK image to sRGB at 300 dpi",
+        "render/the JPEG page at 72 dpi",
+        "render/the JPEG page at 300 dpi",
+        "render/a second render of the JPEG page at 300 dpi",
+        "render/the JPEG 2000 page at 72 dpi",
+        "render/the G4 scan page at 150 dpi",
+        "render/the JBIG2 scan page at 150 dpi",
+        "render/the Flate RGB image page at 72 dpi",
+        "encode/PNG of the 1240x1755 text page",
+        "encode/PNG of the near-blank page",
+        "encode/deflate page-like data",
+        "encode/deflate photo-like data",
+        "decode/inflate page-like data",
+        "decode/inflate near-incompressible data",
+        "decode/LZW decode page-like data",
+        "decode/baseline JPEG 2480x3508",
+        "decode/progressive JPEG 2480x3508",
+        "decode/irreversible JPEG 2000 2480x3508",
+        "decode/reversible JPEG 2000 2480x3508",
+        "decode/decode the JBIG2 generic page",
+        "decode/decode the CCITT G4 page"
       ],
       "operations": [
         {

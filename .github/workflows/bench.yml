@@ -73,7 +73,7 @@ jobs:
           - group: text
             count: 9
           - group: render
-            count: 21
+            count: 30
           - group: write
             count: 12
           - group: layout
@@ -82,6 +82,10 @@ jobs:
             count: 1
           - group: analysis
             count: 8
+          - group: encode
+            count: 4
+          - group: decode
+            count: 9
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

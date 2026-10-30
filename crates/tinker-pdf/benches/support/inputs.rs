@@ -14,15 +14,18 @@
 
 use std::sync::{Arc, OnceLock};
 
+use tinker_pdf::write::{self, SaveOptions};
 use tinker_pdf::{
-    ArchivalLevel, ArchivalPart, ArchivalProfile, DeviceSpace, Document, DocumentBuilder,
-    Encryption, Function, ImageData, PageBuilder, Shading, TilingPattern, TilingType, WriteMode,
-    WriteOptions,
+    ArchivalLevel, ArchivalPart, ArchivalProfile, BilevelCodec, CcittParams, CompressedImage,
+    ContinuousCodec, DeviceSpace, Document, DocumentBuilder, Encryption, Function, ImageColorSpace,
+    ImageData, ImageFilter, ImagePolicy, ImageRecoding, PageBuilder, RenderOptions, Shading,
+    TilingPattern, TilingType, WriteMode, WriteOptions,
 };
 use tinker_pdf_cos::edit::annot::{self, Color};
 use tinker_pdf_cos::pages::Rect;
 use tinker_pdf_cos::write::StreamData;
 use tinker_pdf_cos::{Dict, ObjRef, Object};
+use tinker_pdf_crypto::sha2::sha256;
 
 /// Three A4 pages of forty lines each in standard-14 Helvetica, unembedded.
 ///
@@ -822,6 +825,399 @@ pub fn tiling(fills: usize) -> Vec<u8> {
             rectangles.push_str(&format!("0 {:.4} 595 {strip:.4} re f\n", strip * at as f64));
         }
         page.raw(rectangles.as_bytes());
+    });
+    builder.finish()
+}
+
+/// The width and height of the pages the decode group and the image pages
+/// decode, in pixels: A4 at 300 dpi, as a scan is made.
+pub const SCAN: (u32, u32) = (2480, 3508);
+
+/// The bytes of [`page_like`] and [`photo_like`]: 1240 by 1755 RGB.
+pub const PAGE_BYTES: usize = 1240 * 1755 * 3;
+
+/// 1240 by 1755 RGB of text-like marks on white, about a tenth of the
+/// pixels inked: lines of glyph-sized boxes in words, each box drawn in a
+/// stroke pattern, by formula — never a render, so it cannot move with the
+/// renderer.
+pub fn page_like() -> Vec<u8> {
+    let (width, height) = (1240usize, 1755usize);
+    let mut out = vec![255u8; PAGE_BYTES];
+    let mut seed = Seeded::new(11);
+    let mut top = 60;
+    while top + 24 < height - 60 {
+        let mut x = 80;
+        while x + 12 < width - 80 {
+            for _ in 0..2 + seed.below(8) {
+                let (glyph, tall) = (5 + seed.below(6), 10 + seed.below(6));
+                for y in top + 16 - tall..top + 16 {
+                    for column in x..(x + glyph).min(width - 80) {
+                        if (column + 2 * y) % 4 == 0 {
+                            let at = (y * width + column) * 3;
+                            out[at..at + 3].copy_from_slice(&[24, 24, 32]);
+                        }
+                    }
+                }
+                x += glyph + 2;
+            }
+            x += 8;
+        }
+        top += 24;
+    }
+    out
+}
+
+/// [`photo`] at 1240 by 1755, seed 0: the photo-like data the encode and
+/// decode groups compress.
+pub fn photo_like() -> Vec<u8> {
+    photo(1240, 1755, 0)
+}
+
+/// [`PAGE_BYTES`] seeded bytes that deflate to between 90 % and 100 % of
+/// their length: literals drawn from the 144 the fixed code writes in eight
+/// bits, with a four-byte repeat every 32 bytes, so inflate decodes coded
+/// literals and a few matches rather than stored blocks.
+pub fn noise() -> Vec<u8> {
+    let mut seed = Seeded::new(13);
+    let mut out = Vec::with_capacity(PAGE_BYTES);
+    while out.len() < PAGE_BYTES {
+        if out.len() % 32 == 28 && out.len() >= 64 {
+            let from = out.len() - 64;
+            for at in from..from + 4 {
+                out.push(out[at]);
+            }
+        } else {
+            out.push((seed.next() % 144) as u8);
+        }
+    }
+    out.truncate(PAGE_BYTES);
+    out
+}
+
+/// `bytes` coded as 7.4.4's LZW: 9- to 12-bit codes, `/EarlyChange 1`, a
+/// clear code first and again before the table passes 4 096 entries, and
+/// the end-of-data code last. The tree writes no LZW of its own, so this is
+/// the one, round-tripped through `lzw_decode` by its caller.
+pub fn lzw(bytes: &[u8]) -> Vec<u8> {
+    const CLEAR: u32 = 256;
+    const END: u32 = 257;
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    let (mut held, mut held_bits) = (0u64, 0u32);
+    let mut put = |code: u32, width: u32, out: &mut Vec<u8>| {
+        held = held << width | u64::from(code);
+        held_bits += width;
+        while held_bits >= 8 {
+            held_bits -= 8;
+            out.push((held >> held_bits) as u8);
+        }
+    };
+    let mut table: std::collections::HashMap<(u32, u8), u32> = std::collections::HashMap::new();
+    let (mut next, mut width) = (258u32, 9u32);
+    put(CLEAR, width, &mut out);
+    let mut iter = bytes.iter();
+    let Some(&first) = iter.next() else {
+        put(END, width, &mut out);
+        if held_bits > 0 {
+            out.push((held << (8 - held_bits)) as u8);
+        }
+        return out;
+    };
+    let mut string = u32::from(first);
+    for &byte in iter {
+        if let Some(&code) = table.get(&(string, byte)) {
+            string = code;
+            continue;
+        }
+        put(string, width, &mut out);
+        table.insert((string, byte), next);
+        next += 1;
+        // The reader adds each entry one code behind the writer, and with
+        // `/EarlyChange 1` widens when its next entry would reach the width's
+        // last code, which is when this side's count reaches it.
+        if next >= 1 << width && width < 12 {
+            width += 1;
+        }
+        if next >= 4094 {
+            put(CLEAR, width, &mut out);
+            table.clear();
+            next = 258;
+            width = 9;
+        }
+        string = u32::from(byte);
+    }
+    put(string, width, &mut out);
+    put(END, width, &mut out);
+    if held_bits > 0 {
+        out.push((held << (8 - held_bits)) as u8);
+    }
+    out
+}
+
+/// [`photo`] at [`SCAN`]'s size, seed 0, as a baseline JPEG under Annex K's
+/// tables. Written once a process.
+pub fn baseline_jpeg() -> Arc<[u8]> {
+    static JPEG: OnceLock<Arc<[u8]>> = OnceLock::new();
+    Arc::clone(JPEG.get_or_init(|| {
+        let samples = photo(SCAN.0, SCAN.1, 0);
+        let jpeg = tinker_pdf_filters::jpeg_encode(
+            &tinker_pdf_filters::JpegSource {
+                width: SCAN.0,
+                height: SCAN.1,
+                colour: tinker_pdf_filters::JpegSourceColour::Rgb,
+                stride: SCAN.0 as usize * 3,
+                data: &samples,
+            },
+            &tinker_pdf_filters::JpegOptions::default(),
+        )
+        .expect("a baseline JPEG");
+        // The source `data/progressive-2480x3508.jpg` was transcoded from, as
+        // `data/README.md` records it: a changed encoder fails here, before
+        // the decode group compares the two.
+        assert_eq!(
+            hex(&sha256(&jpeg)),
+            "754c262d187b8459117b897f5d79c97d71062c58ed6ff494b82438d8ed8dcbbc",
+            "baseline_jpeg() is the progressive file's source"
+        );
+        jpeg.into()
+    }))
+}
+
+/// `bytes` as lower-case hexadecimal.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// One of the codestreams committed under `benches/data/`, by its name.
+pub fn committed_data(name: &str) -> Vec<u8> {
+    let path = format!("{}/benches/data/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read(&path).unwrap_or_else(|error| panic!("the committed file {path}: {error}"))
+}
+
+/// A scan: the dense text page rendered at 300 dpi and thresholded to one
+/// bit a pixel, rows packed from the most significant bit, **0 for black**
+/// as a one-bit `/DeviceGray` sample is. Its width, height and bytes.
+pub fn scan() -> (u32, u32, Arc<[u8]>) {
+    static SCAN_PAGE: OnceLock<(u32, u32, Arc<[u8]>)> = OnceLock::new();
+    let (width, height, bytes) = SCAN_PAGE.get_or_init(|| {
+        let doc = Document::open(dense(1, 0)).expect("the text page opens");
+        let bitmap = doc
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::at_dpi(300.0));
+        let stride = bitmap.width.div_ceil(8) as usize;
+        let n = bitmap.components();
+        let mut bits = vec![0xFFu8; stride * bitmap.height as usize];
+        for (y, row) in bitmap.data.chunks(bitmap.stride).enumerate() {
+            for (x, pixel) in row.chunks(n).take(bitmap.width as usize).enumerate() {
+                if pixel.iter().take(3).map(|&v| u32::from(v)).sum::<u32>() < 3 * 128 {
+                    bits[y * stride + x / 8] &= !(0x80 >> (x % 8));
+                }
+            }
+        }
+        (bitmap.width, bitmap.height, bits.into())
+    });
+    (*width, *height, Arc::clone(bytes))
+}
+
+/// [`scan`] coded as ITU-T T.6, as `/CCITTFaxDecode /K -1` reads it.
+pub fn g4(width: u32, height: u32, bits: &[u8]) -> Vec<u8> {
+    tinker_pdf_filters::ccitt_g4_encode(&tinker_pdf_filters::CcittSource {
+        columns: width,
+        rows: height,
+        black_is_1: false,
+        stride: width.div_ceil(8) as usize,
+        end_of_block: true,
+        data: bits,
+    })
+    .expect("a G4 page")
+}
+
+/// [`scan`] as a T.88 immediate lossless generic region, in the embedded
+/// organisation `/JBIG2Decode` reads (Annex D.3): a page information
+/// segment, the region and an end of page, as the image pass writes them.
+pub fn jbig2(width: u32, height: u32, bits: &[u8]) -> Vec<u8> {
+    // T.88 codes 1 for black.
+    let inverted: Vec<u8> = bits.iter().map(|b| !b).collect();
+    let region = tinker_pdf_filters::jbig2_generic_region_segment(
+        &tinker_pdf_filters::Jbig2GenericSource {
+            width,
+            height,
+            template: 0,
+            tpgdon: true,
+            at: [(3, -1), (-3, -1), (2, -2), (-2, -2)],
+            stride: width.div_ceil(8) as usize,
+            data: &inverted,
+        },
+        0,
+        0,
+        0,
+    )
+    .expect("a generic region");
+    let segment = |number: u32, kind: u8, data: &[u8]| -> Vec<u8> {
+        let mut out = Vec::with_capacity(data.len() + 11);
+        out.extend_from_slice(&number.to_be_bytes());
+        out.push(kind & 0x3F);
+        out.push(0);
+        out.push(1);
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(data);
+        out
+    };
+    let mut page = Vec::with_capacity(19);
+    page.extend_from_slice(&width.to_be_bytes());
+    page.extend_from_slice(&height.to_be_bytes());
+    page.extend_from_slice(&[0; 8]);
+    page.push(0x01);
+    page.extend_from_slice(&[0, 0]);
+    let mut out = segment(0, 48, &page);
+    out.extend_from_slice(&segment(1, 39, &region));
+    out.extend_from_slice(&segment(2, 49, &[]));
+    out
+}
+
+/// An A4 page covered by one image: `image` placed as `Im0` over the page.
+fn image_page(image: &ImageData<'_>) -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_image(b"Im0", image), "the image is placed");
+    builder.add_page(595.0, 842.0, |page| {
+        page.image(b"Im0", 0.0, 0.0, 595.0, 842.0)
+    });
+    builder.finish()
+}
+
+/// An A4 page covered by [`baseline_jpeg`].
+pub fn jpeg_page() -> Vec<u8> {
+    image_page(&ImageData::Jpeg(&baseline_jpeg()))
+}
+
+/// An A4 page covered by [`photo`] at [`SCAN`]'s size, seed 1, Flate-coded.
+pub fn flate_page() -> Vec<u8> {
+    let coded = tinker_pdf_filters::zlib_compress(&photo(SCAN.0, SCAN.1, 1));
+    image_page(&ImageData::Compressed(CompressedImage {
+        width: SCAN.0,
+        height: SCAN.1,
+        bits_per_component: 8,
+        color_space: ImageColorSpace::DeviceRgb,
+        filter: Some(ImageFilter::Flate),
+        data: &coded,
+        color_key_mask: None,
+        soft_mask: None,
+    }))
+}
+
+/// An A4 page covered by [`photo`] at [`SCAN`]'s size, seed 0, turned into
+/// ink by formula — black the darkest of the three, each colour the rest of
+/// its complement — Flate-coded under `/ICCBased` over `cmyk-lut.icc`.
+pub fn cmyk_page() -> Vec<u8> {
+    let rgb = photo(SCAN.0, SCAN.1, 0);
+    let mut ink = Vec::with_capacity(rgb.len() / 3 * 4);
+    for pixel in rgb.chunks(3) {
+        let (c, m, y) = (255 - pixel[0], 255 - pixel[1], 255 - pixel[2]);
+        let k = c.min(m).min(y);
+        ink.extend_from_slice(&[c - k, m - k, y - k, k]);
+    }
+    let coded = tinker_pdf_filters::zlib_compress(&ink);
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_icc_color_space(b"CS0", &cmyk_profile(), 4));
+    assert!(builder.add_image(
+        b"Im0",
+        &ImageData::Compressed(CompressedImage {
+            width: SCAN.0,
+            height: SCAN.1,
+            bits_per_component: 8,
+            color_space: ImageColorSpace::Icc {
+                resource: b"CS0",
+                components: 4,
+            },
+            filter: Some(ImageFilter::Flate),
+            data: &coded,
+            color_key_mask: None,
+            soft_mask: None,
+        })
+    ));
+    builder.add_page(595.0, 842.0, |page| {
+        page.image(b"Im0", 0.0, 0.0, 595.0, 842.0)
+    });
+    builder.finish()
+}
+
+/// An A4 page covered by the committed irreversible JPEG 2000 codestream.
+pub fn jpx_page() -> Vec<u8> {
+    let codestream = committed_data("irreversible-2480x3508.jp2");
+    image_page(&ImageData::Compressed(CompressedImage {
+        width: SCAN.0,
+        height: SCAN.1,
+        // Neither is written for a codestream, which states both itself.
+        bits_per_component: 8,
+        color_space: ImageColorSpace::DeviceRgb,
+        filter: Some(ImageFilter::Jpx),
+        data: &codestream,
+        color_key_mask: None,
+        soft_mask: None,
+    }))
+}
+
+/// An A4 page covered by [`scan`], G4-coded.
+pub fn g4_page() -> Vec<u8> {
+    let (width, height, bits) = scan();
+    let coded = g4(width, height, &bits);
+    image_page(&ImageData::Compressed(CompressedImage {
+        width,
+        height,
+        bits_per_component: 1,
+        color_space: ImageColorSpace::DeviceGray,
+        filter: Some(ImageFilter::CcittFax(CcittParams {
+            k: -1,
+            columns: width,
+            rows: height,
+            ..CcittParams::default()
+        })),
+        data: &coded,
+        color_key_mask: None,
+        soft_mask: None,
+    }))
+}
+
+/// An A4 page covered by [`scan`], saved through the image pass's JBIG2
+/// generic coding, the builder having no JBIG2 filter of its own.
+///
+/// The scan is placed as raw one-bit samples rather than as [`g4_page`]'s G4,
+/// because the pass keeps a new coding only when it is smaller than the
+/// stored one, and a generic region need not beat G4.
+pub fn jbig2_page() -> Vec<u8> {
+    let (width, height, bits) = scan();
+    let raw = image_page(&ImageData::Compressed(CompressedImage {
+        width,
+        height,
+        bits_per_component: 1,
+        color_space: ImageColorSpace::DeviceGray,
+        filter: None,
+        data: &bits,
+        color_key_mask: None,
+        soft_mask: None,
+    }));
+    let doc = Document::open(raw).expect("the raw scan page opens");
+    let options = SaveOptions {
+        write: WriteOptions {
+            mode: WriteMode::Rewrite,
+            ..WriteOptions::default()
+        },
+        images: ImagePolicy::Recode(ImageRecoding::new(
+            ContinuousCodec::Keep,
+            BilevelCodec::Jbig2Generic,
+        )),
+        ..SaveOptions::default()
+    };
+    write::save(&mut doc.editor(), &options).bytes
+}
+
+/// A page holding one line of Helvetica, which renders to paper and little
+/// else.
+pub fn near_blank() -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F0", b"Helvetica");
+    builder.add_page(595.0, 842.0, |page| {
+        page.text(b"F0", 11.0, 72.0, 780.0, "A page with one line on it.");
     });
     builder.finish()
 }
