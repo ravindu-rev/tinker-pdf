@@ -2,6 +2,8 @@
 //!
 //! Feature documentation: `docs/features/fonts.md`.
 
+#![forbid(unsafe_code)]
+
 pub mod base14;
 /// The twelve faces a `bundled-fonts` build carries (9.6.2.2's standard 14,
 /// less the two symbolic ones).

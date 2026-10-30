@@ -4,6 +4,8 @@
 //!
 //! Feature documentation: `docs/features/content-and-text.md`.
 
+#![forbid(unsafe_code)]
+
 pub mod device;
 pub mod interpret;
 pub mod plain;

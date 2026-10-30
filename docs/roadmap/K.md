@@ -235,18 +235,6 @@ K-08 extends the mechanism to every new rendered surface.
 | --- | --- | --- | --- | --- | --- |
 | K-16.1 | doc | Reword every comment that cites a section of `docs/verification.md` or a design doc that is gone, and the `image.rs` and `jbig2.rs` comments that contradict the code. | `crates/`, `xtask/src/bench.rs`, `.github/workflows/ci.yml` | `git grep` finds no comment naming a missing doc section; the gates are green. | — |
 
-## K-17 — `#![forbid(unsafe_code)]` in every engine crate
-
-**`#![forbid(unsafe_code)]` in every engine crate**: `tinker-pdf-content`, `tinker-pdf-font` and `tinker-pdf-raster` hold no `unsafe` code but do not forbid it, so ruling 1 rests on review there rather than on the compiler
-
-**Exit criterion.** every engine crate's `lib.rs` forbids `unsafe_code`
-
-**Doc:** [architecture.md](../architecture.md) · **Depends on:** —
-
-| Step | Kind | What | Where | Exit | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| K-17.1 | fix | Add `#![forbid(unsafe_code)]` to the three crates. | `crates/tinker-pdf-content/src/lib.rs`, `crates/tinker-pdf-font/src/lib.rs`, `crates/tinker-pdf-raster/src/lib.rs` | The gates are green with the attribute in all three. | — |
-
 ## K-18 — A JBIG2 refusal nothing raises
 
 **A JBIG2 refusal nothing raises**: `Jbig2Refusal::HuffmanBmSizeOrAggInstSelector` is matched but never constructed

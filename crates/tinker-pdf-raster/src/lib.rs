@@ -3,6 +3,8 @@
 //!
 //! Feature documentation: `docs/features/rasterizer.md`.
 
+#![forbid(unsafe_code)]
+
 pub mod blend;
 pub mod canvas;
 pub mod fill;
