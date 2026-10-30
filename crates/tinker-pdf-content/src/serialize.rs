@@ -701,6 +701,7 @@ mod tests {
             mcid: None,
             stream: 0,
             font: font.cloned(),
+            stated: None,
         }
     }
 
@@ -758,6 +759,7 @@ mod tests {
                 ])],
             }],
             mcid_props: Default::default(),
+            stated: Vec::new(),
             warnings: vec![
                 TextWarning::UnknownFont {
                     name: "F<1>\"".to_string(),

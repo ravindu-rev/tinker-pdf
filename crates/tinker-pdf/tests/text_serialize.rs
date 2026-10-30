@@ -161,6 +161,7 @@ fn hostile_text_round_trips_through_json_exactly() {
                     mcid: None,
                     stream: 0,
                     font: Some(font.clone()),
+                    stated: None,
                 }],
                 text: hostile.to_string(),
                 quad,
@@ -170,6 +171,7 @@ fn hostile_text_round_trips_through_json_exactly() {
             }],
         }],
         mcid_props: Default::default(),
+        stated: Vec::new(),
         warnings: vec![TextWarning::UnknownFont {
             name: hostile.to_string(),
         }],

@@ -103,8 +103,12 @@ over-cap ledger and the form-XObject save/restore of
 
 `TextDevice` tracks marked-content scopes — its artifact counter implements
 14.8.2.2's exclusion — and records, per `TextChar`, the innermost MCID in
-scope (`Option<u32>`, `None` outside any marked sequence). `TextPage` is the
-flat extraction's; `plain_text()` and `search()` do not read the MCID.
+scope (`Option<u32>`, `None` outside any marked sequence) and the outermost
+`/ActualText` span open (`TextChar::stated`). `TextPage` is the flat
+extraction's; `plain_text()` and `search()` do not read the MCID, and the
+facade puts each span's text where its glyphs stand before either reads the
+page, so a property list's `/ActualText` replaces what it encloses in both
+views.
 
 The structured view is a join, computed in the facade:
 `Page::structured_text()` walks the page's slice of the structure tree

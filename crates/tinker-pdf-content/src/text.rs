@@ -104,6 +104,15 @@ pub struct TextChar {
     /// fonts to a file — or `None` where the font has no name this build could
     /// read. See [`Glyph::font_name`] for why it travels with the character.
     pub font: Option<std::sync::Arc<str>>,
+    /// The outermost `/ActualText` span open when it was shown (14.9.4): an
+    /// index into [`TextPage::stated`], or `None` outside every span.
+    ///
+    /// **Outermost, not innermost**, the other way round from
+    /// [`TextChar::mcid`]: a span's text replaces everything it encloses,
+    /// the spans inside it too. A span is recorded whether its property list
+    /// carries an `/MCID` or not, and the facade's `Page::text` puts its text
+    /// where its glyphs stand.
+    pub stated: Option<u32>,
 }
 
 /// Which way a line runs.
@@ -189,6 +198,9 @@ pub struct TextPage {
     /// malformation, and letting the later one overwrite would make what a
     /// page says depend on how far down its own damage sits.
     pub mcid_props: BTreeMap<(u64, u32), MarkedProps>,
+    /// Each `/ActualText` span's text (14.9.4), by the index
+    /// [`TextChar::stated`] names, in the order the spans opened.
+    pub stated: Vec<String>,
     /// What extraction had to tolerate.
     ///
     /// Ruling 2 applies to text as much as to pixels: a page whose font could
@@ -374,6 +386,11 @@ pub struct TextDevice {
     mcids: Vec<(u64, u32)>,
     /// The 14.9 values seen per sequence, first writer winning.
     mcid_props: BTreeMap<(u64, u32), MarkedProps>,
+    /// The `/ActualText` spans open, outermost first, each an index into
+    /// [`TextDevice::stated_texts`] (14.9.4). A glyph is held by the first.
+    stated: Vec<u32>,
+    /// Each span's text, in the order the spans opened.
+    stated_texts: Vec<String>,
 }
 
 /// One open marked-content scope.
@@ -383,7 +400,16 @@ struct Scope {
     /// Whether it pushed onto [`TextDevice::mcids`], so `EMC` knows whether
     /// to pop. A scope with no `/MCID` must not pop its parent's.
     carried_mcid: bool,
+    /// Whether it pushed onto [`TextDevice::stated`], for the same reason.
+    carried_stated: bool,
 }
+
+/// How many `/ActualText` spans one page records (14.9.4).
+///
+/// An honest page states a span a line at most. The cap exists so that a
+/// stream of nothing but `BDC` cannot turn a bounded page into unbounded
+/// memory; past it a span is not recorded, and its glyphs read as drawn.
+const MAX_STATED: usize = 1 << 16;
 
 /// How many distinct `/MCID`s one page retains 14.9 values for.
 ///
@@ -536,6 +562,7 @@ impl TextDevice {
         TextPage {
             blocks,
             mcid_props: std::mem::take(&mut self.mcid_props),
+            stated: std::mem::take(&mut self.stated_texts),
             warnings: std::mem::take(&mut self.warnings),
         }
     }
@@ -986,9 +1013,20 @@ impl Device for TextDevice {
                 }
             }
         }
+        // 14.9.4: a span's `/ActualText` replaces what it encloses, with an
+        // `/MCID` on the same list or without one.
+        let stated = props
+            .and_then(|p| p.actual_text.as_ref())
+            .filter(|_| self.stated_texts.len() < MAX_STATED);
+        if let Some(text) = stated {
+            let at = u32::try_from(self.stated_texts.len()).unwrap_or(u32::MAX);
+            self.stated_texts.push(text.clone());
+            self.stated.push(at);
+        }
         self.scopes.push(Scope {
             artifact,
             carried_mcid: key.is_some(),
+            carried_stated: stated.is_some(),
         });
         if artifact {
             // A line may not straddle the boundary: the artifact's glyphs are
@@ -1005,6 +1043,9 @@ impl Device for TextDevice {
         };
         if scope.carried_mcid {
             self.mcids.pop();
+        }
+        if scope.carried_stated {
+            self.stated.pop();
         }
         if scope.artifact {
             self.flush();
@@ -1245,6 +1286,7 @@ impl Device for TextDevice {
                 mcid: self.mcids.last().map(|(_, mcid)| *mcid),
                 stream: self.mcids.last().map_or(0, |(stream, _)| *stream),
                 font: glyph.font_name.clone(),
+                stated: self.stated.first().copied(),
             });
         }
     }

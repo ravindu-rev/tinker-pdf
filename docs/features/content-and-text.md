@@ -320,7 +320,34 @@ meets. And a line that overlaps the chain by more than half the shorter
 one's extent is not part of it: that is text drawn over itself, a fake bold
 or a hand-made shadow, and each copy reads back whole rather than
 interleaved with the other. `Page::text_with` with
-`TextOptions::content_order` is the opt-out. Search boxes a match from
+`TextOptions::content_order` is the opt-out.
+
+**Stated text.** An `/ActualText` on a marked-content property list (14.9.4),
+with an `/MCID` or without, replaces the glyphs it encloses in `Page::text`,
+in either order `Page::text_with` gives, and so in search, the structured
+view and the text writers (ruling 14). `TextDevice` holds each glyph to the
+outermost span open when it was shown (`TextChar::stated`, an index into
+`TextPage::stated`), since a span replaces everything inside it, the spans
+inside it too. A line all of whose glyphs one span holds reads as the span's
+text, its direction the text's first strong character's; a span holding
+part of a line is one unit of the line's order, read as U+FFFC OBJECT
+REPLACEMENT CHARACTER, a neutral, and stands for its text there; a span
+holding part of a line ruling 14 does not reorder stands for its text at its
+first glyph; and a span whose glyphs stand on several lines puts its text on
+the first of them the page reads, its glyphs on the others reading nothing.
+Each character of the text stands on a glyph of the span that draws it —
+the first not yet taken, in the order the content stream drew them, whose
+text the text continues with — with that glyph's quad, `/MCID`, stream and
+font, so search finds the text where it is drawn and a structure tree's
+order holds; a character no glyph draws stands on the span's box. An
+`/ActualText` on a structure element stays the structured view's: an
+element can span lines and pages, where a line has no place for it.
+(`text_logical_order.rs`'s `a_line_a_span_states_whole_reads_as_its_text`,
+`a_span_inside_a_left_to_right_line_stands_where_its_glyphs_do`,
+`a_span_inside_a_right_to_left_line_is_one_unit_of_its_order`,
+`a_span_across_two_lines_states_its_text_on_the_first` and
+`a_span_with_an_mcid_states_its_text_in_its_sequence`; `tagged_pdf.rs`'s
+`actual_text_on_a_property_list_replaces_its_own_sequence`.) Search boxes a match from
 whichever of its ends starts first along the baseline, so a logical-order
 match on a right-to-left line is not boxed inside out. Warnings are
 deduplicated — a page whose font is unknown says so once, not once per
@@ -795,7 +822,6 @@ crate has an API of its own; see [architecture](../architecture.md).
 | An `/MCR` carrying `/StmOwn` without the `/Stm` it qualifies | `StructureWarning::StreamOwnerWithoutStream { element, owner }` | Table 324 permits the owner only beside a stream; an owner alone names the owner of a stream nobody named, so it is dropped | 14.7.4.2 |
 | An `/MCR` with no `/Stm` whose `/MCID` is in no page-stream sequence but in exactly one other stream on the page | `StructureWarning::ContentStreamAssumed { page, mcid }` | a producer that tags content inside a form and omits `/Stm` writes something 14.7.4.2 does not define; where one reading exists it is taken and named, and where two streams share the identifier it is refused, because that is the collision `/Stm` exists to resolve | 14.7.4.2 |
 | A marked-content sequence in a stream `/StmOwn` says another object owns — an annotation's `/AP` | — | page text extraction runs the page's stream and the forms it invokes, never an annotation's appearance, so such a reference matches nothing here rather than taking whatever else shares its number; extracting appearance-stream text is separate work | 14.7.4.2, 12.5.5; [ROADMAP](../ROADMAP.md) FT-27 |
-| `/ActualText` on a property list carrying no `/MCID` | — | the map is keyed by `(stream, /MCID)`, so a list with no identifier reaches no consumer | 14.9.4 |
 | Images inside a tiling pattern's cell, a soft-mask group or an annotation appearance | `Page::images()` does not list them | none is a drawing of the page's content: the renderer reaches a pattern cell and a mask group through its own device, not through the interpreter's `Do`, and an appearance belongs to the annotation | 8.7.3, 11.6.5, 12.5.5 |
 | A JPEG 2000 image's own opacity channel in extraction | `PageImage::samples` holds the colour channels only | `/SMaskInData` decides what the channel means (8.9.5.4), and a soft mask carried out of the codestream is not an `/SMask` image the type can name; the renderer applies it | 8.9.5.4 |
 | A table attribute with a value Table 349 does not define — a `/Scope` that is not `/Row`, `/Column` or `/Both`, a span below one, a `/Headers` entry that is not a string | `StructureWarning::AttributeIgnored { element, owner, key }` | read as absent rather than guessed at; the element and its other attributes are read as usual, so a table whose headers head nothing stays distinguishable from one that said something this reader could not read | 14.8.5.7 |

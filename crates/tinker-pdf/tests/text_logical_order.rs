@@ -659,3 +659,207 @@ fn no_left_to_right_page_moves() {
         "the pages and lines compared moved"
     );
 }
+
+/// What [`stated_page`] writes into the content stream, in order.
+enum Item {
+    /// `/Span << … >> BDC`, the dictionary's entries as given.
+    Open(String),
+    /// `EMC`.
+    Close,
+    /// A run of strokes on a line, `0` the top one.
+    Run(usize, Vec<Stroke>),
+}
+
+/// `text` as a PDF text string: UTF-16BE behind its byte-order mark
+/// (7.9.2.2), in hexadecimal.
+fn text_string(text: &str) -> String {
+    let mut hex = String::from("<FEFF");
+    for unit in text.encode_utf16() {
+        hex.push_str(&format!("{unit:04X}"));
+    }
+    hex.push('>');
+    hex
+}
+
+/// A one-page document of `rows` lines, drawn as `items` say, with
+/// [`page_of`]'s face, size and leading.
+fn stated_page(rows: usize, items: &[Item]) -> Vec<u8> {
+    let face = Face::new("Fixture Hebrew", COVERS);
+    let program = face.build();
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_cid_font(b"F0", b"FixtureHebrew", &program));
+    let below = LEADING * rows.saturating_sub(1) as f64;
+    let mut content = Vec::new();
+    for item in items {
+        match item {
+            Item::Open(dict) => {
+                content.extend_from_slice(format!("/Span <<{dict}>> BDC\n").as_bytes())
+            }
+            Item::Close => content.extend_from_slice(b"EMC\n"),
+            Item::Run(row, strokes) => {
+                let texts: Vec<String> = strokes.iter().map(|(ch, _)| ch.to_string()).collect();
+                let glyphs: Vec<PlacedGlyph<'_>> = strokes
+                    .iter()
+                    .zip(texts.iter())
+                    .map(|((ch, x), text)| PlacedGlyph {
+                        glyph: Glyph {
+                            id: face
+                                .glyph_of(*ch)
+                                .expect("the face covers what the page draws"),
+                            text,
+                        },
+                        x: *x,
+                        rise: 0.0,
+                    })
+                    .collect();
+                let baseline = 100.0 + below - LEADING * *row as f64;
+                assert!(builder.glyph_run(
+                    &mut content,
+                    b"F0",
+                    SIZE,
+                    [1.0, 0.0, 0.0, 1.0, 40.0, baseline],
+                    &glyphs
+                ));
+            }
+        }
+    }
+    builder.add_page(300.0, 200.0 + below, |page| page.raw(&content));
+    builder.finish()
+}
+
+/// `/ActualText` stating `text`, the entries of a span's dictionary.
+fn stating(text: &str) -> String {
+    format!("/ActualText {}", text_string(text))
+}
+
+/// **A line a span states whole reads as its text** (14.9.4; ruling 14,
+/// H-152). Left (1)'s shape, typed in a left-to-right paragraph,
+/// `שלום 60.`, is drawn `60 םולש.`, which a right-to-left paragraph draws
+/// for `.שלום 60`: read off the line, the stop comes first. Stated, the line
+/// reads as typed, in `Page::text` and in the stream's order alike, each
+/// character on the glyph that draws it.
+#[test]
+fn a_line_a_span_states_whole_reads_as_its_text() {
+    let typed = format!("{SHALOM} 60.");
+    let drawn = format!("60 {}.", reversed(SHALOM));
+    assert_ne!(
+        extract(page(&visual(&drawn))),
+        typed,
+        "read off the line alone"
+    );
+    let bytes = stated_page(
+        1,
+        &[
+            Item::Open(stating(&typed)),
+            Item::Run(0, visual(&drawn)),
+            Item::Close,
+        ],
+    );
+    let doc = Document::open(bytes).expect("opens");
+    let page = doc.page(0).expect("a page");
+    let text = page.text();
+    assert_eq!(text.plain_text().trim_end(), typed);
+    let line = text.lines()[0].clone();
+    assert!(line.rtl, "the stated text opens with a Hebrew letter");
+    // Shin is drawn seventh from the left: its character stands on it.
+    let shin = line
+        .chars
+        .iter()
+        .find(|c| c.text == "\u{5E9}")
+        .expect("shin");
+    assert!(
+        (shin.quad.ll.0 - (40.0 + 6.0 * ADVANCE)).abs() < 0.01,
+        "{:?}",
+        shin.quad
+    );
+    assert_eq!(text.search(SHALOM).len(), 1, "the stated word is found");
+    let stream = page.text_with(&TextOptions {
+        content_order: true,
+    });
+    assert_eq!(
+        stream.plain_text().trim_end(),
+        typed,
+        "in the stream's order too"
+    );
+}
+
+/// **A span holding part of a left-to-right line puts its text in its
+/// glyphs' place**, the rest of the line as drawn.
+#[test]
+fn a_span_inside_a_left_to_right_line_stands_where_its_glyphs_do() {
+    let bytes = stated_page(
+        1,
+        &[
+            Item::Run(0, vec![('s', 0.0)]),
+            Item::Open(stating("wa")),
+            Item::Run(0, vec![('e', ADVANCE)]),
+            Item::Close,
+            Item::Run(0, vec![('o', 2.0 * ADVANCE)]),
+        ],
+    );
+    let doc = Document::open(bytes).expect("opens");
+    assert_eq!(
+        doc.page(0).expect("a page").text().plain_text().trim_end(),
+        "swao"
+    );
+}
+
+/// **A span holding part of a right-to-left line is one unit of its order**,
+/// read as U+FFFC, a neutral that takes the level of the letters either
+/// side: drawn left of `שלום`, it is read after it.
+#[test]
+fn a_span_inside_a_right_to_left_line_is_one_unit_of_its_order() {
+    let drawn: Vec<Stroke> = visual(&format!("\u{5D5}\u{5D7} {}", reversed(SHALOM)));
+    let bytes = stated_page(
+        1,
+        &[
+            Item::Open(stating(PRIT)),
+            Item::Run(0, drawn[..2].to_vec()),
+            Item::Close,
+            Item::Run(0, drawn[2..].to_vec()),
+        ],
+    );
+    assert_eq!(extract(bytes), format!("{SHALOM} {PRIT}"));
+}
+
+/// **A span across two lines puts its text on the first**, and the glyphs
+/// it holds on the second read nothing there.
+#[test]
+fn a_span_across_two_lines_states_its_text_on_the_first() {
+    let bytes = stated_page(
+        2,
+        &[
+            Item::Run(0, visual("wa")),
+            Item::Open(stating("seon")),
+            Item::Run(0, vec![('s', 2.0 * ADVANCE), ('e', 3.0 * ADVANCE)]),
+            Item::Run(1, visual("on")),
+            Item::Close,
+            Item::Run(1, vec![('b', 2.0 * ADVANCE)]),
+        ],
+    );
+    let lines: Vec<String> = extract_lines(bytes)
+        .into_iter()
+        .map(|(text, _)| text)
+        .collect();
+    assert_eq!(lines, ["waseon", "b"]);
+}
+
+/// **A span whose list carries an `/MCID` states its text too**, and each
+/// character keeps the sequence it was drawn in.
+#[test]
+fn a_span_with_an_mcid_states_its_text_in_its_sequence() {
+    let typed = format!("{SHALOM} 60.");
+    let drawn = format!("60 {}.", reversed(SHALOM));
+    let bytes = stated_page(
+        1,
+        &[
+            Item::Open(format!("/MCID 0 {}", stating(&typed))),
+            Item::Run(0, visual(&drawn)),
+            Item::Close,
+        ],
+    );
+    let doc = Document::open(bytes).expect("opens");
+    let text = doc.page(0).expect("a page").text();
+    assert_eq!(text.plain_text().trim_end(), typed);
+    assert!(text.lines()[0].chars.iter().all(|c| c.mcid == Some(0)));
+}

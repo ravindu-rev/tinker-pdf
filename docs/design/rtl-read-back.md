@@ -454,7 +454,7 @@ the reader takes each where it is said.
    reads as its text; a span holding some of a line's glyphs is one unit of
    the line's order, read as U+FFFC OBJECT REPLACEMENT CHARACTER is, and
    stands for its text there; a span whose glyphs stand on several lines
-   puts its text on the line of its first glyph. Each character of the text
+   puts its text on the first of them the page reads. Each character of the text
    stands on a glyph of the span that draws it — the first not yet taken, in
    the order the content stream drew them, whose text the text continues
    with — and takes its quad, `/MCID`, stream and font, so that search finds
@@ -492,7 +492,7 @@ it.
 
 **What it costs.** A PDF from another producer that carries `/ActualText` on
 marked content reads that text in `Page::text` as well as in the structured
-view (`tagged_pdf.rs` pins today that the flat extraction ignores it); one
+view (`tagged_pdf.rs` pins the flat extraction reading it); one
 whose declared direction its text contradicts reads in the declared one.
 The lookup reads the parent tree once a page, for a page that holds
 right-to-left text. The writer's output grows by an attribute on each

@@ -539,6 +539,7 @@ mod tests {
             mcid: None,
             stream: 0,
             font: None,
+            stated: None,
         }
     }
 

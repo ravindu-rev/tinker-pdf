@@ -2581,11 +2581,14 @@ impl Page {
     /// With [`TextOptions::default`] this is [`Page::text`]. With
     /// [`TextOptions::content_order`] every line's characters are in the order
     /// the content stream showed them, which is what [`Page::text`] returned
-    /// before ruling 14.
+    /// before ruling 14. Either way an `/ActualText` on a marked-content
+    /// property list stands where the glyphs it encloses do (14.9.4).
     #[must_use]
     pub fn text_with(&self, options: &TextOptions) -> TextPage {
         let mut page = self.text_in_content_order();
-        if !options.content_order {
+        if options.content_order {
+            text_order::state_in_content_order(&mut page);
+        } else {
             text_order::into_logical_order(&mut page);
         }
         page
@@ -2647,8 +2650,9 @@ impl Page {
     /// This is a *second view* over the extraction [`Page::text`] already
     /// produces, not a second extractor: the same [`TextPage`] is built, and
     /// [`TextPage::plain_text`] on it is unchanged by a byte. What differs is
-    /// the order the characters come back in, that `/ActualText` replaces what
-    /// it encloses (14.9.4), that `/Alt` and `/E` surface, and that content
+    /// the order the characters come back in, that an element's `/ActualText`
+    /// replaces what it encloses (14.9.4) — a property list's already has, in
+    /// [`Page::text`] — that `/Alt` and `/E` surface, and that content
     /// the structure tree does not claim is **counted** rather than appended —
     /// see [`StructuredText::orphans`].
     #[must_use]
