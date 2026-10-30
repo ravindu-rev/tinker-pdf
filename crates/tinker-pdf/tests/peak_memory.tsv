@@ -1,0 +1,11 @@
+# Each operation's peak resident set, held by peak_memory.rs.
+#
+# Three tab-separated fields: build, case, bytes.
+#
+#   build   default or bundled-fonts, the build the figure was read in
+#   case    one of the probe's seven, as CASES in peak_memory.rs names it
+#   bytes   the child's VmHWM, in bytes
+#
+# A run holds each case to its build's figure plus 2 % and fails a case with
+# no figure here. `TINKER_PEAK_RECORD=1` prints each case's line in this form
+# instead of holding it.

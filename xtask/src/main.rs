@@ -1048,6 +1048,14 @@ const SPAWNERS: &[(&str, &str)] = &[
          is the bench's own",
     ),
     (
+        "crates/tinker-pdf/tests/peak_memory.rs",
+        "PERMANENT: re-executes its own test binary, built from this \
+         revision, once a case, so that each process performs one operation \
+         and its peak resident set is that operation's. It hosts one case a \
+         process and adjudicates nothing: the peak is the kernel's figure, \
+         and holding it to the committed table is the parent's own",
+    ),
+    (
         "xtask/src/parity.rs",
         "PERMANENT: spawns `cargo`, `python`, `node` and `dotnet` as *hosts* \
          for this repository's own code. Each loads this engine — as a cargo \

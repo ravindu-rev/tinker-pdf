@@ -842,6 +842,39 @@ band. Every band in the committed file is pushed against from both sides by a
 unit test, because a band nobody has ever crossed is a number nobody has
 checked.
 
+## Peak memory, a process a case
+
+A peak resident set belongs to a whole process, so
+`crates/tinker-pdf/tests/peak_memory.rs` measures each of its seven operations
+in a process of its own: a page rendered at 300 dpi to PNG, the JPEG page at
+300 dpi, the JPEG 2000 page at 72, twenty pages at 150 dpi to PNG on four
+scoped threads, the text of 10 000 small pages, a merge of four 100-page files
+and the open of the 23 MB image file. The test binary re-executes itself once a
+case. The parent writes each case's input from the benchmark set's own
+generators (`benches/support/inputs.rs`, reached by path); the child reads it
+once, into the buffer it opens, performs the one operation and prints the
+`VmHWM` the kernel tracked since exec, read as `tpdf`'s `peak_bytes` reads it,
+so a figure holds the operation and its input and never the generator.
+
+The parent holds each case to its build's figure in `peak_memory.tsv`, the
+default and `bundled-fonts` builds each with their own, plus the 2 % the corpus
+bars give their peaks, and fails a case the table has no figure for. The table
+holds none, so a run fails every case unless `TINKER_PEAK_RECORD` is set, which
+prints each case's line for the table instead of holding it:
+
+```sh
+TINKER_PEAK_RECORD=1 cargo test --release -p tinker-pdf --test peak_memory -- --ignored --nocapture
+```
+
+It is Linux-only, since the peak is read from `/proc`, and `#[ignore]`d, since
+a render at 300 dpi and ten thousand pages of text are a release binary's
+work. What it decides with the numbers — the status line read in KiB, the
+band, the refusal, the line the record switch prints — is plain functions its
+own unit tests hold on every target, and
+`a_child_holding_64_mib_reports_at_least_that` shows that a child's figure
+sees what the child holds. The child is this test binary, so the file is a
+`SPAWNERS` row: it hosts one case a process and adjudicates nothing.
+
 ## The examples, run rather than compiled
 
 `crates/tinker-pdf/examples/` holds the documented end-to-end usage: open,

@@ -888,8 +888,8 @@ to it in the commit that adds the capability.
 - **Floors, calibrations and relations.** What an operation is lives here;
   how it gates is MS-02.3's to commit beside it, and the thread floors are
   MS-09.3's.
-- **Memory and wasm.** MS-05's probe builds its cases from these inputs
-  (MS-05.1) and keeps its own bands. MS-10.1 builds this set for
+- **Memory and wasm.** MS-05's probe, `tests/peak_memory.rs`, builds its
+  cases from these inputs and keeps its own bands. MS-10.1 builds this set for
   `wasm32-wasip1` and runs it under a wasm runtime, less the operations it
   lists as unable to run there — a child, a thread — so every file here
   compiles for that target and reads its committed inputs by path, which the
@@ -919,9 +919,9 @@ crates/tinker-pdf/benches/
 
 One `[[bench]]` per group file, `harness = false`. `inputs.rs`
 holds no criterion type, no clock and no spawn, so a test reaches it by path
-alone — MS-05's probe for its cases (MS-05.1) and P-04's `deflate_size.rs` for
-the level-6 counts (P-04.1's exit) — without compiling the harness or the
-child. `cli.rs` is the only file here that calls `Command::new`, so it is the
+alone — MS-05's probe, `tests/peak_memory.rs`, for its cases and P-04's
+`deflate_size.rs` for the level-6 counts (P-04.1's exit) — without compiling
+the harness or the child. `cli.rs` is the only file here that calls `Command::new`, so it is the
 one `SPAWNERS` row `cargo xtask oracles` needs (`xtask/src/main.rs:984-1048`,
 `:1076-1079`). Every input is generated in memory except what `data/` and
 the tree already hold, and a CLI operation's files are written once a process
