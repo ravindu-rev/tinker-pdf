@@ -104,7 +104,7 @@ footprint options:
 
 corpus-run options:
   --corpus NAME   only this one; repeatable
-  --timeout N     seconds per file before the child is killed (default 60)
+  --timeout N     seconds per file before the child is killed (default {timeout})
   --dpi D         render resolution (default 72)
   --fonts PATH    a face, or directory of faces, for documents embedding none
   --fonts synthetic
@@ -123,6 +123,12 @@ corpus-run options:
 
   cargo xtask help
 ";
+
+/// [`USAGE`], its defaults filled in from the constants the tasks use, so
+/// the text cannot name one the code does not set.
+fn usage() -> String {
+    USAGE.replace("{timeout}", &corpus::DEFAULT_TIMEOUT_SECONDS.to_string())
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -189,12 +195,12 @@ fn main() -> ExitCode {
         "bench-check" => one("bench-check", bench::run(&repo_root(), rest)),
         "synth-face" => one("synth-face", synth_face(rest)),
         "help" | "-h" | "--help" => {
-            print!("{USAGE}");
+            print!("{}", usage());
             ExitCode::SUCCESS
         }
         other => {
             eprintln!("xtask: unknown task `{other}`");
-            print!("{USAGE}");
+            print!("{}", usage());
             ExitCode::from(2)
         }
     }
@@ -1636,6 +1642,25 @@ fn check_dag() -> Result<(), Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `corpus-run`'s usage text names the timeout `RunArgs::default` sets:
+    /// both read [`corpus::DEFAULT_TIMEOUT_SECONDS`], and no placeholder is
+    /// left unfilled.
+    #[test]
+    fn the_usage_text_names_the_default_timeout() {
+        let text = usage();
+        let seconds = corpus::RunArgs::default().timeout.as_secs();
+        assert!(
+            text.contains(&format!(
+                "seconds per file before the child is killed (default {seconds})"
+            )),
+            "the usage text does not name the {seconds}-second default"
+        );
+        assert!(
+            !text.contains("{timeout}"),
+            "a placeholder is left unfilled"
+        );
+    }
 
     /// The check runs against this repository, which is the point of it.
     ///

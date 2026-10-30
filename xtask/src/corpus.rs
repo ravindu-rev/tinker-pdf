@@ -110,6 +110,11 @@ fn resolve_fonts(root: &Path, args: &RunArgs) -> Result<(String, Option<String>)
     }
 }
 
+/// The seconds a file runs before its child is killed, where `--timeout`
+/// says nothing: [`RunArgs::default`]'s, and the figure `corpus-run`'s usage
+/// text names.
+pub const DEFAULT_TIMEOUT_SECONDS: u64 = 180;
+
 /// Everything `corpus-run`'s command line can say.
 #[derive(Clone, Debug)]
 pub struct RunArgs {
@@ -181,7 +186,7 @@ impl Default for RunArgs {
     fn default() -> RunArgs {
         RunArgs {
             only: Vec::new(),
-            timeout: Duration::from_secs(180),
+            timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
             timeout_explicit: false,
             // 72 dpi: one device pixel per point. The question this run asks
             // is whether a bitmap comes back at all, and asking it four times

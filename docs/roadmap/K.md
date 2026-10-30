@@ -211,18 +211,6 @@ K-08 extends the mechanism to every new rendered surface.
 | --- | --- | --- | --- | --- | --- |
 | K-14.1 | fix | `CosDocument::bytes()` warns `WholeFileFetched` when it fetches a streamed file whole. | `crates/tinker-pdf-cos/src/doc.rs`, `crates/tinker-pdf-cos/tests/streaming.rs` | `streaming.rs`: `bytes()` on a streamed document fetches the file once and warns `WholeFileFetched` once. | — |
 
-## K-15 — `corpus-run --help` states the runner's timeout
-
-**`corpus-run --help` states the runner's timeout**: the help text says the per-file timeout defaults to 60 seconds, and `RunArgs::default` sets 180
-
-**Exit criterion.** the help text and the default agree, and a test holds them to one constant
-
-**Doc:** — · **Depends on:** —
-
-| Step | Kind | What | Where | Exit | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| K-15.1 | fix | The usage text reads the default timeout from the constant `RunArgs::default` uses. | `xtask/src/main.rs`, `xtask/src/corpus.rs` | An `xtask` unit test asserts the usage text names the default `RunArgs::default` sets. | — |
-
 ## K-16 — Code comments that cite docs the docs no longer carry
 
 **Code comments that cite docs the docs no longer carry, or contradict the code**: comments that point at sections of `docs/verification.md` and the design docs that describe history (its `jbig2` fuzz row, what a census or campaign found), the comment in `crates/tinker-pdf-raster/src/image.rs` that says `fill` truncates crossings where `fill.rs` rounds, and the `jbig2.rs` comments that call the symbol lineage and custom tables unsupported
