@@ -540,7 +540,14 @@ instead of living in one feature's head.
     whatever is drawn, is read back in the whole budget, 128 readings against
     one, and over `epub_fallback.rs` and `epub_conservation.rs` the read-back
     takes 1.09 to 1.14 times the time in release and 1.11 to 1.14 in debug of
-    one that held a reading to the letters. Under a transform, a line whose
+    one that held a reading to the letters. Each distinct drawing of a line
+    is read once: a run's drawing that writes what its rules' drawing or an
+    earlier drawing of the run writes is not read again, so the drawings
+    within the budget reach further (H-151). The owner took its price: a
+    justified Arabic paragraph at `line-height: 0.4`, with no `dir` or right
+    to left, whose rows a reader runs into the next, loses its structure
+    tree's order, the drawing found right for one line alone read with the
+    next line on the page. Under a transform, a line whose
     rules' drawing reads on the page with its letters in order and not its
     words, which nothing tried there reads with its words, is read again in
     its runs' own space. Where reading each glyph back as the

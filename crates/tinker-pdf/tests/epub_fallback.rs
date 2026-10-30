@@ -3096,7 +3096,7 @@ fn a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed() {
             "ar",
             LS025_JUSTIFIED,
             "<p dir=\"rtl\">كتاب <i>?!</i> مدرسة <b>?!</b>الطالب جميل.</p>",
-            Expect::Holds("logical found apart"),
+            right,
         ),
         Case::both(
             "a styled ?! glued to the word after it, he (hunt H3)",
@@ -3153,7 +3153,7 @@ fn a_styled_neutral_glued_to_a_word_under_spacing_reads_where_it_was_typed() {
     for (pi, piece, expects) in [
         (1, "!!", [conserves, conserves, right, right]),
         (2, "...", [conserves, conserves, right, right]),
-        (14, "?! ?!", [in_order, right, right, in_order]),
+        (14, "?! ?!", [conserves, right, right, in_order]),
     ] {
         let text = rep(3, |i| {
             format!(
@@ -4078,7 +4078,7 @@ fn what_a_line_read_as_typed_finds_is_drawn_only_where_it_reads_closer_on_the_pa
         "p { transform: scaleX(2); word-spacing: 0.6em }",
         format!("<p>{comma}</p>"),
         Expect::Holds("found apart"),
-        Expect::Holds("logical found apart"),
+        Expect::Holds("cons logical found apart"),
     )]);
 }
 
@@ -4325,39 +4325,36 @@ fn a_reading_that_cuts_or_joins_a_word_is_searched_past_for_the_lines_words() {
     ]);
 }
 
-/// **A line whose right drawing lies past the read-back's budget is drawn by
-/// the rules** (V5 of round 6's lane V; ROADMAP CD-19, Left (8)), pinned.
+/// **A line whose right drawing lies past the read-back's budget is reached
+/// by reading each drawing once** (V5 of round 6's lane V; ROADMAP CD-19,
+/// Left (8); H-151).
 ///
 /// The read-back tries each run's drawings, then two runs' at a time, and
 /// gives up after `paint::READINGS_PER_LINE` readings. Many of a run's
 /// drawings write the same text objects as the rules' or as another of its
-/// own, and each is read again: on a line of a few spaced runs the pair that
-/// reads it right comes after the budget. A right-to-left paragraph after a
-/// generated `§ ` at `word-spacing: 0.6em` or `1em` is not read whole. A
-/// `<bdi>` holding a Latin sentence with Hebrew in it, in a Hebrew paragraph
-/// at `word-spacing: 1em`, reads right in both builds (held): in a default
-/// build `TextDevice`'s mend of a cut at a word space's stretch reads it so,
-/// and with `bundled-fonts` a run's word space drawn against the glyph after
-/// it (`paint::Cut::Hugged`), one run's drawing, which the read-back tries
-/// before any pair. Reading each drawing once reaches the `§ ` paragraphs'
-/// drawings, and costs an Arabic paragraph at `line-height: 0.4`, whose rows
-/// a reader runs into the next ones, its structure tree's order, which it
-/// holds at 56dfd93 and 935b077: the read-back reads a line alone, and a
-/// drawing it finds right for the line is read with the next on the page.
-/// Whether that is a price worth paying is the owner's; both are pinned at
-/// what they read.
+/// own, and each is read once (`paint::Fonts::distinct`): on a line of a few
+/// spaced runs the pair that reads it right comes inside the budget, and a
+/// right-to-left paragraph after a generated `§ ` at `word-spacing: 0.6em`
+/// or `1em` reads whole, in both builds; it does not conserve, its `§ ` being
+/// no text of the book. A `<bdi>` holding a Latin sentence with Hebrew in it,
+/// in a Hebrew paragraph at `word-spacing: 1em`, reads right in both builds
+/// (held). The price the owner took: an Arabic paragraph at
+/// `line-height: 0.4`, whose rows a reader runs into the next ones, loses its
+/// structure tree's order, since the read-back reads a line alone and a
+/// drawing it finds right for the line is read with the next on the page;
+/// pinned at what it reads (ruling 14).
 #[test]
-fn a_line_whose_right_drawing_lies_past_the_budget_is_drawn_by_the_rules() {
+fn a_line_whose_right_drawing_lies_past_the_budget_is_reached_by_reading_each_drawing_once() {
     let he = "<p dir=\"rtl\" class=\"b\">שלום עולם <b>מלחמה</b> ספר، בית (גדול) אור.</p>";
     let ar = "<p dir=\"rtl\" class=\"b\">كتاب مدرسة <b>الطالب</b> جميل، بيت (كبير) نور.</p>";
     let generated_06 = "p { word-spacing: 0.6em } .b::before { content: \"\u{a7} \" }";
     let generated_1 = "p { word-spacing: 1em } .b::before { content: \"\u{a7} \" }";
     let tight = "p { margin: 0 30%; line-height: 0.4; letter-spacing: 0.1em; word-spacing: 0.5em; text-align: justify }";
     check(&[
-        Case::both("a Hebrew paragraph after a generated \u{a7} at 0.6em (V5)", "he", generated_06, he, Expect::Pinned("found apart")),
-        Case::both("the same at 1em (V5)", "he", generated_1, he, Expect::Pinned("found apart")),
-        Case::both("an Arabic paragraph after a generated \u{a7} at 0.6em (V5)", "ar", generated_06, ar, Expect::Pinned("found apart")),
-        Case::both("the same at 1em (V5)", "ar", generated_1, ar, Expect::Pinned("found apart")),
+        Case::both("a Hebrew paragraph after a generated \u{a7} at 0.6em (V5)", "he", generated_06, he, Expect::Pinned("whole found apart")),
+        Case::both("the same at 1em (V5)", "he", generated_1, he, Expect::Pinned("whole found apart")),
+        Case::both("an Arabic paragraph after a generated \u{a7} at 0.6em (V5)", "ar", generated_06, ar, Expect::Pinned("whole found apart")),
+        Case::both("the same at 1em (V5)", "ar", generated_1, ar, Expect::Pinned("whole found apart")),
         Case::both(
             "a bdi of Latin with Hebrew in it in a Hebrew paragraph at 1em (V5)",
             "he",
@@ -4365,8 +4362,8 @@ fn a_line_whose_right_drawing_lies_past_the_budget_is_drawn_by_the_rules() {
             "<p dir=\"rtl\">יום <bdi>The word שלום means עולם in <i>מלחמה</i>. The word שלום means עולם in <i>מלחמה</i>.</bdi> בראשית.</p>",
             Expect::Holds("cons logical whole found apart"),
         ),
-        Case::both("a justified Arabic paragraph at line-height 0.4, no dir (what reading each drawing once costs)", "ar", tight, format!("<p>{}</p>", styled_marks(&AR)), Expect::Pinned("logical found apart")),
-        Case::both("the same, right to left (what reading each drawing once costs)", "ar", tight, format!("<p dir=\"rtl\">{}</p>", styled_marks(&AR)), Expect::Pinned("logical found apart")),
+        Case::both("a justified Arabic paragraph at line-height 0.4, no dir (the price of reading each drawing once)", "ar", tight, format!("<p>{}</p>", styled_marks(&AR)), Expect::Pinned("found apart")),
+        Case::both("the same, right to left (the price of reading each drawing once)", "ar", tight, format!("<p dir=\"rtl\">{}</p>", styled_marks(&AR)), Expect::Pinned("found apart")),
     ]);
 }
 
@@ -4433,7 +4430,7 @@ fn a_line_nothing_reads_right_on_the_page_is_searched_in_its_runs_space() {
             "he",
             at_1,
             body.clone(),
-            Expect::Holds("logical found"),
+            Expect::Holds("logical whole found"),
             Expect::Holds("found"),
         ),
         Case::each(

@@ -2784,8 +2784,10 @@ fn searches_to_open(book: Vec<u8>) -> (usize, usize) {
 /// again: not a line read again in its runs' own space, a pair of words a
 /// line repeats, a line another line of the page repeats, nor the line of
 /// units every drawing a search tries reads alike. Each is held to how often
-/// it is read back (a guard: what is read does not change) and to the lines
-/// of units it may search. Held by count, as
+/// it is read back (a guard: what is read does not change; the line of
+/// styled neutrals, each of its distinct drawings and their pairs read once,
+/// within the budget) and to the lines of units it may search. Held by
+/// count, as
 /// [`a_line_whose_rules_drawing_reads_its_letters_in_order_is_searched_for_its_words`]
 /// holds the readings, not by a clock.
 #[test]
@@ -2843,17 +2845,17 @@ fn a_line_of_units_the_read_back_has_read_is_not_searched_again() {
             searched,
         ),
         (
-            "a line of styled neutrals under word spacing, searched over its drawings",
+            "a line of styled neutrals under word spacing, searched over its distinct drawings",
             "p { word-spacing: 0.5em; white-space: nowrap }",
             neutrals.clone(),
-            128,
+            93,
             127,
         ),
         (
             "the same under scaleX(2), searched on the page and in its runs' own space",
             "p { word-spacing: 0.5em; white-space: nowrap; transform: scaleX(2) }",
             neutrals,
-            256,
+            186,
             128,
         ),
     ];

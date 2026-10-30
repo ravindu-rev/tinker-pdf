@@ -359,81 +359,50 @@ and the cases it reads right in
 and `a_line_of_units_the_read_back_has_read_is_not_searched_again`, which
 hold its readings by count.
 
-### D: each distinct drawing of a line read once
+### Each distinct drawing of a line read once
 
-**What decides it.** `Fonts::search` reads a line in each of its runs'
+**The rule, as landed.** `Fonts::search` reads a line in each of its runs'
 drawings other than the rules' (`drawings_of`), then two runs' at a time, and
-keeps the rules' drawing after 128 readings (`READINGS_PER_LINE`). Many of a
-run's drawings write the same text objects as its rules' drawing or as
-another of its own, and each is read again: on a line of a few spaced runs
-the pair that reads it right comes after the budget. `epub_fallback.rs`'s
-`a_line_whose_right_drawing_lies_past_the_budget_is_drawn_by_the_rules` pins
-Left (8)'s lines so, and what reading each drawing once costs; `epub::tests`'
-`a_line_of_units_the_read_back_has_read_is_not_searched_again` holds the
-readings of a line that spends the budget, by count.
+keeps the rules' drawing after 128 readings (`READINGS_PER_LINE`). A run's
+drawing is planned before it is read (`Fonts::plan_run`), and one whose plan
+writes what the run's rules' drawing writes, or what an earlier drawing of
+the run writes, reads as that one does and is not read again
+(`Fonts::distinct`): the pairs are of the drawings left. The budget, the
+order of the drawings and the bound on glyphs over others stay as they are.
+Of the options CD-19.10 priced this is D, which the owner took with its price
+(H-151).
 
-**The option.** A run's drawing is planned before it is read
-(`Fonts::plan_run`), and one whose plan writes what the run's rules' drawing
-writes, or what an earlier drawing of the run writes, is not read; the pairs
-are of the drawings left. The budget, the order of the drawings and the bound
-on glyphs over others stay as they are.
+**What it reads.** In both builds Left (8)'s lines, a Hebrew and an Arabic
+paragraph after a generated `§ ` at `word-spacing: 0.6em` and `1em`, read
+whole, their right drawing now inside the budget; an Arabic line of a styled
+`?!` glued to the word after it, letter-spaced and justified, conserves and
+reads whole; and an Arabic paragraph of styled `?! ?!` glued to a word at
+`0.51em` conserves. With `bundled-fonts`, Left (9)'s dir-less Hebrew line of
+`1 234،` under `scaleX(2)` at `0.6em` conserves too, its comma still read
+apart from its word; in a default build the dir-less Hebrew paragraph of
+inline blocks squeezed by `scaleX(0.5)` at `1em` reads whole. Lines whose
+verdicts do not change read the spaces typed beside a number or a stop,
+`ספר 25٪` and `٢٠١٠. ۴۵` where the rules' drawing read `ספר25٪` and
+`٢٠١٠ .۴۵`. It sets no glyph over another.
 
-**What CD-19.10 measures**, D prototyped in `Fonts::search` on the landed
-`paint.rs` before a reading was held to the line's words, in both builds,
-for this section and H-151's row:
+**What it costs.** The justified Arabic paragraph of styled stops and
+brackets at `line-height: 0.4`, with no `dir` and right to left, loses its
+structure tree's order: a reader runs its rows into the next, and the drawing
+found right for one line alone is read with the next line on the page,
+`(نور)` and `بيت` into one another. The owner took that price (ruling 14). D
+reads less: the line of styled neutrals that spends the whole budget is read
+back 93 times, its distinct drawings and their pairs all read, against 128,
+and 186 times under `scaleX(2)`, where it is read again in its runs' own
+space, against 256. Over `epub_fallback.rs` and `epub_conservation.rs`, one
+test at a time, it takes 0.88 to 0.90 of the time without it in release and debug, faster
+in every round.
 
-- each case whose verdicts change, better or worse, by its `CASE` line:
-  `cargo test -p tinker-pdf --test epub_fallback -- --nocapture` and
-  `cargo test -p tinker-pdf --test epub_conservation -- --nocapture`, each
-  again with `--features bundled-fonts`, and
-  `cargo test -p tinker-pdf-shape --test bidi_conformance`;
-- each test whose outcome D changes, in those suites and in
-  `cargo test -p tinker-pdf --lib epub::`, with the readings `epub::tests`
-  counts (`paint::READINGS`);
-- the time of `epub_fallback.rs` and `epub_conservation.rs`, one test at a
-  time (`--test-threads=1`), in release and debug: D's ratio to the tree
-  without it in the same round, the median over seven rounds in debug and
-  fifteen in release.
-
-**What D reads.** It sets no glyph over another the tree does not, reads
-`epub_conservation.rs` as the tree does, and does not reach
-`bidi_conformance.rs`; release reads every case as debug does.
-
-| Option | `epub_fallback.rs`, default (232 cases) | with `bundled-fonts` (235) | `epub_conservation.rs` (119), each build |
-|---|---|---|---|
-| D | 6 better, 2 worse | 7 better, 2 worse | none changes |
-
-Better, in both builds: Left (8)'s lines, a Hebrew and an Arabic paragraph
-after a generated `§ ` at `word-spacing: 0.6em` and `1em`, read whole; an
-Arabic line of a styled `?!` glued to the word after it, letter-spaced and
-justified, conserves and reads whole; and an Arabic paragraph of styled
-`?! ?!` glued to a word at `0.51em` conserves. With `bundled-fonts`, Left
-(9)'s dir-less Hebrew line of `1 234،` under `scaleX(2)` at `0.6em` conserves
-too, its comma still read apart from its word. Worse, in both builds: the
-justified Arabic paragraph of styled stops and brackets at
-`line-height: 0.4`, with no `dir` and right to left, loses its structure
-tree's order, as the pin names it: a reader runs its rows into the next, and
-the drawing D finds right for one line alone is read with the next line on
-the page, `(نور)` and `بيت` into one another. The tests D fails are that pin,
-by its Left (8) rows and its two rows of what D costs, and
-`a_line_of_units_the_read_back_has_read_is_not_searched_again`, whose counts
-it lowers.
-
-**What it costs.** D reads less: the line of styled neutrals that spends the
-tree's whole budget is read back 93 times, its distinct drawings and their
-pairs all read, against 128, and 94 times against 129 under `scaleX(2)`.
-Over the two suites, one test at a time, the median ratio to the tree, with
-the rounds out of all that ran slower:
-
-| Option | debug, default | debug, `bundled-fonts` | release, default | release, `bundled-fonts` |
-|---|---|---|---|---|
-| D | 0.91 (0 of 7) | 0.94 (1 of 7) | 0.92 (3 of 15) | 0.94 (2 of 15) |
-
-The tree's own rounds spread over an interquartile range of 5 to 8 per cent
-of their median, so D is faster by about the noise, in all but a few rounds:
-planning a run's drawings before they are read costs less than the readings
-it saves on these suites. D reads two cases worse in each build, so ruling 14
-leaves it to the owner, case by case (H-151).
+**What holds it.** `epub_fallback.rs`'s
+`a_line_whose_right_drawing_lies_past_the_budget_is_reached_by_reading_each_drawing_once`,
+Left (8)'s lines read whole and the paragraph at `line-height: 0.4` pinned at
+its price, and the pins of the cases it reads better holding them;
+`epub::tests`' `a_line_of_units_the_read_back_has_read_is_not_searched_again`,
+by its counts.
 
 ### H1: the comma tie-break at a number or a closing bracket
 
@@ -611,8 +580,7 @@ Each gets its section from its design step: Left (4), the lines the reader
 reads from the right whatever the writer draws (CD-19.22); Left (9), a comma read
 apart after a number a NO-BREAK SPACE holds together (CD-19.32); and
 Left (5), its findings outside ruling 14's rules (CD-19.34). The options whose price the owner decides get
-their figures here from their measure steps: D (CD-19.10) and H1
-(CD-19.11) above. Left (2) reads in two, as a
+their figures here from their measure steps: H1 (CD-19.11) above. Left (2) reads in two, as a
 Latin word does, by the owner's decision (CD-19.18).
 
 ## Milestones
@@ -636,9 +604,8 @@ Every fix step also passes `epub_fallback.rs`, `epub_conservation.rs` and
    `a_line_whose_rules_drawing_reads_its_letters_in_order_is_searched_for_its_words`
    holding the new readings.
 6. CD-19.15: D, as the owner chose; exit:
-   `a_line_whose_right_drawing_lies_past_the_budget_is_drawn_by_the_rules`,
-   renamed for it, holding Left (8)'s lines read right, or the pin citing the
-   owner's word.
+   `a_line_whose_right_drawing_lies_past_the_budget_is_reached_by_reading_each_drawing_once`
+   holding Left (8)'s lines read whole and the price pinned.
 7. CD-19.16: H1, as the owner chose; exit: a `bidi.rs` test of a line whose
    left end is a number or a closing bracket, and `epub_conservation.rs`'s
    `a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop` holding

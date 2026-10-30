@@ -459,8 +459,16 @@ page for every reading of its line, and the page writes the plan its line was
 read in, found by the run's place in the page's list of runs, wherever the run
 is held by then, while a text shadow, a copy with no place, is planned anew
 (`paint::Fonts::plans`, `paint::place_in`), and a line of units whose reading the page
-has searched is not searched again (`text_order::Readings`)
-(`a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on`,
+has searched is not searched again (`text_order::Readings`). Each distinct
+drawing of a line is read once: a run's drawing whose plan writes what its
+rules' drawing or an earlier drawing of the run writes reads as that one and
+is not read again (`paint::Fonts::distinct`), so the drawings within the
+budget reach further, and a right-to-left paragraph after a generated `§ ` is
+read whole; a justified paragraph at `line-height: 0.4`, whose rows a reader
+runs into the next, loses its structure tree's order so, a price ruling 14
+records
+(`a_line_whose_right_drawing_lies_past_the_budget_is_reached_by_reading_each_drawing_once`,
+`a_line_drawn_under_a_transform_is_read_back_on_the_page_it_is_drawn_on`,
 `a_line_is_read_back_as_the_pages_fonts_give_its_characters_back`,
 `a_styled_mark_between_letters_the_page_gives_back_as_spaces_reads_as_typed`,
 `a_styled_mark_after_a_number_a_no_break_space_holds_together_reads_as_typed`,
@@ -476,9 +484,8 @@ has searched is not searched again (`text_order::Readings`)
 `a_line_of_units_the_read_back_has_read_is_not_searched_again` and
 `a_run_is_drawn_from_its_plan_by_its_place_in_the_page`).
 
-**What the read-back leaves** (ROADMAP CD-19). Reading each drawing once is
-not done. These lines no drawing tried reads right, and they are drawn by the
-rules:
+**What the read-back leaves** (ROADMAP CD-19). These lines no drawing tried
+reads right, and they are drawn by the rules:
 
 - `25٪ <b>W</b>` in an Arabic paragraph at `word-spacing: 1em`, turned by
   `rotate(180deg)` or not, whose line that opens with `25٪` a reader reads
@@ -497,13 +504,10 @@ rules:
   placement of a space parts into halves a reader resumes a line across;
 - a paragraph of Arabic with no `dir` whose inline `word-spacing: 1em` span
   cuts a word;
-- lines the reader reads from the right whatever the writer draws — a Latin
-  gloss before a bracketed right-to-left word, table cells (two right-to-left
-  cells with no `dir` touching, or a cell `(ספר) בית` alone on its line), an
-  ARABIC COMMA or QUESTION MARK after Latin text;
-- and a line whose right drawing comes after the read-back's budget: a
-  right-to-left paragraph after a generated `§ ` at `word-spacing: 0.6em` or
-  `1em`.
+- and lines the reader reads from the right whatever the writer draws — a
+  Latin gloss before a bracketed right-to-left word, table cells (two
+  right-to-left cells with no `dir` touching, or a cell `(ספר) בית` alone on
+  its line), an ARABIC COMMA or QUESTION MARK after Latin text.
 
 A word of Greek, Cyrillic or Armenian that an inline block cuts,
 `αλφα<span style="display: inline-block; width: 1em"> </span>βήτα`, reads in

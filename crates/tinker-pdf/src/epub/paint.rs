@@ -1436,8 +1436,9 @@ impl<'a> Fonts<'a> {
     /// in order, where the rules' drawing does not ([`Read::Letters`]); else
     /// [`Search::Letters`] where the rules' drawing reads the letters in
     /// order, and nothing where it does not. A drawing that sets more glyphs
-    /// over others than the rules' is never taken. Each glyph is read back
-    /// as `given` says.
+    /// over others than the rules' is never taken, and each distinct drawing
+    /// is read once ([`Fonts::distinct`]). Each glyph is read back as `given`
+    /// says.
     #[allow(clippy::too_many_arguments)]
     fn search(
         &self,
@@ -1468,6 +1469,9 @@ impl<'a> Fonts<'a> {
             Some((Read::Letters, over)) => (true, over.count()),
             Some((Read::Otherwise, over)) => (false, over.count()),
         };
+        // Each distinct drawing of the line is read once (H-151).
+        let options = self.distinct(line, places, options);
+        let options = &options[..];
         // A drawing that reads the line's words is taken. One that reads its
         // letters in order and not its words is kept while the search goes
         // on, and drawn only where none reads the words and the rules'
@@ -1514,6 +1518,47 @@ impl<'a> Fonts<'a> {
             None if letters => Search::Letters,
             None => Search::Nothing,
         }
+    }
+
+    /// `options` but for the drawings that read as another does: a run's
+    /// drawing whose plan ([`Fonts::plan_run`]) writes what the run's rules'
+    /// drawing writes, or what an earlier drawing of the run in `options`
+    /// writes, is not read again ([`Fonts::search`]). Many of a run's
+    /// drawings write the same text objects, and read again each spent the
+    /// budget before the pair that reads a line of a few spaced runs right:
+    /// a right-to-left paragraph after a generated `§ ` (H-151).
+    fn distinct(
+        &self,
+        line: &[&TextRun],
+        places: &[usize],
+        options: &[(RunKey, Drawing)],
+    ) -> Vec<(RunKey, Drawing)> {
+        let runs: BTreeMap<RunKey, (usize, &TextRun)> = line
+            .iter()
+            .zip(places)
+            .map(|(run, &place)| (run_key(run), (place, *run)))
+            .collect();
+        let mut kept: Vec<(RunKey, Drawing)> = Vec::new();
+        for &(key, drawing) in options {
+            let Some(&(place, run)) = runs.get(&key) else {
+                kept.push((key, drawing));
+                continue;
+            };
+            let mine = self.plan_run(place, run, drawing);
+            let rules = self.plan_run(place, run, Drawing::default());
+            let plans = self.plans.borrow();
+            let writes = plans.get(&mine);
+            let again = plans.get(&rules) == writes
+                || kept
+                    .iter()
+                    .filter(|(other, _)| *other == key)
+                    .any(|&(_, earlier)| plans.get(&(place, earlier)) == writes);
+            drop(plans);
+            if !again {
+                kept.push((key, drawing));
+            }
+        }
+        kept
     }
 
     /// Whether `found`, a drawing [`Fonts::search`] found reading `line` right
