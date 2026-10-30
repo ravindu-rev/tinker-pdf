@@ -837,6 +837,22 @@ split rather than noise, so `bench.yml` writes `/proc/cpuinfo`'s model name and
 the CPU count into `bench.log`, so that a measurement can attribute the split
 rather than band it.
 
+**A pair is judged on its rounds.** `cargo xtask bench-check --paired BASE
+HEAD` holds a head's rounds to a base's, timing nothing a second time. Each
+side is a directory of ten rounds, `round-01` to `round-10`, each the
+`CRITERION_HOME` one round of one build wrote, with that build's committed
+`baseline.json` beside them. An operation's figure for a round is its
+`estimates.json` mean over the `calls` its own side's list gives it, so a
+change to `calls` moves neither side, and its `sample.json` must hold ten
+samples taken flat. Each round's ratio is the head's figure over the
+base's; the operation fails when the median of the ten is above 1 + its
+band and at least eight of the ten rounds are slower. The band keeps two
+builds of one revision green, and the sign test asks that a slowdown show in
+eight rounds of ten rather than in a few far ones. An operation one side
+alone timed is reported, not judged; a missing round, or a round sampled
+otherwise, is refused; and an operation whose list carries no `paired` band
+is reported, never failed.
+
 **A pinned machine names its host.** An entry for one host held still
 carries `cpu`, that host's `/proc/cpuinfo` model name, and `held`, the
 frequency and core isolation it is held at, and `bench-check --machine NAME`

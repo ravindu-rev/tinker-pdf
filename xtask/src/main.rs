@@ -81,6 +81,10 @@ bindings-parity options:
   cargo xtask corpus-licences [--check]  the corpus lock's licence table
   cargo xtask corpus-run [options]       open and render every corpus file
   cargo xtask bench-check --machine NAME  hold `cargo bench` to the committed baseline
+  cargo xtask bench-check --paired BASE HEAD
+                                         hold the head's ten rounds to the base's:
+                                         the median paired ratio against 1 + the
+                                         band, and eight slower rounds of ten
   cargo xtask footprint --profile NAME --gzipped BYTES [options]
                                          hold a profile's gzipped wasm to its
                                          figure in bindings/js/footprint.json

@@ -159,6 +159,11 @@ pub struct Listed {
     pub per_iteration: u64,
     /// How many calls one iteration makes: at least one.
     pub calls: u64,
+    /// The band `bench-check --paired` holds its median paired ratio to, in
+    /// per cent, from the entry's `paired` object; `None` until the A/A
+    /// dispatches have set one, and an operation with none is reported,
+    /// never failed.
+    pub paired_band: Option<f64>,
 }
 
 /// One group's list of operations, in the order its file declares them.
@@ -602,11 +607,20 @@ pub fn groups(text: &str, path: &str) -> Result<Vec<Group>, BaselineError> {
             };
             let per_iteration = at_least_one("per_iteration")?;
             let calls = at_least_one("calls")?;
+            let paired_band = match entry.split_once("\"paired\":") {
+                Some((_, paired)) => Some(
+                    number_after(paired, "band_percent")
+                        .filter(|band| *band > 0.0)
+                        .ok_or_else(|| refused("paired"))?,
+                ),
+                None => None,
+            };
             operations.push(Listed {
                 name,
                 unit,
                 per_iteration,
                 calls,
+                paired_band,
             });
         }
         if operations.is_empty() {
@@ -1318,6 +1332,290 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
 ///
 /// Reads `target/criterion` and the committed baseline, and fails when an
 /// operation is slower than its recorded figure by more than the band.
+/// How many rounds a paired run times each operation in on each side: a sign
+/// test of eight slower rounds in ten needs ten.
+pub const ROUNDS: usize = 10;
+
+/// How many of an operation's rounds must be slower, its median past its
+/// band besides, before the pair fails it.
+pub const SLOWER_TO_FAIL: usize = 8;
+
+/// How many samples each round takes of an operation: criterion's fewest,
+/// as the paired job's `--sample-size 10` asks.
+pub const ROUND_SAMPLES: usize = 10;
+
+/// One side of a pair: each round's per-call figure for each operation, in
+/// nanoseconds, round 1 first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Side {
+    /// One map a round, from an operation's id to its figure.
+    pub rounds: Vec<BTreeMap<String, f64>>,
+}
+
+/// One operation both sides timed, and its ten paired ratios.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pair {
+    /// The operation.
+    pub id: String,
+    /// The head's figure over the base's, round by round.
+    pub ratios: Vec<f64>,
+    /// The band its median is held to, in per cent, or `None` before one is
+    /// set: then it is reported and not judged.
+    pub band_percent: Option<f64>,
+}
+
+impl Pair {
+    /// The median of the ratios: the mean of the two middle ones of an even
+    /// count, so of the fifth and the sixth of ten.
+    #[must_use]
+    pub fn median(&self) -> f64 {
+        let mut sorted = self.ratios.clone();
+        sorted.sort_by(f64::total_cmp);
+        let middle = sorted.len() / 2;
+        if sorted.is_empty() {
+            return 1.0;
+        }
+        if sorted.len() % 2 == 0 {
+            (sorted[middle - 1] + sorted[middle]) / 2.0
+        } else {
+            sorted[middle]
+        }
+    }
+
+    /// How many rounds the head was slower in: a ratio above 1.
+    #[must_use]
+    pub fn slower(&self) -> usize {
+        self.ratios.iter().filter(|ratio| **ratio > 1.0).count()
+    }
+
+    /// Whether the pair fails the operation: its median above 1 + its band
+    /// **and** at least [`SLOWER_TO_FAIL`] of its rounds slower. Each half
+    /// covers what the other cannot: the band keeps an A/A pair green, and
+    /// the sign test asks that a slowdown show in eight rounds of ten rather
+    /// than in a few far ones.
+    #[must_use]
+    pub fn fails(&self) -> bool {
+        self.band_percent.is_some_and(|band| {
+            self.median() > 1.0 + band / 100.0 && self.slower() >= SLOWER_TO_FAIL
+        })
+    }
+}
+
+/// What pairing two sides finds: every operation both timed, and the ids one
+/// side timed alone, which are reported and not judged.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Paired {
+    /// Each operation both sides timed, in id order.
+    pub pairs: Vec<Pair>,
+    /// Ids the base timed and the head did not.
+    pub base_only: Vec<String>,
+    /// Ids the head timed and the base did not.
+    pub head_only: Vec<String>,
+}
+
+/// Pairs `base` with `head` round by round, each operation's band read from
+/// `bands`. Refused when a side has other than [`ROUNDS`] rounds, or an
+/// operation a side timed is missing from one of that side's rounds: a
+/// missing round is a pair the sign test cannot count.
+pub fn pair(base: &Side, head: &Side, bands: &BTreeMap<String, f64>) -> Result<Paired, String> {
+    let ids = |side: &Side, which: &str| -> Result<Vec<String>, String> {
+        if side.rounds.len() != ROUNDS {
+            return Err(format!(
+                "the {which} holds {} rounds, and a pair needs {ROUNDS}",
+                side.rounds.len()
+            ));
+        }
+        let mut all: Vec<String> = side
+            .rounds
+            .iter()
+            .flat_map(|round| round.keys().cloned())
+            .collect();
+        all.sort();
+        all.dedup();
+        for id in &all {
+            if let Some(at) = side.rounds.iter().position(|round| !round.contains_key(id)) {
+                return Err(format!(
+                    "the {which} timed `{id}` and has no figure for it in round {}: a \
+                     missing round is refused, never paired around",
+                    at + 1
+                ));
+            }
+        }
+        Ok(all)
+    };
+    let base_ids = ids(base, "base")?;
+    let head_ids = ids(head, "head")?;
+    let mut paired = Paired::default();
+    for id in &head_ids {
+        if !base_ids.contains(id) {
+            paired.head_only.push(id.clone());
+            continue;
+        }
+        let ratios = (0..ROUNDS)
+            .map(|round| head.rounds[round][id] / base.rounds[round][id])
+            .collect();
+        paired.pairs.push(Pair {
+            id: id.clone(),
+            ratios,
+            band_percent: bands.get(id).copied(),
+        });
+    }
+    paired.base_only = base_ids
+        .into_iter()
+        .filter(|id| !head_ids.contains(id))
+        .collect();
+    Ok(paired)
+}
+
+/// The ten iteration counts and the samples of one `sample.json`, refused
+/// unless it holds [`ROUND_SAMPLES`] samples taken flat, each of one count.
+fn check_samples(file: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(file)
+        .map_err(|error| format!("cannot read {}: {error}", file.display()))?;
+    let iters = text
+        .find("\"iters\":")
+        .and_then(|at| {
+            let rest = &text[at..];
+            let open = rest.find('[')?;
+            let close = rest[open..].find(']')? + open;
+            Some(
+                rest[open + 1..close]
+                    .split(',')
+                    .map(|n| n.trim().parse::<f64>())
+                    .collect::<Result<Vec<_>, _>>(),
+            )
+        })
+        .and_then(Result::ok)
+        .ok_or_else(|| format!("{} holds no readable `iters`", file.display()))?;
+    if iters.len() != ROUND_SAMPLES || iters.iter().any(|n| *n != iters[0]) {
+        return Err(format!(
+            "{} holds {} samples of {:?} iterations; a round takes {ROUND_SAMPLES} \
+             samples of one count, flat, and a round sampled otherwise is refused",
+            file.display(),
+            iters.len(),
+            iters
+        ));
+    }
+    Ok(())
+}
+
+/// Every operation one round of one build timed: each `<group>/<name>/new/`
+/// under `dir`, its `estimates.json`'s mean over the `calls` its side's list
+/// gives it, its `sample.json` checked.
+fn read_round(dir: &Path, calls: &BTreeMap<String, u64>) -> Result<BTreeMap<String, f64>, String> {
+    let mut found = BTreeMap::new();
+    collect(dir, &mut Vec::new(), &mut found);
+    let mut round = BTreeMap::new();
+    for (id, mean) in found {
+        let Some(calls) = calls.get(&id) else {
+            return Err(format!(
+                "{} times `{id}`, which its side's lists do not name, so a call's time \
+                 cannot be read",
+                dir.display()
+            ));
+        };
+        check_samples(&dir.join(&id).join("new").join("sample.json"))?;
+        round.insert(id, mean / *calls as f64);
+    }
+    Ok(round)
+}
+
+/// One side of a pair, read from `dir`: its lists, the `baseline.json` its
+/// build committed, copied beside its rounds so that a call is that build's
+/// call, and its rounds `round-01` to `round-10`, each the `CRITERION_HOME`
+/// one round of that build wrote.
+pub fn read_side(dir: &Path) -> Result<(Side, Vec<Group>), String> {
+    let lists_path = dir.join("baseline.json");
+    let text = std::fs::read_to_string(&lists_path).map_err(|error| {
+        format!(
+            "{}: {error}; each side carries its build's committed lists beside its \
+             rounds, so that each figure is a call's time by that build's `calls`",
+            lists_path.display()
+        )
+    })?;
+    let lists = groups(&text, &lists_path.display().to_string()).map_err(|e| e.to_string())?;
+    let calls: BTreeMap<String, u64> = lists
+        .iter()
+        .flat_map(|list| {
+            list.operations
+                .iter()
+                .map(|operation| (list.id(&operation.name), operation.calls))
+        })
+        .collect();
+    let mut side = Side::default();
+    for round in 1..=ROUNDS {
+        let round_dir = dir.join(format!("round-{round:02}"));
+        if !round_dir.is_dir() {
+            return Err(format!(
+                "{} is missing; a side holds {ROUNDS} rounds, and a missing round is refused",
+                round_dir.display()
+            ));
+        }
+        side.rounds.push(read_round(&round_dir, &calls)?);
+    }
+    Ok((side, lists))
+}
+
+/// `bench-check --paired BASE HEAD`: the head's rounds against the base's,
+/// each operation judged on its median paired ratio and the sign test, its
+/// band read from the head's lists. Nothing is timed a second time.
+fn run_paired(base: &Path, head: &Path) -> Result<(), String> {
+    let (base_side, _) = read_side(base)?;
+    let (head_side, head_lists) = read_side(head)?;
+    let bands: BTreeMap<String, f64> = head_lists
+        .iter()
+        .flat_map(|list| {
+            list.operations
+                .iter()
+                .filter_map(|operation| Some((list.id(&operation.name), operation.paired_band?)))
+        })
+        .collect();
+    let paired = pair(&base_side, &head_side, &bands)?;
+    println!(
+        "bench-check --paired: {} operations over {ROUNDS} rounds, {} against {}",
+        paired.pairs.len(),
+        head.display(),
+        base.display()
+    );
+    for pair in &paired.pairs {
+        let band = pair
+            .band_percent
+            .map_or("no band yet: reported".to_string(), |band| {
+                format!("band {band} %")
+            });
+        println!(
+            "  {:+7.2} % median, {:2}/{ROUNDS} slower, {band}{}  {}",
+            (pair.median() - 1.0) * 100.0,
+            pair.slower(),
+            if pair.fails() { ", FAILS" } else { "" },
+            pair.id
+        );
+    }
+    for id in &paired.head_only {
+        println!("  the head's alone, reported, not judged: {id}");
+    }
+    for id in &paired.base_only {
+        println!("  the base's alone, reported, not judged: {id}");
+    }
+    let failing: Vec<&Pair> = paired.pairs.iter().filter(|pair| pair.fails()).collect();
+    if failing.is_empty() {
+        return Ok(());
+    }
+    let mut message = format!(
+        "slower than the base beyond the band in at least {SLOWER_TO_FAIL} of {ROUNDS} rounds:\n"
+    );
+    for pair in failing {
+        message.push_str(&format!(
+            "  {}: median {:+.2} %, {}/{ROUNDS} rounds slower, band {} %\n",
+            pair.id,
+            (pair.median() - 1.0) * 100.0,
+            pair.slower(),
+            pair.band_percent.unwrap_or_default()
+        ));
+    }
+    Err(message)
+}
+
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let mut machine_name = None;
     let mut index = 0;
@@ -1326,6 +1624,15 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             "--machine" => {
                 index += 1;
                 machine_name = args.get(index).cloned();
+            }
+            "--paired" => {
+                let (Some(base), Some(head)) = (args.get(index + 1), args.get(index + 2)) else {
+                    return Err("bench-check --paired needs BASE HEAD".to_string());
+                };
+                if args.len() != index + 3 || machine_name.is_some() {
+                    return Err("bench-check --paired BASE HEAD takes nothing else".to_string());
+                }
+                return run_paired(Path::new(base), Path::new(head));
             }
             other => return Err(format!("unknown option `{other}`")),
         }
@@ -2741,5 +3048,276 @@ fn render(c: &mut Criterion) {
             7,
             "the seven, and no figure beside them"
         );
+    }
+
+    /// One side's lists: a banded operation, an unbanded one, and one whose
+    /// iteration makes `calls` calls.
+    fn paired_lists(calls: u64) -> String {
+        format!(
+            "{{\n  \"groups\": [\n    {{ \"group\": \"render\", \"operations\": [\n      \
+             {{ \"name\": \"render text at 150 dpi\", \"unit\": \"pixels\",\n        \
+             \"per_iteration\": 2176200, \"calls\": 1,\n        \
+             \"paired\": {{ \"spread_percent\": 3.0, \"band_percent\": 5 }} }},\n      \
+             {{ \"name\": \"the text page at 72 dpi\", \"unit\": \"pixels\",\n        \
+             \"per_iteration\": 2504950, \"calls\": {calls},\n        \
+             \"paired\": {{ \"spread_percent\": 3.0, \"band_percent\": 5 }} }},\n      \
+             {{ \"name\": \"5000 paths at 150 dpi\", \"unit\": \"pixels\",\n        \
+             \"per_iteration\": 2176200, \"calls\": 1 }}\n    ] }}\n  ],\n  \
+             \"machines\": []\n}}\n"
+        )
+    }
+
+    /// A side written out as the paired job keeps one: its lists, and ten
+    /// round directories whose `<group>/<name>/new/` hold the
+    /// `estimates.json` and `sample.json` criterion writes, each operation's
+    /// mean in round r being `nanos(id, r)`, `None` leaving it out.
+    fn stage_side(
+        tag: &str,
+        lists: &str,
+        ids: &[&str],
+        nanos: impl Fn(&str, usize) -> Option<f64>,
+    ) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("tinker-paired-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(&root).expect("a directory");
+        std::fs::write(root.join("baseline.json"), lists).expect("a file");
+        for round in 1..=ROUNDS {
+            for id in ids {
+                let Some(mean) = nanos(id, round) else {
+                    continue;
+                };
+                let new = root.join(format!("round-{round:02}")).join(id).join("new");
+                std::fs::create_dir_all(&new).expect("a directory");
+                std::fs::write(
+                    new.join("estimates.json"),
+                    format!(
+                        "{{\"mean\":{{\"confidence_interval\":{{\"confidence_level\":0.95,\
+                         \"lower_bound\":{mean},\"upper_bound\":{mean}}},\
+                         \"point_estimate\":{mean},\"standard_error\":0.0}}}}"
+                    ),
+                )
+                .expect("a file");
+                let iters = ["1.0"; ROUND_SAMPLES].join(",");
+                std::fs::write(
+                    new.join("sample.json"),
+                    format!("{{\"sampling_mode\":\"Flat\",\"iters\":[{iters}],\"times\":[]}}"),
+                )
+                .expect("a file");
+            }
+            std::fs::create_dir_all(root.join(format!("round-{round:02}"))).expect("a directory");
+        }
+        root
+    }
+
+    const TEXT_150: &str = "render/render text at 150 dpi";
+    const TEXT_72: &str = "render/the text page at 72 dpi";
+    const PATHS: &str = "render/5000 paths at 150 dpi";
+
+    /// The base's figure for every operation in every round.
+    fn base_nanos(id: &str, _round: usize) -> Option<f64> {
+        Some(if id == TEXT_72 {
+            2_000_000.0
+        } else {
+            1_000_000.0
+        })
+    }
+
+    /// `bench-check --paired` over a staged base and head, and what pairing
+    /// them finds, the stage removed.
+    fn compared(
+        tag: &str,
+        head: impl Fn(&str, usize) -> Option<f64>,
+    ) -> (Result<(), String>, Result<Paired, String>) {
+        let ids = [TEXT_150, TEXT_72, PATHS];
+        let base = stage_side(&format!("{tag}-base"), &paired_lists(1), &ids, base_nanos);
+        let head = stage_side(&format!("{tag}-head"), &paired_lists(1), &ids, head);
+        let verdict = run_paired(&base, &head);
+        let paired = read_side(&base).and_then(|(base_side, _)| {
+            let (head_side, lists) = read_side(&head)?;
+            let bands = lists
+                .iter()
+                .flat_map(|list| {
+                    list.operations.iter().filter_map(|operation| {
+                        Some((list.id(&operation.name), operation.paired_band?))
+                    })
+                })
+                .collect();
+            pair(&base_side, &head_side, &bands)
+        });
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&head).ok();
+        (verdict, paired)
+    }
+
+    fn found<'a>(paired: &'a Paired, id: &str) -> &'a Pair {
+        paired
+            .pairs
+            .iter()
+            .find(|pair| pair.id == id)
+            .expect("the pair")
+    }
+
+    /// Every round's head at 1.10 times its base, against a band of 5 %:
+    /// a median of 1.10 and ten slower rounds, so the operation fails, by
+    /// name, and the band-less one beside it is reported and never failed.
+    #[test]
+    fn a_ten_percent_slowdown_is_caught() {
+        let (verdict, paired) = compared("slowdown", |id, round| {
+            base_nanos(id, round).map(|nanos| nanos * 1.10)
+        });
+        let message = verdict.expect_err("a 10 % slowdown is caught");
+        assert!(
+            message.contains(TEXT_150) && message.contains(TEXT_72),
+            "{message}"
+        );
+        assert!(
+            !message.contains(PATHS),
+            "an operation with no band is not judged: {message}"
+        );
+        let paired = paired.expect("the sides pair");
+        let pair = found(&paired, TEXT_150);
+        assert!((pair.median() - 1.10).abs() < 1e-9, "{}", pair.median());
+        assert_eq!(pair.slower(), 10);
+        assert!(pair.fails());
+        assert!(!found(&paired, PATHS).fails(), "no band, no verdict");
+    }
+
+    /// Two builds of one revision: the rounds part by a few hundredths
+    /// either way, the median sits at 1, and nothing fails.
+    #[test]
+    fn an_a_a_pair_passes() {
+        let (verdict, paired) = compared("a-a", |id, round| {
+            let wobble = if round % 2 == 0 { 1.01 } else { 0.99 };
+            base_nanos(id, round).map(|nanos| nanos * wobble)
+        });
+        assert_eq!(verdict, Ok(()));
+        let paired = paired.expect("the sides pair");
+        assert_eq!(paired.pairs.len(), 3);
+        for pair in &paired.pairs {
+            assert!(
+                (pair.median() - 1.0).abs() < 1e-9,
+                "{}: {}",
+                pair.id,
+                pair.median()
+            );
+            assert_eq!(pair.slower(), 5, "{}", pair.id);
+            assert!(!pair.fails(), "{}", pair.id);
+        }
+    }
+
+    /// Seven rounds 20 % slower and three faster: a median far past the band,
+    /// and a slowdown the sign test does not see in eight rounds of ten, so
+    /// the operation passes; an eighth slower round fails it.
+    #[test]
+    fn seven_slower_rounds_of_ten_pass_the_sign_test() {
+        let rounds = |slower: usize| {
+            move |id: &str, round: usize| {
+                let factor = if round <= slower { 1.20 } else { 0.95 };
+                base_nanos(id, round).map(|nanos| nanos * factor)
+            }
+        };
+        let (verdict, paired) = compared("seven", rounds(7));
+        assert_eq!(verdict, Ok(()));
+        let pair = found(paired.as_ref().expect("the sides pair"), TEXT_150).clone();
+        assert!(pair.median() > 1.05, "{}", pair.median());
+        assert_eq!(pair.slower(), 7);
+        assert!(!pair.fails());
+
+        let (verdict, _) = compared("eight", rounds(8));
+        assert!(verdict
+            .expect_err("eight slower rounds fail")
+            .contains(TEXT_150));
+    }
+
+    /// Every round slower, by 4 %, against a band of 5 %: the sign test sees
+    /// ten slower rounds and the median stays inside the band, so it passes.
+    #[test]
+    fn a_median_inside_the_band_passes_however_many_rounds_are_slower() {
+        let (verdict, paired) = compared("inside", |id, round| {
+            base_nanos(id, round).map(|nanos| nanos * 1.04)
+        });
+        assert_eq!(verdict, Ok(()));
+        let pair = found(paired.as_ref().expect("the sides pair"), TEXT_150).clone();
+        assert_eq!(pair.slower(), 10);
+        assert!((pair.median() - 1.04).abs() < 1e-9);
+        assert!(!pair.fails());
+    }
+
+    /// A round is never paired around: a side whose operation is missing
+    /// from one round, a side missing a round's directory, a side of nine
+    /// rounds, and a round sampled other than ten flat samples are each
+    /// refused by what is missing.
+    #[test]
+    fn a_missing_round_is_refused() {
+        let (verdict, _) = compared("gap", |id, round| {
+            (!(id == TEXT_150 && round == 7))
+                .then(|| base_nanos(id, round))
+                .flatten()
+        });
+        let message = verdict.expect_err("a missing round");
+        assert!(
+            message.contains(&format!(
+                "timed `{TEXT_150}` and has no figure for it in round 7"
+            )),
+            "{message}"
+        );
+
+        let ids = [TEXT_150];
+        let side = stage_side("no-dir", &paired_lists(1), &ids, base_nanos);
+        std::fs::remove_dir_all(side.join("round-04")).expect("the round");
+        let refused = read_side(&side).expect_err("a round's directory missing");
+        assert!(refused.contains("round-04 is missing"), "{refused}");
+        std::fs::remove_dir_all(&side).ok();
+
+        let nine = Side {
+            rounds: vec![BTreeMap::from([(TEXT_150.to_string(), 1.0)]); ROUNDS - 1],
+        };
+        let ten = Side {
+            rounds: vec![BTreeMap::from([(TEXT_150.to_string(), 1.0)]); ROUNDS],
+        };
+        let refused = pair(&nine, &ten, &BTreeMap::new()).expect_err("nine rounds");
+        assert!(refused.contains("holds 9 rounds"), "{refused}");
+
+        let side = stage_side("nine-samples", &paired_lists(1), &ids, base_nanos);
+        let sample = side
+            .join("round-02")
+            .join(TEXT_150)
+            .join("new")
+            .join("sample.json");
+        let iters = ["1.0"; ROUND_SAMPLES - 1].join(",");
+        std::fs::write(&sample, format!("{{\"iters\":[{iters}],\"times\":[]}}")).expect("a file");
+        let refused = read_side(&side).expect_err("nine samples");
+        assert!(refused.contains("holds 9 samples"), "{refused}");
+        std::fs::remove_dir_all(&side).ok();
+    }
+
+    /// Each side's figure is a call's time by that side's own `calls`, so an
+    /// iteration that makes twice the calls on the head moves nothing; and
+    /// an operation one side timed alone is reported, not judged.
+    #[test]
+    fn a_call_is_each_sides_own_and_a_one_sided_operation_is_reported() {
+        let base = stage_side(
+            "calls-base",
+            &paired_lists(1),
+            &[TEXT_150, TEXT_72, PATHS],
+            base_nanos,
+        );
+        let head = stage_side(
+            "calls-head",
+            &paired_lists(2),
+            &[TEXT_150, TEXT_72],
+            |id, round| {
+                base_nanos(id, round).map(|nanos| if id == TEXT_72 { nanos * 2.0 } else { nanos })
+            },
+        );
+        let (base_side, _) = read_side(&base).expect("the base");
+        let (head_side, _) = read_side(&head).expect("the head");
+        let paired = pair(&base_side, &head_side, &BTreeMap::new()).expect("they pair");
+        assert!((found(&paired, TEXT_72).median() - 1.0).abs() < 1e-9);
+        assert_eq!(paired.base_only, [PATHS.to_string()]);
+        assert!(paired.head_only.is_empty());
+        assert_eq!(run_paired(&base, &head), Ok(()));
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&head).ok();
     }
 }
