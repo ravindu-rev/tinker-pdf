@@ -56,7 +56,7 @@ use tinker_pdf_content::{
 use tinker_pdf_cos::pages as cos_pages;
 
 use crate::tables::{TableRule, MAX_TABLE_RULES};
-use crate::{resources, text_order, Page};
+use crate::{resources, Page};
 
 /// The widest a stroke, or the thinnest dimension of a filled rectangle, may
 /// be and still be a rule, in points (design/table-reconstruction.md).
@@ -134,7 +134,7 @@ impl Observed {
             ..
         } = observer;
         let mut text = text.finish();
-        text_order::into_logical_order(&mut text);
+        page.put_in_logical_order(&mut text);
         // Past the cap a page's rules are not read at all, rather than read
         // up to an arbitrary first part of the content stream; and its fills
         // the same way, so a shading the cap happened to keep is not read

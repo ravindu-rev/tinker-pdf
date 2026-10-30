@@ -17,6 +17,7 @@ use crate::object::{Dict, ObjRef, Object, PdfString};
 use crate::resolve::Resolve;
 use crate::warn::WarningKind;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Collects every entry of a name tree rooted at `root` (7.9.6).
 ///
@@ -155,6 +156,122 @@ fn within_limits<R: Resolve + ?Sized>(doc: &R, node: ObjRef, key: &[u8]) -> bool
         return true;
     };
     key >= low.as_slice() && key <= high.as_slice()
+}
+
+/// Finds one entry of a number tree, descending by `/Limits` (7.9.7), as
+/// [`name_tree_lookup`] finds one of a name tree: a page's `/StructParents`
+/// entry of a `/ParentTree` (14.7.4.4) is read without reading every other
+/// page's.
+#[must_use]
+pub fn number_tree_lookup(doc: &CosDocument, root: ObjRef, key: i64) -> Option<Object> {
+    let mut visited = HashSet::new();
+    let keys = NumberKeys {
+        nums: doc.intern(b"Nums"),
+        limits: doc.intern(b"Limits"),
+    };
+    descend_numbers(doc, root, key, &keys, 0, &mut visited)
+}
+
+/// The names [`number_tree_lookup`] reads at every node, interned once.
+struct NumberKeys {
+    nums: Name,
+    limits: Name,
+}
+
+fn descend_numbers<R: Resolve + ?Sized>(
+    doc: &R,
+    node: ObjRef,
+    key: i64,
+    keys: &NumberKeys,
+    depth: u32,
+    visited: &mut HashSet<u32>,
+) -> Option<Object> {
+    if depth > limits::MAX_NEST_DEPTH || !visited.insert(node.num) {
+        return None;
+    }
+
+    let object = doc.get(node).ok()?;
+    let dict = object.as_dict()?;
+
+    // A leaf: /Nums is a flat [key value key value] array. A root that is a
+    // one-level tree may carry /Kids as well, so a miss here looks there.
+    let mut held = None;
+    if let Some(nums) = array_in(doc, dict, keys.nums, &mut held) {
+        for pair in nums.chunks_exact(2).take(limits::MAX_ARRAY_LEN) {
+            if integer(doc, &pair[0]) == Some(key) {
+                return Some(doc.resolve(&pair[1]).as_ref().clone());
+            }
+        }
+    }
+
+    let mut held = None;
+    let kids = array_in(doc, dict, Name::KIDS, &mut held)?;
+    for kid in kids.iter().take(limits::MAX_ARRAY_LEN) {
+        let Some(reference) = kid.as_objref() else {
+            continue;
+        };
+        if !within_number_limits(doc, reference, key, keys) {
+            continue;
+        }
+        if let Some(found) = descend_numbers(doc, reference, key, keys, depth + 1, visited) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Whether a number tree node's `/Limits` admit a key; absent or malformed
+/// limits admit everything, as [`within_limits`]'s do.
+fn within_number_limits<R: Resolve + ?Sized>(
+    doc: &R,
+    node: ObjRef,
+    key: i64,
+    keys: &NumberKeys,
+) -> bool {
+    let Ok(object) = doc.get(node) else {
+        return true;
+    };
+    let Some(dict) = object.as_dict() else {
+        return true;
+    };
+    let mut held = None;
+    let Some(pair) = array_in(doc, dict, keys.limits, &mut held) else {
+        return true;
+    };
+    let (Some(low), Some(high)) = (
+        pair.first().and_then(|o| integer(doc, o)),
+        pair.get(1).and_then(|o| integer(doc, o)),
+    ) else {
+        return true;
+    };
+    key >= low && key <= high
+}
+
+/// `dict`'s `key` as an array: a direct one read where it stands, and an
+/// indirect one resolved into `held`, so a node's `/Kids`, `/Nums` and
+/// `/Limits` are not copied to be read.
+fn array_in<'a, R: Resolve + ?Sized>(
+    doc: &R,
+    dict: &'a Dict,
+    key: Name,
+    held: &'a mut Option<Arc<Object>>,
+) -> Option<&'a [Object]> {
+    match dict.get(key)? {
+        Object::Array(items) => Some(items),
+        other => {
+            let held: &'a Arc<Object> = held.insert(doc.resolve(other));
+            held.as_array()
+        }
+    }
+}
+
+/// An integer, direct or behind a reference.
+fn integer<R: Resolve + ?Sized>(doc: &R, object: &Object) -> Option<i64> {
+    match object {
+        Object::Int(n) => Some(*n),
+        Object::Ref(_) => doc.resolve(object).as_int(),
+        _ => None,
+    }
 }
 
 /// Collects every entry of a number tree rooted at `root` (7.9.7).
@@ -509,5 +626,37 @@ mod tests {
             "before the first range there is nothing"
         );
         assert_eq!(lookup_number_range(&[], 0), None);
+    }
+
+    /// A number is found by descending the `/Limits`: in a root's own
+    /// `/Nums` beside its `/Kids`, through two levels, into a node with no
+    /// limits, and behind references to the array, the key and the value. A
+    /// kid whose limits exclude the key is not read, so what it holds past
+    /// them is not found, and a kid naming the root ends the descent there.
+    #[test]
+    fn a_number_is_found_by_descending_the_limits() {
+        let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+10 0 obj\n<< /Nums [0 (root)] /Kids [11 0 R 12 0 R 13 0 R] >>\nendobj\n\
+11 0 obj\n<< /Limits [1 4] /Nums [1 (one) 4 (four)] >>\nendobj\n\
+12 0 obj\n<< /Limits [10 20] /Kids [10 0 R 14 0 R] >>\nendobj\n\
+13 0 obj\n<< /Nums 15 0 R >>\nendobj\n\
+14 0 obj\n<< /Limits [10 20] /Nums [15 (fifteen) 30 (past its limits)] >>\nendobj\n\
+15 0 obj\n[16 0 R 17 0 R]\nendobj\n\
+16 0 obj\n40\nendobj\n\
+17 0 obj\n(forty)\nendobj\n\
+trailer\n<< /Size 18 /Root 1 0 R >>\n%%EOF\n";
+        let doc = CosDocument::open(bytes).expect("it opens");
+        let found = |key| {
+            number_tree_lookup(&doc, ObjRef::new(10, 0), key)
+                .and_then(|value| value.as_string().map(|s| s.bytes.clone()))
+        };
+        assert_eq!(found(0), Some(b"root".to_vec()));
+        assert_eq!(found(4), Some(b"four".to_vec()));
+        assert_eq!(found(15), Some(b"fifteen".to_vec()));
+        assert_eq!(found(40), Some(b"forty".to_vec()));
+        assert_eq!(found(30), None, "held only past its node's limits");
+        assert_eq!(found(5), None);
     }
 }

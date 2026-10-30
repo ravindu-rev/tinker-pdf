@@ -18,7 +18,8 @@ mod epub_support;
 
 use epub_support::typeface::Face;
 use tinker_pdf::{Document, TextFormat, TextOptions, TextWriter};
-use tinker_pdf_cos::build::{DocumentBuilder, Glyph, PlacedGlyph};
+use tinker_pdf_cos::build::{DocumentBuilder, FormXObject, Glyph, PlacedGlyph};
+use tinker_pdf_cos::{Dict, DocumentEditor, Name, ObjRef, Object, StreamData, WriteOptions};
 
 /// Shin, lamed, vav, final mem: `shalom`, as it is read.
 const SHALOM: &str = "\u{5E9}\u{5DC}\u{5D5}\u{5DD}";
@@ -688,6 +689,41 @@ fn stated_page(rows: usize, items: &[Item]) -> Vec<u8> {
     let program = face.build();
     let mut builder = DocumentBuilder::new();
     assert!(builder.add_cid_font(b"F0", b"FixtureHebrew", &program));
+    let content = stated_content(&mut builder, &face, rows, items);
+    let below = LEADING * rows.saturating_sub(1) as f64;
+    builder.add_page(300.0, 200.0 + below, |page| page.raw(&content));
+    builder.finish()
+}
+
+/// [`stated_page`]'s page, `items` drawn in a form XObject, `/Fm0`, which
+/// the page's own content invokes.
+fn formed_page(rows: usize, items: &[Item]) -> Vec<u8> {
+    let face = Face::new("Fixture Hebrew", COVERS);
+    let program = face.build();
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_cid_font(b"F0", b"FixtureHebrew", &program));
+    let content = stated_content(&mut builder, &face, rows, items);
+    let below = LEADING * rows.saturating_sub(1) as f64;
+    assert!(builder.add_form(
+        b"Fm0",
+        &FormXObject {
+            bbox: [0.0, 0.0, 300.0, 200.0 + below],
+            matrix: None,
+            group: None,
+            content: &content,
+        }
+    ));
+    builder.add_page(300.0, 200.0 + below, |page| page.raw(b"/Fm0 Do"));
+    builder.finish()
+}
+
+/// The content stream [`stated_page`] draws `items` in, with `face` as `F0`.
+fn stated_content(
+    builder: &mut DocumentBuilder,
+    face: &Face,
+    rows: usize,
+    items: &[Item],
+) -> Vec<u8> {
     let below = LEADING * rows.saturating_sub(1) as f64;
     let mut content = Vec::new();
     for item in items {
@@ -723,8 +759,7 @@ fn stated_page(rows: usize, items: &[Item]) -> Vec<u8> {
             }
         }
     }
-    builder.add_page(300.0, 200.0 + below, |page| page.raw(&content));
-    builder.finish()
+    content
 }
 
 /// `/ActualText` stating `text`, the entries of a span's dictionary.
@@ -862,4 +897,403 @@ fn a_span_with_an_mcid_states_its_text_in_its_sequence() {
     let text = doc.page(0).expect("a page").text();
     assert_eq!(text.plain_text().trim_end(), typed);
     assert!(text.lines()[0].chars.iter().all(|c| c.mcid == Some(0)));
+}
+
+/// [`stated_page`]'s `/Span` holding the marked-content sequence `/MCID
+/// mcid` of the stream it is drawn in (14.7.4.2).
+fn sequence(mcid: u32) -> Item {
+    Item::Open(format!("/MCID {mcid}"))
+}
+
+/// A structure element [`declaring`] writes, under the element before it
+/// that `parent` names or else under the tree's root: the attribute objects
+/// its `/A` holds, each an owner, a key and the name it is given, and the
+/// classes its `/C` names.
+#[derive(Default)]
+struct Element {
+    parent: Option<usize>,
+    attributes: Vec<(&'static str, &'static str, &'static str)>,
+    classes: Vec<&'static str>,
+}
+
+impl Element {
+    /// One under the tree's root whose Layout attributes state the writing
+    /// mode `mode` (ISO 32000-2 §14.8.5.4.2).
+    fn writing(mode: &'static str) -> Element {
+        Element {
+            attributes: vec![("Layout", "WritingMode", mode)],
+            ..Element::default()
+        }
+    }
+}
+
+/// `bytes`, a one-page document, given a structure tree (14.7): `elements`;
+/// its `/ClassMap`, `classes`, each a class's name and the one Layout
+/// attribute it states, a key and a name; and `claims`, the page's
+/// `/ParentTree` entry and then its form `/Fm0`'s, under the stream's
+/// `/StructParents`, `/MCID n` of the stream belonging to the element the
+/// entry's `n`th names (14.7.4.4).
+fn declaring(
+    bytes: Vec<u8>,
+    elements: &[Element],
+    classes: &[(&str, &str, &str)],
+    claims: &[&[usize]],
+) -> Vec<u8> {
+    fn name(editor: &DocumentEditor, text: &str) -> Object {
+        Object::Name(editor.intern(text.as_bytes()))
+    }
+    fn attribute(editor: &DocumentEditor, owner: &str, key: &str, value: &str) -> Object {
+        let mut attributes = Dict::new();
+        attributes.insert(editor.intern(b"O"), name(editor, owner));
+        attributes.insert(editor.intern(key.as_bytes()), name(editor, value));
+        Object::Dict(attributes)
+    }
+    let doc = Document::open(bytes).expect("opens");
+    let cos = doc.cos();
+    let page = tinker_pdf_cos::pages::collect(cos)[0].reference;
+    let catalog = cos.trailer().get_ref(Name::ROOT).expect("a catalog");
+    let mut editor = doc.editor();
+    let page_dict = editor
+        .get(page)
+        .and_then(|page| page.as_dict().cloned())
+        .expect("a page");
+    let form = (claims.len() > 1).then(|| {
+        let resources = cos.resolve_key(&page_dict, Name::RESOURCES);
+        let forms = cos.resolve_key(
+            resources.as_dict().expect("resources"),
+            cos.intern(b"XObject"),
+        );
+        let form = forms.as_dict().expect("forms").get_ref(cos.intern(b"Fm0"));
+        form.expect("the form /Fm0")
+    });
+
+    let root = editor.allocate();
+    let parent_tree = editor.allocate();
+    let refs: Vec<ObjRef> = elements.iter().map(|_| editor.allocate()).collect();
+    for (at, element) in elements.iter().enumerate() {
+        let mut dict = Dict::new();
+        dict.insert(Name::TYPE, name(&editor, "StructElem"));
+        dict.insert(editor.intern(b"S"), name(&editor, "P"));
+        let parent = element.parent.map_or(root, |parent| refs[parent]);
+        dict.insert(editor.intern(b"P"), Object::Ref(parent));
+        dict.insert(editor.intern(b"Pg"), Object::Ref(page));
+        let mut kids: Vec<Object> = elements
+            .iter()
+            .zip(&refs)
+            .filter(|(kid, _)| kid.parent == Some(at))
+            .map(|(_, kid)| Object::Ref(*kid))
+            .collect();
+        for (key, entry) in claims.iter().enumerate() {
+            for (mcid, _) in entry.iter().enumerate().filter(|(_, e)| **e == at) {
+                let mcid = Object::Int(mcid as i64);
+                kids.push(match (key, form) {
+                    (0, _) | (_, None) => mcid,
+                    (_, Some(form)) => {
+                        let mut reference = Dict::new();
+                        reference.insert(Name::TYPE, name(&editor, "MCR"));
+                        reference.insert(editor.intern(b"Stm"), Object::Ref(form));
+                        reference.insert(editor.intern(b"MCID"), mcid);
+                        Object::Dict(reference)
+                    }
+                });
+            }
+        }
+        dict.insert(editor.intern(b"K"), Object::Array(kids));
+        let attributes: Vec<Object> = element
+            .attributes
+            .iter()
+            .map(|(owner, key, value)| attribute(&editor, owner, key, value))
+            .collect();
+        match <[Object; 1]>::try_from(attributes) {
+            Ok([one]) => {
+                dict.insert(editor.intern(b"A"), one);
+            }
+            // An array of them, each followed by its revision number.
+            Err(many) if !many.is_empty() => {
+                let revised = many.into_iter().flat_map(|a| [a, Object::Int(0)]);
+                dict.insert(editor.intern(b"A"), Object::Array(revised.collect()));
+            }
+            Err(_) => {}
+        }
+        match element.classes.as_slice() {
+            [] => {}
+            [one] => {
+                dict.insert(editor.intern(b"C"), name(&editor, one));
+            }
+            many => {
+                let many = many.iter().map(|class| name(&editor, class)).collect();
+                dict.insert(editor.intern(b"C"), Object::Array(many));
+            }
+        }
+        editor.put(refs[at], Object::Dict(dict));
+    }
+
+    let mut tree = Dict::new();
+    tree.insert(Name::TYPE, name(&editor, "StructTreeRoot"));
+    let top: Vec<Object> = elements
+        .iter()
+        .zip(&refs)
+        .filter(|(element, _)| element.parent.is_none())
+        .map(|(_, element)| Object::Ref(*element))
+        .collect();
+    tree.insert(editor.intern(b"K"), Object::Array(top));
+    tree.insert(editor.intern(b"ParentTree"), Object::Ref(parent_tree));
+    if !classes.is_empty() {
+        let mut map = Dict::new();
+        for (class, key, value) in classes {
+            let layout = attribute(&editor, "Layout", key, value);
+            map.insert(editor.intern(class.as_bytes()), layout);
+        }
+        tree.insert(editor.intern(b"ClassMap"), Object::Dict(map));
+    }
+    editor.put(root, Object::Dict(tree));
+
+    let mut nums = Vec::new();
+    for (key, entry) in claims.iter().enumerate() {
+        nums.push(Object::Int(key as i64));
+        let entry = entry.iter().map(|element| Object::Ref(refs[*element]));
+        nums.push(Object::Array(entry.collect()));
+    }
+    let mut numbers = Dict::new();
+    numbers.insert(editor.intern(b"Nums"), Object::Array(nums));
+    editor.put(parent_tree, Object::Dict(numbers));
+
+    let mut catalog_dict = editor
+        .get(catalog)
+        .and_then(|catalog| catalog.as_dict().cloned())
+        .expect("a catalog");
+    catalog_dict.insert(editor.intern(b"StructTreeRoot"), Object::Ref(root));
+    editor.put(catalog, Object::Dict(catalog_dict));
+    let mut page_dict = page_dict;
+    page_dict.insert(editor.intern(b"StructParents"), Object::Int(0));
+    editor.put(page, Object::Dict(page_dict));
+    if let Some(form) = form {
+        let stored = cos.get(form).expect("the form");
+        let stored = stored.as_stream().expect("a stream");
+        let mut dict = Dict::new();
+        for (key, value) in stored.dict.iter() {
+            if ![Name::FILTER, Name::DECODE_PARMS, Name::LENGTH].contains(key) {
+                dict.insert(*key, value.clone());
+            }
+        }
+        dict.insert(editor.intern(b"StructParents"), Object::Int(1));
+        let data = editor.stream_bytes(form).expect("the form's content");
+        editor.put_stream(form, StreamData { dict, data });
+    }
+    editor.save(&WriteOptions::default())
+}
+
+/// Left (1)'s line, `שלום 60.` typed in a left-to-right paragraph, as it is
+/// drawn: `60 םולש.`, which a right-to-left paragraph draws for `.שלום 60`.
+fn left_one() -> (String, String) {
+    (format!("{SHALOM} 60."), format!("60 {}.", reversed(SHALOM)))
+}
+
+/// A right-to-left paragraph's line opening with a dash, `— שלום`, as it is
+/// drawn: `םולש —`, which a left-to-right paragraph draws for `שלום —`.
+fn opening_dash() -> (String, String) {
+    (
+        format!("\u{2014} {SHALOM}"),
+        format!("{} \u{2014}", reversed(SHALOM)),
+    )
+}
+
+/// **A line its structure element declares left to right reads so**
+/// (ISO 32000-2 §14.8.5.4.2; ruling 14, H-152). Left (1)'s line is drawn as
+/// a right-to-left paragraph draws another text, and read off the line
+/// alone, its stop comes first. Its element's Layout attributes state
+/// `/WritingMode /LrTb`, and the line reads as typed, the stop last.
+#[test]
+fn a_line_its_element_declares_left_to_right_reads_its_stop_last() {
+    let (typed, drawn) = left_one();
+    let items = [sequence(0), Item::Run(0, visual(&drawn)), Item::Close];
+    let undeclared = extract_lines(declaring(stated_page(1, &items), &[], &[], &[]));
+    assert_ne!(undeclared[0].0, typed, "read off the line alone");
+    let bytes = declaring(
+        stated_page(1, &items),
+        &[Element::writing("LrTb")],
+        &[],
+        &[&[0]],
+    );
+    assert_eq!(extract_lines(bytes), [(typed, false)]);
+}
+
+/// **A right-to-left line opening with a dash, declared right to left,
+/// reads as typed**: the price of ruling 14's tie-break
+/// (`a_right_to_left_line_opening_with_a_dash_reads_the_dash_last`), which
+/// a page that says how it reads does not pay.
+#[test]
+fn a_right_to_left_line_opening_with_a_dash_declared_right_to_left_reads_as_typed() {
+    let (typed, drawn) = opening_dash();
+    let items = [sequence(0), Item::Run(0, visual(&drawn)), Item::Close];
+    let bytes = declaring(
+        stated_page(1, &items),
+        &[Element::writing("RlTb")],
+        &[],
+        &[&[0]],
+    );
+    assert_eq!(extract_lines(bytes), [(typed, true)]);
+}
+
+/// **A writing mode holds where an element inherits it or a class states
+/// it** (14.7.6.2, 14.8.5.4.2): a line whose element states nothing under
+/// one declaring `/RlTb`; one whose `/C` names a class that states no
+/// writing mode and then one that states `/RlTb`; one whose `/A` holds a
+/// Table attribute object and a Layout one, each with its revision number;
+/// and Left (1)'s line, whose `/A` states `/LrTb` and whose class states
+/// `/RlTb`, `/A` first.
+#[test]
+fn a_writing_mode_inherited_or_stated_by_a_class_holds() {
+    let (dash, dash_drawn) = opening_dash();
+    let (left, left_drawn) = left_one();
+    let mut items = Vec::new();
+    for (row, drawn) in [&dash_drawn, &dash_drawn, &dash_drawn, &left_drawn]
+        .into_iter()
+        .enumerate()
+    {
+        items.extend([
+            sequence(row as u32),
+            Item::Run(row, visual(drawn)),
+            Item::Close,
+        ]);
+    }
+    let elements = [
+        Element::writing("RlTb"),
+        Element {
+            parent: Some(0),
+            ..Element::default()
+        },
+        Element {
+            classes: vec!["Plain", "Verse"],
+            ..Element::default()
+        },
+        Element {
+            attributes: vec![("Table", "Scope", "Row"), ("Layout", "WritingMode", "RlTb")],
+            ..Element::default()
+        },
+        Element {
+            classes: vec!["Verse"],
+            ..Element::writing("LrTb")
+        },
+    ];
+    let classes = [
+        ("Plain", "Placement", "Block"),
+        ("Verse", "WritingMode", "RlTb"),
+    ];
+    let bytes = declaring(
+        stated_page(4, &items),
+        &elements,
+        &classes,
+        &[&[1, 2, 3, 4]],
+    );
+    assert_eq!(
+        extract_lines(bytes),
+        [
+            (dash.clone(), true),
+            (dash.clone(), true),
+            (dash, true),
+            (left, false),
+        ]
+    );
+}
+
+/// **A line the page does not declare whole reads as before**: one with a
+/// character drawn outside any sequence, one with a character whose
+/// sequence no element claims, two whose characters' elements declare two
+/// directions, each way round, and one whose element declares a vertical
+/// mode, which says nothing of the direction a line is read in.
+#[test]
+fn a_line_declared_in_part_or_two_ways_or_vertically_reads_as_before() {
+    let (_, drawn) = opening_dash();
+    let strokes = visual(&drawn);
+    let (word, dash) = strokes.split_at(5);
+    let items = [
+        sequence(0),
+        Item::Run(0, word.to_vec()),
+        Item::Close,
+        Item::Run(0, dash.to_vec()),
+        sequence(1),
+        Item::Run(1, word.to_vec()),
+        Item::Close,
+        sequence(9),
+        Item::Run(1, dash.to_vec()),
+        Item::Close,
+        sequence(2),
+        Item::Run(2, word.to_vec()),
+        Item::Close,
+        sequence(3),
+        Item::Run(2, dash.to_vec()),
+        Item::Close,
+        sequence(5),
+        Item::Run(3, word.to_vec()),
+        Item::Close,
+        sequence(6),
+        Item::Run(3, dash.to_vec()),
+        Item::Close,
+        sequence(4),
+        Item::Run(4, strokes.clone()),
+        Item::Close,
+    ];
+    let before = extract_lines(stated_page(5, &items));
+    let elements = [
+        Element::writing("RlTb"),
+        Element::writing("LrTb"),
+        Element::writing("TbRl"),
+    ];
+    let bytes = declaring(
+        stated_page(5, &items),
+        &elements,
+        &[],
+        &[&[0, 0, 0, 1, 2, 1, 0]],
+    );
+    let read = extract_lines(bytes);
+    assert_eq!(read, before);
+    assert!(read
+        .iter()
+        .all(|(text, rtl)| !rtl && text.ends_with('\u{2014}')));
+}
+
+/// **A line the stream split reads in its declared direction whole**: the
+/// dash of `— תפוחים` drawn first, at the right, and the word after it,
+/// more than three ems to its left, so the device cuts the line there, each
+/// in a sequence of its own. The pieces are one line once joined
+/// (`text_order`'s `rejoin_split_lines`), and the dash's piece, which holds
+/// no right-to-left character, is declared too.
+#[test]
+fn a_line_the_stream_split_reads_in_its_declared_direction() {
+    let typed = format!("\u{2014} {TAPUCHIM}");
+    let strokes = visual(&format!("{} \u{2014}", reversed(TAPUCHIM)));
+    let (word, dash) = strokes.split_at(7);
+    let items = [
+        sequence(0),
+        Item::Run(0, dash.to_vec()),
+        Item::Close,
+        sequence(1),
+        Item::Run(0, word.to_vec()),
+        Item::Close,
+    ];
+    let bytes = declaring(
+        stated_page(1, &items),
+        &[Element::writing("RlTb")],
+        &[],
+        &[&[0, 0]],
+    );
+    assert_eq!(extract_lines(bytes), [(typed, true)]);
+}
+
+/// **A sequence a form draws finds its element through the form's own
+/// `/StructParents`** (14.7.4.4): the form's `/MCID 0` belongs to an element
+/// declaring `/RlTb`, and the page's own `/MCID 0`, which it never draws, to
+/// one declaring `/LrTb`.
+#[test]
+fn a_sequence_a_form_draws_finds_its_element_through_the_forms_entry() {
+    let (typed, drawn) = opening_dash();
+    let items = [sequence(0), Item::Run(0, visual(&drawn)), Item::Close];
+    let bytes = declaring(
+        formed_page(1, &items),
+        &[Element::writing("LrTb"), Element::writing("RlTb")],
+        &[],
+        &[&[0], &[1]],
+    );
+    assert_eq!(extract_lines(bytes), [(typed, true)]);
 }

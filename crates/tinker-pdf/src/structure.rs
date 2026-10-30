@@ -30,11 +30,12 @@ use std::sync::Arc;
 
 use tinker_pdf_content::{PlainText, PlainTextOptions, TextChar, TextPage};
 use tinker_pdf_cos::{
-    limits, number_tree, pages as cos_pages, CosDocument, Dict, Name, ObjRef, Object,
-    PDF_1_7_NAMESPACE,
+    limits, number_tree, number_tree_lookup, pages as cos_pages, CosDocument, Dict, Name, ObjRef,
+    Object, PDF_1_7_NAMESPACE,
 };
 
 use crate::copies::{decodes_to_nothing, value, Copies};
+use tinker_pdf_shape::bidi::BaseDirection;
 
 /// How deep the `/K` tree may nest before a subtree is refused (14.7.2).
 ///
@@ -831,6 +832,212 @@ fn read_role_map(doc: &CosDocument, root: &Dict) -> BTreeMap<Vec<u8>, Vec<u8>> {
         out.insert(from.to_vec(), to.to_vec());
     }
     out
+}
+
+/// The direction each of `sequences` — `(stream, /MCID)` pairs on `page`, the
+/// stream `0` for the page's own and a form's packed reference otherwise —
+/// has its lines read in, where its structure element declares one: a
+/// horizontal `/WritingMode` (ISO 32000-2 §14.8.5.4.2) in the element's `/A`
+/// attribute objects or in the `/ClassMap` classes its `/C` names, `/A`
+/// first, the element's own or inherited along `/P`. `/LrTb` and `/LrBt` are
+/// left to right, `/RlTb` and `/RlBt` right to left; a vertical mode, or none
+/// anywhere above, declares nothing, and the sequence is not in the map.
+///
+/// Each sequence's element is found through the `/StructParents` of the
+/// stream that holds it and the `/ParentTree` (14.7.4.4), one entry looked
+/// up a stream rather than the tree read, and each element's answer is kept
+/// for the sequences that share it or an ancestor, so each element is read
+/// once, and no more of them on a page than one document may yield
+/// ([`MAX_STRUCTURE_ELEMENTS`]); past that, a sequence whose element is not
+/// yet read declares nothing.
+pub(crate) fn declared_directions(
+    doc: &CosDocument,
+    page: ObjRef,
+    sequences: &BTreeSet<(u64, u32)>,
+) -> BTreeMap<(u64, u32), BaseDirection> {
+    let mut out = BTreeMap::new();
+    if sequences.is_empty() {
+        return out;
+    }
+    let Some(catalog) = doc.catalog() else {
+        return out;
+    };
+    let root = doc.resolve_key(&catalog, doc.intern(b"StructTreeRoot"));
+    let Some(root) = root.as_dict() else {
+        return out;
+    };
+    let Some(parent_tree) = root.get_ref(doc.intern(b"ParentTree")) else {
+        return out;
+    };
+    let class_map = doc.resolve_key(root, doc.intern(b"ClassMap"));
+    let class_map = class_map.as_dict();
+    let struct_parents = doc.intern(b"StructParents");
+    let mut known: BTreeMap<ObjRef, Option<BaseDirection>> = BTreeMap::new();
+    let mut budget = MAX_STRUCTURE_ELEMENTS;
+    let mut stream: Option<(u64, Option<Arc<Object>>)> = None;
+    for &(at, mcid) in sequences {
+        if stream.as_ref().map(|(s, _)| *s) != Some(at) {
+            // 14.7.4.4: the page's, or the form's own, `/StructParents`.
+            let holder = if at == 0 {
+                Some(page)
+            } else {
+                u32::try_from(at >> 16).ok().map(|num| ObjRef {
+                    num,
+                    gen: u16::try_from(at & 0xffff).unwrap_or(0),
+                })
+            };
+            let entry = holder.and_then(|holder| {
+                let object = doc.get(holder).ok()?;
+                let dict = match (object.as_dict(), object.as_stream()) {
+                    (Some(dict), _) => dict,
+                    (None, Some(form)) => &form.dict,
+                    (None, None) => return None,
+                };
+                let key = doc.resolve_key(dict, struct_parents).as_int()?;
+                number_tree_lookup(doc, parent_tree, key).map(Arc::new)
+            });
+            stream = Some((at, entry));
+        }
+        let Some(entry) = stream.as_ref().and_then(|(_, entry)| entry.as_ref()) else {
+            continue;
+        };
+        let element = entry
+            .as_array()
+            .and_then(|items| items.get(usize::try_from(mcid).ok()?))
+            .and_then(Object::as_objref);
+        let Some(element) = element else {
+            continue;
+        };
+        if let Some(direction) = declared_by(doc, element, class_map, &mut known, &mut budget) {
+            out.insert((at, mcid), direction);
+        }
+    }
+    out
+}
+
+/// The direction `element` declares or inherits ([`declared_directions`]),
+/// kept in `known` for it and for each element the walk passed on the way,
+/// whose answer it is too: the mode an element above them states, or none
+/// where the parents end or run in a cycle that states none. Each element
+/// read costs one of `budget`; a walk the budget ends keeps nothing and
+/// declares nothing.
+fn declared_by(
+    doc: &CosDocument,
+    element: ObjRef,
+    class_map: Option<&Dict>,
+    known: &mut BTreeMap<ObjRef, Option<BaseDirection>>,
+    budget: &mut usize,
+) -> Option<BaseDirection> {
+    let parent = doc.intern(b"P");
+    let mut passed: Vec<ObjRef> = Vec::new();
+    let mut on_path: BTreeSet<ObjRef> = BTreeSet::new();
+    let mut at = Some(element);
+    let mut found = None;
+    while let Some(reference) = at {
+        if let Some(answer) = known.get(&reference) {
+            found = *answer;
+            break;
+        }
+        if !on_path.insert(reference) {
+            break;
+        }
+        *budget = budget.checked_sub(1)?;
+        passed.push(reference);
+        let Ok(object) = doc.get(reference) else {
+            break;
+        };
+        let Some(dict) = object.as_dict() else {
+            break;
+        };
+        match writing_mode(doc, dict, class_map) {
+            Some(mode) => {
+                found = mode;
+                break;
+            }
+            None => at = dict.get_ref(parent),
+        }
+    }
+    for reference in passed {
+        known.insert(reference, found);
+    }
+    found
+}
+
+/// The `/WritingMode` an element states itself: `Some(Some(direction))` for
+/// a horizontal one, `Some(None)` for a vertical one, which declares no
+/// direction a line is read in, and `None` where it states none, in its `/A`
+/// attribute objects (Layout's, `/O /Layout`) or then in the classes its `/C`
+/// names.
+fn writing_mode(
+    doc: &CosDocument,
+    element: &Dict,
+    class_map: Option<&Dict>,
+) -> Option<Option<BaseDirection>> {
+    let attributes = doc.resolve_key(element, doc.intern(b"A"));
+    if let Some(mode) = layout_writing_mode(doc, &attributes) {
+        return Some(mode);
+    }
+    let class_map = class_map?;
+    let classes = doc.resolve_key(element, doc.intern(b"C"));
+    let names: Vec<Arc<Object>> = match classes.as_array() {
+        Some(items) => items
+            .iter()
+            .take(limits::MAX_ARRAY_LEN)
+            .map(|item| doc.resolve(item))
+            .collect(),
+        None => vec![classes.clone()],
+    };
+    for name in &names {
+        let Some(name) = name.as_name() else {
+            continue;
+        };
+        let class = doc.resolve_key(class_map, name);
+        if let Some(mode) = layout_writing_mode(doc, &class) {
+            return Some(mode);
+        }
+    }
+    None
+}
+
+/// The `/WritingMode` of the first Layout attribute object that states one
+/// in `value`: an attribute object, a dictionary or a stream, or an array of
+/// them each optionally followed by a revision number (14.7.6).
+fn layout_writing_mode(doc: &CosDocument, value: &Object) -> Option<Option<BaseDirection>> {
+    let objects: Vec<Arc<Object>> = match value.as_array() {
+        Some(items) => items
+            .iter()
+            .take(limits::MAX_ARRAY_LEN)
+            .map(|item| doc.resolve(item))
+            .collect(),
+        None => vec![Arc::new(value.clone())],
+    };
+    let owner = doc.intern(b"O");
+    let writing_mode = doc.intern(b"WritingMode");
+    for object in &objects {
+        let attributes = match (object.as_dict(), object.as_stream()) {
+            (Some(attributes), _) => attributes,
+            (None, Some(stream)) => &stream.dict,
+            (None, None) => continue,
+        };
+        let layout = doc
+            .resolve_key(attributes, owner)
+            .as_name()
+            .and_then(|n| doc.name_bytes(n))
+            .is_some_and(|n| &*n == b"Layout");
+        if !layout {
+            continue;
+        }
+        let mode = doc.resolve_key(attributes, writing_mode);
+        let Some(mode) = mode.as_name().and_then(|n| doc.name_bytes(n)) else {
+            continue;
+        };
+        return Some(match &*mode {
+            b"LrTb" | b"LrBt" => Some(BaseDirection::LeftToRight),
+            b"RlTb" | b"RlBt" => Some(BaseDirection::RightToLeft),
+            _ => None,
+        });
+    }
+    None
 }
 
 /// The `/StructParents` key of each page, and how many content items each
@@ -2319,5 +2526,61 @@ trailer\n<< /Size 4 /Root 1 0 R >>\n%%EOF\n"
         let no_kids = tree("", "");
         assert_eq!(no_kids.element_count(), 0);
         assert!(no_kids.marked, "the /MarkInfo is still read");
+    }
+
+    /// `/MCID 0`'s element and its parent name each other as `/P` and state
+    /// nothing; `/MCID 1`'s is the foot of a chain of three hundred parents,
+    /// more than [`MAX_STRUCTURE_DEPTH`], whose head states `/RlTb`. The
+    /// cycle ends and declares nothing, and the chain's foot inherits its
+    /// head's mode, however long the chain.
+    #[test]
+    fn a_cycle_of_parents_declares_nothing_and_a_long_chain_its_heads_mode() {
+        let mut objects = String::from(
+            "6 0 obj\n<< /Nums [0 [10 0 R 20 0 R]] >>\nendobj\n\
+10 0 obj\n<< /Type /StructElem /S /P /P 11 0 R >>\nendobj\n\
+11 0 obj\n<< /Type /StructElem /S /P /P 10 0 R >>\nendobj\n",
+        );
+        for at in 20..319 {
+            let up = at + 1;
+            objects.push_str(&format!(
+                "{at} 0 obj\n<< /Type /StructElem /S /Span /P {up} 0 R >>\nendobj\n"
+            ));
+        }
+        objects.push_str(
+            "319 0 obj\n<< /Type /StructElem /S /P /P 5 0 R\n\
+             /A << /O /Layout /WritingMode /RlTb >> >>\nendobj\n",
+        );
+        let doc = document("/ParentTree 6 0 R /K [319 0 R 10 0 R]", &objects);
+        let sequences = BTreeSet::from([(0, 0), (0, 1)]);
+        assert_eq!(
+            declared_directions(&doc, ObjRef::new(3, 0), &sequences),
+            BTreeMap::from([((0, 1), BaseDirection::RightToLeft)])
+        );
+    }
+
+    /// Each element read costs one of the budget: a walk the budget ends
+    /// keeps nothing and declares nothing, and one it covers keeps every
+    /// element it passed.
+    #[test]
+    fn a_walk_the_budget_ends_keeps_nothing() {
+        let doc = document(
+            "/K [32 0 R]",
+            "30 0 obj\n<< /Type /StructElem /S /Span /P 31 0 R >>\nendobj\n\
+31 0 obj\n<< /Type /StructElem /S /Span /P 32 0 R >>\nendobj\n\
+32 0 obj\n<< /Type /StructElem /S /P /P 5 0 R\n\
+   /A [<< /O /Table /Scope /Row >> 0 << /O /Layout /WritingMode /LrTb >> 0] >>\nendobj\n",
+        );
+        let mut known = BTreeMap::new();
+        let mut budget = 2;
+        let foot = ObjRef::new(30, 0);
+        assert_eq!(declared_by(&doc, foot, None, &mut known, &mut budget), None);
+        assert!(known.is_empty());
+        let mut budget = 3;
+        assert_eq!(
+            declared_by(&doc, foot, None, &mut known, &mut budget),
+            Some(BaseDirection::LeftToRight)
+        );
+        assert_eq!(known.len(), 3);
+        assert_eq!(budget, 0);
     }
 }

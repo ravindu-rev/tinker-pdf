@@ -437,14 +437,16 @@ the reader takes each where it is said.
    its `/C` names, `/A` first. The reader finds the element of each
    sequence on the page through the page's `/StructParents` and the
    `/ParentTree` (14.7.4.4), and of a form's sequences through the form's own
-   `/StructParents`; only for a page that holds a line with a right-to-left
-   character, and only for the identifiers on it. A line every character of
-   which that draws something belongs to sequences whose elements declare
-   one horizontal direction is read in it: `bidi::logical_order` for that
-   direction, the paragraph's direction not read off the line and no
-   tie-break asked. A line with a character no element claims, or two
-   directions, reads as before; a vertical writing mode decides nothing,
-   since a vertical line is not reordered.
+   `/StructParents`; only for a page with a block that holds a right-to-left
+   character, and only for the identifiers in such a block, whose pieces of a
+   line the stream split are joined before the line is read. A line every
+   character of which that draws something belongs to sequences whose
+   elements declare one horizontal direction is read in it:
+   `bidi::logical_order` for that direction, the paragraph's direction not
+   read off the line and no tie-break asked. A line with a character no
+   element claims, or two directions, reads as before; a vertical writing
+   mode decides nothing, its element's or an ancestor's, since a vertical
+   line is not reordered.
 2. *Stated text.* An `/ActualText` on a marked-content property list
    (14.9.4), with an `/MCID` or without, replaces the glyphs it encloses in
    `Page::text`, and so in every view that reads it: `TextPage::search`,
@@ -494,7 +496,8 @@ it.
 marked content reads that text in `Page::text` as well as in the structured
 view (`tagged_pdf.rs` pins the flat extraction reading it); one
 whose declared direction its text contradicts reads in the declared one.
-The lookup reads the parent tree once a page, for a page that holds
+The lookup reads one entry of the parent tree a stream, found by its
+`/Limits`, and each element once, for a page with a block that holds
 right-to-left text. The writer's output grows by an attribute on each
 element that holds right-to-left text and a span around each stated line.
 What the suites read and what it costs in time is CD-19.45's to measure.

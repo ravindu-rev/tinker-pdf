@@ -2589,9 +2589,19 @@ impl Page {
         if options.content_order {
             text_order::state_in_content_order(&mut page);
         } else {
-            text_order::into_logical_order(&mut page);
+            self.put_in_logical_order(&mut page);
         }
         page
+    }
+
+    /// `page`, this page's text, put into logical order (ruling 14), each
+    /// line in the direction its structure elements declare where they
+    /// declare one (`structure::declared_directions`), which is looked up
+    /// only for a page with a line that holds a right-to-left character.
+    pub(crate) fn put_in_logical_order(&self, page: &mut TextPage) {
+        let sequences = text_order::sequences_read(page);
+        let declared = structure::declared_directions(&self.doc, self.inner.reference, &sequences);
+        text_order::into_logical_order(page, Some(text_order::Declared::BySequence(&declared)));
     }
 
     /// What the content stream showed, in the order it showed it.

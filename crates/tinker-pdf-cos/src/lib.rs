@@ -164,7 +164,8 @@ pub use tiff_embed::{tiff_image, tiff_image_directory, TiffImageData, TiffRoute}
 /// its content key and every recipient's padding from.
 pub use tinker_pdf_crypto::EntropySource;
 pub use trees::{
-    name_tree, name_tree_lookup, number_tree, write_name_tree, write_number_tree, TreeWriteError,
+    name_tree, name_tree_lookup, number_tree, number_tree_lookup, write_name_tree,
+    write_number_tree, TreeWriteError,
 };
 pub use validate::{kind_counts, tier_counts, validate, Defect, DefectKind, Tier};
 pub use viewer::{

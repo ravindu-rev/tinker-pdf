@@ -118,7 +118,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tinker_pdf_content::{Quad, TextBlock, TextChar, TextLine, TextPage, WritingMode};
-use tinker_pdf_shape::bidi::{drawn_reading, faces_outward, BaseDirection, DrawnReading};
+use tinker_pdf_shape::bidi::{
+    drawn_reading, faces_outward, logical_order, BaseDirection, DrawnReading,
+};
 use tinker_pdf_shape::unicode::{bidi_class, BidiClass};
 
 /// How [`crate::Page::text_with`] orders a page's lines.
@@ -135,23 +137,77 @@ pub struct TextOptions {
     pub content_order: bool,
 }
 
-/// Puts every line of `page` into logical order, and returns how many lines it
+/// What a page says of the direction its lines are read in (ISO 32000-2
+/// §14.8.5.4.2): each marked sequence's, by `(stream, /MCID)`, where its
+/// structure element declares one (`structure::declared_directions`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Declared<'a> {
+    /// Each sequence's, where its element declares one.
+    BySequence(&'a BTreeMap<(u64, u32), BaseDirection>),
+}
+
+impl Declared<'_> {
+    /// The direction `chars` are read in: the one every character of them
+    /// that draws something belongs to a sequence declaring, where all agree.
+    fn of(self, chars: &[TextChar]) -> Option<BaseDirection> {
+        match self {
+            Declared::BySequence(declared) => {
+                let mut found = None;
+                for c in chars.iter().filter(|c| !c.text.trim().is_empty()) {
+                    let direction = c.mcid.and_then(|mcid| declared.get(&(c.stream, mcid)))?;
+                    if found.is_some_and(|seen| seen != *direction) {
+                        return None;
+                    }
+                    found = Some(*direction);
+                }
+                found
+            }
+        }
+    }
+}
+
+/// Puts every line of `page` into logical order, each in the direction its
+/// page declares where it declares one, and returns how many lines it
 /// changed.
-pub(crate) fn into_logical_order(page: &mut TextPage) -> usize {
-    in_logical_order(page, None)
+pub(crate) fn into_logical_order(page: &mut TextPage, declared: Option<Declared<'_>>) -> usize {
+    in_logical_order(page, None, declared)
 }
 
 /// [`into_logical_order`], asking `known` for each line's reading before
 /// [`drawn_reading`] searches for it, and keeping what that finds there
 /// ([`Readings`]): for a caller that reads lines of the same characters over
 /// and over.
-pub(crate) fn into_logical_order_knowing(page: &mut TextPage, known: &mut Readings) -> usize {
-    in_logical_order(page, Some(known))
+pub(crate) fn into_logical_order_knowing(
+    page: &mut TextPage,
+    known: &mut Readings,
+    declared: Option<Declared<'_>>,
+) -> usize {
+    in_logical_order(page, Some(known), declared)
+}
+
+/// The `(stream, /MCID)` of each character in a block of `page` that holds a
+/// right-to-left character: the sequences whose declared direction
+/// [`into_logical_order`] may read a line in. The whole block's, as the lines
+/// it reads are joined within a block where the stream split them
+/// ([`rejoin_split_lines`]), a piece with no right-to-left character among
+/// them.
+pub(crate) fn sequences_read(page: &TextPage) -> BTreeSet<(u64, u32)> {
+    page.blocks
+        .iter()
+        .filter(|block| block.lines.iter().any(|line| holds_rtl(&line.chars)))
+        .flat_map(|block| block.lines.iter())
+        .flat_map(|line| line.chars.iter())
+        .filter_map(|c| c.mcid.map(|mcid| (c.stream, mcid)))
+        .collect()
 }
 
 /// [`into_logical_order`], each line's reading asked of `known` where there
 /// is one.
-fn in_logical_order(page: &mut TextPage, mut known: Option<&mut Readings>) -> usize {
+fn in_logical_order(
+    page: &mut TextPage,
+    mut known: Option<&mut Readings>,
+    declared: Option<Declared<'_>>,
+) -> usize {
     let mut changed = 0usize;
     let TextPage { blocks, stated, .. } = page;
     let mut reads: Vec<Vec<Option<Read>>> = Vec::with_capacity(blocks.len());
@@ -166,11 +222,12 @@ fn in_logical_order(page: &mut TextPage, mut known: Option<&mut Readings>) -> us
     for (block, mut read) in blocks.iter_mut().zip(reads) {
         for (at, line) in block.lines.iter_mut().enumerate() {
             let read = read.get_mut(at).and_then(Option::take);
+            let direction = declared.and_then(|declared| declared.of(&line.chars));
             let moved = match known.as_deref_mut() {
-                Some(known) => {
-                    logical_line_reading(line, read, stated, |visual| known.reading(visual))
-                }
-                None => logical_line(line, read, stated),
+                Some(known) => logical_line_reading(line, read, stated, direction, |visual| {
+                    known.reading(visual, direction)
+                }),
+                None => logical_line(line, read, stated, direction),
             };
             if moved {
                 changed += 1;
@@ -436,30 +493,32 @@ fn first_strong_rtl(text: &str) -> bool {
 /// searched each time.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Readings {
-    /// Each line of units searched, by its [`fingerprint`]: its units' text,
-    /// where each unit ends in that text, and its reading.
-    found: BTreeMap<u64, Vec<(String, Vec<usize>, DrawnReading)>>,
+    /// Each line of units searched, by its [`fingerprint`].
+    found: BTreeMap<u64, Vec<Searched>>,
 }
 
+/// A line of units [`Readings`] searched: its units' text, where each unit
+/// ends in that text, the direction declared for it, and its reading.
+type Searched = (String, Vec<usize>, Option<BaseDirection>, DrawnReading);
+
 impl Readings {
-    /// What [`drawn_reading`] finds for `visual`: what it found for these
-    /// units before, or else what it finds now, kept.
-    fn reading(&mut self, visual: &[&str]) -> DrawnReading {
+    /// What [`search`] finds for `visual` read in `declared`: what it found
+    /// for these units so before, or else what it finds now, kept.
+    fn reading(&mut self, visual: &[&str], declared: Option<BaseDirection>) -> DrawnReading {
         let lines = self.found.entry(fingerprint(visual)).or_default();
-        if let Some((_, _, reading)) = lines
-            .iter()
-            .find(|(text, ends, _)| holds_units(text, ends, visual))
-        {
+        if let Some((_, _, _, reading)) = lines.iter().find(|(text, ends, direction, _)| {
+            *direction == declared && holds_units(text, ends, visual)
+        }) {
             return reading.clone();
         }
-        let reading = search(visual);
+        let reading = search(visual, declared);
         let mut text = String::new();
         let mut ends = Vec::with_capacity(visual.len());
         for unit in visual {
             text.push_str(unit);
             ends.push(text.len());
         }
-        lines.push((text, ends, reading.clone()));
+        lines.push((text, ends, declared, reading.clone()));
         reading
     }
 }
@@ -488,13 +547,22 @@ fn holds_units(text: &str, ends: &[usize], visual: &[&str]) -> bool {
             .is_some()
 }
 
-/// [`drawn_reading`]'s search for a line's reading. Counted only under
-/// `cfg(test)`, where the tests hold how often the read-back searches by
-/// count ([`Readings`]), not by a clock.
-fn search(visual: &[&str]) -> DrawnReading {
+/// [`drawn_reading`]'s search for a line's reading, or in a direction the
+/// page declares, [`logical_order`]'s for it, no tie-break asked: the page's
+/// word, not P2 read off the line. Counted only under `cfg(test)`, where the
+/// tests hold how often the read-back searches by count ([`Readings`]), not
+/// by a clock.
+fn search(visual: &[&str], declared: Option<BaseDirection>) -> DrawnReading {
     #[cfg(test)]
     SEARCHES.with(|searches| searches.set(searches.get().saturating_add(1)));
-    drawn_reading(visual)
+    match declared {
+        Some(direction) => DrawnReading {
+            direction,
+            order: logical_order(visual, direction),
+            turned_by_brackets: false,
+        },
+        None => drawn_reading(visual),
+    }
 }
 
 /// Joins consecutive lines of one block that the content stream's order split
@@ -703,7 +771,7 @@ fn turned_whole(pieces: &[TextLine]) -> Option<Read> {
     if !faces_outward(&visual) {
         return None;
     }
-    let reading = search(&visual);
+    let reading = search(&visual, None);
     let turned = reading.turned_by_brackets;
     turned.then_some(Read { units, reading })
 }
@@ -1057,18 +1125,27 @@ fn drawn_units(chars: &[TextChar]) -> Units {
 }
 
 /// Puts one line into logical order, reading it as `read` says where
-/// [`rejoin_split_lines`] already read it, and each `/ActualText` span it
-/// holds in its text (`stated`). Returns whether anything moved.
-fn logical_line(line: &mut TextLine, read: Option<Read>, stated: &[String]) -> bool {
-    logical_line_reading(line, read, stated, search)
+/// [`rejoin_split_lines`] already read it, in `declared` where its page
+/// declares a direction for it, and each `/ActualText` span it holds in its
+/// text (`stated`). Returns whether anything moved.
+fn logical_line(
+    line: &mut TextLine,
+    read: Option<Read>,
+    stated: &[String],
+    declared: Option<BaseDirection>,
+) -> bool {
+    logical_line_reading(line, read, stated, declared, |visual| {
+        search(visual, declared)
+    })
 }
 
 /// [`logical_line`], a line it reads read by `reading_of`, which finds what
-/// [`drawn_reading`] finds ([`Readings`]).
+/// [`search`] finds ([`Readings`]).
 fn logical_line_reading(
     line: &mut TextLine,
     read: Option<Read>,
     stated: &[String],
+    declared: Option<BaseDirection>,
     reading_of: impl FnOnce(&[&str]) -> DrawnReading,
 ) -> bool {
     let held = line.chars.iter().any(|c| c.stated.is_some());
@@ -1087,15 +1164,23 @@ fn logical_line_reading(
         let glyphs: Vec<&TextChar> = line.chars.iter().collect();
         line.chars = stated_chars(text, &glyphs, span);
         line.text = line.chars.iter().map(|c| c.text.as_str()).collect();
-        line.rtl = first_strong_rtl(&line.text);
+        line.rtl = declared.map_or_else(
+            || first_strong_rtl(&line.text),
+            |direction| direction == BaseDirection::RightToLeft,
+        );
         return true;
     }
     let count = line.chars.len();
 
     // Steps 3 and 4: the paragraph's direction, and the order the visual line
     // is read in — found together, one search in the direction chosen. A span
-    // holding part of the line is one unit of it, read as U+FFFC.
-    let read = if held { None } else { read };
+    // holding part of the line is one unit of it, read as U+FFFC. A reading
+    // the join found reads off the line, which a declared direction is not.
+    let read = if held || declared.is_some() {
+        None
+    } else {
+        read
+    };
     let Read { units, reading } = read.unwrap_or_else(|| {
         let mut units = drawn_units(&line.chars);
         if held {
@@ -1202,7 +1287,7 @@ mod tests {
             vec![ch(GIMEL, 0.0, 5.0), ch(BET, 5.0, 5.0), ch(ALEF, 10.0, 5.0)],
             true,
         );
-        assert!(logical_line(&mut l, None, &[]));
+        assert!(logical_line(&mut l, None, &[], None));
         assert_eq!(l.text, format!("{ALEF}{BET}{GIMEL}"));
     }
 
@@ -1214,7 +1299,7 @@ mod tests {
             true,
         );
         assert!(
-            !logical_line(&mut l, None, &[]),
+            !logical_line(&mut l, None, &[], None),
             "nothing should have moved"
         );
         assert_eq!(l.text, format!("{ALEF}{BET}{GIMEL}"));
@@ -1239,7 +1324,7 @@ mod tests {
         ];
         for chars in [after, before] {
             let mut l = line(chars, true);
-            logical_line(&mut l, None, &[]);
+            logical_line(&mut l, None, &[], None);
             assert_eq!(l.text, format!("{ALEF}{BET}{QAMATS}{GIMEL}"));
         }
     }
@@ -1258,7 +1343,7 @@ mod tests {
             ],
             true,
         );
-        logical_line(&mut l, None, &[]);
+        logical_line(&mut l, None, &[], None);
         assert_eq!(l.text, format!("{ALEF}{BET} 12"));
     }
 
@@ -1267,7 +1352,7 @@ mod tests {
         // Out of order on purpose: a line with no right-to-left character is
         // left as collected, even where its geometry disagrees with its order.
         let mut l = line(vec![ch("b", 5.0, 5.0), ch("a", 0.0, 5.0)], false);
-        assert!(!logical_line(&mut l, None, &[]));
+        assert!(!logical_line(&mut l, None, &[], None));
         assert_eq!(l.text, "ba");
     }
 
@@ -1288,7 +1373,7 @@ mod tests {
             ],
             true,
         );
-        assert!(logical_line(&mut l, None, &[]));
+        assert!(logical_line(&mut l, None, &[], None));
         assert_eq!(l.text, format!("a {ALEF}{BET}{GIMEL} b"));
         assert!(!l.rtl, "the line was read left to right");
     }
@@ -1309,7 +1394,7 @@ mod tests {
             ],
             true,
         );
-        assert!(logical_line(&mut quoted, None, &[]));
+        assert!(logical_line(&mut quoted, None, &[], None));
         assert_eq!(quoted.text, format!("{ALEF}{BET}{GIMEL},"));
         assert!(!quoted.rtl, "the line was read left to right");
 
@@ -1322,7 +1407,7 @@ mod tests {
             ],
             false,
         );
-        assert!(logical_line(&mut own, None, &[]));
+        assert!(logical_line(&mut own, None, &[], None));
         assert_eq!(own.text, format!("{ALEF}{BET}{GIMEL},"));
         assert!(own.rtl, "the line was read right to left");
     }
@@ -1337,7 +1422,7 @@ mod tests {
             .map(|(i, t)| ch(t, i as f64 * 5.0, 5.0))
             .collect();
         let mut l = line(drawn, false);
-        logical_line(&mut l, None, &[]);
+        logical_line(&mut l, None, &[], None);
         assert_eq!(l.text, typed);
         assert!(l.rtl);
     }
@@ -1349,7 +1434,7 @@ mod tests {
             .chain(std::iter::once(ch(ALEF, 0.0, 5.0)))
             .collect();
         let mut l = line(chars, true);
-        logical_line(&mut l, None, &[]);
+        logical_line(&mut l, None, &[], None);
         assert_eq!(l.chars.len(), 20_001, "no character may be lost");
     }
 
@@ -1384,7 +1469,7 @@ mod tests {
             lines: split_in_three(),
             quad: ch("a", 0.0, 35.0).quad,
         });
-        into_logical_order(&mut page);
+        into_logical_order(&mut page, None);
         let lines = &page.blocks[0].lines;
         assert_eq!(lines.len(), 1, "the three pieces are one line");
         assert_eq!(lines[0].text, format!("a {ALEF}{BET}{GIMEL} b"));
@@ -1435,7 +1520,7 @@ mod tests {
             lines: vec![copy(0.0), copy(0.5)],
             quad: ch(ALEF, 10.0, 15.5).quad,
         });
-        into_logical_order(&mut page);
+        into_logical_order(&mut page, None);
         let texts: Vec<&str> = page.blocks[0]
             .lines
             .iter()
@@ -1498,7 +1583,7 @@ mod tests {
         });
 
         LOOKS.with(|looks| looks.set(0));
-        into_logical_order(&mut page);
+        into_logical_order(&mut page, None);
         let looks = LOOKS.with(core::cell::Cell::get);
 
         let bound = 8 * characters;
@@ -1703,7 +1788,7 @@ mod tests {
             ],
             quad: ch("a", 0.0, 30.0).quad,
         });
-        into_logical_order(&mut page);
+        into_logical_order(&mut page, None);
         let lines = &page.blocks[0].lines;
         assert_eq!(lines.len(), 1, "the three pieces are one line");
         assert_eq!(lines[0].text, format!("(ab){ALEF}{BET}"));
@@ -1737,7 +1822,7 @@ mod tests {
         ];
         let whole = join(pieces.clone());
         let mut read_whole = whole.clone();
-        logical_line(&mut read_whole, None, &[]);
+        logical_line(&mut read_whole, None, &[], None);
         assert!(
             !read_whole.text.starts_with(')'),
             "read whole, the `)` does not open the line: {:?}",
@@ -1748,7 +1833,7 @@ mod tests {
             lines: pieces,
             quad: whole.quad,
         });
-        into_logical_order(&mut page);
+        into_logical_order(&mut page, None);
         let lines = &page.blocks[0].lines;
         let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(texts, ["de".to_string(), format!("). {ALEF}{BET}.")]);
@@ -1798,12 +1883,43 @@ mod tests {
         let mut known = Readings::default();
         SEARCHES.with(|searches| searches.set(0));
         for visual in lines.iter().chain(lines.iter()) {
-            assert_eq!(known.reading(visual), drawn_reading(visual), "{visual:?}");
+            assert_eq!(
+                known.reading(visual, None),
+                drawn_reading(visual),
+                "{visual:?}"
+            );
         }
         assert_eq!(
             SEARCHES.with(core::cell::Cell::get),
             lines.len(),
             "each line of units searched once"
+        );
+    }
+
+    /// **A line read in a direction its page declares is kept apart from
+    /// the same units read off the line** (H-152): [`Readings`] hands back,
+    /// for each direction asked, what [`search`] found in it, so a line a
+    /// page declares and the same line on a page that declares nothing are
+    /// each read their own way, and each searched once.
+    #[test]
+    fn a_line_read_in_a_declared_direction_is_kept_apart() {
+        // `— אב` as a right-to-left paragraph draws it, `בא —`, which read
+        // off the line keeps its dash last.
+        let visual: &[&str] = &[BET, ALEF, " ", "\u{2014}"];
+        let declared = logical_order(visual, BaseDirection::RightToLeft);
+        assert_ne!(drawn_reading(visual).order, declared);
+        let mut known = Readings::default();
+        SEARCHES.with(|searches| searches.set(0));
+        for _ in 0..2 {
+            assert_eq!(known.reading(visual, None), drawn_reading(visual));
+            let reading = known.reading(visual, Some(BaseDirection::RightToLeft));
+            assert_eq!(reading.direction, BaseDirection::RightToLeft);
+            assert_eq!(reading.order, declared);
+        }
+        assert_eq!(
+            SEARCHES.with(core::cell::Cell::get),
+            2,
+            "each direction searched once"
         );
     }
 
@@ -1876,8 +1992,8 @@ mod tests {
             let mut afresh = page.clone();
             let mut knowing = page.clone();
             assert_eq!(
-                into_logical_order_knowing(&mut knowing, &mut known),
-                into_logical_order(&mut afresh)
+                into_logical_order_knowing(&mut knowing, &mut known, None),
+                into_logical_order(&mut afresh, None)
             );
             assert_eq!(
                 format!("{:?}", knowing.blocks),

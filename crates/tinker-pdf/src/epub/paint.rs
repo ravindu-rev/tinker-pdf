@@ -1910,7 +1910,11 @@ impl<'a> Fonts<'a> {
         }
         let mut page = device.finish();
         let over = Overprint::of(&page);
-        crate::text_order::into_logical_order_knowing(&mut page, &mut self.readings.borrow_mut());
+        crate::text_order::into_logical_order_knowing(
+            &mut page,
+            &mut self.readings.borrow_mut(),
+            None,
+        );
         Some((
             page.blocks
                 .iter()

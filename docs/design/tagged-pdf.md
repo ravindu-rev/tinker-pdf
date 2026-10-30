@@ -45,9 +45,10 @@ output through a general tagging API ("The writer" below).
   document's tree for an untagged one is [ROADMAP](../ROADMAP.md) row SD-07;
   reading reports what the file states.
 - **The basic layout model** (14.8.3) and structure attributes (14.8.5)
-  beyond the `/Table` owner's: `/Placement` and `/BBox` are parsed no further
-  than storage requires, and attributes reached through `/C` and the
-  `/ClassMap` are not read. [ROADMAP](../ROADMAP.md) row SD-08.
+  beyond the `/Table` owner's and the Layout owner's `/WritingMode`:
+  `/Placement` and `/BBox` are parsed no further than storage requires, and
+  Table attributes reached through `/C` and the `/ClassMap` are not read.
+  [ROADMAP](../ROADMAP.md) row SD-08.
 - **Assistive-technology integration.** This is bytes-to-values reading; a
   screen-reader bridge belongs to an embedder. The accessibility tree a bridge
   consumes is [ROADMAP](../ROADMAP.md) row SD-09.
@@ -121,6 +122,14 @@ element claims are reported as an orphan count, not silently appended — the
 parent tree (14.7.4.4) is read to cross-check that count, and a
 disagreement between `/ParentTree` and the `/K` walk is a warning naming
 the element (ruling 10), with the `/K` walk winning.
+
+The flat extraction reads the tree for one thing: the direction a line is
+read in, where its sequences' elements declare one (14.8.5.4.2). A char's
+`(stream, MCID)` finds its element through that stream's `/StructParents`
+entry of the `/ParentTree`, looked up by `/Limits`
+(`tinker_pdf_cos::number_tree_lookup`) rather than walked, and the
+element's `/WritingMode` is read, or inherited along `/P`
+(`structure::declared_directions`).
 
 ### Measurement is the corpus harness
 
@@ -240,7 +249,10 @@ The tagging API, family by family:
   writes one attribute object owned by `/Table` directly in `/A`. The reader
   reads `/A` (a dictionary, a stream, or an array with revision numbers) for
   the `/Table` owner into the same `TableAttributes` type, and `/C` classes
-  are not read.
+  are not read for it. The Layout owner's `/WritingMode` is, in `/A` and then
+  in the classes `/C` names, inherited along `/P`, for the direction a line
+  is read in (`structure::declared_directions`,
+  [content-and-text](../features/content-and-text.md)).
 - **The EPUB's pictures and languages.** The structure emission is in
   `epub/tagging.rs`. `<img alt>` is a `/Figure`'s `/Alt`, an empty `alt` an
   artifact; a picture is drawn in painting order and placed in reading order
@@ -297,8 +309,8 @@ The tagging API, family by family:
 Not written, each named in a refusal table rather than absent: a link wrapped
 across lines is one annotation per rectangle rather than ISO 32000-2 erratum
 133's one annotation with `/QuadPoints`
-([content-and-text](../features/content-and-text.md)); attributes reached
-through `/C` and the `/ClassMap` are not read (the same); an empty EPUB table
+([content-and-text](../features/content-and-text.md)); Table attributes
+reached through `/C` and the `/ClassMap` are not read (the same); an empty EPUB table
 cell is not in the tree ([epub](../features/epub.md)).
 
 ## Dependencies

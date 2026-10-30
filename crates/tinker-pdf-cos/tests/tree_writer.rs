@@ -3,18 +3,18 @@
 //!
 //! The readers are the adjudicators here, and they were written first and
 //! against other producers' files: `name_tree` and `number_tree` walk every
-//! leaf, `name_tree_lookup` descends by `/Limits` and skips a subtree whose
-//! range excludes the key. A tree whose `/Limits` were wrong would still read
-//! back whole through the first two and lose entries through the third, so
-//! every entry is looked up as well as collected.
+//! leaf, `name_tree_lookup` and `number_tree_lookup` descend by `/Limits` and
+//! skip a subtree whose range excludes the key. A tree whose `/Limits` were
+//! wrong would still read back whole through the walks and lose entries
+//! through the lookups, so every entry is looked up as well as collected.
 
 use std::sync::Arc;
 
 use proptest::prelude::*;
 use tinker_pdf_cos::limits::MAX_TREE_ENTRIES;
 use tinker_pdf_cos::{
-    name_tree, name_tree_lookup, number_tree, CosDocument, DocumentBuilder, DocumentEditor, Name,
-    ObjRef, Object, TreeWriteError, WriteMode, WriteOptions,
+    name_tree, name_tree_lookup, number_tree, number_tree_lookup, CosDocument, DocumentBuilder,
+    DocumentEditor, Name, ObjRef, Object, TreeWriteError, WriteMode, WriteOptions,
 };
 
 fn blank() -> Arc<CosDocument> {
@@ -165,6 +165,20 @@ fn check_numbers(keys: &[i64]) {
     expected.sort_by_key(|entry| entry.0);
     assert_well_formed(&doc, root, b"Nums", true);
     assert_eq!(number_tree(&doc, root), expected);
+    for (key, value) in &expected {
+        assert_eq!(
+            number_tree_lookup(&doc, root, *key).as_ref(),
+            Some(value),
+            "found by /Limits: {key}"
+        );
+    }
+    // The first key past the least that the tree does not hold: between two
+    // of its entries where the keys leave a gap.
+    let held = |key: &i64| expected.binary_search_by_key(key, |entry| entry.0).is_ok();
+    let first = expected.first().map_or(0, |entry| entry.0);
+    if let Some(absent) = (first..=i64::MAX).find(|key| !held(key)) {
+        assert_eq!(number_tree_lookup(&doc, root, absent), None, "{absent}");
+    }
     assert!(doc.warnings().is_empty(), "{:?}", doc.warnings());
 }
 
