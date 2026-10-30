@@ -4715,3 +4715,86 @@ fn two_cells_are_read_back_as_a_reader_parts_them_on_the_page() {
         wrong.join("\n")
     );
 }
+
+/// The span of the glyphs on page one of `book` that draw any of `letters`,
+/// left edge to right edge, in content order.
+fn span_of(book: &[u8], letters: &str) -> Option<(f64, f64)> {
+    let doc = Document::open(book.to_vec()).expect("the book opens");
+    let drawn = doc.page(0).expect("a page").text_with(&TextOptions {
+        content_order: true,
+    });
+    let mut span: Option<(f64, f64)> = None;
+    for c in drawn.lines().iter().flat_map(|line| line.chars.iter()) {
+        if !c.text.chars().any(|ch| letters.contains(ch)) {
+            continue;
+        }
+        let (x0, _, x1, _) = c.quad.bounds();
+        let s = span.get_or_insert((x0, x1));
+        *s = (s.0.min(x0), s.1.max(x1));
+    }
+    span
+}
+
+/// **Each atomic inline is one unit of its line's order, wherever layout set
+/// it** (ROADMAP CD-19): layout records every atomic inline its lines set
+/// (`tinker_pdf_layout::Page::atomics`), and the painter orders the unit it
+/// set with the line's runs (`paint::visual_lines`). In a right-to-left
+/// paragraph, an inline block its margin sets apart at the line's end stands
+/// left of the words before it; an empty inline block, which paints nothing
+/// and holds no text, keeps its place between the words either side of it;
+/// and a line of two inline blocks and nothing else reads its first at the
+/// right. The same shapes in Latin, with no right-to-left character, are
+/// left where layout set them (a guard).
+#[test]
+fn an_atomic_inline_is_one_unit_of_its_line_wherever_layout_set_it() {
+    // At `16px` an em is twelve points on the page. Each block has a width:
+    // a right-to-left inline block of `width: auto` is as wide as its line.
+    let em = 12.0;
+    let style = "p { font-size: 16px } \
+                 .m { display: inline-block; width: 4em; margin-left: 2em } \
+                 .e { display: inline-block; width: 3em } \
+                 .b { display: inline-block; width: 4em }";
+    let mut wrong = Vec::new();
+    let span = |language: &str, body: &str, letters: &str| {
+        span_of(&styled_book(language, style, body), letters)
+    };
+    // An inline block its margin sets apart at its line's end.
+    let body = "<p dir=\"rtl\">שלום עולם <span class=\"m\">אבג</span></p>";
+    match (span("he", body, "שלוםעולם"), span("he", body, "אבג")) {
+        (Some(words), Some(block)) if block.1 <= words.0 + 0.5 => {}
+        other => wrong.push(format!(
+            "a block its margin sets apart at the line's end: {other:?}"
+        )),
+    }
+    // An empty inline block between two words.
+    let body = "<p dir=\"rtl\">שמש <span class=\"e\"></span> גדר</p>";
+    match (span("he", body, "שמש"), span("he", body, "גדר")) {
+        (Some(first), Some(second)) if second.1 + 3.0 * em <= first.0 + 0.5 => {}
+        other => wrong.push(format!("an empty block between two words: {other:?}")),
+    }
+    // A line of two inline blocks and nothing else.
+    let body = "<p dir=\"rtl\"><span class=\"b\">אבג</span><span class=\"b\">דהו</span></p>";
+    match (span("he", body, "אבג"), span("he", body, "דהו")) {
+        (Some(first), Some(second)) if second.1 <= first.0 + 0.5 => {}
+        other => wrong.push(format!("a line of two blocks alone: {other:?}")),
+    }
+    // The guard: in Latin, each is where layout set it, in logical order.
+    let body = "<p>book look <span class=\"m\">jaz</span></p>";
+    match (span("en", body, "bk"), span("en", body, "jaz")) {
+        (Some(words), Some(block)) if words.1 + 2.0 * em <= block.0 + 0.5 => {}
+        other => wrong.push(format!("Latin, a block set apart at the end: {other:?}")),
+    }
+    let body = "<p>book <span class=\"e\"></span> look</p>";
+    match (span("en", body, "b"), span("en", body, "l")) {
+        (Some(first), Some(second)) if first.1 + 3.0 * em <= second.0 + 0.5 => {}
+        other => wrong.push(format!(
+            "Latin, an empty block between two words: {other:?}"
+        )),
+    }
+    let body = "<p><span class=\"b\">jaz</span><span class=\"b\">fix</span></p>";
+    match (span("en", body, "jaz"), span("en", body, "fix")) {
+        (Some(first), Some(second)) if first.1 <= second.0 + 0.5 => {}
+        other => wrong.push(format!("Latin, a line of two blocks alone: {other:?}")),
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}

@@ -483,6 +483,11 @@ pub struct Page {
     /// by it and none of them is beside it here. The caller has the tree;
     /// [`ClipFragment::anchor`] says whose clip this is.
     pub clips: Vec<ClipFragment>,
+    /// The atomic inline-level boxes set on this page's lines, each with its
+    /// margin box and the unit its line set for it ([`AtomicFragment`]): an
+    /// empty one and one its margins set apart included, since a line places
+    /// every atomic box it holds, painted or not.
+    pub atomics: Vec<AtomicFragment>,
 }
 
 /// A block box's decoration on one page.
@@ -594,6 +599,36 @@ pub struct ReplacedFragment {
     /// The only thing that says **which** picture this is. This crate never
     /// reads it; see [`BoxNode::anchor`].
     pub anchor: Option<u32>,
+}
+
+/// One atomic inline-level box on a page, CSS 2.2 §9.2.2 — an
+/// `inline-block`, an `inline-flex` or a replaced element set inline — where
+/// the line it is set on placed it: one unit of that line, which no run of
+/// [`Page::runs`] marks.
+///
+/// A caller that orders a line's runs (UAX #9's L2) orders this unit with
+/// them, as the line did, and moves what is set inside it — its own runs and
+/// fragments, anchored inside its element — with it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AtomicFragment {
+    /// Margin-box left edge.
+    pub x: f64,
+    /// Margin-box top edge.
+    pub y: f64,
+    /// Margin-box width: what the box takes on its line.
+    pub width: f64,
+    /// Margin-box height.
+    pub height: f64,
+    /// The [`BoxNode::anchor`] of the element, unchanged.
+    pub anchor: Option<u32>,
+    /// The unit its line set for it, as [`Page::runs`] holds a run: no text,
+    /// unpainted and generated, at the margin box's `x` and as wide, on the
+    /// line's baseline at the box's `vertical-align` shift, in the line's
+    /// paragraph ([`TextRun::paragraph`]) and inside the embeddings its
+    /// inline ancestors open ([`TextRun::embeddings`]), and stamped with its
+    /// place in reading order ([`TextRun::order`]): after the runs set inside
+    /// it and before the text that follows it.
+    pub unit: TextRun,
 }
 
 /// One run of text, positioned.

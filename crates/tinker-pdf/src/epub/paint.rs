@@ -81,7 +81,6 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use tinker_pdf_cos::build::{
     DeviceSpace, DocumentBuilder, ExtGState, Function, Glyph, PageBuilder, PieceText, Shading,
@@ -90,20 +89,18 @@ use tinker_pdf_cos::build::{
 use tinker_pdf_css::cascade::StyleTree;
 
 use tinker_pdf_css::property::{
-    BackgroundSize, BorderStyle, Color, ColorStop, ComputedOffset, Direction as CssDirection,
-    Display, FeatureSetting, Float, FontFamily, FontKerning, FontStyle, Gradient, GradientOffset,
-    GradientShape, Image, ImageRef, LengthPercentage, LinearDirection, Position, RadialSize,
-    RepeatStyle, Side, TextDecoration, Transform, TransformOrigin, UnicodeBidi,
+    BackgroundSize, BorderStyle, Color, ColorStop, ComputedOffset, FeatureSetting, FontFamily,
+    FontKerning, FontStyle, Gradient, GradientOffset, GradientShape, Image, ImageRef,
+    LengthPercentage, LinearDirection, Position, RadialSize, RepeatStyle, Side, TextDecoration,
+    Transform, TransformOrigin,
 };
 use tinker_pdf_font::base14::Standard14;
 use tinker_pdf_font::encoding::{base_char, glyph_name_for_char, glyph_name_to_char, BaseEncoding};
 use tinker_pdf_font::Sfnt;
-use tinker_pdf_layout::limits::MAX_EMBEDDING_DEPTH;
 use tinker_pdf_layout::metrics::{
     FirstStrong, FontRequest, Metrics, Neighbour, PlacedGlyph, ShapedText, Shaper, ShapingContext,
     Vertical, CONTEXT_BYTES,
 };
-use tinker_pdf_layout::style::{consume, Consumed};
 use tinker_pdf_layout::{
     BackgroundLayer, BoxFragment, BoxNode, ClipFragment, Content, Embedding, EmbeddingKind,
     Page as LayoutPage, ReplacedFragment, TextRun,
@@ -5537,44 +5534,16 @@ fn is_object(run: &TextRun) -> bool {
     run.order == OBJECT
 }
 
-/// How far a fragment's edge may lie from a run's and still meet it, in
-/// layout pixels: the two are sums of different terms.
-const SLACK: f64 = 1e-3;
-
-/// How many comparisons [`set_objects`] makes on one page before it sets no
-/// stand-in there. Finding where each atomic inline stands compares the
-/// page's runs with its atomic inlines, which a page a book crafts with many
-/// of both makes quadratic: a page past this orders its lines by their runs
-/// alone, each atomic inline's box where layout set it, as a page with none
-/// does ([`visual_lines`]).
-pub(crate) const OBJECT_WORK: usize = 4_000_000;
-
-/// The comparisons [`set_objects`] has made on a page, against
-/// [`OBJECT_WORK`].
-struct Work(usize);
-
-impl Work {
-    /// Charges `n` comparisons; false once the page's are spent.
-    fn charge(&mut self, n: usize) -> bool {
-        self.0 = self.0.saturating_add(n);
-        #[cfg(test)]
-        OBJECT_PEAK.with(|peak| peak.set(peak.get().max(self.0)));
-        self.0 <= OBJECT_WORK
-    }
-}
-
 /// The atomic inlines of a chapter, CSS 2.2 §9.2.2 — an `inline-block`, an
 /// `inline-flex` and a replaced element set inline — each one unit of the
 /// line it is set on ([`visual_lines`]), and what is set in each.
 ///
-/// Found in the box tree layout was given, as layout finds them (`flow.rs`'s
-/// `Builder::children` and `Builder::gather`): a box gathered into a line —
-/// an inline-level child of a block container, or a child of an inline box —
-/// that is not `display: none`, floated or absolutely positioned, and is an
-/// `inline-block`, an `inline-flex` or a replaced element. The page holds no
-/// mark of one: a fragment says whose box it is ([`BoxFragment::anchor`]) and
-/// a run whose characters it holds ([`TextRun::anchor`]), and only the tree
-/// says which elements are set inline and which is inside which.
+/// Which elements they are is layout's record: each page lists the atomic
+/// inlines its lines set ([`tinker_pdf_layout::Page::atomics`]). What is set
+/// in each is the box tree's to say: a fragment says whose box it is
+/// ([`BoxFragment::anchor`]) and a run whose characters it holds
+/// ([`TextRun::anchor`]), and only the tree says which element is inside
+/// which.
 #[derive(Clone, Debug, Default)]
 pub struct Atomics {
     /// For each anchor set inside an atomic inline, the innermost one: the
@@ -5582,53 +5551,30 @@ pub struct Atomics {
     within: BTreeMap<u32, u32>,
     /// For each atomic inline, the atomic inline its own box is set in.
     around: BTreeMap<u32, Option<u32>>,
-    /// For each atomic inline, the embeddings its inline ancestors open
-    /// round it, as `flow.rs`'s `embedding_of` opens them: what the text of
-    /// its line writes round its U+FFFC.
-    embeddings: BTreeMap<u32, Arc<[Embedding]>>,
 }
 
 impl Atomics {
-    /// The atomic inlines of `tree`, the box tree a chapter is laid out from.
+    /// The atomic inlines `pages`, a chapter's, record, each set where
+    /// `tree`, the box tree the chapter is laid out from, sets it.
     #[must_use]
-    pub fn of(tree: &BoxNode) -> Atomics {
-        /// How a box's parent sets it.
-        #[derive(Clone, Copy, PartialEq, Eq)]
-        enum Set {
-            /// A child of a block container, gathered into its lines where it
-            /// is inline-level.
-            Block,
-            /// A child of an inline box, gathered into the line.
-            Inline,
-            /// The root, a flex item, a table's row or a row's cell: on no
-            /// line.
-            Apart,
-        }
-        /// A box still to walk: how its parent sets it, the atomic inline
-        /// it is set in, and the embeddings open round it.
-        type Pending<'t> = (&'t BoxNode, Set, Option<u32>, Arc<[Embedding]>);
+    pub fn of(tree: &BoxNode, pages: &[LayoutPage]) -> Atomics {
+        let recorded: std::collections::BTreeSet<u32> = pages
+            .iter()
+            .flat_map(|page| &page.atomics)
+            .filter_map(|atomic| atomic.anchor)
+            .collect();
         let mut out = Atomics::default();
-        let mut stack: Vec<Pending<'_>> = vec![(tree, Set::Apart, None, Arc::default())];
-        while let Some((node, set, within, open)) = stack.pop() {
-            let style = consume(&node.style);
-            if style.is_none() {
-                continue;
-            }
-            let out_of_flow = style.float != Float::None
-                || matches!(style.position, Position::Absolute | Position::Fixed);
-            let gathered = !out_of_flow
-                && match set {
-                    Set::Inline => true,
-                    Set::Block => !style.is_block_level() && !style.is_internal_table(),
-                    Set::Apart => false,
-                };
-            let atomic = gathered
-                && (matches!(style.display, Display::InlineBlock | Display::InlineFlex)
-                    || matches!(node.content, Content::Replaced(_)));
+        if recorded.is_empty() {
+            return out;
+        }
+        // Each box, and the atomic inline it is set in. An element is the
+        // first box the walk meets with its anchor; a box after it with the
+        // same one is its generated content, set in it.
+        let mut stack: Vec<(&BoxNode, Option<u32>)> = vec![(tree, None)];
+        while let Some((node, within)) = stack.pop() {
             let here = match node.anchor {
-                Some(anchor) if atomic => {
+                Some(anchor) if recorded.contains(&anchor) && !out.around.contains_key(&anchor) => {
                     out.around.insert(anchor, within);
-                    out.embeddings.insert(anchor, open.clone());
                     Some(anchor)
                 }
                 _ => within,
@@ -5636,36 +5582,10 @@ impl Atomics {
             if let (Some(anchor), Some(inner)) = (node.anchor, here) {
                 out.within.entry(anchor).or_insert(inner);
             }
-            let Content::Children(children) = &node.content else {
-                continue;
-            };
-            let (set, open) = if atomic {
-                let set = if style.is_flex() {
-                    Set::Apart
-                } else {
-                    Set::Block
-                };
-                (set, Arc::default())
-            } else if gathered {
-                match opened_by(&style, node.anchor).filter(|_| open.len() < MAX_EMBEDDING_DEPTH) {
-                    Some(embedding) => {
-                        let mut more = open.to_vec();
-                        more.push(embedding);
-                        (Set::Inline, more.into())
-                    }
-                    None => (Set::Inline, open),
+            if let Content::Children(children) = &node.content {
+                for child in children.iter().rev() {
+                    stack.push((child, here));
                 }
-            } else if style.is_flex()
-                || style.is_table()
-                || (style.is_internal_table()
-                    && !matches!(style.display, Display::TableCell | Display::TableCaption))
-            {
-                (Set::Apart, Arc::default())
-            } else {
-                (Set::Block, Arc::default())
-            };
-            for child in children.iter().rev() {
-                stack.push((child, set, here, open.clone()));
             }
         }
         out
@@ -5718,385 +5638,63 @@ impl Atomics {
     }
 }
 
-/// The embedding an inline box opens round its content, `css-writing-modes-3`
-/// §2.4.2, as `flow.rs`'s `embedding_of` opens it.
-fn opened_by(style: &Consumed, anchor: Option<u32>) -> Option<Embedding> {
-    let kind = match style.unicode_bidi {
-        UnicodeBidi::Normal => return None,
-        UnicodeBidi::Embed => EmbeddingKind::Embed,
-        UnicodeBidi::Isolate => EmbeddingKind::Isolate,
-        UnicodeBidi::Plaintext => EmbeddingKind::FirstStrong,
-    };
-    Some(Embedding {
-        kind,
-        rtl: style.direction == CssDirection::Rtl,
-        anchor,
-    })
-}
-
-/// A box on the page in layout pixels, grown to hold each rectangle it takes.
-#[derive(Clone, Copy, Debug)]
-struct Hull {
-    left: f64,
-    top: f64,
-    right: f64,
-    bottom: f64,
-}
-
-impl Default for Hull {
-    fn default() -> Self {
-        Hull {
-            left: f64::INFINITY,
-            top: f64::INFINITY,
-            right: f64::NEG_INFINITY,
-            bottom: f64::NEG_INFINITY,
-        }
-    }
-}
-
-impl Hull {
-    /// Grows to hold `(x, y, width, height)`.
-    fn take(&mut self, (x, y, width, height): (f64, f64, f64, f64)) {
-        self.left = self.left.min(x);
-        self.top = self.top.min(y);
-        self.right = self.right.max(x + width);
-        self.bottom = self.bottom.max(y + height);
-    }
-
-    /// Whether it holds anything, at finite places.
-    fn holds(&self) -> bool {
-        finite(&[self.left, self.top, self.right, self.bottom])
-            && self.left <= self.right
-            && self.top <= self.bottom
-    }
-
-    /// Whether it stands on `run`'s baseline: the baseline crosses it, as a
-    /// box set on a line at its baseline is crossed by the line's — a picture
-    /// at its bottom edge, an inline block at its last line's baseline. A
-    /// box of the line above or below, whose text stands a line height away,
-    /// is not crossed by it.
-    fn on(&self, run: &TextRun) -> bool {
-        self.top - SLACK <= run.y && run.y <= self.bottom + SLACK
-    }
-}
-
 /// Sets each atomic inline of a page on its line as one U+FFFC OBJECT
 /// REPLACEMENT CHARACTER, a stand-in [`split_at_levels`] and
-/// [`visual_lines`] order with the line's runs ([`OBJECT`]): unpainted, in
-/// its line's paragraph, inside the embeddings its inline ancestors open
-/// ([`Atomics`]), and as wide as the stretch of the line it takes.
-///
-/// Its box on the page is its own fragments' — its border box, its picture's
-/// content box — or, for one with none, the runs set in it. It is on the
-/// line, of the runs set in what it is set in, that it stands on
-/// ([`Hull::on`]) and either lies between two of whose runs, of one
-/// paragraph, or meets an end of ([`lines_across`], [`stands_on`]). It takes
-/// the stretch from the unit before it to the one after; at the line's ends,
-/// its own box's edge. A line of nothing but atomic inlines holds no run to
-/// find it by, and an atomic inline set apart from its neighbours by its
-/// margins only between two runs; it is not set. A page whose search passes
-/// [`OBJECT_WORK`] comparisons sets none.
+/// [`visual_lines`] order with the line's runs ([`OBJECT`]): the unit layout
+/// set for it on its line ([`tinker_pdf_layout::AtomicFragment::unit`]),
+/// unpainted, at its margin box, in its line's paragraph and inside the
+/// embeddings its inline ancestors open, and in reading order among the
+/// page's runs, which layout sorts by their stamps: after the runs set inside
+/// it and before the text that follows it ([`TextRun::order`]). An atomic
+/// inline its margins set apart from its neighbours, an empty one that paints
+/// nothing and a line of nothing but atomic inlines are each set so, since
+/// layout placed each; the page's runs are walked once.
 fn set_objects(page: &mut LayoutPage, atomics: &Atomics) {
     if atomics.is_empty() {
         return;
     }
-    let mut boxes: BTreeMap<u32, Hull> = BTreeMap::new();
-    let own = page
-        .boxes
+    let mut objects: Vec<TextRun> = page
+        .atomics
         .iter()
-        .map(|b| (b.anchor, (b.x, b.y, b.width, b.height)))
-        .chain(
-            page.replaced
-                .iter()
-                .map(|r| (r.anchor, (r.x, r.y, r.width, r.height))),
-        );
-    for (anchor, rect) in own {
-        if let Some(atomic) = anchor.filter(|anchor| atomics.is_atomic(*anchor)) {
-            boxes.entry(atomic).or_default().take(rect);
-        }
-    }
-    let mut texts: BTreeMap<u32, Hull> = BTreeMap::new();
-    for run in &page.runs {
-        for atomic in atomics.chain(run.anchor) {
-            if !boxes.contains_key(&atomic) {
-                texts.entry(atomic).or_default().take((
-                    run.x,
-                    run.y - run.font_size,
-                    run.width,
-                    run.font_size * 1.25,
-                ));
-            }
-        }
-    }
-    for (atomic, hull) in texts {
-        boxes.entry(atomic).or_insert(hull);
-    }
-    let mut kids: BTreeMap<Option<u32>, Vec<(u32, Hull)>> = BTreeMap::new();
-    for (atomic, hull) in boxes {
-        if hull.holds() {
-            kids.entry(atomics.around(atomic))
-                .or_default()
-                .push((atomic, hull));
-        }
-    }
-    if kids.is_empty() {
-        return;
-    }
-    let levels: Vec<Option<u32>> = page
-        .runs
-        .iter()
-        .map(|run| atomics.innermost(run.anchor))
+        .filter(|atomic| {
+            atomic
+                .anchor
+                .is_some_and(|anchor| atomics.is_atomic(anchor))
+        })
+        .map(|atomic| {
+            let mut object = atomic.unit.clone();
+            object.text = "\u{FFFC}".to_owned();
+            object.bidi_level = None;
+            object.bidi_gap = None;
+            object.bidi_line_rtl = false;
+            object.hyphenated = false;
+            object.painted = false;
+            object.generated = false;
+            object.letter_spacing = 0.0;
+            object.word_spacing = 0.0;
+            object
+        })
         .collect();
-    let mut objects: Vec<(usize, TextRun)> = Vec::new();
-    let mut work = Work(0);
-    for (level, kids) in &kids {
-        if !work.charge(levels.len()) {
-            return;
-        }
-        let own: Vec<usize> = levels
-            .iter()
-            .enumerate()
-            .filter(|(_, at)| *at == level)
-            .map(|(at, _)| at)
-            .collect();
-        let mut placed = vec![false; kids.len()];
-        let Some(lines) = lines_across(&page.runs, &own, kids, &mut work) else {
-            return;
-        };
-        for line in lines {
-            let set = stands_on(
-                &page.runs,
-                &line,
-                kids,
-                &mut placed,
-                atomics,
-                &mut objects,
-                &mut work,
-            );
-            if set.is_none() {
-                return;
-            }
-        }
-    }
     if objects.is_empty() {
         return;
     }
-    objects.sort_by_key(|(at, _)| *at);
+    objects.sort_by_key(|object| object.order);
+    #[cfg(test)]
+    OBJECTS_SET.with(|set| set.set(set.get().saturating_add(objects.len())));
+    let stand = |mut object: TextRun| {
+        object.order = OBJECT;
+        object
+    };
     let taken = std::mem::take(&mut page.runs);
     page.runs.reserve(taken.len() + objects.len());
     let mut objects = objects.into_iter().peekable();
-    for (at, run) in taken.into_iter().enumerate() {
-        while let Some((_, object)) = objects.next_if(|(before, _)| *before <= at) {
-            page.runs.push(object);
+    for run in taken {
+        while let Some(object) = objects.next_if(|object| object.order < run.order) {
+            page.runs.push(stand(object));
         }
         page.runs.push(run);
     }
-    page.runs.extend(objects.map(|(_, object)| object));
-}
-
-/// The lines of the runs `own` of `runs`, in order, as [`same_line`] finds
-/// them, but that two runs of one paragraph are one line across a stretch
-/// one of `kids` lies in, on their baseline ([`set_objects`]). `None` once
-/// the page's `work` is spent.
-fn lines_across(
-    runs: &[TextRun],
-    own: &[usize],
-    kids: &[(u32, Hull)],
-    work: &mut Work,
-) -> Option<Vec<Vec<usize>>> {
-    let bridged = |a: &TextRun, b: &TextRun| {
-        let end = a.x + a.width;
-        !beside_the_line(a)
-            && !beside_the_line(b)
-            && a.paragraph == b.paragraph
-            && (a.y - b.y).abs() <= a.font_size.max(b.font_size)
-            && end <= b.x + SLACK
-            && kids.iter().any(|(_, hull)| {
-                hull.left >= end - SLACK && hull.right <= b.x + SLACK && hull.on(b)
-            })
-    };
-    let mut lines: Vec<Vec<usize>> = Vec::new();
-    for &at in own {
-        let Some(run) = runs.get(at) else {
-            continue;
-        };
-        let continues = match lines
-            .last()
-            .and_then(|line| line.last())
-            .and_then(|last| runs.get(*last))
-        {
-            Some(last) if same_line(last, run) => true,
-            Some(last) => {
-                if !work.charge(kids.len()) {
-                    return None;
-                }
-                bridged(last, run)
-            }
-            None => false,
-        };
-        match lines.last_mut() {
-            Some(line) if continues => line.push(at),
-            _ => lines.push(vec![at]),
-        }
-    }
-    Some(lines)
-}
-
-/// One unit of a line as [`stands_on`] sets it: a run, by its index on the
-/// page, or an atomic inline, by its index among the kids.
-#[derive(Clone, Copy)]
-enum Unit {
-    Run(usize),
-    Kid(usize),
-}
-
-/// Finds the atomic inlines among `kids` not yet `placed` that stand on
-/// `line` — between two of its runs, or meeting one of its ends, through
-/// each other — and adds a stand-in for each to `objects`, with the index of
-/// the run it goes before on the page ([`set_objects`]). `None` once the
-/// page's `work` is spent.
-fn stands_on(
-    runs: &[TextRun],
-    line: &[usize],
-    kids: &[(u32, Hull)],
-    placed: &mut [bool],
-    atomics: &Atomics,
-    objects: &mut Vec<(usize, TextRun)>,
-    work: &mut Work,
-) -> Option<()> {
-    let (Some(first), Some(last)) = (
-        line.first().and_then(|at| runs.get(*at)),
-        line.last().and_then(|at| runs.get(*at)),
-    ) else {
-        return Some(());
-    };
-    let mut members: Vec<usize> = Vec::new();
-    for pair in line.windows(2) {
-        let (Some(a), Some(b)) = (
-            pair.first().and_then(|at| runs.get(*at)),
-            pair.get(1).and_then(|at| runs.get(*at)),
-        ) else {
-            continue;
-        };
-        let end = a.x + a.width;
-        if !work.charge(kids.len()) {
-            return None;
-        }
-        for (kid, (_, hull)) in kids.iter().enumerate() {
-            let free = placed.get(kid).is_some_and(|placed| !placed);
-            if free && hull.left >= end - SLACK && hull.right <= b.x + SLACK && hull.on(b) {
-                if let Some(slot) = placed.get_mut(kid) {
-                    *slot = true;
-                }
-                members.push(kid);
-            }
-        }
-    }
-    let (mut left, mut right) = (first.x, last.x + last.width);
-    loop {
-        if !work.charge(kids.len()) {
-            return None;
-        }
-        let mut grew = false;
-        for (kid, (_, hull)) in kids.iter().enumerate() {
-            if placed.get(kid).is_none_or(|placed| *placed) {
-                continue;
-            }
-            let before = (hull.right - left).abs() <= SLACK && hull.on(first);
-            let after = (hull.left - right).abs() <= SLACK && hull.on(last);
-            if before || after {
-                if let Some(slot) = placed.get_mut(kid) {
-                    *slot = true;
-                }
-                members.push(kid);
-                if before {
-                    left = hull.left;
-                } else {
-                    right = hull.right;
-                }
-                grew = true;
-            }
-        }
-        if !grew {
-            break;
-        }
-    }
-    if members.is_empty() {
-        return Some(());
-    }
-    // In the order layout set them, left to right: a kid before a run at the
-    // same edge, since only an empty one can start where a run does.
-    let mut units: Vec<(f64, u8, Unit)> = line
-        .iter()
-        .filter_map(|at| runs.get(*at).map(|run| (run.x, 1u8, Unit::Run(*at))))
-        .chain(members.iter().filter_map(|kid| {
-            kids.get(*kid)
-                .map(|(_, hull)| (hull.left, 0u8, Unit::Kid(*kid)))
-        }))
-        .collect();
-    units.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    let mut edge: Option<f64> = None;
-    for (at, (_, _, unit)) in units.iter().enumerate() {
-        let kid = match unit {
-            Unit::Run(index) => {
-                edge = runs.get(*index).map(|run| run.x + run.width);
-                continue;
-            }
-            Unit::Kid(kid) => *kid,
-        };
-        let Some(&(atomic, hull)) = kids.get(kid) else {
-            continue;
-        };
-        let from = edge.unwrap_or(hull.left);
-        let to = match units.get(at + 1).map(|next| next.2) {
-            Some(Unit::Run(index)) => runs.get(index).map_or(hull.right, |run| run.x),
-            _ => hull.right,
-        }
-        .max(from);
-        edge = Some(to);
-        let after = units
-            .get(at + 1..)
-            .unwrap_or(&[])
-            .iter()
-            .find_map(|unit| match unit.2 {
-                Unit::Run(index) => Some(index),
-                Unit::Kid(_) => None,
-            });
-        let before = units
-            .get(..at)
-            .unwrap_or(&[])
-            .iter()
-            .rev()
-            .find_map(|unit| match unit.2 {
-                Unit::Run(index) => Some(index),
-                Unit::Kid(_) => None,
-            });
-        let (template, goes) = match (after, before) {
-            (Some(index), _) => (index, index),
-            (None, Some(index)) => (index, index + 1),
-            (None, None) => continue,
-        };
-        let Some(template) = runs.get(template) else {
-            continue;
-        };
-        let mut object = template.clone();
-        object.x = from;
-        object.width = to - from;
-        object.text = "\u{FFFC}".to_owned();
-        object.embeddings = atomics.embeddings.get(&atomic).cloned().unwrap_or_default();
-        object.bidi_level = None;
-        object.bidi_gap = None;
-        object.bidi_line_rtl = false;
-        object.hyphenated = false;
-        object.painted = false;
-        object.generated = false;
-        object.letter_spacing = 0.0;
-        object.word_spacing = 0.0;
-        object.anchor = Some(atomic);
-        object.order = OBJECT;
-        objects.push((goes, object));
-    }
-    Some(())
+    page.runs.extend(objects.map(stand));
 }
 
 /// Cuts every run that crosses one of its line's UAX #9 level boundaries
@@ -7329,9 +6927,8 @@ pub(crate) fn cut_run(
 thread_local! {
     /// [`step`]'s count, on this thread.
     pub(crate) static STEPS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
-    /// The most comparisons [`set_objects`] made on any page, on this thread,
-    /// against [`OBJECT_WORK`].
-    pub(crate) static OBJECT_PEAK: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    /// How many stand-ins [`set_objects`] set, on this thread.
+    pub(crate) static OBJECTS_SET: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
     /// How many times [`Fonts::read_back`] read a line back, on this thread:
     /// counted under `cfg(test)` only, so that `epub/tests.rs` holds the
     /// read-back's work by count where a clock would only run slowly.

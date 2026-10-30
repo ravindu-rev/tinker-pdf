@@ -1654,12 +1654,13 @@ fn write_chapters<R: read::Resources + ?Sized>(
                 // `paint::visual_lines`).
                 // The levels are each bidi paragraph's, resolved over every
                 // line of it, so the chapter's pages are cut together. An
-                // atomic inline is one unit of its line, which moves whole
-                // (`paint::Atomics`).
+                // atomic inline is one unit of its line, which moves whole:
+                // each page records the ones its lines set, and the tree
+                // says what is set in each (`paint::Atomics`).
                 for page in &mut chapter.pages {
                     paint::hyphenate(&mut page.runs);
                 }
-                let atomics = paint::Atomics::of(&reading.tree);
+                let atomics = paint::Atomics::of(&reading.tree, &chapter.pages);
                 paint::split_at_levels(&mut chapter.pages, &metrics, &atomics);
                 for page in &mut chapter.pages {
                     paint::visual_lines(page, &atomics);

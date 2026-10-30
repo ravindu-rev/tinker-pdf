@@ -521,9 +521,15 @@ reorders, an inline block, an `inline-flex` or a picture set inline is
 ordered as one U+FFFC OBJECT REPLACEMENT CHARACTER, a neutral
 (`css-writing-modes-3` §2.4), set inside the embeddings its inline ancestors
 open; its own text is ordered as the paragraph of its own it is, in its own
-`direction`. Which boxes are atomic inlines is read from the box tree, as
-layout gathers a box into its line (`paint::Atomics`), and each is set on
-the line whose baseline crosses its box. Where the reordering moves one,
+`direction`. Layout records each atomic inline on its page, its margin box
+and the unit its line set for it — where the line set the box, as wide, on
+its baseline, in its paragraph, and stamped with its place in reading order
+(`tinker_pdf_layout::Page::atomics`, `AtomicFragment`) — and the painter
+sets each from that record: an empty one that paints nothing, one its
+margins set apart from the run beside it and a line of nothing but atomic
+inlines are each one unit of their line's order (`paint::set_objects`). The
+box tree says only what is set in each (`paint::Atomics`). Where the
+reordering moves one,
 `paint::visual_lines` moves everything set in it by the same distance — its
 runs, its box fragment with its background, border and outline, its
 pictures and its clips — so the origin of its `transform`
@@ -535,12 +541,13 @@ character moves nothing (`epub_paint.rs`'s
 `a_turned_or_skewed_inline_block_turns_about_its_own_text_in_a_reordered_line`,
 `an_inline_block_in_a_line_with_no_right_to_left_character_moves_nothing`
 and `an_inside_marker_is_on_its_items_start_side_beside_an_inline_block`;
-`epub_images.rs`'s `an_inline_img_is_ordered_with_its_words_in_a_right_to_left_line`).
-Finding where each atomic inline stands compares a page's runs with its
-atomic inlines, so a page whose search passes `paint::OBJECT_WORK`
-comparisons, which only a page a book crafts with thousands of them reaches,
-sets none and orders its lines by their runs alone, its text all there
-(`epub::tests`' `a_page_of_many_atomic_inlines_is_set_within_its_budget`).
+`epub_images.rs`'s `an_inline_img_is_ordered_with_its_words_in_a_right_to_left_line`;
+`epub_fallback.rs`'s
+`an_atomic_inline_is_one_unit_of_its_line_wherever_layout_set_it`;
+`tinker-pdf-layout`'s `a_page_records_each_atomic_inline_with_its_margin_box`).
+Each is set in one walk of a page's runs, so a page a book crafts with
+thousands of them sets every one (`epub::tests`'
+`a_page_of_many_atomic_inlines_sets_each_from_its_record`).
 What a transform paints past its box is CSS's: an inline block widened by
 `scaleX(2)` paints its glyphs over its neighbours', and the paragraph that
 holds it is pinned at the count (`epub_fallback.rs`'s
@@ -550,12 +557,9 @@ A block's own paragraph is left to right in a paragraph with no `dir`, so a
 neighbours a reader reads it with them, from the right, the `?!` first;
 where the word space after it is drawn against the word that follows
 (`paint::Cut::Hugged`), a block set more than half an em from its neighbours
-is read as a line of its own, left to right, the `?!` after its word. Not
-ordered: an atomic inline its margin sets apart from the run at a line's end,
-an empty inline block that paints nothing, and a line of atomic inlines
-alone; and a right-to-left inline block of `width: auto` is as wide as its
-line, so it is a line of its own
-([design/rtl-read-back.md](../design/rtl-read-back.md)).
+is read as a line of its own, left to right, the `?!` after its word. A
+right-to-left inline block of `width: auto` is as wide as its line, so it is
+a line of its own ([design/rtl-read-back.md](../design/rtl-read-back.md)).
 
 **A run that ends on a mark.** A slice that ends on a mark ends its text
 object a spacing less a millionth of an em from the next run, so a run that

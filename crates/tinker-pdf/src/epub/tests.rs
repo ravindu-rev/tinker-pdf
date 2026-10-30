@@ -2427,6 +2427,7 @@ fn the_public_draw_page_still_tags_a_page_from_its_element_tree() {
         replaced: Vec::new(),
         runs: vec![run],
         clips: Vec::new(),
+        atomics: Vec::new(),
     };
     // No element of this one asks for an effect, so the page is drawn under
     // none — the default the book path gives a chapter with no styles.
@@ -2510,6 +2511,7 @@ fn a_run_is_drawn_from_its_plan_by_its_place_in_the_page() {
         replaced: Vec::new(),
         runs: vec![run(10.0, 9.0, "?!", 2), run(19.0, 40.0, "שלום", 1)],
         clips: Vec::new(),
+        atomics: Vec::new(),
     };
     let faces = super::typeface::FaceSet::new();
     let mut fonts = Fonts::new(&faces);
@@ -2652,52 +2654,41 @@ fn stored_book(language: &str, style: &str, body: &str) -> Vec<u8> {
     out
 }
 
-/// **Setting a page's atomic inlines on their lines is bounded.** Finding
-/// where each atomic inline stands compares the page's runs with its atomic
-/// inlines: a page a book crafts with thousands of both stops at
-/// `paint::OBJECT_WORK` comparisons and sets none, its lines ordered by their
-/// runs alone, and its text is all there; a page of a few is set as ever.
+/// **A page's atomic inlines are each set on their line from layout's
+/// record, however many there are.** Layout lists every atomic inline a
+/// page's lines set (`tinker_pdf_layout::Page::atomics`), and the painter
+/// sets a stand-in for each from it in one walk of the page's runs
+/// (`paint::set_objects`): a page a book crafts with thousands sets every
+/// one, and its text is all there.
 #[test]
-fn a_page_of_many_atomic_inlines_is_set_within_its_budget() {
-    use super::paint::{OBJECT_PEAK, OBJECT_WORK};
+fn a_page_of_many_atomic_inlines_sets_each_from_its_record() {
+    use super::paint::OBJECTS_SET;
     // Small enough that every block is on one page.
     let style = "body, p { margin: 0; padding: 0 } p { font-size: 0.25px; line-height: 0.25px }";
-    let book = |blocks: usize| {
+    let open = |blocks: usize| {
         let body: String = (0..blocks)
             .map(|_| "א <span style=\"display: inline-block\">ב</span> ")
             .collect();
-        stored_book("he", style, &format!("<p dir=\"rtl\">{body}</p>"))
-    };
-    let open = |blocks: usize| {
-        OBJECT_PEAK.with(|peak| peak.set(0));
-        let doc = crate::Document::open(book(blocks)).expect("opens");
+        let book = stored_book("he", style, &format!("<p dir=\"rtl\">{body}</p>"));
+        OBJECTS_SET.with(|set| set.set(0));
+        let doc = crate::Document::open(book).expect("opens");
         let text: String = (0..doc.page_count())
             .map(|at| doc.page(at).expect("a page").text().plain_text())
             .collect();
         (
-            OBJECT_PEAK.with(core::cell::Cell::get),
+            OBJECTS_SET.with(core::cell::Cell::get),
             text.matches('ב').count(),
             doc.page_count(),
         )
     };
-
-    let (peak, found, pages) = open(3000);
-    assert!(
-        peak > OBJECT_WORK,
-        "the crafted page reaches its budget ({peak}, {pages} pages)"
-    );
-    assert!(
-        peak <= OBJECT_WORK + 8 * 3000,
-        "and stops within one comparison of the page's after it ({peak})"
-    );
-    assert_eq!(found, 3000, "every block's letter is on the page");
-
-    let (peak, found, _) = open(20);
-    assert!(
-        peak > 0 && peak < OBJECT_WORK / 1000,
-        "a few are set as ever ({peak})"
-    );
-    assert_eq!(found, 20);
+    for blocks in [3000, 20] {
+        let (set, found, pages) = open(blocks);
+        assert_eq!(
+            set, blocks,
+            "{blocks} blocks over {pages} pages: {set} stand-ins set"
+        );
+        assert_eq!(found, blocks, "every block's letter is on the page");
+    }
 }
 
 /// How many lines `book` reads back to open (`paint::READINGS`).

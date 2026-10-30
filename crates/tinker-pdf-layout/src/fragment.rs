@@ -44,7 +44,8 @@
 
 use crate::flow::{Abreast, BlockRecord, FloatRecord, Flow, Item, ItemKind};
 use crate::{
-    BoxFragment, ClipFragment, Layout, Limits, Options, Page, Refusal, ReplacedFragment, Warning,
+    AtomicFragment, BoxFragment, ClipFragment, Layout, Limits, Options, Page, Refusal,
+    ReplacedFragment, Warning,
 };
 use tinker_pdf_css::property::LengthPercentage;
 
@@ -866,6 +867,7 @@ fn emit(
                 // line's baseline. Its runs keep their own reading-order
                 // stamps, so an `inline-block` reads where it was written.
                 for placed in &line.boxes {
+                    out.atomics.push(atomic_on(placed, baseline));
                     emit(
                         &placed.items,
                         &placed.blocks,
@@ -889,6 +891,22 @@ fn emit(
             }
             ItemKind::Margin(_) | ItemKind::Edge => {}
         }
+    }
+}
+
+/// The record of an atomic box placed on a line whose baseline is at
+/// `baseline` on the page: its margin box, and the unit the line set for it
+/// with its `y` on the page, as the line's runs are given theirs.
+fn atomic_on(placed: &crate::flow::InlineBox, baseline: f64) -> AtomicFragment {
+    let mut unit = placed.unit.clone();
+    unit.y += baseline;
+    AtomicFragment {
+        x: unit.x,
+        y: baseline + placed.dy,
+        width: unit.width,
+        height: placed.height,
+        anchor: unit.anchor,
+        unit,
     }
 }
 
@@ -1109,6 +1127,7 @@ fn draw_band(band: &Abreast, offset: f64, window: Slice, out: &mut Page) {
                 // for a band and one for the column, and neither of them
                 // gets to forget an `inline-block`.
                 for placed in &line.boxes {
+                    out.atomics.push(atomic_on(placed, baseline));
                     emit(
                         &placed.items,
                         &placed.blocks,

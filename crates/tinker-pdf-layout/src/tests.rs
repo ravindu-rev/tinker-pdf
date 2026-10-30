@@ -3916,6 +3916,102 @@ fn the_space_after_an_inline_block_is_kept() {
     }
 }
 
+/// **A page records each atomic inline its lines set, with its margin box**
+/// (`Page::atomics`): a painted `inline-block` its margins set apart from the
+/// words beside it, its margin box its border box and its margins; an empty
+/// one, which has no fragment and no run; and a line of two blocks and
+/// nothing else. Each record's unit stands where its line set the box, as
+/// wide, on the line's baseline, in its paragraph, unpainted and of no text,
+/// and is stamped between the runs written either side of it.
+#[test]
+fn a_page_records_each_atomic_inline_with_its_margin_box() {
+    let mut spaced = block();
+    spaced.display = Display::InlineBlock;
+    spaced.width = Size::Length(LengthPercentage::Px(30.0));
+    spaced.margin.left = px(5.0);
+    spaced.margin.right = px(7.0);
+    spaced.margin.top = px(2.0);
+    spaced.margin.bottom = px(3.0);
+    spaced.background_color = Color {
+        r: 1,
+        g: 2,
+        b: 3,
+        a: 255,
+    };
+    let mut empty = block();
+    empty.display = Display::InlineBlock;
+    empty.width = Size::Length(LengthPercentage::Px(20.0));
+    let tree = paragraph_of(
+        false,
+        vec![
+            text("book "),
+            BoxNode::element(spaced, vec![text("jazz")]).with_anchor(1),
+            text(" "),
+            BoxNode::element(empty, Vec::new()).with_anchor(2),
+            text(" student"),
+        ],
+    );
+    let laid = run(&tree, 400.0, 400.0);
+    let page = &laid.pages[0];
+    assert_eq!(
+        page.atomics.iter().map(|a| a.anchor).collect::<Vec<_>>(),
+        vec![Some(1), Some(2)]
+    );
+    let border = &page.boxes[0];
+    let (block, gap) = (&page.atomics[0], &page.atomics[1]);
+    assert!(close(block.x, border.x - 5.0), "{block:?} {border:?}");
+    assert!(close(block.width, border.width + 12.0));
+    assert!(close(block.y, border.y - 2.0));
+    assert!(close(block.height, border.height + 5.0));
+    assert!(close(block.x, 50.0), "five letters past the line's start");
+    assert!(
+        close(gap.x, block.x + block.width + 10.0),
+        "a space past it"
+    );
+    assert!(close(gap.width, 20.0));
+    let line = |text: &str| {
+        page.runs
+            .iter()
+            .find(|run| run.text == text)
+            .expect("the run")
+    };
+    let (book, student) = (line("book "), line(" student"));
+    for atomic in [block, gap] {
+        let unit = &atomic.unit;
+        assert!(close(unit.x, atomic.x) && close(unit.width, atomic.width));
+        assert!(close(unit.y, book.y), "on the line's baseline");
+        // The baseline crosses the margin box, at its bottom edge for the
+        // empty block, which has no line (§10.8.1).
+        assert!(atomic.y <= unit.y && unit.y <= atomic.y + atomic.height);
+        assert!(unit.text.is_empty() && !unit.painted && unit.generated);
+        assert_eq!(unit.paragraph, book.paragraph);
+        assert_eq!(unit.anchor, atomic.anchor);
+        assert!(book.order < unit.order && unit.order < student.order);
+    }
+    let jazz = line("jazz");
+    assert!(
+        jazz.order < block.unit.order,
+        "after the runs set inside it"
+    );
+    assert!(block.unit.order < gap.unit.order);
+
+    let alone = paragraph_of(
+        true,
+        vec![
+            inline_block(Some(30.0), "ab").with_anchor(1),
+            inline_block(Some(40.0), "cd").with_anchor(2),
+        ],
+    );
+    let laid = run(&alone, 400.0, 400.0);
+    let page = &laid.pages[0];
+    let units: Vec<&crate::TextRun> = page.atomics.iter().map(|a| &a.unit).collect();
+    assert_eq!(units.len(), 2, "a line of two blocks and nothing else");
+    assert!(close(units[0].x + units[0].width, units[1].x), "end to end");
+    assert!(close(units[0].y, units[1].y));
+    assert_eq!(units[0].paragraph_rtl, Some(true));
+    assert!(units[0].order < units[1].order);
+}
+
 /// The same after a picture set inline: the space after it is set, where the
 /// picture ends.
 #[test]

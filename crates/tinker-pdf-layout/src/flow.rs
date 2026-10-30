@@ -956,6 +956,12 @@ pub(crate) struct InlineBox {
     pub blocks: Vec<BlockRecord>,
     /// From the line's baseline to the box's **top**.
     pub dy: f64,
+    /// The margin-box height.
+    pub height: f64,
+    /// The unit the line set for it, `x` already absolute and `y` relative
+    /// to the baseline, as the line's runs are: the run of no text that took
+    /// the box's place while the line was set ([`crate::AtomicFragment`]).
+    pub unit: TextRun,
 }
 
 /// Lays a tree out into one continuous column.
@@ -5387,15 +5393,7 @@ impl<M: Metrics> Builder<'_, M> {
             // that is the box's. Its `x` is filled in by the alignment pass
             // below, in the same order the runs are.
             if let Some(atomic) = atomic {
-                boxes.push((
-                    runs.len(),
-                    InlineBox {
-                        items: atomic.items.clone(),
-                        blocks: atomic.blocks.clone(),
-                        dy: shift - atomic.baseline,
-                    },
-                ));
-                runs.push(TextRun {
+                let unit = TextRun {
                     x: 0.0,
                     y: shift,
                     width: atomic.width,
@@ -5422,7 +5420,18 @@ impl<M: Metrics> Builder<'_, M> {
                     generated: true,
                     anchor: pieces[*index].anchor,
                     order: pieces[*index].order,
-                });
+                };
+                boxes.push((
+                    runs.len(),
+                    InlineBox {
+                        items: atomic.items.clone(),
+                        blocks: atomic.blocks.clone(),
+                        dy: shift - atomic.baseline,
+                        height: atomic.height,
+                        unit: unit.clone(),
+                    },
+                ));
+                runs.push(unit);
                 width += atomic.width;
                 continue;
             }
@@ -5538,11 +5547,13 @@ impl<M: Metrics> Builder<'_, M> {
         // The placeholder runs carry the `x` the alignment pass computed, so
         // the boxes take it from them and the placeholders go. One pass and not
         // two, which is what keeps a box and the text beside it from ever
-        // disagreeing about where the line starts.
+        // disagreeing about where the line starts. Each box keeps its
+        // placeholder as the unit the line set for it.
         let mut boxes: Vec<InlineBox> = boxes
             .into_iter()
             .map(|(at, mut placed)| {
                 translate(&mut placed.items, &mut placed.blocks, runs[at].x, 0.0);
+                placed.unit = runs[at].clone();
                 placed
             })
             .collect();
@@ -6655,6 +6666,8 @@ fn shift(items: &mut [Item], dx: f64, dy: f64) {
                 for placed in &mut line.boxes {
                     translate(&mut placed.items, &mut placed.blocks, dx, 0.0);
                     placed.dy += dy;
+                    placed.unit.x += dx;
+                    placed.unit.y += dy;
                 }
             }
             ItemKind::Rows(band) | ItemKind::FlexLine(band) | ItemKind::Columns(band) => {
@@ -6679,6 +6692,7 @@ fn translate(items: &mut [Item], blocks: &mut [BlockRecord], dx: f64, dy: f64) {
                 }
                 for placed in &mut line.boxes {
                     translate(&mut placed.items, &mut placed.blocks, dx, 0.0);
+                    placed.unit.x += dx;
                 }
             }
             // A band's items are already relative to the band, so only the

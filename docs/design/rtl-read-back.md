@@ -72,15 +72,17 @@ each half ordered alone.
 **The rule, as landed.** An atomic inline — an inline block, an `inline-flex`
 or a replaced element set inline — is one unit of its line's order, which
 UAX #9 reads as U+FFFC OBJECT REPLACEMENT CHARACTER, a neutral
-(`css-writing-modes-3` §2.4). Which elements are atomic inlines, and which
-anchors each holds, is read from the box tree layout was given, as layout's
-`Builder::gather` gathers a box into a line (`paint::Atomics`): the page marks
-none, an unpainted inline block has no fragment, and two table cells on one
-baseline look like a block on a line. `split_at_levels` sets a stand-in for
-each on the line whose baseline crosses its box (`set_objects`, `Hull::on`):
-an unpainted run of one U+FFFC, in its line's paragraph, inside the
-embeddings its inline ancestors open, as wide as the stretch between its
-neighbours. The atomic inline's own runs are lines of their own, ordered as
+(`css-writing-modes-3` §2.4). Layout records each atomic inline on its page:
+its margin box and the unit its line set for it, where the line set the box,
+as wide, on the line's baseline, in its paragraph, inside the embeddings its
+inline ancestors open, and stamped with its place in reading order
+(`tinker_pdf_layout::Page::atomics`). `split_at_levels` sets a stand-in for
+each from that record (`set_objects`): an unpainted run of one U+FFFC where
+the unit stood, among the page's runs in reading order, in one walk of them.
+An empty inline block that paints nothing, one its margins set apart from
+the run beside it and a line of nothing but atomic inlines are each set so.
+Which anchors each holds is the box tree's to say (`paint::Atomics`). The
+atomic inline's own runs are lines of their own, ordered as
 the paragraph of their own they are, in its own `direction`. Where L2 moves
 the stand-in, `visual_lines` moves everything set in the atomic inline by the
 same distance — its runs, box fragments, pictures and clips (`carry`) — so
@@ -109,16 +111,9 @@ trailing `?!` is drawn right of its word: where the block touches its
 neighbours, a reader reads it with them, from the right, and the `?!` before
 its word.
 
-**Known limits.** A stand-in is set only where its box meets the line's runs:
-an atomic inline its margin sets apart from the run at a line's end is not
-set, and is not moved; an empty inline block that paints nothing has neither
-a fragment nor a run to find it by; and a line of nothing but atomic inlines
-has no run to find, and is not ordered. A right-to-left inline block of
-`width: auto` is as wide as its line, layout's shrink-to-fit counting the edge
-right-aligned text reaches, so it is a line of its own. And the search for
-where each atomic inline stands is bounded: a page past `paint::OBJECT_WORK`
-comparisons, which only a page a book crafts with thousands of atomic inlines
-reaches, sets none, and its lines are ordered by their runs alone.
+**Known limits.** A right-to-left inline block of `width: auto` is as wide as
+its line, layout's shrink-to-fit counting the edge right-aligned text
+reaches, so it is a line of its own.
 
 **What holds it.** The case above, pinned at each paragraph's verdicts and
 glyphs over others in both builds; `epub_paint.rs`'s
@@ -127,7 +122,12 @@ glyphs over others in both builds; `epub_paint.rs`'s
 `an_inline_block_in_a_line_with_no_right_to_left_character_moves_nothing`
 and `an_inside_marker_is_on_its_items_start_side_beside_an_inline_block`;
 `epub_images.rs`'s `an_inline_img_is_ordered_with_its_words_in_a_right_to_left_line`;
-and `tinker-pdf-layout`'s `the_space_after_an_inline_block_is_kept`,
+`epub_fallback.rs`'s
+`an_atomic_inline_is_one_unit_of_its_line_wherever_layout_set_it`, the
+three shapes and their guard; `epub::tests`'
+`a_page_of_many_atomic_inlines_sets_each_from_its_record`; and
+`tinker-pdf-layout`'s `a_page_records_each_atomic_inline_with_its_margin_box`,
+`the_space_after_an_inline_block_is_kept`,
 `the_space_after_an_inline_picture_is_kept` and
 `spaces_beside_an_atomic_inline_collapse_where_css_collapses_them`.
 
@@ -518,6 +518,6 @@ Every fix step also passes `epub_fallback.rs`, `epub_conservation.rs` and
 |---|---|
 | An atomic inline read as U+FFFC gives its neighbours other levels, and a line reads otherwise | CD-19.7 compares every case in both builds before anything lands, and anything read worse is a price for H-149 |
 | Moving a box moves what else reads its fragment: a link's rectangle, a clip, a figure's tag | Every reader of `LayoutPage::boxes` and `LayoutPage::replaced` moves with it, and CD-19.8 tests each |
-| Which elements are atomic inlines is decided twice, by layout and by the writer, and the two drift | The writer reads the box tree as layout's `Builder::gather` reads it (`paint::Atomics`), and the class's tests hold the two together; an atomic inline the writer does not find is ordered as its runs were before, unmoved |
+| Which elements are atomic inlines is decided twice, by layout and by the writer, and the two drift | Decided once: layout records each atomic inline on its page (`Page::atomics`), and the writer sets its stand-ins from that record |
 | A left-to-right page moves | `visual_lines` touches no line without a right-to-left character; `no_left_to_right_page_moves` and the determinism fingerprints hold that |
 | A block's own transform still paints over its neighbours, so `apart` never holds for Left (10) | CD-19.8 pins each paragraph at the glyphs over others its transforms ask for, and CD-19's exit counts only the others |
