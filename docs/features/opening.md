@@ -242,7 +242,8 @@ reads the main cross-reference table at `/T`, each within a byte budget
 `streaming_open.rs` commits. What still costs the tail: the page *count* and `xref()` fetch the
 main table, and a repair rescan, a save and a signature's byte range fetch the
 whole file; `main_table_fetched` and `whole_file_fetched` are the observables
-that say so, and a repair also warns `WholeFileFetched`. See
+that say so, and a repair warns `WholeFileFetched`, as `CosDocument::bytes()`
+does the one time it fetches the file. See
 [design/streaming-open.md](../design/streaming-open.md).
 
 **Encryption at open.** An encrypted document opens perfectly well; the

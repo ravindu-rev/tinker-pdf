@@ -199,18 +199,6 @@ K-08 extends the mechanism to every new rendered surface.
 | --- | --- | --- | --- | --- | --- |
 | K-13.1 | fix | The head-only open resolves the first page's inheritable attributes through its ancestors. | `crates/tinker-pdf-cos/src/doc.rs`, `crates/tinker-pdf-cos/tests/linearized.rs` | `linearized.rs`: the first page's rotation and crop box agree between the head-only and the full open. | — |
 
-## K-14 — A streamed document's whole-file fetch is reported
-
-**A streamed document's whole-file fetch is reported**: `CosDocument::bytes()` on a document opened from a `ByteSource` warns `WholeFileFetched` when it fetches the whole file, as the other whole-file paths do
-
-**Exit criterion.** a document opened from a counting source and asked for `bytes()` carries one `WholeFileFetched` warning
-
-**Doc:** [features/opening.md](../features/opening.md) · **Depends on:** —
-
-| Step | Kind | What | Where | Exit | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| K-14.1 | fix | `CosDocument::bytes()` warns `WholeFileFetched` when it fetches a streamed file whole. | `crates/tinker-pdf-cos/src/doc.rs`, `crates/tinker-pdf-cos/tests/streaming.rs` | `streaming.rs`: `bytes()` on a streamed document fetches the file once and warns `WholeFileFetched` once. | — |
-
 ## K-16 — Code comments that cite docs the docs no longer carry
 
 **Code comments that cite docs the docs no longer carry, or contradict the code**: comments that point at sections of `docs/verification.md` and the design docs that describe history (its `jbig2` fuzz row, what a census or campaign found), the comment in `crates/tinker-pdf-raster/src/image.rs` that says `fill` truncates crossings where `fill.rs` rounds, and the `jbig2.rs` comments that call the symbol lineage and custom tables unsupported

@@ -1026,7 +1026,17 @@ impl CosDocument {
     ///
     /// An incremental update must reproduce them exactly as its prefix, which
     /// is what keeps a signature over the original valid.
+    ///
+    /// A streamed document fetches them whole the first time it is asked, and
+    /// says so then, once, as every whole-file fetch does ([`fetch_whole`],
+    /// ruling 10): asked again, it fetches nothing and says nothing.
     pub fn bytes(&self) -> &[u8] {
+        if self.buffer.is_streamed() && !self.buffer.whole_fetched() {
+            let mut sink = WarningSink::new();
+            if fetch_whole(&self.buffer, &mut sink).is_some() {
+                self.absorb(sink);
+            }
+        }
         self.buffer.whole()
     }
 

@@ -249,6 +249,44 @@ fn a_lying_offset_is_repaired_on_both_paths() {
         .any(|w| w.kind == WarningKind::WholeFileFetched));
 }
 
+/// The document's own bytes, asked of a streamed open, are fetched once and
+/// declared once: the first call fetches the file and warns
+/// `WholeFileFetched`, and a second fetches nothing and warns nothing.
+#[test]
+fn a_streamed_documents_bytes_are_fetched_once_and_said_once() {
+    let bytes = a_document();
+    let counter = Arc::new(CountingSource::new(SliceSource::new(bytes.clone())));
+    let streamed = CosDocument::open_source(counter.clone()).expect("it opens");
+    let whole = |doc: &CosDocument| {
+        doc.warnings()
+            .iter()
+            .filter(|w| w.kind == WarningKind::WholeFileFetched)
+            .count()
+    };
+    assert!(
+        !streamed.whole_file_fetched(),
+        "the open read part of the file"
+    );
+    assert_eq!(whole(&streamed), 0);
+
+    assert_eq!(streamed.bytes(), &bytes[..], "the bytes are the file's");
+    let read = counter.bytes_read();
+    assert!(streamed.whole_file_fetched());
+    assert_eq!(whole(&streamed), 1, "the fetch is declared");
+
+    assert_eq!(streamed.bytes(), &bytes[..]);
+    assert_eq!(
+        counter.bytes_read(),
+        read,
+        "the second call fetches nothing"
+    );
+    assert_eq!(whole(&streamed), 1, "and declares nothing");
+
+    let buffered = CosDocument::open(bytes.clone()).expect("it opens");
+    assert_eq!(buffered.bytes(), &bytes[..]);
+    assert_eq!(whole(&buffered), 0, "a buffer fetches nothing");
+}
+
 /// The completion call gives back the eager answer.
 #[test]
 fn completing_validation_restores_the_verdict_a_buffer_would_have_given() {
