@@ -224,6 +224,20 @@ pub struct Machine {
     pub unmeasured: Vec<String>,
     /// When the entry was recorded, and by what.
     pub recorded: String,
+    /// What makes a pinned machine that machine, or `None` for a fleet such
+    /// as `ubuntu-latest`, whose runs land on hosts no entry can name.
+    pub pinned: Option<Pinned>,
+}
+
+/// One host, held still: what a pinned machine's entry says it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pinned {
+    /// The host's CPU, as `/proc/cpuinfo`'s first `model name` line gives it
+    /// and `bench.yml` writes it into `bench.log`.
+    pub cpu: String,
+    /// The frequency and core isolation it is held at, as its entry states
+    /// them.
+    pub held: String,
 }
 
 /// Why a baseline was refused.
@@ -360,7 +374,7 @@ impl core::fmt::Display for BaselineError {
                 f,
                 "the entry for `{machine}` puts `{key}` after its `operations`; \
                  the reader takes an entry's operations to its end, so the ids \
-                 it has not measured come first"
+                 it has not measured, and a pinned machine's host, come first"
             ),
             BaselineError::NoGroups(path) => write!(
                 f,
@@ -462,6 +476,30 @@ pub fn parse(text: &str, path: &str) -> Result<Vec<Machine>, BaselineError> {
         } else {
             Vec::new()
         };
+        // A pinned machine names its host and how it is held, both ahead of
+        // its operations, and a fleet names neither: one without the other
+        // is no pin.
+        for key in ["cpu", "held"] {
+            if body.contains(&format!("\"{key}\":")) {
+                return Err(BaselineError::Misplaced {
+                    machine: name.clone(),
+                    key,
+                });
+            }
+        }
+        let pinned = match (
+            string_after(head, "\"cpu\":").filter(|cpu| !cpu.is_empty()),
+            string_after(head, "\"held\":").filter(|held| !held.is_empty()),
+        ) {
+            (None, None) if !head.contains("\"cpu\":") && !head.contains("\"held\":") => None,
+            (Some(cpu), Some(held)) => Some(Pinned { cpu, held }),
+            (cpu, _) => {
+                return Err(BaselineError::Field {
+                    machine: name.clone(),
+                    key: if cpu.is_none() { "cpu" } else { "held" },
+                })
+            }
+        };
         let mut operations = Vec::new();
         for entry in body.split("\"id\":").skip(1) {
             let id = string_after(entry, "").unwrap_or_default();
@@ -512,6 +550,7 @@ pub fn parse(text: &str, path: &str) -> Result<Vec<Machine>, BaselineError> {
             operations,
             unmeasured,
             recorded,
+            pinned,
         });
     }
     if machines.is_empty() {
@@ -705,6 +744,40 @@ impl Verdict {
             return 0.0;
         }
         (self.now - self.before) / self.before * 100.0
+    }
+}
+
+/// The host's CPU, as `/proc/cpuinfo`'s first `model name` line gives it:
+/// the line `bench.yml` writes into `bench.log`, read the same way.
+#[must_use]
+pub fn host_model(cpuinfo: &str) -> Option<String> {
+    cpuinfo.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        (key.trim() == "model name").then(|| value.trim().to_string())
+    })
+}
+
+/// Whether a host whose `/proc/cpuinfo` reads `cpuinfo` may be held to
+/// `machine`'s figures: any host for a fleet, and for a pinned machine only
+/// the host its entry names, so a run that lands elsewhere is refused by name
+/// rather than judged against figures it did not set.
+pub fn host_allows(machine: &Machine, cpuinfo: Option<&str>) -> Result<(), String> {
+    let Some(pinned) = &machine.pinned else {
+        return Ok(());
+    };
+    match cpuinfo.and_then(host_model) {
+        Some(host) if host == pinned.cpu => Ok(()),
+        Some(host) => Err(format!(
+            "this host is `{host}`, and `{}` is `{}` held at {}: its figures are \
+             that machine's, so this run is refused rather than judged against them",
+            machine.name, pinned.cpu, pinned.held
+        )),
+        None => Err(format!(
+            "this host's model name cannot be read from /proc/cpuinfo, and `{}` is \
+             `{}` held at {}: refused rather than judged against figures another \
+             host set",
+            machine.name, pinned.cpu, pinned.held
+        )),
     }
 }
 
@@ -1288,6 +1361,11 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         return Ok(());
     };
 
+    // Nothing is spawned: the file `bench.yml` reads its model name from.
+    host_allows(
+        machine,
+        std::fs::read_to_string("/proc/cpuinfo").ok().as_deref(),
+    )?;
     let (outside, inside, unrecorded) = compare(machine, &now);
     println!(
         "bench-check: `{}`, widest measured swing {} %, no band wider than {} % \
@@ -2270,6 +2348,117 @@ fn render(c: &mut Criterion) {
                 ),
             ],
         );
+    }
+
+    /// The fixture's machine, pinned to one host held still.
+    fn pinned_lists() -> String {
+        LISTS.replace(
+            "      \"recorded\": \"5 September 2026\",\n",
+            "      \"recorded\": \"5 September 2026\",\n      \
+             \"cpu\": \"AMD EPYC 7763 64-Core Processor\",\n      \
+             \"held\": \"2.45 GHz, cores 2 and 3 isolated\",\n",
+        )
+    }
+
+    /// `/proc/cpuinfo` as a host with `model` reports its first processor.
+    fn cpuinfo(model: &str) -> String {
+        format!(
+            "processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: 25\n\
+             model\t\t: 1\nmodel name\t: {model}\nstepping\t: 1\n\n\
+             processor\t: 1\nmodel name\t: {model}\n"
+        )
+    }
+
+    /// A pinned machine's figures are one host's, so a run that lands on
+    /// another is refused by both names, and so is one on a host whose model
+    /// cannot be read.
+    #[test]
+    fn a_host_that_is_not_the_pinned_machine_is_refused() {
+        let machines = parse(&pinned_lists(), BASELINE_PATH).expect("it parses");
+        let machine = &machines[0];
+        assert_eq!(
+            machine.pinned,
+            Some(Pinned {
+                cpu: "AMD EPYC 7763 64-Core Processor".to_string(),
+                held: "2.45 GHz, cores 2 and 3 isolated".to_string(),
+            })
+        );
+        let other = cpuinfo("Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz");
+        let refused = host_allows(machine, Some(&other)).expect_err("another host");
+        for words in [
+            "`Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz`",
+            "`AMD EPYC 7763 64-Core Processor` held at 2.45 GHz",
+            "refused rather than judged",
+        ] {
+            assert!(refused.contains(words), "no `{words}` in: {refused}");
+        }
+        let unread = host_allows(machine, None).expect_err("an unread host");
+        assert!(unread.contains("cannot be read"), "{unread}");
+        assert!(
+            host_allows(machine, Some("processor\t: 0\n")).is_err(),
+            "a cpuinfo with no model name is no host"
+        );
+    }
+
+    /// The pinned machine's own host compares, and a fleet — the fixture's,
+    /// and the committed `ubuntu-latest`, which names no model — compares on
+    /// any host, exactly as before a machine could be pinned.
+    #[test]
+    fn the_pinned_machine_compares() {
+        let machines = parse(&pinned_lists(), BASELINE_PATH).expect("it parses");
+        let same = cpuinfo("AMD EPYC 7763 64-Core Processor");
+        assert_eq!(
+            host_model(&same).as_deref(),
+            Some("AMD EPYC 7763 64-Core Processor")
+        );
+        assert_eq!(host_allows(&machines[0], Some(&same)), Ok(()));
+
+        let other = cpuinfo("Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz");
+        let fleet = &parse(LISTS, BASELINE_PATH).expect("it parses")[0];
+        assert_eq!(fleet.pinned, None);
+        assert_eq!(host_allows(fleet, Some(&other)), Ok(()));
+        assert_eq!(host_allows(fleet, None), Ok(()));
+
+        let text =
+            std::fs::read_to_string(repo_root().join(BASELINE_PATH)).expect("the committed file");
+        let committed = parse(&text, BASELINE_PATH).expect("it parses");
+        let ubuntu = committed
+            .iter()
+            .find(|machine| machine.name == "ubuntu-latest")
+            .expect("the committed fleet");
+        assert_eq!(ubuntu.pinned, None, "`ubuntu-latest` is a fleet");
+        assert_eq!(host_allows(ubuntu, Some(&other)), Ok(()));
+        assert_eq!(host_allows(ubuntu, None), Ok(()));
+    }
+
+    /// A pin is a host and how it is held, both ahead of the operations: half
+    /// of one, or either after them, is refused rather than read as a fleet.
+    #[test]
+    fn a_pin_with_half_its_fields_is_refused() {
+        let held_only =
+            pinned_lists().replace("      \"cpu\": \"AMD EPYC 7763 64-Core Processor\",\n", "");
+        assert!(matches!(
+            parse(&held_only, BASELINE_PATH),
+            Err(BaselineError::Field { key: "cpu", .. })
+        ));
+        let cpu_only = pinned_lists().replace(
+            "      \"held\": \"2.45 GHz, cores 2 and 3 isolated\",\n",
+            "",
+        );
+        assert!(matches!(
+            parse(&cpu_only, BASELINE_PATH),
+            Err(BaselineError::Field { key: "held", .. })
+        ));
+        let late = LISTS.replace(
+            "\"band_percent\": 11.0 }\n      ]\n    }\n  ]",
+            "\"band_percent\": 11.0 }\n      ],\n      \"cpu\": \"AMD EPYC 7763 64-Core \
+             Processor\",\n      \"held\": \"2.45 GHz\"\n    }\n  ]",
+        );
+        assert_ne!(late, LISTS, "the fixture moved");
+        assert!(matches!(
+            parse(&late, BASELINE_PATH),
+            Err(BaselineError::Misplaced { key: "cpu", .. })
+        ));
     }
 
     /// Each list entry carries a unit of the five, and a `per_iteration` and

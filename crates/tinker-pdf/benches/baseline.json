@@ -21,7 +21,14 @@
     "own operation's swing. Key order is load-bearing -- `groups` comes before",
     "`machines`, and the reader cuts each into entries at a first key: `group`",
     "and then `name` in the lists, `machine` and then `id` in the machines,",
-    "where an entry's `unmeasured` comes before its `operations`."
+    "where an entry's `unmeasured`, `cpu` and `held` come before its",
+    "`operations`.",
+    "",
+    "A pinned machine's entry carries `cpu`, its host's /proc/cpuinfo model",
+    "name, and `held`, the frequency and core isolation it is held at, and",
+    "`bench-check` refuses to compare on a host whose model name is not `cpu`.",
+    "A fleet, such as `ubuntu-latest`, carries neither and compares on any",
+    "host."
   ],
   "groups": [
     {

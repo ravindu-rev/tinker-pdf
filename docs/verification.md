@@ -837,6 +837,14 @@ split rather than noise, so `bench.yml` writes `/proc/cpuinfo`'s model name and
 the CPU count into `bench.log`, so that a measurement can attribute the split
 rather than band it.
 
+**A pinned machine names its host.** An entry for one host held still
+carries `cpu`, that host's `/proc/cpuinfo` model name, and `held`, the
+frequency and core isolation it is held at, and `bench-check --machine NAME`
+reads this host's model name the way `bench.yml` logs it and refuses to
+compare when it is not the entry's: a run that lands on another host is
+refused by name rather than judged against figures it did not set. A fleet
+names no model, so `ubuntu-latest` compares on any host.
+
 **What this does not catch.** The widest band passes a change that makes its
 operation half again slower in silence; a several-fold regression would not.
 This is a ratchet against the catastrophic and not against the incremental,
