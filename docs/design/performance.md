@@ -961,7 +961,9 @@ often it is repeated.
 Mpixel/s), bytes (MB/s, a megabyte being 10⁶ bytes), outlines (tier P states
 P-26's CFF target in outlines a second), or none, for an operation whose input
 is none of these — a private-key operation, a shaped paragraph — which
-reports milliseconds alone. A render's pixels are its bitmap's; a decode's
+reports milliseconds alone. Criterion keeps a group's throughput from one
+operation to the next and has no call that clears it, so a group declares its
+unitless operations first: the AES-256 open opens the open group. A render's pixels are its bitmap's; a decode's
 are the image's; the ICC conversion's are the image's, because tier P states
 that target in the image's Mpixel/s.
 
@@ -1045,24 +1047,24 @@ only where n × today's figure stays at or under 300 ms.
 | Id | Unit · an iteration | Input | Tier P: today → target; gate | Window | Step |
 | --- | --- | --- | --- | --- | --- |
 | `open/open a 3-page document` | bytes · the file a call | `three_pages()` | —; floor 1 | unmeasured | built |
-| `open/open and count the 23 MB image file` | bytes · the file a call | `image_file()` | twin; floor 1 | unmeasured | MS-04.3 |
-| `open/open the AES-256 file` | none | `aes_file()`, authenticated with the empty password (`lib.rs:1722`) and counted | the Item's; floor 1 | unmeasured | MS-04.3 |
-| `open/every page's size, 3000 pages` | pages · 3 000 | `small(3000)`, `page(i)` then `Page::size` (`lib.rs:1773`, `:2198`) for every i | 2 569 → 3; 856× | crosses | MS-04.3 |
-| `open/every page's size, 10000 pages` | pages · 10 000 | `small(10000)` | Θ(n²), about 28 500 from the 3 000-page figure → 10; relation ≤ 3.6 × 3 000 | crosses | MS-04.3 |
+| `open/open and count the 23 MB image file` | bytes · the file a call | `image_file()` | twin; floor 1 | unmeasured | built |
+| `open/open the AES-256 file` | none | `aes_file()`, authenticated with the empty password (`lib.rs:1722`) and counted | the Item's; floor 1 | unmeasured | built |
+| `open/every page's size, 3000 pages` | pages · 3 000 | `small(3000)`, `page(i)` then `Page::size` (`lib.rs:1773`, `:2198`) for every i | 2 569 → 3; 856× | crosses | built |
+| `open/every page's size, 10000 pages` | pages · 10 000 | `small(10000)` | Θ(n²), about 28 500 from the 3 000-page figure → 10; relation ≤ 3.6 × 3 000 | crosses | built |
 | `open/open and count the 23 MB image file, CLI` | bytes · 5 files | `tpdf info` | 36 → 6; 6× | ×5 | MS-04.8 |
 
 **text**
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `text/text of 100 dense pages` | pages · 100 | `dense(100, 0)`, every page's `text().plain_text()` by index, as `tpdf text` reads them (`tools/tpdf/src/main.rs:973-991`) | 751 → 100; 7.51× | above | MS-04.3 |
-| `text/text of 100 standard-14 pages` | pages · 100 | `producer(100)` | the Item's; floor 1 | above, expected | MS-04.3 |
-| `text/text of 1000 small pages` | pages · 1 000 | `small(1000)` | twin (CLI 350); floor 1 | crosses | MS-04.3 |
-| `text/text of 10000 small pages` | pages · 10 000 | `small(10000)` | twin (CLI 36 000); floor 1 | above | MS-04.3 |
-| `text/structured JSON of 100 pages` | pages · 100 | `dense(100, 0)` through `TextWriter`'s JSON, as `tpdf text --json` (`main.rs:962-972`) | twin (CLI 1 926); floor 1 | above | MS-04.3 |
-| `text/search a phrase over 100 pages from scratch` | pages · 100 | `dense(100, 0)`, `TextPage::search` (`crates/tinker-pdf-content/src/text.rs:265`) | 722 → 110; 6.56× | above | MS-04.3 |
-| `text/search 100 pages' prebuilt text` | pages · 500 | the 100 `TextPage`s, built once | 36 → 6; 6× | ×5 | MS-04.3 |
-| `text/search 100 pages' prebuilt text, whole words, unaccented` | pages · 300 | the same, `search_with` whole-word and diacritic-insensitive (`search.rs:43-50`, `:108`) | 77 → 12; 6.41× | ×3 | MS-04.3 |
+| `text/text of 100 dense pages` | pages · 100 | `dense(100, 0)`, every page's `text().plain_text()` by index, as `tpdf text` reads them (`tools/tpdf/src/main.rs:973-991`) | 751 → 100; 7.51× | above | built |
+| `text/text of 100 standard-14 pages` | pages · 100 | `producer(100)` | the Item's; floor 1 | above, expected | built |
+| `text/text of 1000 small pages` | pages · 1 000 | `small(1000)` | twin (CLI 350); floor 1 | crosses | built |
+| `text/text of 10000 small pages` | pages · 10 000 | `small(10000)` | twin (CLI 36 000); floor 1 | above | built |
+| `text/structured JSON of 100 pages` | pages · 100 | `dense(100, 0)` through `TextWriter`'s JSON, as `tpdf text --json` (`main.rs:962-972`) | twin (CLI 1 926); floor 1 | above | built |
+| `text/search a phrase over 100 pages from scratch` | pages · 100 | `dense(100, 0)`, `TextPage::search` (`crates/tinker-pdf-content/src/text.rs:265`) | 722 → 110; 6.56× | above | built |
+| `text/search 100 pages' prebuilt text` | pages · 500 | the 100 `TextPage`s, built once | 36 → 6; 6× | ×5 | built |
+| `text/search 100 pages' prebuilt text, whole words, unaccented` | pages · 300 | the same, `search_with` whole-word and diacritic-insensitive (`search.rs:43-50`, `:108`) | 77 → 12; 6.41× | ×3 | built |
 | `text/text of 100 dense pages, CLI` | pages · 100 | `tpdf text` | 678 → 130; 5.21× | above | MS-04.8 |
 | `text/text of 1000 small pages, CLI` | pages · 1 000 | `tpdf text` | 350 → 15; 23.3× | crosses | MS-04.8 |
 | `text/text of 10000 small pages, CLI` | pages · 10 000 | `tpdf text` | 36 000 → 150; relation ≤ 11 × 1 000 | above | MS-04.8 |
@@ -1244,7 +1246,7 @@ their files (below). **calibration** holds one:
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `calibration/text of 100 dense pages` | pages · 100 | `dense(100, 0)`, the call `text/text of 100 dense pages` makes | 751 on the planning machine (H-112); the operation every calibrated target is a fraction of | above until P-02 | MS-04.3 |
+| `calibration/text of 100 dense pages` | pages · 100 | `dense(100, 0)`, the call `text/text of 100 dense pages` makes | 751 on the planning machine (H-112); the operation every calibrated target is a fraction of | above until P-02 | built |
 
 Its file is frozen: it is the same input and call as the text group's, kept
 apart so that nothing a later row adds to the text group can move it, and a

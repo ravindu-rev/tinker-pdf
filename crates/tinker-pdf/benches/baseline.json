@@ -27,15 +27,39 @@
     {
       "group": "open",
       "operations": [
+        { "name": "open the AES-256 file", "unit": "none",
+          "per_iteration": 1, "calls": 1 },
         { "name": "open a 3-page document", "unit": "bytes",
-          "per_iteration": 10985, "calls": 1 }
+          "per_iteration": 10985, "calls": 1 },
+        { "name": "open and count the 23 MB image file", "unit": "bytes",
+          "per_iteration": 23229599, "calls": 1 },
+        { "name": "every page's size, 3000 pages", "unit": "pages",
+          "per_iteration": 3000, "calls": 1 },
+        { "name": "every page's size, 10000 pages", "unit": "pages",
+          "per_iteration": 10000, "calls": 1 }
       ]
     },
     {
       "group": "text",
       "operations": [
         { "name": "extract a page of text", "unit": "pages",
-          "per_iteration": 1, "calls": 1 }
+          "per_iteration": 1, "calls": 1 },
+        { "name": "text of 100 dense pages", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "text of 100 standard-14 pages", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "text of 1000 small pages", "unit": "pages",
+          "per_iteration": 1000, "calls": 1 },
+        { "name": "text of 10000 small pages", "unit": "pages",
+          "per_iteration": 10000, "calls": 1 },
+        { "name": "structured JSON of 100 pages", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "search a phrase over 100 pages from scratch", "unit": "pages",
+          "per_iteration": 100, "calls": 1 },
+        { "name": "search 100 pages' prebuilt text", "unit": "pages",
+          "per_iteration": 500, "calls": 5 },
+        { "name": "search 100 pages' prebuilt text, whole words, unaccented",
+          "unit": "pages", "per_iteration": 300, "calls": 3 }
       ]
     },
     {
@@ -62,6 +86,13 @@
         { "name": "paginate a book at 432x648 pt", "unit": "pages",
           "per_iteration": 7, "calls": 1 }
       ]
+    },
+    {
+      "group": "calibration",
+      "operations": [
+        { "name": "text of 100 dense pages", "unit": "pages",
+          "per_iteration": 100, "calls": 1 }
+      ]
     }
   ],
   "machines": [
@@ -77,7 +108,21 @@
         "35462926404", "35463256473", "35463258487", "35463260359",
         "35463262176", "35463264168", "35463266192"
       ],
-      "unmeasured": [],
+      "unmeasured": [
+        "open/open the AES-256 file",
+        "open/open and count the 23 MB image file",
+        "open/every page's size, 3000 pages",
+        "open/every page's size, 10000 pages",
+        "text/text of 100 dense pages",
+        "text/text of 100 standard-14 pages",
+        "text/text of 1000 small pages",
+        "text/text of 10000 small pages",
+        "text/structured JSON of 100 pages",
+        "text/search a phrase over 100 pages from scratch",
+        "text/search 100 pages' prebuilt text",
+        "text/search 100 pages' prebuilt text, whole words, unaccented",
+        "calibration/text of 100 dense pages"
+      ],
       "operations": [
         {
           "id": "layout/paginate a book at 432x648 pt",

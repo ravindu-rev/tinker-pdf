@@ -924,9 +924,9 @@ same way.
   verdict, the page tree's walk for the count and page one: the work P-05.9's
   6x floor holds against the planning baseline. A linearized file, `probe` or a
   verdict flag would time a whole-file read, and floor an operation P-05 does
-  not change. MS-04.3's in-process "open and count a 23 MB image file" opens
-  bytes already in memory, so it does not reach this path, and it is not the
-  gated row.
+  not change. The open group's in-process "open and count the 23 MB image
+  file" opens bytes already in memory, so it does not reach this path, and it
+  is not the gated row.
 - **MS-05's open case** re-executes its own test binary, so it cannot time
   `tpdf`; P-05.5 has its child do what `info` does to the file instead. The
   parent writes the file to disk, so the child holds no generated copy; the

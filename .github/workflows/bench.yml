@@ -69,14 +69,16 @@ jobs:
         # this job.
         include:
           - group: open
-            count: 1
+            count: 5
           - group: text
-            count: 1
+            count: 9
           - group: render
             count: 3
           - group: write
             count: 1
           - group: layout
+            count: 1
+          - group: calibration
             count: 1
     steps:
       - uses: actions/checkout@v4
