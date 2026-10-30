@@ -19,7 +19,11 @@ chased:
 - **No platform libm on any pixel path.** `tinker-pdf-math` supplies `sin`,
   `cos`, `tan`, `atan`, `atan2`, `ln`, `exp`, `pow`, `cbrt`, `log2` and
   `log10`, built from nothing but operations IEEE 754 pins exactly, and it
-  is `no_std` so `x.sin()` does not compile inside it. The boundary is
+  is `no_std` so `x.sin()` does not compile inside it. `sin` and `cos`
+  reduce every finite argument exactly — by Cody and Waite's split π/2 while
+  the quadrant count is below 2^22, and past it by Payne and Hanek's integer
+  product with 1 216 bits of 2/π — so a turn of any size is a point on the
+  circle and never a NaN. The boundary is
   precise: `sqrt`, `floor`, `ceil`, `round`, `trunc` and `abs` **are**
   correctly rounded by the standard and may be used freely; only the
   transcendental family diverges between libms, and last-ulp differences

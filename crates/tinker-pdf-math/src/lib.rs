@@ -59,12 +59,43 @@ extern crate std;
 /// Written from its bits rather than as a decimal because the trailing zeros
 /// are the entire point and a literal cannot promise them.
 ///
-/// (Cody and Waite's method. Beyond about 2^22 radians the product stops
-/// being exact and accuracy degrades — still deterministically, since it is
-/// all still plain arithmetic — and nothing rotates a page by four million
-/// radians.)
+/// (Cody and Waite's method. From 2^22 quadrants on the product is no longer
+/// exact, so a larger argument is reduced by [`reduce_exactly`] instead.)
 const PIO2_HI: f64 = f64::from_bits(0x3FF9_21FB_5440_0000);
 const PIO2_LO: f64 = 6.077_100_506_506_192e-11;
+
+/// The quadrant count from which `n · PIO2_HI` stops being exact.
+const EXACT_QUADRANTS: u64 = 1 << 22;
+
+/// 2/π's binary fraction `0.b₁b₂b₃…`, most significant bit first: bit `i` is
+/// bit `63 − (i − 1) mod 64` of word `(i − 1) / 64`.
+///
+/// 1 216 bits, of which [`reduce_exactly`] reads at most the first 1 161:
+/// the largest double is `m · 2^971`, and the bits of 2/π above position 970
+/// weigh whole turns of it. They are fdlibm's `ipio2` digits, which are
+/// 2/π's, recomputed in integers by Machin's formula — the same figures to
+/// the last bit, so the table is checked by arithmetic rather than copied.
+const TWO_OVER_PI: [u64; 19] = [
+    0xA2F9_836E_4E44_1529,
+    0xFC27_57D1_F534_DDC0,
+    0xDB62_9599_3C43_9041,
+    0xFE51_63AB_DEBB_C561,
+    0xB724_6E3A_424D_D2E0,
+    0x0649_2EEA_09D1_921C,
+    0xFE1D_EB1C_B129_A73E,
+    0xE882_35F5_2EBB_4484,
+    0xE99C_7026_B45F_7E41,
+    0x3991_D639_8353_39F4,
+    0x9C84_5F8B_BDF9_283B,
+    0x1FF8_97FF_DE05_980F,
+    0xEF2F_118B_5A0A_6D1F,
+    0x6D36_7ECF_27CB_09B7,
+    0x4F46_3F66_9E5F_EA2D,
+    0x7527_BAC7_EBE5_F17B,
+    0x3D07_39F7_8A52_92EA,
+    0x6BFB_5FB1_1F8D_5D08,
+    0x5603_3046_FC7B_6BAB,
+];
 
 /// ln 2, split the same way so `exp`'s reduction stays exact.
 const LN2_HI: f64 = 0.693_147_180_369_123_8;
@@ -130,7 +161,8 @@ pub fn tan(x: f64) -> f64 {
 }
 
 /// Removes whole quadrants, returning the remainder in about `[-π/4, π/4]`
-/// and how many came off.
+/// and how many came off — past [`EXACT_QUADRANTS`], how many modulo four,
+/// which is all `sin` and `cos` read.
 fn reduce(x: f64) -> (f64, i64) {
     // Small arguments need no reduction, and taking the general path for them
     // would only add rounding.
@@ -139,12 +171,145 @@ fn reduce(x: f64) -> (f64, i64) {
     }
 
     let quadrant = round_to_int(x * FRAC_2_PI);
+    if quadrant.unsigned_abs() >= EXACT_QUADRANTS {
+        return reduce_exactly(x);
+    }
     let n = quadrant as f64;
 
     // `n · PIO2_HI` is exact, so the first subtraction is too; the second
     // removes the rest of π/2 and is the only step that rounds at all.
     let r = (x - n * PIO2_HI) - n * PIO2_LO;
     (r, quadrant)
+}
+
+/// Payne and Hanek's reduction, for an argument too large for Cody and
+/// Waite's: `x · 2/π` modulo four, worked in integers from as many bits of
+/// 2/π as the product needs, so that every finite argument keeps a remainder
+/// in about `[-π/4, π/4]` and no argument's sine is anything but a sine.
+///
+/// `|x|` is `m · 2^k` for a 53-bit integer `m`. A bit of 2/π at position
+/// `i ≤ k − 2` adds `m · 2^(k−i)` quadrants, a multiple of four, which moves
+/// no answer; so the product is taken of `m` and a 192-bit window of 2/π
+/// starting at position `k − 1` (or at the first bit, for a small `k`).
+/// What the window leaves out is below 2^-137 of a quadrant, and the closest
+/// a double comes to a multiple of π/2 is about 2^-61 of one, so the
+/// remainder keeps more significant bits than a double holds.
+fn reduce_exactly(x: f64) -> (f64, i64) {
+    let bits = x.to_bits();
+    let m = (bits & ((1 << 52) - 1)) | (1 << 52);
+    let k = ((bits >> 52) & 0x7FF) as i64 - 1075;
+    let start = (k - 1).max(1);
+    let product = times_window(m, two_over_pi_from(start as u32));
+    // `product` is `|x| · 2/π` with this many bits after the point.
+    let point = (start + 191 - k) as u32;
+
+    let mut quadrant = bit(&product, point) | bit(&product, point + 1) << 1;
+    let mut fraction = product;
+    keep_below(&mut fraction, point);
+    // A fraction of a half or more rounds to the next quadrant, and what is
+    // left is the distance back from it.
+    let past_half = bit(&fraction, point - 1) == 1;
+    if past_half {
+        quadrant += 1;
+        negate(&mut fraction);
+        keep_below(&mut fraction, point);
+    }
+    let r = match highest_bit(&fraction) {
+        None => 0.0,
+        Some(top) => {
+            // Sixty-four bits from the leading one, rounded once to a double
+            // and placed by its exponent: the fraction of a quadrant.
+            let mut leading = 0u64;
+            for step in 0..64 {
+                let at = i64::from(top) - step;
+                leading = leading << 1
+                    | if at >= 0 {
+                        bit(&fraction, at as u32)
+                    } else {
+                        0
+                    };
+            }
+            let of_a_quadrant =
+                scale_by_power_of_two(leading as f64, i64::from(top) - 63 - i64::from(point));
+            of_a_quadrant * FRAC_PI_2
+        }
+    };
+    let r = if past_half { -r } else { r };
+    let quadrant = (quadrant & 3) as i64;
+    if is_negative(x) {
+        (-r, (4 - quadrant) & 3)
+    } else {
+        (r, quadrant)
+    }
+}
+
+/// 192 bits of [`TWO_OVER_PI`] from 1-based position `start`, most
+/// significant word first.
+fn two_over_pi_from(start: u32) -> [u64; 3] {
+    let offset = (start - 1) as usize;
+    let (word, shift) = (offset / 64, offset % 64);
+    let at = |i: usize| TWO_OVER_PI.get(i).copied().unwrap_or(0);
+    let mut window = [0u64; 3];
+    for (j, slot) in window.iter_mut().enumerate() {
+        *slot = if shift == 0 {
+            at(word + j)
+        } else {
+            at(word + j) << shift | at(word + j + 1) >> (64 - shift)
+        };
+    }
+    window
+}
+
+/// `m` times a 192-bit window: 256 bits, most significant word first.
+fn times_window(m: u64, window: [u64; 3]) -> [u64; 4] {
+    let mut product = [0u64; 4];
+    let mut carry = 0u128;
+    for j in (0..3).rev() {
+        let wide = u128::from(m) * u128::from(window[j]) + carry;
+        product[j + 1] = wide as u64;
+        carry = wide >> 64;
+    }
+    product[0] = carry as u64;
+    product
+}
+
+/// Bit `at` of a 256-bit number, counted from the least significant.
+fn bit(number: &[u64; 4], at: u32) -> u64 {
+    3usize
+        .checked_sub((at / 64) as usize)
+        .and_then(|word| number.get(word))
+        .map_or(0, |w| w >> (at % 64) & 1)
+}
+
+/// Clears every bit of a 256-bit number from position `from` up.
+fn keep_below(number: &mut [u64; 4], from: u32) {
+    for (index, word) in number.iter_mut().enumerate() {
+        let low = (3 - index) as u32 * 64;
+        if from <= low {
+            *word = 0;
+        } else if from < low + 64 {
+            *word &= (1u64 << (from - low)) - 1;
+        }
+    }
+}
+
+/// A 256-bit number's two's complement, in place.
+fn negate(number: &mut [u64; 4]) {
+    let mut carry = true;
+    for word in number.iter_mut().rev() {
+        let (sum, overflowed) = (!*word).overflowing_add(u64::from(carry));
+        *word = sum;
+        carry = overflowed;
+    }
+}
+
+/// The position of a 256-bit number's highest set bit, or `None` for zero.
+fn highest_bit(number: &[u64; 4]) -> Option<u32> {
+    number
+        .iter()
+        .enumerate()
+        .find(|(_, word)| **word != 0)
+        .map(|(index, word)| (3 - index) as u32 * 64 + 63 - word.leading_zeros())
 }
 
 /// sin on `[-π/4, π/4]`. The coefficients are fdlibm's minimax fit, which is
@@ -628,6 +793,70 @@ mod tests {
             within_ulps(sin(x), x.sin(), 2, &format!("sin({x})"));
             within_ulps(cos(x), x.cos(), 2, &format!("cos({x})"));
             x += 0.013;
+        }
+    }
+
+    /// Past Cody and Waite's range an argument is reduced exactly, so the
+    /// sine and cosine of any finite double are its own. The expected values
+    /// are each argument reduced by π computed to 3 000 bits in integers
+    /// (Machin's formula), not the platform's: `1e22` is the classic case,
+    /// `6381956970095103 · 2^797` the double nearest a multiple of π/2, and
+    /// `f64::MAX` the largest there is.
+    #[test]
+    fn a_huge_argument_keeps_its_own_sine_and_cosine() {
+        #[allow(clippy::excessive_precision)]
+        let cases: [(f64, f64, f64); 12] = [
+            (1.0e7, 0.420_547_793_190_782_45, -0.907_270_386_181_739_6),
+            (1.0e15, 0.858_272_793_170_235_9, -0.513_193_737_786_970_3),
+            (
+                7.0 * 9_007_199_254_740_992.0,
+                -0.727_357_272_887_399_8,
+                -0.686_258_987_247_383_5,
+            ),
+            (1.4e19, -0.995_925_160_358_515_2, 0.090_183_562_609_080_09),
+            (1.0e22, -0.852_200_849_767_188_8, 0.523_214_785_395_139),
+            (
+                5.313_557_944_960_515e35,
+                0.263_176_822_585_353_2,
+                0.964_747_614_691_986_4,
+            ),
+            (1.0e100, -0.380_637_731_005_028_7, 0.924_724_238_751_933_8),
+            (1.0e300, -0.817_881_912_115_908_5, -0.575_386_111_957_549_1),
+            (
+                f64::MAX,
+                0.004_961_954_789_184_061,
+                -0.999_987_689_426_559_9,
+            ),
+            (-1.0e22, 0.852_200_849_767_188_8, 0.523_214_785_395_139),
+            (-1.0e300, 0.817_881_912_115_908_5, -0.575_386_111_957_549_1),
+            (5.319_372_648_326_541e255, 1.0, -4.687_165_924_254_628e-19),
+        ];
+        for (x, want_sin, want_cos) in cases {
+            within_ulps(sin(x), want_sin, 2, &format!("sin({x:e})"));
+            within_ulps(cos(x), want_cos, 2, &format!("cos({x:e})"));
+        }
+    }
+
+    /// Every argument past Cody and Waite's range, sampled across the
+    /// exponents, has a sine and a cosine on the unit circle — none is a NaN,
+    /// which is what a remainder left unreduced became.
+    #[test]
+    fn every_finite_argument_has_a_point_on_the_circle() {
+        let mut x = 6.0e6f64;
+        while x.is_finite() {
+            for value in [x, -x, x * 1.7, -x * 1.3] {
+                let (s, c) = (sin(value), cos(value));
+                assert!(
+                    s.is_finite() && c.is_finite(),
+                    "sin and cos of {value:e}: {s}, {c}"
+                );
+                assert!(
+                    abs(s * s + c * c - 1.0) < 1e-14,
+                    "sin^2 + cos^2 at {value:e} is {}",
+                    s * s + c * c
+                );
+            }
+            x *= 3.1;
         }
     }
 

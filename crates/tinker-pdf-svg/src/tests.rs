@@ -80,6 +80,29 @@ fn a_rotation_about_a_point_fixes_that_point() {
     }
 }
 
+/// A rotation by an angle of any size is still a rotation: its matrix is
+/// finite, orthonormal, and fixes its centre. An angle of 3·10^37 degrees
+/// is a turn far past where a quadrant count fits a double's integers, and
+/// its sine and cosine are reduced exactly rather than left as a remainder
+/// no polynomial can take.
+#[test]
+fn a_rotation_by_a_huge_angle_is_still_a_rotation() {
+    let matrix = transform::list("rotate(30444444444444444444444444444444444444, 7, -3)").unwrap();
+    assert!(
+        matrix.iter().all(|n| n.is_finite()),
+        "a finite matrix: {matrix:?}"
+    );
+    assert!(
+        (matrix[0] * matrix[0] + matrix[1] * matrix[1] - 1.0).abs() < 1e-12,
+        "a turn, not a stretch: {matrix:?}"
+    );
+    point(
+        transform::apply(matrix, [7.0, -3.0]),
+        [7.0, -3.0],
+        "the centre of the rotation",
+    );
+}
+
 /// A transform that is not the grammar is `None`, so a caller can name it —
 /// not an identity, which would move the shape somewhere the file did not.
 #[test]
