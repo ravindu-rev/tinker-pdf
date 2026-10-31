@@ -785,189 +785,213 @@ criterion alone; its input and call are the text group's
 
 **The count job counts each operation's instructions.** A dispatch of
 `bench.yml` with `count` set runs the `count` job instead of the timing one,
-one job a group, and a schedule never does. Each builds the release bench
-binary and `tpdf`, then runs every operation of its group's list in
-`baseline.json` in count mode under cachegrind (`--cache-sim=no`, every child
-traced, so a CLI operation's `tpdf` counts with the bench), at one iteration
-and at two, twice over: the second count less the first is one warm
-iteration's instructions. A run that does not exit 0 and print its `RAN` line,
-or a process with no count, fails the job. Each operation's two figures, their
-spread — the larger less the smaller, over the smaller — and its seconds go to
-the log and to `counts.tsv`, kept 90 days. cachegrind is in the dev-tooling
-exemption ([architecture](architecture.md)): it executes the bench and judges
-no document. `calibration` has no count mode, and its input and call are the
+and a schedule never does: one job a group, but `open` in six parts and
+`write` in five, each part every sixth or fifth operation of its group's list
+in `baseline.json` from its own. Each builds the release bench binary and
+`tpdf`, then runs every operation of its share in count mode under cachegrind
+(`--cache-sim=no`, every child traced, so a CLI operation's `tpdf` counts with
+the bench), at one iteration and at two, twice over: the second count less the
+first is one warm iteration's instructions. A run that does not exit 0 and
+print its `RAN` line, a process with no count, or a part with no operation
+fails the job. Each operation's two figures, their spread — the larger less
+the smaller, over the smaller — and its seconds go to the log and to the job's
+`counts.tsv` as each is counted, so a job the limit cuts off keeps them, and
+the job's time to its `job.tsv`. The `counted` job then fails unless the jobs
+counted every operation of the set exactly once, and keeps the set as one
+`counts.tsv` beside every job's time in `jobs.tsv`, in the `counted-set`
+artefact, kept 90 days. cachegrind is in the dev-tooling exemption
+([architecture](architecture.md)): it executes the bench and judges no
+document. `calibration` has no count mode, and its input and call are the
 text group's `text of 100 dense pages`.
 
-Dispatch 41068883186 counted 138 of the set's 141 operations. Each job counts
-its group twice at one revision, which is what a base and a head cost, so its
-time is the time of one pair; `open` and `write` reached the 300-minute limit
-first:
+Dispatch 41204196780 counted all 141 operations of the set. Each job counts
+its share twice at one revision, which is what a base and a head cost, so its
+time is the time of one pair. `open` and `write` count in parts because,
+whole, their jobs would take 29 201 s and 20 557 s, past the 300 minutes a job
+may run:
 
-| Group | Operations | Counted | Seconds |
-| --- | ---: | ---: | ---: |
-| `open` | 6 | 4 | cut off at 300 minutes |
-| `text` | 13 | 13 | 11 499 |
-| `render` | 34 | 34 | 12 071 |
-| `write` | 17 | 16 | cut off at 300 minutes |
-| `layout` | 40 | 40 | 3 828 |
-| `analysis` | 8 | 8 | 1 199 |
-| `encode` | 4 | 4 | 185 |
-| `decode` | 9 | 9 | 2 314 |
-| `sign` | 3 | 3 | 63 |
-| `fonts` | 7 | 7 | 168 |
+| Job | Operations | Seconds |
+| --- | ---: | ---: |
+| `open-1-of-6` | 1 | 7 398 |
+| `open-2-of-6` | 1 | 2 |
+| `open-3-of-6` | 1 | 10 286 |
+| `open-4-of-6` | 1 | 305 |
+| `open-5-of-6` | 1 | 5 043 |
+| `open-6-of-6` | 1 | 6 167 |
+| `text` | 13 | 11 713 |
+| `render` | 34 | 12 096 |
+| `write-1-of-5` | 4 | 111 |
+| `write-2-of-5` | 4 | 7 732 |
+| `write-3-of-5` | 3 | 213 |
+| `write-4-of-5` | 3 | 7 453 |
+| `write-5-of-5` | 3 | 5 048 |
+| `layout` | 40 | 3 836 |
+| `analysis` | 8 | 746 |
+| `encode` | 4 | 185 |
+| `decode` | 9 | 2 301 |
+| `sign` | 3 | 61 |
+| `fonts` | 7 | 168 |
 
-`open/every page's size, 10000 pages`,
-`open/open and count the 23 MB image file, CLI` and
-`write/encrypt the 23 MB image file, CLI` were not counted. Most of those two
-jobs' time went to four operations of about two hours each —
-`open/open the AES-256 file` (8 005 s),
-`open/open and count the 23 MB image file` (7 908 s),
-`write/AES-256-CBC decrypt 23 MB` (7 409 s) and
-`write/AES-256-CBC encrypt 23 MB` (7 427 s) — although none counts more than
-6 592 865 637 instructions an iteration: what a run does besides its
-iterations, which the counter counts as well, is most of its time.
+The longest job is `render`'s, 12 096 s, so a gate that counts a base and a
+head runs at least that long. Most of a slow operation's time is what its
+process does besides its iterations, which the counter counts as well:
+`open/open and count the 23 MB image file` takes 10 286 s and counts
+9 340 950 instructions an iteration, and `open/open the AES-256 file`
+7 398 s for 197 966 766.
 
-The two counts of 120 of the 138 operations differ, so a count is not a
-property of the code and the input alone, and those of four differ by more
-than 1 %, more than a 1 % rule can resolve:
-`layout/render every page of pandoc-book-epub2.epub at 72 dpi` (3.13 %),
-`analysis/PDF-X validation of 100 pages` (2.88 %),
-`layout/paginate a book at 432x648 pt` (1.63 %) and
-`write/edit an annotation, save, reopen, 1000 pages` (1.20 %). They stay in
-the set, and how a gate holds them is H-78's, for the owner. Every count:
+The two counts of 123 of the 141 operations differ, so a count is not a
+property of the code and the input alone. Those of two differ by more than
+1 %, more than a 1 % rule can resolve, and those of four others did in
+dispatch 41068883186, which counted 138 of the set; which operations pass 1 %
+moves from one dispatch to the next:
+
+| Operation | 41068883186 | 41204196780 |
+| --- | ---: | ---: |
+| `layout/render every page of pandoc-book-cover.epub at 72 dpi` | 0.6143 % | 1.0783 % |
+| `layout/render every page of pandoc-plates.epub at 72 dpi` | 0.4085 % | 1.0030 % |
+| `layout/render every page of pandoc-book-epub2.epub at 72 dpi` | 3.1337 % | 0.2312 % |
+| `analysis/PDF-X validation of 100 pages` | 2.8814 % | 0.6377 % |
+| `layout/paginate a book at 432x648 pt` | 1.6343 % | 0.0393 % |
+| `write/edit an annotation, save, reopen, 1000 pages` | 1.1968 % | 0.2429 % |
+
+They stay in the set, and how a gate holds them is H-78's, for the owner.
+Every count of dispatch 41204196780:
 
 | Operation | First | Second | Spread |
 | --- | ---: | ---: | ---: |
-| `open/open the AES-256 file` | 197 917 376 | 197 931 195 | 0.0070 % |
-| `open/open a 3-page document` | 175 517 | 176 085 | 0.3236 % |
-| `open/open and count the 23 MB image file` | 9 340 432 | 9 333 919 | 0.0698 % |
-| `open/every page's size, 3000 pages` | 25 349 512 082 | 25 350 795 957 | 0.0051 % |
-| `text/extract a page of text` | 10 315 089 | 10 349 390 | 0.3325 % |
-| `text/text of 100 dense pages` | 12 131 841 471 | 12 144 710 605 | 0.1061 % |
-| `text/text of 100 standard-14 pages` | 3 396 229 149 | 3 381 356 353 | 0.4398 % |
-| `text/text of 1000 small pages` | 3 156 513 380 | 3 154 171 911 | 0.0742 % |
-| `text/text of 10000 small pages` | 286 067 531 697 | 286 999 215 458 | 0.3257 % |
-| `text/structured JSON of 100 pages` | 22 361 849 114 | 22 356 388 154 | 0.0244 % |
-| `text/search a phrase over 100 pages from scratch` | 12 407 355 269 | 12 447 217 001 | 0.3213 % |
-| `text/search 100 pages' prebuilt text` | 1 445 562 019 | 1 439 008 940 | 0.4554 % |
-| `text/search 100 pages' prebuilt text, whole words, unaccented` | 1 937 521 308 | 1 935 137 753 | 0.1232 % |
-| `text/text of 100 dense pages, CLI` | 12 126 151 275 | 12 126 160 963 | 0.0001 % |
-| `text/text of 1000 small pages, CLI` | 3 168 044 669 | 3 167 982 375 | 0.0020 % |
-| `text/text of 10000 small pages, CLI` | 288 830 196 099 | 288 901 784 107 | 0.0248 % |
-| `text/structured JSON of 100 pages, CLI` | 22 424 460 978 | 22 423 310 182 | 0.0051 % |
-| `render/render text at 150 dpi` | 71 166 246 | 70 940 897 | 0.3177 % |
-| `render/render a full-page axial shading at 150 dpi` | 2 230 683 135 | 2 230 682 846 | 0.0000 % |
-| `render/fill 300 anti-aliased paths at 150 dpi` | 579 749 050 | 579 747 784 | 0.0002 % |
-| `render/the text page at 72 dpi` | 2 428 277 514 | 2 429 878 757 | 0.0659 % |
-| `render/the text page at 150 dpi` | 1 634 930 108 | 1 630 539 321 | 0.2693 % |
-| `render/the text page at 300 dpi` | 1 626 191 166 | 1 625 554 725 | 0.0392 % |
-| `render/record the text page's display list` | 2 552 288 011 | 2 552 278 611 | 0.0004 % |
-| `render/5000 paths at 150 dpi` | 17 592 058 430 | 17 592 058 565 | 0.0000 % |
-| `render/5000 paths at 300 dpi` | 52 464 640 190 | 52 464 639 222 | 0.0000 % |
-| `render/the 2000 stroked curves alone at 150 dpi` | 10 498 314 730 | 10 498 314 723 | 0.0000 % |
-| `render/a full-page axial shading at 300 dpi` | 8 920 008 894 | 8 920 009 063 | 0.0000 % |
-| `render/the mesh shadings fixture at 150 dpi` | 1 517 673 997 | 1 517 673 259 | 0.0000 % |
-| `render/the mesh shadings fixture at 300 dpi` | 1 743 727 966 | 1 743 727 528 | 0.0000 % |
-| `render/the transparency fixture at 150 dpi` | 636 838 991 | 636 838 993 | 0.0000 % |
-| `render/a page tiled by one pattern fill at 150 dpi` | 761 662 748 | 761 661 237 | 0.0002 % |
-| `render/a page tiled by 50 pattern fills at 150 dpi` | 1 191 244 433 | 1 191 236 386 | 0.0007 % |
-| `render/the 300-dpi text page in 4 bands on 4 threads` | 6 197 703 068 | 6 200 513 445 | 0.0453 % |
-| `render/100 text pages at 150 dpi on 1 thread` | 81 845 594 737 | 81 789 021 190 | 0.0692 % |
-| `render/100 text pages at 150 dpi on 4 threads` | 82 084 499 386 | 81 968 097 521 | 0.1420 % |
-| `render/the annotated text page at 150 dpi` | 1 650 660 666 | 1 653 083 907 | 0.1468 % |
-| `render/re-render a changed 100x100 pt annotation` | 2 525 939 654 | 2 527 733 474 | 0.0710 % |
-| `render/replay the Flate RGB image page at 150 dpi` | 4 053 693 628 | 4 053 694 029 | 0.0000 % |
-| `render/an ICC-based CMYK image to sRGB at 300 dpi` | 24 812 416 936 | 24 812 416 907 | 0.0000 % |
-| `render/the JPEG page at 72 dpi` | 8 375 930 263 | 8 375 930 057 | 0.0000 % |
-| `render/the JPEG page at 300 dpi` | 18 796 332 209 | 18 796 333 420 | 0.0000 % |
-| `render/a second render of the JPEG page at 300 dpi` | 27 173 042 384 | 27 173 043 872 | 0.0000 % |
-| `render/the JPEG 2000 page at 72 dpi` | 27 144 431 866 | 27 144 433 736 | 0.0000 % |
-| `render/the G4 scan page at 150 dpi` | 7 411 505 608 | 7 411 503 520 | 0.0000 % |
-| `render/the JBIG2 scan page at 150 dpi` | 8 651 714 479 | 8 651 798 529 | 0.0010 % |
-| `render/the Flate RGB image page at 72 dpi` | 11 697 076 558 | 11 697 076 106 | 0.0000 % |
-| `render/the text page to PNG at 150 dpi, CLI` | 3 684 633 565 | 3 684 547 890 | 0.0023 % |
-| `render/the text page to PNG at 300 dpi, CLI` | 12 084 929 374 | 12 085 005 470 | 0.0006 % |
-| `render/20 pages to PNG at 150 dpi, 1 job, CLI` | 73 651 230 613 | 73 653 620 724 | 0.0032 % |
-| `render/20 pages to PNG at 150 dpi, 4 jobs, CLI` | 73 620 210 802 | 73 621 760 585 | 0.0021 % |
-| `write/rewrite a document` | 843 897 | 844 323 | 0.0505 % |
-| `write/rewrite 100 pages` | 4 448 583 | 4 442 881 | 0.1283 % |
-| `write/rewrite 1000 pages` | 44 191 585 | 44 189 903 | 0.0038 % |
-| `write/rewrite 3000 pages` | 132 791 641 | 132 840 982 | 0.0372 % |
-| `write/rewrite 100 pages into object streams` | 44 045 186 | 44 107 523 | 0.1415 % |
-| `write/rewrite 100 pages linearized` | 72 980 222 | 73 148 514 | 0.2306 % |
-| `write/subset-on-save of 100 pages` | 14 784 555 586 | 14 788 930 364 | 0.0296 % |
-| `write/merge 4 x 100 pages` | 9 001 521 401 | 9 001 306 574 | 0.0024 % |
-| `write/AES-256-CBC decrypt 23 MB` | 6 592 865 637 | 6 592 860 928 | 0.0001 % |
-| `write/AES-256-CBC encrypt 23 MB` | 5 753 344 194 | 5 753 337 124 | 0.0001 % |
-| `write/edit an annotation, save, reopen, 1000 pages` | 63 757 082 | 64 520 118 | 1.1968 % |
-| `write/edit an annotation, save, reopen, 10 pages` | 286 268 | 285 572 | 0.2437 % |
-| `write/rewrite 100 pages, CLI` | 42 662 676 | 42 642 048 | 0.0484 % |
-| `write/rewrite 1000 pages, CLI` | 99 336 741 | 99 374 154 | 0.0377 % |
-| `write/subset-on-save of 100 pages, CLI` | 15 003 428 378 | 14 956 938 970 | 0.3108 % |
-| `write/merge 4 x 100 pages, CLI` | 9 017 381 046 | 9 017 271 045 | 0.0012 % |
-| `layout/paginate a book at 432x648 pt` | 181 425 999 | 184 391 046 | 1.6343 % |
-| `layout/open and paginate calibre-book-cover.epub at 432x648 pt` | 184 273 968 | 184 142 944 | 0.0712 % |
-| `layout/open and paginate calibre-book-nocover.epub at 432x648 pt` | 180 782 150 | 180 815 623 | 0.0185 % |
-| `layout/open and paginate calibre-embedded-font.epub at 432x648 pt` | 618 595 875 | 619 852 270 | 0.2031 % |
-| `layout/open and paginate kcc-fixed-layout.epub at 432x648 pt` | 31 928 691 | 31 927 574 | 0.0035 % |
-| `layout/open and paginate pandoc-book-cover.epub at 432x648 pt` | 732 815 337 | 733 054 729 | 0.0327 % |
-| `layout/open and paginate pandoc-book-epub2.epub at 432x648 pt` | 729 598 635 | 728 728 889 | 0.1194 % |
-| `layout/open and paginate pandoc-book-nocover.epub at 432x648 pt` | 719 663 447 | 715 767 620 | 0.5443 % |
-| `layout/open and paginate pandoc-embedded-font.epub at 432x648 pt` | 555 892 402 | 554 391 268 | 0.2708 % |
-| `layout/open and paginate pandoc-plates.epub at 432x648 pt` | 201 420 859 | 201 392 179 | 0.0142 % |
-| `layout/render every page of calibre-book-cover.epub at 72 dpi` | 57 757 276 | 57 627 754 | 0.2248 % |
-| `layout/render every page of calibre-book-nocover.epub at 72 dpi` | 49 476 156 | 49 361 147 | 0.2330 % |
-| `layout/render every page of calibre-embedded-font.epub at 72 dpi` | 126 631 925 | 126 051 112 | 0.4608 % |
-| `layout/render every page of kcc-fixed-layout.epub at 72 dpi` | 38 770 952 | 38 756 724 | 0.0367 % |
-| `layout/render every page of pandoc-book-cover.epub at 72 dpi` | 76 471 242 | 76 941 004 | 0.6143 % |
-| `layout/render every page of pandoc-book-epub2.epub at 72 dpi` | 75 867 095 | 78 244 530 | 3.1337 % |
-| `layout/render every page of pandoc-book-nocover.epub at 72 dpi` | 68 208 397 | 67 742 965 | 0.6871 % |
-| `layout/render every page of pandoc-embedded-font.epub at 72 dpi` | 166 923 147 | 166 715 270 | 0.1247 % |
-| `layout/render every page of pandoc-plates.epub at 72 dpi` | 67 012 492 | 66 739 861 | 0.4085 % |
-| `layout/open and paginate the 1000-chapter book` | 50 535 593 286 | 50 538 348 881 | 0.0055 % |
-| `layout/render the 1000-chapter book at 72 dpi` | 62 655 930 419 | 62 671 593 716 | 0.0250 % |
-| `layout/open and paginate the 100-chapter book` | 5 081 444 953 | 5 079 383 066 | 0.0406 % |
-| `layout/render the 100-chapter book at 72 dpi` | 6 233 671 596 | 6 222 503 858 | 0.1795 % |
-| `layout/the 20-page HTML report to PDF` | 293 040 472 | 292 521 179 | 0.1775 % |
-| `layout/the 20-page Markdown document to PDF` | 332 836 612 | 332 831 516 | 0.0015 % |
-| `layout/open each SVG fixture, render page 1` | 295 565 627 | 295 681 630 | 0.0392 % |
-| `layout/render each SVG fixture's synthesised PDF` | 255 013 376 | 255 196 677 | 0.0719 % |
-| `layout/open each XPS fixture, render page 1` | 2 417 863 357 | 2 419 388 455 | 0.0631 % |
-| `layout/render each XPS fixture's synthesised PDF` | 1 950 663 282 | 1 950 381 211 | 0.0145 % |
-| `layout/open each CBZ fixture, render page 1` | 122 704 483 | 123 267 908 | 0.4592 % |
-| `layout/render each CBZ fixture's synthesised PDF` | 90 409 239 | 91 200 631 | 0.8753 % |
-| `layout/render every page of calibre-book-cover.epub at 72 dpi, CLI` | 1 111 922 653 | 1 112 604 025 | 0.0613 % |
-| `layout/render every page of calibre-book-nocover.epub at 72 dpi, CLI` | 902 854 649 | 902 785 691 | 0.0076 % |
-| `layout/render every page of calibre-embedded-font.epub at 72 dpi, CLI` | 813 979 697 | 813 566 001 | 0.0508 % |
-| `layout/render every page of kcc-fixed-layout.epub at 72 dpi, CLI` | 75 223 943 | 75 223 367 | 0.0008 % |
-| `layout/render every page of pandoc-book-cover.epub at 72 dpi, CLI` | 1 677 437 286 | 1 676 387 568 | 0.0626 % |
-| `layout/render every page of pandoc-book-epub2.epub at 72 dpi, CLI` | 1 677 126 463 | 1 676 964 907 | 0.0096 % |
-| `layout/render every page of pandoc-book-nocover.epub at 72 dpi, CLI` | 1 465 583 702 | 1 463 577 604 | 0.1371 % |
-| `layout/render every page of pandoc-embedded-font.epub at 72 dpi, CLI` | 1 290 613 351 | 1 290 600 520 | 0.0010 % |
-| `layout/render every page of pandoc-plates.epub at 72 dpi, CLI` | 1 148 420 772 | 1 148 645 541 | 0.0196 % |
-| `analysis/text of the 100 report pages` | 10 631 662 755 | 10 631 616 371 | 0.0004 % |
-| `analysis/redact a rectangle on each of 100 pages` | 1 251 634 184 | 1 261 186 290 | 0.7632 % |
-| `analysis/reading order inferred over 100 pages` | 22 579 976 275 | 22 579 624 360 | 0.0016 % |
-| `analysis/tables inferred over 100 pages` | 11 270 452 270 | 11 270 408 517 | 0.0004 % |
-| `analysis/text of the 100 claiming pages` | 10 636 960 192 | 10 637 177 622 | 0.0020 % |
-| `analysis/PDF-A validation of 100 pages` | 893 854 834 | 894 587 694 | 0.0820 % |
-| `analysis/PDF-UA validation of 100 pages` | 758 623 982 | 754 463 555 | 0.5514 % |
-| `analysis/PDF-X validation of 100 pages` | 360 831 516 | 371 228 417 | 2.8814 % |
-| `encode/PNG of the 1240x1755 text page` | 2 869 040 717 | 2 868 946 329 | 0.0033 % |
-| `encode/PNG of the near-blank page` | 3 486 422 039 | 3 486 422 326 | 0.0000 % |
+| `open/open the AES-256 file` | 197 966 766 | 197 906 657 | 0.0304 % |
+| `open/open a 3-page document` | 176 118 | 175 803 | 0.1792 % |
+| `open/open and count the 23 MB image file` | 9 340 950 | 9 330 481 | 0.1122 % |
+| `open/every page's size, 3000 pages` | 25 478 794 176 | 25 391 485 633 | 0.3438 % |
+| `open/every page's size, 10000 pages` | 289 763 232 333 | 289 252 206 759 | 0.1767 % |
+| `open/open and count the 23 MB image file, CLI` | 59 804 639 | 59 827 177 | 0.0377 % |
+| `text/extract a page of text` | 10 352 950 | 10 422 003 | 0.6670 % |
+| `text/text of 100 dense pages` | 12 133 559 702 | 12 130 809 276 | 0.0227 % |
+| `text/text of 100 standard-14 pages` | 3 397 980 995 | 3 391 177 326 | 0.2006 % |
+| `text/text of 1000 small pages` | 3 149 016 771 | 3 153 093 404 | 0.1295 % |
+| `text/text of 10000 small pages` | 286 543 894 229 | 286 530 454 644 | 0.0047 % |
+| `text/structured JSON of 100 pages` | 22 383 968 608 | 22 341 978 462 | 0.1879 % |
+| `text/search a phrase over 100 pages from scratch` | 12 415 435 826 | 12 391 319 347 | 0.1946 % |
+| `text/search 100 pages' prebuilt text` | 1 443 023 290 | 1 446 255 702 | 0.2240 % |
+| `text/search 100 pages' prebuilt text, whole words, unaccented` | 1 953 486 979 | 1 954 466 524 | 0.0501 % |
+| `text/text of 100 dense pages, CLI` | 12 152 123 179 | 12 125 236 567 | 0.2217 % |
+| `text/text of 1000 small pages, CLI` | 3 161 798 593 | 3 161 632 197 | 0.0053 % |
+| `text/text of 10000 small pages, CLI` | 288 545 212 957 | 288 536 266 202 | 0.0031 % |
+| `text/structured JSON of 100 pages, CLI` | 22 411 107 172 | 22 411 001 296 | 0.0005 % |
+| `render/render text at 150 dpi` | 71 177 584 | 71 282 942 | 0.1480 % |
+| `render/render a full-page axial shading at 150 dpi` | 2 230 683 155 | 2 230 684 648 | 0.0001 % |
+| `render/fill 300 anti-aliased paths at 150 dpi` | 579 745 308 | 579 743 765 | 0.0003 % |
+| `render/the text page at 72 dpi` | 2 421 927 879 | 2 423 584 042 | 0.0684 % |
+| `render/the text page at 150 dpi` | 1 637 078 434 | 1 639 072 951 | 0.1218 % |
+| `render/the text page at 300 dpi` | 1 626 713 015 | 1 628 093 143 | 0.0848 % |
+| `render/record the text page's display list` | 2 545 820 755 | 2 538 659 592 | 0.2821 % |
+| `render/5000 paths at 150 dpi` | 17 598 511 995 | 17 598 511 458 | 0.0000 % |
+| `render/5000 paths at 300 dpi` | 52 467 795 487 | 52 467 796 105 | 0.0000 % |
+| `render/the 2000 stroked curves alone at 150 dpi` | 10 459 943 615 | 10 459 943 285 | 0.0000 % |
+| `render/a full-page axial shading at 300 dpi` | 8 920 009 722 | 8 920 008 822 | 0.0000 % |
+| `render/the mesh shadings fixture at 150 dpi` | 1 517 686 654 | 1 517 684 172 | 0.0002 % |
+| `render/the mesh shadings fixture at 300 dpi` | 1 743 741 551 | 1 743 739 419 | 0.0001 % |
+| `render/the transparency fixture at 150 dpi` | 636 838 710 | 636 837 821 | 0.0001 % |
+| `render/a page tiled by one pattern fill at 150 dpi` | 761 663 104 | 761 662 673 | 0.0001 % |
+| `render/a page tiled by 50 pattern fills at 150 dpi` | 1 191 258 315 | 1 191 258 412 | 0.0000 % |
+| `render/the 300-dpi text page in 4 bands on 4 threads` | 6 180 633 910 | 6 185 998 093 | 0.0868 % |
+| `render/100 text pages at 150 dpi on 1 thread` | 81 915 427 936 | 81 819 195 681 | 0.1176 % |
+| `render/100 text pages at 150 dpi on 4 threads` | 82 019 897 396 | 82 048 181 180 | 0.0345 % |
+| `render/the annotated text page at 150 dpi` | 1 650 715 035 | 1 649 568 209 | 0.0695 % |
+| `render/re-render a changed 100x100 pt annotation` | 2 522 825 341 | 2 525 396 795 | 0.1019 % |
+| `render/replay the Flate RGB image page at 150 dpi` | 4 053 692 989 | 4 053 694 118 | 0.0000 % |
+| `render/an ICC-based CMYK image to sRGB at 300 dpi` | 24 812 416 640 | 24 812 417 161 | 0.0000 % |
+| `render/the JPEG page at 72 dpi` | 8 375 931 247 | 8 375 930 782 | 0.0000 % |
+| `render/the JPEG page at 300 dpi` | 18 796 333 308 | 18 796 332 859 | 0.0000 % |
+| `render/a second render of the JPEG page at 300 dpi` | 27 173 043 386 | 27 173 044 484 | 0.0000 % |
+| `render/the JPEG 2000 page at 72 dpi` | 27 143 758 867 | 27 143 757 636 | 0.0000 % |
+| `render/the G4 scan page at 150 dpi` | 7 410 916 878 | 7 411 003 742 | 0.0012 % |
+| `render/the JBIG2 scan page at 150 dpi` | 8 651 714 150 | 8 651 716 095 | 0.0000 % |
+| `render/the Flate RGB image page at 72 dpi` | 11 697 078 589 | 11 697 077 403 | 0.0000 % |
+| `render/the text page to PNG at 150 dpi, CLI` | 3 685 211 958 | 3 685 033 082 | 0.0049 % |
+| `render/the text page to PNG at 300 dpi, CLI` | 12 084 637 446 | 12 084 635 979 | 0.0000 % |
+| `render/20 pages to PNG at 150 dpi, 1 job, CLI` | 73 638 978 413 | 73 645 074 132 | 0.0083 % |
+| `render/20 pages to PNG at 150 dpi, 4 jobs, CLI` | 73 635 197 969 | 73 628 993 252 | 0.0084 % |
+| `write/rewrite a document` | 843 939 | 844 334 | 0.0468 % |
+| `write/rewrite 100 pages` | 4 448 161 | 4 445 155 | 0.0676 % |
+| `write/rewrite 1000 pages` | 44 188 742 | 44 188 755 | 0.0000 % |
+| `write/rewrite 3000 pages` | 132 884 356 | 132 922 175 | 0.0285 % |
+| `write/rewrite 100 pages into object streams` | 44 100 984 | 43 910 316 | 0.4342 % |
+| `write/rewrite 100 pages linearized` | 72 985 462 | 72 790 061 | 0.2684 % |
+| `write/subset-on-save of 100 pages` | 14 802 503 152 | 14 830 250 367 | 0.1874 % |
+| `write/merge 4 x 100 pages` | 9 001 394 444 | 9 001 284 989 | 0.0012 % |
+| `write/AES-256-CBC decrypt 23 MB` | 6 592 853 140 | 6 592 858 161 | 0.0001 % |
+| `write/AES-256-CBC encrypt 23 MB` | 5 753 336 887 | 5 753 341 009 | 0.0001 % |
+| `write/edit an annotation, save, reopen, 1000 pages` | 63 547 315 | 63 393 357 | 0.2429 % |
+| `write/edit an annotation, save, reopen, 10 pages` | 287 137 | 289 265 | 0.7411 % |
+| `write/rewrite 100 pages, CLI` | 42 656 851 | 42 641 876 | 0.0351 % |
+| `write/rewrite 1000 pages, CLI` | 99 394 956 | 99 349 085 | 0.0462 % |
+| `write/subset-on-save of 100 pages, CLI` | 14 931 033 161 | 14 930 996 889 | 0.0002 % |
+| `write/merge 4 x 100 pages, CLI` | 9 017 630 789 | 9 017 298 902 | 0.0037 % |
+| `write/encrypt the 23 MB image file, CLI` | 7 670 137 790 | 7 670 130 613 | 0.0001 % |
+| `layout/paginate a book at 432x648 pt` | 182 327 799 | 182 399 428 | 0.0393 % |
+| `layout/open and paginate calibre-book-cover.epub at 432x648 pt` | 184 154 232 | 184 457 926 | 0.1649 % |
+| `layout/open and paginate calibre-book-nocover.epub at 432x648 pt` | 180 801 447 | 180 811 884 | 0.0058 % |
+| `layout/open and paginate calibre-embedded-font.epub at 432x648 pt` | 619 487 869 | 619 808 043 | 0.0517 % |
+| `layout/open and paginate kcc-fixed-layout.epub at 432x648 pt` | 32 057 574 | 32 060 276 | 0.0084 % |
+| `layout/open and paginate pandoc-book-cover.epub at 432x648 pt` | 729 106 300 | 732 860 531 | 0.5149 % |
+| `layout/open and paginate pandoc-book-epub2.epub at 432x648 pt` | 730 436 647 | 731 497 159 | 0.1452 % |
+| `layout/open and paginate pandoc-book-nocover.epub at 432x648 pt` | 717 831 424 | 717 091 306 | 0.1032 % |
+| `layout/open and paginate pandoc-embedded-font.epub at 432x648 pt` | 553 719 791 | 552 730 273 | 0.1790 % |
+| `layout/open and paginate pandoc-plates.epub at 432x648 pt` | 201 586 452 | 201 854 265 | 0.1329 % |
+| `layout/render every page of calibre-book-cover.epub at 72 dpi` | 57 837 519 | 57 638 844 | 0.3447 % |
+| `layout/render every page of calibre-book-nocover.epub at 72 dpi` | 49 414 776 | 49 616 229 | 0.4077 % |
+| `layout/render every page of calibre-embedded-font.epub at 72 dpi` | 125 546 815 | 125 928 418 | 0.3040 % |
+| `layout/render every page of kcc-fixed-layout.epub at 72 dpi` | 38 759 955 | 38 766 806 | 0.0177 % |
+| `layout/render every page of pandoc-book-cover.epub at 72 dpi` | 77 139 095 | 76 316 209 | 1.0783 % |
+| `layout/render every page of pandoc-book-epub2.epub at 72 dpi` | 76 033 744 | 75 858 342 | 0.2312 % |
+| `layout/render every page of pandoc-book-nocover.epub at 72 dpi` | 67 392 626 | 68 057 513 | 0.9866 % |
+| `layout/render every page of pandoc-embedded-font.epub at 72 dpi` | 166 652 786 | 166 448 026 | 0.1230 % |
+| `layout/render every page of pandoc-plates.epub at 72 dpi` | 66 667 158 | 67 335 856 | 1.0030 % |
+| `layout/open and paginate the 1000-chapter book` | 50 540 442 094 | 50 533 274 606 | 0.0142 % |
+| `layout/render the 1000-chapter book at 72 dpi` | 62 547 934 607 | 62 771 429 880 | 0.3573 % |
+| `layout/open and paginate the 100-chapter book` | 5 082 630 152 | 5 081 059 205 | 0.0309 % |
+| `layout/render the 100-chapter book at 72 dpi` | 6 230 263 077 | 6 220 358 505 | 0.1592 % |
+| `layout/the 20-page HTML report to PDF` | 293 114 678 | 292 598 153 | 0.1765 % |
+| `layout/the 20-page Markdown document to PDF` | 333 027 377 | 332 310 638 | 0.2157 % |
+| `layout/open each SVG fixture, render page 1` | 295 351 307 | 295 367 313 | 0.0054 % |
+| `layout/render each SVG fixture's synthesised PDF` | 255 194 271 | 255 277 307 | 0.0325 % |
+| `layout/open each XPS fixture, render page 1` | 2 418 397 662 | 2 421 058 865 | 0.1100 % |
+| `layout/render each XPS fixture's synthesised PDF` | 1 949 245 698 | 1 949 435 305 | 0.0097 % |
+| `layout/open each CBZ fixture, render page 1` | 123 292 670 | 123 107 036 | 0.1508 % |
+| `layout/render each CBZ fixture's synthesised PDF` | 91 370 607 | 90 639 093 | 0.8071 % |
+| `layout/render every page of calibre-book-cover.epub at 72 dpi, CLI` | 1 112 950 498 | 1 113 867 554 | 0.0824 % |
+| `layout/render every page of calibre-book-nocover.epub at 72 dpi, CLI` | 902 696 935 | 902 619 359 | 0.0086 % |
+| `layout/render every page of calibre-embedded-font.epub at 72 dpi, CLI` | 813 742 088 | 814 048 646 | 0.0377 % |
+| `layout/render every page of kcc-fixed-layout.epub at 72 dpi, CLI` | 75 218 749 | 75 226 973 | 0.0109 % |
+| `layout/render every page of pandoc-book-cover.epub at 72 dpi, CLI` | 1 677 733 752 | 1 675 200 111 | 0.1512 % |
+| `layout/render every page of pandoc-book-epub2.epub at 72 dpi, CLI` | 1 677 397 903 | 1 675 493 151 | 0.1137 % |
+| `layout/render every page of pandoc-book-nocover.epub at 72 dpi, CLI` | 1 464 681 462 | 1 463 614 935 | 0.0729 % |
+| `layout/render every page of pandoc-embedded-font.epub at 72 dpi, CLI` | 1 290 930 847 | 1 290 036 523 | 0.0693 % |
+| `layout/render every page of pandoc-plates.epub at 72 dpi, CLI` | 1 148 557 059 | 1 148 387 321 | 0.0148 % |
+| `analysis/text of the 100 report pages` | 10 633 534 182 | 10 633 522 395 | 0.0001 % |
+| `analysis/redact a rectangle on each of 100 pages` | 1 260 488 481 | 1 254 285 760 | 0.4945 % |
+| `analysis/reading order inferred over 100 pages` | 22 631 369 843 | 22 581 444 575 | 0.2211 % |
+| `analysis/tables inferred over 100 pages` | 11 268 909 162 | 11 279 185 134 | 0.0912 % |
+| `analysis/text of the 100 claiming pages` | 10 637 092 209 | 10 653 885 095 | 0.1579 % |
+| `analysis/PDF-A validation of 100 pages` | 886 726 299 | 894 822 431 | 0.9130 % |
+| `analysis/PDF-UA validation of 100 pages` | 754 719 301 | 759 678 700 | 0.6571 % |
+| `analysis/PDF-X validation of 100 pages` | 370 702 216 | 368 353 229 | 0.6377 % |
+| `encode/PNG of the 1240x1755 text page` | 2 868 954 230 | 2 868 956 058 | 0.0001 % |
+| `encode/PNG of the near-blank page` | 3 486 422 576 | 3 486 422 367 | 0.0000 % |
 | `encode/deflate page-like data` | 1 646 042 412 | 1 646 042 412 | 0.0000 % |
 | `encode/deflate photo-like data` | 1 578 560 042 | 1 578 560 042 | 0.0000 % |
 | `decode/inflate page-like data` | 204 987 824 | 204 987 824 | 0.0000 % |
 | `decode/inflate near-incompressible data` | 394 558 041 | 394 558 041 | 0.0000 % |
-| `decode/LZW decode page-like data` | 165 846 160 | 165 785 464 | 0.0366 % |
+| `decode/LZW decode page-like data` | 165 836 076 | 165 866 150 | 0.0181 % |
 | `decode/baseline JPEG 2480x3508` | 6 643 680 847 | 6 643 680 847 | 0.0000 % |
 | `decode/progressive JPEG 2480x3508` | 7 314 140 717 | 7 314 140 717 | 0.0000 % |
 | `decode/irreversible JPEG 2000 2480x3508` | 25 095 196 363 | 25 095 196 363 | 0.0000 % |
 | `decode/reversible JPEG 2000 2480x3508` | 65 490 751 249 | 65 490 751 249 | 0.0000 % |
-| `decode/decode the JBIG2 generic page` | 1 733 769 433 | 1 733 768 109 | 0.0001 % |
-| `decode/decode the CCITT G4 page` | 491 924 148 | 491 923 693 | 0.0001 % |
-| `sign/RSA-2048 private-key operation` | 1 467 364 414 | 1 467 364 414 | 0.0000 % |
-| `sign/verify an RSA-2048 signature over 10 MB` | 630 663 771 | 630 663 771 | 0.0000 % |
+| `decode/decode the JBIG2 generic page` | 1 733 557 255 | 1 733 769 914 | 0.0123 % |
+| `decode/decode the CCITT G4 page` | 492 030 759 | 492 030 415 | 0.0001 % |
+| `sign/RSA-2048 private-key operation` | 1 467 364 232 | 1 467 364 232 | 0.0000 % |
+| `sign/verify an RSA-2048 signature over 10 MB` | 630 663 743 | 630 663 743 | 0.0000 % |
 | `sign/SHA-256 of 10 MB` | 629 848 693 | 629 848 693 | 0.0000 % |
 | `fonts/shape 1000 characters of Latin` | 709 864 010 | 709 864 010 | 0.0000 % |
 | `fonts/shape 1000 characters of Arabic` | 2 547 846 611 | 2 547 846 611 | 0.0000 % |
