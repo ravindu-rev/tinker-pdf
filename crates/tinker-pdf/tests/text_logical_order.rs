@@ -446,8 +446,7 @@ fn pieces_page(pieces: &[Vec<Stroke>]) -> Vec<u8> {
 }
 
 /// **A right-to-left line that opens with a bracketed Latin run reads as
-/// written** — ROADMAP K-11, and ruling 14's bracket tie-break, amended 10
-/// October 2026.
+/// written** — ruling 14's bracket tie-break.
 ///
 /// `(seen wan). חו`, a right-to-left paragraph's line, is drawn
 /// `וח .)seen wan(`: the pair at the paragraph's level, typed characters
@@ -456,14 +455,14 @@ fn pieces_page(pieces: &[Vec<Stroke>]) -> Vec<u8> {
 /// order: the `(` at the right end, the Latin words, then `וח .)` at the
 /// left — three pieces on one baseline.
 ///
-/// Two things read it backwards. The `(` and the Latin words hold no
-/// right-to-left character, and the join asked that of each pair of
-/// pieces, so the `(` was read as a line of its own; the whole chain is
-/// joined now. And the line holds seven Latin letters to two Hebrew ones,
-/// its ends disagree, and the majority read it left to right,
-/// `חו .)seen wan(`, which a left-to-right paragraph draws as the line
-/// stands; only a pair at a right-to-left level is drawn facing outward, and
-/// the right-to-left reading pairs it.
+/// Two things would read it backwards. The `(` and the Latin words hold no
+/// right-to-left character, so a join that asks that of each pair of pieces
+/// reads the `(` as a line of its own; the whole chain is joined. And the
+/// line holds seven Latin letters to two Hebrew ones, its ends disagree,
+/// and the majority reads it left to right, `חו .)seen wan(`, which a
+/// left-to-right paragraph draws as the line stands; only a pair at a
+/// right-to-left level is drawn facing outward, and the right-to-left
+/// reading pairs it.
 #[test]
 fn a_right_to_left_line_opening_with_a_bracketed_latin_run_reads_as_written() {
     let drawn = format!("{} .)seen wan(", reversed(HET_VAV));
@@ -478,20 +477,19 @@ fn a_right_to_left_line_opening_with_a_bracketed_latin_run_reads_as_written() {
 }
 
 /// **Brackets that are no pair as typed keep a left-to-right line's
-/// direction** — ruling 14's bracket tie-break as the review of the K-11 fix
-/// revised it.
+/// direction** — ruling 14's bracket tie-break.
 ///
 /// A list marker before a parenthesis, `1) see (שלום) as 2) one.`, and a
 /// parenthesis opened at a line's end, `a) שלום b) חו (see`, each draw a
 /// closing bracket left of an opening one, and a right-to-left paragraph
 /// draws each line the same for another text, in which two of them pair
-/// facing outward. As first proposed, the tie-break took that reading and
-/// read both lines backwards: `.as 2) one )שלום( see )1` and
-/// `see( חו )b שלום )a`. The first pairs no
-/// more brackets read from the right than as typed, `(שלום)` against
-/// `) see (`; the second pairs one read from the right, `see( חו )b`, but
-/// with the spaces that stood outside its two brackets inside it, and a
-/// bracket is set against its own text. Both read as typed.
+/// facing outward. A tie-break that took that reading would read both lines
+/// backwards: `.as 2) one )שלום( see )1` and `see( חו )b שלום )a`. The first
+/// pairs no more brackets read from the right than as typed, `(שלום)`
+/// against `) see (`; the second pairs one read from the right,
+/// `see( חו )b`, but with the spaces that stand outside its two brackets as
+/// typed inside it, and a bracket is set against its own text. Both read as
+/// typed.
 #[test]
 fn a_list_marker_and_a_wrapped_parenthesis_in_left_to_right_text_read_as_typed() {
     let first = format!("1) see ({SHALOM}) as 2) one.");
@@ -768,11 +766,11 @@ fn stating(text: &str) -> String {
 }
 
 /// **A line a span states whole reads as its text** (14.9.4; ruling 14,
-/// H-152). Left (1)'s shape, typed in a left-to-right paragraph,
-/// `שלום 60.`, is drawn `60 םולש.`, which a right-to-left paragraph draws
-/// for `.שלום 60`: read off the line, the stop comes first. Stated, the line
-/// reads as typed, in `Page::text` and in the stream's order alike, each
-/// character on the glyph that draws it.
+/// *What a page says*). A Hebrew word, a number and a stop, typed in a
+/// left-to-right paragraph, `שלום 60.`, is drawn `60 םולש.`, which a
+/// right-to-left paragraph draws for `.שלום 60`: read off the line, the stop
+/// comes first. Stated, the line reads as typed, in `Page::text` and in the
+/// stream's order alike, each character on the glyph that draws it.
 #[test]
 fn a_line_a_span_states_whole_reads_as_its_text() {
     let typed = format!("{SHALOM} 60.");
@@ -1152,9 +1150,10 @@ fn declaring(
     editor.save(&WriteOptions::default())
 }
 
-/// Left (1)'s line, `שלום 60.` typed in a left-to-right paragraph, as it is
-/// drawn: `60 םולש.`, which a right-to-left paragraph draws for `.שלום 60`.
-fn left_one() -> (String, String) {
+/// A Hebrew line that ends in a number and a stop, `שלום 60.` typed in a
+/// left-to-right paragraph, as it is drawn: `60 םולש.`, which a
+/// right-to-left paragraph draws for `.שלום 60`.
+fn ending_a_number_and_a_stop() -> (String, String) {
     (format!("{SHALOM} 60."), format!("60 {}.", reversed(SHALOM)))
 }
 
@@ -1168,13 +1167,14 @@ fn opening_dash() -> (String, String) {
 }
 
 /// **A line its structure element declares left to right reads so**
-/// (ISO 32000-2 §14.8.5.4.2; ruling 14, H-152). Left (1)'s line is drawn as
-/// a right-to-left paragraph draws another text, and read off the line
-/// alone, its stop comes first. Its element's Layout attributes state
-/// `/WritingMode /LrTb`, and the line reads as typed, the stop last.
+/// (ISO 32000-2 §14.8.5.4.2; ruling 14, *What a page says*). The Hebrew line
+/// that ends in a number and a stop (`ending_a_number_and_a_stop`) is drawn as a right-to-left
+/// paragraph draws another text, and read off the line alone, its stop comes
+/// first. Its element's Layout attributes state `/WritingMode /LrTb`, and
+/// the line reads as typed, the stop last.
 #[test]
 fn a_line_its_element_declares_left_to_right_reads_its_stop_last() {
-    let (typed, drawn) = left_one();
+    let (typed, drawn) = ending_a_number_and_a_stop();
     let items = [sequence(0), Item::Run(0, visual(&drawn)), Item::Close];
     let undeclared = extract_lines(declaring(stated_page(1, &items), &[], &[], &[]));
     assert_ne!(undeclared[0].0, typed, "read off the line alone");
@@ -1209,14 +1209,14 @@ fn a_right_to_left_line_opening_with_a_dash_declared_right_to_left_reads_as_type
 /// one declaring `/RlTb`; one whose `/C` names a class that states no
 /// writing mode and then one that states `/RlTb`; one whose `/A` holds a
 /// Table attribute object and a Layout one, each with its revision number;
-/// and Left (1)'s line, whose `/A` states `/LrTb` and whose class states
-/// `/RlTb`, `/A` first.
+/// and the Hebrew line that ends in a number and a stop (`ending_a_number_and_a_stop`), whose
+/// `/A` states `/LrTb` and whose class states `/RlTb`, `/A` first.
 #[test]
 fn a_writing_mode_inherited_or_stated_by_a_class_holds() {
     let (dash, dash_drawn) = opening_dash();
-    let (left, left_drawn) = left_one();
+    let (ending, ending_drawn) = ending_a_number_and_a_stop();
     let mut items = Vec::new();
-    for (row, drawn) in [&dash_drawn, &dash_drawn, &dash_drawn, &left_drawn]
+    for (row, drawn) in [&dash_drawn, &dash_drawn, &dash_drawn, &ending_drawn]
         .into_iter()
         .enumerate()
     {
@@ -1261,7 +1261,7 @@ fn a_writing_mode_inherited_or_stated_by_a_class_holds() {
             (dash.clone(), true),
             (dash.clone(), true),
             (dash, true),
-            (left, false),
+            (ending, false),
         ]
     );
 }

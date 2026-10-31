@@ -185,8 +185,9 @@ fn actual_text_replaces_what_it_encloses_without_orphaning_it() {
 /// alike, so this engine has to as well — which is only possible because the
 /// property list crosses the `Device` seam. On a property list it replaces
 /// the glyphs in the flat extraction too, which reads what the page states
-/// (ruling 14, H-152); on an element it is the structured view's, an element
-/// reaching across lines and pages where a line has no place for it.
+/// (ruling 14, *What a page says*); on an element it is the structured
+/// view's, an element reaching across lines and pages where a line has no
+/// place for it.
 #[test]
 fn actual_text_on_a_property_list_replaces_its_own_sequence() {
     let content = "/Span << /MCID 0 /ActualText (fi) >> BDC \

@@ -685,12 +685,13 @@ fn search(visual: &[&str], declared: Option<BaseDirection>) -> DrawnReading {
 /// moves its pen left, and when that word is several text objects inside a
 /// left-to-right line — `a ب<span>ح</span>م b`, each span its own object — the
 /// object drawn first is the rightmost: `a ` ends at one place and `ب` starts
-/// two letters further on, so the line was cut there, and again after `م`,
-/// which ends at the word's left edge while ` b` starts at its right. Three
-/// lines on one baseline came back, and the reading order below, which never
-/// trusts the stream's order, was handed three lines to order instead of one.
-/// Ruling 14 says the content stream's order decides nothing; this is that
-/// sentence applied to where a line ends as well as to how one is read.
+/// two letters further on, so the device cuts the line there, and again
+/// after `م`, which ends at the word's left edge while ` b` starts at its
+/// right: three lines on one baseline, and the reading order below, which
+/// never trusts the stream's order, would be handed three lines to order
+/// instead of one. Ruling 14 says the content stream's order decides
+/// nothing; this is that sentence applied to where a line ends as well as to
+/// how one is read.
 ///
 /// So a line in a row is the rest of the one before it — a **chain** of
 /// pieces — when their baselines agree to half an em and their extents along
@@ -699,8 +700,8 @@ fn search(visual: &[&str], declared: Option<BaseDirection>) -> DrawnReading {
 /// right-to-left character. A chain with none is left exactly as it was
 /// collected — a left-to-right page is not touched — and so is a vertical
 /// line. Within a chain, a piece joins the one before it where either holds
-/// a right-to-left character, as at 9297d2d: those pieces are the chain's
-/// **groups**, and each is one line.
+/// a right-to-left character: those pieces are the chain's **groups**, and
+/// each is one line.
 ///
 /// # And the chain, not the pair, holds a bracket the line pairs
 ///
@@ -709,36 +710,37 @@ fn search(visual: &[&str], declared: Option<BaseDirection>) -> DrawnReading {
 /// the line breaks before the bracket — is three runs at three levels, and an
 /// EPUB writes each as its own text object in reading order: the `(` at the
 /// line's right end, then the Latin words left of it, then the Arabic left
-/// of those. The device cut the line twice. The join asked whether either of
-/// the **two** lines it was joining held a right-to-left character, and the
-/// `(` and the Latin words hold none, so they stayed apart and only the Latin
-/// and the Arabic were joined: the `(` was read as a line of its own, and the
-/// rest as a line with no bracket to pair (ROADMAP K-11). So a chain of more
-/// than one group is read whole too, and joined whole where the bracket
-/// tie-break turns it read so ([`DrawnReading::turned_by_brackets`]): a pair
-/// drawn facing outward across its groups, which only the whole chain pairs.
-/// That reading is the one handed on.
+/// of those. The device cuts the line twice. A join that asks whether either
+/// of the **two** lines it joins holds a right-to-left character leaves the
+/// `(` and the Latin words apart, since they hold none, and joins only the
+/// Latin and the Arabic: the `(` reads as a line of its own, and the rest as
+/// a line with no bracket to pair. So a chain of more than one group is read
+/// whole too, and joined whole where the bracket tie-break turns it read so
+/// ([`DrawnReading::turned_by_brackets`]): a pair drawn facing outward
+/// across its groups, which only the whole chain pairs. That reading is the
+/// one handed on.
 ///
-/// Only there. Joined whole wherever any piece held a right-to-left
-/// character, as the K-11 fix first had it, a chain whose groups each read
-/// right fell into other limits: the line after K-11's, `deacetylase).
-/// מִלְחָמָה סֵפֶר בַּיִת.`, is three pieces too, and two groups —
-/// `deacetylase` and `). מִלְחָמָה …` — that each read right; whole, it is
-/// a bracket a line break parted, its Latin letters as many as its Hebrew
-/// ones, and read `.מִלְחָמָה סֵפֶר בַּיִת .)deacetylase` (review of the K-11
-/// fix). A chain the tie-break does not turn is joined group by group.
+/// Only there. Joined whole wherever any piece holds a right-to-left
+/// character, a chain whose groups each read right would fall into other
+/// limits: a line that opens with the end of a bracketed Latin run, its `(`
+/// on the line before, `deacetylase). מִלְחָמָה סֵפֶר בַּיִת.`, is three
+/// pieces too, and two groups — `deacetylase` and `). מִלְחָמָה …` — that
+/// each read right; whole, it is a bracket a line break parted, its Latin
+/// letters as many as its Hebrew ones, and reads
+/// `.מִלְחָמָה סֵפֶר בַּיִת .)deacetylase`. A chain the tie-break does not
+/// turn is joined group by group.
 ///
 /// # And two lines on top of each other are two drawings
 ///
 /// **Meeting is not overlapping.** The pieces of a split line lie end to end,
 /// touching or a kerned hair into each other; text overdrawn in a second text
 /// object — a fake bold, a hand-made shadow, a word stroked twice — lies over
-/// the first copy. Joined, the two copies became one line whose characters
-/// [`logical_line`] interleaved: `אבג` drawn twice half a point apart read
-/// back `אאבבגג`, where every reader before this join read two lines of
-/// `אבג` (review of lane 8C). So a line overlapping the chain so far by more
-/// than half the shorter one's extent is not its rest. A zero-width mark in
-/// an object of its own overlaps nothing and still joins its base's line.
+/// the first copy. Joined, the two copies would become one line whose
+/// characters [`logical_line`] interleaves: `אבג` drawn twice half a point
+/// apart would read back `אאבבגג`, where read apart they are two lines of
+/// `אבג`. So a line overlapping the chain so far by more than half the
+/// shorter one's extent is not its rest. A zero-width mark in an object of
+/// its own overlaps nothing and still joins its base's line.
 ///
 /// # And a join costs the piece it joins
 ///
@@ -746,10 +748,10 @@ fn search(visual: &[&str], declared: Option<BaseDirection>) -> DrawnReading {
 /// which way that baseline runs, whether it holds a right-to-left character —
 /// is kept in a [`Reach`] and grown by each piece, never read again from the
 /// chain's first character; and a chain is joined once, when it ends. Read
-/// again, a line rejoined from `n` pieces cost `n²`: a right-to-left word
-/// drawn as one text object per letter or two is all a page needs to be that
-/// line, and this runs on every PDF's default extraction (review of lane 8C).
-/// A chain of more than one group is asked for the bracket tie-break's shape
+/// again, a line rejoined from `n` pieces would cost `n²`: a right-to-left
+/// word drawn as one text object per letter or two is all a page needs to be
+/// that line, and this runs on every PDF's default extraction. A chain of
+/// more than one group is asked for the bracket tie-break's shape
 /// ([`faces_outward`]), linear in its characters, and read only where it has
 /// it — a reading [`logical_line`] is handed where the chain is joined whole,
 /// and that a group joined on its own would have read in part anyway.
@@ -1874,14 +1876,14 @@ mod tests {
         );
     }
 
-    /// **The chain, not the pair, holds a bracket the line pairs** (ROADMAP
-    /// K-11). `(ab) אב`-shaped, as an EPUB draws a right-to-left line that
-    /// opens with a bracketed Latin run: the `(` at the right end drawn first,
-    /// then the Latin, then the Hebrew and the `)` at the left — three pieces,
+    /// **The chain, not the pair, holds a bracket the line pairs.**
+    /// `(ab) אב`-shaped, as an EPUB draws a right-to-left line that opens
+    /// with a bracketed Latin run: the `(` at the right end drawn first, then
+    /// the Latin, then the Hebrew and the `)` at the left — three pieces,
     /// each meeting the next. The first two hold nothing right to left, and a
-    /// join that asked that of each pair left the `(` a line of its own. Read
-    /// whole, the pair faces outward and the bracket tie-break turns the line:
-    /// all three are one line, read in logical order.
+    /// join that asks that of each pair leaves the `(` a line of its own.
+    /// Read whole, the pair faces outward and the bracket tie-break turns the
+    /// line: all three are one line, read in logical order.
     #[test]
     fn a_chain_the_bracket_tie_break_turns_is_joined_whole() {
         let mut page = TextPage::default();
@@ -1903,15 +1905,15 @@ mod tests {
         assert!(lines[0].rtl, "and it reads right to left");
     }
 
-    /// **A chain whose groups each read right is joined group by group** —
-    /// the review of the K-11 fix. The line after K-11's, `de). אב.`-shaped:
-    /// the Latin at the right end, then the `)` left of it, then the Hebrew
-    /// and its stops — three pieces, each meeting the next, and two groups,
-    /// `de` and `). אב.`, as 9297d2d joined them. Read whole, its strong
-    /// characters' ends disagree and its Latin letters are as many as its
-    /// Hebrew ones, so it is read left to right and the `)` lands after the
-    /// Hebrew; no bracket faces outward for the tie-break to turn it. Each
-    /// group is read on its own, as before the fix.
+    /// **A chain whose groups each read right is joined group by group.** A
+    /// right-to-left line that opens with the end of a bracketed Latin run,
+    /// its `(` on the line before, `de). אב.`-shaped: the Latin at the right
+    /// end, then the `)` left of it, then the Hebrew and its stops — three
+    /// pieces, each meeting the next, and two groups, `de` and `). אב.`.
+    /// Read whole, its strong characters' ends disagree and its Latin letters
+    /// are as many as its Hebrew ones, so it is read left to right and the
+    /// `)` lands after the Hebrew; no bracket faces outward for the tie-break
+    /// to turn it. Each group is read on its own.
     #[test]
     fn a_chain_the_bracket_tie_break_does_not_turn_is_joined_group_by_group() {
         let pieces = vec![
@@ -2005,10 +2007,11 @@ mod tests {
     }
 
     /// **A line read in a direction its page declares is kept apart from
-    /// the same units read off the line** (H-152): [`Readings`] hands back,
-    /// for each direction asked, what [`search`] found in it, so a line a
-    /// page declares and the same line on a page that declares nothing are
-    /// each read their own way, and each searched once.
+    /// the same units read off the line** (ruling 14, *What a page says*):
+    /// [`Readings`] hands back, for each direction asked, what [`search`]
+    /// found in it, so a line a page declares and the same line on a page
+    /// that declares nothing are each read their own way, and each searched
+    /// once.
     #[test]
     fn a_line_read_in_a_declared_direction_is_kept_apart() {
         // `— אב` as a right-to-left paragraph draws it, `בא —`, which read

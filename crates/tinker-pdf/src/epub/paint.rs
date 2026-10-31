@@ -1174,15 +1174,14 @@ impl<'a> Fonts<'a> {
     /// level's order ([`neutrals_drawn_as_typed`]), which slices are one text
     /// object ([`draw_coded`]) — each model what `tinker-pdf-content`'s
     /// `TextDevice` and ruling 14's reading (`text_order.rs`) will do with the
-    /// line, and each was measured to model it on the books it was found on.
-    /// But the reader cuts a line where its text objects leave a gap and
-    /// resumes one it went back over within three ems, carries its pen across
-    /// a stretch only into a right-to-left letter, rejoins pieces that meet,
-    /// and reads each piece's direction off its ends and its majority — and a
-    /// model of all of that drifts from it, as every review of the overflow
-    /// font at `0 Tw` found (ROADMAP CD-19): `<p dir="rtl"><i>?!</i> عوامل</p>`
-    /// letter-spaced and justified, its `?!` drawn as typed for a reader the
-    /// model said read it alone, was read with the word before it, `!?`.
+    /// line. But the reader cuts a line where its text objects leave a gap
+    /// and resumes one it went back over within three ems, carries its pen
+    /// across a stretch only into a right-to-left letter, rejoins pieces that
+    /// meet, and reads each piece's direction off its ends and its majority —
+    /// and a model of all of that drifts from it:
+    /// `<p dir="rtl"><i>?!</i> عوامل</p>` letter-spaced and justified, its
+    /// `?!` drawn as typed for a reader the model says reads it alone, is
+    /// read with the word before it, `!?`.
     ///
     /// So the line is drawn into the reader itself — the text objects
     /// [`plan_coded`] would write, each glyph where the page has it, under
@@ -1200,12 +1199,11 @@ impl<'a> Fonts<'a> {
     /// its letters in order and not its words, a word cut where a reader
     /// parts the spacing or two run together ([`Read::Letters`]), is kept
     /// while the search goes on, where the rules' drawing does not read the
-    /// letters so. Under a transform, a line the rules' drawing reads
-    /// there with its letters in order and not its words, which nothing
-    /// tried reads with its words, is searched in its runs' own space too, as
-    /// 935b077 searched every line under a transform, and what that finds is
-    /// drawn only where it reads the words right on the page
-    /// ([`Fonts::reads_whole`]). **A line no drawing tried reads right is
+    /// letters so. Under a transform, a line the rules' drawing reads there
+    /// with its letters in order and not its words, which nothing tried
+    /// reads with its words, is searched in its runs' own space too, and
+    /// what that finds is drawn only where it reads the words right on the
+    /// page ([`Fonts::reads_whole`]). **A line no drawing tried reads right is
     /// drawn by the rules and states its text** (14.9.4): its runs, and what
     /// is drawn between them, in a `/Span` whose `/ActualText` is the text
     /// they draw, as typed, which a reader reads in place of the glyphs
@@ -1429,11 +1427,11 @@ impl<'a> Fonts<'a> {
             // in order, a word cut where a reader parts the spacing or two run
             // together, is searched on for a drawing that reads the words:
             // ruling 14 takes the time that costs, the whole budget of a line
-            // a reader parts at its letter spacing whatever is drawn (H-150).
+            // a reader parts at its letter spacing whatever is drawn.
             Some((Read::Letters, over)) => (true, over.count()),
             Some((Read::Otherwise, over)) => (false, over.count()),
         };
-        // Each distinct drawing of the line is read once (H-151).
+        // Each distinct drawing of the line is read once (ruling 14).
         let options = self.distinct(line, places, options);
         let options = &options[..];
         // A drawing that reads the line's words is taken. One that reads its
@@ -1487,10 +1485,11 @@ impl<'a> Fonts<'a> {
     /// `options` but for the drawings that read as another does: a run's
     /// drawing whose plan ([`Fonts::plan_run`]) writes what the run's rules'
     /// drawing writes, or what an earlier drawing of the run in `options`
-    /// writes, is not read again ([`Fonts::search`]). Many of a run's
-    /// drawings write the same text objects, and read again each spent the
-    /// budget before the pair that reads a line of a few spaced runs right:
-    /// a right-to-left paragraph after a generated `§ ` (H-151).
+    /// writes, is not read again ([`Fonts::search`]), so that each distinct
+    /// drawing of a line is read once (ruling 14). Many of a run's drawings
+    /// write the same text objects, and read again they would spend the
+    /// budget before the search reached the pair that reads a line of a few
+    /// spaced runs right: a right-to-left paragraph after a generated `§ `.
     fn distinct(
         &self,
         line: &[&TextRun],
@@ -5923,8 +5922,8 @@ pub(super) fn opens_right_to_left(c: char) -> bool {
 /// X9 removes both before anything is resolved, so its reading never sees
 /// the embedding they opened, and a run of neutrals drawn in that
 /// embedding's order reads back reversed: `x RLE ?! PDF y`, its `?!` drawn
-/// `!?` because its line held an `RLE`, extracted `x RLE PDF !? y` (review of
-/// the K-11 fix). Drawn as typed, as it was before, it reads as typed.
+/// `!?` because its line holds an `RLE`, extracts `x RLE PDF !? y`. Drawn as
+/// typed, it reads as typed.
 fn undoes_its_levels(c: char) -> bool {
     matches!(bidi_class(c), BidiClass::R | BidiClass::AL | BidiClass::RLI)
 }
@@ -5938,10 +5937,9 @@ fn undoes_its_levels(c: char) -> bool {
 /// Such a piece is drawn in its level's order because a reader of the page
 /// undoes that order: ruling 14 reads a line holding a right-to-left
 /// character in the order UAX #9 draws it. Where the reader would not undo
-/// it, a piece so drawn reads back reversed, and drawn as typed, as every
-/// such piece was before ROADMAP K-11, it reads back as typed. Two kinds,
-/// each measured (reviews of the K-11 fix), and a third whose order a
-/// reader does not read:
+/// it, a piece so drawn reads back reversed, and drawn as typed it reads
+/// back as typed. Three kinds, and a fourth whose order a reader does not
+/// read:
 ///
 /// - **A piece read alone for its spacing.** `TextDevice` resumes a line
 ///   across a text object's end only where the next glyph starts within half
@@ -5956,14 +5954,14 @@ fn undoes_its_levels(c: char) -> bool {
 ///   that is not white space: its run's `letter-spacing`, and after a word
 ///   space its `word-spacing`, which justification stretches. A run
 ///   letter-spaced by half an em is read run by run, whatever stands beside
-///   it: at `letter-spacing: 0.5em`, `שָׁלוֹם עוֹלָם (HDAC) (SIRT).` drew its
-///   `) (` `( )` and read it so (`bundled-fonts`), and in monospace at `8px`
-///   `שָׁלוֹם <i>?!</i> עוֹלָם` read its `?!` on a line with the word after
-///   it, by the comma tie-break, `עוֹלָם !?`. And a run whose word spaces
-///   stretch apart from the words either side of it is read alone too:
-///   `عوامل <i>?!</i> عدّة` at `letter-spacing: 0.3em`, justified, and at
-///   `word-spacing: 1em`, drawn `!?`, read back `!?` (third review of the
-///   K-11 fix, 15 books in a default build and 18 with `bundled-fonts`).
+///   it: drawn in its level's order, `שָׁלוֹם עוֹלָם (HDAC) (SIRT).` at
+///   `letter-spacing: 0.5em` draws its `) (` `( )` and reads it so
+///   (`bundled-fonts`), and `שָׁלוֹם <i>?!</i> עוֹלָם` in monospace at `8px`
+///   reads its `?!` on a line with the word after it, by the comma
+///   tie-break, `עוֹלָם !?`. And a run whose word spaces stretch apart from
+///   the words either side of it is read alone too: `عوامل <i>?!</i> عدّة`
+///   at `letter-spacing: 0.3em`, justified, and at `word-spacing: 1em`,
+///   drawn `!?`, reads back `!?`.
 /// - **A piece its line alone resolves otherwise.** Ruling 14 reads a line by
 ///   itself, in the direction [`drawn_direction`] reads it in as it is drawn,
 ///   and UAX #9 resolves a paragraph: where the levels the line alone gives a
@@ -5973,10 +5971,10 @@ fn undoes_its_levels(c: char) -> bool {
 ///   the line above, so the `$` is a neutral at the paragraph's level, drawn
 ///   right of its number, `1,234.56$(`; resolved alone, the line has no
 ///   Arabic letter before the digits, the `$` is a European number's (W5),
-///   and the line read back `(1,234.56$)`. And `<p dir="rtl"><i>?!</i>
+///   and the line reads back `(1,234.56$)`. And `<p dir="rtl"><i>?!</i>
 ///   שלום</p>`, which the comma tie-break reads left to right: resolved with
 ///   the line alone as a left-to-right paragraph's, its `?!` is at level 0,
-///   not 1, and drawn `!?` in its paragraph's level order it read back
+///   not 1, and drawn `!?` in its paragraph's level order it reads back
 ///   `שלום !?` where as typed it reads `שלום ?!` — the price the comma
 ///   tie-break costs the line in one run on a page that declares no
 ///   direction, and no more. A tagged page declares the paragraph's, and the
@@ -5986,20 +5984,19 @@ fn undoes_its_levels(c: char) -> bool {
 ///   the reader reads the line in, not its paragraph's: resolved in a
 ///   paragraph's with no `dir` — left to right, for a line with Arabic at
 ///   both ends that a reader reads from the right — the `). ` after a
-///   bracketed year is a piece of other levels too, drawn as typed, and
-///   `… عدّة (2010). وقد …` read its full stop away from its bracket — CI's
-///   K-11 failure itself, `Missing ").وقد…"` (73 probe books, 75 with
-///   `bundled-fonts`). So too a piece that holds a letter, where any of its
-///   other characters the line alone resolves otherwise: a face that draws
-///   its neutrals and not its letters draws them as a slice of neutrals of
-///   their own. `<p dir="rtl">جميل بيت كبير نور 5% يوم</p>` in sans-serif,
-///   broken before the `5`: W2 makes it `AN` for the Arabic letter on the
-///   line above, so the `%` is a neutral at the paragraph's level, in a
-///   piece with `يوم`, and Helvetica's `% ` drawn in its level's order read
-///   back `%5`, where alone the `5` is a European number and W5 makes the
-///   `%` one too; as typed it reads as at 9297d2d (review of the third review's
-///   fix, 85 books in a default build and 86 with `bundled-fonts`, `%`, `‰`,
-///   `°`, `¢` and `£` after a number in Arabic and Persian).
+///   bracketed year would be a piece of other levels too, drawn as typed,
+///   and `… عدّة (2010). وقد …` would read its full stop away from its
+///   bracket (conservation's `Missing ").وقد…"`). So too a piece that holds
+///   a letter, where any of its other characters the line alone resolves
+///   otherwise: a face that draws its neutrals and not its letters draws
+///   them as a slice of neutrals of their own.
+///   `<p dir="rtl">جميل بيت كبير نور 5% يوم</p>` in sans-serif, broken
+///   before the `5`: W2 makes it `AN` for the Arabic letter on the line
+///   above, so the `%` is a neutral at the paragraph's level, in a piece
+///   with `يوم`, and Helvetica's `% ` drawn in its level's order reads back
+///   `%5`, where alone the `5` is a European number and W5 makes the `%`
+///   one too; drawn as typed it reads as typed, and so do `‰`, `°`, `¢` and
+///   `£` after a number, in Arabic and in Persian.
 /// - **A piece that ends, on its right, what a reader reads together, where
 ///   that reads left to right** ([`Gaps::left_to_right_ends`]): a reader
 ///   reads the units between two gaps of half an em by themselves, and read
@@ -6010,8 +6007,7 @@ fn undoes_its_levels(c: char) -> bool {
 ///   round**, ` (` or ` #`, which [`coded_order`] draws as typed itself, its
 ///   word space first ([`opens_with_its_word_space`]): what a reader reads is
 ///   the same either way, and the space is stretched inside the slice's own
-///   text object. (It also stood where the overflow font's string before it
-///   overran, until that font was written at `0 Tw`, ROADMAP CD-19.)
+///   text object.
 fn neutrals_drawn_as_typed(
     line: &[TextRun],
     pieces: &[Vec<(core::ops::Range<usize>, Level)>],
@@ -7397,11 +7393,11 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// ([`letter_spaced`]: a letter and its marks are one typographic character
 /// unit, spaced once, as layout measured them). The one exception to where
 /// is a nonspacing mark of no advance drawn after its letter
-/// ([`coded_order`]'s `rides`): where the pen stood, at its letter's end,
-/// its box lay in the next glyph's and extraction read it there. So it is
-/// drawn **inside its letter's box**, at [`mark_at`], and is read with its
-/// letter — a letter's second, third and fourth marks too, in either
-/// direction — while the pen moves as layout measured.
+/// ([`coded_order`]'s `rides`): drawn where the pen stands, at its letter's
+/// end, its box would lie in the next glyph's and extraction would read it
+/// there. So it is drawn **inside its letter's box**, at [`mark_at`], and is
+/// read with its letter — a letter's second, third and fourth marks too, in
+/// either direction — while the pen moves as layout measured.
 ///
 /// # One text object for a slice that holds a mark
 ///
@@ -7412,17 +7408,14 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// of a slice that holds a mark: `tinker-pdf-content`'s `TextDevice`
 /// resumes a line after an `ET` only within half an em of where the last
 /// glyph's box ended, and ruling 14's rejoin allows the same half em. Drawn
-/// in a text object of its own (6d79fa4), a mark left a reader's pen at
-/// its own box, short of its letter's end, and the glyph after it was every
-/// spacing past that: a word's pointed letters became lines of their own
-/// from a quarter of an em of spacing (`The word ךְ\nלֶ\nמֶ\n, quoted`;
-/// review of 6d79fa4). A slice holding no mark keeps a text object per
-/// segment, and the pen moves by `advance + letter-spacing` in one sum as it
-/// always did, so a slice with no mark is written as cd407d5 wrote it
-/// (measured on the round-3 and round-4 probes' mark-free books,
-/// letter-spaced ones among them) but for the overflow font's `Tw` under
-/// `word-spacing` (below), and for two more kinds of slice, under spacing
-/// that may part their text objects ([`PARTED_FROM`]).
+/// in a text object of its own, a mark would leave a reader's pen at its own
+/// box, short of its letter's end, and the glyph after it would start every
+/// spacing past that: a word's pointed letters would become lines of their
+/// own from a quarter of an em of spacing (`The word ךְ\nלֶ\nמֶ\n, quoted`).
+/// A slice holding no mark keeps a text object per segment, but for two more
+/// kinds of slice under spacing that may part their text objects
+/// ([`PARTED_FROM`]), below; the pen moves by `advance + letter-spacing` in
+/// one sum.
 ///
 /// # One text object for neutrals a reader undoes
 ///
@@ -7430,65 +7423,64 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// right-to-left character, is drawn in its level's order for a reader to
 /// undo with its line ([`coded_order`]), and is one text object too. A
 /// neutral past `WinAnsiEncoding` is the overflow font's and the word space
-/// beside it a standard face's: two resources, and drawn as two text
-/// objects, the reader's pen stopped at the space's box and the neutral
-/// started a stretched word space later. `TextDevice` carries a pen across
-/// spacing only into a right-to-left letter, so past half an em the line was
-/// cut at the neutral: `<p>… أصبحنا ٥٪ <b>نعرف</b> كتاب</p>`, Arabic with no
-/// `dir`, at `word-spacing: 0.5em`, drew its ` ٪` in level order, space
-/// first, and read `٥ \nنعرف٪` (V3 of the review of the third review's K-11
-/// fix; 9297d2d drew the slice as typed and conserved). In one text object
-/// the space and the sign are pieces of it, the space at the run's `Tw` and
-/// the sign at none ([`PieceText::UnspacedCodes`]), so the sign reads as a
+/// beside it a standard face's: two resources, which drawn as two text
+/// objects would stop the reader's pen at the space's box and start the
+/// neutral a stretched word space later. `TextDevice` carries a pen across
+/// spacing only into a right-to-left letter, so past half an em the line
+/// would be cut at the neutral: `<p>… أصبحنا ٥٪ <b>نعرف</b> كتاب</p>`,
+/// Arabic with no `dir`, at `word-spacing: 0.5em`, its ` ٪` drawn in level
+/// order, space first, would read `٥ \nنعرف٪`. In one text object the space
+/// and the sign are pieces of it, the space at the run's `Tw` and the sign
+/// at none ([`PieceText::UnspacedCodes`]), so the sign reads as a
 /// `WinAnsiEncoding` one does, a glyph of the space's string
-/// (`a_non_winansi_neutral_after_a_word_space_reads_with_its_number`). A
-/// slice of one resource is written as before, and so is one whose run's
-/// spacing parts no two text objects: written whole under any spacing, as
-/// first fixed, a book with none was other bytes and read the same (16
-/// books of the hunt's; review of CD-19's fix). Two shapes read worse for it
-/// than at 56dfd93 until their lines were read back
-/// ([`Fonts::set_readings`]): a sign after European digits before a bold
-/// word in Arabic at `word-spacing: 1em`, `25٪ <b>W</b>`, read before its
-/// number, and is drawn with the word before it whole now; and with
-/// `bundled-fonts` an ARABIC COMMA after a number in justified Hebrew,
-/// `N، <b>W</b>`, whose space started at the bold word's end and drew the
-/// comma's line up to it, and is drawn in pieces now.
+/// (`a_non_winansi_neutral_after_a_word_space_reads_with_its_number`). Such
+/// a slice is one text object only where its run's spacing may part two text
+/// objects ([`PARTED_FROM`]), and a slice of one resource is written alike
+/// either way: written whole under any spacing, a book with none would be
+/// other bytes and read the same. Two shapes read wrong in one text object,
+/// and their lines' read-back ([`Fonts::set_readings`]) draws them
+/// otherwise: a sign after European digits before a bold word in Arabic at
+/// `word-spacing: 1em`, `25٪ <b>W</b>`, which so reads before its number, is
+/// drawn with the word before it whole; and with `bundled-fonts` an ARABIC
+/// COMMA after a number in justified Hebrew, `N، <b>W</b>`, whose space so
+/// starts at the bold word's end and draws the comma's line up to it, is
+/// drawn in pieces.
 ///
 /// # One text object for the inside of a spaced slice
 ///
 /// A slice that holds a character past `WinAnsiEncoding` needs two
 /// resources, the overflow font for that character and the face's own for
-/// its word spaces, and each change of resource started a text object. Under
-/// spacing each starts a spacing past where the one before it ended, and a
-/// reader cut the slice wherever that passed half an em and `TextDevice`
-/// carries no pen, which is everywhere but into a right-to-left letter after
-/// right-to-left text: a Greek or Cyrillic word ended at every stretched word
-/// space, and an Arabic paragraph letter-spaced by `0.55em` and justified at
-/// every word space, a text object `0.55em` past its word. While the
-/// overflow font was written at the run's `Tw` the glyphs after its code-32
-/// letter were moved over some of those gaps (below); written at `0 Tw`
-/// every gap is where layout put it, and the pieces were read apart — the
-/// last word of a Greek table cell glued to the right-to-left cell beside
-/// it and read with that cell, `αβ | ספרγδ` (H2 of the review of CD-19's
-/// fix), and an Arabic paragraph's words in the order drawn. So **the inside
-/// of a spaced slice is one text object**, from its first unit that is not
-/// white space to its last, each change of resource a piece of it
-/// ([`PageBuilder::text_pieces`]), and is read as one line, as a slice of one
-/// resource, one string, always was
+/// its word spaces, and each change of resource would start a text object.
+/// Under spacing each starts a spacing past where the one before it ended,
+/// and a reader cuts the slice wherever that passes half an em and
+/// `TextDevice` carries no pen, which is everywhere but into a right-to-left
+/// letter after right-to-left text: a Greek or Cyrillic word would end at
+/// every stretched word space, and an Arabic paragraph letter-spaced by
+/// `0.55em` and justified at every word space, a text object `0.55em` past
+/// its word. The overflow font is written at `0 Tw` (below), so nothing
+/// after its code-32 letter moves over those gaps: every gap is where layout
+/// put it, and the pieces would be read apart — the last word of a Greek
+/// table cell glued to the right-to-left cell beside it and read with that
+/// cell, `αβ | ספרγδ`, and an Arabic paragraph's words in the order drawn.
+/// So **the inside of a spaced slice is one text object**, from its first
+/// unit that is not white space to its last, each change of resource a piece
+/// of it ([`PageBuilder::text_pieces`]), and is read as one line, as a slice
+/// of one resource, one string, is
 /// (`the_inside_of_a_spaced_slice_is_one_text_object`). The white space at
 /// either end of it stays a text object of its own, and so does every change
 /// of resource of a slice [`joins_its_inside`] leaves in pieces, each read in
 /// the order drawn, the order written: written whole, the word space after a
-/// right-to-left word drew the word's line up to a Latin run beside it, and
-/// ruling 14 read the two as one line whose Latin letters were the more
+/// right-to-left word would draw the word's line up to a Latin run beside it,
+/// and ruling 14 would read the two as one line, its Latin letters the more
 /// (`a_spaced_slice_is_one_text_object_only_where_its_line_reads_it_whole`).
 /// A run whose spacing opens no gap a reader parts two objects at
-/// ([`PARTED_FROM`]) is written as before. A right-to-left slice of a
-/// left-to-right paragraph on a line that holds another paragraph's text,
-/// a table cell touching the next, is left in pieces too: whole, a table
-/// with no `dir` whose cell `abc (x).` touches a right-to-left cell
-/// (`border-spacing: 0; padding: 0`) drew what a right-to-left paragraph
-/// draws for `أصبحنا نعرف.abc (x)`, and read so ([`joins_its_inside`]).
+/// ([`PARTED_FROM`]) keeps a text object per change of resource. A
+/// right-to-left slice of a left-to-right paragraph on a line that holds
+/// another paragraph's text, a table cell touching the next, is left in
+/// pieces too: whole, a table with no `dir` whose cell `abc (x).` touches a
+/// right-to-left cell (`border-spacing: 0; padding: 0`) would draw what a
+/// right-to-left paragraph draws for `أصبحنا نعرف.abc (x)`, and read so
+/// ([`joins_its_inside`]).
 ///
 /// # Where the letter a mark rides on is drawn
 ///
@@ -7498,13 +7490,12 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// each starts where the rounded widths before it put it; one that carries a
 /// mark of no advance is a piece of its own, from the pen, so it starts
 /// where layout put it and ends within that one rounding of where it was
-/// measured to. (bf081ca drew it in its string and its mark a hundredth of
-/// an em inside, which the review of bf081ca found cut a line from
-/// `0.491em`; moving the letter so that it **ended** exactly, tried first,
-/// moved where it **started** by the same rounding, and a line cut there
-/// before a right-to-left word at exactly half an em.) Every mark that rides
-/// on a letter in its slice is placed [`EXACT_MARK_INSET`] inside the end
-/// layout measured for it.
+/// measured to. Drawn in its string, its mark a hundredth of an em inside,
+/// its line would be cut from `0.491em` of spacing; moved so that it
+/// **ends** exactly, it would **start** a rounding off, and a line would be
+/// cut there before a right-to-left word at exactly half an em. Every mark
+/// that rides on a letter in its slice is placed [`EXACT_MARK_INSET`] inside
+/// the end layout measured for it.
 ///
 /// # The overflow font's code 32
 ///
@@ -7516,42 +7507,34 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// a text object of several as [`PieceText::UnspacedCodes`], which
 /// [`PageBuilder::text_pieces`] writes at `0 Tw` between the pieces that
 /// take the run's. Every glyph of it is drawn where layout put it, under
-/// `word-spacing` and justification alike. A word spacing that is a zero is
-/// written as it was, so a book with no mark that sets no word spacing, and
-/// no `letter-spacing` that parts two text objects ([`PARTED_FROM`]), is
-/// written byte for byte as before; in a slice that holds a mark the glyph
-/// after the code-32 letter goes on in its string now, where it was a piece
-/// of its own at the same place, so such a book is other bytes even with no
-/// word spacing, and reads the same.
+/// `word-spacing` and justification alike, and nothing after its code-32
+/// letter moves: in a slice that holds a mark too, the glyph after that
+/// letter goes on in its string. A word spacing that is a zero, of either
+/// sign, is written unchanged, so the font's `Tw` is the run's in a book
+/// that sets no word spacing.
 ///
-/// Until October 2026 (ROADMAP CD-19) the font was written at the run's
-/// `Tw`, and in its string every glyph after the code 32 was drawn a
-/// word spacing right of where layout put it — into the gap before the next
-/// word (`مدة معلم.` at `word-spacing: 0.5em` read `مدةم علم.`), onto
-/// punctuation another resource draws right after the word (`معلم.`'s MEM
-/// on its full stop), onto the glyph after a run that ends inside a word
-/// (`x <b>αλ</b>φα` at `word-spacing: 4px` drew the λ on the φ in a default
-/// build), and onto a styled neutral glued to a right-to-left word, whose
-/// line K-11's carry then read interleaved (`<p dir="rtl">ا <b>.</b>أصبحنا
-/// ن</p>` at `0.6em` read `اأص.بحنا ن`, and search lost the word). The
-/// fixes before it each placed the glyph after the code 32 where layout put
-/// it in one kind of slice, as a piece of its own: one that holds a mark,
-/// where the moved LAM of `مُدَّةَ مُعلِّم.` was drawn on its AIN at
-/// `word-spacing: 4px` (re-review of f529a47), and one with no mark drawn left
-/// to right inside right-to-left text, where with `bundled-fonts` the THREE
-/// of `(١٢٣),` was drawn on its `(` (third review of the K-11 fix). A
-/// right-to-left word's string kept moving: placed where layout put it,
-/// table cells at `word-spacing: 1em` after a cell ending in a Latin word
-/// left a stretched word gap only the moved glyph had closed, which
-/// `tinker-pdf-content`'s `TextDevice` bridges since a gap no spacing
-/// accounts for ends the word before it. Written at `0 Tw`, the probes of
-/// ROADMAP K-11's reviews draw no glyph over another under `word-spacing` or
-/// justification. Not a few books read right only because a moved glyph
-/// closed or opened a gap — hundreds on the reviews' probes, of a dozen
-/// shapes — and each line of them is read back as a reader of the page
-/// reads it and drawn for that reading where some drawing of its runs reads
-/// it right ([`Fonts::set_readings`]); the books no drawing tried reads
-/// right ROADMAP CD-19 counts, shape by shape.
+/// At the run's `Tw`, every glyph after the code 32 in the font's string
+/// would be drawn a word spacing right of where layout put it — into the
+/// gap before the next word (`مدة معلم.` at `word-spacing: 0.5em` reading
+/// `مدةم علم.`), onto punctuation another resource draws right after the
+/// word (`معلم.`'s MEM on its full stop), onto the glyph after a run that
+/// ends inside a word (`x <b>αλ</b>φα` at `word-spacing: 4px`, the λ on the
+/// φ in a default build), onto a letter of its own word in a slice that
+/// holds a mark (the LAM of `مُدَّةَ مُعلِّم.` on its AIN at
+/// `word-spacing: 4px`), onto the bracket beside a number drawn left to
+/// right inside right-to-left text (with `bundled-fonts`, the THREE of
+/// `(١٢٣),` on its `(`), and onto a styled neutral glued to a right-to-left
+/// word, whose line `TextDevice`'s carry (`Stretch::carries`) would then
+/// read interleaved (`<p dir="rtl">ا <b>.</b>أصبحنا ن</p>` at `0.6em`
+/// reading `اأص.بحنا ن`, its word lost to search). Placed where layout put
+/// it, a right-to-left word's glyphs leave table cells at `word-spacing: 1em`
+/// after a cell ending in a Latin word a stretched word gap, which
+/// `tinker-pdf-content`'s `TextDevice` bridges, since a gap no spacing
+/// accounts for ends the word before it. A line that would read right only
+/// with a glyph so moved, closing or opening a gap, is read back as a reader
+/// of the page reads it and drawn for that reading where some drawing of its
+/// runs reads it right ([`Fonts::set_readings`]); a line no drawing tried
+/// reads right states its text ([`Fonts::stated`]).
 ///
 /// # Where a slice ends on a mark
 ///
@@ -7560,14 +7543,13 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// millionth of an em past that end ([`EXACT_MARK_INSET`]), so that glyph is
 /// a spacing less a millionth of an em from the reader's pen: a run that ends
 /// on a mark is not cut from what follows up to half an em of spacing, half
-/// an em included, in either build — at `0.495em` and `8px` too, where
-/// bf081ca cut a stand-in letter's line (review of bf081ca) — and is cut past
-/// half an em and a millionth. After its letter alone the run is cut past
-/// half an em, or at it by a last place, for a simple font's letter, and
-/// within half a thousandth of an em of it, by the `/W` rounding, for a
-/// stand-in's. cd407d5 drew a stand-in's mark a spacing past its letter, its
-/// box a thousandth of an em wide, and with `bundled-fonts` cut such a line
-/// only past half an em and a thousandth: a known limit `epub.md` names
+/// an em included, in either build — at `0.495em` and `8px` too — and is cut
+/// past half an em and a millionth. After its letter alone the run is cut
+/// past half an em, or at it by a last place, for a simple font's letter,
+/// and within half a thousandth of an em of it, by the `/W` rounding, for a
+/// stand-in's. Past that a run boundary cuts its line, marks or none, and a
+/// search across the cut does not find its word: a known limit `epub.md`
+/// names
 /// (`a_standard_14_run_ending_on_a_mark_is_cut_past_half_an_em_as_its_letter_is`).
 ///
 /// # A mark whose letter is not in the slice
@@ -7579,12 +7561,12 @@ fn leading_mark_at(start: f64, letter_spacing: f64, font_size: f64) -> f64 {
 /// was drawn just before the slice, ending where the slice starts less a
 /// `letter-spacing` (this run's is the one to hand), so a mark that opens
 /// the slice is drawn inside that end ([`leading_mark_at`]): drawn at the
-/// pen, it was read with the glyph after it on a line ruling 14 reorders,
-/// `x<b>e</b>\u{301}x` beside a right-to-left word reading `xex\u{301}`. In a
-/// right-to-left run the letter is drawn to the right of the slice, by a run
-/// the content stream may have written earlier, and the mark is drawn where
-/// the pen stands; a line no drawing then reads with the mark on its letter
-/// is stated ([`Fonts::stated`]).
+/// pen, it would be read with the glyph after it on a line ruling 14
+/// reorders, `x<b>e</b>\u{301}x` beside a right-to-left word reading
+/// `xex\u{301}`. In a right-to-left run the letter is drawn to the right of
+/// the slice, by a run the content stream may have written earlier, and the
+/// mark is drawn where the pen stands; a line no drawing then reads with the
+/// mark on its letter is stated ([`Fonts::stated`]).
 ///
 /// Returns where the pen ended, in layout pixels.
 #[expect(
@@ -7861,30 +7843,28 @@ fn plan_coded(
 /// right-to-left level that holds no formatting character.
 ///
 /// Not a left-to-right slice inside right-to-left text, at level 2 or above:
-/// read whole, `Łódź Kraków ő` in a right-to-left paragraph joined the
+/// read whole, `Łódź Kraków ő` in a right-to-left paragraph would join the
 /// Hebrew either side of it into a line whose Latin letters are the more,
 /// which ruling 14 reads as a left-to-right paragraph's, and the paragraph's
-/// words came back out of order; read in its pieces, each read in the order
-/// drawn, which is the order written (6 books of the K-11 review's hunt in
-/// a default build). And not a slice that holds an embedding, override or
-/// isolate formatting character (`Bidi_Class` `LRE` to `PDI`), which the
-/// overflow font draws: read whole, `שלום \u{202D}ab\u{202C} עולם
-/// \u{202E}cd\u{202C} מלחמה.` at `word-spacing: 1em` or letter-spaced and
-/// justified read its Hebrew words backwards and `ab` and `cd` were found
-/// no more, where in its pieces it read whole (4 books of the hunt).
+/// words would come back out of order; in its pieces, each is read in the
+/// order drawn, which is the order written. And not a slice that holds an
+/// embedding, override or isolate formatting character (`Bidi_Class` `LRE`
+/// to `PDI`), which the overflow font draws: read whole, `שלום
+/// \u{202D}ab\u{202C} עולם \u{202E}cd\u{202C} מלחמה.` at
+/// `word-spacing: 1em` or letter-spaced and justified would read its Hebrew
+/// words backwards and `ab` and `cd` would be found no more, where in its
+/// pieces it reads whole.
 ///
 /// Nor, where its paragraph is left to right, a right-to-left slice of a
 /// run on a line that holds another paragraph's text too (`shared`,
 /// [`sharing_a_line`]): table cells set touching, which a reader reads as
 /// one line. Whole, the Arabic or Hebrew cell of a table with no `dir`
-/// touching a cell `abc (x).` at `word-spacing: 1em` drew the row what a
-/// right-to-left paragraph draws for `أصبحنا نعرف.abc (x)`, and read so; in
-/// its pieces the row reads whole, as it did before the inside of a spaced
-/// slice was one object (2 books in a default build and 4 with
-/// `bundled-fonts` of the review of b73550b;
-/// `a_right_to_left_cell_touching_a_left_to_right_one_is_left_in_pieces`).
-/// A right-to-left paragraph's slice on such a line is still one object,
-/// since there the row reads whole either way and a right-to-left table at
+/// touching a cell `abc (x).` at `word-spacing: 1em` would draw the row what
+/// a right-to-left paragraph draws for `أصبحنا نعرف.abc (x)`, and read so;
+/// in its pieces the row reads whole
+/// (`a_right_to_left_cell_touching_a_left_to_right_one_is_left_in_pieces`).
+/// A right-to-left paragraph's slice on such a line is one object, since
+/// there the row reads whole either way and a right-to-left table at
 /// `word-spacing: 1em` reads whole only so.
 fn joins_its_inside(run: &TextRun, slice: &str, shared: bool) -> bool {
     inside_joins(run.bidi_level, run.paragraph_rtl, shared, slice)
@@ -7919,17 +7899,15 @@ fn inside_joins(level: Option<u8>, paragraph_rtl: Option<bool>, shared: bool, sl
 ///
 /// [`draw_coded`] writes a code where the pen stands and moves the pen
 /// right, so the order it is handed is the order the page shows. Handed
-/// `slice` as written, it drew a right-to-left word backwards — `חו` with
-/// its `ח` at the left — which nobody saw while extraction read the content
-/// stream's order, since that order was the logical one too. Ruling 14
-/// (dd50471) reads the line the page **draws**, as it must for every other
-/// producer, and read the word back as `וח`. Every character past
-/// `WinAnsiEncoding` in a standard-14 run comes here — the overflow font in
-/// a default build, the Liberation stand-in with `bundled-fonts` — so a
-/// book's Hebrew or Arabic that no face of its own covers extracted
-/// reversed: the etymology of `pg2701-images.epub` in `epub_fetched.rs`'s
-/// two conservation sweeps, and `epub_fallback.rs`'s
-/// `a_standard_14_hebrew_word_extracts_as_written`.
+/// `slice` as written, it would draw a right-to-left word backwards — `חו`
+/// with its `ח` at the left — and ruling 14, which reads the line the page
+/// **draws**, as it must for every other producer, would read the word back
+/// as `וח`. Every character past `WinAnsiEncoding` in a standard-14 run
+/// comes here — the overflow font in a default build, the Liberation
+/// stand-in with `bundled-fonts` — so a book's Hebrew or Arabic that no face
+/// of its own covers would extract reversed: the etymology of
+/// `pg2701-images.epub` in `epub_fetched.rs`'s two conservation sweeps, and
+/// `epub_fallback.rs`'s `a_standard_14_hebrew_word_extracts_as_written`.
 ///
 /// The level is the run's, as for a shaped slice ([`draw_shaped`]):
 /// [`TextRun::bidi_level`] once its line has cut it to one level, its own
@@ -7938,38 +7916,36 @@ fn inside_joins(level: Option<u8>, paragraph_rtl: Option<bool>, shared: bool, sl
 /// run, which no reader reads, keeps the order it was written in without
 /// resolving anything, as [`piece_order`] does — so a left-to-right page, and
 /// a right-to-left `inside` marker's `1. ` beside an Arabic word, are drawn
-/// exactly as before.
+/// as written.
 ///
 /// **A run of nothing but neutrals at a right-to-left level is drawn in its
 /// level's order on a line that holds a right-to-left character, and as
 /// typed on one that holds none** ([`TextRun::bidi_line_rtl`], which
 /// [`split_line`] sets). On a line with no right-to-left character as typed
 /// is the right answer — `<p dir="rtl">?!</p>` reads `?!`, since ruling 14
-/// reads such a line in content order. On a line that holds one it was a
-/// known limit until ROADMAP K-11: the `.,` between two right-to-left words
-/// (`<p dir="rtl"><i>חו</i>.,<i>וח</i></p>`) is a run of its own that N1 puts
-/// at the paragraph's level, where L2 draws it `,.`, and drawn as typed the
-/// line read back `חו,.וח`; and in a sans-serif book whose Arabic the
-/// overflow font draws, the ` (` and `). ` that Helvetica draws are face
-/// segments of their own inside an Arabic run, drawn as typed, so the page
-/// itself showed `عدة( النازعة` and read `.)وقد` — CI's
-/// `sample-regime-anticancer-arabic.epub` at character 20 963. Reordering
-/// every slice at an odd level, tried on the review of 6d08c6b, drew those
-/// lines right, and the next review measured what it broke: every line of
-/// neutrals alone at a right-to-left level read back reversed —
+/// reads such a line in content order — and in its level's order every line
+/// of neutrals alone at a right-to-left level would read back reversed:
 /// `<p dir="rtl">?!</p>` as `!?`, a heading's `?!`, `(...)` (drawn `)...(`,
 /// each bracket's hollow turned away from the dots), the first line of
-/// `?!<br/>חו`. Which of the two a slice is on is whether its **line** holds
-/// a right-to-left character, and the line says so now (`epub_fallback.rs`
-/// pins both sides) — but for the runs of neutrals on such a line that
-/// a reader of the page would not undo, which [`neutrals_drawn_as_typed`]
-/// names and which are drawn as typed as before (review of the K-11 fix).
+/// `?!<br/>חו`. On a line that holds one, as typed reads wrong: the `.,`
+/// between two right-to-left words (`<p dir="rtl"><i>חו</i>.,<i>וח</i></p>`)
+/// is a run of its own that N1 puts at the paragraph's level, where L2 draws
+/// it `,.`, and drawn as typed the line would read back `חו,.וח`; and in a
+/// sans-serif book whose Arabic the overflow font draws, the ` (` and `). `
+/// that Helvetica draws are face segments of their own inside an Arabic run,
+/// so drawn as typed the page itself would show `عدة( النازعة` and read
+/// `.)وقد`, as in CI's `sample-regime-anticancer-arabic.epub` at
+/// character 20 963. Which of the two a slice is on is whether its **line**
+/// holds a right-to-left character, which the line says (`epub_fallback.rs`
+/// pins both sides) — but for the runs of neutrals on such a line that a
+/// reader of the page would not undo, which [`neutrals_drawn_as_typed`]
+/// names and which are drawn as typed.
 ///
 /// The units L2 orders are **a character and the nonspacing marks after
 /// it** (`Bidi_Class` `NSM`), kept together as rule L3 keeps a mark with its
 /// base: reversed a character at a time, the marks of a right-to-left run
-/// left their letters, and `שָׁלוֹם` read back `שָלׁוםֹ` in a default build
-/// (review of 6d08c6b). The order is [`order_units`]'s, the function
+/// would leave their letters, and `שָׁלוֹם` would read back `שָלׁוםֹ` in a
+/// default build. The order is [`order_units`]'s, the function
 /// `bidi_conformance.rs` runs the whole of Unicode's test files through, so
 /// this draws what the reader of the page checks against — a character X9
 /// removes, a joiner or a formatting character, kept at the level of the
@@ -7986,47 +7962,49 @@ fn inside_joins(level: Option<u8>, paragraph_rtl: Option<bool>, shared: bool, sl
 /// `letter-spacing` ([`letter_spaced`]), so a mark of no advance does not
 /// move the pen, and [`draw_coded`] draws it inside its letter's box, where
 /// ruling 14's extraction pairs it with that letter: the neighbour, in
-/// content order, whose box holds its centre. How that came to be, since
-/// each step was a fix of its own:
+/// content order, whose box holds its centre. Each part of that keeps a mark
+/// with its letter:
 ///
-/// - The overflow font gave a mark a space's advance, and a mark drawn
-///   after its letter had its centre exactly as far outside its letter's box
-///   as outside the next glyph's: rounding decided which read it (`a מֶלֶךְ,`
-///   came back `a מלֶךְ,ֶ` at a `font-size` of `12.5px` and of `14px`), and a
-///   letter's second mark was nearer the next glyph and was read with it —
-///   `sample-regime-anticancer-arabic.epub`'s `يًّا`, its FATHATAN on the
-///   letter before (CI run 38041540464).
-/// - A mark of no advance drawn where the pen stood after its letter lies in
-///   the next glyph's box, since `tinker-pdf-content` reads a glyph of no
-///   advance as a box a thousandth of an em wide running right from where it
-///   is drawn: every point of `מֶלֶךְ` was read with its neighbour in a
-///   `bundled-fonts` build. Drawn before its letter, where the letter
-///   starts, it was read with the letter — until `letter-spacing`, which was
-///   added after a mark as after any character, moved it off: `שָׁלוֹם` at
-///   `0.5px` came back `שׁלָוֹם` and `מֶלֶךְ` at `-0.5px` `מלֶךְֶ`. And a
-///   left-to-right slice, which keeps its marks after their letters, had
+/// - **The overflow font gives a mark no advance.** With a space's advance,
+///   a mark drawn after its letter would have its centre exactly as far
+///   outside its letter's box as outside the next glyph's: rounding would
+///   decide which read it (`a מֶלֶךְ,` reading `a מלֶךְ,ֶ` at a `font-size` of
+///   `12.5px` and of `14px`), and a letter's second mark, nearer the next
+///   glyph, would be read with it — `sample-regime-anticancer-arabic.epub`'s
+///   `يًّا`, its FATHATAN on the letter before.
+/// - **A mark is drawn inside its letter's box.** A mark of no advance drawn
+///   where the pen stands after its letter lies in the next glyph's box,
+///   since `tinker-pdf-content` reads a glyph of no advance as a box a
+///   thousandth of an em wide running right from where it is drawn: every
+///   point of `מֶלֶךְ` would be read with its neighbour in a `bundled-fonts`
+///   build. Drawn before its letter, where the letter starts, it is read
+///   with the letter only while no spacing moves it off — `letter-spacing`
+///   added after a mark as after any character would read `שָׁלוֹם` at
+///   `0.5px` as `שׁלָוֹם` and `מֶלֶךְ` at `-0.5px` as `מלֶךְֶ` — and a
+///   left-to-right slice, which keeps its marks after their letters, has
 ///   nowhere else to draw them: a decomposed `e\u{301}` beside a
-///   right-to-left word read as an `e` and an accented space.
-/// - Drawn inside its letter by a text object of its own (6d79fa4), a mark
-///   left a reader's pen at its own box, and the glyph after it started
-///   every spacing past — the letter's and each mark's: from a quarter of an
-///   em of `letter-spacing` a pointed word was read a letter a line. A slice
-///   holding a mark is one text object now ([`draw_coded`]), and a mark is
-///   not spaced (`css-text-3` §10.2 spaces typographic character units, and
-///   a letter with its marks is one).
-/// - Drawn a hundredth of an em inside a letter the stand-in draws (bf081ca),
-///   whose `/W` is rounded, a mark that ended a run left the next run nine
-///   thousandths of an em further from a reader's pen than its letter would
-///   have, and the line was cut from `0.491em` of spacing. Such a letter is
-///   drawn where layout put it now, a piece of its own, and every mark on a
-///   letter in its slice ends its box a millionth of an em past the end
-///   layout measured for the letter ([`EXACT_MARK_INSET`]).
+///   right-to-left word would read as an `e` and an accented space.
+/// - **A slice holding a mark is one text object** ([`draw_coded`]), **and a
+///   mark is not spaced** (`css-text-3` §10.2 spaces typographic character
+///   units, and a letter with its marks is one). Drawn inside its letter by
+///   a text object of its own, a mark would leave a reader's pen at its own
+///   box, and the glyph after it would start every spacing past — the
+///   letter's and each mark's: from a quarter of an em of `letter-spacing` a
+///   pointed word would be read a letter a line.
+/// - **A letter the stand-in draws that carries a mark is drawn where layout
+///   put it**, a piece of its own, and every mark on a letter in its slice
+///   ends its box a millionth of an em past the end layout measured for the
+///   letter ([`EXACT_MARK_INSET`]). Drawn a hundredth of an em inside a
+///   letter the stand-in draws, whose `/W` is rounded, a mark that ends a run
+///   would leave the next run nine thousandths of an em further from a
+///   reader's pen than its letter would, and the line would be cut from
+///   `0.491em` of spacing.
 ///
 /// Positioned inside its letter, a mark is read with it at every size and
 /// spacing the tests sweep, four to a letter, and its line is not cut
 /// inside its slice; where a slice ends on a mark, [`draw_coded`] says how
-/// far the next run may be. Where on its letter it stands is still not where
-/// a point should, over the middle: that is `GPOS`'s to say, and an unshaped
+/// far the next run may be. Where on its letter it stands is not where a
+/// point should, over the middle: that is `GPOS`'s to say, and an unshaped
 /// run reads none. Marks with nothing before them in the slice, their letter
 /// in another run or face segment, ride on nothing; [`draw_coded`] says
 /// where those are drawn.
@@ -8071,39 +8049,27 @@ fn coded_order(run: &TextRun, slice: &str, level_order: bool) -> Vec<(char, bool
 /// glyphs read alike either way round — one glyph, or a run of them that
 /// reads the same reversed — so that drawn in its level's order or as typed
 /// it reads the same, and the two differ only in which end its word space is
-/// drawn at (third review of the K-11 fix).
+/// drawn at.
 ///
 /// Drawn as typed, the space is drawn first and the glyph after it, where
-/// layout put the slice's end:
-///
-/// - **No glyph was drawn where the one before it overran** — the first
-///   reason, and history since the overflow font is written at `0 Tw`
-///   (ROADMAP CD-19). The overflow font's code
-///   32 is a letter of the book's, and while the font was written at the
-///   run's `Tw` the last glyphs of its string were drawn up to a word
-///   spacing right of where layout put them, over whatever was drawn next:
-///   drawn in its level's order the monospace `#` of `أصبحنا #نعرف`,
-///   justified, stood on the NOON the overflow font moved, and the line read
-///   `أصبحنا ن#عرف` (4 books in each build); drawn as typed, the space stood
-///   there, which draws nothing, as at 9297d2d. The font is written at
-///   `0 Tw` now and moves nothing.
-/// - **The space is stretched inside the slice's own text object**, and the
-///   glyph meets what is drawn after it. `TextDevice` carries a reader's pen
-///   across a gap `Tw` made into a right-to-left letter only on a line that
-///   holds one of its own, and the ` (` that a sans-serif book's Helvetica
-///   draws at the left end of a justified Arabic line's run, `( ` in its
-///   level's order, is a text object no right-to-left letter precedes: its
-///   stretched space parted it from the Arabic word after it, and the `(`
-///   was read as a line of its own, out of its place (the K-11 probe's
-///   sans-serif books at `margin: 0 15%`, `(histone deacetylase)` three and
-///   six times over, pointed and not).
+/// layout put the slice's end, so **the space is stretched inside the
+/// slice's own text object**, and the glyph meets what is drawn after it.
+/// `TextDevice` carries a reader's pen across a gap `Tw` made into a
+/// right-to-left letter only on a line that holds one of its own
+/// (`Stretch::carries`), and the ` (` that a sans-serif book's Helvetica
+/// draws at the left end of a justified Arabic line's run, `( ` in its
+/// level's order, is a text object no right-to-left letter precedes: drawn
+/// `( `, its stretched space would part it from the Arabic word after it,
+/// and the `(` would be read as a line of its own, out of its place (a
+/// sans-serif book at `margin: 0 15%` quoting `(histone deacetylase)`,
+/// pointed or not).
 ///
 /// Its glyphs, read in either order, are the same, so nothing a reader reads
 /// moves but the space. Where that space parts a bracket from what it
-/// encloses the bracket tie-break counts the pair no more: with
-/// `bundled-fonts`, the third review's sans-serif Hebrew paragraph quoting
-/// `(histone deacetylase)` four times, pointed and not, which 7330cd5 read
-/// whole, reads one line left to right again, as 9297d2d did.
+/// encloses the bracket tie-break does not count the pair: with
+/// `bundled-fonts`, a sans-serif Hebrew paragraph quoting
+/// `(histone deacetylase)` four times, pointed and not, reads one of its
+/// lines left to right.
 fn opens_with_its_word_space(run: &TextRun, units: &[&str]) -> bool {
     if run.word_spacing <= 0.0 || units.first() != Some(&" ") {
         return false;

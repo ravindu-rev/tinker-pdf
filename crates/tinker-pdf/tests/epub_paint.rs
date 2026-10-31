@@ -1222,14 +1222,14 @@ const DECORATIONS: [(&str, &str, [u8; 3]); 3] = [
 
 /// **An inline block's background, border and outline stand around its own
 /// text in a line UAX #9 reorders** (`docs/design/rtl-read-back.md`,
-/// Left (10)): the block is one unit of its line's order, and its box
-/// fragment moves with its text (`paint::visual_lines`), so what `draw_box`
-/// and `draw_outlines` paint from the fragment is drawn where its glyphs
-/// are. The rectangle the decoration paints, read off the rendered page,
-/// holds the block's glyph boxes; and the box stands where a right-to-left
-/// line puts its word, right of the words written after it. Left where
-/// layout set it in logical order, it stood left of them, apart from its
-/// text.
+/// "A transformed block in a reordered line"): the block is one unit of its
+/// line's order, and its box fragment moves with its text
+/// (`paint::visual_lines`), so what `draw_box` and `draw_outlines` paint from
+/// the fragment is drawn where its glyphs are. The rectangle the decoration
+/// paints, read off the rendered page, holds the block's glyph boxes; and the
+/// box stands where a right-to-left line puts its word, right of the words
+/// written after it. Left where layout set it in logical order, it would
+/// stand left of them, apart from its text.
 #[test]
 fn an_inline_blocks_background_border_and_outline_stand_around_its_own_text_in_a_reordered_line() {
     let mut wrong = Vec::new();

@@ -690,8 +690,8 @@ fn a_book_with_an_uppercased_heading_conserves() {
     assert!(verdict.holds(), "{verdict:?}");
 }
 
-/// The paragraph ROADMAP K-11's probe builds: `repeat` sentences, each a
-/// filler, a bracketed `inside` and its full stop, and a tail — the shape
+/// A paragraph of `repeat` sentences, each a filler, a bracketed `inside`
+/// and its full stop, and a tail — the shape
 /// `sample-regime-anticancer-arabic.epub` holds at character 20 963.
 fn bracketed_paragraph(inside: &str, repeat: usize) -> String {
     const FILLERS: [&str; 2] = [
@@ -704,7 +704,7 @@ fn bracketed_paragraph(inside: &str, repeat: usize) -> String {
         .collect()
 }
 
-/// `text` with its Arabic marks taken out: the probe's mark-free twin.
+/// `text` with its Arabic marks taken out: a book's mark-free twin.
 fn unpointed(text: &str) -> String {
     text.chars()
         .filter(|c| !matches!(c, '\u{064B}'..='\u{065F}' | '\u{0670}'))
@@ -712,42 +712,39 @@ fn unpointed(text: &str) -> String {
 }
 
 /// **A bracketed run and the full stop after it read as written in
-/// right-to-left text** — ROADMAP K-11, closed 10 October 2026.
+/// right-to-left text.**
 ///
-/// CI's `epub-corpus` job found the shape in
-/// `sample-regime-anticancer-arabic.epub`, from character 20 963
-/// (`Missing ").وقد…"`, `Extra ")وقد…"`). A synthetic probe of 240 books
-/// failed 82, the same 82 with every mark stripped, and three causes, none of
-/// them where a mark is drawn, stood behind them; each shape here failed at
-/// 9297d2d, pointed and mark-free alike, in both builds:
+/// `sample-regime-anticancer-arabic.epub`, a book of CI's `epub-corpus` job,
+/// holds the shape from character 20 963; read wrong, it reports
+/// `Missing ").وقد…"`, `Extra ")وقد…"`. Three mechanisms, none of them where
+/// a mark is drawn, hold each shape here, pointed and mark-free alike, in
+/// both builds:
 ///
-/// - **The writer drew the punctuation backwards.** In a sans-serif book the
-///   brackets, the full stop and the spaces are Helvetica's and the Arabic is
-///   the overflow font's, so ` (` and `). ` are face segments of their own,
-///   and a standard-14 segment with no right-to-left character in it was
-///   drawn as typed even at a right-to-left level: the page itself showed
-///   `عدة( النازعة` and read `.)وقد` — CI's `Missing ").وقد"`,
-///   `Extra ")وقد"`. Such a segment is drawn in its level's order now on a
-///   line that holds a right-to-left character (`paint::coded_order`,
-///   `TextRun::bidi_line_rtl`).
-/// - **The line came back in pieces.** Narrowed so that `(histone
+/// - **The writer draws the punctuation in its level's order.** In a
+///   sans-serif book the brackets, the full stop and the spaces are
+///   Helvetica's and the Arabic is the overflow font's, so ` (` and `). ` are
+///   face segments of their own. On a line that holds a right-to-left
+///   character such a standard-14 segment, with no right-to-left character in
+///   it, is drawn in its level's order (`paint::coded_order`,
+///   `TextRun::bidi_line_rtl`); drawn as typed at a right-to-left level, the
+///   page itself shows `عدة( النازعة` and reads `.)وقد`, the verdict above.
+/// - **The line is read whole, not in pieces.** Narrowed so that `(histone
 ///   deacetylase).` opens a line, the `(`, the Latin words and the Arabic
-///   are three text objects, and the join of a line's pieces asked whether
-///   either of **two** pieces held a right-to-left character; the `(` and
-///   the Latin hold none, so the `(` was read as a line of its own. The
-///   chain the pieces make is joined whole now where, read whole, the
-///   bracket tie-break turns it (`text_order::rejoin_split_lines`). And justified
-///   at `margin: 0 35%`, an Arabic line's word spaces were stretched past half
-///   an em, which `TextDevice` cut it at, so the words read in drawn order,
-///   backwards; a word space stretched by `Tw` carries the pen within
-///   right-to-left text now (`tinker-pdf-content`'s `Stretch`).
-/// - **The majority read the line the wrong way.** That narrowed line holds
-///   eighteen Latin letters and seventeen Arabic ones, and ruling 14 read it
-///   left to right, `.)histone deacetylase(`: a text a left-to-right
+///   are three text objects; the `(` and the Latin hold no right-to-left
+///   character, so a join that asks whether either of **two** pieces holds
+///   one reads the `(` as a line of its own. The chain the pieces make is
+///   joined whole where, read whole, the bracket tie-break turns it
+///   (`text_order::rejoin_split_lines`). And justified at `margin: 0 35%`, an
+///   Arabic line's word spaces are stretched past half an em, where
+///   `TextDevice` cuts a line, and a line cut there reads its words in drawn
+///   order, backwards; a word space stretched by `Tw` carries the pen within
+///   right-to-left text (`tinker-pdf-content`'s `Stretch`).
+/// - **The line is read the way that pairs its brackets.** That narrowed line
+///   holds eighteen Latin letters and seventeen Arabic ones, so its majority
+///   reads it left to right, `.)histone deacetylase(`: a text a left-to-right
 ///   paragraph draws as the line stands. The pair is drawn facing outward,
-///   which only a pair at a right-to-left level is; ruling 14's bracket
-///   tie-break (amended 10 October 2026) reads it in the direction that pairs
-///   it.
+///   which only a pair at a right-to-left level is, and ruling 14's bracket
+///   tie-break reads the line in the direction that pairs it.
 #[test]
 fn a_bracketed_run_and_its_full_stop_in_right_to_left_text_read_as_written() {
     let read = |style: &str, open: &str, text: &str| {
@@ -907,22 +904,21 @@ fn a_dirless_line_with_arabic_at_both_ends_and_latin_in_brackets_reads_as_its_dr
     assert_eq!(right_to_left, line.text, "ruling 14 reads the second");
 }
 
-/// **List markers and glosses in left-to-right text conserve** — ruling 14's
-/// bracket tie-break as the review of the K-11 fix revised it.
+/// **List markers and glosses in left-to-right text conserve** under
+/// ruling 14's bracket tie-break.
 ///
 /// A left-to-right paragraph's `1)` before a parenthesis, or a parenthesis
 /// that opens at the end of a line and closes on the next, draws a closing
 /// bracket left of an opening one, and a right-to-left paragraph draws the
-/// same line for another text in which the two pair facing outward. As first
-/// proposed, the tie-break read every such line from the right, and books
-/// like these, which conserved before it, stopped conserving at their first
-/// character: `<p>Step 1) read the word (…) aloud and 2) write it down, then
-/// 3) check (…) again.</p>` in six of nine styles, Arabic and Hebrew, pointed
-/// and not, in both builds, and three glosses wrapped at `margin: 0 25%` in a
-/// `bundled-fonts` one. A reading from the right pairs no more of their
-/// brackets than as typed, or pairs them with the spaces that stood outside
-/// them inside the pair, and the tie-break now asks for more pairs, each set
-/// against what it encloses.
+/// same line for another text in which the two pair facing outward. A
+/// tie-break that read every such line from the right would have books like
+/// these diverge at their first character: `<p>Step 1) read the word (…)
+/// aloud and 2) write it down, then 3) check (…) again.</p>`, Arabic and
+/// Hebrew, pointed and not, in both builds, and three glosses wrapped at
+/// `margin: 0 25%` with `bundled-fonts`. A reading from the right pairs no
+/// more of their brackets than as typed, or pairs them with the spaces that
+/// stand outside them inside the pair, so the tie-break asks for more pairs,
+/// each set against what it encloses.
 #[test]
 fn list_markers_and_glosses_in_left_to_right_text_conserve() {
     let words: [(&str, [&str; 4]); 2] = [
@@ -984,32 +980,30 @@ fn conserves_pointed_and_not(language: &str, style: &str, body: &str) {
     }
 }
 
-/// **Spacing carries a reader's pen only within right-to-left text** —
-/// the review of the K-11 fix.
+/// **Spacing carries a reader's pen only within right-to-left text.**
 ///
-/// K-11's fix took the pen across a gap `Tw` or `Tc` made where a line closed
-/// by `ET` met the next text object, so that a justified or letter-spaced
-/// Arabic line was not cut into words read backwards. Each pointed book here
-/// conserved at 9297d2d, which cut its line at the gap, and did not when the
-/// pen was carried across it — the line so joined, each piece of it read
-/// right alone, fell into ruling 14's limits, read by its two Hebrew ends or
-/// by its majority as a right-to-left paragraph's. Their mark-free twins are
-/// held to conserve too, which not all of them did at 9297d2d (the `-` line
-/// under `word-spacing: 0.6em` did not):
+/// The text device takes the pen across a gap `Tw` or `Tc` made where a line
+/// closed by `ET` meets the next text object, so that a justified or
+/// letter-spaced Arabic line is not cut into words read backwards. Each
+/// pointed book here conserves with its line cut at the gap, and not with the
+/// pen carried across it: the line so joined, each piece of it read right
+/// alone, falls into ruling 14's limits, read by its two Hebrew ends or by its
+/// majority as a right-to-left paragraph's. Their mark-free twins are held to
+/// conserve too. A carry across every such gap would take the pen:
 ///
-/// - carried after a right-to-left word into a neutral, the `(` or `⟨` that
-///   opens a Latin run, and into the Hebrew after `( ` in an English line;
-/// - carried after a word of neutrals, the `-` of `שָׁלוֹם - (HDAC) - עוֹלָם`,
-///   on a line that held the Latin;
-/// - carried a little further than the spacing reaches, from one table cell
-///   into the next, two Hebrew cells read as one word, `גדולספר`.
+/// - after a right-to-left word into a neutral, the `(` or `⟨` that opens a
+///   Latin run, and into the Hebrew after `( ` in an English line;
+/// - after a word of neutrals, the `-` of `שָׁלוֹם - (HDAC) - עוֹלָם`, on a
+///   line that holds the Latin;
+/// - a little further than the spacing reaches, from one table cell into the
+///   next, two Hebrew cells read as one word, `גדולספר`.
 ///
-/// The pen is carried now only into a right-to-left glyph that starts where
+/// So the pen is carried only into a right-to-left glyph that starts where
 /// the spacing put it, on a line holding no left-to-right letter or after a
-/// right-to-left word (`tinker-pdf-content`'s `Stretch`). And the last,
-/// a right-to-left paragraph letter-spaced by half an em, whose `) (` between
-/// two Latin runs a reader read on its own (`bundled-fonts`): such a run of
-/// neutrals is drawn as typed, as it was (`paint::neutrals_drawn_as_typed`).
+/// right-to-left word (`tinker-pdf-content`'s `Stretch`). And the last, a
+/// right-to-left paragraph letter-spaced by half an em, whose `) (` between
+/// two Latin runs a reader reads on its own (`bundled-fonts`): such a run of
+/// neutrals is drawn as typed (`paint::neutrals_drawn_as_typed`).
 #[test]
 fn spacing_carries_the_pen_only_within_right_to_left_text() {
     let justified = "p, td { letter-spacing: 0.3em; text-align: justify; margin: 0 25% }";
@@ -1063,20 +1057,18 @@ fn spacing_carries_the_pen_only_within_right_to_left_text() {
     }
 }
 
-/// **A line whose pieces read right apart is read in them** — the review of
-/// the K-11 fix.
+/// **A line whose pieces read right apart is read in them.**
 ///
-/// K-11's fix joined the whole chain of pieces a line came to the reader
-/// in, wherever any piece held a right-to-left character, so that a
-/// right-to-left line opening with `(histone deacetylase).` kept its `(`
-/// for the bracket tie-break to pair. The line after it, `deacetylase).
-/// מִלְחָמָה סֵפֶר בַּיִת.`, is three pieces too, and read as two — `deacetylase`
-/// and `). מִלְחָמָה …`, as 9297d2d joined them — each reads right; joined
-/// whole it fell into the limit of a bracket a line break parted, its
-/// Latin letters as many as its Hebrew ones, and read `.מִלְחָמָה סֵפֶר בַּיִת
-/// .)deacetylase`. A chain is joined whole now only where the bracket
-/// tie-break turns it read whole (`text_order::rejoin_split_lines`), and
-/// otherwise as 9297d2d joined its pieces.
+/// A right-to-left line opening with `(histone deacetylase).` comes to the
+/// reader in pieces, and their whole chain is joined so that the bracket
+/// tie-break pairs its `(`. The line after it, `deacetylase).
+/// מִלְחָמָה סֵפֶר בַּיִת.`, is three pieces too; read as two, `deacetylase`
+/// and `). מִלְחָמָה …`, each reads right, and joined whole it falls into the
+/// limit of a bracket a line break parted, its Latin letters as many as its
+/// Hebrew ones, and reads `.מִלְחָמָה סֵפֶר בַּיִת .)deacetylase`. So a chain
+/// is joined whole only where the bracket tie-break turns it read whole
+/// (`text_order::rejoin_split_lines`), and otherwise a piece joins the one
+/// before it where either holds a right-to-left character.
 #[test]
 fn a_line_whose_pieces_read_right_apart_is_read_in_them() {
     let style = "body { font-family: monospace } p { margin: 0 22% }";
@@ -1090,19 +1082,19 @@ fn a_line_whose_pieces_read_right_apart_is_read_in_them() {
 }
 
 /// **A neutral the device cut from its line carries no pen into the
-/// right-to-left word after it** — the third review of the K-11 fix.
+/// right-to-left word after it.**
 ///
 /// The text device starts a line afresh at every cut, so an opening mark
 /// cut from the Latin text it belongs to — `«`, `"`, `#` or `?!` in a text
-/// object of its own, a table cell's `[` — began a line that held no
-/// left-to-right letter, and the pen was carried from it across the spacing
-/// into the Hebrew or Arabic word after it. The line so joined read right
-/// to left, its mark at the wrong end: `«שָׁלוֹם עוֹלָם»` letter-spaced by
+/// object of its own, a table cell's `[` — begins a line that holds no
+/// left-to-right letter. Carried from it across the spacing into the Hebrew
+/// or Arabic word after it, the pen would join a line that reads right to
+/// left, its mark at the wrong end: `«שָׁלוֹם עוֹלָם»` letter-spaced by
 /// `0.55em` as `שָׁלוֹם עוֹלָם«`, `<td>[שָׁלוֹם]</td>` as `שָׁלוֹם[`, and `<i>?!</i>
-/// שָׁלוֹם עוֹלָם` at `word-spacing: 1em` as `שָׁלוֹם עוֹלָם !?`. Each book
-/// conserved at 9297d2d (pointed; its mark-free twin did not, nor does it
-/// now). After neutrals the pen goes on now only on a line that holds a
-/// right-to-left letter of its own (`tinker-pdf-content`'s `Stretch`).
+/// שָׁלוֹם עוֹלָם` at `word-spacing: 1em` as `שָׁלוֹם עוֹלָם !?`. So after
+/// neutrals the pen goes on only on a line that holds a right-to-left letter
+/// of its own (`tinker-pdf-content`'s `Stretch`). Each book is held pointed;
+/// its mark-free twin does not conserve.
 #[test]
 fn a_neutral_cut_from_its_line_carries_no_pen_into_the_word_after_it() {
     let spaced = "p, li, td { letter-spacing: 0.55em; text-align: justify; margin: 0 20% }";
@@ -1133,21 +1125,21 @@ fn a_neutral_cut_from_its_line_carries_no_pen_into_the_word_after_it() {
 }
 
 /// **A justified English paragraph quoting Hebrew in brackets reads as
-/// written** — the third review of the K-11 fix.
+/// written.**
 ///
 /// `Words <b>שָׁלוֹם</b> <i>עוֹלָם</i> (<b>מִלְחָמָה</b>) and more English
 /// text,`, five times over with the Hebrew words changing, under `text-align:
 /// justify` and under `word-spacing: 0.3em`. A line that opens with a
 /// bracketed Hebrew word the line above ended next to — `(הָאָרֶץ) and more
-/// English text, Words …` — draws that pair facing outward, since N0 took
+/// English text, Words …` — draws that pair facing outward, since N0 takes
 /// its level from the Hebrew word before it, on the line above; read from the
-/// right the line pairs it, and the bracket tie-break turned the line,
-/// fifty Latin letters to fifteen Hebrew ones, and read it backwards. Such a
-/// pair is no evidence for the other direction (`tinker-pdf-shape`'s
-/// `OpenedBefore`). In a default build each conserved in logical order at
-/// 9297d2d, pointed and not; with `bundled-fonts`, whose wider Hebrew breaks
-/// these lines elsewhere, the pointed paragraph set in monospace, justified,
-/// at `margin: 0 20%` did.
+/// right the line pairs it, and a bracket tie-break that counted it would
+/// turn the line, fifty Latin letters to fifteen Hebrew ones, and read it
+/// backwards. Such a pair is no evidence for the other direction
+/// (`tinker-pdf-shape`'s `OpenedBefore`). The paragraph is held in logical
+/// order in a default build under both styles, pointed and not, and with
+/// `bundled-fonts`, whose wider Hebrew breaks these lines elsewhere, pointed,
+/// set in monospace, justified, at `margin: 0 20%`.
 #[test]
 fn a_bracket_pair_the_line_above_resolved_turns_no_line() {
     let words = [
@@ -1202,20 +1194,19 @@ fn a_bracket_pair_the_line_above_resolved_turns_no_line() {
     }
 }
 
-/// **A cut ORNATE PARENTHESIS, or an ARABIC PERCENT SIGN, carries no pen**
-/// (review of the third review's K-11 fix).
+/// **A cut ORNATE PARENTHESIS, or an ARABIC PERCENT SIGN, carries no pen.**
 ///
 /// The text device carries the pen across spacing only into a glyph that
-/// reads right to left by its class. The third review's table took in every
-/// punctuation mark of the right-to-left blocks, the ORNATE PARENTHESES `﴿`
-/// and `﴾` among them, which are `ON` like `(`: cut into a text object of
-/// its own, a `﴿` began a line the pen went on from into the Arabic or
-/// Hebrew word after it, and `﴿عوامل عدّة﴾` letter-spaced read
-/// `﴾عوامل عدّة﴿`, `عوامل ﴿HDAC﴾ عدّة` at `word-spacing: 1em` `﴾HDAC﴿ عوامل`.
-/// And the ARABIC PERCENT SIGN, `ET`, joined a justified line whole that then
-/// read the sign at its far end, `٥٠ بيت ٫ كبير٪`. Each conserved at
-/// 9297d2d, in both builds; the table holds `R`, `AL` and the ARABIC COMMA
-/// now (`tinker-pdf-content`'s `reads_right_to_left`).
+/// reads right to left by its class, and its table of those holds `R`, `AL`
+/// and the ARABIC COMMA (`tinker-pdf-content`'s `reads_right_to_left`). A
+/// table that took in every punctuation mark of the right-to-left blocks
+/// would hold the ORNATE PARENTHESES `﴿` and `﴾`, which are `ON` like `(`:
+/// cut into a text object of its own, a `﴿` would begin a line the pen went
+/// on from into the Arabic or Hebrew word after it, and `﴿عوامل عدّة﴾`
+/// letter-spaced would read `﴾عوامل عدّة﴿`, `عوامل ﴿HDAC﴾ عدّة` at
+/// `word-spacing: 1em` `﴾HDAC﴿ عوامل`. And the ARABIC PERCENT SIGN, `ET`,
+/// would join a justified line whole that then read the sign at its far end,
+/// `٥٠ بيت ٫ كبير٪`. Each book conserves in both builds.
 #[test]
 fn an_ornate_parenthesis_or_an_arabic_percent_sign_carries_no_pen() {
     let spaced = "p, li, td { letter-spacing: 0.55em; text-align: justify; margin: 0 20% }";
@@ -1256,17 +1247,17 @@ fn an_ornate_parenthesis_or_an_arabic_percent_sign_carries_no_pen() {
 }
 
 /// **A sign after a number that opens a wrapped Arabic line reads after
-/// it** (review of the third review's K-11 fix).
+/// it.**
 ///
 /// `<p dir="rtl">جميل بيت كبير نور 5% يوم</p>` in sans-serif, broken
 /// before the `5`. W2 makes the `5` an Arabic number for the Arabic letter on
 /// the line above, so the `%` is a neutral at the paragraph's level, in one
 /// piece with `يوم`; Helvetica draws it and the overflow font the Arabic, and
-/// drawn in its level's order Helvetica's `% ` read back `%5 يوم`: a reader
+/// drawn in its level's order Helvetica's `% ` reads back `%5 يوم`: a reader
 /// of the line alone finds no Arabic letter before the `5`, and W5 makes
 /// the `%` a European number's. Such a piece's neutrals are drawn as typed
-/// now, as every one was at 9297d2d, which conserved each of these in both
-/// builds (`paint::neutrals_drawn_as_typed`).
+/// (`paint::neutrals_drawn_as_typed`), and each of these books conserves in
+/// both builds.
 #[test]
 fn a_sign_after_a_number_opening_a_wrapped_arabic_line_reads_as_typed() {
     let style = "body { font-family: sans-serif } p { margin: 0 42% }";
@@ -1287,15 +1278,15 @@ fn a_sign_after_a_number_opening_a_wrapped_arabic_line_reads_as_typed() {
 }
 
 /// **A styled `?!` glued to the word after it, letter-spaced and justified,
-/// reads as typed** (review of the third review's K-11 fix).
+/// reads as typed.**
 ///
 /// `كتاب <i>?!</i> مدرسة <b>?!</b>الطالب جميل.` justified at
 /// `letter-spacing: 0.25em`: the bold `?!` is drawn against `الطالب` and a
 /// stretched word space before it, so a reader reads the two together and,
 /// by the comma tie-break, left to right — the `?!` in the order it was
-/// drawn. Drawn in its level's order it read `!?`; as typed, as at 9297d2d,
-/// which conserved it in logical order in both builds, it reads `?!`
-/// (`paint::Gaps::left_to_right_ends`).
+/// drawn. Drawn in its level's order it reads `!?`; drawn as typed it reads
+/// `?!` (`paint::Gaps::left_to_right_ends`), and the book conserves in
+/// logical order in both builds.
 #[test]
 fn a_styled_pair_glued_to_the_word_after_it_reads_as_typed_letter_spaced() {
     let style = "p { letter-spacing: 0.25em; text-align: justify; margin: 0 25% }";
@@ -1307,20 +1298,20 @@ fn a_styled_pair_glued_to_the_word_after_it_reads_as_typed_letter_spaced() {
 }
 
 /// **A line of a paragraph with no `dir` that opens with a bracket pair
-/// reads its full stop last** (review of the third review's K-11 fix).
+/// reads its full stop last.**
 ///
 /// `<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم.</p>`, broken before the
 /// bracket: N0 takes the pair's level from the Arabic on the line above, so
 /// the second line is drawn `موي )رون(.`, its stop at the right. The comma
 /// tie-break reads that left to right; read from the right the line pairs
-/// `(نور)`, and the bracket tie-break turned it and read the stop first,
-/// `(نور). يوم` in logical order. A pair with a bracket just left of the
-/// mark the comma tie-break took is one the line above resolved, and counts
-/// for neither reading (`tinker-pdf-shape`'s `OpenedBefore`). And the line
-/// `(١٬٢٣٤), الآن الموادّ تكبح عوامل.`, letter-spaced, in pieces the device
-/// cut, was joined whole for that turn and read `.(١٬٢٣٤), …`. Each conserved
-/// in logical order at 9297d2d — the number's book in content order too —
-/// in the build it is listed for.
+/// `(نور)`, and a bracket tie-break that counted the pair would turn it and
+/// read the stop first, `(نور). يوم` in logical order. A pair with a bracket
+/// just left of the mark the comma tie-break took is one the line above
+/// resolved, and counts for neither reading (`tinker-pdf-shape`'s
+/// `OpenedBefore`). And the line `(١٬٢٣٤), الآن الموادّ تكبح عوامل.`,
+/// letter-spaced, in pieces the device cut, would be joined whole for that
+/// turn and read `.(١٬٢٣٤), …`. Each book conserves in logical order — the
+/// number's book in content order too — in the build it is listed for.
 #[test]
 fn a_dirless_line_opening_with_a_bracket_pair_reads_its_full_stop_last() {
     let narrow = "p { margin: 0 42% }";
@@ -1359,20 +1350,20 @@ fn a_dirless_line_opening_with_a_bracket_pair_reads_its_full_stop_last() {
 }
 
 /// **A line of a paragraph with no `dir` that opens with a bracket pair
-/// reads its closing quotation marks and its stops last** (K-11 review,
-/// finding V1).
+/// reads its closing quotation marks and its stops last.**
 ///
-/// The test above's pair, which the line above resolved, was passed over
-/// only where one of seven marks ended the line and the unit just left of it
-/// held the bracket: `<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم?!</p>`,
-/// broken before the bracket, draws `موي )رون(?!`, whose rightmost unit is
-/// a stop but whose unit just left of it is another, so the pair counted,
-/// the bracket tie-break turned the line and it read `!?(نور) يوم`; so did
-/// `."`, whose rightmost unit is no stop, and `…`, which was none. The line
-/// opens left of any closing quotation marks and then one stop or more, an
-/// ellipsis among them (`tinker-pdf-shape`'s
-/// `OpenedBefore::before_its_punctuation`). Each book conserved in logical
-/// order at 9297d2d and did not at 56dfd93, in the build it is written for.
+/// The test above's pair, which the line above resolved, is passed over
+/// where the line opens left of any closing quotation marks and then one stop
+/// or more, an ellipsis among them (`tinker-pdf-shape`'s
+/// `OpenedBefore::before_its_punctuation`). A rule that asked only whether
+/// one of seven marks ends the line, the unit just left of it holding the
+/// bracket, would count the pair in
+/// `<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم?!</p>`, broken before the
+/// bracket, which draws `موي )رون(?!`, whose rightmost unit is a stop but
+/// whose unit just left of it is another: the bracket tie-break would turn
+/// the line and read it `!?(نور) يوم`, and turn the lines ending `."`, whose
+/// rightmost unit is no stop, and `…`, which is not one of the seven, too.
+/// Each book conserves in logical order in the build it is written for.
 #[test]
 fn a_dirless_line_opening_with_a_bracket_pair_reads_its_closing_quotes_and_stops_last() {
     let narrow = "p { margin: 0 42% }";
@@ -1402,14 +1393,13 @@ fn a_dirless_line_opening_with_a_bracket_pair_reads_its_closing_quotes_and_stops
     }
 }
 
-// ---- the cases the reviews found -------------------------------------------
+// ---- the cases: books read as a reader reads them ----------------------------
 //
-// Every book a finding of the K-11 and CD-19 reviews named is a row of the
-// test of its mechanism, here and in `epub_fallback.rs`, read as
-// `epub_support::reading` reads a book. A case that
-// was fixed is held to its right reading (`Expect::Holds`); a case a limit
-// leaves is pinned at what it reads today (`Expect::Pinned`) and says which
-// limit, so that it fails when the limit closes.
+// Each case below, like those of `epub_fallback.rs`, is a row of the test of
+// its mechanism, read as `epub_support::reading` reads a book. A case that
+// reads right is held to its reading (`Expect::Holds`); a case a limit leaves
+// is pinned at what it reads (`Expect::Pinned`) and says which limit, so that
+// it fails when the limit closes.
 
 /// **A case holds what it says and a pin holds exactly that** — the
 /// harness the cases below rely on (`epub_support::reading::meets`).
@@ -1471,20 +1461,22 @@ const JUSTIFIED: &str = "p { text-align: justify; margin: 0 41% }";
 const NARROW: &str = "p { margin: 0 42% }";
 
 /// **A neutral the pen could carry into the word beside it reads where it
-/// was typed** — the K-11 round-4 review's code F1 and hunt H5, fixed by
-/// 56dfd93's table (`tinker-pdf-content`'s `reads_right_to_left`).
+/// was typed** — the table of the glyphs that read right to left by their
+/// class (`tinker-pdf-content`'s `reads_right_to_left`).
 ///
 /// The text device carries the pen across spacing only into a glyph that
 /// reads right to left by its class. The ORNATE PARENTHESES are `ON`, like
-/// `(`; counted as right to left, a cut `﴿` carried the pen into the word
+/// `(`; counted as right to left, a cut `﴿` would carry the pen into the word
 /// after it, in Arabic, Hebrew, an English sentence quoting Hebrew, at
 /// `word-spacing: 1em` and in a table's cells. The ARABIC PERCENT SIGN is
-/// `ET`; counted so, it joined a justified line whole, styled or not and
-/// whatever letter is the overflow font's code 32. Guillemets, which round
-/// 4's own rule covered, guard the shape. And `٪٥٠` opening a wrapped line of
-/// a justified paragraph, styled or not, read its sign at the line's far
-/// end, `٥٠ يوم بيت كبير٪`, at every tree since 9297d2d; in its declared
-/// direction it reads as typed (held).
+/// `ET`; counted so, it would join a justified line whole, styled or not and
+/// whatever letter is the overflow font's code 32. Guillemets guard the
+/// shape: a guillemet cut into a line of its own leaves that line no
+/// right-to-left letter, so the pen goes on from it into no word
+/// (`a_neutral_cut_from_its_line_carries_no_pen_into_the_word_after_it`). And
+/// `٪٥٠` opening a wrapped line of a justified paragraph, styled or not, read
+/// off the line alone, reads its sign at the line's far end,
+/// `٥٠ يوم بيت كبير٪`; in its declared direction it reads as typed.
 #[test]
 fn a_neutral_the_pen_could_carry_into_a_word_reads_where_it_was_typed() {
     let percent = "<p dir=\"rtl\">الطالب ﴿جميل﴾. جميل <b>٪</b>٥٠ بيت <i>٫</i> كبير ﴿نور﴾.</p>";
@@ -1546,36 +1538,37 @@ fn price_book(words: &[&'static str], lead: usize, mark: &str, open: &str, close
 /// typed** — ruling 14's bracket tie-break and the pair the line above
 /// resolved (`tinker-pdf-shape`'s `OpenedBefore`), and its price.
 ///
-/// - The K-11 round-4 review's hunt H2 and code F2, fixed by 56dfd93: a
-///   dir-less `(W) W.` line with the brackets styled apart, `[ ]` and `?`
-///   too, and `(١٬٢٣٤),` opening a letter-spaced line, read their stop first.
-///   The right-to-left paragraph guards the shape. The unstyled `(W) W.`
-///   and `(١٢٣),`, K-11's own dir-less limit on a page that declares
-///   nothing, `نور) يوم(.`, read as typed in their declared direction (held).
-/// - The fix's verification, V1, fixed by acf944b: the same line ending in
-///   several stops or closing quotation marks.
-/// - CR2 and F6 of the review of CD-19's fix: a right-to-left line that opens
-///   with `?!`, `!!`, `".` or `'.` before a pair, after a `<br/>` or a soft
-///   wrap, reads as the dir-less line does on a page that declares nothing —
-///   ruling 14's price — and as typed in its declared direction, the
-///   ellipsis the owner's decision named among them (held).
-/// - H6 and PRICE-RESIDUAL, a run of stops before a styled pair after a
-///   `<br/>`: with no spacing, `…`, `?!` and `!!`, which pay the price on a
-///   page that declares nothing, and a lone `.`, the price's control, read
-///   as typed in their declared direction (held); a run that mixes the
-///   stops, `.!` or `!…`, ends no sentence (ruling 14) and reads as typed,
-///   held.
-///   At `word-spacing: 0.6em` all six read right, and so do the `!?` and `?!`
-///   books before styled brackets at `0.6em` and `1em` that lost their
-///   structure tree's order where the overflow font at 0 Tw met the rule,
-///   fixed by 935b077's read-back (held); and the three `'.` books at
-///   `0.5em` (Left (5)) hold it in their declared direction.
-/// - Confirm F3 of the review of CD-19's fix: two bracket pairs ending in
-///   the ARABIC COMMA in pointed Hebrew, letter-spaced and justified, with
-///   `bundled-fonts` (Left (4)), held in both builds.
-/// - H2-7d of the second review: `(abc ברא) אלהים؟`, ending in a stop outside
-///   the rule's, which K-11's reader reads from the right on a page that
-///   declares nothing (Left (4)), held in its declared direction.
+/// - A dir-less `(W) W.` line with the brackets styled apart, `[ ]` and `?`
+///   too, and `(١٬٢٣٤),` opening a letter-spaced line, read their stop last:
+///   counted, the pair the line above resolved would turn each and read its
+///   stop first. The right-to-left paragraph guards the shape. The unstyled
+///   `(W) W.` and `(١٢٣),`, which on a page that declares nothing read as
+///   ruling 14 reads a dir-less line alone, `نور) يوم(.`, read as typed in
+///   their declared direction.
+/// - The same line ending in several stops or closing quotation marks: the
+///   line opens just left of them (`OpenedBefore::before_its_punctuation`).
+/// - A right-to-left line that opens with `?!`, `!!`, `".` or `'.` before a
+///   pair, after a `<br/>` or a soft wrap, reads as the dir-less line does on
+///   a page that declares nothing — ruling 14's price — and as typed in its
+///   declared direction, the ellipsis ruling 14 names among them.
+/// - A run of stops before a styled pair after a `<br/>`: with no spacing,
+///   `…`, `?!` and `!!`, which pay the price on a page that declares nothing,
+///   and a lone `.`, the price's control, read as typed in their declared
+///   direction; a run that mixes the stops, `.!` or `!…`, ends no sentence
+///   (ruling 14) and reads as typed. At `word-spacing: 0.6em` all six read
+///   right, and so do the `!?` and `?!` books before styled brackets at
+///   `0.6em` and `1em`, where the overflow font at `0 Tw` meets the rule: the
+///   read-back, reading each line as a reader does, keeps their structure
+///   tree's order. And the three `'.` books at `0.5em` hold that order in
+///   their declared direction (`docs/design/rtl-read-back.md`, "A page that
+///   says how it reads: declared direction and stated text").
+/// - Two bracket pairs ending in the ARABIC COMMA in pointed Hebrew,
+///   letter-spaced and justified: with `bundled-fonts`, read off the line
+///   alone, the line reads from the right whatever the writer draws; in its
+///   declared direction it reads right, in both builds.
+/// - `(abc ברא) אלהים؟`, ending in a stop outside the rule's, which the reader
+///   reads from the right on a page that declares nothing, reads in its
+///   declared direction.
 #[test]
 fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
     let hebrew = if cfg!(feature = "bundled-fonts") {
@@ -1594,14 +1587,14 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
             "ar",
             NARROW,
             "<div style=\"direction: rtl\"><p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم.</p></div>", Expect::Holds("cons logical whole found apart")),
-        Case::both("dir-less (W) W. unstyled, ar (K-11's dir-less limit, as at every tree)", "ar", NARROW, "<p>جميل بيت كبير (نور) يوم.</p>", Expect::Holds("cons logical whole found apart")),
+        Case::both("dir-less (W) W. unstyled, ar (ruling 14's dir-less limit)", "ar", NARROW, "<p>جميل بيت كبير (نور) يوم.</p>", Expect::Holds("cons logical whole found apart")),
         Case::both(
             "dir-less (١٬٢٣٤), opening a letter-spaced line (code F2)",
             "ar",
             "p, li, td { letter-spacing: 0.5em }",
             "<p>عوامل عدّة وقد (١٬٢٣٤), أصبحنا نعرف الآن الموادّ. عدّة وقد أصبحنا (١٬٢٣٤), نعرف الآن الموادّ تكبح. وقد أصبحنا نعرف (١٬٢٣٤), الآن الموادّ تكبح عوامل. </p>", Expect::Holds("cons logical whole found apart")),
         Case::both(
-            "dir-less (١٢٣), opening a letter-spaced line (K-11's dir-less limit, as at every tree)",
+            "dir-less (١٢٣), opening a letter-spaced line (ruling 14's dir-less limit)",
             "ar",
             "p, li, td { letter-spacing: 0.5em }",
             "<p>عوامل عدّة وقد (١٢٣), أصبحنا نعرف الآن الموادّ. عدّة وقد أصبحنا (١٢٣), نعرف الآن الموادّ تكبح. وقد أصبحنا نعرف (١٢٣), الآن الموادّ تكبح عوامل. </p>", Expect::Holds("cons logical whole found apart")),
@@ -1756,7 +1749,7 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
             )
         });
         cases.push(Case::each(
-            "two pairs ending ، in pointed Hebrew, letter-spaced (confirm1 F3, Left (4))",
+            "two pairs ending ، in pointed Hebrew, letter-spaced (confirm1 F3)",
             "he",
             "p { letter-spacing: 0.5em; text-align: justify; margin: 0 25% }",
             format!("<p>{two}</p>"),
@@ -1776,33 +1769,30 @@ fn a_line_opening_with_a_bracket_pair_reads_its_stops_where_they_were_typed() {
     check(&cases);
 }
 
-/// **A left-to-right Hebrew paragraph that ends a number and a stop** —
-/// Left (1), read in its declared direction; H1 of the review of CD-19's fix.
+/// **A left-to-right Hebrew paragraph that ends a number and a stop** reads
+/// in its declared direction (`docs/design/rtl-read-back.md`, "A page that
+/// says how it reads: declared direction and stated text").
 ///
 /// `<p>בראשית. אור ٦٠.</p>` at `word-spacing: 0.5em`, in a default build: the
-/// glyph CD-19's code-32 move put a word spacing right left a gap before the
-/// final stop, which read alone; written at 0 Tw, the stop abuts the
-/// right-to-left run, ruling 14's rejoin joins them, and the comma
-/// tie-break, which asks for a strong right-to-left character at the line's
-/// left end, does not take a line that opens with a number, so on a page
-/// that declares nothing the stop is read first. The paragraph's element
-/// declares `/LrTb`, so the line is read left to right and conserves, in
-/// both builds (held). With `bundled-fonts` the stand-in
-/// draws the Hebrew, and these books are found by search with no glyph drawn
-/// over another, as at every tree since 94e3bb5 (held). Without the number
-/// the line reads right, in a default build a gain over both trees since
-/// e7ca679 (held); the paragraph alone, its own first letter at code 32,
-/// reads as at every tree (a guard). And with them, H4(2) of the same review:
+/// overflow font is written at `0 Tw`, so nothing after its code-32 letter
+/// moves and the final stop abuts the right-to-left run; ruling 14's rejoin
+/// joins them, and the comma tie-break, which asks for a strong right-to-left
+/// character at the line's left end, does not take a line that opens with a
+/// number, so on a page that declares nothing the stop is read first. The
+/// paragraph's element declares `/LrTb`, so the line is read left to right
+/// and conserves, in both builds. With `bundled-fonts` the stand-in draws the
+/// Hebrew, and these books are found by search with no glyph drawn over
+/// another. Without the number the line reads right; the paragraph alone,
+/// its own first letter at code 32, reads right too, a guard. And with them,
 /// a right-to-left paragraph of the same words letter-spaced and justified,
 /// whose rules' drawing a reader reads with the number run into the word
 /// beside it, `٢٠١٠ .۴۵`, reads whole in both builds, the read-back searching
-/// on to a drawing that reads its words (H-150, held). V2 of round
-/// 6's hunt is the same tie-break at a closing bracket, which it refuses as
-/// it does a number: `<p>שלום.<br/>בראשית (אלהים).</p>` letter-spaced, a
-/// number at spacings the review did not name, and with `bundled-fonts`
-/// Arabic, each conserving at 9297d2d and 56dfd93, lost since e7ca679
-/// wrote the overflow font at `0 Tw`, and read in their declared direction
-/// now (held).
+/// on to a drawing that reads its words (ruling 14: a reading is held to the
+/// line's words). The same tie-break refuses a closing bracket at the line's
+/// left end as it does a number: `<p>שלום.<br/>בראשית (אלהים).</p>`
+/// letter-spaced, a number at other spacings, and with `bundled-fonts`
+/// Arabic, each of which reads its stop first on a page that declares
+/// nothing, read in their declared direction.
 #[test]
 fn a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop() {
     let worded = "p { word-spacing: 0.5em }";
@@ -1905,8 +1895,8 @@ fn a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop() {
         Expect::Holds("cons logical whole found apart"),
         Expect::Holds("cons logical whole found apart"),
     ));
-    // V2 of round 6's lane V: the same class at a closing bracket and at
-    // spacings Left (1) did not name, and with `bundled-fonts`.
+    // The same class at a closing bracket and at other spacings, and with
+    // `bundled-fonts`.
     for (what, language, style, body) in [
         (
             "a dir-less line ending a bracketed word and a stop, letter-spaced (V2)",
@@ -1938,29 +1928,28 @@ fn a_left_to_right_hebrew_paragraph_ending_a_number_and_a_stop() {
     check(&cases);
 }
 
-/// **A dir-less line K-11's reader reads from the right** on a page that
-/// declares nothing — Left (3) and (4), held; H2-2 and H2-7 of the second
-/// review of CD-19's fix.
+/// **A dir-less line the reader reads from the right** on a page that
+/// declares nothing, and a word space styled apart across a two-em stretch.
 ///
-/// Since 56dfd93 K-11's carry joins the right-to-left word after a
+/// The carry (`Stretch::carries`) joins the right-to-left word after a
 /// bracketed gloss to the line, and the line, mostly right to left, is read
 /// from the right whatever the writer draws: a Latin gloss before a
 /// bracketed Arabic word at `0.5em` and at `12px`, a table cell ending a dash
 /// before a `(ספר) בית` cell, and in a default build a bold Greek word before
-/// a bracketed Hebrew one in a spanned cell (Left (4)), each read in its
-/// declared direction now (held). A styled
-/// Latin, Greek, Cyrillic or Armenian word before a gloss was fixed at
-/// `12px` by 935b077's read-back, which centres the word space styled apart
-/// in its stretch (held); before a bare gloss and a Latin tail at `2em`,
-/// `TextDevice` mends the line the word space's stretch cut, since the joined
-/// line's ends read left to right (Left (3)), held in both builds. And V3 of round 6's
-/// hunt: two right-to-left cells of a table with no `dir`, touching, at
-/// `word-spacing: 1em`, which K-11's reader joins into one line that holds
-/// nothing left to right and whose left end is the second cell's `)`, so the
-/// comma tie-break does not take it and the stop is read first: they
-/// conserved at 9297d2d, and since 56dfd93, whose content stream is 9297d2d's
-/// byte for byte, they read from the right (Left (4)); each cell declares
-/// its direction now, and they conserve (held).
+/// a bracketed Hebrew one in a spanned cell, each read in its declared
+/// direction (`docs/design/rtl-read-back.md`, "A page that says how it reads:
+/// declared direction and stated text"). A styled Latin, Greek, Cyrillic or
+/// Armenian word before a gloss reads right at `12px` by the read-back, which
+/// centres the word space styled apart in its stretch; before a bare gloss
+/// and a Latin tail at `2em`, `TextDevice` mends the line the word space's
+/// stretch cut, since the joined line's ends read left to right, in both
+/// builds (`docs/design/rtl-read-back.md`, "A word space styled apart across
+/// a two-em stretch"). And two right-to-left cells of a table with no `dir`,
+/// touching, at `word-spacing: 1em`, which the reader joins into one line
+/// that holds nothing left to right and whose left end is the second cell's
+/// `)`, so the comma tie-break does not take it and the stop is read first:
+/// read off the line alone they read from the right whatever the writer
+/// draws; each cell declares its direction, and they conserve.
 #[test]
 fn a_dirless_line_with_a_right_to_left_gloss() {
     let px12 = "p { word-spacing: 12px }";
@@ -1987,7 +1976,7 @@ fn a_dirless_line_with_a_right_to_left_gloss() {
         Case::both("a Greek word before (ספר) בית at 6px (guard)", "he", "p { word-spacing: 6px }", "<p>αλφα <b>βήτα</b> (ספר) בית</p>", Expect::Holds("cons logical whole found apart")),
         Case::both("an unstyled Greek gloss before (ספר) בית (guard)", "he", px12, "<p>αλφα βήτα (ספר) בית</p>", Expect::Holds("cons logical whole found apart")),
         Case::both(
-            "a bold Greek word before a bare gloss and a Latin tail at 2em (Left (3))",
+            "a bold Greek word before a bare gloss and a Latin tail at 2em",
             "he",
             "p { word-spacing: 2em }",
             "<p>αλφα <b>βήτα</b> ספר בית xyz.</p>", Expect::Holds("cons logical whole found apart")),

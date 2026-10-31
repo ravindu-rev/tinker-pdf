@@ -642,59 +642,56 @@ const STRETCH_ROUNDING: f64 = 0.05;
 /// A line closed by an `ET` is resumed only where the last glyph's box
 /// ended, give or take half an em. A glyph's box ends where its own width
 /// does, and 9.4.4 moves the pen on past it by `Tc`, and past a word space by
-/// `Tw` as well: a justified line set as one text object per font — its words
-/// in the overflow font and its spaces in a standard one, as this engine's
-/// EPUB writer sets a book's Arabic — was cut at every word space
-/// justification stretched past half an em. Cut so, a right-to-left line
-/// drawn in visual order is read a word at a time in the order the words were
-/// drawn, left to right: backwards (ROADMAP K-11, a narrowed right-to-left
-/// paragraph justified at `margin: 0 35%`). And a line letter-spaced by half
-/// an em was cut where one text object ended and the next began, at a gap
-/// that is the spacing and nothing else: `مُدَّة مُعلِّم.` in monospace at
-/// `letter-spacing: 8px`, its full stop drawn left of its word space as UAX #9
-/// draws it, was cut after the stop and read `مُدَّة مُعلِّم .` (review of the
-/// K-11 fix).
+/// `Tw` as well: resumed from the box alone, a justified line set as one text
+/// object per font — its words in the overflow font and its spaces in a
+/// standard one, as this engine's EPUB writer sets a book's Arabic — would be
+/// cut at every word space justification stretches past half an em. Cut so,
+/// a right-to-left line drawn in visual order is read a word at a time in the
+/// order the words were drawn, left to right: backwards (a narrowed
+/// right-to-left paragraph justified at `margin: 0 35%`). And a line
+/// letter-spaced by half an em would be cut where one text object ends and
+/// the next begins, at a gap that is the spacing and nothing else:
+/// `مُدَّة مُعلِّم.` in monospace at `letter-spacing: 8px`, its full stop
+/// drawn left of its word space as UAX #9 draws it, would be cut after the
+/// stop and read `مُدَّة مُعلِّم .`.
 ///
 /// **So within right-to-left text spacing carries the pen**
-/// ([`Stretch::carries`]), and nowhere else. Every piece a carry joins is a
-/// piece that was read apart before, and read apart each was read right: a
+/// ([`Stretch::carries`]), and nowhere else. Every piece a carry joins is one
+/// the device would otherwise cut apart, and read apart each reads right: a
 /// carry is worth taking only where the line it makes is right-to-left text
-/// that ruling 14 reads as such, and measured, every other carry cost books
-/// that conserved at 9297d2d:
+/// that ruling 14 reads as such, and every other carry reads wrong a line
+/// whose pieces read right apart:
 ///
-/// - carried everywhere, the stretch joined a right-to-left word to a longer
+/// - carried everywhere, the stretch joins a right-to-left word to a longer
 ///   Latin run (`hello world שלום`), read by its majority as a left-to-right
 ///   line, and `The word` to a longer Arabic phrase, read as a right-to-left
-///   one — 29 books of the marks probe;
-/// - carried after a right-to-left word into a neutral, the pen was carried
-///   into a Latin word the neutral opened — `שָׁלוֹם עוֹלָם <b>(HDAC)</b>.`,
-///   `⟨HDAC⟩`, `( עוֹלָם` after `(x) and` — and the line so joined fell into
-///   ruling 14's limits (review of the K-11 fix, 20 books of its probe);
+///   one;
+/// - carried after a right-to-left word into a neutral, the pen goes on into
+///   a Latin word the neutral opens — `שָׁלוֹם עוֹלָם <b>(HDAC)</b>.`,
+///   `⟨HDAC⟩`, `( עוֹלָם` after `(x) and` — and the line so joined falls into
+///   ruling 14's limits;
 /// - carried after a word of neutrals, `- ` in `שָׁלוֹם - (HDAC) - עוֹלָם`
-///   with no `dir`, it joined the Hebrew after it to a line that held the
+///   with no `dir`, it joins the Hebrew after it to a line that holds the
 ///   Latin, read right to left as its two Hebrew ends say;
-/// - carried a little further than the spacing reaches, it crossed from
+/// - carried a little further than the spacing reaches, it crosses from
 ///   one table cell to the next: `td { letter-spacing: 0.5em }` with
-///   `border-spacing: 2px` read two Hebrew cells as one word, `גדולספר`;
-/// - carried after neutrals on a line that held no left-to-right letter, it
-///   joined a neutral the device had cut from the Latin text it belongs to,
-///   and that starts a line afresh, to the right-to-left word after it — an
+///   `border-spacing: 2px` reads two Hebrew cells as one word, `גדולספר`;
+/// - carried after neutrals on a line that holds no left-to-right letter, it
+///   joins a neutral the device cut from the Latin text it belongs to, and
+///   that starts a line afresh, to the right-to-left word after it — an
 ///   opening `«`, `"`, `(`, `#` or `...` in a text object of its own, `<i>?!</i>`
 ///   and its stretched space before `שָׁלוֹם`, a table cell's `[` — and the
-///   line read its mark at the wrong end: `«שָׁלוֹם עוֹלָם»` letter-spaced as
-///   `שָׁלוֹם עוֹלָם«`, `<td>[שָׁלוֹם]</td>` as `שָׁלוֹם[` (third review of the
-///   K-11 fix, 163 books of its probe in a default build, about 201 with
-///   `bundled-fonts`, 128 of them tables);
-/// - carried into an Arabic-Indic digit, which the block table counted as
-///   right to left, it read `(١٢٣)` after a Hebrew word as `٢٣ (١)`, and a
-///   search for `١٢٣` found nothing (6 books with `bundled-fonts`);
+///   line reads its mark at the wrong end: `«שָׁלוֹם עוֹלָם»` letter-spaced as
+///   `שָׁלוֹם עוֹלָם«`, `<td>[שָׁלוֹם]</td>` as `שָׁלוֹם[`;
+/// - carried into an Arabic-Indic digit, which the block table counts as
+///   right to left, it reads `(١٢٣)` after a Hebrew word as `٢٣ (١)`, and a
+///   search for `١٢٣` finds nothing;
 /// - and carried out of or into an ORNATE PARENTHESIS, which is `ON` like
-///   `(` but which the table took in with the Arabic block's punctuation, a
-///   `﴿` in a text object of its own went on into the word after it,
+///   `(` but which the table takes in with the Arabic block's punctuation, a
+///   `﴿` in a text object of its own goes on into the word after it,
 ///   `﴿عوامل عدّة﴾` letter-spaced reading `﴾عوامل عدّة﴿`; and the ARABIC
-///   PERCENT SIGN, `ET`, so taken in, joined a justified line whole that
-///   then read the sign at its far end (review of the third review's fix,
-///   22 books in a default build and 24 with `bundled-fonts`).
+///   PERCENT SIGN, `ET`, so taken in, joins a justified line whole that
+///   then reads the sign at its far end.
 ///
 /// So the pen is carried only into a glyph that reads right to left by its
 /// own class ([`reads_right_to_left`]), only as far as the spacing reaches,
@@ -703,37 +700,35 @@ const STRETCH_ROUNDING: f64 = 0.05;
 /// line the device starts at a cut holds nothing from before the cut but the
 /// word the cut interrupted where the spacing put the next glyph, which
 /// counts against a carry and never for one.
-/// A left-to-right page is collected exactly as before, and so is every line
-/// that holds a left-to-right letter but after a right-to-left word on it:
-/// the two words of a Hebrew gloss in an English sentence, `peace (עוֹלָם
-/// מִלְחָמָה)`, justified, are one piece of right-to-left text as they were in
-/// a right-to-left paragraph. A run of neutrals the EPUB writer draws at the
-/// start of a right-to-left run, the ` (` of a sans-serif book's Helvetica,
-/// is a text object no right-to-left letter precedes, so the writer draws its
-/// word space first, where the stretch stays inside it (`paint`'s
-/// `opens_with_its_word_space`).
+/// A left-to-right page is collected exactly as if spacing carried nothing,
+/// and so is every line that holds a left-to-right letter but after a
+/// right-to-left word on it: the two words of a Hebrew gloss in an English
+/// sentence, `peace (עוֹלָם מִלְחָמָה)`, justified, are one piece of
+/// right-to-left text as they are in a right-to-left paragraph. A run of
+/// neutrals the EPUB writer draws at the start of a right-to-left run, the
+/// ` (` of a sans-serif book's Helvetica, is a text object no right-to-left
+/// letter precedes, so the writer draws its word space first, where the
+/// stretch stays inside it (`paint`'s `opens_with_its_word_space`).
 ///
 /// **A word cut on one baseline goes on into the next piece where the spacing
 /// put it.** A word is all of its glyphs since the white space before it; a
 /// line the device cut inside a word, at a gap the spacing accounts for
 /// ([`Stretch::reaches`]), holds that word's left-to-right letter, if it has
 /// one, from its first glyph: `[ŋ̊ə̃] חו`, letter-spaced by half an em and cut
-/// before its `]`, does not carry the pen from the `] ` into the Hebrew word
-/// (review of the K-11 fix). A gap no spacing accounts for — a table cell's,
-/// a column's — ends the word as white space does (ROADMAP CD-19): two cells
-/// of a right-to-left table row at `word-spacing: 1em`,
-/// `<td>def</td><td>أصبحنا نعرف</td>`, have no white space between them, and
-/// the Arabic cell's first drawn glyph starts 4.7 em right of `def`'s end.
-/// Taken on into it, `def`'s left-to-right word took in the Arabic letters
-/// drawn after it, the stretched space after them carried nothing, and the
-/// cell was cut in two at that space; ruling 14 rejoins two pieces only where
-/// they meet end to end, and these met only because the glyph after the
-/// overflow font's code-32 letter, moved on by `Tw`, had closed most of the
-/// gap.
+/// before its `]`, does not carry the pen from the `] ` into the Hebrew word.
+/// A gap no spacing accounts for — a table cell's, a column's — ends the word
+/// as white space does: two cells of a right-to-left table row at
+/// `word-spacing: 1em`, `<td>def</td><td>أصبحنا نعرف</td>`, have no white
+/// space between them, and the Arabic cell's first drawn glyph starts 4.7 em
+/// right of `def`'s end. Taken on into it, `def`'s left-to-right word would
+/// take in the Arabic letters drawn after it, the stretched space after them
+/// would carry nothing, and the cell would read in two, cut at that space:
+/// ruling 14 rejoins two pieces only where they meet end to end.
 ///
 /// **A cut at a word space's stretch is mended once the piece after it
-/// ends** (ROADMAP CD-19, Left (3)). Where the carry refuses a gap that a
-/// word space's `Tw` accounts for, the line the next glyph starts is the
+/// ends** (`docs/design/rtl-read-back.md`, "A word space styled apart
+/// across a two-em stretch"). Where the carry refuses a gap that a word
+/// space's `Tw` accounts for, the line the next glyph starts is the
 /// rest of the one before ([`PendingLine::rest`]), and as it ends it is
 /// appended to it where the two hold a right-to-left letter of their own and
 /// the leftmost and the rightmost of their glyphs that read either way both
@@ -833,24 +828,26 @@ fn mends(before: &PendingLine, rest: &PendingLine) -> bool {
         })
 }
 
-/// **The axes a horizontal line is measured on** (ROADMAP CD-19, Left (6)):
-/// `u`, the line's direction over its length, and `n`, `u` turned a quarter
+/// **The axes a horizontal line is measured on**
+/// (`docs/design/rtl-read-back.md`, "A line under a half turn"): `u`, the
+/// line's direction over its length, and `n`, `u` turned a quarter
 /// anticlockwise. A point's place along the line is its dot product with
 /// `u`, and across it its dot product with `n`.
 ///
 /// Measured on the page's axes, a line under a half turn runs to the page's
-/// left: its pen stood where its last glyph started, no [`Stretch`] was kept,
-/// a text object's end parted a glyph gone back along the line past half an
-/// em and none gone on, and `backwards` cut one gone on past three ems and
-/// none gone back — `25٪ <b>W</b> ١٢٣ … 2010،` in an Arabic paragraph turned
-/// by `rotate(180deg)` at `word-spacing: 1em` read `25` alone. Measured in
-/// its own frame, it is continued and cut as it is unturned.
+/// left: its pen would stand where its last glyph starts, no [`Stretch`]
+/// would be kept, a text object's end would part a glyph gone back along the
+/// line past half an em and none gone on, and `backwards` would cut one gone
+/// on past three ems and none gone back — `25٪ <b>W</b> ١٢٣ … 2010،` in an
+/// Arabic paragraph turned by `rotate(180deg)` at `word-spacing: 1em` would
+/// read `25` alone. Measured in its own frame, it is continued and cut as it
+/// is unturned.
 ///
 /// A line whose direction is `(a, 0)` with `a > 0` — every unturned line and
 /// every one under a positive scale — takes the page's `x` and `y`
 /// themselves, not a dot product, so that its lines, characters and order are
-/// what they were to the bit; so does a vertical line, and one whose
-/// direction has no finite, non-zero length.
+/// those the page's axes give, to the bit; so does a vertical line, and one
+/// whose direction has no finite, non-zero length.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Frame {
     /// The page's own `x` and `y`.
@@ -918,17 +915,13 @@ impl Frame {
 /// Arabic Extended-B among them), the Hebrew and Arabic presentation forms,
 /// and the supplementary planes' right-to-left blocks (U+10800 to U+10FFF,
 /// Arabic Extended-C and Sogdian among them, and U+1E800 to U+1EFFF, Adlam's).
-/// Until the review of the K-11 fix the table left out the Arabic Supplement
-/// (U+0750 to U+077F), N'Ko to Arabic Extended-B (U+07C0 to U+089F) and both
-/// supplementary ranges.
 ///
-/// By block, for [`is_rtl`]'s count of a line's direction alone, which a
+/// By block, for [`is_rtl`]'s count of a line's direction alone, in which a
 /// character of another class inside these blocks — an Arabic-Indic digit, a
-/// mark, a separator — has always been counted in with the script it belongs
-/// to. Whether spacing carries the pen into a glyph is asked of its own
-/// class instead ([`reads_right_to_left`]): carried into an Arabic-Indic
-/// digit, which is `AN`, a Hebrew paragraph's `(١٢٣)` read `٢٣ (١)` (third
-/// review of the K-11 fix).
+/// mark, a separator — is counted in with the script it belongs to. Whether
+/// spacing carries the pen into a glyph is asked of its own class instead
+/// ([`reads_right_to_left`]): carried into an Arabic-Indic digit, which is
+/// `AN`, a Hebrew paragraph's `(١٢٣)` would read `٢٣ (١)`.
 fn rtl_char(c: char) -> bool {
     let code = u32::from(c);
     (0x0590..=0x08FF).contains(&code)
@@ -1256,8 +1249,8 @@ impl Device for TextDevice {
                 // `w0 + (Tc + Tw) / Tfs` in glyph space; `Tw` only after a
                 // code 32 that decodes to white space — not after a letter a
                 // font draws at code 32, after which the interpreter moves
-                // the pen on by `Tw` all the same (ROADMAP CD-19) — and only
-                // horizontally. As the interpreter moves the pen otherwise:
+                // the pen on by `Tw` all the same — and only horizontally. As
+                // the interpreter moves the pen otherwise:
                 // [`crate::FontSource::decode`] does not say how many bytes a
                 // code took, so a two-byte code 32 of a Type 0 font is moved
                 // by `Tw` there too, which 9.3.3 applies to a single-byte code
@@ -1494,14 +1487,14 @@ mod tests {
             .collect()
     }
 
-    /// **A justified word space carries the pen within right-to-left text**
-    /// (ROADMAP K-11). Two Hebrew words, each a text object, with a space
-    /// between them in a third: the space's box is half an em wide, and
-    /// `Tw` of eight points moves the pen on to where the next word is
-    /// written, 0.8 em past the box — more than the half em a line closed by
-    /// `ET` is resumed within. Read from the box, the line was cut there, and
-    /// a right-to-left line cut so is read a word at a time in the order the
-    /// words were drawn: backwards.
+    /// **A justified word space carries the pen within right-to-left text.**
+    /// Two Hebrew words, each a text object, with a space between them in a
+    /// third: the space's box is half an em wide, and `Tw` of eight points
+    /// moves the pen on to where the next word is written, 0.8 em past the
+    /// box — more than the half em a line closed by `ET` is resumed within.
+    /// Read from the box, the line would be cut there, and a right-to-left
+    /// line cut so is read a word at a time in the order the words were
+    /// drawn: backwards.
     #[test]
     fn a_justified_word_space_carries_the_pen_within_right_to_left_text() {
         let pieces = [("\u{5D0}", 0.0), (" ", 5.0), ("\u{5D1}", 18.0)];
@@ -1518,8 +1511,7 @@ mod tests {
             ["\u{5D0} ( \u{5D1}"]
         );
         // Every letter of `Bidi_Class` `R` or `AL` reads right to left: the
-        // Arabic Supplement's letters, N'Ko's and Adlam's among them (review
-        // of the K-11 fix; the block table stopped short of all three).
+        // Arabic Supplement's letters, N'Ko's and Adlam's among them.
         for (first, second) in [
             ("\u{750}", "\u{751}"),
             ("\u{7CA}", "\u{7CB}"),
@@ -1567,7 +1559,7 @@ mod tests {
         assert_eq!(justified(&pieces, 8.0), ["\u{5D1}"]);
         // A word is all its glyphs: `a.` is a left-to-right word, though its
         // last glyph is a neutral — `(HDAC). ` before a Hebrew word in a
-        // justified paragraph with no `dir` (review of the K-11 fix).
+        // justified paragraph with no `dir`.
         let pieces = [("a", 0.0), (".", 5.0), (" ", 10.0), ("\u{5D1}", 23.0)];
         assert_eq!(justified(&pieces, 8.0), ["a. ", "\u{5D1}"]);
         // And a word of neutrals and right-to-left letters is a
@@ -1576,12 +1568,11 @@ mod tests {
         assert_eq!(justified(&pieces, 8.0), ["\u{5D0}. \u{5D1}"]);
     }
 
-    /// **`Tw` is carried only after a code 32** (9.3.3; the review of the
-    /// K-11 fix). A space a font draws with another code — a Type 0 font's
-    /// CID 3, which its `/ToUnicode` names a space — is not moved by `Tw`, so
-    /// a gap after it is a gap the content stream drew, and the line is cut
-    /// there as before. (A two-byte code 32 is moved by `Tw` as the
-    /// interpreter moves it; see `show_glyph`.)
+    /// **`Tw` is carried only after a code 32** (9.3.3). A space a font draws
+    /// with another code — a Type 0 font's CID 3, which its `/ToUnicode`
+    /// names a space — is not moved by `Tw`, so a gap after it is a gap the
+    /// content stream drew, and the line is cut there. (A two-byte code 32 is
+    /// moved by `Tw` as the interpreter moves it; see `show_glyph`.)
     #[test]
     fn word_spacing_carries_the_pen_only_after_a_code_32() {
         let mut device = TextDevice::new();
@@ -1630,14 +1621,14 @@ mod tests {
             .collect()
     }
 
-    /// **Letter-spacing carries the pen within right-to-left text too**
-    /// (review of the K-11 fix). A Hebrew letter, a space and a full stop in
-    /// one text object and another letter in the next, under `Tc` of six
-    /// points: each glyph's box is half an em wide and the next is written
-    /// 0.6 em past it, where `Tc` left the pen — more than the half em a line
-    /// closed by `ET` is resumed within. Read from the box, the line was cut
-    /// there: `مُدَّة مُعلِّم.` in monospace at `letter-spacing: 8px`, its stop
-    /// drawn left of its space as UAX #9 draws it, read `مُدَّة مُعلِّم .`.
+    /// **Letter-spacing carries the pen within right-to-left text too.** A
+    /// Hebrew letter, a space and a full stop in one text object and another
+    /// letter in the next, under `Tc` of six points: each glyph's box is half
+    /// an em wide and the next is written 0.6 em past it, where `Tc` left the
+    /// pen — more than the half em a line closed by `ET` is resumed within.
+    /// Read from the box, the line would be cut there: `مُدَّة مُعلِّم.` in
+    /// monospace at `letter-spacing: 8px`, its stop drawn left of its space
+    /// as UAX #9 draws it, would read `مُدَّة مُعلِّم .`.
     #[test]
     fn letter_spacing_carries_the_pen_within_right_to_left_text() {
         let first: &[(&str, f64)] = &[("\u{5D0}", 0.0), (" ", 11.0), (".", 22.0)];
@@ -1687,12 +1678,12 @@ mod tests {
     }
 
     /// **Spacing carries the pen only into a glyph that is itself right to
-    /// left** (second review of the K-11 fix). After a right-to-left word and
-    /// a stretched space, the next text object's first glyph was a neutral —
-    /// the `(` of `<b>(HDAC)</b>`, the `⟨` of `⟨HDAC⟩` — and a neutral says
-    /// nothing of the word it opens: carried into it, a dir-less Hebrew line
-    /// was joined to its Latin run and read by its Hebrew ends as a
-    /// right-to-left paragraph's, `.מִלְחָמָה … .)HDAC( …`.
+    /// left.** After a right-to-left word and a stretched space, the next
+    /// text object's first glyph is here a neutral — the `(` of
+    /// `<b>(HDAC)</b>`, the `⟨` of `⟨HDAC⟩` — and a neutral says nothing of
+    /// the word it opens: carried into it, a dir-less Hebrew line would be
+    /// joined to its Latin run and read by its Hebrew ends as a right-to-left
+    /// paragraph's, `.מִלְחָמָה … .)HDAC( …`.
     #[test]
     fn spacing_carries_the_pen_only_into_a_right_to_left_glyph() {
         for opening in ["(", "\u{27E8}", "-"] {
@@ -1727,16 +1718,16 @@ mod tests {
     }
 
     /// **After neutrals, only on a line that holds a right-to-left letter of
-    /// its own** (third review of the K-11 fix). The device starts a line
-    /// afresh at every cut, so a neutral cut from the Latin text it belongs
-    /// to — an opening `«`, `"`, `(` or `#` in a text object of its own,
-    /// `<p><i>«</i>שָׁלוֹם עוֹלָם<i>»</i></p>` letter-spaced by `0.55em` — begins
-    /// a line that holds no left-to-right letter, and carried from it into
-    /// the Hebrew word the line read right to left with its `«` last,
-    /// `שָׁלוֹם עוֹלָם«`; and `<i>?!</i> שָׁלוֹם` at `word-spacing: 1em`, its `?!`
-    /// and a stretched space before the word, read `שָׁלוֹם !?`. Taken where
-    /// the line holds a right-to-left letter of its own, the pen still goes on
-    /// after `- ` or `( ` in a right-to-left line.
+    /// its own.** The device starts a line afresh at every cut, so a neutral
+    /// cut from the Latin text it belongs to — an opening `«`, `"`, `(` or `#`
+    /// in a text object of its own, `<p><i>«</i>שָׁלוֹם עוֹלָם<i>»</i></p>`
+    /// letter-spaced by `0.55em` — begins a line that holds no left-to-right
+    /// letter, and carried from it into the Hebrew word the line would read
+    /// right to left with its `«` last, `שָׁלוֹם עוֹלָם«`; and `<i>?!</i> שָׁלוֹם`
+    /// at `word-spacing: 1em`, its `?!` and a stretched space before the word,
+    /// would read `שָׁלוֹם !?`. Taken where the line holds a right-to-left
+    /// letter of its own, the pen still goes on after `- ` or `( ` in a
+    /// right-to-left line.
     #[test]
     fn spacing_carries_nothing_out_of_a_line_of_neutrals_alone() {
         let hebrew: &[(&str, f64)] = &[("\u{5D1}", 11.0)];
@@ -1754,13 +1745,14 @@ mod tests {
     }
 
     /// **A word a cut interrupted counts against a carry, and never for
-    /// one** (third review of the K-11 fix). Two table cells with no space
-    /// between them, letter-spaced: the first cell's Hebrew word and the
-    /// second's `[` are one word to the device, cut where the cell ended, and
-    /// the line the `[` begins went on with that right-to-left word — so the
-    /// pen was carried from the `[` into the second cell's Hebrew, and
-    /// `[שָׁלוֹם]` read `שָׁלוֹם[`. A left-to-right word interrupted so still
-    /// stops a carry: `[ŋ̊ə̃] חו` (`letter_spacing_carries_nothing_into_a_neutral_or_beside_left_to_right_text`).
+    /// one.** Two table cells with no space between them, letter-spaced: the
+    /// first cell's Hebrew word and the second's `[` are one word to the
+    /// device, cut where the cell ends, and the line the `[` begins goes on
+    /// with that right-to-left word — were the word counted for a carry, the
+    /// pen would go on from the `[` into the second cell's Hebrew, and
+    /// `[שָׁלוֹם]` would read `שָׁלוֹם[`. A left-to-right word interrupted so
+    /// still stops a carry: `[ŋ̊ə̃] חו`
+    /// (`letter_spacing_carries_nothing_into_a_neutral_or_beside_left_to_right_text`).
     #[test]
     fn a_word_a_cut_interrupted_never_enables_a_carry() {
         let first: &[(&str, f64)] = &[("\u{5D0}", 0.0)];
@@ -1773,19 +1765,19 @@ mod tests {
     }
 
     /// **A word goes on across a cut only where the spacing put the glyph
-    /// after it** (ROADMAP CD-19). Two cells of a right-to-left table row at
+    /// after it.** Two cells of a right-to-left table row at
     /// `word-spacing: 1em`, `<td>def</td><td>أصبحنا نعرف</td>`, have no white
     /// space between them, and the Arabic cell's first drawn glyph starts 4.7
-    /// em past the end of `def`, where no spacing put it. The line it began
-    /// went on with `def`'s left-to-right word, so the Arabic letters joined
-    /// that word, the stretched space after them carried nothing, and the
-    /// device cut the cell in two at that space. A gap no spacing accounts
-    /// for ends the word as white space does: here 0.8 em with no spacing at
-    /// all, and 0.45 em past where a tenth of an em of letter-spacing left
-    /// the pen. Where the spacing did put the next glyph the word goes on,
-    /// and still counts against a carry: `a` letter-spaced by 0.6 em and cut
-    /// before a Hebrew letter is one left-to-right word with it, as `[ŋ̊ə̃]`
-    /// cut before its `]` is
+    /// em past the end of `def`, where no spacing put it. If the line it
+    /// begins went on with `def`'s left-to-right word, the Arabic letters
+    /// would join that word, the stretched space after them would carry
+    /// nothing, and the device would cut the cell in two at that space. A gap
+    /// no spacing accounts for ends the word as white space does: here 0.8 em
+    /// with no spacing at all, and 0.45 em past where a tenth of an em of
+    /// letter-spacing left the pen. Where the spacing did put the next glyph
+    /// the word goes on, and still counts against a carry: `a` letter-spaced
+    /// by 0.6 em and cut before a Hebrew letter is one left-to-right word with
+    /// it, as `[ŋ̊ə̃]` cut before its `]` is
     /// (`letter_spacing_carries_nothing_into_a_neutral_or_beside_left_to_right_text`).
     #[test]
     fn a_gap_no_spacing_accounts_for_ends_the_word_before_it() {
@@ -1811,16 +1803,16 @@ mod tests {
         );
     }
 
-    /// **A glyph reads right to left by its own class, not its block** (third
-    /// review of the K-11 fix). A digit is no right-to-left letter, an
-    /// Arabic-Indic one either: its `Bidi_Class` is `AN`, though it stands in
-    /// the Arabic block, which the device counted by. Carried into `(١٢٣)`
-    /// after a Hebrew word in a justified paragraph, the digits read `٢٣ (١)`,
-    /// and a search for `١٢٣` that found them found nothing. The punctuation
-    /// of the right-to-left scripts does read right to left, the ARABIC COMMA
-    /// among it though its class is `CS`: a right-to-left word that ends in
-    /// one is drawn from it, and a justified K-11 probe line at `margin: 0
-    /// 35%` not carried into it read `منخلايا،`, its words apart.
+    /// **A glyph reads right to left by its own class, not its block.** A
+    /// digit is no right-to-left letter, an Arabic-Indic one either: its
+    /// `Bidi_Class` is `AN`, though it stands in the Arabic block. Carried
+    /// into `(١٢٣)` after a Hebrew word in a justified paragraph, the digits
+    /// would read `٢٣ (١)`, and a search for `١٢٣` would find nothing. The
+    /// punctuation of the right-to-left scripts does read right to left, the
+    /// ARABIC COMMA among it though its class is `CS`: a right-to-left word
+    /// that ends in one is drawn from it, and a justified line of a
+    /// right-to-left paragraph narrowed by `margin: 0 35%`, not carried into
+    /// it, would read `منخلايا،`, its words apart.
     #[test]
     fn a_glyph_reads_right_to_left_by_its_class() {
         for digit in ["\u{661}", "\u{6F1}", "1"] {
@@ -1838,8 +1830,8 @@ mod tests {
     /// **And only as far as the spacing reaches**, give or take a rounding.
     /// Two Hebrew table cells letter-spaced by half an em, `border-spacing:
     /// 2px` apart: the second cell starts a quarter of an em past where `Tc`
-    /// left the pen, and carried there the two were read as one word,
-    /// `גדולספר` (second review of the K-11 fix).
+    /// left the pen, and carried there the two would read as one word,
+    /// `גדולספר`.
     #[test]
     fn spacing_carries_the_pen_only_as_far_as_it_reaches() {
         let first: &[(&str, f64)] = &[("\u{5D0}", 0.0)];
@@ -1851,18 +1843,20 @@ mod tests {
     }
 
     /// **A cut at a word space's stretch is mended once the piece after it
-    /// ends** (ROADMAP CD-19, Left (3)). `a` and its word space, `Tw` of
-    /// eight points moving the pen on to 18, and `ב c` in a text object of
-    /// its own at the stretched pen: the carry refuses the gap after a
-    /// left-to-right word, and the piece after it, ending in `c`, makes with
-    /// it a line whose ends both read left to right.
+    /// ends** (`docs/design/rtl-read-back.md`, "A word space styled apart
+    /// across a two-em stretch"). `a` and its word space, `Tw` of eight
+    /// points moving the pen on to 18, and `ב c` in a text object of its own
+    /// at the stretched pen: the carry refuses the gap after a left-to-right
+    /// word, and the piece after it, ending in `c`, makes with it a line
+    /// whose ends both read left to right.
     #[test]
     fn a_cut_at_a_word_spaces_stretch_is_mended_where_the_line_reads_left_to_right() {
         let a: &[(&str, f64)] = &[("a", 0.0), (" ", 5.0)];
         let cell = |at: f64| [("\u{5D1}", at), (" ", at + 5.0), ("c", at + 18.0)];
         let mended = cell(18.0);
         assert_eq!(objects_spaced(&[a, &mended], 0.0, 8.0), ["a \u{5D1} c"]);
-        // Left (3)'s three pieces: `x` and `y` apart, since the two hold no
+        // Three pieces, as `αλφα <b>βήτα</b> ספר בית xyz.` is cut at
+        // `word-spacing: 2em`: `x` and `y` apart, since the two hold no
         // right-to-left letter, and `y` and `ב z` one line.
         let x: &[(&str, f64)] = &[("x", 0.0), (" ", 5.0)];
         let y: &[(&str, f64)] = &[("y", 18.0), (" ", 23.0)];
@@ -1954,18 +1948,19 @@ mod tests {
     }
 
     /// **A line under a half turn is continued and cut as it is unturned**
-    /// (ROADMAP CD-19, Left (6)). The glyphs of the tests above that hold
-    /// where a line is cut — a text object's end resumed and a gap kept, a
-    /// stretched word space and letter-spacing carried and refused, a word
-    /// taken whole across a cut, a cut at a word space's stretch mended and
-    /// kept — and a new baseline and glyphs gone back past three ems and
-    /// within them, drawn under a half turn and under a quarter turn at
-    /// places exact in binary, read into the same lines, characters and order
-    /// as unturned: each line is measured along its own baseline and across
-    /// it ([`Frame`]). Measured on the page's `x` and `y`, a half turn's pen
-    /// stood where its last glyph started, so a text object's end parted
-    /// none of these gaps, and a quarter turn's every glyph stood half an em
-    /// up the page from the one before.
+    /// (`docs/design/rtl-read-back.md`, "A line under a half turn"). The
+    /// glyphs of the tests above that hold where a line is cut — a text
+    /// object's end resumed and a gap kept, a stretched word space and
+    /// letter-spacing carried and refused, a word taken whole across a cut, a
+    /// cut at a word space's stretch mended and kept — and a new baseline and
+    /// glyphs gone back past three ems and within them, drawn under a half
+    /// turn and under a quarter turn at places exact in binary, read into the
+    /// same lines, characters and order as unturned: each line is measured
+    /// along its own baseline and across it ([`Frame`]). Measured on the
+    /// page's `x` and `y`, a half turn's pen would stand where its last glyph
+    /// starts, so a text object's end would part none of these gaps, and a
+    /// quarter turn's every glyph would stand half an em up the page from the
+    /// one before.
     #[test]
     fn a_line_under_a_half_turn_is_continued_and_cut_as_it_is_unturned() {
         let (alef, bet, gimel) = ("\u{5D0}", "\u{5D1}", "\u{5D2}");

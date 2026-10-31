@@ -2701,7 +2701,8 @@ fn readings_to_open(book: Vec<u8>) -> usize {
 }
 
 /// **A line whose rules' drawing a reader reads the letters of in order is
-/// searched on for a drawing that reads its words** (H-150).
+/// searched on for a drawing that reads its words** (ruling 14: a reading is
+/// held to the line's words).
 ///
 /// The read-back compares what a reader reads off a line with the line's
 /// letters and its words (`paint::Words`). Under word spacing a reader runs
@@ -2932,13 +2933,13 @@ fn attribute_owners(book: Vec<u8>) -> Vec<(String, Vec<String>)> {
 }
 
 /// **Each element whose runs hold a right-to-left character declares its
-/// paragraph's direction** (ISO 32000-2 §14.8.5.4.2, H-152): an Arabic
-/// paragraph with `dir="rtl"` `/RlTb`; Left (1)'s Hebrew paragraph with no
-/// `dir`, drawn `٦٠ רוא .תישארב.` as a right-to-left paragraph draws
-/// `.בראשית. אור ٦٠`, `/LrTb`, so that it reads as typed, its stop last; a
-/// header cell holding Hebrew, its row and its table `/LrTb`, the cell's
-/// Table attributes beside the Layout ones; and a Latin paragraph and a
-/// Latin cell nothing.
+/// paragraph's direction** (ISO 32000-2 §14.8.5.4.2; ruling 14,
+/// *What a page says*): an Arabic paragraph with `dir="rtl"` `/RlTb`; a
+/// Hebrew paragraph with no `dir` that ends a number and a stop, drawn
+/// `٦٠ רוא .תישארב.` as a right-to-left paragraph draws `.בראשית. אור ٦٠`,
+/// `/LrTb`, so that it reads as typed, its stop last; a header cell holding
+/// Hebrew, its row and its table `/LrTb`, the cell's Table attributes beside
+/// the Layout ones; and a Latin paragraph and a Latin cell nothing.
 #[test]
 fn each_element_holding_right_to_left_text_declares_its_paragraphs_direction() {
     let book = stored_book(
@@ -3033,12 +3034,12 @@ fn a_line_is_read_back_in_the_direction_its_structure_declares() {
 
 // ---- The stated line ----------------------------------------------------------
 
-/// **A line no drawing reads right states its text** (14.9.4, H-152): drawn
-/// by the rules inside one `/Span` whose `/ActualText` is the text its runs
-/// draw, as typed, round the sequences its runs are drawn in, each in its
-/// own element's. A letter-spaced line, which a reader parts at its spacing
-/// whatever is drawn, `٦٠.` reading `٦٠ .`, reads as typed; and a line a
-/// drawing reads right states nothing.
+/// **A line no drawing reads right states its text** (14.9.4; ruling 14,
+/// *What a page says*): drawn by the rules inside one `/Span` whose
+/// `/ActualText` is the text its runs draw, as typed, round the sequences its
+/// runs are drawn in, each in its own element's. A letter-spaced line, which
+/// a reader parts at its spacing whatever is drawn, `٦٠.` reading `٦٠ .`,
+/// reads as typed; and a line a drawing reads right states nothing.
 #[test]
 fn a_line_no_drawing_reads_right_states_its_text_round_its_runs_sequences() {
     let book = stored_book(

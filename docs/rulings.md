@@ -433,7 +433,7 @@ instead of living in one feature's head.
     one of UAX #14's classes (`.`, `...`, `?!`): `EX`, `!` and `?`; `IS`, the
     full stop, the comma, the colon, the semicolon and the ARABIC COMMA; and
     `IN`, the ellipses. A run that mixes the classes, `.!` or `!…`, ends no
-    sentence (H-153). The closing quotation marks are `"`, `'` and the ten
+    sentence. The closing quotation marks are `"`, `'` and the ten
     of `General_Category` `Pf` (`»`, `’`, `”`, `›`, U+2E03, U+2E05, U+2E0A,
     U+2E0D, U+2E1D and U+2E21), so that `."`, `.»` and `.”` end a sentence
     as `.` does. A closing quotation mark alone ends none, nor does a
@@ -528,7 +528,7 @@ instead of living in one feature's head.
     `a_dirless_line_opening_with_a_bracket_pair_reads_its_closing_quotes_and_stops_last`
     (a sentence's end).
 
-    **What a page says** (H-152). A page can say two things its drawn line
+    **What a page says.** A page can say two things its drawn line
     cannot, and `Page::text` takes each where it is said. A line every
     character of which that draws something belongs to marked-content
     sequences whose structure elements declare one horizontal
@@ -573,8 +573,12 @@ instead of living in one feature's head.
     worse in either build and none draws a glyph more over another: in a
     default build 99 of the first's 232 cases and 77 of the second's 119
     read better, and with `bundled-fonts` 94 of 235 and 76 of 119; the
-    design doc's Left (1), Left (4), Left (5) and Left (9) conserve, read
-    whole, are found and draw no glyph over another. 75 cases of both builds
+    cases the design doc's *A page that says how it reads* names — a
+    dir-less Hebrew paragraph that ends a number and a stop, lines a reader
+    reads from the right whatever is drawn, a dir-less Arabic paragraph whose
+    inline `word-spacing` span cuts a word, and a comma that a NO-BREAK SPACE
+    in the number before it would set apart — conserve, read whole, are found
+    and draw no glyph over another. 75 cases of both builds
     read the same characters in the same order with their white space
     otherwise: a line its declared direction reads right is drawn by the
     rules, and where a reader parts a word space stretched past half an em
@@ -620,7 +624,7 @@ instead of living in one feature's head.
     for its reading once a page (`text_order::Readings`). A reading is held
     to the line's words: a line whose rules' drawing reads it with a word
     cut where a reader parts the spacing, or two run together, is searched
-    on for a drawing that reads the words (H-150), and a line no drawing
+    on for a drawing that reads the words, and a line no drawing
     tried reads with its words states its text (*What a page says*). The owner's rules took the time
     that costs: a letter-spaced line, which a reader parts at its spacing
     whatever is drawn, is read back in the whole budget, 128 readings against
@@ -629,7 +633,7 @@ instead of living in one feature's head.
     one that held a reading to the letters. Each distinct drawing of a line
     is read once: a run's drawing that writes what its rules' drawing or an
     earlier drawing of the run writes is not read again, so the drawings
-    within the budget reach further (H-151). The owner took its price: a
+    within the budget reach further. The owner took its price: a
     justified Arabic paragraph at `line-height: 0.4`, with no `dir` or right
     to left, whose rows a reader runs into the next, loses its structure
     tree's order, the drawing found right for one line alone read with the

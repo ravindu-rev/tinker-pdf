@@ -508,9 +508,9 @@ pub struct DrawnReading {
 /// comma tie-break's shape, and a line holding a closing bracket left of an
 /// opening one — is read in the direction chosen once, and that reading is
 /// the order returned. Asked of [`drawn_direction`] and then of
-/// [`logical_order`], such a line was searched in the direction chosen twice:
+/// [`logical_order`], such a line is searched in the direction chosen twice:
 /// three searches on every line of the bracket tie-break's shape where two
-/// do (review of the K-11 fix).
+/// do.
 #[must_use]
 pub fn drawn_reading(visual: &[&str]) -> DrawnReading {
     let (direction, order, turned_by_brackets) = decide(visual);
@@ -875,12 +875,12 @@ fn paired_brackets(
 /// left-to-right paragraph's line opening with `(הָאָרֶץ)`, after a line that
 /// ended in Hebrew, draws the pair facing outward, `)ץֶרָאָה(`, at its left
 /// end, exactly as a right-to-left paragraph draws a pair that ends it — and
-/// read from the right, the line pairs it. The review of the K-11 fix found
-/// an English paragraph quoting Hebrew in brackets, justified, whose third
-/// line was turned so, though it held fifty Latin letters to fifteen Hebrew
-/// ones, and read backwards (4 books in a default build, 1 with
-/// `bundled-fonts`): its reading from the right paired that pair and the
-/// `(מִלְחָמָה)` later on the line, the reading as chosen only the second.
+/// read from the right, the line pairs it. Counted, such a pair would turn
+/// the third line of a justified English paragraph quoting Hebrew in
+/// brackets, though it holds fifty Latin letters to fifteen Hebrew ones, and
+/// the line would read backwards: its reading from the right pairs that pair
+/// and the `(מִלְחָמָה)` later on the line, the reading as chosen only the
+/// second.
 ///
 /// Such a pair is passed over by both readings — matched, as BD16 matches
 /// it, and counted neither among the pairs nor among those facing outward —
@@ -896,12 +896,12 @@ fn paired_brackets(
 /// letters to 5 Hebrew ones. So the tie-break reads every line of
 /// `BidiCharacterTest.txt` — whole paragraphs, where nothing comes from a
 /// line before, and none of whose turned lines holds more than six letters
-/// against the turn — and the reviews' 2 235 wrapped and 13 300 sentence
-/// lines as it did without this: passed over wherever it opens the line and
-/// the letters outnumber the other's, it read 1 393 of the file's lines worse
-/// and 52 better (1 341 fewer read as typed), and 2 of the sentence lines
-/// worse; wherever the reading as chosen also pairs one facing outward, 8
-/// worse and none better, each with an unpaired bracket.
+/// against the turn — as it reads them with no pair passed over: with such a
+/// pair passed over wherever it opens the line and the letters outnumber the
+/// other's, it would read 1 393 of the file's lines worse and 52 better
+/// (1 341 fewer read as typed); wherever the reading as chosen also pairs
+/// one facing outward, 8 worse and none better, each with an unpaired
+/// bracket.
 ///
 /// And where the comma tie-break chose left to right for a line that ends a
 /// sentence — one stop or more, then any closing quotation marks — the line
@@ -1041,37 +1041,33 @@ impl OpenedBefore {
     /// where [`OpenedBefore::of`] decides as for any other line: a run that
     /// mixes the classes, `.!` or `!…`, ends no sentence.
     ///
-    /// A left-to-right paragraph drew such a line as right-to-left text with
+    /// A left-to-right paragraph draws such a line as right-to-left text with
     /// its sentence's end after it, so the line opens where that text does,
     /// at the first unit left of the stops that draws something, and a pair
     /// with a bracket there is one N0 resolved by the line above. The letters
     /// say nothing here, all of them right to left; the end does.
     /// `<p>جميل بيت كبير <b>(</b>نور<b>)</b> يوم.</p>`, with no `dir` and
     /// broken before the bracket, draws its second line `موي )رون(.`, and
-    /// read from the right it paired `(نور)` but read its full stop first,
-    /// `.(نور) يوم` (review of the third review's fix: 32 books in a default
-    /// build and 29 with `bundled-fonts` whose stop read last at 9297d2d, and
-    /// a line opening with `(١٬٢٣٤),` that the join read whole for the turn).
-    /// Asked only whether the rightmost unit was one of seven marks, with the
-    /// unit just left of it as the line's start, it still turned the lines
-    /// ending `...`, `?!`, `."`, `.»` and `…` (K-11 review, finding V1: 76 of
-    /// its 864 books in a default build and 82 with `bundled-fonts` that read
-    /// their marks last at 9297d2d), and a line with a second pair.
+    /// read from the right it pairs `(نور)` but reads its full stop first,
+    /// `.(نور) يوم`; turned so, a line opening with `(١٬٢٣٤),` would be read
+    /// whole by the join. A test of the rightmost unit alone against seven
+    /// marks, with the unit just left of it as the line's start, would still
+    /// turn the lines ending `...`, `?!`, `."`, `.»` and `…`, and a line with
+    /// a second pair.
     ///
     /// A right-to-left paragraph draws the same line where it opens with
     /// those marks before the pair — after a forced break, or after a space
     /// where UAX #14 lets a soft wrap break before them ([`ENDS_A_LINE`],
     /// [`CLOSES_A_QUOTE`]) — and that line reads as the left-to-right one:
     /// the price ruling 14 measures, which the owner accepted for the
-    /// ellipsis on 11 October 2026. A closing quotation mark alone ends no
-    /// sentence, nor does a closing bracket, and a stop with a closing
-    /// quotation mark left of it puts the line's start at that mark
-    /// (`ב)א(”.`); the line that opens with a symbol, `⚀(א)ב` drawn
-    /// `ב)א(⚀`, is still turned: with every mark the comma tie-break takes
-    /// passed over so, a lone closing mark among them, 215 lines of
-    /// `BidiCharacterTest.txt` read worse and 12 better; with these, the
-    /// file, the wrapped and the sentence lines read as without it. Linear in
-    /// the line: each unit is read once, from the right.
+    /// ellipsis. A closing quotation mark alone ends no sentence, nor does a
+    /// closing bracket, and a stop with a closing quotation mark left of it
+    /// puts the line's start at that mark (`ב)א(”.`); the line that opens
+    /// with a symbol, `⚀(א)ב` drawn `ב)א(⚀`, is still turned: with every
+    /// mark the comma tie-break takes passed over so, a lone closing mark
+    /// among them, 215 lines of `BidiCharacterTest.txt` would read worse and
+    /// 12 better; with these, the file reads as it does with no pair passed
+    /// over. Linear in the line: each unit is read once, from the right.
     fn before_its_punctuation(visual: &[&str]) -> Option<OpenedBefore> {
         // The units that draw something, from the right, each by the
         // character it draws first: one pass, each unit read once.
@@ -2406,14 +2402,14 @@ mod tests {
     }
 
     /// **A pair drawn facing outward reads in the direction that pairs it**
-    /// (ruling 14's bracket tie-break, amended 10 October 2026; ROADMAP K-11).
+    /// (ruling 14's bracket tie-break).
     ///
     /// A right-to-left paragraph narrowed so that a line opens with a
     /// bracketed Latin run: `(histone deacetylase). وقد أصبحنا`, eighteen
     /// Latin letters and eleven Arabic ones. Its ends disagree and the
     /// majority is left to right, and a left-to-right paragraph draws
     /// `وقد أصبحنا .)histone deacetylase(` as that line stands, so the forward
-    /// check could not refuse it. The pair is drawn facing outward, which
+    /// check cannot refuse it. The pair is drawn facing outward, which
     /// only a pair at a right-to-left level is, and the right-to-left reading
     /// pairs it.
     #[test]
@@ -2460,21 +2456,21 @@ mod tests {
     }
 
     /// **Brackets that are no pair as typed keep the direction the rules
-    /// before the tie-break give the line** — the review of the K-11 fix.
+    /// before the tie-break give the line.**
     ///
     /// Each of these left-to-right lines draws a closing bracket left of an
     /// opening one, and a right-to-left paragraph draws the same picture for
-    /// another text, in which the two pair facing outward. As first written
-    /// the tie-break took that reading wherever it paired more brackets
-    /// facing outward and no fewer in all, and read every one of them
-    /// backwards: `.and 2) close it )שלום( open the file )Step 1`. A list
-    /// marker, a smiley and a parenthesis wrapped onto the next line are
-    /// commoner in running text than any line `BidiCharacterTest.txt` holds,
-    /// whose lines are each a whole paragraph. The first pairs `(שלום)` read
-    /// as typed and `) open the file (` read from the right — one each, so
-    /// nothing is said for the other; the rest pair more read from the right,
-    /// but with the spaces that stood outside the two brackets inside the
-    /// pair, `see( מלחמה )b` — no bracket set against its own text.
+    /// another text, in which the two pair facing outward. A tie-break that
+    /// took that reading wherever it pairs more brackets facing outward and
+    /// no fewer in all would read every one of them backwards:
+    /// `.and 2) close it )שלום( open the file )Step 1`. A list marker, a
+    /// smiley and a parenthesis wrapped onto the next line are commoner in
+    /// running text than any line `BidiCharacterTest.txt` holds, whose lines
+    /// are each a whole paragraph. The first pairs `(שלום)` read as typed and
+    /// `) open the file (` read from the right — one each, so nothing is said
+    /// for the other; the rest pair more read from the right, but with the
+    /// spaces that stand outside the two brackets as typed inside the pair,
+    /// `see( מלחמה )b` — no bracket set against its own text.
     #[test]
     fn brackets_that_are_no_pair_as_typed_keep_the_lines_direction() {
         for typed in [
@@ -2569,22 +2565,23 @@ mod tests {
     }
 
     /// **A pair that may have taken its level from the line before turns no
-    /// line** ([`OpenedBefore`]; the third review of the K-11 fix).
+    /// line** ([`OpenedBefore`]).
     ///
     /// A justified English paragraph quoting Hebrew in brackets, `… Words
     /// שלום עולם (מלחמה) and more English text, …`, wraps so that a line
-    /// opens with `(הארץ)`: N0 resolved that pair by the Hebrew word that
-    /// ended the line above, so it is drawn facing outward at the line's left
+    /// opens with `(הארץ)`: N0 resolves that pair by the Hebrew word that
+    /// ends the line above, so it is drawn facing outward at the line's left
     /// end, `)ץראה(`. Read from the right the line pairs it and `(מלחמה)`; as
-    /// the strong letters choose, left to right, only `(מלחמה)`. The bracket
-    /// tie-break took the reading from the right, which reads the English
-    /// backwards. That pair opens the line a left-to-right reading starts
-    /// from and encloses no Latin letter, so it is no evidence: the reading as
-    /// chosen pairs a bracket facing outward of its own and the line's Latin
-    /// letters outnumber its Hebrew ones, and the line keeps its direction.
-    /// The paragraph's last line, `(מלחמה) and more English text,.`, pairs
-    /// nothing else; its Latin letters are more than three times its Hebrew
-    /// ones and eight more, and it keeps its direction too.
+    /// the strong letters choose, left to right, only `(מלחמה)`. Counted, the
+    /// pair would have the bracket tie-break take the reading from the right,
+    /// which reads the English backwards. That pair opens the line a
+    /// left-to-right reading starts from and encloses no Latin letter, so it
+    /// is no evidence: the reading as chosen pairs a bracket facing outward
+    /// of its own and the line's Latin letters outnumber its Hebrew ones, and
+    /// the line keeps its direction. The paragraph's last line,
+    /// `(מלחמה) and more English text,.`, pairs nothing else; its Latin
+    /// letters are more than three times its Hebrew ones and eight more, and
+    /// it keeps its direction too.
     #[test]
     fn a_pair_the_line_above_resolved_turns_no_line() {
         let ltr = BaseDirection::LeftToRight;
@@ -2622,18 +2619,19 @@ mod tests {
     }
 
     /// **A pair before the comma tie-break's full stop that the line above
-    /// resolved turns no line** — the review of the third review's K-11 fix.
+    /// resolved turns no line.**
     ///
     /// `جميل بيت كبير (نور) يوم.` with no `dir`, broken before the bracket:
-    /// N0 took the pair's level from the Arabic on the line above, and the
+    /// N0 takes the pair's level from the Arabic on the line above, and the
     /// line is drawn `موي )رون(.`. The comma tie-break reads it left to
-    /// right for its full stop; read from the right it pairs `(نور)` and the
-    /// bracket tie-break took that reading, which reads the stop first. The
-    /// pair has a bracket just left of the stop, where such a line opens, and
-    /// encloses no Latin letter, so it is no evidence and the line keeps the
-    /// comma tie-break's direction. A line that opens with a symbol rather
-    /// than ends in such a mark, `⚀(א)ב` drawn `ב)א(⚀` — a whole
-    /// right-to-left paragraph of `BidiCharacterTest.txt` — is still turned.
+    /// right for its full stop; read from the right it pairs `(نور)`, and
+    /// counted, the pair would have the bracket tie-break take that reading,
+    /// which reads the stop first. The pair has a bracket just left of the
+    /// stop, where such a line opens, and encloses no Latin letter, so it is
+    /// no evidence and the line keeps the comma tie-break's direction. A line
+    /// that opens with a symbol rather than ends in such a mark, `⚀(א)ב`
+    /// drawn `ב)א(⚀` — a whole right-to-left paragraph of
+    /// `BidiCharacterTest.txt` — is still turned.
     #[test]
     fn a_pair_before_a_full_stop_the_line_above_resolved_turns_no_line() {
         let ltr = BaseDirection::LeftToRight;
@@ -2655,23 +2653,22 @@ mod tests {
     }
 
     /// **A pair before closing quotation marks and several stops turns no
-    /// line either** — the K-11 review, finding V1.
+    /// line either.**
     ///
     /// The full stop's line, `موي )رون(.`, with its sentence ended otherwise:
-    /// `...`, `?!`, `!!` and `!?`, whose rightmost unit is a stop but whose
-    /// unit just left of it is another, so the pair was counted; `."`, `.»`
-    /// and `.”`, whose rightmost unit is no stop; `…`, which was none; and a
-    /// line with a second pair, `)دقو(`, at its far end. Each was turned and
-    /// read its marks first; each reads them last, as the full stop's line
-    /// does, `نور) يوم(…` — the pair's level came from the line above, which
-    /// a line read alone cannot see. A right-to-left paragraph draws the same
-    /// `…` line where it opens with the ellipsis before the pair, `…(نور) يوم`
-    /// after a forced break, and that line now reads so too: the price ruling
-    /// 14 names, which the owner accepted on 11 October 2026. A closing
-    /// bracket is no closing quotation mark, a
-    /// closing quotation mark alone ends no sentence, and a stop with one
-    /// left of it puts the line's start at that mark: those lines are still
-    /// turned.
+    /// `...`, `?!`, `!!` and `!?`, whose rightmost unit is a stop and whose
+    /// unit just left of it is another; `."`, `.»` and `.”`, whose rightmost
+    /// unit is no stop; the ellipsis, `…`; and a line with a second pair,
+    /// `)دقو(`, at its far end. Were the pair counted, each would be turned
+    /// and read its marks first; each reads them last, as the full stop's
+    /// line does, `نور) يوم(…` — the pair's level comes from the line above,
+    /// which a line read alone cannot see. A right-to-left paragraph draws
+    /// the same `…` line where it opens with the ellipsis before the pair,
+    /// `…(نور) يوم` after a forced break, and that line reads so too: the
+    /// price ruling 14 names, which the owner accepted. A closing bracket is
+    /// no closing quotation mark, a closing quotation mark alone ends no
+    /// sentence, and a stop with one left of it puts the line's start at that
+    /// mark: those lines are still turned.
     #[test]
     fn a_pair_before_closing_quotes_and_several_stops_turns_no_line() {
         let ltr = BaseDirection::LeftToRight;
@@ -2724,7 +2721,7 @@ mod tests {
         }
     }
 
-    /// **A run that mixes the stops ends no sentence** — ruling 14, H-153.
+    /// **A run that mixes the stops ends no sentence** — ruling 14.
     /// A right-to-left line that opens with `.!` or `!…` before a pair,
     /// `.!(نور) يوم` after a forced break, is drawn `موي )رون(!.`: the comma
     /// tie-break reads it left to right, and with no sentence's end at its
@@ -2767,19 +2764,19 @@ mod tests {
 
     /// **[`drawn_reading`] is [`drawn_direction`] and [`logical_order`] in
     /// one, and reads a line no more often than choosing its direction
-    /// does** — the review of the K-11 fix. A line is searched once or, where
-    /// it draws a closing bracket left of an opening one, once in each
-    /// direction, and the order returned is the one deciding found; asked of
-    /// [`drawn_direction`] and then of [`logical_order`] for the direction
-    /// chosen, such a line was searched three times. `turned_by_brackets` is
-    /// set on the lines the bracket tie-break turns and on no other.
+    /// does.** A line is searched once or, where it draws a closing bracket
+    /// left of an opening one, once in each direction, and the order returned
+    /// is the one deciding finds; asked of [`drawn_direction`] and then of
+    /// [`logical_order`] for the direction chosen, such a line is searched
+    /// three times. `turned_by_brackets` is set on the lines the bracket
+    /// tie-break turns and on no other.
     #[test]
     fn a_line_is_read_once_in_the_direction_chosen() {
-        let k11 = "(histone deacetylase). \u{648}\u{642}\u{62F} \u{623}\u{635}\u{628}\u{62D}\u{646}\u{627}";
+        let bracketed_latin = "(histone deacetylase). \u{648}\u{642}\u{62F} \u{623}\u{635}\u{628}\u{62D}\u{646}\u{627}";
         let rtl = BaseDirection::RightToLeft;
         let ltr = BaseDirection::LeftToRight;
         for (typed, direction, turned, outward) in [
-            (k11, rtl, true, true),
+            (bracketed_latin, rtl, true, true),
             ("x)\u{5E9}\u{5DC}\u{5D5}\u{5DD}(y", ltr, true, true),
             ("(a)\u{5D0}(", ltr, false, true),
             (

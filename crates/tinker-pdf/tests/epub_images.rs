@@ -394,13 +394,14 @@ fn glyphs(doc: &Document, at: u32, letters: &str) -> Option<(f64, f64, f64, f64)
 }
 
 /// **An inline picture is one unit of its line's order**
-/// (`docs/design/rtl-read-back.md`, Left (10)): in a right-to-left line,
-/// with `dir="rtl"` or none, it is placed where UAX #9 puts the neutral it
-/// is (`paint::visual_lines`), right of the words written after it and left
-/// of the word written before it. Where layout set it, in logical order, its
-/// line was cut at it and the two halves drawn left to right, the picture
-/// between them the wrong way round. A line with no right-to-left character
-/// keeps it where layout set it, between its words left to right.
+/// (`docs/design/rtl-read-back.md`, "A transformed block in a reordered
+/// line"): in a right-to-left line, with `dir="rtl"` or none, it is placed
+/// where UAX #9 puts the neutral it is (`paint::visual_lines`), right of the
+/// words written after it and left of the word written before it. Left where
+/// layout set it, in logical order, it would cut its line in two, each half
+/// drawn left to right and the picture between them the wrong way round. A
+/// line with no right-to-left character keeps it where layout set it,
+/// between its words left to right.
 #[test]
 fn an_inline_img_is_ordered_with_its_words_in_a_right_to_left_line() {
     let png = rgb_png(24, 12, &[0, 255, 0].repeat(24 * 12));

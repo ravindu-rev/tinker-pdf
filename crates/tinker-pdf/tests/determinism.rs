@@ -1905,8 +1905,8 @@ fn default_cmyk_profile() -> Vec<u8> {
 /// and none of its text is right-to-left. (Its non-breaking hyphen and its
 /// Japanese line are outside WinAnsi, and are drawn in a fallback font, but
 /// the book sets no `word-spacing` and justifies nothing, so writing the
-/// overflow font at `0 Tw` (ROADMAP CD-19, October 2026) moved neither hash
-/// either: a word spacing of zero is written as it always was.) The new values
+/// overflow font at `0 Tw` moved neither hash either: a word spacing of zero
+/// is written as it always was.) The new values
 /// were produced on `x86_64-unknown-linux-gnu` and reproduced under
 /// `wasm32-wasip1` before they were committed.
 const GOLDEN: &[Fixture] = &[
