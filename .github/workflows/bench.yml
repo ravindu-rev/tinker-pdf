@@ -206,6 +206,18 @@ jobs:
   # job counts the set as often as a gate counting a base and a head would.
   # `calibration` has no count mode: its file is frozen (H-77), and its input
   # and call are `text/text of 100 dense pages`, counted here.
+  #
+  # One job a group, or a part of one where the group would not fit in a
+  # job's 300 minutes: `open-2-of-6` counts every sixth operation of `open`'s
+  # list in `baseline.json`, from the second. Under cachegrind most of an
+  # operation's time is what its process does besides its iterations --
+  # building its inputs, which the counter counts too -- and four operations
+  # of `open` and `write` took about two hours each, so a job of either whole
+  # group ran out of time before its last operations (`docs/verification.md`).
+  # Split so, no part holds two of those four or of the operations the limit
+  # cut off. A part that holds no operation fails, and `counted` below fails
+  # unless the jobs counted every operation of the set exactly once, so a
+  # part missing from this list cannot drop an operation unseen.
   count:
     if: ${{ inputs.count }}
     runs-on: ubuntu-latest
@@ -213,7 +225,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [open, text, render, write, layout, analysis, encode, decode, sign, fonts]
+        job:
+          - open-1-of-6
+          - open-2-of-6
+          - open-3-of-6
+          - open-4-of-6
+          - open-5-of-6
+          - open-6-of-6
+          - text
+          - render
+          - write-1-of-5
+          - write-2-of-5
+          - write-3-of-5
+          - write-4-of-5
+          - write-5-of-5
+          - layout
+          - analysis
+          - encode
+          - decode
+          - sign
+          - fonts
+    env:
+      JOB: ${{ matrix.job }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -225,31 +258,40 @@ jobs:
           sudo apt-get install -y valgrind
           valgrind --version
 
+      # The group a job counts in, the part of its name before the first `-`.
+      - name: Group
+        run: echo "GROUP=${JOB%%-*}" >> "$GITHUB_ENV"
+
       # The bench binary in the profile `cargo bench` builds, and the release
       # `tpdf` its CLI operations take from beside it.
       - name: Build
         run: |
           set -o pipefail
           cargo build --release -p tpdf
-          cargo bench -p tinker-pdf --bench ${{ matrix.group }} --no-run 2>&1 | tee build.log
-          grep -oE 'target/release/deps/${{ matrix.group }}-[0-9a-f]+' build.log | head -n 1 > bench-binary
+          cargo bench -p tinker-pdf --bench "$GROUP" --no-run 2>&1 | tee build.log
+          grep -oE "target/release/deps/$GROUP-[0-9a-f]+" build.log | head -n 1 > bench-binary
           test -x "$(cat bench-binary)"
 
       # Every process of a run is counted, `tpdf`'s children with the bench's
       # own, each writing its own log. A run that does not exit 0 or print
       # its `RAN` line, or a process with no count, fails the job: a count
-      # of nothing is the silent pass every guard here exists to stop.
+      # of nothing is the silent pass every guard here exists to stop. Each
+      # operation's row is written as it is counted, so a job the limit cuts
+      # off keeps what it counted.
       - name: Count
-        env:
-          GROUP: ${{ matrix.group }}
         run: |
           python3 -I - <<'EOF'
           import json, os, pathlib, re, subprocess, tempfile, time
 
-          group = os.environ["GROUP"]
+          job = os.environ["JOB"]
+          group, _, share = job.partition("-")
+          part, parts = (int(n) for n in share.split("-of-")) if share else (1, 1)
           binary = pathlib.Path("bench-binary").read_text().strip()
           lists = json.loads(pathlib.Path("crates/tinker-pdf/benches/baseline.json").read_text())
           names = [op["name"] for op in next(g for g in lists["groups"] if g["group"] == group)["operations"]]
+          mine = names[part - 1::parts]
+          if not mine:
+              raise SystemExit(f"{job}: part {part} of {parts} holds none of {group}'s {len(names)} operations")
           refs = re.compile(r"I\s+refs:\s+([\d,]+)")
 
           def count(name, iterations):
@@ -268,27 +310,88 @@ jobs:
                       raise SystemExit(f"{group}/{name} at {iterations}: a process wrote no instruction count")
                   return sum(int(match.group(1).replace(",", "")) for match in found)
 
-          rows = ["id\tfirst\tsecond\tspread_percent\tseconds"]
+          table = pathlib.Path("counts.tsv")
+          table.write_text("id\tfirst\tsecond\tspread_percent\tseconds\n")
           started = time.monotonic()
-          for name in names:
+          for name in mine:
               began = time.monotonic()
               per = [count(name, 2) - count(name, 1) for _ in range(2)]
               low, high = min(per), max(per)
               spread = (high - low) / low * 100 if low > 0 else float("inf")
               line = f"{group}/{name}\t{per[0]}\t{per[1]}\t{spread:.4f}\t{time.monotonic() - began:.0f}"
               print(line, flush=True)
-              rows.append(line)
-          pathlib.Path("counts.tsv").write_text("\n".join(rows) + "\n")
-          print(f"count-job: {group}, {len(names)} operations, {time.monotonic() - started:.0f} s")
+              with table.open("a") as rows:
+                  rows.write(line + "\n")
+          seconds = time.monotonic() - started
+          pathlib.Path("job.tsv").write_text(f"job\toperations\tseconds\n{job}\t{len(mine)}\t{seconds:.0f}\n")
+          print(f"count-job: {job}, {len(mine)} of {group}'s {len(names)} operations, {seconds:.0f} s")
           EOF
 
       - name: Keep the counts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: count-${{ matrix.group }}
+          name: count-${{ matrix.job }}
           path: |
             counts.tsv
+            job.tsv
             build.log
+          if-no-files-found: warn
+          retention-days: 90
+
+  # The set, counted: every operation of every group's list in `baseline.json`
+  # but the frozen `calibration`'s, each exactly once across the jobs above,
+  # in one table, and each job's time for a pair beside how many it counted.
+  # It runs when a job failed or was cut off too, and names what went
+  # uncounted, counted twice, or counted under a name no list holds.
+  counted:
+    if: ${{ always() && inputs.count }}
+    needs: count
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: count-*
+          path: counted
+
+      - name: Every operation counted once
+        run: |
+          python3 -I - <<'EOF'
+          import json, pathlib
+
+          lists = json.loads(pathlib.Path("crates/tinker-pdf/benches/baseline.json").read_text())
+          want = [f"{g['group']}/{op['name']}" for g in lists["groups"] if g["group"] != "calibration"
+                  for op in g["operations"]]
+          rows = [line for table in sorted(pathlib.Path("counted").glob("*/counts.tsv"))
+                  for line in table.read_text().splitlines()[1:] if line]
+          jobs = [line for table in sorted(pathlib.Path("counted").glob("*/job.tsv"))
+                  for line in table.read_text().splitlines()[1:] if line]
+          ids = [row.split("\t")[0] for row in rows]
+          missing = [op for op in want if op not in ids]
+          twice = sorted({op for op in ids if ids.count(op) > 1})
+          unknown = sorted({op for op in ids if op not in want})
+          order = {op: i for i, op in enumerate(want)}
+          rows.sort(key=lambda row: order.get(row.split("\t")[0], len(want)))
+          pathlib.Path("counts.tsv").write_text("id\tfirst\tsecond\tspread_percent\tseconds\n"
+                                                + "".join(row + "\n" for row in rows))
+          pathlib.Path("jobs.tsv").write_text("job\toperations\tseconds\n" + "".join(job + "\n" for job in jobs))
+          print("\n".join(jobs))
+          print(f"counted-set: {len(set(ids) & set(want))} of {len(want)} operations, {len(jobs)} jobs finished")
+          problems = [f"not counted: {op}" for op in missing] + [f"counted twice: {op}" for op in twice] \
+              + [f"no list holds: {op}" for op in unknown]
+          if problems:
+              raise SystemExit("\n".join(problems))
+          EOF
+
+      - name: Keep the set
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: counted-set
+          path: |
+            counts.tsv
+            jobs.tsv
           if-no-files-found: warn
           retention-days: 90
