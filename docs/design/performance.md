@@ -31,7 +31,7 @@ MS-02's paired job, MS-04's benchmark set and MS-07's corpus time ratchet.
   pinned counts that show the tally the same on every target, and its rule
   against clocks.
 - **Allocations per page** for A10, counted by a test binary's allocator
-  (MS-01.7) rather than by the tally.
+  rather than by the tally.
 - **The four legs** that run the suite: the three native `test` legs and
   `wasm-determinism`.
 - **A section for each row with an instrument of its own**: MS-02, MS-04
@@ -50,9 +50,11 @@ MS-02's paired job, MS-04's benchmark set and MS-07's corpus time ratchet.
   decoder and nothing to do with this one) and the caps in cos's `limits`. The
   tally only adds, and nothing but a door reads it.
 - **`unsafe`.** None in the tally, the doors or the guards. The one
-  `unsafe impl` in this design is MS-01.7's counting allocator, in a test
-  binary, forwarding every call to `System` as `property_list_work.rs:27-31`
-  and `svg_dash_memory.rs` already do; no engine crate is touched by it.
+  `unsafe impl` in this design is the counting allocator in
+  `crates/tinker-pdf/tests/guard_support/mod.rs`, which
+  `guard_allocations.rs` installs, forwarding every call to `System` as
+  `property_list_work.rs:27-31` and `svg_dash_memory.rs` already do; no
+  engine crate is touched by it.
 - **A count on `Document`, in a global or in a thread-local.** `Document` is
   `Send + Sync` and one is read by many threads at once
   (`docs/architecture.md`, Concurrency; `tinker_parity.rs:323`), so a count
@@ -302,7 +304,8 @@ first need them, by these two rules, and not before.
 — ten thousand is 10⁴, so fan-out 10 over four levels is the shape under which
 the per-lookup bound is small enough to mean something, and the generator
 states its own shape and asserts it; documents of 1 000 and 4 000 pages for
-the A2 legs, one generator for all nine — a line of text a page from a
+the A2 legs, one generator for all nine, which `guard_allocations.rs`
+reads too from `guard_support/mod.rs` — a line of text a page from a
 deflated content stream of its own, under a flat tree, with a packet claiming
 PDF/A-2b, which is the least that gives text, a render, subsetting and
 redaction glyphs, a rewrite, a rotation, a split and a merge pages, and a
@@ -354,9 +357,9 @@ are not pinned. A pin a fix has to move is a finding the owner rules on, as a
 moved fingerprint is.
 
 **No clock.** `the_guard_suite_reads_no_clock` reads the suite's sources —
-`guards.rs`, `render_support/mod.rs`, which it is built with, every file the
-roster names, and `guard_allocations.rs` and `guard_support/mod.rs` once
-MS-01.7 adds them — and fails on `Instant::now` or `SystemTime::now`, as
+`guards.rs` and `guard_allocations.rs`, `guard_support/mod.rs` and
+`render_support/mod.rs`, which they are built with, and every file the roster
+names — and fails on `Instant::now` or `SystemTime::now`, as
 `bounds_ledger.rs` holds the sources its ledger lists
 (`crates/tinker-pdf/tests/bounds_ledger.rs:3229-3255`); it puts its needles
 together, so that `guards.rs` does not hold them whole.
@@ -370,12 +373,42 @@ it, which is why P-01.1 records, for each leg, the site that is superlinear at
 the tip and the counter that sees it.
 
 **A10** counts allocations, which no tally sees without instrumenting every
-allocation, so MS-01.7 counts them with a counting `#[global_allocator]` put
-once in `crates/tinker-pdf/tests/guard_support/mod.rs`. A process-wide count
-sees every thread's allocations, so either each counted test has a binary of
-its own — the rule `property_list_work.rs:30-31` keeps — or the allocator
-counts per thread. MS-01.7 settles which, and where A10's entries live follows
-from it.
+allocation. `crates/tinker-pdf/tests/guard_support/mod.rs` holds a counting
+`#[global_allocator]`, `Counting`, which forwards every call to `System` and
+counts each allocation against the thread that made it, in a `const`
+thread-local `Cell` that neither allocates nor registers a destructor, so it
+can count from inside an allocation. A test reads its own thread's
+allocations, so a binary that installs it holds several tests without their
+counts mixing — where a process-wide count would need a binary a test, the
+rule `property_list_work.rs:30-31` keeps — and A10's guards land in
+`guard_allocations.rs` beside the measurement. Every operation A10 names runs
+on its caller's thread; an operation that handed work to other threads would
+count only its caller's share, so P-15, whose pool is the first that does,
+counts its workers into the operation or gives A10's render leg a binary of
+its own. The thread-local is the test allocator's; the tally stays one `Work`
+an operation.
+
+`allocations_per_page_by_operation` (`guard_allocations.rs`) runs each
+operation as the CLI runs it over a whole document — every page looked up by
+its index, then read — over A2's documents of 1 000 and 4 000 pages, each
+written and opened outside the count, and prints its allocations a page at
+both sizes. The default and `bundled-fonts` builds count alike:
+
+| Allocations a page | 1 000 pages | 4 000 pages | 4 000 over 1 000 |
+| --- | ---: | ---: | ---: |
+| page lookup | 5 548.5 | 22 052.5 | 3.97 |
+| text | 5 868.7 | 22 381.5 | 3.81 |
+| render-all at 36 dpi | 6 228.1 | 22 758.2 | 3.65 |
+| text, beyond its lookup | 320.1 | 329.0 | 1.03 |
+| render-all at 36 dpi, beyond its lookup | 679.6 | 705.7 | 1.04 |
+
+A count a page at 4 000 pages within 1.1 times the count at 1 000 is flat,
+and none of the three is. The cause is one: `pages::at` gathers `index + 1`
+pages into a fresh `Vec` on every lookup
+(`crates/tinker-pdf-cos/src/pages.rs:587-599`), so a lookup allocates in
+proportion to its index and a whole document's lookups in proportion to its
+pages squared; text and the render are flat once their lookups are taken out.
+All three of A10's entries are owed to P-01, and land with P-01.3's index.
 
 ### The four targets
 
@@ -413,8 +446,8 @@ counts, and what keeping it costs goes to the owner.
 
 ### The roster
 
-Every entry starts owed but A2's book, which P-18.5 adds landed; A10's
-entries join with MS-01.7. A guard lands in the step named, in
+Every entry starts owed but A2's book, which P-18.5 adds landed. A guard
+lands in the step named, in
 `crates/tinker-pdf/tests/guards.rs` unless another file is named.
 
 | Guard | Clause, as the row's exit states it | Test | Owner, and the step it lands in |
@@ -444,13 +477,13 @@ entries join with MS-01.7. A guard lands in the step named, in
 | A8 | whole-image scratch on the PNG path ≤ 1 × the image | `a8_the_png_path_holds_at_most_one_image_of_scratch` | P-04, P-04.5 |
 | A9 | page-parallel renders byte-identical to serial at 2, 3, 4 and 7 threads | `a9_page_walks_are_the_serial_walk_at_2_3_4_and_7_threads` | P-15, P-15.3 |
 | A9 | band-parallel renders byte-identical to serial at 2, 3, 4 and 7 threads | `a9_band_renders_are_the_serial_page_at_2_3_4_and_7_threads` | P-15, P-15.7 |
-| A10 | allocations O(1) per page: page lookup | `a10_page_lookup_allocates_a_flat_amount_per_page` | as MS-01.7 settles: MS-01 in MS-01.7 if flat, else the row its cause is owed to |
-| A10 | text | `a10_text_allocates_a_flat_amount_per_page` | as MS-01.7 settles |
-| A10 | render-all at 36 dpi | `a10_render_all_at_36_dpi_allocates_a_flat_amount_per_page` | as MS-01.7 settles |
+| A10 | allocations O(1) per page: page lookup | `a10_page_lookup_allocates_a_flat_amount_per_page`, in `crates/tinker-pdf/tests/guard_allocations.rs` | P-01, P-01.3 |
+| A10 | text | `a10_text_allocates_a_flat_amount_per_page`, in `guard_allocations.rs` | P-01, P-01.3 |
+| A10 | render-all at 36 dpi | `a10_render_all_at_36_dpi_allocates_a_flat_amount_per_page`, in `guard_allocations.rs` | P-01, P-01.3 |
 
 The names A7 and A9 carry, and A2's book, are the ones their rows' steps
-already give; the rest are given here. A10's file is `guard_allocations.rs` or a
-binary per entry, as MS-01.7 settles the counting allocator.
+already give; the rest are given here. A10's file is `guard_allocations.rs`, whose allocator counts a test's own
+thread.
 
 ## Risks
 
@@ -467,7 +500,7 @@ binary per entry, as MS-01.7 settles the counting allocator.
 | A byte total hides a step count | `work()` leaves out maxima and quantities, and a failing leg prints every counter's ratio |
 | A guard is absent and reads as green | The roster checks each landed name is an un-ignored `#[test]` in its file, and every leg greps every landed name (`docs/verification.md`) |
 | A guard is too slow for a leg, in debug or under wasmtime | Pages carry the least content that exercises their leg; a slow guard is never ignored or shrunk below its page counts, and what keeping it costs goes to the owner |
-| A process-wide allocation count sees another test's allocations | One counted test a binary, or a per-thread count in `guard_support`; MS-01.7 settles which |
+| An allocation count sees another test's allocations | The allocator counts each thread's apart, and every operation A10 names runs on its caller's thread; P-15, whose pool is the first to hand work to other threads, counts its workers into the operation or gives A10's render leg a binary of its own |
 | A hand-built `Bitmap` stops compiling | The field is public, so a literal needs `stats: None`; nothing in the C ABI or the bindings builds one |
 | `Stats` names counts made above cos | Each counter's doc comment names the layer that counts it, and cos counts only its walk, its filter chain and its editor; the alternative was two ledgers an operation, and an editor able to carry only one of them |
 

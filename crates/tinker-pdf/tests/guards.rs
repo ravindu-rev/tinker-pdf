@@ -15,10 +15,12 @@
 //! draws it in an embedded face (`render_support::curvy_font`), so the
 //! default and `bundled-fonts` builds count the same work.
 
+mod guard_support;
 mod render_support;
 
 use std::collections::BTreeSet;
 
+use guard_support::{deflated, document, face, line, object, pdf, stream, A2_PAGES};
 use tinker_pdf::write::{
     save, BilevelCodec, ContinuousCodec, FontPolicy, ImagePolicy, ImageRecoding, SaveOptions,
 };
@@ -77,8 +79,12 @@ const fn owed(
 /// Every guard test, with the row that owns it, as the design's roster gives
 /// them. Each entry starts owed, because each fails against today's code; its
 /// row flips it in the commit that fixes the cause. A2's 1 000-chapter book
-/// joins landed with P-18.5, and A10's entries with MS-01.7, whose
-/// measurement settles the file they are in.
+/// joins landed with P-18.5.
+///
+/// A10's entries follow `guard_allocations.rs`'s table: every operation it
+/// counts allocates a page in proportion to the document, through its lookup
+/// of the page, so each is owed to P-01's index. Their tests will be in that
+/// file, whose allocator counts a test's own thread.
 const ROSTER: &[Guard] = &[
     owed(
         "A1",
@@ -255,21 +261,55 @@ const ROSTER: &[Guard] = &[
         "P-15",
         "P-15.7",
     ),
+    Guard {
+        file: "guard_allocations.rs",
+        ..owed(
+            "A10",
+            "allocations O(1) per page: page lookup",
+            "a10_page_lookup_allocates_a_flat_amount_per_page",
+            "P-01",
+            "P-01.3",
+        )
+    },
+    Guard {
+        file: "guard_allocations.rs",
+        ..owed(
+            "A10",
+            "allocations O(1) per page: text",
+            "a10_text_allocates_a_flat_amount_per_page",
+            "P-01",
+            "P-01.3",
+        )
+    },
+    Guard {
+        file: "guard_allocations.rs",
+        ..owed(
+            "A10",
+            "allocations O(1) per page: render-all at 36 dpi",
+            "a10_render_all_at_36_dpi_allocates_a_flat_amount_per_page",
+            "P-01",
+            "P-01.3",
+        )
+    },
 ];
 
 /// Each file the roster names, read when the suite is built: the wasm leg
 /// has no filesystem to read it from when the suite runs.
 const SOURCES: &[(&str, &str)] = &[
     ("guards.rs", include_str!("guards.rs")),
+    ("guard_allocations.rs", include_str!("guard_allocations.rs")),
     ("images.rs", include_str!("images.rs")),
     ("jpx_images.rs", include_str!("jpx_images.rs")),
 ];
 
 /// The other sources the suite is built from, which hold no guard.
-const SUPPORT: &[(&str, &str)] = &[(
-    "render_support/mod.rs",
-    include_str!("render_support/mod.rs"),
-)];
+const SUPPORT: &[(&str, &str)] = &[
+    ("guard_support/mod.rs", include_str!("guard_support/mod.rs")),
+    (
+        "render_support/mod.rs",
+        include_str!("render_support/mod.rs"),
+    ),
+];
 
 /// What a source has under a function's name.
 #[derive(Debug, PartialEq, Eq)]
@@ -361,8 +401,8 @@ fn every_guard_is_landed_or_owed() {
             panic!("{why}");
         }
     }
-    // Every guard the exit names but A10, whose entries come with MS-01.7.
-    for guard in ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9"] {
+    // Every guard the exit names.
+    for guard in ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10"] {
         assert!(
             ROSTER.iter().any(|entry| entry.guard == guard),
             "{guard} has no entry"
@@ -444,84 +484,6 @@ fn the_guard_suite_reads_no_clock() {
         }
     }
 }
-
-// ---- Writing a document ----------------------------------------------------
-
-/// A PDF of `objects`, numbered from 1 in order, the first its catalog, with
-/// a cross-reference table so that it opens without repair.
-fn pdf(objects: &[Vec<u8>]) -> Vec<u8> {
-    let mut out = b"%PDF-1.7\n".to_vec();
-    let mut offsets = Vec::with_capacity(objects.len());
-    for (index, body) in objects.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
-        out.extend_from_slice(body);
-        out.extend_from_slice(b"\nendobj\n");
-    }
-    let xref = out.len();
-    out.extend_from_slice(
-        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
-    );
-    for offset in offsets {
-        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
-    }
-    out.extend_from_slice(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
-            objects.len() + 1
-        )
-        .as_bytes(),
-    );
-    out
-}
-
-/// A stream object: `dict`'s entries, its `/Length`, and `data`.
-fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
-    let mut out = format!("<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
-    out.extend_from_slice(data);
-    out.extend_from_slice(b"\nendstream");
-    out
-}
-
-/// `data` deflated, as a stream with `dict`'s entries.
-fn deflated(dict: &str, data: &[u8]) -> Vec<u8> {
-    stream(
-        &format!("{dict} /Filter /FlateDecode"),
-        &tinker_pdf_filters::zlib_compress(data),
-    )
-}
-
-fn object(text: &str) -> Vec<u8> {
-    text.as_bytes().to_vec()
-}
-
-/// The embedded face as three objects numbered from `at`: the font, its
-/// descriptor at `at + 1`, and its program at `at + 2`, deflated. The face
-/// draws an outline for every printable code but the space.
-fn face(at: usize) -> [Vec<u8>; 3] {
-    [
-        object(&format!(
-            "<< /Type /Font /Subtype /TrueType /BaseFont /Curvy /FirstChar 32 /LastChar 126\n\
-             /Widths [320{}] /Encoding /WinAnsiEncoding /FontDescriptor {} 0 R >>",
-            " 640".repeat(94),
-            at + 1
-        )),
-        object(&format!(
-            "<< /Type /FontDescriptor /FontName /Curvy /Flags 32 /FontBBox [0 0 1000 1000]\n\
-             /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /FontFile2 {} 0 R >>",
-            at + 2
-        )),
-        deflated("", &render_support::curvy_font()),
-    ]
-}
-
-/// A packet claiming PDF/A-2b, so that a validation judges what claims it.
-const PDFA_PACKET: &str = r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF
- xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-<rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/"
- pdfaid:part="2" pdfaid:conformance="B"/>
-</rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#;
 
 /// The nodes of a page tree, level by level from its root: each level the
 /// kids of the one above, in order. A node that is not a dictionary, or a
@@ -637,59 +599,10 @@ fn the_a1_tree_is_ten_thousand_pages_ten_kids_a_node_over_four_levels() {
 
 // ---- A2 and A6: documents of pages to read, write and merge ---------------
 
-/// The two sizes A2 compares: the work at 4 000 pages at most 4.4 times the
-/// work at 1 000.
-const A2_PAGES: [usize; 2] = [1_000, 4_000];
-
 /// A6 merges four documents of a hundred pages.
 const A6_PARTS: usize = 4;
 /// The pages of each document A6 merges.
 const A6_PAGES: usize = 100;
-
-/// The line page `page` of part `part` shows.
-fn line(part: usize, page: usize) -> String {
-    format!("Part {part}, page {}", page + 1)
-}
-
-/// A document of `pages` pages, part `part` of a merge: each page one line of
-/// text in the embedded face from a content stream of its own, every stream
-/// deflated, under one flat page tree, and a packet claiming PDF/A-2b.
-///
-/// It is the least that exercises every A2 leg: text, a render, subsetting
-/// and redaction have glyphs to work on; a rewrite, a rotation, a split and a
-/// merge have pages; and a validation has a claim to judge. Each part draws
-/// its own lines, so two parts' contents differ while their faces are the same
-/// encoded bytes: a merge's deduplication meets one collision a part, the
-/// face, and none among the pages.
-fn document(part: usize, pages: usize) -> Vec<u8> {
-    // 1 the catalog, 2 the page tree, 3 to 5 the face, 6 the packet, then each
-    // page and its content from 7.
-    let kids: Vec<String> = (0..pages).map(|at| format!("{} 0 R", 7 + 2 * at)).collect();
-    let mut objects = vec![
-        object("<< /Type /Catalog /Pages 2 0 R /Metadata 6 0 R >>"),
-        object(&format!(
-            "<< /Type /Pages /Count {pages} /Kids [{}] >>",
-            kids.join(" ")
-        )),
-    ];
-    objects.extend(face(3));
-    objects.push(stream(
-        "/Type /Metadata /Subtype /XML",
-        PDFA_PACKET.as_bytes(),
-    ));
-    for at in 0..pages {
-        objects.push(object(&format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
-             /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
-            8 + 2 * at
-        )));
-        objects.push(deflated(
-            "",
-            format!("BT /F1 12 Tf 10 50 Td ({}) Tj ET", line(part, at)).as_bytes(),
-        ));
-    }
-    pdf(&objects)
-}
 
 /// The documents A6 merges.
 fn merge_parts() -> Vec<Vec<u8>> {

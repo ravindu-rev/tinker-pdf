@@ -1107,15 +1107,22 @@ relation over counted work, never a time: the `Stats` a door hands back
 sizes of one input. `crates/tinker-pdf/tests/guards.rs` is where those guards
 live, and it holds what they stand on.
 
-- **The roster**: every guard, A1 to A9 — its clause, its test, the file the
+- **The roster**: every guard, A1 to A10 — its clause, its test, the file the
   test is in, and the row that owns it — landed or owed.
   `every_guard_is_landed_or_owed` reads each file it names, built in through
   `include_str!` because the wasm leg has no filesystem, and fails when a
   landed test is missing or ignored there, or an owed one is already there: a
   guard is added in the commit of the row that makes it hold, which flips its
   entry. `the_roster_tells_a_running_test_from_every_other_case` holds that
-  reading itself. A10's entries join with the allocation count that settles
-  them.
+  reading itself.
+- **Allocations a page**, A10's count, which no tally sees:
+  `guard_allocations.rs` installs the counting allocator in
+  `guard_support/mod.rs`, which counts each thread's allocations apart, and
+  `allocations_per_page_by_operation` prints what page lookup, text and a
+  render at 36 dpi allocate a page over every page of a thousand and of four
+  thousand. The table it prints is the one
+  [performance](design/performance.md) commits, and A10's roster entries
+  follow it.
 - **The generators**, each held to its shape by a test of its own: a balanced
   tree of ten thousand pages, ten kids a node over four levels; documents of
   a thousand and four thousand pages, a line of text each, for comparing one
