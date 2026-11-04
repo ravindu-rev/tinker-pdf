@@ -296,28 +296,41 @@ first need them, by these two rules, and not before.
 
 ### The guard suite
 
-`crates/tinker-pdf/tests/guards.rs` (MS-01.6) holds four things.
+`crates/tinker-pdf/tests/guards.rs` holds four things.
 
 **Generators.** A balanced 10 000-page tree of stated depth and fan-out for A1
 — ten thousand is 10⁴, so fan-out 10 over four levels is the shape under which
 the per-lookup bound is small enough to mean something, and the generator
 states its own shape and asserts it; documents of 1 000 and 4 000 pages for
-each A2 operation; a 5 600-glyph page of about 80 distinct glyphs for A4; and
-four documents of 100 pages to merge for A6. Each is written in memory, object by
-object, by the generator itself, so a tree's shape is the generator's statement
-rather than the writer's choice. Pages carry the least content that exercises
-their leg, with their faces embedded — `tests/render_support`'s
-`curvy_font` (`crates/tinker-pdf/tests/render_support/mod.rs:434`) — so the
-default build and `bundled-fonts` count the same work. Nothing is read from
-disk, because wasmtime gives the `wasm32-wasip1` leg no filesystem
+the A2 legs, one generator for all nine — a line of text a page from a
+deflated content stream of its own, under a flat tree, with a packet claiming
+PDF/A-2b, which is the least that gives text, a render, subsetting and
+redaction glyphs, a rewrite, a rotation, a split and a merge pages, and a
+validation a claim to judge; a 5 600-glyph page of 80 distinct glyphs for A4,
+whose every glyph origin falls on a whole pixel at 72 dpi, so that its
+distinct (glyph, scale, phase) keys at that scale are its 80 glyphs; and four
+documents of 100 pages to merge for A6, the same generator's, whose faces are
+one encoded stream and whose pages' contents all differ, so that a merge's
+deduplication meets one collision a part. Each is written in memory, object
+by object, by the generator itself, so a tree's shape is the generator's
+statement rather than the writer's choice, and each has a test that holds it
+to its shape. Pages carry the least content that exercises their leg, with
+their faces embedded — `tests/render_support`'s `curvy_font`
+(`crates/tinker-pdf/tests/render_support/mod.rs:434`) — so the default build
+and `bundled-fonts` count the same work. Nothing is read from disk, because
+wasmtime gives the `wasm32-wasip1` leg no filesystem
 (`.github/workflows/ci.yml:410-415`), and nothing is fetched.
 
-**The roster.** A `const` table with one entry per guard test: its guard, its
-test's name, the file it is in, the row that owns it, and whether it is landed
-or owed. `every_guard_is_landed_or_owed` reads each file the roster names
-through `include_str!`, since the wasm leg has no filesystem to read them from,
-and fails when a landed entry is not an un-ignored `#[test]` there or an owed
-one already is. An owning row lands its entry in the commit that fixes the
+**The roster.** A `const` table with one entry per guard test: its guard, the
+clause it holds, its test's name, the file it is in, the row that owns it and
+the step it lands in, and whether it is landed or owed. `every_guard_is_landed_or_owed`
+reads each file the roster names through `include_str!`, since the wasm leg
+has no filesystem to read them from, and fails when a landed entry is not an
+un-ignored `#[test]` there or an owed one already is;
+`the_roster_tells_a_running_test_from_every_other_case` holds that reading to
+a source with a test that runs, two that are ignored, a function that is no
+test and a name that is absent, so a reading gone blind cannot pass the
+roster. An owning row lands its entry in the commit that fixes the
 cause, flipping it from owed to landed. A guard that holds at the tip — A2's
 subset, validation and split legs (`crates/tinker-pdf/src/subset.rs:552`,
 `crates/tinker-pdf/src/pdfa/content.rs:90`) and A10's flat entries — lands
@@ -329,16 +342,24 @@ never owed.
 fixtures to committed values, and K-07's determinism roster makes every leg
 grep it. The guards each compare counts on one target; the pins are what show
 the counts every guard reads do not depend on which target read them. They are
-goldens, so MS-01.6 pins the counters whose value is the fixture's rather than
-the algorithm's — the glyphs a page shows, the bytes of streams each decoded
-once, the nodes of a one-page tree — and says which it pinned and why. A pin a
-fix has to move is a finding the owner rules on, as a moved fingerprint is.
+goldens, so they hold the counters whose value is the fixture's rather than
+the algorithm's, over one page of a line in the embedded face and an image
+drawn once: a render's glyphs shown, and its streams decoded — the content,
+the face and the samples, once each — with the bytes they inflate to; a text
+extraction's one decode of the content; a save's image pass, its one walk of
+the one-page tree and its two decodes, the content and the samples; and a
+lookup's walk of the root and the page. A cache's hits and misses, the font
+dictionaries read and the outlines filled are how the code does the work, and
+are not pinned. A pin a fix has to move is a finding the owner rules on, as a
+moved fingerprint is.
 
 **No clock.** `the_guard_suite_reads_no_clock` reads the suite's sources —
-`guards.rs`, `guard_allocations.rs`, `guard_support/mod.rs` and every file the
-roster names — and fails on `Instant::now` or `SystemTime::now`, as
+`guards.rs`, `render_support/mod.rs`, which it is built with, every file the
+roster names, and `guard_allocations.rs` and `guard_support/mod.rs` once
+MS-01.7 adds them — and fails on `Instant::now` or `SystemTime::now`, as
 `bounds_ledger.rs` holds the sources its ledger lists
-(`crates/tinker-pdf/tests/bounds_ledger.rs:3229-3255`).
+(`crates/tinker-pdf/tests/bounds_ledger.rs:3229-3255`); it puts its needles
+together, so that `guards.rs` does not hold them whole.
 
 **A2's bound** is 1.1 times the ratio of the two sizes: 4.4 for 4 000 pages
 over 1 000, as the exit states it, and 11 for P-18.5's 1 000-chapter book over
@@ -392,8 +413,8 @@ counts, and what keeping it costs goes to the owner.
 
 ### The roster
 
-Every entry MS-01.6 writes starts owed but A2's book, which P-18.5 adds
-landed; A10's entries wait for MS-01.7. A guard lands in the step named, in
+Every entry starts owed but A2's book, which P-18.5 adds landed; A10's
+entries join with MS-01.7. A guard lands in the step named, in
 `crates/tinker-pdf/tests/guards.rs` unless another file is named.
 
 | Guard | Clause, as the row's exit states it | Test | Owner, and the step it lands in |
@@ -441,7 +462,7 @@ binary per entry, as MS-01.7 settles the counting allocator.
 | Two threads' counts mix | One `Work` an operation, never on `Document`, in a global or in a thread-local; an operation's own workers add to one total in any order |
 | Hits and misses depend on interleaving when threads share a cache | Guards and pins read serial runs; A9 compares pixels and warnings, not counts; P-15.6's single-flight fills make a shared cache's counts deterministic and its test reads them |
 | A count differs by target | `u64` counters with saturating adds, a `BTreeMap` for the per-stream decodes, no count of a hash-ordered walk; the pins are read on all four legs |
-| The pins are goldens and the P rows exist to cut work | MS-01.6 pins counts that are the fixture's rather than the algorithm's, and says which; a pin a fix has to move is a finding the owner rules on, raised by the row that moves it |
+| The pins are goldens and the P rows exist to cut work | The pins hold counts that are the fixture's rather than the algorithm's, and say which; a pin a fix has to move is a finding the owner rules on, raised by the row that moves it |
 | A2 reads only what is counted | A superlinear loop that counts nothing passes A2; P-01.1 records each leg's superlinear site at the tip and the counter that sees it, and a site outside P-01 is a finding, not absorbed |
 | A byte total hides a step count | `work()` leaves out maxima and quantities, and a failing leg prints every counter's ratio |
 | A guard is absent and reads as green | The roster checks each landed name is an un-ignored `#[test]` in its file, and every leg greps every landed name (`docs/verification.md`) |

@@ -739,7 +739,8 @@ so the caps are properties of inputs, not of machines.
 
 Clocks are banned from **tests**. `bounds_ledger.rs` bans `Instant::now` from
 every source its rows name, so that every hardening bound is a property of an
-input rather than of a machine.
+input rather than of a machine, and the guard suite bans `Instant::now` and
+`SystemTime::now` from every source it is built from or names.
 
 They live in `crates/tinker-pdf/benches/` instead — one file a group over a
 shared `support/` module, under criterion, which is exempt tooling by name and
@@ -1097,6 +1098,39 @@ it keeps — since a name it rewrites is reported as new and never held to its
 band. Every band in the committed file is pushed against from both sides by a
 unit test, because a band nobody has ever crossed is a number nobody has
 checked.
+
+## Counted work, guarded
+
+A speed claim that can hold on a shared runner and under every target is a
+relation over counted work, never a time: the `Stats` a door hands back
+([performance](design/performance.md)), held to a bound or compared at two
+sizes of one input. `crates/tinker-pdf/tests/guards.rs` is where those guards
+live, and it holds what they stand on.
+
+- **The roster**: every guard, A1 to A9 — its clause, its test, the file the
+  test is in, and the row that owns it — landed or owed.
+  `every_guard_is_landed_or_owed` reads each file it names, built in through
+  `include_str!` because the wasm leg has no filesystem, and fails when a
+  landed test is missing or ignored there, or an owed one is already there: a
+  guard is added in the commit of the row that makes it hold, which flips its
+  entry. `the_roster_tells_a_running_test_from_every_other_case` holds that
+  reading itself. A10's entries join with the allocation count that settles
+  them.
+- **The generators**, each held to its shape by a test of its own: a balanced
+  tree of ten thousand pages, ten kids a node over four levels; documents of
+  a thousand and four thousand pages, a line of text each, for comparing one
+  operation at two sizes; a page of 5 600 glyphs of 80 distinct codes; and
+  four documents of a hundred pages to merge. Each is written object by
+  object in memory, and every glyph is drawn in an embedded face, so both
+  builds count alike and nothing is read from disk.
+- **The pins**: `the_tally_counts_the_same_on_every_target` holds a render's,
+  a text extraction's, a save's and a page lookup's counts over one fixed page
+  to committed values — only the counts the page decides, never how a cache
+  or a walk does the work — so a target that counted differently fails. A pin
+  a fix has to move is a finding the owner rules on, as a moved fingerprint
+  is.
+- **No clock**: `the_guard_suite_reads_no_clock` fails on a clock in any
+  source the suite is built from or names.
 
 ## Peak memory, a process a case
 
