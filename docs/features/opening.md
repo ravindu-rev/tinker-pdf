@@ -297,6 +297,10 @@ The streaming seam adds `open_streaming(source)` and
 chunk cache reads in, and four observables a caller measures a streamed open
 by: `is_streamed()`, `first_page_end()` (Annex F's `/E`, `None` unless the
 head-only path engaged), `main_table_fetched()` and `whole_file_fetched()`.
+A read that needs chunks the cache does not hold asks the source for each run
+of them in a row with one read and keeps only the chunks that arrived whole,
+so a read over *k* missing chunks is one request rather than *k*, for the same
+bytes.
 A streamed document that has fetched the whole file holds it once: the fetch
 asks the source for every byte as one range, keeps an answer of the whole
 length as the document's buffer and fills a short one into a buffer of the

@@ -264,7 +264,9 @@ differs is what the store is lazy *over*. `CosDocument`'s buffer is a
 `Backing`: a whole buffer (zero new cost) or a chunk
 cache over a `ByteSource` — fixed-granularity aligned chunks, each fetched
 once and kept as `Arc<[u8]>`, so repeated small reads coalesce and the byte
-counter measures policy, not luck. Every internal read
+counter measures policy, not luck, and the chunks a window lacks in a row are
+fetched with one read (*One read per run of missing chunks*, below). Every
+internal read
 goes through a window accessor; the parse layer (`parse_indirect_at`,
 `lexer.rs`, `streams::resolve_extent`) keeps taking `&[u8]` — bytes in,
 values out, per ruling 8. A miss never publishes: no `Object::Null` enters
@@ -390,7 +392,7 @@ counted.
 - **What a request is:** one call to `ByteSource::read` that reaches the source
   a document was opened over, which is what `CountingSource::reads()` counts.
 - **One read per run of missing chunks** (MS-08.2): `ChunkCache::window`
-  fetching each run of the window's uncached chunks with one read, rather
+  fetches each run of the window's uncached chunks with one read, rather
   than one read per chunk.
 - **The linearized bound:** page one of the 60-page linearized fixture
   (`a_linearized_document`, `crates/tinker-pdf/tests/streaming_open.rs`)
@@ -436,7 +438,7 @@ counted.
 `a_linearized_file_renders_page_one_without_touching_its_tail` does, so every
 read anything in the engine makes is one the counter sees. Two readers make
 them, and only two: the chunk cache, whose one read is in `ChunkCache::gather`
-— which `ChunkCache::chunk` calls, and so does `Backing::read_transient`, the
+— which `ChunkCache::run` calls, and so does `Backing::read_transient`, the
 windowed verdict's read, which keeps nothing — and the facade's `filled`,
 through which the facade sniffs for a container. A file whose first kilobyte
 holds no `%PDF-` adds the standalone sniff's wider read; neither fixture does.
@@ -460,26 +462,28 @@ That is the request MS-08 counts, and three things follow from it.
 
 #### One read per run of missing chunks
 
-`ChunkCache::window` takes the chunks from `first` to `last` and asks
-`ChunkCache::chunk` for each in turn, and `chunk` fetches a missing one with a
-read of its own, so a window over *k* missing chunks is *k* requests. MS-08.2
-makes it one request a run:
+`ChunkCache::window` takes the chunks from `first` to `last` that the cache
+holds, under one read lock, and fetches the rest a run at a time
+(`ChunkCache::run`), so a window over *k* missing chunks in a row is one
+request rather than *k*:
 
 1. the window's chunks that are not yet cached are grouped into maximal runs of
    consecutive indices, between `first` and `last` and never outside them;
 2. each run is one read, from its first chunk's start to its last chunk's end,
-   clamped to the document, looping on a short answer as `chunk` does;
+   clamped to the document, looping on a short answer in `ChunkCache::gather`;
 3. what arrives is cut at chunk boundaries and published a whole chunk at a
-   time, so a miss part-way through a run publishes the whole chunks before it,
-   as the chunk-at-a-time loop does, and never a part-filled one -- the
-   invariant `chunk` keeps for one chunk ("nothing is cached until it is
-   complete").
+   time (`ChunkCache::publish`), so a miss part-way through a run publishes the
+   whole chunks before it, as fetching them one at a time would, and never a
+   part-filled one ("nothing is cached until it is complete"). The miss names
+   the rest of the run, from the byte the source stopped at.
 
 A cached chunk inside a window splits it into two runs and two reads; a window
 with nothing missing is no read. **A run never reaches past its window**, and
 that is what keeps the no-prefetch non-goal true: the chunks a coalesced read
 fetches are the chunks a chunk-at-a-time loop fetches, so the bytes and every
-value are unchanged and only the number of requests moves. A window that asks
+value are unchanged and only the number of requests moves
+(`a_window_over_missing_chunks_is_one_read` and its neighbours in
+`crates/tinker-pdf-cos/src/source.rs`). A window that asks
 for more than its object needs -- a section's first window
 (`XREF_SECTION_WINDOW`, 8 KiB), an object's (`OBJECT_WINDOW`, 1 KiB) -- costs
 the chunks it costs. Shrinking a window is a different change, and not this
@@ -496,8 +500,7 @@ both bounds count it: the linearized page's `LINEARIZED_PAGE_ONE_BUDGET` bytes
 are 7 x 4,096 + 1,024, and its 6 requests include the sniff.
 
 What it costs is one round trip and 1,024 bytes on every streamed PDF open: on
-the bench's link 50 ms, and with MS-08.2 one of the linearized page's three
-requests. Serving chunk 0 from the sniff -- the facade reading a whole chunk and
+the bench's link 50 ms, and one of the linearized page's three requests. Serving chunk 0 from the sniff -- the facade reading a whole chunk and
 handing it to the open -- would take that page from three requests to two, and
 every budget measured from an open down by 1,024 bytes. That is a facade change
 that moves committed budgets, which this row leaves alone, so it is named here
@@ -507,9 +510,8 @@ rather than taken.
 
 The head window is chunk 0, and the page's content stream is read by one
 window over its declared length (`crates/tinker-pdf-cos/src/streams.rs`),
-which ends in the chunk `/E` falls in. Read a chunk at a time, that window is
-a request per missing chunk; with MS-08.2 its missing chunks are one read, and
-the page costs three: the sniff, the head, the content.
+which ends in the chunk `/E` falls in. Its missing chunks are one read, so the
+page costs three requests: the sniff, the head, the content.
 
 The guard holds the page to the row's figures: at most
 `LINEARIZED_PAGE_ONE_BUDGET` bytes and 6 requests, `main_table_fetched()`
@@ -611,7 +613,7 @@ the work's.
 
 | Risk | Mitigation |
 |---|---|
-| A miss part-way through a coalesced read publishes a part-filled chunk, and the miss's answer is read back for good | Whole chunks only, the invariant one chunk already keeps, and a test of a miss inside a run |
+| A miss part-way through a coalesced read publishes a part-filled chunk, and the miss's answer is read back for good | Whole chunks only, the invariant one chunk already keeps, and a test of a miss inside a run (`a_miss_inside_a_run_publishes_only_whole_chunks`) |
 | Coalescing grows into read-ahead, and the counter stops measuring what the engine needs | A run is bounded by its window's own chunks, and every byte budget in `streaming_open.rs` holding unchanged is MS-08.2's exit, so a read past a window moves a byte count and fails |
 | A ceiling with room under it hides an added request | The measured counts are committed beside the ceilings |
 | The twin's bound is typed in and rots with the writer | Derived from a buffered open of the same bytes on every run |

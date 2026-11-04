@@ -301,9 +301,10 @@ pub const CHUNK_SIZE: u64 = 4096;
 ///
 /// The whole-buffer arm is today's contract and costs nothing new. The chunked
 /// arm fetches fixed aligned chunks, each fetched once and kept, so repeated
-/// small reads coalesce, until something needs every byte: then it holds the
-/// whole document once, in place of its chunks, and cuts every later read from
-/// it. Which arm a document has changes which ranges are fetched and never a
+/// small reads coalesce, and the chunks a read lacks in a row are fetched with
+/// one read; until something needs every byte: then it holds the whole
+/// document once, in place of its chunks, and cuts every later read from it.
+/// Which arm a document has changes which ranges are fetched and never a
 /// value, which is the invariant the determinism suite runs over a shredded
 /// source to prove.
 pub(crate) enum Backing {
@@ -402,7 +403,9 @@ impl Backing {
                 }
                 let start = range.start.min(cache.len);
                 let end = range.end.min(cache.len).max(start);
-                cache.gather(start, end)
+                let mut bytes = Vec::new();
+                cache.gather(start, end, &mut bytes)?;
+                Ok(bytes)
             }
         }
     }
@@ -457,30 +460,46 @@ impl Backing {
 }
 
 impl ChunkCache {
-    /// One aligned chunk, fetched at most once.
-    fn chunk(&self, index: u64) -> Result<Arc<[u8]>, SourceMiss> {
-        if let Some(chunk) = self.chunks.read_lock().get(&index) {
-            return Ok(Arc::clone(chunk));
+    /// The chunks `first..past`, which the cache did not hold, fetched as one
+    /// range: one read, when the source answers it whole.
+    ///
+    /// Only whole chunks are published. A miss part-way through keeps the
+    /// chunks that arrived whole before it and drops the part-filled one, as
+    /// fetching them one at a time would.
+    fn run(&self, first: u64, past: u64) -> Result<Vec<Arc<[u8]>>, SourceMiss> {
+        let start = first.saturating_mul(CHUNK_SIZE).min(self.len);
+        let end = past.saturating_mul(CHUNK_SIZE).min(self.len);
+        let mut bytes = Vec::new();
+        let fetched = self.gather(start, end, &mut bytes);
+        if fetched.is_err() {
+            // Nothing is cached until it is complete: the chunk the miss
+            // stopped in is dropped.
+            let whole = bytes.len() - bytes.len() % CHUNK_SIZE as usize;
+            bytes.truncate(whole);
         }
-        let start = index.saturating_mul(CHUNK_SIZE).min(self.len);
-        let end = start.saturating_add(CHUNK_SIZE).min(self.len);
+        let chunks: Vec<Arc<[u8]>> = bytes.chunks(CHUNK_SIZE as usize).map(Arc::from).collect();
+        let chunks = self.publish(first, chunks);
+        fetched.map(|()| chunks)
+    }
 
-        // Nothing is cached until it is complete.
-        let chunk: Arc<[u8]> = Arc::from(self.gather(start, end)?);
-        let mut chunks = self.chunks.write_lock();
-        // A fetch of the whole that finished while this chunk was read holds
-        // these bytes already, and emptied the map under this lock after
-        // setting the whole: the chunk is the caller's alone, never published
-        // beside it.
+    /// Publishes `chunks`, consecutive from `first`, and hands back the ones
+    /// to read.
+    fn publish(&self, first: u64, chunks: Vec<Arc<[u8]>>) -> Vec<Arc<[u8]>> {
+        let mut cached = self.chunks.write_lock();
+        // A fetch of the whole that finished while these chunks were read
+        // holds their bytes already, and emptied the map under this lock after
+        // setting the whole: the chunks are the caller's alone, never
+        // published beside it.
         if self.whole.get().is_some() {
-            return Ok(chunk);
+            return chunks;
         }
         // Another thread may have fetched the same chunk meanwhile. Both read
         // the same bytes, so whichever is already there wins and this one is
         // dropped, exactly as the slot store resolves the same race.
-        Ok(Arc::clone(
-            chunks.entry(index).or_insert_with(|| Arc::clone(&chunk)),
-        ))
+        (first..)
+            .zip(chunks)
+            .map(|(index, chunk)| Arc::clone(cached.entry(index).or_insert(chunk)))
+            .collect()
     }
 
     /// Every byte of the document, read from the source as one range, so that
@@ -527,18 +546,18 @@ impl ChunkCache {
     }
 
     /// The bytes of `start..end`, which lies inside the document, asked of the
-    /// source until it has answered all of them.
+    /// source until it has answered all of them, onto `bytes`.
     ///
     /// The loop is the whole point of a source being allowed to answer short:
     /// bytes are gathered until the range is whole, so a source that answers
     /// one byte at a time yields the same bytes as one that answers all of
-    /// them.
-    fn gather(&self, start: u64, end: u64) -> Result<Vec<u8>, SourceMiss> {
+    /// them. On a miss, `bytes` ends with what arrived before it.
+    fn gather(&self, start: u64, end: u64, bytes: &mut Vec<u8>) -> Result<(), SourceMiss> {
         // The length is the host's claim, so what is reserved ahead of the
         // bytes is bounded and the rest grows as they arrive (ruling 1).
         const RESERVE: usize = 1 << 20;
         let want = usize::try_from(end.saturating_sub(start)).unwrap_or(usize::MAX);
-        let mut bytes = Vec::with_capacity(want.min(RESERVE));
+        bytes.reserve(want.min(RESERVE));
         let mut at = start;
         while at < end {
             let got = self.source.read(at..end)?;
@@ -548,11 +567,14 @@ impl ChunkCache {
                 // forever is ruling 1: a hostile host is untrusted input too.
                 return Err(SourceMiss::at(at..end));
             }
-            at = at.saturating_add(got.len() as u64).min(end);
-            bytes.extend_from_slice(&got);
+            // An answer longer than the range is cut to it.
+            let took = got
+                .len()
+                .min(usize::try_from(end - at).unwrap_or(usize::MAX));
+            bytes.extend_from_slice(&got[..took]);
+            at = at.saturating_add(took as u64);
         }
-        bytes.truncate(want);
-        Ok(bytes)
+        Ok(())
     }
 
     fn window(&self, range: Range<u64>) -> Result<Arc<[u8]>, SourceMiss> {
@@ -566,9 +588,32 @@ impl ChunkCache {
         }
         let first = start / CHUNK_SIZE;
         let last = (end - 1) / CHUNK_SIZE;
+        let held: Vec<Option<Arc<[u8]>>> = {
+            let cached = self.chunks.read_lock();
+            (first..=last)
+                .map(|index| cached.get(&index).cloned())
+                .collect()
+        };
+        // The chunks the cache holds, and each run of those it does not,
+        // fetched with one read.
+        let mut chunks = Vec::with_capacity(held.len());
+        let mut slots = held.into_iter().peekable();
+        let mut index = first;
+        while let Some(slot) = slots.next() {
+            if let Some(chunk) = slot {
+                chunks.push(chunk);
+                index += 1;
+                continue;
+            }
+            let mut past = index + 1;
+            while slots.next_if(Option::is_none).is_some() {
+                past += 1;
+            }
+            chunks.extend(self.run(index, past)?);
+            index = past;
+        }
         let mut out = Vec::with_capacity((end - start) as usize);
-        for index in first..=last {
-            let chunk = self.chunk(index)?;
+        for (index, chunk) in (first..).zip(&chunks) {
             let base = index.saturating_mul(CHUNK_SIZE);
             let from = start.saturating_sub(base).min(chunk.len() as u64);
             let to = end.saturating_sub(base).min(chunk.len() as u64);
@@ -590,7 +635,7 @@ impl ChunkCache {
         self.fetched_whole.store(true, Ordering::Release);
         // Emptied after the whole is set and under the lock a chunk is
         // published under, so a chunk gathered meanwhile is not published
-        // beside it (`chunk`).
+        // beside it (`publish`).
         self.chunks.write_lock().clear();
         Ok(self.whole.get().map_or(all, Arc::clone))
     }
@@ -962,5 +1007,136 @@ mod tests {
             &bytes[100..200]
         );
         assert_eq!(source.reads(), reads, "the source was not asked again");
+    }
+
+    /// A chunk cache over `bytes`, and the counter that sees its every read.
+    fn counted(bytes: &Arc<[u8]>) -> (Arc<CountingSource<SliceSource>>, Backing) {
+        let source = Arc::new(CountingSource::new(SliceSource::new(Arc::clone(bytes))));
+        let backing = Backing::chunked(source.clone());
+        (source, backing)
+    }
+
+    /// The exit: a window over chunks the cache does not hold is one read,
+    /// from its first chunk's start to its last chunk's end and no further,
+    /// and each chunk is published whole.
+    #[test]
+    fn a_window_over_missing_chunks_is_one_read() {
+        const C: u64 = CHUNK_SIZE;
+        let bytes = file(10 * C as usize + 500);
+        let (source, backing) = counted(&bytes);
+        let window = backing.window(100..3 * C + 100).expect("four chunks");
+        assert_eq!(&*window, &bytes[100..3 * C as usize + 100]);
+        assert_eq!(source.ranges(), vec![0..4 * C], "one read of the four");
+        assert_eq!(backing.retained(), 4 * C, "each chunk published");
+
+        backing.window(C..2 * C).expect("a cached chunk");
+        assert_eq!(source.reads(), 1, "what the cache holds is not read again");
+
+        // The document's last chunk is short, and the run ends with it.
+        let len = bytes.len() as u64;
+        let tail = backing.window(9 * C + 10..len).expect("the last two");
+        assert_eq!(&*tail, &bytes[9 * C as usize + 10..]);
+        assert_eq!(source.ranges(), vec![0..4 * C, 9 * C..len]);
+        assert_eq!(backing.retained(), 5 * C + 500);
+    }
+
+    /// A chunk the cache holds splits the missing chunks around it into two
+    /// runs, each one read.
+    #[test]
+    fn a_cached_chunk_splits_a_window_into_two_reads() {
+        const C: u64 = CHUNK_SIZE;
+        let bytes = file(6 * C as usize);
+        let (source, backing) = counted(&bytes);
+        backing.window(2 * C + 5..2 * C + 6).expect("chunk 2");
+        source.reset();
+
+        let window = backing.window(0..5 * C).expect("chunks 0 to 4");
+        assert_eq!(&*window, &bytes[..5 * C as usize]);
+        assert_eq!(
+            source.ranges(),
+            vec![0..2 * C, 3 * C..5 * C],
+            "the runs either side of the cached chunk"
+        );
+        assert_eq!(backing.retained(), 5 * C);
+    }
+
+    /// A source that answers short is asked again from where it stopped,
+    /// across the run's chunk boundaries as within one chunk.
+    #[test]
+    fn a_short_reading_source_still_fills_a_coalesced_run() {
+        const C: u64 = CHUNK_SIZE;
+        let bytes = file(4 * C as usize);
+        let source = Arc::new(CountingSource::new(Pieces {
+            bytes: Arc::clone(&bytes),
+            piece: 1_000,
+        }));
+        let backing = Backing::chunked(source.clone());
+        let window = backing.window(10..3 * C - 10).expect("three chunks");
+        assert_eq!(&*window, &bytes[10..3 * C as usize - 10]);
+        // 12,288 bytes in answers of at most 1,000 are thirteen reads, where
+        // the three chunks read one at a time are fifteen.
+        assert_eq!(source.reads(), 13);
+        assert_eq!(source.bytes_read(), 3 * C);
+        assert_eq!(backing.retained(), 3 * C, "three whole chunks");
+
+        let small = file(2 * C as usize + 7);
+        let shredded = Backing::chunked(Arc::new(ShreddedSource::new(SliceSource::new(
+            Arc::clone(&small),
+        ))));
+        let all = 0..small.len() as u64;
+        assert_eq!(&*shredded.window(all).expect("a byte at a time"), &*small);
+        assert_eq!(shredded.retained(), small.len() as u64);
+    }
+
+    /// A source with the bytes before `upto` and none from there on, as a
+    /// host has that has fetched a prefix; `upto` moves as more arrives.
+    struct Prefix {
+        bytes: Arc<[u8]>,
+        upto: std::sync::atomic::AtomicU64,
+    }
+
+    impl ByteSource for Prefix {
+        fn len(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+
+        fn read(&self, range: Range<u64>) -> Result<Arc<[u8]>, SourceMiss> {
+            let upto = self.upto.load(Ordering::SeqCst);
+            if range.start >= upto && range.start < self.len() {
+                return Err(SourceMiss::at(range));
+            }
+            let end = range.end.min(upto);
+            Ok(Arc::from(clamped(&self.bytes, &(range.start..end))))
+        }
+    }
+
+    /// A miss part-way through a run keeps the chunks that arrived whole
+    /// before it, drops the one it stopped in, and names the rest of the run;
+    /// the retry reads from the dropped chunk's start.
+    #[test]
+    fn a_miss_inside_a_run_publishes_only_whole_chunks() {
+        const C: u64 = CHUNK_SIZE;
+        let bytes = file(5 * C as usize);
+        let prefix = Arc::new(Prefix {
+            bytes: Arc::clone(&bytes),
+            upto: std::sync::atomic::AtomicU64::new(2 * C + 100),
+        });
+        let source = Arc::new(CountingSource::new(Arc::clone(&prefix)));
+        let backing = Backing::chunked(source.clone());
+
+        let miss = backing.window(0..4 * C).expect_err("chunk 2 stops short");
+        assert_eq!(miss.needed, 2 * C + 100..4 * C, "the rest of the run");
+        assert_eq!(backing.retained(), 2 * C, "chunks 0 and 1, and none of 2");
+
+        prefix.upto.store(bytes.len() as u64, Ordering::SeqCst);
+        source.reset();
+        let window = backing.window(0..4 * C).expect("every byte has arrived");
+        assert_eq!(&*window, &bytes[..4 * C as usize]);
+        assert_eq!(
+            source.ranges(),
+            vec![2 * C..4 * C],
+            "from the dropped chunk's start"
+        );
+        assert_eq!(backing.retained(), 4 * C);
     }
 }
