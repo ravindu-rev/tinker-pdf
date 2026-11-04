@@ -105,8 +105,8 @@ a choice inside a step; so is anything a change would cost that works today.
 Take the first step in this list whose **Depends on** is done; a step that
 waits on the owner is passed over until the owner decides.
 
-1. **The MS tier** from where it stands: P-05.3, then
-   MS-08.2; MS-07.3. Then MS-14 to MS-21, MS-01 to MS-01.8,
+1. **The MS tier** from where it stands: MS-08.2;
+   MS-07.3. Then MS-14 to MS-21, MS-01 to MS-01.8,
    MS-04, MS-05, MS-06 and MS-02, in that order. MS-01.9 closes MS-01 once
    the P rows that land its guards have.
 2. **K-06** (the `jbig2` fuzz target), **K-01** (the external graphics

@@ -893,14 +893,17 @@ same way.
 
 #### One copy, and what a slice costs
 
-- **A whole-file fetch holds the file once** (P-05.3). `materialise` keeps
-  every chunk beside a joined copy, and the join is a `Vec` copied into an
-  `Arc`; P-05.3 makes it ask the source for the whole range, keep an answer of
-  the whole length as the document's buffer, gather a short one into a buffer
-  of the document's length filled in place, and empty the chunk map. The file
-  source keeps no bytes of its own, so the process holds the file once. A
-  `SliceSource` keeps its own, so a streamed open over one holds them twice
-  after a whole-file fetch; no host that owns a file uses one.
+- **A whole-file fetch holds the file once** (P-05.3). `materialise` asks the
+  source for the whole range, keeps an answer of the whole length as the
+  document's buffer, gathers a short one into a buffer of the document's
+  length filled in place, and empties the chunk map, after the buffer is set
+  and under the lock a chunk is published under, so a chunk read in flight is
+  never published beside it; every later read is cut from the buffer
+  (`a_whole_file_fetch_holds_the_file_once` and its neighbours in
+  `crates/tinker-pdf-cos/src/source.rs`). The file source keeps no bytes of
+  its own, so the process holds the file once. A `SliceSource` keeps its own,
+  so a streamed open over one holds them twice after a whole-file fetch; no
+  host that owns a file uses one.
 - **A slice handed to the facade costs one copy, and an `Arc<[u8]>` none.**
   `Document::open` takes `impl Into<Arc<[u8]>>` and converts once: a slice is
   copied into a new `Arc`, so is a `Vec`, both existing for the moment of the

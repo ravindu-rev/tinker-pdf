@@ -297,6 +297,11 @@ The streaming seam adds `open_streaming(source)` and
 chunk cache reads in, and four observables a caller measures a streamed open
 by: `is_streamed()`, `first_page_end()` (Annex F's `/E`, `None` unless the
 head-only path engaged), `main_table_fetched()` and `whole_file_fetched()`.
+A streamed document that has fetched the whole file holds it once: the fetch
+asks the source for every byte as one range, keeps an answer of the whole
+length as the document's buffer and fills a short one into a buffer of the
+document's length, drops the chunks it read before, and cuts every later read
+from that buffer.
 `complete_validation()` runs the eager offset probe a streamed open defers and
 returns the ladder level a buffered open would have reported, reading each
 header through a window it keeps none of rather than fetching the file, and

@@ -7,8 +7,9 @@
 //! document through [`ByteSource`]. The engine defines the trait; hosts
 //! implement transport, which is the `FontProvider` pattern one layer down.
 //! Nothing here performs any transport itself: there is no HTTP client, no
-//! file I/O and no mmap call anywhere in this workspace, because
-//! `wasm32-unknown-unknown` has none of them and is a first-class target.
+//! file I/O and no mmap call anywhere in the engine crates, because
+//! `wasm32-unknown-unknown` has none of them and is a first-class target. A
+//! host's own source, such as the CLI's over a file, is the host's code.
 //!
 //! # Synchronous, forever
 //!
@@ -18,9 +19,10 @@
 //! exactly what ruling 4 exists to prevent. The shape here is sync plus a
 //! typed miss: a read the host has not fed yet returns [`SourceMiss`] naming
 //! the range it wanted, and that propagates upward without ever becoming a
-//! value. A native host backs the source with a mapping and never misses; a
-//! wasm host feeds ranges and calls again, and because parsing is pure and the
-//! store caches, the retry repeats no completed work.
+//! value. A native host backs the source with a mapping, which never misses,
+//! or with reads at offsets, which miss only when a read fails; a wasm host
+//! feeds ranges and calls again, and because parsing is pure and the store
+//! caches, the retry repeats no completed work.
 //!
 //! # Arrival is not an input
 //!
@@ -299,9 +301,11 @@ pub const CHUNK_SIZE: u64 = 4096;
 ///
 /// The whole-buffer arm is today's contract and costs nothing new. The chunked
 /// arm fetches fixed aligned chunks, each fetched once and kept, so repeated
-/// small reads coalesce. Which arm a document has changes which ranges are
-/// fetched and never a value, which is the invariant the determinism suite
-/// runs over a shredded source to prove.
+/// small reads coalesce, until something needs every byte: then it holds the
+/// whole document once, in place of its chunks, and cuts every later read from
+/// it. Which arm a document has changes which ranges are fetched and never a
+/// value, which is the invariant the determinism suite runs over a shredded
+/// source to prove.
 pub(crate) enum Backing {
     /// Every byte, in hand.
     Whole(Arc<[u8]>),
@@ -316,9 +320,10 @@ pub(crate) struct ChunkCache {
     /// Chunk index to its bytes. Only complete chunks are published: a
     /// half-filled chunk cached after a miss would answer later reads with the
     /// bytes that happened to arrive first, which is the miss's answer baked
-    /// in forever.
+    /// in forever. Empty once `whole` is set, which holds them all.
     chunks: RwLock<BTreeMap<u64, Arc<[u8]>>>,
-    /// The whole document, once something has needed all of it.
+    /// The whole document, once something has needed all of it; every read
+    /// after that is cut from it.
     whole: OnceLock<Arc<[u8]>>,
     /// Whether that has happened, readable without materialising it.
     fetched_whole: AtomicBool,
@@ -387,11 +392,14 @@ impl Backing {
     /// none is consulted, so a pass that touches every object's header, which
     /// is what the windowed verdict is, leaves the cache holding what it held
     /// before. What it read is the caller's, and gone when the caller drops
-    /// it.
+    /// it. Once the whole document is held, it is cut from that instead.
     pub(crate) fn read_transient(&self, range: Range<u64>) -> Result<Vec<u8>, SourceMiss> {
         match self {
             Backing::Whole(bytes) => Ok(clamped(bytes, &range).to_vec()),
             Backing::Chunked(cache) => {
+                if let Some(whole) = cache.whole.get() {
+                    return Ok(clamped(whole, &range).to_vec());
+                }
                 let start = range.start.min(cache.len);
                 let end = range.end.min(cache.len).max(start);
                 cache.gather(start, end)
@@ -400,7 +408,8 @@ impl Backing {
     }
 
     /// How many bytes this backing holds: the buffer, or every cached chunk
-    /// and the whole-file copy beside them.
+    /// and the whole document, which are never both held once a fetch of the
+    /// whole has finished.
     ///
     /// The instrument for "kept by nothing", which a byte counter over the
     /// source cannot see: a read that went to the source and was then cached
@@ -459,12 +468,62 @@ impl ChunkCache {
         // Nothing is cached until it is complete.
         let chunk: Arc<[u8]> = Arc::from(self.gather(start, end)?);
         let mut chunks = self.chunks.write_lock();
+        // A fetch of the whole that finished while this chunk was read holds
+        // these bytes already, and emptied the map under this lock after
+        // setting the whole: the chunk is the caller's alone, never published
+        // beside it.
+        if self.whole.get().is_some() {
+            return Ok(chunk);
+        }
         // Another thread may have fetched the same chunk meanwhile. Both read
         // the same bytes, so whichever is already there wins and this one is
         // dropped, exactly as the slot store resolves the same race.
         Ok(Arc::clone(
             chunks.entry(index).or_insert_with(|| Arc::clone(&chunk)),
         ))
+    }
+
+    /// Every byte of the document, read from the source as one range, so that
+    /// the bytes are held once.
+    ///
+    /// An answer of the whole length is kept as it is: a source that reads a
+    /// file into one allocation costs no second one. A short answer is the
+    /// start of a buffer of the document's length, filled in place as the
+    /// rest arrives, so a source that answers a piece at a time is never
+    /// joined from a copy either. The buffer's length is the host's claim, as
+    /// a window's is.
+    fn read_whole(&self) -> Result<Arc<[u8]>, SourceMiss> {
+        let whole = 0..self.len;
+        let len = usize::try_from(self.len).map_err(|_| SourceMiss::at(whole.clone()))?;
+        let first = self.source.read(whole.clone())?;
+        if first.len() == len {
+            return Ok(first);
+        }
+        if first.len() > len {
+            return Ok(Arc::from(&first[..len]));
+        }
+        if first.is_empty() {
+            // As `gather` reads it: a conforming source never answers nothing
+            // for a range inside its length (ruling 1).
+            return Err(SourceMiss::at(whole));
+        }
+        let mut buffer: Arc<[u8]> = std::iter::repeat_n(0, len).collect();
+        let Some(bytes) = Arc::get_mut(&mut buffer) else {
+            // A buffer made here is held by nothing else.
+            return Err(SourceMiss::at(whole));
+        };
+        bytes[..first.len()].copy_from_slice(&first);
+        let mut at = first.len();
+        while at < len {
+            let got = self.source.read(at as u64..self.len)?;
+            if got.is_empty() {
+                return Err(SourceMiss::at(at as u64..self.len));
+            }
+            let took = got.len().min(len - at);
+            bytes[at..at + took].copy_from_slice(&got[..took]);
+            at += took;
+        }
+        Ok(buffer)
     }
 
     /// The bytes of `start..end`, which lies inside the document, asked of the
@@ -502,6 +561,9 @@ impl ChunkCache {
         if start == end {
             return Ok(Arc::from(&[][..]));
         }
+        if let Some(whole) = self.whole.get() {
+            return Ok(Arc::from(clamped(whole, &(start..end))));
+        }
         let first = start / CHUNK_SIZE;
         let last = (end - 1) / CHUNK_SIZE;
         let mut out = Vec::with_capacity((end - start) as usize);
@@ -515,15 +577,21 @@ impl ChunkCache {
         Ok(Arc::from(out))
     }
 
+    /// Every byte, held once: read whole from the source, set in place of
+    /// the chunks, which are dropped.
     fn materialise(&self) -> Result<Arc<[u8]>, SourceMiss> {
         if let Some(whole) = self.whole.get() {
             return Ok(Arc::clone(whole));
         }
-        let all = self.window(0..self.len)?;
+        let all = self.read_whole()?;
         // The bytes are set before the flag, so a reader that sees the flag
-        // finds them.
+        // finds them. Another thread's whole, set first, is kept.
         let _ = self.whole.set(Arc::clone(&all));
         self.fetched_whole.store(true, Ordering::Release);
+        // Emptied after the whole is set and under the lock a chunk is
+        // published under, so a chunk gathered meanwhile is not published
+        // beside it (`chunk`).
+        self.chunks.write_lock().clear();
         Ok(self.whole.get().map_or(all, Arc::clone))
     }
 
@@ -735,5 +803,164 @@ mod tests {
         let clone = Arc::clone(&source);
         assert_eq!(&*clone.read(0..6).expect("in bounds"), b"shared");
         assert_eq!(source.len(), 6);
+    }
+
+    /// `len` bytes no two neighbours of which are alike.
+    fn file(len: usize) -> Arc<[u8]> {
+        (0..len).map(|at| (at % 251) as u8).collect()
+    }
+
+    /// A source over `bytes` that answers at most `piece` bytes a read, and
+    /// a read of every byte with `bytes` itself rather than a copy.
+    struct Pieces {
+        bytes: Arc<[u8]>,
+        piece: usize,
+    }
+
+    impl ByteSource for Pieces {
+        fn len(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+
+        fn read(&self, range: Range<u64>) -> Result<Arc<[u8]>, SourceMiss> {
+            if range == (0..self.len()) && self.piece >= self.bytes.len() {
+                return Ok(Arc::clone(&self.bytes));
+            }
+            let start = range.start.min(self.len());
+            let end = range.end.min(start.saturating_add(self.piece as u64));
+            Ok(Arc::from(clamped(&self.bytes, &(start..end))))
+        }
+    }
+
+    /// The exit: a fetch of the whole over a 1 MiB source, after the reads an
+    /// open makes have cached chunks at both ends, holds 1 MiB, the chunks
+    /// gone; and a read after it is cut from the whole, publishing nothing.
+    #[test]
+    fn a_whole_file_fetch_holds_the_file_once() {
+        const MIB: u64 = 1 << 20;
+        let bytes = file(MIB as usize);
+        let backing = Backing::chunked(Arc::new(SliceSource::new(Arc::clone(&bytes))));
+        backing.window(0..100).expect("the head");
+        backing.window(MIB - 100..MIB).expect("the tail");
+        assert_eq!(backing.retained(), 2 * CHUNK_SIZE, "two chunks before");
+
+        let whole = backing.materialise().expect("every byte");
+        assert_eq!(&*whole, &*bytes);
+        assert!(backing.whole_fetched());
+        assert_eq!(backing.retained(), MIB, "the file once, its chunks dropped");
+
+        let window = backing.window(5_000..6_000).expect("a window");
+        assert_eq!(&*window, &bytes[5_000..6_000]);
+        assert_eq!(backing.retained(), MIB, "a later read publishes nothing");
+        assert!(Arc::ptr_eq(&backing.materialise().expect("again"), &whole));
+    }
+
+    /// A source that answers a read of every byte in one allocation hands
+    /// the backing its buffer: the bytes are held once in the process.
+    #[test]
+    fn an_answer_of_the_whole_length_is_the_buffer_itself() {
+        let bytes = file(50_000);
+        let backing = Backing::chunked(Arc::new(Pieces {
+            bytes: Arc::clone(&bytes),
+            piece: usize::MAX,
+        }));
+        let whole = backing.materialise().expect("every byte");
+        assert!(Arc::ptr_eq(&whole, &bytes), "the source's own allocation");
+    }
+
+    /// A source that answers a piece at a time fills one buffer of the
+    /// document's length, as one that answers a byte at a time does: the same
+    /// bytes, held once.
+    #[test]
+    fn a_short_answer_fills_the_buffer_in_place() {
+        let bytes = file(50_000);
+        let pieces = Backing::chunked(Arc::new(Pieces {
+            bytes: Arc::clone(&bytes),
+            piece: 7_000,
+        }));
+        assert_eq!(&*pieces.materialise().expect("every byte"), &*bytes);
+        assert_eq!(pieces.retained(), bytes.len() as u64);
+
+        let small = file(3_000);
+        let shredded = Backing::chunked(Arc::new(ShreddedSource::new(SliceSource::new(
+            Arc::clone(&small),
+        ))));
+        assert_eq!(&*shredded.materialise().expect("every byte"), &*small);
+        assert_eq!(shredded.retained(), small.len() as u64);
+
+        let absent = Backing::chunked(Arc::new(Absent { len: 10 }));
+        assert_eq!(
+            absent.materialise().expect_err("nothing arrives").needed,
+            0..10
+        );
+        assert!(!absent.whole_fetched());
+    }
+
+    /// A source that, asked for the first chunk past the head, has the
+    /// backing it feeds fetch the whole before it answers: a chunk in flight
+    /// when the chunk map is emptied.
+    struct Racing {
+        bytes: Arc<[u8]>,
+        backing: OnceLock<std::sync::Weak<Backing>>,
+        raced: AtomicBool,
+    }
+
+    impl ByteSource for Racing {
+        fn len(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+
+        fn read(&self, range: Range<u64>) -> Result<Arc<[u8]>, SourceMiss> {
+            if range.start >= CHUNK_SIZE && !self.raced.swap(true, Ordering::SeqCst) {
+                if let Some(backing) = self.backing.get().and_then(std::sync::Weak::upgrade) {
+                    backing.materialise()?;
+                }
+            }
+            Ok(Arc::from(clamped(&self.bytes, &range)))
+        }
+    }
+
+    /// A chunk read while a fetch of the whole finishes answers its reader
+    /// and is not published beside the whole: the file stays held once.
+    #[test]
+    fn a_chunk_in_flight_when_the_whole_arrives_is_not_published() {
+        let bytes = file(20_000);
+        let source = Arc::new(Racing {
+            bytes: Arc::clone(&bytes),
+            backing: OnceLock::new(),
+            raced: AtomicBool::new(false),
+        });
+        let backing = Arc::new(Backing::chunked(source.clone()));
+        source
+            .backing
+            .set(Arc::downgrade(&backing))
+            .expect("set once");
+        let window = backing
+            .window(CHUNK_SIZE + 10..CHUNK_SIZE + 20)
+            .expect("the window");
+        assert_eq!(&*window, &bytes[4_106..4_116]);
+        assert!(source.raced.load(Ordering::SeqCst), "the race was run");
+        assert!(backing.whole_fetched());
+        assert_eq!(backing.retained(), bytes.len() as u64, "no chunk beside it");
+    }
+
+    /// Once the whole is held, a window and a transient read are cut from it
+    /// and the source is not asked again.
+    #[test]
+    fn reads_after_a_whole_fetch_do_not_reach_the_source() {
+        let bytes = file(30_000);
+        let source = Arc::new(CountingSource::new(SliceSource::new(Arc::clone(&bytes))));
+        let backing = Backing::chunked(source.clone());
+        backing.materialise().expect("every byte");
+        let reads = source.reads();
+        assert_eq!(
+            &*backing.window(9_000..9_500).expect("a window"),
+            &bytes[9_000..9_500]
+        );
+        assert_eq!(
+            backing.read_transient(100..200).expect("a transient read"),
+            &bytes[100..200]
+        );
+        assert_eq!(source.reads(), reads, "the source was not asked again");
     }
 }
