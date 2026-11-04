@@ -2276,7 +2276,7 @@ pub(crate) fn validate_counting(
     // would be telling a comfortable story rather than what happened.
     machinery.reach(RuleGroup::Metadata);
     let mut claim = Vec::new();
-    let flavour = flavour_of(document, &mut claim);
+    let flavour = flavour_of(document, work, &mut claim);
     if groups.metadata {
         raw.append(&mut claim);
     }
@@ -2333,8 +2333,12 @@ pub(crate) fn validate_counting(
 }
 
 /// Reads `pdfaid:part` and `pdfaid:conformance` out of the XMP packet.
-fn flavour_of(document: &Document, findings: &mut Vec<Raw>) -> Option<Flavour> {
-    let Some(packet) = document.xmp_metadata() else {
+fn flavour_of(
+    document: &Document,
+    work: Option<&Arc<Work>>,
+    findings: &mut Vec<Raw>,
+) -> Option<Flavour> {
+    let Some(packet) = crate::stats::xmp(&document.inner, work) else {
         findings.push(Raw::file(clauses::METADATA, FindingKind::MetadataMissing));
         return None;
     };

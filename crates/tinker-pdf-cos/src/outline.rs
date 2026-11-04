@@ -8,6 +8,7 @@ use crate::object::{ObjRef, Object};
 use crate::text_string::{decode_text_string, parse_date, Date};
 use crate::trees;
 use crate::warn::WarningKind;
+use crate::work::Work;
 use std::collections::HashSet;
 
 /// One entry in the outline tree.
@@ -623,9 +624,16 @@ pub fn attachments(doc: &CosDocument) -> Vec<Attachment> {
 /// form would break.
 #[must_use]
 pub fn xmp_metadata(doc: &CosDocument) -> Option<Vec<u8>> {
+    xmp_metadata_counted(doc, None)
+}
+
+/// [`xmp_metadata`], counting the packet's decode into `work` when the
+/// operation is counting.
+#[must_use]
+pub fn xmp_metadata_counted(doc: &CosDocument, work: Option<&Work>) -> Option<Vec<u8>> {
     let catalog = doc.catalog()?;
     let reference = catalog.get_ref(doc.intern(b"Metadata"))?;
-    doc.stream_decoded(reference).ok()
+    doc.stream_decoded_counted(reference, work).ok()
 }
 
 #[cfg(test)]

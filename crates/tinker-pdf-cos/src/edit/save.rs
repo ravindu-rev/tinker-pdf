@@ -6,6 +6,7 @@ use super::{without, DocumentEditor};
 use crate::limits;
 use crate::object::{Dict, ObjRef, Object};
 use crate::resolve::Resolve;
+use crate::work::Work;
 use crate::write::{self, ObjectSet, StreamData, WriteMode, WriteOptions, Written};
 use tinker_pdf_crypto::Permissions;
 
@@ -257,9 +258,21 @@ impl DocumentEditor {
     ///
     /// It writes what it is asked to: [`DocumentEditor::check_save`] is the
     /// question of whether that undoes an encryption.
+    ///
+    /// On an editor asked to count, the streams the serializer decodes count
+    /// into its tally.
     #[must_use]
     pub fn save(&self, options: &WriteOptions) -> Vec<u8> {
-        self.save_with(options, write::Sealing::from_options(options))
+        self.save_counted(options, self.work.as_deref())
+    }
+
+    /// [`DocumentEditor::save`], counting the streams the serializer decodes
+    /// — the contents it compares to deduplicate them — into `work` when the
+    /// save is counting: a save asked for its stats over an editor that was
+    /// not asked to count carries a tally of its own.
+    #[must_use]
+    pub fn save_counted(&self, options: &WriteOptions, work: Option<&Work>) -> Vec<u8> {
+        self.save_with(options, write::Sealing::from_options(options), work)
     }
 
     /// Saves the edits as a document **sealed to recipients** rather than to
@@ -292,10 +305,19 @@ impl DocumentEditor {
         if options.encryption.is_some() {
             return Err(crate::pubsec::SealError::PasswordAlsoRequested);
         }
-        Ok(self.save_with(options, Some(write::Sealing::PublicKey(sealed))))
+        Ok(self.save_with(
+            options,
+            Some(write::Sealing::PublicKey(sealed)),
+            self.work.as_deref(),
+        ))
     }
 
-    fn save_with(&self, options: &WriteOptions, sealing: Option<write::Sealing<'_>>) -> Vec<u8> {
+    fn save_with(
+        &self,
+        options: &WriteOptions,
+        sealing: Option<write::Sealing<'_>>,
+        work: Option<&Work>,
+    ) -> Vec<u8> {
         let set = self.changed_set();
 
         // A reordered page tree needs its /Kids and /Count rewritten.
@@ -430,7 +452,8 @@ impl DocumentEditor {
                 }
                 let mut trailer = trailer;
                 if options.deduplicate_streams {
-                    let content = |num: u32, stream: &StreamData| self.dedup_content(num, stream);
+                    let content =
+                        |num: u32, stream: &StreamData| self.dedup_content(num, stream, work);
                     let (merged, redirected, _) = crate::dedup::deduplicate(
                         &all,
                         &trailer,
@@ -456,16 +479,26 @@ impl DocumentEditor {
     /// two different streams look alike. The warnings go nowhere: a save that
     /// changed what `CosDocument::warnings` reports would make the document's
     /// answer depend on whether it had been saved.
-    fn dedup_content(&self, num: u32, stream: &StreamData) -> crate::dedup::Content {
+    ///
+    /// A decode counts into `work` when the save is counting; a stream with no
+    /// `/Filter` is compared as it is stored, and runs no chain.
+    fn dedup_content(
+        &self,
+        num: u32,
+        stream: &StreamData,
+        work: Option<&Work>,
+    ) -> crate::dedup::Content {
         use crate::dedup::Content;
         if stream.dict.get(crate::name::Name::FILTER).is_none() {
             return Content::Decoded(stream.data.clone());
         }
         let mut sink = crate::warn::WarningSink::new();
-        match self
+        let decoded = self
             .doc
-            .decode_with(&stream.data, &stream.dict, num, &mut sink)
-        {
+            .decode_with(&stream.data, &stream.dict, num, &mut sink);
+        // Keyed as the rewrite reads the object, at generation zero.
+        crate::streams::count_run(work, ObjRef::new(num, 0), &decoded);
+        match decoded {
             Ok(decoded) if sink.is_empty() => Content::Decoded(decoded),
             _ => Content::Stored(stream.data.clone()),
         }

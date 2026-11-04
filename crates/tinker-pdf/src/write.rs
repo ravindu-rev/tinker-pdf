@@ -179,10 +179,11 @@ pub struct SaveOptions {
     /// — the default — leaves every image stream as the file stored it.
     pub images: ImagePolicy,
     /// Count what the save does and hand it back as [`Saved::stats`]: the
-    /// image and font passes' walks of the page tree, and the font
-    /// dictionaries and forms' scopes the font pass reads. On an editor
-    /// [`DocumentEditor::count_work`] asked to count, the count is
-    /// everything counted over the editor since, this save included.
+    /// image and font passes' walks of the page tree, the font dictionaries
+    /// and forms' scopes the font pass reads, and every stream the passes and
+    /// the serializer decode. On an editor [`DocumentEditor::count_work`]
+    /// asked to count, the count is everything counted over the editor since,
+    /// this save included.
     ///
     /// Off by default. A counted save writes the same bytes and reports the
     /// same passes as an uncounted one.
@@ -350,7 +351,8 @@ pub struct Saved {
 pub fn save(editor: &mut DocumentEditor, options: &SaveOptions) -> Saved {
     // The editor's tally when it is counting, so that a merge's save reports
     // what was counted over the editor since `count_work`; the save's own
-    // when it is not and the caller asked. Either way both passes count.
+    // when it is not and the caller asked. Either way both passes and the
+    // serializer count.
     let work = editor
         .work()
         .cloned()
@@ -386,7 +388,7 @@ pub fn save(editor: &mut DocumentEditor, options: &SaveOptions) -> Saved {
         }
     };
     Saved {
-        bytes: editor.save(&options.write),
+        bytes: editor.save_counted(&options.write, work.as_deref()),
         fonts,
         images,
         stats: work.filter(|_| options.stats).map(|work| work.stats()),

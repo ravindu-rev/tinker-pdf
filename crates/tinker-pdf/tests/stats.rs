@@ -41,14 +41,24 @@
 //! - a walk of the page tree reads every node until it has the pages it
 //!   wants, and stops before the next; an editor walks its own tree for its
 //!   page order until an edit first sets it, and an import walks its
-//!   source's.
+//!   source's;
+//! - a stream is decoded each time it is read: a page's content once an
+//!   interpretation, which a save's passes and a validator's rules each make
+//!   of their own; a form's content at each `Do`, and once more when
+//!   `render_form` reads the form it is asked for; a tiling pattern's cell
+//!   once a fill; an appearance once a render of it; an image's samples, and
+//!   its soft mask's, at the decode the image cache or the extraction makes;
+//!   an ICC profile when its transform is compiled; and a font's program when
+//!   a scope first reads it, the font pass's cut of it, and each validator
+//!   rule that reads it. A stream the editor holds unfiltered, an import's
+//!   copy, is handed back as it is and runs no chain.
 
 mod render_support;
 
 use std::sync::Arc;
 
 use tinker_pdf::write::{
-    save, BilevelCodec, ContinuousCodec, ImagePolicy, ImageRecoding, SaveOptions, Saved,
+    save, BilevelCodec, ContinuousCodec, FontPolicy, ImagePolicy, ImageRecoding, SaveOptions, Saved,
 };
 use tinker_pdf::{
     Bitmap, Document, DocumentBuilder, Page, PdfACoverage, PdfUaCoverage, PdfXCoverage,
@@ -104,6 +114,33 @@ fn object(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
 }
 
+/// `expected` with the streams an operation decoded on top: each
+/// `(runs, bytes)` is one stream, decoded `runs` times, each run returning
+/// `bytes` bytes. Every entry is a stream of its own, so the most runs any one
+/// stream had is the largest `runs`.
+fn decoding(mut expected: Stats, streams: &[(u64, usize)]) -> Stats {
+    for &(runs, bytes) in streams {
+        expected.streams_decoded += runs;
+        expected.most_decodes_of_one_stream = expected.most_decodes_of_one_stream.max(runs);
+        expected.bytes_decoded += runs * bytes as u64;
+    }
+    expected
+}
+
+/// The bytes of the embedded face every fixture's `F1` names.
+fn program_len() -> usize {
+    render_support::curvy_font().len()
+}
+
+/// The samples of [`image`]: twelve bytes, whatever the space.
+const SAMPLES: [u8; 12] = [0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0, 0];
+
+/// The bytes of the profile no parser accepts.
+const NOT_A_PROFILE: &[u8] = b"not an ICC profile";
+
+/// The cell every tiling pattern here draws.
+const CELL: &[u8] = b"BT /F1 6 Tf 1 2 Td (ab) Tj ET";
+
 /// The objects every fixture starts with: 1 the catalog, 2 the page tree,
 /// 3 the page — whose resources and annotations are `resources` and `annots`
 /// — 4 its content, and 5 to 7 the synthetic TrueType face
@@ -140,7 +177,7 @@ fn image(space: &str) -> Vec<u8> {
         &format!(
             "/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace {space} /BitsPerComponent 8"
         ),
-        &[0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0, 0],
+        &SAMPLES,
     )
 }
 
@@ -171,6 +208,18 @@ const SHOWN: [(&str, &str); 3] = [("F1", "Curvy!"), ("F2", "Hello"), ("F3", "aaa
 /// `F2` Helvetica and `F3` Courier with no program of their own — and one
 /// image drawn twice.
 fn glyphs_and_an_image_page() -> Vec<u8> {
+    fixture(
+        "/Font << /F1 5 0 R /F2 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\n\
+                  /F3 << /Type /Font /Subtype /Type1 /BaseFont /Courier >> >>\n\
+         /XObject << /Im1 8 0 R >>",
+        "",
+        &glyphs_and_an_image_content(),
+        vec![image("/DeviceRGB")],
+    )
+}
+
+/// [`glyphs_and_an_image_page`]'s content stream.
+fn glyphs_and_an_image_content() -> String {
     let mut content = String::new();
     for (line, (font, text)) in SHOWN.iter().enumerate() {
         content.push_str(&format!(
@@ -179,17 +228,25 @@ fn glyphs_and_an_image_page() -> Vec<u8> {
         ));
     }
     content.push_str("q 20 0 0 20 120 10 cm /Im1 Do Q\nq 20 0 0 20 150 10 cm /Im1 Do Q\n");
-    fixture(
-        "/Font << /F1 5 0 R /F2 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\n\
-                  /F3 << /Type /Font /Subtype /Type1 /BaseFont /Courier >> >>\n\
-         /XObject << /Im1 8 0 R >>",
-        "",
-        &content,
-        vec![image("/DeviceRGB")],
+    content
+}
+
+/// What a render of [`glyphs_and_an_image_page`] costs: its decodes — the
+/// content, `F1`'s program read at its first outline, and the image's samples
+/// at its one decode — on top of [`glyphs_and_an_image_stats`].
+fn glyphs_and_an_image_render() -> Stats {
+    decoding(
+        glyphs_and_an_image_stats(),
+        &[
+            (1, glyphs_and_an_image_content().len()),
+            (1, program_len()),
+            (1, SAMPLES.len()),
+        ],
     )
 }
 
-/// What [`glyphs_and_an_image_page`] costs, derived from `SHOWN`.
+/// What [`glyphs_and_an_image_page`] costs but for its decodes, derived from
+/// `SHOWN`.
 fn glyphs_and_an_image_stats() -> Stats {
     let fonts = SHOWN.len() as u64;
     let shown: u64 = SHOWN.iter().map(|(_, text)| text.len() as u64).sum();
@@ -326,11 +383,14 @@ fn render_stats_count_what_a_generated_page_draws() {
     let (document, index) = first_page(glyphs_and_an_image_page());
     let page = document.page(index).expect("a page");
     let stats = counted(&page);
-    let expected = glyphs_and_an_image_stats();
+    let expected = glyphs_and_an_image_render();
     assert_eq!(stats, expected, "bundled faces: {BUNDLED}");
     assert_eq!(stats.glyphs_shown, 14, "six, five and three glyphs");
     assert_eq!(stats.images_decoded, 1, "one decode");
     assert_eq!(stats.image_hits, 1, "one cache hit");
+    assert_eq!(stats.streams_decoded, 3, "the content, a program, an image");
+    assert_eq!(stats.most_decodes_of_one_stream, 1, "none twice");
+    // The total leaves out the maximum and the bytes.
     assert_eq!(
         stats.work(),
         stats.glyphs_shown
@@ -342,7 +402,8 @@ fn render_stats_count_what_a_generated_page_draws() {
             + stats.image_hits
             + stats.image_misses
             + stats.glyph_outline_hits
-            + stats.glyph_outline_misses,
+            + stats.glyph_outline_misses
+            + stats.streams_decoded,
         "the total is every step counted, and nothing else counted"
     );
 
@@ -361,14 +422,22 @@ fn render_stats_count_what_a_generated_page_draws() {
 }
 
 /// A form invoked three times builds its scope once, and what runs inside it
-/// counts into the page's tally through the scope the cache keeps.
+/// counts into the page's tally through the scope the cache keeps. Its content
+/// is decoded at each `Do`.
 #[test]
 fn a_form_shown_three_times_builds_its_scope_once() {
     let (document, index) = first_page(form_page());
     let page = document.page(index).expect("a page");
     let shown = 3 * FORM_TEXT.len() as u64;
     let distinct = 3;
-    let mut expected = Stats::default();
+    let mut expected = decoding(
+        Stats::default(),
+        &[
+            (1, FORM_PAGE_CONTENT.len()),
+            (3, form_content(FORM_TEXT).len()),
+            (1, program_len()),
+        ],
+    );
     expected.glyphs_shown = shown;
     expected.outlines_filled = shown;
     // The page's scope reads its one font, the form's scope its own one once,
@@ -388,6 +457,10 @@ fn a_form_shown_three_times_builds_its_scope_once() {
 /// The text the form shows: four glyphs, three of them distinct.
 const FORM_TEXT: &str = "abca";
 
+/// [`form_page`]'s content: `Fm1` three times.
+const FORM_PAGE_CONTENT: &str =
+    "q 1 0 0 1 10 10 cm /Fm1 Do Q\nq 1 0 0 1 10 40 cm /Fm1 Do Q\nq 1 0 0 1 10 70 cm /Fm1 Do Q\n";
+
 /// A page invoking `Fm1` three times; the form's own resources name the
 /// embedded face, and the page's name Helvetica, which nothing on it uses.
 fn form_page() -> Vec<u8> {
@@ -395,7 +468,7 @@ fn form_page() -> Vec<u8> {
         "/Font << /F2 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>\n\
          /XObject << /Fm1 8 0 R >>",
         "",
-        "q 1 0 0 1 10 10 cm /Fm1 Do Q\nq 1 0 0 1 10 40 cm /Fm1 Do Q\nq 1 0 0 1 10 70 cm /Fm1 Do Q\n",
+        FORM_PAGE_CONTENT,
         vec![form_with_text(FORM_TEXT)],
     )
 }
@@ -405,12 +478,19 @@ fn form_page() -> Vec<u8> {
 fn form_with_text(text: &str) -> Vec<u8> {
     stream(
         "/Type /XObject /Subtype /Form /BBox [0 0 80 20] /Resources << /Font << /F1 5 0 R >> >>",
-        format!("BT /F1 10 Tf 2 5 Td ({text}) Tj ET").as_bytes(),
+        form_content(text).as_bytes(),
     )
 }
 
+/// [`form_with_text`]'s content.
+fn form_content(text: &str) -> String {
+    format!("BT /F1 10 Tf 2 5 Td ({text}) Tj ET")
+}
+
 /// `render_form` reads the form's name in a scope of its own before it
-/// renders, and that scope's fonts are the door's work too.
+/// renders, and that scope's fonts are the door's work too — and so is its
+/// decode of the form it reads there, which the render's `Do` decodes again.
+/// The page's content is not read.
 #[test]
 fn render_form_counts_the_scope_it_reads_the_name_in() {
     let (document, index) = first_page(form_page());
@@ -422,7 +502,10 @@ fn render_form_counts_the_scope_it_reads_the_name_in() {
         .expect("asked");
     let shown = FORM_TEXT.len() as u64;
     let distinct = 3;
-    let mut expected = Stats::default();
+    let mut expected = decoding(
+        Stats::default(),
+        &[(2, form_content(FORM_TEXT).len()), (1, program_len())],
+    );
     expected.glyphs_shown = shown;
     expected.outlines_filled = shown;
     // The scope the name is read in and the render's own each read the
@@ -442,20 +525,31 @@ fn render_form_counts_the_scope_it_reads_the_name_in() {
 /// one no parser accepts, which is refused once and found refused after.
 #[test]
 fn a_profile_two_images_share_is_compiled_once() {
+    let content = "q 20 0 0 20 10 10 cm /Im1 Do Q\nq 20 0 0 20 40 10 cm /Im2 Do Q\n\
+                   q 20 0 0 20 70 10 cm /Im1 Do Q\n";
     let bytes = fixture(
         "/XObject << /Im1 8 0 R /Im2 9 0 R >>",
         "",
-        "q 20 0 0 20 10 10 cm /Im1 Do Q\nq 20 0 0 20 40 10 cm /Im2 Do Q\n\
-         q 20 0 0 20 70 10 cm /Im1 Do Q\n",
+        content,
         vec![
             image("[/ICCBased 10 0 R]"),
             image("[/ICCBased 10 0 R]"),
-            stream("/N 3", b"not an ICC profile"),
+            stream("/N 3", NOT_A_PROFILE),
         ],
     );
     let (document, index) = first_page(bytes);
     let page = document.page(index).expect("a page");
-    let mut expected = Stats::default();
+    // The content; each image's samples at its decode; the profile at the
+    // compile that refuses it.
+    let mut expected = decoding(
+        Stats::default(),
+        &[
+            (1, content.len()),
+            (1, SAMPLES.len()),
+            (1, SAMPLES.len()),
+            (1, NOT_A_PROFILE.len()),
+        ],
+    );
     // Each image decoded once, the third `Do` finding the first.
     expected.images_decoded = 2;
     expected.image_misses = 2;
@@ -466,22 +560,19 @@ fn a_profile_two_images_share_is_compiled_once() {
     assert_eq!(counted(&page), expected);
 }
 
-/// An inline image is never cached, so each one is a decode.
+/// An inline image is never cached, so each one is a decode. Its data is the
+/// content stream's, which is the one stream decoded.
 #[test]
 fn every_inline_image_is_decoded() {
     let inline = "BI /W 2 /H 2 /CS /RGB /BPC 8 /F /AHx ID 000000FFFFFFFFFFFF000000> EI";
-    let bytes = fixture(
-        "",
-        "",
-        &format!(
-            "q 20 0 0 20 10 10 cm {inline} Q\nq 20 0 0 20 40 10 cm {inline} Q\n\
-             q 20 0 0 20 70 10 cm {inline} Q\n"
-        ),
-        Vec::new(),
+    let content = format!(
+        "q 20 0 0 20 10 10 cm {inline} Q\nq 20 0 0 20 40 10 cm {inline} Q\n\
+         q 20 0 0 20 70 10 cm {inline} Q\n"
     );
+    let bytes = fixture("", "", &content, Vec::new());
     let (document, index) = first_page(bytes);
     let page = document.page(index).expect("a page");
-    let mut expected = Stats::default();
+    let mut expected = decoding(Stats::default(), &[(1, content.len())]);
     expected.images_decoded = 3;
     assert_eq!(counted(&page), expected);
 }
@@ -490,20 +581,25 @@ fn every_inline_image_is_decoded() {
 /// its own, and both count into the page's tally.
 #[test]
 fn a_pattern_cell_counts_what_it_draws() {
+    let content = "/Pattern cs /P1 scn 0 0 200 100 re f\n";
     let bytes = fixture(
         "/Pattern << /P1 8 0 R >>",
         "",
-        "/Pattern cs /P1 scn 0 0 200 100 re f\n",
+        content,
         vec![stream(
             "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 20 10]\n\
              /XStep 20 /YStep 10 /Resources << /Font << /F1 5 0 R >> >>",
-            b"BT /F1 6 Tf 1 2 Td (ab) Tj ET",
+            CELL,
         )],
     );
     let (document, index) = first_page(bytes);
     let page = document.page(index).expect("a page");
-    // One fill, so one cell: drawn once and repeated across the fill.
-    let mut expected = Stats::default();
+    // One fill, so one cell: drawn once and repeated across the fill, and
+    // decoded once.
+    let mut expected = decoding(
+        Stats::default(),
+        &[(1, content.len()), (1, CELL.len()), (1, program_len())],
+    );
     expected.glyphs_shown = 2;
     expected.outlines_filled = 2;
     // The cell's scope reads its one font; each glyph reads it again.
@@ -516,27 +612,36 @@ fn a_pattern_cell_counts_what_it_draws() {
 
 /// An annotation's appearance is drawn over two scopes of its own, the
 /// interpreter's and the renderer's, and both count — through the page's
-/// render and through the annotation's own door alike.
+/// render and through the annotation's own door alike. The appearance is
+/// decoded once; the page's empty content only by the page's render.
 #[test]
 fn an_annotation_counts_both_scopes_its_appearance_builds() {
     let (document, index) = first_page(annotation_page());
     let page = document.page(index).expect("a page");
     let shown = ANNOTATION_TEXT.len() as u64;
-    let mut expected = Stats::default();
-    expected.glyphs_shown = shown;
-    expected.outlines_filled = shown;
+    let mut drawn = decoding(
+        Stats::default(),
+        &[(1, appearance_content().len()), (1, program_len())],
+    );
+    drawn.glyphs_shown = shown;
+    drawn.outlines_filled = shown;
     // Both of the appearance's scopes read its one font; every glyph reads
     // it again.
-    expected.font_dictionaries_resolved = 2 + shown;
-    expected.glyph_outline_misses = shown;
-    expected.font_program_misses = 1;
-    expected.font_program_hits = shown - 1;
-    assert_eq!(counted(&page), expected, "the page, annotations drawn");
+    drawn.font_dictionaries_resolved = 2 + shown;
+    drawn.glyph_outline_misses = shown;
+    drawn.font_program_misses = 1;
+    drawn.font_program_hits = shown - 1;
+    let content = (1, 0);
+    assert_eq!(
+        counted(&page),
+        decoding(drawn, &[content]),
+        "the page, annotations drawn"
+    );
     let part = page
         .render_annotation(0, &asking())
         .expect("the annotation draws")
         .stats;
-    assert_eq!(part, Some(expected), "the annotation's own door");
+    assert_eq!(part, Some(drawn), "the annotation's own door");
 
     let without = page
         .render(&RenderOptions {
@@ -544,7 +649,11 @@ fn an_annotation_counts_both_scopes_its_appearance_builds() {
             ..asking()
         })
         .stats;
-    assert_eq!(without, Some(Stats::default()), "annotations not drawn");
+    assert_eq!(
+        without,
+        Some(decoding(Stats::default(), &[content])),
+        "annotations not drawn"
+    );
 }
 
 /// The text the annotation's appearance shows, every glyph distinct.
@@ -561,10 +670,15 @@ fn annotation_page() -> Vec<u8> {
             object("<< /Type /Annot /Subtype /Square /Rect [20 20 120 60] /AP << /N 9 0 R >> >>"),
             stream(
                 "/Type /XObject /Subtype /Form /BBox [0 0 100 40] /Resources << /Font << /F1 5 0 R >> >>",
-                format!("BT /F1 12 Tf 4 10 Td ({ANNOTATION_TEXT}) Tj ET").as_bytes(),
+                appearance_content().as_bytes(),
             ),
         ],
     )
+}
+
+/// [`annotation_page`]'s appearance stream.
+fn appearance_content() -> String {
+    format!("BT /F1 12 Tf 4 10 Td ({ANNOTATION_TEXT}) Tj ET")
 }
 
 /// A display list renders through the resources it keeps: its first replay
@@ -579,11 +693,13 @@ fn a_display_list_counts_through_the_resources_it_keeps() {
     let direct = glyphs_and_an_image_stats();
 
     let first = list.render(&asking()).stats.expect("asked");
-    let mut expected = direct;
-    // The interpretation ran when the list was recorded, so no scope is built
-    // and no glyph asks whether its font is a Type 3 font; only a bundled
-    // build's substitute requests, made at the first outline, read a
-    // dictionary.
+    // The interpretation ran when the list was recorded, so the content is
+    // not decoded again; `F1`'s program and the image are, at the first
+    // outline and the first `Do` the replay meets.
+    let mut expected = decoding(direct, &[(1, program_len()), (1, SAMPLES.len())]);
+    // Nor is a scope built, nor does a glyph ask whether its font is a Type 3
+    // font; only a bundled build's substitute requests, made at the first
+    // outline, read a dictionary.
     let without_a_program = 2;
     expected.font_dictionaries_resolved = if BUNDLED { without_a_program } else { 0 };
     assert_eq!(first, expected, "the first replay");
@@ -614,11 +730,12 @@ fn a_display_list_counts_the_annotations_it_keeps() {
     assert!(list.is_retained(), "the page is small enough to keep");
     let shown = ANNOTATION_TEXT.len() as u64;
 
-    let mut expected = Stats::default();
+    // The appearance was decoded, its scopes built and its glyphs asked about
+    // their font when the list was recorded; the replay extracts the
+    // outlines, reading the program for the first.
+    let mut expected = decoding(Stats::default(), &[(1, program_len())]);
     expected.glyphs_shown = shown;
     expected.outlines_filled = shown;
-    // The appearance's scopes were built, and its glyphs asked about their
-    // font, when the list was recorded; the replay extracts the outlines.
     expected.glyph_outline_misses = shown;
     expected.font_program_misses = 1;
     expected.font_program_hits = shown - 1;
@@ -673,12 +790,12 @@ fn every_counted_path_page() -> Vec<u8> {
             image("/DeviceRGB"),
             image("[/ICCBased 11 0 R]"),
             image("[/ICCBased 11 0 R]"),
-            stream("/N 3", b"not an ICC profile"),
+            stream("/N 3", NOT_A_PROFILE),
             form_with_text(FORM_TEXT),
             stream(
                 "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 20 10]\n\
                  /XStep 20 /YStep 10 /Resources << /Font << /F1 5 0 R >> >>",
-                b"BT /F1 6 Tf 1 2 Td (ab) Tj ET",
+                CELL,
             ),
             object("<< /Type /Annot /Subtype /Square /Rect [120 5 195 35] /AP << /N 15 0 R >> >>"),
             stream(
@@ -817,9 +934,10 @@ fn text_of(page: &tinker_pdf::TextPage) -> String {
 
 /// Text extraction counts what its scope reads: each font the page's
 /// resources name when the scope is built, the font dictionary each glyph
-/// reads to ask whether it is a Type 3 font, and each form's scope the
-/// interpreter asks for. Nothing is drawn, so nothing else counts. The text
-/// is the uncounted text, in either order.
+/// reads to ask whether it is a Type 3 font, each form's scope the
+/// interpreter asks for, and the content and every form's decoded. Nothing is
+/// drawn, so nothing else counts. The text is the uncounted text, in either
+/// order.
 #[test]
 fn text_stats_count_font_resolutions() {
     let (document, index) = first_page(glyphs_and_an_image_page());
@@ -834,9 +952,13 @@ fn text_stats_count_font_resolutions() {
             text_of(&page.text_with(&options)),
             "{options:?}: counting changed the text"
         );
-        let mut expected = Stats::default();
+        // The content alone is decoded: no outline reads a program, and the
+        // image is drawn twice and decoded by nobody.
+        let mut expected = decoding(
+            Stats::default(),
+            &[(1, glyphs_and_an_image_content().len())],
+        );
         // Three fonts read when the scope is built, and one lookup a glyph.
-        // The image is drawn twice and decoded by nobody.
         expected.font_dictionaries_resolved = SHOWN.len() as u64 + shown();
         assert_eq!(stats, expected, "{options:?}");
     }
@@ -846,7 +968,14 @@ fn text_stats_count_font_resolutions() {
     let (text, stats) = page.text_counted(&TextOptions::default());
     assert_eq!(text_of(&text), text_of(&page.text()));
     let shown = 3 * FORM_TEXT.len() as u64;
-    let mut expected = Stats::default();
+    // The content, and the form's at each of its three `Do`s.
+    let mut expected = decoding(
+        Stats::default(),
+        &[
+            (1, FORM_PAGE_CONTENT.len()),
+            (3, form_content(FORM_TEXT).len()),
+        ],
+    );
     // The page's scope reads its one font, the form's scope its own one once,
     // and every glyph its font's dictionary.
     expected.font_dictionaries_resolved = 1 + 1 + shown;
@@ -868,13 +997,6 @@ const INLINE_IMAGES: u64 = 2;
 /// form that keeps the page's scope, `Im2` soft-masked — and two inline
 /// images.
 fn images_page() -> Vec<u8> {
-    let inline = "BI /W 2 /H 2 /CS /RGB /BPC 8 /F /AHx ID 000000FFFFFFFFFFFF000000> EI";
-    let mut content = String::new();
-    content.push_str("q 20 0 0 20 10 10 cm /Im1 Do Q\nq 20 0 0 20 40 10 cm /Im2 Do Q\n");
-    content.push_str("q 20 0 0 20 70 10 cm /Im1 Do Q\nq 1 0 0 1 100 10 cm /Fm1 Do Q\n");
-    for at in 0..INLINE_IMAGES {
-        content.push_str(&format!("q 20 0 0 20 {} 60 cm {inline} Q\n", 10 + at * 30));
-    }
     let mut masked = image("/DeviceRGB");
     let at = masked
         .windows(9)
@@ -884,18 +1006,33 @@ fn images_page() -> Vec<u8> {
     fixture(
         "/XObject << /Im1 8 0 R /Im2 9 0 R /Fm1 10 0 R >>",
         "",
-        &content,
+        &images_content(),
         vec![
             image("/DeviceRGB"),
             masked,
             stream(
                 "/Type /XObject /Subtype /Form /BBox [0 0 30 30]",
-                b"q 20 0 0 20 5 5 cm /Im1 Do Q",
+                IMAGES_FORM,
             ),
             image("/DeviceGray"),
         ],
     )
 }
+
+/// [`images_page`]'s content stream.
+fn images_content() -> String {
+    let inline = "BI /W 2 /H 2 /CS /RGB /BPC 8 /F /AHx ID 000000FFFFFFFFFFFF000000> EI";
+    let mut content = String::new();
+    content.push_str("q 20 0 0 20 10 10 cm /Im1 Do Q\nq 20 0 0 20 40 10 cm /Im2 Do Q\n");
+    content.push_str("q 20 0 0 20 70 10 cm /Im1 Do Q\nq 1 0 0 1 100 10 cm /Fm1 Do Q\n");
+    for at in 0..INLINE_IMAGES {
+        content.push_str(&format!("q 20 0 0 20 {} 60 cm {inline} Q\n", 10 + at * 30));
+    }
+    content
+}
+
+/// The content of [`images_page`]'s form, which draws `Im1`.
+const IMAGES_FORM: &[u8] = b"q 20 0 0 20 5 5 cm /Im1 Do Q";
 
 /// Image extraction counts a decoder run for each entry it lists — an image
 /// XObject once however often it is drawn in one space, its soft mask part of
@@ -921,7 +1058,19 @@ fn image_stats_count_the_decodes_made() {
         images.iter().any(|image| image.soft_mask.is_some()),
         "Im2's soft mask is described"
     );
-    let mut expected = Stats::default();
+    // The content, the form's content at its one `Do`, and the samples of
+    // each image XObject and of `Im2`'s soft mask; an inline image's data is
+    // the content's.
+    let mut expected = decoding(
+        Stats::default(),
+        &[
+            (1, images_content().len()),
+            (1, IMAGES_FORM.len()),
+            (1, SAMPLES.len()),
+            (1, SAMPLES.len()),
+            (1, SAMPLES.len()),
+        ],
+    );
     expected.images_decoded = listed;
     // The form brings no resources, so it draws in the page's scope: the
     // interpreter's ask records that, and the extraction's at the form's
@@ -967,7 +1116,17 @@ fn save_stats_are_none_unless_asked() {
 
         let counted = save(&mut document.editor(), &asked);
         same_save(&counted, &plain, what);
-        let mut expected = Stats::default();
+        // The font pass decodes the content and `F1`'s program, at its first
+        // glyph, and the program again to cut it; an image pass that walks
+        // decodes the content again, and the image's samples to weigh them.
+        let mut expected = decoding(
+            Stats::default(),
+            &[
+                (1 + image_walks, glyphs_and_an_image_content().len()),
+                (2, program_len()),
+                (image_walks, SAMPLES.len()),
+            ],
+        );
         // Each walk reads the root and the one page.
         expected.page_walks = 1 + image_walks;
         expected.page_nodes_visited = 2 * expected.page_walks;
@@ -998,17 +1157,21 @@ fn part_line(part: usize, page: usize) -> String {
     format!("Page {page} of part {part}")
 }
 
+/// How many pages a [`part`] has.
+const PART_PAGES: usize = 10;
+
 /// A document of ten pages, each with resources of its own naming the
-/// embedded face, showing [`part_line`].
+/// embedded face, one font object for them all, showing [`part_line`].
 fn part(part: usize) -> Vec<u8> {
-    const PAGES: usize = 10;
     // 1 the catalog, 2 the page tree, 3 to 5 the face, then each page and its
     // content.
-    let kids: Vec<String> = (0..PAGES).map(|at| format!("{} 0 R", 6 + 2 * at)).collect();
+    let kids: Vec<String> = (0..PART_PAGES)
+        .map(|at| format!("{} 0 R", 6 + 2 * at))
+        .collect();
     let mut objects = vec![
         object("<< /Type /Catalog /Pages 2 0 R >>"),
         object(&format!(
-            "<< /Type /Pages /Count {PAGES} /Kids [{}] >>",
+            "<< /Type /Pages /Count {PART_PAGES} /Kids [{}] >>",
             kids.join(" ")
         )),
         object(&format!(
@@ -1022,18 +1185,20 @@ fn part(part: usize) -> Vec<u8> {
         ),
         stream("", &render_support::curvy_font()),
     ];
-    for at in 0..PAGES {
+    for at in 0..PART_PAGES {
         objects.push(object(&format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
              /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
             7 + 2 * at
         )));
-        objects.push(stream(
-            "",
-            format!("BT /F1 12 Tf 10 50 Td ({}) Tj ET", part_line(part, at)).as_bytes(),
-        ));
+        objects.push(stream("", part_content(part, at).as_bytes()));
     }
     pdf(&objects)
+}
+
+/// The content of page `page` of part `part`.
+fn part_content(part: usize, page: usize) -> String {
+    format!("BT /F1 12 Tf 10 50 Td ({}) Tj ET", part_line(part, page))
 }
 
 /// Four parts' pages imported into a document of none, and saved.
@@ -1088,7 +1253,15 @@ fn a_merge_reads_its_stats_from_the_save() {
         let shown: u64 = (0..4)
             .flat_map(|part| (0..10).map(move |page| part_line(part, page).len() as u64))
             .sum();
-        let mut expected = Stats::default();
+        // The font pass decodes every page's content, and every page's copy
+        // of the face's program, an import copying it for each page, at its
+        // first glyph. Its cut reads the copies as the editor holds them,
+        // unfiltered, and runs no chain.
+        let mut decoded: Vec<(u64, usize)> = (0..4)
+            .flat_map(|part| (0..10).map(move |page| (1, part_content(part, page).len())))
+            .collect();
+        decoded.extend((0..40).map(|_| (1, program_len())));
+        let mut expected = decoding(Stats::default(), &decoded);
         // The font pass walks the merged tree once, its root and forty pages;
         // each page's scope reads its one font, and each glyph its font's
         // dictionary; each scope reads the face's program at its first glyph
@@ -1110,13 +1283,6 @@ const CLAIMING_LINE: &str = "Curvy!";
 /// elements, claiming PDF/A-2a and PDF/UA-1 in its XMP packet, and
 /// PDF/X-1a:2003 in `/Info` when `pdfx` is set.
 fn claiming_page(pdfx: bool) -> Vec<u8> {
-    let packet = r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF
- xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-<rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/"
- xmlns:pdfuaid="http://www.aiim.org/pdfua/ns/id/"
- pdfaid:part="2" pdfaid:conformance="A" pdfuaid:part="1"/>
-</rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#;
     let objects = vec![
         object(
             "<< /Type /Catalog /Pages 2 0 R /Metadata 8 0 R /StructTreeRoot 9 0 R\n\
@@ -1127,10 +1293,7 @@ fn claiming_page(pdfx: bool) -> Vec<u8> {
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
              /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
         ),
-        stream(
-            "",
-            format!("BT /F1 12 Tf 10 50 Td ({CLAIMING_LINE}) Tj ET").as_bytes(),
-        ),
+        stream("", claiming_content().as_bytes()),
         object(&format!(
             "<< /Type /Font /Subtype /TrueType /BaseFont /Curvy /FirstChar 32 /LastChar 126\n\
              /Widths [320{}] /Encoding /WinAnsiEncoding /FontDescriptor 6 0 R >>",
@@ -1141,11 +1304,39 @@ fn claiming_page(pdfx: bool) -> Vec<u8> {
              /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /FontFile2 7 0 R >>",
         ),
         stream("", &render_support::curvy_font()),
-        stream("/Type /Metadata /Subtype /XML", packet.as_bytes()),
+        stream("/Type /Metadata /Subtype /XML", CLAIMING_PACKET.as_bytes()),
         object("<< /Type /StructTreeRoot >>"),
         object("<< /Title (Counted) /GTS_PDFXVersion (PDF/X-1a:2003) >>"),
     ];
     pdf_trailing(&objects, if pdfx { " /Info 10 0 R" } else { "" })
+}
+
+/// [`claiming_page`]'s content stream.
+fn claiming_content() -> String {
+    format!("BT /F1 12 Tf 10 50 Td ({CLAIMING_LINE}) Tj ET")
+}
+
+/// [`claiming_page`]'s XMP packet.
+const CLAIMING_PACKET: &str = r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF
+ xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/"
+ xmlns:pdfuaid="http://www.aiim.org/pdfua/ns/id/"
+ pdfaid:part="2" pdfaid:conformance="A" pdfuaid:part="1"/>
+</rdf:RDF></x:xmpmeta><?xpacket end="w"?>"#;
+
+/// `expected` with [`claiming_page`]'s streams decoded on top: its content
+/// `content` times, the face's program `programs` times and the XMP packet
+/// `packets` times.
+fn reading(expected: Stats, content: u64, programs: u64, packets: u64) -> Stats {
+    decoding(
+        expected,
+        &[
+            (content, claiming_content().len()),
+            (programs, program_len()),
+            (packets, CLAIMING_PACKET.len()),
+        ],
+    )
 }
 
 /// What a validation of [`claiming_page`] counts: `walks` walks of the page
@@ -1171,29 +1362,54 @@ fn walked(walks: u64, widths: bool) -> Stats {
 
 /// Each validator rule that reads every page walks the page tree itself, and
 /// a validation counts every walk its rules made — the width rule's scope
-/// over the page's one font too. The verdict is the uncounted verdict.
+/// over the page's one font too — and every stream they decode. The verdict
+/// is the uncounted verdict.
 #[test]
 fn validation_stats_count_its_page_walks() {
     let document = Document::open(claiming_page(true)).expect("the fixture opens");
 
-    // PDF/A-2a. Metadata: the packet header rule reads every page's packet,
-    // and part 2's predefined-schema rule reads them again. Structure: level
-    // A binds the structure tree, which maps every page. Fonts: the width
-    // rule and the embedding rules each walk every content stream. Colour:
-    // the scan of every operator, the transparency groups' spaces, and part
-    // 2's blending spaces; the page-level output intent is part 4's and the
-    // transparency rule part 1's.
+    // PDF/A-2a. Every validation reads the packet for the claim. Metadata:
+    // the packet header rule reads the packet again, and every page's, and
+    // part 2's predefined-schema rule reads the pages' again; this page has
+    // none. Structure: level A binds the structure tree, which maps every
+    // page. Fonts: the width rule and the embedding rules each walk every
+    // content stream, decoding it; the width rule reads the program for its
+    // metrics and its scope reads it again at its first selection, and the
+    // embedding rule reads it to parse it. Colour: the scan of every
+    // operator, which decodes the content, the transparency groups' spaces,
+    // and part 2's blending spaces; the page-level output intent is part 4's
+    // and the transparency rule part 1's.
     let colour = PdfACoverage {
         colour: true,
         ..PdfACoverage::default()
     };
     let groups = [
-        ("syntax", PdfACoverage::SYNTAX, walked(0, false)),
-        ("metadata", PdfACoverage::METADATA, walked(2, false)),
-        ("structure", PdfACoverage::STRUCTURE, walked(1, false)),
-        ("fonts", PdfACoverage::FONTS, walked(2, true)),
-        ("colour", colour, walked(3, false)),
-        ("every group", PdfACoverage::IMPLEMENTED, walked(8, true)),
+        (
+            "syntax",
+            PdfACoverage::SYNTAX,
+            reading(walked(0, false), 0, 0, 1),
+        ),
+        (
+            "metadata",
+            PdfACoverage::METADATA,
+            reading(walked(2, false), 0, 0, 2),
+        ),
+        (
+            "structure",
+            PdfACoverage::STRUCTURE,
+            reading(walked(1, false), 0, 0, 1),
+        ),
+        (
+            "fonts",
+            PdfACoverage::FONTS,
+            reading(walked(2, true), 2, 3, 1),
+        ),
+        ("colour", colour, reading(walked(3, false), 1, 0, 1)),
+        (
+            "every group",
+            PdfACoverage::IMPLEMENTED,
+            reading(walked(8, true), 3, 3, 2),
+        ),
     ];
     for (what, coverage, expected) in groups {
         let (verdict, stats) = document.validate_pdfa_counted(coverage);
@@ -1205,15 +1421,38 @@ fn validation_stats_count_its_page_walks() {
         assert_eq!(stats, expected, "PDF/A {what}");
     }
 
-    // PDF/UA-1. Structure: binding the tree, and part 1's annotation rule
-    // reading every page's annotations. Fonts: PDF/A's width and embedding
-    // rules, and the `/ToUnicode` rule's walk of every content stream.
+    // PDF/UA-1. Every validation reads the packet for the claim, and the
+    // metadata rules read what that read. Structure: binding the tree, and
+    // part 1's annotation rule reading every page's annotations. Fonts:
+    // PDF/A's width and embedding rules, as above, and the `/ToUnicode`
+    // rule's walk of every content stream; the font has no `/ToUnicode` to
+    // decode.
     let groups = [
-        ("syntax", PdfUaCoverage::SYNTAX, walked(0, false)),
-        ("metadata", PdfUaCoverage::METADATA, walked(0, false)),
-        ("structure", PdfUaCoverage::STRUCTURE, walked(2, false)),
-        ("fonts", PdfUaCoverage::FONTS, walked(3, true)),
-        ("every group", PdfUaCoverage::IMPLEMENTED, walked(5, true)),
+        (
+            "syntax",
+            PdfUaCoverage::SYNTAX,
+            reading(walked(0, false), 0, 0, 1),
+        ),
+        (
+            "metadata",
+            PdfUaCoverage::METADATA,
+            reading(walked(0, false), 0, 0, 1),
+        ),
+        (
+            "structure",
+            PdfUaCoverage::STRUCTURE,
+            reading(walked(2, false), 0, 0, 1),
+        ),
+        (
+            "fonts",
+            PdfUaCoverage::FONTS,
+            reading(walked(3, true), 3, 3, 1),
+        ),
+        (
+            "every group",
+            PdfUaCoverage::IMPLEMENTED,
+            reading(walked(5, true), 3, 3, 1),
+        ),
     ];
     for (what, coverage, expected) in groups {
         let (verdict, stats) = document.validate_pdfua_counted(coverage);
@@ -1225,14 +1464,32 @@ fn validation_stats_count_its_page_walks() {
         assert_eq!(stats, expected, "PDF/UA {what}");
     }
 
-    // PDF/X-1a:2003. Syntax: the boxes and annotations of every page. Print:
-    // PDF/A's operator scan and its transparency rule. Fonts: the embedding
-    // rule.
+    // PDF/X-1a:2003, claimed in `/Info`, so no packet is read. Syntax: the
+    // boxes and annotations of every page. Print: PDF/A's operator scan,
+    // decoding the content, and its transparency rule; there is no output
+    // intent to read a profile from. Fonts: the embedding rule, decoding the
+    // content; its parse budget of none keeps the program closed.
     let groups = [
-        ("syntax", PdfXCoverage::SYNTAX, walked(1, false)),
-        ("print", PdfXCoverage::PRINT, walked(2, false)),
-        ("fonts", PdfXCoverage::FONTS, walked(1, false)),
-        ("every group", PdfXCoverage::IMPLEMENTED, walked(4, false)),
+        (
+            "syntax",
+            PdfXCoverage::SYNTAX,
+            reading(walked(1, false), 0, 0, 0),
+        ),
+        (
+            "print",
+            PdfXCoverage::PRINT,
+            reading(walked(2, false), 1, 0, 0),
+        ),
+        (
+            "fonts",
+            PdfXCoverage::FONTS,
+            reading(walked(1, false), 1, 0, 0),
+        ),
+        (
+            "every group",
+            PdfXCoverage::IMPLEMENTED,
+            reading(walked(4, false), 2, 0, 0),
+        ),
     ];
     for (what, coverage, expected) in groups {
         let (verdict, stats) = document.validate_pdfx_counted(coverage);
@@ -1394,4 +1651,166 @@ fn page_lookup_counts_the_nodes_it_visits() {
         expected.page_nodes_visited = 1 + ancestors(&whole, index);
         assert_eq!(stats, expected, "streamed page {index}");
     }
+}
+
+/// The content [`deflated_page`] stores deflated: its form three times.
+const DEFLATED_CONTENT: &str = FORM_PAGE_CONTENT;
+
+/// `data` deflated, as a stream with `dict`'s entries.
+fn deflated(dict: &str, data: &[u8]) -> Vec<u8> {
+    stream(
+        &format!("{dict} /Filter /FlateDecode"),
+        &tinker_pdf_filters::zlib_compress(data),
+    )
+}
+
+/// A page invoking `Fm1` three times, every stream deflated: 4 the content,
+/// 5 and 6 the face's font and descriptor, 7 its program, and 8 the form,
+/// which shows [`FORM_TEXT`] in the face.
+fn deflated_page() -> Vec<u8> {
+    pdf(&[
+        object("<< /Type /Catalog /Pages 2 0 R >>"),
+        object("<< /Type /Pages /Count 1 /Kids [3 0 R] >>"),
+        object(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
+             /Resources << /XObject << /Fm1 8 0 R >> >> /Contents 4 0 R >>",
+        ),
+        deflated("", DEFLATED_CONTENT.as_bytes()),
+        object(&format!(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /Curvy /FirstChar 32 /LastChar 126\n\
+             /Widths [320{}] /Encoding /WinAnsiEncoding /FontDescriptor 6 0 R >>",
+            " 640".repeat(94)
+        )),
+        object(
+            "<< /Type /FontDescriptor /FontName /Curvy /Flags 32 /FontBBox [0 0 1000 1000]\n\
+             /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 /FontFile2 7 0 R >>",
+        ),
+        deflated("", &render_support::curvy_font()),
+        deflated(
+            "/Type /XObject /Subtype /Form /BBox [0 0 80 20] /Resources << /Font << /F1 5 0 R >> >>",
+            form_content(FORM_TEXT).as_bytes(),
+        ),
+    ])
+}
+
+/// Decodes are counted for the operation that makes them, stream by stream:
+/// a render of a page whose form is shown three times decodes the content
+/// once, the form at each `Do` and the program at the form's first outline,
+/// and the bytes counted are what each inflate returned; a second render
+/// counts the same again, and a text extraction counts its own. A save that
+/// cuts a font reads the program at every page's first glyph and once more
+/// to cut it.
+#[test]
+fn decodes_are_counted_per_stream_and_operation() {
+    let (document, index) = first_page(deflated_page());
+    let page = document.page(index).expect("a page");
+    let (content, form) = (DEFLATED_CONTENT.len(), form_content(FORM_TEXT).len());
+    let stored = |data: &[u8]| tinker_pdf_filters::zlib_compress(data).len();
+
+    let render = counted(&page);
+    // The content once, the form at each of its three `Do`s, and the program
+    // at the form's first outline.
+    assert_eq!(
+        render.streams_decoded,
+        1 + 3 + 1,
+        "bundled faces: {BUNDLED}"
+    );
+    assert_eq!(
+        render.most_decodes_of_one_stream, 3,
+        "the form, once a `Do`"
+    );
+    assert_eq!(
+        render.bytes_decoded,
+        (content + 3 * form + program_len()) as u64,
+        "the inflated lengths"
+    );
+    let stored_runs = stored(DEFLATED_CONTENT.as_bytes())
+        + 3 * stored(form_content(FORM_TEXT).as_bytes())
+        + stored(&render_support::curvy_font());
+    assert_ne!(
+        render.bytes_decoded, stored_runs as u64,
+        "not the stored lengths"
+    );
+    // Nothing a render decodes is kept for the next: the count is the
+    // operation's.
+    assert_eq!(counted(&page), render, "a second render");
+
+    // Text extraction decodes the content and the form at each `Do`; no
+    // outline reads the program.
+    let (_, text) = page.text_counted(&TextOptions::default());
+    assert_eq!(
+        (
+            text.streams_decoded,
+            text.most_decodes_of_one_stream,
+            text.bytes_decoded
+        ),
+        (1 + 3, 3, (content + 3 * form) as u64),
+        "text extraction"
+    );
+
+    // A subset-on-save of ten pages that share one face: the font pass
+    // decodes each page's content and reads the program at each page's first
+    // glyph, a scope a page, and reads it once more to cut it.
+    let document = Document::open(part(0)).expect("the part opens");
+    let saved = save(
+        &mut document.editor(),
+        &SaveOptions {
+            stats: true,
+            ..SaveOptions::default()
+        },
+    );
+    let stats = saved.stats.expect("asked");
+    let pages = PART_PAGES as u64;
+    let contents: usize = (0..PART_PAGES)
+        .map(|page| part_content(0, page).len())
+        .sum();
+    assert_eq!(stats.streams_decoded, pages + pages + 1, "a subset-on-save");
+    assert_eq!(
+        stats.most_decodes_of_one_stream,
+        pages + 1,
+        "the program, a page and the cut"
+    );
+    assert_eq!(
+        stats.bytes_decoded,
+        (contents + (PART_PAGES + 1) * program_len()) as u64
+    );
+}
+
+/// A save that deduplicates streams decodes each stream with a filter once to
+/// compare it, and counts it; with no pass to run, that is all it decodes.
+/// The bytes are the uncounted save's.
+#[test]
+fn a_deduplicating_save_counts_the_streams_it_compares() {
+    let document = Document::open(deflated_page()).expect("the fixture opens");
+    let unasked = SaveOptions {
+        fonts: FontPolicy::Keep,
+        write: WriteOptions {
+            deduplicate_streams: true,
+            ..WriteOptions::default()
+        },
+        ..SaveOptions::default()
+    };
+    let asked = SaveOptions {
+        stats: true,
+        ..unasked.clone()
+    };
+    let plain = save(&mut document.editor(), &unasked);
+    let counted = save(&mut document.editor(), &asked);
+    same_save(&counted, &plain, "a deduplicating save");
+    let expected = decoding(
+        Stats::default(),
+        &[
+            (1, DEFLATED_CONTENT.len()),
+            (1, program_len()),
+            (1, form_content(FORM_TEXT).len()),
+        ],
+    );
+    assert_eq!(counted.stats, Some(expected));
+
+    // An editor asked to count counts the same compares into its own tally.
+    let mut editor = document.editor();
+    editor.count_work();
+    let bytes = editor.save(&asked.write);
+    assert!(bytes == plain.bytes, "the bytes differ");
+    assert_eq!(editor.work().map(|work| work.stats()), Some(expected));
 }

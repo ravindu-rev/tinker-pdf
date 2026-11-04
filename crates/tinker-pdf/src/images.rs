@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tinker_pdf_content::{interpret, Device, FontSource, GraphicsState, ImageRef, Matrix};
-use tinker_pdf_cos::{pages as cos_pages, ObjRef};
+use tinker_pdf_cos::ObjRef;
 
 use crate::resources::PageResources;
 use crate::stats::{Stats, Work};
@@ -392,7 +392,7 @@ impl Page {
     /// The images this page draws, counting into `work` when the operation
     /// is counting.
     fn images_in(&self, work: Option<&Arc<Work>>) -> Vec<PageImage> {
-        let content = cos_pages::content_bytes(&self.doc, &self.inner);
+        let content = crate::stats::content(&self.doc, &self.inner, work);
         let resources = Arc::new(PageResources::new_counted(
             &self.doc,
             &self.inner,

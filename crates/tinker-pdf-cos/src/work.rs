@@ -18,23 +18,28 @@
 //! nothing is locked or allocated, and the only cost is the `Option` each
 //! counting site tests.
 //!
-//! It lives here, in the lowest crate with an operation context, although what
-//! is counted so far is counted above it — glyphs by the renderer, font
-//! dictionaries and cache lookups by the facade's resource scopes; only the
-//! page walk is counted here. One ledger an operation carries through every
-//! context is the reason, and each counter says which layer counts it. The
-//! editor is the context this crate gives it: a [`crate::DocumentEditor`]
-//! asked to count holds one tally, which the passes over it count into.
+//! It lives here, in the lowest crate with an operation context, although much
+//! of what is counted is counted above it — glyphs by the renderer, font
+//! dictionaries and cache lookups by the facade's resource scopes. The page
+//! walk and the filter chain are counted here. One ledger an operation carries
+//! through every context is the reason, and each counter says which layer
+//! counts it. The editor is the context this crate gives it: a
+//! [`crate::DocumentEditor`] asked to count holds one tally, which the passes
+//! over it count into.
 
+use std::collections::BTreeMap;
 use std::ops::{Add, AddAssign};
 use std::sync::Mutex;
 
+use crate::object::ObjRef;
+
 /// What one operation counted: the value a door hands back when asked.
 ///
-/// Every field is a count of steps of one kind, a public `u64`. **It is
-/// `#[non_exhaustive]`** so that the counters later rows add — pages walked,
-/// streams decoded, masks rasterised — are additions rather than breaks: read
-/// a field by name, total them with [`Stats::work`], and sum two with `+`.
+/// Every field is a public `u64`: a count of steps of one kind, but for one
+/// maximum and one quantity, which say so. **It is `#[non_exhaustive]`** so
+/// that a counter a later row adds — masks rasterised, threads run — is an
+/// addition rather than a break: read a field by name, total the steps with
+/// [`Stats::work`], and sum two with `+`.
 ///
 /// A count is what the operation did, not what it was worth: a cache lookup
 /// counts whether or not the entry it found held anything, and a glyph shown
@@ -115,6 +120,32 @@ pub struct Stats {
     ///
     /// Counted by this crate's page walk and lookup.
     pub page_nodes_visited: u64,
+    /// Runs of a stream's filter chain: each time an operation read a
+    /// stream's bytes decoded, whatever the chain returned — a refusal, and
+    /// output stopped at the decode ceiling, included. A stream read twice is
+    /// two runs; a reference that names no stream is none.
+    ///
+    /// Counted by this crate where the chain is applied: the two decoding
+    /// entry points' counted siblings,
+    /// [`crate::CosDocument::stream_decoded_counted`] and
+    /// [`crate::CosDocument::stream_image_input_counted`], every
+    /// [`crate::resolve::Counting`] view, and a counting editor's own decodes.
+    /// What a document decodes for itself — its object streams,
+    /// cross-reference streams and hint tables, read once and kept — belongs
+    /// to no operation and is not counted.
+    pub streams_decoded: u64,
+    /// The most runs of its filter chain any one stream had, the stream named
+    /// by its reference. A maximum rather than a count of steps: [`Stats::work`]
+    /// leaves it out, and `+` keeps the larger of two. One means no stream was
+    /// decoded twice.
+    ///
+    /// Counted with `streams_decoded`.
+    pub most_decodes_of_one_stream: u64,
+    /// Bytes the filter chains returned, every run's summed. A quantity rather
+    /// than a count of steps, so [`Stats::work`] leaves it out.
+    ///
+    /// Counted with `streams_decoded`.
+    pub bytes_decoded: u64,
 }
 
 /// One kind of step a [`Work`] counts: a [`Stats`] field, by name.
@@ -161,10 +192,9 @@ impl Stats {
     /// The total of every counter that counts a step taken — the figure a
     /// guard compares at two sizes of one input.
     ///
-    /// Every counter `Stats` has today is one. A maximum or a quantity a later
-    /// row adds — the most decodes any one stream had, the bytes a filter
-    /// chain produced — is left out, because a byte total grows with the page
-    /// and would hide a step count that grows with the document.
+    /// A maximum and a quantity are left out — `most_decodes_of_one_stream`
+    /// and `bytes_decoded` — because a byte total grows with the page and
+    /// would hide a step count that grows with the document.
     #[must_use]
     pub fn work(&self) -> u64 {
         [
@@ -184,6 +214,7 @@ impl Stats {
             self.form_scope_misses,
             self.page_walks,
             self.page_nodes_visited,
+            self.streams_decoded,
         ]
         .into_iter()
         .fold(0u64, u64::saturating_add)
@@ -213,7 +244,7 @@ impl Stats {
 }
 
 /// Counts sum, saturating: a caller's loop of doors adds up to the loop's
-/// totals.
+/// totals. A maximum stays the largest either side saw.
 impl Add for Stats {
     type Output = Stats;
 
@@ -253,6 +284,11 @@ impl Add for Stats {
             page_nodes_visited: self
                 .page_nodes_visited
                 .saturating_add(other.page_nodes_visited),
+            streams_decoded: self.streams_decoded.saturating_add(other.streams_decoded),
+            most_decodes_of_one_stream: self
+                .most_decodes_of_one_stream
+                .max(other.most_decodes_of_one_stream),
+            bytes_decoded: self.bytes_decoded.saturating_add(other.bytes_decoded),
         }
     }
 }
@@ -270,14 +306,25 @@ impl AddAssign for Stats {
 /// shared references — the interpreter and the renderer hold a page's
 /// resources behind `&` — and behind one lock, because those contexts may be
 /// shared between threads: a retained page is `Send + Sync` and keeps its
-/// resources. The lock is held for one addition; one that will not open drops
-/// the count rather than panicking, as the caches beside it drop an entry.
+/// resources. The lock is held for one addition or one insertion; one that
+/// will not open drops the count rather than panicking, as the caches beside
+/// it drop an entry.
 ///
 /// One `Work` an operation, never one a document: a document is read by many
 /// threads at once, and a count kept on it would mix their operations.
 #[derive(Debug, Default)]
 pub struct Work {
-    counts: Mutex<Stats>,
+    counts: Mutex<Tally>,
+}
+
+/// What a [`Work`] keeps behind its lock.
+#[derive(Debug, Default)]
+struct Tally {
+    stats: Stats,
+    /// Each stream's runs of its filter chain so far, by its reference: what
+    /// [`Stats::most_decodes_of_one_stream`] is the largest of. A `BTreeMap`,
+    /// so that no count depends on hash order.
+    runs: BTreeMap<ObjRef, u64>,
 }
 
 impl Work {
@@ -289,16 +336,35 @@ impl Work {
 
     /// Adds `n` steps of one kind, saturating.
     pub fn add(&self, counter: Counter, n: u64) {
-        if let Ok(mut counts) = self.counts.lock() {
-            let slot = counts.slot(counter);
+        if let Ok(mut tally) = self.counts.lock() {
+            let slot = tally.stats.slot(counter);
             *slot = slot.saturating_add(n);
+        }
+    }
+
+    /// Counts one run of `stream`'s filter chain that returned `bytes`
+    /// bytes: the run, the bytes, and the stream's own runs, the largest of
+    /// which is [`Stats::most_decodes_of_one_stream`].
+    pub fn decoded(&self, stream: ObjRef, bytes: usize) {
+        if let Ok(mut tally) = self.counts.lock() {
+            let runs = tally.runs.entry(stream).or_insert(0);
+            *runs = runs.saturating_add(1);
+            let runs = *runs;
+            let stats = &mut tally.stats;
+            stats.streams_decoded = stats.streams_decoded.saturating_add(1);
+            stats.most_decodes_of_one_stream = stats.most_decodes_of_one_stream.max(runs);
+            let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+            stats.bytes_decoded = stats.bytes_decoded.saturating_add(bytes);
         }
     }
 
     /// What has been counted so far.
     #[must_use]
     pub fn stats(&self) -> Stats {
-        self.counts.lock().map(|counts| *counts).unwrap_or_default()
+        self.counts
+            .lock()
+            .map(|tally| tally.stats)
+            .unwrap_or_default()
     }
 }
 
@@ -368,6 +434,37 @@ mod tests {
             assert_eq!(*copy.slot(counter), index as u64 + 100, "{counter:?}");
         }
         assert_eq!(sum.work(), one.stats().work() + two.stats().work());
+    }
+
+    #[test]
+    fn a_decode_counts_its_run_its_bytes_and_its_stream() {
+        let work = Work::new();
+        let (one, two) = (ObjRef::new(4, 0), ObjRef::new(7, 0));
+        work.decoded(one, 10);
+        work.decoded(two, 3);
+        work.decoded(one, 10);
+        // Another generation of one number is another stream.
+        work.decoded(ObjRef::new(4, 1), 0);
+        let stats = work.stats();
+        assert_eq!(stats.streams_decoded, 4);
+        assert_eq!(stats.most_decodes_of_one_stream, 2, "object 4 twice");
+        assert_eq!(stats.bytes_decoded, 23);
+        assert_eq!(stats.work(), 4, "the runs alone are steps");
+    }
+
+    #[test]
+    fn a_sum_keeps_the_larger_maximum() {
+        let once = Work::new();
+        once.decoded(ObjRef::new(1, 0), 5);
+        let thrice = Work::new();
+        for _ in 0..3 {
+            thrice.decoded(ObjRef::new(1, 0), 2);
+        }
+        let sum = once.stats() + thrice.stats();
+        assert_eq!(sum.streams_decoded, 4);
+        assert_eq!(sum.bytes_decoded, 11);
+        assert_eq!(sum.most_decodes_of_one_stream, 3, "a maximum, not a sum");
+        assert_eq!(thrice.stats() + once.stats(), sum, "in either order");
     }
 
     #[test]

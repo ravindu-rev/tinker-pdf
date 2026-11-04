@@ -211,7 +211,7 @@ impl Page {
         content.extend_from_slice(&escaped(name));
         content.extend_from_slice(b" Do");
         Ok(
-            self.render_layer_counted(options, frame, work, |renderer, resources| {
+            self.render_layer(options, frame, work, |renderer, resources| {
                 interpret(&content, Matrix::IDENTITY, renderer, resources);
             }),
         )
@@ -256,10 +256,13 @@ impl Page {
         }
         .ok_or(not_drawn(NotDrawn::NotADictionary))?;
 
-        let appearance = annots::prepare(&self.doc, &dict).map_err(not_drawn)?;
+        // The tally is made before the appearance is decoded, so the decode
+        // counts too.
+        let work = crate::stats::tally(options.stats);
+        let appearance = annots::prepare(&self.doc, &dict, work.as_ref()).map_err(not_drawn)?;
         let rect = appearance.rect();
         Ok(
-            self.render_layer(options, Some(rect), |renderer, resources| {
+            self.render_layer(options, Some(rect), work, |renderer, resources| {
                 annots::draw_prepared(
                     &self.doc,
                     &appearance,

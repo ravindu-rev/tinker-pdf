@@ -118,7 +118,7 @@ pub(super) fn rules(
     if part == Some(Part::One) {
         annotation_colours(doc, &destination, out);
     }
-    icc_spaces(doc, &used, part, out);
+    icc_spaces(doc, &used, part, work, out);
     rendering_intents(&used, out);
     xobject_entries(doc, &used, out);
     transfer_functions(doc, &used, out);
@@ -127,7 +127,7 @@ pub(super) fn rules(
     }
     undefined_operators(&used, out);
     if part.is_some() && part != Some(Part::One) {
-        separations_agree(doc, &used, out);
+        separations_agree(doc, &used, work, out);
         colorants_described(doc, &used, out);
     }
 }
@@ -146,7 +146,12 @@ pub(super) fn rules(
 /// different, and the same function written once directly and once by
 /// reference, or once deflated and once not, is the same. [`Comparison::same`]
 /// is that sentence. Part 1 states no such rule.
-fn separations_agree(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
+fn separations_agree(
+    doc: &CosDocument,
+    used: &Used,
+    tally: Option<&Arc<Work>>,
+    out: &mut Vec<Raw>,
+) {
     let mut reported: BTreeSet<&[u8]> = BTreeSet::new();
     let mut work = 0;
     for (index, (name, alternate, tint, at)) in used.separations.iter().enumerate() {
@@ -163,6 +168,7 @@ fn separations_agree(doc: &CosDocument, used: &Used, out: &mut Vec<Raw>) {
             doc,
             assumed: BTreeSet::new(),
             work: &mut work,
+            tally,
         };
         if !comparison.same(first_alternate, alternate, 0) || !comparison.same(first_tint, tint, 0)
         {
@@ -201,6 +207,9 @@ struct Comparison<'a> {
     assumed: BTreeSet<(ObjRef, ObjRef)>,
     /// The rule's work so far, across every question it asks of the file.
     work: &'a mut usize,
+    /// The validation's tally, when it is counting: each stream decoded to
+    /// compare counts.
+    tally: Option<&'a Arc<Work>>,
 }
 
 impl Comparison<'_> {
@@ -249,7 +258,10 @@ impl Comparison<'_> {
                     return false;
                 }
                 match (a.as_objref(), b.as_objref()) {
-                    (Some(x), Some(y)) => match (doc.stream_decoded(x), doc.stream_decoded(y)) {
+                    (Some(x), Some(y)) => match (
+                        crate::stats::decoded(doc, x, self.tally),
+                        crate::stats::decoded(doc, y, self.tally),
+                    ) {
                         // The decoded bytes are the rule's work too, a unit
                         // a kibibyte, so a file of many large equal streams
                         // spends the budget rather than the reader's time.
@@ -490,7 +502,7 @@ fn output_intents(
             continue;
         };
         profiles.insert(profile_ref);
-        if let Ok(bytes) = doc.stream_decoded(profile_ref) {
+        if let Ok(bytes) = crate::stats::decoded(doc, profile_ref, work) {
             for (field, found) in header_defects(&bytes, OUTPUT_CLASSES, OUTPUT_SPACES, part) {
                 out.push(Raw {
                     rule: clauses::OUTPUT_INTENT,
@@ -499,7 +511,7 @@ fn output_intents(
                 });
             }
         }
-        destination = profile_space(doc, profile_ref);
+        destination = profile_space(doc, profile_ref, work);
     }
 
     if profiles.len() > 1 {
@@ -613,7 +625,7 @@ fn page_destination(doc: &CosDocument, work: Option<&Arc<Work>>) -> Destination 
                 continue;
             }
             if let Some(profile) = intent.get_ref(doc.intern(b"DestOutputProfile")) {
-                return profile_space(doc, profile);
+                return profile_space(doc, profile, work);
             }
         }
     }
@@ -626,8 +638,8 @@ fn page_destination(doc: &CosDocument, work: Option<&Arc<Work>>) -> Destination 
 /// [`Destination::Unreadable`] rather than a finding, for the reason the module
 /// note gives: this parser refuses profiles it cannot build a transform from,
 /// and "cannot render" is not "does not conform".
-fn profile_space(doc: &CosDocument, reference: ObjRef) -> Destination {
-    let Ok(bytes) = doc.stream_decoded(reference) else {
+fn profile_space(doc: &CosDocument, reference: ObjRef, work: Option<&Arc<Work>>) -> Destination {
+    let Ok(bytes) = crate::stats::decoded(doc, reference, work) else {
         return Destination::Unreadable;
     };
     match icc::Profile::parse(&bytes) {
@@ -1256,7 +1268,13 @@ fn annotation_colours(doc: &CosDocument, destination: &Destination, out: &mut Ve
 /// profile this build cannot read leaves the second half unasked; the first —
 /// `/N` present and one of the three values ISO 32000-1 8.6.5.5 admits — is
 /// asked either way.
-fn icc_spaces(doc: &CosDocument, used: &Used, part: Option<Part>, out: &mut Vec<Raw>) {
+fn icc_spaces(
+    doc: &CosDocument,
+    used: &Used,
+    part: Option<Part>,
+    work: Option<&Arc<Work>>,
+    out: &mut Vec<Raw>,
+) {
     for reference in &used.icc_streams {
         let Ok(object) = doc.get(*reference) else {
             continue;
@@ -1275,7 +1293,7 @@ fn icc_spaces(doc: &CosDocument, used: &Used, part: Option<Part>, out: &mut Vec<
             });
             continue;
         };
-        let Ok(bytes) = doc.stream_decoded(*reference) else {
+        let Ok(bytes) = crate::stats::decoded(doc, *reference, work) else {
             continue;
         };
         for (field, found) in header_defects(&bytes, ICC_BASED_CLASSES, ICC_BASED_SPACES, part) {

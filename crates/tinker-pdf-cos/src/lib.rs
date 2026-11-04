@@ -141,15 +141,15 @@ pub use lexer::{Keyword, Lexer, Token, TokenKind};
 pub use name::{Name, NameTable, NAMES};
 pub use object::{Dict, ObjRef, Object, PdfString, StreamObj};
 pub use outline::{
-    attachments, metadata, outline, page_labels, xmp_metadata, Attachment, LabelStyle, Metadata,
-    OutlineItem, Trapped,
+    attachments, metadata, outline, page_labels, xmp_metadata, xmp_metadata_counted, Attachment,
+    LabelStyle, Metadata, OutlineItem, Trapped,
 };
 pub use pages::{Page, PageBoundary, Rect};
 pub use parse::{parse_indirect_at, parse_object_at, ParsedIndirect, ParsedObject};
 pub use png_embed::{png_image, PngImageData, PngRoute};
 pub use pubsec::{PubSecError, PublicKeyEncryption, Recipient, SealError};
 pub use raster_embed::RasterImageData;
-pub use resolve::Resolve;
+pub use resolve::{Counting, Resolve};
 pub use script::{Budget, Event, Host, Outcome, ScriptError, ScriptPolicy, ScriptScope, Trigger};
 pub use security::{AuthError, AuthLevel, Authenticated, StandardDecryptor};
 pub use sign::{

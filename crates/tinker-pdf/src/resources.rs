@@ -824,6 +824,18 @@ impl PageResources {
         stats::count(self.work.as_deref(), counter);
     }
 
+    /// `r`'s bytes through its filter chain, the run counted into the tally
+    /// when there is one.
+    fn decoded(&self, r: ObjRef) -> Result<Vec<u8>, tinker_pdf_cos::CosError> {
+        self.doc.stream_decoded_counted(r, self.work.as_deref())
+    }
+
+    /// `r`'s bytes as an image codec takes them, counted as
+    /// [`PageResources::decoded`] counts.
+    fn image_input(&self, r: ObjRef) -> Result<Vec<u8>, tinker_pdf_cos::CosError> {
+        self.doc.stream_image_input_counted(r, self.work.as_deref())
+    }
+
     /// Adds fonts some other pass over the same content could not resolve —
     /// the interpretation a retained page recorded — to what this render
     /// reports, as though its own interpretation had met them.
@@ -858,7 +870,7 @@ impl PageResources {
 
         if let Some(dict) = page.resources.as_ref() {
             resources = Some(dict.clone());
-            for (name, font) in cos_font::from_resources(doc, dict) {
+            for (name, font) in stats::fonts(doc, dict, work.as_deref()) {
                 stats::count(work.as_deref(), Counter::FontDictionariesResolved);
                 if let Some(bytes) = doc.name_bytes(name) {
                     let key = bytes.to_vec();
@@ -909,8 +921,7 @@ impl PageResources {
         }
         self.count(Counter::IccTransformMisses);
         let compiled = self
-            .doc
-            .stream_decoded(reference)
+            .decoded(reference)
             .ok()
             .and_then(|bytes| tinker_pdf_color::icc::Profile::parse(&bytes).ok())
             .as_ref()
@@ -979,7 +990,7 @@ impl PageResources {
         let mut fonts = HashMap::new();
         let mut font_ids = HashMap::new();
 
-        for (name, font) in cos_font::from_resources(doc, &dict) {
+        for (name, font) in stats::fonts(doc, &dict, work.as_deref()) {
             stats::count(work.as_deref(), Counter::FontDictionariesResolved);
             if let Some(bytes) = doc.name_bytes(name) {
                 let key = bytes.to_vec();
@@ -1451,7 +1462,7 @@ impl PageResources {
                         None => items
                             .get(3)
                             .and_then(Object::as_objref)
-                            .and_then(|r| self.doc.stream_decoded(r).ok())
+                            .and_then(|r| self.decoded(r).ok())
                             .unwrap_or_default(),
                     },
                     None => Vec::new(),
@@ -1708,7 +1719,7 @@ impl PageResources {
         space: ColorSpace,
         function: Function,
     ) -> Option<Mesh> {
-        let data = self.doc.stream_decoded(reference?).ok()?;
+        let data = self.decoded(reference?).ok()?;
 
         let integer = |key: &[u8]| {
             self.doc
@@ -1782,7 +1793,7 @@ fn program_for(
     provider: Option<&dyn FontProvider>,
     work: Option<&Work>,
 ) -> Option<Arc<Vec<u8>>> {
-    if let Some(embedded) = embedded_program(doc, name, resources) {
+    if let Some(embedded) = embedded_program(doc, name, resources, work) {
         return Some(Arc::new(embedded));
     }
 
@@ -1794,7 +1805,12 @@ fn program_for(
     provider.substitute(&FontRequest::read(doc, &dict))
 }
 
-fn embedded_program(doc: &CosDocument, name: &[u8], resources: &Dict) -> Option<Vec<u8>> {
+fn embedded_program(
+    doc: &CosDocument,
+    name: &[u8],
+    resources: &Dict,
+    work: Option<&Work>,
+) -> Option<Vec<u8>> {
     let fonts = doc.resolve_key(resources, doc.intern(b"Font"));
     let dict = fonts.as_dict()?;
     let font = doc.resolve_key(dict, doc.intern(name));
@@ -1813,7 +1829,7 @@ fn embedded_program(doc: &CosDocument, name: &[u8], resources: &Dict) -> Option<
 
     for key in [b"FontFile2".as_slice(), b"FontFile3", b"FontFile"] {
         if let Some(reference) = descriptor.get_ref(doc.intern(key)) {
-            if let Ok(bytes) = doc.stream_decoded(reference) {
+            if let Ok(bytes) = doc.stream_decoded_counted(reference, work) {
                 if !bytes.is_empty() {
                     return Some(bytes);
                 }
@@ -1919,7 +1935,7 @@ impl FontSource for PageResources {
 
         let procs = self.doc.resolve_key(&dict, self.doc.intern(b"CharProcs"));
         let reference = procs.as_dict()?.get_ref(name)?;
-        let content = self.doc.stream_decoded(reference).ok()?;
+        let content = self.decoded(reference).ok()?;
 
         // 9.6.5: /FontMatrix maps glyph space to text space. Unlike every
         // other font it is not 1/1000 by convention — a Type 3 font chooses
@@ -2343,7 +2359,7 @@ impl GlyphSource for PageResources {
         // content stream. A direct dictionary carrying the keys but no stream
         // has no cell to draw, and declining here is what turns it back into
         // the reported gap it was.
-        let content = self.doc.stream_decoded(reference?).ok()?;
+        let content = self.decoded(reference?).ok()?;
 
         // 8.7.3.2: the cell's own `/Resources`. Gap 11 recorded that a *form*
         // XObject's `/Resources` are consulted nowhere in this engine; a
@@ -2578,7 +2594,7 @@ impl PageResources {
         name: &[u8],
         contents: Contents,
     ) -> Option<tinker_pdf_content::Form> {
-        let content = self.doc.stream_decoded(reference).ok()?;
+        let content = self.decoded(reference).ok()?;
         // 8.10.2: /Matrix maps the form's space into the one that invoked it.
         let matrix = self
             .doc
@@ -2781,7 +2797,7 @@ impl PageResources {
             0 | 4 => {
                 // Both are streams, so the object handed in is the reference.
                 let reference = object.as_objref()?;
-                let data = self.doc.stream_decoded(reference).ok()?;
+                let data = self.decoded(reference).ok()?;
                 if kind == 4 {
                     return Some(Function::PostScript {
                         domain: pairs(&numbers(b"Domain")),
@@ -3349,7 +3365,7 @@ impl PageResources {
         let globals = self
             .decode_parms(dict)
             .and_then(|parms| match parms.get(self.doc.intern(b"JBIG2Globals")) {
-                Some(Object::Ref(r)) => self.doc.stream_decoded(*r).ok(),
+                Some(Object::Ref(r)) => self.decoded(*r).ok(),
                 _ => None,
             })
             .unwrap_or_default();
@@ -3680,8 +3696,7 @@ impl PageResources {
         let jbig2 = matches!(last_filter, Some(b"JBIG2Decode"));
         let data = if jbig2 {
             let raw = self
-                .doc
-                .stream_image_input(reference)
+                .image_input(reference)
                 .map_err(|_| "JBIG2Decode".to_string())?;
             // The refusal. A stream whose regions this build cannot decode —
             // the symbol-dictionary lineage an OCR pipeline emits — comes back
@@ -3692,14 +3707,12 @@ impl PageResources {
                 .ok_or_else(|| "JBIG2Decode".to_string())?
         } else if fax {
             let raw = self
-                .doc
-                .stream_image_input(reference)
+                .image_input(reference)
                 .map_err(|_| "CCITTFaxDecode".to_string())?;
             self.ccitt_samples(dict, &raw, width, height, name)
         } else {
             // Everything else decodes to raw samples.
-            self.doc
-                .stream_decoded(reference)
+            self.decoded(reference)
                 .map_err(|_| "undecodable".to_string())?
         };
         // 7.4.6 and 7.4.7: both bilevel codecs produce one bit per pixel,
@@ -3800,8 +3813,7 @@ impl PageResources {
             // and handing the undecoded stream to the JPEG decoder made it
             // refuse a perfectly good image.
             let raw = self
-                .doc
-                .stream_image_input(reference)
+                .image_input(reference)
                 .map_err(|_| "DCTDecode".to_string())?;
             let named = self.image_space(&dict, name);
             return self.jpeg_image(&raw, &decode, interpolate, named, name);
@@ -3812,8 +3824,7 @@ impl PageResources {
             // sample loop below -- 8.9.5.4 is explicit that the dictionary's
             // `/BitsPerComponent` and `/Decode` do not apply to it.
             let raw = self
-                .doc
-                .stream_image_input(reference)
+                .image_input(reference)
                 .map_err(|_| "JPXDecode".to_string())?;
             let named = self.image_space(&dict, name);
             return self.jpx_image(&raw, &dict, interpolate, named, name);
@@ -4344,8 +4355,7 @@ impl PageResources {
             Some(b"DCTDecode" | b"DCT") => {
                 image.codec = crate::SampleCodec::Dct;
                 let decoded = self
-                    .doc
-                    .stream_image_input(reference)
+                    .image_input(reference)
                     .map_err(|_| "DCTDecode".to_string())
                     .and_then(|raw| jpeg_samples(&raw));
                 match decoded {
@@ -4357,8 +4367,7 @@ impl PageResources {
                 image.codec = crate::SampleCodec::Jpx;
                 let mut warnings = Vec::new();
                 let decoded = self
-                    .doc
-                    .stream_image_input(reference)
+                    .image_input(reference)
                     .map_err(|_| "JPXDecode".to_string())
                     .and_then(|raw| Self::jpx_samples(&raw, &mut warnings));
                 for warning in &warnings {
@@ -4716,7 +4725,7 @@ impl PageResources {
                     .and_then(|d| d.get(self.doc.intern(b"Alternate")))
                     .map(|a| Box::new(self.describe(a, inline, depth + 1, None)));
                 let profile = stream
-                    .and_then(|r| self.doc.stream_decoded(r).ok())
+                    .and_then(|r| self.decoded(r).ok())
                     .unwrap_or_default();
                 ImageSpace::Icc {
                     components,
@@ -4740,7 +4749,7 @@ impl PageResources {
                         None => items
                             .get(3)
                             .and_then(Object::as_objref)
-                            .and_then(|r| self.doc.stream_decoded(r).ok())
+                            .and_then(|r| self.decoded(r).ok())
                             .unwrap_or_default(),
                     },
                     None => Vec::new(),

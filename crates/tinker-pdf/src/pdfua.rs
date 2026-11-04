@@ -800,7 +800,7 @@ pub(crate) fn validate_counting(
     // counted reach, as `pdfa::validate_counting`.
     machinery.reach(RuleGroup::Metadata);
     let mut claim = Vec::new();
-    let part = claim_of(document, &mut claim);
+    let part = claim_of(document, work, &mut claim);
     if groups.metadata {
         raw.append(&mut claim);
     }
@@ -875,8 +875,12 @@ struct Identification {
 
 /// Reads `pdfuaid:part` and, for part 2, `pdfuaid:rev`, reporting what is
 /// wrong with the claim.
-fn claim_of(document: &Document, out: &mut Vec<UaRaw>) -> Option<UaPart> {
-    let packet = document.xmp_metadata();
+fn claim_of(
+    document: &Document,
+    work: Option<&std::sync::Arc<Work>>,
+    out: &mut Vec<UaRaw>,
+) -> Option<UaPart> {
+    let packet = crate::stats::xmp(&document.inner, work);
     let identification = packet.as_deref().map(identification).unwrap_or_default();
 
     // ISO 14289-1 7.1 and ISO 14289-2 8.11.1: the catalog's packet names

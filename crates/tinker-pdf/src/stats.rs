@@ -12,10 +12,14 @@
 //! An operation nobody asked about carries none, and every counting site tests
 //! that `Option` and does nothing else.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use tinker_pdf_cos::font::Font;
 pub use tinker_pdf_cos::Stats;
-use tinker_pdf_cos::{pages as cos_pages, CosDocument};
+use tinker_pdf_cos::{
+    font as cos_font, pages as cos_pages, CosDocument, CosError, Counting, Dict, Name, ObjRef,
+};
 pub(crate) use tinker_pdf_cos::{Counter, Work};
 use tinker_pdf_render::RenderCounts;
 
@@ -45,6 +49,46 @@ pub(crate) fn pages_upto(
     work: Option<&Arc<Work>>,
 ) -> Vec<cos_pages::Page> {
     cos_pages::collect_upto_counted(doc, limit, work.map(|work| &**work))
+}
+
+/// `r`'s bytes through its filter chain, the run counted into `work` when the
+/// operation is counting.
+pub(crate) fn decoded(
+    doc: &CosDocument,
+    r: ObjRef,
+    work: Option<&Arc<Work>>,
+) -> Result<Vec<u8>, CosError> {
+    doc.stream_decoded_counted(r, work.map(|work| &**work))
+}
+
+/// The document's XMP packet, its decode counted into `work` when the
+/// operation is counting.
+pub(crate) fn xmp(doc: &CosDocument, work: Option<&Arc<Work>>) -> Option<Vec<u8>> {
+    tinker_pdf_cos::xmp_metadata_counted(doc, work.map(|work| &**work))
+}
+
+/// A page's content streams decoded and joined, each part's run counted into
+/// `work` when the operation is counting.
+pub(crate) fn content(
+    doc: &CosDocument,
+    page: &cos_pages::Page,
+    work: Option<&Arc<Work>>,
+) -> Vec<u8> {
+    cos_pages::content_bytes_counted(doc, page, work.map(|work| &**work))
+}
+
+/// The fonts a resource dictionary names, each read as a scope reads it; when
+/// the operation is counting, through a view that counts what reading a font
+/// decodes — its CMaps, its `/ToUnicode` and its `/CIDToGIDMap`.
+pub(crate) fn fonts(
+    doc: &CosDocument,
+    resources: &Dict,
+    work: Option<&Work>,
+) -> HashMap<Name, Arc<Font>> {
+    match work {
+        Some(work) => cos_font::from_resources_in(&Counting::new(doc, work), resources),
+        None => cos_font::from_resources(doc, resources),
+    }
 }
 
 /// Adds what a renderer counted — its glyphs shown and outlines painted — to

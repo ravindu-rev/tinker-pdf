@@ -727,6 +727,26 @@ leniencies a *PDF stream filter* performs. `docs/design/jpeg-xr.md` argues
 this at length; the short version is that an entry nothing can name would
 make both enums wrong.
 
+**Counted decoding.** A stream's chain runs where `tinker-pdf-cos` applies it,
+in `CosDocument::stream_decoded` and `stream_image_input`, and each has a
+counted sibling, `stream_decoded_counted` and `stream_image_input_counted`,
+that counts the run into an operation's tally when the operation is counting:
+the run, whatever the chain returned — a refusal with no bytes, while a
+reference that names no stream runs no chain and counts nothing — the stream it
+ran on, and the bytes it returned. A `Counting` view over any `Resolve` counts
+the same for code written against the trait, which is how a font's CMaps and
+its `/CIDToGIDMap` are counted while a scope is built. An editor asked to count
+counts its own decodes (`DocumentEditor::stream_bytes`, and the serializer's
+when a rewrite deduplicates streams), and `stream_bytes_counted` and
+`save_counted` count into a tally the caller carries instead; a stream the
+editor holds unfiltered, an import's copy, is handed back as it is and runs no
+chain. The facade's doors hand the counts back as `Stats::streams_decoded`,
+`most_decodes_of_one_stream` and `bytes_decoded` ([rendering](rendering.md)).
+What a document decodes for itself — its object streams, cross-reference
+streams and hint tables, read once and kept — belongs to no operation and is
+not counted. This crate counts nothing: the counting is where the chain is
+applied, so it keeps the empty dependency row it has.
+
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |

@@ -625,10 +625,16 @@ font with no program of its own when there are substitute faces to ask — a
 `images_decoded`, an image XObject's decode on a cache miss and every inline
 image's; and a `_hits` and a `_misses` for each of the five caches a page's
 resources keep — `font_program`, `image`, `icc_transform`, `glyph_outline` and
-`form_scope`; and `page_walks`, each walk of the page tree from its root, and
+`form_scope`; `page_walks`, each walk of the page tree from its root, and
 `page_nodes_visited`, each node a walk or a one-page lookup reads, which no
-render makes and a page lookup, the validators, an editor and a save do.
-`Stats::work()` totals the step counts, and two `Stats` add with `+`. Every
+render makes and a page lookup, the validators, an editor and a save do; and
+`streams_decoded`, each run of a stream's filter chain — the page's content, a
+form's at each `Do`, a tiling pattern's cell, an appearance, an image's
+samples and its soft mask's, a font's program and its CMaps, an ICC profile —
+with `most_decodes_of_one_stream`, the most runs any one stream had, and
+`bytes_decoded`, the bytes the runs returned ([filters](filters.md)).
+`Stats::work()` totals the step counts, which leaves out that maximum and that
+quantity, and two `Stats` add with `+`, a maximum keeping the larger. Every
 render door counts the same way: `Page::render`, `Page::render_form` (the
 scope it reads the form's name in included), `Page::render_annotation` (both
 of the appearance's scopes) and `DisplayList::render`, which counts through

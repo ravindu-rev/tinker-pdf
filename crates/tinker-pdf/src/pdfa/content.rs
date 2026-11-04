@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use tinker_pdf_content::{Token, Tokenizer};
 
-use tinker_pdf_cos::{pages, CosDocument, Dict, ObjRef, Object};
+use tinker_pdf_cos::{CosDocument, Dict, ObjRef, Object};
 
 /// How many pages the walk visits.
 const MAX_PAGES: usize = 1 << 14;
@@ -82,8 +82,8 @@ impl Op<'_> {
 }
 
 /// Calls `visit` for every operator of every content stream the document
-/// renders: one walk of the page tree, counted into `work` when the
-/// validation is counting.
+/// renders: one walk of the page tree and each stream it decodes, counted into
+/// `work` when the validation is counting.
 pub(crate) fn walk(
     doc: &CosDocument,
     work: Option<&Arc<crate::stats::Work>>,
@@ -91,12 +91,13 @@ pub(crate) fn walk(
 ) {
     let mut walker = Walker {
         doc,
+        work,
         streams: MAX_STREAMS,
         visited: BTreeSet::new(),
     };
     for page in crate::stats::pages_upto(doc, MAX_PAGES, work) {
         let resources = page.resources.clone();
-        let content = pages::content_bytes(doc, &page);
+        let content = crate::stats::content(doc, &page, work);
         walker.stream(&content, page.reference, resources.as_ref(), 0, 0.0, visit);
 
         // 12.5.5: an annotation's appearance stream is drawn by the reader and
@@ -143,6 +144,8 @@ pub(crate) fn lookup(
 
 struct Walker<'a> {
     doc: &'a CosDocument,
+    /// The validation's tally, when it is counting: each stream decoded counts.
+    work: Option<&'a Arc<crate::stats::Work>>,
     /// How many more streams may be tokenized.
     streams: usize,
     /// Streams already entered, so a form that invokes itself is walked once
@@ -199,7 +202,7 @@ impl Walker<'_> {
             .doc
             .resolve_key(&stream.dict, self.doc.intern(b"Resources"));
         let own = own.as_dict().cloned();
-        let Ok(bytes) = self.doc.stream_decoded(reference) else {
+        let Ok(bytes) = crate::stats::decoded(self.doc, reference, self.work) else {
             return;
         };
         let resources = own.as_ref().or(inherited);

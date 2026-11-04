@@ -166,7 +166,12 @@ rules' walks of every content stream; and the colour group's operator scan and
 group spaces, parts 2 to 4's blending spaces, part 1's transparency rule and
 part 4's page-level output intent; `page_nodes_visited` counts the nodes each
 walk reads. The width rule's scope counts the fonts it reads and the glyph it
-selects for each distinct code with a stated width.
+selects for each distinct code with a stated width. `streams_decoded` counts
+each stream a rule decodes: the XMP packet, read for the claim on every
+validation and again by the packet header rule, and every page's own packet;
+each walk's content streams; the font programs the width rule reads for its
+metrics and its scope for its selections, and the embedding rules for their
+parse; and the output intents' and the colour spaces' ICC profiles.
 
 ## Refused by name
 

@@ -60,7 +60,7 @@ pub(crate) fn draw(
     device: &mut impl AppearanceDevice,
     work: Option<&Arc<Work>>,
 ) {
-    each_appearance(doc, page, |appearance| {
+    each_appearance(doc, page, work, |appearance| {
         draw_prepared(doc, appearance, provider, device, work);
     });
 }
@@ -86,7 +86,7 @@ pub(crate) fn record(
     recorder: &mut DisplayRecorder,
 ) -> Vec<Recorded> {
     let mut out = Vec::new();
-    each_appearance(doc, page, |appearance| {
+    each_appearance(doc, page, None, |appearance| {
         // Two resource objects over one dictionary, as `draw_prepared` makes
         // them: the interpreter's, used up here, and the renderer's, kept.
         let resources = PageResources::from_dict(doc, appearance.resources.clone(), provider);
@@ -109,10 +109,12 @@ pub(crate) fn record(
     out
 }
 
-/// Every annotation of a page that draws, prepared, in `/Annots` order.
+/// Every annotation of a page that draws, prepared, in `/Annots` order, each
+/// appearance's decode counted into `work` when the render is counting.
 fn each_appearance(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
+    work: Option<&Arc<Work>>,
     mut each: impl FnMut(&Appearance),
 ) {
     let Ok(object) = doc.get(page.reference) else {
@@ -138,7 +140,7 @@ fn each_appearance(
         // Every reason `prepare` gives for drawing nothing is a reason a page
         // draws nothing there and says nothing: ruling 2, a page renders what
         // it can. `Page::render_annotation` is the caller that names them.
-        if let Some(Ok(appearance)) = annotation.map(|a| prepare(doc, &a)) {
+        if let Some(Ok(appearance)) = annotation.map(|a| prepare(doc, &a, work)) {
             each(&appearance);
         }
     }
@@ -167,8 +169,13 @@ impl Appearance {
 }
 
 /// Everything `draw_one` decided before drawing, with each reason it had for
-/// drawing nothing named.
-pub(crate) fn prepare(doc: &Arc<CosDocument>, annotation: &Dict) -> Result<Appearance, NotDrawn> {
+/// drawing nothing named. The appearance's decode counts into `work` when the
+/// render is counting.
+pub(crate) fn prepare(
+    doc: &Arc<CosDocument>,
+    annotation: &Dict,
+    work: Option<&Arc<Work>>,
+) -> Result<Appearance, NotDrawn> {
     let flags = annotation.get_int(doc.intern(b"F")).unwrap_or(0);
     if flags & HIDDEN != 0 || flags & NO_VIEW != 0 {
         return Err(NotDrawn::Hidden);
@@ -193,9 +200,8 @@ pub(crate) fn prepare(doc: &Arc<CosDocument>, annotation: &Dict) -> Result<Appea
         .ok_or(NotDrawn::NoRect)?;
 
     let form = normal_appearance(doc, annotation).ok_or(NotDrawn::NoAppearance)?;
-    let content = doc
-        .stream_decoded(form)
-        .map_err(|_| NotDrawn::UnreadableAppearance)?;
+    let content =
+        crate::stats::decoded(doc, form, work).map_err(|_| NotDrawn::UnreadableAppearance)?;
     let object = doc.get(form).map_err(|_| NotDrawn::UnreadableAppearance)?;
     let form_dict = object.as_dict().ok_or(NotDrawn::UnreadableAppearance)?;
 

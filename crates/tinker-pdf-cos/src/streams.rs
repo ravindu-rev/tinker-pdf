@@ -18,6 +18,15 @@ use crate::object::{Dict, ObjRef, Object, StreamObj};
 use crate::repair::{find_from, next_object_header};
 use crate::store::{LockExt, ResolveCtx};
 use crate::warn::{WarningKind, WarningSink};
+use crate::work::Work;
+
+/// Counts one run of `r`'s filter chain into `work`, when the operation is
+/// counting: whatever the chain returned, a refusal counted with no bytes.
+pub(crate) fn count_run(work: Option<&Work>, r: ObjRef, out: &Result<Vec<u8>, CosError>) {
+    if let Some(work) = work {
+        work.decoded(r, out.as_ref().map_or(0, Vec::len));
+    }
+}
 
 /// The bytes a `u64` range names, clamped to the buffer.
 pub(crate) fn slice_range<'a>(buf: &'a [u8], range: &Range<u64>) -> &'a [u8] {
@@ -265,6 +274,21 @@ impl CosDocument {
     /// [`CosError::NotAStream`] when the object is not a stream, and
     /// [`CosError::Filter`] when `/DecodeParms` cannot describe any stream.
     pub fn stream_decoded(&self, r: ObjRef) -> Result<Vec<u8>, CosError> {
+        self.stream_decoded_counted(r, None)
+    }
+
+    /// [`CosDocument::stream_decoded`], counting the run of the stream's
+    /// filter chain into `work` when the operation is counting: the run, the
+    /// stream it ran on, and the bytes it returned. A reference that names no
+    /// stream runs no chain and counts nothing.
+    ///
+    /// # Errors
+    /// As [`CosDocument::stream_decoded`].
+    pub fn stream_decoded_counted(
+        &self,
+        r: ObjRef,
+        work: Option<&Work>,
+    ) -> Result<Vec<u8>, CosError> {
         let object = self.get(r)?;
         let stream = object.as_stream().ok_or(CosError::NotAStream(r))?;
         let mut sink = WarningSink::new();
@@ -272,6 +296,7 @@ impl CosDocument {
         let data = self.decrypted_bytes(r, stream);
         let out = self.decode_with(&data, &stream.dict, r.num, &mut sink);
         self.absorb(sink);
+        count_run(work, r, &out);
         out
     }
 
@@ -287,7 +312,23 @@ impl CosDocument {
     /// Distinct from [`CosDocument::stream_decoded`] only in not warning
     /// `ImageCodecNotDecoded`: that warning is for a caller who wanted pixels
     /// and did not get them, and here the caller is about to produce them.
+    ///
+    /// # Errors
+    /// As [`CosDocument::stream_decoded`].
     pub fn stream_image_input(&self, r: ObjRef) -> Result<Vec<u8>, CosError> {
+        self.stream_image_input_counted(r, None)
+    }
+
+    /// [`CosDocument::stream_image_input`], counting the run of the chain
+    /// into `work` as [`CosDocument::stream_decoded_counted`] does.
+    ///
+    /// # Errors
+    /// As [`CosDocument::stream_decoded`].
+    pub fn stream_image_input_counted(
+        &self,
+        r: ObjRef,
+        work: Option<&Work>,
+    ) -> Result<Vec<u8>, CosError> {
         let object = self.get(r)?;
         let stream = object.as_stream().ok_or(CosError::NotAStream(r))?;
         let mut sink = WarningSink::new();
@@ -295,6 +336,7 @@ impl CosDocument {
         let data = self.decrypted_bytes(r, stream);
         let out = self.decode_chain(&data, &stream.dict, r.num, &mut sink, false);
         self.absorb(sink);
+        count_run(work, r, &out);
         out
     }
 

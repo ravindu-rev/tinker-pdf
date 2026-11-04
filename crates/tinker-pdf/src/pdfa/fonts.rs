@@ -123,7 +123,7 @@ pub(crate) fn run(
         let Some(dict) = object.as_dict() else {
             continue;
         };
-        font(doc, flavour, dict, reference, &mut budget, out);
+        font(doc, flavour, dict, reference, &mut budget, work, out);
     }
 }
 
@@ -167,7 +167,15 @@ pub(crate) fn embedding(doc: &CosDocument, work: Option<&Arc<Work>>, out: &mut V
         let descriptor = doc.resolve_key(&descriptor_owner, doc.intern(b"FontDescriptor"));
         match descriptor.as_dict() {
             Some(descriptor) => {
-                embedded_program(doc, descriptor, &program_subtype, at, &mut budget, out);
+                embedded_program(
+                    doc,
+                    descriptor,
+                    &program_subtype,
+                    at,
+                    &mut budget,
+                    work,
+                    out,
+                );
             }
             None => out.push(Raw {
                 rule: clauses::FONT_EMBEDDING,
@@ -216,6 +224,7 @@ fn font(
     dict: &Dict,
     at: ObjRef,
     budget: &mut usize,
+    work: Option<&Arc<Work>>,
     out: &mut Vec<Raw>,
 ) {
     let subtype = name_of(doc, dict, b"Subtype").unwrap_or_default();
@@ -223,7 +232,7 @@ fn font(
     unicode(doc, flavour, dict, &subtype, at, out);
 
     match subtype.as_slice() {
-        b"Type0" => composite(doc, flavour, dict, at, budget, out),
+        b"Type0" => composite(doc, flavour, dict, at, budget, work, out),
         // 9.6.5: a Type 3 font's glyphs *are* content streams, so there is no
         // program to embed and no descriptor to embed it in. The embedding
         // clause has nothing to say about one, and a rule that reported every
@@ -231,13 +240,14 @@ fn font(
         // a defect. Part 4 forbids Type 3 fonts outright; that is 6.2.10.2's
         // rule rather than this one's, and `super::STAGED` names it.
         b"Type3" => {}
-        _ => simple(doc, flavour, dict, &subtype, at, budget, out),
+        _ => simple(doc, flavour, dict, &subtype, at, budget, work, out),
     }
 }
 
 // ---- 6.3.4 / 6.2.11.4.1 Embedding -----------------------------------------
 
 /// A simple font: Type 1, its multiple-master variant, or TrueType.
+#[allow(clippy::too_many_arguments)]
 fn simple(
     doc: &CosDocument,
     flavour: Option<Flavour>,
@@ -245,6 +255,7 @@ fn simple(
     subtype: &[u8],
     at: ObjRef,
     budget: &mut usize,
+    work: Option<&Arc<Work>>,
     out: &mut Vec<Raw>,
 ) {
     encoding(doc, flavour, dict, subtype, at, out);
@@ -266,7 +277,7 @@ fn simple(
         });
         return;
     };
-    embedded_program(doc, descriptor, subtype, at, budget, out);
+    embedded_program(doc, descriptor, subtype, at, budget, work, out);
 }
 
 /// The descriptor's font-file keys, against the `/Subtype` that named it.
@@ -283,6 +294,7 @@ fn embedded_program(
     subtype: &[u8],
     at: ObjRef,
     budget: &mut usize,
+    work: Option<&Arc<Work>>,
     out: &mut Vec<Raw>,
 ) {
     let mut embedded = false;
@@ -339,7 +351,7 @@ fn embedded_program(
             continue;
         }
         *budget -= 1;
-        let Ok(bytes) = doc.stream_decoded(program_ref) else {
+        let Ok(bytes) = crate::stats::decoded(doc, program_ref, work) else {
             // A stream whose filter chain will not run is a defect the syntax
             // group and the reader's own warnings already speak about. Saying
             // it a third time under a font clause would be attributing a
@@ -677,13 +689,14 @@ fn composite(
     dict: &Dict,
     at: ObjRef,
     budget: &mut usize,
+    work: Option<&Arc<Work>>,
     out: &mut Vec<Raw>,
 ) {
     let reading = match flavour.map(|f| f.part) {
         Some(Part::One) | None => CMapReading::PDF_A_1,
         Some(_) => CMapReading::TABLE_118,
     };
-    for (object, kind) in cmap_findings(doc, dict, at, reading) {
+    for (object, kind) in cmap_findings(doc, dict, at, reading, work) {
         let rule = match kind {
             FindingKind::CidSystemInfoMismatch { .. } => clauses::CID_SYSTEM_INFO,
             _ => clauses::CMAPS,
@@ -717,7 +730,7 @@ fn composite(
     let descriptor = doc.resolve_key(descendant, doc.intern(b"FontDescriptor"));
     match descriptor.as_dict() {
         Some(descriptor) => {
-            embedded_program(doc, descriptor, &subtype, reference, budget, out);
+            embedded_program(doc, descriptor, &subtype, reference, budget, work, out);
         }
         None => out.push(Raw {
             rule: clauses::FONT_EMBEDDING,
@@ -906,7 +919,7 @@ fn widths(doc: &Arc<CosDocument>, work: Option<&Arc<Work>>, out: &mut Vec<Raw>) 
         let Some(program) = font.program() else {
             continue;
         };
-        let Ok(bytes) = doc.stream_decoded(program.stream) else {
+        let Ok(bytes) = crate::stats::decoded(doc, program.stream, work) else {
             continue;
         };
         let Some(metrics) = ProgramMetrics::read(&bytes) else {
@@ -1145,6 +1158,7 @@ pub(crate) fn cmap_findings(
     font: &Dict,
     at: ObjRef,
     reading: CMapReading,
+    work: Option<&Arc<Work>>,
 ) -> Vec<(ObjRef, FindingKind)> {
     let mut out = Vec::new();
     let key = doc.intern(b"Encoding");
@@ -1167,7 +1181,7 @@ pub(crate) fn cmap_findings(
         Object::Stream(stream) => {
             // 7.3.8: a stream is indirect, so the entry is a reference.
             let reference = font.get_ref(key).unwrap_or(at);
-            let program = doc.stream_decoded(reference).unwrap_or_default();
+            let program = crate::stats::decoded(doc, reference, work).unwrap_or_default();
             let (program_mode, used) = cmap_program(&program);
             let dictionary_mode = doc
                 .resolve_key(&stream.dict, doc.intern(b"WMode"))

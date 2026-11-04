@@ -625,9 +625,16 @@ pub fn contents(doc: &CosDocument, page: &Page) -> Vec<ObjRef> {
 /// Every page's content streams decoded and joined, ready for the interpreter.
 #[must_use]
 pub fn content_bytes(doc: &CosDocument, page: &Page) -> Vec<u8> {
+    content_bytes_counted(doc, page, None)
+}
+
+/// [`content_bytes`], counting each part's decode into `work` when the
+/// operation is counting.
+#[must_use]
+pub fn content_bytes_counted(doc: &CosDocument, page: &Page, work: Option<&Work>) -> Vec<u8> {
     let mut out = Vec::new();
     for part in contents(doc, page) {
-        if let Ok(bytes) = doc.stream_decoded(part) {
+        if let Ok(bytes) = doc.stream_decoded_counted(part, work) {
             out.extend_from_slice(&bytes);
             // 7.7.3.3: the parts divide at lexical boundaries only if
             // separated, and a producer may end one mid-token.

@@ -42,7 +42,7 @@ pub(super) fn rules(
     }
     let mut used = Used::default();
     colour::scan(doc, work, &mut used);
-    let intent = output_intent(doc, out);
+    let intent = output_intent(doc, work, out);
     device_rgb(&intent, &used, out);
     if flavour == XFlavour::X3_2003 {
         independent_colour(&intent, &used, out);
@@ -113,7 +113,11 @@ struct Intent {
 /// nothing about a second, and the registry identifier is checked for shape
 /// and not looked up — the registry is data with a date on it, and the design
 /// makes vendoring it a decision rather than a rule.
-fn output_intent(doc: &CosDocument, out: &mut Vec<XRaw>) -> Intent {
+fn output_intent(
+    doc: &CosDocument,
+    work: Option<&std::sync::Arc<Work>>,
+    out: &mut Vec<XRaw>,
+) -> Intent {
     let catalog_at = doc.trailer().get_ref(doc.intern(b"Root"));
     let mut intent = Intent {
         present: false,
@@ -160,8 +164,7 @@ fn output_intent(doc: &CosDocument, out: &mut Vec<XRaw>) -> Intent {
             // The header alone: the data colour space sits at a fixed offset
             // and needs no transform built, which is the reading
             // `pdfa::colour` came to for the same field.
-            intent.space = doc
-                .stream_decoded(profile)
+            intent.space = crate::stats::decoded(doc, profile, work)
                 .ok()
                 .and_then(|bytes| bytes.get(16..20).and_then(|s| <[u8; 4]>::try_from(s).ok()));
         }

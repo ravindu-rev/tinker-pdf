@@ -235,8 +235,8 @@ use std::sync::{Arc, Mutex};
 use tinker_pdf_content::record::{Capture, Event, RecordingDevice};
 use tinker_pdf_content::{interpret, FontSource, Matrix};
 use tinker_pdf_cos::{
-    font as cos_font, pages as cos_pages, subset_tag, CosDocument, Dict, DocumentEditor, Name,
-    ObjRef, Object, Resolve, StreamData,
+    font as cos_font, subset_tag, CosDocument, Dict, DocumentEditor, Name, ObjRef, Object, Resolve,
+    StreamData,
 };
 
 use crate::resources::PageResources;
@@ -470,9 +470,11 @@ impl SubsetReport {
 /// in the file where anyone scanning it finds them — the same caveat
 /// [`crate::redact`] carries, for the same reason.
 ///
-/// On an editor [`DocumentEditor::count_work`] asked to count, the walk counts
-/// into its tally: the page tree's walk, and the font dictionaries and forms'
-/// scopes each page's scope reads.
+/// On an editor [`DocumentEditor::count_work`] asked to count, the pass counts
+/// into its tally: the page tree's walk, the font dictionaries and forms'
+/// scopes each page's scope reads, and every stream it decodes — the content
+/// it walks, each program its scopes read glyphs from, and each program it
+/// cuts.
 pub fn apply(editor: &mut DocumentEditor) -> SubsetReport {
     let work = editor.work().cloned();
     apply_counting(editor, work.as_ref())
@@ -495,7 +497,7 @@ pub(crate) fn apply_counting(
         Err(_) => Usage::default(),
     };
     let doc = editor.shared_document();
-    rewrite(editor, &doc, &usage)
+    rewrite(editor, &doc, &usage, work.map(|work| &**work))
 }
 
 // ---------------------------------------------------------------------------
@@ -568,11 +570,11 @@ fn collect(doc: &Arc<CosDocument>, work: Option<&Arc<Work>>) -> Usage {
 
     for page in crate::stats::pages(doc, work) {
         let resources = Arc::new(PageResources::new_counted(doc, &page, None, work.cloned()));
-        let content = cos_pages::content_bytes(doc, &page);
+        let content = crate::stats::content(doc, &page, work);
         walk(&mut usage, doc, &content, resources);
 
         for appearance in appearances_of(doc, page.reference) {
-            let Ok(content) = doc.stream_decoded(appearance.stream) else {
+            let Ok(content) = crate::stats::decoded(doc, appearance.stream, work) else {
                 continue;
             };
             let resources = Arc::new(PageResources::from_dict_counted(
@@ -623,7 +625,7 @@ fn walk(usage: &mut Usage, doc: &CosDocument, content: &[u8], root: Arc<PageReso
         let Some((stream, scope)) = next else {
             break;
         };
-        let Ok(content) = doc.stream_decoded(stream) else {
+        let Ok(content) = crate::stats::decoded(doc, stream, scope.work()) else {
             continue;
         };
         if let Ok(mut unrun) = unrun.lock() {
@@ -1250,7 +1252,12 @@ struct Job {
     refused: Option<UntouchedReason>,
 }
 
-fn rewrite(editor: &mut DocumentEditor, doc: &Arc<CosDocument>, usage: &Usage) -> SubsetReport {
+fn rewrite(
+    editor: &mut DocumentEditor,
+    doc: &Arc<CosDocument>,
+    usage: &Usage,
+    work: Option<&Work>,
+) -> SubsetReport {
     let mut jobs: BTreeMap<ObjRef, Job> = BTreeMap::new();
     for site in sweep(editor, doc) {
         let Some(program) = program_of(editor, doc, &site) else {
@@ -1285,7 +1292,7 @@ fn rewrite(editor: &mut DocumentEditor, doc: &Arc<CosDocument>, usage: &Usage) -
                 job.refused.get_or_insert(UntouchedReason::NotAnObject);
             }
             None => {
-                let Some(bytes) = editor.stream_bytes(*program) else {
+                let Some(bytes) = editor.stream_bytes_counted(*program, work) else {
                     continue;
                 };
                 report.untouched.push(Untouched {
@@ -1307,7 +1314,7 @@ fn rewrite(editor: &mut DocumentEditor, doc: &Arc<CosDocument>, usage: &Usage) -
         .collect();
 
     for (program, job) in jobs {
-        let Some(bytes) = editor.stream_bytes(program) else {
+        let Some(bytes) = editor.stream_bytes_counted(program, work) else {
             continue;
         };
         let base_font = job
@@ -1351,8 +1358,10 @@ fn rewrite(editor: &mut DocumentEditor, doc: &Arc<CosDocument>, usage: &Usage) -
             glyphs: job.glyphs.len(),
         });
     }
-    report.untouched.extend(orphans(editor, doc, &covered));
-    type3(editor, doc, usage, &mut report);
+    report
+        .untouched
+        .extend(orphans(editor, doc, &covered, work));
+    type3(editor, doc, usage, &mut report, work);
 
     // Object order, as every field promises. The jobs are already in it — a
     // `BTreeMap` keyed by the program — but the directly-written fonts above
@@ -1397,6 +1406,7 @@ fn type3(
     doc: &Arc<CosDocument>,
     usage: &Usage,
     report: &mut SubsetReport,
+    work: Option<&Work>,
 ) {
     let numbers: Vec<u32> = doc
         .xref()
@@ -1470,7 +1480,9 @@ fn type3(
     }
 
     let size = |editor: &DocumentEditor, stream: ObjRef| {
-        editor.stream_bytes(stream).map_or(0, |bytes| bytes.len())
+        editor
+            .stream_bytes_counted(stream, work)
+            .map_or(0, |bytes| bytes.len())
     };
     for face in faces {
         let before: usize = face
@@ -1671,6 +1683,7 @@ fn orphans(
     editor: &DocumentEditor,
     doc: &Arc<CosDocument>,
     covered: &BTreeSet<u32>,
+    work: Option<&Work>,
 ) -> Vec<Untouched> {
     let mut out: Vec<Untouched> = Vec::new();
     let mut seen: BTreeSet<u32> = BTreeSet::new();
@@ -1712,7 +1725,7 @@ fn orphans(
         if covered.contains(&program.num) || !seen.insert(program.num) {
             continue;
         }
-        let Some(bytes) = editor.stream_bytes(program) else {
+        let Some(bytes) = editor.stream_bytes_counted(program, work) else {
             continue;
         };
         // 9.8.1: the descriptor's own `/FontName`, since there is no font

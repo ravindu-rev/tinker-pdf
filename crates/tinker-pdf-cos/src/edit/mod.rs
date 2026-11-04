@@ -119,7 +119,8 @@ pub struct DocumentEditor {
     /// authenticated to read them. [`DocumentEditor::check_save`] reads it.
     encrypted_source: bool,
     /// The tally [`DocumentEditor::count_work`] started, which the editor's
-    /// page walks and every pass over it count into until it is dropped.
+    /// page walks and decodes and every pass over it count into until it is
+    /// dropped.
     ///
     /// **Not restored by a rollback**: a rolled-back edit's work was done,
     /// and a count is of work done, not of what was kept.
@@ -200,9 +201,10 @@ impl DocumentEditor {
     /// Counts the work done over this editor from now until it is dropped,
     /// into one tally: its own page operations' walks of a page tree — its
     /// page order, read until an edit first changes it, and an import's walk
-    /// of its source — and what the passes the facade runs over it count, a
-    /// save's image and font passes; a save asked for its stats hands it back
-    /// whole.
+    /// of its source — the streams it decodes ([`DocumentEditor::stream_bytes`]
+    /// and the serializer's deduplication), and what the passes the facade
+    /// runs over it count, a save's image and font passes; a save asked for
+    /// its stats hands it back whole.
     ///
     /// For an operation made of several calls on one editor, a merge's
     /// imports and its save: called before the first, the save reports
@@ -254,8 +256,22 @@ impl DocumentEditor {
     ///
     /// `None` when the object is neither an overlay stream nor a decodable
     /// stream in the file — including one this editor has deleted.
+    ///
+    /// On an editor asked to count, each run of a filter chain here counts
+    /// into its tally: an overlay stream's that has a `/Filter`, and the
+    /// file's.
     #[must_use]
     pub fn stream_bytes(&self, r: ObjRef) -> Option<Vec<u8>> {
+        self.stream_bytes_counted(r, self.work.as_deref())
+    }
+
+    /// [`DocumentEditor::stream_bytes`], counting each run of a filter chain
+    /// into `work` instead of the editor's own tally: for a pass whose
+    /// operation carries the tally, which is the editor's when it is
+    /// counting and the operation's own when it is not — a save asked for its
+    /// stats over an editor nobody asked to count.
+    #[must_use]
+    pub fn stream_bytes_counted(&self, r: ObjRef, work: Option<&Work>) -> Option<Vec<u8>> {
         if self.deleted.contains(&r.num) {
             return None;
         }
@@ -272,6 +288,7 @@ impl DocumentEditor {
                     .doc
                     .decode_with(&stream.data, &stream.dict, r.num, &mut sink);
                 self.doc.absorb(sink);
+                crate::streams::count_run(work, r, &decoded);
                 decoded.ok()
             }
             Some(Written::Stream(stream)) => Some(stream.data.clone()),
@@ -279,7 +296,7 @@ impl DocumentEditor {
             // something else, and the file's bytes are no longer what this
             // object is.
             Some(Written::Object(_)) => None,
-            None => self.doc.stream_decoded(r).ok(),
+            None => self.doc.stream_decoded_counted(r, work).ok(),
         }
     }
 

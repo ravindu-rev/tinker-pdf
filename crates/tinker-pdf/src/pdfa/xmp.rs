@@ -169,7 +169,7 @@ pub(super) fn rules(
     if !machinery.reach(RuleGroup::Metadata) {
         return;
     }
-    let Some(packet) = document.xmp_metadata() else {
+    let Some(packet) = crate::stats::xmp(&document.inner, work) else {
         // `flavour_of` already reported the absence.
         return;
     };
@@ -1142,7 +1142,7 @@ fn page_packets(doc: &CosDocument, work: Option<&Arc<Work>>) -> Vec<(ObjRef, Vec
         let Some(stream) = dict.get_ref(doc.intern(b"Metadata")) else {
             continue;
         };
-        let Ok(bytes) = doc.stream_decoded(stream) else {
+        let Ok(bytes) = crate::stats::decoded(doc, stream, work) else {
             continue;
         };
         packets.push((page.reference, bytes));

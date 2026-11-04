@@ -2331,8 +2331,11 @@ impl Page {
     /// those pixels, and then the bitmap is that rectangle's size.
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
-        let content = cos_pages::content_bytes(&self.doc, &self.inner);
-        self.render_layer(options, None, |renderer, resources| {
+        // The tally is made before the content is decoded, so the decode
+        // counts too.
+        let work = stats::tally(options.stats);
+        let content = stats::content(&self.doc, &self.inner, work.as_ref());
+        self.render_layer(options, None, work, |renderer, resources| {
             interpret(&content, Matrix::IDENTITY, renderer, resources);
             if options.annotations {
                 // After the content, because an annotation sits on top of the
@@ -2358,23 +2361,13 @@ impl Page {
     /// less in it, never a second implementation, so a part and the page under
     /// it cannot disagree about the scale clamp, the view transform, the canvas,
     /// the warnings or the conversion at the end.
+    ///
+    /// It counts into `work`, the tally the door made when
+    /// [`RenderOptions::stats`] asked for one — made by the door rather than
+    /// here, because each door counts work of its own before the render: the
+    /// page's content decoded, the scope [`Page::render_form`] reads the
+    /// form's name in, the appearance [`Page::render_annotation`] decodes.
     pub(crate) fn render_layer(
-        &self,
-        options: &RenderOptions,
-        frame: Option<(f64, f64, f64, f64)>,
-        paint: impl FnOnce(
-            &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
-            &resources::PageResources,
-        ),
-    ) -> Bitmap {
-        self.render_layer_counted(options, frame, stats::tally(options.stats), paint)
-    }
-
-    /// [`Page::render_layer`] counting into `work`, the tally a door made
-    /// when [`RenderOptions::stats`] asked for one — given here rather than
-    /// made here for the door that counts scopes of its own before the render
-    /// ([`Page::render_form`]'s).
-    pub(crate) fn render_layer_counted(
         &self,
         options: &RenderOptions,
         frame: Option<(f64, f64, f64, f64)>,
@@ -2684,7 +2677,7 @@ impl Page {
 
     /// What the content stream showed, in the order it showed it.
     fn text_in_content_order(&self, work: Option<&Arc<stats::Work>>) -> TextPage {
-        let content = cos_pages::content_bytes(&self.doc, &self.inner);
+        let content = stats::content(&self.doc, &self.inner, work);
         // Text extraction needs no glyph outlines — the widths come from the
         // font dictionary — so no provider is consulted here.
         let resources =

@@ -104,8 +104,7 @@ use std::sync::{Arc, Mutex};
 
 use tinker_pdf_content::{interpret, Device, FontSource, Form, GraphicsState, ImageRef, Matrix};
 use tinker_pdf_cos::{
-    pages as cos_pages, CosDocument, Dict, DocumentEditor, Name, ObjRef, Object, StreamData,
-    XrefEntry,
+    CosDocument, Dict, DocumentEditor, Name, ObjRef, Object, StreamData, XrefEntry,
 };
 
 /// What a save does to the document's images. See [`crate::write::SaveOptions::images`].
@@ -361,7 +360,9 @@ impl ImageReport {
 /// Runs the pass over every image the editor's document holds.
 ///
 /// `work` is the save door's tally, when it is counting: the walk that finds
-/// each image's placements counts into it.
+/// each image's placements counts into it, and so does every stream the pass
+/// decodes — the pages' and appearances' content, each form the walk enters,
+/// and each image's samples.
 pub(crate) fn apply(
     editor: &mut DocumentEditor,
     recoding: &ImageRecoding,
@@ -402,7 +403,7 @@ pub(crate) fn apply(
             matte: masks.matte.contains(&image.reference.num),
             max_ppi,
         };
-        match recode_one(editor, &view, recoding, &job) {
+        match recode_one(editor, &view, recoding, &job, work) {
             Outcome::Recoded(recoded) => report.recoded.push(recoded),
             Outcome::Untouched(reason) => report.untouched.push(UntouchedImage {
                 image: image.reference,
@@ -558,17 +559,19 @@ fn walk(view: &Arc<CosDocument>, work: Option<&Arc<crate::stats::Work>>) -> Plac
             ancestry: Vec::new(),
             found: Arc::clone(&found),
             forms: Arc::clone(&forms),
+            work: work.cloned(),
         };
-        let content = cos_pages::content_bytes(view, &page);
+        let content = crate::stats::content(view, &page, work);
         interpret(&content, Matrix::IDENTITY, &mut device, &scope);
 
-        for (content, resources, matrix) in appearances(view, page.reference) {
+        for (content, resources, matrix) in appearances(view, page.reference, work) {
             let scope = Scope {
                 doc: Arc::clone(view),
                 resources,
                 ancestry: Vec::new(),
                 found: Arc::clone(&found),
                 forms: Arc::clone(&forms),
+                work: work.cloned(),
             };
             interpret(&content, matrix, &mut device, &scope);
         }
@@ -622,6 +625,9 @@ struct Scope {
     found: Arc<Mutex<Option<ObjRef>>>,
     /// Decoded form content, once per form however often it is drawn.
     forms: Arc<Mutex<HashMap<u32, Arc<Vec<u8>>>>>,
+    /// The save door's tally, when it is counting: a form's decode counts
+    /// into it.
+    work: Option<Arc<crate::stats::Work>>,
 }
 
 impl Scope {
@@ -672,7 +678,10 @@ impl FontSource for Scope {
                     match cached {
                         Some(content) => content,
                         None => {
-                            let content = Arc::new(self.doc.stream_decoded(reference).ok()?);
+                            let content = Arc::new(
+                                crate::stats::decoded(&self.doc, reference, self.work.as_ref())
+                                    .ok()?,
+                            );
                             if let Ok(mut cache) = self.forms.lock() {
                                 cache.insert(reference.num, Arc::clone(&content));
                             }
@@ -710,6 +719,7 @@ impl FontSource for Scope {
             ancestry,
             found: Arc::clone(&self.found),
             forms: Arc::clone(&self.forms),
+            work: self.work.clone(),
         }))
     }
 }
@@ -741,8 +751,13 @@ fn rect_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Option<[f64; 4]> {
 }
 
 /// Every appearance stream of every annotation on a page — each state of
-/// `/AP /N` — with its resources and the transform 12.5.5 draws it through.
-fn appearances(view: &CosDocument, page: ObjRef) -> Vec<(Vec<u8>, Option<Dict>, Matrix)> {
+/// `/AP /N` — with its resources and the transform 12.5.5 draws it through,
+/// each decode counted into `work` when the save is counting.
+fn appearances(
+    view: &CosDocument,
+    page: ObjRef,
+    work: Option<&Arc<crate::stats::Work>>,
+) -> Vec<(Vec<u8>, Option<Dict>, Matrix)> {
     let mut out = Vec::new();
     let Ok(page) = view.get(page) else {
         return out;
@@ -789,7 +804,7 @@ fn appearances(view: &CosDocument, page: ObjRef) -> Vec<(Vec<u8>, Option<Dict>, 
             let Some(dict) = object.as_dict() else {
                 continue;
             };
-            let Ok(content) = view.stream_decoded(stream) else {
+            let Ok(content) = crate::stats::decoded(view, stream, work) else {
                 continue;
             };
             let matrix = matrix_of(view, dict, b"Matrix").unwrap_or(Matrix::IDENTITY);
@@ -889,6 +904,7 @@ fn recode_one(
     view: &CosDocument,
     recoding: &ImageRecoding,
     job: &Job<'_>,
+    work: Option<&Arc<crate::stats::Work>>,
 ) -> Outcome {
     let reference = job.image.reference;
     let dict = &job.image.dict;
@@ -899,7 +915,7 @@ fn recode_one(
         Ok(layout) => layout,
         Err(reason) => return Outcome::Untouched(reason),
     };
-    let Some(samples) = editor.stream_bytes(reference) else {
+    let Some(samples) = editor.stream_bytes_counted(reference, work.map(|work| &**work)) else {
         return Outcome::Untouched(UntouchedImageReason::Undecodable);
     };
     let expected = layout.stride().saturating_mul(layout.height as usize);

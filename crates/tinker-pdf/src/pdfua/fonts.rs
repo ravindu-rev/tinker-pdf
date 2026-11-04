@@ -107,7 +107,7 @@ pub(super) fn rules(
 
     for (reference, codes) in &drawn_codes(doc, work) {
         if let Some(codes) = codes {
-            unicode_values(doc, *reference, codes, out);
+            unicode_values(doc, *reference, codes, work, out);
         }
     }
 }
@@ -289,11 +289,17 @@ fn to_unicode_of(doc: &CosDocument, reference: ObjRef) -> Option<ObjRef> {
 /// than zero (0), but not equal to either U+FEFF or U+FFFE." Judged over the
 /// codes a page draws, which is the object veraPDF's rule is stated over —
 /// a `/ToUnicode` may carry entries for codes nothing shows.
-fn unicode_values(doc: &CosDocument, reference: ObjRef, codes: &Codes, out: &mut Vec<UaRaw>) {
+fn unicode_values(
+    doc: &CosDocument,
+    reference: ObjRef,
+    codes: &Codes,
+    work: Option<&std::sync::Arc<Work>>,
+    out: &mut Vec<UaRaw>,
+) {
     let Some(to_unicode) = to_unicode_of(doc, reference) else {
         return;
     };
-    let Ok(bytes) = doc.stream_decoded(to_unicode) else {
+    let Ok(bytes) = crate::stats::decoded(doc, to_unicode, work) else {
         return;
     };
     let cmap = tinker_pdf_font::cmap::parse(&bytes);

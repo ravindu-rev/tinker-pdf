@@ -260,7 +260,9 @@ which reads every node until it has `index + 1` pages and stops before the
 next — a lookup past the last page reads them all and finds nothing — or, on a
 linearized file, the page its first-page entry or its hint tables name and
 each ancestor read with it, and no walk. It counts that lookup alone, so two
-threads' lookups on one document never mix.
+threads' lookups on one document never mix. A lookup decodes no stream of its
+own: the hint tables are decoded once for the document and kept, and no
+lookup counts them.
 
 ```rust
 let doc = tinker_pdf::Document::open(bytes)?;
