@@ -456,7 +456,7 @@ lands in the step named, in
 | A1 | every page of a generated 10 000-page document ≤ 3 × 10 000 in total | `a1_every_page_of_ten_thousand_costs_at_most_thirty_thousand_visits` | P-01, P-01.3 |
 | A2 | text: work(4 000 pages) ≤ 4.4 × work(1 000) | `a2_text_is_linear_in_pages` | P-01, P-01.3 |
 | A2 | render-all at 36 dpi | `a2_render_all_at_36_dpi_is_linear_in_pages` | P-01, P-01.3 |
-| A2 | rewrite | `a2_rewrite_is_linear_in_pages` | P-01, the step P-01.1 assigns |
+| A2 | rewrite | `a2_rewrite_is_linear_in_pages` | P-01, P-01.3, holding at the tip |
 | A2 | rotate | `a2_rotate_is_linear_in_pages` | P-01, P-01.4 |
 | A2 | merge | `a2_merge_is_linear_in_pages` | P-01, P-01.4 |
 | A2 | split | `a2_split_is_linear_in_pages` | P-01, P-01.4, holding at the tip |
@@ -1929,3 +1929,212 @@ report's `slowest_page` names the page that cost a file most.
 | A probe that starts using threads changes what neighbours cost | The engine spawns none, and P-15's pool will run serially unless asked; a row that gives the probe threads re-measures the time block |
 | A corpus's percentiles are one long document's | Said above for verapdf; the report keeps each file's sum and slowest page, so a moved percentile is followed to its file |
 | A zero figure bands nothing | `parse` refuses one over files or pages that were timed |
+
+## P-01 — Page index
+
+*For [ROADMAP](../ROADMAP.md) row P-01.* Every page lookup walks the page
+tree from its root: `pages::at` gathers `index + 1` pages into a fresh list
+and keeps the last (`pages::at_counted`, `crates/tinker-pdf-cos/src/pages.rs`),
+`pages::count` walks the whole tree to check `/Count`, and the editor collects
+every page to find one. A loop over a document's pages is therefore quadratic
+in its pages. This section fixes the order a lookup tries its routes in, what
+the `/Count` descent may believe, when the flat index is built, what it holds
+and when it ends, and which per-page site each guard leg and each of the row's
+operations waits on.
+
+### Scope
+
+- **The lookup order**: Annex F's first page and hinted pages, then the
+  memoised index, then a `/Count` descent, then the walk.
+- **The descent** (P-01.2): what it checks at each node, and what it cannot
+  see.
+- **The index** (P-01.3): when it is built, what an entry holds, its life
+  beside the object store and its end at authentication, and the page-tree
+  warnings raised once.
+- **The editor's indexed lookups** (P-01.4).
+- **A1's and A2's counted quantities** in MS-01's tally, and the site each A2
+  leg and each operation waits on.
+
+### Non-goals
+
+- **Hint tables.** Annex F's first-page and hinted lookups are
+  `streaming-open.md`'s and stay first, unchanged.
+- **Per-call structure binding**, which binds a page to the structure tree
+  each time it is asked and is no lookup of a page.
+- **Per-page work that does not grow with the page count**: a page's own
+  content, fonts and images, which A2's legs already show flat once their
+  lookups are taken out (MS-01.7's table above).
+
+### Design
+
+#### The lookup order
+
+`pages::at(doc, i)` tries, in order:
+
+1. **Annex F**: page one from the linearization dictionary's `/O`, any other
+   page from the hint tables (`linearized_first_page`, `hinted_page`). A
+   lookup either answers is never counted toward the index's build, so a
+   streamed document that pages through its hints never builds it and never
+   fetches its main table (`asking_for_the_page_count_is_what_pays_for_the_tail`).
+2. **The memoised index**, when it is built: the entry at `i`, copied out.
+3. **The `/Count` descent**, when it is not.
+4. **The walk**, when the descent declines.
+
+The descent and the walk must hand back the same page for every tree whose
+counts are honest (tier P: a cache hit returns what a miss computes), so the
+index, the descent and the walk are three ways to one answer and never three
+answers.
+
+#### What the descent checks, and what it cannot see
+
+From the root, a node's kids are taken in order, each read once: a kid
+without `/Kids` is a leaf and counts one; a kid with `/Kids` counts its own
+`/Count`. Kids are skipped while their counts sum to no more than `i`, and
+the descent enters the kid that holds page `i`, carrying the inherited
+attributes (`/Resources`, `/MediaBox`, `/CropBox`, `/Rotate`) down the path
+exactly as the walk does (`Inherited::extend`). At each node it checks:
+
+- the node's `/Count` is a non-negative integer;
+- its kids' counts sum to it;
+- the node is not already on the path (a cycle);
+- the path is no deeper than `limits::MAX_NEST_DEPTH`;
+- an index at or past `limits::MAX_PAGES` answers `None`, as the walk does.
+
+Any check that fails falls back to the walk, warning `PageCountMismatch`
+against the node. One lookup reads at most depth × fan-out nodes.
+
+**What it cannot see**: counts that are honest about a subtree the walk
+reaches differently. A subtree two parents share is two subtrees to the walk,
+which follows `/Kids` and guards only the path it is on, and two subtrees to
+the descent, whose counts include it twice, so the two agree; a node whose
+leaves the walk truncates at `MAX_PAGES` is answered by the walk. And a
+tree whose kids are all leaves — `DocumentBuilder` writes every page under
+one `/Pages` node — has a fan-out of its page count, so the descent reads
+every kid before page `i` and only the index helps.
+
+#### The index: its build rule
+
+The index is the walk's page list, built once by the walk and kept. **It is
+built by the second lookup that Annex F does not answer, or by the first call
+that walks the whole tree anyway** — `count`, `collect`, `collect_upto` asking
+for more than one page — whichever comes first. A first lookup descends.
+
+That rule keeps both of A1's bounds:
+
+- **Each `page(i)` within depth × fan-out**: a lookup alone is the descent, and
+  a lookup after the build reads no node at all.
+- **A page loop within 3 visits a page**: a loop over *n* pages is one descent
+  (at most depth × fan-out nodes), one walk (every node once: *n* leaves and
+  the nodes above them, fewer than *n* for any fan-out of two or more), and
+  *n* entries copied out of the index. On A1's balanced 10 000-page tree of
+  fan-out 10 that is 40 + 11 111 + 10 000, under 30 000.
+
+**An entry** is the `Page` the walk builds — reference, index, the five boxes,
+the rotation and the inherited `/Resources` — and the index keeps beside its
+entries a map from each page's reference to its index, for `dest::Resolver`
+and the editor (P-01.4). A lookup copies one entry out; **the entries a lookup
+copies are counted beside the nodes it visits**, as a counter of their own in
+MS-01's tally, so A1's total is nodes visited plus entries copied.
+
+#### Its life, and its end at authentication
+
+The index lives on `CosDocument` beside the object store, so every clone of a
+`Document`, which shares the `CosDocument`, shares it. `install_security`
+drops it with the store and the object streams: an index read over ciphertext
+holds inherited `/Resources` whose strings were never decrypted, and the next
+lookup after a password builds it again from plaintext
+(`the_index_is_dropped_when_a_password_arrives`, P-01.3).
+
+**Page-tree warnings are raised once**, by the walk that builds the index:
+`PageTreeCycle`, `PageTreeTruncated`, `MediaBoxMissing` and
+`PageCountMismatch` say what the tree is, and a lookup that reads an entry
+reads none of them again.
+
+#### The editor's indexed lookups
+
+`DocumentEditor` gains a page count and a page-by-index lookup that read the
+editor's own page order when an edit has made one, and the document's index
+otherwise, without walking or copying either (P-01.4). Every per-page
+operation in `edit/` uses them in place of `page_refs()`, which collects every
+page while the editor has no order of its own and clones the order when it
+does; `import_page` and `import_page_as_form` read the source page through
+`pages::at`; and facade redaction's `apply` looks its page up the same way.
+`page_refs()` stays, for its callers, and reads the index too.
+
+#### A1's and A2's counted quantities
+
+A1 reads `PageNodesVisited` and the entries copied: per lookup, at most depth ×
+fan-out nodes; over every page of the 10 000-page tree, at most 30 000 nodes
+and entries together. A2 compares `work()`, which the walk's nodes dominate on
+every leg that looks pages up one at a time.
+
+Each A2 leg, the per-page site superlinear at the tip, the counter that sees
+it, and the step that makes its guard pass. "Holds at the tip" means the leg's
+counted work and its time both grow with its pages: measured here at 1 000 and
+4 000 pages of A2's document in release, the save with fonts kept from 7 ms to
+27 ms and with subsetting from 62 to 268 ms.
+
+| Leg | Superlinear site at the tip | Counter that sees it | Step |
+| --- | --- | --- | --- |
+| text | each `page(i)` gathers `i + 1` pages (`pages::at_counted`) | `PageNodesVisited` | P-01.3 |
+| render-all at 36 dpi | the same lookup | `PageNodesVisited` | P-01.3 |
+| rewrite | none: the serializer reads each object once, and a subsetting save walks the tree a fixed number of times (`subset::apply`) | the serializer counts nothing; the leg's work is its subset pass's | P-01.3, landing green |
+| rotate | `rotate_page` reads `page_refs()`, which collects every page while the editor has no order (`edit/page_ops.rs`) | `PageNodesVisited`, on a counting editor | P-01.4 |
+| merge | `import_page` collects every page of the source for each page it imports, and reads the destination's `page_refs()` | `PageWalks`, `PageNodesVisited` | P-01.4 |
+| split | none: `keep_pages` reads the order once | — | P-01.4, landing green |
+| subset | none: a fixed number of walks (`subset::apply`) | — | P-01.3, landing green |
+| redaction | `redact::apply` reads `editor.page_refs()` for each page | `PageNodesVisited`, on a counting editor | P-01.4 |
+| validation | none: PDF/A's `content::walk` walks the tree once | — | P-01.3, landing green |
+
+**The serializer counts nothing**, which is a finding rather than a site: a
+superlinear loop in the writer would pass A2's rewrite leg, whose counted
+work is the subset pass's. It is linear at the tip, so nothing waits on it;
+a row that touches the writer's loops counts them.
+
+The row's three operations:
+
+| Operation | Superlinear site at the tip | Step |
+| --- | --- | --- |
+| Every page's size over 10 000 pages | each `page(i)` gathers `i + 1` pages; on the bench's 1 000- and 3 000-page inputs every page's size took 365 ms and 3.56 s, 9.8 times for 3 times the pages | P-01.3 |
+| Text of 10 000 small pages, CLI | `tpdf text` looks each page up by index: the same lookup | P-01.3 |
+| Rewrite of 3 000 pages | none: the bench's input rewrites 1 000 pages in 6.6 ms and 3 000 in 21 ms, already inside tier P's 40 ms, so the floor P-01.5 raises is held by the tip | P-01.5 records it |
+
+No A2 leg goes to a row outside P-01, so MS-01.9's depends gain nothing from
+this section.
+
+### Milestones
+
+1. **P-01.2: the `/Count` descent** in `pages::at`. Exit: `pages.rs`
+   `descent_and_walk_agree_on_every_page_of_honest_trees` (generated trees of
+   fan-out 1 to 16 and depth 1 to 6, at most 4 096 pages each, with boxes,
+   rotation and resources inherited at every level and a subtree two parents
+   share, give every page what `collect` gives) and
+   `a_lying_count_falls_back_to_the_walk_and_says_so`; `guards.rs`
+   `a1_page_lookup_reads_at_most_depth_times_fan_out_nodes` flips from owed;
+   `streaming_open.rs` unchanged.
+2. **P-01.3: the memoised index**, under the build rule above. Exit: `guards.rs`
+   `a1_every_page_of_ten_thousand_costs_at_most_thirty_thousand_visits`, A2's
+   text and render-all legs, and `guard_allocations.rs` A10's three flip from
+   owed, with A2's subset, validation and rewrite legs landed green;
+   `the_index_is_dropped_when_a_password_arrives`; `tinker-pdf-ffi`
+   `a_page_loop_over_the_c_abi_stays_within_a1`; `streaming_open.rs` and
+   `streaming_determinism.rs` unchanged.
+3. **P-01.4: the editor's indexed lookups.** Exit: A2's rotate, merge and
+   redaction legs flip from owed, with split landed green; `page_lookups.rs`
+   `links_on_every_page_copy_no_page_list`; `edit/tests.rs`, `writer_names.rs`,
+   `stream_dedup.rs` and every redaction test unchanged.
+4. **P-01.5: the row's close** in MS-02's paired job: every page's size over
+   3 000 pages at 856×, text of 1 000 small pages (CLI) at 23.3×, rewrite of
+   3 000 pages at 137×, with the relations 10 000 pages ≤ 3.6 × 3 000 and
+   ≤ 11 × 1 000; A1 and A2 green on linux, windows, macos and `wasm32-wasip1`.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| The descent and the walk disagree on a tree whose counts are honest | `descent_and_walk_agree_on_every_page_of_honest_trees` over generated trees with every inherited attribute and a shared subtree |
+| A count that lies sends the descent to the wrong page | Every count is checked against its kids' sum on the path, and a mismatch falls back to the walk with `PageCountMismatch` |
+| The index serves ciphertext after a password | `install_security` drops it with the store; a test holds it |
+| A streamed document builds the index and fetches its main table | A lookup Annex F answers never counts toward the build; `streaming_open.rs` unchanged |
+| A single lookup pays for the whole tree | The first lookup descends; only a second, or a whole-tree call, builds |
+| The serializer grows superlinear unseen | Named above: it counts nothing, and a row that changes its loops counts them |

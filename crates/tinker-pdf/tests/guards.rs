@@ -119,7 +119,7 @@ const ROSTER: &[Guard] = &[
         "rewrite: work at 4 000 pages at most 4.4 x work at 1 000",
         "a2_rewrite_is_linear_in_pages",
         "P-01",
-        "the step P-01.1 assigns",
+        "P-01.3",
     ),
     owed(
         "A2",
