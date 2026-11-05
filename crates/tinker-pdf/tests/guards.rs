@@ -239,13 +239,16 @@ const ROSTER: &[Guard] = &[
         "P-03",
         "P-03.2",
     ),
-    owed(
-        "A5",
-        "inflate calls per stream at most 1 per operation: a merge",
-        "a5_a_merge_decodes_each_stream_at_most_once",
-        "P-03",
-        "P-03.4",
-    ),
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A5",
+            "inflate calls per stream at most 1 per operation: a merge",
+            "a5_a_merge_decodes_each_stream_at_most_once",
+            "P-03",
+            "P-03.4",
+        )
+    },
     owed(
         "A6",
         "merge deduplication decompresses nothing unless encoded length and encoded hash collide",
@@ -1162,4 +1165,58 @@ fn a2_redaction_is_linear_in_pages() {
         }
         edited(&editor)
     });
+}
+
+// ---- A5: each stream decoded at most once an operation -----------------------
+
+/// **A5, a merge**: the four A6 parts merged as `tpdf merge` merges them — the
+/// first the base and every page of the rest imported — and saved with stream
+/// deduplication and fonts kept. No stream is decoded twice in the save. The
+/// face, copied with every imported page, is one encoding and its copies merge
+/// undecoded; each page's content and the face's program share one dictionary,
+/// `/Filter /FlateDecode` alone, and differ in their encodings, so each is
+/// compared decoded, once.
+#[test]
+fn a5_a_merge_decodes_each_stream_at_most_once() {
+    let parts: Vec<Document> = merge_parts()
+        .into_iter()
+        .map(|bytes| Document::open(bytes).expect("a part opens"))
+        .collect();
+    let mut editor = parts[0].editor();
+    for part in &parts[1..] {
+        for index in 0..part.page_count() {
+            let at = editor.page_count();
+            editor
+                .import_page(part.cos(), index, at)
+                .expect("the page imports");
+        }
+    }
+    let stats = save(
+        &mut editor,
+        &SaveOptions {
+            fonts: FontPolicy::Keep,
+            write: tinker_pdf::WriteOptions {
+                mode: tinker_pdf::WriteMode::Rewrite,
+                deduplicate_streams: true,
+                ..tinker_pdf::WriteOptions::default()
+            },
+            stats: true,
+            ..SaveOptions::default()
+        },
+    )
+    .stats
+    .expect("asked");
+    assert_eq!(
+        stats.streams_decoded,
+        (A6_PARTS * A6_PAGES) as u64 + 1,
+        "every page's content and the face's program compared decoded, once each"
+    );
+    assert_eq!(
+        stats.most_decodes_of_one_stream, 1,
+        "no stream decoded twice in the save"
+    );
+    println!(
+        "guard-a5-merge: RAN {} decodes, at most {} of one stream",
+        stats.streams_decoded, stats.most_decodes_of_one_stream
+    );
 }

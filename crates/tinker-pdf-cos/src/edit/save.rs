@@ -459,7 +459,7 @@ impl DocumentEditor {
                         &trailer,
                         self.doc.names_table(),
                         &content,
-                        &tinker_pdf_crypto::sha2::sha256,
+                        &tinker_pdf_filters::xxh64,
                     );
                     all = merged;
                     trailer = redirected;

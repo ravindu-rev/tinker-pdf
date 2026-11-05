@@ -91,11 +91,17 @@ bounds this shape (`limits::MAX_XREF_SLOTS`).
 identical streams into one object on a rewrite, after garbage collection, and
 **identical means identical**: equal dictionaries — every key and value in
 order, `/Length` aside since the writer computes it — and equal content,
-compared byte for byte. SHA-256 over the content only puts streams in
-buckets worth comparing; it never decides a merge, because a wrong merge is
-not a bigger file but one font drawn with another's program and nothing in the
-output saying so. The content compared is the **decoded** bytes, so two
-encodings of one content under one dictionary merge; a decode that is not
+compared byte for byte. A hash only puts streams in buckets worth comparing;
+it never decides a merge, because a wrong merge is not a bigger file but one
+font drawn with another's program and nothing in the output saying so.
+**Equal encodings merge undecoded**: streams are bucketed by their
+dictionary's bytes, which carry the filter chain, and by the length and the
+XXH64 of their stored bytes, and two whose stored bytes are equal are one
+stream without a decode — a face imported with every page of a merge is
+merged without running its chain once. **Differing encodings under one
+dictionary are compared decoded**, so two encodings of one content merge;
+each such stream is decoded at most once a save, counted on the save's
+`Stats`, and its decoded bytes kept until the pass ends. A decode that is not
 exact — a filter this build cannot run, an image codec the chain stops at, a
 decode that warned or hit the output cap — compares the stored bytes under a
 different tag instead, so a damaged stream that decodes to the same prefix as
@@ -445,9 +451,9 @@ and draw the same glyphs whichever each names, so the same page draws two
 images under equal dictionaries whose samples differ: a merge that did not
 compare their bytes would draw one image twice, and the test asserts they stay
 two objects besides. The render guards that class of swap — a merge that
-looked at too little — and a swap behind a colliding digest rests on
-`dedup.rs`'s injected-digest test below, since SHA-256 cannot be made to
-collide here. Beside it: equal bytes under different
+looked at too little — and a swap behind a colliding hash rests on
+`dedup.rs`'s injected-hash test below, since no colliding XXH64 is built
+here. Beside it: equal bytes under different
 `/DecodeParms` stay two, a zlib stream of stored blocks and the encoder's
 output of the same content merge (the comparison is on decoded bytes), two
 damaged streams that decode to the same prefix stay two, an incremental
@@ -456,8 +462,10 @@ when its dictionary names nothing indirect and stays two when its
 `/ColorSpace` is a reference (`an_imported_image_merges_unless_its_dictionary_names_a_copied_non_stream`,
 the limit the paragraph on `import_page` above states).
 `crates/tinker-pdf-cos/src/dedup.rs`'s own tests cover
-what a real digest cannot be made to do: an injected digest that collides on
-everything, under which only true duplicates merge; the fixed point through
+what a real hash is not made to do here: an injected hash that collides on
+everything, under which only true duplicates merge; four copies of streams
+whose dictionaries differ, which merge with nothing decoded
+(`byte_identical_encodings_merge_undecoded`); the fixed point through
 two forms naming two copies of one image; the trailer redirected; and the
 `/OBJR` and cross-reference holds.
 

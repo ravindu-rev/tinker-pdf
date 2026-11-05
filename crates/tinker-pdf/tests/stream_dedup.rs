@@ -19,9 +19,9 @@
 //! 13): what its glyphs look like is a fact about the face, not about a
 //! fixture written to pass.
 //!
-//! The collision half — a digest that agrees over bytes that do not — cannot
-//! be produced with SHA-256 and is not faked here: `dedup.rs`'s own
-//! `a_colliding_digest_never_merges_different_bytes` injects a digest that
+//! The collision half — a hash that agrees over bytes that do not — is not
+//! built here: `dedup.rs`'s own
+//! `a_colliding_digest_never_merges_different_bytes` injects a hash that
 //! collides on everything and shows the byte comparison still decides.
 
 use tinker_pdf::{

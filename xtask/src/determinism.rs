@@ -145,6 +145,11 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/guards.rs",
         test: "a2_redaction_is_linear_in_pages",
     },
+    // MS-01's A5 merge leg: no stream decoded twice in a merge's save.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a5_a_merge_decodes_each_stream_at_most_once",
+    },
     // MS-08's counted guard: the requests page one of the linearized fixture
     // and of its unlinearized twin makes, measured once and held on every
     // target beside the row's ceilings.

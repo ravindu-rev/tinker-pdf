@@ -6,15 +6,21 @@
 //!
 //! Two streams are merged only when their dictionaries are equal — every key,
 //! every value, in order, `/Length` aside since the writer computes it — **and**
-//! their contents are equal byte for byte. SHA-256 over the content only
-//! decides which streams are worth comparing; it never decides a merge. A
-//! wrong merge is not a larger file, it is a document that silently draws one
-//! font's glyphs with another's program, and nothing downstream can tell.
+//! their contents are equal byte for byte. A hash only decides which streams
+//! are worth comparing; it never decides a merge. A wrong merge is not a
+//! larger file, it is a document that silently draws one font's glyphs with
+//! another's program, and nothing downstream can tell.
 //!
-//! The content compared is the **decoded** bytes, so two streams whose
-//! dictionaries agree — the same `/Filter`, the same `/DecodeParms` — and
-//! whose encodings differ (two deflate levels over one font program) are still
-//! found. Where decoding is anything less than exact — a filter this build
+//! **Equal encodings merge undecoded.** Candidates are bucketed by their
+//! dictionary's bytes, which carry the filter chain, and by the length and
+//! the XXH64 of their stored bytes; two of one bucket whose stored bytes are
+//! equal are one stream, since one chain over one input decodes to one
+//! output, and nothing is decoded to say so.
+//!
+//! **Differing encodings under one dictionary are compared decoded**, so two
+//! deflate levels over one font program are still found. Each such stream is
+//! decoded at most once a pass, and its decoded bytes are kept until the pass
+//! ends. Where decoding is anything less than exact — a filter this build
 //! cannot run, an image codec the chain stops at, a decode that warned or hit
 //! the output cap — the stream's stored bytes are compared instead, under a
 //! different tag, so a truncated decode can never make two different streams
@@ -163,75 +169,73 @@ fn held_apart(objects: &ObjectSet, names: &NameTable) -> HashSet<u32> {
     out
 }
 
+/// What one candidate is compared by once it is decoded: its content and
+/// that content's hash, kept for the pass so no round decodes it again.
+struct Decoded {
+    content: Content,
+    hash: u64,
+}
+
 /// Merges identical streams, returning the set and trailer with every
 /// reference to a merged duplicate pointed at the stream kept in its place,
 /// and each merge as `(duplicate, kept)`.
 ///
-/// `content` gives a stream's content as it is compared; `digest` hashes that
-/// content into buckets and is SHA-256 in every caller but the tests, which
-/// inject a colliding one to show a shared digest is never a merge. The stream
-/// kept is the lowest-numbered of its kind, so the output does not depend on
-/// map order.
+/// `content` gives a stream's content as it is compared decoded, and is
+/// called at most once a stream; `digest` hashes bytes into buckets and is
+/// XXH64 in every caller but the tests, which inject a colliding one to show
+/// a shared hash is never a merge. The stream kept is the lowest-numbered of
+/// its kind, so the output does not depend on map order.
 pub(crate) fn deduplicate(
     objects: &ObjectSet,
     trailer: &Dict,
     names: &NameTable,
     content: &dyn Fn(u32, &StreamData) -> Content,
-    digest: &dyn Fn(&[u8]) -> [u8; 32],
+    digest: &dyn Fn(&[u8]) -> u64,
 ) -> (ObjectSet, Dict, Vec<(u32, u32)>) {
     let apart = held_apart(objects, names);
 
-    // Each candidate's content digest, once: redirecting references changes
-    // dictionaries and never content.
-    let mut digests: BTreeMap<u32, (u8, [u8; 32])> = BTreeMap::new();
+    // Each candidate's stored bytes hashed, once: redirecting references
+    // changes dictionaries and never bytes.
+    let mut encoded: BTreeMap<u32, u64> = BTreeMap::new();
     for (num, entry) in objects.iter() {
         if let Written::Stream(stream) = entry {
-            if apart.contains(num) {
-                continue;
+            if !apart.contains(num) {
+                encoded.insert(*num, digest(&stream.data));
             }
-            let content = content(*num, stream);
-            let (tag, bytes) = content.tagged();
-            digests.insert(*num, (tag, digest(bytes)));
         }
     }
+    let mut decoded: BTreeMap<u32, Decoded> = BTreeMap::new();
 
     let mut set = objects.clone();
     let mut trailer = trailer.clone();
     let mut merges: Vec<(u32, u32)> = Vec::new();
 
     for _ in 0..limits::MAX_NEST_DEPTH {
-        // Buckets of streams that *might* be one: the same dictionary bytes
-        // and the same content digest.
-        let mut buckets: BTreeMap<(Vec<u8>, u8, [u8; 32]), Vec<u32>> = BTreeMap::new();
-        for (num, (tag, hash)) in &digests {
+        // The streams that *might* be one share their dictionary's bytes.
+        let mut groups: BTreeMap<Vec<u8>, Vec<u32>> = BTreeMap::new();
+        for num in encoded.keys() {
             let Some(Written::Stream(stream)) = set.get(*num) else {
                 continue;
             };
             let mut key = Vec::new();
             write_object(&mut key, &Object::Dict(comparable(&stream.dict)), names);
-            buckets.entry((key, *tag, *hash)).or_default().push(*num);
+            groups.entry(key).or_default().push(*num);
         }
 
-        // Within a bucket, the comparison that decides: equal dictionaries
-        // and equal bytes, against every stream already kept there.
         let mut mapping: BTreeMap<u32, u32> = BTreeMap::new();
-        for members in buckets.values().filter(|m| m.len() > 1) {
-            let mut kept: Vec<(u32, Dict, Content)> = Vec::new();
-            for &num in members {
-                let Some(Written::Stream(stream)) = set.get(num) else {
-                    continue;
-                };
-                let dict = comparable(&stream.dict);
-                let mine = content(num, stream);
-                let same = kept.iter().find(|(_, other_dict, other)| {
-                    *other_dict == dict && other.tagged() == mine.tagged()
-                });
-                match same {
-                    Some((canonical, _, _)) => {
-                        mapping.insert(num, *canonical);
+        for members in groups.values().filter(|m| m.len() > 1) {
+            let distinct = merge_equal_encodings(&set, members, &encoded, &mut mapping);
+            if distinct.len() > 1 {
+                for &num in &distinct {
+                    if let (false, Some(Written::Stream(stream))) =
+                        (decoded.contains_key(&num), set.get(num))
+                    {
+                        let content = content(num, stream);
+                        let hash = digest(content.tagged().1);
+                        decoded.insert(num, Decoded { content, hash });
                     }
-                    None => kept.push((num, dict, mine)),
                 }
+                merge_equal_contents(&set, &distinct, &decoded, &mut mapping);
             }
         }
         if mapping.is_empty() {
@@ -256,7 +260,8 @@ pub(crate) fn deduplicate(
         }
         trailer = redirect_dict(&trailer, &mapping, 0);
         for num in mapping.keys() {
-            digests.remove(num);
+            encoded.remove(num);
+            decoded.remove(num);
         }
         merges.extend(mapping);
         set = next;
@@ -281,6 +286,87 @@ pub(crate) fn deduplicate(
     (set, trailer, merges)
 }
 
+/// `num`'s dictionary as it is compared, and its stored bytes.
+fn compared(set: &ObjectSet, num: u32) -> Option<(Dict, &[u8])> {
+    match set.get(num) {
+        Some(Written::Stream(stream)) => Some((comparable(&stream.dict), &stream.data)),
+        _ => None,
+    }
+}
+
+/// `num`'s stored bytes.
+fn stored(set: &ObjectSet, num: u32) -> Option<&[u8]> {
+    match set.get(num) {
+        Some(Written::Stream(stream)) => Some(&stream.data),
+        _ => None,
+    }
+}
+
+/// Within `members`, which share their dictionary's bytes, each stream whose
+/// dictionary and stored bytes equal a lower-numbered one's is mapped to it,
+/// undecoded: bucketed by the bytes' length and hash, and confirmed byte for
+/// byte. Returns the first of each distinct encoding, in number order.
+fn merge_equal_encodings(
+    set: &ObjectSet,
+    members: &[u32],
+    encoded: &BTreeMap<u32, u64>,
+    mapping: &mut BTreeMap<u32, u32>,
+) -> Vec<u32> {
+    let mut buckets: BTreeMap<(usize, u64), Vec<(u32, Dict)>> = BTreeMap::new();
+    let mut distinct = Vec::new();
+    for &num in members {
+        let (Some((dict, data)), Some(&hash)) = (compared(set, num), encoded.get(&num)) else {
+            continue;
+        };
+        let kept = buckets.entry((data.len(), hash)).or_default();
+        let same = kept
+            .iter()
+            .find(|(other, other_dict)| *other_dict == dict && stored(set, *other) == Some(data));
+        match same {
+            Some((canonical, _)) => {
+                mapping.insert(num, *canonical);
+            }
+            None => {
+                kept.push((num, dict));
+                distinct.push(num);
+            }
+        }
+    }
+    distinct
+}
+
+/// Among `distinct`, the first of each encoding under one dictionary's bytes,
+/// each stream whose dictionary and decoded content equal a lower-numbered
+/// one's is mapped to it: bucketed by the content's tag, length and hash, and
+/// confirmed byte for byte.
+fn merge_equal_contents(
+    set: &ObjectSet,
+    distinct: &[u32],
+    decoded: &BTreeMap<u32, Decoded>,
+    mapping: &mut BTreeMap<u32, u32>,
+) {
+    let mut buckets: BTreeMap<(u8, usize, u64), Vec<(u32, Dict)>> = BTreeMap::new();
+    for &num in distinct {
+        let (Some((dict, _)), Some(mine)) = (compared(set, num), decoded.get(&num)) else {
+            continue;
+        };
+        let (tag, bytes) = mine.content.tagged();
+        let kept = buckets.entry((tag, bytes.len(), mine.hash)).or_default();
+        let same = kept.iter().find(|(other, other_dict)| {
+            *other_dict == dict
+                && decoded
+                    .get(other)
+                    .is_some_and(|other| other.content.tagged() == (tag, bytes))
+        });
+        match same {
+            Some((canonical, _)) => {
+                mapping.insert(num, *canonical);
+            }
+            None => kept.push((num, dict)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,8 +387,8 @@ mod tests {
         Content::Decoded(stream.data.clone())
     }
 
-    fn sha(bytes: &[u8]) -> [u8; 32] {
-        tinker_pdf_crypto::sha2::sha256(bytes)
+    fn xxh(bytes: &[u8]) -> u64 {
+        tinker_pdf_filters::xxh64(bytes)
     }
 
     /// Two copies of one program under two font descriptors: one survives
@@ -321,7 +407,7 @@ mod tests {
         };
         set.insert(3, descriptor(1));
         set.insert(4, descriptor(2));
-        let (out, _, merges) = deduplicate(&set, &Dict::new(), &names, &raw, &sha);
+        let (out, _, merges) = deduplicate(&set, &Dict::new(), &names, &raw, &xxh);
         assert_eq!(merges, [(2, 1)]);
         assert!(out.get(2).is_none());
         for num in [3, 4] {
@@ -345,7 +431,7 @@ mod tests {
         let mut set = ObjectSet::new();
         set.insert_stream(1, stream(&names, &[(b"DecodeParms", parms(4))], b"same"));
         set.insert_stream(2, stream(&names, &[(b"DecodeParms", parms(8))], b"same"));
-        let (out, _, merges) = deduplicate(&set, &Dict::new(), &names, &raw, &sha);
+        let (out, _, merges) = deduplicate(&set, &Dict::new(), &names, &raw, &xxh);
         assert!(merges.is_empty());
         assert_eq!(out.len(), 2);
     }
@@ -356,7 +442,7 @@ mod tests {
     #[test]
     fn a_colliding_digest_never_merges_different_bytes() {
         let names = NameTable::new();
-        let collide = |_: &[u8]| [0u8; 32];
+        let collide = |_: &[u8]| 0u64;
         let mut set = ObjectSet::new();
         set.insert_stream(1, stream(&names, &[], b"alpha"));
         set.insert_stream(2, stream(&names, &[], b"omega"));
@@ -366,22 +452,23 @@ mod tests {
         assert!(out.get(2).is_some(), "the collision survives");
     }
 
-    /// Decoded content that agrees under a stored form that does not still
-    /// merges; a stored-bytes comparison never meets a decoded one.
+    /// Two encodings under one dictionary, one decoding exactly to what the
+    /// other stores and could not decode exactly: a stored-bytes comparison
+    /// never meets a decoded one, so they stay two.
     #[test]
     fn decoded_and_stored_content_are_never_compared_with_each_other() {
         let names = NameTable::new();
         let mut set = ObjectSet::new();
-        set.insert_stream(1, stream(&names, &[], b"x"));
-        set.insert_stream(2, stream(&names, &[], b"x"));
-        let tagged = |num: u32, s: &StreamData| {
+        set.insert_stream(1, stream(&names, &[], b"x, encoded once"));
+        set.insert_stream(2, stream(&names, &[], b"x, encoded twice"));
+        let tagged = |num: u32, _: &StreamData| {
             if num == 1 {
-                Content::Decoded(s.data.clone())
+                Content::Decoded(b"x".to_vec())
             } else {
-                Content::Stored(s.data.clone())
+                Content::Stored(b"x".to_vec())
             }
         };
-        let (_, _, merges) = deduplicate(&set, &Dict::new(), &names, &tagged, &sha);
+        let (_, _, merges) = deduplicate(&set, &Dict::new(), &names, &tagged, &xxh);
         assert!(merges.is_empty());
     }
 
@@ -400,7 +487,7 @@ mod tests {
         let xref = (b"Type".as_slice(), Object::Name(names.intern(b"XRef")));
         set.insert_stream(4, stream(&names, std::slice::from_ref(&xref), b"t"));
         set.insert_stream(5, stream(&names, std::slice::from_ref(&xref), b"t"));
-        let (_, _, merges) = deduplicate(&set, &Dict::new(), &names, &raw, &sha);
+        let (_, _, merges) = deduplicate(&set, &Dict::new(), &names, &raw, &xxh);
         assert!(merges.is_empty(), "{merges:?}");
     }
 
@@ -433,7 +520,7 @@ mod tests {
                 Object::String(PdfString::literal(b"kept".to_vec())),
             ]),
         );
-        let (out, trailer, merges) = deduplicate(&set, &trailer, &names, &raw, &sha);
+        let (out, trailer, merges) = deduplicate(&set, &trailer, &names, &raw, &xxh);
         assert_eq!(merges, [(2, 1), (4, 3)]);
         assert_eq!(out.len(), 2);
         assert_eq!(
@@ -444,5 +531,36 @@ mod tests {
             Some(ObjRef::new(3, 0)),
             "the trailer's references are redirected too"
         );
+    }
+
+    /// Four copies of a document whose streams' dictionaries are pairwise
+    /// distinct: every copy merges into the first, and nothing is decoded.
+    #[test]
+    fn byte_identical_encodings_merge_undecoded() {
+        let names = NameTable::new();
+        let mut set = ObjectSet::new();
+        let kinds: [&[u8]; 3] = [b"FontFile2", b"Subtype", b"Width"];
+        for copy in 0..4u32 {
+            for (at, kind) in kinds.iter().enumerate() {
+                let num = 1 + copy * 3 + at as u32;
+                let marker = (*kind, Object::Int(at as i64));
+                set.insert_stream(num, stream(&names, &[marker], b"the same bytes"));
+            }
+        }
+        let decodes = std::cell::Cell::new(0u32);
+        let counted = |num: u32, s: &StreamData| {
+            decodes.set(decodes.get() + 1);
+            raw(num, s)
+        };
+        let (out, _, merges) = deduplicate(&set, &Dict::new(), &names, &counted, &xxh);
+        assert_eq!(decodes.get(), 0, "nothing is decoded");
+        assert_eq!(out.len(), 3, "one stream of each kind survives");
+        let mut want: Vec<(u32, u32)> = (1..4u32)
+            .flat_map(|copy| (0..3u32).map(move |at| (1 + copy * 3 + at, 1 + at)))
+            .collect();
+        want.sort_unstable();
+        let mut got = merges.clone();
+        got.sort_unstable();
+        assert_eq!(got, want, "each copy merges into the first");
     }
 }

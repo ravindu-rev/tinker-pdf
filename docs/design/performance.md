@@ -469,7 +469,7 @@ lands in the step named, in
 | A5 | a render | `a5_a_render_decodes_each_stream_at_most_once` | P-03, P-03.2 |
 | A5 | a text extraction | `a5_text_decodes_each_stream_at_most_once` | P-03, P-03.2 |
 | A5 | image extraction, the decode door | `a5_image_extraction_decodes_each_stream_at_most_once` | P-03, P-03.2 |
-| A5 | a merge | `a5_a_merge_decodes_each_stream_at_most_once` | P-03, P-03.4 |
+| A5 | a merge | `a5_a_merge_decodes_each_stream_at_most_once` | P-03, P-03.4, landed |
 | A6 | merge deduplication decompresses nothing unless encoded length and encoded hash collide | `a6_merge_deduplication_decodes_only_on_a_collision` | P-03, P-03.6, as H-137 is decided |
 | A7 | IDCT output ≤ 4 × drawn pixels for a quarter-scale draw | `a_jpeg_drawn_at_a_quarter_transforms_four_samples_a_pixel`, in `crates/tinker-pdf/tests/images.rs` | P-09, P-09.8 |
 | A7 | JPX levels decoded ≤ levels needed | `a_jpx_image_drawn_at_a_quarter_decodes_two_levels_fewer`, in `crates/tinker-pdf/tests/jpx_images.rs` | P-10, P-10.8 |
@@ -2248,11 +2248,10 @@ the operation reads; a byte budget is P-16's.
 #### Deduplication: the bucket key, and the confirmation
 
 A candidate's bucket is its **comparable dictionary's bytes** (without
-`/Length`), its **encoded length**, and **XXH64 of its encoded bytes and
-filter chain**. The hash is XXH64 because the archive's Zstandard frame
-checksum already carries it (`crates/tinker-pdf-archive/src/zstd/xxhash.rs`);
-P-03.3 moves it into `tinker-pdf-filters`, which `tinker-pdf-cos` and the
-archive both depend on, unchanged in value.
+`/Length`), which carry its filter chain, its **encoded length**, and **XXH64
+of its encoded bytes**. The hash is XXH64, `tinker_pdf_filters::xxh64`, the
+one the archive's Zstandard frame checksum carries, which both
+`tinker-pdf-cos` and the archive reach there.
 
 **The hash only buckets.** Two streams of one bucket merge when their
 comparable dictionaries are equal and their encoded bytes are equal byte for
