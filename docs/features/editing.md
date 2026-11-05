@@ -1016,12 +1016,16 @@ encrypted input decrypted; whether the save doors refuse is
   one after the default save.
 - **The same pass, over the corpus**:
   `crates/tinker-pdf/tests/cff_subset_census.rs` runs
-  `subset::apply` over every fetched document and asserts, over documents
+  `subset::apply` over every fetched PDF and asserts, over documents
   nobody here wrote: every font dictionary identical but for `/BaseFont`,
   every descriptor but for `/FontName`, every cut program still declaring the
   same glyph count and still parsing, none larger than it was, `/Length1`
   describing the bytes it is on (Table 126), and every embedded program in
-  one list or the other.
+  one list or the other. A file `Document::open` lays out from another format
+  is a PDF this engine wrote, so it is counted apart and not walked, and the
+  census prints it by path, every refused file with its error, every program
+  left whole as `ScopeNotWalked` by path and object number, and the outcome of
+  every program a tiling pattern's cell or a soft mask's group names.
 - Every edited document is written through the [writer](writing.md), whose
   output is held to the strict validator (`strict_validator.rs`); the
   `render_page` and

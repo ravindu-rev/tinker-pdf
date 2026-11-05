@@ -917,7 +917,8 @@ corpora already vendored here. So every name stays on the list.
   charset that runs backwards) and `/ToUnicode` — with a charset two glyphs
   share refused.
 - `crates/tinker-pdf/tests/cff_subset_census.rs` — every CFF face in the
-  fetched corpora cut to nine glyphs, and every retained glyph's outline,
+  fetched corpora's PDFs, a document laid out from another format left out,
+  cut to nine glyphs, and every retained glyph's outline,
   advance and font matrix, every glyph's name, every CID's glyph and every one
   of the 256 codes compared with the original's.
 - `crates/tinker-pdf/tests/composite_fonts.rs` — the CID selects glyph and

@@ -29,9 +29,68 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use tinker_pdf::subset::UntouchedReason;
-use tinker_pdf::Document;
-use tinker_pdf_cos::{CosDocument, ObjRef, Object, XrefEntry};
+use tinker_pdf::{Document, OpenError};
+use tinker_pdf_cos::{CosDocument, Dict, ObjRef, Object, XrefEntry};
 use tinker_pdf_font::Cff;
+
+// ---------------------------------------------------------------------------
+// Opening a corpus file.
+// ---------------------------------------------------------------------------
+
+/// What one corpus file opened as.
+///
+/// Both censuses' properties are claims about documents nobody here wrote, and
+/// `Document::open` lays a file of another format out as a PDF of its own: an
+/// HTML page under a `.pdf` name opens, as a document this engine wrote. So a
+/// census tells the three apart and walks the first alone.
+enum Opened {
+    /// A PDF.
+    Pdf(Document),
+    /// A document `Document::open` synthesised from another format, which
+    /// [`Document::archive`] says it is.
+    Synthesised,
+    /// What the file was refused with.
+    Refused(OpenError),
+}
+
+/// Opens one corpus file the way both censuses do.
+///
+/// A file whose password is refused still counts as opened: `Document::open`
+/// does not authenticate, and the censuses try the empty password after.
+fn open_corpus_file(bytes: Vec<u8>) -> Opened {
+    match Document::open(bytes) {
+        Ok(doc) if doc.archive().is_some() => Opened::Synthesised,
+        Ok(doc) => Opened::Pdf(doc),
+        Err(error) => Opened::Refused(error),
+    }
+}
+
+/// An HTML page, a PDF and no bytes at all open as the three things they are,
+/// so the walk can count a document this engine laid out apart from the PDFs.
+#[test]
+fn the_walk_counts_a_synthesised_document_apart_from_the_pdfs() {
+    let html = b"<!DOCTYPE html>\n<html><head><title>A page</title></head>\n\
+                 <body><p>A page of HTML under a .pdf name.</p></body></html>\n";
+    assert!(
+        matches!(open_corpus_file(html.to_vec()), Opened::Synthesised),
+        "an HTML page is laid out, not read"
+    );
+
+    let mut builder = tinker_pdf::DocumentBuilder::new();
+    builder.add_page(100.0, 100.0, |_| {});
+    assert!(
+        matches!(open_corpus_file(builder.finish()), Opened::Pdf(_)),
+        "a PDF is a PDF"
+    );
+
+    assert!(
+        matches!(
+            open_corpus_file(Vec::new()),
+            Opened::Refused(OpenError::Empty)
+        ),
+        "no bytes are refused"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Finding the faces.
@@ -79,7 +138,7 @@ fn inner_cff(program: &[u8]) -> Option<Vec<u8>> {
 /// `/FontFile`, `/FontFile2` and `/FontFile3` are the only three keys 9.9 lets
 /// a program hang off.
 fn cff_faces_in(bytes: Vec<u8>) -> Vec<Face> {
-    let Ok(doc) = Document::open(bytes) else {
+    let Opened::Pdf(doc) = open_corpus_file(bytes) else {
         return Vec::new();
     };
     // An encrypted document's streams do not decode until the file key exists,
@@ -287,8 +346,8 @@ fn census_of_the_corpus_cff_subsets() {
         println!("cff-subset-census: SKIPPED (no corpus; set TINKER_CORPUS)");
         assert!(
             !required(),
-            "TINKER_CORPUS_REQUIRED is set and there is no corpus at \
-             TINKER_CORPUS: this census would have passed over nothing"
+            "cff-subset-census: TINKER_CORPUS_REQUIRED is set and there is no \
+             corpus at TINKER_CORPUS: this census would have passed over nothing"
         );
         return;
     };
@@ -644,6 +703,101 @@ struct Divergences {
     unreported: Vec<String>,
 }
 
+/// Every embedded program a tiling pattern's cell or a soft mask's group
+/// names in its own `/Resources`, by object number.
+///
+/// Those are content streams no page's own `/Resources` lists, which the
+/// subset walk reaches through the pattern and the group (`walk` in
+/// `crates/tinker-pdf/src/subset.rs`), so the outcome each of these programs
+/// gets says whether the walk reached it. A soft mask is often a direct
+/// dictionary inside an `/ExtGState`, so every object is searched through,
+/// not only the indirect ones.
+fn programs_in_cells_and_groups(doc: &CosDocument) -> BTreeSet<u32> {
+    let key = |name: &[u8]| doc.intern(name);
+    let mut scopes: Vec<std::sync::Arc<Object>> = Vec::new();
+    for (number, entry) in doc.xref().iter() {
+        if number == 0 || matches!(entry, XrefEntry::Free { .. }) {
+            continue;
+        }
+        let Ok(object) = doc.get(ObjRef::new(number, 0)) else {
+            continue;
+        };
+        dictionaries_in(&object, 0, &mut |dict| {
+            // A tiling pattern's cell (8.7.3.1).
+            if dict.get_int(key(b"PatternType")) == Some(1) {
+                scopes.push(doc.resolve_key(dict, key(b"Resources")));
+            }
+            // A soft mask's group (11.6.5.2): `/S` its kind, `/G` the group.
+            let mask = matches!(
+                dict.get(key(b"S")),
+                Some(Object::Name(kind)) if *kind == key(b"Alpha") || *kind == key(b"Luminosity")
+            );
+            if let (true, Some(group)) = (mask, dict.get(key(b"G"))) {
+                let group = doc.resolve(group);
+                if let Some(group) = group.as_dict() {
+                    scopes.push(doc.resolve_key(group, key(b"Resources")));
+                }
+            }
+        });
+    }
+
+    let mut out = BTreeSet::new();
+    for scope in scopes {
+        let Some(resources) = scope.as_dict() else {
+            continue;
+        };
+        let fonts = doc.resolve_key(resources, key(b"Font"));
+        let Some(fonts) = fonts.as_dict() else {
+            continue;
+        };
+        for (_, font) in fonts.iter() {
+            let font = doc.resolve(font);
+            let Some(font) = font.as_dict() else {
+                continue;
+            };
+            // A composite font's descriptor is its descendant's (9.7.4).
+            let mut descriptors = vec![doc.resolve_key(font, key(b"FontDescriptor"))];
+            let descendants = doc.resolve_key(font, key(b"DescendantFonts"));
+            for kid in descendants.as_array().unwrap_or(&[]) {
+                let kid = doc.resolve(kid);
+                if let Some(kid) = kid.as_dict() {
+                    descriptors.push(doc.resolve_key(kid, key(b"FontDescriptor")));
+                }
+            }
+            for descriptor in &descriptors {
+                let Some(descriptor) = descriptor.as_dict() else {
+                    continue;
+                };
+                for name in [b"FontFile".as_slice(), b"FontFile2", b"FontFile3"] {
+                    if let Some(program) = descriptor.get_ref(key(name)) {
+                        out.insert(program.num);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Calls `found` with every dictionary in `object`, a stream's own among
+/// them, to a bounded depth, following no reference.
+fn dictionaries_in(object: &Object, depth: u32, found: &mut dyn FnMut(&Dict)) {
+    const MAX_DEPTH: u32 = 32;
+    if depth > MAX_DEPTH {
+        return;
+    }
+    if let Object::Array(items) = object {
+        for item in items {
+            dictionaries_in(item, depth + 1, found);
+        }
+    } else if let Some(dict) = object.as_dict() {
+        found(dict);
+        for (_, value) in dict.iter() {
+            dictionaries_in(value, depth + 1, found);
+        }
+    }
+}
+
 #[test]
 #[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
 fn census_of_the_corpus_rewrite_subsets() {
@@ -651,8 +805,8 @@ fn census_of_the_corpus_rewrite_subsets() {
         println!("rewrite-subset-census: SKIPPED (no corpus; set TINKER_CORPUS)");
         assert!(
             !required(),
-            "TINKER_CORPUS_REQUIRED is set and there is no corpus at \
-             TINKER_CORPUS: this census would have passed over nothing"
+            "rewrite-subset-census: TINKER_CORPUS_REQUIRED is set and there is \
+             no corpus at TINKER_CORPUS: this census would have passed over nothing"
         );
         return;
     };
@@ -688,6 +842,15 @@ fn census_of_the_corpus_rewrite_subsets() {
     // page and `docs/features/editing.md` says so; this is where that sentence
     // gets a number, measured rather than guessed. A clock is not a property.
     let mut walking = std::time::Duration::ZERO;
+    // What the counts rest on, printed and never asserted: every file refused
+    // with its error, every document synthesised from another format, every
+    // program left whole because no walked scope reached it, and how the
+    // programs a tiling pattern's cell or a soft mask's group names came
+    // through the pass, by outcome.
+    let mut refused: Vec<(String, OpenError)> = Vec::new();
+    let mut synthesised: Vec<String> = Vec::new();
+    let mut not_walked: Vec<String> = Vec::new();
+    let mut cells_and_groups: BTreeMap<String, u32> = BTreeMap::new();
 
     for path in &files {
         let name = path
@@ -698,8 +861,16 @@ fn census_of_the_corpus_rewrite_subsets() {
         let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
-        let Ok(doc) = Document::open(bytes) else {
-            continue;
+        let doc = match open_corpus_file(bytes) {
+            Opened::Pdf(doc) => doc,
+            Opened::Synthesised => {
+                synthesised.push(name);
+                continue;
+            }
+            Opened::Refused(error) => {
+                refused.push((name, error));
+                continue;
+            }
         };
         if doc.is_encrypted() {
             let _ = doc.authenticate("");
@@ -711,6 +882,7 @@ fn census_of_the_corpus_rewrite_subsets() {
             continue;
         }
         carriers += 1;
+        let in_cells_and_groups = programs_in_cells_and_groups(doc.cos());
 
         let mut editor = doc.editor();
         let started = std::time::Instant::now();
@@ -756,6 +928,9 @@ fn census_of_the_corpus_rewrite_subsets() {
             cut += 1;
             before_bytes += subsetted.before as u64;
             after_bytes += subsetted.after as u64;
+            if in_cells_and_groups.contains(&subsetted.program.num) {
+                *cells_and_groups.entry("cut".to_string()).or_default() += 1;
+            }
             let Some(after) = editor.stream_bytes(subsetted.program) else {
                 divergences
                     .unreadable
@@ -826,6 +1001,14 @@ fn census_of_the_corpus_rewrite_subsets() {
             if let Some(index) = REASONS.iter().position(|r| *r == untouched.reason) {
                 reasons[index] += 1;
             }
+            if untouched.reason == UntouchedReason::ScopeNotWalked {
+                not_walked.push(format!("{name}: {}", untouched.program.num));
+            }
+            if in_cells_and_groups.contains(&untouched.program.num) {
+                *cells_and_groups
+                    .entry(untouched.reason.to_string())
+                    .or_default() += 1;
+            }
         }
 
         // Ruling 10, over documents nobody here wrote: every program a
@@ -845,7 +1028,20 @@ fn census_of_the_corpus_rewrite_subsets() {
         }
     }
 
-    println!("\n{documents} documents opened; {carriers} carry an embedded program\n");
+    println!("\n{documents} PDFs opened; {carriers} carry an embedded program");
+    println!(
+        "{} documents synthesised from another format, counted apart \
+         (SYNTHESISED) and not walked:",
+        synthesised.len()
+    );
+    for name in &synthesised {
+        println!("  {name}");
+    }
+    println!("{} files refused:", refused.len());
+    for (name, error) in &refused {
+        println!("  {name}: {error}");
+    }
+    println!();
     println!("  {cut} programs cut down, {whole} written through whole");
     println!(
         "  the pass itself took {:.1} s over those {carriers} documents, \
@@ -856,6 +1052,21 @@ fn census_of_the_corpus_rewrite_subsets() {
     println!("  {:<52} {:>6}", "reason a program was left whole", "count");
     for (reason, count) in REASONS.iter().zip(reasons.iter()) {
         println!("  {:<52} {count:>6}", reason.to_string());
+    }
+    println!(
+        "\nprograms left whole because no walked scope reached them ({}):",
+        not_walked.len()
+    );
+    for row in &not_walked {
+        println!("  {row}");
+    }
+    println!(
+        "\nprograms a tiling pattern's cell or a soft mask's group names in its \
+         own /Resources: {}",
+        cells_and_groups.values().sum::<u32>()
+    );
+    for (outcome, count) in &cells_and_groups {
+        println!("  {outcome:<52} {count:>6}");
     }
     println!(
         "\n{before_bytes} bytes of font program became {after_bytes} ({}%)",
@@ -921,7 +1132,7 @@ fn census_of_the_corpus_rewrite_subsets() {
 
     // Recorded against the corpora `corpus/corpora.lock` pins, so a shrinking
     // result cannot read as a passing one.
-    assert_eq!(documents, DOCUMENTS, "documents that opened");
+    assert_eq!(documents, DOCUMENTS, "PDFs that opened");
     assert_eq!(carriers, PROGRAM_CARRIERS, "documents carrying a program");
     assert_eq!(cut, CUT, "programs cut down");
     assert_eq!(whole, LEFT_WHOLE, "programs written through whole");
