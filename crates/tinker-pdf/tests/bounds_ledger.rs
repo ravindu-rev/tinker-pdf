@@ -10,8 +10,8 @@
 //! pixels the caller's own ceiling holds, so its currency is a *multiple*, as
 //! `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`'s is, and its parameter — the ceiling —
 //! is fixed in the row by [`SCAN_WORK_MULTIPLE`]: the tightest a caller can
-//! pass and still receive its page. Its `fixtures` is every committed seed under
-//! the fuzz target's 64 KiB, a hundredth of one rounded up; its comic and
+//! pass and still receive its page. Its `fixtures` is every committed seed the
+//! cap does not stop, under the fuzz target's 64 KiB, thirteen rounded up; its comic and
 //! fixed-document columns carry the bilevel scan, as every JBIG2 row's do; its
 //! book is a zero; and its corpus figure is owed, because the census that
 //! reports it was written where the corpora are not.
@@ -874,17 +874,18 @@ const SCAN_SYMBOL_PAGE_MULTIPLE: u128 = 1;
 /// ceiling of exactly the image's own packed page**, below which the page
 /// itself is refused. The engine names a work ceiling of the image's own
 /// pixels plus 8 388 608 for a shared dictionary (`jbig2_work_ceiling` in
-/// `src/resources.rs`), against which this scan spends 3.1; the census and
+/// `src/resources.rs`), against which this scan spends 3.3; the census and
 /// attribution suites pass 4 MiB and no work ceiling.
 ///
 /// The page is one of [`SCAN_SYMBOLS`]'s 200: 300 dpi A4, 8 699 840 pixels.
 /// Its global dictionary decodes whole for every page that names it —
 /// [`SCAN_SYMBOL_PIXELS`] and the integers that size its symbols, 25.4 million
-/// units; copying its symbols into the page's text region 4 million; the region
-/// 8.7 million; [`SCAN_TEXT_INSTANCES`] placements of a 25 x 50 glyph 6.3
-/// million; and a generic region beside it for the figures 8.7 million. That is
-/// 53 million units, 6.1 pages, and seven rounded up — the cap's 16 clears it
-/// by 2.3x. **The real figure is owed rather than taken**: `jbig2_census.rs`
+/// units; exporting its symbols 1.3 million, at `JBIG2_ELEMENT_COST` each;
+/// copying them into the page's text region 5.3 million, their packed bytes
+/// and that cost each; the region 8.7 million; [`SCAN_TEXT_INSTANCES`]
+/// placements of a 25 x 50 glyph 6.3 million; and a generic region beside it
+/// for the figures 8.7 million. That is 55.6 million units, 6.4 pages, and
+/// seven rounded up — the cap's 16 clears it by 2.3x. **The real figure is owed rather than taken**: `jbig2_census.rs`
 /// now reports every image's work as a multiple of its own packed page, and
 /// the fetched corpora were not where this row was written. The corpus's
 /// largest real dictionary spends 1 568 118 pixels against the 25 000 000
@@ -2018,12 +2019,13 @@ fn ledger() -> Vec<Bound> {
             // yardstick is arithmetic about a scan and the corpus figure is
             // owed.
             published: "16 (estimate)",
-            // Every committed seed but the one this cap closes, through
+            // Every committed seed but the three this cap stops, through
             // `jbig2_decode_measured` under the target's own 64 KiB, both
-            // ways round: Annex H's whole file is the most, 5 962 units of
-            // 524 288, which rounds up to one. The seed this row was written
-            // for, `symbol-dictionary-spun-past-its-marker`, asks for 98.
-            fixtures: 1,
+            // ways round: `symbol-dictionary-template-0-custom-at` is the
+            // most, 6 734 896 units of 524 288, which is 12.8 and rounds up
+            // to 13. The seed this row was written for,
+            // `symbol-dictionary-spun-past-its-marker`, asks for 98.
+            fixtures: 13,
             comic: SCAN_WORK_MULTIPLE,
             document: SCAN_WORK_MULTIPLE,
             book: 0,

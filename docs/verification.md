@@ -174,7 +174,11 @@ A corpus written by an `#[ignore]`d test in the crate that owns the fixtures —
 any `fuzz/corpus/<name>` a crate test calls `fs::write` on — cannot drift from
 those fixtures. A corpus with no writer, such as `jbig2`'s, holds inputs a
 fuzzer found or a person wrote, replayed by a test (`jbig2_seeds.rs`) and
-never regenerated, which is a different guarantee.
+never regenerated, which is a different guarantee. A seed a bound stops is
+held there by the refusal's name and by the count the decode stopped at, never
+by a clock: `pattern-dictionary-of-one-pixel-patterns` stops at its 122 881st
+pattern and `text-regions-re-reading-a-large-dictionary` at its 130 624th
+element, each under the fuzz target's 64 KiB.
 
 `icc_profile`'s first gate is the `acsp` signature at byte 36, so random bytes
 reach its parser essentially never. Its seeds include profiles this build

@@ -1,8 +1,7 @@
 //! The committed JBIG2 fuzz seeds, replayed on stable.
 //!
-//! `fuzz/corpus/jbig2/` is twenty-six inputs a fuzzer found or a person
-//! wrote,
-//! and the target that consumes them needs nightly. So the seeds were only ever
+//! `fuzz/corpus/jbig2/` is twenty-eight inputs a fuzzer found or a person
+//! wrote, and the target that consumes them needs nightly. So the seeds were only ever
 //! exercised when somebody ran `cargo fuzz`, which is not on every commit — and
 //! a seed corpus nothing reads is a corpus that stops describing the decoder
 //! without anybody noticing.
@@ -48,12 +47,19 @@
 //! uncharged and unguarded.
 //! [`the_export_run_seed_stops_at_the_turn_guard`] pins it by the guard's
 //! name and the decode's own count.
+//!
+//! `pattern-dictionary-of-one-pixel-patterns` and
+//! `text-regions-re-reading-a-large-dictionary` are the two shapes
+//! `JBIG2_ELEMENT_COST` closes: one-pixel bitmaps made by the hundred thousand,
+//! each charged one unit for about seventy bytes, so the fuzz target's budget
+//! held about 600 MB of them. Each is pinned by the refusal and by the element
+//! count the decode stops at.
 
 use std::path::{Path, PathBuf};
 
 use tinker_pdf_filters::{
     jbig2_decode, jbig2_decode_measured, Capability, FilterError, Jbig2Params, Jbig2Refusal,
-    MAX_JBIG2_SYMBOLS, MAX_JBIG2_WORK_MULTIPLE,
+    JBIG2_ELEMENT_COST, MAX_JBIG2_SYMBOLS, MAX_JBIG2_WORK_MULTIPLE,
 };
 
 /// The seed directory, from this crate rather than from the working directory.
@@ -347,6 +353,147 @@ fn the_export_run_seed_stops_at_the_turn_guard() {
         println!(
             "jbig2-seed-export: RAN {label}; stopped at the guard after {} units",
             extent.work
+        );
+    }
+}
+
+/// **Seventeen pattern dictionaries of one-pixel patterns, stopped by count.**
+///
+/// Each declares `GRAYMAX` 524 287 at 1 x 1: a collective bitmap of 524 288
+/// pixels, exactly the fuzz target's 64 KiB, coded in one bit of MMR and
+/// charged at its area. Sliced (6.7.5 step 4), it is 524 288 bitmaps of one
+/// pixel each. Charged nothing for the slices, sixteen dictionaries fit the
+/// budget, 8 388 608 bitmaps and about 600 MB from 324 bytes.
+///
+/// Each pattern is charged `JBIG2_ELEMENT_COST`, so the first dictionary's
+/// collective and the 122 880 patterns after it spend the budget exactly, and
+/// the 122 881st is refused. Pinned by the refusal, the element count and the
+/// decode's own count of what it spent, both ways round.
+#[test]
+fn the_one_pixel_pattern_seed_stops_at_the_work_budget_by_count() {
+    let Some(dir) = seeds() else {
+        println!("jbig2-seed-patterns: SKIPPED (no fuzz/corpus/jbig2)");
+        return;
+    };
+    let path = dir.join("pattern-dictionary-of-one-pixel-patterns");
+    let data = std::fs::read(&path).expect("the seed reads");
+    assert_eq!(
+        data.len(),
+        324,
+        "one control byte and seventeen 19-byte segments"
+    );
+    let (width, height, globals, own) = knobs(&data);
+
+    // The fuzz target's own ceiling, and so its own budget.
+    let ceiling = 1 << 16;
+    let budget = ceiling as u64 * 8 * MAX_JBIG2_WORK_MULTIPLE;
+    let collective = ceiling as u64 * 8;
+    let paid = (budget - collective) / JBIG2_ELEMENT_COST;
+    assert_eq!(paid, 122_880);
+    for (label, globals, own) in [("straight", globals, own), ("swapped", own, globals)] {
+        let params = Jbig2Params {
+            globals,
+            width,
+            height,
+            work_ceiling: None,
+        };
+        let mut refusals = Vec::new();
+        let (out, extent) = jbig2_decode_measured(own, &params, ceiling, &mut refusals);
+        assert!(out.is_err(), "{label}: the seed decoded to a page");
+        assert!(
+            refusals.contains(&Jbig2Refusal::WorkCap)
+                && refusals.contains(&Jbig2Refusal::PatternDictionaryRefused),
+            "{label}: the work budget is no longer what stops the first dictionary: \
+             {} patterns, {} units, {refusals:?}",
+            extent.elements,
+            extent.work
+        );
+        assert_eq!(
+            extent.elements,
+            paid + 1,
+            "{label}: the decode stopped at pattern {} of the first dictionary's 524 288",
+            extent.elements
+        );
+        assert_eq!(
+            extent.work,
+            budget + JBIG2_ELEMENT_COST,
+            "{label}: past the budget by more than the one pattern refused"
+        );
+        println!(
+            "jbig2-seed-patterns: RAN {label}; stopped at pattern {} of 524 288 after {} \
+             units of {budget}",
+            extent.elements, extent.work
+        );
+    }
+}
+
+/// **A large dictionary read five hundred times by one text region, stopped by
+/// count.**
+///
+/// A dictionary of 64 one-pixel symbols; a second that refers to it 255 times
+/// and exports the 16 320 symbols it imported; and a text region that refers
+/// to the second 514 times and places nothing, 1 015 bytes in all. Each
+/// reference copies the 16 320 symbols, and charged their packed bytes alone,
+/// one unit each, the region gathered 511 references, 8 339 520 bitmaps and
+/// about 600 MB, before the budget refused the 512th.
+///
+/// Each symbol copied or exported is charged `JBIG2_ELEMENT_COST` as well, so
+/// the count is the small dictionary's 64 exports, the large one's 16 320
+/// symbols copied into its import list, again into its pool and once more as
+/// its exports, and five of the region's references, the fifth refused.
+/// Pinned by the refusals, that count, and what the decode spent, both ways
+/// round.
+#[test]
+fn the_re_read_dictionary_seed_stops_at_the_work_budget_by_count() {
+    let Some(dir) = seeds() else {
+        println!("jbig2-seed-re-read: SKIPPED (no fuzz/corpus/jbig2)");
+        return;
+    };
+    let path = dir.join("text-regions-re-reading-a-large-dictionary");
+    let data = std::fs::read(&path).expect("the seed reads");
+    assert_eq!(data.len(), 1_015, "one control byte and four segments");
+    let (width, height, globals, own) = knobs(&data);
+
+    let ceiling = 1 << 16;
+    let budget = ceiling as u64 * 8 * MAX_JBIG2_WORK_MULTIPLE;
+    let large = 64 * 255;
+    for (label, globals, own) in [("straight", globals, own), ("swapped", own, globals)] {
+        let params = Jbig2Params {
+            globals,
+            width,
+            height,
+            work_ceiling: None,
+        };
+        let mut refusals = Vec::new();
+        let (out, extent) = jbig2_decode_measured(own, &params, ceiling, &mut refusals);
+        assert!(out.is_err(), "{label}: the seed decoded to a page");
+        assert!(
+            refusals.contains(&Jbig2Refusal::WorkCap)
+                && refusals.contains(&Jbig2Refusal::TextRegionRefused)
+                && !refusals.contains(&Jbig2Refusal::SymbolDictionaryRefused),
+            "{label}: the region's references are no longer what the budget stops: \
+             {} elements, {} units, {refusals:?}",
+            extent.elements,
+            extent.work
+        );
+        let references = (extent.elements - 64 - 3 * large) / large;
+        assert_eq!(
+            extent.elements,
+            64 + 3 * large + 5 * large,
+            "{label}: the decode stopped at element {}, reference {references} of 514",
+            extent.elements
+        );
+        // Past the budget, and by at most the one reference whose copy was
+        // refused.
+        assert!(
+            extent.work > budget && extent.work <= budget + large * (1 + JBIG2_ELEMENT_COST),
+            "{label}: {} units against a budget of {budget}",
+            extent.work
+        );
+        println!(
+            "jbig2-seed-re-read: RAN {label}; stopped at reference {references} of 514, \
+             element {}, after {} units of {budget}",
+            extent.elements, extent.work
         );
     }
 }

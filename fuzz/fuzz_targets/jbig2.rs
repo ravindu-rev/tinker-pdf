@@ -64,10 +64,10 @@ fuzz_target!(|data: &[u8]| {
     //
     // **And the ceiling is the whole decode's budget since October 2026**:
     // `MAX_JBIG2_WORK_MULTIPLE` times the 524 288 pixels 64 KiB holds, 8 388 608
-    // units of arithmetic decisions, regions, placements and copies. That is
-    // what stopped `symbol-dictionary-spun-past-its-marker` deciding 38 730
-    // symbols out of its coder's marker on a page of 37 by 56, which the page
-    // bound admits. A larger ceiling here is a larger budget per input.
+    // units of arithmetic decisions, regions, placements, copies and elements.
+    // That is what stopped `symbol-dictionary-spun-past-its-marker` deciding
+    // 38 730 symbols out of its coder's marker on a page of 37 by 56, which the
+    // page bound admits. A larger ceiling here is a larger budget per input.
     // `work_ceiling` is left `None` so that this ceiling stays the measure:
     // the engine names the image's own pixels plus a floor for a shared
     // dictionary instead, which here would be sixteen times as much.

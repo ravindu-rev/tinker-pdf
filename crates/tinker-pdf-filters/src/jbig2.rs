@@ -156,6 +156,11 @@ pub struct Jbig2SymbolExtent {
     /// is what that cap's corpus row is owed by. Divided by eight times the
     /// image's packed size, it is the multiple the cap is charged in.
     pub work: u64,
+    /// How many elements the decode was charged [`JBIG2_ELEMENT_COST`] for —
+    /// the patterns sliced out and the symbols imported, exported, gathered
+    /// or copied — the refused charge's included. Each is a `Bitmap` of its
+    /// own, so this is what a decode of one-pixel elements stops at.
+    pub elements: u64,
 }
 
 impl Jbig2SymbolExtent {
@@ -1642,7 +1647,7 @@ impl SymbolPage {
 ///
 /// | | Multiples of the ceiling |
 /// | --- | --- |
-/// | The most any fixture in this repository spends | 1 |
+/// | The most any fixture in this repository spends | 13 |
 /// | The most any file in the corpus spends | not measured |
 /// | A 200-page bilevel scan sharing one global dictionary | 7 |
 /// | A 300-page reflowable book | 0 |
@@ -1665,13 +1670,17 @@ impl SymbolPage {
 ///   imports, a text region's symbols, a halftone's patterns, a refinement's
 ///   intermediate reference — at its packed bytes, and at least one each,
 ///   because a referred-to list may name the same dictionary a thousand times;
+/// - every element, on top of its pixels, at [`JBIG2_ELEMENT_COST`]: each
+///   pattern a pattern dictionary slices out, and each symbol a dictionary
+///   imports or exports, a text region gathers or a halftone's patterns copy;
 /// - every page information segment that paints the page black, at the
 ///   page's packed bytes.
 ///
 /// What is **not** charged is work bounded by something that is: compositing a
-/// region onto the page, the window a refinement reads, slicing a collective
-/// bitmap, the Gray-code passes over planes, and exporting symbols each cost at
-/// most what the bitmap they read was charged when it was made.
+/// region onto the page, the window a refinement reads, the pixels a slice or
+/// an export reads, the Gray-code passes over planes, and the symbols a
+/// dictionary decodes and does not export, which are dropped with it and
+/// never more than [`MAX_JBIG2_SYMBOLS`].
 ///
 /// **The third row is arithmetic and the published figure says so.** The page
 /// is 300 dpi A4, 8 699 840 pixels, decoded at a ceiling of exactly its own
@@ -1679,10 +1688,11 @@ impl SymbolPage {
 /// the multiple is the largest a real caller can see. Its global dictionary
 /// costs 25.4 million — the 25 000 000 pixels [`MAX_JBIG2_SYMBOL_PIXELS`]'s own
 /// ledger estimates for this scan, and the integers that size its 20 000
-/// symbols — copying those symbols into the page's text region 4 million more,
-/// the region itself 8.7 million, its 5 000 placements of a 25 x 50 glyph 6.3
-/// million, and a generic region beside it for the figures another 8.7
-/// million: 53 million, which is 6.1 pages and rounds up to 7. The cap clears it by 2.3x, between
+/// symbols — exporting those symbols 1.3 million, copying them into the
+/// page's text region 5.3 million more, the region itself 8.7 million, its
+/// 5 000 placements of a 25 x 50 glyph 6.3 million, and a generic region
+/// beside it for the figures another 8.7 million: 55.6 million, which is 6.4
+/// pages and rounds up to 7. The cap clears it by 2.3x, between
 /// [`MAX_JBIG2_SYMBOL_PIXELS`]'s 2.7x and [`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`]'s 4x
 /// over theirs. It binds a caller that sized its ceiling to the page it
 /// expects — the `jbig2` fuzz target's 64 KiB, for one, which is 8 388 608
@@ -1698,15 +1708,16 @@ impl SymbolPage {
 /// as large as [`MAX_JBIG2_SYMBOL_PIXELS`] admits is twice covered on the
 /// smallest image that names it (`jbig2_work_ceiling` in
 /// `crates/tinker-pdf/src/resources.rs` has the argument). The scan above
-/// spends 3.1 of those multiples; the same 2 078 bytes stop at 134 251 481
+/// spends 3.3 of those multiples; the same 2 078 bytes stop at 134 251 481
 /// units in 1.3 s.
 ///
 /// **The second row is owed rather than zero.** `crates/tinker-pdf/tests/jbig2_census.rs`
 /// reports each image's work as a multiple of its own packed page through
 /// [`Jbig2SymbolExtent::work`], and the fetched corpora were not in the
-/// container this bound was written in. The first row is every other committed
-/// seed at the 64 KiB its fuzz target decodes under: Annex H's whole file is
-/// the most, 5 962 units of 524 288, a hundredth of one rounded up.
+/// container this bound was written in. The first row is every committed seed
+/// this cap does not stop, at the 64 KiB its fuzz target decodes under:
+/// `symbol-dictionary-template-0-custom-at` is the most, 6 734 896 units of
+/// 524 288, which is 12.8 and rounds up to 13.
 ///
 /// **Why a ceiling and not the page.** A dictionary in `/JBIG2Globals` is
 /// decoded whole by every image that names it, and an image may be a small
@@ -1727,6 +1738,25 @@ impl SymbolPage {
 /// five shapes.
 pub const MAX_JBIG2_WORK_MULTIPLE: u64 = 16;
 
+/// **What one element costs on top of its pixels**, in
+/// [`MAX_JBIG2_WORK_MULTIPLE`]'s units.
+///
+/// An element is a bitmap the decoder keeps a `Bitmap` of its own for: a
+/// pattern a pattern dictionary slices out (6.7.5 step 4), and a symbol a
+/// dictionary imports or exports, a text region gathers or a halftone's
+/// patterns copy. Its pixels are charged already, but a one-pixel element is
+/// one unit for about seventy bytes on a 64-bit target: its `Bitmap`'s 40
+/// bytes of fields and its pixels' own heap block. Charged that one unit,
+/// the fuzz target's budget of 8 388 608 made as many one-pixel patterns,
+/// about 600 MB. Charged this as well, an element costs about what it holds,
+/// so the elements a decode makes are bounded by their count, whatever their
+/// size.
+///
+/// A constant rather than `size_of::<Bitmap>()`, which is smaller on
+/// `wasm32`, so a decode stops at the same element on every target
+/// (ruling 4).
+pub const JBIG2_ELEMENT_COST: u64 = 64;
+
 /// What one decode has left to spend, in [`MAX_JBIG2_WORK_MULTIPLE`]'s units.
 ///
 /// **Refusing is final.** A charge that does not fit spends everything that
@@ -1741,6 +1771,9 @@ struct Work {
     /// What the decode has asked for, the refused charge included, which is
     /// the figure [`Jbig2SymbolExtent::work`] reports.
     asked: u64,
+    /// The elements the decode has been charged for, the refused charge's
+    /// included, which is the figure [`Jbig2SymbolExtent::elements`] reports.
+    elements: u64,
     /// Whether a charge has been refused. Not the same as nothing being left:
     /// a decode that spends its budget exactly has refused nothing, and the
     /// segment after it — the first that asks for anything — is the one that
@@ -1765,8 +1798,22 @@ impl Work {
         Work {
             left: pixels.saturating_mul(MAX_JBIG2_WORK_MULTIPLE),
             asked: 0,
+            elements: 0,
             refused: false,
         }
+    }
+
+    /// Spends one element made out of pixels already charged: a pattern
+    /// sliced out of its collective bitmap, or a symbol exported.
+    fn element(&mut self) -> bool {
+        self.elements = self.elements.saturating_add(1);
+        self.spend(JBIG2_ELEMENT_COST)
+    }
+
+    /// Spends copying `elements` out of one segment's list into another's.
+    fn copy(&mut self, elements: &[Bitmap]) -> bool {
+        self.elements = self.elements.saturating_add(elements.len() as u64);
+        self.spend(copy_cost(elements))
     }
 
     /// Spends `units` of work that is about to be done or was just done.
@@ -1810,14 +1857,20 @@ impl Work {
     }
 }
 
-/// What copying `bitmaps` out of one segment's list into another's costs:
-/// their packed bytes, and at least one for each, since an empty-looking
-/// bitmap is still an allocation.
-fn copy_cost(bitmaps: &[Bitmap]) -> u64 {
-    bitmaps
+/// What copying `elements` out of one segment's list into another's costs:
+/// each its packed bytes and [`JBIG2_ELEMENT_COST`].
+fn copy_cost(elements: &[Bitmap]) -> u64 {
+    elements
         .iter()
-        .map(|bitmap| (bitmap.bits.len() as u64).max(1))
+        .map(|bitmap| (bitmap.bits.len() as u64).saturating_add(JBIG2_ELEMENT_COST))
         .fold(0, u64::saturating_add)
+}
+
+/// What copying one region's bitmap costs: its packed bytes, and at least one,
+/// since an empty-looking bitmap is still an allocation. A region is not an
+/// element, so it carries no [`JBIG2_ELEMENT_COST`].
+fn region_copy_cost(region: &Bitmap) -> u64 {
+    (region.bits.len() as u64).max(1)
 }
 
 /// What a bitmap of these dimensions costs to produce, one unit a pixel.
@@ -1918,7 +1971,7 @@ fn symbol_dictionary_huffman(
     // 6.5: imported and new share one index space, as on the arithmetic road,
     // because 6.5.8.2 refines against both.
     let base = imported.len();
-    if !page.work.spend(copy_cost(imported)) {
+    if !page.work.copy(imported) {
         note(warnings, Jbig2Refusal::WorkCap);
         return None;
     }
@@ -2191,6 +2244,10 @@ fn symbol_dictionary_huffman(
                 if at >= total {
                     break;
                 }
+                if !page.work.element() {
+                    note(warnings, Jbig2Refusal::WorkCap);
+                    return None;
+                }
                 exported.push(pool.get(at)?.clone());
             }
         }
@@ -2334,7 +2391,7 @@ fn symbol_dictionary(
     // dictionary decoded, which is also the order 6.5.10 exports in — and it
     // is the array 6.5.8.2 refines against, which is why it has to be one.
     let base = imported.len();
-    if !page.work.spend(copy_cost(imported)) {
+    if !page.work.copy(imported) {
         note(warnings, Jbig2Refusal::WorkCap);
         return None;
     }
@@ -2546,6 +2603,10 @@ fn symbol_dictionary(
                 let at = index.checked_add(offset)?;
                 if at >= total {
                     break;
+                }
+                if !page.work.element() {
+                    note(warnings, Jbig2Refusal::WorkCap);
+                    return None;
                 }
                 exported.push(pool.get(at)?.clone());
             }
@@ -3618,8 +3679,14 @@ fn pattern_dictionary(
     }
 
     // 6.7.5 step 4: pattern `i` is the columns `[i × HDPW, (i + 1) × HDPW)`.
-    let mut patterns = Vec::with_capacity(count as usize);
+    // Each is an element, charged before it is made: GRAYMAX may ask for
+    // half a million one-pixel patterns from a collective bitmap of 64 KiB.
+    let mut patterns = Vec::new();
     for index in 0..count {
+        if !work.element() {
+            note(warnings, Jbig2Refusal::WorkCap);
+            return None;
+        }
         let mut pattern = Bitmap::new(width, height, ceiling)?;
         let left = index.checked_mul(width)?;
         for y in 0..height {
@@ -5207,6 +5274,7 @@ pub fn decode_measured(
         }
     }
     page.extent.work = page.work.asked;
+    page.extent.elements = page.work.elements;
 
     if page.regions == 0 {
         // The refusal. Not polish, and not a fallback: see the module note.
@@ -5494,7 +5562,7 @@ impl Page {
         // A copy, and charged as one: any number of refinements may refer to
         // the same intermediate region.
         if let Some(bitmap) = referred {
-            if !self.work.spend(copy_cost(std::slice::from_ref(bitmap))) {
+            if !self.work.spend(region_copy_cost(bitmap)) {
                 note(warnings, Jbig2Refusal::WorkCap);
                 return;
             }
@@ -5565,7 +5633,7 @@ impl Page {
             if let Some(exports) = self.symbols.get(number) {
                 // Per reference rather than per dictionary: a referred-to list
                 // may name one dictionary as often as its header has room for.
-                if !self.work.spend(copy_cost(exports)) {
+                if !self.work.copy(exports) {
                     note(warnings, Jbig2Refusal::WorkCap);
                     self.refused.insert(segment.number);
                     note(warnings, Jbig2Refusal::SymbolDictionaryRefused);
@@ -5667,7 +5735,7 @@ impl Page {
             // ordinary — a text region refers to its custom tables the same
             // way — and contributes nothing to the numbering.
             if let Some(exports) = self.symbols.get(number) {
-                if !self.work.spend(copy_cost(exports)) {
+                if !self.work.copy(exports) {
                     note(warnings, Jbig2Refusal::WorkCap);
                     note(warnings, Jbig2Refusal::TextRegionRefused);
                     return;
@@ -5756,7 +5824,7 @@ impl Page {
         let mut patterns = Vec::new();
         for number in &segment.referred {
             if let Some(declared) = self.patterns.get(number) {
-                if !self.work.spend(copy_cost(declared)) {
+                if !self.work.copy(declared) {
                     note(warnings, Jbig2Refusal::WorkCap);
                     note(warnings, Jbig2Refusal::HalftoneRegionRefused);
                     return;
@@ -8141,7 +8209,13 @@ mod tests {
             &empty,
         ));
         let (_, extent, refusals) = run(&stream, (16, 16), 256);
-        at_budget("three hundred references", &extent, &refusals, 256, 16 * 8);
+        at_budget(
+            "three hundred references",
+            &extent,
+            &refusals,
+            256,
+            16 * (8 + JBIG2_ELEMENT_COST),
+        );
 
         // A 64 x 64 halftone grid stamping one 16 x 16 pattern in every cell,
         // all of them at the origin: 4 096 stamps of 256 pixels.
