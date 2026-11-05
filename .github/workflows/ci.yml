@@ -27,6 +27,14 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
+      # The hosted Linux image keeps toolchains this job never uses, and the
+      # job's debug builds — the workspace, the facade without default
+      # features and with `bundled-fonts`, and its examples — outgrow the disk
+      # they leave: the examples' first link failed with nothing left to write.
+      # Removed before anything is built.
+      - name: Free the disk the builds need
+        if: runner.os == 'Linux'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
