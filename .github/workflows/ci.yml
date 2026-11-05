@@ -165,6 +165,35 @@ jobs:
           grep -q 'byte-identical to the serial render' example-parallel.log
       - run: cargo run -p xtask -- check
 
+  peak-memory:
+    # MS-05's seven operations, each in a process of its own, measured on the
+    # hosted Linux image: release, because the figures are a release binary's
+    # and the ten-thousand-page case is slow even so, and Linux, because the
+    # peak is the kernel's `VmHWM` and the figures are this image's allocator's
+    # and kernel's. Until figures are committed the run carries the record
+    # switch, so each case's line is printed for `peak_memory.tsv` rather than
+    # held to it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Measure each case's peak, in both builds
+        env:
+          TINKER_PEAK_RECORD: "1"
+        run: |
+          set -o pipefail
+          for build in "" "--features bundled-fonts"; do
+            cargo test --release -p tinker-pdf $build --test peak_memory \
+              -- --ignored --nocapture 2>&1 | tee peak.log
+            grep -q 'RAN: peak memory, 7 cases a process each' peak.log
+            for case in png-300 jpeg-300 jpx-72 png-20-on-4 text-10000 merge-4x100 open-23mb; do
+              grep -Pq "^(default|bundled-fonts)\t$case\t[1-9][0-9]*$" peak.log
+            done
+            # The measured table, for the TSV.
+            grep -P '^(default|bundled-fonts)\t' peak.log
+          done
+
   fuzz-targets:
     # The fuzz crate sits outside the workspace, so `cargo check --workspace`
     # never looks at it and its targets can drift out of sync with the APIs

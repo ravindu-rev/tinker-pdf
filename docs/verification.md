@@ -1209,6 +1209,11 @@ own unit tests hold on every target, and
 sees what the child holds. The child is this test binary, so the file is a
 `SPAWNERS` row: it hosts one case a process and adjudicates nothing.
 
+`ci.yml`'s `peak-memory` job runs it on the hosted Linux image, in release and
+in both builds, and greps its `RAN` line and each of the seven cases' lines.
+Until the table carries figures the job sets the record switch, so each case
+is printed for the table rather than held to it.
+
 ## The examples, run rather than compiled
 
 `crates/tinker-pdf/examples/` holds the documented end-to-end usage: open,
