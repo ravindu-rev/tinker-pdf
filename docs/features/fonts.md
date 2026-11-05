@@ -56,7 +56,11 @@ under the font's `/FontMatrix` — which is required, because a Type 3 font
 chooses its own glyph-space units rather than the 1/1000 convention.
 
 **Composite fonts** (9.7.4). The CID the encoding CMap produces — not the
-code — selects both the glyph and the advance. For a CIDFontType2,
+code — selects both the glyph and the advance. The advance is `/W`'s, read in
+both of 9.7.4.3's forms, `c [w1 … wn]` and `c_first c_last w`, mixed freely
+and each entry from its own start, and `/DW`'s (1000 when absent) for a CID no
+entry names; a malformed entry ends the array, and every entry before it
+stands. For a CIDFontType2,
 `/CIDToGIDMap` in both its forms (`/Identity`, or a stream of two-byte GIDs,
 9.7.4.2) turns CID into glyph index; the font program's own `cmap` is not
 consulted on this path, because a composite font's code is not a character.

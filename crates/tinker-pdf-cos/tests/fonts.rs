@@ -347,6 +347,78 @@ fn the_width_and_the_glyph_come_from_the_same_cid() {
     assert_eq!(font.gid_for_cid(other[0].cid), 0);
 }
 
+/// `/W`'s range entry `c_first c_last w` holds three values (9.7.4.3), so the
+/// entry after it starts at the fourth: each CID keeps the width its own
+/// entry states, through `width_of` and through `decode`, whichever of the
+/// two forms follows the other.
+#[test]
+fn a_w_entry_after_a_range_one_is_read_from_its_own_start() {
+    let doc = composite_font(
+        "/Identity-H",
+        "/W [1 1 600 2 2 610 3 3 620 4 4 630 5 5 640 6 [650 660]]",
+        "/Identity",
+        &[],
+    );
+    let font = font_at(&doc, 3);
+    let widths = [600.0, 610.0, 620.0, 630.0, 640.0, 650.0, 660.0];
+    for (cid, width) in (1u8..).zip(widths) {
+        assert_eq!(font.width_of(u32::from(cid)), (width, true), "CID {cid}");
+        let decoded = font.decode(&[0x00, cid]);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(
+            (decoded[0].cid, decoded[0].width, decoded[0].width_is_exact),
+            (u32::from(cid), width, true),
+            "CID {cid}, decoded"
+        );
+    }
+    assert_eq!(font.width_of(8), (250.0, false), "CID 8 is /DW's, unstated");
+
+    let doc = composite_font(
+        "/Identity-H",
+        "/W [1 [600] 2 3 610 4 4 620 5 [630]]",
+        "/Identity",
+        &[],
+    );
+    let font = font_at(&doc, 3);
+    for (cid, width) in [(1, 600.0), (2, 610.0), (3, 610.0), (4, 620.0), (5, 630.0)] {
+        assert_eq!(font.width_of(cid), (width, true), "CID {cid}");
+    }
+}
+
+/// Every malformed `/W` this can write degrades: none panics (ruling 1),
+/// every entry before the malformation is read, and none gives a CID a width
+/// the file did not state for it.
+#[test]
+fn a_malformed_w_degrades() {
+    for entry in [
+        // A reversed range names no CID.
+        "/W [1 [600] 9 5 700]",
+        // A CID that is not an integer.
+        "/W [1 [600] /Two [700]]",
+        "/W [1 [600] 2.5 3 700]",
+        // An array in a range's width slot.
+        "/W [1 [600] 2 3 [700]]",
+        // A truncated last entry.
+        "/W [1 [600] 2 3]",
+        "/W [1 [600] 2]",
+        // A CID past every one a font can address.
+        "/W [1 [600] 9223372036854775807 9223372036854775807 700]",
+        "/W [1 [600] 9223372036854775807 [700 710]]",
+    ] {
+        let doc = composite_font("/Identity-H", entry, "/Identity", &[]);
+        let font = font_at(&doc, 3);
+        assert_eq!(
+            font.width_of(1),
+            (600.0, true),
+            "{entry}: the entry before it"
+        );
+        for cid in 2..=10 {
+            assert_eq!(font.width_of(cid), (250.0, false), "{entry}: CID {cid}");
+        }
+        assert_eq!(font.width_of(u32::MAX), (250.0, false), "{entry}");
+    }
+}
+
 /// A simple font has no CID at all, so the field is the code and nothing
 /// about the one-byte path changes. The code *is* what the encoding maps.
 #[test]

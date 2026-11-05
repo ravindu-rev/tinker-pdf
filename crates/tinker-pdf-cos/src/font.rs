@@ -939,7 +939,7 @@ fn read_composite<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font) {
                 Some(Object::Array(list)) => {
                     for (k, item) in list.iter().enumerate() {
                         if let Some(width) = doc.resolve(item).as_number() {
-                            if let Ok(cid) = u32::try_from(start + k as i64) {
+                            if let Ok(cid) = u32::try_from(start.saturating_add(k as i64)) {
                                 font.cid_widths.insert(cid, width);
                             }
                         }
@@ -955,13 +955,16 @@ fn read_composite<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font) {
                     };
                     // A hostile range would fill memory; bound it to the CID
                     // space, which is what a real font can address anyway.
-                    let end = end.min(start + 65_535);
+                    let end = end.min(start.saturating_add(65_535));
                     for cid in start..=end {
                         if let Ok(cid) = u32::try_from(cid) {
                             font.cid_widths.insert(cid, width);
                         }
                     }
-                    i += 5;
+                    // Three values, `c_first c_last w`, so the next entry
+                    // starts at the fourth. `/W2`'s range form holds five, and
+                    // each form is stepped by its own stride.
+                    i += 3;
                 }
                 None => break,
             }
@@ -1014,7 +1017,7 @@ fn read_composite<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font) {
                         let (Some(w1_y), Some(v_x), Some(v_y)) = (at(0), at(1), at(2)) else {
                             continue;
                         };
-                        if let Ok(cid) = u32::try_from(start + k as i64) {
+                        if let Ok(cid) = u32::try_from(start.saturating_add(k as i64)) {
                             font.cid_vertical.insert(cid, (v_x, v_y, w1_y));
                         }
                     }
@@ -1032,7 +1035,7 @@ fn read_composite<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font) {
                     };
                     // Bounded exactly as /W's range form is, and for the same
                     // reason: a hostile `clast` would otherwise fill memory.
-                    let end = end.min(start + 65_535);
+                    let end = end.min(start.saturating_add(65_535));
                     for cid in start..=end {
                         if let Ok(cid) = u32::try_from(cid) {
                             font.cid_vertical.insert(cid, (v_x, v_y, w1_y));

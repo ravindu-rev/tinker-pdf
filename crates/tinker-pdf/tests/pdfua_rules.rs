@@ -1519,6 +1519,62 @@ fn a_width_the_program_disagrees_with_is_reported_under_each_part() {
     }
 }
 
+/// The same rule over a composite font whose widths are `/W` range entries:
+/// a CIDFontType2 over a five-glyph face 600 units wide, its `/W` five
+/// `c c 600` triples, is clean under both parts, and its twin whose fourth
+/// triple says 500 is reported for code 4 alone under each part's clause.
+#[test]
+fn a_composite_width_written_as_ranges_is_judged_under_each_part() {
+    const TO_UNICODE: &[u8] = b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+        /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+        /CMapName /Adobe-Identity-UCS def /CMapType 2 def\n\
+        1 begincodespacerange <0000> <FFFF> endcodespacerange\n\
+        1 beginbfrange <0001> <0005> <0041> endbfrange\n\
+        endcmap CMapName currentdict /CMap defineresource pop end end";
+    let ranged = |part: &str, fourth: &str| {
+        let mut fixture = Ua::new(part);
+        fixture.font = "/Type /Font /Subtype /Type0 /BaseFont /ABCDEF+Acme \
+                        /Encoding /Identity-H /DescendantFonts [20 0 R] /ToUnicode 21 0 R"
+            .to_string();
+        fixture.program = Some(
+            epub_support::typeface::Face::new("Acme", "ABCDE")
+                .with_advance(600)
+                .build(),
+        );
+        fixture.content =
+            "/P << /MCID 0 >> BDC BT /F1 12 Tf 10 10 Td <00010002000300040005> Tj ET EMC"
+                .to_string();
+        fixture.extra = vec![
+            (
+                20,
+                format!(
+                    "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /ABCDEF+Acme \
+                     /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
+                     /W [1 1 600 2 2 600 3 3 600 4 4 {fourth} 5 5 600] \
+                     /CIDToGIDMap /Identity /FontDescriptor 6 0 R >>"
+                )
+                .into_bytes(),
+            ),
+            (21, stream("", TO_UNICODE)),
+        ];
+        fixture
+    };
+    for (part, clause) in [("1", "7.21.5"), ("2", "8.4.5.6")] {
+        ranged(part, "600").clean();
+        assert_eq!(
+            ranged(part, "500").one_finding(),
+            (
+                clause.to_string(),
+                FindingKind::GlyphWidthInconsistent {
+                    code: 4,
+                    dictionary: 500,
+                    program: 600
+                }
+            )
+        );
+    }
+}
+
 // ---- 7.2, 7.4.4, 7.9: the structure grammar -----------------------------------
 
 /// The baseline with `elements` under its `Document` beside the paragraph:

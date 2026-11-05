@@ -440,6 +440,44 @@ fn the_advance_and_the_glyph_agree_on_the_page() {
     );
 }
 
+/// The advance of each code after a `/W` range entry is the width its own
+/// entry states (9.7.4.3), measured on the page. Codes 1, 2 and 3 draw the
+/// 300-, 900- and 600-unit boxes under `/W [1 1 400 2 2 1000 3 [500]]`, so
+/// their ink runs from the first box's left edge to 400 + 1000 + 600 units
+/// along. Stepping past a range entry by five values instead of its three
+/// leaves CID 2 at `/DW`'s 250, and the third box lands inside the second.
+#[test]
+fn the_advance_after_a_w_range_entry_is_the_width_it_states() {
+    let program = boxes_font(&SIZES, None);
+    let bytes = composite_document(
+        &program,
+        "/Identity-H",
+        "/W [1 1 400 2 2 1000 3 [500]]",
+        "/Identity",
+        &[],
+        &[1, 2, 3],
+    );
+    let font = font_of(&bytes);
+    let advances: Vec<(f64, bool)> = font
+        .decode(&[0, 1, 0, 2, 0, 3])
+        .iter()
+        .map(|code| (code.width, code.width_is_exact))
+        .collect();
+    assert_eq!(advances, [(400.0, true), (1000.0, true), (500.0, true)]);
+
+    let page = render(bytes);
+    let (w, h) = ink_box(&page);
+    let expected = pixels(400.0 + 1000.0 + 600.0);
+    assert!(
+        (w - expected).abs() <= 2.0,
+        "three boxes at the advances /W states span {expected} pixels, not {w}"
+    );
+    assert!(
+        (h - pixels(900.0)).abs() <= 2.0,
+        "and they are the tallest box tall, not {h}"
+    );
+}
+
 /// Milestone 2's other exit criterion: a CID the map does not reach draws
 /// `.notdef` and the page says so. Without the report it is a space, which is
 /// the failure that looks like nothing happened.

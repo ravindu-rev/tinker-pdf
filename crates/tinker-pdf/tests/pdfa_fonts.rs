@@ -985,3 +985,46 @@ fn a_code_reached_by_guess_is_not_judged() {
     unstated.content = "BT /F1 12 Tf 10 10 Td (AB) Tj ET".to_string();
     assert_eq!(widths_of(&unstated), []);
 }
+
+/// A composite font's widths written as `/W` range entries are judged CID by
+/// CID: a CIDFontType2 over a five-glyph face 600 units wide, its `/W` five
+/// `c c 600` triples, is silent under parts 1 and 2, and its twin whose fourth
+/// triple says 500 is reported for code 4 alone. Each triple is three values
+/// (9.7.4.3); read five at a time, the entries after the first fall out of
+/// step and a CID is read where a width belongs.
+#[test]
+fn a_composite_width_written_as_ranges_is_judged_per_cid() {
+    let ranged = |part: &str, fourth: &str| {
+        let mut fixture = composite_in(part, "/Identity-H");
+        fixture.program = Some((
+            String::new(),
+            epub_support::typeface::Face::new("Acme", "ABCDE")
+                .with_advance(600)
+                .build(),
+        ));
+        // Object 8, the descendant.
+        fixture.extra[0].1 = String::from_utf8_lossy(&fixture.extra[0].1)
+            .replace(
+                "/CIDToGIDMap",
+                &format!("/W [1 1 600 2 2 600 3 3 600 4 4 {fourth} 5 5 600] /CIDToGIDMap"),
+            )
+            .into_bytes();
+        fixture.content = "BT /F1 12 Tf 10 10 Td <00010002000300040005> Tj ET".to_string();
+        fixture
+    };
+    for (part, clause) in [("1", "6.3.6"), ("2", "6.2.11.5")] {
+        assert_eq!(widths_of(&ranged(part, "600")), [], "part {part}");
+        assert_eq!(
+            widths_of(&ranged(part, "500")),
+            [(
+                clause.to_string(),
+                FindingKind::GlyphWidthInconsistent {
+                    code: 4,
+                    dictionary: 500,
+                    program: 600
+                }
+            )],
+            "part {part}"
+        );
+    }
+}
