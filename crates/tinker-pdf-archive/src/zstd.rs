@@ -74,7 +74,6 @@
 mod bits;
 mod fse;
 mod huffman;
-mod xxhash;
 
 #[cfg(test)]
 mod tests;
@@ -381,7 +380,7 @@ fn decode_frame(
         let stored = little_endian(src, at, 4).ok_or(Error::Truncated)?;
         at += 4;
         let content = out.get(frame.start..).unwrap_or(&[]);
-        if xxhash::xxh64(content) & 0xFFFF_FFFF != stored {
+        if tinker_pdf_filters::xxh64(content) & 0xFFFF_FFFF != stored {
             return Err(Error::ChecksumMismatch);
         }
     }

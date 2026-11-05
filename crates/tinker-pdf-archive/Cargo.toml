@@ -9,8 +9,8 @@ authors.workspace = true
 description = "The archive containers that are not ZIP, hand-rolled: tar (ustar, GNU long names, PAX), 7z (LZMA, LZMA2, BCJ, BCJ2, bzip2, PPMd) and RAR 5, and the bzip2 and Zstandard decoders ZIP methods 12 and 93 use. No PDF types"
 
 [dependencies]
-# CRC-32 and raw DEFLATE, and nothing else from anywhere. The same edge
-# `tinker-pdf-zip` takes and for two of the same three reasons:
+# CRC-32, raw DEFLATE and XXH64, and nothing else from anywhere. The same
+# edge `tinker-pdf-zip` takes and for two of the same three reasons:
 #
 # - **CRC-32.** Both 7z and RAR record a per-file CRC-32 in the archive's own
 #   header, and this crate's whole verification argument is that it checks
@@ -21,6 +21,9 @@ description = "The archive containers that are not ZIP, hand-rolled: tar (ustar,
 # - **Raw DEFLATE.** 7z method `040108` is RFC 1951 with no wrapper, exactly as
 #   ZIP method 8 is, so `inflate_raw` is free here and a second inflater would
 #   not be.
+# - **XXH64.** A Zstandard frame's content checksum, which deduplication in
+#   `tinker-pdf-cos` buckets streams by too; both reach `filters` and neither
+#   reaches the other, so its one copy is there.
 #
 # What this crate does **not** take from `filters` is an image codec: nothing
 # here has ever seen a picture. The third leaf-to-leaf edge of this shape, and

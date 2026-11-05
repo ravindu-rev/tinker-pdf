@@ -23,7 +23,9 @@
 //! and PNG puts on a chunk; [`png_decode`] is the PNG decoder gap 29 needs for
 //! the images its pass-through cannot carry. All three live here because this
 //! is where inflate, the PNG row filters and the checksum already are, and none
-//! of them changes anything a `/Filter` name reaches.
+//! of them changes anything a `/Filter` name reaches. [`xxh64`] is a hash
+//! two crates above this one share, the Zstandard frame checksum and the
+//! bucket deduplication sorts streams into, and no filter reads it.
 //!
 //! [`png_encode`] is the fourth and the only one that *writes*. It is here for
 //! the same reason and more sharply: a PNG file is a zlib stream inside chunks
@@ -62,6 +64,7 @@ mod raster;
 mod runlength;
 mod tiff;
 mod webp;
+mod xxhash;
 
 use core::fmt;
 
@@ -108,6 +111,7 @@ pub use tiff::{
     TiffSampleRange, TiffScan, MAX_TIFF_SAMPLES,
 };
 pub use webp::{webp_decode, WebpError, WebpImage, MAX_WEBP_SAMPLES};
+pub use xxhash::xxh64;
 
 /// Resource ceilings. Mandatory: a 1 KB flate stream can legally expand to
 /// gigabytes, and a lenient decoder without a ceiling is a denial-of-service

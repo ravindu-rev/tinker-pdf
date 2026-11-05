@@ -301,7 +301,11 @@ pass-through path: it walks chunks, checks every CRC and hands back the
 concatenated IDAT without inflating it. Beside it sit `inflate_raw` (RFC 1951
 with no wrapper, for ZIP entries) and `crc32` — the reflected-polynomial
 CRC-32 that ZIP (APPNOTE 4.4.7) and PNG (5.3) both carry, with a resumable
-`Crc32` for checksums over non-adjacent slices.
+`Crc32` for checksums over non-adjacent slices; and `xxh64`, XXH64 with a
+seed of zero, the checksum a Zstandard frame carries (RFC 8878 §3.1.1) and
+the hash stream deduplication buckets by, kept here because the archive
+crate and `tinker-pdf-cos` both reach this crate and neither reaches the
+other.
 
 **And a PNG *encoder*.**
 `png_encode` takes an interleaved 8-bit raster and returns a whole file:
@@ -679,7 +683,7 @@ to agree with the decode it stands in for. The encoder half is `deflate`, `zlib_
 `jpeg_encode` (takes a `JpegSource` and a `JpegOptions`, returns the whole
 interchange datastream or a `JpegEncodeError`); the container
 half is `png_decode`, `png_scan`, `tiff_decode`, `tiff_scan`, `packbits_decode`,
-`inflate_raw`, `crc32`, `jxr_decode` (returns `JxrImage`), `bmp_decode`
+`inflate_raw`, `crc32`, `xxh64`, `jxr_decode` (returns `JxrImage`), `bmp_decode`
 (returns `BmpImage`, whose pixels are an `ImagePixels`), `gif_decode`
 (returns `GifImage`, the same pixels) and `webp_decode` (returns `WebpImage`,
 the same pixels, never indexed).
