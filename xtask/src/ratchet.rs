@@ -106,6 +106,12 @@ pub struct Bar {
     /// The five runs' time figures, or `None` where none were measured for
     /// this corpus.
     pub time: Option<TimeBar>,
+    /// How many files ended each way when the bar was recorded, by the
+    /// report's word: `passed`, `failed`, `crashed`, `timed_out`, and
+    /// `stalled` where any did. A word the bar does not state counts none,
+    /// so a bar without the key, or without `stalled`, counts no stall
+    /// (MS-20).
+    pub outcomes: BTreeMap<String, u64>,
 }
 
 /// The peak-memory bar for one corpus.
@@ -567,6 +573,39 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
                 out.regressions.push(format!(
                     "{}: and {timed_out} of those timed out, which accounts for the whole shortfall of {short}. A file near the limit flips when the machine is busy; re-run before believing this is the engine",
                     bar.name
+                ));
+            }
+        }
+
+        // A child that stops finishing is a regression in its own name,
+        // whatever the pass rate does (MS-20): two files the bar counts as
+        // failing that now open lift the pass rate over a file that stalled.
+        // A stall is named with the phase it stopped in, a crash with what
+        // the child last said. `timed_out` stays the note beside the pass
+        // rate it is, since a file near its limit flips with the machine.
+        for word in ["stalled", "crashed"] {
+            let counted = bar.outcomes.get(word).copied().unwrap_or(0);
+            let ended: Vec<String> = corpus
+                .files
+                .iter()
+                .filter_map(|file| match &file.outcome {
+                    crate::runner::Outcome::Stalled { at } if word == "stalled" => Some(format!(
+                        "{} at {}",
+                        file.path,
+                        if at.is_empty() { "no phase" } else { at }
+                    )),
+                    crate::runner::Outcome::Crashed(detail) if word == "crashed" => {
+                        Some(format!("{} ({detail})", file.path))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if ended.len() as u64 > counted {
+                out.regressions.push(format!(
+                    "{}: {} files {word}, where the bar counts {counted}: {}",
+                    bar.name,
+                    ended.len(),
+                    ended.join("; ")
                 ));
             }
         }
@@ -1180,6 +1219,24 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
             }
         }
 
+        let mut outcomes: BTreeMap<String, u64> = BTreeMap::new();
+        if let Some(object) = entry.get("outcomes") {
+            let Json::Object(members) = object else {
+                return Err(format!("`{name}`'s `outcomes` is not an object"));
+            };
+            for (word, value) in members {
+                let count = value
+                    .as_u64()
+                    .ok_or_else(|| format!("`{name}`'s `outcomes.{word}` is not a whole number"))?;
+                if count > total {
+                    return Err(format!(
+                        "`{name}` says {count} files ended {word} and the corpus is {total} files"
+                    ));
+                }
+                outcomes.insert(word.clone(), count);
+            }
+        }
+
         let tagged = match entry.get("tagged") {
             None => None,
             Some(object) => {
@@ -1279,6 +1336,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
             capabilities,
             peak,
             time,
+            outcomes,
         });
     }
     if bars.is_empty() {
@@ -1380,6 +1438,104 @@ mod tests {
         );
     }
 
+    /// A bar recorded with eight of ten passing, two failing and no file
+    /// stalled or crashed.
+    fn bar_with_outcomes() -> Ratchet {
+        let mut committed = bar("safedocs", 8, 10, 0);
+        committed.bars[0].outcomes = BTreeMap::from([
+            ("passed".to_string(), 8),
+            ("failed".to_string(), 2),
+            ("crashed".to_string(), 0),
+            ("timed_out".to_string(), 0),
+        ]);
+        committed
+    }
+
+    /// **A file that stops finishing is a regression however the pass rate
+    /// moves**: one file more passes and one stalls, so the pass rate reads
+    /// better, and the stall fails the run by name, at the phase it stopped
+    /// in.
+    #[test]
+    fn a_file_that_stops_finishing_is_a_regression_however_the_pass_rate_moves() {
+        let mut now = run("safedocs", 9, 1, 0);
+        now.corpora[0].files[9].outcome = Outcome::Stalled {
+            at: "page 1/5".to_string(),
+        };
+        let out = compare(&bar_with_outcomes(), &now, false);
+        assert!(out.failed(), "{out:#?}");
+        assert!(
+            out.improvements
+                .iter()
+                .any(|i| i.contains("9/10 passed, up from 8/10")),
+            "the pass rate reads better: {:?}",
+            out.improvements
+        );
+        assert!(
+            out.regressions.iter().any(|r| r
+                .contains("safedocs: 1 files stalled, where the bar counts 0: 9.pdf at page 1/5")),
+            "{:?}",
+            out.regressions
+        );
+    }
+
+    /// A crash the bar does not count is a regression too, named with what
+    /// the child last said.
+    #[test]
+    fn a_crash_its_bar_does_not_count_is_a_regression() {
+        let mut now = run("safedocs", 9, 1, 0);
+        now.corpora[0].files[9].outcome = Outcome::Crashed("thread 'main' overflowed".to_string());
+        let out = compare(&bar_with_outcomes(), &now, false);
+        assert!(
+            out.regressions.iter().any(|r| r.contains(
+                "safedocs: 1 files crashed, where the bar counts 0: 9.pdf (thread 'main' overflowed)"
+            )),
+            "{:?}",
+            out.regressions
+        );
+
+        // One the bar counts is not.
+        let mut counted = bar_with_outcomes();
+        counted.bars[0].outcomes.insert("crashed".to_string(), 1);
+        let out = compare(&counted, &now, false);
+        assert!(
+            !out.regressions.iter().any(|r| r.contains("crashed")),
+            "{:?}",
+            out.regressions
+        );
+    }
+
+    /// The committed bars state no `stalled`, and a bar without the key, or
+    /// without `outcomes` at all, counts none: a run with no stall holds and
+    /// one with a stall does not.
+    #[test]
+    fn a_bar_without_a_stalled_count_counts_none() {
+        for text in [
+            r#"{"schema":2,"complete":true,"settings":{"fonts":"none"},
+                "corpora":[{"name":"safedocs","total":10,"passed":8,"degraded":0,
+                "strict_eligible":10,"strict_clean":10,
+                "outcomes":{"crashed":0,"failed":2,"passed":8,"timed_out":0}}]}"#,
+            r#"{"schema":2,"complete":true,"settings":{"fonts":"none"},
+                "corpora":[{"name":"safedocs","total":10,"passed":8,"degraded":0,
+                "strict_eligible":10,"strict_clean":10}]}"#,
+        ] {
+            let committed = parse(text).expect("the bar reads");
+            assert_eq!(committed.bars[0].outcomes.get("stalled"), None);
+            let held = compare(&committed, &run("safedocs", 9, 1, 0), false);
+            assert!(!held.failed(), "{held:#?}");
+            let mut stalled = run("safedocs", 9, 1, 0);
+            stalled.corpora[0].files[9].outcome = Outcome::Stalled { at: String::new() };
+            let out = compare(&committed, &stalled, false);
+            assert!(
+                out.regressions
+                    .iter()
+                    .any(|r| r
+                        .contains("1 files stalled, where the bar counts 0: 9.pdf at no phase")),
+                "{:?}",
+                out.regressions
+            );
+        }
+    }
+
     /// A shortfall bigger than the timeout count is not explained by them,
     /// and the message must not say it is.
     ///
@@ -1436,6 +1592,7 @@ mod tests {
                 capabilities: BTreeMap::new(),
                 peak: None,
                 time: None,
+                outcomes: BTreeMap::new(),
             }],
             complete: true,
             fonts: "none".to_string(),

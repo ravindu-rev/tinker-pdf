@@ -289,7 +289,11 @@ writer defects nothing else here does, because this engine's own reader
 repairs them in silence.
 
 The ratchet: recorded rates may not decrease; improving one updates the
-recorded floor in the same change. The floor and the budgets live in-repo,
+recorded floor in the same change. A run with more files stalled, or more
+crashed, than its bar's `outcomes` counts fails by name, each stall at the
+phase it stopped in and each crash with what its child last said, whatever
+the pass rate does; a timeout stays a note beside the pass rate, since a file
+near its limit flips with the machine's load. The floor and the budgets live in-repo,
 diffable, so lowering one is the owner's decision (H-78) rather than a drift.
 
 **Time is held to a band rather than a floor.** Each child times its open and
