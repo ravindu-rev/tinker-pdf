@@ -204,7 +204,12 @@ carrying a class — our bug, a staged rule, or a reading — and a **mandatory
 reason**; a row without one is refused by the reader that loads the file, and a
 row whose subject no longer disagrees fails as stale. `PDFA_STAGED` names
 every rule this build knows it does not run, each with its clause and what it
-is waiting for, and a `staged` ledger row has to point at one.
+is waiting for, and a `staged` ledger row has to point at one. A rule that
+does not run reports nothing, so a `staged` row covers a failing file nothing
+caught and never a conforming file this build reported; only a `bug` or a
+`reading` row covers that, and a `staged` row with no uncaught failure under
+it is stale. Each false positive prints beside its path with every finding's
+clause, object and kind.
 
 One `pass` fixture is a recorded **reading**: ISO 19005-1 6.1.2 says the
 header consists of `%PDF-1.n`, the fixture carries `%PDF-2.0`, and this build

@@ -59,7 +59,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use tinker_pdf::{Document, FindingKind, PdfUaAbstentionClass, PdfUaCoverage, PdfUaPart};
+use tinker_pdf::{
+    ConformanceFinding, Document, FindingKind, PdfUaAbstentionClass, PdfUaCoverage, PdfUaPart,
+};
 
 #[path = "epub_support/mod.rs"]
 mod epub_support;
@@ -81,6 +83,16 @@ fn label(kind: &FindingKind) -> String {
         .next()
         .unwrap_or_default()
         .to_string()
+}
+
+/// One false alarm as the census prints it: the file, and beside it every
+/// finding reported on it as a finding displays itself -- its clause, its
+/// object and its kind with the kind's fields -- so the line says which code
+/// and which widths, not only which rule. `pdfa_ledger.rs` prints a false
+/// positive's findings the same way.
+fn false_alarm_line(path: &Path, findings: &[ConformanceFinding]) -> String {
+    let findings: Vec<String> = findings.iter().map(ToString::to_string).collect();
+    format!("{} — {}", path.display(), findings.join("; "))
 }
 
 /// Every finding kind the validator reported on one opened document, in the
@@ -190,7 +202,7 @@ fn the_implemented_clauses_catch_failures_and_never_conforming_files() {
     // (caught, abstained) per clause, over the `-fail-` files only.
     let mut by_clause: BTreeMap<(&str, String), (usize, usize)> = BTreeMap::new();
     let mut by_rule: BTreeMap<String, usize> = BTreeMap::new();
-    let mut false_alarms: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    let mut false_alarms: Vec<String> = Vec::new();
     let mut unopened: Vec<PathBuf> = Vec::new();
     let mut named: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
     let (mut caught, mut abstained, mut conforming) = (0usize, 0usize, 0usize);
@@ -219,7 +231,7 @@ fn the_implemented_clauses_catch_failures_and_never_conforming_files() {
         if *expected {
             conforming += 1;
             if !fired.is_empty() {
-                false_alarms.push((path.clone(), fired));
+                false_alarms.push(false_alarm_line(path, &verdict.findings));
             }
             continue;
         }
@@ -274,8 +286,8 @@ fn the_implemented_clauses_catch_failures_and_never_conforming_files() {
     println!("    abstained               {abstained}");
     println!("could not be opened         {}", unopened.len());
     println!("false alarms                {}", false_alarms.len());
-    for (path, fired) in &false_alarms {
-        println!("  {} — {}", path.display(), fired.join(", "));
+    for line in &false_alarms {
+        println!("  {line}");
     }
 
     // The assertion that matters, and the only symmetric one available: a
@@ -337,6 +349,27 @@ fn skips(doc: &Document) -> Vec<(u8, u8)> {
             _ => None,
         })
         .collect()
+}
+
+/// A false alarm's line names each finding by its clause and with its kind's
+/// fields, so a run says which levels, codes or widths each one is.
+#[test]
+fn a_false_alarm_line_names_its_clause_object_and_fields() {
+    let findings = tagged(&[b"H1", b"H3"]).validate_pdfua().findings;
+    let line = false_alarm_line(Path::new("PDF_UA-1/a-conforming-pass-a.pdf"), &findings);
+    let (path, said) = line.split_once(" — ").expect("the path, then the findings");
+    assert_eq!(path, "PDF_UA-1/a-conforming-pass-a.pdf");
+    assert!(
+        said.contains("7.4.2") && said.contains("HeadingLevelSkipped { previous: 1, level: 3 }"),
+        "{line}"
+    );
+    // Every finding is on it, each as it displays itself.
+    for finding in &findings {
+        assert!(
+            line.contains(&finding.to_string()),
+            "{finding} not in {line}"
+        );
+    }
 }
 
 /// The heading walk, on trees small enough to reason about, so the corpus

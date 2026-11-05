@@ -7,7 +7,8 @@
 #
 #   class    bug      this engine is wrong; the row is work to do
 #            staged   a rule this build knows it does not run, named in
-#                     `tinker_pdf::PDFA_STAGED`
+#                     `tinker_pdf::PDFA_STAGED`; it covers a failing file
+#                     nothing caught, never a conforming file reported
 #            reading  a clause this build reads differently from the suite,
 #                     recorded with the clause and the reading
 #   clause   as the part in question numbers it

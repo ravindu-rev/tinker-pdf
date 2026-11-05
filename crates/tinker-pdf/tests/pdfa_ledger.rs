@@ -142,6 +142,97 @@ pub fn read_ledger(text: &str) -> Result<Vec<Row>, LedgerError> {
     Ok(rows)
 }
 
+/// Which way a file disagrees with its annotation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Direction {
+    /// The corpus says `pass` and this build reported something.
+    FalsePositive,
+    /// The corpus says `fail` and this build found nothing.
+    FalseNegative,
+}
+
+/// Whether `row` can be why a disagreement of `direction` happened.
+///
+/// A `staged` row names a rule this build does not run, and a rule that does
+/// not run reports nothing: it can be why a failing file went uncaught and
+/// never why a conforming file was reported. A `bug` or a `reading` row can be
+/// either.
+fn accounts_for(row: &Row, direction: Direction) -> bool {
+    row.class != Class::Staged || direction == Direction::FalseNegative
+}
+
+/// The ledger held to a census's disagreements, each a subject and its
+/// direction: the disagreements no row accounts for, and the rows no
+/// disagreement they could account for sits under, which are stale.
+///
+/// A row sits over a subject that is its own or starts with it, so a
+/// directory row covers every file in the directory.
+fn audit(rows: &[Row], disagreements: &[(String, Direction)]) -> (Vec<String>, Vec<String>) {
+    let explains = |row: &Row, (subject, direction): &(String, Direction)| {
+        subject.starts_with(&row.subject) && accounts_for(row, *direction)
+    };
+    let uncovered = disagreements
+        .iter()
+        .filter(|disagreement| !rows.iter().any(|row| explains(row, disagreement)))
+        .map(|(subject, _)| subject.clone())
+        .collect();
+    let stale = rows
+        .iter()
+        .filter(|row| {
+            !disagreements
+                .iter()
+                .any(|disagreement| explains(row, disagreement))
+        })
+        .map(|row| row.subject.clone())
+        .collect();
+    (uncovered, stale)
+}
+
+/// A `staged` row covers a `fail` file under it and not a `pass` file, and
+/// with only a `pass` file under it, it is stale; a `reading` or a `bug` row
+/// covers the `pass` file.
+#[test]
+fn a_staged_row_does_not_cover_a_false_positive() {
+    let row = |class: Class, subject: &str| Row {
+        class,
+        clause: "6.2.10".to_string(),
+        subject: subject.to_string(),
+        reason: "the reason this row is written for".to_string(),
+    };
+    let directory = "PDF_A-4/6.2 Graphics/6.2.10 Fonts";
+    let pass = (
+        format!("{directory}/6-2-10-3-2-t01-pass-a.pdf"),
+        Direction::FalsePositive,
+    );
+    let fail = (directory.to_string(), Direction::FalseNegative);
+
+    let staged = [row(Class::Staged, directory)];
+    let (uncovered, stale) = audit(&staged, std::slice::from_ref(&pass));
+    assert_eq!(
+        uncovered,
+        std::slice::from_ref(&pass.0),
+        "a staged rule reports nothing"
+    );
+    assert_eq!(stale, [directory], "nothing it can explain sits under it");
+
+    for class in [Class::Reading, Class::Bug] {
+        let (uncovered, stale) = audit(&[row(class, directory)], std::slice::from_ref(&pass));
+        assert!(uncovered.is_empty(), "{class:?}: {uncovered:?}");
+        assert!(stale.is_empty(), "{class:?}: {stale:?}");
+    }
+
+    let (uncovered, stale) = audit(&staged, &[fail, pass.clone()]);
+    assert_eq!(
+        uncovered,
+        [pass.0],
+        "the fail file is covered, the pass file not"
+    );
+    assert!(
+        stale.is_empty(),
+        "a false negative sits under it: {stale:?}"
+    );
+}
+
 fn ledger_text() -> String {
     std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -448,7 +539,7 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
     let mut rule_groups: BTreeMap<&'static str, Tally> = BTreeMap::new();
     let mut other_suites: BTreeMap<String, Tally> = BTreeMap::new();
     let mut bar = Tally::default();
-    let mut false_positives: Vec<String> = Vec::new();
+    let mut false_positives: Vec<(String, Vec<String>)> = Vec::new();
     let mut false_negatives: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut unopenable = 0usize;
     let mut annotated = 0usize;
@@ -506,13 +597,11 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
             (true, true) => bar.pass_agreed += 1,
             (true, false) => {
                 bar.pass_disagreed += 1;
-                false_positives.push(format!(
-                    "{relative}\n    {:?}",
-                    verdict
-                        .findings
-                        .iter()
-                        .map(|f| format!("{} {:?}", f.clause, f.kind))
-                        .collect::<Vec<_>>()
+                // Each finding as it displays itself: its clause, its
+                // object and its kind with the kind's fields.
+                false_positives.push((
+                    relative.clone(),
+                    verdict.findings.iter().map(ToString::to_string).collect(),
                 ));
             }
             (false, false) => bar.fail_agreed += 1,
@@ -610,8 +699,8 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
          reported something ---",
         false_positives.len()
     );
-    for line in &false_positives {
-        println!("  {line}");
+    for (path, findings) in &false_positives {
+        println!("  {path}\n    {}", findings.join("; "));
     }
 
     println!(
@@ -639,35 +728,20 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
     // disagreement with no row fails here by name; a row whose subject no
     // longer disagrees is stale and fails here too. The reason field is
     // mandatory at the reader (`a_row_without_a_reason_is_refused`), so
-    // "covered" cannot mean "listed without an explanation".
+    // "covered" cannot mean "listed without an explanation". Which row can
+    // cover which direction is `audit`'s, which a test holds without the
+    // corpus.
     let rows = read_ledger(&ledger_text()).expect("the committed ledger is complete");
-    let covers = |subject: &str| {
-        rows.iter()
-            .any(|row| subject == row.subject || subject.starts_with(&row.subject))
-    };
-
-    let mut uncovered: Vec<String> = Vec::new();
-    for line in &false_positives {
-        let subject = line.split('\n').next().unwrap_or(line);
-        if !covers(subject) {
-            uncovered.push(subject.to_string());
-        }
-    }
-    for subject in false_negatives.keys() {
-        if !covers(subject) {
-            uncovered.push(subject.clone());
-        }
-    }
-    let stale: Vec<&str> = rows
+    let disagreements: Vec<(String, Direction)> = false_positives
         .iter()
-        .map(|row| row.subject.as_str())
-        .filter(|subject| {
-            !false_negatives.keys().any(|key| key.starts_with(*subject))
-                && !false_positives
-                    .iter()
-                    .any(|line| line.starts_with(*subject))
-        })
+        .map(|(path, _)| (path.clone(), Direction::FalsePositive))
+        .chain(
+            false_negatives
+                .keys()
+                .map(|key| (key.clone(), Direction::FalseNegative)),
+        )
         .collect();
+    let (uncovered, stale) = audit(&rows, &disagreements);
 
     println!(
         "\nledger: {} rows, {} disagreements uncovered, {} rows stale",
