@@ -103,6 +103,9 @@ pub struct Bar {
     /// Empty is an improvement rather than a refusal, for [`Bar::tagged`]'s
     /// reason.
     pub capabilities: BTreeMap<String, u64>,
+    /// The five runs' time figures, or `None` where none were measured for
+    /// this corpus.
+    pub time: Option<TimeBar>,
 }
 
 /// The peak-memory bar for one corpus.
@@ -177,14 +180,243 @@ pub struct TaggedBar {
     pub orphans: u64,
 }
 
-/// A committed ratchet.
+/// How many runs set a corpus's time figures: five dispatches of `corpus.yml`
+/// at one revision (MS-07).
+pub const TIME_RUNS: usize = 5;
+
+/// The narrowest band a time figure is held to, in percent.
+///
+/// The swing the bench's noisiest operation showed within one of the fleet's
+/// two groups, so five runs that all landed on one group are not held tighter
+/// than that group has been seen to move.
+pub const TIME_BAND_FLOOR_PERCENT: u128 = 20;
+
+/// One run's time figures for one corpus: what a report's `summary.time`
+/// carries, and what a bar's `time.runs` holds five of (MS-07).
+///
+/// Counts and sums rather than rates, as every other axis here: the two means
+/// are a sum over a count and are compared by cross-multiplication. The three
+/// percentiles are over the corpus's pages, not its files.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TimeFigures {
+    /// Files whose open and count was timed: those that opened.
+    pub files: u64,
+    /// Their open-and-count spans, summed, in microseconds.
+    pub open_micros: u64,
+    /// Pages whose render was timed.
+    pub pages: u64,
+    /// Their render spans, summed, in microseconds.
+    pub render_micros: u64,
+    /// The 50th percentile page render, in microseconds, by nearest rank.
+    pub p50_micros: u64,
+    /// The 95th.
+    pub p95_micros: u64,
+    /// The 99th.
+    pub p99_micros: u64,
+}
+
+impl TimeFigures {
+    /// The object a report's summary and a bar's run carry.
+    pub fn to_json(&self) -> Json {
+        Json::object([
+            ("files", Json::count(self.files)),
+            ("open_micros", Json::count(self.open_micros)),
+            ("pages", Json::count(self.pages)),
+            ("render_micros", Json::count(self.render_micros)),
+            ("p50_micros", Json::count(self.p50_micros)),
+            ("p95_micros", Json::count(self.p95_micros)),
+            ("p99_micros", Json::count(self.p99_micros)),
+        ])
+    }
+
+    fn from_json(json: &Json, name: &str) -> Result<TimeFigures, String> {
+        let read = |key: &str| -> Result<u64, String> {
+            json.get(key)
+                .and_then(Json::as_u64)
+                .ok_or_else(|| format!("`{name}`'s timed run has no whole-number `{key}`"))
+        };
+        Ok(TimeFigures {
+            files: read("files")?,
+            open_micros: read("open_micros")?,
+            pages: read("pages")?,
+            render_micros: read("render_micros")?,
+            p50_micros: read("p50_micros")?,
+            p95_micros: read("p95_micros")?,
+            p99_micros: read("p99_micros")?,
+        })
+    }
+}
+
+/// The five runs a bar's time figures come from, and what they ran under.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TimeRuns {
+    /// The resolution every page was rendered at.
+    pub dpi: f64,
+    /// How many children ran at once: a span is wall time, and its neighbours
+    /// are part of it.
+    pub jobs: u64,
+    /// The revision of `develop` the five ran at.
+    pub revision: String,
+    /// When they were recorded.
+    pub recorded: String,
+    /// Each run's dispatch and the host it landed on, in the order every
+    /// corpus's `time.runs` holds them.
+    pub dispatches: Vec<Dispatch>,
+}
+
+/// One of the five dispatches.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dispatch {
+    /// The workflow run's id.
+    pub id: String,
+    /// The machine it ran on, as its report states it.
+    pub host: String,
+}
+
+/// One corpus's time block: the five runs' figures.
+///
+/// No band is a key: each is derived from the runs by [`band`], so none is
+/// typed by hand.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimeBar {
+    /// The corpus's file count when the five ran. A run over another count is
+    /// a different measurement.
+    pub total: u64,
+    /// The five runs' figures, in the order `time_runs` names the dispatches.
+    pub runs: Vec<TimeFigures>,
+}
+
+/// A time a figure stands for: `micros` over `over`, so a mean is compared by
+/// cross-multiplication and never divided. A percentile is over one page, and
+/// a figure over nothing was not measured.
+#[derive(Clone, Copy, Debug)]
+struct Time {
+    micros: u64,
+    over: u64,
+}
+
+impl Time {
+    /// Whether this is no slower than `other`.
+    fn at_most(self, other: Time) -> bool {
+        u128::from(self.micros) * u128::from(other.over)
+            <= u128::from(other.micros) * u128::from(self.over)
+    }
+
+    /// Whether this is at most `band` percent slower than `fastest`.
+    fn within(self, fastest: Time, band: u128) -> bool {
+        let now = u128::from(self.micros)
+            .saturating_mul(u128::from(fastest.over))
+            .saturating_mul(100);
+        let allowed = (100 + band)
+            .saturating_mul(u128::from(fastest.micros))
+            .saturating_mul(u128::from(self.over));
+        now <= allowed
+    }
+
+    /// In microseconds, for a message. Nothing compares it.
+    fn mean(self) -> f64 {
+        self.micros as f64 / self.over.max(1) as f64
+    }
+}
+
+/// The five figures a corpus is held to (MS-07).
+#[derive(Clone, Copy, Debug)]
+enum Figure {
+    PagesPerSecond,
+    OpenAndCount,
+    P50,
+    P95,
+    P99,
+}
+
+impl Figure {
+    const ALL: [Figure; 5] = [
+        Figure::PagesPerSecond,
+        Figure::OpenAndCount,
+        Figure::P50,
+        Figure::P95,
+        Figure::P99,
+    ];
+
+    /// The figure as a time, so every band reads one way: pages a second is
+    /// held as its reciprocal, the mean time a page took.
+    fn time(self, figures: &TimeFigures) -> Time {
+        let page = u64::from(figures.pages > 0);
+        match self {
+            Figure::PagesPerSecond => Time {
+                micros: figures.render_micros,
+                over: figures.pages,
+            },
+            Figure::OpenAndCount => Time {
+                micros: figures.open_micros,
+                over: figures.files,
+            },
+            Figure::P50 => Time {
+                micros: figures.p50_micros,
+                over: page,
+            },
+            Figure::P95 => Time {
+                micros: figures.p95_micros,
+                over: page,
+            },
+            Figure::P99 => Time {
+                micros: figures.p99_micros,
+                over: page,
+            },
+        }
+    }
+
+    /// The figure as a message states it.
+    fn show(self, time: Time) -> String {
+        let micros = time.mean();
+        match self {
+            Figure::PagesPerSecond => format!(
+                "{:.1} pages/s ({micros:.1} µs a page)",
+                1_000_000.0 / micros.max(f64::MIN_POSITIVE)
+            ),
+            Figure::OpenAndCount => format!("an open and count of {micros:.1} µs a file"),
+            Figure::P50 => format!("a p50 page render of {micros:.0} µs"),
+            Figure::P95 => format!("a p95 page render of {micros:.0} µs"),
+            Figure::P99 => format!("a p99 page render of {micros:.0} µs"),
+        }
+    }
+}
+
+/// The band five runs set for one figure, in percent.
+///
+/// The runs' spread -- slowest over fastest, less one -- times 2.295, rounded
+/// up to the next 5 %, and never under [`TIME_BAND_FLOOR_PERCENT`]. 2.295 is
+/// the 1.53 the bench's widest spread grew by from five runs to fifteen, made
+/// half again as wide, the bench's own rule: the band is the spread fifteen
+/// runs would show, set as the bench sets one from fifteen. Integers
+/// throughout, as every comparison here is.
+fn band(fastest: Time, slowest: Time) -> u128 {
+    // The spread as a fraction: (slowest - fastest) / fastest.
+    let num = (u128::from(slowest.micros) * u128::from(fastest.over))
+        .saturating_sub(u128::from(fastest.micros) * u128::from(slowest.over));
+    let den = u128::from(fastest.micros) * u128::from(slowest.over);
+    if den == 0 {
+        return TIME_BAND_FLOOR_PERCENT;
+    }
+    // 2.295 x the spread x 100 %, in whole steps of 5 %.
+    let steps = num.saturating_mul(2295).div_ceil(den.saturating_mul(50));
+    steps.saturating_mul(5).max(TIME_BAND_FLOOR_PERCENT)
+}
+
+/// A committed ratchet.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Ratchet {
     pub bars: Vec<Bar>,
     /// Whether the run that produced it covered everything.
     pub complete: bool,
     /// The `--fonts` setting it was measured under.
     pub fonts: String,
+    /// The five runs its time figures come from, or `None` in a bar recorded
+    /// before any were measured.
+    ///
+    /// `None` is an improvement rather than a refusal, for [`Bar::peak`]'s
+    /// reason, and it is what keeps `SCHEMA` at 2.
+    pub time_runs: Option<TimeRuns>,
 }
 
 impl Ratchet {
@@ -256,6 +488,28 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
             before.fonts, now.settings.fonts
         ));
     }
+    // The time figures are a measurement of their own, refused as `--fonts`
+    // is when this run is not the measurement they were: a page rendered at
+    // another resolution, or beside another number of neighbours, is another
+    // span. `None` is a bar with no figures, `Some(false)` figures refused.
+    let times = before.time_runs.as_ref().map(|runs| {
+        let mut agree = true;
+        if runs.dpi.to_bits() != now.settings.dpi.to_bits() {
+            out.refusals.push(format!(
+                "the time figures were measured at {} dpi and this run rendered at {}; a page rendered at another resolution is another measurement",
+                runs.dpi, now.settings.dpi
+            ));
+            agree = false;
+        }
+        if runs.jobs != now.settings.jobs as u64 {
+            out.refusals.push(format!(
+                "the time figures were measured {} children at a time and this run ran {}; a span is wall time, and its neighbours are part of it",
+                runs.jobs, now.settings.jobs
+            ));
+            agree = false;
+        }
+        agree
+    });
 
     for bar in &before.bars {
         let Some(corpus) = now.corpora.iter().find(|c| c.name == bar.name) else {
@@ -576,6 +830,29 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
                 }
             }
         }
+
+        // The seventh axis (MS-07): time, each figure held to the band its
+        // five runs set.
+        let now_time = corpus.time();
+        match (times, &bar.time) {
+            // Refused above, once for the whole bar.
+            (Some(false), _) => {}
+            (Some(true), Some(time)) => hold_times(&mut out, &bar.name, total, &now_time, time),
+            // No band: a bar recorded before the times, or a corpus new to
+            // them. A first measurement sets none, for the peak's reason.
+            _ if now_time.files == 0 && now_time.pages == 0 => out.notes.push(format!(
+                "{}: no open or page render was timed, and there is no recorded band",
+                bar.name
+            )),
+            _ => out.improvements.push(format!(
+                "{}: {} over {} pages, and {} over {} files — new, with no recorded band",
+                bar.name,
+                Figure::PagesPerSecond.show(Figure::PagesPerSecond.time(&now_time)),
+                now_time.pages,
+                Figure::OpenAndCount.show(Figure::OpenAndCount.time(&now_time)),
+                now_time.files
+            )),
+        }
     }
 
     for corpus in &now.corpora {
@@ -590,6 +867,213 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
     }
 
     out
+}
+
+/// Holds one corpus's time figures to the bands its five runs set (MS-07).
+///
+/// Each figure is judged alone, so one past its band fails the run by itself.
+fn hold_times(out: &mut Comparison, name: &str, total: u64, now: &TimeFigures, time: &TimeBar) {
+    if total != time.total {
+        out.refusals.push(format!(
+            "`{name}` ran {total} files and its times were measured over {}; a corpus that changed is another measurement until five runs re-measure it",
+            time.total
+        ));
+        return;
+    }
+    // A figure over fewer files or pages is a smaller measurement, not a
+    // faster one: each is held to the fewest of the five, as a peak is to its
+    // children.
+    let fewest_files = time.runs.iter().map(|run| run.files).min().unwrap_or(0);
+    if now.files < fewest_files {
+        out.regressions.push(format!(
+            "{name}: the open of {} files was timed, fewer than the {fewest_files} the fewest of the five runs timed; a figure over fewer files is not a faster one",
+            now.files
+        ));
+    }
+    let fewest_pages = time.runs.iter().map(|run| run.pages).min().unwrap_or(0);
+    if now.pages < fewest_pages {
+        out.regressions.push(format!(
+            "{name}: {} page renders were timed, fewer than the {fewest_pages} the fewest of the five runs timed; a figure over fewer pages is not a faster one",
+            now.pages
+        ));
+    }
+    for figure in Figure::ALL {
+        let runs: Vec<Time> = time.runs.iter().map(|run| figure.time(run)).collect();
+        let now_time = figure.time(now);
+        // A figure a run did not measure is held to nothing; the counts above
+        // are what catch a measurement that stopped.
+        if now_time.over == 0 || runs.iter().any(|run| run.over == 0) {
+            continue;
+        }
+        let fastest = runs
+            .iter()
+            .copied()
+            .reduce(|a, b| if b.at_most(a) { b } else { a });
+        let slowest = runs
+            .iter()
+            .copied()
+            .reduce(|a, b| if a.at_most(b) { b } else { a });
+        let (Some(fastest), Some(slowest)) = (fastest, slowest) else {
+            continue;
+        };
+        let band = band(fastest, slowest);
+        if !now_time.within(fastest, band) {
+            out.regressions.push(format!(
+                "{name}: {}, past its band of {band} % over the five runs' fastest, {}",
+                figure.show(now_time),
+                figure.show(fastest)
+            ));
+        } else if !fastest.at_most(now_time) {
+            // Faster than all five. One run measures no band, so it moves
+            // nothing and is said rather than counted.
+            out.notes.push(format!(
+                "{name}: {}, faster than the five runs' fastest, {}; one run measures no band",
+                figure.show(now_time),
+                figure.show(fastest)
+            ));
+        }
+    }
+}
+
+/// The bar `--record` writes: `recorded`, every axis from its run, with the
+/// time figures of `committed` carried over unchanged (MS-07).
+///
+/// A time figure from one run would ratchet the bar onto whichever host that
+/// run landed on, and the next run on the fleet's other group would fail on
+/// the machine rather than on the code. So a run writes none: `time_runs` and
+/// each corpus's `time` are the five runs' the committed bar holds, and stay
+/// until five more re-measure them. A corpus the run no longer has takes its
+/// block with it.
+#[must_use]
+pub fn carry_times(committed: &Json, recorded: Json) -> Json {
+    let Json::Object(mut top) = recorded else {
+        return recorded;
+    };
+    if let Some(runs) = committed.get("time_runs") {
+        top.insert("time_runs".to_string(), runs.clone());
+    }
+    let blocks: BTreeMap<&str, &Json> = committed
+        .get("corpora")
+        .and_then(Json::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|corpus| Some((corpus.get("name")?.as_str()?, corpus.get("time")?)))
+        .collect();
+    if let Some(Json::Array(corpora)) = top.get_mut("corpora") {
+        for corpus in corpora {
+            let Json::Object(fields) = corpus else {
+                continue;
+            };
+            let block = fields
+                .get("name")
+                .and_then(Json::as_str)
+                .and_then(|name| blocks.get(name))
+                .map(|block| (*block).clone());
+            if let Some(block) = block {
+                fields.insert("time".to_string(), block);
+            }
+        }
+    }
+    Json::Object(top)
+}
+
+/// Reads a bar's `time_runs`.
+fn parse_time_runs(object: &Json) -> Result<TimeRuns, String> {
+    let dpi = match object.get("dpi") {
+        Some(Json::Number(dpi)) if dpi.is_finite() && *dpi > 0.0 => *dpi,
+        _ => return Err("`time_runs` has no `dpi`".to_string()),
+    };
+    let jobs = object
+        .get("jobs")
+        .and_then(Json::as_u64)
+        .filter(|jobs| *jobs > 0)
+        .ok_or("`time_runs` has no whole-number `jobs`")?;
+    let text = |json: &Json, key: &str| -> Result<String, String> {
+        json.get(key)
+            .and_then(Json::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("`time_runs` has no `{key}`"))
+    };
+    let dispatches = object
+        .get("dispatches")
+        .and_then(Json::as_array)
+        .ok_or("`time_runs` has no `dispatches` array")?
+        .iter()
+        .map(|dispatch| {
+            Ok(Dispatch {
+                id: text(dispatch, "id")?,
+                host: text(dispatch, "host")?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if dispatches.len() != TIME_RUNS {
+        return Err(format!(
+            "`time_runs` names {} dispatches, and a band is set from {TIME_RUNS}",
+            dispatches.len()
+        ));
+    }
+    Ok(TimeRuns {
+        dpi,
+        jobs,
+        revision: text(object, "revision")?,
+        recorded: text(object, "recorded")?,
+        dispatches,
+    })
+}
+
+/// Reads one corpus's `time`, which needs the bar's `time_runs` to say what
+/// its runs were.
+fn parse_time(object: &Json, name: &str, time_runs: Option<&TimeRuns>) -> Result<TimeBar, String> {
+    let Some(time_runs) = time_runs else {
+        return Err(format!(
+            "`{name}` records times and the bar has no `time_runs` naming the runs they came from"
+        ));
+    };
+    let total = object
+        .get("total")
+        .and_then(Json::as_u64)
+        .ok_or_else(|| format!("`{name}`'s `time` has no whole-number `total`"))?;
+    let runs = object
+        .get("runs")
+        .and_then(Json::as_array)
+        .ok_or_else(|| format!("`{name}`'s `time` has no `runs` array"))?;
+    if runs.len() != time_runs.dispatches.len() {
+        return Err(format!(
+            "`{name}` records {} timed runs and `time_runs` names {} dispatches; each run is one dispatch's",
+            runs.len(),
+            time_runs.dispatches.len()
+        ));
+    }
+    let runs = runs
+        .iter()
+        .map(|run| TimeFigures::from_json(run, name))
+        .collect::<Result<Vec<_>, String>>()?;
+    for run in &runs {
+        if run.files > total {
+            return Err(format!(
+                "`{name}` records the open of {} files timed out of {total}, which cannot be",
+                run.files
+            ));
+        }
+        // Refused at the bar, for a peak of zero bytes' reason: a band set
+        // from zero is a band nothing can sit under.
+        let zero_open = run.files > 0 && run.open_micros == 0;
+        let zero_page = run.pages > 0
+            && [
+                run.render_micros,
+                run.p50_micros,
+                run.p95_micros,
+                run.p99_micros,
+            ]
+            .contains(&0);
+        if zero_open || zero_page {
+            return Err(format!(
+                "`{name}` records a time of zero over {} files and {} pages that were timed, which is a band nothing can sit under",
+                run.files, run.pages
+            ));
+        }
+    }
+    Ok(TimeBar { total, runs })
 }
 
 /// Reads a committed ratchet.
@@ -616,6 +1100,12 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
         .and_then(Json::as_str)
         .ok_or("the ratchet does not say what `--fonts` it was measured with")?
         .to_string();
+    // Absent in a bar recorded before the time figures, which compares
+    // against nothing on that axis and refuses nothing.
+    let time_runs = match json.get("time_runs") {
+        None => None,
+        Some(object) => Some(parse_time_runs(object)?),
+    };
 
     let entries = json
         .get("corpora")
@@ -770,6 +1260,10 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
                 Some(peak)
             }
         };
+        let time = match entry.get("time") {
+            None => None,
+            Some(object) => Some(parse_time(object, &name, time_runs.as_ref())?),
+        };
         if bars.iter().any(|b: &Bar| b.name == name) {
             return Err(format!("`{name}` appears twice in the ratchet"));
         }
@@ -784,6 +1278,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
             tagged,
             capabilities,
             peak,
+            time,
         });
     }
     if bars.is_empty() {
@@ -793,6 +1288,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
         bars,
         complete,
         fonts,
+        time_runs,
     })
 }
 
@@ -800,7 +1296,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
 mod tests {
     use super::*;
     use crate::report::{CorpusReport, Settings};
-    use crate::runner::{FileResult, Outcome, Tagged};
+    use crate::runner::{FileResult, Outcome, PageTime, Tagged};
     use std::collections::{BTreeMap, BTreeSet};
 
     fn files(passed: u64, failed: u64, degraded: u64) -> Vec<FileResult> {
@@ -917,6 +1413,8 @@ mod tests {
                 timeout_seconds: 20,
                 dpi: 72.0,
                 fonts: "none".to_string(),
+                jobs: 4,
+                host: None,
             },
         }
     }
@@ -934,9 +1432,399 @@ mod tests {
                 tagged: None,
                 capabilities: BTreeMap::new(),
                 peak: None,
+                time: None,
             }],
             complete: true,
             fonts: "none".to_string(),
+            time_runs: None,
+        }
+    }
+
+    /// A run of ten files, each opened in `open` µs, whose twenty pages took
+    /// `pages`, two to a file.
+    fn timed_run(name: &str, open: u64, pages: [u64; 20]) -> Run {
+        let mut run = run(name, 10, 0, 0);
+        for (index, file) in run.corpora[0].files.iter_mut().enumerate() {
+            file.pages = 2;
+            file.rendered = 2;
+            file.open_micros = Some(open);
+            file.page_micros = vec![
+                PageTime {
+                    page: 1,
+                    micros: pages[2 * index],
+                },
+                PageTime {
+                    page: 2,
+                    micros: pages[2 * index + 1],
+                },
+            ];
+        }
+        run
+    }
+
+    /// Five runs of that corpus: ten files opened in 3 000 µs each, twenty
+    /// pages at 2 000 to 2 080 µs a page, a p50 of 2 000 µs, a p95 of 4 000
+    /// and a p99 of 5 000 to 5 200. Every spread is 4 % or none, so every
+    /// band is the floor's 20 %.
+    fn five_runs() -> [TimeFigures; 5] {
+        std::array::from_fn(|index| {
+            let index = index as u64;
+            TimeFigures {
+                files: 10,
+                open_micros: 30_000,
+                pages: 20,
+                render_micros: 40_000 + 400 * index,
+                p50_micros: 2_000,
+                p95_micros: 4_000,
+                p99_micros: 5_000 + 50 * index,
+            }
+        })
+    }
+
+    fn timed_bar(name: &str, runs: [TimeFigures; 5]) -> Ratchet {
+        let mut committed = bar(name, 10, 10, 0);
+        committed.time_runs = Some(TimeRuns {
+            dpi: 72.0,
+            jobs: 4,
+            revision: "0123abcd".to_string(),
+            recorded: "the five runs".to_string(),
+            dispatches: (1..=5)
+                .map(|id| Dispatch {
+                    id: id.to_string(),
+                    host: "a machine, 4 logical CPUs".to_string(),
+                })
+                .collect(),
+        });
+        committed.bars[0].time = Some(TimeBar {
+            total: 10,
+            runs: runs.to_vec(),
+        });
+        committed
+    }
+
+    /// A committed bar's text with a time block: `dispatches` dispatches and
+    /// these runs' figures, each `(files, open_micros, p99_micros)` over
+    /// twenty pages.
+    fn timed_bar_text(dispatches: usize, runs: &[(u64, u64, u64)]) -> String {
+        let dispatches: Vec<String> = (0..dispatches)
+            .map(|id| format!(r#"{{"id": "{id}", "host": "a machine"}}"#))
+            .collect();
+        let runs: Vec<String> = runs
+            .iter()
+            .map(|(files, open, p99)| {
+                format!(
+                    r#"{{"files": {files}, "open_micros": {open}, "pages": 20,
+                    "render_micros": 40000, "p50_micros": 2000, "p95_micros": 4000,
+                    "p99_micros": {p99}}}"#
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"schema": 2, "complete": true, "settings": {{"fonts": "none"}},
+            "time_runs": {{"dpi": 72, "jobs": 4, "revision": "0123abcd",
+            "recorded": "the five runs", "dispatches": [{}]}},
+            "corpora": [{{"name": "pdfjs", "total": 10, "passed": 10, "degraded": 0,
+            "strict_eligible": 10, "strict_clean": 10,
+            "time": {{"total": 10, "runs": [{}]}}}}]}}"#,
+            dispatches.join(", "),
+            runs.join(", ")
+        )
+    }
+
+    /// **One figure past its band fails the run, alone.** The p99 here is
+    /// 7 000 µs against the five runs' fastest 5 000 and a band of 20 %; the
+    /// mean page, the open and the p50 sit inside theirs, and the p95 is
+    /// faster than all five, which is a note and moves nothing.
+    #[test]
+    fn a_time_figure_past_its_band_fails_alone() {
+        let committed = timed_bar("pdfjs", five_runs());
+        let mut pages = [2_000; 20];
+        pages[7] = 7_000;
+        let out = compare(&committed, &timed_run("pdfjs", 3_000, pages), true);
+        assert!(out.failed(), "{out:#?}");
+        assert!(out.refusals.is_empty(), "{:?}", out.refusals);
+        assert_eq!(out.regressions.len(), 1, "{:?}", out.regressions);
+        assert!(
+            out.regressions[0].contains(
+                "pdfjs: a p99 page render of 7000 µs, past its band of 20 % over the five runs' fastest, a p99 page render of 5000 µs"
+            ),
+            "{:?}",
+            out.regressions
+        );
+        assert!(
+            out.notes
+                .iter()
+                .any(|n| n
+                    .contains("a p95 page render of 2000 µs, faster than the five runs' fastest")),
+            "{:?}",
+            out.notes
+        );
+
+        // Inside every band, nothing fails.
+        let out = compare(&committed, &timed_run("pdfjs", 3_000, [2_000; 20]), true);
+        assert!(!out.failed(), "{out:#?}");
+    }
+
+    /// The bars committed before the time figures carry none. A bar that
+    /// predates a measurement cannot be regressed against, so the run's
+    /// figures are new rather than refused, which is what keeps `SCHEMA` at 2.
+    #[test]
+    fn a_bar_without_times_is_an_improvement() {
+        let text = r#"{"schema":2,"complete":true,"settings":{"fonts":"none"},
+            "corpora":[{"name":"pdfjs","total":10,"passed":10,"degraded":0,
+            "strict_eligible":10,"strict_clean":10}]}"#;
+        let committed = parse(text).expect("a bar with no times is still a bar");
+        assert_eq!(committed.time_runs, None);
+        assert_eq!(committed.bars[0].time, None);
+        let out = compare(&committed, &timed_run("pdfjs", 3_000, [2_000; 20]), true);
+        assert!(!out.failed(), "{out:#?}");
+        assert!(
+            out.improvements.iter().any(|i| i.contains(
+                "pdfjs: 500.0 pages/s (2000.0 µs a page) over 20 pages, and an open and count of 3000.0 µs a file over 10 files — new, with no recorded band"
+            )),
+            "{:?}",
+            out.improvements
+        );
+
+        // A corpus the five runs did not time is new in the same way.
+        let mut committed = timed_bar("pdfjs", five_runs());
+        committed.bars[0].time = None;
+        let out = compare(&committed, &timed_run("pdfjs", 3_000, [2_000; 20]), true);
+        assert!(!out.failed(), "{out:#?}");
+        assert!(
+            out.improvements
+                .iter()
+                .any(|i| i.contains("new, with no recorded band")),
+            "{:?}",
+            out.improvements
+        );
+
+        // And a run that timed nothing claims nothing, and says so.
+        let out = compare(&committed, &run("pdfjs", 10, 0, 0), true);
+        assert!(
+            out.notes
+                .iter()
+                .any(|n| n.contains("no open or page render was timed")),
+            "{:?}",
+            out.notes
+        );
+    }
+
+    /// The bar records the run's ten slowest files, slowest first and ties by
+    /// path, each under its `/Producer`; a file with no span is not ranked,
+    /// and the printed table escapes a producer's pipe as the producer table
+    /// does. The bar carries no time figure of the run's own.
+    #[test]
+    fn the_slowest_ten_name_their_producers() {
+        let mut run = run("pdfjs", 12, 0, 0);
+        let pages = [
+            0, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 8_000, 9_000, 9_000, 500, 700,
+        ];
+        for (index, file) in run.corpora[0].files.iter_mut().enumerate() {
+            file.producer = Some(format!("Producer {index}"));
+            // The first file timed nothing.
+            if index > 0 {
+                file.open_micros = Some(10);
+                file.page_micros = vec![PageTime {
+                    page: 1,
+                    micros: pages[index],
+                }];
+            }
+        }
+        run.corpora[0].files[8].producer = Some("Tool | Version".to_string());
+
+        let recorded = run.to_ratchet_json("n");
+        let corpus = recorded
+            .get("corpora")
+            .and_then(Json::as_array)
+            .and_then(|corpora| corpora.first())
+            .expect("the corpus");
+        let slowest = corpus
+            .get("slowest")
+            .and_then(Json::as_array)
+            .expect("the bar lists the slowest");
+        let paths: Vec<&str> = slowest
+            .iter()
+            .filter_map(|file| file.get("path").and_then(Json::as_str))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "8.pdf", "9.pdf", "7.pdf", "6.pdf", "5.pdf", "4.pdf", "3.pdf", "2.pdf", "1.pdf",
+                "11.pdf"
+            ]
+        );
+        assert_eq!(
+            slowest[0].get("producer").and_then(Json::as_str),
+            Some("Tool | Version")
+        );
+        assert_eq!(slowest[0].get("micros").and_then(Json::as_u64), Some(9_010));
+        assert_eq!(slowest[0].get("pages").and_then(Json::as_u64), Some(1));
+        assert!(corpus.get("time").is_none(), "no figure of the run's own");
+
+        let table = run.slowest_table();
+        assert!(
+            table.contains("| Tool \\| Version | `pdfjs` | `8.pdf` | 1 | 9.0 ms |"),
+            "{table}"
+        );
+        assert!(!table.contains("`10.pdf`"), "the eleventh: {table}");
+        assert!(!table.contains("`0.pdf`"), "untimed: {table}");
+    }
+
+    /// The band rule on the design's own figures: a spread of 3 % is banded
+    /// at 20 %, one of 10 % at 25 % and one of 36 % at 85 %, and each band
+    /// holds the slowest of the runs that set it. A mean's spread is the same
+    /// as the times it averages.
+    #[test]
+    fn the_band_is_the_spread_fifteen_runs_would_show() {
+        let time = |micros| Time { micros, over: 1 };
+        for (slowest, expected) in [(100, 20), (103, 20), (110, 25), (136, 85)] {
+            let band = band(time(100), time(slowest));
+            assert_eq!(band, expected, "a spread of {} %", slowest - 100);
+            assert!(time(slowest).within(time(100), band), "{slowest}");
+        }
+        let mean = |micros| Time { micros, over: 20 };
+        assert_eq!(band(mean(40_000), mean(44_000)), 25);
+    }
+
+    /// A run at another resolution or job count is another measurement, as a
+    /// run under another `--fonts` is, and so is a corpus whose file count is
+    /// not the one its times were measured over: each is refused by name.
+    #[test]
+    fn a_time_measured_otherwise_is_refused_by_name() {
+        let committed = timed_bar("pdfjs", five_runs());
+        let mut other = timed_run("pdfjs", 3_000, [2_000; 20]);
+        other.settings.dpi = 150.0;
+        other.settings.jobs = 8;
+        let out = compare(&committed, &other, true);
+        assert!(out.failed(), "{out:#?}");
+        for expected in [
+            "measured at 72 dpi and this run rendered at 150",
+            "measured 4 children at a time and this run ran 8",
+        ] {
+            assert!(
+                out.refusals.iter().any(|r| r.contains(expected)),
+                "{expected}: {:?}",
+                out.refusals
+            );
+        }
+
+        let mut repinned = timed_bar("pdfjs", five_runs());
+        if let Some(time) = &mut repinned.bars[0].time {
+            time.total = 12;
+        }
+        let out = compare(&repinned, &timed_run("pdfjs", 3_000, [2_000; 20]), true);
+        assert!(
+            out.refusals
+                .iter()
+                .any(|r| r.contains("`pdfjs` ran 10 files and its times were measured over 12")),
+            "{:?}",
+            out.refusals
+        );
+    }
+
+    /// A run that timed fewer files or pages than the fewest of the five has
+    /// a smaller measurement, not a faster one, and fails as a peak over fewer
+    /// children does.
+    #[test]
+    fn a_figure_over_fewer_files_or_pages_is_not_a_faster_one() {
+        let committed = timed_bar("pdfjs", five_runs());
+        let mut thinned = timed_run("pdfjs", 3_000, [2_000; 20]);
+        for file in thinned.corpora[0].files.iter_mut().take(3) {
+            file.open_micros = None;
+            file.page_micros.clear();
+        }
+        let out = compare(&committed, &thinned, true);
+        assert!(out.failed(), "{out:#?}");
+        for expected in [
+            "the open of 7 files was timed, fewer than the 10",
+            "14 page renders were timed, fewer than the 20",
+        ] {
+            assert!(
+                out.regressions.iter().any(|r| r.contains(expected)),
+                "{expected}: {:?}",
+                out.regressions
+            );
+        }
+    }
+
+    /// A time block the band rule cannot be read from is refused when the bar
+    /// is read: other than five runs, runs that do not match the dispatches,
+    /// a run over more files than the corpus, and a zero time over files or
+    /// pages that were timed, which is a band nothing can sit under.
+    #[test]
+    fn a_time_block_that_cannot_be_is_refused_at_the_ratchet() {
+        let good = [(10, 30_000, 5_000); 5];
+        let read = parse(&timed_bar_text(5, &good)).expect("five runs over five dispatches");
+        assert_eq!(read.time_runs.map(|runs| runs.dispatches.len()), Some(5));
+        assert_eq!(
+            read.bars[0].time.as_ref().map(|time| time.runs.len()),
+            Some(5)
+        );
+
+        let first = |run: (u64, u64, u64)| {
+            let mut runs = good;
+            runs[0] = run;
+            timed_bar_text(5, &runs)
+        };
+        for (text, expected) in [
+            (timed_bar_text(4, &good[..4]), "a band is set from 5"),
+            (
+                timed_bar_text(5, &good[..4]),
+                "records 4 timed runs and `time_runs` names 5 dispatches",
+            ),
+            (
+                first((11, 30_000, 5_000)),
+                "the open of 11 files timed out of 10",
+            ),
+            (first((10, 0, 5_000)), "a band nothing can sit under"),
+            (first((10, 30_000, 0)), "a band nothing can sit under"),
+        ] {
+            let error = parse(&text).expect_err(expected);
+            assert!(error.contains(expected), "expected `{expected}`: {error}");
+        }
+
+        let orphan = r#"{"schema":2,"complete":true,"settings":{"fonts":"none"},
+            "corpora":[{"name":"pdfjs","total":10,"passed":10,"degraded":0,
+            "strict_eligible":10,"strict_clean":10,"time":{"total":10,"runs":[]}}]}"#;
+        let error = parse(orphan).expect_err("times with no runs named");
+        assert!(error.contains("no `time_runs` naming the runs"), "{error}");
+    }
+
+    /// `--record` writes every other axis from its run and none of its
+    /// times: the committed bar's `time_runs` and each corpus's `time` come
+    /// over unchanged, and the bar still reads as the one it was.
+    #[test]
+    fn a_record_carries_the_five_runs_and_writes_no_time_of_its_own() {
+        let text = timed_bar_text(5, &[(10, 30_000, 5_000); 5]);
+        let committed = crate::json::parse(&text).expect("the committed bar");
+        let run = timed_run("pdfjs", 3_333, [7_777; 20]);
+        let recorded = carry_times(&committed, run.to_ratchet_json("n"));
+        assert_eq!(recorded.get("time_runs"), committed.get("time_runs"));
+
+        let read = parse(&recorded.to_pretty()).expect("the recorded bar reads");
+        let before = parse(&text).expect("the committed bar reads");
+        assert_eq!(read.time_runs, before.time_runs);
+        assert_eq!(read.bars[0].time, before.bars[0].time);
+        assert!(
+            !recorded.to_pretty().contains("\"p50_micros\": 7777"),
+            "the run's own figure was written"
+        );
+    }
+
+    /// The three bars committed today go on reading as bars: a time block
+    /// that is absent is a bar with no band, never a refusal.
+    #[test]
+    fn the_three_committed_bars_still_parse() {
+        for path in [
+            crate::corpus::RATCHET_PATH,
+            crate::corpus::RATCHET_FONTS_PATH,
+            crate::corpus::RATCHET_BUNDLED_PATH,
+        ] {
+            let text = std::fs::read_to_string(crate::repo_root().join(path))
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+            let bar = parse(&text).unwrap_or_else(|e| panic!("{path}: {e}"));
+            assert!(bar.complete, "{path} is a bar");
         }
     }
 

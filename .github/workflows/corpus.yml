@@ -170,6 +170,10 @@ jobs:
           # every file "not eligible", which reads as a run that measured
           # nothing rather than as a regression.
           grep -Eq '^strict +[1-9][0-9]* rewritten' corpus-run.log
+          # And the time axis (MS-07): a child that wrote no spans leaves
+          # every time figure empty, which reads as a run with no time to hold
+          # rather than as one that measured none.
+          grep -Eq '^time +[1-9][0-9]* pages timed' corpus-run.log
 
       # The second bar, a second step that runs whatever the first returned
       # (the `if:` every check after the fetch carries): one failing must not
@@ -198,6 +202,7 @@ jobs:
             exit 1
           fi
           grep -Eq '^all +[1-9][0-9]* files' corpus-fonts.log
+          grep -Eq '^time +[1-9][0-9]* pages timed' corpus-fonts.log
           # And prove the face actually reached the child. A `--fonts` run
           # whose provider silently loaded nothing would look exactly like a
           # no-faces run measured against the wrong bar.
@@ -228,6 +233,7 @@ jobs:
             exit 1
           fi
           grep -Eq '^all +[1-9][0-9]* files' corpus-bundled.log
+          grep -Eq '^time +[1-9][0-9]* pages timed' corpus-bundled.log
 
       # Kept whatever the outcome: when the bar moves, the per-file record is
       # the only thing that says which files moved and why.

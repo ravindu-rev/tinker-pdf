@@ -122,7 +122,8 @@ corpus-run options:
   --check         compare against the bar for this --fonts setting; fail on a
                   regression. corpus/ratchet.json without faces,
                   corpus/ratchet-fonts.json with them — never each other
-  --record        rewrite that bar from this run
+  --record        rewrite that bar from this run, carrying its time figures
+                  over unchanged: those are five runs', never one run's
   --strict        with --check, a rise in the degradation rate also fails
 
   cargo xtask help

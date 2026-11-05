@@ -458,6 +458,10 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             timeout_seconds: args.timeout.as_secs(),
             dpi: args.dpi,
             fonts,
+            jobs: args.jobs,
+            host: std::fs::read_to_string("/proc/cpuinfo")
+                .ok()
+                .and_then(|text| host(&text)),
         },
     };
 
@@ -498,6 +502,12 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         println!();
         print!("{attribution}");
     }
+    // And the files that cost the most, on every run that timed any (MS-07).
+    let slowest = run.slowest_table();
+    if !slowest.is_empty() {
+        println!();
+        print!("{slowest}");
+    }
 
     if let Some(path) = &args.report {
         if let Some(parent) = path.parent() {
@@ -512,7 +522,25 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let ratchet_path = root.join(bar_path);
     if args.record {
         let note = ratchet_note(&run);
-        std::fs::write(&ratchet_path, run.to_ratchet_json(&note).to_pretty())
+        let mut recorded = run.to_ratchet_json(&note);
+        // **The time figures are five runs', never this one's** (MS-07). The
+        // committed bar's are carried over unchanged, so a bar that cannot be
+        // read is refused rather than overwritten: overwriting it would drop
+        // five dispatches' measurements without a word.
+        match std::fs::read_to_string(&ratchet_path) {
+            Ok(text) => {
+                let committed = crate::json::parse(&text).map_err(|e| {
+                    format!(
+                        "{bar_path}: {e}; the time figures it holds cannot be carried over, \
+                         so nothing was recorded"
+                    )
+                })?;
+                recorded = ratchet::carry_times(&committed, recorded);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{}: {e}", ratchet_path.display())),
+        }
+        std::fs::write(&ratchet_path, recorded.to_pretty())
             .map_err(|e| format!("{}: {e}", ratchet_path.display()))?;
         println!("recorded {}", ratchet_path.display());
         // Recording an incomplete run is allowed only in the sense that the
@@ -559,11 +587,33 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             };
             println!(
                 "\nthe bar held, and moved. To take the new numbers:\n  \
-                 cargo run -p xtask -- corpus-run --record{again}"
+                 cargo run -p xtask -- corpus-run --record{again}\n\
+                 The time figures are not among them: a bar's are five runs', \
+                 and `--record` carries them over unchanged."
             );
         }
     }
     Ok(())
+}
+
+/// The machine a run is measured on, from the text of `/proc/cpuinfo`: its
+/// first model name and how many logical CPUs it lists, or `None` where it
+/// names no model.
+///
+/// Recorded in the report beside the run's times, so that a figure that moved
+/// with the host is attributed to the host (MS-07). Off Linux there is no such
+/// file, and the report has no host.
+fn host(cpuinfo: &str) -> Option<String> {
+    let field = |line: &str, key: &str| -> Option<String> {
+        let (name, value) = line.split_once(':')?;
+        (name.trim() == key).then(|| value.trim().to_string())
+    };
+    let model = cpuinfo.lines().find_map(|line| field(line, "model name"))?;
+    let cpus = cpuinfo
+        .lines()
+        .filter(|line| field(line, "processor").is_some())
+        .count();
+    Some(format!("{model}, {cpus} logical CPUs"))
 }
 
 /// The note carried in `ratchet.json`, which is the first thing anybody reads.
@@ -834,6 +884,20 @@ mod tests {
             .is_none(),
             "the version this runner reads is not a disagreement"
         );
+    }
+
+    /// The host is the first model name and the count of logical CPUs, and
+    /// nothing where the file names no model.
+    #[test]
+    fn the_host_is_read_from_cpuinfo() {
+        let cpuinfo = "processor\t: 0\nvendor_id\t: AuthenticAMD\n\
+                       model name\t: AMD EPYC 7763 64-Core Processor\n\n\
+                       processor\t: 1\nmodel name\t: AMD EPYC 7763 64-Core Processor\n";
+        assert_eq!(
+            host(cpuinfo).as_deref(),
+            Some("AMD EPYC 7763 64-Core Processor, 2 logical CPUs")
+        );
+        assert_eq!(host("processor\t: 0\nFeatures\t: fp asimd\n"), None);
     }
 
     /// A `--child` naming somebody else's program owes this runner no flag,

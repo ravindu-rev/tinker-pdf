@@ -1405,7 +1405,7 @@ Tier P marks thirteen operations CLI, and their figures include the process;
 `images.rs`), so each is timed by running it. `support/cli.rs` resolves `tpdf`
 beside the bench binary's profile directory — a bench binary lives in
 `target/<profile>/deps/`, so `tpdf` is `target/<profile>/tpdf` — the layout
-`xtask/src/corpus.rs:717-730` relies on for its own child, and refuses with
+`xtask/src/corpus.rs:767-780` relies on for its own child, and refuses with
 the command that builds it when it is not there. Each call is one child, its
 stdout and stderr written to files in the operation's scratch directory, its
 exit status checked every time: a failed child panics the bench, which the
@@ -1713,7 +1713,7 @@ which rewrite the document and render page one again (`:2129`, `:2159`,
 the runner keeps nothing of one but its producer
 (`xtask/src/runner.rs:459-485`), so a file that timed out or stalled has no
 times; it is the pass rate's regression, and the producer table names it
-(`xtask/src/report.rs:638`). Each child renders on one thread: the engine
+(`xtask/src/report.rs:825`). Each child renders on one thread: the engine
 spawns none outside its tests (the only `thread::spawn` under `crates/*/src`
 are in `tinker-pdf-cos`'s test modules, `name.rs:305` and `store.rs:234`), and
 P-15's pool, when it lands, runs serially unless a caller asks for threads
@@ -1733,7 +1733,7 @@ Every figure is a time once pages/s is read as its reciprocal, so every band
 reads one way: the run's figure may be at most (100 + band) % of the bar's.
 The two means stay a count and a sum, and every comparison is a
 cross-multiplication in `u128`, as every other axis in `ratchet.rs` is
-(`xtask/src/ratchet.rs:1-26`, `:200-207`). Every key is a whole number, which
+(`xtask/src/ratchet.rs:1-26`, `:432-439`). Every key is a whole number, which
 `json.rs` holds exactly below 2⁵³ (`xtask/src/json.rs:42-46`, `:105-107`), and the
 largest, a corpus's summed render time in microseconds, sits far below it.
 
@@ -1749,8 +1749,8 @@ which is where the tail is read.
 #### Four children at once, and what a pass of its own would cost
 
 `corpus-run` runs one child a logical CPU unless told otherwise
-(`xtask/src/corpus.rs:192`, `:628-656`), and `corpus.yml` never tells it
-(`.github/workflows/corpus.yml:152-154`, `:190-193`, `:220-223`): four, on the
+(`xtask/src/corpus.rs:197`, `:678-706`), and `corpus.yml` never tells it
+(`.github/workflows/corpus.yml:152-154`, `:194-197`, `:225-228`): four, on the
 runner's four logical CPUs. A span is wall time, so a page's includes what its
 three neighbours cost it — shared caches, memory bandwidth, and a core where two
 logical CPUs share one — and seldom a wait for a CPU: four single-threaded
@@ -1789,7 +1789,7 @@ Version 7 rather than a quiet new key, for `peak`'s reason
 (`xtask/src/runner.rs:604-617`): the time figures are made from the spans, so
 a version-6 child read as version 7 would be a corpus whose files timed
 nothing rather than a `tpdf` nobody rebuilt, and the handshake exists to name
-the second (`xtask/src/corpus.rs:749-794`). The runner keeps a file's open
+the second (`xtask/src/corpus.rs:799-844`). The runner keeps a file's open
 span as an `Option` and its page spans as a list of page and microseconds
 (`xtask/src/runner.rs:131-151`, `:222-229`), and drops a line that does not
 parse, or that names a page outside 1 to `pages`, rather than reading it as
@@ -1797,21 +1797,23 @@ zero (`:690-703`, `:818-821`).
 
 **The report** carries, per file, `open_micros`, `render_micros` (its pages'
 sum) and `slowest_page` (`{ "page", "micros" }`), each absent where there was
-nothing to time; per corpus, in its `summary` (`xtask/src/report.rs:406-450`),
+nothing to time; per corpus, in its `summary` (`xtask/src/report.rs:541-591`),
 `time` — `files`, `open_micros`, `pages`, `render_micros`, `p50_micros`,
 `p95_micros` and `p99_micros` — and `slowest`, the ten slowest; `jobs` in its
-`settings` (`:237-250`, `:395-404`); and a `host` beside them,
+`settings` (`:331-356`, `:525-539`); and a `host` beside them,
 `/proc/cpuinfo`'s first model name and the logical CPU count, absent off
 Linux, so that a figure that moved with the host is attributed rather than
 banded, which is why `bench.yml` logs its host
 (`.github/workflows/bench.yml:62-70`). Its summary lines
-(`xtask/src/report.rs:555-619`) carry a `time` line per corpus — pages/s at the
+(`xtask/src/report.rs:704-806`) carry a `time` line per corpus — pages/s at the
 dpi, the latency and the three percentiles — and one for the run,
 `time   N pages timed   M files opened`, which each bar's step in
-`corpus.yml` greps as it greps `strict` (`.github/workflows/corpus.yml:172`).
+`corpus.yml` greps (`.github/workflows/corpus.yml:176`, `:205`, `:236`) as the
+first greps `strict` (`:172`).
 
 **The bar** carries `time_runs` at its top and `time` and `slowest` in each
-corpus, and each run's per-corpus figures go into it whole:
+corpus, and `jobs` but no `host` in its `settings`; each run's per-corpus
+figures go into it whole:
 
 ```text
 "time_runs": {
@@ -1841,23 +1843,27 @@ rule below, so none is typed by hand.
   fails the run alone. It refuses the times of a run at another dpi or job
   count than `time_runs`', and those of a corpus whose file count is not
   `time.total`, as it refuses a run under another `--fonts`
-  (`xtask/src/ratchet.rs:251-258`): each is a different measurement. A run
+  (`xtask/src/ratchet.rs:483-490`): each is a different measurement. A run
   that timed fewer files or pages in a corpus than the fewest of the five
-  fails, as a peak over fewer children does (`:567-576`). A figure faster
+  fails, as a peak over fewer children does (`:821-830`). A figure faster
   than the five's fastest is a note, not an improvement, because one run
   measures no band. A bar with no `time_runs` is an improvement, new with no
   recorded band, and `SCHEMA` stays 2, as it does for `peak`
   (`xtask/src/report.rs:23`, `xtask/src/ratchet.rs:82-90`).
 - **`--record`** writes every other axis from its run
-  (`xtask/src/corpus.rs:508-524`), and the run's ten slowest; it carries
+  (`xtask/src/corpus.rs:523-557`), and the run's ten slowest; it carries
   `time_runs` and each corpus's `time` over from the committed bar unchanged,
-  and never writes a time figure from one run. A figure from one run would
-  ratchet the bar onto whichever host that run landed on, and the next run on
-  the fleet's other group would fail on the machine rather than on the code.
+  and never writes a time figure from one run (`ratchet::carry_times`). A
+  figure from one run would ratchet the bar onto whichever host that run
+  landed on, and the next run on the fleet's other group would fail on the
+  machine rather than on the code. A committed bar that does not read as JSON
+  is refused rather than overwritten, since overwriting it would drop the five
+  runs' figures.
 - **`ratchet::parse`** refuses a time block of other than five runs, or whose
-  runs do not match `dispatches`; a run with more files than `total`; and a
-  zero figure over files or pages that were timed, a band nothing can sit
-  under, as it refuses a peak of zero bytes (`xtask/src/ratchet.rs:756-761`).
+  runs do not match `dispatches`, or that sits in a bar with no `time_runs`; a
+  run with more files than `total`; and a zero figure over files or pages that
+  were timed, a band nothing can sit under, as it refuses a peak of zero bytes
+  (`xtask/src/ratchet.rs:1246-1251`).
 
 #### The band rule over five runs
 
@@ -1865,7 +1871,7 @@ The five runs are five dispatches of `corpus.yml` at one revision of
 `develop`; a run at another revision is not one of them. They need not be
 green: every bar's step runs whatever the one before it returned
 (`.github/workflows/corpus.yml:65-71`), and the report is kept whatever the
-outcome (`:232-244`). For each corpus and each figure:
+outcome (`:238-250`). For each corpus and each figure:
 
 - **The figure is the fastest of the five**, for the reason the bench's is the
   fastest of fifteen: the comparison is one-sided, so the bar worth holding is
@@ -1884,8 +1890,8 @@ outcome (`:232-244`). For each corpus and each figure:
 So a spread of 3 % is banded at 20 %, one of 10 % at 25 %, and one of 36 % —
 what the bench's fifteen runs put between their fastest and slowest scores,
 1.00 and 1.36 — at 85 %. Every recorded run holds the band it sets: its
-figure is at most the slowest, and the band is above the spread. `ratchet.rs`
-derives each band in integers, as it compares.
+figure is at most the slowest, and the band is above the spread.
+`ratchet::band` derives each band in integers, as it compares.
 
 **What this does not catch.** A regression inside its band: on a figure
 banded at 85 %, a page render half again slower passes in silence, and a
@@ -1901,8 +1907,8 @@ page — slowest first, ties by path, each with its corpus, its path, its pages
 timed and its sum, under its `/Producer` as the record states it
 (`xtask/src/runner.rs:159-168`; `(none stated)` is a producer,
 `tools/tpdf/src/main.rs:2618-2627`). The table is `producer_table`'s shape,
-with its escaping of a producer's pipe (`xtask/src/report.rs:638`, `:680`),
-printed after it on every run (`xtask/src/corpus.rs:491-495`), in each
+with its escaping of a producer's pipe (`xtask/src/report.rs:825`, `:867`),
+printed after it on every run (`xtask/src/corpus.rs:505-510`), in each
 corpus's report summary, and in the bar as `slowest`; nothing compares it. A
 file with no spans is not ranked, so a file the runner killed is in the
 producer table instead. Ranking by a file's sum favours long documents; the

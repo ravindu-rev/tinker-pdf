@@ -284,6 +284,16 @@ The ratchet: recorded rates may not decrease; improving one updates the
 recorded floor in the same change. The floor and the budgets live in-repo,
 diffable, so lowering one is the owner's decision (H-78) rather than a drift.
 
+**Time is held to a band rather than a floor.** Each child times its open and
+count and each page's render (`tpdf probe`'s `time` lines), and per corpus the
+run reports pages a second at its dpi, the mean open-and-count latency, and the
+50th, 95th and 99th percentile page render over the corpus's pages, with its
+ten slowest files under their `/Producer`. A bar's time figures come from five
+dispatches at one revision and never from one run, so `--record` carries them
+over unchanged; `--check` holds each figure to the band those five set, refuses
+a run at another dpi or job count, and reads a bar without them as new.
+[design/performance.md](design/performance.md) has the band rule.
+
 ### The fourth axis: relations between two renders
 
 The corpus has no ground truth — nobody here knows what its pages should look

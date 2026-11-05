@@ -347,6 +347,8 @@ fn the_report_carries_both_states_by_name() {
             timeout_seconds: 1,
             dpi: 72.0,
             fonts: "none".to_string(),
+            jobs: 4,
+            host: None,
         },
     };
 

@@ -162,6 +162,59 @@ impl CorpusReport {
         out
     }
 
+    /// The seventh axis's figures over this corpus (MS-07): the files whose
+    /// open was timed and their summed spans, the pages whose render was
+    /// timed and theirs, and the 50th, 95th and 99th percentile page render.
+    ///
+    /// **The percentiles are over pages, not files**, because a page is what
+    /// a reader waits on; so a corpus's percentiles are its long documents'.
+    pub fn time(&self) -> crate::ratchet::TimeFigures {
+        let mut out = crate::ratchet::TimeFigures::default();
+        let mut pages: Vec<u64> = Vec::new();
+        for file in &self.files {
+            if let Some(open) = file.open_micros {
+                out.files += 1;
+                out.open_micros += open;
+            }
+            for page in &file.page_micros {
+                out.render_micros += page.micros;
+                pages.push(page.micros);
+            }
+        }
+        out.pages = pages.len() as u64;
+        pages.sort_unstable();
+        out.p50_micros = nearest_rank(&pages, 50);
+        out.p95_micros = nearest_rank(&pages, 95);
+        out.p99_micros = nearest_rank(&pages, 99);
+        out
+    }
+
+    /// The [`SLOWEST`] files whose spans -- the open and every page -- sum
+    /// the most, slowest first and ties by path, each under its `/Producer`.
+    ///
+    /// A file with no span is not ranked: one the runner killed wrote none,
+    /// and the producer table names it instead.
+    pub fn slowest(&self) -> Vec<SlowFile> {
+        let mut out: Vec<SlowFile> = self
+            .files
+            .iter()
+            .filter(|file| file.open_micros.is_some() || !file.page_micros.is_empty())
+            .map(|file| SlowFile {
+                path: file.path.clone(),
+                producer: file
+                    .producer
+                    .clone()
+                    .unwrap_or_else(|| "(not in its record)".to_string()),
+                pages: file.page_micros.len() as u64,
+                micros: file.open_micros.unwrap_or(0)
+                    + file.page_micros.iter().map(|page| page.micros).sum::<u64>(),
+            })
+            .collect();
+        out.sort_by(|a, b| b.micros.cmp(&a.micros).then_with(|| a.path.cmp(&b.path)));
+        out.truncate(SLOWEST);
+        out
+    }
+
     /// How many files each metamorphic relation was **asked** of, by name.
     ///
     /// Asked and held are two counts and both are recorded, for the reason the
@@ -203,6 +256,47 @@ impl CorpusReport {
         }
         out
     }
+}
+
+/// How many of a corpus's slowest files a run lists (MS-07).
+pub const SLOWEST: usize = 10;
+
+/// A file among a corpus's slowest, recorded and never compared.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlowFile {
+    /// The path as the report names it.
+    pub path: String,
+    /// Its `/Producer` as the record states it; `(none stated)` is a
+    /// producer.
+    pub producer: String,
+    /// How many of its pages were timed.
+    pub pages: u64,
+    /// Its open and its pages' renders, summed, in microseconds.
+    pub micros: u64,
+}
+
+impl SlowFile {
+    /// The object a report's summary and a bar's `slowest` carry.
+    pub fn to_json(&self) -> Json {
+        Json::object([
+            ("path", Json::string(&self.path)),
+            ("producer", Json::string(&self.producer)),
+            ("pages", Json::count(self.pages)),
+            ("micros", Json::count(self.micros)),
+        ])
+    }
+}
+
+/// Of `sorted` times, ascending, the nearest rank's: the ⌈p × n ÷ 100⌉-th
+/// smallest, or zero where there are none.
+fn nearest_rank(sorted: &[u64], percentile: u64) -> u64 {
+    let n = sorted.len() as u64;
+    let rank = (percentile * n).div_ceil(100).max(1);
+    usize::try_from(rank - 1)
+        .ok()
+        .and_then(|at| sorted.get(at))
+        .copied()
+        .unwrap_or(0)
 }
 
 /// One file's strict verdict, as the report carries it.
@@ -247,6 +341,18 @@ pub struct Settings {
     /// the engine — and a number recorded without saying which it was is a
     /// number nobody can use.
     pub fonts: String,
+    /// How many children ran at once.
+    ///
+    /// A child's spans are wall time, and what its neighbours cost it is part
+    /// of every one, so a time measured four children at a time is another
+    /// measurement from one measured alone (MS-07).
+    pub jobs: usize,
+    /// The machine the run was measured on, `/proc/cpuinfo`'s first model
+    /// name and its logical CPUs, or `None` off Linux.
+    ///
+    /// In the report only, so that a time that moved with the host is
+    /// attributed to the host rather than to the engine.
+    pub host: Option<String>,
 }
 
 /// A whole run.
@@ -340,6 +446,28 @@ impl Run {
                         if let Some(producer) = &file.producer {
                             fields.push(("producer", Json::string(producer)));
                         }
+                        // The two spans (MS-07), per file because a corpus's
+                        // figures are over its pages and the tail is read
+                        // here: which file, and which of its pages cost most.
+                        // Each is absent where nothing was timed.
+                        if let Some(open) = file.open_micros {
+                            fields.push(("open_micros", Json::count(open)));
+                        }
+                        let slowest_page = file
+                            .page_micros
+                            .iter()
+                            .max_by(|a, b| a.micros.cmp(&b.micros).then(b.page.cmp(&a.page)));
+                        if let Some(slowest) = slowest_page {
+                            let render: u64 = file.page_micros.iter().map(|page| page.micros).sum();
+                            fields.push(("render_micros", Json::count(render)));
+                            fields.push((
+                                "slowest_page",
+                                Json::object([
+                                    ("page", Json::count(u64::from(slowest.page))),
+                                    ("micros", Json::count(slowest.micros)),
+                                ]),
+                            ));
+                        }
                         if file.cost != crate::runner::Cost::default() {
                             fields.push((
                                 "cost",
@@ -387,20 +515,27 @@ impl Run {
                 "limits",
                 Json::Array(self.limits.iter().map(Json::string).collect()),
             ),
-            ("settings", self.settings_json()),
+            ("settings", self.settings_json(true)),
             ("corpora", Json::Array(corpora)),
         ])
     }
 
-    fn settings_json(&self) -> Json {
-        Json::object([
+    /// The settings, with the host where `with_host` asks and the run knows
+    /// it: the report's, never the bar's, whose hosts are its five runs'.
+    fn settings_json(&self, with_host: bool) -> Json {
+        let mut fields = vec![
             (
                 "timeout_seconds",
                 Json::count(self.settings.timeout_seconds),
             ),
             ("dpi", Json::Number(self.settings.dpi)),
             ("fonts", Json::string(&self.settings.fonts)),
-        ])
+            ("jobs", Json::count(self.settings.jobs as u64)),
+        ];
+        if let (true, Some(host)) = (with_host, &self.settings.host) {
+            fields.push(("host", Json::string(host)));
+        }
+        Json::object(fields)
     }
 
     fn corpus_summary(&self, corpus: &CorpusReport) -> Json {
@@ -445,6 +580,12 @@ impl Run {
                         .into_iter()
                         .map(|(k, v)| (k, Json::count(v))),
                 ),
+            ),
+            // The object a bar's `time.runs` holds five of (MS-07).
+            ("time", corpus.time().to_json()),
+            (
+                "slowest",
+                Json::Array(corpus.slowest().iter().map(SlowFile::to_json).collect()),
             ),
         ])
     }
@@ -534,6 +675,14 @@ impl Run {
                         ]),
                     ));
                 }
+                // The run's ten slowest, recorded and never compared (MS-07).
+                // Its time figures are not written: a figure from one run
+                // would ratchet the bar onto that run's host, so a bar's
+                // `time` is its five runs', which `--record` carries over.
+                fields.push((
+                    "slowest",
+                    Json::Array(corpus.slowest().iter().map(SlowFile::to_json).collect()),
+                ));
                 Json::object(fields)
             })
             .collect();
@@ -546,7 +695,7 @@ impl Run {
                 "limits",
                 Json::Array(self.limits.iter().map(Json::string).collect()),
             ),
-            ("settings", self.settings_json()),
+            ("settings", self.settings_json(false)),
             ("corpora", Json::Array(corpora)),
         ])
     }
@@ -588,6 +737,29 @@ impl Run {
                     peak.files
                 )
             });
+            // The seventh axis, on its own line for the peak's reason. A
+            // corpus with nothing timed says so in words.
+            let time = corpus.time();
+            lines.push(if time.files == 0 && time.pages == 0 {
+                format!("{:<14} no open or page render was timed", "  time")
+            } else {
+                let ms = |micros: u64| micros as f64 / 1000.0;
+                let per_second = if time.render_micros == 0 {
+                    0.0
+                } else {
+                    time.pages as f64 * 1_000_000.0 / time.render_micros as f64
+                };
+                format!(
+                    "{:<14} {per_second:>8.1} pages/s at {} dpi  open {:.2} ms  \
+                     p50 {:.2} ms  p95 {:.2} ms  p99 {:.2} ms",
+                    "  time",
+                    self.settings.dpi,
+                    ms(time.open_micros) / time.files.max(1) as f64,
+                    ms(time.p50_micros),
+                    ms(time.p95_micros),
+                    ms(time.p99_micros),
+                )
+            });
         }
         lines.push(format!(
             "{:<14} {:>6} files  {:>6} passed",
@@ -606,6 +778,21 @@ impl Run {
         lines.push(format!(
             "{:<14} {:>6} rewritten  {:>6} validate strictly",
             "strict", eligible, clean
+        ));
+        // The time axis's line for the run, which each bar's step in
+        // `corpus.yml` greps as it greps `strict`: a child that wrote no spans
+        // leaves every figure empty, and that must read as a run that
+        // measured no time rather than as a run with none to report.
+        let (pages, files) = self
+            .corpora
+            .iter()
+            .map(CorpusReport::time)
+            .fold((0, 0), |(pages, files), time| {
+                (pages + time.pages, files + time.files)
+            });
+        lines.push(format!(
+            "{:<14} {:>6} pages timed  {:>6} files opened",
+            "time", pages, files
         ));
         if !self.complete() {
             lines.push(String::from(
@@ -683,6 +870,35 @@ impl Run {
         out
     }
 
+    /// **Each corpus's ten slowest files, and who wrote them** (MS-07).
+    ///
+    /// The producer table's shape and its escaping of a producer's pipe,
+    /// printed after it on every run. Recorded and never compared: a time
+    /// figure that moved is followed from here to the files, and the tools,
+    /// that cost the most. Empty where nothing was timed.
+    pub fn slowest_table(&self) -> String {
+        let mut rows = String::new();
+        for corpus in &self.corpora {
+            for slow in corpus.slowest() {
+                rows.push_str(&format!(
+                    "| {} | `{}` | `{}` | {} | {:.1} ms |\n",
+                    slow.producer.replace('|', "\\|"),
+                    corpus.name,
+                    slow.path,
+                    slow.pages,
+                    slow.micros as f64 / 1000.0
+                ));
+            }
+        }
+        if rows.is_empty() {
+            return String::new();
+        }
+        format!(
+            "The {SLOWEST} slowest files of each corpus, by their open and every page:\n\n\
+             | Producer | Corpus | File | Pages | Time |\n| --- | --- | --- | ---: | ---: |\n{rows}"
+        )
+    }
+
     pub fn capability_table(&self) -> String {
         let mut names: Vec<String> = Vec::new();
         for corpus in &self.corpora {
@@ -738,7 +954,7 @@ impl Run {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::Outcome;
+    use crate::runner::{Outcome, PageTime};
     use std::collections::{BTreeMap, BTreeSet};
 
     fn file(path: &str, outcome: Outcome, warnings: &[&str], capabilities: &[&str]) -> FileResult {
@@ -801,8 +1017,117 @@ mod tests {
                 timeout_seconds: 20,
                 dpi: 72.0,
                 fonts: "none".to_string(),
+                jobs: 4,
+                host: None,
             },
         }
+    }
+
+    /// Nine one-page files and one of ninety pages: the corpus's pages are
+    /// the long file's, so its percentiles are too. Taken over files, the
+    /// median would be a short file's 100 µs.
+    #[test]
+    fn percentiles_are_over_pages_not_files() {
+        let mut run = run();
+        let mut files = Vec::new();
+        for index in 0..9 {
+            let mut short = file(&format!("short-{index}.pdf"), Outcome::Passed, &[], &[]);
+            short.open_micros = Some(500);
+            short.page_micros = vec![PageTime {
+                page: 1,
+                micros: 100,
+            }];
+            files.push(short);
+        }
+        let mut long = file("long.pdf", Outcome::Passed, &[], &[]);
+        long.pages = 90;
+        long.rendered = 90;
+        long.open_micros = Some(500);
+        long.page_micros = (1..=90)
+            .map(|page| PageTime {
+                page,
+                micros: 1_000 + u64::from(page),
+            })
+            .collect();
+        files.push(long);
+        run.corpora[0].files = files;
+
+        let time = run.corpora[0].time();
+        assert_eq!((time.files, time.open_micros), (10, 5_000));
+        assert_eq!((time.pages, time.render_micros), (99, 900 + 94_095));
+        // Of 99 pages, the 50th, 95th and 99th smallest by nearest rank: the
+        // long file's 41st, 86th and 90th.
+        assert_eq!(
+            (time.p50_micros, time.p95_micros, time.p99_micros),
+            (1_041, 1_086, 1_090)
+        );
+        assert_eq!(nearest_rank(&[1, 2, 3, 4], 50), 2);
+        assert_eq!(nearest_rank(&[7], 99), 7, "one page is every percentile");
+        assert_eq!(nearest_rank(&[], 50), 0, "no page is none");
+
+        let summary = run.summary_lines();
+        assert!(
+            summary
+                .iter()
+                .any(|line| line.starts_with("time ") && line.contains("99 pages timed")),
+            "{summary:#?}"
+        );
+        assert!(
+            summary
+                .iter()
+                .any(|line| line.starts_with("  time") && line.contains("pages/s at 72 dpi")),
+            "{summary:#?}"
+        );
+    }
+
+    /// A file's open, its pages' sum and the page that cost it most are in the
+    /// report, and absent where nothing was timed. The host is the report's
+    /// and never the bar's.
+    #[test]
+    fn a_file_reports_its_spans_and_the_page_that_cost_most() {
+        let mut run = run();
+        run.settings.host = Some("a machine, 4 logical CPUs".to_string());
+        let timed = &mut run.corpora[0].files[0];
+        timed.pages = 3;
+        timed.rendered = 3;
+        timed.open_micros = Some(1_830);
+        timed.page_micros = [400, 900, 900]
+            .into_iter()
+            .zip(1..)
+            .map(|(micros, page)| PageTime { page, micros })
+            .collect();
+
+        let report = run.to_report_json();
+        let files = report
+            .get("corpora")
+            .and_then(Json::as_array)
+            .and_then(|corpora| corpora.first())
+            .and_then(|corpus| corpus.get("files"))
+            .and_then(Json::as_array)
+            .expect("the corpus's files");
+        let read = |file: &Json, path: &[&str]| -> Option<u64> {
+            path.iter()
+                .try_fold(file, |json, key| json.get(key))
+                .and_then(Json::as_u64)
+        };
+        assert_eq!(read(&files[0], &["open_micros"]), Some(1_830));
+        assert_eq!(read(&files[0], &["render_micros"]), Some(2_200));
+        assert_eq!(
+            read(&files[0], &["slowest_page", "page"]),
+            Some(2),
+            "the first of two equal pages"
+        );
+        assert_eq!(read(&files[0], &["slowest_page", "micros"]), Some(900));
+        for key in ["open_micros", "render_micros", "slowest_page"] {
+            assert!(files[1].get(key).is_none(), "{key} on an untimed file");
+        }
+
+        let settings = report.get("settings").expect("settings");
+        assert_eq!(settings.get("jobs").and_then(Json::as_u64), Some(4));
+        assert!(settings.get("host").is_some());
+        let bar = run.to_ratchet_json("n").to_pretty();
+        assert!(!bar.contains("\"host\""), "{bar}");
+        assert!(bar.contains("\"jobs\": 4"), "{bar}");
     }
 
     #[test]
