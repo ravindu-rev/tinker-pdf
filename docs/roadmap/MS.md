@@ -96,18 +96,6 @@ censuses no corpus run has fed.
 | --- | --- | --- | --- | --- | --- |
 | MS-07.4 | measure | Measure the bands: five runs of `corpus.yml` dispatched on `develop`, since the nightly schedule runs `main` until the owner's merge; each corpus's figures and bands by MS-07.1's rule into `ratchet.json`, `ratchet-fonts.json` and `ratchet-bundled.json` with the ten slowest, and the measurement recorded in `docs/verification.md`. *Note:* The corpora are fetched by CI only, never locally. The figures are read from the runs' uploaded reports, which `corpus.yml` keeps 14 days (`.github/workflows/corpus.yml:250`), so they are copied before they expire. | `corpus/ratchet.json`, `corpus/ratchet-fonts.json`, `corpus/ratchet-bundled.json`, `docs/verification.md` | The three bars carry every corpus's time figures with bands and its ten slowest files by `/Producer`, each band above the spread the five runs measured, and each of the five runs passes the bars they set. | MS-07.3, MS-13 |
 
-## MS-08 — Time to first page
-
-**Time to first page** over a `ByteSource` with simulated latency and bandwidth, linearized against not
-
-**Exit criterion.** a counted guard in `cargo test`: page one of the linearized fixture after ≤ 29 696 bytes in ≤ 6 range requests, the main cross-reference table never fetched; the same document saved without linearization, page one after ≤ its tail, its cross-reference data and page one's objects plus one 4 KiB window per request, in ≤ 12 requests; and a bench row at 50 ms latency and 10 Mbit/s whose time follows from those counts
-
-**Doc:** — · **Depends on:** MS-01
-
-| Step | Kind | What | Where | Exit | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| MS-08.4 | measure | The bench row: `CountingSource::link_time(latency, bits_per_second)`, the reads times the latency plus the bytes over the bandwidth, and in MS-04's open group the operation tier P names, 'Time to first page over a source with 50 ms latency at 10 Mbit/s, the 60-page linearized fixture', timed through criterion's custom timing as the measured open-and-render time plus that link time, so the row's time follows from MS-08.3's counts. *Note:* Nothing sleeps: a slept latency would time the runner's timer, and the row asks for a time its counts determine. The figure is recorded the way MS-04 records a new operation's. No fetch changes here, so MS-08.3's guard is untouched. | `crates/tinker-pdf-cos/src/source.rs`, `crates/tinker-pdf/benches`, `crates/tinker-pdf/benches/baseline.json`, `.github/workflows/bench.yml`, `docs/design/streaming-open.md` | `source.rs` `the_link_model_charges_latency_per_read_and_bandwidth_per_byte` (new) holds the model to hand-computed figures; `xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree` holds the bench file, the workflow's guard count and `baseline.json` to one list with the operation in it; the design doc's Measured table carries its figure and the unlinearized twin's link time from MS-08.3's counts. | MS-08.3, MS-04.3 |
-
 ## MS-09 — Thread-scaling ratchet
 
 **Thread-scaling ratchet**

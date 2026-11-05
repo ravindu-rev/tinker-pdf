@@ -305,7 +305,11 @@ container sniff, the head and its content — and never the main table, and the
 same pages saved without linearization cost five, within the bytes of their
 tail, their cross-reference section and page one's objects plus a chunk a
 request; `streaming_open.rs` holds both counts exactly, beside the ceilings of
-six and twelve, on all four targets.
+six and twelve, on all four targets. `CountingSource::link_time(latency,
+bits_per_second)` turns its counts into the time a link would take — a
+latency a request and the bytes over the bandwidth, computed and never slept
+— and the open group's bench row times page one as its work plus that link
+time at 50 ms and 10 Mbit/s.
 A streamed document that has fetched the whole file holds it once: the fetch
 asks the source for every byte as one range, keeps an answer of the whole
 length as the document's buffer and fills a short one into a buffer of the

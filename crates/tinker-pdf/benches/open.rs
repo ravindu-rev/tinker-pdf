@@ -10,11 +10,12 @@ mod support;
 use std::cell::LazyCell;
 use std::hint::black_box;
 use std::sync::Arc;
+use std::time::Duration;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use support::cli::{self, Cli};
 use support::{inputs, Group, Per};
-use tinker_pdf::Document;
+use tinker_pdf::{CountingSource, Document, RenderOptions, SliceSource};
 
 fn open(c: &mut Criterion) {
     let small_3000 = LazyCell::new(|| small(3000));
@@ -79,6 +80,29 @@ fn open(c: &mut Criterion) {
             "tpdf info counts the image file's {pages} pages"
         );
     });
+
+    // Tier P's time to first page over a slow link (MS-08): each iteration
+    // opens the fixture over a fresh counting source and renders page one,
+    // and its time is that work plus the link time of what it read, at 50 ms
+    // a request and 10 Mbit/s. Nothing sleeps; the counts do not vary, so the
+    // link part is a constant (`streaming_open.rs` holds them).
+    group.operation(
+        "first page of the 60-page linearized fixture over a slow link",
+        |op| {
+            let fixture: Arc<[u8]> = inputs::linearized(60).into();
+            op.per(Per::Pages(1));
+            op.iter_plus(|| {
+                let source = Arc::new(CountingSource::new(SliceSource::new(fixture.to_vec())));
+                let doc = Document::open_streaming(source.clone()).expect("it opens");
+                black_box(
+                    doc.page(0)
+                        .expect("page one")
+                        .render(&RenderOptions::default()),
+                );
+                source.link_time(Duration::from_millis(50), 10_000_000)
+            });
+        },
+    );
 
     group.finish();
 }

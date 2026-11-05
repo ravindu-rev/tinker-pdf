@@ -124,7 +124,7 @@ is never re-run against a build (H-112).
 | A second render of a page at another dpi | not measured | ≤ 30 % of the first | relation | P-16 |
 | Edit one annotation, save incrementally, reopen, 1 000-page file | not measured | ≤ 2 ms plus output bytes | relation: the 1 000-page file ≤ 2 × a 10-page one | P-17 |
 | Re-render a changed 100×100 pt annotation | not measured | ≤ 10 % of a full-page render | relation | P-17 |
-| Time to first page over a source with 50 ms latency at 10 Mbit/s, the 60-page linearized fixture | 29 696 bytes; requests not counted | ≤ 29 696 bytes in ≤ 6 requests | counted | MS-08 |
+| Time to first page over a source with 50 ms latency at 10 Mbit/s, the 60-page linearized fixture | 29 696 bytes in 3 requests | ≤ 29 696 bytes in ≤ 6 requests | counted | MS-08 |
 | wasm / native, every suite operation | 1.0–1.94× | ≤ 1.5× | relation (MS-10) | P-19 |
 | `+simd128` / plain wasm, raster and decoder operations | 1.00–1.11× | ≥ 1.3× | relation (MS-10) | P-19 |
 | Open a small file, CLI (held) | 4–5 ms | ≤ 5 ms | held | P-21 |

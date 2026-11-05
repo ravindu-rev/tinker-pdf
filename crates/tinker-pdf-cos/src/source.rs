@@ -35,6 +35,7 @@
 
 use core::fmt;
 use core::ops::Range;
+use core::time::Duration;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -231,6 +232,26 @@ impl<S: ByteSource> CountingSource<S> {
             .filter(|read| read.start < range.end && range.start < read.end)
             .cloned()
             .collect()
+    }
+
+    /// What the reads counted so far cost over a link of `latency` a request
+    /// and `bits_per_second` of bandwidth: the reads times the latency, and
+    /// the bytes, gross as [`CountingSource::bytes_read`] counts them, over the
+    /// bandwidth.
+    ///
+    /// A model and never a wait: the trait is synchronous, so each read is a
+    /// round trip that ends before the next begins, and nothing sleeps. At 10
+    /// Mbit/s a byte is exactly 800 ns. A bandwidth of zero answers
+    /// `Duration::MAX`, as a link that carries nothing never delivers.
+    #[must_use]
+    pub fn link_time(&self, latency: Duration, bits_per_second: u64) -> Duration {
+        if bits_per_second == 0 {
+            return Duration::MAX;
+        }
+        let reads = u32::try_from(self.reads()).unwrap_or(u32::MAX);
+        let nanos = u128::from(self.bytes_read()) * 8 * 1_000_000_000 / u128::from(bits_per_second);
+        let transfer = Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX));
+        latency.saturating_mul(reads).saturating_add(transfer)
     }
 
     /// Forgets what has been counted so far, so a measurement can start at a
@@ -735,6 +756,34 @@ impl Bytes<'_> {
 
 #[cfg(test)]
 mod tests {
+    /// **The link model charges a latency a read and the bandwidth a byte**,
+    /// held to figures worked by hand: two reads of 1 000 and 4 096 bytes at
+    /// 50 ms and 10 Mbit/s are 100 ms and 5 096 x 800 ns, and at 1 Mbit/s a
+    /// byte is 8 us; no reads cost nothing, and no bandwidth never delivers.
+    #[test]
+    fn the_link_model_charges_latency_per_read_and_bandwidth_per_byte() {
+        let source = CountingSource::new(SliceSource::new(vec![7u8; 10_000]));
+        let latency = Duration::from_millis(50);
+        assert_eq!(source.link_time(latency, 10_000_000), Duration::ZERO);
+
+        source.read(0..1_000).expect("the first range");
+        source.read(1_000..5_096).expect("the second range");
+        assert_eq!((source.reads(), source.bytes_read()), (2, 5_096));
+        assert_eq!(
+            source.link_time(latency, 10_000_000),
+            Duration::from_millis(100) + Duration::from_nanos(5_096 * 800)
+        );
+        assert_eq!(
+            source.link_time(latency, 1_000_000),
+            Duration::from_millis(100) + Duration::from_micros(5_096 * 8)
+        );
+        assert_eq!(
+            source.link_time(Duration::ZERO, 10_000_000),
+            Duration::from_nanos(4_076_800)
+        );
+        assert_eq!(source.link_time(latency, 0), Duration::MAX);
+    }
+
     use super::*;
 
     /// A source that answers nothing, for the miss path.

@@ -47,7 +47,9 @@
         { "name": "every page's size, 10000 pages", "unit": "pages",
           "per_iteration": 10000, "calls": 1 },
         { "name": "open and count the 23 MB image file, CLI", "unit": "bytes",
-          "per_iteration": 116147995, "calls": 5 }
+          "per_iteration": 116147995, "calls": 5 },
+        { "name": "first page of the 60-page linearized fixture over a slow link",
+          "unit": "pages", "per_iteration": 1, "calls": 1 }
       ]
     },
     {
@@ -500,6 +502,7 @@
         "fonts/outlines of Liberation Mono Regular",
         "fonts/outlines of every committed CFF program",
         "open/open and count the 23 MB image file, CLI",
+        "open/first page of the 60-page linearized fixture over a slow link",
         "text/text of 100 dense pages, CLI",
         "text/text of 1000 small pages, CLI",
         "text/text of 10000 small pages, CLI",

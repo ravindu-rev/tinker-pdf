@@ -79,7 +79,7 @@ jobs:
         # this job.
         include:
           - group: open
-            count: 6
+            count: 7
           - group: text
             count: 13
           - group: render

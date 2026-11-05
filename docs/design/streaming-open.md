@@ -602,7 +602,16 @@ MS-04's open group. It is timed through criterion's custom timing: each
 iteration opens the fixture over a fresh `CountingSource`, renders page one,
 and reports the time that took plus the link time of that iteration's counts.
 The counts do not vary, so the link part is a constant and the row's spread is
-the work's.
+the work's. The harness times it through `Op::iter_plus`, which adds the
+duration a routine answers to the time it took, and in count mode runs it
+with no clock read. The operation is listed unmeasured in `baseline.json`
+until the next fifteen-run measurement (H-109), as every new operation is.
+Its link part, and its twin's, from MS-08.3's counts:
+
+| Page one of | Requests | Bytes | Link time at 50 ms and 10 Mbit/s |
+| --- | ---: | ---: | ---: |
+| the 60-page linearized fixture | 3 | 29 696 | 173.7568 ms |
+| the same pages unlinearized | 5 | 42 260 | 283.808 ms |
 
 ### Milestones
 

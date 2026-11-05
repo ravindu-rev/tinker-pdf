@@ -332,6 +332,34 @@ impl Op<'_, '_> {
         }
     }
 
+    /// `routine`, once an iteration, timed as its own run plus the duration
+    /// it answers: a figure part measured and part computed, as a link's
+    /// latency and bandwidth are from the requests and bytes a run counted.
+    /// Count mode runs it `n` times and reads no clock.
+    pub fn iter_plus(&mut self, mut routine: impl FnMut() -> std::time::Duration) {
+        self.runs();
+        match &mut self.run {
+            Run::Measure(group) => {
+                group.bench_function(self.name, |b| {
+                    b.iter_custom(|iterations| {
+                        let mut total = std::time::Duration::ZERO;
+                        for _ in 0..iterations {
+                            let started = std::time::Instant::now();
+                            let computed = black_box(routine());
+                            total += started.elapsed() + computed;
+                        }
+                        total
+                    });
+                });
+            }
+            Run::Count(iterations) => {
+                for _ in 0..*iterations {
+                    black_box(routine());
+                }
+            }
+        }
+    }
+
     fn runs(&mut self) {
         assert!(!self.ran, "{} declares a second routine", self.name);
         self.ran = true;

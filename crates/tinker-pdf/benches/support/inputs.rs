@@ -317,6 +317,41 @@ pub fn small(pages: usize) -> Vec<u8> {
     builder.finish()
 }
 
+/// The 60-page linearized fixture of `crates/tinker-pdf/tests/streaming_open.rs`
+/// (`a_linearized_document`): pages of tens of kilobytes of filled paths,
+/// saved linearized with object streams off.
+pub fn linearized(pages: usize) -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    for index in 0..pages {
+        builder.add_page(200.0, 100.0, |page| {
+            let mut ops = Vec::with_capacity(24 * 1024);
+            let shade = (index % 7) as f64 / 7.0;
+            for step in 0..400 {
+                let x = (step % 40) as f64 * 4.0;
+                let y = (step / 40) as f64 * 6.0;
+                ops.extend_from_slice(
+                    format!(
+                        "{shade:.3} 0.400 0.600 rg {x:.2} {y:.2} m {:.2} {:.2} l {:.2} {:.2} l h f ",
+                        x + 3.5,
+                        y + 5.5,
+                        x + 1.25,
+                        y + 2.75
+                    )
+                    .as_bytes(),
+                );
+            }
+            page.raw(&ops);
+        });
+    }
+    let base = Document::open(builder.finish()).expect("the pages open");
+    base.editor().save(&tinker_pdf::WriteOptions {
+        mode: tinker_pdf::WriteMode::Rewrite,
+        linearize: true,
+        object_streams: false,
+        ..tinker_pdf::WriteOptions::default()
+    })
+}
+
 /// `width` by `height` RGB samples by formula: smooth fields, hard-edged
 /// shapes and a few levels of seeded noise, the photographic content of
 /// every image input.
