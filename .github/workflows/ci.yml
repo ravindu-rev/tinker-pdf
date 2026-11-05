@@ -426,6 +426,39 @@ jobs:
             Smoke testdata/simple-text.pdf /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf 2>&1 | tee java-smoke.log
           grep -q 'JAVA-SMOKE: RAN' java-smoke.log
 
+  footprint:
+    # Each build profile's gzipped wasm, held to bindings/js/footprint.json by
+    # `cargo xtask footprint`. Each is built and measured exactly as
+    # release.yml's npm job builds and measures the wasm, so the number held
+    # here is the one the release gate reads. A profile adds its own step.
+    # One named `--unrecorded` has no figure yet: its size is printed, not
+    # held.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: jetli/wasm-pack-action@v0.4.0
+      - run: cargo build -p xtask
+      - name: default
+        run: |
+          set -euo pipefail
+          wasm-pack build --release --target web --out-dir pkg bindings/js
+          bytes=$(gzip -9 -c bindings/js/pkg/tinker_pdf_js_bg.wasm | wc -c)
+          echo "default: the wasm is $bytes bytes gzipped"
+          cargo run -p xtask -- footprint --profile default --gzipped "$bytes" \
+            --run "$GITHUB_RUN_ID" --date "$(date -u +%F)" --unrecorded
+      - name: bundled-fonts
+        run: |
+          set -euo pipefail
+          wasm-pack build --release --target web --out-dir pkg bindings/js -- --features bundled-fonts
+          bytes=$(gzip -9 -c bindings/js/pkg/tinker_pdf_js_bg.wasm | wc -c)
+          echo "bundled-fonts: the wasm is $bytes bytes gzipped"
+          cargo run -p xtask -- footprint --profile bundled-fonts --gzipped "$bytes" \
+            --run "$GITHUB_RUN_ID" --date "$(date -u +%F)" --unrecorded
+
   wasm:
     # wasm32-unknown-unknown is a first-class target from day one. The ffi crate
     # (cdylib for native bindings) and the CLI tools are excluded; the engine

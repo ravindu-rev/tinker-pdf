@@ -24,6 +24,9 @@ crate-type = ["cdylib", "rlib"]
 # what plan 05's "wasm hosts ... can drop both" is about.
 default = ["cmap-predefined"]
 cmap-predefined = ["tinker-pdf/cmap-predefined"]
+# Forwarded for the same reason: it is a footprint profile, and the wasm this
+# crate builds is the one whose size the footprint job measures.
+bundled-fonts = ["tinker-pdf/bundled-fonts"]
 
 [dependencies]
 tinker-pdf = { path = "../../crates/tinker-pdf", default-features = false }

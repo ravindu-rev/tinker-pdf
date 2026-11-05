@@ -448,7 +448,14 @@ can diverge, and ruling 11's point is that a binding has nothing to diverge
 package is `tinker-pdf-js`, name and version derived from `Cargo.toml` so
 `cargo xtask versions` has no extra manifest to police. `release.yml` gates
 the gzipped `.wasm` at 2.5 MiB, with every predefined CMap in; `cmap-predefined`
-off is the switch for a host that renders no CJK.
+off is the switch for a host that renders no CJK. Between releases, `ci.yml`'s
+`footprint` job builds the same `.wasm` with the release's command once per
+build profile — the default, and `bundled-fonts`, which the crate forwards to
+the facade as it forwards `cmap-predefined` — measures each with the release's
+`gzip -9`, and hands the size to `cargo xtask footprint`, which holds it to the
+profile's figure in `bindings/js/footprint.json` plus that figure's measured
+tolerance. Neither profile has a figure yet, so the job names both
+`--unrecorded` and prints their sizes rather than holding them.
 
 **.NET** (`bindings/dotnet`, C# over the C ABI). Every native handle lives
 in a `SafeHandle`, so a document or bitmap is released exactly once even if
