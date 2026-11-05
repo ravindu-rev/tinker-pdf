@@ -7,8 +7,8 @@
 
 use crate::device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 use crate::state::{
-    BlackPointCompensation, BlendMode, GraphicsState, LineCap, LineJoin, Matrix, RenderingIntent,
-    Rgb, TextRenderMode, Transfer,
+    BlackPointCompensation, BlendMode, GraphicsState, Halftone, LineCap, LineJoin, Matrix,
+    RenderingIntent, Rgb, TextRenderMode, Transfer,
 };
 use crate::tokenizer::{Token, Tokenizer};
 use core::mem;
@@ -203,6 +203,10 @@ pub struct StateParameters {
     pub undercolor_removal: Option<Option<Arc<Function>>>,
     /// `/TR2` over `/TR`; `Some(None)` is `/TR2 /Default`.
     pub transfer: Option<Option<Transfer>>,
+    /// `/HT`; `Some(None)` is `/HT /Default`.
+    pub halftone: Option<Option<Arc<Halftone>>>,
+    /// `/HTO`.
+    pub halftone_origin: Option<[f64; 2]>,
     /// `/CA`, the stroking alpha.
     pub stroke_alpha: Option<f64>,
     /// `/ca`, the non-stroking alpha.
@@ -927,6 +931,14 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             }
             if let Some(transfer) = &set.transfer {
                 s.transfer.clone_from(transfer);
+            }
+            if let Some(halftone) = &set.halftone {
+                s.halftone.clone_from(halftone);
+            }
+            if let Some(origin) = set.halftone_origin {
+                if origin.iter().all(|v| v.is_finite()) {
+                    s.halftone_origin = Some(origin);
+                }
             }
         });
         // 11.6.5.1. The group is rendered *here*, at this CTM, rather than

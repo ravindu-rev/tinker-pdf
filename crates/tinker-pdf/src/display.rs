@@ -293,8 +293,8 @@ mod tests {
 
     use tinker_pdf_color::Function;
     use tinker_pdf_content::{
-        BlackPointCompensation, BlendMode, Event, GraphicsState, RenderingIntent, StoredParameters,
-        Transfer,
+        BlackPointCompensation, BlendMode, Event, GraphicsState, Halftone, RenderingIntent,
+        SpotFunction, StoredParameters, Transfer,
     };
 
     use crate::Document;
@@ -621,6 +621,165 @@ mod tests {
             fills[7].stored_parameters(),
             &StoredParameters::INITIAL,
             "`/Default` restores each"
+        );
+    }
+
+    /// **Every halftone key is stored as the dictionary or stream writes it**:
+    /// a halftone of each type records its type and parameters, a threshold
+    /// array by its stream, a type 5's entries per colorant; a halftone of the
+    /// wrong shape is absent; `/Default` restores the initial value; `/HTO`
+    /// records its origin; and a `gs` that omits a key and a `Q` behave as
+    /// for the scalar keys.
+    #[test]
+    fn every_halftone_key_is_stored() {
+        let stream = |dict: &str, data: &str| {
+            format!(
+                "<< {dict} /Filter /ASCIIHexDecode /Length {} >>\nstream\n{data}\nendstream",
+                data.len()
+            )
+        };
+        // Objects 5 to 9: a type 6, a type 10 and a type 16 halftone, a
+        // transfer function and a spot function.
+        let extra = [
+            stream("/HalftoneType 6 /Width 2 /Height 2", "004080C0>"),
+            stream("/HalftoneType 10 /Xsquare 1 /Ysquare 1", "0080>"),
+            stream(
+                "/HalftoneType 16 /Width 1 /Height 1 /Width2 1 /Height2 1 /TransferFunction 8 0 R",
+                "00008000>",
+            ),
+            "<< /FunctionType 4 /Domain [0 1] /Range [0 1] /Length 14 >>\n\
+             stream\n{ 1 exch sub }\nendstream"
+                .to_string(),
+            "<< /FunctionType 4 /Domain [-1 1 -1 1] /Range [-1 1] /Length 39 >>\n\
+             stream\n{ dup mul exch dup mul add 1 exch sub }\nendstream"
+                .to_string(),
+        ];
+        let screen = "<< /HalftoneType 1 /Frequency 60 /Angle 45 /SpotFunction /Round >>";
+        let states = format!(
+            "/Screen << /HT {screen} >> \
+             /SpotFunction << /HT << /HalftoneType 1 /Frequency 85 /Angle 15 \
+               /SpotFunction 9 0 R /AccurateScreens true /TransferFunction /Identity >> >> \
+             /SpotNames << /HT << /HalftoneType 1 /Frequency 60 /Angle 0 \
+               /SpotFunction [/Vivid /Ellipse] >> >> \
+             /Type6 << /HT 5 0 R >> /Type10 << /HT 6 0 R >> /Type16 << /HT 7 0 R >> \
+             /Type5 << /HT << /HalftoneType 5 /Default {screen} /Cyan 5 0 R >> >> \
+             /NoDefault << /HT << /HalftoneType 5 /Cyan 5 0 R >> >> \
+             /Nested << /HT << /HalftoneType 5 /Default << /HalftoneType 5 /Default {screen} >> >> >> \
+             /NoFrequency << /HT << /HalftoneType 1 /Angle 45 /SpotFunction /Round >> >> \
+             /Default << /HT /Default >> /Origin << /HTO [3 4] >> /Width << /LW 2 >>"
+        );
+        let f = "0 0 1 1 re f";
+        let page = format!(
+            "q /Screen gs /Origin gs {f} /Width gs {f} /NoFrequency gs {f} /NoDefault gs {f} \
+             /Nested gs {f} Q {f} /SpotFunction gs {f} /SpotNames gs {f} /Type6 gs {f} \
+             /Type10 gs {f} /Type16 gs {f} /Type5 gs {f} /Default gs {f}"
+        );
+        let recorded = recordings_with(&states, &extra, &[&page]);
+        let fills = painted(&recorded[0]);
+        assert_eq!(fills.len(), 13);
+        let halftone = |at: usize| fills[at].stored_parameters().halftone.clone();
+        let round = Halftone::Screen {
+            frequency: 60.0,
+            angle: 45.0,
+            spot: SpotFunction::Names(vec![b"Round".to_vec()]),
+            accurate: false,
+            transfer: None,
+        };
+
+        assert_eq!(halftone(0).as_deref(), Some(&round), "type 1, by name");
+        assert_eq!(
+            fills[0].stored_parameters().halftone_origin,
+            Some([3.0, 4.0])
+        );
+        for (at, what) in [
+            (1, "a `gs` that omits it"),
+            (2, "a type 1 with no /Frequency, absent"),
+            (3, "a type 5 with no /Default, absent"),
+            (4, "a type 5 inside a type 5, absent"),
+        ] {
+            assert_eq!(
+                fills[at].stored_parameters(),
+                fills[0].stored_parameters(),
+                "{what}"
+            );
+        }
+        assert!(fills[5].stored.is_none(), "`Q` restores the initial values");
+
+        match halftone(6).as_deref() {
+            Some(Halftone::Screen {
+                frequency,
+                angle,
+                spot: SpotFunction::Function(spot),
+                accurate,
+                transfer,
+            }) => {
+                assert_eq!((*frequency, *angle, *accurate), (85.0, 15.0, true));
+                assert_eq!(transfer, &Some(Transfer::Identity));
+                assert_eq!(spot.eval(&[0.5, 0.5]), vec![0.5], "1 - x^2 - y^2");
+            }
+            other => panic!("a type 1 with a spot function, and {other:?} recorded"),
+        }
+        assert_eq!(
+            halftone(7).as_deref(),
+            Some(&Halftone::Screen {
+                frequency: 60.0,
+                angle: 0.0,
+                spot: SpotFunction::Names(vec![b"Vivid".to_vec(), b"Ellipse".to_vec()]),
+                accurate: false,
+                transfer: None,
+            }),
+            "names in order of preference, as written"
+        );
+        assert_eq!(
+            halftone(8).as_deref(),
+            Some(&Halftone::Threshold {
+                width: 2,
+                height: 2,
+                thresholds: 5 << 16,
+                transfer: None,
+            })
+        );
+        assert_eq!(
+            halftone(9).as_deref(),
+            Some(&Halftone::Squares {
+                xsquare: 1,
+                ysquare: 1,
+                thresholds: 6 << 16,
+                transfer: None,
+            })
+        );
+        match halftone(10).as_deref() {
+            Some(Halftone::Threshold16 {
+                width: 1,
+                height: 1,
+                second: Some((1, 1)),
+                thresholds,
+                transfer: Some(Transfer::One(transfer)),
+            }) => {
+                assert_eq!(*thresholds, 7 << 16);
+                assert_eq!(transfer.eval(&[0.25]), vec![0.75]);
+            }
+            other => panic!("a type 16 of two rectangles, and {other:?} recorded"),
+        }
+        assert_eq!(
+            halftone(11).as_deref(),
+            Some(&Halftone::Colorants(vec![
+                (b"Default".to_vec(), round.clone()),
+                (
+                    b"Cyan".to_vec(),
+                    Halftone::Threshold {
+                        width: 2,
+                        height: 2,
+                        thresholds: 5 << 16,
+                        transfer: None,
+                    }
+                ),
+            ]))
+        );
+        assert_eq!(
+            fills[12].stored_parameters(),
+            &StoredParameters::INITIAL,
+            "`/HT /Default` restores the initial value"
         );
     }
 }

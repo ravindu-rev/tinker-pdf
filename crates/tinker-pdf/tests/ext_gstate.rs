@@ -352,3 +352,42 @@ fn every_function_key_draws_as_the_page_without_it() {
         keys.len()
     );
 }
+
+/// **Every halftone key draws as the page without it**, until the row that
+/// applies it does: a halftone of each type, `/Default` and `/HTO`.
+#[test]
+fn every_halftone_key_draws_as_the_page_without_it() {
+    let stream = |dict: &str, data: &str| {
+        format!(
+            "<< {dict} /Filter /ASCIIHexDecode /Length {} >>\nstream\n{data}\nendstream",
+            data.len()
+        )
+    };
+    let extra = [
+        stream("/HalftoneType 6 /Width 2 /Height 2", "004080C0>"),
+        stream("/HalftoneType 10 /Xsquare 1 /Ysquare 1", "0080>"),
+        stream("/HalftoneType 16 /Width 1 /Height 1", "0000>"),
+    ];
+    let screen = "<< /HalftoneType 1 /Frequency 60 /Angle 45 /SpotFunction /Round >>";
+    let states = format!(
+        "/Type1 << /HT {screen} >> /Type5 << /HT << /HalftoneType 5 /Default {screen} \
+         /Cyan 5 0 R >> >> /Type6 << /HT 5 0 R >> /Type10 << /HT 6 0 R >> \
+         /Type16 << /HT 7 0 R >> /Default << /HT /Default >> /Origin << /HTO [3 4] >>"
+    );
+    let keys = [
+        "Type1", "Type5", "Type6", "Type10", "Type16", "Default", "Origin",
+    ];
+    let fill = "0.2 0.4 0.6 0.1 k 5 5 30 30 re f 0.5 g 10 10 m 30 30 l S";
+    let mut pages: Vec<String> = keys.iter().map(|key| format!("/{key} gs {fill}")).collect();
+    pages.push(fill.to_string());
+    let contents: Vec<&str> = pages.iter().map(String::as_str).collect();
+    let bitmaps = render_all(document_with(&states, &extra, &contents));
+    let without = &bitmaps[keys.len()];
+    for (key, page) in keys.iter().zip(&bitmaps) {
+        assert_eq!(
+            page.data, without.data,
+            "/{key}: a stored halftone moved a pixel before its row applies it"
+        );
+    }
+    println!("ext-gstate-halftones: RAN {} keys", keys.len());
+}

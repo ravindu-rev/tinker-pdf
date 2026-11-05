@@ -682,8 +682,8 @@ every device the state a `gs` made, never the `gs`.
 
 The parameters a `gs` stores rather than applies — the rendering intent,
 black-point compensation, overprint, flatness, smoothness, stroke adjustment,
-alpha source, text knockout, and the black generation, undercolour removal and
-transfer functions — travel in the state as one shared
+alpha source, text knockout, the black generation, undercolour removal and
+transfer functions, and the halftone and its origin — travel in the state as one shared
 `StoredParameters` value, `None` while every one has its initial value, so a
 `q` copies one word more and a copy allocates nothing. The display list's
 budget counts that value once per change rather than once per event: the
@@ -691,7 +691,12 @@ recorder remembers the value it last counted and counts again when an event
 holds another. A function is kept parsed, never sampled — sampling is the
 applying row's, at its stage and depth — and `/Default` stores the device's
 own, `None`. Each scope reads a function it names by reference once, however
-many states share it.
+many states share it. A halftone is kept as its type and parameters — a type
+1's frequency, angle, spot function (a function, or its predefined names as
+written) and accuracy, a type 5's halftone per colorant, a threshold
+halftone's dimensions — with each threshold array kept by its stream's
+reference, decoded only where a render screens with it; a halftone of the
+wrong shape is absent, never a refusal of the page.
 The output is the same bytes every time, and nothing on its path calls a
 transcendental, so ruling 4's argument covers it; no SVG fingerprint is
 committed beside `determinism.rs`'s, so the cross-target claim is argued

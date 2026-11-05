@@ -29,8 +29,9 @@ was. `/LW` `/LC` `/LJ` `/ML` `/D` are applied through the setters `w` `J` `j`
 (`/LW -1` changes nothing, `/LC 7` is a butt cap); `/CA` `/ca` `/BM` and
 `/SMask` set the alphas, the blend mode and the soft mask (11.3.5, 11.6.5.1),
 the mask last; and `/RI` `/FL` `/SM` `/SA` `/OP` `/op` `/OPM` `/AIS` `/TK`
-`/UseBlackPtComp`, and the functions `/TR` `/TR2` `/BG` `/BG2` `/UCR` `/UCR2`
-(the second spelling winning when a dictionary writes both), are kept in the
+`/UseBlackPtComp`, the functions `/TR` `/TR2` `/BG` `/BG2` `/UCR` `/UCR2`
+(the second spelling winning when a dictionary writes both), and the halftone
+`/HT` with its origin `/HTO`, are kept in the
 state's `StoredParameters`, with `ri` and
 `i` setting the intent and the flatness, for the rows that apply them —
 none moves a pixel yet. An absent `/op` takes `/OP`'s value (Table 58), and a

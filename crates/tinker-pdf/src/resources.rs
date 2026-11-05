@@ -2173,6 +2173,8 @@ impl PageResources {
                 b"UCR2" => removal2 = self.state_curve(raw, value, true),
                 b"TR" => transfer = self.state_transfer(raw, value, false),
                 b"TR2" => transfer2 = self.state_transfer(raw, value, true),
+                b"HT" => set.halftone = self.state_halftone(raw, value),
+                b"HTO" => set.halftone_origin = self.halftone_origin(value),
                 _ => {}
             });
         }
@@ -2268,6 +2270,143 @@ impl PageResources {
             return Some(Some(Transfer::Four(four)));
         }
         self.state_function(raw).map(|f| Some(Transfer::One(f)))
+    }
+
+    /// `/HT` (10.6.5): a halftone dictionary or stream, or `/Default`, which
+    /// is `Some(None)`. A halftone of the wrong shape is absent, never a
+    /// refusal of the page (ruling 2).
+    fn state_halftone(
+        &self,
+        raw: &Object,
+        value: &Object,
+    ) -> Option<Option<Arc<tinker_pdf_content::Halftone>>> {
+        if let Some(name) = value.as_name().and_then(|n| self.doc.name_bytes(n)) {
+            return (name.as_ref() == b"Default").then_some(None);
+        }
+        self.halftone(raw, false)
+            .map(|halftone| Some(Arc::new(halftone)))
+    }
+
+    /// One halftone dictionary or stream, as written (10.6.5, Tables 130 to
+    /// 134). A threshold array is kept by its stream's reference; a type 5's
+    /// entries are halftones of the other types, and it holds `/Default`.
+    fn halftone(&self, raw: &Object, in_type5: bool) -> Option<tinker_pdf_content::Halftone> {
+        use tinker_pdf_content::Halftone;
+        let reference = raw
+            .as_objref()
+            .map(|r| (u64::from(r.num) << 16) | u64::from(r.gen));
+        read_resolved(&self.doc, raw, |value| {
+            let dict = value.as_dict()?;
+            let int = |key: &[u8]| read_key(&self.doc, dict, key, Object::as_int);
+            let number = |key: &[u8]| {
+                read_key(&self.doc, dict, key, Object::as_number).filter(|v| v.is_finite())
+            };
+            // A threshold array is a stream's data, reached by reference.
+            let thresholds = || value.as_stream().and(reference);
+            let transfer = match dict.get(self.doc.intern(b"TransferFunction")) {
+                None => None,
+                Some(raw) => read_resolved(&self.doc, raw, |value| {
+                    self.state_transfer(raw, value, false)
+                })?,
+            };
+            match int(b"HalftoneType")? {
+                1 => {
+                    let spot = dict.get(self.doc.intern(b"SpotFunction"))?;
+                    let spot =
+                        read_resolved(&self.doc, spot, |value| self.spot_function(spot, value))?;
+                    Some(Halftone::Screen {
+                        frequency: number(b"Frequency")?,
+                        angle: number(b"Angle")?,
+                        spot,
+                        accurate: read_key(&self.doc, dict, b"AccurateScreens", Object::as_bool)
+                            .unwrap_or(false),
+                        transfer,
+                    })
+                }
+                5 if !in_type5 => {
+                    let mut entries = Vec::new();
+                    for (key, raw) in dict.iter() {
+                        let key = self.doc.name_bytes(*key)?;
+                        if matches!(key.as_ref(), b"Type" | b"HalftoneType" | b"HalftoneName") {
+                            continue;
+                        }
+                        entries.push((key.to_vec(), self.halftone(raw, true)?));
+                    }
+                    entries
+                        .iter()
+                        .any(|(colorant, _)| colorant == b"Default")
+                        .then_some(Halftone::Colorants(entries))
+                }
+                6 => Some(Halftone::Threshold {
+                    width: int(b"Width")?,
+                    height: int(b"Height")?,
+                    thresholds: thresholds()?,
+                    transfer,
+                }),
+                10 => Some(Halftone::Squares {
+                    xsquare: int(b"Xsquare")?,
+                    ysquare: int(b"Ysquare")?,
+                    thresholds: thresholds()?,
+                    transfer,
+                }),
+                16 => {
+                    let second = match (int(b"Width2"), int(b"Height2")) {
+                        (Some(width), Some(height)) => Some((width, height)),
+                        (None, None) => None,
+                        _ => return None,
+                    };
+                    Some(Halftone::Threshold16 {
+                        width: int(b"Width")?,
+                        height: int(b"Height")?,
+                        second,
+                        thresholds: thresholds()?,
+                        transfer,
+                    })
+                }
+                _ => None,
+            }
+        })
+    }
+
+    /// A type 1 halftone's `/SpotFunction` (10.6.5.2): a function, read as
+    /// written, or a predefined name, or an array of names in order of
+    /// preference, kept as written.
+    fn spot_function(
+        &self,
+        raw: &Object,
+        value: &Object,
+    ) -> Option<tinker_pdf_content::SpotFunction> {
+        use tinker_pdf_content::SpotFunction;
+        let name = |object: &Object| {
+            object
+                .as_name()
+                .and_then(|n| self.doc.name_bytes(n))
+                .map(|n| n.to_vec())
+        };
+        if let Some(name) = name(value) {
+            return Some(SpotFunction::Names(vec![name]));
+        }
+        if let Some(items) = value.as_array() {
+            let names: Option<Vec<Vec<u8>>> = items
+                .iter()
+                .map(|item| read_resolved(&self.doc, item, name))
+                .collect();
+            return names
+                .filter(|names| !names.is_empty())
+                .map(SpotFunction::Names);
+        }
+        self.state_function(raw).map(SpotFunction::Function)
+    }
+
+    /// `/HTO` (ISO 32000-2): an origin of two numbers.
+    fn halftone_origin(&self, value: &Object) -> Option<[f64; 2]> {
+        let [x, y] = value.as_array()? else {
+            return None;
+        };
+        Some([
+            read_resolved(&self.doc, x, Object::as_number)?,
+            read_resolved(&self.doc, y, Object::as_number)?,
+        ])
     }
 
     /// `/BM` (11.3.5): a name, or an array of names offering fallbacks.

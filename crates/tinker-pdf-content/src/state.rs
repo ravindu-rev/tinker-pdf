@@ -438,6 +438,78 @@ pub enum Transfer {
     Four([Arc<Function>; 4]),
 }
 
+/// A type 1 halftone's spot function (10.6.5.2).
+#[derive(Clone, Debug, PartialEq)]
+pub enum SpotFunction {
+    /// A function of two inputs, read as written.
+    Function(Arc<Function>),
+    /// One of the predefined spot functions by name, or names in order of
+    /// preference, as written: the applying row picks the first it knows.
+    Names(Vec<Vec<u8>>),
+}
+
+/// A halftone (10.6.5), as `/HT` sets it.
+///
+/// A threshold array is kept by its stream, `thresholds`, packed
+/// `num << 16 | gen` as [`crate::Form::stream`] packs one: it is the one value
+/// whose size is the file's, and nothing reads it until a render screens with
+/// it, so it is decoded there rather than at every `gs`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Halftone {
+    /// Type 1: a screen of `frequency` lines per inch at `angle` degrees,
+    /// shaped by its spot function.
+    Screen {
+        /// `/Frequency`.
+        frequency: f64,
+        /// `/Angle`, in degrees.
+        angle: f64,
+        /// `/SpotFunction`.
+        spot: SpotFunction,
+        /// `/AccurateScreens`.
+        accurate: bool,
+        /// `/TransferFunction`.
+        transfer: Option<Transfer>,
+    },
+    /// Type 5: a halftone for each colorant, in the order written, `/Default`
+    /// among them.
+    Colorants(Vec<(Vec<u8>, Halftone)>),
+    /// Type 6: a threshold array of `width` by `height` bytes.
+    Threshold {
+        /// `/Width`.
+        width: i64,
+        /// `/Height`.
+        height: i64,
+        /// The threshold array's stream.
+        thresholds: u64,
+        /// `/TransferFunction`.
+        transfer: Option<Transfer>,
+    },
+    /// Type 10: thresholds over two squares.
+    Squares {
+        /// `/Xsquare`, the first square's side.
+        xsquare: i64,
+        /// `/Ysquare`, the second's.
+        ysquare: i64,
+        /// The threshold array's stream.
+        thresholds: u64,
+        /// `/TransferFunction`.
+        transfer: Option<Transfer>,
+    },
+    /// Type 16: 16-bit thresholds over one rectangle, or two.
+    Threshold16 {
+        /// `/Width`.
+        width: i64,
+        /// `/Height`.
+        height: i64,
+        /// `/Width2` and `/Height2`, when the array has a second rectangle.
+        second: Option<(i64, i64)>,
+        /// The threshold array's stream.
+        thresholds: u64,
+        /// `/TransferFunction`.
+        transfer: Option<Transfer>,
+    },
+}
+
 /// The graphics state parameters kept for the rows that apply them: set by
 /// `gs`, `ri` and `i`, and read by nothing yet, so none of them moves a pixel.
 ///
@@ -473,6 +545,10 @@ pub struct StoredParameters {
     pub undercolor_removal: Option<Arc<Function>>,
     /// `/TR2` over `/TR`.
     pub transfer: Option<Transfer>,
+    /// `/HT`.
+    pub halftone: Option<Arc<Halftone>>,
+    /// `/HTO`, ISO 32000-2's halftone origin.
+    pub halftone_origin: Option<[f64; 2]>,
 }
 
 impl StoredParameters {
@@ -492,6 +568,8 @@ impl StoredParameters {
         black_generation: None,
         undercolor_removal: None,
         transfer: None,
+        halftone: None,
+        halftone_origin: None,
     };
 }
 
@@ -700,6 +778,7 @@ mod tests {
         );
         assert!(initial.black_generation.is_none() && initial.undercolor_removal.is_none());
         assert!(initial.transfer.is_none());
+        assert!(initial.halftone.is_none() && initial.halftone_origin.is_none());
 
         let mut state = GraphicsState::new(Matrix::IDENTITY);
         state.set_stored(|s| s.rendering_intent = RenderingIntent::RelativeColorimetric);
