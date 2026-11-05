@@ -8,11 +8,12 @@
 use crate::device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 use crate::state::{
     BlackPointCompensation, BlendMode, GraphicsState, LineCap, LineJoin, Matrix, RenderingIntent,
-    Rgb, TextRenderMode,
+    Rgb, TextRenderMode, Transfer,
 };
 use crate::tokenizer::{Token, Tokenizer};
 use core::mem;
 use std::sync::Arc;
+use tinker_pdf_color::Function;
 use tinker_pdf_cos::decode_text_string;
 
 /// Everything the interpreter needs from a page's resources.
@@ -196,6 +197,12 @@ pub struct StateParameters {
     pub alpha_is_shape: Option<bool>,
     /// `/TK`.
     pub text_knockout: Option<bool>,
+    /// `/BG2` over `/BG`; `Some(None)` is `/BG2 /Default`.
+    pub black_generation: Option<Option<Arc<Function>>>,
+    /// `/UCR2` over `/UCR`; `Some(None)` is `/UCR2 /Default`.
+    pub undercolor_removal: Option<Option<Arc<Function>>>,
+    /// `/TR2` over `/TR`; `Some(None)` is `/TR2 /Default`.
+    pub transfer: Option<Option<Transfer>>,
     /// `/CA`, the stroking alpha.
     pub stroke_alpha: Option<f64>,
     /// `/ca`, the non-stroking alpha.
@@ -911,6 +918,15 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             }
             if let Some(knockout) = set.text_knockout {
                 s.text_knockout = knockout;
+            }
+            if let Some(generation) = &set.black_generation {
+                s.black_generation.clone_from(generation);
+            }
+            if let Some(removal) = &set.undercolor_removal {
+                s.undercolor_removal.clone_from(removal);
+            }
+            if let Some(transfer) = &set.transfer {
+                s.transfer.clone_from(transfer);
             }
         });
         // 11.6.5.1. The group is rendered *here*, at this CTM, rather than

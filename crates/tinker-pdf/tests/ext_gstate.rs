@@ -20,8 +20,14 @@ use tinker_pdf::{Bitmap, Document, RenderOptions};
 /// soft mask can name: its left half white and its right half black. Page
 /// `i` is 40 x 40 and draws `contents[i]`.
 fn document(states: &str, contents: &[&str]) -> Vec<u8> {
+    document_with(states, &[], contents)
+}
+
+/// [`document`], with `extra` as objects 5 onwards, for `states` to name.
+fn document_with(states: &str, extra: &[String], contents: &[&str]) -> Vec<u8> {
+    let first = 5 + extra.len();
     let kids: Vec<String> = (0..contents.len())
-        .map(|i| format!("{} 0 R", 5 + 2 * i))
+        .map(|i| format!("{} 0 R", first + 2 * i))
         .collect();
     let mask = "1 g 0 0 20 40 re f 0 g 20 0 20 40 re f";
     let mut objects = vec![
@@ -39,11 +45,12 @@ fn document(states: &str, contents: &[&str]) -> Vec<u8> {
             mask.len()
         ),
     ];
+    objects.extend(extra.iter().cloned());
     for (i, content) in contents.iter().enumerate() {
         objects.push(format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40] /Resources 3 0 R \
              /Contents {} 0 R >>",
-            6 + 2 * i
+            first + 1 + 2 * i
         ));
         objects.push(format!(
             "<< /Length {} >>\nstream\n{content}\nendstream",
@@ -257,5 +264,91 @@ fn every_scalar_key_set_by_gs_draws_as_its_twin() {
         "ext-gstate-twins: RAN {} twins and {} stored keys",
         twins.len() + 2,
         stored.len()
+    );
+}
+
+/// Objects 5 and 6 for [`document_with`]: `1 - x` sampled at its two ends, and
+/// the same curve as a calculator.
+fn inverting_streams() -> Vec<String> {
+    let sampled = "FF00>";
+    let calculator = "{ 1 exch sub }";
+    vec![
+        format!(
+            "<< /FunctionType 0 /Domain [0 1] /Range [0 1] /Size [2] /BitsPerSample 8 \
+             /Filter /ASCIIHexDecode /Length {} >>\nstream\n{sampled}\nendstream",
+            sampled.len()
+        ),
+        format!(
+            "<< /FunctionType 4 /Domain [0 1] /Range [0 1] /Length {} >>\n\
+             stream\n{calculator}\nendstream",
+            calculator.len()
+        ),
+    ]
+}
+
+/// **Every function key draws as the page without it**, until the row that
+/// applies it does; and **a soft mask's `/TR` is read as written**: a sampled
+/// and a calculator function, both streams, draw as the type 2 function of the
+/// same curve, and unlike the mask with no `/TR`.
+#[test]
+fn every_function_key_draws_as_the_page_without_it() {
+    let inverse = "<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>";
+    let states = format!(
+        "/TR << /TR 5 0 R >> /TRFour << /TR [6 0 R 6 0 R 6 0 R 6 0 R] >> \
+         /TRIdentity << /TR /Identity >> /TR2 << /TR2 {inverse} >> \
+         /TR2Default << /TR2 /Default >> /BG << /BG 6 0 R >> /BG2 << /BG2 {inverse} >> \
+         /BG2Default << /BG2 /Default >> /UCR << /UCR 5 0 R >> \
+         /UCR2 << /UCR2 {inverse} >> /UCR2Default << /UCR2 /Default >> \
+         /Mask << /SMask << /S /Luminosity /G 4 0 R >> >> \
+         /MaskT2 << /SMask << /S /Luminosity /G 4 0 R /TR {inverse} >> >> \
+         /MaskT0 << /SMask << /S /Luminosity /G 4 0 R /TR 5 0 R >> >> \
+         /MaskT4 << /SMask << /S /Luminosity /G 4 0 R /TR 6 0 R >> >>"
+    );
+    let keys = [
+        "TR",
+        "TRFour",
+        "TRIdentity",
+        "TR2",
+        "TR2Default",
+        "BG",
+        "BG2",
+        "BG2Default",
+        "UCR",
+        "UCR2",
+        "UCR2Default",
+    ];
+    let fill = "0.2 0.4 0.6 0.1 k 5 5 30 30 re f";
+    let mut pages: Vec<String> = keys.iter().map(|key| format!("/{key} gs {fill}")).collect();
+    pages.push(fill.to_string());
+    let masked = "0 0 1 rg 0 0 40 40 re f";
+    for mask in ["MaskT2", "MaskT0", "MaskT4", "Mask"] {
+        pages.push(format!("/{mask} gs {masked}"));
+    }
+    let contents: Vec<&str> = pages.iter().map(String::as_str).collect();
+    let bitmaps = render_all(document_with(&states, &inverting_streams(), &contents));
+
+    let without = &bitmaps[keys.len()];
+    for (key, page) in keys.iter().zip(&bitmaps) {
+        assert_eq!(
+            page.data, without.data,
+            "/{key}: a stored function moved a pixel before its row applies it"
+        );
+    }
+    let [type2, type0, type4, untransferred] = [1, 2, 3, 4].map(|at| &bitmaps[keys.len() + at]);
+    assert_ne!(
+        type2.data, untransferred.data,
+        "the mask's type 2 `/TR` changed nothing"
+    );
+    assert_eq!(
+        type0.data, type2.data,
+        "a sampled `/TR`, a stream, does not draw as the type 2 function of its curve"
+    );
+    assert_eq!(
+        type4.data, type2.data,
+        "a calculator `/TR`, a stream, does not draw as the type 2 function of its curve"
+    );
+    println!(
+        "ext-gstate-functions: RAN {} keys and three mask transfers",
+        keys.len()
     );
 }

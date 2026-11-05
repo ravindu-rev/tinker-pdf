@@ -289,8 +289,12 @@ impl core::fmt::Debug for DisplayList {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use tinker_pdf_color::Function;
     use tinker_pdf_content::{
         BlackPointCompensation, BlendMode, Event, GraphicsState, RenderingIntent, StoredParameters,
+        Transfer,
     };
 
     use crate::Document;
@@ -299,9 +303,10 @@ mod tests {
     /// holding `states` as its `/ExtGState`, and a transparency group form
     /// (object 4) a soft mask can name. Page `i` is 40 x 40 and draws
     /// `contents[i]`.
-    fn document(states: &str, contents: &[&str]) -> Vec<u8> {
+    fn document(states: &str, extra: &[String], contents: &[&str]) -> Vec<u8> {
+        let first = 5 + extra.len();
         let kids: Vec<String> = (0..contents.len())
-            .map(|i| format!("{} 0 R", 5 + 2 * i))
+            .map(|i| format!("{} 0 R", first + 2 * i))
             .collect();
         let mask = "1 g 0 0 20 40 re f";
         let mut objects = vec![
@@ -319,11 +324,12 @@ mod tests {
                 mask.len()
             ),
         ];
+        objects.extend(extra.iter().cloned());
         for (i, content) in contents.iter().enumerate() {
             objects.push(format!(
                 "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40] /Resources 3 0 R \
                  /Contents {} 0 R >>",
-                6 + 2 * i
+                first + 1 + 2 * i
             ));
             objects.push(format!(
                 "<< /Length {} >>\nstream\n{content}\nendstream",
@@ -355,7 +361,12 @@ mod tests {
 
     /// Each page's recording.
     fn recordings(states: &str, contents: &[&str]) -> Vec<Vec<Event>> {
-        let doc = Document::open(document(states, contents)).expect("the document opens");
+        recordings_with(states, &[], contents)
+    }
+
+    /// Each page's recording, with `extra` as objects 5 onwards.
+    fn recordings_with(states: &str, extra: &[String], contents: &[&str]) -> Vec<Vec<Event>> {
+        let doc = Document::open(document(states, extra, contents)).expect("the document opens");
         (0..doc.page_count())
             .map(|i| {
                 let list = doc.page(i).expect("a page").display_list();
@@ -493,6 +504,7 @@ mod tests {
             flatness: Some(3.0),
             smoothness: Some(0.5),
             stroke_adjustment: Some(true),
+            ..StoredParameters::INITIAL
         };
         assert_eq!(fills[0].stored_parameters(), &expected);
         assert_eq!(
@@ -503,5 +515,112 @@ mod tests {
         assert_eq!(fills[1].line_width, 2.0);
         assert!(fills[2].stored.is_none(), "`Q` restores the initial values");
         assert_eq!(fills[2].stored_parameters(), &StoredParameters::INITIAL);
+    }
+
+    /// **Every function key is stored as the dictionary writes it**: each
+    /// recorded function evaluates as the test evaluates the dictionary's, a
+    /// sampled one included; the second spelling wins when both are written;
+    /// `/Default` restores the initial value; a key the table does not admit
+    /// is absent; and a `gs` that omits a key and a `Q` behave as for the
+    /// scalar keys. Four references to one function share one reading.
+    #[test]
+    fn every_function_key_is_stored() {
+        // Object 5 samples a curve through 0, 64 and 255; object 6 is
+        // `1 - x` as a calculator.
+        let samples = "0040FF>";
+        let calculator = "{ 1 exch sub }";
+        let extra = [
+            format!(
+                "<< /FunctionType 0 /Domain [0 1] /Range [0 1] /Size [3] /BitsPerSample 8 \
+                 /Filter /ASCIIHexDecode /Length {} >>\nstream\n{samples}\nendstream",
+                samples.len()
+            ),
+            format!(
+                "<< /FunctionType 4 /Domain [0 1] /Range [0 1] /Length {} >>\n\
+                 stream\n{calculator}\nendstream",
+                calculator.len()
+            ),
+        ];
+        let squared = "<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 2 >>";
+        let cubed = "<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 3 >>";
+        let states = format!(
+            "/TR << /TR 5 0 R >> /TRFour << /TR [6 0 R 6 0 R 6 0 R 6 0 R] >> \
+             /TRIdentity << /TR /Identity >> /TRBoth << /TR 6 0 R /TR2 5 0 R >> \
+             /TR2Default << /TR2 /Default >> /TRWrong << /TR /Default >> \
+             /BG << /BG {squared} >> /BGBoth << /BG {squared} /BG2 {cubed} >> \
+             /BG2Default << /BG2 /Default >> /UCR << /UCR 6 0 R >> \
+             /UCRBoth << /UCR 6 0 R /UCR2 5 0 R >> /UCR2Default << /UCR2 /Default >> \
+             /Width << /LW 2 >>"
+        );
+        let f = "0 0 1 1 re f";
+        let page = format!(
+            "q /TR gs /BG gs /UCR gs {f} /Width gs {f} /TRWrong gs {f} Q {f} \
+             /TRFour gs {f} /TRIdentity gs {f} /TRBoth gs /BGBoth gs /UCRBoth gs {f} \
+             /TR2Default gs /BG2Default gs /UCR2Default gs {f}"
+        );
+        let recorded = recordings_with(&states, &extra, &[&page]);
+        let fills = painted(&recorded[0]);
+        assert_eq!(fills.len(), 8);
+
+        // The dictionary's functions, as the test evaluates them.
+        let at = [0.0, 0.25, 0.5, 0.75, 1.0];
+        let sampled = |x: f64| {
+            let s = [0.0, 64.0, 255.0];
+            let e = x * 2.0;
+            let i = (e.floor() as usize).min(1);
+            (s[i] + (e - i as f64) * (s[i + 1] - s[i])) / 255.0
+        };
+        let holds = |function: &Function, expected: &dyn Fn(f64) -> f64| {
+            at.iter().all(|&x| {
+                let got = function.eval(&[x]).first().copied().unwrap_or(f64::NAN);
+                (got - expected(x)).abs() < 1e-9
+            })
+        };
+        let one = |transfer: &Option<Transfer>| match transfer {
+            Some(Transfer::One(function)) => Arc::clone(function),
+            other => panic!("one transfer function was written, and {other:?} recorded"),
+        };
+
+        let set = fills[0].stored_parameters();
+        assert!(holds(&one(&set.transfer), &sampled), "/TR, sampled");
+        let generation = set.black_generation.as_deref().expect("/BG is stored");
+        assert!(holds(generation, &|x| x * x), "/BG");
+        let removal = set.undercolor_removal.as_deref().expect("/UCR is stored");
+        assert!(holds(removal, &|x| 1.0 - x), "/UCR, a calculator");
+        assert_eq!(fills[1].stored_parameters(), set, "a `gs` that omits them");
+        assert_eq!(
+            fills[2].stored_parameters(),
+            set,
+            "`/TR /Default` is not a value `/TR` admits, so it is absent"
+        );
+        assert!(fills[3].stored.is_none(), "`Q` restores the initial values");
+
+        match &fills[4].stored_parameters().transfer {
+            Some(Transfer::Four(four)) => {
+                assert!(holds(&four[0], &|x| 1.0 - x));
+                assert!(
+                    four.iter().all(|function| Arc::ptr_eq(function, &four[0])),
+                    "one object, read once"
+                );
+            }
+            other => panic!("four functions were written, and {other:?} recorded"),
+        }
+        assert_eq!(
+            fills[5].stored_parameters().transfer,
+            Some(Transfer::Identity)
+        );
+
+        let both = fills[6].stored_parameters();
+        assert!(holds(&one(&both.transfer), &sampled), "/TR2 over /TR");
+        let generation = both.black_generation.as_deref().expect("/BG2 is stored");
+        assert!(holds(generation, &|x| x * x * x), "/BG2 over /BG");
+        let removal = both.undercolor_removal.as_deref().expect("/UCR2 is stored");
+        assert!(holds(removal, &sampled), "/UCR2 over /UCR");
+
+        assert_eq!(
+            fills[7].stored_parameters(),
+            &StoredParameters::INITIAL,
+            "`/Default` restores each"
+        );
     }
 }

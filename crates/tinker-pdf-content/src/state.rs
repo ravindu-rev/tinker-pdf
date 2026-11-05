@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use tinker_pdf_color::Function;
+
 /// A 2-D affine transform, in PDF's row-vector convention (8.3.3):
 /// `[a b c d e f]` maps `(x, y)` to `(a·x + c·y + e, b·x + d·y + f)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -425,6 +427,17 @@ pub enum BlackPointCompensation {
     Default,
 }
 
+/// A transfer function (10.5), as `/TR` or `/TR2` sets it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Transfer {
+    /// `/Identity`.
+    Identity,
+    /// One function for every colorant.
+    One(Arc<Function>),
+    /// One function for each of the four colorants, in the order 10.5 gives.
+    Four([Arc<Function>; 4]),
+}
+
 /// The graphics state parameters kept for the rows that apply them: set by
 /// `gs`, `ri` and `i`, and read by nothing yet, so none of them moves a pixel.
 ///
@@ -453,6 +466,13 @@ pub struct StoredParameters {
     pub smoothness: Option<f64>,
     /// `/SA`.
     pub stroke_adjustment: Option<bool>,
+    /// `/BG2` over `/BG`: the function, parsed, never sampled — sampling is
+    /// the applying row's, at its stage and depth.
+    pub black_generation: Option<Arc<Function>>,
+    /// `/UCR2` over `/UCR`.
+    pub undercolor_removal: Option<Arc<Function>>,
+    /// `/TR2` over `/TR`.
+    pub transfer: Option<Transfer>,
 }
 
 impl StoredParameters {
@@ -469,6 +489,9 @@ impl StoredParameters {
         flatness: None,
         smoothness: None,
         stroke_adjustment: None,
+        black_generation: None,
+        undercolor_removal: None,
+        transfer: None,
     };
 }
 
@@ -675,6 +698,8 @@ mod tests {
             ),
             (None, None, None)
         );
+        assert!(initial.black_generation.is_none() && initial.undercolor_removal.is_none());
+        assert!(initial.transfer.is_none());
 
         let mut state = GraphicsState::new(Matrix::IDENTITY);
         state.set_stored(|s| s.rendering_intent = RenderingIntent::RelativeColorimetric);

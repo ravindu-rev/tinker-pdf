@@ -109,6 +109,13 @@ struct Caches {
     /// and nothing per operator — the interpreter asks once a scope too
     /// ([`FontSource::device_defaults`]).
     defaults: OnceLock<Defaults>,
+    /// The functions a graphics state names (`/TR`, `/BG`, `/UCR`, their
+    /// second spellings, and a soft mask's `/TR`), by the function's own
+    /// object packed as `num << 16 | gen`: one function many states share, or
+    /// one state set at every `gs`, is decoded and parsed once. `None` is
+    /// cached too. A function written directly into a dictionary has no
+    /// object, is a few numbers, and is read where it lies.
+    functions: Mutex<HashMap<u64, Option<Arc<Function>>>>,
 }
 
 /// What a scope's `/ColorSpace` subdictionary puts in for each device space
@@ -2117,12 +2124,18 @@ impl PageResources {
         use tinker_pdf_content::{BlackPointCompensation, RenderingIntent};
         let mut set = tinker_pdf_content::StateParameters::default();
         let mut fill_overprint = None;
+        // Table 58's second spellings win when a dictionary writes both.
+        let (mut generation, mut generation2) = (None, None);
+        let (mut removal, mut removal2) = (None, None);
+        let (mut transfer, mut transfer2) = (None, None);
         let name_of = |value: &Object| value.as_name().and_then(|n| self.doc.name_bytes(n));
-        for (key, value) in dict.iter() {
+        for (key, raw) in dict.iter() {
             let Some(key) = self.doc.name_bytes(*key) else {
                 continue;
             };
-            read_resolved(&self.doc, value, |value| match key.as_ref() {
+            // A function is handed to its reader as written: a sampled or a
+            // calculator function is a stream, reached through its reference.
+            read_resolved(&self.doc, raw, |value| match key.as_ref() {
                 b"LW" => set.line_width = value.as_number(),
                 b"LC" => set.line_cap = value.as_number(),
                 b"LJ" => set.line_join = value.as_number(),
@@ -2154,9 +2167,18 @@ impl PageResources {
                 b"ca" => set.fill_alpha = value.as_number(),
                 b"BM" => set.blend = self.blend_mode(value),
                 b"SMask" => set.soft_mask = self.state_soft_mask(value, name),
+                b"BG" => generation = self.state_curve(raw, value, false),
+                b"BG2" => generation2 = self.state_curve(raw, value, true),
+                b"UCR" => removal = self.state_curve(raw, value, false),
+                b"UCR2" => removal2 = self.state_curve(raw, value, true),
+                b"TR" => transfer = self.state_transfer(raw, value, false),
+                b"TR2" => transfer2 = self.state_transfer(raw, value, true),
                 _ => {}
             });
         }
+        set.black_generation = generation2.or(generation);
+        set.undercolor_removal = removal2.or(removal);
+        set.transfer = transfer2.or(transfer);
         // Table 58: an absent `/op` takes `/OP`'s value, so a dictionary that
         // writes only `/OP true` is one that writes both.
         set.fill_overprint = fill_overprint.or(set.stroke_overprint);
@@ -2181,6 +2203,71 @@ impl PageResources {
                 .collect::<Option<Vec<f64>>>()
         })?;
         Some((dashes, phase))
+    }
+
+    /// A function a graphics state names, read as written by
+    /// [`PageResources::parse_function`], and through the scope's cache when
+    /// it is an object of its own.
+    fn state_function(&self, raw: &Object) -> Option<Arc<Function>> {
+        let Some(reference) = raw.as_objref() else {
+            return self.parse_function(raw, 0).map(Arc::new);
+        };
+        let key = (u64::from(reference.num) << 16) | u64::from(reference.gen);
+        if let Ok(cache) = self.caches.functions.lock() {
+            if let Some(hit) = cache.get(&key) {
+                return hit.clone();
+            }
+        }
+        let read = self.parse_function(raw, 0).map(Arc::new);
+        if let Ok(mut cache) = self.caches.functions.lock() {
+            cache.insert(key, read.clone());
+        }
+        read
+    }
+
+    /// `/BG` or `/UCR` (10.3.4, 10.3.5): a function; the second spellings
+    /// also `/Default`, which is `Some(None)`. Anything else is absent.
+    fn state_curve(
+        &self,
+        raw: &Object,
+        value: &Object,
+        default: bool,
+    ) -> Option<Option<Arc<Function>>> {
+        if let Some(name) = value.as_name().and_then(|n| self.doc.name_bytes(n)) {
+            return (default && name.as_ref() == b"Default").then_some(None);
+        }
+        self.state_function(raw).map(Some)
+    }
+
+    /// `/TR` or `/TR2` (10.5): a function, an array of four, or `/Identity`;
+    /// `/TR2` also `/Default`, which is `Some(None)`. Anything else is absent.
+    fn state_transfer(
+        &self,
+        raw: &Object,
+        value: &Object,
+        default: bool,
+    ) -> Option<Option<tinker_pdf_content::Transfer>> {
+        use tinker_pdf_content::Transfer;
+        if let Some(name) = value.as_name().and_then(|n| self.doc.name_bytes(n)) {
+            return match name.as_ref() {
+                b"Identity" => Some(Some(Transfer::Identity)),
+                b"Default" if default => Some(None),
+                _ => None,
+            };
+        }
+        if let Some(items) = value.as_array() {
+            let [a, b, c, d] = items else {
+                return None;
+            };
+            let four = [
+                self.state_function(a)?,
+                self.state_function(b)?,
+                self.state_function(c)?,
+                self.state_function(d)?,
+            ];
+            return Some(Some(Transfer::Four(four)));
+        }
+        self.state_function(raw).map(|f| Some(Transfer::One(f)))
     }
 
     /// `/BM` (11.3.5): a name, or an array of names offering fallbacks.
@@ -2254,15 +2341,14 @@ impl PageResources {
 
         // 11.6.5.2: `/TR` is a function, or the name `/Identity`. A name is
         // the identity whatever it says, because the only alternative a
-        // reader has for an unknown one is to mask nothing.
-        let transfer = self
-            .doc
-            .resolve_key(mask, self.doc.intern(b"TR"))
-            .as_dict()
-            .and_then(|_| {
-                let entry = self.doc.resolve_key(mask, self.doc.intern(b"TR"));
-                self.parse_function(&entry, 0)
-            })
+        // reader has for an unknown one is to mask nothing. The entry is read
+        // as written, by the reader every graphics state function takes, so a
+        // sampled or a calculator function — a stream — is reached through its
+        // reference; sampled to 256 entries, since the mask applies it per
+        // pixel.
+        let transfer = mask
+            .get(self.doc.intern(b"TR"))
+            .and_then(|raw| self.state_function(raw))
             .map(|function| sample_transfer(&function));
 
         Some(tinker_pdf_content::SoftMask::Group(Box::new(

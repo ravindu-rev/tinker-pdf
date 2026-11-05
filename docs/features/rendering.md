@@ -300,8 +300,9 @@ rather than in RGB, and it is not the same as blending the unencoded values.
 Every space a group can declare has a buffer. ExtGState `/SMask` works in
 both kinds — `/Alpha` and `/Luminosity` (11.6.5.2) — with `/BC` read in the
 mask group's own `/Group /CS` and defaulting to black (fully masked, the
-default that does not invert every drop shadow), and `/TR` pre-sampled to 256
-entries. An absent `/SMask` key leaves the mask in force where `/None`
+default that does not invert every drop shadow), and `/TR` read as written —
+so a sampled or a calculator function, a stream, is reached through its
+reference — and sampled to 256 entries. An absent `/SMask` key leaves the mask in force where `/None`
 removes it (11.6.5.1); `q`/`Q` save and restore the mask beside the clip
 (8.5.4). A clip is the path times the clip in force and nothing else — a
 mask in force is not multiplied into it, so a group painted under a mask is
@@ -681,12 +682,16 @@ every device the state a `gs` made, never the `gs`.
 
 The parameters a `gs` stores rather than applies — the rendering intent,
 black-point compensation, overprint, flatness, smoothness, stroke adjustment,
-alpha source and text knockout — travel in the state as one shared
+alpha source, text knockout, and the black generation, undercolour removal and
+transfer functions — travel in the state as one shared
 `StoredParameters` value, `None` while every one has its initial value, so a
 `q` copies one word more and a copy allocates nothing. The display list's
 budget counts that value once per change rather than once per event: the
 recorder remembers the value it last counted and counts again when an event
-holds another.
+holds another. A function is kept parsed, never sampled — sampling is the
+applying row's, at its stage and depth — and `/Default` stores the device's
+own, `None`. Each scope reads a function it names by reference once, however
+many states share it.
 The output is the same bytes every time, and nothing on its path calls a
 transcendental, so ruling 4's argument covers it; no SVG fingerprint is
 committed beside `determinism.rs`'s, so the cross-target claim is argued
