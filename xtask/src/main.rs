@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use xtask::version::{internal_dependencies, package_name};
-use xtask::{bench, corpus, fetch, footprint, fuzzaudit, parity, release, repo_root, version};
+use xtask::{
+    bench, corpus, determinism, fetch, footprint, fuzzaudit, parity, release, repo_root, version,
+};
 
 const USAGE: &str = "\
 xtask — repository chores
@@ -31,7 +33,11 @@ usage:
                         fetch runs whatever the check before it returned
   cargo xtask footprint check that every figure in bindings/js/footprint.json
                         carries its tolerance, date and run
-  cargo xtask check     all ten of the above
+  cargo xtask determinism
+                        check that every cross-target fingerprint test in
+                        the roster runs un-ignored and is grepped by name in
+                        the native test legs and the wasm-determinism job
+  cargo xtask check     all eleven of the above
 
   cargo xtask release [options]  publish to crates.io, PyPI, npm and NuGet
 
@@ -150,6 +156,7 @@ fn main() -> ExitCode {
         "versions" => report("versions", version::check(&repo_root())),
         "baseline" => report("baseline", bench::check(&repo_root())),
         "corpusjob" => report("corpusjob", check_corpus_job()),
+        "determinism" => report("determinism", determinism::check(&repo_root())),
         "footprint" if rest.is_empty() => report("footprint", footprint::check(&repo_root())),
         "footprint" => one("footprint", footprint::run(&repo_root(), rest)),
         "check" => {
@@ -163,6 +170,7 @@ fn main() -> ExitCode {
             let baseline = bench::check(&repo_root());
             let corpus_job = check_corpus_job();
             let figures = footprint::check(&repo_root());
+            let roster = determinism::check(&repo_root());
             let mut problems = dag.err().unwrap_or_default();
             problems.extend(libm.err().unwrap_or_default());
             problems.extend(oracles.err().unwrap_or_default());
@@ -173,6 +181,7 @@ fn main() -> ExitCode {
             problems.extend(baseline.err().unwrap_or_default());
             problems.extend(corpus_job.err().unwrap_or_default());
             problems.extend(figures.err().unwrap_or_default());
+            problems.extend(roster.err().unwrap_or_default());
             report(
                 "check",
                 if problems.is_empty() {

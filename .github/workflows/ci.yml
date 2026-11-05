@@ -57,6 +57,29 @@ jobs:
           cargo test -p tinker-pdf --test determinism 2>&1 | tee determinism.log
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' determinism.log
           grep -Eq 'rendering_is_stable_across_targets [.]{3} ok' determinism.log
+          grep -Eq 'the_synthesised_document_is_the_same_bytes_on_every_target [.]{3} ok' determinism.log
+          grep -Eq 'the_synthesised_fixed_document_is_the_same_bytes_on_every_target [.]{3} ok' determinism.log
+          grep -Eq 'the_synthesised_book_is_the_same_bytes_on_every_target [.]{3} ok' determinism.log
+          grep -Eq 'a_display_list_replays_every_fingerprinted_page_byte_for_byte [.]{3} ok' determinism.log
+      # The rest of the determinism roster (`cargo xtask determinism`): the
+      # archival packet's hash, the shaped page's pixels and the render
+      # options' pinned hashes, each recorded on one target and claimed for
+      # all of them, so each leg says it reproduced them.
+      - name: The archival, shaped-page and render-option fingerprints were reproduced on this target
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test pdfa_writer 2>&1 | tee pdfa.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' pdfa.log
+          grep -Eq 'the_archival_fixture_hashes_the_same_on_every_target [.]{3} ok' pdfa.log
+          cargo test -p tinker-pdf --test epub_shaped 2>&1 | tee epub.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' epub.log
+          grep -Eq 'the_shaped_page_renders_to_the_bytes_it_always_did [.]{3} ok' epub.log
+          cargo test -p tinker-pdf --test render_options 2>&1 | tee options.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' options.log
+          grep -Eq 'ink_output_is_pinned [.]{3} ok' options.log
+          grep -Eq 'transparent_and_premultiplied_output_is_pinned [.]{3} ok' options.log
+          grep -Eq 'hard_edged_output_is_pinned [.]{3} ok' options.log
       # The same claim for shaping, which `cargo test --workspace` above
       # already runs — and which the same `#[ignore]`-one-afternoon hazard
       # would silence just as quietly. `docs/design/shaping.md` milestone 2
@@ -405,6 +428,14 @@ jobs:
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' determinism.log
           grep -q 'test rendering_is_stable_across_targets \.\.\. ok' \
             determinism.log
+          grep -q 'test the_synthesised_document_is_the_same_bytes_on_every_target \.\.\. ok' \
+            determinism.log
+          grep -q 'test the_synthesised_fixed_document_is_the_same_bytes_on_every_target \.\.\. ok' \
+            determinism.log
+          grep -q 'test the_synthesised_book_is_the_same_bytes_on_every_target \.\.\. ok' \
+            determinism.log
+          grep -q 'test a_display_list_replays_every_fingerprinted_page_byte_for_byte \.\.\. ok' \
+            determinism.log
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
       # Shaping's fourth target. The corpora are `include_bytes!` rather than
@@ -445,6 +476,19 @@ jobs:
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' epub.log
           grep -q 'the_shaped_page_renders_to_the_bytes_it_always_did \.\.\. ok' \
             epub.log
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+      # The render options' pinned hashes: ink, transparency, premultiplied
+      # and hard-edged output, recorded on one target and claimed for all.
+      - name: Render each option on wasm32-wasip1 and compare its pinned hash
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test render_options \
+            --target wasm32-wasip1 2>&1 | tee options.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' options.log
+          grep -q 'test ink_output_is_pinned \.\.\. ok' options.log
+          grep -q 'test transparent_and_premultiplied_output_is_pinned \.\.\. ok' options.log
+          grep -q 'test hard_edged_output_is_pinned \.\.\. ok' options.log
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
       - name: Shape on wasm32-wasip1 and compare against the fingerprints

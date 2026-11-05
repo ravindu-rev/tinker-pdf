@@ -111,9 +111,21 @@ below the arithmetic — a different `std`, allocator and linker — and
 `wasm32-wasip1` varies width as well: 64-bit against 32-bit, where a `usize`
 assumption would show.
 
-Each leg runs `determinism.rs` on its own and greps its log for
-`rendering_is_stable_across_targets ... ok`: `cargo test --workspace` runs
-those tests too, but a green tick from it is not evidence that it did, and
-an `#[ignore]` added one afternoon would look identical. That is
+Each leg runs every fingerprint test's file on its own and greps its log for
+each test by name: `cargo test --workspace` runs those tests too, but a
+green tick from it is not evidence that it did, and an `#[ignore]` added one
+afternoon would look identical. That is
 [verification.md](../verification.md)'s "a check that can be absent is red,
 not green".
+
+**The determinism roster** (`xtask/src/determinism.rs`) names them:
+`determinism.rs`'s render fingerprints, its three synthesised documents'
+byte hashes and its display list's replay of every fingerprinted page;
+`pdfa_writer.rs`'s archival hash; `epub_shaped.rs`'s shaped page;
+`render_options.rs`'s pinned ink, transparent and premultiplied, and
+hard-edged output; and the shaper's two fingerprints. `cargo xtask
+determinism`, part of `cargo xtask check`, holds each to be a `#[test]` in its
+file with no `#[ignore]`, grepped as passing by the native `test` legs and the
+`wasm-determinism` job, and every test those jobs grep to be in the roster. A
+row that lands a fingerprint adds its roster entry and its greps in one
+commit.

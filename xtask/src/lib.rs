@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 pub mod bench;
 pub mod corpus;
+pub mod determinism;
 pub mod face;
 pub mod fetch;
 pub mod footprint;
