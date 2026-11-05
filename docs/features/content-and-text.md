@@ -379,9 +379,14 @@ in the order a line of them reads in the text's direction (as drawn, on a
 vertical line), so that a letter a right-to-left word repeats stands on its
 own glyph — with that glyph's quad, `/MCID`, stream and font, so search
 finds the text where it is drawn and a structure tree's order holds; a
-character no glyph draws stands on the span's box. An
+character no glyph draws stands on the span's box. The structured view and
+a stated table's cells take those characters for a property list's
+`/ActualText`, so its run is spelled by them, and take its text with none
+only where no character carries it: the glyphs read nothing, or the page
+holds more spans than extraction states. An
 `/ActualText` on a structure element stays the structured view's: an
-element can span lines and pages, where a line has no place for it.
+element can span lines and pages, where a line has no place for it, and its
+run has no characters.
 (`text_logical_order.rs`'s `a_line_a_span_states_whole_reads_as_its_text`,
 `a_span_inside_a_left_to_right_line_stands_where_its_glyphs_do`,
 `a_span_inside_a_right_to_left_line_is_one_unit_of_its_order`,

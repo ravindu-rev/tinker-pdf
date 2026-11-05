@@ -115,7 +115,11 @@ The structured view is a join, computed in the facade:
 `Page::structured_text()` walks the page's slice of the structure tree
 depth-first — which **is** reading order for tagged PDF (14.8) — and pulls,
 for each `Content { mcid }` kid, the chars of the same `TextPage` carrying
-that MCID. `/ActualText` replaces the enclosed content (14.9.4); `/Alt`
+that MCID. `/ActualText` replaces the enclosed content (14.9.4): a property
+list's run takes the characters the flat extraction stood its text on, each
+with its glyph's quad and MCID, and its list's `/Alt`, `/Lang` and `/E` as a
+drawn run does, and goes in as text with no characters only where none of
+them carries it; an element's has no characters. `/Alt`
 surfaces on the element (a `Figure`'s description); artifacts are absent
 because `TextDevice` already dropped them. Chars whose MCID no structure
 element claims are reported as an orphan count, not silently appended — the

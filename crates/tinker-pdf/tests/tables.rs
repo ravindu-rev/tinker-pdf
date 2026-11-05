@@ -280,6 +280,71 @@ fn a_page_of_many_small_stated_tables_is_read_in_bounded_work() {
     assert_eq!(again.len(), TABLES);
 }
 
+/// One page whose `TD` holds a list: an `L`, an `LI`, an `Lbl` whose
+/// sequence's property list carries `/MCID 0` and `/ActualText <FEFFF0B7>`
+/// around a drawn bullet, and an `LBody` drawing ` Bullet One` — the shape a
+/// word processor writes for a bulleted cell. Built from bytes, as
+/// `tagged_pdf.rs`'s fixtures are, because the property list's `/ActualText`
+/// is the point.
+fn a_bulleted_cell(label: &str) -> Vec<u8> {
+    let content = format!(
+        "/Lbl << /MCID 0 {label} >> BDC BT /F0 12 Tf 5 40 Td (\\267) Tj ET EMC\n\
+         /LBody << /MCID 1 >> BDC BT /F0 12 Tf 12 40 Td ( Bullet One) Tj ET EMC\n"
+    );
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 5 0 R /MarkInfo << /Marked true >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 60] /StructParents 0\n\
+   /Resources << /Font << /F0 4 0 R >> >> /Contents 6 0 R >>\nendobj\n\
+4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n\
+5 0 obj\n<< /Type /StructTreeRoot /K 10 0 R >>\nendobj\n\
+6 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+10 0 obj\n<< /S /Table /Pg 3 0 R /K [11 0 R] >>\nendobj\n\
+11 0 obj\n<< /S /TR /Pg 3 0 R /K [12 0 R] >>\nendobj\n\
+12 0 obj\n<< /S /TD /Pg 3 0 R /K [13 0 R] >>\nendobj\n\
+13 0 obj\n<< /S /L /Pg 3 0 R /K [14 0 R] >>\nendobj\n\
+14 0 obj\n<< /S /LI /Pg 3 0 R /K [15 0 R 16 0 R] >>\nendobj\n\
+15 0 obj\n<< /S /Lbl /Pg 3 0 R /K [0] >>\nendobj\n\
+16 0 obj\n<< /S /LBody /Pg 3 0 R /K [1] >>\nendobj\n\
+trailer\n<< /Size 17 /Root 1 0 R >>\n%%EOF\n",
+        content.len()
+    )
+    .into_bytes()
+}
+
+/// **A cell whose label a property list states is spelled by its
+/// characters.** The list's `/ActualText` stands on the bullet's glyph as
+/// `Page::text` stands it, so the cell's text, `\u{F0B7} Bullet One`, is its
+/// characters', and its quad encloses the bullet.
+#[test]
+fn a_cell_whose_label_a_property_list_states_is_spelled_by_its_characters() {
+    let doc = open(a_bulleted_cell("/ActualText <FEFFF0B7>"));
+    let tables = stated(&doc);
+    assert_eq!(tables.len(), 1, "one stated table");
+    let cell = &tables[0].1.cells[0];
+    assert_eq!(cell.text, "\u{F0B7} Bullet One");
+    let spelled: String = cell.chars.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(spelled, cell.text, "spelled by its characters");
+
+    let page = doc.page(0).expect("a page");
+    let text = page.text();
+    let bullet = text
+        .lines()
+        .iter()
+        .flat_map(|line| line.chars.iter())
+        .find(|c| c.mcid == Some(0))
+        .expect("the bullet's character");
+    let (x0, y0, x1, y1) = bullet.quad.bounds();
+    let (cx0, cy0, cx1, cy1) = cell.quad.expect("the cell's quad").bounds();
+    assert!(
+        cx0 <= x0 && cy0 <= y0 && x1 <= cx1 && y1 <= cy1,
+        "the cell's quad {:?} encloses the bullet's {:?}",
+        (cx0, cy0, cx1, cy1),
+        (x0, y0, x1, y1)
+    );
+}
+
 /// An untagged page states no table, and a tagged page with none states none.
 #[test]
 fn no_tree_and_no_table_state_nothing() {

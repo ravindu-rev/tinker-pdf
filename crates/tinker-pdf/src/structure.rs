@@ -709,9 +709,12 @@ pub struct StructuredNode {
     pub expansion: Option<String>,
     /// The characters this run covers, for selection and highlighting.
     ///
-    /// Empty when the text came from an `/ActualText`: there are no glyphs
-    /// behind one, and inventing quads would put a selection rectangle over
-    /// content that says something else.
+    /// A property list's `/ActualText` keeps the characters [`crate::Page::text`]
+    /// stands it on, each on the glyph it replaces (ruling 14). Empty when the
+    /// text came from an element's `/ActualText`, or from a property list's
+    /// whose glyphs read nothing: there are no glyphs behind one, and inventing
+    /// quads would put a selection rectangle over content that says something
+    /// else.
     pub chars: Vec<TextChar>,
 }
 
@@ -1966,18 +1969,27 @@ impl Join<'_> {
             return;
         }
         // 14.9.4: an `/ActualText` on the *property list* replaces exactly the
-        // sequence it encloses, which is this one.
+        // sequence it encloses, which is this one. `Page::text` has already
+        // stood its text on the glyphs it replaces (ruling 14) — the outer
+        // span's, where one encloses it — so the run takes those characters,
+        // each with its glyph's quad and `/MCID`. Only where none of them
+        // carries a stated text (the glyphs read nothing, or the page is past
+        // the spans extraction states) does the list's text go in with no
+        // characters.
+        let chars = self.by_mcid.get(&key);
         if let Some(actual) = self
             .page
             .mcid_props
             .get(&(key.1, key.2))
-            .and_then(|p| p.actual_text.clone())
+            .and_then(|p| p.actual_text.as_ref())
         {
-            run.text.push_str(&actual);
             run.replaced = true;
-            return;
+            if !chars.is_some_and(|chars| chars.iter().any(|c| c.stated.is_some())) {
+                run.text.push_str(actual);
+                return;
+            }
         }
-        for character in self.by_mcid.get(&key).into_iter().flatten() {
+        for character in chars.into_iter().flatten() {
             run.text.push_str(&character.text);
             run.chars.push(character.clone());
         }

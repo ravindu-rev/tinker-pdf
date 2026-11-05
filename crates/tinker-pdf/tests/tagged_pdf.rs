@@ -213,6 +213,50 @@ fn actual_text_on_a_property_list_replaces_its_own_sequence() {
     );
 }
 
+/// The same page in the structured view: the property list's `/ActualText`
+/// stands on the glyphs `Page::text` stands it on, so its run keeps those
+/// characters — `fi`, with the quads and `/MCID` flat extraction gives them —
+/// and still says its text is not the glyphs', with nothing orphaned.
+#[test]
+fn a_property_lists_actual_text_stands_on_its_glyphs_in_the_structured_view() {
+    let content = "/Span << /MCID 0 /ActualText (fi) >> BDC \
+                   BT /F0 12 Tf 5 40 Td (o) Tj ET EMC\n"
+        .to_string()
+        + &marked(1, 20, "tail");
+    let page = page(build(
+        "",
+        "/K 10 0 R",
+        &content,
+        "10 0 obj\n<< /S /Document /Pg 3 0 R /K [11 0 R 12 0 R] >>\nendobj\n\
+         11 0 obj\n<< /S /Span /Pg 3 0 R /K [0] >>\nendobj\n\
+         12 0 obj\n<< /S /P /Pg 3 0 R /K [1] >>\nendobj\n",
+    ));
+
+    let structured = page.structured_text().expect("a structure tree");
+    let run = &structured.nodes[0];
+    assert_eq!(run.text, "fi");
+    assert_eq!(run.source, TextSource::ActualText);
+    let spelled: String = run.chars.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(spelled, "fi", "the run's characters spell its text");
+
+    let text = page.text();
+    let flat: Vec<&tinker_pdf::TextChar> = text
+        .lines()
+        .iter()
+        .flat_map(|line| line.chars.iter())
+        .filter(|c| c.mcid == Some(0))
+        .collect();
+    assert_eq!(run.chars.len(), flat.len());
+    for (structured, flat) in run.chars.iter().zip(flat) {
+        assert_eq!(
+            (&structured.text, structured.quad, structured.mcid),
+            (&flat.text, flat.quad, flat.mcid),
+            "the characters flat extraction stands the text on"
+        );
+    }
+    assert_eq!(structured.orphans, 0);
+}
+
 /// 14.9.3: a `Figure` describes content that draws no glyphs, and the
 /// description surfaces anyway.
 ///

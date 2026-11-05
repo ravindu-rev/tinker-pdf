@@ -343,8 +343,11 @@ pub struct StatedCell {
     pub id: Option<Vec<u8>>,
     /// The cell's text on this page, its runs in structure order.
     pub text: String,
-    /// The characters the cell claims on this page; empty where its text is
-    /// an `/ActualText` (14.9.4) or it draws nothing here.
+    /// The characters the cell claims on this page. A property list's
+    /// `/ActualText` keeps the characters [`crate::Page::text`] stands it on,
+    /// each on the glyph it replaces (ruling 14); empty where its text is an
+    /// element's `/ActualText`, or a property list's whose glyphs read nothing
+    /// (14.9.4), or it draws nothing here.
     pub chars: Vec<TextChar>,
     /// The quad enclosing `chars`; `None` when there are none.
     pub quad: Option<Quad>,
