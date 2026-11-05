@@ -1999,25 +1999,45 @@ impl Join<'_> {
         // 14.9.4: an `/ActualText` on the element replaces everything it
         // encloses. The subtree is still walked, so its identifiers count as
         // claimed rather than becoming orphans — the content was accounted
-        // for, it was simply spelled differently.
+        // for, it was simply spelled differently. It reads only on a page that
+        // holds what it replaces, the test `alt_only` makes for an `/Alt`:
+        // without it, an element on page 40 is read on every page.
         if !suppressed {
             if let Some(actual) = &element.actual_text {
-                self.nodes.push(StructuredNode {
-                    raw_type: element.raw_type.clone(),
-                    standard_type: element.standard_type.clone(),
-                    depth,
-                    text: actual.clone(),
-                    source: TextSource::ActualText,
-                    alt: element.alt.clone(),
-                    lang: element.lang.clone(),
-                    expansion: element.expansion.clone(),
-                    chars: Vec::new(),
-                });
+                if self.holds(element) {
+                    self.nodes.push(StructuredNode {
+                        raw_type: element.raw_type.clone(),
+                        standard_type: element.standard_type.clone(),
+                        depth,
+                        text: actual.clone(),
+                        source: TextSource::ActualText,
+                        alt: element.alt.clone(),
+                        lang: element.lang.clone(),
+                        expansion: element.expansion.clone(),
+                        chars: Vec::new(),
+                    });
+                }
                 self.kids(&element.kids, Some(element), depth + 1, true);
                 return;
             }
         }
         self.kids(&element.kids, Some(element), depth + 1, suppressed);
+    }
+
+    /// Whether `element` holds content on this page: its `/Pg` is the page,
+    /// or its subtree's is, or a sequence its subtree claims is here.
+    fn holds(&self, element: &StructElement) -> bool {
+        element.page == Some(self.index) || self.holds_any(&element.kids)
+    }
+
+    fn holds_any(&self, kids: &[StructKid]) -> bool {
+        kids.iter().any(|kid| match kid {
+            StructKid::Content { page, .. } => {
+                *page == Some(self.index) || (page.is_none() && self.unpaged_is_here)
+            }
+            StructKid::Element(element) => self.holds(element),
+            StructKid::Object(_) => false,
+        })
     }
 
     fn flush(&mut self, under: Option<&StructElement>, depth: u32, run: &mut Run) {

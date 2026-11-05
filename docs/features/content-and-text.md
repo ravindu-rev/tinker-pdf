@@ -386,7 +386,8 @@ only where no character carries it: the glyphs read nothing, or the page
 holds more spans than extraction states. An
 `/ActualText` on a structure element stays the structured view's: an
 element can span lines and pages, where a line has no place for it, and its
-run has no characters.
+run has no characters. It reads on a page that holds what it replaces — the
+element's `/Pg` or a sequence its subtree claims there — and on no other.
 (`text_logical_order.rs`'s `a_line_a_span_states_whole_reads_as_its_text`,
 `a_span_inside_a_left_to_right_line_stands_where_its_glyphs_do`,
 `a_span_inside_a_right_to_left_line_is_one_unit_of_its_order`,

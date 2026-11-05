@@ -345,6 +345,37 @@ fn a_cell_whose_label_a_property_list_states_is_spelled_by_its_characters() {
     );
 }
 
+/// **A table is stated only on the page that holds it.** A two-page document
+/// whose second page holds a table, a `Span` in its cell stating
+/// `/ActualText`, states the table there and on no other page: the element's
+/// text reads where its content is, not on every page the join reads.
+#[test]
+fn a_table_is_stated_only_on_the_page_that_holds_it() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(200.0, 100.0, |page| {
+        page.tagged_with(&Tag::new(b"P"), |page| {
+            page.text(b"F1", 12.0, 10.0, 50.0, "before");
+        });
+    });
+    builder.add_page(200.0, 100.0, |page| {
+        page.tagged_with(&Tag::new(b"Table"), |page| {
+            page.tagged_with(&Tag::new(b"TR"), |page| {
+                page.tagged_with(&Tag::new(b"TD"), |page| {
+                    page.tagged_with(&Tag::new(b"Span").actual_text("ffi"), |page| {
+                        page.text(b"F1", 12.0, 10.0, 50.0, "o");
+                    });
+                });
+            });
+        });
+    });
+    let doc = open(builder.finish());
+    let tables = stated(&doc);
+    let pages: Vec<u32> = tables.iter().map(|(index, _)| *index).collect();
+    assert_eq!(pages, [1], "stated on its own page alone");
+    assert_eq!(tables[0].1.cells[0].text, "ffi");
+}
+
 /// An untagged page states no table, and a tagged page with none states none.
 #[test]
 fn no_tree_and_no_table_state_nothing() {

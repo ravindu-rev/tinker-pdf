@@ -213,6 +213,40 @@ fn actual_text_on_a_property_list_replaces_its_own_sequence() {
     );
 }
 
+/// An element's `/ActualText` reads on the page that holds what it replaces
+/// and on no other: a two-page document whose second page's `Span` states
+/// `ffi` reads it there, and the first page's structured text does not, with
+/// nothing orphaned on either.
+#[test]
+fn an_elements_actual_text_reads_only_on_a_page_that_holds_it() {
+    let mut builder = tinker_pdf_cos::build::DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(200.0, 100.0, |page| {
+        page.tagged_with(&tinker_pdf::Tag::new(b"P"), |page| {
+            page.text(b"F1", 12.0, 10.0, 50.0, "first");
+        });
+    });
+    builder.add_page(200.0, 100.0, |page| {
+        page.tagged_with(&tinker_pdf::Tag::new(b"Span").actual_text("ffi"), |page| {
+            page.text(b"F1", 12.0, 10.0, 50.0, "o");
+        });
+    });
+    let doc = Document::open(builder.finish()).expect("it opens");
+    let first = doc
+        .page(0)
+        .expect("page one")
+        .structured_text()
+        .expect("a structure tree");
+    let second = doc
+        .page(1)
+        .expect("page two")
+        .structured_text()
+        .expect("a structure tree");
+    assert_eq!(first.plain_text(), "first\n", "no ffi on the first page");
+    assert_eq!(second.plain_text(), "ffi\n");
+    assert_eq!((first.orphans, second.orphans), (0, 0));
+}
+
 /// The same page in the structured view: the property list's `/ActualText`
 /// stands on the glyphs `Page::text` stands it on, so its run keeps those
 /// characters — `fi`, with the quads and `/MCID` flat extraction gives them —
