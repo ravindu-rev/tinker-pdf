@@ -177,6 +177,10 @@ pub struct StateParameters {
     pub miter_limit: Option<f64>,
     /// `/D`: the dash array and phase, as `d` takes them.
     pub dash: Option<(Vec<f64>, f64)>,
+    /// `/Font`: the text font's name and size, as `Tf` takes them. The name is
+    /// the one the source gives the font the dictionary names by reference,
+    /// which is the scope's own name for it where the scope has one.
+    pub font: Option<(Vec<u8>, f64)>,
     /// `/RI`.
     pub rendering_intent: Option<RenderingIntent>,
     /// `/UseBlackPtComp`.
@@ -862,6 +866,14 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         self.gs.dash_phase = phase;
     }
 
+    /// `Tf`, `/Font`: the text font by name, and its size (9.3.1).
+    fn set_font(&mut self, name: Vec<u8>, size: f64) {
+        if size.is_finite() {
+            self.gs.text.font = Some(name);
+            self.gs.text.size = size;
+        }
+    }
+
     /// `gs` (8.4.5): every parameter the dictionary sets, then its soft mask.
     ///
     /// The mask runs last, at the CTM in force (11.6.5.1), so its group runs
@@ -881,6 +893,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         }
         if let Some((dashes, phase)) = &set.dash {
             self.set_dash(dashes.clone(), *phase);
+        }
+        if let Some((name, size)) = &set.font {
+            self.set_font(name.clone(), *size);
         }
         if let Some(alpha) = set.fill_alpha {
             self.gs.fill_alpha = alpha.clamp(0.0, 1.0);
@@ -998,8 +1013,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     self.stack.get(self.stack.len().wrapping_sub(2)).cloned(),
                     self.num(0),
                 ) {
-                    self.gs.text.font = Some(name);
-                    self.gs.text.size = size;
+                    self.set_font(name, size);
                 }
             }
             b"Tc" => {

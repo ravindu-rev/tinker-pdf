@@ -13,6 +13,7 @@
 //! `/CA`, `/ca`, `/BM` and `/SMask` have no operator twin; their pages are held
 //! to pinned pixels.
 
+use tinker_pdf::write::{save, SaveOptions};
 use tinker_pdf::{Bitmap, Document, RenderOptions};
 
 /// A document whose pages share one indirect `/Resources` (object 3) holding
@@ -390,4 +391,164 @@ fn every_halftone_key_draws_as_the_page_without_it() {
         );
     }
     println!("ext-gstate-halftones: RAN {} keys", keys.len());
+}
+
+/// A face whose glyphs draw, embedded whole.
+const SANS: &[u8] =
+    include_bytes!("../../tinker-pdf-font/data/liberation/LiberationSans-Regular.ttf");
+
+/// One page of 120 x 40 drawing `content` under `resources`, with
+/// Liberation Sans embedded as object 4: a TrueType font of WinAnsi codes
+/// 72 to 111 (`H` to `o`).
+fn font_document(resources: &str, content: &str) -> Vec<u8> {
+    let widths = vec!["600"; 40].join(" ");
+    let mut objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [7 0 R] >>".to_vec(),
+        resources.as_bytes().to_vec(),
+        format!(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /LiberationSans \
+             /Encoding /WinAnsiEncoding /FirstChar 72 /LastChar 111 /Widths [{widths}] \
+             /FontDescriptor 5 0 R >>"
+        )
+        .into_bytes(),
+        b"<< /Type /FontDescriptor /FontName /LiberationSans /Flags 32 \
+           /FontBBox [-203 -303 1050 910] /ItalicAngle 0 /Ascent 905 /Descent -212 \
+           /CapHeight 716 /StemV 80 /FontFile2 6 0 R >>"
+            .to_vec(),
+    ];
+    let mut program = format!(
+        "<< /Length {} /Length1 {} >>\nstream\n",
+        SANS.len(),
+        SANS.len()
+    )
+    .into_bytes();
+    program.extend_from_slice(SANS);
+    program.extend_from_slice(b"\nendstream");
+    objects.push(program);
+    objects.push(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 40] /Resources 3 0 R \
+           /Contents 8 0 R >>"
+            .to_vec(),
+    );
+    objects.push(
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        )
+        .into_bytes(),
+    );
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        out.extend_from_slice(object);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// What one page of a document gives every reader of its text font: its
+/// pixels, its text, the program a subsetting save keeps of object 4, and how
+/// `Document::fonts` lists object 4.
+fn readings(bytes: Vec<u8>) -> (Vec<u8>, String, Vec<u8>, (String, bool, bool)) {
+    let doc = Document::open(bytes).expect("the document opens");
+    let page = doc.page(0).expect("a page");
+    let pixels = page.render(&RenderOptions::default()).data;
+    let text = page.text().plain_text();
+    let saved = save(&mut doc.editor(), &SaveOptions::default());
+    let reopened = Document::open(saved.bytes).expect("the saved document opens");
+    let program = reopened
+        .fonts()
+        .into_iter()
+        .find(|font| font.reference.is_some_and(|r| r.num == 4))
+        .and_then(|font| font.program_bytes())
+        .expect("object 4 keeps a program");
+    let listed = doc
+        .fonts()
+        .into_iter()
+        .find(|font| font.reference.is_some_and(|r| r.num == 4))
+        .map(|font| {
+            (
+                font.base_font.clone(),
+                font.is_embedded(),
+                font.resource_names.is_empty(),
+            )
+        })
+        .expect("object 4 is listed");
+    (pixels, text, program, listed)
+}
+
+/// **A font a `gs` selects draws and reads as the `Tf` that selects it**:
+/// rendered, extracted, subset on save and listed by `Document::fonts` alike,
+/// whether the scope's `/Font` names the object or not.
+#[test]
+fn a_font_set_by_gs_draws_and_reads_as_tf() {
+    let text = "5 15 Td (Hello) Tj ET";
+    let tf = readings(font_document(
+        "<< /Font << /F1 4 0 R >> >>",
+        &format!("BT /F1 18 Tf {text}"),
+    ));
+    let named = readings(font_document(
+        "<< /Font << /F1 4 0 R >> /ExtGState << /G << /Font [4 0 R 18] >> >> >>",
+        &format!("/G gs BT {text}"),
+    ));
+    let unnamed = readings(font_document(
+        "<< /ExtGState << /G << /Font [4 0 R 18] >> >> >>",
+        &format!("/G gs BT {text}"),
+    ));
+    let blank = readings(font_document(
+        "<< /Font << /F1 4 0 R >> >>",
+        "BT /F1 18 Tf ET",
+    ));
+
+    assert_ne!(tf.0, blank.0, "the `Tf` page draws its text");
+    assert_eq!(tf.1.trim(), "Hello");
+    for (label, page) in [
+        ("named in /Font", &named),
+        ("named only by the state", &unnamed),
+    ] {
+        assert_eq!(
+            page.0, tf.0,
+            "{label}: the page does not draw as its `Tf` twin"
+        );
+        assert_eq!(
+            page.1, tf.1,
+            "{label}: the text does not read as its `Tf` twin's"
+        );
+        assert_eq!(
+            page.2, tf.2,
+            "{label}: a subsetting save keeps another program than its `Tf` twin's"
+        );
+        assert_eq!(
+            (&page.3 .0, page.3 .1),
+            (&tf.3 .0, tf.3 .1),
+            "{label}: listed unlike its `Tf` twin"
+        );
+    }
+    assert!(
+        tf.2.len() < SANS.len(),
+        "the save subsets the program it keeps"
+    );
+    assert!(!tf.3 .2 && !named.3 .2, "`/Font` names it: F1");
+    assert!(
+        unnamed.3 .2,
+        "a font only a state names has no resource name of its own"
+    );
+    println!("ext-gstate-font: RAN rendered, extracted, subset and listed as `Tf`");
 }

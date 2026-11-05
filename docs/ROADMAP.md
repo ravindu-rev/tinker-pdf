@@ -108,8 +108,7 @@ waits on the owner is passed over until the owner decides.
 1. **The MS tier** from where it stands: MS-14 to MS-21, MS-04, MS-05, MS-06
    and MS-02, in that order. MS-01.9 closes MS-01 once the P rows that land
    its guards have.
-2. **K-06** (the `jbig2` fuzz target), **K-01** (the external graphics
-   state) and **K-02** (default colour spaces).
+2. **K-06** (the `jbig2` fuzz target) and **K-02** (default colour spaces).
 3. **P-01 to P-05** and **P-28**.
 
 Then the capability tiers in the order of the table above, with signatures'
@@ -123,7 +122,7 @@ AN-31; FJ-03e → AN-30; FJ-06 → AN-15; FJ-07 → AN-24; FJ-11 → AN-11c; SG-
 AN-17; SG-09 → FJ-17; SG-13 → AN-34; SE-07 → SG-25; FI-14 → ED-41; FI-27 →
 ED-33; FO-18 → ED-37; SD-02, SD-12 → FO-27; SU-12 → RC-18; SU-15 → SG-28;
 CD-01 → AN-29; CD-04 → FT-34; CD-16 → FI-33. These are the long chains that
-run forward across tiers: K-01 → RC-03, RC-08; RC-01, RC-02, RC-20 → ED-06b
+run forward across tiers: RC-01, RC-02, RC-20 → ED-06b
 → SD-02, SD-12; FO-10 → FO-08b, SD-02 (part 1), SD-12; FT-12 → SD-02, SD-12;
 FJ-01 → FJ-02 → FJ-03a…FJ-03f → AN-30, CD-12, SU-11; FJ-18 → FJ-10…FJ-13;
 SG-04 → SG-02; SG-01, SG-02, SG-05 → SG-06 → SG-07, SG-08, SG-09; SG-06,

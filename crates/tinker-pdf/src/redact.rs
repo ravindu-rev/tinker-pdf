@@ -1515,6 +1515,74 @@ fn fonts_in(editor: &DocumentEditor, resources: &Dict) -> HashMap<Vec<u8>, Arc<R
         .collect()
 }
 
+/// The font a reserved text-font name spells (`fonts::state_font`): the font
+/// a graphics state selects by reference where the scope's `/Font` does not
+/// name it, read as [`fonts_in`] reads a font there.
+fn reserved_font(editor: &DocumentEditor, name: &[u8]) -> Option<Arc<RunFont>> {
+    let reference = crate::fonts::reserved_reference(name)?;
+    let object = editor.get(reference)?;
+    let dict = object.as_dict()?;
+    let font = Arc::new(cos_font::read_in(editor, dict));
+    let (glyph_space, procedures, own) = if font.kind() == cos_font::FontKind::Type3 {
+        let own = Resolve::resolve_key(editor, dict, Name::RESOURCES)
+            .as_dict()
+            .filter(|own| !own.is_empty())
+            .cloned();
+        (
+            Some(GlyphSpace::read(editor, dict)),
+            carrying_procedures(editor, dict),
+            own,
+        )
+    } else {
+        (None, HashMap::new(), None)
+    };
+    Some(Arc::new(RunFont {
+        font,
+        glyph_space,
+        procedures,
+        own,
+        own_fonts: OnceLock::new(),
+    }))
+}
+
+/// [`reserved_font`], read once per object for one stream's walk.
+struct ReservedFonts<'a> {
+    editor: &'a DocumentEditor,
+    read: std::cell::RefCell<HashMap<Vec<u8>, Option<Arc<RunFont>>>>,
+}
+
+impl<'a> ReservedFonts<'a> {
+    fn new(editor: &'a DocumentEditor) -> Self {
+        ReservedFonts {
+            editor,
+            read: std::cell::RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn get(&self, name: &[u8]) -> Option<Arc<RunFont>> {
+        if let Some(hit) = self.read.borrow().get(name) {
+            return hit.clone();
+        }
+        let font = reserved_font(self.editor, name);
+        self.read.borrow_mut().insert(name.to_vec(), font.clone());
+        font
+    }
+}
+
+/// What the scopes a stream runs in answer about the names it uses, for
+/// [`rewrite`]: whether a graphics state sets a soft mask ([`Followed`]), the
+/// text font and size one sets (`fonts::font_of_state`), and the font a
+/// text-font name the scopes' `/Font` maps lack stands for — a reserved name
+/// a graphics state gave (`fonts::text_font`).
+struct ScopeAnswers<'a> {
+    sets_mask: &'a dyn Fn(&[u8]) -> bool,
+    state_font: &'a dyn Fn(&[u8]) -> Option<TextFont>,
+    text_font: &'a dyn Fn(&[u8]) -> Option<Arc<RunFont>>,
+}
+
+/// A text font's name and size, as `Tf` takes them.
+type TextFont = (Vec<u8>, f64);
+
 /// The glyph space each font in `/Font` declares (9.6.5), its glyph
 /// procedures that can draw text or an image, and its own `/Resources` when
 /// they name anything.
@@ -2907,13 +2975,21 @@ impl Scan<'_> {
                 // 11.6.5.2: a state that sets a soft mask draws its group.
                 b"gs" => {
                     if let Some(Token::Name(name)) = operands.last() {
+                        let name = name.clone();
                         if let Some((reference, dict)) =
-                            resolve_mask_group(self.editor, scope, name)
+                            resolve_mask_group(self.editor, scope, &name)
                         {
                             if counting {
                                 self.drawn.insert(reference.num);
                             }
                             self.form(reference, &dict, scope, counting, depth + 1);
+                        }
+                        // 8.4.5: a state that selects a font selects its face
+                        // as a `Tf` does.
+                        if let Some((font, _)) =
+                            crate::fonts::font_of_state(self.editor, scope, &name)
+                        {
+                            self.face(scope, &font, depth);
                         }
                     }
                 }
@@ -2970,10 +3046,16 @@ impl Scan<'_> {
     fn face(&mut self, scope: &Dict, name: &[u8], depth: u32) {
         let editor = self.editor;
         let fonts = Resolve::resolve_key(editor, scope, editor.intern(b"Font"));
-        let Some(entry) = fonts.as_dict().and_then(|f| f.get(editor.intern(name))) else {
-            return;
+        let entry = match fonts.as_dict().and_then(|f| f.get(editor.intern(name))) {
+            Some(entry) => entry.clone(),
+            // A reserved name a graphics state gave spells the object itself
+            // (`fonts::state_font`).
+            None => match crate::fonts::reserved_reference(name) {
+                Some(reference) => Object::Ref(reference),
+                None => return,
+            },
         };
-        let (key, font) = match entry {
+        let (key, font) = match &entry {
             Object::Ref(r) => (
                 format!("R{} {}", r.num, r.gen).into_bytes(),
                 editor.get(*r).and_then(|o| o.as_dict().cloned()),
@@ -3149,8 +3231,16 @@ fn cut_stream(
     warnings: &mut Vec<RedactionWarning>,
 ) -> (Vec<u8>, RedactionReport, Vec<XObjectUse>) {
     let sets_mask = |name: &[u8]| resolve_mask_group(editor, scope, name).is_some();
+    let state_font = |name: &[u8]| crate::fonts::font_of_state(editor, scope, name);
+    let reserved = ReservedFonts::new(editor);
+    let text_font = |name: &[u8]| reserved.get(name);
+    let answers = ScopeAnswers {
+        sets_mask: &sets_mask,
+        state_font: &state_font,
+        text_font: &text_font,
+    };
     let mut procedures = Procedures::default();
-    let first = rewrite(content, areas, &[fonts], ctm, &mut procedures, &sets_mask);
+    let first = rewrite(content, areas, &[fonts], ctm, &mut procedures, &answers);
     if procedures.found.is_empty() {
         return first;
     }
@@ -3197,7 +3287,7 @@ fn cut_stream(
         drop,
         ..Procedures::default()
     };
-    rewrite(content, areas, &[fonts], ctm, &mut again, &sets_mask)
+    rewrite(content, areas, &[fonts], ctm, &mut again, &answers)
 }
 
 /// How many streams one use of a Type 3 glyph may still run while its
@@ -3399,6 +3489,19 @@ fn draws_under(
             .iter()
             .any(|scope| resolve_mask_group(measure.editor, scope, name).is_some())
     };
+    let state_font = |name: &[u8]| {
+        measure
+            .scopes
+            .iter()
+            .find_map(|scope| crate::fonts::font_of_state(measure.editor, scope, name))
+    };
+    let reserved = ReservedFonts::new(measure.editor);
+    let text_font = |name: &[u8]| reserved.get(name);
+    let answers = ScopeAnswers {
+        sets_mask: &sets_mask,
+        state_font: &state_font,
+        text_font: &text_font,
+    };
     let mut procedures = Procedures::default();
     let (_, pass, uses) = rewrite(
         content,
@@ -3406,7 +3509,7 @@ fn draws_under(
         &measure.fonts,
         ctm,
         &mut procedures,
-        &sets_mask,
+        &answers,
     );
     for warning in pass.warnings {
         note(warnings, warning);
@@ -4480,20 +4583,30 @@ struct GlyphUse {
 /// A glyph is measured by its box. The Type 3 glyph occurrences `procedures`
 /// names are removed whatever their box says, and the other Type 3 glyphs
 /// whose procedures could draw beyond it are recorded in it, for
-/// [`cut_stream`] to measure. `sets_mask` answers whether the graphics state
-/// a `gs` names sets a soft mask, whose group is then a use ([`Followed`]).
+/// [`cut_stream`] to measure. `scope` answers whether the graphics state a
+/// `gs` names sets a soft mask, whose group is then a use ([`Followed`]), and
+/// which font it selects, if any, as a `Tf` would.
 fn rewrite(
     content: &[u8],
     areas: &[Redaction],
     fonts: &[&HashMap<Vec<u8>, Arc<RunFont>>],
     initial: Matrix,
     procedures: &mut Procedures,
-    sets_mask: &dyn Fn(&[u8]) -> bool,
+    scope: &ScopeAnswers<'_>,
 ) -> (Vec<u8>, RedactionReport, Vec<XObjectUse>) {
     let mut out = Vec::with_capacity(content.len());
     let mut tokens = Tokenizer::new(content);
     let mut operands: Vec<Token> = Vec::new();
-    let mut followed = Followed::new(sets_mask);
+    let mut followed = Followed::new(scope.sets_mask);
+    // The font a text-font name stands for: the scopes' `/Font` maps, then a
+    // reserved name's object (`fonts::text_font`).
+    let find_font = |name: &[u8]| {
+        fonts
+            .iter()
+            .find_map(|scope| scope.get(name))
+            .map(Arc::clone)
+            .or_else(|| (scope.text_font)(name))
+    };
     let mut pen = Pen {
         ctm: initial,
         ..Pen::default()
@@ -4579,6 +4692,13 @@ fn rewrite(
                 // and `TooManyXObjects` counts it with them. A state that
                 // sets no mask is not a use at all ([`Followed::state`]).
                 if let Some(Token::Name(name)) = operands.last() {
+                    // 8.4.5: a state that sets `/Font [font size]` selects
+                    // the text font and size as `Tf` does.
+                    if let Some((font, size)) = (scope.state_font)(name) {
+                        pen.size = size;
+                        pen.font = find_font(&font);
+                        pen.font_name = font;
+                    }
                     recorded = followed.state(name, pen.ctm);
                 }
             }
@@ -4618,10 +4738,7 @@ fn rewrite(
                         _ => None,
                     })
                     .unwrap_or_default();
-                pen.font = fonts
-                    .iter()
-                    .find_map(|scope| scope.get(&pen.font_name))
-                    .map(Arc::clone);
+                pen.font = find_font(&pen.font_name);
             }
             b"Tc" => pen.char_spacing = number(0),
             b"Tw" => pen.word_spacing = number(0),
@@ -4876,7 +4993,7 @@ fn redact_string(bytes: &[u8], pen: &Pen, areas: &[Redaction], procedures: &mut 
         return whole(None);
     }
 
-    let font = || pen.font_name.clone();
+    let font = || crate::fonts::shown(&pen.font_name);
     let left = bytes.len();
 
     let Some(selected) = pen.font.as_ref() else {
@@ -5183,6 +5300,68 @@ mod tests {
             !streams.contains("SECRET"),
             "the redacted bytes must be gone from the file, got: {streams}"
         );
+    }
+
+    /// A page drawing `content` under `resources`, with 12pt Helvetica as
+    /// object 4: `content` selects it and shows `PUBLIC SECRET` at (10, 50),
+    /// where [`second_word`] covers the second word.
+    fn raw_page(resources: &str, content: &str) -> Arc<CosDocument> {
+        let pdf = format!(
+            "%PDF-1.7\n\
+             1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+             2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+             3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 100] \
+             /Resources {resources} /Contents 5 0 R >>\nendobj\n\
+             4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n\
+             5 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+             trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+            content.len()
+        );
+        Arc::new(CosDocument::open(pdf.into_bytes()).expect("it opens"))
+    }
+
+    /// **Text whose font a `gs` set is redacted as text a `Tf` set** (8.4.5's
+    /// `/Font [font size]`), whether the scope's `/Font` names the object or
+    /// not: a font a redaction cannot see is text it leaves behind.
+    #[test]
+    fn text_whose_font_gs_set_is_redacted_as_tf_text() {
+        let tf = raw_page(
+            "<< /Font << /F0 4 0 R >> >>",
+            "BT /F0 12 Tf 10 50 Td (PUBLIC SECRET) Tj ET",
+        );
+        let (streams, twin) = redact_to_streams(tf, &[second_word()]);
+        assert!(
+            !streams.contains("SECRET") && streams.contains("PUBLIC"),
+            "the `Tf` twin is redacted: {streams}"
+        );
+        assert!(twin.glyphs > 0);
+        for (label, resources) in [
+            (
+                "named in /Font",
+                "<< /Font << /F0 4 0 R >> /ExtGState << /G << /Font [4 0 R 12] >> >> >>",
+            ),
+            (
+                "named only by the state",
+                "<< /ExtGState << /G << /Font [4 0 R 12] >> >> >>",
+            ),
+        ] {
+            let doc = raw_page(resources, "/G gs BT 10 50 Td (PUBLIC SECRET) Tj ET");
+            let (streams, report) = redact_to_streams(doc, &[second_word()]);
+            assert!(
+                !streams.contains("SECRET"),
+                "{label}: the redacted bytes survive: {streams}"
+            );
+            assert!(streams.contains("PUBLIC"), "{label}: {streams}");
+            assert_eq!(report.glyphs, twin.glyphs, "{label}");
+            assert!(
+                !report
+                    .warnings
+                    .iter()
+                    .any(|w| matches!(w, RedactionWarning::UnknownFont { .. })),
+                "{label}: {:?}",
+                report.warnings
+            );
+        }
     }
 
     #[test]
@@ -6953,7 +7132,11 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n";
             &[&fonts],
             Matrix::IDENTITY,
             &mut Procedures::default(),
-            &|_| false,
+            &ScopeAnswers {
+                sets_mask: &|_| false,
+                state_font: &|_| None,
+                text_font: &|_| None,
+            },
         );
         assert_eq!(report, RedactionReport::default());
         assert!(out.contains(&b'q'), "the operators survive");

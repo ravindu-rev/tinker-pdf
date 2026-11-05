@@ -212,6 +212,85 @@ fn text_page() -> Vec<u8> {
     builder.finish()
 }
 
+/// The `text` page with each line's font selected by a graphics state
+/// rather than by `Tf` (8.4.5's `/Font [font size]`), and the page's `/Font`
+/// taken away, so every reader reaches the face by the reserved name the state
+/// gives it.
+///
+/// Made from [`text_page`]'s own bytes, each `/F0 n Tf` moved into a state
+/// `/Sn` naming the face's object at size `n`: the same face, lines and
+/// positions, so its fingerprint is the `text` page's — a font a state selects
+/// draws as its `Tf` twin on every target.
+fn gs_text_page() -> Vec<u8> {
+    use tinker_pdf_cos::{
+        CosDocument, Dict, DocumentEditor, Object, Resolve, StreamData, WriteMode, WriteOptions,
+    };
+    let doc = Arc::new(CosDocument::open(text_page()).expect("the text page opens"));
+    let key = |name: &[u8]| doc.intern(name);
+    let catalog = Resolve::catalog(&*doc).expect("a catalog");
+    let pages = doc.resolve_key(&catalog, key(b"Pages"));
+    let kids = doc.resolve_key(pages.as_dict().expect("a page tree"), key(b"Kids"));
+    let page_ref = kids
+        .as_array()
+        .and_then(<[Object]>::first)
+        .and_then(Object::as_objref)
+        .expect("one page");
+    let page = doc.get(page_ref).expect("the page reads");
+    let mut page = page.as_dict().expect("a page dictionary").clone();
+    let resources = doc.resolve_key(&page, key(b"Resources"));
+    let resources = resources.as_dict().expect("resources");
+    let face = doc
+        .resolve_key(resources, key(b"Font"))
+        .as_dict()
+        .and_then(|fonts| fonts.get_ref(key(b"F0")))
+        .expect("the face is an object");
+    let contents = page.get_ref(key(b"Contents")).expect("one content stream");
+    let content = String::from_utf8(doc.stream_decoded(contents).expect("the content decodes"))
+        .expect("the content is text");
+    let mut moved = content.clone();
+    for size in [14, 9] {
+        let tf = format!("BT /F0 {size} Tf ");
+        assert_eq!(
+            moved.matches(&tf).count(),
+            1,
+            "the page sets size {size} once"
+        );
+        moved = moved.replace(&tf, &format!("/S{size} gs BT "));
+    }
+
+    let mut states = Dict::new();
+    for size in [14, 9] {
+        let mut state = Dict::new();
+        state.insert(
+            key(b"Font"),
+            Object::Array(vec![Object::Ref(face), Object::Int(size)]),
+        );
+        states.insert(key(format!("S{size}").as_bytes()), Object::Dict(state));
+    }
+    let mut scope = Dict::new();
+    for (name, value) in resources.iter() {
+        if *name != key(b"Font") {
+            scope.insert(*name, value.clone());
+        }
+    }
+    scope.insert(key(b"ExtGState"), Object::Dict(states));
+    page.insert(key(b"Resources"), Object::Dict(scope));
+
+    let mut editor = DocumentEditor::new(Arc::clone(&doc));
+    editor.put(page_ref, Object::Dict(page));
+    editor.put_stream(
+        contents,
+        StreamData {
+            dict: Dict::new(),
+            data: moved.into_bytes(),
+        },
+    );
+    editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        ..WriteOptions::default()
+    })
+}
+
 /// Curves and strokes at an angle, where flattening tolerance and the
 /// stroker's joins decide individual pixels.
 fn curves_page() -> Vec<u8> {
@@ -1918,6 +1997,13 @@ const GOLDEN: &[Fixture] = &[
         open: Open::Closed,
         least_ink: 700,
     },
+    // The `text` page, its font selected by graphics states: the same ink.
+    Fixture {
+        name: "gs_text",
+        build: gs_text_page,
+        open: Open::Closed,
+        least_ink: 700,
+    },
     Fixture {
         name: "curves",
         build: curves_page,
@@ -2341,6 +2427,13 @@ fn rendering_is_stable_across_targets() {
         (
             "default_spaces",
             "cfe787612cba9228dd2a089986d409a34f599f2000ea708f96b6278036967374",
+        ),
+        // The `text` page with its font selected by graphics states (8.4.5's
+        // `/Font`): the same face, lines and pixels, so the `text` page's
+        // fingerprint.
+        (
+            "gs_text",
+            "82510bb48a364a4bc92729cfcdcd1e14aa99fe817a323a78e48cfb51f76a181d",
         ),
     ];
     assert_eq!(

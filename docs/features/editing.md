@@ -446,7 +446,11 @@ face's procedures and resources — through `cos::font::from_resources_in`, the
 font loader generic over `Resolve`, so a run in a font only the editor
 holds (a page `import_page` copied in, a font object a caller wrote) is
 measured and cut rather than left whole as `UnknownFont`
-(`a_run_in_a_font_only_the_editor_holds_is_cut`). What
+(`a_run_in_a_font_only_the_editor_holds_is_cut`). A font a `gs` selects by
+reference (8.4.5's `/Font [font size]`) is the pen's font as a `Tf`'s is, and
+the scan reads its Type 3 face's procedures as at a `Tf`, whether the scope's
+`/Font` names the object or not, so text the renderer draws in it is text the
+redaction measures (`text_whose_font_gs_set_is_redacted_as_tf_text`). What
 redaction cannot **measure** it leaves whole and names in
 `RedactionReport::warnings` — two of that type's six classes, in the
 refusal table below; the third is the form placement one further down, the

@@ -304,6 +304,11 @@ mod tests {
     /// (object 4) a soft mask can name. Page `i` is 40 x 40 and draws
     /// `contents[i]`.
     fn document(states: &str, extra: &[String], contents: &[&str]) -> Vec<u8> {
+        document_in(&format!("<< /ExtGState << {states} >> >>"), extra, contents)
+    }
+
+    /// [`document`], with `resources` as object 3 as written.
+    fn document_in(resources: &str, extra: &[String], contents: &[&str]) -> Vec<u8> {
         let first = 5 + extra.len();
         let kids: Vec<String> = (0..contents.len())
             .map(|i| format!("{} 0 R", first + 2 * i))
@@ -316,7 +321,7 @@ mod tests {
                 contents.len(),
                 kids.join(" ")
             ),
-            format!("<< /ExtGState << {states} >> >>"),
+            resources.to_string(),
             format!(
                 "<< /Type /XObject /Subtype /Form /BBox [0 0 40 40] \
                  /Group << /S /Transparency /CS /DeviceGray >> /Length {} >>\n\
@@ -366,7 +371,12 @@ mod tests {
 
     /// Each page's recording, with `extra` as objects 5 onwards.
     fn recordings_with(states: &str, extra: &[String], contents: &[&str]) -> Vec<Vec<Event>> {
-        let doc = Document::open(document(states, extra, contents)).expect("the document opens");
+        recordings_of(document(states, extra, contents))
+    }
+
+    /// Each page's recording of `bytes`.
+    fn recordings_of(bytes: Vec<u8>) -> Vec<Vec<Event>> {
+        let doc = Document::open(bytes).expect("the document opens");
         (0..doc.page_count())
             .map(|i| {
                 let list = doc.page(i).expect("a page").display_list();
@@ -451,6 +461,67 @@ mod tests {
                 parting(&pair[0], &pair[1]).unwrap_or_default()
             );
         }
+
+        // A font set by `gs` records the events its `Tf` twin records: the
+        // state gives the object the name `/Font` binds it to, so every glyph
+        // carries the same id and every state the same name. A page whose
+        // `/Font` does not name the object differs in exactly those two: its
+        // glyphs carry the reserved name's id and its states that name.
+        let helvetica = ["<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string()];
+        let show = "5 5 Td (Hi) Tj ET";
+        let named = recordings_of(document_in(
+            "<< /Font << /F1 5 0 R >> /ExtGState << /G << /Font [5 0 R 12] >> >> >>",
+            &helvetica,
+            &[&format!("BT /F1 12 Tf {show}"), &format!("/G gs BT {show}")],
+        ));
+        assert!(
+            parting(&named[0], &named[1]).is_none(),
+            "/Font: {}",
+            parting(&named[0], &named[1]).unwrap_or_default()
+        );
+        let glyphs = |events: &[Event]| -> Vec<(u64, Option<Vec<u8>>, f64)> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::ShowGlyph { glyph, state } => state
+                        .as_deref()
+                        .map(|state| (glyph.font_id, state.text.font.clone(), state.text.size)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(glyphs(&named[1]).len(), 2, "both glyphs are shown");
+        let unnamed = recordings_of(document_in(
+            "<< /ExtGState << /G << /Font [5 0 R 12] >> >> >>",
+            &helvetica,
+            &[&format!("/G gs BT {show}")],
+        ));
+        let reserved = 1u64 << 63 | 5 << 16;
+        assert_eq!(
+            glyphs(&unnamed[0]),
+            vec![(reserved, Some(b"\x005 0".to_vec()), 12.0); 2],
+            "the reserved name and its id"
+        );
+        let normalise = |events: &[Event]| -> Vec<Event> {
+            events
+                .iter()
+                .cloned()
+                .map(|mut event| {
+                    if let Event::ShowGlyph { glyph, state } = &mut event {
+                        glyph.font_id = 0;
+                        if let Some(state) = state.as_deref_mut() {
+                            state.text.font = None;
+                        }
+                    }
+                    event
+                })
+                .collect()
+        };
+        assert_eq!(
+            normalise(&unnamed[0]),
+            normalise(&named[0]),
+            "the reserved name's page differs from its twin in the id and the name alone"
+        );
 
         // The four keys with no operator, against their pins.
         let states = "/StrokeHalf << /CA 0.5 >> /FillHalf << /ca 0.5 >> \

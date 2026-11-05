@@ -26,7 +26,16 @@ and `gs` (8.4.5), whose dictionary the resource seam reads once into a
 `StateParameters` value, one `Option` per parameter, `None` leaving it as it
 was. `/LW` `/LC` `/LJ` `/ML` `/D` are applied through the setters `w` `J` `j`
 `M` `d` call, so a dictionary and its operator check a degenerate value alike
-(`/LW -1` changes nothing, `/LC 7` is a butt cap); `/CA` `/ca` `/BM` and
+(`/LW -1` changes nothing, `/LC 7` is a butt cap); `/Font [font size]` sets the
+text font and size through the setter `Tf` calls, under a name: the scope's
+own name for the object where its `/Font` binds one, so the state and its
+`Tf` twin select the same name, and otherwise a reserved name — a NUL byte and
+the object's numbers, which no conforming `/Font` binds and no conforming `Tf`
+writes — that means the same object in every scope, whose glyphs carry the
+reference with the top bit set as their font id and whose warnings call it
+`5 0 R`. Every reader of the text font resolves a name the same way
+(`fonts::text_font`): rendering, extraction, the display list, SVG output,
+subsetting on save, redaction, PDF/A's walk and `Document::fonts`. `/CA` `/ca` `/BM` and
 `/SMask` set the alphas, the blend mode and the soft mask (11.3.5, 11.6.5.1),
 the mask last; and `/RI` `/FL` `/SM` `/SA` `/OP` `/op` `/OPM` `/AIS` `/TK`
 `/UseBlackPtComp`, the functions `/TR` `/TR2` `/BG` `/BG2` `/UCR` `/UCR2`

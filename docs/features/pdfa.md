@@ -110,7 +110,8 @@ form's `/DR` names standard-14 fonts nothing draws with, and a font drawn only
 at text rendering mode 3 paints nothing. `pdfa/content.rs` walks the page
 contents, the form XObjects they invoke and the appearance streams their
 annotations carry, tracking the rendering mode and the selected font through
-`q` and `Q`, and the font and colour groups are visitors over it.
+`q` and `Q` — a font a `gs` selects by reference (8.4.5's `/Font`) as a `Tf`
+selects one — and the font and colour groups are visitors over it.
 
 **The writer refuses at the call.** Under an `ArchivalProfile`,
 `add_base_font` and `add_named_font` return false because the standard 14 have

@@ -208,7 +208,9 @@ pub(crate) fn usage(doc: &CosDocument, work: Option<&Arc<Work>>) -> BTreeSet<Obj
         let (Some(name), Some(resources)) = (op.font, op.resources) else {
             return;
         };
-        if let Some(reference) = content::lookup(doc, resources, b"Font", name) {
+        // The scope's `/Font` entry, or the object a reserved name a
+        // graphics state gave spells (`fonts::text_font`).
+        if let Some((_, Some(reference))) = crate::fonts::text_font(doc, resources, name) {
             rendered.insert(reference);
         }
     });
@@ -875,7 +877,7 @@ fn widths(doc: &Arc<CosDocument>, work: Option<&Arc<Work>>, out: &mut Vec<Raw>) 
         let (Some(name), Some(resources)) = (op.font, op.resources) else {
             return;
         };
-        let Some(reference) = content::lookup(doc, resources, b"Font", name) else {
+        let Some((_, Some(reference))) = crate::fonts::text_font(&**doc, resources, name) else {
             return;
         };
         if !drawn.contains_key(&reference) {

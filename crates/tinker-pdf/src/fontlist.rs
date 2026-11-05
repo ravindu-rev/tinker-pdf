@@ -538,6 +538,50 @@ fn walk(
         }
     }
 
+    // 8.4.5: a graphics state names a font by reference (`/Font [font
+    // size]`), which an interpreter binds as `Tf` binds a name, so it is a
+    // font the scope could bind. Its resource names are the ones `/Font`
+    // gives it, none for a font only a state names.
+    let states = doc.resolve_key(resources, doc.intern(b"ExtGState"));
+    for (_, entry) in states.as_dict().into_iter().flat_map(Dict::iter) {
+        if out.len() >= MAX_FONTS {
+            return;
+        }
+        let state = doc.resolve(entry);
+        let Some(value) = state
+            .as_dict()
+            .and_then(|state| state.get(doc.intern(b"Font")))
+        else {
+            continue;
+        };
+        let value = doc.resolve(value);
+        let Some(reference) = value
+            .as_array()
+            .and_then(<[Object]>::first)
+            .and_then(Object::as_objref)
+        else {
+            continue;
+        };
+        let Ok(object) = doc.get(reference) else {
+            continue;
+        };
+        let Some(dict) = object.as_dict() else {
+            continue;
+        };
+        let font = read_one(doc, dict, Some(reference));
+        if !seen.insert(identity(Some(reference), &font)) {
+            continue;
+        }
+        if font.kind == FontKind::Type3 {
+            if let Some(nested) = doc.resolve_key(dict, Name::RESOURCES).as_dict().cloned() {
+                out.push(font);
+                walk(doc, &nested, depth + 1, scopes, seen, out);
+                continue;
+            }
+        }
+        out.push(font);
+    }
+
     for key in [&b"XObject"[..], &b"Pattern"[..]] {
         let table = doc.resolve_key(resources, doc.intern(key));
         let Some(table) = table.as_dict() else {

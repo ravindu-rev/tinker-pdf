@@ -352,6 +352,49 @@ fn a_standard_font_with_no_descriptor_is_a_font_with_no_program() {
     );
 }
 
+/// **A font a graphics state selects is judged as the font a `Tf` selects**
+/// (8.4.5's `/Font [font size]`): an unembedded font reached only by `gs` is
+/// reported as its `Tf` twin is, whether `/Font` names it or only the state
+/// does.
+#[test]
+fn an_unembedded_font_reached_only_by_gs_is_reported_as_its_tf_twin() {
+    let findings = |resources: &str, content: &str| {
+        let mut fixture = conforming();
+        fixture.descriptor = String::new();
+        fixture.program = None;
+        fixture.font = "/Type /Font /Subtype /Type1 /BaseFont /Helvetica".to_string();
+        fixture.resources = resources.to_string();
+        fixture.content = content.to_string();
+        fixture.findings()
+    };
+    let twin = findings(
+        "<< /Font << /F1 5 0 R >> >>",
+        "BT /F1 12 Tf 10 10 Td (A) Tj ET",
+    );
+    assert_eq!(
+        twin,
+        vec![FindingKind::FontNotEmbedded {
+            subtype: "Type1".to_string()
+        }]
+    );
+    for (label, resources) in [
+        (
+            "named in /Font",
+            "<< /Font << /F1 5 0 R >> /ExtGState << /G << /Font [5 0 R 12] >> >> >>",
+        ),
+        (
+            "named only by the state",
+            "<< /ExtGState << /G << /Font [5 0 R 12] >> >> >>",
+        ),
+    ] {
+        assert_eq!(
+            findings(resources, "/G gs BT 10 10 Td (A) Tj ET"),
+            twin,
+            "{label}"
+        );
+    }
+}
+
 /// A descriptor with no font-file key at all, and the near-miss: a descriptor
 /// whose `/FontFile2` is present and **null**, which one corpus fixture
 /// writes and which is a key present with no program behind it.

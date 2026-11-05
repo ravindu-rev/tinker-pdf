@@ -292,7 +292,10 @@ rendering anything. Each `DocumentFont` carries the `/Subtype` family
 (`FontKind`), `/BaseFont` exactly as the file spelled it, that name with
 9.6.4's subset tag stripped, the tag itself, whether a program is embedded and
 under which `/FontFile*` key (`ProgramKey`), and the resource names the font
-answered to. `tpdf fonts <file>` prints that list; `tpdf fonts <file> --out
+answered to. A font a scope's graphics state names by reference (8.4.5's
+`/Font [font size]`) is listed too, since an interpreter binds it as `Tf`
+binds a name; its resource names are the ones `/Font` gives it, none for a
+font only a state names. `tpdf fonts <file>` prints that list; `tpdf fonts <file> --out
 DIR` additionally writes each embedded program out, naming each file from the
 program's own first bytes rather than from the descriptor key, since
 `/FontFile3` holds a bare CFF or an OpenType wrapper and the listing does not

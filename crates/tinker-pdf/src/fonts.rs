@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use tinker_pdf_cos::{CosDocument, Dict, Font, Object};
+use tinker_pdf_cos::{CosDocument, Dict, Font, ObjRef, Object, Resolve};
 
 use crate::stats::{self, Counter, Work};
 
@@ -224,9 +224,127 @@ pub(crate) fn font_dict(
     work: Option<&Work>,
 ) -> Option<Dict> {
     stats::count(work, Counter::FontDictionariesResolved);
-    let fonts = doc.resolve_key(resources, doc.intern(b"Font"));
-    let dict = fonts.as_dict()?;
-    doc.resolve_key(dict, doc.intern(name)).as_dict().cloned()
+    text_font(doc, resources, name).map(|(dict, _)| dict)
+}
+
+// ---- a font selected by reference (8.4.5's `/Font [font size]`) ----------
+
+/// The first byte of a reserved text-font name. 7.3.5 allows any byte in a
+/// name but NUL, so no conforming resource dictionary binds one and no
+/// conforming `Tf` writes one.
+const RESERVED: u8 = 0;
+
+/// The text-font name a graphics state that sets `/Font [font size]` gives the
+/// font in a scope: the scope's own name for the object, when its `/Font`
+/// binds one to that reference — the first such entry in file order — so the
+/// state and its `Tf` twin select the same name; otherwise the reserved name
+/// that spells the reference ([`reserved_name`]), which means the same object
+/// in every scope.
+pub(crate) fn state_font<R: Resolve + ?Sized>(
+    doc: &R,
+    resources: &Dict,
+    reference: ObjRef,
+) -> Vec<u8> {
+    let table = doc.resolve_key(resources, doc.intern(b"Font"));
+    let bound = table.as_dict().and_then(|table| {
+        table
+            .iter()
+            .find(|(_, value)| value.as_objref() == Some(reference))
+            .and_then(|(name, _)| doc.name_bytes(*name))
+    });
+    match bound {
+        Some(name) => name.to_vec(),
+        None => reserved_name(reference),
+    }
+}
+
+/// The text font and size the `/ExtGState` a scope names `state` sets, under
+/// the name [`state_font`] gives it; `None` where it sets none, or sets one a
+/// reader cannot read (Table 58: an indirect reference and a finite size).
+pub(crate) fn font_of_state<R: Resolve + ?Sized>(
+    doc: &R,
+    resources: &Dict,
+    state: &[u8],
+) -> Option<(Vec<u8>, f64)> {
+    let table = doc.resolve_key(resources, doc.intern(b"ExtGState"));
+    let entry = doc.resolve(table.as_dict()?.get(doc.intern(state))?);
+    let value = doc.resolve(entry.as_dict()?.get(doc.intern(b"Font"))?);
+    let [font, size] = value.as_array()? else {
+        return None;
+    };
+    let reference = font.as_objref()?;
+    let size = doc
+        .resolve(size)
+        .as_number()
+        .filter(|size| size.is_finite())?;
+    Some((state_font(doc, resources, reference), size))
+}
+
+/// The reserved name for a font object: a NUL byte, then its object and
+/// generation numbers in decimal.
+pub(crate) fn reserved_name(reference: ObjRef) -> Vec<u8> {
+    let mut name = vec![RESERVED];
+    name.extend_from_slice(format!("{} {}", reference.num, reference.gen).as_bytes());
+    name
+}
+
+/// The object a reserved name spells, or `None` for any other name.
+pub(crate) fn reserved_reference(name: &[u8]) -> Option<ObjRef> {
+    let rest = name.strip_prefix(&[RESERVED])?;
+    let (num, gen) = core::str::from_utf8(rest).ok()?.split_once(' ')?;
+    Some(ObjRef::new(num.parse().ok()?, gen.parse().ok()?))
+}
+
+/// What a warning calls a text-font name: the reference a reserved name
+/// spells, `5 0 R` (ruling 10: the warning names the object), or the name
+/// itself.
+pub(crate) fn shown(name: &[u8]) -> Vec<u8> {
+    match reserved_reference(name) {
+        Some(reference) => format!("{} {} R", reference.num, reference.gen).into_bytes(),
+        None => name.to_vec(),
+    }
+}
+
+/// The font a text-font name stands for in a scope, as a font dictionary and
+/// its reference: the scope's `/Font` entry for the name; else, for a reserved
+/// name, the object it spells; else nothing, the missing font it is. The scope
+/// is asked first, so no name that resolves through `/Font` resolves
+/// differently.
+pub(crate) fn text_font<R: Resolve + ?Sized>(
+    doc: &R,
+    resources: &Dict,
+    name: &[u8],
+) -> Option<(Dict, Option<ObjRef>)> {
+    let table = doc.resolve_key(resources, doc.intern(b"Font"));
+    if let Some(entry) = table
+        .as_dict()
+        .and_then(|table| table.get(doc.intern(name)))
+    {
+        let reference = entry.as_objref();
+        return doc
+            .resolve(entry)
+            .as_dict()
+            .cloned()
+            .map(|dict| (dict, reference));
+    }
+    let reference = reserved_reference(name)?;
+    let object = doc.get(reference).ok()?;
+    object
+        .as_dict()
+        .cloned()
+        .map(|dict| (dict, Some(reference)))
+}
+
+/// A reserved name's font id: its reference with the top bit set, which no
+/// interned name's id (a `u32`) can be, and the same in every scope.
+pub(crate) fn reserved_id(reference: ObjRef) -> u64 {
+    (1 << 63) | (u64::from(reference.num) << 16) | u64::from(reference.gen)
+}
+
+/// The reference a reserved name's font id carries, or `None` for any other
+/// id.
+pub(crate) fn reserved_id_reference(id: u64) -> Option<ObjRef> {
+    (id >> 63 == 1).then(|| ObjRef::new(((id >> 16) & 0xFFFF_FFFF) as u32, (id & 0xFFFF) as u16))
 }
 
 /// Whether a font is one whose glyphs a substitute can stand in for.

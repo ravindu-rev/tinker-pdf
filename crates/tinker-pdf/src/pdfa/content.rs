@@ -263,6 +263,19 @@ impl Walker<'_> {
                         _ => None,
                     });
                 }
+                // 8.4.5: a graphics state that sets `/Font [font size]`
+                // selects the text font as `Tf` does, under the name the
+                // interpreter gives it (`fonts::state_font`).
+                b"gs" => {
+                    if let (Some(Token::Name(name)), Some(resources)) = (operands.last(), resources)
+                    {
+                        if let Some((selected, _)) =
+                            crate::fonts::font_of_state(self.doc, resources, name)
+                        {
+                            font = Some(selected);
+                        }
+                    }
+                }
                 b"Tr" => {
                     if let Some(Token::Number(value)) = operands.first() {
                         mode = *value;

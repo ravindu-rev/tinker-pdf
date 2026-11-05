@@ -14,18 +14,6 @@ come back") are not rows (NG-04).
 The nine reviewed goldens are a person's reading, H-60 in [H.md](H.md);
 K-08 extends the mechanism to every new rendered surface.
 
-## K-01 — The external graphics state, complete
-
-**The external graphics state, complete.** `gs` applies every key of ISO 32000-1 Table 58 and its 2.0 additions: `/LW`, `/LC`, `/LJ`, `/ML`, `/D`, `/RI`, `/Font`, `/OP`, `/op`, `/OPM`, `/BG`, `/BG2`, `/UCR`, `/UCR2`, `/TR`, `/TR2`, `/HT`, `/FL`, `/SM`, `/SA`, `/BM`, `/SMask`, `/CA`, `/ca`, `/AIS`, `/TK`, `/UseBlackPtComp`, `/HTO` — device-independent keys applied, device-dependent ones stored in the graphics state for RC-03 and RC-08
-
-**Exit criterion.** one fixture per key with its twin (the same state set by the operator) asserting identical recordings in `display_list` and identical pixels; `rotate` and `crop` relations re-run over the corpus with no regression
-
-**Doc:** [design/graphics-state.md](../design/graphics-state.md) · **Depends on:** —
-
-| Step | Kind | What | Where | Exit | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| K-01.5 | build | A font set by `gs` (`/Font [ref size]`) becomes the text font for every reader of the text font, in one change: the interpreter and the facade's font seam (rendering, text, `display_list`, `to_svg`, subset-on-save through `subset.rs`'s `font_object`), redaction's scan and pen (`redact.rs`, its two `Tf` arms), PDF/A's content walk (`pdfa/content.rs`) and `Document::fonts`'s listing (`fontlist.rs`), each through `fonts::state_font` and `fonts::text_font` as K-01.1 settles. *Note:* One change, because a font that renders where redaction cannot see it is text a redaction leaves behind. Inside a form the reference is absolute, not scoped. Adds a `gs`-driven page to `determinism.rs`'s table (K-07); no speed row, since no operation is new. | `crates/tinker-pdf-content/src/interpret.rs`, `crates/tinker-pdf/src/resources.rs`, `crates/tinker-pdf/src/fonts.rs`, `crates/tinker-pdf/src/fontlist.rs`, `crates/tinker-pdf/src/subset.rs`, `crates/tinker-pdf/src/redact.rs`, `crates/tinker-pdf/src/pdfa/content.rs`, `crates/tinker-pdf/src/pdfa/fonts.rs`, `crates/tinker-pdf/src/display.rs`, `crates/tinker-pdf/tests/ext_gstate.rs` (new), `crates/tinker-pdf/tests/pdfa_fonts.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/content-and-text.md`, `docs/features/editing.md`, `docs/features/fonts.md`, `docs/features/pdfa.md`, `docs/features/determinism.md` | `ext_gstate.rs` `a_font_set_by_gs_draws_and_reads_as_tf` (new): a page that selects its font by `gs` renders, extracts, subsets and is listed by `Document::fonts` as its `Tf` twin naming the same object, and so does a page whose `/Font` does not name the object; `display.rs`'s `gs_twins_record_the_same_events` takes the font's twins, recording the same events; `redact.rs`'s unit test `text_whose_font_gs_set_is_redacted_as_tf_text` (new) removes the twin's glyphs; `pdfa_fonts.rs` reports an unembedded font reached only by `gs` as its `Tf` twin is; in the default and `bundled-fonts` builds. | K-01.2 |
-
 ## K-02 — Default colour spaces
 
 **Default colour spaces** (8.6.5.6): `DefaultGray`, `DefaultRGB`, `DefaultCMYK` in a page's or form's `/ColorSpace` resources substitute for device spaces when rendering and extracting colour

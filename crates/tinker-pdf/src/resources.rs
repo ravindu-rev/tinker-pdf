@@ -116,6 +116,10 @@ struct Caches {
     /// cached too. A function written directly into a dictionary has no
     /// object, is a few numbers, and is read where it lies.
     functions: Mutex<HashMap<u64, Option<Arc<Function>>>>,
+    /// The fonts reached by a reserved name (`fonts::state_font`), by the
+    /// object it spells packed as `num << 16 | gen`, read on the first
+    /// question about each. `None` is cached too.
+    reserved_fonts: Mutex<HashMap<u64, Option<Arc<cos_font::Font>>>>,
 }
 
 /// What a scope's `/ColorSpace` subdictionary puts in for each device space
@@ -1818,10 +1822,7 @@ fn embedded_program(
     resources: &Dict,
     work: Option<&Work>,
 ) -> Option<Vec<u8>> {
-    let fonts = doc.resolve_key(resources, doc.intern(b"Font"));
-    let dict = fonts.as_dict()?;
-    let font = doc.resolve_key(dict, doc.intern(name));
-    let mut font = font.as_dict()?.clone();
+    let (mut font, _) = fonts::text_font(doc, resources, name)?;
 
     // A composite font keeps its program on the descendant.
     let descendants = doc.resolve_key(&font, doc.intern(b"DescendantFonts"));
@@ -1848,12 +1849,12 @@ fn embedded_program(
 
 impl FontSource for PageResources {
     fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
-        let Some(found) = self.fonts.get(font) else {
+        let Some(found) = self.font(font) else {
             // A name the resource dictionary does not define. Recorded so a
             // caller can tell "this page has no text" from "this page has text
             // whose font this build could not resolve".
             if let Ok(mut missing) = self.missing_fonts.lock() {
-                let name = String::from_utf8_lossy(font).into_owned();
+                let name = String::from_utf8_lossy(&fonts::shown(font)).into_owned();
                 if missing.len() < 64 && !missing.contains(&name) {
                     missing.push(name);
                 }
@@ -1868,11 +1869,11 @@ impl FontSource for PageResources {
     }
 
     fn is_vertical(&self, font: &[u8]) -> bool {
-        self.fonts.get(font).is_some_and(|f| f.is_vertical())
+        self.font(font).is_some_and(|f| f.is_vertical())
     }
 
     fn vertical_metrics(&self, font: &[u8], code: u32) -> (f64, f64, f64) {
-        let Some(found) = self.fonts.get(font) else {
+        let Some(found) = self.font(font) else {
             // Unreachable in practice: an unresolved font decodes to no codes
             // at all, so nothing is ever shown to ask about. 9.7.4.3's default
             // rather than a zero displacement, so that a future caller getting
@@ -1886,14 +1887,21 @@ impl FontSource for PageResources {
     }
 
     fn font_id(&self, font: &[u8]) -> u64 {
-        self.font_ids.get(font).copied().unwrap_or(0)
+        // A reserved name's id is its reference with the top bit set, the
+        // same in every scope (`fonts::reserved_id`).
+        self.font_ids
+            .get(font)
+            .copied()
+            .or_else(|| fonts::reserved_reference(font).map(fonts::reserved_id))
+            .unwrap_or(0)
     }
 
     /// `/BaseFont` as the dictionary writes it; `None` for a name this scope
     /// does not define and for a font that states none (a Type 3 font may
     /// omit it, 9.6.5 Table 110).
     fn font_name(&self, font: &[u8]) -> Option<Arc<str>> {
-        let name = self.fonts.get(font)?.base_font();
+        let found = self.font(font)?;
+        let name = found.base_font();
         (!name.is_empty()).then(|| Arc::from(name))
     }
 
@@ -2141,6 +2149,7 @@ impl PageResources {
                 b"LJ" => set.line_join = value.as_number(),
                 b"ML" => set.miter_limit = value.as_number(),
                 b"D" => set.dash = self.dash(value),
+                b"Font" => set.font = self.state_text_font(value),
                 b"RI" => {
                     set.rendering_intent =
                         name_of(value).map(|intent| RenderingIntent::from_name(&intent));
@@ -2185,6 +2194,24 @@ impl PageResources {
         // writes only `/OP true` is one that writes both.
         set.fill_overprint = fill_overprint.or(set.stroke_overprint);
         set
+    }
+
+    /// `/Font` (Table 58), `[font size]`: the font an indirect reference as
+    /// written and the size a finite number, as `Tf`'s operands. The text font
+    /// is the name `fonts::state_font` gives the object in this scope — the
+    /// scope's own name for it where `/Font` binds one, so a twin's `Tf`
+    /// selects the same name, and otherwise the reserved name that spells it.
+    fn state_text_font(&self, value: &Object) -> Option<(Vec<u8>, f64)> {
+        let [font, size] = value.as_array()? else {
+            return None;
+        };
+        let reference = font.as_objref()?;
+        let size = read_resolved(&self.doc, size, Object::as_number).filter(|v| v.is_finite())?;
+        let name = match self.resources.as_ref() {
+            Some(resources) => fonts::state_font(&*self.doc, resources, reference),
+            None => fonts::reserved_name(reference),
+        };
+        Some((name, size))
     }
 
     /// `/D`, `[dashArray dashPhase]`: the numbers as written, for the check
@@ -3116,7 +3143,7 @@ impl PageResources {
     /// what its name says for the extraction path, which turns it into
     /// `TextWarning::UnknownFont`.
     fn report_unresolved_glyph(&self, font: &[u8]) {
-        let name = String::from_utf8_lossy(font).into_owned();
+        let name = String::from_utf8_lossy(&fonts::shown(font)).into_owned();
         if let Ok(mut marker) = self.unresolved.lock() {
             *marker = Some(name.clone());
         }
@@ -3163,19 +3190,15 @@ impl PageResources {
             }
         }
         self.count(Counter::FontProgramMisses);
-        let name = self
-            .font_ids
-            .iter()
-            .find(|(_, id)| **id == font_id)
-            .map(|(name, _)| name.clone());
+        let name = self.resource_name(font_id);
         let built = name.as_ref().and_then(|name| {
-            let font = self.fonts.get(name)?;
+            let font = self.font(name)?;
             let resources = self.resources.as_ref()?;
             program_for(
                 &self.doc,
                 name,
                 resources,
-                font,
+                &font,
                 self.provider.as_deref(),
                 self.work.as_deref(),
             )
@@ -3192,6 +3215,30 @@ impl PageResources {
             .iter()
             .find(|(_, id)| **id == font_id)
             .map(|(name, _)| name.clone())
+            .or_else(|| fonts::reserved_id_reference(font_id).map(fonts::reserved_name))
+    }
+
+    /// The font a text-font name stands for in this scope: the `/Font` entry
+    /// read when the scope was built, or — for a reserved name a graphics
+    /// state gave (`fonts::state_font`) — the object it spells, read on the
+    /// first question about it.
+    fn font(&self, name: &[u8]) -> Option<Arc<cos_font::Font>> {
+        if let Some(font) = self.fonts.get(name) {
+            return Some(Arc::clone(font));
+        }
+        let reference = fonts::reserved_reference(name)?;
+        let key = (u64::from(reference.num) << 16) | u64::from(reference.gen);
+        if let Ok(cache) = self.caches.reserved_fonts.lock() {
+            if let Some(hit) = cache.get(&key) {
+                return hit.clone();
+            }
+        }
+        self.count(Counter::FontDictionariesResolved);
+        let read = cos_font::at(&self.doc, reference).map(Arc::new);
+        if let Ok(mut cache) = self.caches.reserved_fonts.lock() {
+            cache.insert(key, read.clone());
+        }
+        read
     }
 
     /// This scope's `/Font` subdictionary (7.8.3).
@@ -3218,6 +3265,10 @@ impl PageResources {
     /// subsetting leaves such a font whole rather than editing a copy of it
     /// that the file does not use.
     pub(crate) fn font_object(&self, font_id: u64) -> Option<ObjRef> {
+        // A reserved name's id carries the object itself.
+        if let Some(reference) = fonts::reserved_id_reference(font_id) {
+            return Some(reference);
+        }
         let name = self.resource_name(font_id)?;
         self.font_table()?.get_ref(self.doc.intern(&name))
     }
@@ -3228,13 +3279,39 @@ impl PageResources {
     /// which is what lets an embedded program whose text a redaction removed
     /// be cut down to `.notdef` rather than left whole.
     pub(crate) fn font_objects(&self) -> Vec<ObjRef> {
-        let Some(table) = self.font_table() else {
-            return Vec::new();
-        };
-        table
-            .iter()
-            .filter_map(|(_, value)| value.as_objref())
-            .collect()
+        let mut objects: Vec<ObjRef> = self
+            .font_table()
+            .map(|table| {
+                table
+                    .iter()
+                    .filter_map(|(_, value)| value.as_objref())
+                    .collect()
+            })
+            .unwrap_or_default();
+        // 8.4.5: a graphics state names a font by reference (`/Font [font
+        // size]`), which this scope's content may select as `Tf` selects one
+        // `/Font` names.
+        if let Some(resources) = self.resources.as_ref() {
+            let states = self
+                .doc
+                .resolve_key(resources, self.doc.intern(b"ExtGState"));
+            for (_, entry) in states.as_dict().into_iter().flat_map(Dict::iter) {
+                let state = self.doc.resolve(entry);
+                let font = state
+                    .as_dict()
+                    .and_then(|state| state.get(self.doc.intern(b"Font")))
+                    .map(|font| self.doc.resolve(font));
+                let reference = font
+                    .as_deref()
+                    .and_then(Object::as_array)
+                    .and_then(<[Object]>::first)
+                    .and_then(Object::as_objref);
+                if let Some(reference) = reference.filter(|r| !objects.contains(r)) {
+                    objects.push(reference);
+                }
+            }
+        }
+        objects
     }
 
     /// Every font this scope writes **directly** into its `/Font`
@@ -3262,7 +3339,7 @@ impl PageResources {
 
         // The font's own character mapping decides which glyph a code means.
         let name = self.resource_name(font_id)?;
-        let font = self.fonts.get(&name)?;
+        let font = self.font(&name)?;
         let text = font.text_of(code);
         let ch = text.chars().next();
 
@@ -3276,14 +3353,14 @@ impl PageResources {
             if sfnt.table(0x676C_7966).is_none() {
                 if let Some(table) = sfnt.table(0x4346_4620) {
                     if let Some(cff) = Cff::parse(table) {
-                        let chosen = self.cff_selection(&cff, font, &name, code);
+                        let chosen = self.cff_selection(&cff, &font, &name, code);
                         return self.cff_outline(&cff, chosen.glyph);
                     }
                 }
                 return None;
             }
 
-            let glyph = self.sfnt_selection(&sfnt, font, &name, code)?.glyph;
+            let glyph = self.sfnt_selection(&sfnt, &font, &name, code)?.glyph;
 
             let units = f64::from(sfnt.units_per_em.max(1));
             let outline = glyf::outline(&sfnt, glyph)?;
@@ -3291,7 +3368,7 @@ impl PageResources {
         }
 
         if let Some(cff) = Cff::parse(&program) {
-            let chosen = self.cff_selection(&cff, font, &name, code);
+            let chosen = self.cff_selection(&cff, &font, &name, code);
             return self.cff_outline(&cff, chosen.glyph);
         }
 
@@ -3345,17 +3422,17 @@ impl PageResources {
     pub(crate) fn selection(&self, font_id: u64, code: u32) -> Option<Selection> {
         let program = self.program(font_id)?;
         let name = self.resource_name(font_id)?;
-        let font = self.fonts.get(&name)?;
+        let font = self.font(&name)?;
 
         if let Some(sfnt) = Sfnt::parse(&program) {
             if sfnt.table(0x676C_7966).is_none() {
                 let cff = Cff::parse(sfnt.table(0x4346_4620)?)?;
-                return Some(self.cff_selection(&cff, font, &name, code));
+                return Some(self.cff_selection(&cff, &font, &name, code));
             }
-            return self.sfnt_selection(&sfnt, font, &name, code);
+            return self.sfnt_selection(&sfnt, &font, &name, code);
         }
         if let Some(cff) = Cff::parse(&program) {
-            return Some(self.cff_selection(&cff, font, &name, code));
+            return Some(self.cff_selection(&cff, &font, &name, code));
         }
         None
     }
