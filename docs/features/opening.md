@@ -300,7 +300,12 @@ head-only path engaged), `main_table_fetched()` and `whole_file_fetched()`.
 A read that needs chunks the cache does not hold asks the source for each run
 of them in a row with one read and keeps only the chunks that arrived whole,
 so a read over *k* missing chunks is one request rather than *k*, for the same
-bytes.
+bytes. Page one of the 60-page linearized fixture costs three requests — the
+container sniff, the head and its content — and never the main table, and the
+same pages saved without linearization cost five, within the bytes of their
+tail, their cross-reference section and page one's objects plus a chunk a
+request; `streaming_open.rs` holds both counts exactly, beside the ceilings of
+six and twelve, on all four targets.
 A streamed document that has fetched the whole file holds it once: the fetch
 asks the source for every byte as one range, keeps an answer of the whole
 length as the document's buffer and fills a short one into a buffer of the

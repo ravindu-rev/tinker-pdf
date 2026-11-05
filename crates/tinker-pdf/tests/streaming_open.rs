@@ -12,6 +12,7 @@
 //! produce the same bytes on every target, which is what `determinism.rs`
 //! pins for the writer already.
 
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -237,6 +238,12 @@ fn opening_a_large_document_and_reading_one_object_stays_under_budget() {
 /// off: a container would put the first page's objects in the same blob as
 /// everything else and defeat the layout entirely.
 fn a_linearized_document(pages: usize) -> Vec<u8> {
+    pages_saved(pages, true)
+}
+
+/// [`a_linearized_document`]'s pages, saved with or without linearization and
+/// with object streams off, so the two files differ in layout alone.
+fn pages_saved(pages: usize, linearize: bool) -> Vec<u8> {
     let mut builder = DocumentBuilder::new();
     for index in 0..pages {
         builder.add_page(200.0, 100.0, |page| {
@@ -265,7 +272,7 @@ fn a_linearized_document(pages: usize) -> Vec<u8> {
     let base = Document::open(builder.finish()).expect("it opens");
     base.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
-        linearize: true,
+        linearize,
         object_streams: false,
         ..WriteOptions::default()
     })
@@ -376,6 +383,313 @@ fn a_linearized_file_renders_page_one_without_touching_its_tail() {
         source.bytes_read()
     );
     assert!(!document.whole_file_fetched());
+}
+
+/// The requests page one of the 60-page linearized fixture may make
+/// (`docs/design/streaming-open.md`, "Time to first page").
+const LINEARIZED_PAGE_ONE_REQUEST_CEILING: usize = 6;
+
+/// And the requests it makes, measured and committed beside the ceiling: the
+/// container sniff, the head, and one read over the content's missing chunks.
+/// The ceiling alone has room for a request added under it.
+const LINEARIZED_PAGE_ONE_REQUESTS: usize = 3;
+
+/// The requests page one of the same pages saved without linearization may
+/// make.
+const UNLINEARIZED_PAGE_ONE_REQUEST_CEILING: usize = 12;
+
+/// And the requests it makes, measured and committed beside the ceiling: the
+/// container sniff, the head, the tail with the table and its trailer, the
+/// chunk holding the catalog, the page tree and the page, and one read over
+/// the content's missing chunks.
+const UNLINEARIZED_PAGE_ONE_REQUESTS: usize = 5;
+
+/// The value of an integer entry of a linearized file's first object, the
+/// linearization parameter dictionary (F.2): `/T`, the main cross-reference
+/// table's offset, or `/E`.
+fn linearization_entry(bytes: &[u8], key: &[u8]) -> u64 {
+    let end = find(bytes, b"endobj", 0).expect("the dictionary ends");
+    let head = &bytes[..end];
+    let mut at = 0;
+    while let Some(found) = find(head, key, at) {
+        let rest = &head[found + key.len()..];
+        let digits: String = rest
+            .iter()
+            .skip_while(|b| b.is_ascii_whitespace())
+            .take_while(|b| b.is_ascii_digit())
+            .map(|b| char::from(*b))
+            .collect();
+        let delimited = rest.first().is_some_and(u8::is_ascii_whitespace);
+        if delimited && !digits.is_empty() {
+            return digits.parse().expect("an offset");
+        }
+        at = found + key.len();
+    }
+    panic!(
+        "no {} in the linearization dictionary",
+        String::from_utf8_lossy(key)
+    );
+}
+
+/// The first occurrence of `needle` in `haystack` at or after `from`.
+fn find(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    haystack
+        .get(from..)?
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|at| at + from)
+}
+
+/// The three byte ranges page one of an unlinearized file needs, derived from
+/// a buffered open of the same bytes (`docs/design/streaming-open.md`, "The
+/// unlinearized bound, and its three terms"): the tail window `startxref` is
+/// found in; the cross-reference section it names, through its trailer; and
+/// page one's objects, each from its header to the next object's.
+fn page_one_terms(bytes: &[u8]) -> Vec<Range<u64>> {
+    use tinker_pdf_cos::{limits, pages, CosDocument, XrefEntry};
+
+    let doc = CosDocument::open(bytes.to_vec()).expect("the twin opens");
+    let length = bytes.len() as u64;
+    let mut terms = Vec::new();
+
+    // T: the window `xref::startxref` finds the keyword in.
+    let keyword = bytes
+        .windows(b"startxref".len())
+        .rposition(|window| window == b"startxref")
+        .expect("a startxref") as u64;
+    let near = length.saturating_sub(limits::STARTXREF_SCAN as u64);
+    let far = length.saturating_sub(limits::STARTXREF_SCAN_MAX as u64);
+    terms.push(if keyword >= near { near } else { far }..length);
+
+    // X: the section `startxref` names, through its trailer's `>>`.
+    let section = doc.last_startxref();
+    let trailer = find(bytes, b"trailer", section as usize).expect("a trailer");
+    let open = find(bytes, b"<<", trailer).expect("a trailer dictionary");
+    let mut depth = 0usize;
+    let mut at = open;
+    let close = loop {
+        match bytes.get(at..at + 2) {
+            Some(b"<<") => {
+                depth += 1;
+                at += 2;
+            }
+            Some(b">>") => {
+                depth -= 1;
+                at += 2;
+                if depth == 0 {
+                    break at;
+                }
+            }
+            Some(_) => at += 1,
+            None => panic!("the trailer dictionary does not close"),
+        }
+    };
+    terms.push(section..close as u64);
+
+    // P: page one's objects, each from its header to where the next object,
+    // or the section, begins — its `endobj`, and a stream's `endstream`.
+    let mut starts: Vec<u64> = doc
+        .xref()
+        .iter()
+        .filter_map(|(_, entry)| match entry {
+            XrefEntry::Offset { offset, .. } => Some(offset),
+            _ => None,
+        })
+        .collect();
+    starts.push(section);
+    starts.sort_unstable();
+    let extent = |reference: tinker_pdf_cos::ObjRef| -> Range<u64> {
+        let Some(XrefEntry::Offset { offset, .. }) = doc.xref().get(reference.num) else {
+            panic!("{reference:?} is not at an offset");
+        };
+        let next = starts
+            .iter()
+            .copied()
+            .find(|start| *start > offset)
+            .unwrap_or(length);
+        offset..next
+    };
+    let root = doc.trailer().get_ref(Name::ROOT).expect("a catalog");
+    let catalog = doc.get(root).expect("the catalog reads");
+    let mut objects = vec![root];
+    // The nodes from `/Pages` down to page one: each first kid in turn.
+    let mut node = catalog
+        .as_dict()
+        .and_then(|catalog| catalog.get_ref(Name::PAGES))
+        .expect("a page tree");
+    loop {
+        objects.push(node);
+        let object = doc.get(node).expect("a node reads");
+        let dict = object.as_dict().expect("a node is a dictionary");
+        match dict.get(Name::KIDS) {
+            None => break,
+            Some(kids) => {
+                let kids = doc.resolve(kids);
+                node = kids
+                    .as_array()
+                    .and_then(<[Object]>::first)
+                    .and_then(Object::as_objref)
+                    .expect("a first kid");
+            }
+        }
+    }
+    let page = pages::at(&doc, 0).expect("page one");
+    assert_eq!(
+        objects.last(),
+        Some(&page.reference),
+        "the walk ends at page one"
+    );
+    objects.extend(pages::contents(&doc, &page));
+    let leaf = doc.get(page.reference).expect("the leaf reads");
+    let leaf = leaf.as_dict().expect("a page dictionary");
+    if let Some(array) = leaf
+        .get_ref(Name::CONTENTS)
+        .filter(|r| doc.get(*r).is_ok_and(|object| object.as_array().is_some()))
+    {
+        objects.push(array);
+    }
+    // Its resources, and every indirect object reachable from them.
+    let mut pending: Vec<Object> = leaf.get(Name::RESOURCES).cloned().into_iter().collect();
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(object) = pending.pop() {
+        match object {
+            Object::Ref(reference) => {
+                if seen.insert(reference.num) {
+                    objects.push(reference);
+                    if let Ok(target) = doc.get(reference) {
+                        pending.push((*target).clone());
+                    }
+                }
+            }
+            Object::Array(items) => pending.extend(items),
+            Object::Dict(dict) => pending.extend(dict.iter().map(|(_, v)| v.clone())),
+            Object::Stream(stream) => {
+                pending.extend(stream.dict.iter().map(|(_, v)| v.clone()));
+            }
+            _ => {}
+        }
+    }
+    terms.extend(objects.into_iter().map(extent));
+    terms
+}
+
+/// How many bytes the union of `terms` holds: a byte two terms hold counts
+/// once.
+fn union_length(terms: &[Range<u64>]) -> u64 {
+    let mut sorted = terms.to_vec();
+    sorted.sort_by_key(|range| range.start);
+    let mut total = 0;
+    let mut reach = 0;
+    for range in sorted {
+        let start = range.start.max(reach);
+        if range.end > start {
+            total += range.end - start;
+            reach = range.end;
+        }
+    }
+    total
+}
+
+/// **Page one of a linearized file costs three requests and never its main
+/// table** (MS-08): at most `LINEARIZED_PAGE_ONE_BUDGET` bytes and six
+/// requests, the request count it measured held exactly, `main_table_fetched()`
+/// false, and no read touching the table at `/T`.
+#[test]
+fn a_linearized_first_page_costs_at_most_six_requests_and_never_its_main_table() {
+    let bytes = a_linearized_document(60);
+    let source = Arc::new(CountingSource::new(SliceSource::new(bytes.clone())));
+    let document = Document::open_streaming(source.clone()).expect("it opens");
+    let drawn = ink(&document
+        .page(0)
+        .expect("page one")
+        .render(&RenderOptions::default()));
+    assert!(drawn > 1000, "page one painted {drawn} pixels");
+
+    // The main cross-reference table at `/T`, and the trailer after it.
+    let table = linearization_entry(&bytes, b"/T")..bytes.len() as u64;
+    assert!(
+        !source.touched(&table),
+        "a read touched the main table at {}: {:?}",
+        table.start,
+        source.touching(&table)
+    );
+    assert!(!document.main_table_fetched(), "the main table was fetched");
+
+    let (reads, read) = (source.reads(), source.bytes_read());
+    println!(
+        "RAN linearized page one over requests: {reads} requests, {read} bytes, {:?}",
+        source.ranges()
+    );
+    assert!(
+        read <= LINEARIZED_PAGE_ONE_BUDGET,
+        "{read} bytes, over {LINEARIZED_PAGE_ONE_BUDGET}"
+    );
+    assert!(
+        reads <= LINEARIZED_PAGE_ONE_REQUEST_CEILING,
+        "{reads} requests, over the row's {LINEARIZED_PAGE_ONE_REQUEST_CEILING}"
+    );
+    assert_eq!(
+        reads,
+        LINEARIZED_PAGE_ONE_REQUESTS,
+        "page one makes another number of requests than it measured: {:?}",
+        source.ranges()
+    );
+}
+
+/// **The same pages unlinearized cost their tail, their table and page one,
+/// in at most twelve requests** (MS-08): no more bytes than the three terms a
+/// buffered open of the same bytes gives (`page_one_terms`) plus a chunk a
+/// request, and the request count it measured held exactly.
+#[test]
+fn the_same_pages_unlinearized_cost_their_tail_table_and_page_one_in_at_most_twelve_requests() {
+    let bytes = pages_saved(60, false);
+    let terms = page_one_terms(&bytes);
+    let source = Arc::new(CountingSource::new(SliceSource::new(bytes.clone())));
+    let document = Document::open_streaming(source.clone()).expect("it opens");
+    let drawn = ink(&document
+        .page(0)
+        .expect("page one")
+        .render(&RenderOptions::default()));
+    assert!(drawn > 1000, "page one painted {drawn} pixels");
+
+    let (reads, read) = (source.reads(), source.bytes_read());
+    let held = union_length(&terms);
+    let allowance = held + CHUNK_SIZE * reads as u64;
+    println!(
+        "RAN unlinearized page one over requests: {reads} requests, {read} bytes, within \
+         {held} in its terms and {CHUNK_SIZE} a request"
+    );
+    let outside = |read: &Range<u64>| -> u64 {
+        let inside: u64 = terms
+            .iter()
+            .map(|term| {
+                read.end
+                    .min(term.end)
+                    .saturating_sub(read.start.max(term.start))
+            })
+            .sum();
+        (read.end - read.start).saturating_sub(inside)
+    };
+    assert!(
+        read <= allowance,
+        "{read} bytes, over {held} in its terms and {CHUNK_SIZE} a request: each read and \
+         what it carried outside them: {:?}",
+        source
+            .ranges()
+            .iter()
+            .map(|r| (r.clone(), outside(r)))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        reads <= UNLINEARIZED_PAGE_ONE_REQUEST_CEILING,
+        "{reads} requests, over the row's {UNLINEARIZED_PAGE_ONE_REQUEST_CEILING}"
+    );
+    assert_eq!(
+        reads,
+        UNLINEARIZED_PAGE_ONE_REQUESTS,
+        "page one makes another number of requests than it measured: {:?}",
+        source.ranges()
+    );
 }
 
 /// How many bytes rendering page 31 of the 60-page linearized fixture may

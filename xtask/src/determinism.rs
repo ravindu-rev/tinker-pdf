@@ -82,6 +82,17 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/guards.rs",
         test: "the_tally_counts_the_same_on_every_target",
     },
+    // MS-08's counted guard: the requests page one of the linearized fixture
+    // and of its unlinearized twin makes, measured once and held on every
+    // target beside the row's ceilings.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/streaming_open.rs",
+        test: "a_linearized_first_page_costs_at_most_six_requests_and_never_its_main_table",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/streaming_open.rs",
+        test: "the_same_pages_unlinearized_cost_their_tail_table_and_page_one_in_at_most_twelve_requests",
+    },
     // The shaper's own fingerprints.
     Fingerprint {
         file: "crates/tinker-pdf-shape/tests/fingerprints.rs",

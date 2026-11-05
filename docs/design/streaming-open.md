@@ -580,7 +580,12 @@ are what catch a request added under them.
 
 Each prints a `RAN` line with its counts and runs in MS-01's guard suite on
 linux, windows, macos and `wasm32-wasip1`. The fixtures draw paths and no text,
-so one build.
+so one build. The committed counts are three requests for the linearized page
+— the sniff, the head, the content — and five for the twin: the sniff, the
+head, the tail with the table and its trailer, the chunk holding the catalog,
+the page tree and the page, and the content. Both tests are in K-07's
+determinism roster, since each claims for every target a count measured on
+one.
 
 #### The link time is computed, never slept
 
