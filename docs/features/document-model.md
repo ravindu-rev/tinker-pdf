@@ -57,6 +57,20 @@ reporting the displayed size with the quarter-turn axis swap applied.
 `/Count` is a claim like any other: a document that lies about it gets
 counted by walking instead of believed.
 
+**One page by index** descends by `/Count` rather than walking: from the root,
+a node's kids are read in order, a leaf counting one and a node its own
+`/Count`, and the lookup enters the kid that holds the page, carrying the
+inherited attributes down the path as the walk does — so it reads its root and
+at most fan-out kids at each level under it, and never a kid after the one it
+enters. It hands back the walk's page for every tree whose counts are honest.
+A count that is not a non-negative integer, kids whose counts pass their
+node's, a leaf reached before the index runs down, a node met twice on the
+path or a path past the depth cap sends the lookup to the walk, with a
+`PageCountMismatch` naming the node; an index past the root's own `/Count`
+goes to the walk without one, and an index at or past `MAX_PAGES` finds
+nothing, as the walk does. A linearized file's first-page entry and hint
+tables are asked first.
+
 The three production boundaries of 14.11.2 — `/BleedBox`, `/TrimBox`,
 `/ArtBox` — are read beside them and are **not** inherited: Table 30 marks
 four attributes inheritable and these are not among them, so a value on a
@@ -256,10 +270,12 @@ translation.
 
 `page_counted(index)` is `page(index)` with a `Stats` of what finding the page
 did ([rendering](rendering.md) names the counters): one walk of the page tree,
-which reads every node until it has `index + 1` pages and stops before the
-next — a lookup past the last page reads them all and finds nothing — or, on a
-linearized file, the page its first-page entry or its hint tables name and
-each ancestor read with it, and no walk. It counts that lookup alone, so two
+the descent's nodes — its root and the kids it reads on the way down — or,
+where a count does not hold up, those and a second walk that reads every node
+until it has `index + 1` pages and stops before the next, a lookup past the
+last page reading them all and finding nothing; or, on a linearized file, the
+page its first-page entry or its hint tables name and each ancestor read with
+it, and no walk. It counts that lookup alone, so two
 threads' lookups on one document never mix. A lookup decodes no stream of its
 own: the hint tables are decoded once for the document and kept, and no
 lookup counts them.

@@ -452,7 +452,7 @@ lands in the step named, in
 
 | Guard | Clause, as the row's exit states it | Test | Owner, and the step it lands in |
 | --- | --- | --- | --- |
-| A1 | `page(i)` visits ≤ depth × fan-out nodes | `a1_page_lookup_reads_at_most_depth_times_fan_out_nodes` | P-01, P-01.2 |
+| A1 | `page(i)` visits its root and ≤ depth × fan-out nodes under it | `a1_page_lookup_reads_at_most_depth_times_fan_out_nodes` | P-01, P-01.2, landed |
 | A1 | every page of a generated 10 000-page document ≤ 3 × 10 000 in total | `a1_every_page_of_ten_thousand_costs_at_most_thirty_thousand_visits` | P-01, P-01.3 |
 | A2 | text: work(4 000 pages) ≤ 4.4 × work(1 000) | `a2_text_is_linear_in_pages` | P-01, P-01.3 |
 | A2 | render-all at 36 dpi | `a2_render_all_at_36_dpi_is_linear_in_pages` | P-01, P-01.3 |
@@ -1989,22 +1989,34 @@ answers.
 
 From the root, a node's kids are taken in order, each read once: a kid
 without `/Kids` is a leaf and counts one; a kid with `/Kids` counts its own
-`/Count`. Kids are skipped while their counts sum to no more than `i`, and
-the descent enters the kid that holds page `i`, carrying the inherited
-attributes (`/Resources`, `/MediaBox`, `/CropBox`, `/Rotate`) down the path
-exactly as the walk does (`Inherited::extend`). At each node it checks:
+`/Count`; a kid that does not read counts none, as the walk finds no page in
+it. Kids are skipped while their counts sum to no more than `i`, and the
+descent enters the kid that holds page `i`, carrying the inherited attributes
+(`/Resources`, `/MediaBox`, `/CropBox`, `/Rotate`) down the path exactly as the
+walk does (`Inherited::extend`). The kids after the one it enters are never
+read: checking that every kid's count sums to the node's own would read the
+whole of a flat tree to find its first page, which the walk finds in two
+reads and MS-08.3 holds a streamed open to. At each node it checks:
 
-- the node's `/Count` is a non-negative integer;
-- its kids' counts sum to it;
+- the node's `/Count` is a non-negative integer, and more than what is left
+  of the index;
+- the counts of the kids it reads, up to and including the one it enters,
+  stay within it;
+- a leaf is reached with nothing left of the index;
 - the node is not already on the path (a cycle);
 - the path is no deeper than `limits::MAX_NEST_DEPTH`;
 - an index at or past `limits::MAX_PAGES` answers `None`, as the walk does.
 
 Any check that fails falls back to the walk, warning `PageCountMismatch`
-against the node. One lookup reads at most depth × fan-out nodes.
+against the node; an index past the root's own `/Count` goes to the walk
+without one. One lookup reads its root and at most fan-out kids at each
+level under it: the root and depth × fan-out nodes. It counts as one walk of
+the tree, as `collect_upto(1)` does, so a lookup's pinned count — one walk of
+the root and the page — is unchanged.
 
-**What it cannot see**: counts that are honest about a subtree the walk
-reaches differently. A subtree two parents share is two subtrees to the walk,
+**What it cannot see**: a lie in a kid it passes, whose `/Count` is believed
+as a reader that never enters the kid must; and counts that are honest about
+a subtree the walk reaches differently. A subtree two parents share is two subtrees to the walk,
 which follows `/Kids` and guards only the path it is on, and two subtrees to
 the descent, whose counts include it twice, so the two agree; a node whose
 leaves the walk truncates at `MAX_PAGES` is answered by the walk. And a
@@ -2021,8 +2033,8 @@ for more than one page — whichever comes first. A first lookup descends.
 
 That rule keeps both of A1's bounds:
 
-- **Each `page(i)` within depth × fan-out**: a lookup alone is the descent, and
-  a lookup after the build reads no node at all.
+- **Each `page(i)` within its root and depth × fan-out**: a lookup alone is
+  the descent, and a lookup after the build reads no node at all.
 - **A page loop within 3 visits a page**: a loop over *n* pages is one descent
   (at most depth × fan-out nodes), one walk (every node once: *n* leaves and
   the nodes above them, fewer than *n* for any fan-out of two or more), and

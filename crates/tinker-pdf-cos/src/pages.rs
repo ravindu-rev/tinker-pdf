@@ -12,6 +12,7 @@ use crate::object::{Dict, ObjRef, Object};
 use crate::warn::WarningKind;
 use crate::work::{Counter, Work};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 /// A rectangle in PDF units, normalized so the corners are ordered.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -580,9 +581,10 @@ pub fn at(doc: &CosDocument, index: u32) -> Option<Page> {
 }
 
 /// [`at`], counting into `work` when the operation is counting: the objects a
-/// linearized file's first-page entry or its hint tables read, or the walk
-/// that gathers `index + 1` pages — which a page past the last one walks to
-/// its end.
+/// linearized file's first-page entry or its hint tables read; or the `/Count`
+/// descent, one walk of the nodes on the page's path and the kids before
+/// them; or, where a count does not hold up, the walk that gathers
+/// `index + 1` pages — which a page past the last one walks to its end.
 #[must_use]
 pub fn at_counted(doc: &CosDocument, index: u32, work: Option<&Work>) -> Option<Page> {
     if index == 0 {
@@ -592,10 +594,146 @@ pub fn at_counted(doc: &CosDocument, index: u32, work: Option<&Work>) -> Option<
     } else if let Some(page) = hinted_page(doc, index, work) {
         return Some(page);
     }
+    match descend(doc, index, work) {
+        Descent::Found(page) => return Some(page),
+        Descent::Absent => return None,
+        Descent::Lied(node) => doc.warn_object(node, WarningKind::PageCountMismatch),
+        Descent::Past => {}
+    }
     let wanted = (index as usize).checked_add(1)?;
     collect_upto_counted(doc, wanted, work)
         .into_iter()
         .nth(index as usize)
+}
+
+/// What the `/Count` descent found.
+enum Descent {
+    /// The page.
+    Found(Page),
+    /// No page: the index is at or past `limits::MAX_PAGES`, which the walk
+    /// never reaches either.
+    Absent,
+    /// The page lies past the root's own `/Count`, or the tree has no root to
+    /// count: the walk decides, and nothing lied.
+    Past,
+    /// A count on the path did not hold up at this node: the walk decides, and
+    /// the node is named.
+    Lied(ObjRef),
+}
+
+/// One node of the tree, read and counted as the walk reads and counts one:
+/// `None` for a node that does not read as a dictionary, which holds no page.
+fn read_node(doc: &CosDocument, node: ObjRef, work: Option<&Work>) -> Option<Arc<Object>> {
+    tally(work, Counter::PageNodesVisited);
+    let object = doc.get(node).ok()?;
+    object.as_dict().is_some().then_some(object)
+}
+
+/// Page `index` by 7.7.3.2's `/Count`, without the walk.
+///
+/// From the root, a node's kids are read in order, each once: a kid without
+/// `/Kids` is a leaf and counts one, as the walk takes it whatever its `/Type`
+/// says; a kid with `/Kids` counts its own `/Count`; a kid that does not read
+/// counts none, as the walk finds no page in it. Kids are passed while their
+/// counts sum to no more than the index, and the descent enters the one that
+/// holds the page, carrying the inherited attributes down the path exactly as
+/// the walk does. So one lookup reads its root and at most fan-out kids at
+/// each level under it — and the kids after the one it enters are never read,
+/// which is what keeps a page near the front of a flat tree as cheap as the
+/// walk makes it.
+///
+/// What it checks, at each node on the path: a `/Count` that is a
+/// non-negative integer and more than what is left of the index; kids whose
+/// counts, up to and including the one it enters, stay within it; a leaf
+/// reached with nothing left of the index; no node twice on the path; and a
+/// path no deeper than `limits::MAX_NEST_DEPTH`. Any that fails is
+/// [`Descent::Lied`], and the walk answers. What it cannot see is a lie in a
+/// kid it passes: that kid's `/Count` is believed, as a reader that never
+/// enters it must.
+///
+/// Counted as one walk of the tree, whose nodes are the ones it reads.
+fn descend(doc: &CosDocument, index: u32, work: Option<&Work>) -> Descent {
+    if index as usize >= limits::MAX_PAGES {
+        return Descent::Absent;
+    }
+    let Some(tree) = doc.catalog().and_then(|root| root.get_ref(Name::PAGES)) else {
+        return Descent::Past;
+    };
+    tally(work, Counter::PageWalks);
+    let Some(mut object) = read_node(doc, tree, work) else {
+        return Descent::Past;
+    };
+    let mut node = tree;
+    let mut left = u64::from(index);
+    let mut inherited = Inherited::default();
+    let mut path = HashSet::new();
+    let mut depth = 0u32;
+    loop {
+        if depth > limits::MAX_NEST_DEPTH || !path.insert(node.num) {
+            return Descent::Lied(node);
+        }
+        let Some(dict) = object.as_dict() else {
+            return Descent::Lied(node);
+        };
+        inherited = inherited.extend(dict, doc);
+        let Some(kids) = dict.get_array(Name::KIDS) else {
+            // A leaf, which is the page when the index has run down to it.
+            return match left {
+                0 => Descent::Found(leaf(node, index, inherited, doc)),
+                _ => Descent::Lied(node),
+            };
+        };
+        let Some(count) = dict
+            .get_int(Name::COUNT)
+            .and_then(|count| u64::try_from(count).ok())
+        else {
+            return Descent::Lied(node);
+        };
+        if left >= count {
+            // Past the root's count, the walk decides what is there; past an
+            // inner node's, its parent counted it wrong.
+            return match depth {
+                0 => Descent::Past,
+                _ => Descent::Lied(node),
+            };
+        }
+        let mut passed = 0u64;
+        let mut entered = None;
+        for kid in kids.iter().filter_map(Object::as_objref) {
+            let read = read_node(doc, kid, work);
+            let holds = match read.as_deref().and_then(Object::as_dict) {
+                None => 0,
+                Some(kid_dict) => match kid_dict.get_array(Name::KIDS) {
+                    None => 1,
+                    Some(_) => match kid_dict
+                        .get_int(Name::COUNT)
+                        .and_then(|count| u64::try_from(count).ok())
+                    {
+                        Some(count) => count,
+                        None => return Descent::Lied(kid),
+                    },
+                },
+            };
+            let through = passed.saturating_add(holds);
+            if through > count {
+                return Descent::Lied(node);
+            }
+            if through > left {
+                entered = read.map(|read| (kid, read));
+                break;
+            }
+            passed = through;
+        }
+        // The kids ran out before the page: their counts fall short of the
+        // node's own.
+        let Some((kid, read)) = entered else {
+            return Descent::Lied(node);
+        };
+        left -= passed;
+        node = kid;
+        object = read;
+        depth += 1;
+    }
 }
 
 /// The `/Contents` streams of a page, in order.
@@ -647,6 +785,247 @@ pub fn content_bytes_counted(doc: &CosDocument, page: &Page, work: Option<&Work>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A PDF of `objects` (numbered from 1) with a classic table, whose
+    /// catalog is object 1.
+    fn pdf(objects: &[String]) -> Vec<u8> {
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (at, object) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", at + 1).as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// What `/Pages` node `level` of a generated tree writes besides its kids:
+    /// each attribute 7.7.3.4 lets a node pass down, at some levels and not
+    /// others, so a page inherits each from a different ancestor.
+    fn attributes(level: usize) -> String {
+        let mut out = String::new();
+        if level % 2 == 0 {
+            out += &format!(" /MediaBox [0 0 {} {}]", 300 + level, 400 + 2 * level);
+        }
+        if level % 3 == 1 {
+            out += &format!(" /CropBox [{level} {level} 250 350]");
+        }
+        if level % 2 == 1 {
+            out += &format!(" /Rotate {}", 90 * level);
+        }
+        if level % 3 == 2 {
+            out += &format!(" /Resources << /ProcSet [/PDF] /Level {level} >>");
+        }
+        out
+    }
+
+    /// A tree `depth` levels of `fan_out` kids under its root, every level
+    /// full, its nodes passing attributes down at every level, three leaves in
+    /// four carrying a box or a rotation of their own, and — where the tree is
+    /// two levels deep and the root has two kids or more — the root's first
+    /// kid shared by its last kid, in place of that kid's own first kid, so
+    /// two parents hold it. Every `/Count` is honest: it counts what the walk
+    /// finds, a shared subtree twice.
+    fn tree(depth: usize, fan_out: usize) -> Vec<u8> {
+        // Numbered breadth first from 2; the catalog is 1.
+        let mut levels: Vec<Vec<usize>> = vec![vec![2]];
+        let mut next = 3;
+        for _ in 0..depth {
+            let width = levels[levels.len() - 1].len() * fan_out;
+            levels.push((next..next + width).collect());
+            next += width;
+        }
+        let mut objects = vec!["<< /Type /Catalog /Pages 2 0 R >>".to_string()];
+        let mut counts = vec![0usize; next];
+        // Counts bottom up, the shared subtree counted under both parents.
+        for level in (0..=depth).rev() {
+            for (at, node) in levels[level].iter().enumerate() {
+                counts[*node] = if level == depth {
+                    1
+                } else {
+                    let mut kids: Vec<usize> =
+                        levels[level + 1][at * fan_out..(at + 1) * fan_out].to_vec();
+                    if level == 1 && fan_out > 1 && at == fan_out - 1 {
+                        kids[0] = levels[1][0];
+                    }
+                    kids.iter().map(|kid| counts[*kid]).sum()
+                };
+            }
+        }
+        for (level, nodes) in levels.iter().enumerate() {
+            for (at, node) in nodes.iter().enumerate() {
+                if level == depth {
+                    let own = match node % 4 {
+                        0 => " /Rotate 270",
+                        1 => " /MediaBox [0 0 123 456]",
+                        2 => " /TrimBox [5 5 100 100]",
+                        _ => "",
+                    };
+                    objects.push(format!("<< /Type /Page{own} >>"));
+                    continue;
+                }
+                let mut kids: Vec<usize> =
+                    levels[level + 1][at * fan_out..(at + 1) * fan_out].to_vec();
+                if level == 1 && fan_out > 1 && at == fan_out - 1 {
+                    kids[0] = levels[1][0];
+                }
+                let kids: Vec<String> = kids.iter().map(|kid| format!("{kid} 0 R")).collect();
+                objects.push(format!(
+                    "<< /Type /Pages{} /Kids [{}] /Count {} >>",
+                    attributes(level),
+                    kids.join(" "),
+                    counts[*node]
+                ));
+            }
+        }
+        pdf(&objects)
+    }
+
+    /// Whether two pages are the same page: reference, index, every box, the
+    /// rotation and the resources.
+    fn same(a: &Page, b: &Page) -> bool {
+        a.reference == b.reference
+            && a.index == b.index
+            && a.media_box == b.media_box
+            && a.crop_box == b.crop_box
+            && a.bleed_box == b.bleed_box
+            && a.trim_box == b.trim_box
+            && a.art_box == b.art_box
+            && a.rotation == b.rotation
+            && format!("{:?}", a.resources) == format!("{:?}", b.resources)
+    }
+
+    /// **The descent hands back the walk's page, for every page of every
+    /// honest tree**: fan-out 1 to 16, depth 1 to 6, at most 4 096 pages,
+    /// attributes inherited at every level, and a subtree two parents share.
+    /// Each lookup is the descent, not the walk: it reads its root and at most
+    /// fan-out kids a level, where the walk to a late page reads every node
+    /// before it.
+    #[test]
+    fn descent_and_walk_agree_on_every_page_of_honest_trees() {
+        let mut trees = 0;
+        for fan_out in 1..=16usize {
+            for depth in 1..=6u32 {
+                let Some(leaves) = fan_out.checked_pow(depth).filter(|n| *n <= 4_096) else {
+                    continue;
+                };
+                let doc = CosDocument::open(tree(depth as usize, fan_out)).expect("the tree opens");
+                let walked = collect(&doc);
+                // The shared subtree, `fan_out^(depth - 1)` pages, stands in
+                // for one of `fan_out^(depth - 2)`.
+                let shared = if fan_out > 1 && depth >= 2 {
+                    fan_out.pow(depth - 1) - fan_out.pow(depth - 2)
+                } else {
+                    0
+                };
+                assert_eq!(
+                    walked.len(),
+                    leaves + shared,
+                    "the walk of {fan_out}^{depth}"
+                );
+                for page in &walked {
+                    let work = Work::new();
+                    let found = at_counted(&doc, page.index, Some(&work)).expect("a page");
+                    assert!(
+                        same(&found, page),
+                        "{fan_out}^{depth}: page {} is {found:?} by the descent and {page:?} by \
+                         the walk",
+                        page.index
+                    );
+                    let stats = work.stats();
+                    // A page under the shared subtree sits a level deeper.
+                    let deepest = u64::from(depth) + u64::from(shared > 0);
+                    let bound = 1 + deepest * fan_out as u64;
+                    assert_eq!(stats.page_walks, 1, "one walk of the tree");
+                    assert!(
+                        stats.page_nodes_visited <= bound,
+                        "{fan_out}^{depth}: page {} read {} nodes, over {bound}",
+                        page.index,
+                        stats.page_nodes_visited
+                    );
+                }
+                assert!(
+                    at(&doc, walked.len() as u32).is_none(),
+                    "past the last page"
+                );
+                assert!(
+                    !doc.warnings()
+                        .iter()
+                        .any(|w| w.kind == WarningKind::PageCountMismatch),
+                    "{fan_out}^{depth}: an honest tree is said to lie"
+                );
+                trees += 1;
+            }
+        }
+        assert!(trees >= 40, "{trees} trees");
+    }
+
+    /// **A count that lies falls back to the walk and says so**: a node whose
+    /// `/Count` claims a page its kids do not hold sends the lookup to the
+    /// walk, which answers as it always did, and the lie is a
+    /// `PageCountMismatch` naming the node. A count that is not a non-negative
+    /// integer, and a node met twice on the path, do the same.
+    #[test]
+    fn a_lying_count_falls_back_to_the_walk_and_says_so() {
+        // 2 is the root, holding 3 (claiming 3 pages and holding 2) and the
+        // leaf 6; 4 and 5 are 3's leaves.
+        let lying = |count: &str| {
+            pdf(&[
+                "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+                "<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 4 /MediaBox [0 0 100 100] >>"
+                    .to_string(),
+                format!("<< /Type /Pages /Kids [4 0 R 5 0 R] /Count {count} >>"),
+                "<< /Type /Page /Rotate 90 >>".to_string(),
+                "<< /Type /Page /Rotate 180 >>".to_string(),
+                "<< /Type /Page /Rotate 270 >>".to_string(),
+            ])
+        };
+        for count in ["3", "-1", "two"] {
+            let doc = CosDocument::open(lying(count)).expect("it opens");
+            let walked = collect(&doc);
+            assert_eq!(walked.len(), 3, "the walk finds three pages");
+            // Page 2 is the leaf 6, which the lie in 3 would place wrong.
+            let found = at(&doc, 2).expect("the walk finds page 2");
+            assert!(same(&found, &walked[2]), "/Count {count}: {found:?}");
+            assert_eq!(found.reference, ObjRef::new(6, 0));
+            let named = doc.warnings().into_iter().any(|w| {
+                w.kind == WarningKind::PageCountMismatch && w.object == Some(ObjRef::new(3, 0))
+            });
+            assert!(named, "/Count {count}: no PageCountMismatch names node 3");
+        }
+
+        // A node met twice on the path: 3's kids hold 3 itself.
+        let cyclic = pdf(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 2 /MediaBox [0 0 100 100] >>".to_string(),
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>".to_string(),
+            "<< /Type /Page >>".to_string(),
+        ]);
+        let doc = CosDocument::open(cyclic).expect("it opens");
+        let walked = collect(&doc);
+        let found = at(&doc, 0);
+        assert_eq!(
+            found.map(|p| p.reference),
+            walked.first().map(|p| p.reference)
+        );
+        assert!(doc
+            .warnings()
+            .iter()
+            .any(|w| w.kind == WarningKind::PageCountMismatch));
+    }
 
     #[test]
     fn rotation_normalizes_every_way_a_file_can_write_it() {

@@ -86,13 +86,16 @@ const fn owed(
 /// of the page, so each is owed to P-01's index. Their tests will be in that
 /// file, whose allocator counts a test's own thread.
 const ROSTER: &[Guard] = &[
-    owed(
-        "A1",
-        "page(i) visits at most depth x fan-out nodes",
-        "a1_page_lookup_reads_at_most_depth_times_fan_out_nodes",
-        "P-01",
-        "P-01.2",
-    ),
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A1",
+            "page(i) visits its root and at most depth x fan-out nodes under it",
+            "a1_page_lookup_reads_at_most_depth_times_fan_out_nodes",
+            "P-01",
+            "P-01.2",
+        )
+    },
     owed(
         "A1",
         "every page of a generated 10 000-page document costs at most 3 x 10 000 visits",
@@ -595,6 +598,33 @@ fn the_a1_tree_is_ten_thousand_pages_ten_kids_a_node_over_four_levels() {
             assert_eq!(name.as_ref(), expected, "a node at depth {depth}");
         }
     }
+}
+
+/// **A1: `page(i)` reads its root and at most depth x fan-out nodes under
+/// it**, through MS-01's document door: every page of A1's tree looked up by
+/// index on its own, each lookup's count held to the bound, and the last page
+/// of every level reading exactly it — the root and all ten kids at each of
+/// four levels.
+#[test]
+fn a1_page_lookup_reads_at_most_depth_times_fan_out_nodes() {
+    let document = Document::open(tree(A1_DEPTH, A1_FAN_OUT)).expect("the tree opens");
+    let bound = 1 + u64::from(A1_DEPTH) * A1_FAN_OUT as u64;
+    let mut most = 0;
+    for index in 0..10_000u32 {
+        let (page, stats) = document.page_counted(index);
+        assert!(page.is_some(), "page {index} is in the tree");
+        assert!(
+            stats.page_nodes_visited <= bound,
+            "page {index} read {} nodes, over {bound}",
+            stats.page_nodes_visited
+        );
+        most = most.max(stats.page_nodes_visited);
+    }
+    assert_eq!(
+        most, bound,
+        "the last page reads the root and every kid on its path"
+    );
+    println!("guard-a1-lookup: RAN 10 000 lookups, at most {most} nodes each, bound {bound}");
 }
 
 // ---- A2 and A6: documents of pages to read, write and merge ---------------

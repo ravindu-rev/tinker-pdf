@@ -82,6 +82,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/guards.rs",
         test: "the_tally_counts_the_same_on_every_target",
     },
+    // MS-01's A1 lookup guard: the nodes one page lookup reads, held on every
+    // target to its root and depth x fan-out under it.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a1_page_lookup_reads_at_most_depth_times_fan_out_nodes",
+    },
     // MS-08's counted guard: the requests page one of the linearized fixture
     // and of its unlinearized twin makes, measured once and held on every
     // target beside the row's ceilings.
