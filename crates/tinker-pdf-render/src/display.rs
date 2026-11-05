@@ -48,9 +48,12 @@
 //! stop, and says so ([`DisplayRecorder::overflowed`]); the caller then draws
 //! the page the direct way, which holds one canvas whatever the page does.
 
+use std::sync::Arc;
+
 use tinker_pdf_content::record::{Answers, Event, RecordingDevice};
 use tinker_pdf_content::{
     Device, Glyph, GraphicsState, Group, ImageRef, MarkedProps, MaskGroup, PathSegment,
+    StoredParameters,
 };
 
 use crate::{MAX_GROUP_BUFFERS, MAX_GROUP_DEPTH};
@@ -73,18 +76,19 @@ use crate::{MAX_GROUP_BUFFERS, MAX_GROUP_DEPTH};
 /// | --- | --- |
 /// | The most any fixture in this repository spends | 67 108 864 |
 /// | A 200-page comic, whose largest page is one image | 1 000 |
-/// | A dense 200-page fixed document, 2 000 elements and 40 000 path segments a page | 3 184 000 |
-/// | A 300-page reflowable book, a page of 2 500 glyphs | 1 190 000 |
+/// | A dense 200-page fixed document, 2 000 elements and 40 000 path segments a page | 3 200 000 |
+/// | A 300-page reflowable book, a page of 2 500 glyphs | 1 210 000 |
 /// | **This cap** | **64 MiB** |
 ///
 /// The count is [`kept_bytes`]: each event's own size, the state it carries
 /// with that state's heap parts, its path at `size_of::<PathSegment>()` a
 /// segment, and every name, string, inline image and mask-group stream it
 /// copies — what the recording allocates, short of the allocator's own
-/// bookkeeping. The yardsticks are on a 64-bit target, where an event is 168
-/// bytes, a state 304 and a segment 56: a fixed page's two thousand elements
-/// and forty thousand segments are 3 184 000, a book page's glyphs a little
-/// under 1.2 MB, and a comic page — `q`, the image's `cm` and `Do`, `Q` —
+/// bookkeeping — and the stored parameters a state shares, once per change
+/// (`DisplayRecorder::count`). The yardsticks are on a 64-bit target, where an
+/// event is 168 bytes, a state 312 and a segment 56: a fixed page's two
+/// thousand elements and forty thousand segments are 3 200 000, a book page's
+/// glyphs a little over 1.2 MB, and a comic page — `q`, the image's `cm` and `Do`, `Q` —
 /// under a kilobyte. The cap clears the densest by 21x, and a page past it
 /// still draws. The fixtures' figure is the cap itself and is allowed, for
 /// `MAX_PAGE_PIXELS`'s reason: the test that fires it records past it, and the
@@ -92,12 +96,13 @@ use crate::{MAX_GROUP_BUFFERS, MAX_GROUP_DEPTH};
 /// before it.
 ///
 /// Reachable: `0 0 1 1 re f` is thirteen bytes of content and one recorded
-/// fill of five segments, 752 bytes, so a content stream as long as
-/// `MAX_DECODED_STREAM` records 7.2 GiB before any form multiplies it.
+/// fill of five segments, 760 bytes, so a content stream as long as
+/// `MAX_DECODED_STREAM` records 7.3 GiB before any form multiplies it.
 pub const MAX_DISPLAY_LIST_BYTES: usize = 64 << 20;
 
 /// What one recorded event holds, in bytes, as [`MAX_DISPLAY_LIST_BYTES`]
-/// counts it: its own size, and everything it copied to the heap.
+/// counts it: its own size, and everything it copied to the heap. The stored
+/// parameters its state shares are the recorder's to count, once per change.
 #[must_use]
 pub fn kept_bytes(event: &Event) -> usize {
     use core::mem::size_of;
@@ -160,6 +165,21 @@ pub fn kept_bytes(event: &Event) -> usize {
         _ => 0,
     };
     size_of::<Event>().saturating_add(own)
+}
+
+/// The graphics state an event carries, if it carries one.
+fn event_state(event: &Event) -> Option<&GraphicsState> {
+    match event {
+        Event::ShowGlyph { state, .. }
+        | Event::FillPath { state, .. }
+        | Event::StrokePath { state, .. }
+        | Event::ClipPath { state, .. }
+        | Event::DrawImage { state, .. }
+        | Event::DrawShading { state, .. }
+        | Event::BeginGroup { state, .. }
+        | Event::BeginSoftMask { state, .. } => state.as_deref(),
+        _ => None,
+    }
 }
 
 /// The renderer's answers to the interpreter's questions, apart from its
@@ -324,6 +344,10 @@ pub struct DisplayRecorder {
     budget: usize,
     /// Whether the budget was passed, after which nothing is kept.
     overflowed: bool,
+    /// The stored parameters last counted (`GraphicsState::stored`): a value
+    /// every event after a `gs` shares is counted once, when the recording
+    /// first holds it, and again when an event holds another.
+    stored: Option<Arc<StoredParameters>>,
 }
 
 impl Default for DisplayRecorder {
@@ -348,6 +372,7 @@ impl DisplayRecorder {
             counted: 0,
             budget: MAX_DISPLAY_LIST_BYTES,
             overflowed: false,
+            stored: None,
         }
     }
 
@@ -410,6 +435,16 @@ impl DisplayRecorder {
         let mut added = 0usize;
         for event in events.get(self.counted..).unwrap_or_default() {
             added = added.saturating_add(kept_bytes(event));
+            if let Some(stored) = event_state(event).and_then(|state| state.stored.as_ref()) {
+                if !self
+                    .stored
+                    .as_ref()
+                    .is_some_and(|last| Arc::ptr_eq(last, stored))
+                {
+                    added = added.saturating_add(core::mem::size_of::<StoredParameters>());
+                    self.stored = Some(Arc::clone(stored));
+                }
+            }
         }
         self.counted = events.len();
         if self.kept.saturating_add(added) > self.budget {
@@ -678,6 +713,30 @@ mod tests {
         recorder.fill_path(&path, &state, false);
         assert!(recorder.overflowed(), "the fourth, across the take");
         assert!(recorder.take().is_empty());
+    }
+
+    /// **The stored parameters are counted once per change**: three fills
+    /// sharing one value count it once, a fourth and fifth holding another
+    /// count it once more, and a state with none counts nothing more.
+    #[test]
+    fn stored_parameters_are_counted_once_per_change() {
+        let (path, each) = fill(10);
+        let stored = core::mem::size_of::<StoredParameters>();
+        let mut state = GraphicsState::new(Matrix::IDENTITY);
+        state.set_stored(|s| s.smoothness = Some(0.5));
+        let mut recorder = DisplayRecorder::new();
+        for _ in 0..3 {
+            recorder.fill_path(&path, &state, false);
+        }
+        assert_eq!(recorder.kept(), 3 * each + stored);
+
+        state.set_stored(|s| s.smoothness = Some(0.25));
+        recorder.fill_path(&path, &state, false);
+        recorder.fill_path(&path, &state, false);
+        assert_eq!(recorder.kept(), 5 * each + 2 * stored);
+
+        recorder.fill_path(&path, &GraphicsState::new(Matrix::IDENTITY), false);
+        assert_eq!(recorder.kept(), 6 * each + 2 * stored);
     }
 
     /// What an event holds counts what it copied: an inline image's data, a

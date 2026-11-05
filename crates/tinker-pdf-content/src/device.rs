@@ -91,7 +91,7 @@ impl MarkedProps {
 }
 
 /// One glyph, as the interpreter resolved it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Glyph {
     /// The character code from the string.
     pub code: u32,
@@ -376,7 +376,7 @@ pub enum PathSegment {
 
 /// An image the interpreter reached, identified rather than decoded — decoding
 /// is the rasterizing device's business.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageRef {
     /// The resource name, or empty for an inline image.
     pub name: Vec<u8>,

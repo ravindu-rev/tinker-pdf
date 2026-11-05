@@ -678,6 +678,15 @@ group form's resource name, `Truncated { limit }` and
 `Render(RenderWarning)` — each naming what it touched (ruling 10), except
 the blend mode, whose `ExtGState` no device is told: the interpreter hands
 every device the state a `gs` made, never the `gs`.
+
+The parameters a `gs` stores rather than applies — the rendering intent,
+black-point compensation, overprint, flatness, smoothness, stroke adjustment,
+alpha source and text knockout — travel in the state as one shared
+`StoredParameters` value, `None` while every one has its initial value, so a
+`q` copies one word more and a copy allocates nothing. The display list's
+budget counts that value once per change rather than once per event: the
+recorder remembers the value it last counted and counts again when an event
+holds another.
 The output is the same bytes every time, and nothing on its path calls a
 transcendental, so ruling 4's argument covers it; no SVG fingerprint is
 committed beside `determinism.rs`'s, so the cross-target claim is argued

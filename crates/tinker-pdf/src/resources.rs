@@ -2043,40 +2043,148 @@ impl FontSource for PageResources {
         }
     }
 
-    fn ext_g_state_alpha(&self, name: &[u8]) -> Option<(Option<f64>, Option<f64>)> {
+    fn ext_g_state(&self, name: &[u8]) -> Option<Arc<tinker_pdf_content::StateParameters>> {
+        // The table and the entry are read where they lie, as
+        // `with_property_list` reads them, and the entry's keys once each:
+        // a `gs` before every text object costs the keys its dictionary
+        // writes, with no copy of a table written inline.
         let resources = self.resources.as_ref()?;
-        let table = self
-            .doc
-            .resolve_key(resources, self.doc.intern(b"ExtGState"));
-        let entry = self
-            .doc
-            .resolve_key(table.as_dict()?, self.doc.intern(name));
-        let dict = entry.as_dict()?;
-
-        // 8.4.5 Table 58: `ca` is the non-stroking alpha, `CA` the stroking.
-        let fill = self
-            .doc
-            .resolve_key(dict, self.doc.intern(b"ca"))
-            .as_number();
-        let stroke = self
-            .doc
-            .resolve_key(dict, self.doc.intern(b"CA"))
-            .as_number();
-        (fill.is_some() || stroke.is_some()).then_some((fill, stroke))
+        let table = resources.get(self.doc.intern(b"ExtGState"))?;
+        read_resolved(&self.doc, table, |table| {
+            let entry = table.as_dict()?.get(self.doc.intern(name))?;
+            read_resolved(&self.doc, entry, |entry| {
+                entry
+                    .as_dict()
+                    .map(|dict| Arc::new(self.state_parameters(dict, name)))
+            })
+        })
     }
 
-    fn ext_g_state_blend(&self, name: &[u8]) -> Option<tinker_pdf_content::BlendMode> {
+    fn optional_content(&self, name: &[u8]) -> Option<Layer> {
+        // 8.11.3.2: `/OC /MC0 BDC` names an entry in the /Properties
+        // sub-dictionary of the current resource dictionary. The entry is an
+        // optional content group or a membership dictionary; anything else is
+        // an ordinary property list and hides nothing.
+        // The table and the entry are read where they lie, as
+        // `with_property_list` reads them: every `/OC` `BDC` asks.
         let resources = self.resources.as_ref()?;
-        let table = self
-            .doc
-            .resolve_key(resources, self.doc.intern(b"ExtGState"));
-        let entry = self
-            .doc
-            .resolve_key(table.as_dict()?, self.doc.intern(name));
-        let dict = entry.as_dict()?;
+        let table = resources.get(self.doc.intern(b"Properties"))?;
+        read_resolved(&self.doc, table, |table| {
+            let entry = table.as_dict()?.get(self.doc.intern(name))?;
+            let label = String::from_utf8_lossy(name).into_owned();
+            Some(self.optional.layer_of(&self.doc, entry, &label))
+        })
+    }
 
-        // 11.3.5: /BM is a name, or an array of names offering fallbacks.
-        let value = self.doc.resolve_key(dict, self.doc.intern(b"BM"));
+    fn xobject_optional_content(&self, name: &[u8]) -> Option<Layer> {
+        // 8.11.4.4: an /OC entry on a form or image XObject hides the whole
+        // XObject, and is read from the XObject's own dictionary rather than
+        // from /Properties.
+        let (dict, _) = self.xobject(name)?;
+        let entry = dict.get(self.doc.intern(b"OC"))?.clone();
+        let label = String::from_utf8_lossy(name).into_owned();
+        Some(self.optional.layer_of(&self.doc, &entry, &label))
+    }
+
+    fn marked_content_properties(&self, name: &[u8]) -> Option<MarkedProps> {
+        // 14.6.2: `/P /MC0 BDC` names an entry in the same /Properties
+        // sub-dictionary `optional_content` reads. This is the COS half of
+        // the seam — the interpreter never sees a dictionary — and it is the
+        // reason the inline and named forms arrive at a device
+        // indistinguishable from each other.
+        let props = self.with_property_list(name, |dict| self.marked_props(name, dict))?;
+        // An `/OC` group, a `/Type /Pagination` artifact list, a producer's
+        // private dictionary: every one of them reaches here and says nothing
+        // 14.6.2 or 14.9 defines. `None` rather than an empty struct, so the
+        // interpreter's own filter and this one cannot disagree.
+        (!props.is_empty()).then_some(props)
+    }
+}
+
+/// The most elements a `/D` dash array may hold: `d` reads its operands off a
+/// stack of 512 tokens, which holds the brackets, the phase and 509 numbers,
+/// and a longer array never reaches it. A dictionary is held to the same
+/// bound, so it cannot put an array into every state copy that no content
+/// stream could.
+const MAX_DASH_ELEMENTS: usize = 509;
+
+impl PageResources {
+    /// A graphics state parameter dictionary (8.4.5, Table 58, and ISO
+    /// 32000-2's `/UseBlackPtComp`), read once: each key's value where it
+    /// lies, and a value of a type the table does not give read as absent.
+    /// `name` is the dictionary's resource name, for a soft mask's warnings.
+    fn state_parameters(&self, dict: &Dict, name: &[u8]) -> tinker_pdf_content::StateParameters {
+        use tinker_pdf_content::{BlackPointCompensation, RenderingIntent};
+        let mut set = tinker_pdf_content::StateParameters::default();
+        let mut fill_overprint = None;
+        let name_of = |value: &Object| value.as_name().and_then(|n| self.doc.name_bytes(n));
+        for (key, value) in dict.iter() {
+            let Some(key) = self.doc.name_bytes(*key) else {
+                continue;
+            };
+            read_resolved(&self.doc, value, |value| match key.as_ref() {
+                b"LW" => set.line_width = value.as_number(),
+                b"LC" => set.line_cap = value.as_number(),
+                b"LJ" => set.line_join = value.as_number(),
+                b"ML" => set.miter_limit = value.as_number(),
+                b"D" => set.dash = self.dash(value),
+                b"RI" => {
+                    set.rendering_intent =
+                        name_of(value).map(|intent| RenderingIntent::from_name(&intent));
+                }
+                b"UseBlackPtComp" => {
+                    set.black_point_compensation = match name_of(value).as_deref() {
+                        Some(b"ON") => Some(BlackPointCompensation::On),
+                        Some(b"OFF") => Some(BlackPointCompensation::Off),
+                        Some(b"Default") => Some(BlackPointCompensation::Default),
+                        _ => None,
+                    };
+                }
+                b"OP" => set.stroke_overprint = value.as_bool(),
+                b"op" => fill_overprint = value.as_bool(),
+                b"OPM" => set.overprint_mode = value.as_int(),
+                b"FL" => set.flatness = value.as_number(),
+                b"SM" => set.smoothness = value.as_number(),
+                b"SA" => set.stroke_adjustment = value.as_bool(),
+                b"AIS" => set.alpha_is_shape = value.as_bool(),
+                b"TK" => set.text_knockout = value.as_bool(),
+                // 8.4.5 Table 58: `ca` is the non-stroking alpha, `CA` the
+                // stroking.
+                b"CA" => set.stroke_alpha = value.as_number(),
+                b"ca" => set.fill_alpha = value.as_number(),
+                b"BM" => set.blend = self.blend_mode(value),
+                b"SMask" => set.soft_mask = self.state_soft_mask(value, name),
+                _ => {}
+            });
+        }
+        // Table 58: an absent `/op` takes `/OP`'s value, so a dictionary that
+        // writes only `/OP true` is one that writes both.
+        set.fill_overprint = fill_overprint.or(set.stroke_overprint);
+        set
+    }
+
+    /// `/D`, `[dashArray dashPhase]`: the numbers as written, for the check
+    /// `d` makes; anything `d` could not have been handed is absent.
+    fn dash(&self, value: &Object) -> Option<(Vec<f64>, f64)> {
+        let [array, phase] = value.as_array()? else {
+            return None;
+        };
+        let phase = read_resolved(&self.doc, phase, Object::as_number)?;
+        let dashes = read_resolved(&self.doc, array, |array| {
+            let array = array.as_array()?;
+            if array.len() > MAX_DASH_ELEMENTS {
+                return None;
+            }
+            array
+                .iter()
+                .map(|item| read_resolved(&self.doc, item, Object::as_number))
+                .collect::<Option<Vec<f64>>>()
+        })?;
+        Some((dashes, phase))
+    }
+
+    /// `/BM` (11.3.5): a name, or an array of names offering fallbacks.
+    fn blend_mode(&self, value: &Object) -> Option<tinker_pdf_content::BlendMode> {
         if let Some(name) = value.as_name().and_then(|n| self.doc.name_bytes(n)) {
             return Some(tinker_pdf_content::BlendMode::from_name(&name));
         }
@@ -2091,22 +2199,13 @@ impl FontSource for PageResources {
             .then(|| tinker_pdf_content::BlendMode::from_names(names.iter().map(Vec::as_slice)))
     }
 
-    fn ext_g_state_soft_mask(&self, name: &[u8]) -> Option<tinker_pdf_content::SoftMask> {
-        let resources = self.resources.as_ref()?;
-        let table = self
-            .doc
-            .resolve_key(resources, self.doc.intern(b"ExtGState"));
-        let entry = self
-            .doc
-            .resolve_key(table.as_dict()?, self.doc.intern(name));
-        let dict = entry.as_dict()?;
-
+    /// `/SMask` (11.6.5.1), as the dictionary `gs` names `name` writes it.
+    fn state_soft_mask(&self, value: &Object, name: &[u8]) -> Option<tinker_pdf_content::SoftMask> {
         // 11.6.5.1: `/SMask` is either the name `/None` or a mask dictionary.
         // The key being absent is *not* the same as `/None` — the first
         // leaves whatever mask is in force alone, the second removes it —
         // which is why the whole method returns an `Option` of an enum rather
         // than an `Option` of a mask.
-        let value = self.doc.resolve_key(dict, self.doc.intern(b"SMask"));
         if let Some(name) = value.as_name().and_then(|n| self.doc.name_bytes(n)) {
             return (name.as_ref() == b"None").then_some(tinker_pdf_content::SoftMask::None);
         }
@@ -2174,46 +2273,6 @@ impl FontSource for PageResources {
                 transfer,
             },
         )))
-    }
-
-    fn optional_content(&self, name: &[u8]) -> Option<Layer> {
-        // 8.11.3.2: `/OC /MC0 BDC` names an entry in the /Properties
-        // sub-dictionary of the current resource dictionary. The entry is an
-        // optional content group or a membership dictionary; anything else is
-        // an ordinary property list and hides nothing.
-        // The table and the entry are read where they lie, as
-        // `with_property_list` reads them: every `/OC` `BDC` asks.
-        let resources = self.resources.as_ref()?;
-        let table = resources.get(self.doc.intern(b"Properties"))?;
-        read_resolved(&self.doc, table, |table| {
-            let entry = table.as_dict()?.get(self.doc.intern(name))?;
-            let label = String::from_utf8_lossy(name).into_owned();
-            Some(self.optional.layer_of(&self.doc, entry, &label))
-        })
-    }
-
-    fn xobject_optional_content(&self, name: &[u8]) -> Option<Layer> {
-        // 8.11.4.4: an /OC entry on a form or image XObject hides the whole
-        // XObject, and is read from the XObject's own dictionary rather than
-        // from /Properties.
-        let (dict, _) = self.xobject(name)?;
-        let entry = dict.get(self.doc.intern(b"OC"))?.clone();
-        let label = String::from_utf8_lossy(name).into_owned();
-        Some(self.optional.layer_of(&self.doc, &entry, &label))
-    }
-
-    fn marked_content_properties(&self, name: &[u8]) -> Option<MarkedProps> {
-        // 14.6.2: `/P /MC0 BDC` names an entry in the same /Properties
-        // sub-dictionary `optional_content` reads. This is the COS half of
-        // the seam — the interpreter never sees a dictionary — and it is the
-        // reason the inline and named forms arrive at a device
-        // indistinguishable from each other.
-        let props = self.with_property_list(name, |dict| self.marked_props(name, dict))?;
-        // An `/OC` group, a `/Type /Pagination` artifact list, a producer's
-        // private dictionary: every one of them reaches here and says nothing
-        // 14.6.2 or 14.9 defines. `None` rather than an empty struct, so the
-        // interpreter's own filter and this one cannot disagree.
-        (!props.is_empty()).then_some(props)
     }
 }
 

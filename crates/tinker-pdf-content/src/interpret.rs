@@ -6,7 +6,10 @@
 //! of the page.
 
 use crate::device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
-use crate::state::{GraphicsState, LineCap, LineJoin, Matrix, Rgb, TextRenderMode};
+use crate::state::{
+    BlackPointCompensation, BlendMode, GraphicsState, LineCap, LineJoin, Matrix, RenderingIntent,
+    Rgb, TextRenderMode,
+};
 use crate::tokenizer::{Token, Tokenizer};
 use core::mem;
 use std::sync::Arc;
@@ -26,7 +29,7 @@ use tinker_pdf_cos::decode_text_string;
 /// would have compiled everywhere and quietly clipped nothing — which is
 /// exactly how `GlyphSource::image` once stopped drawing every image in every
 /// document with the whole suite green.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Form {
     /// The decoded content stream.
     pub content: Vec<u8>,
@@ -142,12 +145,66 @@ impl GroupSpace {
 }
 
 /// An ExtGState `/SMask` (11.6.5.1).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SoftMask {
     /// `/None`: whatever mask was in force stops applying.
     None,
     /// A group to render and read back as a mask.
     Group(Box<MaskGroup>),
+}
+
+/// What one graphics state parameter dictionary sets (8.4.5, Table 58, and
+/// ISO 32000-2's `/UseBlackPtComp`): one field per parameter, `None` where the
+/// dictionary leaves it as it was.
+///
+/// One field per **parameter**, not per key, so Table 58's rules between keys
+/// are applied once, where the dictionary is read: `/op` absent takes `/OP`'s
+/// value. A value of a type Table 58 does not give is absent, and leaves the
+/// parameter alone, as an operator leaves it on an operand it cannot read.
+///
+/// The line parameters are the numbers written, which the interpreter checks
+/// as their operators check them: `/LW -1` changes nothing, as `-1 w` does.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StateParameters {
+    /// `/LW`, as `w` takes it.
+    pub line_width: Option<f64>,
+    /// `/LC`, as `J` takes it.
+    pub line_cap: Option<f64>,
+    /// `/LJ`, as `j` takes it.
+    pub line_join: Option<f64>,
+    /// `/ML`, as `M` takes it.
+    pub miter_limit: Option<f64>,
+    /// `/D`: the dash array and phase, as `d` takes them.
+    pub dash: Option<(Vec<f64>, f64)>,
+    /// `/RI`.
+    pub rendering_intent: Option<RenderingIntent>,
+    /// `/UseBlackPtComp`.
+    pub black_point_compensation: Option<BlackPointCompensation>,
+    /// `/OP`.
+    pub stroke_overprint: Option<bool>,
+    /// `/op`, or `/OP` where `/op` is absent.
+    pub fill_overprint: Option<bool>,
+    /// `/OPM`.
+    pub overprint_mode: Option<i64>,
+    /// `/FL`.
+    pub flatness: Option<f64>,
+    /// `/SM`.
+    pub smoothness: Option<f64>,
+    /// `/SA`.
+    pub stroke_adjustment: Option<bool>,
+    /// `/AIS`.
+    pub alpha_is_shape: Option<bool>,
+    /// `/TK`.
+    pub text_knockout: Option<bool>,
+    /// `/CA`, the stroking alpha.
+    pub stroke_alpha: Option<f64>,
+    /// `/ca`, the non-stroking alpha.
+    pub fill_alpha: Option<f64>,
+    /// `/BM` (11.3.5).
+    pub blend: Option<BlendMode>,
+    /// `/SMask` (11.6.5.1). `None` leaves the mask in force alone, which is
+    /// not `/None`: that removes it.
+    pub soft_mask: Option<SoftMask>,
 }
 
 /// Whichever resource dictionary is in force: the caller's, or a form's own.
@@ -174,7 +231,7 @@ impl<F> core::ops::Deref for Scope<'_, F> {
 }
 
 /// The `/SMask` dictionary's group, resolved (11.6.5.2).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MaskGroup {
     /// `/G`, the transparency group XObject that draws the mask.
     pub form: Form,
@@ -400,31 +457,13 @@ pub trait FontSource {
         DeviceDefaults::NONE
     }
 
-    /// The fill and stroke alphas an `/ExtGState` sets, if it sets them.
-    fn ext_g_state_alpha(&self, name: &[u8]) -> Option<(Option<f64>, Option<f64>)> {
-        let _ = name;
-        None
-    }
-
-    /// `/BM` from a named external graphics state (11.3.5).
+    /// A named `/ExtGState` (8.4.5), read once into what it sets.
     ///
-    /// Separate from the alphas rather than folded in with them because a
-    /// dictionary may set either without the other, and `None` here has to
-    /// mean "unchanged" rather than "Normal" — a `gs` that sets only `/ca`
-    /// must not silently reset the blend mode.
-    fn ext_g_state_blend(&self, name: &[u8]) -> Option<crate::state::BlendMode> {
-        let _ = name;
-        None
-    }
-
-    /// `/SMask` from a named external graphics state (11.6.5.1).
-    ///
-    /// Separate from the alphas and from `/BM` for the same reason those two
-    /// are separate from each other: a dictionary may set any of the three
-    /// without the others, and `None` here has to mean "unchanged" rather
-    /// than "no mask". A `gs` that sets only `/ca` must not clear a soft mask
-    /// somebody else installed.
-    fn ext_g_state_soft_mask(&self, name: &[u8]) -> Option<SoftMask> {
+    /// Every parameter is an `Option` whose `None` leaves it as it was, so a
+    /// `gs` that sets only `/ca` neither resets the blend mode nor clears a
+    /// soft mask somebody else installed. Shared, so a source that keeps each
+    /// name's reading hands every `gs` of the name the same value.
+    fn ext_g_state(&self, name: &[u8]) -> Option<Arc<StateParameters>> {
         let _ = name;
         None
     }
@@ -737,14 +776,10 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         }
     }
 
-    /// Reads `d`: a dash array and a phase (8.4.3.6).
-    ///
-    /// An array of all zeros, or one containing a negative, is invalid and
-    /// means a solid line rather than an invisible one — the alternative is a
-    /// stroke that vanishes, which reads as missing content.
+    /// Reads `d`'s operands, a dash array and a phase (8.4.3.6), for
+    /// [`Interpreter::set_dash`].
     fn set_dashes(&mut self) {
-        let phase = self.num(0).filter(|v| v.is_finite() && *v >= 0.0);
-        let Some(phase) = phase else { return };
+        let Some(phase) = self.num(0) else { return };
 
         // The array is the operand before the phase, and the tokenizer leaves
         // its elements on the stack between the brackets.
@@ -752,7 +787,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         let mut seen_open = false;
         for token in self.stack.iter().rev().skip(1) {
             match token {
-                Token::Number(v) if v.is_finite() && *v >= 0.0 => dashes.push(*v),
+                Token::Number(v) => dashes.push(*v),
                 Token::ArrayClose => {}
                 Token::ArrayOpen => {
                     seen_open = true;
@@ -765,12 +800,126 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             return;
         }
         dashes.reverse();
+        self.set_dash(dashes, phase);
+    }
 
+    // **One setter per applied parameter**, called by its operator and by `gs`
+    // alike, so a dictionary and the operator it stands for cannot drift.
+
+    /// `w`, `/LW`: a width that is finite and not negative (8.4.3.2).
+    fn set_line_width(&mut self, width: f64) {
+        if width.is_finite() && width >= 0.0 {
+            self.gs.line_width = width;
+        }
+    }
+
+    /// `J`, `/LC`: anything but 1 and 2 is a butt cap (8.4.3.3).
+    fn set_line_cap(&mut self, cap: f64) {
+        if cap.is_finite() {
+            self.gs.line_cap = LineCap::from_operand(cap);
+        }
+    }
+
+    /// `j`, `/LJ`: anything but 1 and 2 is a miter join (8.4.3.4).
+    fn set_line_join(&mut self, join: f64) {
+        if join.is_finite() {
+            self.gs.line_join = LineJoin::from_operand(join);
+        }
+    }
+
+    /// `M`, `/ML`. 8.4.3.5: a limit below 1 is meaningless — the ratio it
+    /// bounds is never less than 1 — so it is ignored rather than turning
+    /// every join into a bevel.
+    fn set_miter_limit(&mut self, limit: f64) {
+        if limit.is_finite() && limit >= 1.0 {
+            self.gs.miter_limit = limit;
+        }
+    }
+
+    /// `d`, `/D`. A negative or non-finite element or phase leaves the dash as
+    /// it was; an array of all zeros is a solid line rather than an invisible
+    /// one, since a stroke that vanishes reads as missing content.
+    fn set_dash(&mut self, mut dashes: Vec<f64>, phase: f64) {
+        let valid = |v: &f64| v.is_finite() && *v >= 0.0;
+        if !valid(&phase) || !dashes.iter().all(valid) {
+            return;
+        }
         if dashes.iter().all(|v| *v == 0.0) {
             dashes.clear();
         }
         self.gs.dashes = dashes;
         self.gs.dash_phase = phase;
+    }
+
+    /// `gs` (8.4.5): every parameter the dictionary sets, then its soft mask.
+    ///
+    /// The mask runs last, at the CTM in force (11.6.5.1), so its group runs
+    /// under the state the `gs` made.
+    fn apply_state(&mut self, set: &StateParameters) {
+        if let Some(width) = set.line_width {
+            self.set_line_width(width);
+        }
+        if let Some(cap) = set.line_cap {
+            self.set_line_cap(cap);
+        }
+        if let Some(join) = set.line_join {
+            self.set_line_join(join);
+        }
+        if let Some(limit) = set.miter_limit {
+            self.set_miter_limit(limit);
+        }
+        if let Some((dashes, phase)) = &set.dash {
+            self.set_dash(dashes.clone(), *phase);
+        }
+        if let Some(alpha) = set.fill_alpha {
+            self.gs.fill_alpha = alpha.clamp(0.0, 1.0);
+        }
+        if let Some(alpha) = set.stroke_alpha {
+            self.gs.stroke_alpha = alpha.clamp(0.0, 1.0);
+        }
+        if let Some(blend) = set.blend {
+            self.gs.blend = blend;
+        }
+        let finite = |v: Option<f64>| v.filter(|v| v.is_finite());
+        self.gs.set_stored(|s| {
+            if let Some(intent) = set.rendering_intent {
+                s.rendering_intent = intent;
+            }
+            if let Some(compensation) = set.black_point_compensation {
+                s.black_point_compensation = compensation;
+            }
+            if let Some(overprint) = set.stroke_overprint {
+                s.stroke_overprint = overprint;
+            }
+            if let Some(overprint) = set.fill_overprint {
+                s.fill_overprint = overprint;
+            }
+            if let Some(mode) = set.overprint_mode {
+                s.overprint_mode = mode;
+            }
+            if let Some(flatness) = finite(set.flatness) {
+                s.flatness = Some(flatness);
+            }
+            if let Some(smoothness) = finite(set.smoothness) {
+                s.smoothness = Some(smoothness);
+            }
+            if let Some(adjust) = set.stroke_adjustment {
+                s.stroke_adjustment = Some(adjust);
+            }
+            if let Some(shape) = set.alpha_is_shape {
+                s.alpha_is_shape = shape;
+            }
+            if let Some(knockout) = set.text_knockout {
+                s.text_knockout = knockout;
+            }
+        });
+        // 11.6.5.1. The group is rendered *here*, at this CTM, rather than
+        // recorded for the paint that will use it.
+        match &set.soft_mask {
+            Some(SoftMask::None) => self.device.clear_soft_mask(),
+            Some(SoftMask::Group(mask)) => self.run_soft_mask(mask),
+            None => {}
+        }
     }
 
     fn operator(&mut self, op: &[u8]) {
@@ -1049,33 +1198,39 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             // way that looks deliberate.
             b"w" => {
                 if let Some(v) = self.num(0) {
-                    if v.is_finite() && v >= 0.0 {
-                        self.gs.line_width = v;
-                    }
+                    self.set_line_width(v);
                 }
             }
             b"J" => {
                 if let Some(v) = self.num(0) {
-                    self.gs.line_cap = LineCap::from_operand(v);
+                    self.set_line_cap(v);
                 }
             }
             b"j" => {
                 if let Some(v) = self.num(0) {
-                    self.gs.line_join = LineJoin::from_operand(v);
+                    self.set_line_join(v);
                 }
             }
             b"M" => {
                 if let Some(v) = self.num(0) {
-                    // 8.4.3.5: a limit below 1 is meaningless — the ratio it
-                    // bounds is never less than 1 — so it is ignored rather
-                    // than turning every join into a bevel.
-                    if v.is_finite() && v >= 1.0 {
-                        self.gs.miter_limit = v;
-                    }
+                    self.set_miter_limit(v);
                 }
             }
             b"d" => self.set_dashes(),
-            b"ri" | b"i" => {}
+
+            // 8.6.5.8 and 10.6.2: kept for the rows that apply them, as `/RI`
+            // and `/FL` are.
+            b"ri" => {
+                if let Some(Token::Name(name)) = self.stack.last() {
+                    let intent = RenderingIntent::from_name(name);
+                    self.gs.set_stored(|s| s.rendering_intent = intent);
+                }
+            }
+            b"i" => {
+                if let Some(v) = self.num(0) {
+                    self.gs.set_stored(|s| s.flatness = Some(v));
+                }
+            }
 
             // 8.6.8 colour. The device operators resolve immediately, unless
             // the scope remaps their space to a default (8.6.5.6); the named
@@ -1228,27 +1383,11 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                 }
             }
 
-            // 8.4.5 external graphics state. Only the alphas are modelled;
-            // the rest of an /ExtGState needs the resource dictionary.
+            // 8.4.5 external graphics state, read once by the seam.
             b"gs" => {
-                if let Some(Token::Name(name)) = self.stack.last().cloned() {
-                    if let Some((fill, stroke)) = self.fonts.ext_g_state_alpha(&name) {
-                        if let Some(alpha) = fill {
-                            self.gs.fill_alpha = alpha.clamp(0.0, 1.0);
-                        }
-                        if let Some(alpha) = stroke {
-                            self.gs.stroke_alpha = alpha.clamp(0.0, 1.0);
-                        }
-                    }
-                    if let Some(blend) = self.fonts.ext_g_state_blend(&name) {
-                        self.gs.blend = blend;
-                    }
-                    // 11.6.5.1. The group is rendered *here*, at this CTM,
-                    // rather than recorded for the paint that will use it.
-                    match self.fonts.ext_g_state_soft_mask(&name) {
-                        Some(SoftMask::None) => self.device.clear_soft_mask(),
-                        Some(SoftMask::Group(mask)) => self.run_soft_mask(&mask),
-                        None => {}
+                if let Some(Token::Name(name)) = self.stack.last() {
+                    if let Some(set) = self.fonts.ext_g_state(name) {
+                        self.apply_state(&set);
                     }
                 }
             }
@@ -2180,11 +2319,15 @@ mod tests {
                 stream: 0,
             })
         }
-        fn ext_g_state_alpha(&self, name: &[u8]) -> Option<(Option<f64>, Option<f64>)> {
-            (name == b"Half").then_some((Some(0.5), Some(0.25)))
-        }
-        fn ext_g_state_blend(&self, name: &[u8]) -> Option<crate::state::BlendMode> {
-            (name == b"Half").then_some(crate::state::BlendMode::Multiply)
+        fn ext_g_state(&self, name: &[u8]) -> Option<Arc<StateParameters>> {
+            (name == b"Half").then(|| {
+                Arc::new(StateParameters {
+                    fill_alpha: Some(0.5),
+                    stroke_alpha: Some(0.25),
+                    blend: Some(BlendMode::Multiply),
+                    ..StateParameters::default()
+                })
+            })
         }
     }
 

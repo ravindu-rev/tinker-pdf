@@ -22,8 +22,18 @@ contain `--5`, `.5.3` and bare `-`, and none of them stops the page.
 operator consumes them; an operator with the wrong operand count is skipped
 and the stack cleared, so one malformed instruction cannot desynchronise the
 rest. The full graphics state is modelled (8.4.1): `q`/`Q`/`cm` (8.4.4),
-`gs` with alphas, `/BM` and `/SMask` through the resource seam (8.4.5,
-11.3.5, 11.6.5.1); the complete text state — `Tf` `Tc` `Tw` `Tz` `TL` `Ts`
+and `gs` (8.4.5), whose dictionary the resource seam reads once into a
+`StateParameters` value, one `Option` per parameter, `None` leaving it as it
+was. `/LW` `/LC` `/LJ` `/ML` `/D` are applied through the setters `w` `J` `j`
+`M` `d` call, so a dictionary and its operator check a degenerate value alike
+(`/LW -1` changes nothing, `/LC 7` is a butt cap); `/CA` `/ca` `/BM` and
+`/SMask` set the alphas, the blend mode and the soft mask (11.3.5, 11.6.5.1),
+the mask last; and `/RI` `/FL` `/SM` `/SA` `/OP` `/op` `/OPM` `/AIS` `/TK`
+`/UseBlackPtComp` are kept in the state's `StoredParameters`, with `ri` and
+`i` setting the intent and the flatness, for the rows that apply them —
+none moves a pixel yet. An absent `/op` takes `/OP`'s value (Table 58), and a
+value of a type the table does not give is read as absent. The complete text
+state — `Tf` `Tc` `Tw` `Tz` `TL` `Ts`
 `Tr` (9.3) — positioning `Td` `TD` `Tm` `T*` (9.4.2) and showing `Tj` `TJ`
 `'` `"` (9.4.3), with glyph placement built exactly per 9.4.4. Word spacing
 applies to the single-byte code 32 and never to a byte 32 inside a two-byte

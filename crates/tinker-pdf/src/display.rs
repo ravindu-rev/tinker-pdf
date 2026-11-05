@@ -286,3 +286,222 @@ impl core::fmt::Debug for DisplayList {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tinker_pdf_content::{
+        BlackPointCompensation, BlendMode, Event, GraphicsState, RenderingIntent, StoredParameters,
+    };
+
+    use crate::Document;
+
+    /// A document whose pages share one indirect `/Resources` (object 3)
+    /// holding `states` as its `/ExtGState`, and a transparency group form
+    /// (object 4) a soft mask can name. Page `i` is 40 x 40 and draws
+    /// `contents[i]`.
+    fn document(states: &str, contents: &[&str]) -> Vec<u8> {
+        let kids: Vec<String> = (0..contents.len())
+            .map(|i| format!("{} 0 R", 5 + 2 * i))
+            .collect();
+        let mask = "1 g 0 0 20 40 re f";
+        let mut objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            format!(
+                "<< /Type /Pages /Count {} /Kids [{}] >>",
+                contents.len(),
+                kids.join(" ")
+            ),
+            format!("<< /ExtGState << {states} >> >>"),
+            format!(
+                "<< /Type /XObject /Subtype /Form /BBox [0 0 40 40] \
+                 /Group << /S /Transparency /CS /DeviceGray >> /Length {} >>\n\
+                 stream\n{mask}\nendstream",
+                mask.len()
+            ),
+        ];
+        for (i, content) in contents.iter().enumerate() {
+            objects.push(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40] /Resources 3 0 R \
+                 /Contents {} 0 R >>",
+                6 + 2 * i
+            ));
+            objects.push(format!(
+                "<< /Length {} >>\nstream\n{content}\nendstream",
+                content.len()
+            ));
+        }
+        let mut out = b"%PDF-1.7\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, object) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", i + 1).as_bytes());
+        }
+        let xref = out.len();
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// Each page's recording.
+    fn recordings(states: &str, contents: &[&str]) -> Vec<Vec<Event>> {
+        let doc = Document::open(document(states, contents)).expect("the document opens");
+        (0..doc.page_count())
+            .map(|i| {
+                let list = doc.page(i).expect("a page").display_list();
+                assert!(list.is_retained(), "page {i} is retained");
+                list.content().to_vec()
+            })
+            .collect()
+    }
+
+    /// Where two recordings part, with both events, or `None` when they are
+    /// equal.
+    fn parting(a: &[Event], b: &[Event]) -> Option<String> {
+        if a == b {
+            return None;
+        }
+        let at = a
+            .iter()
+            .zip(b)
+            .position(|(x, y)| x != y)
+            .unwrap_or(a.len().min(b.len()));
+        Some(format!(
+            "they part at event {at} of {} and {}: {:?} against {:?}",
+            a.len(),
+            b.len(),
+            a.get(at),
+            b.get(at)
+        ))
+    }
+
+    /// The states of the painting events, in order.
+    fn painted(events: &[Event]) -> Vec<&GraphicsState> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::FillPath { state, .. } | Event::StrokePath { state, .. } => state.as_deref(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **A `gs` and its operator twin record the same events**, on two pages
+    /// of one document sharing one `/Resources`; `/CA`, `/ca`, `/BM` and
+    /// `/SMask` record their pinned values; and each stored key's recorded
+    /// value is the dictionary's, kept through a later `gs` that omits it and
+    /// restored by `Q`.
+    #[test]
+    fn gs_twins_record_the_same_events() {
+        let twins = [
+            ("/LW 3", "3 w"),
+            ("/LW -1", "-1 w"),
+            ("/LC 1", "1 J"),
+            ("/LC 7", "7 J"),
+            ("/LJ 2", "2 j"),
+            ("/ML 1", "1 M"),
+            ("/ML 0.5", "0.5 M"),
+            ("/D [[3 2] 1]", "[3 2] 1 d"),
+            ("/D [[0 0] 0]", "[0 0] 0 d"),
+            ("/D [[-1 2] 0]", "[-1 2] 0 d"),
+            ("/RI /Perceptual", "/Perceptual ri"),
+            ("/RI /Vivid", "/Vivid ri"),
+            ("/FL 5", "5 i"),
+        ];
+        let stroke = "0 0 1 RG 6 6 m 20 34 l 34 6 l S";
+        let mut states = String::new();
+        let mut pages = Vec::new();
+        for (index, (entry, operator)) in twins.iter().enumerate() {
+            states.push_str(&format!("/S{index} << {entry} >> "));
+            pages.push(format!("q /S{index} gs {stroke} Q {stroke}"));
+            pages.push(format!("q {operator} {stroke} Q {stroke}"));
+        }
+        // Table 58: an absent `/op` takes `/OP`'s value.
+        states.push_str("/OPOnly << /OP true >> /OPBoth << /OP true /op true >> ");
+        pages.push(format!("/OPOnly gs {stroke}"));
+        pages.push(format!("/OPBoth gs {stroke}"));
+        let contents: Vec<&str> = pages.iter().map(String::as_str).collect();
+        let recorded = recordings(&states, &contents);
+        for (index, pair) in recorded.chunks(2).enumerate() {
+            let label = twins.get(index).map_or("/OP alone", |(entry, _)| entry);
+            assert!(
+                parting(&pair[0], &pair[1]).is_none(),
+                "{label}: {}",
+                parting(&pair[0], &pair[1]).unwrap_or_default()
+            );
+        }
+
+        // The four keys with no operator, against their pins.
+        let states = "/StrokeHalf << /CA 0.5 >> /FillHalf << /ca 0.5 >> \
+                      /Multiply << /BM /Multiply >> \
+                      /Mask << /SMask << /S /Luminosity /G 4 0 R >> >> /Unmask << /SMask /None >>";
+        let pages = [
+            "/StrokeHalf gs 0 0 1 RG 5 20 m 35 20 l S",
+            "/FillHalf gs 0 0 1 rg 10 10 20 20 re f",
+            "/Multiply gs 0.5 g 10 10 20 20 re f",
+            "/Mask gs 0 0 1 rg 0 0 40 40 re f /Unmask gs 0 0 40 40 re f",
+        ];
+        let recorded = recordings(states, &pages);
+        let stroked = painted(&recorded[0]);
+        assert_eq!((stroked[0].stroke_alpha, stroked[0].fill_alpha), (0.5, 1.0));
+        let filled = painted(&recorded[1]);
+        assert_eq!((filled[0].fill_alpha, filled[0].stroke_alpha), (0.5, 1.0));
+        assert_eq!(painted(&recorded[2])[0].blend, BlendMode::Multiply);
+        let masked = &recorded[3];
+        let mask = masked.iter().find_map(|event| match event {
+            Event::BeginSoftMask { mask, entered, .. } => Some((mask, *entered)),
+            _ => None,
+        });
+        let (mask, entered) = mask.expect("the `gs` offered its mask group");
+        assert!(entered && mask.luminosity);
+        assert_eq!((mask.backdrop, mask.transfer), (None, None));
+        assert_eq!(mask.form.bbox, Some([0.0, 0.0, 40.0, 40.0]));
+        assert_eq!(mask.form.stream, 4 << 16, "`/G` is object 4");
+        assert!(
+            masked
+                .iter()
+                .any(|event| matches!(event, Event::ClearSoftMask)),
+            "`/SMask /None` clears the mask"
+        );
+
+        // Every stored key, kept through a `gs` that omits it and restored by
+        // `Q`.
+        let states = "/Stored << /SM 0.5 /SA true /OP true /OPM 1 /AIS true /TK false \
+                      /UseBlackPtComp /ON /RI /Saturation /FL 3 >> /Width << /LW 2 >>";
+        let fill = "0 0 1 1 re f";
+        let page = format!("q /Stored gs {fill} /Width gs {fill} Q {fill}");
+        let recorded = recordings(states, &[&page]);
+        let fills = painted(&recorded[0]);
+        let expected = StoredParameters {
+            rendering_intent: RenderingIntent::Saturation,
+            black_point_compensation: BlackPointCompensation::On,
+            stroke_overprint: true,
+            fill_overprint: true,
+            overprint_mode: 1,
+            alpha_is_shape: true,
+            text_knockout: false,
+            flatness: Some(3.0),
+            smoothness: Some(0.5),
+            stroke_adjustment: Some(true),
+        };
+        assert_eq!(fills[0].stored_parameters(), &expected);
+        assert_eq!(
+            fills[1].stored_parameters(),
+            &expected,
+            "a `gs` that omits a key leaves it"
+        );
+        assert_eq!(fills[1].line_width, 2.0);
+        assert!(fills[2].stored.is_none(), "`Q` restores the initial values");
+        assert_eq!(fills[2].stored_parameters(), &StoredParameters::INITIAL);
+    }
+}

@@ -988,19 +988,13 @@ impl FontSource for Recorded {
         self.inner.resolve_color(space, components)
     }
 
-    fn ext_g_state_alpha(&self, name: &[u8]) -> Option<(Option<f64>, Option<f64>)> {
-        self.inner.ext_g_state_alpha(name)
-    }
-
-    fn ext_g_state_blend(&self, name: &[u8]) -> Option<tinker_pdf_content::BlendMode> {
-        self.inner.ext_g_state_blend(name)
-    }
-
-    fn ext_g_state_soft_mask(&self, name: &[u8]) -> Option<tinker_pdf_content::SoftMask> {
-        let answer = self.inner.ext_g_state_soft_mask(name);
+    fn ext_g_state(&self, name: &[u8]) -> Option<Arc<tinker_pdf_content::StateParameters>> {
+        let answer = self.inner.ext_g_state(name);
         // 11.6.5.2: the group is content the page draws, and this walk's
         // device declines to run it; it is walked afterwards instead.
-        if let Some(tinker_pdf_content::SoftMask::Group(mask)) = &answer {
+        if let Some(tinker_pdf_content::SoftMask::Group(mask)) =
+            answer.as_ref().and_then(|set| set.soft_mask.as_ref())
+        {
             let stream = ObjRef::new(
                 u32::try_from(mask.form.stream >> 16).unwrap_or(0),
                 (mask.form.stream & 0xFFFF) as u16,

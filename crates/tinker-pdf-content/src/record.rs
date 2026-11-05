@@ -236,7 +236,7 @@ pub struct MarkedScope {
 /// The variants are one per trait method that carries information; the three
 /// that ask a question also record the answer that was given, because the
 /// matching `end_` event arrives only for a question answered `true`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     /// `BT`.
     BeginText,
@@ -883,8 +883,13 @@ mod tests {
         fn font_id(&self, name: &[u8]) -> u64 {
             u64::from(name[0])
         }
-        fn ext_g_state_alpha(&self, name: &[u8]) -> Option<(Option<f64>, Option<f64>)> {
-            (name == b"Half").then_some((Some(0.5), None))
+        fn ext_g_state(&self, name: &[u8]) -> Option<std::sync::Arc<crate::StateParameters>> {
+            (name == b"Half").then(|| {
+                std::sync::Arc::new(crate::StateParameters {
+                    fill_alpha: Some(0.5),
+                    ..crate::StateParameters::default()
+                })
+            })
         }
     }
 

@@ -1,5 +1,7 @@
 //! Graphics and text state (8.4, 9.3).
 
+use std::sync::Arc;
+
 /// A 2-D affine transform, in PDF's row-vector convention (8.3.3):
 /// `[a b c d e f]` maps `(x, y)` to `(a·x + c·y + e, b·x + d·y + f)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -178,7 +180,7 @@ impl TextRenderMode {
 }
 
 /// The text state parameters (9.3), which survive `q`/`Q` inside `BT`/`ET`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TextState {
     /// `Tf` size.
     pub size: f64,
@@ -380,8 +382,102 @@ impl BlendMode {
     }
 }
 
+/// A rendering intent (8.6.5.8), as `/RI` and `ri` name it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderingIntent {
+    /// `/AbsoluteColorimetric`.
+    AbsoluteColorimetric,
+    /// `/RelativeColorimetric`, the initial intent (8.4.1, Table 52).
+    #[default]
+    RelativeColorimetric,
+    /// `/Saturation`.
+    Saturation,
+    /// `/Perceptual`.
+    Perceptual,
+    /// Any other name. Kept as unrecognised rather than replaced, so the row
+    /// that applies intents reads 8.6.5.8's rule for a name it does not know.
+    Unrecognised,
+}
+
+impl RenderingIntent {
+    /// The intent a name selects.
+    #[must_use]
+    pub fn from_name(name: &[u8]) -> RenderingIntent {
+        match name {
+            b"AbsoluteColorimetric" => RenderingIntent::AbsoluteColorimetric,
+            b"RelativeColorimetric" => RenderingIntent::RelativeColorimetric,
+            b"Saturation" => RenderingIntent::Saturation,
+            b"Perceptual" => RenderingIntent::Perceptual,
+            _ => RenderingIntent::Unrecognised,
+        }
+    }
+}
+
+/// ISO 32000-2's `/UseBlackPtComp`: whether black-point compensation is used.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BlackPointCompensation {
+    /// `/ON`.
+    On,
+    /// `/OFF`.
+    Off,
+    /// `/Default`, and the value when the key is absent: the device decides.
+    #[default]
+    Default,
+}
+
+/// The graphics state parameters kept for the rows that apply them: set by
+/// `gs`, `ri` and `i`, and read by nothing yet, so none of them moves a pixel.
+///
+/// A plain field starts at the initial value 8.4.1 (Tables 52 and 53) or 9.3.8
+/// gives. An `Option` field's `None` is the device's own: what the renderer
+/// does with no key, and what `/Default` restores.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StoredParameters {
+    /// `/RI`, `ri`.
+    pub rendering_intent: RenderingIntent,
+    /// `/UseBlackPtComp`.
+    pub black_point_compensation: BlackPointCompensation,
+    /// `/OP`.
+    pub stroke_overprint: bool,
+    /// `/op`, or `/OP` where `/op` is absent.
+    pub fill_overprint: bool,
+    /// `/OPM`, the integer written.
+    pub overprint_mode: i64,
+    /// `/AIS`.
+    pub alpha_is_shape: bool,
+    /// `/TK`.
+    pub text_knockout: bool,
+    /// `/FL`, `i`: the number written.
+    pub flatness: Option<f64>,
+    /// `/SM`: the number written.
+    pub smoothness: Option<f64>,
+    /// `/SA`.
+    pub stroke_adjustment: Option<bool>,
+}
+
+impl StoredParameters {
+    /// Every parameter at its initial value.
+    pub const INITIAL: StoredParameters = StoredParameters {
+        rendering_intent: RenderingIntent::RelativeColorimetric,
+        black_point_compensation: BlackPointCompensation::Default,
+        stroke_overprint: false,
+        fill_overprint: false,
+        overprint_mode: 0,
+        alpha_is_shape: false,
+        // 9.3.8: text knockout is initially true.
+        text_knockout: true,
+        flatness: None,
+        smoothness: None,
+        stroke_adjustment: None,
+    };
+}
+
+/// What [`GraphicsState::stored_parameters`] answers while every parameter has
+/// its initial value.
+static INITIAL_STORED: StoredParameters = StoredParameters::INITIAL;
+
 /// The graphics state (8.4.1), reduced to what interpretation needs.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct GraphicsState {
     /// The current transformation matrix.
     pub ctm: Matrix,
@@ -436,6 +532,10 @@ pub struct GraphicsState {
     pub blend: BlendMode,
     /// The same for a stroking `SCN`.
     pub stroke_pattern: Option<Vec<u8>>,
+    /// The parameters kept for the rows that apply them; `None` while every
+    /// one has its initial value. One pointer wide, so a `q` copies one word
+    /// more, and shared, so a copy allocates nothing.
+    pub stored: Option<Arc<StoredParameters>>,
 }
 
 impl GraphicsState {
@@ -465,7 +565,28 @@ impl GraphicsState {
             fill_pattern: None,
             blend: BlendMode::Normal,
             stroke_pattern: None,
+            stored: None,
         }
+    }
+
+    /// The stored parameters in force.
+    #[must_use]
+    pub fn stored_parameters(&self) -> &StoredParameters {
+        self.stored.as_deref().unwrap_or(&INITIAL_STORED)
+    }
+
+    /// Changes the stored parameters through `change`. The value in force is
+    /// kept when nothing changed, so a `gs` repeated before every text object
+    /// allocates nothing after the first, and the initial values are stored as
+    /// `None`, so two states holding the same parameters compare equal however
+    /// they were reached.
+    pub fn set_stored(&mut self, change: impl FnOnce(&mut StoredParameters)) {
+        let mut next = self.stored_parameters().clone();
+        change(&mut next);
+        if next == *self.stored_parameters() {
+            return;
+        }
+        self.stored = (next != StoredParameters::INITIAL).then(|| Arc::new(next));
     }
 }
 
@@ -521,6 +642,67 @@ mod tests {
         assert!(!bad.is_finite());
         let infinite = Matrix::scale(f64::INFINITY, 1.0);
         assert!(!infinite.is_finite());
+    }
+
+    /// The stored parameters cost a state one word, and a set that changes
+    /// nothing keeps the value in force.
+    #[test]
+    fn stored_parameters_cost_a_state_one_word() {
+        assert_eq!(
+            core::mem::size_of::<Option<Arc<StoredParameters>>>(),
+            core::mem::size_of::<usize>()
+        );
+
+        // 8.4.1, Tables 52 and 53, and 9.3.8.
+        let initial = StoredParameters::INITIAL;
+        assert_eq!(
+            initial.rendering_intent,
+            RenderingIntent::RelativeColorimetric
+        );
+        assert_eq!(
+            initial.black_point_compensation,
+            BlackPointCompensation::Default
+        );
+        assert!(!initial.stroke_overprint && !initial.fill_overprint);
+        assert_eq!(initial.overprint_mode, 0);
+        assert!(!initial.alpha_is_shape);
+        assert!(initial.text_knockout);
+        assert_eq!(
+            (
+                initial.flatness,
+                initial.smoothness,
+                initial.stroke_adjustment
+            ),
+            (None, None, None)
+        );
+
+        let mut state = GraphicsState::new(Matrix::IDENTITY);
+        state.set_stored(|s| s.rendering_intent = RenderingIntent::RelativeColorimetric);
+        assert!(
+            state.stored.is_none(),
+            "the initial value is stored as nothing"
+        );
+
+        state.set_stored(|s| s.text_knockout = false);
+        let set = state
+            .stored
+            .clone()
+            .expect("a value that is not the initial one");
+        let saved = state.clone();
+        assert!(
+            saved.stored.as_ref().is_some_and(|s| Arc::ptr_eq(s, &set)),
+            "a copy of the state shares the value"
+        );
+        state.set_stored(|s| s.text_knockout = false);
+        assert!(
+            state.stored.as_ref().is_some_and(|s| Arc::ptr_eq(s, &set)),
+            "a set that changes nothing keeps the value in force"
+        );
+        assert!(!state.stored_parameters().text_knockout);
+
+        state.set_stored(|s| s.text_knockout = true);
+        assert!(state.stored.is_none(), "back at the initial values");
+        assert_eq!(state, GraphicsState::new(Matrix::IDENTITY));
     }
 
     #[test]
