@@ -42,7 +42,7 @@ impl DocumentEditor {
         if right - left <= 0.0 || top - bottom <= 0.0 {
             return false;
         }
-        let Some(reference) = self.page_refs().get(index as usize).copied() else {
+        let Some(reference) = self.page_ref(index) else {
             return false;
         };
         let Some(Object::Dict(mut dict)) = self.get(reference) else {

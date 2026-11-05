@@ -12,14 +12,41 @@ use crate::write::StreamData;
 
 impl DocumentEditor {
     /// The page references, in order, including any reordering done here.
+    ///
+    /// The editor's own order once an edit has made one; until then the
+    /// document's page index, which this builds when nothing has, each
+    /// reference counted as an entry copied. A caller after one page or the
+    /// count reads [`DocumentEditor::page_ref`] or
+    /// [`DocumentEditor::page_count`], which copy nothing.
     #[must_use]
     pub fn page_refs(&self) -> Vec<ObjRef> {
         match &self.page_order {
             Some(order) => order.clone(),
-            None => pages::collect_counted(&self.doc, self.work.as_deref())
-                .into_iter()
-                .map(|p| p.reference)
-                .collect(),
+            None => pages::references_counted(&self.doc, self.work.as_deref()),
+        }
+    }
+
+    /// The number of pages, including any added or removed here: the length
+    /// of the editor's own order once an edit has made one, and until then
+    /// the document's page count, which builds its page index when nothing
+    /// has ([`pages::count`]).
+    #[must_use]
+    pub fn page_count(&self) -> u32 {
+        match &self.page_order {
+            Some(order) => u32::try_from(order.len()).unwrap_or(u32::MAX),
+            None => pages::count_counted(&self.doc, self.work.as_deref()),
+        }
+    }
+
+    /// The reference of page `index`, including any reordering done here:
+    /// from the editor's own order once an edit has made one, and until then
+    /// out of the document's page index, which this builds when nothing has,
+    /// counted as one entry copied. `None` past the last page.
+    #[must_use]
+    pub fn page_ref(&self, index: u32) -> Option<ObjRef> {
+        match &self.page_order {
+            Some(order) => order.get(index as usize).copied(),
+            None => pages::reference_counted(&self.doc, index, self.work.as_deref()),
         }
     }
 
@@ -37,24 +64,22 @@ impl DocumentEditor {
     /// merely unchanged in content — `is_dirty` must not become true because
     /// someone asked for a page that is not there.
     pub fn delete_page(&mut self, index: u32) -> bool {
-        let index = index as usize;
-        if index >= self.page_refs().len() {
+        if index >= self.page_count() {
             return false;
         }
-        self.ensure_order().remove(index);
+        self.ensure_order().remove(index as usize);
         true
     }
 
     /// Moves a page to a new position.
     pub fn move_page(&mut self, from: u32, to: u32) -> bool {
-        let (from, to) = (from as usize, to as usize);
-        let len = self.page_refs().len();
+        let len = self.page_count();
         if from >= len || to >= len {
             return false;
         }
         let order = self.ensure_order();
-        let page = order.remove(from);
-        order.insert(to, page);
+        let page = order.remove(from as usize);
+        order.insert(to as usize, page);
         true
     }
 
@@ -72,7 +97,7 @@ impl DocumentEditor {
         if degrees % 90 != 0 {
             return false;
         }
-        let Some(reference) = self.page_refs().get(index as usize).copied() else {
+        let Some(reference) = self.page_ref(index) else {
             return false;
         };
         let Some(Object::Dict(mut dict)) = self.get(reference) else {
@@ -110,7 +135,7 @@ impl DocumentEditor {
         if right - left <= 0.0 || top - bottom <= 0.0 {
             return false;
         }
-        let Some(reference) = self.page_refs().get(index as usize).copied() else {
+        let Some(reference) = self.page_ref(index) else {
             return false;
         };
         let Some(Object::Dict(mut dict)) = self.get(reference) else {
@@ -137,7 +162,7 @@ impl DocumentEditor {
     /// not to have the page land somewhere plausible.
     pub fn insert_page(&mut self, index: u32, width: f64, height: f64) -> Option<ObjRef> {
         let at = index as usize;
-        if at > self.page_refs().len() || !width.is_finite() || !height.is_finite() {
+        if index > self.page_count() || !width.is_finite() || !height.is_finite() {
             return None;
         }
         if width <= 0.0 || height <= 0.0 {
@@ -177,13 +202,11 @@ impl DocumentEditor {
     /// Returns the new page's reference, or `None` when the source has no such
     /// page.
     pub fn import_page(&mut self, source: &CosDocument, page: u32, index: u32) -> Option<ObjRef> {
-        let at = index as usize;
-        if at > self.page_refs().len() {
+        if index > self.page_count() {
             return None;
         }
 
-        let pages = pages::collect_counted(source, self.work.as_deref());
-        let from = pages.get(page as usize)?;
+        let from = pages::at_counted(source, page, self.work.as_deref())?;
 
         // The page's own dictionary, minus the entries that describe where it
         // sat in a tree it is leaving.
@@ -215,7 +238,7 @@ impl DocumentEditor {
 
         let reference = self.allocate();
         self.put(reference, copied);
-        self.ensure_order().insert(at, reference);
+        self.ensure_order().insert(index as usize, reference);
         Some(reference)
     }
 
@@ -344,7 +367,7 @@ impl DocumentEditor {
     /// added — without that, a page whose content ends inside a `q` would
     /// apply its transform to the addition.
     pub fn append_content(&mut self, page: u32, operators: &[u8]) -> bool {
-        let Some(reference) = self.page_refs().get(page as usize).copied() else {
+        let Some(reference) = self.page_ref(page) else {
             return false;
         };
         let Some(Object::Dict(mut dict)) = self.get(reference) else {
@@ -401,9 +424,7 @@ impl DocumentEditor {
     /// The media box of a page, for callers placing things on it.
     #[must_use]
     pub fn page_box(&self, index: u32) -> Option<Rect> {
-        pages::collect_counted(&self.doc, self.work.as_deref())
-            .get(index as usize)
-            .map(|p| p.media_box)
+        pages::at_counted(&self.doc, index, self.work.as_deref()).map(|p| p.media_box)
     }
 
     /// The page tree and page dictionaries a reordering changes.

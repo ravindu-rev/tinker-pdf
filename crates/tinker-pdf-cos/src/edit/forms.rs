@@ -1208,12 +1208,8 @@ impl DocumentEditor {
     /// Every widget `kind` places, after checking everything about the kind
     /// that could refuse.
     fn placements<'a>(&self, kind: &'a NewFieldKind) -> Result<Vec<Placement<'a>>, AddFieldError> {
-        let pages = self.page_refs();
         let place = |page: u32, rect: Rect, export: Option<&'a str>| {
-            let page_ref = pages
-                .get(page as usize)
-                .copied()
-                .ok_or(AddFieldError::NoSuchPage(page))?;
+            let page_ref = self.page_ref(page).ok_or(AddFieldError::NoSuchPage(page))?;
             let rect = usable_rect(rect).ok_or(AddFieldError::RectUnusable)?;
             Ok::<_, AddFieldError>(Placement {
                 page: page_ref,

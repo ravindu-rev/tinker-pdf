@@ -36,7 +36,7 @@ impl DocumentEditor {
         if name.is_empty() || !view.is_writable() {
             return false;
         }
-        let Some(page_ref) = self.page_refs().get(page as usize).copied() else {
+        let Some(page_ref) = self.page_ref(page) else {
             return false;
         };
         let Some(catalog) = self.catalog() else {

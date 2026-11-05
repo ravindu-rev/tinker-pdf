@@ -91,7 +91,14 @@ another `CosDocument`), `keep_pages` (the complement of delete, in one
 call), `append_content` (operators appended to a page's content array) and
 `page_box`. Page operations apply to whichever object set the save mode
 builds — rewrite or incremental — so a reordered `/Kids` reaches the file
-either way. `set_trim_box`, `set_art_box` and `set_bleed_box` — and
+either way. `page_count` and `page_ref(index)` read the editor's own page
+order once an edit has made one, and the document's page index until then —
+which counting the pages builds once
+([document model](document-model.md)) — so a loop over every page turns,
+stamps or redacts each without walking the tree again; every page operation
+looks its page up the same way, and `import_page` and `import_page_as_form`
+look the source's page up as `Document::page` does. `page_refs()` hands back
+every reference, a copy of the order or of the index. `set_trim_box`, `set_art_box` and `set_bleed_box` — and
 `set_page_boundary(index, PageBoundary, ..)` for any of the five — follow
 `set_crop_box`'s rules and write on the page itself, because 7.7.3.3 Table 30
 does not make the three production boxes inheritable and a value on a
@@ -665,7 +672,8 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 `set_layer_visible()`,
 `set_trailer_entry()`, `set_info()`,
 `view()`,
-`transaction()`, `checkpoint()`, `restore()`, `page_refs()`,
+`transaction()`, `checkpoint()`, `restore()`, `page_refs()`, `page_count()`,
+`page_ref()`,
 `delete_page()`,
 `move_page()`, `rotate_page()`, `set_crop_box()`, `insert_page()`,
 `import_page()`,

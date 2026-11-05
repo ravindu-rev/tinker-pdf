@@ -1225,8 +1225,9 @@ fn merge(parts: &[Document], counting: bool, options: &SaveOptions) -> Saved {
 
 /// A merge is pages imported and then saved, and it reads its stats from the
 /// save: what was counted over the editor since `count_work` — each import's
-/// walk of its source, the editor's walks of its own tree, and the save's
-/// passes. A counted merge writes the bytes an uncounted one writes.
+/// page copied out of its source's index, the editor's walk of its own tree,
+/// and the save's passes. A counted merge writes the bytes an uncounted one
+/// writes.
 #[test]
 fn a_merge_reads_its_stats_from_the_save() {
     let parts: Vec<Document> = (0..4)
@@ -1241,15 +1242,13 @@ fn a_merge_reads_its_stats_from_the_save() {
     for (what, counting) in [("a counting editor", true), ("a save of its own", false)] {
         let counted = merge(&parts, counting, &asked);
         same_save(&counted, &plain, what);
-        // The editor reads its page order from its tree, a root of no kids,
-        // until the first import sets it: for the loop's question before that
-        // import, for the import's own bound check, and when it inserts. Each
-        // import walks its source, the root and ten pages.
-        let (editor_walks, editor_nodes) = if counting {
-            (3 + 40, 3 + 40 * 11)
-        } else {
-            (0, 0)
-        };
+        // The editor reads its page order out of its document's page index
+        // until the first import sets it, and its first question, the loop's
+        // before that import, builds the index with one walk of a root of no
+        // kids. Each import copies its page out of its source's index, which
+        // the loop's count of the source's pages built.
+        let (editor_walks, editor_nodes, editor_entries) =
+            if counting { (1, 1, 40) } else { (0, 0, 0) };
         let shown: u64 = (0..4)
             .flat_map(|part| (0..10).map(move |page| part_line(part, page).len() as u64))
             .sum();
@@ -1268,6 +1267,7 @@ fn a_merge_reads_its_stats_from_the_save() {
         // and finds it at the rest.
         expected.page_walks = editor_walks + 1;
         expected.page_nodes_visited = editor_nodes + 41;
+        expected.page_entries_copied = editor_entries;
         expected.font_dictionaries_resolved = 40 + shown;
         expected.font_program_misses = 40;
         expected.font_program_hits = shown - 40;
@@ -1564,6 +1564,15 @@ fn nodes_to_gather(depth: u32, fan_out: u64, wanted: u64) -> u64 {
         .sum()
 }
 
+/// The nodes the `/Count` descent reads to page `index` of [`balanced`]: the
+/// root, and on each level below it the kids before the one it enters and
+/// that one — the page's digit on that level, plus one.
+fn nodes_to_descend(depth: u32, fan_out: u64, index: u64) -> u64 {
+    1 + (1..=depth)
+        .map(|level| index / fan_out.pow(depth - level) % fan_out + 1)
+        .sum::<u64>()
+}
+
 /// A document of `pages` pages, saved linearized by this engine.
 fn linearized(pages: usize) -> Vec<u8> {
     let mut builder = DocumentBuilder::new();
@@ -1600,11 +1609,13 @@ fn ancestors(document: &Document, index: u32) -> u64 {
     count
 }
 
-/// `page(i)` reads the nodes today's walk visits to gather `i + 1` pages —
-/// a lookup past the last page reads them all and finds nothing — in one walk
-/// of the tree; and on a streamed linearized file, the first page and a page
-/// the hint tables place are read from the head, each with its ancestors,
-/// without a walk.
+/// `page(i)` reads, in one walk of the tree, the nodes the `/Count` descent
+/// reads on its way down: the root, and on each level the kids before the one
+/// it enters and that one. A lookup past the last page reads the root, finds
+/// the index past its `/Count`, and walks every node to find nothing, a second
+/// walk. On a streamed linearized file, the first page and a page the hint
+/// tables place are read from the head, each with its ancestors, without a
+/// walk.
 #[test]
 fn page_lookup_counts_the_nodes_it_visits() {
     for (depth, fan_out) in [(1, 5), (2, 10), (3, 4)] {
@@ -1625,8 +1636,13 @@ fn page_lookup_counts_the_nodes_it_visits() {
                 "page {index} of {pages}"
             );
             let mut expected = Stats::default();
-            expected.page_walks = 1;
-            expected.page_nodes_visited = nodes_to_gather(depth, fan, u64::from(index) + 1);
+            if u64::from(index) < pages {
+                expected.page_walks = 1;
+                expected.page_nodes_visited = nodes_to_descend(depth, fan, u64::from(index));
+            } else {
+                expected.page_walks = 2;
+                expected.page_nodes_visited = 1 + nodes_to_gather(depth, fan, u64::from(index) + 1);
+            }
             assert_eq!(
                 stats, expected,
                 "depth {depth}, fan-out {fan_out}: page {index}"

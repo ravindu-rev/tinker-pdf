@@ -127,6 +127,24 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/guard_allocations.rs",
         test: "a10_render_all_at_36_dpi_allocates_a_flat_amount_per_page",
     },
+    // MS-01's A2 editor legs: every page turned, a second document's every
+    // page imported, two halves kept and saved, and every page redacted.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a2_rotate_is_linear_in_pages",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a2_merge_is_linear_in_pages",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a2_split_is_linear_in_pages",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a2_redaction_is_linear_in_pages",
+    },
     // MS-08's counted guard: the requests page one of the linearized fixture
     // and of its unlinearized twin makes, measured once and held on every
     // target beside the row's ceilings.

@@ -60,7 +60,7 @@ impl DocumentEditor {
     ///
     /// Returns how many were flattened.
     pub fn flatten_annotations(&mut self, page: u32) -> Option<usize> {
-        let reference = self.page_refs().get(page as usize).copied()?;
+        let reference = self.page_ref(page)?;
         let Some(Object::Dict(dict)) = self.get(reference) else {
             return None;
         };
@@ -212,7 +212,7 @@ impl DocumentEditor {
     /// `/AP` in keeps it untouched; [`crate::appearance::synthesize`] is what
     /// gets called otherwise, and the subtypes it declines are left bare.
     pub fn add_annotation(&mut self, page: u32, annotation: Dict) -> Option<ObjRef> {
-        let reference = self.page_refs().get(page as usize).copied()?;
+        let reference = self.page_ref(page)?;
         let Some(Object::Dict(mut dict)) = self.get(reference) else {
             return None;
         };

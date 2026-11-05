@@ -1112,7 +1112,7 @@ pub fn apply(
     // order, its content as the editor now holds it, and its resources read
     // through the editor. See [`EditorPage`] for the three ways reading the
     // file instead went wrong.
-    let reference = editor.page_refs().get(page as usize).copied()?;
+    let reference = editor.page_ref(page)?;
     let EditorPage {
         content,
         existing,

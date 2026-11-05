@@ -334,7 +334,7 @@ impl DocumentEditor {
         let root = if ranges.is_empty() {
             None
         } else {
-            let pages = u32::try_from(self.page_refs().len()).unwrap_or(u32::MAX);
+            let pages = self.page_count();
             if !ranges.iter().any(|range| range.first_page == 0) {
                 return Err(PageLabelError::NoFirstPage);
             }

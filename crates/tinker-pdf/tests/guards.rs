@@ -136,27 +136,36 @@ const ROSTER: &[Guard] = &[
             "P-01.3",
         )
     },
-    owed(
-        "A2",
-        "rotate: work at 4 000 pages at most 4.4 x work at 1 000",
-        "a2_rotate_is_linear_in_pages",
-        "P-01",
-        "P-01.4",
-    ),
-    owed(
-        "A2",
-        "merge: work at 4 000 pages at most 4.4 x work at 1 000",
-        "a2_merge_is_linear_in_pages",
-        "P-01",
-        "P-01.4",
-    ),
-    owed(
-        "A2",
-        "split: work at 4 000 pages at most 4.4 x work at 1 000",
-        "a2_split_is_linear_in_pages",
-        "P-01",
-        "P-01.4",
-    ),
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A2",
+            "rotate: work at 4 000 pages at most 4.4 x work at 1 000",
+            "a2_rotate_is_linear_in_pages",
+            "P-01",
+            "P-01.4",
+        )
+    },
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A2",
+            "merge: work at 4 000 pages at most 4.4 x work at 1 000",
+            "a2_merge_is_linear_in_pages",
+            "P-01",
+            "P-01.4",
+        )
+    },
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A2",
+            "split: work at 4 000 pages at most 4.4 x work at 1 000",
+            "a2_split_is_linear_in_pages",
+            "P-01",
+            "P-01.4",
+        )
+    },
     Guard {
         state: State::Landed,
         ..owed(
@@ -167,13 +176,16 @@ const ROSTER: &[Guard] = &[
             "P-01.3",
         )
     },
-    owed(
-        "A2",
-        "redaction: work at 4 000 pages at most 4.4 x work at 1 000",
-        "a2_redaction_is_linear_in_pages",
-        "P-01",
-        "P-01.4",
-    ),
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A2",
+            "redaction: work at 4 000 pages at most 4.4 x work at 1 000",
+            "a2_redaction_is_linear_in_pages",
+            "P-01",
+            "P-01.4",
+        )
+    },
     Guard {
         state: State::Landed,
         ..owed(
@@ -1049,5 +1061,105 @@ fn a2_validation_is_linear_in_pages() {
         document
             .validate_pdfa_counted(tinker_pdf::PdfACoverage::IMPLEMENTED)
             .1
+    });
+}
+
+/// A2's editor legs read the editor's tally: what was counted over it since
+/// `count_work`.
+fn edited(editor: &tinker_pdf::DocumentEditor) -> Stats {
+    editor.work().expect("the editor counts").stats()
+}
+
+/// **A2, rotate**: every page turned a quarter on a counting editor, each
+/// looked up by its index.
+#[test]
+fn a2_rotate_is_linear_in_pages() {
+    a2("rotate", |document| {
+        let mut editor = document.editor();
+        editor.count_work();
+        for index in 0..editor.page_count() {
+            assert!(editor.rotate_page(index, 90), "page {index} turns");
+        }
+        edited(&editor)
+    });
+}
+
+/// **A2, merge**: every page of a second document of as many pages imported
+/// at the end on a counting editor, as `tpdf merge` imports them.
+#[test]
+fn a2_merge_is_linear_in_pages() {
+    a2("merge", |document| {
+        let pages = document.page_count();
+        let second = Document::open(guard_support::document(1, pages as usize))
+            .expect("the second document opens");
+        let mut editor = document.editor();
+        editor.count_work();
+        for index in 0..second.page_count() {
+            let at = editor.page_count();
+            editor
+                .import_page(second.cos(), index, at)
+                .expect("the page imports");
+        }
+        assert_eq!(editor.page_count(), 2 * pages, "every page imported");
+        edited(&editor)
+    });
+}
+
+/// **A2, split**: the document cut into two halves, each kept on a counting
+/// editor and rewritten with what it no longer reaches collected, as `tpdf
+/// split` writes its pieces.
+#[test]
+fn a2_split_is_linear_in_pages() {
+    a2("split", |document| {
+        let pages = document.page_count();
+        let mut total = Stats::default();
+        for half in [
+            (0..pages / 2).collect::<Vec<u32>>(),
+            (pages / 2..pages).collect(),
+        ] {
+            let mut editor = document.editor();
+            editor.count_work();
+            assert!(editor.keep_pages(&half), "the half is kept");
+            total += save(
+                &mut editor,
+                &SaveOptions {
+                    write: tinker_pdf::WriteOptions {
+                        mode: tinker_pdf::WriteMode::Rewrite,
+                        garbage_collect: true,
+                        ..tinker_pdf::WriteOptions::default()
+                    },
+                    stats: true,
+                    ..SaveOptions::default()
+                },
+            )
+            .stats
+            .expect("asked");
+        }
+        total
+    });
+}
+
+/// **A2, redaction**: one rectangle across every page's line on a counting
+/// editor, each page looked up by its index.
+#[test]
+fn a2_redaction_is_linear_in_pages() {
+    a2("redaction", |document| {
+        let mut editor = document.editor();
+        editor.count_work();
+        let areas = [tinker_pdf::redact::Redaction {
+            area: tinker_pdf::Rect {
+                x0: 0.0,
+                y0: 40.0,
+                x1: 200.0,
+                y1: 70.0,
+            },
+            mark: false,
+        }];
+        for index in 0..editor.page_count() {
+            let report =
+                tinker_pdf::redact::apply(&mut editor, index, &areas).expect("the page is there");
+            assert!(report.glyphs > 0, "page {index}: its line is cut");
+        }
+        edited(&editor)
     });
 }

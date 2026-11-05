@@ -111,6 +111,10 @@ jobs:
           grep -Eq 'a10_page_lookup_allocates_a_flat_amount_per_page [.]{3} ok' workspace.log
           grep -Eq 'a10_text_allocates_a_flat_amount_per_page [.]{3} ok' workspace.log
           grep -Eq 'a10_render_all_at_36_dpi_allocates_a_flat_amount_per_page [.]{3} ok' workspace.log
+          grep -Eq 'a2_rotate_is_linear_in_pages [.]{3} ok' workspace.log
+          grep -Eq 'a2_merge_is_linear_in_pages [.]{3} ok' workspace.log
+          grep -Eq 'a2_split_is_linear_in_pages [.]{3} ok' workspace.log
+          grep -Eq 'a2_redaction_is_linear_in_pages [.]{3} ok' workspace.log
       # MS-08's counted guard, the requests page one costs over a streamed
       # open, which `cargo test --workspace` ran. Its fixtures draw paths and
       # no text, so one build.
@@ -169,6 +173,10 @@ jobs:
           grep -Eq 'a10_page_lookup_allocates_a_flat_amount_per_page [.]{3} ok' bundled.log
           grep -Eq 'a10_text_allocates_a_flat_amount_per_page [.]{3} ok' bundled.log
           grep -Eq 'a10_render_all_at_36_dpi_allocates_a_flat_amount_per_page [.]{3} ok' bundled.log
+          grep -Eq 'a2_rotate_is_linear_in_pages [.]{3} ok' bundled.log
+          grep -Eq 'a2_merge_is_linear_in_pages [.]{3} ok' bundled.log
+          grep -Eq 'a2_split_is_linear_in_pages [.]{3} ok' bundled.log
+          grep -Eq 'a2_redaction_is_linear_in_pages [.]{3} ok' bundled.log
       - run: cargo clippy -p tinker-pdf --features bundled-fonts --all-targets -- -D warnings
       # Two design rules the compiler cannot enforce: a new crate edge
       # compiles perfectly well, and so does a `.sin()` on a pixel path. Plan
@@ -631,6 +639,10 @@ jobs:
           grep -q 'test a10_page_lookup_allocates_a_flat_amount_per_page \.\.\. ok' guards.log
           grep -q 'test a10_text_allocates_a_flat_amount_per_page \.\.\. ok' guards.log
           grep -q 'test a10_render_all_at_36_dpi_allocates_a_flat_amount_per_page \.\.\. ok' guards.log
+          grep -q 'test a2_rotate_is_linear_in_pages \.\.\. ok' guards.log
+          grep -q 'test a2_merge_is_linear_in_pages \.\.\. ok' guards.log
+          grep -q 'test a2_split_is_linear_in_pages \.\.\. ok' guards.log
+          grep -q 'test a2_redaction_is_linear_in_pages \.\.\. ok' guards.log
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
       # MS-08's counted guard on wasm32-wasip1: the requests page one costs

@@ -456,11 +456,11 @@ lands in the step named, in
 | A2 | text: work(4 000 pages) ≤ 4.4 × work(1 000) | `a2_text_is_linear_in_pages` | P-01, P-01.3, landed |
 | A2 | render-all at 36 dpi | `a2_render_all_at_36_dpi_is_linear_in_pages` | P-01, P-01.3, landed |
 | A2 | rewrite | `a2_rewrite_is_linear_in_pages` | P-01, P-01.3, landed |
-| A2 | rotate | `a2_rotate_is_linear_in_pages` | P-01, P-01.4 |
-| A2 | merge | `a2_merge_is_linear_in_pages` | P-01, P-01.4 |
-| A2 | split | `a2_split_is_linear_in_pages` | P-01, P-01.4, holding at the tip |
+| A2 | rotate | `a2_rotate_is_linear_in_pages` | P-01, P-01.4, landed |
+| A2 | merge | `a2_merge_is_linear_in_pages` | P-01, P-01.4, landed |
+| A2 | split | `a2_split_is_linear_in_pages` | P-01, P-01.4, landed |
 | A2 | subset | `a2_subset_is_linear_in_pages` | P-01, P-01.3, landed |
-| A2 | redaction | `a2_redaction_is_linear_in_pages` | P-01, P-01.4 |
+| A2 | redaction | `a2_redaction_is_linear_in_pages` | P-01, P-01.4, landed |
 | A2 | validation | `a2_validation_is_linear_in_pages` | P-01, P-01.3, landed |
 | A2 | a 1 000-chapter book against 100 chapters, beyond the exit's nine | `a2_a_thousand_chapter_book_costs_at_most_eleven_times_a_hundred` | P-18, P-18.5, entered landed |
 | A3 | font dictionaries resolved per page ≤ distinct `/Font` entries used | `a3_fonts_resolved_per_page_are_at_most_the_fonts_it_uses` | P-02, P-02.3 |
@@ -1934,8 +1934,8 @@ report's `slowest_page` names the page that cost a file most.
 *For [ROADMAP](../ROADMAP.md) row P-01.* A page lookup finds its page
 without walking the tree from its root: out of the page index a count builds,
 or by a `/Count` descent before one has (`pages::at_counted`,
-`crates/tinker-pdf-cos/src/pages.rs`). The editor collects every page to find
-one, which P-01.4 replaces with the same lookups. This section fixes the order
+`crates/tinker-pdf-cos/src/pages.rs`), and the editor looks its pages up in
+the same index. This section fixes the order
 a lookup tries its routes in, what the `/Count` descent may believe, when the
 flat index is built, what it holds and when it ends, and which per-page site
 each guard leg and each of the row's operations waits on.
@@ -2025,13 +2025,15 @@ every kid before page `i` and only the index helps.
 #### The index: its build rule
 
 The index is the walk's page list, built once by the walk and kept. **It is
-built by `pages::count`, and by nothing else**: the count walks the whole tree
-to answer, so keeping what the walk found costs it nothing more. A lookup the
-index does not answer descends, however many lookups came before it, and
-`collect` and `collect_upto` read the index once it is built and walk without
-keeping what they find before then. A page loop counts its pages first — the
-CLI's, the C ABI's, the benches' — so it reads every page out of the index,
-and a lookup on its own never pays for the tree.
+built by a count of the pages, and by nothing else**: `pages::count`, and an
+editor's lookups while it has no page order of its own, which count the
+document's pages first. The count walks the whole tree to answer, so keeping
+what the walk found costs it nothing more. A document's lookup the index does
+not answer descends, however many lookups came before it, and `collect` and
+`collect_upto` read the index once it is built and walk without keeping what
+they find before then. A page loop counts its pages first — the CLI's, the C
+ABI's, the benches' — so it reads every page out of the index, and a lookup
+on its own never pays for the tree.
 
 That rule keeps both of A1's bounds:
 
@@ -2045,9 +2047,11 @@ That rule keeps both of A1's bounds:
   11 111 + 10 000, under 30 000.
 
 **An entry** is the `Page` the walk builds — reference, index, the five boxes,
-the rotation and the inherited `/Resources`; P-01.4 adds beside the entries a
-map from each page's reference to its index, for `dest::Resolver` and the
-editor. A lookup copies one entry out, and a read of every page copies each;
+the rotation and the inherited `/Resources` — and the index keeps beside its
+entries a map from each page's reference to its position, the first where a
+shared subtree holds a page twice, which `dest::Resolver` reads to place a
+destination's page. A lookup copies one entry out, and a read of every page
+copies each;
 **the entries copied are counted beside the nodes visited**, as a counter of
 their own in MS-01's tally (`page_entries_copied`), so A1's total is nodes
 visited plus entries copied.
@@ -2069,14 +2073,19 @@ the index raises none of them again.
 
 #### The editor's indexed lookups
 
-`DocumentEditor` gains a page count and a page-by-index lookup that read the
-editor's own page order when an edit has made one, and the document's index
-otherwise, without walking or copying either (P-01.4). Every per-page
-operation in `edit/` uses them in place of `page_refs()`, which collects every
-page while the editor has no order of its own and clones the order when it
-does; `import_page` and `import_page_as_form` read the source page through
-`pages::at`; and facade redaction's `apply` looks its page up the same way.
-`page_refs()` stays, for its callers, and reads the index too.
+`DocumentEditor::page_count` and `DocumentEditor::page_ref` read the editor's
+own page order when an edit has made one, and the document's index otherwise,
+without walking or copying either: a lookup is one entry copied. Every
+per-page operation in `edit/` uses them, and facade redaction's `apply` looks
+its page up the same way; `import_page` and `import_page_as_form` read the
+source page through `pages::at`, and `page_box` its own. `page_refs()` stays
+for its callers, the CLI's merge loop and the C ABI's and bindings' editor
+page counts among them: it clones the editor's order, or copies every
+reference out of the index. `dest::Resolver` holds the index — the
+document's when a count has built it, one walked for it and not kept
+otherwise — and places a destination's page by the index's map, so a page's
+links copy no page list (`page_lookups.rs`
+`links_on_every_page_copy_no_page_list`).
 
 #### A1's and A2's counted quantities
 
@@ -2097,11 +2106,11 @@ kept from 7 ms to 27 ms and with subsetting from 62 to 268 ms, at 1 000 and
 | text | none: the loop counts first, and each `page(i)` copies its entry out of the index | `PageEntriesCopied`, one a page | P-01.3, landed |
 | render-all at 36 dpi | none: the same lookup | `PageEntriesCopied`, one a page | P-01.3, landed |
 | rewrite | none: the serializer reads each object once, and the save's subset pass walks the tree a fixed number of times (`subset::apply`); the leg packs object streams and compresses | the serializer counts nothing; the leg's work is its subset pass's | P-01.3, landed |
-| rotate | `rotate_page` reads `page_refs()`, which collects every page while the editor has no order (`edit/page_ops.rs`) | `PageNodesVisited`, on a counting editor | P-01.4 |
-| merge | `import_page` collects every page of the source for each page it imports, and reads the destination's `page_refs()` | `PageWalks`, `PageNodesVisited` | P-01.4 |
-| split | none: `keep_pages` reads the order once | — | P-01.4, landing green |
+| rotate | none: `rotate_page` looks its page up by `page_ref` (`edit/page_ops.rs`) | `PageEntriesCopied`, one a page, on a counting editor | P-01.4, landed |
+| merge | none: `import_page` looks the source's page up by `pages::at`, out of the index the source's count built, and checks its place by `page_count` | `PageEntriesCopied`, one a page | P-01.4, landed |
+| split | none: `keep_pages` reads the order once, and each half's save walks its tree a fixed number of times | — | P-01.4, landed |
 | subset | none: a fixed number of walks (`subset::apply`) | — | P-01.3, landed |
-| redaction | `redact::apply` reads `editor.page_refs()` for each page | `PageNodesVisited`, on a counting editor | P-01.4 |
+| redaction | none: `redact::apply` looks its page up by `page_ref` | `PageEntriesCopied`, one a page, on a counting editor | P-01.4, landed |
 | validation | none: every group `validate_pdfa` asks for, whose rules walk the tree a fixed number of times (`pdfa/content.rs`) | — | P-01.3, landed |
 
 **The serializer counts nothing**, which is a finding rather than a site: a

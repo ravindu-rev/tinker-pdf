@@ -399,7 +399,7 @@ impl DocumentEditor {
     /// September 2026 that it was "12.5.3's NoView bit", which is bit 6 and
     /// 32; nothing was ever hidden by a flag, only by the empty rectangle.
     fn attach_to_new_field(&mut self, name: &str, signature: ObjRef) -> Result<(), SignError> {
-        let page = *self.page_refs().first().ok_or(SignError::NoPages)?;
+        let page = self.page_ref(0).ok_or(SignError::NoPages)?;
         let widget = self.allocate();
 
         let dict = self.signature_widget(
@@ -459,9 +459,8 @@ impl DocumentEditor {
         seal: &Seal<'_>,
         signature: ObjRef,
     ) -> Result<(), SignError> {
-        let page = *self
-            .page_refs()
-            .get(seal.page as usize)
+        let page = self
+            .page_ref(seal.page)
             .ok_or(SignError::NoSuchPage(seal.page))?;
         let rect = super::forms::usable_rect(seal.rect).ok_or(SignError::RectUnusable)?;
         let image = match &seal.appearance.image {

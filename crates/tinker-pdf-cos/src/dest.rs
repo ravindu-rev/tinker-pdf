@@ -10,7 +10,8 @@
 use crate::doc::CosDocument;
 use crate::name::{Name, NameTable};
 use crate::object::{Dict, ObjRef, Object, PdfString};
-use crate::pages::{Page, Rect};
+use crate::pages::{Page, PageIndex, Rect};
+use std::sync::Arc;
 
 /// How a destination positions the page it names (12.3.2.2, Table 151).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -116,7 +117,7 @@ pub enum Action {
 /// Reads destinations and actions in the context of one document.
 pub struct Resolver<'d> {
     doc: &'d CosDocument,
-    pages: Vec<Page>,
+    pages: Arc<PageIndex>,
     xyz: Name,
     fit: Name,
     fit_h: Name,
@@ -147,7 +148,7 @@ impl<'d> Resolver<'d> {
     pub fn new(doc: &'d CosDocument) -> Resolver<'d> {
         let i = |b: &[u8]| doc.intern(b);
         Resolver {
-            pages: crate::pages::collect(doc),
+            pages: crate::pages::index_or_walked(doc),
             xyz: i(b"XYZ"),
             fit: i(b"Fit"),
             fit_h: i(b"FitH"),
@@ -177,7 +178,7 @@ impl<'d> Resolver<'d> {
     /// The pages this resolver indexed, for callers that want them anyway.
     #[must_use]
     pub fn pages(&self) -> &[Page] {
-        &self.pages
+        self.pages.pages()
     }
 
     fn kind_of(&self, name: Name, values: &[Object]) -> Option<DestKind> {
@@ -229,13 +230,7 @@ impl<'d> Resolver<'d> {
             Object::Array(values) => {
                 let target = values.first()?;
                 let (page_ref, page_index) = match target {
-                    Object::Ref(r) => (
-                        Some(*r),
-                        self.pages
-                            .iter()
-                            .find(|p| p.reference == *r)
-                            .map(|p| p.index),
-                    ),
+                    Object::Ref(r) => (Some(*r), self.pages.position(*r)),
                     Object::Int(n) if *n >= 0 => (None, u32::try_from(*n).ok()),
                     _ => (None, None),
                 };

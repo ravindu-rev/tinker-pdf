@@ -12,7 +12,7 @@ use crate::object::{Dict, ObjRef, Object};
 use crate::store::MutexExt;
 use crate::warn::WarningKind;
 use crate::work::{Counter, Work};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// A rectangle in PDF units, normalized so the corners are ordered.
@@ -257,10 +257,35 @@ impl Inherited {
 }
 
 /// Every page one walk found, kept on the document (P-01's index): the pages
-/// in document order as [`collect`] returns them.
+/// in document order as [`collect`] returns them, and each page's position by
+/// its reference.
 #[derive(Debug)]
 pub(crate) struct PageIndex {
     pages: Vec<Page>,
+    positions: HashMap<ObjRef, u32>,
+}
+
+impl PageIndex {
+    /// The index of `pages`, a walk's list in document order.
+    fn new(pages: Vec<Page>) -> PageIndex {
+        let mut positions = HashMap::with_capacity(pages.len());
+        for page in &pages {
+            positions.entry(page.reference).or_insert(page.index);
+        }
+        PageIndex { pages, positions }
+    }
+
+    /// The pages, in document order.
+    pub(crate) fn pages(&self) -> &[Page] {
+        &self.pages
+    }
+
+    /// The position of the page whose object is `reference`: its first, for a
+    /// page a shared subtree holds twice, as a search of [`PageIndex::pages`]
+    /// from the front finds.
+    pub(crate) fn position(&self, reference: ObjRef) -> Option<u32> {
+        self.positions.get(&reference).copied()
+    }
 }
 
 /// The index's place on a document: the index once [`count`] has built it.
@@ -287,9 +312,43 @@ fn build(doc: &CosDocument, work: Option<&Work>) -> Arc<PageIndex> {
     if claimed.is_some_and(|claimed| u64::try_from(claimed).ok() != Some(pages.len() as u64)) {
         doc.warn(WarningKind::PageCountMismatch);
     }
-    let index = Arc::new(PageIndex { pages });
+    let index = Arc::new(PageIndex::new(pages));
     doc.page_index().lock_safe().index = Some(Arc::clone(&index));
     index
+}
+
+/// The document's page index, built by this call when nothing has, as
+/// [`count`] builds it: what an editor reads its pages out of.
+pub(crate) fn index_counted(doc: &CosDocument, work: Option<&Work>) -> Arc<PageIndex> {
+    match indexed(doc) {
+        Some(index) => index,
+        None => build(doc, work),
+    }
+}
+
+/// The document's page index when a count has built it, and otherwise an
+/// index of one walk made for this caller and not kept: what a reader that
+/// needs every page's position reads, without building the index itself.
+pub(crate) fn index_or_walked(doc: &CosDocument) -> Arc<PageIndex> {
+    indexed(doc)
+        .unwrap_or_else(|| Arc::new(PageIndex::new(collect_walked(doc, limits::MAX_PAGES, None))))
+}
+
+/// The reference of page `at` out of the document's page index, which this
+/// builds when nothing has, counted as one entry copied; `None` past the last
+/// page.
+pub(crate) fn reference_counted(doc: &CosDocument, at: u32, work: Option<&Work>) -> Option<ObjRef> {
+    let reference = index_counted(doc, work).pages.get(at as usize)?.reference;
+    tally(work, Counter::PageEntriesCopied);
+    Some(reference)
+}
+
+/// Every page's reference out of the document's page index, which this
+/// builds when nothing has, each counted as an entry copied.
+pub(crate) fn references_counted(doc: &CosDocument, work: Option<&Work>) -> Vec<ObjRef> {
+    let index = index_counted(doc, work);
+    tally_entries(work, index.pages.len());
+    index.pages.iter().map(|page| page.reference).collect()
 }
 
 /// Page `index` out of the document's index, counted as one entry copied;
@@ -519,10 +578,7 @@ pub fn count(doc: &CosDocument) -> u32 {
 /// that builds the index, or, once it is built, nothing.
 #[must_use]
 pub fn count_counted(doc: &CosDocument, work: Option<&Work>) -> u32 {
-    match indexed(doc) {
-        Some(index) => index.pages.len() as u32,
-        None => build(doc, work).pages.len() as u32,
-    }
+    index_counted(doc, work).pages.len() as u32
 }
 
 /// One page built from one object and the ancestors the head already holds,

@@ -143,7 +143,7 @@ impl DocumentEditor {
         if category.is_empty() {
             return None;
         }
-        let reference = self.page_refs().get(page as usize).copied()?;
+        let reference = self.page_ref(page)?;
         let Some(Object::Dict(mut dict)) = DocumentEditor::get(self, reference) else {
             return None;
         };
@@ -226,7 +226,7 @@ impl DocumentEditor {
         if !self.is_form(form) {
             return None;
         }
-        let reference = self.page_refs().get(page as usize).copied()?;
+        let reference = self.page_ref(page)?;
         let Some(Object::Dict(_)) = DocumentEditor::get(self, reference) else {
             return None;
         };
@@ -345,14 +345,13 @@ impl DocumentEditor {
         page: u32,
         matrix: Option<[f64; 6]>,
     ) -> Option<ObjRef> {
-        let pages = pages::collect_counted(source, self.work.as_deref());
-        let from = pages.get(page as usize)?;
+        let from = pages::at_counted(source, page, self.work.as_deref())?;
         let crop = from.crop_box;
         let bbox = [crop.x0, crop.y0, crop.x1, crop.y1];
         if !is_box(&bbox) || matrix.is_some_and(|m| !all_finite(&m)) {
             return None;
         }
-        let content = pages::content_bytes(source, from);
+        let content = pages::content_bytes(source, &from);
         let resources = Object::Dict(from.resources.clone().unwrap_or_default());
         let mut mapping: HashMap<u32, ObjRef> = HashMap::new();
         let Some(Object::Dict(resources)) = self.copy_value(source, &resources, &mut mapping, 0)
