@@ -114,10 +114,11 @@ below the arithmetic — a different `std`, allocator and linker — and
 `wasm32-wasip1` varies width as well: 64-bit against 32-bit, where a `usize`
 assumption would show.
 
-Each leg runs every fingerprint test's file on its own and greps its log for
-each test by name: `cargo test --workspace` runs those tests too, but a
-green tick from it is not evidence that it did, and an `#[ignore]` added one
-afternoon would look identical. That is
+Each leg greps a log for every fingerprint test by name — `determinism.rs`'s
+own run, and on the native legs `cargo test --workspace`'s for the rest: a
+green tick is not evidence that a test ran, and an `#[ignore]` added one
+afternoon would look identical, where a test's name in the log beside `ok` is.
+That is
 [verification.md](../verification.md)'s "a check that can be absent is red,
 not green".
 

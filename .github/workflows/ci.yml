@@ -37,7 +37,15 @@ jobs:
       # fingerprints, so linux, windows and macos disagreeing is a build
       # failure rather than something nobody notices. The wasm leg is the
       # `wasm-determinism` job below.
-      - run: cargo test --workspace
+      #
+      # Its log is kept: the steps below read in it the tests it ran, rather
+      # than building the facade again to run them a second time, which is a
+      # build the hosted Linux runner has no disk for.
+      - name: cargo test --workspace
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee workspace.log
       # Ruling 4's fourth target is the reason this matrix has a macos-14 leg,
       # and until now that leg proved it by *existing*. `cargo test --workspace`
       # above does run `determinism.rs` — but a `#[ignore]` added one afternoon,
@@ -64,37 +72,27 @@ jobs:
       # The rest of the determinism roster (`cargo xtask determinism`): the
       # archival packet's hash, the shaped page's pixels and the render
       # options' pinned hashes, each recorded on one target and claimed for
-      # all of them, so each leg says it reproduced them.
+      # all of them, so each leg says `cargo test --workspace` reproduced
+      # them.
       - name: The archival, shaped-page and render-option fingerprints were reproduced on this target
         shell: bash
         run: |
-          set -o pipefail
-          cargo test -p tinker-pdf --test pdfa_writer 2>&1 | tee pdfa.log
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed' pdfa.log
-          grep -Eq 'the_archival_fixture_hashes_the_same_on_every_target [.]{3} ok' pdfa.log
-          cargo test -p tinker-pdf --test epub_shaped 2>&1 | tee epub.log
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed' epub.log
-          grep -Eq 'the_shaped_page_renders_to_the_bytes_it_always_did [.]{3} ok' epub.log
-          cargo test -p tinker-pdf --test render_options 2>&1 | tee options.log
-          grep -Eq 'test result: ok\. [1-9][0-9]* passed' options.log
-          grep -Eq 'ink_output_is_pinned [.]{3} ok' options.log
-          grep -Eq 'transparent_and_premultiplied_output_is_pinned [.]{3} ok' options.log
-          grep -Eq 'hard_edged_output_is_pinned [.]{3} ok' options.log
-      # MS-01's guard suite on this target, in both builds: the counted-work
-      # guards, their roster and the counts they pin, and the allocations a
-      # page costs. The roster and the pinned counts are in the determinism
-      # roster, so the leg says it ran them.
-      - name: The guard suite holds on this target, in both builds
+          grep -Eq 'the_archival_fixture_hashes_the_same_on_every_target [.]{3} ok' workspace.log
+          grep -Eq 'the_shaped_page_renders_to_the_bytes_it_always_did [.]{3} ok' workspace.log
+          grep -Eq 'ink_output_is_pinned [.]{3} ok' workspace.log
+          grep -Eq 'transparent_and_premultiplied_output_is_pinned [.]{3} ok' workspace.log
+          grep -Eq 'hard_edged_output_is_pinned [.]{3} ok' workspace.log
+      # MS-01's guard suite on this target, in the default build: the
+      # counted-work guards, their roster and the counts they pin, and the
+      # allocations a page costs, which `cargo test --workspace` ran. The
+      # roster and the pinned counts are in the determinism roster, so the
+      # leg says it ran them; the `bundled-fonts` step below says the same of
+      # the other build.
+      - name: The guard suite holds on this target, in the default build
         shell: bash
         run: |
-          set -o pipefail
-          for build in "" "--features bundled-fonts"; do
-            cargo test -p tinker-pdf $build --test guards --test guard_allocations \
-              2>&1 | tee guards.log
-            grep -Eq 'test result: ok\. [1-9][0-9]* passed' guards.log
-            grep -Eq 'every_guard_is_landed_or_owed [.]{3} ok' guards.log
-            grep -Eq 'the_tally_counts_the_same_on_every_target [.]{3} ok' guards.log
-          done
+          grep -Eq 'every_guard_is_landed_or_owed [.]{3} ok' workspace.log
+          grep -Eq 'the_tally_counts_the_same_on_every_target [.]{3} ok' workspace.log
       # The same claim for shaping, which `cargo test --workspace` above
       # already runs — and which the same `#[ignore]`-one-afternoon hazard
       # would silence just as quietly. `docs/design/shaping.md` milestone 2
@@ -126,7 +124,15 @@ jobs:
       # draw", which is true of the default build and false of this one, so a
       # leg that never builds it would let those two claims drift apart. Run
       # rather than checked, for the reason every other line here is.
-      - run: cargo test -p tinker-pdf --features bundled-fonts
+      #
+      # Its log says the guard suite held in this build too.
+      - name: cargo test -p tinker-pdf --features bundled-fonts
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --features bundled-fonts 2>&1 | tee bundled.log
+          grep -Eq 'every_guard_is_landed_or_owed [.]{3} ok' bundled.log
+          grep -Eq 'the_tally_counts_the_same_on_every_target [.]{3} ok' bundled.log
       - run: cargo clippy -p tinker-pdf --features bundled-fonts --all-targets -- -D warnings
       # Two design rules the compiler cannot enforce: a new crate edge
       # compiles perfectly well, and so does a `.sin()` on a pixel path. Plan

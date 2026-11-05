@@ -1173,10 +1173,13 @@ live, and it holds what they stand on.
 - **No clock**: `the_guard_suite_reads_no_clock` fails on a clock in any
   source the suite is built from or names.
 - **On four targets**: each native `test` leg runs `guards.rs` and
-  `guard_allocations.rs` in both builds and greps `every_guard_is_landed_or_owed`
-  and `the_tally_counts_the_same_on_every_target` by name, and
-  `wasm-determinism` runs both on `wasm32-wasip1` under wasmtime with the same
-  greps. Those two are in the determinism roster
+  `guard_allocations.rs` in both builds — the default in `cargo test
+  --workspace`, `bundled-fonts` in the facade's own run of that build — and
+  greps each run's log for `every_guard_is_landed_or_owed` and
+  `the_tally_counts_the_same_on_every_target` by name, and `wasm-determinism`
+  runs both on `wasm32-wasip1` under wasmtime with the same greps. The native
+  legs read the logs of runs they make anyway rather than building the facade
+  again, a build the hosted Linux runner has no disk for. Those two are in the determinism roster
   ([determinism](features/determinism.md)), and a guard a row lands later joins
   the greps in that row's commit.
 
