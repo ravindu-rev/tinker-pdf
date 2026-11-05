@@ -123,7 +123,10 @@ not green".
 byte hashes and its display list's replay of every fingerprinted page;
 `pdfa_writer.rs`'s archival hash; `epub_shaped.rs`'s shaped page;
 `render_options.rs`'s pinned ink, transparent and premultiplied, and
-hard-edged output; and the shaper's two fingerprints. `cargo xtask
+hard-edged output; the shaper's two fingerprints; and the guard suite's
+roster of guards and the work counts it pins (`guards.rs`), which each
+native leg runs in both builds and `wasm-determinism` under wasmtime, beside
+`guard_allocations.rs`. `cargo xtask
 determinism`, part of `cargo xtask check`, holds each to be a `#[test]` in its
 file with no `#[ignore]`, grepped as passing by the native `test` legs and the
 `wasm-determinism` job, and every test those jobs grep to be in the roster. A

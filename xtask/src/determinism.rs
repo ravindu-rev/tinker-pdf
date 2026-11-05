@@ -72,6 +72,16 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/render_options.rs",
         test: "hard_edged_output_is_pinned",
     },
+    // MS-01's guard suite: its roster of guards, and the work counts it pins
+    // for every target.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "every_guard_is_landed_or_owed",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "the_tally_counts_the_same_on_every_target",
+    },
     // The shaper's own fingerprints.
     Fingerprint {
         file: "crates/tinker-pdf-shape/tests/fingerprints.rs",

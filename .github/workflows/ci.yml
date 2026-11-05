@@ -80,6 +80,21 @@ jobs:
           grep -Eq 'ink_output_is_pinned [.]{3} ok' options.log
           grep -Eq 'transparent_and_premultiplied_output_is_pinned [.]{3} ok' options.log
           grep -Eq 'hard_edged_output_is_pinned [.]{3} ok' options.log
+      # MS-01's guard suite on this target, in both builds: the counted-work
+      # guards, their roster and the counts they pin, and the allocations a
+      # page costs. The roster and the pinned counts are in the determinism
+      # roster, so the leg says it ran them.
+      - name: The guard suite holds on this target, in both builds
+        shell: bash
+        run: |
+          set -o pipefail
+          for build in "" "--features bundled-fonts"; do
+            cargo test -p tinker-pdf $build --test guards --test guard_allocations \
+              2>&1 | tee guards.log
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed' guards.log
+            grep -Eq 'every_guard_is_landed_or_owed [.]{3} ok' guards.log
+            grep -Eq 'the_tally_counts_the_same_on_every_target [.]{3} ok' guards.log
+          done
       # The same claim for shaping, which `cargo test --workspace` above
       # already runs — and which the same `#[ignore]`-one-afternoon hazard
       # would silence just as quietly. `docs/design/shaping.md` milestone 2
@@ -489,6 +504,19 @@ jobs:
           grep -q 'test ink_output_is_pinned \.\.\. ok' options.log
           grep -q 'test transparent_and_premultiplied_output_is_pinned \.\.\. ok' options.log
           grep -q 'test hard_edged_output_is_pinned \.\.\. ok' options.log
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
+      # MS-01's guard suite on the fourth target: the guards, their roster and
+      # the counts they pin, and the allocations a page costs, which on a
+      # target with no threads counts its one thread's.
+      - name: Hold the guard suite on wasm32-wasip1
+        run: |
+          set -o pipefail
+          cargo test -p tinker-pdf --test guards --test guard_allocations \
+            --target wasm32-wasip1 2>&1 | tee guards.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' guards.log
+          grep -q 'test every_guard_is_landed_or_owed \.\.\. ok' guards.log
+          grep -q 'test the_tally_counts_the_same_on_every_target \.\.\. ok' guards.log
         env:
           CARGO_TARGET_WASM32_WASIP1_RUNNER: wasmtime
       - name: Shape on wasm32-wasip1 and compare against the fingerprints

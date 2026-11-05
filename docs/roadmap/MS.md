@@ -17,7 +17,6 @@ censuses no corpus run has fed.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| MS-01.8 | ci | Run the guard suite on the four targets: each native `test` leg runs `guards.rs` and `guard_allocations.rs` in both builds and greps the roster and pinned-count tests by name, the `wasm-determinism` job runs both on `wasm32-wasip1` with the same greps, and the pinned counts join K-07's determinism roster. *Note:* `ci.yml` fires on `main` and pull requests until MS-11 adds `develop`. The 1 000-, 4 000- and 10 000-page generators run in debug on every leg and under the wasm runtime (the A2 guards join them with P-01), so each leg's wall time is read from this run and recorded in the doc; a guard too slow for a leg is never ignored or shrunk below the exit's page counts, and its cost, where it is a price, goes to the owner. It needs K-07.1's roster, not the rest of K-07. | `.github/workflows/ci.yml`, `xtask/src/determinism.rs` (new), `docs/features/determinism.md`, `docs/verification.md` | The next CI run on `develop` is green on linux, windows, macos and `wasm32-wasip1`, each leg's log showing `every_guard_is_landed_or_owed` and `the_tally_counts_the_same_on_every_target` passed and `cargo xtask check` listing the pinned counts in the roster; a guard a P row lands later joins the greps in that row's commit. | MS-01.7, MS-11, K-07.1 |
 
 ## MS-02 — A paired base-versus-head wall-clock gate on every pull request
 
