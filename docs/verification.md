@@ -227,7 +227,15 @@ A child killed at the timeout is **stalled** if it had written nothing for half
 its budget and merely **timed out** if it was still naming pages: Rust's stdout
 is line-buffered, so the capture file's length is a progress signal the runner
 gets without a pipe or a protocol, and the report names the phase the child
-stopped in. The limit of the signal is worth stating — one unit of work longer
+stopped in (`at`) and the last line it wrote (`last`): `at` and `last` both
+`page 1/5` is a child stopped inside page one's render, `last` `time page 1 …`
+one stopped after the render returned, and `join 2/5` one stopped in page
+two's structure join. `tpdf probe --stages` takes a page's render apart into
+announced, timed stages — the page lookup, the document's fonts, the page's
+images, its display list's recording, the list's draw and the draw with its
+annotations, the last two cancelled after `--stage-limit` seconds with the
+counts they reached — so the stage a render that does not return stops in is
+the last one announced. No bar runs it. The limit of the signal is worth stating — one unit of work longer
 than the stall window is silent for the same reason a hang is, so what the
 runner claims honestly is *made no observable progress for half its budget*.
 

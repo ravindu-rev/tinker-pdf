@@ -21,6 +21,15 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// `println!` into the probe's record: line-buffered stdout in a run, a
+/// buffer a test reads back. A line that cannot be written is lost as a
+/// `println!` that cannot be is, and the runner reads what arrived.
+macro_rules! say {
+    ($out:expr, $($arg:tt)*) => {{
+        let _ = writeln!($out, $($arg)*);
+    }};
+}
+
 use tinker_pdf::{
     BilevelCodec, Bitmap, CosDocument, Dict, Document, FontPolicy, HeaderEvidence, LadderLevel,
     ObjRef, Object, OrderedText, Page, PageTables, ReadingOrder, RenderOptions, Sanitise,
@@ -43,7 +52,7 @@ usage:
   tpdf outline <file.pdf> [--password P]
   tpdf objects <file.pdf> [--object N [--stream [--raw]]] [--password P]
   tpdf check   <file.pdf>... [--strict] [--pdfa] [--pdfua] [--pdfx]
-  tpdf probe   <file.pdf>... [--dpi D] [--fonts PATH]
+  tpdf probe   <file.pdf>... [--dpi D] [--fonts PATH] [--stages [--stage-limit S]]
 
 writing (each writes a new file, and takes --font-policy and the image flags):
   tpdf merge    <a.pdf> <b.pdf>... --out FILE
@@ -72,6 +81,10 @@ options:
   --fonts bundled
                the faces this build carries; refused unless it carries any
   --password P the password to open an encrypted file with
+  --stages     with probe, each page's render taken apart into announced,
+               timed stages: lookup, fonts, images, record, draw, annotations
+  --stage-limit S
+               with --stages, cancel draw and annotations after S seconds
   --quiet      only report failures
   --strict     with check, also validate against ISO 32000 strictly
   --pdfa       with check, also validate against ISO 19005 (PDF/A)
@@ -369,6 +382,12 @@ struct Options {
     /// rendering rather than as a binary that needs rebuilding. Asking costs
     /// one process at the start of a run that spawns thousands.
     record_version: bool,
+    /// `--stages`, for `probe`: each page's render taken apart into announced
+    /// stages in place of its one `page.render` (MS-20).
+    stages: bool,
+    /// `--stage-limit S`: the seconds `draw` and `annotations` run before
+    /// the probe cancels them; `None` cancels nothing.
+    stage_limit: Option<u64>,
     /// `--pages LIST`: inclusive ranges, 0-based. Exclusive with `--page`.
     page_ranges: Option<Vec<(u32, u32)>>,
     /// `--font-policy`: what a command that rewrites a document does to its
@@ -470,6 +489,8 @@ impl Options {
             order: ReadingOrder::Stream,
             tables: false,
             record_version: false,
+            stages: false,
+            stage_limit: None,
             page_ranges: None,
             font_policy: FontPolicy::default(),
             by: None,
@@ -560,6 +581,13 @@ impl Options {
                 "--pdfua" => options.pdfua = true,
                 "--pdfx" => options.pdfx = true,
                 "--record-version" => options.record_version = true,
+                "--stages" => options.stages = true,
+                "--stage-limit" => {
+                    let raw = value()?;
+                    options.stage_limit = Some(raw.parse().map_err(|_| {
+                        format!("`--stage-limit {raw}` is not a number of seconds")
+                    })?);
+                }
                 "--json" | "--xml" | "--html" => {
                     let format = match arg {
                         "--json" => TextFormat::Json,
@@ -2083,11 +2111,11 @@ enum Relation {
 }
 
 impl Relation {
-    fn print(&self, name: &str) {
+    fn print(&self, out: &mut dyn std::io::Write, name: &str) {
         match self {
-            Relation::Held(moved, total) => println!("meta {name} held {moved} of {total}"),
-            Relation::Broke(detail) => println!("meta {name} broke {}", one_line(detail)),
-            Relation::Skipped(why) => println!("meta {name} skipped {why}"),
+            Relation::Held(moved, total) => say!(out, "meta {name} held {moved} of {total}"),
+            Relation::Broke(detail) => say!(out, "meta {name} broke {}", one_line(detail)),
+            Relation::Skipped(why) => say!(out, "meta {name} skipped {why}"),
         }
     }
 }
@@ -2133,10 +2161,15 @@ impl Relation {
 /// What is left declining a relation is a property of the document — no pages,
 /// encrypted, opened with a warning, a page too large to render twice — so
 /// `compared` is a function of the corpus and not of the machine.
-fn metamorphic(doc: &Document, options: &Options, fonts: Option<&Arc<SimpleFontProvider>>) {
+fn metamorphic(
+    out: &mut dyn std::io::Write,
+    doc: &Document,
+    options: &Options,
+    fonts: Option<&Arc<SimpleFontProvider>>,
+) {
     if doc.page_count() == 0 {
         for name in ["rotate", ROTATE_WATCH_NAME, "crop", "dpi"] {
-            Relation::Skipped("the document has no pages").print(name);
+            Relation::Skipped("the document has no pages").print(out, name);
         }
         return;
     }
@@ -2153,7 +2186,7 @@ fn metamorphic(doc: &Document, options: &Options, fonts: Option<&Arc<SimpleFontP
     // every one of them holds trivially over nothing.
     if base.width == 0 || base.height == 0 {
         for name in ["rotate", ROTATE_WATCH_NAME, "crop", "dpi"] {
-            Relation::Skipped("the page rendered to nothing").print(name);
+            Relation::Skipped("the page rendered to nothing").print(out, name);
         }
         return;
     }
@@ -2177,22 +2210,22 @@ fn metamorphic(doc: &Document, options: &Options, fonts: Option<&Arc<SimpleFontP
             // A phase line before each: both rewrite and reopen the document,
             // which is several seconds of silence on a large file — and is
             // where a rewrite that does not terminate stops.
-            println!("phase meta-rotate");
+            say!(out, "phase meta-rotate");
             let turned = rotation(doc, &base, &render, fonts);
-            turned.judged(ROTATE_BUDGET).print("rotate");
-            turned.judged(ROTATE_WATCH).print(ROTATE_WATCH_NAME);
-            println!("phase meta-crop");
-            cropping(doc, &page, &base, &render, fonts).print("crop");
+            turned.judged(ROTATE_BUDGET).print(out, "rotate");
+            turned.judged(ROTATE_WATCH).print(out, ROTATE_WATCH_NAME);
+            say!(out, "phase meta-crop");
+            cropping(doc, &page, &base, &render, fonts).print(out, "crop");
         }
         Some(why) => {
-            Relation::Skipped(why).print("rotate");
-            Relation::Skipped(why).print(ROTATE_WATCH_NAME);
-            Relation::Skipped(why).print("crop");
+            Relation::Skipped(why).print(out, "rotate");
+            Relation::Skipped(why).print(out, ROTATE_WATCH_NAME);
+            Relation::Skipped(why).print(out, "crop");
         }
     }
     // `dpi` rewrites nothing, so it is asked of every document that rendered.
-    println!("phase meta-dpi");
-    resolution(&page, &base, &render).print("dpi");
+    say!(out, "phase meta-dpi");
+    resolution(&page, &base, &render).print(out, "dpi");
 }
 
 /// One pixel of a bitmap, as three channels.
@@ -2585,21 +2618,21 @@ fn status_bytes(field: &str) -> Option<u64> {
 /// `hwm <phase> <bytes>`: the kernel's high-water mark as a phase of the
 /// probe ends, so a report can say which phase reached a file's peak (MS-19).
 /// Omitted off Linux, as the file-backed share is.
-fn mark(phase: &str) {
+fn mark(out: &mut dyn std::io::Write, phase: &str) {
     if let Some(bytes) = status_bytes("VmHWM") {
-        println!("hwm {phase} {bytes}");
+        say!(out, "hwm {phase} {bytes}");
     }
 }
 
 /// The record's memory lines: `rss-file`, the file-backed part of the
 /// resident set (`RssFile`), which tells the binary's own pages from what the
 /// document cost, then `peak`. Each omitted where the platform will not say.
-fn print_peak() {
+fn print_peak(out: &mut dyn std::io::Write) {
     if let Some(bytes) = status_bytes("RssFile") {
-        println!("rss-file {bytes}");
+        say!(out, "rss-file {bytes}");
     }
     if let Some(peak) = peak_bytes() {
-        println!("peak {peak}");
+        say!(out, "peak {peak}");
     }
 }
 
@@ -2649,9 +2682,22 @@ fn probe(options: &Options) -> Result<(), String> {
 }
 
 fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvider>>) {
+    probe_to(&mut std::io::stdout().lock(), options, path, fonts);
+}
+
+/// [`probe_one`]'s record, written to `out`.
+///
+/// Stdout's lock in a run, which is line-buffered, so each line reaches the
+/// capture file as it is written; a buffer in a test, which reads it back.
+fn probe_to(
+    out: &mut dyn std::io::Write,
+    options: &Options,
+    path: &str,
+    fonts: Option<&Arc<SimpleFontProvider>>,
+) {
     let started = std::time::Instant::now();
-    println!("probe {PROBE_VERSION}");
-    println!("file {path}");
+    say!(out, "probe {PROBE_VERSION}");
+    say!(out, "file {path}");
 
     // `phase` lines are the corpus runner's progress signal, and the reason
     // they work needs no protocol: Rust's stdout is a `LineWriter`, so each
@@ -2660,7 +2706,7 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     // and the runner reports that as `stalled` rather than as a slow file.
     // `parse_record` ignores keys it does not know, so these cost an older
     // runner nothing.
-    println!("phase open");
+    say!(out, "phase open");
     // **The open-and-count span**, printed as `time open` once the pages are
     // counted. It starts after the read, which measures the runner's disk
     // rather than the engine, and it holds `Document::open`, the faces, the
@@ -2677,24 +2723,24 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
         Err(message) => {
             // On one line, and last but for the sentinel, so a reason
             // containing anything at all cannot be mistaken for another key.
-            println!("opened no {}", one_line(&message));
+            say!(out, "opened no {}", one_line(&message));
             // Said in its own words rather than left out: a record that simply
             // omits the strict pass reads as a child that skipped it, and "the
             // file did not open" is a different fact from "this build does not
             // run the pass".
-            println!("strict ineligible the file did not open");
-            print_peak();
-            println!("ms {}", started.elapsed().as_millis());
-            println!("done");
+            say!(out, "strict ineligible the file did not open");
+            print_peak(out);
+            say!(out, "ms {}", started.elapsed().as_millis());
+            say!(out, "done");
             return;
         }
     };
 
-    println!("opened yes");
+    say!(out, "opened yes");
     if BUNDLED_FACES {
-        println!("build bundled-fonts");
+        say!(out, "build bundled-fonts");
     }
-    println!("ladder {:?}", doc.ladder_level());
+    say!(out, "ladder {:?}", doc.ladder_level());
 
     // **Who wrote the file, when the file says.** The production corpus's
     // whole argument is that its documents were emitted by real producers for
@@ -2708,7 +2754,8 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     // population, not a gap in the data.
     let producer = doc.metadata().producer.unwrap_or_default();
     let producer = producer.trim();
-    println!(
+    say!(
+        out,
         "producer {}",
         if producer.is_empty() {
             "(none stated)".to_string()
@@ -2720,9 +2767,13 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     let counting = std::time::Instant::now();
     let pages = doc.page_count();
     let counting = counting.elapsed();
-    println!("pages {pages}");
-    println!("time open {}", opening.saturating_add(counting).as_micros());
-    mark("open");
+    say!(out, "pages {pages}");
+    say!(
+        out,
+        "time open {}",
+        opening.saturating_add(counting).as_micros()
+    );
+    mark(out, "open");
 
     // Counted by kind rather than listed: a damaged file can emit tens of
     // thousands of warnings, and the report wants to know which kinds a
@@ -2735,7 +2786,7 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     }
 
     for capability in capabilities(doc.cos()) {
-        println!("cap {capability}");
+        say!(out, "cap {capability}");
     }
 
     // Bound once, outside the page loop. `Document::structure()` re-walks
@@ -2743,7 +2794,8 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     // N-page document cost N walks of a tree that did not change.
     let tree = doc.structure();
     match &tree {
-        Some(tree) => println!(
+        Some(tree) => say!(
+            out,
             "tagged tree yes elements {} content {} objects {}",
             tree.element_count(),
             tree.content_count(),
@@ -2752,58 +2804,81 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
         // Its own line rather than an omission: a record with no `tagged` key
         // at all is one from a child that did not look, and that is a
         // different fact from a document with no structure tree.
-        None => println!("tagged tree no"),
+        None => say!(out, "tagged tree no"),
     }
-    mark("scan");
+    mark(out, "scan");
 
     let render = RenderOptions {
         annotations: options.annotations,
         ..RenderOptions::at_dpi(options.dpi)
     };
-    println!("phase render");
+    say!(out, "phase render");
     let mut rendered = 0u32;
     let mut join = Join::default();
+    let mut fonts_listed = false;
     for index in options.pages(&doc) {
-        let Some(page) = doc.page(index) else {
+        // With `--stages` the lookup is a stage of its own, announced and
+        // timed, since the walk to a page is work a render waits on.
+        let page = if options.stages {
+            say!(out, "phase lookup");
+            let clock = std::time::Instant::now();
+            let page = doc.page(index);
+            say!(out, "time lookup {}", clock.elapsed().as_micros());
+            page
+        } else {
+            doc.page(index)
+        };
+        let Some(page) = page else {
             continue;
         };
         // Only where there is a tree to join to. Text extraction is cheap
         // beside rendering, but it is not free, and on the 3 800-odd corpus
-        // files carrying no structure tree it would measure nothing.
+        // files carrying no structure tree it would measure nothing. Announced,
+        // so a child killed inside a join is not read as one inside the page
+        // before it.
         if let Some(tree) = &tree {
+            say!(out, "phase join {}/{pages}", index + 1);
             join.add(tree, index, &page);
         }
         // Before the page rather than after it, so the line names the page
         // being worked on when a kill arrives rather than the last one that
         // finished. The runner never reads the number, only the fact that the
         // capture file grew; the number is for whoever reads the report.
-        println!("page {}/{pages}", index + 1);
-        // **A page's span**: the render and nothing else. The lookup above
-        // is outside it, because today's walk to a page gathers every leaf
-        // before it, so on a long document the lookups grow with the square
-        // of its pages and would be most of what a span measured; so are the
-        // structure join and the progress line.
-        let clock = std::time::Instant::now();
-        let bitmap = page.render(&render);
-        let micros = clock.elapsed().as_micros();
-        println!("time page {} {micros}", index + 1);
+        say!(out, "page {}/{pages}", index + 1);
+        let warnings = if options.stages {
+            stages(out, &doc, &page, &render, options, &mut fonts_listed)
+        } else {
+            // **A page's span**: the render and nothing else. The lookup
+            // above is outside it, because today's walk to a page gathers
+            // every leaf before it, so on a long document the lookups grow
+            // with the square of its pages and would be most of what a span
+            // measured; so are the structure join and the progress line.
+            let clock = std::time::Instant::now();
+            let bitmap = page.render(&render);
+            let micros = clock.elapsed().as_micros();
+            say!(out, "time page {} {micros}", index + 1);
+            bitmap.warnings
+        };
         // Ruling 2's definition, and the one the ratchet counts: a bitmap
         // came back. A page rendered with a JBIG2 placeholder on it rendered.
         rendered += 1;
-        for warning in &bitmap.warnings {
+        for warning in &warnings {
             *kinds
                 .entry(format!("render:{}", render_warning_label(warning)))
                 .or_default() += 1;
         }
     }
-    println!("rendered {rendered}");
+    say!(out, "rendered {rendered}");
     if tree.is_some() {
-        println!(
+        say!(
+            out,
             "tagged chars matched {} orphans {} unmarked {}",
-            join.matched, join.orphans, join.unmarked
+            join.matched,
+            join.orphans,
+            join.unmarked
         );
     }
-    mark("render");
+    mark(out, "render");
 
     // What this document costs to work on, as properties of the document.
     //
@@ -2827,16 +2902,16 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
             0
         }
     });
-    println!("cost bytes {bytes} objects {objects} pixels {pixels}");
+    say!(out, "cost bytes {bytes} objects {objects} pixels {pixels}");
 
-    println!("phase strict");
-    strict(&doc);
-    mark("strict");
-    metamorphic(&doc, options, fonts);
-    mark("metamorphic");
+    say!(out, "phase strict");
+    strict(out, &doc);
+    mark(out, "strict");
+    metamorphic(out, &doc, options, fonts);
+    mark(out, "metamorphic");
 
     for (kind, count) in &kinds {
-        println!("warn {kind} {count}");
+        say!(out, "warn {kind} {count}");
     }
     // Last of the measurements and after every phase, so it is the peak of the
     // whole file's work rather than of the part that had run when it was
@@ -2846,9 +2921,9 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     //
     // Omitted where the platform will not say. See [`peak_bytes`] for why that
     // is an omission rather than a zero.
-    print_peak();
-    println!("ms {}", started.elapsed().as_millis());
-    println!("done");
+    print_peak(out);
+    say!(out, "ms {}", started.elapsed().as_millis());
+    say!(out, "done");
 }
 
 /// Ruling 13's validator, over a **rewrite** of the file rather than over the
@@ -2874,6 +2949,136 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
 /// One definition, used by the strict pass and by the metamorphic relations
 /// that rewrite. Both are asking the same question — *is a rewrite of this
 /// document a comparison or a repair?* — and two spellings of it would drift.
+/// `--stages`: one page's render taken apart through announced stages, in
+/// place of its one `page.render` (MS-20). Each stage is a `phase` line
+/// before it and `time <stage> <micros>` after, so the stage a killed child
+/// stopped in is the last one announced: `fonts` (the document's, once),
+/// `images` (the decode without the conversion a render adds), `record` (the
+/// page's display list), `draw` (the list rendered, annotations off) and
+/// `annotations` (the same with them on, passed over after a cancelled
+/// `draw`). A replay is the direct render byte for byte, so these are
+/// `Page::render`'s own work taken apart.
+///
+/// Returns the warnings of the render whose annotations are the run's, which
+/// the record counts as a page's.
+fn stages(
+    out: &mut dyn std::io::Write,
+    doc: &Document,
+    page: &tinker_pdf::Page,
+    render: &RenderOptions,
+    options: &Options,
+    fonts_listed: &mut bool,
+) -> Vec<tinker_pdf::RenderWarning> {
+    if !*fonts_listed {
+        *fonts_listed = true;
+        say!(out, "phase fonts");
+        let clock = std::time::Instant::now();
+        let found = doc.fonts();
+        let micros = clock.elapsed().as_micros();
+        for font in &found {
+            say!(
+                out,
+                "font {} {:?} {}",
+                if font.name.is_empty() {
+                    "(no /BaseFont)"
+                } else {
+                    font.name.as_str()
+                },
+                font.kind,
+                match font.program {
+                    Some(program) => format!("{:?}", program.key),
+                    None => "not embedded".to_string(),
+                }
+            );
+        }
+        say!(out, "time fonts {micros}");
+    }
+
+    say!(out, "phase images");
+    let clock = std::time::Instant::now();
+    let images = page.images();
+    let micros = clock.elapsed().as_micros();
+    for image in &images {
+        say!(out, "image {}", images::describe(image));
+    }
+    say!(out, "time images {micros}");
+
+    say!(out, "phase record");
+    let clock = std::time::Instant::now();
+    let list = page.display_list();
+    say!(out, "time record {}", clock.elapsed().as_micros());
+    // A recording past its budget is not retained, and every render of it is
+    // then a direct one, which the line says.
+    say!(
+        out,
+        "list {} retained {}",
+        list.len(),
+        if list.is_retained() { "yes" } else { "no" }
+    );
+
+    let limit = options.stage_limit.map(std::time::Duration::from_secs);
+    let mut drawn = Vec::new();
+    for (stage, annotations) in [("draw", false), ("annotations", true)] {
+        say!(out, "phase {stage}");
+        let clock = std::time::Instant::now();
+        let bitmap = within_limit(limit, |cancel| {
+            list.render(&RenderOptions {
+                annotations,
+                stats: true,
+                cancel,
+                ..render.clone()
+            })
+        });
+        say!(out, "time {stage} {}", clock.elapsed().as_micros());
+        if let Some(stats) = &bitmap.stats {
+            say!(out, "counts {stage} {stats:?}");
+        }
+        let cancelled = bitmap
+            .warnings
+            .contains(&tinker_pdf::RenderWarning::Cancelled);
+        if cancelled {
+            say!(out, "cancelled {stage}");
+        }
+        if annotations == options.annotations || cancelled {
+            drawn = bitmap.warnings;
+        }
+        if cancelled {
+            break;
+        }
+    }
+    drawn
+}
+
+/// Runs `stage` with a cancel token the probe cancels once `limit` has
+/// passed, or with none where there is no limit; a limit of zero is
+/// cancelled before the stage starts.
+fn within_limit<T>(
+    limit: Option<std::time::Duration>,
+    stage: impl FnOnce(Option<tinker_pdf::CancelToken>) -> T,
+) -> T {
+    let Some(limit) = limit else {
+        return stage(None);
+    };
+    let token = tinker_pdf::CancelToken::new();
+    if limit.is_zero() {
+        token.cancel();
+        return stage(Some(token));
+    }
+    let (finished, waiting) = std::sync::mpsc::channel::<()>();
+    let watcher = {
+        let token = token.clone();
+        std::thread::spawn(move || {
+            if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = waiting.recv_timeout(limit) {
+                token.cancel();
+            }
+        })
+    };
+    let out = stage(Some(token));
+    let _ = finished.send(());
+    let _ = watcher.join();
+    out
+}
+
 fn cleanly_read(doc: &Document) -> Option<&'static str> {
     if doc.ladder_level() != LadderLevel::Trust {
         return Some("the file needed the leniency ladder to open");
@@ -2887,13 +3092,13 @@ fn cleanly_read(doc: &Document) -> Option<&'static str> {
     None
 }
 
-fn strict(doc: &Document) {
+fn strict(out: &mut dyn std::io::Write, doc: &Document) {
     if let Some(why) = cleanly_read(doc) {
-        println!("strict ineligible {why}");
+        say!(out, "strict ineligible {why}");
         return;
     }
 
-    println!("strict eligible");
+    say!(out, "strict eligible");
     let saved = doc.editor().save(&WriteOptions {
         mode: WriteMode::Rewrite,
         ..WriteOptions::default()
@@ -2902,9 +3107,9 @@ fn strict(doc: &Document) {
         // Not an ineligibility: a rewrite this engine cannot re-open is the
         // worst defect on this axis, and filing it as "not measured" would
         // make the number go up by hiding it.
-        println!("strict structure 1");
-        println!("strict semantics 0");
-        println!("strict kind rewrite-did-not-open 1");
+        say!(out, "strict structure 1");
+        say!(out, "strict semantics 0");
+        say!(out, "strict kind rewrite-did-not-open 1");
         return;
     };
 
@@ -2913,8 +3118,9 @@ fn strict(doc: &Document) {
         .iter()
         .filter(|defect| defect.kind.tier() == Tier::Structure)
         .count();
-    println!("strict structure {structure}");
-    println!(
+    say!(out, "strict structure {structure}");
+    say!(
+        out,
         "strict semantics {}",
         defects.len().saturating_sub(structure)
     );
@@ -2922,7 +3128,7 @@ fn strict(doc: &Document) {
     // thousands of the same finding, and the report wants to know which rules
     // a corpus breaks.
     for (kind, count) in tinker_pdf::kind_counts(&defects) {
-        println!("strict kind {kind} {count}");
+        say!(out, "strict kind {kind} {count}");
     }
 }
 
@@ -3168,6 +3374,118 @@ mod tests {
             None,
             "another field"
         );
+    }
+
+    /// The probe's record of `bytes` under `args`, line by line, as the
+    /// runner would read it from the capture file.
+    fn probe_record(bytes: &[u8], args: &[&str], name: &str) -> Vec<String> {
+        let path = std::env::temp_dir().join(format!("tpdf-{name}-{}.pdf", std::process::id()));
+        std::fs::write(&path, bytes).expect("the fixture is written");
+        let file = path.to_string_lossy().into_owned();
+        let mut all: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
+        all.push(file.clone());
+        let options = Options::parse(&all).expect("the options parse");
+        let mut out = Vec::new();
+        probe_to(&mut out, &options, &file, None);
+        let _ = std::fs::remove_file(&path);
+        String::from_utf8(out)
+            .expect("the record is text")
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The stage lines of a record, `phase <stage>` and `time <stage>`, in
+    /// the order written.
+    fn stage_lines(record: &[String]) -> Vec<String> {
+        const STAGES: [&str; 6] = ["lookup", "fonts", "images", "record", "draw", "annotations"];
+        record
+            .iter()
+            .filter_map(|line| {
+                let mut words = line.split_whitespace();
+                match (words.next(), words.next()) {
+                    (Some(kind @ ("phase" | "time")), Some(stage)) if STAGES.contains(&stage) => {
+                        Some(format!("{kind} {stage}"))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// **Every stage is announced before it runs and timed after**, page by
+    /// page, over a document with an embedded face, an image and an
+    /// annotation on each page: the fonts once, then each page's images,
+    /// recording, draw and annotations, with the font, image and `list`
+    /// lines between, and a record ending as the probe's does without
+    /// `--stages` — the same `rendered`, `warn` and relation lines.
+    #[test]
+    fn every_stage_is_announced_before_it_runs_and_timed_after() {
+        let bytes = mixed_pages(2);
+        let staged = probe_record(
+            &bytes,
+            &["--dpi", "72", "--stages", "--stage-limit", "600"],
+            "stages",
+        );
+        let page = |fonts: bool| -> Vec<String> {
+            ["lookup", "fonts", "images", "record", "draw", "annotations"]
+                .into_iter()
+                .filter(|stage| fonts || *stage != "fonts")
+                .flat_map(|stage| [format!("phase {stage}"), format!("time {stage}")])
+                .collect()
+        };
+        let mut expected = page(true);
+        expected.extend(page(false));
+        assert_eq!(stage_lines(&staged), expected, "{staged:#?}");
+
+        let count = |prefix: &str| staged.iter().filter(|l| l.starts_with(prefix)).count();
+        assert!(
+            count("font ") >= 2,
+            "the embedded face and Helvetica: {staged:#?}"
+        );
+        assert_eq!(count("image "), 2, "one image a page: {staged:#?}");
+        assert_eq!(count("list "), 2, "one recording a page: {staged:#?}");
+        assert_eq!(count("counts draw "), 2, "{staged:#?}");
+        assert_eq!(count("cancelled "), 0, "nothing reached its limit");
+        assert_eq!(staged.last().map(String::as_str), Some("done"));
+
+        let plain = probe_record(&bytes, &["--dpi", "72"], "unstaged");
+        let outcome = |record: &[String]| -> Vec<String> {
+            record
+                .iter()
+                .filter(|l| {
+                    l.starts_with("rendered ") || l.starts_with("warn ") || l.starts_with("meta ")
+                })
+                .cloned()
+                .collect()
+        };
+        assert_eq!(outcome(&staged), outcome(&plain));
+        assert!(
+            outcome(&plain).iter().any(|l| l.starts_with("meta ")),
+            "{plain:#?}"
+        );
+    }
+
+    /// A stage past `--stage-limit` comes back `cancelled` with the counts it
+    /// reached, and `annotations` is passed over after a cancelled `draw`.
+    #[test]
+    fn a_stage_past_its_limit_comes_back_cancelled_with_its_counts() {
+        let record = probe_record(
+            &mixed_pages(1),
+            &["--dpi", "72", "--stages", "--stage-limit", "0"],
+            "cancelled",
+        );
+        assert!(record.iter().any(|l| l == "cancelled draw"), "{record:#?}");
+        assert!(
+            record.iter().any(|l| l.starts_with("counts draw ")),
+            "{record:#?}"
+        );
+        assert!(
+            !record.iter().any(|l| l == "phase annotations"),
+            "passed over after a cancelled draw: {record:#?}"
+        );
+        assert!(record.iter().any(|l| l == "rendered 1"), "{record:#?}");
+        assert_eq!(record.last().map(String::as_str), Some("done"));
     }
 
     fn document() -> Document {

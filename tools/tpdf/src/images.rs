@@ -150,7 +150,7 @@ fn write(file: &str, bytes: &[u8]) -> Result<Vec<String>, String> {
 
 /// One image on one line: what it is called, its geometry and depth, the
 /// codec and space its samples are in, and how it is masked and drawn.
-fn describe(image: &PageImage) -> String {
+pub(crate) fn describe(image: &PageImage) -> String {
     let name = match (image.reference, image.name.is_empty()) {
         (Some(r), false) => format!("/{} ({} {} R)", lossy(&image.name), r.num, r.gen),
         (Some(r), true) => format!("({} {} R)", r.num, r.gen),

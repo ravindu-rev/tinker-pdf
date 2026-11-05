@@ -1335,6 +1335,7 @@ mod tests {
                 peak: None,
                 marks: Vec::new(),
                 rss_file: None,
+                last: None,
             });
         }
         out

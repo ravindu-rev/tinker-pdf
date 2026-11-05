@@ -190,6 +190,11 @@ pub struct FileResult {
     /// in bytes: the binary's own pages rather than what the document cost.
     /// `None` off Linux and from a child that did not say.
     pub rss_file: Option<u64>,
+    /// The last line a killed child wrote, kept beside `at` (MS-20): `at` and
+    /// `last` both `page 1/5` is a child stopped inside page one's render,
+    /// and `last` `time page 1 ...` one stopped after the render returned.
+    /// `None` for a child that finished.
+    pub last: Option<String>,
     /// `/Producer` as the document states it, or `None` from a child that did
     /// not say.
     ///
@@ -388,6 +393,7 @@ pub fn run_one(
         peak: None,
         marks: Vec::new(),
         rss_file: None,
+        last: None,
         // A child that wrote no record did not look at a structure tree, and
         // `None` is the same answer as "there was none". They aggregate the
         // same way, and the file is already counted as failed.
@@ -539,7 +545,8 @@ pub fn run_one(
     // already decided not to wait for it and counting it as a pass would make
     // the timeout depend on scheduling luck.
     if killed {
-        let at = last_phase(&stdout);
+        let (at, last) = where_it_stopped(&stdout);
+        result.last = last;
         result.outcome = if silent_for >= stall_window {
             Outcome::Stalled { at }
         } else {
@@ -589,6 +596,12 @@ fn producer_line(text: &str) -> Option<String> {
         .find_map(|line| line.strip_prefix("producer "))
         .map(|rest| rest.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// Where a killed child stopped: the last phase it announced, and the last
+/// line it wrote, which `report.json` keeps beside it as `last`.
+pub fn where_it_stopped(text: &str) -> (String, Option<String>) {
+    (last_phase(text), last_meaningful_line(text))
 }
 
 fn last_meaningful_line(text: &str) -> Option<String> {
@@ -888,6 +901,7 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
         peak,
         marks,
         rss_file,
+        last: None,
         producer,
         tagged,
     })
@@ -1085,6 +1099,51 @@ mod tests {
         let quiet = parse_record(&marked(&["peak 120000000"])).expect("complete");
         assert!(quiet.marks.is_empty());
         assert_eq!(quiet.rss_file, None);
+    }
+
+    /// A killed child's last line is kept beside the phase it announced: a
+    /// record cut inside page one's render reads `page 1/5` for both, and one
+    /// cut after the render returned keeps its time as the last line.
+    #[test]
+    fn the_last_line_of_a_cut_record_is_kept() {
+        let head = [
+            "probe 7",
+            "file x.pdf",
+            "phase open",
+            "opened yes",
+            "pages 5",
+        ];
+        let inside = record(&[&head[..], &["phase render", "page 1/5"]].concat());
+        assert_eq!(
+            where_it_stopped(&inside),
+            ("page 1/5".to_string(), Some("page 1/5".to_string()))
+        );
+        let after =
+            record(&[&head[..], &["phase render", "page 1/5", "time page 1 4875"]].concat());
+        assert_eq!(
+            where_it_stopped(&after),
+            ("page 1/5".to_string(), Some("time page 1 4875".to_string()))
+        );
+        assert_eq!(where_it_stopped(""), (String::new(), None));
+    }
+
+    /// A child killed in page two's structure join stopped in it, and not in
+    /// the page before, whose render had returned.
+    #[test]
+    fn a_child_killed_in_a_join_stopped_in_it() {
+        let text = record(&[
+            "probe 7",
+            "phase open",
+            "pages 5",
+            "phase render",
+            "page 1/5",
+            "time page 1 4875",
+            "phase join 2/5",
+        ]);
+        assert_eq!(
+            where_it_stopped(&text),
+            ("join 2/5".to_string(), Some("phase join 2/5".to_string()))
+        );
     }
 
     /// A mark is never the file's peak, however it is spelled: without the

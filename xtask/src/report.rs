@@ -427,6 +427,11 @@ impl Run {
                             if !at.is_empty() {
                                 fields.push(("at", Json::string(at)));
                             }
+                            // And the last line it wrote (MS-20), which says
+                            // whether the work it was in had returned.
+                            if let Some(last) = &file.last {
+                                fields.push(("last", Json::string(last)));
+                            }
                         }
                         if !file.capabilities.is_empty() {
                             fields.push((
@@ -1027,6 +1032,7 @@ mod tests {
             peak: None,
             marks: Vec::new(),
             rss_file: None,
+            last: None,
             pages: 1,
             rendered: 1,
             warnings: warnings
@@ -1247,6 +1253,18 @@ mod tests {
         let ratchet = run.to_ratchet_json("n").to_pretty();
         assert!(ratchet.contains("\"bytes\": 120000000"), "{ratchet}");
         assert!(!ratchet.contains("141000000"), "{ratchet}");
+    }
+
+    /// A killed file's last line is written beside `at`, and only a killed
+    /// file has one.
+    #[test]
+    fn a_killed_files_last_line_is_written_beside_at() {
+        let mut run = run();
+        run.corpora[0].files[4].last = Some("time page 3 4875".to_string());
+        let text = run.to_report_json().to_pretty();
+        assert!(text.contains("\"at\": \"page 3/900\""), "{text}");
+        assert!(text.contains("\"last\": \"time page 3 4875\""), "{text}");
+        assert_eq!(text.matches("\"last\"").count(), 1, "{text}");
     }
 
     /// The peak line names where the corpus's peak was reached: the file
