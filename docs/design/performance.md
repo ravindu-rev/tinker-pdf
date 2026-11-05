@@ -2166,3 +2166,185 @@ this section.
 | A streamed document builds the index and fetches its main table | Only a count builds it, and a count walks the whole tree anyway; `streaming_open.rs` unchanged |
 | A single lookup pays for the whole tree | No lookup builds; a lookup the index does not answer descends |
 | The serializer grows superlinear unseen | Named above: it counts nothing, and a row that changes its loops counts them |
+
+## P-03 — A decoded-stream cache per operation, and deduplication on encoded bytes
+
+*For [ROADMAP](../ROADMAP.md) row P-03.* An operation decodes one stream as
+many times as it is reached: a font program once for every page's scope that
+draws it, a form's content on every `Do`, a Type 3 procedure for every glyph,
+and a merge's deduplication every candidate stream for its digest and again
+for each comparison. This section fixes who holds the decoded bytes for an
+operation and until when, what deduplication buckets and compares, what each
+outcome of H-137 leaves a save merging, and what A5 and A6 count.
+
+### Scope
+
+- **The operation-scoped decoded-stream cache** (P-03.2): who owns it for a
+  render, a text extraction, an image extraction, a save and a merge; its
+  key; what it holds and until when.
+- **The hash** (P-03.3): XXH64, moved into `tinker-pdf-filters`.
+- **Deduplication on encoded bytes** (P-03.4): the bucket key, the
+  byte-for-byte confirmation, and a decode at most once a save.
+- **H-137** (P-03.5, P-03.6): what each answer costs and keeps.
+- **A5's and A6's counted quantities**, and MS-05's merge band (P-03.7).
+
+### Non-goals
+
+- **A cache that outlives an operation**, or one held to a byte budget:
+  P-16's.
+- **Inflate speed**: P-12's. This row decodes less, not faster.
+- **Resolving a resource once per scope**: P-02's. A scope's font table and
+  its colour spaces and functions are read once by P-02; this row is about
+  the bytes behind them.
+
+### Design
+
+#### What is decoded more than once at the tip
+
+| Stream | Where it is decoded | Operation | Decodes at the tip | Step |
+| --- | --- | --- | --- | --- |
+| A font program | `PageResources::program` keeps it per scope (`Caches::programs`, `crates/tinker-pdf/src/resources.rs`); `program_for` decodes it for each scope that draws a glyph of it | a subset save over *n* pages drawing one face; a render or text of a page whose forms draw the page's fonts | one a scope: *n* over the save's pages, and once more when the cut reads it | P-03.2 |
+| A font's CMaps (`/ToUnicode`, an embedded `/Encoding` CMap and its `usecmap` parents) | `read_cmap` (`crates/tinker-pdf-cos/src/font.rs`), for each font each scope reads | text or a render of a page whose forms use its fonts; a subset save, a scope a page | one a scope | P-03.2 |
+| A form's content | `PageResources::form_from` (`resources.rs`), on every `Do` and every soft mask's `/G` | a render or text of a page showing one form *k* times | *k* | P-03.2 |
+| A Type 3 glyph procedure | `PageResources::type3_glyph` (`resources.rs`), for every glyph shown | a render of a page showing one Type 3 glyph *g* times | *g*, which P-02.4 leaves here | P-03.2 |
+| A deduplication candidate | `dedup::deduplicate` (`crates/tinker-pdf-cos/src/dedup.rs`): once for its digest, and once more for each comparison in a bucket of two or more, every round | a rewrite with `deduplicate_streams`, which every merge is | two a round in a shared bucket | P-03.4 |
+
+#### The cache: who holds it, and its key
+
+One cache an operation, read through a `Resolve` whose `stream_decoded`
+consults it before it runs a chain and keeps what it ran. Every reader of the
+operation takes that `Resolve`: `PageResources`, its nested form and pattern
+scopes, and the font reader they call (`cos_font::from_resources_in`), so a
+CMap or a program a nested scope reads is the one the page's scope read.
+
+- **A render, a text extraction and an image extraction** hold one for their
+  page, made beside the operation's tally and dropped when the door returns.
+  A retained page's resources, shared by its renders, never hold one: two
+  renders are two operations.
+- **A save** holds one across `subset::collect`'s pages and
+  `subset::rewrite`'s reads of the same programs, in place of the per-scope
+  `Caches::programs`, whose key is a resource name that two pages may give to
+  two fonts.
+- **A merge** is imports and a save: an import copies stored bytes and
+  decodes nothing, and the save's deduplication keeps its own map of what it
+  decoded (P-03.4), since it reads the object set it is about to write and
+  not a document.
+
+**The key is the stream's reference in the document the operation reads.**
+A save's passes read the editor's view, whose numbers are the editor's, so a
+stream the editor replaced is the editor's stream under its number and is
+never served from a decode of the file's. Keyed by stream, never by region
+or by page, so a tile and its page hit alike (ruling 5).
+
+**What it holds**: each stream's decoded bytes, behind an `Arc` so a hit
+hands out a reference rather than a copy, and nothing else. The first decode
+raises the chain's warnings and a hit raises none, as a second read of a
+cached object raises none. An image's samples are not held: the scope's
+image cache already keeps each decoded image, and holding its samples too
+would double the image in the peak MS-05 bands. **Until when**: the
+operation's end. The bytes held are at most the decoded size of every stream
+the operation reads; a byte budget is P-16's.
+
+#### Deduplication: the bucket key, and the confirmation
+
+A candidate's bucket is its **comparable dictionary's bytes** (without
+`/Length`), its **encoded length**, and **XXH64 of its encoded bytes and
+filter chain**. The hash is XXH64 because the archive's Zstandard frame
+checksum already carries it (`crates/tinker-pdf-archive/src/zstd/xxhash.rs`);
+P-03.3 moves it into `tinker-pdf-filters`, which `tinker-pdf-cos` and the
+archive both depend on, unchanged in value.
+
+**The hash only buckets.** Two streams of one bucket merge when their
+comparable dictionaries are equal and their encoded bytes are equal byte for
+byte — undecoded. Equality is decided by bytes, as `dedup.rs`'s module rule
+says of SHA-256 today, so a colliding hash costs a comparison and never a
+wrong merge (`a_colliding_digest_never_merges_different_bytes`, its injected
+digest retyped to a `u64`).
+
+**What is decoded, and how often.** Under H-137's default (P-03.4), a stream
+whose comparable dictionary matches another's and whose encoding differs is
+compared decoded, as today; each such stream is decoded at most once a save,
+its decoded bytes kept in the pass's map until the pass ends, and counted on
+the save door. Every round after the first reads the map, since redirecting
+references changes dictionaries and never content.
+
+**The whole-set copy and each round's rebuild stay.** The pass copies the
+object set once (`deduplicate`'s `objects.clone()`) and rebuilds it in each
+round that merged something; each moves every stream's stored bytes once,
+linear in the output and memory-bound. A merge of four parts that share a
+face merges in its first round and finds nothing in its second, so it makes
+one copy and one rebuild: two passes over the merged file's bytes, beside
+which the per-stream decodes this row removes are the merge's cost. A later
+round runs only when a merge made two dictionaries equal.
+
+#### H-137: what each answer keeps
+
+| Answer | The merges a save still makes | What A6 counts |
+| --- | --- | --- |
+| **Merge on encoded bytes alone** | every pair whose comparable dictionaries and encoded bytes are equal: a face, an image or a form imported once a page or a part; never two encodings of one content, so `two_encodings_of_one_content_merge` becomes `two_encodings_of_one_content_stay_two` | a decode only when two different encodings share a bucket, which is a 64-bit hash collision at one length; over a merge of 4 × 100 pages whose encodings all differ, none |
+| **Keep merging two encodings of one content** (the default until the owner decides) | those, and every pair whose dictionaries match and whose decoded bytes are equal | one decode a save of every stream whose comparable dictionary another shares with a different encoding — every page's content stream of a merge among them — so A6's clause and the merge floors are re-stated under H-77 or H-78, at the figures P-03.5 prices |
+
+P-03.5 prices both on a merge of four 100-page documents as MS-04's
+generator builds them and on every committed fixture that merges two
+encodings of one content — dedup decodes, merges lost, output bytes, merge
+time in release and debug — through a parameter of the pass only its own
+unit tests reach, and commits the table here; P-03.6 lands the owner's
+answer.
+
+#### A5's and A6's counted quantities
+
+A5 reads `most_decodes_of_one_stream`, the most runs of one stream's filter
+chain in the operation, from MS-01's per-stream decode counts on each door,
+and holds it to one: a save over a 100-page document drawing one embedded
+face with a `/ToUnicode` on every page; a render and a text extraction of a
+page showing one form three times and one Type 3 glyph fifty times; an image
+extraction through the decode door; and a merge's save (P-03.4). A6 reads
+`streams_decoded` on the save of a merge of the guard suite's four 100-page
+A6 documents, whose faces are one encoded stream and whose pages' contents
+all differ, against the clause H-137 leaves it.
+
+#### MS-05's merge band
+
+MS-05's merge 4 × 100 case is set at the figure the fixed merge peaks at,
+because the row names none (P-03.7): the set copy and the rebuild are its
+largest allocations, and the decoded map holds only the streams the default
+compares decoded.
+
+### Milestones
+
+1. **P-03.2: the operation-scoped cache.** Exit: `guards.rs`
+   `a5_a_save_decodes_each_stream_at_most_once`,
+   `a5_a_render_decodes_each_stream_at_most_once`,
+   `a5_text_decodes_each_stream_at_most_once` and
+   `a5_image_extraction_decodes_each_stream_at_most_once` flip from owed;
+   every subset test, `cff_subset_census.rs`'s fixtures, `write.rs`'s save
+   tests, `type3_fonts.rs`, `render_regions.rs` and every fingerprint
+   unchanged, in both builds.
+2. **P-03.3: XXH64 in `tinker-pdf-filters`.** Exit:
+   `xxh64_keeps_the_values_the_archive_copy_gave`; the Zstandard
+   frame-checksum tests unchanged.
+3. **P-03.4: buckets on encoded bytes.** Exit: `dedup.rs`
+   `byte_identical_encodings_merge_undecoded`;
+   `a5_a_merge_decodes_each_stream_at_most_once` flips from owed;
+   `a_colliding_digest_never_merges_different_bytes` keeps its assertion, and
+   every `stream_dedup.rs` test passes unchanged.
+4. **P-03.5: H-137 priced.** Exit: the `#[ignore]`d pricing test in
+   `dedup.rs` with its `RAN` banner, and its table committed here.
+5. **P-03.6: the owner's answer.** Exit:
+   `a6_merge_deduplication_decodes_only_on_a_collision` flips from owed as
+   decided, with `two_encodings_of_one_content_merge` renamed and inverted
+   or kept.
+6. **P-03.7: the row's close** in MS-02's paired job: subset-on-save of 100
+   pages (CLI) at 10×, merge of 4 × 100 pages at 25.2× CLI and 114×
+   in-process, MS-05's merge band at the fixed figure, and A5 and A6 green on
+   every target.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| The cache serves a stream the editor replaced | Keyed by reference in the document the operation reads, which for a save is the editor's view |
+| A hit hides a warning a caller expects | The miss raises the chain's warnings, as a cached object's first read does |
+| The cache raises an operation's peak | An image's samples are not held, and the operation drops it when it returns; MS-05's bands hold the cases it touches |
+| A hash collision merges two different streams | The hash only buckets; equality is decided by bytes |
+| Dropping cross-encoding merges grows files that compress one content twice | H-137 is the owner's, priced by P-03.5 before P-03.6 lands either answer |
