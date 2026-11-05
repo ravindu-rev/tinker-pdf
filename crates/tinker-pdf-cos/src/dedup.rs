@@ -192,6 +192,20 @@ pub(crate) fn deduplicate(
     content: &dyn Fn(u32, &StreamData) -> Content,
     digest: &dyn Fn(&[u8]) -> u64,
 ) -> (ObjectSet, Dict, Vec<(u32, u32)>) {
+    deduplicate_comparing(objects, trailer, names, content, digest, true)
+}
+
+/// [`deduplicate`], comparing differing encodings under one dictionary
+/// decoded or not: the switch H-137 is priced by (P-03.5), which only this
+/// module's tests turn off.
+fn deduplicate_comparing(
+    objects: &ObjectSet,
+    trailer: &Dict,
+    names: &NameTable,
+    content: &dyn Fn(u32, &StreamData) -> Content,
+    digest: &dyn Fn(&[u8]) -> u64,
+    decoded_comparison: bool,
+) -> (ObjectSet, Dict, Vec<(u32, u32)>) {
     let apart = held_apart(objects, names);
 
     // Each candidate's stored bytes hashed, once: redirecting references
@@ -225,7 +239,7 @@ pub(crate) fn deduplicate(
         let mut mapping: BTreeMap<u32, u32> = BTreeMap::new();
         for members in groups.values().filter(|m| m.len() > 1) {
             let distinct = merge_equal_encodings(&set, members, &encoded, &mut mapping);
-            if distinct.len() > 1 {
+            if decoded_comparison && distinct.len() > 1 {
                 for &num in &distinct {
                     if let (false, Some(Written::Stream(stream))) =
                         (decoded.contains_key(&num), set.get(num))
@@ -562,5 +576,308 @@ mod tests {
         let mut got = merges.clone();
         got.sort_unstable();
         assert_eq!(got, want, "each copy merges into the first");
+    }
+    // ---- H-137's price (P-03.5) -------------------------------------------------
+
+    /// SplitMix64, the stream MS-04's generator draws its words from.
+    struct Seeded(u64);
+
+    impl Seeded {
+        fn below(&mut self, bound: usize) -> usize {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            ((z ^ (z >> 31)) % bound as u64) as usize
+        }
+    }
+
+    /// The workspace root, where the committed fixtures and faces are.
+    fn root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    /// `pages` pages as MS-04's `dense` builds them: A4, seventy lines of
+    /// about eighty characters a page, in Liberation Serif embedded whole.
+    fn dense(pages: usize, seed: u64, face: &[u8]) -> Vec<u8> {
+        const WORDS: [&str; 24] = [
+            "the", "of", "and", "a", "to", "in", "is", "that", "it", "was", "for", "on", "with",
+            "from", "which", "their", "page", "line", "glyph", "reader", "order", "about", "1984",
+            "2026",
+        ];
+        let mut words = Seeded(seed);
+        let mut builder = crate::build::DocumentBuilder::new();
+        builder.set_subset_fonts(false);
+        assert!(builder.add_embedded_font(b"F0", b"LiberationSerif", face));
+        for _ in 0..pages {
+            builder.add_page(595.0, 842.0, |page| {
+                for at in 0..70 {
+                    let mut line = String::new();
+                    while line.len() < 78 {
+                        if !line.is_empty() {
+                            line.push(' ');
+                        }
+                        line.push_str(WORDS[words.below(WORDS.len())]);
+                    }
+                    let y = 806.0 - 11.0 * f64::from(at);
+                    page.encoded_text(b"F0", 9.0, 36.0, y, (0.0, 0.0), line.as_bytes(), &line);
+                }
+            });
+        }
+        builder.finish()
+    }
+
+    /// Four of [`dense`]'s 100-page documents merged as `tpdf merge` merges
+    /// them, the first the base and every page of the rest imported, and
+    /// written without deduplication: the set a merge's save deduplicates.
+    fn merged_four_by_a_hundred() -> Vec<u8> {
+        let face = std::fs::read(
+            root().join("crates/tinker-pdf-font/data/liberation/LiberationSerif-Regular.ttf"),
+        )
+        .expect("the committed face");
+        let parts: Vec<std::sync::Arc<crate::doc::CosDocument>> = (0..4)
+            .map(|seed| {
+                std::sync::Arc::new(
+                    crate::doc::CosDocument::open(dense(100, seed, &face)).expect("a part opens"),
+                )
+            })
+            .collect();
+        let mut editor = crate::edit::DocumentEditor::new(std::sync::Arc::clone(&parts[0]));
+        for part in &parts[1..] {
+            for index in 0..crate::pages::count(part) {
+                let at = editor.page_count();
+                editor
+                    .import_page(part, index, at)
+                    .expect("the page imports");
+            }
+        }
+        editor.save(&crate::write::WriteOptions {
+            mode: crate::write::WriteMode::Rewrite,
+            ..crate::write::WriteOptions::default()
+        })
+    }
+
+    /// The fixture `stream_dedup.rs`'s `two_encodings_of_one_content_merge`
+    /// builds: one content under one dictionary, deflated by the encoder and
+    /// stored in a zlib stream of stored blocks.
+    fn two_encodings_of_one_content() -> (crate::doc::CosDocument, ObjectSet) {
+        let mut builder = crate::build::DocumentBuilder::new();
+        builder.add_page(50.0, 50.0, |_| {});
+        let doc = crate::doc::CosDocument::open(builder.finish()).expect("opens");
+        let names = doc.names_table();
+        let content = b"one content, two encodings, one object".repeat(20);
+        let packed = tinker_pdf_filters::zlib_compress(&content);
+        let mut stored = vec![0x78, 0x01, 0x01];
+        stored.extend_from_slice(&(content.len() as u16).to_le_bytes());
+        stored.extend_from_slice(&(!(content.len() as u16)).to_le_bytes());
+        stored.extend_from_slice(&content);
+        let mut a = 1u32;
+        let mut b = 0u32;
+        for &byte in &content {
+            a = (a + u32::from(byte)) % 65_521;
+            b = (b + a) % 65_521;
+        }
+        stored.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        let flate = (
+            b"Filter".as_slice(),
+            Object::Name(names.intern(b"FlateDecode")),
+        );
+        let mut set = ObjectSet::new();
+        set.insert_stream(1, stream(names, std::slice::from_ref(&flate), &packed));
+        set.insert_stream(2, stream(names, std::slice::from_ref(&flate), &stored));
+        (doc, set)
+    }
+
+    /// The objects and trailer a rewrite of `doc` hands deduplication.
+    fn rewrite_set(doc: &crate::doc::CosDocument) -> (ObjectSet, Dict) {
+        let mut set = ObjectSet::new();
+        for (num, _) in doc.xref().iter() {
+            if num == 0 {
+                continue;
+            }
+            let reference = ObjRef::new(num, 0);
+            let Ok(object) = doc.get(reference) else {
+                continue;
+            };
+            match object.as_ref() {
+                Object::Null => {}
+                Object::Stream(parsed) => {
+                    if let Ok(data) = doc.stream_raw(reference) {
+                        let dict = parsed.dict.clone();
+                        set.insert_stream(num, StreamData { dict, data });
+                    }
+                }
+                other => set.insert(num, other.clone()),
+            }
+        }
+        (set, doc.trailer().clone())
+    }
+
+    /// What one mode of the pass did to one input: the decodes it ran, the
+    /// merges it made, the rewrite's bytes, and the median time of the pass
+    /// and the rewrite over five runs.
+    struct Priced {
+        decodes: u32,
+        merges: usize,
+        bytes: usize,
+        millis: f64,
+    }
+
+    /// The pass over `set`, comparing differing encodings decoded or not,
+    /// decoding through `doc` as a save decodes through its document.
+    fn price(
+        set: &ObjectSet,
+        trailer: &Dict,
+        names: &NameTable,
+        doc: &crate::doc::CosDocument,
+        decoded: bool,
+    ) -> Priced {
+        let decodes = std::cell::Cell::new(0u32);
+        let content = |num: u32, stream: &StreamData| {
+            if stream.dict.get(Name::FILTER).is_none() {
+                return Content::Decoded(stream.data.clone());
+            }
+            decodes.set(decodes.get() + 1);
+            let mut sink = crate::warn::WarningSink::new();
+            match doc.decode_with(&stream.data, &stream.dict, num, &mut sink) {
+                Ok(bytes) if sink.is_empty() => Content::Decoded(bytes),
+                _ => Content::Stored(stream.data.clone()),
+            }
+        };
+        let options = crate::write::WriteOptions {
+            mode: crate::write::WriteMode::Rewrite,
+            ..crate::write::WriteOptions::default()
+        };
+        let mut times = Vec::new();
+        let mut last = None;
+        for _ in 0..5 {
+            decodes.set(0);
+            let start = std::time::Instant::now();
+            let (out, out_trailer, merges) =
+                deduplicate_comparing(set, trailer, names, &content, &xxh, decoded);
+            let bytes = crate::write::rewrite(&out, &out_trailer, &options, names).len();
+            times.push(start.elapsed().as_secs_f64() * 1000.0);
+            last = Some((merges.len(), bytes));
+        }
+        times.sort_by(f64::total_cmp);
+        let (merges, bytes) = last.expect("five runs");
+        Priced {
+            decodes: decodes.get(),
+            merges,
+            bytes,
+            millis: times[2],
+        }
+    }
+
+    /// One input priced both ways, as a row: decodes, merges and bytes kept
+    /// and dropped, the merges dropping loses, and each mode's time; and
+    /// whether the two modes differ.
+    fn row(
+        name: &str,
+        set: &ObjectSet,
+        trailer: &Dict,
+        names: &NameTable,
+        doc: &crate::doc::CosDocument,
+    ) -> (String, bool) {
+        let kept = price(set, trailer, names, doc, true);
+        let dropped = price(set, trailer, names, doc, false);
+        let differ = kept.merges != dropped.merges || kept.decodes != dropped.decodes;
+        (
+            format!(
+                "| {name} | {} / {} | {} / {} | {} | {} / {} | {:.2} / {:.2} |",
+                kept.decodes,
+                dropped.decodes,
+                kept.merges,
+                dropped.merges,
+                kept.merges - dropped.merges,
+                kept.bytes,
+                dropped.bytes,
+                kept.millis,
+                dropped.millis
+            ),
+            differ,
+        )
+    }
+
+    /// Every committed PDF under the workspace, outside `target` and `.git`.
+    fn committed_pdfs(at: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(at) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if path.is_dir() {
+                if name != "target" && name != ".git" {
+                    committed_pdfs(&path, out);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "pdf") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// **H-137's price** (P-03.5): the decoded comparison of differing
+    /// encodings under one dictionary kept, as today, and dropped, as merging
+    /// on encoded bytes alone would, over a merge of four 100-page documents
+    /// built as MS-04's generator builds them and over every committed fixture
+    /// whose two modes differ. Prints a row an input: decodes, merges, the
+    /// merges dropping loses, the rewrite's bytes, and the median time of the
+    /// pass and the rewrite, each kept / dropped. Holds nothing.
+    ///
+    /// `cargo test -p tinker-pdf-cos --lib h137 -- --ignored --nocapture`,
+    /// and again with `--release`.
+    #[test]
+    #[ignore = "a measurement for the owner: prints H-137's price and holds nothing"]
+    fn h137_prices_the_decoded_comparison_kept_and_dropped() {
+        println!("RAN h137_prices_the_decoded_comparison_kept_and_dropped");
+        println!("| Input | Decodes | Merges | Lost | Bytes | ms |");
+        println!("| --- | ---: | ---: | ---: | ---: | ---: |");
+        let merged = crate::doc::CosDocument::open(merged_four_by_a_hundred()).expect("opens");
+        let (set, trailer) = rewrite_set(&merged);
+        let (line, _) = row(
+            "merge of 4 x 100 pages",
+            &set,
+            &trailer,
+            merged.names_table(),
+            &merged,
+        );
+        println!("{line}");
+        let (doc, set) = two_encodings_of_one_content();
+        let name = "`two_encodings_of_one_content_merge`";
+        println!(
+            "{}",
+            row(name, &set, &Dict::new(), doc.names_table(), &doc).0
+        );
+        let mut pdfs = Vec::new();
+        committed_pdfs(&root(), &mut pdfs);
+        pdfs.sort();
+        let scanned = pdfs.len();
+        for path in pdfs {
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let Ok(doc) = crate::doc::CosDocument::open(bytes) else {
+                continue;
+            };
+            let (set, trailer) = rewrite_set(&doc);
+            let name = path
+                .strip_prefix(root())
+                .unwrap_or(&path)
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            let (line, differ) = row(
+                &format!("`{name}`"),
+                &set,
+                &trailer,
+                doc.names_table(),
+                &doc,
+            );
+            if differ {
+                println!("{line}");
+            }
+        }
+        println!("{scanned} committed PDFs scanned; a row for each whose two modes differ");
     }
 }

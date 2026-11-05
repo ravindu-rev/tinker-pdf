@@ -2283,11 +2283,26 @@ round runs only when a merge made two dictionaries equal.
 | **Merge on encoded bytes alone** | every pair whose comparable dictionaries and encoded bytes are equal: a face, an image or a form imported once a page or a part; never two encodings of one content, so `two_encodings_of_one_content_merge` becomes `two_encodings_of_one_content_stay_two` | a decode only when two different encodings share a bucket, which is a 64-bit hash collision at one length; over a merge of 4 × 100 pages whose encodings all differ, none |
 | **Keep merging two encodings of one content** (the default until the owner decides) | those, and every pair whose dictionaries match and whose decoded bytes are equal | one decode a save of every stream whose comparable dictionary another shares with a different encoding — every page's content stream of a merge among them — so A6's clause and the merge floors are re-stated under H-77 or H-78, at the figures P-03.5 prices |
 
-P-03.5 prices both on a merge of four 100-page documents as MS-04's
-generator builds them and on every committed fixture that merges two
-encodings of one content — dedup decodes, merges lost, output bytes, merge
-time in release and debug — through a parameter of the pass only its own
-unit tests reach, and commits the table here; P-03.6 lands the owner's
+**The price** (P-03.5). `dedup.rs`'s ignored
+`h137_prices_the_decoded_comparison_kept_and_dropped` runs the pass both ways,
+through a parameter only that module's tests reach, over a merge of four
+100-page documents built as MS-04's generator builds them and over every
+committed PDF and the fixture `two_encodings_of_one_content_merge` builds,
+and prints a row for each input whose two modes differ, the merge always.
+Each figure is kept / dropped; the time is the median of five runs of the
+pass and the rewrite of its result:
+
+| Input | Decodes | Merges | Merges lost | Output bytes | Release (ms) | Debug (ms) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| merge of 4 × 100 pages | 0 / 0 | 300 / 300 | 0 | 4 255 883 / 4 255 883 | 94.2 / 95.1 | 1 994 / 1 979 |
+| `two_encodings_of_one_content_merge`'s fixture | 2 / 0 | 1 / 0 | 1 | 298 / 1 158 | 0.02 / 0.01 | 0.20 / 0.10 |
+
+None of the forty committed PDFs merges two encodings of one content. The
+merge pays nothing for the decoded comparison: the builder writes page
+contents and font programs without a filter, so comparing them runs no
+chain, and the 300 copies of the face its imports make are one encoding,
+merged undecoded. Regenerate with `cargo test -p tinker-pdf-cos --lib h137 --
+--ignored --nocapture`, and again with `--release`. P-03.6 lands the owner's
 answer.
 
 #### A5's and A6's counted quantities
