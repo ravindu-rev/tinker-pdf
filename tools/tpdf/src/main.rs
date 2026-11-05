@@ -2464,14 +2464,7 @@ fn peak_bytes() -> Option<u64> {
     // in what the file calls `kB` and means KiB.
     #[cfg(target_os = "linux")]
     {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("VmHWM:") {
-                let kib: u64 = rest.split_whitespace().next()?.parse().ok()?;
-                return Some(kib * 1024);
-            }
-        }
-        None
+        status_bytes("VmHWM")
     }
 
     // Windows: `PeakWorkingSetSize` out of `PROCESS_MEMORY_COUNTERS`, which is
@@ -2549,6 +2542,64 @@ fn peak_bytes() -> Option<u64> {
     #[cfg(not(any(target_os = "linux", windows)))]
     {
         None
+    }
+}
+
+/// A field of `/proc/self/status` in bytes, from the KiB the file states it
+/// in, or `None` where the field is absent or does not parse.
+///
+/// The one parser [`peak_bytes`], the phase marks and the file-backed share
+/// read the status file through: the file says `kB` and means KiB.
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "only Linux has the file; the test reads it on every platform"
+    )
+)]
+fn status_field(status: &str, field: &str) -> Option<u64> {
+    let kib: u64 = status
+        .lines()
+        .find_map(|line| line.strip_prefix(field)?.strip_prefix(':'))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    kib.checked_mul(1024)
+}
+
+/// `field` of this process's `/proc/self/status`, in bytes; `None` off Linux,
+/// where there is no such file.
+fn status_bytes(field: &str) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        status_field(&std::fs::read_to_string("/proc/self/status").ok()?, field)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = field;
+        None
+    }
+}
+
+/// `hwm <phase> <bytes>`: the kernel's high-water mark as a phase of the
+/// probe ends, so a report can say which phase reached a file's peak (MS-19).
+/// Omitted off Linux, as the file-backed share is.
+fn mark(phase: &str) {
+    if let Some(bytes) = status_bytes("VmHWM") {
+        println!("hwm {phase} {bytes}");
+    }
+}
+
+/// The record's memory lines: `rss-file`, the file-backed part of the
+/// resident set (`RssFile`), which tells the binary's own pages from what the
+/// document cost, then `peak`. Each omitted where the platform will not say.
+fn print_peak() {
+    if let Some(bytes) = status_bytes("RssFile") {
+        println!("rss-file {bytes}");
+    }
+    if let Some(peak) = peak_bytes() {
+        println!("peak {peak}");
     }
 }
 
@@ -2632,9 +2683,7 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
             // file did not open" is a different fact from "this build does not
             // run the pass".
             println!("strict ineligible the file did not open");
-            if let Some(peak) = peak_bytes() {
-                println!("peak {peak}");
-            }
+            print_peak();
             println!("ms {}", started.elapsed().as_millis());
             println!("done");
             return;
@@ -2673,6 +2722,7 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     let counting = counting.elapsed();
     println!("pages {pages}");
     println!("time open {}", opening.saturating_add(counting).as_micros());
+    mark("open");
 
     // Counted by kind rather than listed: a damaged file can emit tens of
     // thousands of warnings, and the report wants to know which kinds a
@@ -2704,6 +2754,7 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
         // different fact from a document with no structure tree.
         None => println!("tagged tree no"),
     }
+    mark("scan");
 
     let render = RenderOptions {
         annotations: options.annotations,
@@ -2752,6 +2803,7 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
             join.matched, join.orphans, join.unmarked
         );
     }
+    mark("render");
 
     // What this document costs to work on, as properties of the document.
     //
@@ -2779,7 +2831,9 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
 
     println!("phase strict");
     strict(&doc);
+    mark("strict");
     metamorphic(&doc, options, fonts);
+    mark("metamorphic");
 
     for (kind, count) in &kinds {
         println!("warn {kind} {count}");
@@ -2792,9 +2846,7 @@ fn probe_one(options: &Options, path: &str, fonts: Option<&Arc<SimpleFontProvide
     //
     // Omitted where the platform will not say. See [`peak_bytes`] for why that
     // is an omission rather than a zero.
-    if let Some(peak) = peak_bytes() {
-        println!("peak {peak}");
-    }
+    print_peak();
     println!("ms {}", started.elapsed().as_millis());
     println!("done");
 }
@@ -3095,6 +3147,28 @@ fn filter_names(cos: &CosDocument, value: &Object) -> Vec<Vec<u8>> {
 mod tests {
     use super::*;
     use tinker_pdf::{DocumentBuilder, ImageData, PdfString};
+
+    /// The status file states its sizes in what it calls `kB` and means KiB;
+    /// a field it does not state, or states as something else, is `None`
+    /// rather than a zero, as a missing peak is.
+    #[test]
+    fn a_status_field_is_read_in_kib_and_a_missing_one_is_none() {
+        let status = "Name:\ttpdf\nVmPeak:\t  20480 kB\nVmHWM:\t    1234 kB\n\
+                      RssAnon:\t     900 kB\nRssFile:\t     334 kB\nVmHWMX:\t 7 kB\n";
+        assert_eq!(status_field(status, "VmHWM"), Some(1234 * 1024));
+        assert_eq!(status_field(status, "RssFile"), Some(334 * 1024));
+        assert_eq!(status_field(status, "RssShmem"), None, "absent");
+        assert_eq!(
+            status_field("VmHWM:\tmany kB\n", "VmHWM"),
+            None,
+            "unparseable"
+        );
+        assert_eq!(
+            status_field("VmHWMX:\t 7 kB\n", "VmHWM"),
+            None,
+            "another field"
+        );
+    }
 
     fn document() -> Document {
         let mut builder = DocumentBuilder::new();

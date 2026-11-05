@@ -1333,6 +1333,8 @@ mod tests {
                 tagged: None,
                 producer: None,
                 peak: None,
+                marks: Vec::new(),
+                rss_file: None,
             });
         }
         out

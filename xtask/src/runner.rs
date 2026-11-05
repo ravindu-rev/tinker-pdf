@@ -177,6 +177,19 @@ pub struct FileResult {
     /// the line, which is already a crash. A zero would merge them into a
     /// measurement, and a measurement of zero is a ceiling nothing can exceed.
     pub peak: Option<u64>,
+    /// The kernel's high-water mark as each phase of the child's work ended,
+    /// in bytes and in the order the phases ran: `open`, `scan`, `render`,
+    /// `strict`, `metamorphic` (MS-19).
+    ///
+    /// Where a file's peak is reached, never the peak itself: a mark is the
+    /// mark so far, and [`peak`](Self::peak), read after every phase, is the
+    /// one figure a bar holds. Empty off Linux and from a child that did not
+    /// say.
+    pub marks: Vec<(String, u64)>,
+    /// The file-backed part of the child's resident set as its record ended,
+    /// in bytes: the binary's own pages rather than what the document cost.
+    /// `None` off Linux and from a child that did not say.
+    pub rss_file: Option<u64>,
     /// `/Producer` as the document states it, or `None` from a child that did
     /// not say.
     ///
@@ -373,6 +386,8 @@ pub fn run_one(
         // zero for the reason the field carries: this file is already counted
         // as a crash, and a zero here would be a measurement.
         peak: None,
+        marks: Vec::new(),
+        rss_file: None,
         // A child that wrote no record did not look at a structure tree, and
         // `None` is the same answer as "there was none". They aggregate the
         // same way, and the file is already counted as failed.
@@ -647,6 +662,8 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
     let mut producer: Option<String> = None;
     let mut open_micros: Option<u64> = None;
     let mut page_micros: Vec<PageTime> = Vec::new();
+    let mut marks: Vec<(String, u64)> = Vec::new();
+    let mut rss_file: Option<u64> = None;
 
     for line in text.lines() {
         let line = line.trim_end_matches(['\r', '\n']);
@@ -687,6 +704,18 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
             // value of the field is that "not measured" and "measured as
             // nothing" are different answers.
             "peak" => peak = rest.trim().parse::<u64>().ok(),
+            // A phase's mark is a key of its own, by `peak`'s rule: exactly
+            // a phase and a number, or nothing. `peak` above would read
+            // `peak render <n>` as no peak at all, so a mark never stands in
+            // for the file's peak, however it is spelled.
+            "hwm" => {
+                if let [phase, bytes] = rest.split_whitespace().collect::<Vec<_>>().as_slice() {
+                    if let Ok(bytes) = bytes.parse::<u64>() {
+                        marks.push(((*phase).to_string(), bytes));
+                    }
+                }
+            }
+            "rss-file" => rss_file = rest.trim().parse::<u64>().ok(),
             // The two spans, by `peak`'s rule: a value that does not parse is
             // no span. A line needs exactly its words -- `open` and a time, or
             // `page`, a page and a time -- and is dropped whole otherwise, so
@@ -857,6 +886,8 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
         bundled_faces,
         cost,
         peak,
+        marks,
+        rss_file,
         producer,
         tagged,
     })
@@ -1006,6 +1037,75 @@ mod tests {
             assert_eq!(result.open_micros, None, "{broken:?}");
             assert_eq!(result.page_micros.len(), 2, "{broken:?}");
         }
+    }
+
+    /// A record of a file's memory as the probe writes it on Linux: a mark as
+    /// each phase ends, the file-backed share, then the peak.
+    fn marked(lines: &[&str]) -> String {
+        let mut all = vec!["probe 7", "opened yes", "pages 1", "rendered 1"];
+        all.extend_from_slice(lines);
+        all.extend_from_slice(&["ms 5", "done"]);
+        record(&all)
+    }
+
+    /// The phase marks are read in the order the phases ran, and the
+    /// file-backed share beside them.
+    #[test]
+    fn the_phase_marks_and_the_file_backed_share_are_read() {
+        let result = parse_record(&marked(&[
+            "hwm open 21000000",
+            "hwm scan 23000000",
+            "hwm render 90000000",
+            "hwm strict 90000000",
+            "hwm metamorphic 120000000",
+            "rss-file 9000000",
+            "peak 120000000",
+        ]))
+        .expect("complete");
+        let phases: Vec<(&str, u64)> = result
+            .marks
+            .iter()
+            .map(|(phase, bytes)| (phase.as_str(), *bytes))
+            .collect();
+        assert_eq!(
+            phases,
+            [
+                ("open", 21_000_000),
+                ("scan", 23_000_000),
+                ("render", 90_000_000),
+                ("strict", 90_000_000),
+                ("metamorphic", 120_000_000),
+            ]
+        );
+        assert_eq!(result.rss_file, Some(9_000_000));
+        assert_eq!(result.peak, Some(120_000_000));
+
+        // Off Linux the child writes none of them, and a record without
+        // them is read as one.
+        let quiet = parse_record(&marked(&["peak 120000000"])).expect("complete");
+        assert!(quiet.marks.is_empty());
+        assert_eq!(quiet.rss_file, None);
+    }
+
+    /// A mark is never the file's peak, however it is spelled: without the
+    /// `peak` line the file has none, a garbled mark is dropped rather than
+    /// read as zero, and `peak render <n>` is no peak at all.
+    #[test]
+    fn a_phase_mark_never_stands_in_for_the_files_peak() {
+        let unpeaked =
+            parse_record(&marked(&["hwm open 21000000", "hwm render 90000000"])).expect("complete");
+        assert_eq!(unpeaked.peak, None);
+        assert_eq!(unpeaked.marks.len(), 2);
+
+        let garbled = parse_record(&marked(&[
+            "hwm render",
+            "hwm render many",
+            "hwm render 9 more",
+            "peak render 90000000",
+        ]))
+        .expect("complete");
+        assert!(garbled.marks.is_empty(), "{:?}", garbled.marks);
+        assert_eq!(garbled.peak, None, "a mark spelled as a peak is no peak");
     }
 
     /// The structure counts arrive on two lines because they are measured at

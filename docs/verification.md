@@ -294,6 +294,14 @@ over unchanged; `--check` holds each figure to the band those five set, refuses
 a run at another dpi or job count, and reads a bar without them as new.
 [design/performance.md](design/performance.md) has the band rule.
 
+**Where a peak is reached.** On Linux each child writes the kernel's
+high-water mark as each phase of its work ends — `open`, `scan`, `render`,
+`strict`, `metamorphic` — and, before its `peak`, the file-backed part of its
+resident set, which is the binary's own pages rather than what the document
+cost. The report keeps both per file, and each corpus's `peak` line names the
+file that reached the largest peak, the first phase whose mark reads it and
+its file-backed share. A bar holds the peak alone.
+
 ### The fourth axis: relations between two renders
 
 The corpus has no ground truth — nobody here knows what its pages should look

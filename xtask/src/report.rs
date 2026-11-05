@@ -162,6 +162,19 @@ impl CorpusReport {
         out
     }
 
+    /// The file whose child reached this corpus's largest peak, the first in
+    /// path order where two reached it, or `None` where no child reported
+    /// one.
+    pub fn peak_file(&self) -> Option<&FileResult> {
+        let largest = self.peak();
+        if largest.files == 0 {
+            return None;
+        }
+        self.files
+            .iter()
+            .find(|file| file.peak == Some(largest.bytes))
+    }
+
     /// The seventh axis's figures over this corpus (MS-07): the files whose
     /// open was timed and their summed spans, the pages whose render was
     /// timed and theirs, and the 50th, 95th and 99th percentile page render.
@@ -438,6 +451,28 @@ impl Run {
                         // nothing from one that says a small number.
                         if let Some(peak) = file.peak {
                             fields.push(("peak", Json::count(peak)));
+                        }
+                        // Where the peak was reached (MS-19): the mark as each
+                        // phase ended, in the order the phases ran, and the
+                        // file-backed share. Absent off Linux.
+                        if !file.marks.is_empty() {
+                            fields.push((
+                                "hwm",
+                                Json::Array(
+                                    file.marks
+                                        .iter()
+                                        .map(|(phase, bytes)| {
+                                            Json::object([
+                                                ("phase", Json::string(phase)),
+                                                ("bytes", Json::count(*bytes)),
+                                            ])
+                                        })
+                                        .collect(),
+                                ),
+                            ));
+                        }
+                        if let Some(rss_file) = file.rss_file {
+                            fields.push(("rss_file", Json::count(rss_file)));
                         }
                         // Who wrote the file. Per file for the same reason the
                         // peak is: the per-corpus grouping below is a summary,
@@ -730,12 +765,36 @@ impl Run {
             lines.push(if peak.files == 0 {
                 format!("{:<14} no child reported a peak resident set", "  peak")
             } else {
-                format!(
+                let mut line = format!(
                     "{:<14} {:>6} MiB  the largest peak resident set of {} children",
                     "  peak",
                     peak.bytes / (1 << 20),
                     peak.files
-                )
+                );
+                // Which file, which phase's mark first reads it, and how much
+                // of it was the binary's own pages (MS-19).
+                if let Some(file) = corpus.peak_file() {
+                    line.push_str(&format!(": {} bytes in {}", peak.bytes, file.path));
+                    let phase = file.marks.iter().find(|(_, bytes)| *bytes >= peak.bytes);
+                    match phase {
+                        Some((phase, _)) => line.push_str(&format!(", reached by {phase}")),
+                        None if !file.marks.is_empty() => {
+                            line.push_str(", reached after its last phase mark");
+                        }
+                        None => {}
+                    }
+                    if let Some(rss_file) = file.rss_file {
+                        line.push_str(&format!(
+                            ", {} MiB of it file-backed ({}%)",
+                            rss_file / (1 << 20),
+                            rss_file
+                                .saturating_mul(100)
+                                .checked_div(peak.bytes)
+                                .unwrap_or(0)
+                        ));
+                    }
+                }
+                line
             });
             // The seventh axis, on its own line for the peak's reason. A
             // corpus with nothing timed says so in words.
@@ -966,6 +1025,8 @@ mod tests {
             tagged: None,
             producer: None,
             peak: None,
+            marks: Vec::new(),
+            rss_file: None,
             pages: 1,
             rendered: 1,
             warnings: warnings
@@ -1186,6 +1247,43 @@ mod tests {
         let ratchet = run.to_ratchet_json("n").to_pretty();
         assert!(ratchet.contains("\"bytes\": 120000000"), "{ratchet}");
         assert!(!ratchet.contains("141000000"), "{ratchet}");
+    }
+
+    /// The peak line names where the corpus's peak was reached: the file
+    /// whose child reached it, the first phase whose mark reads it, and how
+    /// much of it was file-backed.
+    #[test]
+    fn the_peak_line_names_its_file_phase_and_file_backed_share() {
+        let mut run = run();
+        run.corpora[0].files[0].peak = Some(21_000_000);
+        let heavy = &mut run.corpora[0].files[1];
+        heavy.peak = Some(120 << 20);
+        heavy.marks = vec![
+            ("open".to_string(), 20 << 20),
+            ("render".to_string(), 120 << 20),
+            ("strict".to_string(), 120 << 20),
+        ];
+        heavy.rss_file = Some(12 << 20);
+
+        let lines = run.summary_lines();
+        let peak = lines
+            .iter()
+            .find(|line| line.starts_with("  peak"))
+            .expect("a peak line");
+        assert!(peak.contains("120 MiB"), "{peak}");
+        assert!(
+            peak.contains(&format!("{} bytes in b.pdf", 120u64 << 20)),
+            "{peak}"
+        );
+        assert!(
+            peak.contains("reached by render"),
+            "the first mark that reads it: {peak}"
+        );
+        assert!(peak.contains("12 MiB of it file-backed (10%)"), "{peak}");
+
+        let report = run.to_report_json().to_pretty();
+        assert!(report.contains("\"phase\": \"render\""), "{report}");
+        assert!(report.contains("\"rss_file\": 12582912"), "{report}");
     }
 
     /// And a corpus nothing measured writes no band at all rather than a band
