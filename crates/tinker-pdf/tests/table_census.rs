@@ -39,9 +39,12 @@
 //! corpus holds: every stated table reads without a panic, every cell the
 //! join gives characters to spells its text with them, and no table is
 //! inferred on a veraPDF page that states none ([`held`]) — the design's
-//! zero, owed its first run like everything else here. The eight span
-//! fixtures' verdicts (spans reproduced, `SpanInconsistent` named) are
-//! printed by name.
+//! zero, owed its first run like everything else here. A cell whose
+//! characters do not spell its text does not stop the census: every one is
+//! named ([`misspelled`]), with the elements under it that state an
+//! `/ActualText`, the corpus read to its end and its table printed before the
+//! test fails on them. The eight span fixtures' verdicts (spans reproduced,
+//! `SpanInconsistent` named) are printed by name.
 //!
 //! # Ruling 13
 //!
@@ -51,8 +54,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use tinker_pdf::{
-    Document, HeaderEvidence, InferredTable, InferredTables, StatedTable, TableAttributes,
-    TableEvidence, TableOptions, TableWarning, Tag,
+    Document, HeaderEvidence, InferredTable, InferredTables, StatedTable, StructElement, StructKid,
+    TableAttributes, TableEvidence, TableOptions, TableWarning, Tag,
 };
 use tinker_pdf_cos::build::DocumentBuilder;
 
@@ -327,6 +330,145 @@ fn held(per_corpus: &BTreeMap<String, Totals>) -> Vec<String> {
     broken
 }
 
+/// The cells of `table`, on page `page` of `file`, whose characters do not
+/// spell their text, each named: its row and column, its text, its
+/// characters' text, and the standard types of the elements under it that
+/// state an `/ActualText` — `types[i]` for the table's `i`-th cell, in the
+/// order [`actual_text_types`] gives them.
+///
+/// A cell that claims no character here is not one: its text is an
+/// `/ActualText` or it draws nothing on this page. A cell named with no such
+/// element under it took its text from a property list's `/ActualText`.
+fn misspelled(file: &str, page: u32, table: &StatedTable, types: &[Vec<String>]) -> Vec<String> {
+    table
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| !cell.chars.is_empty())
+        .filter_map(|(at, cell)| {
+            let spelled: String = cell.chars.iter().map(|c| c.text.as_str()).collect();
+            (spelled != cell.text).then(|| {
+                let under: &[String] = types.get(at).map(Vec::as_slice).unwrap_or_default();
+                format!(
+                    "{file} page {}: row {} column {}: text {:?}, characters {spelled:?}, \
+                     /ActualText under it on {under:?}",
+                    page + 1,
+                    cell.row,
+                    cell.column,
+                    cell.text
+                )
+            })
+        })
+        .collect()
+}
+
+/// The standard types of the elements under each cell of the `Table`
+/// element `table` that state an `/ActualText` (14.9.4), cell by cell in the
+/// order `Page::stated_tables` lists them: the rows in the tree's order, a
+/// `TR` found through any grouping element, and each row's `TH` and `TD`
+/// found through anything but another row or table.
+fn actual_text_types(table: &StructElement) -> Vec<Vec<String>> {
+    fn rows<'a>(kids: &'a [StructKid], out: &mut Vec<&'a StructElement>) {
+        for kid in kids {
+            let StructKid::Element(element) = kid else {
+                continue;
+            };
+            match element.standard_type.as_str() {
+                "TR" => cells(&element.kids, out),
+                "Table" | "TH" | "TD" => {}
+                _ => rows(&element.kids, out),
+            }
+        }
+    }
+    fn cells<'a>(kids: &'a [StructKid], out: &mut Vec<&'a StructElement>) {
+        for kid in kids {
+            let StructKid::Element(element) = kid else {
+                continue;
+            };
+            match element.standard_type.as_str() {
+                "TH" | "TD" => out.push(element),
+                "TR" | "Table" => {}
+                _ => cells(&element.kids, out),
+            }
+        }
+    }
+    fn stating(kids: &[StructKid], out: &mut Vec<String>) {
+        for kid in kids {
+            let StructKid::Element(element) = kid else {
+                continue;
+            };
+            if element.actual_text.is_some() {
+                out.push(element.standard_type.clone());
+            }
+            stating(&element.kids, out);
+        }
+    }
+    let mut found = Vec::new();
+    rows(&table.kids, &mut found);
+    found
+        .into_iter()
+        .map(|cell| {
+            let mut out = Vec::new();
+            stating(&cell.kids, &mut out);
+            out
+        })
+        .collect()
+}
+
+/// **Every cell whose characters do not spell its text is named**, not the
+/// first: two cells whose text their characters misspell are named, each
+/// with its place, both texts and the elements under it that state an
+/// `/ActualText`, and the cell whose characters spell its text is not.
+#[test]
+fn the_census_names_every_cell_its_characters_do_not_spell() {
+    let doc = ruled_and_tagged(
+        &[
+            &[("Name", 1, true), ("Size", 1, true)],
+            &[("Ada", 1, false), ("12", 1, false)],
+        ],
+        false,
+    );
+    let tree = doc.structure().expect("a tagged fixture");
+    let element = tree
+        .elements()
+        .into_iter()
+        .find(|e| e.standard_type == "Table")
+        .expect("its Table");
+    assert_eq!(
+        actual_text_types(element),
+        vec![Vec::<String>::new(); 4],
+        "one entry a cell, none stating /ActualText"
+    );
+
+    let page = doc.page(0).expect("a page");
+    let mut table = page
+        .stated_tables()
+        .into_iter()
+        .next()
+        .expect("the stated table");
+    table.cells.truncate(3);
+    table.cells[0].text = "Nmae".to_string();
+    table.cells[2].text = "Adda".to_string();
+    let types = [Vec::new(), Vec::new(), vec!["Span".to_string()]];
+    let named = misspelled("tables.pdf", 0, &table, &types);
+    assert_eq!(named.len(), 2, "{named:#?}");
+    assert!(
+        named[0]
+            .starts_with("tables.pdf page 1: row 0 column 0: text \"Nmae\", characters \"Name\""),
+        "{}",
+        named[0]
+    );
+    assert!(
+        named[1].contains("row 1 column 0") && named[1].ends_with("[\"Span\"]"),
+        "{}",
+        named[1]
+    );
+    assert!(
+        !named.iter().any(|line| line.contains("Size")),
+        "{named:#?}"
+    );
+}
+
 #[test]
 #[ignore = "reads the fetched corpora; set TINKER_CORPUS=corpus/files"]
 fn every_stated_table_in_the_corpora_is_counted_and_read() {
@@ -351,6 +493,9 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
     println!("{RAN} ({} files under {})", files.len(), root.display());
 
     let mut per_corpus: BTreeMap<String, Totals> = BTreeMap::new();
+    // Every cell whose characters do not spell its text, named; the census
+    // reads on and fails on them at the end.
+    let mut misspelled_cells: Vec<String> = Vec::new();
     for (name, path) in &files {
         let totals = per_corpus.entry(name.clone()).or_default();
         totals.files += 1;
@@ -360,6 +505,11 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
         let Some(tree) = doc.structure() else {
             continue;
         };
+        let file = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
         let mut counts = [0usize; 4];
         for element in tree.elements() {
             match element.standard_type.as_str() {
@@ -423,17 +573,19 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
                         _ => {}
                     }
                 }
-                for cell in &table.cells {
-                    if !cell.chars.is_empty() {
-                        let spelled: String = cell.chars.iter().map(|c| c.text.as_str()).collect();
-                        assert_eq!(
-                            spelled,
-                            cell.text,
-                            "{}: a cell's text is not its characters",
-                            path.display()
-                        );
-                    }
-                }
+                // The `Table` element the stated table is, by its reference;
+                // a table written inline has none, and its cells are named
+                // without the elements under them.
+                let types = table
+                    .element
+                    .and_then(|reference| {
+                        tree.elements()
+                            .into_iter()
+                            .find(|e| e.reference == Some(reference))
+                    })
+                    .map(actual_text_types)
+                    .unwrap_or_default();
+                misspelled_cells.extend(misspelled(&file, index, &table, &types));
                 if span_fixture {
                     for t in &inferred.tables {
                         let spans: Vec<String> = t
@@ -530,8 +682,20 @@ fn every_stated_table_in_the_corpora_is_counted_and_read() {
         }
     }
     println!("total family {total:?} (the design recorded [207, 1908, 15235, 3285, 74474, 98])");
+    println!(
+        "cells whose characters do not spell their text: {}",
+        misspelled_cells.len()
+    );
+    for line in &misspelled_cells {
+        println!("  {line}");
+    }
     let broken = held(&per_corpus);
     assert!(broken.is_empty(), "{broken:#?}");
+    assert!(
+        misspelled_cells.is_empty(),
+        "{} cells' text is not their characters: {misspelled_cells:#?}",
+        misspelled_cells.len()
+    );
 }
 
 /// **The veraPDF zero is held, not printed.** A census whose veraPDF row
