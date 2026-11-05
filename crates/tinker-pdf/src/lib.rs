@@ -1780,9 +1780,26 @@ impl Document {
     }
 
     /// The number of pages.
+    ///
+    /// The first count walks the page tree and keeps what it found as the
+    /// document's page index, which every clone of the document shares: every
+    /// page lookup after it reads its page out of the index rather than the
+    /// tree, so a loop that counts the pages and then looks each one up reads
+    /// the tree once.
     #[must_use]
     pub fn page_count(&self) -> u32 {
         cos_pages::count(&self.inner)
+    }
+
+    /// [`Document::page_count`], counting: the count, and what it did
+    /// ([`Stats`]) — the walk that builds the page index and each node it
+    /// reads, or, once the index is built, nothing. Counted for this count
+    /// alone.
+    #[must_use]
+    pub fn page_count_counted(&self) -> (u32, Stats) {
+        let work = stats::Work::new();
+        let count = cos_pages::count_counted(&self.inner, Some(&work));
+        (count, work.stats())
     }
 
     /// Every page, in document order.
@@ -1806,9 +1823,11 @@ impl Document {
 
     /// [`Document::page`], counting: the page, and what finding it did
     /// ([`Stats`]) — the objects a linearized file's first-page entry or its
-    /// hint tables read, or the walk of the page tree that gathers `index + 1`
-    /// pages and each node it reads. A lookup past the last page walks the
-    /// whole tree and finds nothing.
+    /// hint tables read; or, once a count has built the page index, one entry
+    /// copied out of it; or the `/Count` descent's walk of the nodes on the
+    /// page's path and the kids before them, falling back to the walk that
+    /// gathers `index + 1` pages where a count does not hold up. A lookup past
+    /// the last page finds nothing.
     ///
     /// Counted for this lookup alone, never on the document, which many
     /// threads may read at once.

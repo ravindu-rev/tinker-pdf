@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use tinker_pdf_cos::{
     pages, AuthLevel, CosDocument, Dict, DocumentBuilder, DocumentEditor, Encryption, Object,
-    PdfString, StreamData, WriteMode, WriteOptions,
+    PdfString, StreamData, Work, WriteMode, WriteOptions,
 };
 
 /// Forty-eight deterministic bytes. Real callers pass real randomness; a test
@@ -496,4 +496,53 @@ fn strings_in_a_stream_dictionary_are_encrypted_too() {
             "{how}: and so does the stream"
         );
     }
+}
+
+/// The page index a count builds is dropped when a password arrives. The tree
+/// sits in an encrypted object stream, so the count before the password finds
+/// no page and indexes none; the count after it walks again and finds the page
+/// rather than reading the empty index back.
+#[test]
+fn the_page_index_is_dropped_when_a_password_arrives() {
+    let editor = DocumentEditor::new(source());
+    let bytes = editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        object_streams: true,
+        encryption: Some(Encryption {
+            user_password: "open-me".to_string(),
+            owner_password: "owner-me".to_string(),
+            permissions: -1,
+            entropy: entropy(),
+        }),
+        ..WriteOptions::default()
+    });
+    let doc = CosDocument::open(bytes).expect("it opens");
+
+    assert_eq!(
+        pages::count(&doc),
+        0,
+        "the tree is ciphertext before the password"
+    );
+    let again = Work::new();
+    assert_eq!(pages::count_counted(&doc, Some(&again)), 0);
+    assert_eq!(
+        again.stats().page_walks,
+        0,
+        "the second count reads the index"
+    );
+
+    assert_eq!(doc.authenticate("open-me"), Ok(AuthLevel::User));
+    let after = Work::new();
+    assert_eq!(
+        pages::count_counted(&doc, Some(&after)),
+        1,
+        "the password's count finds the page"
+    );
+    assert_eq!(after.stats().page_walks, 1, "by walking the tree again");
+    let page = pages::at(&doc, 0).expect("the page is in the new index");
+    assert!(
+        String::from_utf8_lossy(&pages::content_bytes(&doc, &page))
+            .contains("CONFIDENTIAL CONTENT"),
+        "and reads decrypted"
+    );
 }

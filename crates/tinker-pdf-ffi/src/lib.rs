@@ -4968,6 +4968,47 @@ endobj
         doc
     }
 
+    /// **A page loop over the C ABI stays within A1**: the count a loop
+    /// starts with builds the document's page index, so every page the loop
+    /// then asks for by index is an entry copied out of it, not a walk. What
+    /// follows the loop shows it: the count builds nothing again, and a
+    /// lookup reads no node and copies one entry.
+    #[test]
+    fn a_page_loop_over_the_c_abi_stays_within_a1() {
+        let mut builder = DocumentBuilder::new();
+        for _ in 0..1_000 {
+            builder.add_page(100.0, 100.0, |_| {});
+        }
+        let doc = open_bytes(&builder.finish());
+        let pages = unsafe { tpdf_document_page_count(doc) };
+        assert_eq!(pages, 1_000);
+        for index in 0..pages {
+            let (mut width, mut height) = (0.0, 0.0);
+            let status = unsafe { tpdf_page_size(doc, index, &mut width, &mut height) };
+            assert_eq!(status, TpdfStatus::Ok, "page {index}");
+        }
+        let inner = unsafe { &(*doc).inner };
+        let (count, counting) = inner.page_count_counted();
+        assert_eq!(
+            (count, counting.page_walks, counting.page_nodes_visited),
+            (1_000, 0, 0),
+            "the loop's own count built the index"
+        );
+        for index in 0..pages {
+            let (_, lookup) = inner.page_counted(index);
+            assert_eq!(
+                (
+                    lookup.page_walks,
+                    lookup.page_nodes_visited,
+                    lookup.page_entries_copied
+                ),
+                (0, 0, 1),
+                "page {index} is read out of the index"
+            );
+        }
+        unsafe { tpdf_document_free(doc) };
+    }
+
     fn signature_string(
         signatures: *const TpdfSignatures,
         index: u32,

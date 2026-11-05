@@ -9,6 +9,7 @@ use crate::doc::CosDocument;
 use crate::limits;
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
+use crate::store::MutexExt;
 use crate::warn::WarningKind;
 use crate::work::{Counter, Work};
 use std::collections::HashSet;
@@ -255,6 +256,50 @@ impl Inherited {
     }
 }
 
+/// Every page one walk found, kept on the document (P-01's index): the pages
+/// in document order as [`collect`] returns them.
+#[derive(Debug)]
+pub(crate) struct PageIndex {
+    pages: Vec<Page>,
+}
+
+/// The index's place on a document: the index once [`count`] has built it.
+#[derive(Debug, Default)]
+pub(crate) struct IndexSlot {
+    index: Option<Arc<PageIndex>>,
+}
+
+/// The document's page index, when it has been built.
+fn indexed(doc: &CosDocument) -> Option<Arc<PageIndex>> {
+    doc.page_index().lock_safe().index.clone()
+}
+
+/// Builds the document's page index with one walk, counted, which raises the
+/// walk's warnings this once — and `/Count`'s, where the root's disagrees with
+/// what the walk found.
+fn build(doc: &CosDocument, work: Option<&Work>) -> Arc<PageIndex> {
+    let pages = collect_walked(doc, limits::MAX_PAGES, work);
+    let claimed = doc
+        .catalog()
+        .and_then(|root| root.get_ref(Name::PAGES))
+        .and_then(|tree| doc.get(tree).ok())
+        .and_then(|node| node.as_dict().and_then(|d| d.get_int(Name::COUNT)));
+    if claimed.is_some_and(|claimed| u64::try_from(claimed).ok() != Some(pages.len() as u64)) {
+        doc.warn(WarningKind::PageCountMismatch);
+    }
+    let index = Arc::new(PageIndex { pages });
+    doc.page_index().lock_safe().index = Some(Arc::clone(&index));
+    index
+}
+
+/// Page `index` out of the document's index, counted as one entry copied;
+/// `None` past the last page.
+fn copied(index: &PageIndex, at: u32, work: Option<&Work>) -> Option<Page> {
+    let page = index.pages.get(at as usize).cloned()?;
+    tally(work, Counter::PageEntriesCopied);
+    Some(page)
+}
+
 /// Every page in document order.
 ///
 /// A cyclic or absurdly deep `/Kids` graph is truncated with a warning rather
@@ -299,8 +344,29 @@ pub fn collect_upto(doc: &CosDocument, limit: usize) -> Vec<Page> {
 /// walk of the page tree ([`Counter::PageWalks`]), and each node of it the
 /// walk reads ([`Counter::PageNodesVisited`]) — a node it stops before, having
 /// gathered `limit` pages, is not read and not counted.
+///
+/// Read out of the document's page index once it is built, each page counted
+/// as an entry copied ([`Counter::PageEntriesCopied`]); a whole-tree read does
+/// not build the index itself.
 #[must_use]
 pub fn collect_upto_counted(doc: &CosDocument, limit: usize, work: Option<&Work>) -> Vec<Page> {
+    if let Some(index) = indexed(doc) {
+        let pages: Vec<Page> = index.pages.iter().take(limit).cloned().collect();
+        tally_entries(work, pages.len());
+        return pages;
+    }
+    collect_walked(doc, limit, work)
+}
+
+/// Counts `n` entries copied out of the index.
+fn tally_entries(work: Option<&Work>, n: usize) {
+    if let Some(work) = work {
+        work.add(Counter::PageEntriesCopied, n as u64);
+    }
+}
+
+/// [`collect_upto_counted`]'s walk, which the index is built by.
+fn collect_walked(doc: &CosDocument, limit: usize, work: Option<&Work>) -> Vec<Page> {
     let mut pages = Vec::new();
     let mut visited = HashSet::new();
     if limit == 0 {
@@ -436,27 +502,26 @@ pub fn normalize_rotation(degrees: i64) -> u16 {
     (quarter * 90) as u16
 }
 
-/// The number of pages, from `/Count` when it is honest and by walking when it
-/// is not.
+/// The number of pages: the length of the document's page index, which this
+/// builds when nothing has yet.
 ///
-/// `/Count` is a claim like any other in a PDF; a document that lies about it
-/// gets counted the slow way rather than believed.
+/// `/Count` is a claim like any other; a document that lies about it gets
+/// counted by the walk rather than believed, and says so once, when the
+/// walk builds the index ([`WarningKind::PageCountMismatch`]). A count walks
+/// the whole tree, so the index it builds costs nothing more, and every page
+/// loop that starts by counting reads its pages out of it.
 #[must_use]
 pub fn count(doc: &CosDocument) -> u32 {
-    let claimed = doc
-        .catalog()
-        .and_then(|root| root.get_ref(Name::PAGES))
-        .and_then(|tree| doc.get(tree).ok())
-        .and_then(|node| node.as_dict().and_then(|d| d.get_int(Name::COUNT)));
+    count_counted(doc, None)
+}
 
-    let actual = collect(doc).len() as u32;
-    match claimed {
-        Some(c) if c >= 0 && c as u64 == u64::from(actual) => actual,
-        Some(_) => {
-            doc.warn(WarningKind::PageCountMismatch);
-            actual
-        }
-        None => actual,
+/// [`count`], counting into `work` when the operation is counting: the walk
+/// that builds the index, or, once it is built, nothing.
+#[must_use]
+pub fn count_counted(doc: &CosDocument, work: Option<&Work>) -> u32 {
+    match indexed(doc) {
+        Some(index) => index.pages.len() as u32,
+        None => build(doc, work).pages.len() as u32,
     }
 }
 
@@ -593,6 +658,11 @@ pub fn at_counted(doc: &CosDocument, index: u32, work: Option<&Work>) -> Option<
         }
     } else if let Some(page) = hinted_page(doc, index, work) {
         return Some(page);
+    }
+    // The index, once a count has built it; a lookup never builds it, so one
+    // lookup on its own stays within its root and depth x fan-out.
+    if let Some(built) = indexed(doc) {
+        return copied(&built, index, work);
     }
     match descend(doc, index, work) {
         Descent::Found(page) => return Some(page),
@@ -911,9 +981,9 @@ mod tests {
     /// **The descent hands back the walk's page, for every page of every
     /// honest tree**: fan-out 1 to 16, depth 1 to 6, at most 4 096 pages,
     /// attributes inherited at every level, and a subtree two parents share.
-    /// Each lookup is the descent, not the walk: it reads its root and at most
-    /// fan-out kids a level, where the walk to a late page reads every node
-    /// before it.
+    /// Each lookup is the descent, not the walk or the index: it reads its root
+    /// and at most fan-out kids a level, where the walk to a late page reads
+    /// every node before it.
     #[test]
     fn descent_and_walk_agree_on_every_page_of_honest_trees() {
         let mut trees = 0;
@@ -937,8 +1007,15 @@ mod tests {
                     "the walk of {fan_out}^{depth}"
                 );
                 for page in &walked {
+                    // The descent itself: a lookup through `at` builds the
+                    // index at its second miss and reads pages out of it.
                     let work = Work::new();
-                    let found = at_counted(&doc, page.index, Some(&work)).expect("a page");
+                    let Descent::Found(found) = descend(&doc, page.index, Some(&work)) else {
+                        panic!(
+                            "{fan_out}^{depth}: the descent gave up on page {}",
+                            page.index
+                        );
+                    };
                     assert!(
                         same(&found, page),
                         "{fan_out}^{depth}: page {} is {found:?} by the descent and {page:?} by \

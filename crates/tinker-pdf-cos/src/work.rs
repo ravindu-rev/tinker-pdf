@@ -120,6 +120,11 @@ pub struct Stats {
     ///
     /// Counted by this crate's page walk and lookup.
     pub page_nodes_visited: u64,
+    /// Pages handed out of a document's page index (`crate::pages`): one for
+    /// each lookup the index answers, and each page a whole-tree read the
+    /// index answers returns. Counted beside `page_nodes_visited`, since a page
+    /// read out of the index stands in for the nodes a walk would read to it.
+    pub page_entries_copied: u64,
     /// Runs of a stream's filter chain: each time an operation read a
     /// stream's bytes decoded, whatever the chain returned — a refusal, and
     /// output stopped at the decode ceiling, included. A stream read twice is
@@ -186,6 +191,8 @@ pub enum Counter {
     PageWalks,
     /// [`Stats::page_nodes_visited`].
     PageNodesVisited,
+    /// [`Stats::page_entries_copied`].
+    PageEntriesCopied,
 }
 
 impl Stats {
@@ -214,6 +221,7 @@ impl Stats {
             self.form_scope_misses,
             self.page_walks,
             self.page_nodes_visited,
+            self.page_entries_copied,
             self.streams_decoded,
         ]
         .into_iter()
@@ -239,6 +247,7 @@ impl Stats {
             Counter::FormScopeMisses => &mut self.form_scope_misses,
             Counter::PageWalks => &mut self.page_walks,
             Counter::PageNodesVisited => &mut self.page_nodes_visited,
+            Counter::PageEntriesCopied => &mut self.page_entries_copied,
         }
     }
 }
@@ -284,6 +293,9 @@ impl Add for Stats {
             page_nodes_visited: self
                 .page_nodes_visited
                 .saturating_add(other.page_nodes_visited),
+            page_entries_copied: self
+                .page_entries_copied
+                .saturating_add(other.page_entries_copied),
             streams_decoded: self.streams_decoded.saturating_add(other.streams_decoded),
             most_decodes_of_one_stream: self
                 .most_decodes_of_one_stream
@@ -373,7 +385,7 @@ mod tests {
     use super::*;
 
     /// Every counter, so a test of one property covers them all.
-    const ALL: [Counter; 16] = [
+    const ALL: [Counter; 17] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::FontDictionariesResolved,
@@ -390,6 +402,7 @@ mod tests {
         Counter::FormScopeMisses,
         Counter::PageWalks,
         Counter::PageNodesVisited,
+        Counter::PageEntriesCopied,
     ];
 
     #[test]

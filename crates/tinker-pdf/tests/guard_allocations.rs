@@ -9,10 +9,11 @@
 //! `#![forbid(unsafe_code)]` binds the library this tests and is untouched;
 //! the allocator forwards every call to `System` and reads no document byte.
 //!
-//! Each operation runs as the CLI runs it over a whole document — every page
-//! looked up by its index, then read — over a document of its own, written and
-//! opened outside the count, at both of A2's sizes. A count at 4 000 pages
-//! within 1.1 times the count at 1 000, a page each, is flat.
+//! Each operation runs as the CLI runs it over a whole document — the pages
+//! counted, which builds the page index, then every page looked up by its
+//! index and read — over a document of its own, written and opened outside the
+//! count, at both of A2's sizes. A count at 4 000 pages within 1.1 times the
+//! count at 1 000, a page each, is flat.
 
 mod guard_support;
 mod render_support;
@@ -55,6 +56,54 @@ const OPERATIONS: [(&str, Operation); 3] = [
     ("render-all at 36 dpi", render),
 ];
 
+/// `operation` over every page of A2's document at each size, as the CLI runs
+/// it — the count, then each page by its index — and what it allocated a page.
+fn per_page(name: &str, operation: Operation) -> [f64; 2] {
+    let mut out = [0.0; 2];
+    for (slot, &pages) in out.iter_mut().zip(A2_PAGES.iter()) {
+        let document =
+            Document::open(guard_support::document(0, pages)).expect("the document opens");
+        let allocated = allocations_of(|| {
+            let count = document.page_count();
+            for index in 0..count {
+                operation(&document, index);
+            }
+        });
+        assert!(allocated > 0, "{name} at {pages} pages allocated nothing");
+        *slot = allocated as f64 / pages as f64;
+    }
+    out
+}
+
+/// One of A10's guards: `operation`'s allocations a page at 4 000 pages within
+/// 1.1 times its allocations a page at 1 000.
+fn flat(guard: &str, name: &str, operation: Operation) {
+    let [small, large] = per_page(name, operation);
+    assert!(
+        large <= 1.1 * small,
+        "{name}: {large:.1} allocations a page at 4 000 pages against {small:.1} at 1 000"
+    );
+    println!("{guard}: RAN {name}, {small:.1} then {large:.1} allocations a page");
+}
+
+/// **A10, page lookup**: allocations O(1) per page.
+#[test]
+fn a10_page_lookup_allocates_a_flat_amount_per_page() {
+    flat("guard-a10-lookup", "page lookup", lookup);
+}
+
+/// **A10, text**: allocations O(1) per page.
+#[test]
+fn a10_text_allocates_a_flat_amount_per_page() {
+    flat("guard-a10-text", "text", text);
+}
+
+/// **A10, render-all at 36 dpi**: allocations O(1) per page.
+#[test]
+fn a10_render_all_at_36_dpi_allocates_a_flat_amount_per_page() {
+    flat("guard-a10-render", "render-all at 36 dpi", render);
+}
+
 /// Prints each operation's allocations per page at 1 000 and 4 000 pages,
 /// their ratio, and what text and the render allocate a page beyond their
 /// lookup. `docs/design/performance.md` commits the table, and A10's roster
@@ -82,22 +131,7 @@ fn allocations_per_page_by_operation() {
 
     let mut rows = Vec::new();
     for (name, operation) in OPERATIONS {
-        let per_page: Vec<f64> = A2_PAGES
-            .iter()
-            .map(|&pages| {
-                let document =
-                    Document::open(guard_support::document(0, pages)).expect("the document opens");
-                let count = u32::try_from(pages).expect("a page count");
-                let allocated = allocations_of(|| {
-                    for index in 0..count {
-                        operation(&document, index);
-                    }
-                });
-                assert!(allocated > 0, "{name} at {pages} pages allocated nothing");
-                allocated as f64 / pages as f64
-            })
-            .collect();
-        rows.push((name, per_page));
+        rows.push((name, per_page(name, operation).to_vec()));
     }
 
     println!(

@@ -88,6 +88,45 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/guards.rs",
         test: "a1_page_lookup_reads_at_most_depth_times_fan_out_nodes",
     },
+    // MS-01's A1 total, A2 and A10 guards: a page loop over the 10 000-page
+    // tree within 3 x 10 000 visits, every A2 leg's work linear in its pages,
+    // and the allocations a page of three page loops costs flat in the pages.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a1_every_page_of_ten_thousand_costs_at_most_thirty_thousand_visits",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a2_text_is_linear_in_pages",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a2_render_all_at_36_dpi_is_linear_in_pages",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a2_rewrite_is_linear_in_pages",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a2_subset_is_linear_in_pages",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a2_validation_is_linear_in_pages",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guard_allocations.rs",
+        test: "a10_page_lookup_allocates_a_flat_amount_per_page",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guard_allocations.rs",
+        test: "a10_text_allocates_a_flat_amount_per_page",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guard_allocations.rs",
+        test: "a10_render_all_at_36_dpi_allocates_a_flat_amount_per_page",
+    },
     // MS-08's counted guard: the requests page one of the linearized fixture
     // and of its unlinearized twin makes, measured once and held on every
     // target beside the row's ceilings.

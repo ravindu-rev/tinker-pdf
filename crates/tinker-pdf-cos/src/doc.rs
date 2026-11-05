@@ -299,6 +299,10 @@ pub struct CosDocument {
     /// password arrives. A refusal reached over ciphertext is dropped by
     /// `install_security` along with everything else read through it.
     page_hints: Mutex<HintState>,
+    /// The page index (`crate::pages`): every page one walk found, kept
+    /// beside the object store so every clone of a `Document` shares it, and
+    /// dropped with the store by `install_security`.
+    page_index: Mutex<crate::pages::IndexSlot>,
     /// Where the hint tables said an object was.
     ///
     /// Consulted after the first-page table and before the main one, so a page
@@ -563,6 +567,7 @@ impl CosDocument {
             revisions,
             linearized,
             page_hints: Mutex::new(HintState::Untried),
+            page_index: Mutex::new(crate::pages::IndexSlot::default()),
             hinted: RwLock::new(HashMap::new()),
             completed: OnceLock::new(),
             store: SlotStore::new(),
@@ -1001,6 +1006,14 @@ impl CosDocument {
         // `hinted` is dropped -- an `N G obj` header is plaintext wherever it
         // sits, and the offsets recorded from one are what they were.
         *self.page_hints.lock_safe() = HintState::Untried;
+        // The page index with them: an index read over ciphertext holds
+        // inherited `/Resources` whose strings were never decrypted.
+        *self.page_index.lock_safe() = crate::pages::IndexSlot::default();
+    }
+
+    /// The page index's slot (`crate::pages`).
+    pub(crate) fn page_index(&self) -> &Mutex<crate::pages::IndexSlot> {
+        &self.page_index
     }
 
     /// The document catalog (7.7.2), resolved from the trailer's `/Root`.

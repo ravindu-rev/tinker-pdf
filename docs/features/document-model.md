@@ -55,9 +55,16 @@ it when absent (7.7.3.3), `/Rotate` reduced to {0, 90, 180, 270} with
 off-quarter values rounding to the nearest turn, and `Page::size()`
 reporting the displayed size with the quarter-turn axis swap applied.
 `/Count` is a claim like any other: a document that lies about it gets
-counted by walking instead of believed.
+counted by walking instead of believed. Counting the pages keeps that walk as
+the document's **page index**, shared by every clone of the `Document`: once
+it is built, a lookup copies its page out of it and a read of every page reads
+it, without walking again, and the walk's warnings are raised that once. No
+lookup builds it, so a viewer paging through a streamed file's hint tables
+never fetches the pages it does not show. A password drops it with every
+object read before it, and the next count builds it again from plaintext.
 
-**One page by index** descends by `/Count` rather than walking: from the root,
+**One page by index**, before the pages are counted, descends by `/Count`
+rather than walking: from the root,
 a node's kids are read in order, a leaf counting one and a node its own
 `/Count`, and the lookup enters the kid that holds the page, carrying the
 inherited attributes down the path as the walk does — so it reads its root and
@@ -269,16 +276,19 @@ plus `DestKind`, a registered name or a URI for `PageBuilder::link` and
 translation.
 
 `page_counted(index)` is `page(index)` with a `Stats` of what finding the page
-did ([rendering](rendering.md) names the counters): one walk of the page tree,
-the descent's nodes — its root and the kids it reads on the way down — or,
-where a count does not hold up, those and a second walk that reads every node
-until it has `index + 1` pages and stops before the next, a lookup past the
-last page reading them all and finding nothing; or, on a linearized file, the
+did ([rendering](rendering.md) names the counters): on a linearized file, the
 page its first-page entry or its hint tables name and each ancestor read with
-it, and no walk. It counts that lookup alone, so two
+it, and no walk; once the pages are counted, one entry copied out of the index
+and no node read; before then, one walk of the page tree, the descent's
+nodes — its root and the kids it reads on the way down — or, where a count
+does not hold up, those and a second walk that reads every node until it has
+`index + 1` pages and stops before the next, a lookup past the last page
+reading them all and finding nothing. It counts that lookup alone, so two
 threads' lookups on one document never mix. A lookup decodes no stream of its
 own: the hint tables are decoded once for the document and kept, and no
-lookup counts them.
+lookup counts them. `page_count_counted()` is `page_count()` with a `Stats` of
+the walk that builds the index — one walk and every node of the tree — or of
+nothing, once it is built.
 
 ```rust
 let doc = tinker_pdf::Document::open(bytes)?;

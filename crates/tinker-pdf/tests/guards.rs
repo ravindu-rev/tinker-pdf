@@ -24,7 +24,7 @@ use guard_support::{deflated, document, face, line, object, pdf, stream, A2_PAGE
 use tinker_pdf::write::{
     save, BilevelCodec, ContinuousCodec, FontPolicy, ImagePolicy, ImageRecoding, SaveOptions,
 };
-use tinker_pdf::{Document, RenderOptions, TextOptions};
+use tinker_pdf::{Document, RenderOptions, Stats, TextOptions};
 use tinker_pdf_cos::Object;
 
 // ---- The roster -------------------------------------------------------------
@@ -96,34 +96,46 @@ const ROSTER: &[Guard] = &[
             "P-01.2",
         )
     },
-    owed(
-        "A1",
-        "every page of a generated 10 000-page document costs at most 3 x 10 000 visits",
-        "a1_every_page_of_ten_thousand_costs_at_most_thirty_thousand_visits",
-        "P-01",
-        "P-01.3",
-    ),
-    owed(
-        "A2",
-        "text: work at 4 000 pages at most 4.4 x work at 1 000",
-        "a2_text_is_linear_in_pages",
-        "P-01",
-        "P-01.3",
-    ),
-    owed(
-        "A2",
-        "render-all at 36 dpi: work at 4 000 pages at most 4.4 x work at 1 000",
-        "a2_render_all_at_36_dpi_is_linear_in_pages",
-        "P-01",
-        "P-01.3",
-    ),
-    owed(
-        "A2",
-        "rewrite: work at 4 000 pages at most 4.4 x work at 1 000",
-        "a2_rewrite_is_linear_in_pages",
-        "P-01",
-        "P-01.3",
-    ),
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A1",
+            "every page of a generated 10 000-page document costs at most 3 x 10 000 visits",
+            "a1_every_page_of_ten_thousand_costs_at_most_thirty_thousand_visits",
+            "P-01",
+            "P-01.3",
+        )
+    },
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A2",
+            "text: work at 4 000 pages at most 4.4 x work at 1 000",
+            "a2_text_is_linear_in_pages",
+            "P-01",
+            "P-01.3",
+        )
+    },
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A2",
+            "render-all at 36 dpi: work at 4 000 pages at most 4.4 x work at 1 000",
+            "a2_render_all_at_36_dpi_is_linear_in_pages",
+            "P-01",
+            "P-01.3",
+        )
+    },
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A2",
+            "rewrite: work at 4 000 pages at most 4.4 x work at 1 000",
+            "a2_rewrite_is_linear_in_pages",
+            "P-01",
+            "P-01.3",
+        )
+    },
     owed(
         "A2",
         "rotate: work at 4 000 pages at most 4.4 x work at 1 000",
@@ -145,13 +157,16 @@ const ROSTER: &[Guard] = &[
         "P-01",
         "P-01.4",
     ),
-    owed(
-        "A2",
-        "subset: work at 4 000 pages at most 4.4 x work at 1 000",
-        "a2_subset_is_linear_in_pages",
-        "P-01",
-        "P-01.3",
-    ),
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A2",
+            "subset: work at 4 000 pages at most 4.4 x work at 1 000",
+            "a2_subset_is_linear_in_pages",
+            "P-01",
+            "P-01.3",
+        )
+    },
     owed(
         "A2",
         "redaction: work at 4 000 pages at most 4.4 x work at 1 000",
@@ -159,13 +174,16 @@ const ROSTER: &[Guard] = &[
         "P-01",
         "P-01.4",
     ),
-    owed(
-        "A2",
-        "validation: work at 4 000 pages at most 4.4 x work at 1 000",
-        "a2_validation_is_linear_in_pages",
-        "P-01",
-        "P-01.3",
-    ),
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A2",
+            "validation: work at 4 000 pages at most 4.4 x work at 1 000",
+            "a2_validation_is_linear_in_pages",
+            "P-01",
+            "P-01.3",
+        )
+    },
     owed(
         "A3",
         "font dictionaries resolved per page at most the distinct /Font entries used",
@@ -266,6 +284,7 @@ const ROSTER: &[Guard] = &[
     ),
     Guard {
         file: "guard_allocations.rs",
+        state: State::Landed,
         ..owed(
             "A10",
             "allocations O(1) per page: page lookup",
@@ -276,6 +295,7 @@ const ROSTER: &[Guard] = &[
     },
     Guard {
         file: "guard_allocations.rs",
+        state: State::Landed,
         ..owed(
             "A10",
             "allocations O(1) per page: text",
@@ -286,6 +306,7 @@ const ROSTER: &[Guard] = &[
     },
     Guard {
         file: "guard_allocations.rs",
+        state: State::Landed,
         ..owed(
             "A10",
             "allocations O(1) per page: render-all at 36 dpi",
@@ -627,6 +648,28 @@ fn a1_page_lookup_reads_at_most_depth_times_fan_out_nodes() {
     println!("guard-a1-lookup: RAN 10 000 lookups, at most {most} nodes each, bound {bound}");
 }
 
+/// **A1: every page of the 10 000-page tree in at most 3 x 10 000 visits**, as
+/// a page loop makes them: the count, whose walk builds the page index, then
+/// each page by its index, read out of it. Visits are the nodes read and the
+/// entries copied, through MS-01's document doors.
+#[test]
+fn a1_every_page_of_ten_thousand_costs_at_most_thirty_thousand_visits() {
+    let document = Document::open(tree(A1_DEPTH, A1_FAN_OUT)).expect("the tree opens");
+    let (pages, counting) = document.page_count_counted();
+    assert_eq!(pages, 10_000);
+    let mut visits = counting.page_nodes_visited + counting.page_entries_copied;
+    for index in 0..pages {
+        let (page, stats) = document.page_counted(index);
+        assert!(page.is_some(), "page {index}");
+        visits += stats.page_nodes_visited + stats.page_entries_copied;
+    }
+    assert!(
+        visits <= 30_000,
+        "every page of ten thousand cost {visits} visits, over 30 000"
+    );
+    println!("guard-a1-total: RAN 10 000 pages in {visits} visits, the count's walk included");
+}
+
 // ---- A2 and A6: documents of pages to read, write and merge ---------------
 
 /// A6 merges four documents of a hundred pages.
@@ -871,4 +914,140 @@ fn the_tally_counts_the_same_on_every_target() {
         (1, 2),
         "a lookup: one walk of the root and the page"
     );
+}
+
+// ---- A2's legs ---------------------------------------------------------------
+
+/// A2's bound: the work at 4 000 pages at most 1.1 times the ratio of the sizes
+/// times the work at 1 000.
+const A2_BOUND: f64 = 1.1 * 4.0;
+
+/// One A2 leg: `leg` over A2's document at each size, its `work()` at 4 000
+/// pages held to `A2_BOUND` times its work at 1 000, every counter's ratio
+/// printed beside it so a failure names the counter that grew.
+fn a2(name: &str, leg: impl Fn(&Document) -> Stats) {
+    let measured: Vec<Stats> = A2_PAGES
+        .iter()
+        .map(|&pages| {
+            let document = Document::open(document(0, pages)).expect("the document opens");
+            leg(&document)
+        })
+        .collect();
+    let (small, large) = (measured[0], measured[1]);
+    assert!(
+        small.work() > 0,
+        "{name}: the leg counted nothing at {} pages",
+        A2_PAGES[0]
+    );
+    let ratio = large.work() as f64 / small.work() as f64;
+    let each = |a: u64, b: u64| if a == 0 { 0.0 } else { b as f64 / a as f64 };
+    let counters =
+        format!(
+        "page walks {:.2}, nodes {:.2}, entries {:.2}, streams {:.2}, glyphs {:.2}, fonts {:.2}",
+        each(small.page_walks, large.page_walks),
+        each(small.page_nodes_visited, large.page_nodes_visited),
+        each(small.page_entries_copied, large.page_entries_copied),
+        each(small.streams_decoded, large.streams_decoded),
+        each(small.glyphs_shown, large.glyphs_shown),
+        each(small.font_dictionaries_resolved, large.font_dictionaries_resolved),
+    );
+    assert!(
+        ratio <= A2_BOUND,
+        "{name}: work {} at {} pages against {} at {}, {ratio:.2}x, over {A2_BOUND}; {counters}",
+        large.work(),
+        A2_PAGES[1],
+        small.work(),
+        A2_PAGES[0]
+    );
+    println!("guard-a2-{name}: RAN {ratio:.2}x within {A2_BOUND}; {counters}");
+}
+
+/// Every page, as the CLI reads a whole document: the count, then each page
+/// by its index and `read` of it, every door's tally summed.
+fn every_page(document: &Document, read: impl Fn(&tinker_pdf::Page) -> Stats) -> Stats {
+    let (pages, mut total) = document.page_count_counted();
+    for index in 0..pages {
+        let (page, lookup) = document.page_counted(index);
+        total += lookup;
+        total += read(&page.expect("a counted page is there"));
+    }
+    total
+}
+
+/// **A2, text**: every page's text, looked up by its index.
+#[test]
+fn a2_text_is_linear_in_pages() {
+    a2("text", |document| {
+        every_page(document, |page| {
+            page.text_counted(&TextOptions::default()).1
+        })
+    });
+}
+
+/// **A2, render-all at 36 dpi**: every page rendered at half of 72 dpi.
+#[test]
+fn a2_render_all_at_36_dpi_is_linear_in_pages() {
+    a2("render", |document| {
+        every_page(document, |page| {
+            page.render(&RenderOptions {
+                scale: 0.5,
+                stats: true,
+                ..RenderOptions::default()
+            })
+            .stats
+            .expect("asked")
+        })
+    });
+}
+
+/// **A2, rewrite**: a rewrite that repacks the document into object streams
+/// and compresses it, with the save's font pass. The serializer counts
+/// nothing, so the pass's walk and decodes are what is held
+/// (`docs/design/performance.md`, P-01).
+#[test]
+fn a2_rewrite_is_linear_in_pages() {
+    a2("rewrite", |document| {
+        save(
+            &mut document.editor(),
+            &SaveOptions {
+                write: tinker_pdf::WriteOptions {
+                    object_streams: true,
+                    compress: true,
+                    ..tinker_pdf::WriteOptions::default()
+                },
+                stats: true,
+                ..SaveOptions::default()
+            },
+        )
+        .stats
+        .expect("asked")
+    });
+}
+
+/// **A2, subset**: a save that cuts every embedded program to the glyphs the
+/// document draws.
+#[test]
+fn a2_subset_is_linear_in_pages() {
+    a2("subset", |document| {
+        save(
+            &mut document.editor(),
+            &SaveOptions {
+                stats: true,
+                ..SaveOptions::default()
+            },
+        )
+        .stats
+        .expect("asked")
+    });
+}
+
+/// **A2, validation**: PDF/A, every group this build has rules for, as
+/// `validate_pdfa` asks, through MS-01.3's door.
+#[test]
+fn a2_validation_is_linear_in_pages() {
+    a2("validation", |document| {
+        document
+            .validate_pdfa_counted(tinker_pdf::PdfACoverage::IMPLEMENTED)
+            .1
+    });
 }

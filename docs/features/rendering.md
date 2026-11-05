@@ -626,9 +626,12 @@ font with no program of its own when there are substitute faces to ask — a
 `images_decoded`, an image XObject's decode on a cache miss and every inline
 image's; and a `_hits` and a `_misses` for each of the five caches a page's
 resources keep — `font_program`, `image`, `icc_transform`, `glyph_outline` and
-`form_scope`; `page_walks`, each walk of the page tree from its root, and
-`page_nodes_visited`, each node a walk or a one-page lookup reads, which no
-render makes and a page lookup, the validators, an editor and a save do; and
+`form_scope`; `page_walks`, each walk of the page tree from its root,
+`page_nodes_visited`, each node a walk or a one-page lookup reads, and
+`page_entries_copied`, each page a lookup or a read of every page copies out
+of the page index a count built ([document model](document-model.md)), which
+no render makes and a page lookup, a count, the validators, an editor and a
+save do; and
 `streams_decoded`, each run of a stream's filter chain — the page's content, a
 form's at each `Do`, a tiling pattern's cell, an appearance, an image's
 samples and its soft mask's, a font's program and its CMaps, an ICC profile —
