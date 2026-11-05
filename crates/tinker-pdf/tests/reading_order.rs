@@ -265,6 +265,38 @@ fn a_page_with_no_text_says_so() {
 
 // ---- the instrument -----------------------------------------------------------
 
+/// **The characters out of stream order are the fewest** whose removal leaves
+/// the rest where the stream drew them: the positions outside a longest
+/// increasing subsequence of the permutation, checked on written ones. A
+/// block read after a longer one is out of place and the longer one is not;
+/// a head read first and a number read last around a longer body are; a
+/// swap of neighbours costs one, not two; a reversal keeps one in place.
+#[test]
+fn the_fewest_characters_out_of_stream_order_are_found() {
+    let out = |permutation: &[usize]| -> Vec<usize> {
+        reading_order_support::out_of_stream_order(permutation)
+            .iter()
+            .enumerate()
+            .filter(|(_, out)| **out)
+            .map(|(at, _)| at)
+            .collect()
+    };
+    assert_eq!(out(&[]), Vec::<usize>::new());
+    assert_eq!(out(&[0, 1, 2, 3]), Vec::<usize>::new(), "nothing moved");
+    assert_eq!(out(&[2, 3, 4, 5, 6, 0, 1]), [5, 6]);
+    assert_eq!(out(&[5, 6, 7, 1, 2, 3, 4, 0]), [0, 1, 2, 7]);
+    assert_eq!(out(&[1, 0, 2, 3]).len(), 1);
+    assert_eq!(out(&[4, 3, 2, 1, 0]).len(), 4);
+
+    // `moved()` counts every index that changed: on the head-and-number
+    // permutation, all eight characters, where four were read out of place.
+    let order = tinker_pdf::InferredOrder {
+        permutation: vec![5, 6, 7, 1, 2, 3, 4, 0],
+        ..tinker_pdf::InferredOrder::default()
+    };
+    assert_eq!(order.moved(), 8);
+}
+
 /// **The pair score counts inversions**, checked against arithmetic: the
 /// identity agrees on all `n(n-1)/2` pairs, the reversal on none, one swap of
 /// neighbours costs one pair, and a character the answer does not hold is not

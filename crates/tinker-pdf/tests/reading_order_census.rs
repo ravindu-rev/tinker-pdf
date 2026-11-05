@@ -58,8 +58,10 @@ mod reading_order_support;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use reading_order_support::{furniture_truth, note_keys, role_score, Agreement, RoleScore, Scored};
-use tinker_pdf::{Document, Role, Tag};
+use reading_order_support::{
+    furniture_truth, note_keys, role_score, Agreement, Moved, RoleScore, Scored,
+};
+use tinker_pdf::{Document, InferenceOptions, Role, Tag};
 use tinker_pdf_cos::build::{DocumentBuilder, PageBuilder};
 
 /// Printed once when the census read the corpora. CI greps it.
@@ -154,6 +156,13 @@ struct Totals {
     /// Characters the inference put somewhere other than their stream
     /// position.
     moved: usize,
+    /// The characters read out of stream order, by the block each was read
+    /// in and by whose text each is: what names `moved`, printed and never
+    /// held.
+    what_moved: Moved,
+    /// One line per page with a moved character, kept for the corpus where
+    /// nothing may move.
+    moved_pages: Vec<String>,
     /// Column crossings walking the tree, over the files whose stream does
     /// *not* already agree exactly — the design's column score, computed
     /// where it carries information.
@@ -204,8 +213,9 @@ impl FileRole {
     }
 }
 
-/// Scores one tagged file into `totals`.
-fn score(doc: &Document, totals: &mut Totals) {
+/// Scores one tagged file, `file`, into `totals`, keeping a line for each
+/// page with a moved character when `list_pages`.
+fn score(doc: &Document, file: &str, list_pages: bool, totals: &mut Totals) {
     let pages = doc.page_count().min(PAGES_PER_FILE);
     let mut file_stream = Agreement::default();
     let mut file_crossings = 0usize;
@@ -227,7 +237,21 @@ fn score(doc: &Document, totals: &mut Totals) {
         totals.pages += 1;
         totals.stream = totals.stream.plus(stream);
         totals.inferred = totals.inferred.plus(scored.inferred_agreement());
-        totals.moved += scored.inferred.moved();
+        let moved = scored.inferred.moved();
+        totals.moved += moved;
+        let what = scored.what_moved();
+        if list_pages && moved > 0 {
+            totals.moved_pages.push(format!(
+                "{file} page {}: {n} characters, {moved} moved; out of stream order {}: {}; \
+                 {} columns; warnings {:?}",
+                index + 1,
+                what.total(),
+                what.describe(),
+                scored.inferred.columns,
+                scored.inferred.warnings,
+            ));
+        }
+        totals.what_moved = totals.what_moved.plus(&what);
         file_crossings += scored.crossings();
         file_notes.page(role_score(
             &scored.inferred,
@@ -296,7 +320,12 @@ fn the_inference_is_scored_against_every_tagged_files_own_order() {
         if doc.page_count() > 1 {
             totals.multi_page += 1;
         }
-        score(&doc, totals);
+        let file = path
+            .strip_prefix(&root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        score(&doc, &file, name == NOTHING_MAY_MOVE, totals);
     }
 
     println!();
@@ -359,6 +388,16 @@ fn the_inference_is_scored_against_every_tagged_files_own_order() {
             t.noted_pages,
             t.noted
         );
+        println!(
+            "{:<14} out of stream order: {} of the {} moved, by block and by text: {}",
+            "",
+            t.what_moved.total(),
+            t.moved,
+            t.what_moved.describe()
+        );
+        for line in &t.moved_pages {
+            println!("{:<14}   {line}", "");
+        }
     }
     let mut population = Agreement::default();
     for name in RATCHET_POPULATION {
@@ -490,7 +529,7 @@ fn heads_marked_on_two_pages_of_three() -> Document {
 fn furniture_precision_counts_a_call_on_an_unmarked_page() {
     let doc = heads_marked_on_two_pages_of_three();
     let mut totals = Totals::default();
-    score(&doc, &mut totals);
+    score(&doc, "heads.pdf", false, &mut totals);
     assert_eq!(
         (totals.furniture.called, totals.furniture.correct),
         (3, 2),
@@ -498,4 +537,139 @@ fn furniture_precision_counts_a_call_on_an_unmarked_page() {
         totals.furniture
     );
     assert!(!totals.furniture.precision_at_least(1, 1));
+}
+
+/// Three pages of one tagged file, each drawing its page number at the foot
+/// before the body and a running head, longer than the number, after it,
+/// both `/Artifact /Pagination`.
+fn furniture_drawn_out_of_place() -> Document {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    for at in 1..=3 {
+        builder.add_page(612.0, 792.0, |page| {
+            page.raw(b"/Artifact <</Type /Pagination /Subtype /Footer>> BDC\n");
+            page.text(b"F1", 9.0, 300.0, 30.0, &at.to_string());
+            page.raw(b"EMC\n");
+            page.tagged_with(&Tag::new(b"P"), |page| {
+                for line in 0..12 {
+                    let y = 600.0 - f64::from(line) * 14.0;
+                    page.text(b"F1", 10.0, 72.0, y, "The body of the page, a line of it.");
+                }
+            });
+            page.raw(b"/Artifact <</Type /Pagination /Subtype /Header>> BDC\n");
+            page.text(b"F1", 9.0, 72.0, 760.0, "A Treatise On Columns");
+            page.raw(b"EMC\n");
+        });
+    }
+    open(builder.finish()).expect("the fixture opens")
+}
+
+/// One page drawing a long paragraph low on the page before a short one
+/// above it, tagged in the order drawn.
+fn a_lower_paragraph_drawn_first() -> Document {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(612.0, 792.0, |page| {
+        page.tagged_with(&Tag::new(b"P"), |page| {
+            for line in 0..8 {
+                let y = 400.0 - f64::from(line) * 14.0;
+                page.text(
+                    b"F1",
+                    10.0,
+                    72.0,
+                    y,
+                    "The lower paragraph, drawn first, and the longer.",
+                );
+            }
+        });
+        page.tagged_with(&Tag::new(b"P"), |page| {
+            page.text(b"F1", 10.0, 72.0, 600.0, "The upper one.");
+        });
+    });
+    open(builder.finish()).expect("the fixture opens")
+}
+
+/// The characters of `doc`'s inferred orders, with the tree hidden, in
+/// blocks of each role: counted from the inference's own blocks, so the
+/// test does not decide for itself which glyphs are characters.
+fn characters_by_role(doc: &Document) -> BTreeMap<String, usize> {
+    let mut out = BTreeMap::new();
+    for index in 0..doc.page_count() {
+        let order = doc
+            .inferred_order(
+                index,
+                &InferenceOptions {
+                    hide_structure: true,
+                },
+            )
+            .expect("an inferred order");
+        for block in &order.blocks {
+            let n: usize = block.lines.iter().map(|line| line.chars.len()).sum();
+            *out.entry(format!("{:?}", block.role)).or_default() += n;
+        }
+    }
+    out
+}
+
+/// **The census names what moved.** On three pages that draw the page
+/// number before the body and a longer running head after it, the inference
+/// reads the head first and the number last, and the characters out of
+/// stream order are the head's and the number's, under `RunningHead` and
+/// `PageNumber` and as artifact text, while `moved()` counts the body's as
+/// well, each an index away from where the stream drew it. On a page drawing
+/// a long lower paragraph before a short upper one, they are the upper
+/// paragraph's, under `Body` and claimed by the tree.
+#[test]
+fn what_moved_is_counted_under_the_block_it_was_read_in() {
+    let doc = furniture_drawn_out_of_place();
+    let roles = characters_by_role(&doc);
+    let (head, number) = (roles["RunningHead"], roles["PageNumber"]);
+    assert!(head > number && number > 0, "{roles:?}");
+    let mut totals = Totals::default();
+    score(&doc, "furniture.pdf", true, &mut totals);
+    let what = &totals.what_moved;
+    assert_eq!(
+        what.by_role,
+        BTreeMap::from([
+            ("PageNumber".to_string(), number),
+            ("RunningHead".to_string(), head),
+        ]),
+        "the body is where the stream drew it"
+    );
+    assert_eq!(
+        (what.claimed, what.unclaimed, what.artifact),
+        (0, 0, head + number)
+    );
+    assert_eq!(
+        totals.moved,
+        roles.values().sum::<usize>(),
+        "moved() counts the body's characters too"
+    );
+    assert_eq!(totals.moved_pages.len(), 3, "{:#?}", totals.moved_pages);
+    assert!(
+        totals.moved_pages[0].starts_with("furniture.pdf page 1: "),
+        "{}",
+        totals.moved_pages[0]
+    );
+
+    let doc = a_lower_paragraph_drawn_first();
+    let order = doc
+        .inferred_order(
+            0,
+            &InferenceOptions {
+                hide_structure: true,
+            },
+        )
+        .expect("an inferred order");
+    let upper: usize = order.blocks[0]
+        .lines
+        .iter()
+        .map(|line| line.chars.len())
+        .sum();
+    let mut totals = Totals::default();
+    score(&doc, "paragraphs.pdf", false, &mut totals);
+    let what = &totals.what_moved;
+    assert_eq!(what.by_role, BTreeMap::from([("Body".to_string(), upper)]));
+    assert_eq!((what.claimed, what.unclaimed, what.artifact), (upper, 0, 0));
+    assert!(totals.moved_pages.is_empty(), "listed only when asked");
 }

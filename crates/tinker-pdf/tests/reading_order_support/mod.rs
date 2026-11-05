@@ -247,6 +247,130 @@ impl Scored {
     pub fn crossings(&self) -> usize {
         column_crossings(&self.answer, &self.inferred)
     }
+
+    /// The characters the inference read out of stream order on this page
+    /// ([`out_of_stream_order`]), under the role of the block each was read
+    /// in and by whose text each is.
+    pub fn what_moved(&self) -> Moved {
+        let out = out_of_stream_order(&self.inferred.permutation);
+        let claimed: BTreeSet<&Key> = self.answer.iter().collect();
+        let shown: BTreeSet<&Key> = self.stream.iter().collect();
+        let mut moved = Moved::default();
+        let mut at = 0usize;
+        for block in &self.inferred.blocks {
+            for c in block.lines.iter().flat_map(|line| line.chars.iter()) {
+                if out.get(at).copied().unwrap_or(false) {
+                    *moved
+                        .by_role
+                        .entry(format!("{:?}", block.role))
+                        .or_default() += 1;
+                    let k = key(c);
+                    if claimed.contains(&k) {
+                        moved.claimed += 1;
+                    } else if shown.contains(&k) {
+                        moved.unclaimed += 1;
+                    } else {
+                        moved.artifact += 1;
+                    }
+                }
+                at += 1;
+            }
+        }
+        moved
+    }
+}
+
+/// Which positions of an inferred order's permutation lie outside a longest
+/// increasing subsequence of it: the fewest characters whose removal leaves
+/// every other one in the order the stream drew it.
+///
+/// [`InferredOrder::moved`] counts every character whose index changed, so a
+/// block read anywhere but where the stream drew it displaces every character
+/// between the two places; these are the characters that were themselves read
+/// out of place. A longest subsequence need not be the only one, and any of
+/// them gives the fewest. Patience sorting, so a page of ten thousand
+/// characters costs a fraction of a second.
+pub fn out_of_stream_order(permutation: &[usize]) -> Vec<bool> {
+    // `tails[k]` is the position ending the increasing subsequence of length
+    // `k + 1` with the smallest last value; `previous` links each position to
+    // the one before it in the subsequence it ended.
+    let mut tails: Vec<usize> = Vec::new();
+    let mut previous: Vec<Option<usize>> = vec![None; permutation.len()];
+    for (at, &value) in permutation.iter().enumerate() {
+        let length = tails.partition_point(|&tail| permutation[tail] < value);
+        if length > 0 {
+            previous[at] = Some(tails[length - 1]);
+        }
+        if length == tails.len() {
+            tails.push(at);
+        } else {
+            tails[length] = at;
+        }
+    }
+    let mut out = vec![true; permutation.len()];
+    let mut at = tails.last().copied();
+    while let Some(position) = at {
+        out[position] = false;
+        at = previous[position];
+    }
+    out
+}
+
+/// The characters read out of stream order, counted under the role of the
+/// block each was read in and by whose text each is: what the tree's answer
+/// claims, what `Page::text` shows and the tree does not claim, and artifact
+/// text, which only the extraction with the tree hidden holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Moved {
+    /// By the block's role, named as `Role` prints it.
+    pub by_role: BTreeMap<String, usize>,
+    /// Text the tree claims.
+    pub claimed: usize,
+    /// `Page::text`'s text the tree does not claim.
+    pub unclaimed: usize,
+    /// Artifact text.
+    pub artifact: usize,
+}
+
+impl Moved {
+    /// How many characters moved.
+    pub fn total(&self) -> usize {
+        self.claimed + self.unclaimed + self.artifact
+    }
+
+    /// Two breakdowns summed, as a corpus total.
+    pub fn plus(&self, other: &Moved) -> Moved {
+        let mut by_role = self.by_role.clone();
+        for (role, count) in &other.by_role {
+            *by_role.entry(role.clone()).or_default() += count;
+        }
+        Moved {
+            by_role,
+            claimed: self.claimed + other.claimed,
+            unclaimed: self.unclaimed + other.unclaimed,
+            artifact: self.artifact + other.artifact,
+        }
+    }
+
+    /// `RunningHead 21, PageNumber 1; claimed 0, unclaimed 0, artifact 22`.
+    pub fn describe(&self) -> String {
+        let roles: Vec<String> = self
+            .by_role
+            .iter()
+            .map(|(role, count)| format!("{role} {count}"))
+            .collect();
+        format!(
+            "{}; claimed {}, unclaimed {}, artifact {}",
+            if roles.is_empty() {
+                "none".to_string()
+            } else {
+                roles.join(", ")
+            },
+            self.claimed,
+            self.unclaimed,
+            self.artifact
+        )
+    }
 }
 
 /// The characters of page `index` that only a reading with the tree hidden

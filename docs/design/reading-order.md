@@ -283,7 +283,15 @@ instrument seeing disorder. `reading_order_census.rs` is the corpus census,
 asserts what holds whatever the corpus holds — every inferred order a
 permutation, a floor only on the ratchet population, every floor in
 `INFERRED_FLOORS` met by cross-multiplication as `corpus/ratchet.json`'s
-bars are, and **zero characters moved on veraPDF**.
+bars are, and **zero characters moved on veraPDF**. It names what moved,
+printed and never held: on every scored page, the characters outside a
+longest increasing subsequence of the permutation — the fewest whose removal
+leaves the rest where the stream drew them (`out_of_stream_order`, held by
+`the_fewest_characters_out_of_stream_order_are_found`) — counted under the
+role of the block each was read in and as text the tree claims, unclaimed
+text of `Page::text`, or artifact text; one line per veraPDF page with a
+moved character, naming the file, the page, its characters, `moved()`, that
+breakdown, its column count and its warnings; and each corpus's totals.
 
 **The one first-party construction that is admissible, and why.** This
 engine's EPUB pipeline lays out real producers' books into multi-column
