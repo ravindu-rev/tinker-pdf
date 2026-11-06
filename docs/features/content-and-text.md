@@ -72,9 +72,21 @@ no buffer must not have `ca 0.5` reset underneath it. A soft-mask group is
 run at the `gs` that installs it, at the CTM in force there (11.6.5.2). A
 Type 3 glyph is a content stream, not an outline, so it is run the way a
 form is, with `/FontMatrix` inside the placing transform and the advance
-scaled by it (9.6.5). Recursion of all three kinds stops at a shared depth
-cap, and hostile streams meet bounds throughout — operand stack, save
-stack, path length — rather than allocation.
+scaled by it (9.6.5). Each of the three runs as a stream of its own: it
+starts with an empty `q` stack, so a `Q` it has no `q` for restores nothing
+of its caller's, and every `q` and marked-content scope it leaves open is
+closed, at the device too, before control returns — so no nested stream, and
+not the page's own content before an annotation's appearance, leaves a device
+clipping or masking what is drawn next by its state (8.4.2, 14.6.2).
+Recursion of all three kinds stops at a shared depth cap, and a depth is not
+a bound on work once the recursion branches, so transparency groups and soft
+masks' groups also spend from a page budget (`MAX_GROUP_RUNS`, 2 000 runs a
+stream, at any depth): a group form spends whether or not the device holds
+the group, since its content runs either way; a mask spends when the device
+accepts it; past the budget neither is run, and the device is told once
+(`Device::group_budget_spent`), which the renderer and the SVG writer report
+as `GroupBudgetSpent`. Hostile streams meet bounds throughout — operand
+stack, save stack, path length — rather than allocation.
 
 **Marked content and optional content.** `BMC`/`BDC`/`EMC` scopes reach the
 device with their tag, their own visibility and — when hidden — the layer's
@@ -899,6 +911,7 @@ crate has an API of its own; see [architecture](../architecture.md).
 | A font resource the page names but the build cannot resolve | `TextWarning::UnknownFont { name }` | emitted by `Page::text()`, deduplicated, naming which resource — absence stays distinguishable from emptiness | ruling 2, [rulings](../rulings.md) |
 | A code with no `/ToUnicode` entry and no encoding that names it | `TextWarning::UnmappedCode { code }` | the typed vocabulary for a per-code guess; a glyph that decodes to no text at all is dropped from the page rather than invented | 9.10.3 |
 | Form XObject / Type 3 / soft-mask nesting past 16 levels | `MAX_FORM_DEPTH` | recursion is refused rather than allowed to overflow the stack | 8.10 |
+| More than 2 000 transparency groups and soft masks' groups run in one stream | `MAX_GROUP_RUNS`, said to the device as `Device::group_budget_spent` | a budget, not a depth: a group that draws itself twice is two to the sixteenth runs inside the depth cap, and a device that declines groups still runs each one's content | 11.6.6 |
 | More than 4 096 open marked-content scopes | `MAX_MARKED_CONTENT_DEPTH` | scopes past the cap go unreported, and unreported means *visible* — a runaway stream must not hide a page | 14.6.2 |
 | Text shaping while **reading** — Arabic joining, ligature substitution | — | the producer positioned every glyph and re-shaping them would be wrong; a ligature extracts as whatever its `/ToUnicode` says. Bidi *reordering* is not refused: ruling 14 puts a right-to-left line into logical order | [design/shaping.md](../design/shaping.md) |
 | L4 mirroring undone in extraction, and the paragraph as a bidi unit | — | ruling 14 resolves each line alone and swaps no character: whether a producer's `/ToUnicode` names a mirrored glyph's character or its shape is not on the page. Alone, on a page that declares no direction for it (a structure element's `/WritingMode`, above), a line of a right-to-left paragraph that holds nothing left to right and opens with a mark of `Bidi_Class` `CS`, `ON`, `ES` or `ET` that is not `Ps` or `Pi` — a dash, a bullet, `*`, `#`, `%`, an ellipsis, a straight or closing-form quotation mark used to open; `— שלום` — draws as a quoted word and its trailing mark, and reads `שלום —`: the comma tie-break's known limit, pinned by `a_right_to_left_line_opening_with_a_dash_reads_the_dash_last`. Not with an opening bracket or quotation mark where `/ToUnicode` names the typed character (`(١) بند`, `“שלום`; `a_right_to_left_line_opening_with_a_bracket_or_quotation_mark_reads_as_typed`) — where it names the mirrored glyph, `»` for `«`, the line reads like a dash — nor with a European number after the mark (`(1) פריט`, `— 2026 שלום`, `• 5 תפוחים`, which no left-to-right paragraph draws; `a_right_to_left_line_opening_with_a_mark_and_a_number_reads_as_typed`); still with Arabic-Indic digits, `— ١ بند` reading `١ بند —`, or a number further on, `— שלום 5 חו`. A mark of several characters reads reversed as well, in the order drawn: the line `<p dir="rtl">?! שלום</p>` draws reads `שלום !?` where nothing declares its direction. The EPUB writer's book declares it, and reads `?! שלום` as typed, the mark styled apart or not (`a_run_of_neutrals_opening_a_right_to_left_line_is_drawn_as_typed`) | ruling 14 |

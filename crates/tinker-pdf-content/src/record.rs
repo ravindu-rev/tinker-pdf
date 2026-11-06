@@ -337,6 +337,9 @@ pub enum Event {
     EndSoftMask,
     /// `/SMask /None`.
     ClearSoftMask,
+    /// The interpreter's group budget ran out
+    /// ([`Device::group_budget_spent`]): no group or mask after it was run.
+    GroupBudgetSpent,
 }
 
 /// Which trait method an [`Event`] came from, with the payload dropped.
@@ -385,6 +388,8 @@ pub enum EventKind {
     EndSoftMask,
     /// [`Event::ClearSoftMask`].
     ClearSoftMask,
+    /// [`Event::GroupBudgetSpent`].
+    GroupBudgetSpent,
 }
 
 impl Event {
@@ -411,6 +416,7 @@ impl Event {
             Event::BeginSoftMask { .. } => EventKind::BeginSoftMask,
             Event::EndSoftMask => EventKind::EndSoftMask,
             Event::ClearSoftMask => EventKind::ClearSoftMask,
+            Event::GroupBudgetSpent => EventKind::GroupBudgetSpent,
         }
     }
 
@@ -819,6 +825,12 @@ impl Device for RecordingDevice {
     fn clear_soft_mask(&mut self) {
         if self.capture.structure {
             self.events.push(Event::ClearSoftMask);
+        }
+    }
+
+    fn group_budget_spent(&mut self) {
+        if self.capture.structure {
+            self.events.push(Event::GroupBudgetSpent);
         }
     }
 

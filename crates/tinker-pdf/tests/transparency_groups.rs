@@ -1015,6 +1015,67 @@ fn a_soft_mask_that_names_its_own_page_is_bounded_and_says_so() {
     );
 }
 
+/// The seed above with 252 bytes mutated by a fuzzing run, and every reading
+/// the `render_page` target makes of it.
+///
+/// The mutation broke object 6's length, so the knockout group reads on into
+/// a copy of the page's content: it draws itself twice and leaves a `q` open
+/// each time. Depth alone let that be two to the sixteenth runs in every
+/// reading, a device that declines groups running them all as content, and
+/// the open `q` cost the SVG writer an element per run it never popped, so
+/// `to_svg` did not return. The interpreter now closes what a nested stream
+/// leaves open and spends every group's run from the page's group budget,
+/// whatever the device answers; the render and the SVG writer both say the
+/// budget ran out.
+#[test]
+fn a_soft_mask_mutated_past_its_seed_is_bounded_in_every_reading() {
+    let bytes =
+        include_bytes!("../../../fuzz/corpus/render_page/soft-mask-mutated-past-its-seed.pdf");
+    let doc = Document::open(bytes.to_vec()).expect("it opens, damaged as it is");
+    let page = doc.page(0).expect("a page");
+
+    let text = page.text();
+    let _ = text.plain_text();
+    for line in text.lines() {
+        let _ = line.words();
+    }
+    let _ = text.search_with(
+        "e",
+        &tinker_pdf::SearchOptions {
+            case_sensitive: false,
+            whole_word: true,
+            diacritic_insensitive: true,
+        },
+    );
+    let _ = text.serialize(tinker_pdf::TextFormat::Json, &page.text_frame());
+    if let Some(tree) = doc.structure() {
+        let _ = tree.text_for_page(0, &page.text()).plain_text();
+    }
+    let _ = page.images();
+
+    let bitmap = page.render(&RenderOptions::at_dpi(12.0));
+    assert!(
+        bitmap
+            .warnings
+            .iter()
+            .any(|w| matches!(w, RenderWarning::GroupBudgetSpent { .. })),
+        "the render says the budget stopped it: {:?}",
+        bitmap.warnings
+    );
+
+    let mut options = tinker_pdf::SvgOptions::default();
+    options.raster_scale = 0.25;
+    let svg = page.to_svg(&options);
+    assert!(
+        svg.warnings.iter().any(|w| matches!(
+            w,
+            tinker_pdf::SvgWarning::Render(RenderWarning::GroupBudgetSpent { .. })
+        )),
+        "and so does the SVG writer: {:?}",
+        svg.warnings
+    );
+}
+
 // ---- the group's own colour space (11.6.6, 11.4.7) --------------------------
 
 /// A page whose single form XObject is a transparency group declaring `cs` as

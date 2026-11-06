@@ -89,14 +89,22 @@ pub fn replay<D: Device + ?Sized>(events: &[Event], device: &mut D) -> Replayed 
 
     for (index, event) in events.iter().enumerate() {
         if skipping > 0 {
-            done.skipped += 1;
             match event {
                 Event::BeginForm { entered: true, .. }
                 | Event::BeginGroup { entered: true, .. }
                 | Event::BeginSoftMask { entered: true, .. } => skipping += 1,
                 Event::EndForm { .. } | Event::EndGroup | Event::EndSoftMask => skipping -= 1,
+                // Delivered from inside a bracket the device declined too:
+                // it is about the interpretation, not about what the bracket
+                // drew, and the budget usually runs out deep inside one.
+                Event::GroupBudgetSpent => {
+                    done.delivered += 1;
+                    device.group_budget_spent();
+                    continue;
+                }
                 _ => {}
             }
+            done.skipped += 1;
             continue;
         }
         if device.is_cancelled() {
@@ -177,6 +185,7 @@ pub fn replay<D: Device + ?Sized>(events: &[Event], device: &mut D) -> Replayed 
             }
             Event::EndSoftMask => device.end_soft_mask(),
             Event::ClearSoftMask => device.clear_soft_mask(),
+            Event::GroupBudgetSpent => device.group_budget_spent(),
         }
     }
     done

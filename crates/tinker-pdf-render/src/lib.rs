@@ -3275,6 +3275,12 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         self.soft = None;
         self.soft_bounds = None;
     }
+
+    /// The interpreter passed groups over for its budget: the page says so
+    /// as [`RenderWarning::GroupBudgetSpent`], as it does for its own.
+    fn group_budget_spent(&mut self) {
+        self.admission.note_budget_spent();
+    }
 }
 
 /// Inverts an affine transform, or `None` when it is degenerate.

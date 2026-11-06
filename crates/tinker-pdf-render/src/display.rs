@@ -298,10 +298,19 @@ impl Admission {
         self.buffers
     }
 
-    /// Whether [`MAX_GROUP_BUFFERS`] ever declined one.
+    /// Whether [`MAX_GROUP_BUFFERS`] ever declined one, or the interpreter's
+    /// own group budget passed groups over ([`Admission::note_budget_spent`]).
     #[must_use]
     pub fn budget_spent(&self) -> bool {
         self.budget_spent
+    }
+
+    /// The interpreter ran out of its group budget
+    /// (`tinker_pdf_content::MAX_GROUP_RUNS`) and runs no more groups or
+    /// masks, so the page loses them to a budget all the same: reported as
+    /// this one's, at the buffers it had opened.
+    pub fn note_budget_spent(&mut self) {
+        self.budget_spent = true;
     }
 
     /// Spends one buffer from the budget, or records that there was none.
@@ -623,6 +632,16 @@ impl Device for DisplayRecorder {
     fn clear_soft_mask(&mut self) {
         if !self.overflowed {
             self.events.clear_soft_mask();
+            self.count();
+        }
+    }
+
+    /// Recorded, so that the replay tells the renderer what the
+    /// interpretation passed over, as a direct render is told.
+    fn group_budget_spent(&mut self) {
+        if !self.overflowed {
+            self.admission.note_budget_spent();
+            self.events.group_budget_spent();
             self.count();
         }
     }

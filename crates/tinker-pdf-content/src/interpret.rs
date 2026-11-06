@@ -538,6 +538,29 @@ pub trait FontSource {
 /// How deep form XObjects may nest before recursion is refused (8.10).
 const MAX_FORM_DEPTH: u32 = 16;
 
+/// How many transparency groups and soft masks' groups one interpretation
+/// runs the content of, at any depth and whatever the device answers (11.6.6,
+/// 11.6.5.2).
+///
+/// [`MAX_FORM_DEPTH`] bounds how deep the nesting goes and not how much work
+/// it is, which are different numbers the moment the recursion *branches*: a
+/// group form whose content draws itself twice is two to the sixteenth runs
+/// inside the depth. A device that holds group buffers declines the ones past
+/// its own budget, the renderer at two thousand, and that bounded its buffers
+/// and not the walk: a declined group still runs as content, and a device
+/// that keeps no buffer — the text device, the image lister — declines every
+/// group and runs them all. So every reading of such a page paid for the
+/// whole tree, and one that also paid per element written, the SVG writer,
+/// did not finish (MS-21).
+///
+/// This is the same budget in the interpreter, for every device: spent and
+/// never refunded, so a page cannot recover budget by unwinding and going
+/// again, and two thousand like the renderer's, far above any real page. A
+/// soft mask spends only when the device accepts it, because only then is its
+/// group run; past the budget neither is offered, and the device hears
+/// [`Device::group_budget_spent`] once.
+pub const MAX_GROUP_RUNS: u32 = 2000;
+
 /// A `BDC`'s property list, in the two forms 14.6.2 gives it.
 ///
 /// Three variants and not two: "the file wrote no readable list" is a
@@ -693,11 +716,17 @@ pub fn interpret<D: Device, F: FontSource>(
         marked: 0,
         marked_over_cap: 0,
         streams: Vec::new(),
+        group_runs: 0,
+        group_budget_told: false,
     };
     interp.run(content);
     // 14.6.2: a stream may end with scopes still open, and a device left
     // inside one would treat everything after it as part of that layer.
     interp.close_open_marked_content();
+    // 8.4.2: and with `q`s still open, and a device left inside one would
+    // clip and mask what it draws next — an annotation's appearance after the
+    // page's content — by this stream's state.
+    interp.close_open_saves();
 }
 
 struct Interpreter<'d, D: Device, F: FontSource> {
@@ -731,6 +760,11 @@ struct Interpreter<'d, D: Device, F: FontSource> {
     /// stream that invoked it: that is the old behaviour, kept for the case
     /// where there is no better answer rather than asserted as one.
     streams: Vec<u64>,
+    /// Groups and soft masks' groups whose content this interpretation has
+    /// run, against [`MAX_GROUP_RUNS`].
+    group_runs: u32,
+    /// Whether the device has heard [`Device::group_budget_spent`].
+    group_budget_told: bool,
 }
 
 impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
@@ -1654,6 +1688,34 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         }
     }
 
+    /// Closes every `q` the stream just run left open (8.4.2), so that a
+    /// nested stream — a form, a soft mask's group, a Type 3 glyph's
+    /// procedure — cannot leave its caller inside one.
+    ///
+    /// Each nested stream runs with the `q` stack taken from its caller, so
+    /// what is on it here is the stream's own. The device is told: one that
+    /// keeps a single stack for the states `q` saves and the ones a form
+    /// saves would otherwise pop the form's for the `q`'s, and go on clipping
+    /// what its caller draws after it by the form's `/BBox`.
+    fn close_open_saves(&mut self) {
+        while self.saved.pop().is_some() {
+            self.device.restore_state();
+        }
+    }
+
+    /// Whether the page's group budget has a run left ([`MAX_GROUP_RUNS`]),
+    /// telling the device, the first time it has none.
+    fn group_run_left(&mut self) -> bool {
+        if self.group_runs < MAX_GROUP_RUNS {
+            return true;
+        }
+        if !self.group_budget_told {
+            self.group_budget_told = true;
+            self.device.group_budget_spent();
+        }
+        false
+    }
+
     /// Hands a recorded `W`/`W*` to the device, now that the path has ended.
     fn apply_pending_clip(&mut self, path: &[PathSegment]) {
         if let Some(even_odd) = self.pending_clip.take() {
@@ -1776,6 +1838,12 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         if self.depth >= MAX_FORM_DEPTH {
             return;
         }
+        // A group form spends from the page's group budget whether or not the
+        // device holds the group, because its content runs either way.
+        let group_form = form.group.is_some();
+        if group_form && !self.group_run_left() {
+            return;
+        }
         let id = self.fonts.font_id(name);
         // 8.10.1: a form may bring its own resources, and the device is asked
         // for the same form by the same name so that both seams change scope
@@ -1783,6 +1851,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         let nested = self.fonts.form_scope(name);
         if !self.device.begin_form(id, name) {
             return;
+        }
+        if group_form {
+            self.group_runs += 1;
         }
         let outer = nested.map(|scope| mem::replace(&mut self.fonts, Scope::Owned(scope)));
         // 8.6.5.6 reads a default in "the current resource dictionary", which
@@ -1855,6 +1926,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         self.depth -= 1;
 
         self.close_open_marked_content();
+        self.close_open_saves();
         if grouped {
             self.device.end_group();
         }
@@ -1920,6 +1992,12 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         if self.depth >= MAX_FORM_DEPTH {
             return;
         }
+        // The page's group budget: a mask group that names its own page
+        // opens more masks each time it runs, and a branching walk is bounded
+        // by a budget rather than a depth (`MAX_GROUP_RUNS`).
+        if !self.group_run_left() {
+            return;
+        }
 
         // The state the group runs under, saved exactly as a form's is: the
         // mask group is a content stream and may do anything one can.
@@ -1950,6 +2028,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             &self.gs,
         );
         if accepted {
+            self.group_runs += 1;
             // 8.10.2 still clips the group to its box, and 11.6.6 still
             // resets the alphas and the blend mode inside it — a mask group
             // is a transparency group, whatever `/G`'s own `/Group` says.
@@ -1964,6 +2043,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             self.run(&mask.form.content);
             self.depth -= 1;
             self.close_open_marked_content();
+            self.close_open_saves();
             self.device.end_soft_mask();
         }
 
@@ -2105,6 +2185,11 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     // and 14.6.2's scopes are per stream in the same way.
                     let saved_marked = std::mem::replace(&mut self.marked, 0);
                     let saved_over_cap = std::mem::replace(&mut self.marked_over_cap, 0);
+                    // And 8.4.2's `q` stack is its own too: a `Q` the
+                    // procedure has no `q` for must not restore the state of
+                    // the text that shows the glyph, and a `q` it leaves open
+                    // is closed before the device's own save is.
+                    let saved_stack = std::mem::take(&mut self.saved);
 
                     self.gs.ctm = font_matrix.then(&transform);
                     self.depth += 1;
@@ -2112,9 +2197,11 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     let inner = proc_bytes.clone();
                     self.run(&inner);
                     self.close_open_marked_content();
+                    self.close_open_saves();
                     self.device.restore_state();
                     self.depth -= 1;
 
+                    self.saved = saved_stack;
                     self.marked = saved_marked;
                     self.marked_over_cap = saved_over_cap;
                     self.gs = saved_gs;
@@ -2469,6 +2556,220 @@ mod tests {
             vec![(0.5, 0.25, crate::state::BlendMode::Multiply)],
             "the content keeps the alphas the page set"
         );
+    }
+
+    /// A source of nested streams: `/F` a plain form with a box whose
+    /// content a test gives, `/K` a transparency group that draws itself
+    /// twice, `/M` a graphics state whose soft mask's group sets `/M` twice,
+    /// and every code of the font `/T3` a Type 3 glyph whose procedure a test
+    /// gives.
+    struct Nested {
+        form: &'static [u8],
+        glyph: &'static [u8],
+    }
+
+    impl FontSource for Nested {
+        fn decode(&self, _font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|&b| (u32::from(b), char::from(b).to_string(), 500.0))
+                .collect()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+        fn form(&self, name: &[u8]) -> Option<Form> {
+            let (content, group) = match name {
+                b"F" => (self.form.to_vec(), None),
+                b"K" => (b"/K Do /K Do".to_vec(), Some(Group::default())),
+                _ => return None,
+            };
+            Some(Form {
+                content,
+                matrix: Matrix::IDENTITY,
+                bbox: Some([0.0, 0.0, 10.0, 10.0]),
+                group,
+                stream: 0,
+            })
+        }
+        fn ext_g_state(&self, name: &[u8]) -> Option<Arc<StateParameters>> {
+            (name == b"M").then(|| {
+                Arc::new(StateParameters {
+                    soft_mask: Some(SoftMask::Group(Box::new(MaskGroup {
+                        form: Form {
+                            content: b"/M gs /M gs".to_vec(),
+                            matrix: Matrix::IDENTITY,
+                            bbox: None,
+                            group: None,
+                            stream: 0,
+                        },
+                        luminosity: true,
+                        backdrop: None,
+                        transfer: None,
+                    }))),
+                    ..StateParameters::default()
+                })
+            })
+        }
+        fn type3_glyph(&self, font: &[u8], _code: u32) -> Option<(Vec<u8>, Matrix)> {
+            (font == b"T3").then(|| {
+                (
+                    self.glyph.to_vec(),
+                    Matrix {
+                        a: 0.001,
+                        d: 0.001,
+                        ..Matrix::IDENTITY
+                    },
+                )
+            })
+        }
+    }
+
+    /// The calls that save and restore state, and the forms and paints
+    /// between them, in order.
+    fn saves(d: &RecordingDevice) -> Vec<EventKind> {
+        d.kinds()
+            .into_iter()
+            .filter(|kind| {
+                matches!(
+                    kind,
+                    EventKind::BeginForm
+                        | EventKind::EndForm
+                        | EventKind::SaveState
+                        | EventKind::RestoreState
+                        | EventKind::FillPath
+                )
+            })
+            .collect()
+    }
+
+    /// 8.4.2: a nested stream's `q`s are its own. The ones a form leaves open
+    /// are closed before the form ends, so a device that keeps one stack for
+    /// the states `q` saves and the ones a form saves pops the form's own at
+    /// its end and stops clipping by its box; the page's own are closed when
+    /// the page ends, before anything drawn after it.
+    #[test]
+    fn a_nested_stream_cannot_leave_its_caller_inside_a_q() {
+        use EventKind::{BeginForm, EndForm, FillPath, RestoreState, SaveState};
+        let fonts = Nested {
+            form: b"q 0 0 5 5 re W n q",
+            glyph: b"",
+        };
+        let mut device = RecordingDevice::new();
+        interpret(
+            b"/F Do 0 0 20 20 re f q",
+            Matrix::IDENTITY,
+            &mut device,
+            &fonts,
+        );
+        assert_eq!(
+            saves(&device),
+            [
+                BeginForm,
+                SaveState,
+                SaveState,
+                RestoreState,
+                RestoreState,
+                EndForm,
+                FillPath,
+                SaveState,
+                RestoreState,
+            ],
+            "every save is restored inside the stream that made it"
+        );
+    }
+
+    /// A `Q` a Type 3 glyph's procedure has no `q` for restores nothing of
+    /// the text that shows the glyph: the page's own `q` around the text is
+    /// still the one its `Q` closes, so what the page fills after it is
+    /// black again rather than the grey the `q` saved over.
+    #[test]
+    fn a_glyph_procedure_cannot_close_the_text_s_q() {
+        let fonts = Nested {
+            form: b"",
+            glyph: b"Q Q 0 0 1000 1000 re f",
+        };
+        let mut device = RecordingDevice::new();
+        interpret(
+            b"q 0.5 g BT /T3 10 Tf (a) Tj ET Q 0 0 20 20 re f",
+            Matrix::IDENTITY,
+            &mut device,
+            &fonts,
+        );
+        let fills: Vec<Rgb> = device
+            .of_kind(EventKind::FillPath)
+            .map(|event| event.state().expect("the state was captured").fill_color)
+            .collect();
+        let black = Rgb { r: 0, g: 0, b: 0 };
+        assert_eq!(fills.len(), 2, "the glyph's square and the page's");
+        assert_eq!(
+            fills[1], black,
+            "the page's `Q` restored the black its `q` saved: {fills:?}"
+        );
+        assert_eq!(
+            device.count(EventKind::SaveState),
+            device.count(EventKind::RestoreState),
+            "and the device's saves balance"
+        );
+    }
+
+    /// A group that draws itself twice is two to the sixteenth runs inside
+    /// the form depth. The page's group budget stops the walk at
+    /// [`MAX_GROUP_RUNS`] whether the device holds groups or declines them —
+    /// a declined group still runs as content — and tells the device once.
+    #[test]
+    fn a_group_that_draws_itself_spends_the_page_group_budget() {
+        for groups in [false, true] {
+            let mut device = RecordingDevice::new().answering(Answers {
+                groups,
+                ..Answers::default()
+            });
+            let fonts = Nested {
+                form: b"",
+                glyph: b"",
+            };
+            interpret(b"/K Do", Matrix::IDENTITY, &mut device, &fonts);
+            assert_eq!(
+                device.count(EventKind::BeginForm),
+                MAX_GROUP_RUNS as usize,
+                "groups accepted: {groups}"
+            );
+            assert_eq!(device.count(EventKind::GroupBudgetSpent), 1);
+        }
+    }
+
+    /// The same for a soft mask whose group sets the mask again: each run
+    /// opens two more. A mask spends only when the device accepts it, since
+    /// only then is its group run.
+    #[test]
+    fn a_soft_mask_that_sets_itself_spends_the_page_group_budget() {
+        let fonts = Nested {
+            form: b"",
+            glyph: b"",
+        };
+        let mut accepting = RecordingDevice::new().answering(Answers {
+            soft_masks: true,
+            ..Answers::default()
+        });
+        interpret(b"/M gs", Matrix::IDENTITY, &mut accepting, &fonts);
+        assert_eq!(
+            accepting.count(EventKind::BeginSoftMask),
+            MAX_GROUP_RUNS as usize
+        );
+        assert_eq!(accepting.count(EventKind::GroupBudgetSpent), 1);
+
+        let mut declining = RecordingDevice::new();
+        interpret(b"/M gs", Matrix::IDENTITY, &mut declining, &fonts);
+        assert_eq!(declining.count(EventKind::BeginSoftMask), 1);
+        assert_eq!(declining.count(EventKind::GroupBudgetSpent), 0);
+
+        // Replayed into a device that declines the mask the notice was
+        // recorded deep inside, the notice still arrives: it is about the
+        // interpretation, not about what the mask drew.
+        let mut replayed = RecordingDevice::new();
+        crate::replay::replay(accepting.events(), &mut replayed);
+        assert_eq!(replayed.count(EventKind::BeginSoftMask), 1);
+        assert_eq!(replayed.count(EventKind::GroupBudgetSpent), 1);
     }
 
     /// A form that is not a transparency group is not offered at all.

@@ -455,6 +455,8 @@ struct Writer<'a> {
     marked: Vec<bool>,
     hidden: u32,
     groups: usize,
+    /// Every `<g>` a group opened, for the group budget's report.
+    opened: u32,
     warnings: Vec<SvgWarning>,
     /// The most bytes `defs` and `body` may hold together.
     limit: usize,
@@ -504,6 +506,7 @@ impl<'a> Writer<'a> {
             marked: Vec::new(),
             hidden: 0,
             groups: 0,
+            opened: 0,
             warnings: Vec::new(),
             limit: budget(options),
             spent: false,
@@ -1447,6 +1450,7 @@ impl Device for Writer<'_> {
             return false;
         }
         self.groups = self.groups.saturating_add(1);
+        self.opened = self.opened.saturating_add(1);
         true
     }
 
@@ -1472,6 +1476,15 @@ impl Device for Writer<'_> {
         });
         self.warn(SvgWarning::SoftMaskRefused { group });
         false
+    }
+
+    /// The interpreter passed groups over for the page's group budget: said
+    /// as the renderer says it, with the `<g>`s this write opened.
+    fn group_budget_spent(&mut self) {
+        let opened = self.opened;
+        self.warn(SvgWarning::Render(RenderWarning::GroupBudgetSpent {
+            opened,
+        }));
     }
 
     /// Yes once the budget is spent: nothing more would be written, so

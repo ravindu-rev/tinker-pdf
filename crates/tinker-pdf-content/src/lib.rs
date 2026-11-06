@@ -21,7 +21,7 @@ pub mod words;
 pub use device::{Device, Glyph, ImageRef, MarkedProps, PathSegment};
 pub use interpret::{
     interpret, DeviceDefaults, FontSource, Form, Group, GroupSpace, Layer, MaskGroup, SoftMask,
-    StateParameters,
+    StateParameters, MAX_GROUP_RUNS,
 };
 pub use plain::{HyphenCounts, PlainText, PlainTextOptions};
 pub use record::{Answers, Capture, Event, EventKind, MarkedScope, RecordingDevice};

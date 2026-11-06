@@ -143,6 +143,39 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
     );
 }
 
+/// Nor may a `q` the form leaves open keep its clip alive. The page invokes
+/// the form outside any `q` of its own, and the form's content ends inside
+/// one; the renderer keeps one stack for both, so unless the interpreter
+/// closes the form's `q` before the form ends, the form's end pops the `q`'s
+/// state and the box goes on clipping the rest of the page.
+#[test]
+fn a_q_the_form_leaves_open_does_not_keep_its_clip() {
+    let page_content = "/Fm0 Do 0 0 1 rg 20 20 20 20 re f";
+    let form_content = "1 0 0 rg 0 0 40 40 re f q";
+    let bytes = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+   /Resources << /XObject << /Fm0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{page_content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 20 20]\n\
+   /Length {} >>\nstream\n{form_content}\nendstream\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+        page_content.len(),
+        form_content.len()
+    )
+    .into_bytes();
+
+    let bitmap = render(bytes);
+    let (x, y) = upper_right(&bitmap);
+    let after = pixel(&bitmap, x, y);
+    assert!(
+        after.2 > 200 && after.0 < 60,
+        "what the page drew after the form is outside the form's box and still there, got {after:?}"
+    );
+}
+
 /// 8.10.2 makes the box required, but a file that omits it gets an unclipped
 /// form rather than no form (ruling 2).
 #[test]

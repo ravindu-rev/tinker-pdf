@@ -331,6 +331,17 @@ pub trait Device {
     /// `/SMask /None`: whatever mask was in force stops applying.
     fn clear_soft_mask(&mut self) {}
 
+    /// The interpreter has run [`MAX_GROUP_RUNS`] groups and soft masks'
+    /// groups, and from here on runs no more of either, whatever this device
+    /// would answer: said once per interpretation, before the first one it
+    /// passes over.
+    ///
+    /// A device that reports what it could not draw reports this; the
+    /// default ignores it, as a device that keeps no buffer ignores groups.
+    ///
+    /// [`MAX_GROUP_RUNS`]: crate::MAX_GROUP_RUNS
+    fn group_budget_spent(&mut self) {}
+
     /// Whether interpretation should stop — a cancellation hook checked
     /// between operators.
     fn is_cancelled(&self) -> bool {
