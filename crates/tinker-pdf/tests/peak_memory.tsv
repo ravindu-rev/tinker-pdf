@@ -7,5 +7,37 @@
 #   bytes   the child's VmHWM, in bytes
 #
 # A run holds each case to its build's figure plus 2 % and fails a case with
-# no figure here. `TINKER_PEAK_RECORD=1` prints each case's line in this form
-# instead of holding it.
+# no line here. `unheld` in place of the bytes measures and prints the case and
+# holds it to nothing (H-78). `TINKER_PEAK_RECORD=1` prints each case's line in
+# this form instead of holding it.
+#
+# Read on the hosted Linux image from the `peak-memory` jobs of CI runs
+# 42181215562 (job 127771045439) and 42196647113 (job 127821577062) on
+# `develop`, 6 November 2026: each figure is the larger of its case's two
+# peaks, and the spread between the two, larger over smaller less one, is
+# beside it in this comment.
+#
+#   default        png-300 0.24 %, jpeg-300 0.14 %, jpx-72 0.08 %,
+#                  text-10000 1.39 %, merge-4x100 0.01 %, open-23mb 0.40 %
+#   bundled-fonts  png-300 0.04 %, jpeg-300 0.01 %, jpx-72 0.12 %,
+#                  text-10000 0.31 %, merge-4x100 0.05 %, open-23mb 0.72 %
+#
+# png-20-on-4, twenty pages rendered on four threads, read 82 636 800 and
+# 98 439 168 bytes in the default build and 88 715 264 and 77 705 216 with the
+# bundled faces, a spread of 19.1 % and 14.2 %: its peak moves with how the
+# pages are scheduled, so it is held to nothing until MS-25 makes it steady.
+
+default	png-300	88739840
+default	jpeg-300	138256384
+default	jpx-72	231350272
+default	png-20-on-4	unheld
+default	text-10000	31047680
+default	merge-4x100	528793600
+default	open-23mb	28991488
+bundled-fonts	png-300	88317952
+bundled-fonts	jpeg-300	138153984
+bundled-fonts	jpx-72	231383040
+bundled-fonts	png-20-on-4	unheld
+bundled-fonts	text-10000	30760960
+bundled-fonts	merge-4x100	528838656
+bundled-fonts	open-23mb	29278208

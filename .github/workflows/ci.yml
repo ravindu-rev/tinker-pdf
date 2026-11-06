@@ -222,17 +222,15 @@ jobs:
     # hosted Linux image: release, because the figures are a release binary's
     # and the ten-thousand-page case is slow even so, and Linux, because the
     # peak is the kernel's `VmHWM` and the figures are this image's allocator's
-    # and kernel's. Until figures are committed the run carries the record
-    # switch, so each case's line is printed for `peak_memory.tsv` rather than
-    # held to it.
+    # and kernel's. Each case is held to its build's figure in
+    # `peak_memory.tsv` and 2 %, but one the table names unheld (H-78), and
+    # each case's line is printed beside it.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Measure each case's peak, in both builds
-        env:
-          TINKER_PEAK_RECORD: "1"
+      - name: Hold each case's peak, in both builds
         run: |
           set -o pipefail
           for build in "" "--features bundled-fonts"; do

@@ -15,8 +15,11 @@
 //! The parent holds each case to its figure for this build in
 //! `peak_memory.tsv` plus [`TOLERANCE_PERCENT`], the tolerance the corpus bars
 //! give their peaks (`PEAK_TOLERANCE_PERCENT`, `xtask/src/ratchet.rs`), and
-//! refuses a case the table has no figure for. With `TINKER_PEAK_RECORD` set
-//! it prints each case's line for the table instead of holding it.
+//! refuses a case the table has no line for. A line whose bytes read
+//! [`UNHELD`] names a case measured and printed but held to no figure: the
+//! owner's word (H-78) for a case whose runs spread past the tolerance, until
+//! a row makes its peak steady. With `TINKER_PEAK_RECORD` set it prints each
+//! case's line for the table instead of holding it.
 //!
 //! The child is this test binary, built from the same revision, so this file
 //! is a `SPAWNERS` row in `xtask/src/main.rs`: it hosts one case a process and
@@ -46,6 +49,9 @@ const TOLERANCE_PERCENT: u64 = 2;
 /// The committed figures: a build, a case and its bytes a line.
 const TABLE: &str = include_str!("peak_memory.tsv");
 
+/// What a line's bytes read for a case held to no figure.
+const UNHELD: &str = "unheld";
+
 /// The build this binary is, as the table names it.
 const BUILD: &str = if cfg!(feature = "bundled-fonts") {
     "bundled-fonts"
@@ -70,12 +76,13 @@ const CASES: [&str; 7] = [
 /// What a child prints before its case and its peak.
 const REPORT: &str = "peak-memory-case";
 
-/// One committed figure: a case's peak in one build, in bytes.
+/// One committed figure: a case's peak in one build, in bytes, or `None` for
+/// a case the table names [`UNHELD`].
 #[derive(Debug, PartialEq, Eq)]
 struct Figure {
     build: String,
     case: String,
-    bytes: u64,
+    bytes: Option<u64>,
 }
 
 /// `VmHWM` out of a `/proc/<pid>/status` text, in bytes: the file writes `kB`
@@ -93,8 +100,8 @@ fn vm_hwm(status: &str) -> Option<u64> {
 }
 
 /// The committed figures. Lines starting with `#` and blank lines are passed
-/// over; any other line that is not a build, a case and a count of bytes,
-/// tab-separated, is refused by its number.
+/// over; any other line that is not a build, a case and a count of bytes or
+/// [`UNHELD`], tab-separated, is refused by its number.
 fn figures(table: &str) -> Result<Vec<Figure>, String> {
     table
         .lines()
@@ -109,12 +116,15 @@ fn figures(table: &str) -> Result<Vec<Figure>, String> {
                     fields.len()
                 ));
             };
-            let bytes = bytes.trim().parse().map_err(|_| {
-                format!(
-                    "peak_memory.tsv line {}: `{bytes}` is no count of bytes",
-                    at + 1
-                )
-            })?;
+            let bytes = match bytes.trim() {
+                UNHELD => None,
+                count => Some(count.parse().map_err(|_| {
+                    format!(
+                        "peak_memory.tsv line {}: `{bytes}` is no count of bytes",
+                        at + 1
+                    )
+                })?),
+            };
             Ok(Figure {
                 build: build.to_string(),
                 case: case.to_string(),
@@ -131,8 +141,8 @@ fn line(build: &str, case: &str, bytes: u64) -> String {
 
 /// What holding `measured`, a run of `build`, to `figures` finds: a line for
 /// each case above its figure and [`TOLERANCE_PERCENT`] over it, and one for
-/// each case the table has no figure for in `build`. Empty when every case
-/// holds.
+/// each case the table has no line for in `build`; a case it names
+/// [`UNHELD`] is held to nothing. Empty when every case holds.
 fn judge(figures: &[Figure], build: &str, measured: &[(&str, u64)]) -> Vec<String> {
     measured
         .iter()
@@ -146,14 +156,13 @@ fn judge(figures: &[Figure], build: &str, measured: &[(&str, u64)]) -> Vec<Strin
                      and commit its line"
                 ));
             };
+            let held = figure.bytes?;
             // The ratchet's comparison, in the same width.
-            (u128::from(bytes) * 100
-                > u128::from(figure.bytes) * u128::from(100 + TOLERANCE_PERCENT))
-            .then(|| {
+            let allowed = u128::from(held) * u128::from(100 + TOLERANCE_PERCENT);
+            (u128::from(bytes) * 100 > allowed).then(|| {
                 format!(
-                    "{case}: a peak of {bytes} bytes, above the {build} build's figure of {} \
-                         and its {TOLERANCE_PERCENT} % tolerance",
-                    figure.bytes
+                    "{case}: a peak of {bytes} bytes, above the {build} build's figure of \
+                     {held} and its {TOLERANCE_PERCENT} % tolerance"
                 )
             })
         })
@@ -422,7 +431,49 @@ fn figure(build: &str, case: &str, bytes: u64) -> Figure {
     Figure {
         build: build.to_string(),
         case: case.to_string(),
-        bytes,
+        bytes: Some(bytes),
+    }
+}
+
+/// A case the table names unheld is measured and held to nothing, in that
+/// build only, and a line that names it is still a line: a case with none is
+/// refused as before.
+#[test]
+fn a_case_named_unheld_is_held_to_nothing() {
+    let table = "default\tpng-20-on-4\tunheld\ndefault\tpng-300\t1000\n";
+    let committed = figures(table).expect("an unheld line reads");
+    assert_eq!(committed[0].bytes, None);
+    let problems = judge(
+        &committed,
+        "default",
+        &[("png-20-on-4", u64::MAX), ("png-300", 1000)],
+    );
+    assert!(problems.is_empty(), "{problems:?}");
+    let problems = judge(&committed, "bundled-fonts", &[("png-20-on-4", 1)]);
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].starts_with("png-20-on-4: no figure for the bundled-fonts build"),
+        "{problems:?}"
+    );
+}
+
+/// The committed table reads and names every case in both builds, leaving
+/// unheld only the case whose two runs spread past the tolerance.
+#[test]
+fn the_committed_table_names_every_case_in_both_builds() {
+    let committed = figures(TABLE).unwrap_or_else(|error| panic!("{error}"));
+    for build in BUILDS {
+        for case in CASES {
+            let line = committed
+                .iter()
+                .find(|figure| figure.build == build && figure.case == case)
+                .unwrap_or_else(|| panic!("{case}: no line for the {build} build"));
+            assert_eq!(
+                line.bytes.is_none(),
+                case == "png-20-on-4",
+                "{case} in the {build} build"
+            );
+        }
     }
 }
 

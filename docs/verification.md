@@ -1282,9 +1282,13 @@ so a figure holds the operation and its input and never the generator.
 
 The parent holds each case to its build's figure in `peak_memory.tsv`, the
 default and `bundled-fonts` builds each with their own, plus the 2 % the corpus
-bars give their peaks, and fails a case the table has no figure for. The table
-holds none, so a run fails every case unless `TINKER_PEAK_RECORD` is set, which
-prints each case's line for the table instead of holding it:
+bars give their peaks, and fails a case the table has no line for. Each figure
+is the larger of two CI runs' peaks, the runs and the spread between them
+recorded in the table. A case whose two runs spread by 2 % or more is named
+`unheld`, by the owner's word (H-78): it is measured and printed and held to
+nothing, which is the twenty pages rendered on four threads, whose peak moves
+with how the pages are scheduled. `TINKER_PEAK_RECORD` prints each case's line
+for the table instead of holding it:
 
 ```sh
 TINKER_PEAK_RECORD=1 cargo test --release -p tinker-pdf --test peak_memory -- --ignored --nocapture
@@ -1300,9 +1304,8 @@ sees what the child holds. The child is this test binary, so the file is a
 `SPAWNERS` row: it hosts one case a process and adjudicates nothing.
 
 `ci.yml`'s `peak-memory` job runs it on the hosted Linux image, in release and
-in both builds, and greps its `RAN` line and each of the seven cases' lines.
-Until the table carries figures the job sets the record switch, so each case
-is printed for the table rather than held to it.
+in both builds, holds every case to the table, and greps its `RAN` line and
+each of the seven cases' lines.
 
 ## The examples, run rather than compiled
 
