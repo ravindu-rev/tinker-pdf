@@ -154,6 +154,10 @@ jobs:
       - name: Hold every corpus census
         if: ${{ !cancelled() && steps.fetch.outcome == 'success' }}
         env:
+          # The fetched corpora, named rather than guessed: every census that
+          # guesses `corpus/files` finds the same directory, and the structure
+          # census, which only reads this, would otherwise read nothing.
+          TINKER_CORPUS: ${{ github.workspace }}/corpus/files
           TINKER_CORPUS_REQUIRED: '1'
         run: |
           set +e

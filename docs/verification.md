@@ -253,9 +253,9 @@ Its outcome, its missing peak and every verdict, span and join count stay a
 finished child's alone.
 
 The census step holds every census it names to its own banner:
-`pdfa-ledger: RAN ...`, `structure-census: RAN ...`. It sets
-`TINKER_CORPUS_REQUIRED`, under which a census that finds no corpus fails by
-name rather than skipping, and it greps each census's banner, so a census that
+`pdfa-ledger: RAN ...`, `structure-census: RAN ...`. It names the fetched
+corpora in `TINKER_CORPUS` and sets `TINKER_CORPUS_REQUIRED`, under which a
+census that finds no corpus fails by name rather than skipping, and it greps each census's banner, so a census that
 read nothing fails the step. `streaming_open.rs`'s three corpus tests are not
 `#[ignore]`d, so the step runs them by name in a command of its own.
 
