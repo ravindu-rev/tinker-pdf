@@ -336,15 +336,25 @@ fn the_fetched_corpora_yield_structure_trees() {
         println!("warn {name:<24} {count}");
     }
 
+    // Per corpus, so a corpus the lock adds, or a tree that stops reading, is
+    // named by its corpus rather than read as a change in one total.
+    let read: Vec<(&str, usize, usize)> = per_corpus
+        .iter()
+        .map(|(name, totals)| (name.as_str(), totals.files, totals.trees))
+        .collect();
     assert_eq!(
-        files.len(),
-        4605,
-        "TINKER_CORPUS is not corpus/files with every corpus in \
-         corpus/corpora.lock fetched"
+        read, CORPORA,
+        "each corpus's files, and its files carrying a /StructTreeRoot this \
+         engine could read: TINKER_CORPUS is not corpus/files with every corpus \
+         in corpus/corpora.lock fetched, or a tree stopped reading"
     );
     assert_eq!(
-        with_tree, 716,
-        "files carrying a /StructTreeRoot this engine could read"
+        files.len(),
+        CORPORA.iter().map(|(_, files, _)| files).sum::<usize>()
+    );
+    assert_eq!(
+        with_tree,
+        CORPORA.iter().map(|(_, _, trees)| trees).sum::<usize>()
     );
     assert_eq!(
         ua_files, 434,
@@ -366,6 +376,17 @@ fn the_fetched_corpora_yield_structure_trees() {
          the join, not the corpora, is what would have to be wrong"
     );
 }
+
+/// Each fetched corpus's files and the files of it carrying a
+/// `/StructTreeRoot` this engine reads, by name, as the corpus job's census of
+/// CI run 42203024874 read them.
+const CORPORA: [(&str, usize, usize); 5] = [
+    ("pdfa-examples", 7, 1),
+    ("pdfjs", 976, 89),
+    ("qpdf", 715, 38),
+    ("safedocs", 1000, 359),
+    ("verapdf", 2907, 588),
+];
 
 /// Whether a missing corpus is a failure rather than a skip: the corpus job
 /// sets `TINKER_CORPUS_REQUIRED`, so a census there cannot pass over nothing.
