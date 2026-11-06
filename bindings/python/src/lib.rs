@@ -93,10 +93,11 @@ pub struct PyBitmap {
 
 #[pymethods]
 impl PyDocument {
-    /// Opens a document from bytes.
+    /// Opens a document from bytes, copied once into the buffer the document
+    /// keeps.
     #[new]
     fn new(data: &[u8]) -> PyResult<PyDocument> {
-        tinker_pdf::Document::open(data.to_vec())
+        tinker_pdf::Document::open(data)
             .map(|inner| PyDocument { inner })
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }

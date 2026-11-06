@@ -923,11 +923,13 @@ same way.
 - **A slice handed to the facade costs one copy, and an `Arc<[u8]>` none.**
   `Document::open` takes `impl Into<Arc<[u8]>>` and converts once: a slice is
   copied into a new `Arc`, so is a `Vec`, both existing for the moment of the
-  copy, and an `Arc` is kept as it is. The surfaces that take bytes copy a
-  borrowed slice into a `Vec` first, which the facade then copies again
-  (`crates/tinker-pdf-ffi/src/lib.rs`, `bindings/python/src/lib.rs`,
-  `bindings/js/src/lib.rs`); P-05.6 builds the `Arc` straight from the
-  slice.
+  copy, and an `Arc` is kept as it is
+  (`facade_read.rs` `an_arc_handed_to_open_is_not_copied`). The surfaces
+  that take bytes — the C ABI's `tpdf_document_open`, Python's
+  `Document(bytes)` and JavaScript's `new PdfDocument(bytes)` — hand the
+  facade the borrowed slice, so the one copy is the facade's
+  (`crates/tinker-pdf-ffi/tests/open_copies.rs`
+  `opening_bytes_copies_them_once`).
 - **Every CLI command holds one copy fewer:** on demand it holds the chunks its
   reads touched, and whole it holds the file once, where a read-then-copy
   holds it twice for the length of the copy.

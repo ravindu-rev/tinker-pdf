@@ -185,11 +185,11 @@ impl PdfSource {
 impl PdfDocument {
     /// Opens a document from bytes.
     ///
-    /// The bytes are copied into the wasm heap, so the caller's buffer may be
-    /// released immediately.
+    /// The bytes are copied once into the wasm heap, into the buffer the
+    /// document keeps, so the caller's buffer may be released immediately.
     #[wasm_bindgen(constructor)]
     pub fn new(bytes: &[u8]) -> Result<PdfDocument, JsError> {
-        tinker_pdf::Document::open(bytes.to_vec())
+        tinker_pdf::Document::open(bytes)
             .map(|inner| PdfDocument { inner })
             .map_err(|e| JsError::new(&e.to_string()))
     }

@@ -627,7 +627,8 @@ pub unsafe extern "C" fn tpdf_version() -> *const c_char {
 
 /// Opens a document from bytes.
 ///
-/// The bytes are copied, so the caller may free theirs immediately.
+/// The bytes are copied once, into the buffer the document keeps, so the
+/// caller may free theirs immediately.
 ///
 /// # Safety
 ///
@@ -644,7 +645,9 @@ pub unsafe extern "C" fn tpdf_document_open(
         return TpdfStatus::BadArgument;
     }
 
-    let data = unsafe { std::slice::from_raw_parts(bytes, len) }.to_vec();
+    // The facade builds its buffer from the borrowed slice, which is the one
+    // copy: no `Vec` of it is made first.
+    let data = unsafe { std::slice::from_raw_parts(bytes, len) };
     match Document::open(data) {
         Ok(inner) => {
             let handle = Box::new(TpdfDocument { inner });

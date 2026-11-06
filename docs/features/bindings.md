@@ -74,7 +74,10 @@ Validating is the strict validator the write surface leans on
 `_is_encrypted` / `_authenticate` (returning a `TpdfAuthLevel` of `None`,
 `User` or `Owner`) / `_may_print` / `_set_fonts`, `tpdf_page_size` /
 `_text` / `_render`, `tpdf_string_free`, and `tpdf_bitmap_width` /
-`_height` / `_stride` / `_data` / `_free`.
+`_height` / `_stride` / `_data` / `_free`. `tpdf_document_open` copies the
+caller's bytes once, into the buffer the document keeps, so the caller may
+free theirs at once; Python's `Document(bytes)` and JavaScript's
+`new PdfDocument(bytes)` do the same.
 
 **The streaming seam** (Annex F): `tpdf_document_open_streaming`,
 which takes a `TpdfSourceVtable` of `len` / `read` / `free` plus an opaque

@@ -258,3 +258,20 @@ fn the_read_surface_adds_no_warnings() {
         "a read surface that mutates the thing it reads is not a read surface"
     );
 }
+
+/// An `Arc<[u8]>` handed to `Document::open` is kept as it is: the document's
+/// bytes are the caller's allocation, not a copy of it, so a caller that
+/// already holds its file in an `Arc` pays nothing to open it.
+#[test]
+fn an_arc_handed_to_open_is_not_copied() {
+    let mut builder = tinker_pdf::DocumentBuilder::new();
+    builder.add_page(200.0, 100.0, |page| {
+        page.raw(b"0 0 10 10 re f");
+    });
+    let bytes: std::sync::Arc<[u8]> = builder.finish().into();
+    let document = Document::open(std::sync::Arc::clone(&bytes)).expect("it opens");
+    assert!(
+        std::ptr::eq(document.cos().bytes().as_ptr(), bytes.as_ptr()),
+        "the document reads the caller's allocation"
+    );
+}
