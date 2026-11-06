@@ -2362,3 +2362,216 @@ compares decoded.
 | The cache raises an operation's peak | An image's samples are not held, and the operation drops it when it returns; MS-05's bands hold the cases it touches |
 | A hash collision merges two different streams | The hash only buckets; equality is decided by bytes |
 | Dropping cross-encoding merges grows files that compress one content twice | H-137 is the owner's, priced by P-03.5 before P-03.6 lands either answer |
+
+## P-04 — PNG and deflate
+
+*For [ROADMAP](../ROADMAP.md) row P-04.* The encoder is one fixed-Huffman
+block over the whole input, its match finder holds one `usize` per input byte
+(`prev`, `crates/tinker-pdf-filters/src/deflate.rs`), and `deflate` writes a
+stored copy of the whole input beside it to keep the smaller; the PNG writer
+filters the whole image into one buffer, compresses that, and copies the
+compressed stream into its chunks (`png/encode.rs`). This section fixes the
+encoder's two levels, the match finder's ring and how its positions are held,
+dynamic-Huffman blocks and each block's choice, the streaming interface and
+the window it keeps, the PNG writer's one pass and its chunks as the deflater
+emits them, A8 and the scratch bound, how the ratio level is held to level
+6's sizes, and which committed hashes the one change of written bytes moves.
+
+### Scope
+
+- **The two levels** (P-04.3, P-04.4): a ratio level for document writing
+  and a fast level for rendered output.
+- **The match finder's ring** (P-04.2), and the width of a position.
+- **Dynamic-Huffman blocks** (P-04.4), each written dynamic, fixed or stored.
+- **The streaming interface** (P-04.3), and the window it keeps.
+- **The PNG writer's one pass** and IDAT as the deflater emits (P-04.5).
+- **A8 and the scratch bound**, the level-6 size bound, and the written-bytes
+  hashes P-04.7 moves.
+
+### Non-goals
+
+- **Inflate**: P-12's.
+- **PNG palettes and interlace**: `png/encode.rs`'s header argues both away,
+  and nothing here reopens it.
+- **Threads**: P-15's. One deflater is one thread's.
+
+### Design
+
+#### The two levels
+
+Both are hash-chain LZ77 over the ring below, with the same hash, the same
+window and the same insertion of every position a match covers; they differ
+in how far a position searches and whether it looks one byte on. The numbers
+are zlib's published parameters for its levels 6 and 1, taken as numbers:
+no outside program runs in the tree or decides a build (ruling 13).
+
+| Level | Chain bound | Search ends at a match of | Lazy step | Used by |
+| --- | --- | --- | --- | --- |
+| **Ratio** | 128, a quarter of it once the match in hand reaches 8 | 128 | a match shorter than 16 is held while the next position searches, and the longer wins (a longer match one byte on is taken, and the byte before it is a literal); a three-byte match more than 4 096 back is dropped | document writing (`zlib_compress`, `deflate`), from P-04.7 |
+| **Fast** | 4 | 8 | none: greedy | rendered output (PNG), from P-04.5, as H-42's default |
+
+The chain bound is the hostile-input bound `MAX_CHAIN` already argues: the
+input is the caller's, and the bound caps a position's work whatever it is.
+
+#### The match finder's ring, and the width of a position
+
+`head` keeps, for each of the 32 768 hash buckets, the newest position that
+hashed there; **the ring** keeps, for each position, the position before it in
+its bucket, at slot `position mod 32 768`. Both are 32 768 entries, so the
+finder's scratch is the same for any input length (P-04.2), in place of
+`prev`'s one entry per input byte. A slot is overwritten only by the position
+a whole window later, and the walk stops at the first candidate further back
+than the window, which the window test already rejects — so every slot the
+walk reads holds the predecessor of the candidate it reached, and the ring
+visits the candidates `prev` visits, in the same order.
+
+**A position is a `u32` offset from a base**, which keeps the tables at
+256 KiB together. An offset never reaches `2^31`: when the next one would,
+the base moves forward by `2^31 − 32 768`, every entry of `head` and the ring
+has that subtracted, and an entry the move takes below zero — older than the
+window, so no walk could take it — becomes the empty sentinel `u32::MAX`,
+which no offset below `2^31` equals. The move runs once in two gigabytes of
+input, so a stream of any length never wraps, and the 64 Ki entries it
+rewrites cost nothing a byte. P-04.2 lands the ring over the whole input,
+where an offset is the input position until the first move.
+
+#### Dynamic-Huffman blocks, and each block's choice
+
+A block ends every 16 384 symbols — literals and matches — or at the end of
+the input, so its boundaries are a function of the input alone and never of
+how the input arrived (ruling 4). Each block is written whichever of three is
+smallest, counted in bits before any is written, ties going to the simpler:
+
+- **stored**, the block's bytes verbatim, five bytes a 65 535 and its
+  alignment — only when the input it covers is still in the window buffer;
+- **fixed**, RFC 1951 3.2.6's codes;
+- **dynamic** (3.2.7), code lengths for the literal/length and distance
+  alphabets from the block's symbol counts, limited to 15 bits by
+  package-merge, which is optimal under the limit and breaks ties by symbol
+  order; the code-length alphabet run-length coded with 16, 17 and 18 and
+  limited to 7 bits; the header's counts trimmed of trailing zeros.
+
+Fixed codes alone cannot reach level 6's sizes: the module's header puts
+dynamic tables at about ten per cent, so dynamic blocks and lazy matching
+carry the bound together (P-04.4).
+
+#### The streaming interface, and the window it keeps
+
+A `Deflater` at one level takes input in pieces and appends whole blocks to
+the caller's output as they complete: `write(input, out)` and
+`finish(out)`, the last block final and the stream aligned; a zlib wrapper
+around it keeps the header and a running Adler-32. It keeps a **window
+buffer of 2 × 32 KiB**: input is copied in at the scan's end, and when the
+scan comes within 262 bytes of the buffer's end — a match's reach forward
+plus a hash's three — the upper half slides down, so the 32 KiB a match may
+reach back is always held and no more than 64 KiB of input is ever retained.
+Positions are absolute offsets, so a slide moves the buffer and no table
+entry. Beside the window, the block's symbols, at most 16 384 of them; the
+output is the caller's. P-04.3 lands it with stored and fixed blocks, and
+P-04.4 adds dynamic ones.
+
+#### The PNG writer's one pass, and IDAT as the deflater emits
+
+A scanline's five filters are costed in one integer pass over the row: at
+each byte the five filtered values are formed from `a`, `b` and `c` and each
+added, as a signed magnitude, to its own sum — 12.8's minimum sum of absolute
+differences, as `cost_of` reads it — so the five sums are today's five costs,
+and the cheapest wins with today's tie rule, the first of None, Sub, Up,
+Average and Paeth. The row is then filtered once, with that filter, and its
+type byte and bytes are fed to a fast-level deflater. **IDAT is written as the
+deflater emits**: a chunk is opened in the output, the deflater's bytes are
+appended to it, and it is closed — its length written and its CRC-32 taken
+over its type and its data — when it reaches 64 KiB and at the end. The
+path holds three rows (the one above, the one read, the one filtered), the
+deflater's fixed state and the output: no whole filtered image, no whole
+compressed stream and no stored copy.
+
+#### A8, and the scratch bound
+
+`tinker-pdf-filters` counts, on the PNG path, the bytes of every buffer it
+sizes from the image rather than from a row or a constant — the filtered
+image, the finder's per-byte chain, the stored copy, the compressed stream
+and its copy into chunks — and the facade's PNG door (`Bitmap::to_png`, as
+MS-01's `Stats`) reports the most of them live at once. **A8** holds that to
+one image (`a8_the_png_path_holds_at_most_one_image_of_scratch`, P-04.5),
+which P-04.5 meets with none; and the row's scratch bound, the path's peak
+with its output at most 1.2 × the image's bytes, holds on MS-04's two PNG
+inputs, the 1240 × 1755 text page and the near-blank page, where three rows
+and the deflater's 384 KiB are a few per cent of the image. MS-05's band for
+rendering at 300 dpi to PNG holds the process's peak (P-04.8).
+
+#### The level-6 size bound
+
+Tier P holds the ratio level to 1.02 × the byte counts level 6's parameters
+give MS-04's page-like and photo-like inputs, exactly: a byte count on
+generated inputs. P-04.4's `crates/tinker-pdf/tests/deflate_size.rs` reaches
+MS-04's generators by path, as `tests/peak_memory.rs` does
+(`#[path = "../benches/support/inputs.rs"]`), builds `page_like()` and
+`photo_like()` — each asserting its own length and SHA-256 — deflates each at
+the ratio level through `tinker_pdf_filters`, and asserts
+`100 × len ≤ 102 × count` in integers against the two counts MS-04.10 commits
+beside the generators (H-112). No level-6 encoder runs: the counts are
+committed numbers.
+
+#### The written bytes P-04.7 moves
+
+Only P-04.7 moves written bytes: with document writing on the ratio level,
+every stream the writer deflates re-encodes and decodes to what it did. The
+committed hashes over written bytes that hold a stream the encoder wrote are
+two, both in `crates/tinker-pdf/tests/determinism.rs`, re-recorded once after
+H-138's review:
+
+| Hash | The encoder's stream in it |
+| --- | --- |
+| `the_synthesised_document_is_the_same_bytes_on_every_target` | the CBZ archive's RGBA PNG, decoded and re-compressed as samples and an `/SMask` (`png_embed`) |
+| `the_synthesised_fixed_document_is_the_same_bytes_on_every_target` | the XPS package's RGBA images, split into samples and an `/SMask` and re-compressed (`png_embed`) |
+
+The other committed hashes over written bytes hold none, and do not move:
+`the_synthesised_book_is_the_same_bytes_on_every_target`, whose one raster is
+an RGB PNG named only by the SVG cover this build refuses;
+`pdfa_writer.rs`'s `the_archival_fixture_hashes_the_same_on_every_target`,
+whose builder compresses nothing; and `form_transactions.rs`'s
+`a_successful_fill_produces_the_bytes_it_always_did`, whose saves are
+uncompressed. No committed hash is over PNG bytes: every PNG test compares
+decoded samples, so P-04.5's change of PNG bytes moves no hash.
+
+### Milestones
+
+1. **P-04.2: the ring.** Exit: `deflate.rs`
+   `the_match_finder_keeps_a_fixed_ring_whatever_the_input_length` and
+   `the_ring_finds_what_the_vector_found`; every round trip and every
+   `determinism.rs` writer fingerprint unchanged.
+2. **P-04.3: the streaming deflater, stored and fixed blocks, both levels.**
+   Exit: `the_stream_round_trips_however_it_is_fed`,
+   `the_window_is_all_the_deflater_keeps` (retained input at most the 64 KiB
+   window buffer), `lazy_matching_takes_the_longer_match_one_byte_on`;
+   `the_committed_baseline_agrees_with_the_tree` and
+   `every_operation_has_a_baseline_side_or_a_calibration` with the fast
+   level's two operations.
+3. **P-04.4: dynamic blocks.** Exit: `code_lengths_are_complete_and_at_most_fifteen`,
+   `a_skewed_block_is_smaller_dynamic_than_fixed`, and `deflate_size.rs`
+   `the_ratio_level_holds_level_six_size`; every round trip and
+   `png/encode/tests.rs` unchanged.
+4. **P-04.5: the PNG writer streams.** Exit: `encode/tests.rs`
+   `the_one_pass_cost_chooses_what_five_passes_chose`; `guards.rs`
+   `a8_the_png_path_holds_at_most_one_image_of_scratch` flips from owed;
+   `png_output.rs` and `png_input.rs`'s round trips pass.
+5. **P-04.6: the encoder's floors** in MS-02's paired job, with
+   `the_ratio_level_holds_level_six_size` and A8 green on every target.
+6. **P-04.7: document writing on the ratio level.** Exit: the two hashes
+   above re-recorded once after H-138, agreeing on linux, windows, macos and
+   `wasm32-wasip1`; every round trip, `stream_dedup.rs` and the `png_embed`
+   and `tiff_embed` tests pass.
+7. **P-04.8: the row's close** in MS-02's paired job, with MS-05's 300-dpi
+   render-to-PNG band at 60 MB.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| The ring visits a candidate `prev` did not, or in another order | `the_ring_finds_what_the_vector_found` compares bytes with the old finder, kept test-only until P-04.7 |
+| A position wraps over a long stream, or the sentinel aliases one | Offsets stay below `2^31` by the base's move, and the sentinel is `u32::MAX` |
+| Block boundaries follow the writes | Boundaries are symbol counts; `the_stream_round_trips_however_it_is_fed` compares the bytes of whole, byte-at-a-time and random-piece feeds |
+| A dynamic code is incomplete or longer than the format allows | `code_lengths_are_complete_and_at_most_fifteen` holds Kraft equality within the limit, and every block round-trips through this crate's inflate |
+| A fast-level PNG is larger than today's | P-04.5 records each PNG input's bytes at today's encoder and at both levels, and one larger than today's stops the step for H-42 |
+| Written bytes move unseen | Only P-04.7 moves them, the two hashes above with them, under H-138 |
