@@ -1132,6 +1132,11 @@ fn census_of_the_corpus_rewrite_subsets() {
 
     // Recorded against the corpora `corpus/corpora.lock` pins, so a shrinking
     // result cannot read as a passing one.
+    assert_eq!(
+        u32::try_from(synthesised.len()).unwrap_or(u32::MAX),
+        SYNTHESISED,
+        "documents synthesised from another format"
+    );
     assert_eq!(documents, DOCUMENTS, "PDFs that opened");
     assert_eq!(carriers, PROGRAM_CARRIERS, "documents carrying a program");
     assert_eq!(cut, CUT, "programs cut down");
@@ -1181,12 +1186,35 @@ fn census_of_the_corpus_rewrite_subsets() {
 // The pass took 93 seconds over the 2 180 documents that carry a program,
 // which is the number `docs/features/editing.md` means by "a full
 // interpretation of every page".
+//
+// **Every pin below is run 42171286639's figure**, `corpus.yml` dispatched on
+// `develop` over the same 5 605 files. Six moved from the 23 September
+// figures, each the way more reading moves it, and the rest held:
+//
+// - The subset walk reaches every tiling pattern's cell and soft mask's group
+//   a stream paints with (`walk` and `Unrun` in `src/subset.rs`) -- the run's
+//   "programs a tiling pattern's cell or a soft mask's group names in its own
+//   /Resources: 44", 24 of them no smaller and 19 shown by guess -- and the
+//   text font a `gs` selects: 49 programs left `ScopeNotWalked` (151 -> 102),
+//   22 for `SubsetNotSmaller` (3 406 -> 3 428), 21 for `CodeNotMapped`
+//   (581 -> 602) and 6 to be cut (5 882 -> 5 888 cut, 4 950 -> 4 944 whole).
+// - The six more cut take 100 773 fewer bytes out (401 630 511 ->
+//   401 529 738), and six more glyph counts are compared and /Length1
+//   declarations checked (5 882 -> 5 888, 5 481 -> 5 487).
+// - [`SYNTHESISED`] counts the two documents `Document::open` lays out from
+//   another format, which [`DOCUMENTS`] -- the PDFs that opened -- leaves out
+//   and the walk does not enter: safedocs/0000819.pdf and
+//   safedocs/0000920.pdf, HTML pages under a `.pdf` name.
+//
+// PROGRAM_CARRIERS (2 180), PROGRAM_BYTES_BEFORE (669 086 159), the CFF
+// census's six pins and the seven properties held on the run.
+const SYNTHESISED: u32 = 2;
 const DOCUMENTS: u32 = 5597;
 const PROGRAM_CARRIERS: u32 = 2180;
-const CUT: u32 = 5882;
-const LEFT_WHOLE: u32 = 4950;
-const REASON_COUNTS: [u32; 8] = [553, 3406, 581, 176, 151, 0, 10, 73];
+const CUT: u32 = 5888;
+const LEFT_WHOLE: u32 = 4944;
+const REASON_COUNTS: [u32; 8] = [553, 3428, 602, 176, 102, 0, 10, 73];
 const PROGRAM_BYTES_BEFORE: u64 = 669_086_159;
-const PROGRAM_BYTES_AFTER: u64 = 401_630_511;
-const GLYPH_COUNTS_COMPARED: u32 = 5882;
-const LENGTH1_CHECKED: u32 = 5481;
+const PROGRAM_BYTES_AFTER: u64 = 401_529_738;
+const GLYPH_COUNTS_COMPARED: u32 = 5888;
+const LENGTH1_CHECKED: u32 = 5487;
