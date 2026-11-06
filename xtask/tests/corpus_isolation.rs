@@ -199,9 +199,9 @@ fn a_file_that_aborts_and_a_file_that_hangs_both_reach_the_report() {
 /// A child that dies **after** printing part of a record, and exits zero.
 ///
 /// This is the case an exit code cannot catch and the sentinel can. The stub's
-/// `truncate` role prints everything up to `rendered` and stops; the process
-/// exits successfully, having said the file opened and has nine pages. A
-/// runner that trusted what it was given would record a pass.
+/// `truncate` role prints the document's lines and stops; the process exits
+/// successfully, having said the file opened and has nine pages. A runner
+/// that trusted what it was given would record a pass.
 #[test]
 fn a_child_that_stops_mid_record_is_a_crash_rather_than_a_pass() {
     let (dir, files) = synthetic_corpus("truncated", &[("aa-truncates", "truncate")]);
@@ -219,6 +219,45 @@ fn a_child_that_stops_mid_record_is_a_crash_rather_than_a_pass() {
         "an incomplete record is never a result: {:?}",
         results[0].outcome
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file whose record was cut still counts for what it said about the
+/// document before it drew anything (MS-20). The stub's `truncate` writes the
+/// pages and `cap jbig2` and stops: the corpus counts one `jbig2` file and the
+/// file as crashed, so a crash or a stall cannot read a second time as a
+/// scanner that stopped recognising what the file carries.
+#[test]
+fn a_file_whose_record_is_cut_still_counts_for_what_it_carries() {
+    let (dir, files) = synthetic_corpus("cut", &[("aa-good", "pass"), ("bb-truncates", "truncate")]);
+    let results = corpus::run_files(
+        &stub(),
+        &dir,
+        &files,
+        Duration::from_secs(5),
+        2,
+        &BTreeMap::new(),
+    );
+    let corpus = CorpusReport {
+        name: "synthetic".to_string(),
+        files: results,
+    };
+
+    let cut = corpus
+        .files
+        .iter()
+        .find(|result| result.path.contains("bb-truncates"))
+        .expect("the cut file is in the report");
+    assert!(
+        matches!(&cut.outcome, Outcome::Crashed(_)),
+        "a cut record is still a crash: {:?}",
+        cut.outcome
+    );
+    assert_eq!(cut.pages, 9, "its record says how many pages it claimed");
+    assert_eq!(cut.peak, None, "and it measured no peak");
+    assert_eq!(corpus.capabilities().get("jbig2"), Some(&1));
+    assert_eq!(corpus.outcomes()["crashed"], 1);
+    assert_eq!(corpus.outcomes()["passed"], 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

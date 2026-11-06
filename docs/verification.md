@@ -243,6 +243,15 @@ the last one announced. No bar runs it. The limit of the signal is worth stating
 than the stall window is silent for the same reason a hang is, so what the
 runner claims honestly is *made no observable progress for half its budget*.
 
+A record that never reached `done` — a child that crashed, timed out or
+stalled — keeps what the child wrote about the document before it drew
+anything: its `/Producer`, the pages it claims, the capabilities its objects
+need and its structure tree's counts, so the file still counts for what it
+carries and its record says how many pages it claimed. Only whole lines
+before `phase render` are read, since a kill can cut the last line in half.
+Its outcome, its missing peak and every verdict, span and join count stay a
+finished child's alone.
+
 Encrypted fixtures are opened with the passwords their upstreams state. `tpdf`
 tries the empty password and nothing else, which is right for a tool and wrong
 for a census, so [corpus/passwords.tsv](../corpus/passwords.tsv) carries a row

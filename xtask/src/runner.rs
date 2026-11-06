@@ -367,40 +367,7 @@ pub fn run_one(
     extra: &[String],
 ) -> FileResult {
     let started = Instant::now();
-    let empty = |outcome: Outcome, millis: u64| FileResult {
-        path: relative.to_string(),
-        outcome,
-        pages: 0,
-        rendered: 0,
-        warnings: BTreeMap::new(),
-        capabilities: BTreeSet::new(),
-        millis,
-        // A child that wrote no record timed nothing this runner keeps: a
-        // span from a child that did not finish is not a result, and the
-        // file is already counted as one that did not pass.
-        open_micros: None,
-        page_micros: Vec::new(),
-        strict: Strict::Ineligible("the child produced no record".to_string()),
-        // A child that wrote no record asked no relation, which is not the
-        // same as a relation that held: an empty map counts as neither
-        // compared nor held.
-        metamorphic: BTreeMap::new(),
-        bundled_faces: false,
-        cost: Cost::default(),
-        // A child that wrote no record measured no peak. `None` rather than a
-        // zero for the reason the field carries: this file is already counted
-        // as a crash, and a zero here would be a measurement.
-        peak: None,
-        marks: Vec::new(),
-        rss_file: None,
-        last: None,
-        // A child that wrote no record did not look at a structure tree, and
-        // `None` is the same answer as "there was none". They aggregate the
-        // same way, and the file is already counted as failed.
-        tagged: None,
-        // And it never read an `/Info` dictionary either.
-        producer: None,
-    };
+    let empty = |outcome: Outcome, millis: u64| unrecorded(relative, outcome, millis);
 
     // Both streams go to temporary files rather than to pipes. A pipe whose
     // reader is the same thread that waits for the child deadlocks the moment
@@ -511,32 +478,70 @@ pub fn run_one(
     let millis = started.elapsed().as_millis() as u64;
     let stdout = read_and_remove(&out_path);
     let stderr = read_and_remove(&err_path);
+    let ending = if killed {
+        Ending::Killed {
+            stalled: silent_for >= stall_window,
+        }
+    } else {
+        Ending::Exited
+    };
+    read_child(relative, &stdout, &stderr, millis, ending)
+}
 
-    let mut result = match parse_record(&stdout) {
+/// How a child the runner waited on ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ending {
+    /// It exited on its own, whatever its status.
+    Exited,
+    /// The runner killed it at the timeout; `stalled` when it had written
+    /// nothing for half its budget.
+    Killed { stalled: bool },
+}
+
+/// A file's result from what its child wrote and how the child ended.
+fn read_child(
+    relative: &str,
+    stdout: &str,
+    stderr: &str,
+    millis: u64,
+    ending: Ending,
+) -> FileResult {
+    let mut result = match parse_record(stdout) {
         Some(mut result) => {
             result.path = relative.to_string();
             result.millis = millis;
             result
         }
         None => {
-            let detail = last_meaningful_line(&stderr)
+            let detail = last_meaningful_line(stderr)
                 .unwrap_or_else(|| "the child wrote no complete record".to_string());
-            let mut empty = empty(Outcome::Crashed(detail), millis);
-            // **The producer survives an incomplete record, and nothing else
-            // does.** Everything else in a record is a *result* -- what the
-            // relations said, what the strict pass found -- and a result from
-            // a child that did not finish is not a result. `/Producer` is not:
-            // it is a property of the document, printed before any of the work
-            // that then failed to finish.
+            let mut cut = unrecorded(relative, Outcome::Crashed(detail), millis);
+            // **What the child said about the document survives an incomplete
+            // record, and nothing else does.** Everything else in a record is
+            // a *result* -- what the relations said, what the strict pass
+            // found, how long a page took, how much memory it all cost -- and
+            // a result from a child that did not finish is not a result. The
+            // lines the child writes before it draws anything are not: its
+            // `/Producer`, the pages it claims, the capabilities its objects
+            // need and its structure tree's counts are properties of the
+            // document, read before any of the work that then failed to
+            // finish.
             //
-            // Keeping it is the difference between a producer table that
-            // attributes failures and one that cannot. Measured on the
-            // production corpus's first run: eighteen files did not pass and
-            // all eighteen read `(unread: the file did not open)`, because
+            // Keeping them is the difference between a bar that counts what a
+            // corpus carries and one that reads a stall twice. Measured on
+            // the production corpus's first run: eighteen files did not pass
+            // and all eighteen read `(unread: the file did not open)`, because
             // fourteen of them were killed at the timeout with the producer
-            // line already in the capture file and thrown away here.
-            empty.producer = producer_line(&stdout);
-            empty
+            // line already in the capture file and thrown away here; and on
+            // `develop`'s dispatch 41024947516 one stalled file took its `cap
+            // iccbased` with it, so the capability axis read the stall again
+            // as a scanner that had stopped recognising profiles (MS-20).
+            let read = before_render(stdout);
+            cut.producer = read.producer;
+            cut.pages = read.pages;
+            cut.capabilities = read.capabilities;
+            cut.tagged = read.tagged;
+            cut
         }
     };
 
@@ -544,16 +549,56 @@ pub fn run_one(
     // before it died; it is a timeout all the same, because the run had
     // already decided not to wait for it and counting it as a pass would make
     // the timeout depend on scheduling luck.
-    if killed {
-        let (at, last) = where_it_stopped(&stdout);
+    if let Ending::Killed { stalled } = ending {
+        let (at, last) = where_it_stopped(stdout);
         result.last = last;
-        result.outcome = if silent_for >= stall_window {
+        result.outcome = if stalled {
             Outcome::Stalled { at }
         } else {
             Outcome::TimedOut { at }
         };
     }
     result
+}
+
+/// The result of a file whose child wrote no record this runner accepts:
+/// `outcome`, and nothing measured.
+fn unrecorded(relative: &str, outcome: Outcome, millis: u64) -> FileResult {
+    FileResult {
+        path: relative.to_string(),
+        outcome,
+        pages: 0,
+        rendered: 0,
+        warnings: BTreeMap::new(),
+        capabilities: BTreeSet::new(),
+        millis,
+        // A child that wrote no record timed nothing this runner keeps: a
+        // span from a child that did not finish is not a result, and the
+        // file is already counted as one that did not pass.
+        open_micros: None,
+        page_micros: Vec::new(),
+        strict: Strict::Ineligible("the child produced no record".to_string()),
+        // A child that wrote no record asked no relation, which is not the
+        // same as a relation that held: an empty map counts as neither
+        // compared nor held.
+        metamorphic: BTreeMap::new(),
+        bundled_faces: false,
+        cost: Cost::default(),
+        // A child that wrote no record measured no peak. `None` rather than a
+        // zero for the reason the field carries: this file is already counted
+        // as a crash, and a zero here would be a measurement.
+        peak: None,
+        marks: Vec::new(),
+        rss_file: None,
+        last: None,
+        // No structure tree read, which is the same answer as "there was
+        // none": they aggregate the same way, and the file is already counted
+        // as failed. A cut record that wrote its tree's line before it was
+        // cut keeps it (`before_render`).
+        tagged: None,
+        // And no `/Info` dictionary read either, short of the same line.
+        producer: None,
+    }
 }
 
 fn read_and_remove(path: &Path) -> String {
@@ -586,16 +631,84 @@ pub fn last_phase(text: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The `producer` line out of a record that may be incomplete.
+/// What a child wrote about the document before it drew anything: the lines
+/// [`read_child`] keeps from a record that never finished.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct BeforeRender {
+    /// `/Producer` as the document states it.
+    producer: Option<String>,
+    /// The pages the document claims, 0 where the child had not counted them.
+    pages: u32,
+    /// The capabilities its objects need.
+    capabilities: BTreeSet<String>,
+    /// Its structure tree's elements, content and objects; the join counts
+    /// a finished child adds are a finished child's alone.
+    tagged: Option<Tagged>,
+}
+
+/// The document's lines out of a record that may be incomplete: `producer`,
+/// `pages`, `cap` and `tagged tree`, as the child writes them before `phase
+/// render`.
 ///
 /// Scanned rather than parsed, because the record this reads is by definition
-/// one `parse_record` refused: there is no `done`, the last line may be half
-/// written, and every other key in it is untrustworthy for that reason.
-fn producer_line(text: &str) -> Option<String> {
-    text.lines()
-        .find_map(|line| line.strip_prefix("producer "))
-        .map(|rest| rest.trim().to_string())
-        .filter(|value| !value.is_empty())
+/// one `parse_record` refused: there is no `done`, and every key after the
+/// child started drawing is a result of work that did not finish. Only whole
+/// lines count, and only those before `phase render`: a kill can cut the last
+/// line in half, and `pages 1` read off a half-written `pages 12` would be a
+/// figure the document never stated.
+fn before_render(text: &str) -> BeforeRender {
+    let mut read = BeforeRender::default();
+    for line in text.split_inclusive('\n') {
+        let Some(line) = line.strip_suffix('\n') else {
+            break;
+        };
+        let line = line.trim_end_matches('\r');
+        if line == "phase render" {
+            break;
+        }
+        let Some((key, rest)) = line.split_once(' ') else {
+            continue;
+        };
+        match key {
+            "producer" => {
+                let value = rest.trim();
+                if !value.is_empty() {
+                    read.producer = Some(value.to_string());
+                }
+            }
+            "pages" => read.pages = rest.trim().parse().unwrap_or(0),
+            "cap" => {
+                read.capabilities.insert(rest.trim().to_string());
+            }
+            "tagged" => {
+                if let Some(fields) = rest.strip_prefix("tree ") {
+                    read.tagged = tree_line(fields);
+                }
+            }
+            _ => {}
+        }
+    }
+    read
+}
+
+/// A `tagged tree` line's counts, from the fields after `tree`: `None` for
+/// `no`, the document having no structure tree this engine reads.
+fn tree_line(fields: &str) -> Option<Tagged> {
+    let mut fields = fields.split_whitespace();
+    if fields.next() != Some("yes") {
+        return None;
+    }
+    let mut tree = Tagged::default();
+    while let (Some(field), Some(value)) = (fields.next(), fields.next()) {
+        let value = value.parse().unwrap_or(0);
+        match field {
+            "elements" => tree.elements = value,
+            "content" => tree.content = value,
+            "objects" => tree.objects = value,
+            _ => {}
+        }
+    }
+    Some(tree)
 }
 
 /// Where a killed child stopped: the last phase it announced, and the last
@@ -761,18 +874,11 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
                     // `tree no` leaves `tagged` at `None`, which is what a
                     // document with no structure tree means.
                     "tree" => {
-                        let mut fields = rest.split_whitespace();
-                        if fields.next() == Some("yes") {
+                        if let Some(tree) = tree_line(rest) {
                             let slot = tagged.get_or_insert_with(Tagged::default);
-                            while let (Some(field), Some(value)) = (fields.next(), fields.next()) {
-                                let value = value.parse().unwrap_or(0);
-                                match field {
-                                    "elements" => slot.elements = value,
-                                    "content" => slot.content = value,
-                                    "objects" => slot.objects = value,
-                                    _ => {}
-                                }
-                            }
+                            slot.elements = tree.elements;
+                            slot.content = tree.content;
+                            slot.objects = tree.objects;
                         }
                     }
                     // Only ever printed by a child that already printed
@@ -1453,14 +1559,94 @@ mod tests {
             "a record with no `done` is not a record"
         );
         assert_eq!(
-            producer_line(partial).as_deref(),
+            before_render(partial).producer.as_deref(),
             Some("Microsoft(R) PowerPoint(R) for Microsoft 365")
         );
         assert_eq!(
-            producer_line("probe 7\nopened no nope\n"),
+            before_render("probe 7\nopened no nope\n").producer,
             None,
             "a file that never opened states no producer"
         );
+    }
+
+    /// A record cut after the lines a child writes about the document keeps
+    /// them -- the pages it claims, its capabilities and its structure tree,
+    /// as `producer` survives -- and nothing that is a result of work it did
+    /// not finish: no peak, mark, span, join count, strict verdict or
+    /// relation (MS-20).
+    #[test]
+    fn a_cut_records_pages_capabilities_and_tree_survive_it() {
+        let cut = record(&[
+            "probe 7",
+            "file x.pdf",
+            "phase open",
+            "opened yes",
+            "producer Acrobat Distiller 9.0",
+            "pages 5",
+            "time open 1500",
+            "hwm open 21000000",
+            "cap iccbased",
+            "tagged tree yes elements 3 content 2 objects 0",
+            "hwm scan 22000000",
+            "phase render",
+            "page 1/5",
+            "time page 1 4875",
+            "tagged chars matched 4 orphans 1 unmarked 0",
+            "strict eligible",
+            "strict structure 1",
+            "meta rotate held 0 of 100",
+            "peak 23000000",
+        ]);
+        let result = read_child("x.pdf", &cut, "", 240_001, Ending::Killed { stalled: true });
+        assert_eq!(
+            result.outcome,
+            Outcome::Stalled {
+                at: "page 1/5".to_string()
+            }
+        );
+        assert_eq!(result.path, "x.pdf");
+        assert_eq!(result.millis, 240_001);
+        assert_eq!(result.pages, 5);
+        assert_eq!(
+            result.capabilities,
+            BTreeSet::from(["iccbased".to_string()])
+        );
+        assert_eq!(
+            result.tagged,
+            Some(Tagged {
+                elements: 3,
+                content: 2,
+                objects: 0,
+                ..Tagged::default()
+            }),
+            "the tree's counts, and none of the join's"
+        );
+        assert_eq!(result.producer.as_deref(), Some("Acrobat Distiller 9.0"));
+
+        assert_eq!(result.peak, None);
+        assert!(result.marks.is_empty());
+        assert_eq!(result.open_micros, None);
+        assert!(result.page_micros.is_empty());
+        assert_eq!(result.rendered, 0);
+        assert!(!result.strict.eligible());
+        assert!(result.metamorphic.is_empty());
+        assert_eq!(result.last.as_deref(), Some("peak 23000000"));
+
+        // The same record from a child that exited on its own is a crash
+        // that keeps the same lines.
+        let crashed = read_child("x.pdf", &cut, "", 7, Ending::Exited);
+        assert!(matches!(crashed.outcome, Outcome::Crashed(_)));
+        assert_eq!(crashed.pages, 5);
+        assert_eq!(crashed.capabilities, result.capabilities);
+        assert_eq!(crashed.last, None);
+
+        // A line the kill cut in half counts for nothing: `pages 1` off a
+        // half-written `pages 12` would be a figure the document never
+        // stated.
+        let half = before_render("probe 7\nopened yes\ncap jbig2\npages 1");
+        assert_eq!(half.pages, 0);
+        assert_eq!(half.capabilities, BTreeSet::from(["jbig2".to_string()]));
+        assert_eq!(before_render("probe 7\ntagged tree no\n").tagged, None);
     }
 
     /// A verdict this runner does not know is **not** a hold.

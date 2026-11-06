@@ -69,13 +69,16 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
-        // Dies mid-record: everything up to `rendered` and then nothing. This
-        // is the one an exit code cannot catch, because the process exits 0.
+        // Dies mid-record: the lines about the document -- its pages and a
+        // capability -- and then nothing. This is the one an exit code cannot
+        // catch, because the process exits 0, and the capability is the one
+        // a cut record keeps (MS-20).
         "truncate" => {
             println!("probe {}", xtask::runner::PROBE_VERSION);
             println!("file {file}");
             println!("opened yes");
             println!("pages 9");
+            println!("cap jbig2");
         }
         "unopenable" => {
             println!("probe {}", xtask::runner::PROBE_VERSION);
