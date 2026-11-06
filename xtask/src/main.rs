@@ -101,6 +101,12 @@ bindings-parity options:
                                          its children, its phase and its
                                          file-backed share, beside the
                                          committed band. Decides nothing
+  cargo xtask corpus-peaks --record BAR --revision REV RUN=REPORT...
+                                         write BAR's peak bands from three
+                                         dispatches' reports at REV, each the
+                                         largest of their maxima, and name the
+                                         runs; refuses other settings, another
+                                         denominator and a spread of 2 %
   cargo xtask bench-check --machine NAME [--sizes [report]]
                                          hold `cargo bench` to the committed baseline,
                                          printing each operation's throughput in

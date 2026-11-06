@@ -167,6 +167,23 @@ pub struct PeakBar {
     pub files: u64,
 }
 
+/// How many dispatches set a bar's peak bands: three runs of `corpus.yml` on
+/// `develop` at one revision, read by `corpus-peaks --record` (MS-19).
+///
+/// A band from one run would set the bar on whichever machine that run landed
+/// on, the reason a time figure is five runs' and never one's.
+pub const PEAK_RUNS: usize = 3;
+
+/// The dispatches a bar's peak bands were read from, at its top beside
+/// `time_runs` and in the shape of that block's `dispatches` (MS-19).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeakRuns {
+    /// The revision of `develop` the runs ran at.
+    pub revision: String,
+    /// Each run's dispatch and the host it landed on.
+    pub dispatches: Vec<Dispatch>,
+}
+
 /// The structure-tree bar for one corpus.
 ///
 /// Four counts, compared three ways, and none of them a stored rate — see
@@ -423,6 +440,9 @@ pub struct Ratchet {
     /// `None` is an improvement rather than a refusal, for [`Bar::peak`]'s
     /// reason, and it is what keeps `SCHEMA` at 2.
     pub time_runs: Option<TimeRuns>,
+    /// The dispatches its peak bands were read from, or `None` in a bar whose
+    /// bands predate the block, which reads as it did.
+    pub peak_runs: Option<PeakRuns>,
 }
 
 impl Ratchet {
@@ -1016,6 +1036,54 @@ pub fn carry_times(committed: &Json, recorded: Json) -> Json {
     Json::Object(top)
 }
 
+/// The bar `--record` writes, with `committed`'s peak bands and the runs they
+/// were read from carried over unchanged, and none of `recorded`'s own
+/// (MS-19).
+///
+/// A band from one run would set the bar on whichever machine that run landed
+/// on, so a run writes none: each corpus's `peak` and the bar's `peak_runs`
+/// are the dispatches' `corpus-peaks --record` read them from, and stay until
+/// it reads them again. A corpus the committed bar holds no band for gets
+/// none, and one the run no longer has takes its band with it.
+#[must_use]
+pub fn carry_peaks(committed: Option<&Json>, recorded: Json) -> Json {
+    let Json::Object(mut top) = recorded else {
+        return recorded;
+    };
+    top.remove("peak_runs");
+    if let Some(runs) = committed.and_then(|committed| committed.get("peak_runs")) {
+        top.insert("peak_runs".to_string(), runs.clone());
+    }
+    let bands: BTreeMap<&str, &Json> = committed
+        .and_then(|committed| committed.get("corpora"))
+        .and_then(Json::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|corpus| Some((corpus.get("name")?.as_str()?, corpus.get("peak")?)))
+        .collect();
+    if let Some(Json::Array(corpora)) = top.get_mut("corpora") {
+        for corpus in corpora {
+            let Json::Object(fields) = corpus else {
+                continue;
+            };
+            let band = fields
+                .get("name")
+                .and_then(Json::as_str)
+                .and_then(|name| bands.get(name))
+                .map(|band| (*band).clone());
+            match band {
+                Some(band) => {
+                    fields.insert("peak".to_string(), band);
+                }
+                None => {
+                    fields.remove("peak");
+                }
+            }
+        }
+    }
+    Json::Object(top)
+}
+
 /// Reads a bar's `time_runs`.
 fn parse_time_runs(object: &Json) -> Result<TimeRuns, String> {
     let dpi = match object.get("dpi") {
@@ -1033,18 +1101,7 @@ fn parse_time_runs(object: &Json) -> Result<TimeRuns, String> {
             .map(str::to_string)
             .ok_or_else(|| format!("`time_runs` has no `{key}`"))
     };
-    let dispatches = object
-        .get("dispatches")
-        .and_then(Json::as_array)
-        .ok_or("`time_runs` has no `dispatches` array")?
-        .iter()
-        .map(|dispatch| {
-            Ok(Dispatch {
-                id: text(dispatch, "id")?,
-                host: text(dispatch, "host")?,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let dispatches = parse_dispatches(object, "time_runs")?;
     if dispatches.len() != TIME_RUNS {
         return Err(format!(
             "`time_runs` names {} dispatches, and a band is set from {TIME_RUNS}",
@@ -1056,6 +1113,58 @@ fn parse_time_runs(object: &Json) -> Result<TimeRuns, String> {
         jobs,
         revision: text(object, "revision")?,
         recorded: text(object, "recorded")?,
+        dispatches,
+    })
+}
+
+/// Reads a block's `dispatches`, each run's id and the host it landed on.
+fn parse_dispatches(object: &Json, block: &str) -> Result<Vec<Dispatch>, String> {
+    let text = |json: &Json, key: &str| -> Result<String, String> {
+        json.get(key)
+            .and_then(Json::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("`{block}` has no `{key}`"))
+    };
+    object
+        .get("dispatches")
+        .and_then(Json::as_array)
+        .ok_or_else(|| format!("`{block}` has no `dispatches` array"))?
+        .iter()
+        .map(|dispatch| {
+            Ok(Dispatch {
+                id: text(dispatch, "id")?,
+                host: text(dispatch, "host")?,
+            })
+        })
+        .collect()
+}
+
+/// Reads a bar's `peak_runs`: the revision and the [`PEAK_RUNS`] dispatches
+/// its peak bands were read from, none of them twice.
+fn parse_peak_runs(object: &Json) -> Result<PeakRuns, String> {
+    let revision = object
+        .get("revision")
+        .and_then(Json::as_str)
+        .filter(|revision| !revision.is_empty())
+        .ok_or("`peak_runs` has no `revision`")?
+        .to_string();
+    let dispatches = parse_dispatches(object, "peak_runs")?;
+    if dispatches.len() != PEAK_RUNS {
+        return Err(format!(
+            "`peak_runs` names {} dispatches, and a band is read from {PEAK_RUNS}",
+            dispatches.len()
+        ));
+    }
+    for (index, dispatch) in dispatches.iter().enumerate() {
+        if dispatches[..index]
+            .iter()
+            .any(|other| other.id == dispatch.id)
+        {
+            return Err(format!("`peak_runs` names dispatch {} twice", dispatch.id));
+        }
+    }
+    Ok(PeakRuns {
+        revision,
         dispatches,
     })
 }
@@ -1144,6 +1253,11 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
     let time_runs = match json.get("time_runs") {
         None => None,
         Some(object) => Some(parse_time_runs(object)?),
+    };
+    // Absent in a bar whose peak bands predate it, which reads as it did.
+    let peak_runs = match json.get("peak_runs") {
+        None => None,
+        Some(object) => Some(parse_peak_runs(object)?),
     };
 
     let entries = json
@@ -1347,6 +1461,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
         complete,
         fonts,
         time_runs,
+        peak_runs,
     })
 }
 
@@ -1597,6 +1712,7 @@ mod tests {
             complete: true,
             fonts: "none".to_string(),
             time_runs: None,
+            peak_runs: None,
         }
     }
 
@@ -2151,6 +2267,51 @@ mod tests {
             "tagged":{"files":6,"elements":0,"matched":0,"orphans":0}}]}"#;
         let error = parse(text).expect_err("a floor of zero is not a floor");
         assert!(error.contains("no structure elements at all"), "{error}");
+    }
+
+    /// A bar's `peak_runs` names the dispatches its bands were read from: read
+    /// where it is, absent where the bands predate it, and refused where it
+    /// names other than three runs, or one run twice.
+    #[test]
+    fn a_bar_parses_with_peak_runs_and_without() {
+        let text = |runs: &str| {
+            format!(
+                r#"{{"schema":2,"complete":true,"settings":{{"fonts":"none"}},{runs}
+                "corpora":[{{"name":"verapdf","total":10,"passed":10,"degraded":0,
+                "strict_eligible":10,"strict_clean":10,
+                "peak":{{"bytes":200000000,"files":10}}}}]}}"#
+            )
+        };
+        let block = |ids: &[&str]| {
+            let dispatches: Vec<String> = ids
+                .iter()
+                .map(|id| format!(r#"{{"id":"{id}","host":"Example CPU x 4"}}"#))
+                .collect();
+            format!(
+                r#""peak_runs":{{"revision":"0123abcd","dispatches":[{}]}},"#,
+                dispatches.join(",")
+            )
+        };
+
+        let without = parse(&text("")).expect("a bar whose bands predate their runs");
+        assert_eq!(without.peak_runs, None);
+        assert!(without.bars[0].peak.is_some());
+
+        let with = parse(&text(&block(&["1", "2", "3"]))).expect("a bar that names its runs");
+        let runs = with.peak_runs.expect("its runs");
+        assert_eq!(runs.revision, "0123abcd");
+        assert_eq!(
+            runs.dispatches
+                .iter()
+                .map(|dispatch| dispatch.id.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "2", "3"]
+        );
+
+        let two = parse(&text(&block(&["1", "2"]))).expect_err("two runs");
+        assert!(two.contains("names 2 dispatches"), "{two}");
+        let twice = parse(&text(&block(&["1", "2", "1"]))).expect_err("one run twice");
+        assert!(twice.contains("names dispatch 1 twice"), "{twice}");
     }
 
     /// A run where the given files each reached the given peak.

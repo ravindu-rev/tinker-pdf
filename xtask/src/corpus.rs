@@ -538,24 +538,22 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let ratchet_path = root.join(bar_path);
     if args.record {
         let note = ratchet_note(&run);
-        let mut recorded = run.to_ratchet_json(&note);
-        // **The time figures are five runs', never this one's** (MS-07). The
-        // committed bar's are carried over unchanged, so a bar that cannot be
-        // read is refused rather than overwritten: overwriting it would drop
-        // five dispatches' measurements without a word.
-        match std::fs::read_to_string(&ratchet_path) {
-            Ok(text) => {
-                let committed = crate::json::parse(&text).map_err(|e| {
-                    format!(
-                        "{bar_path}: {e}; the time figures it holds cannot be carried over, \
-                         so nothing was recorded"
-                    )
-                })?;
-                recorded = ratchet::carry_times(&committed, recorded);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // **The time figures are five runs' and the peak bands three's, never
+        // this one's** (MS-07, MS-19). The committed bar's are carried over
+        // unchanged, so a bar that cannot be read is refused rather than
+        // overwritten: overwriting it would drop the dispatches' measurements
+        // without a word.
+        let committed = match std::fs::read_to_string(&ratchet_path) {
+            Ok(text) => Some(crate::json::parse(&text).map_err(|e| {
+                format!(
+                    "{bar_path}: {e}; the time figures and peak bands it holds cannot be \
+                     carried over, so nothing was recorded"
+                )
+            })?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(format!("{}: {e}", ratchet_path.display())),
-        }
+        };
+        let recorded = recorded_bar(run.to_ratchet_json(&note), committed.as_ref());
         std::fs::write(&ratchet_path, recorded.to_pretty())
             .map_err(|e| format!("{}: {e}", ratchet_path.display()))?;
         println!("recorded {}", ratchet_path.display());
@@ -610,6 +608,20 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The bar `--record` writes from a run's own, `recorded`: its time figures
+/// and peak bands are `committed`'s, carried over unchanged, since each is
+/// several dispatches' and never one run's (MS-07, MS-19).
+fn recorded_bar(
+    recorded: crate::json::Json,
+    committed: Option<&crate::json::Json>,
+) -> crate::json::Json {
+    let recorded = match committed {
+        Some(committed) => ratchet::carry_times(committed, recorded),
+        None => recorded,
+    };
+    ratchet::carry_peaks(committed, recorded)
 }
 
 /// The machine a run is measured on, from the text of `/proc/cpuinfo`: its
@@ -1004,6 +1016,70 @@ mod tests {
 
     /// The host is the first model name and the count of logical CPUs, and
     /// nothing where the file names no model.
+    /// `--record` writes no peak from its own run (MS-19): each corpus's band
+    /// and the runs it was read from are the committed bar's, a corpus the
+    /// committed bar holds no band for gets none, the time figures still carry
+    /// over, and with no committed bar the run's own peaks are not written
+    /// either.
+    #[test]
+    fn a_recorded_bar_keeps_the_committed_peak_and_its_runs() {
+        use crate::json::{self, Json};
+
+        let committed = json::parse(
+            r#"{"schema": 2, "complete": true,
+                "settings": {"dpi": 72, "fonts": "none", "timeout_seconds": 180},
+                "peak_runs": {"revision": "0123abcd", "dispatches": [
+                  {"id": "1", "host": "h"}, {"id": "2", "host": "h"},
+                  {"id": "3", "host": "h"}]},
+                "corpora": [
+                  {"name": "pdfjs", "peak": {"bytes": 900, "files": 10}},
+                  {"name": "qpdf", "time": {"total": 5, "runs": []}}]}"#,
+        )
+        .expect("the committed bar");
+        let recorded = json::parse(
+            r#"{"schema": 2, "complete": true,
+                "settings": {"dpi": 72, "fonts": "none", "timeout_seconds": 180},
+                "corpora": [
+                  {"name": "pdfjs", "total": 10, "peak": {"bytes": 1200, "files": 10}},
+                  {"name": "qpdf", "total": 5, "peak": {"bytes": 50, "files": 5}}]}"#,
+        )
+        .expect("the run's own bar");
+        let corpus = |bar: &Json, name: &str| -> Json {
+            bar.get("corpora")
+                .and_then(Json::as_array)
+                .and_then(|corpora| {
+                    corpora
+                        .iter()
+                        .find(|corpus| corpus.get("name").and_then(Json::as_str) == Some(name))
+                })
+                .cloned()
+                .unwrap_or_else(|| panic!("{name} is in the bar"))
+        };
+
+        let bar = recorded_bar(recorded.clone(), Some(&committed));
+        assert_eq!(
+            corpus(&bar, "pdfjs").get("peak"),
+            corpus(&committed, "pdfjs").get("peak"),
+            "the committed band, not the run's"
+        );
+        assert_eq!(
+            corpus(&bar, "qpdf").get("peak"),
+            None,
+            "no band from one run"
+        );
+        assert_eq!(
+            corpus(&bar, "qpdf").get("time"),
+            corpus(&committed, "qpdf").get("time")
+        );
+        assert_eq!(bar.get("peak_runs"), committed.get("peak_runs"));
+        assert_eq!(corpus(&bar, "pdfjs").get("total"), Some(&Json::count(10)));
+
+        let first = recorded_bar(recorded, None);
+        assert_eq!(first.get("peak_runs"), None);
+        assert_eq!(corpus(&first, "pdfjs").get("peak"), None);
+        assert_eq!(corpus(&first, "qpdf").get("peak"), None);
+    }
+
     #[test]
     fn the_host_is_read_from_cpuinfo() {
         let cpuinfo = "processor\t: 0\nvendor_id\t: AuthenticAMD\n\

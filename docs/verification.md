@@ -357,6 +357,18 @@ over unchanged; `--check` holds each figure to the band those five set, refuses
 a run at another dpi or job count, and reads a bar without them as new.
 [design/performance.md](design/performance.md) has the band rule.
 
+**A peak band is three dispatches'.** `cargo xtask corpus-peaks --record BAR
+--revision REV RUN=REPORT...` writes each corpus's `peak` in a bar from the
+reports of three `corpus.yml` dispatches on `develop` at one revision: the
+largest of their maxima, over the children they agree reported one, with the
+runs, the hosts they landed on and their revision in the bar's `peak_runs`.
+It refuses, each by name, runs under other settings than the bar's, runs that
+disagree on a corpus's children or report fewer than its band does, and maxima
+that spread by `PEAK_TOLERANCE_PERCENT` or more; such a spread or denominator
+is the owner's to judge (H-78), never banded wider. `corpus-run --record`
+writes no peak from its own run and carries each committed band and
+`peak_runs` over unchanged, as it does the time figures.
+
 **Where a peak is reached.** On Linux each child writes the kernel's
 high-water mark as each phase of its work ends — `open`, `scan`, `render`,
 `strict`, `metamorphic` — and, before its `peak`, the file-backed part of its
