@@ -590,6 +590,59 @@ fn every_inline_image_is_decoded() {
     assert_eq!(counted(&page), expected);
 }
 
+/// A page that sets one soft-masked graphics state before each of `fills`
+/// rectangles, the mask a luminosity group that paints a white square.
+fn masked_fills(fills: usize) -> Vec<u8> {
+    let mut content = String::new();
+    for at in 0..fills {
+        let x = (at % 20) as f64 * 10.0;
+        let y = (at / 20) as f64 * 10.0;
+        content.push_str(&format!("/GS1 gs 0 0 1 rg {x} {y} 8 8 re f\n"));
+    }
+    fixture(
+        "/ExtGState << /GS1 << /Type /ExtGState /SMask << /Type /Mask /S /Luminosity /G 8 0 R >> >> >>",
+        "",
+        &content,
+        vec![stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 200 100] \
+             /Group << /S /Transparency /CS /DeviceGray >>",
+            b"1 g 0 0 200 100 re f",
+        )],
+    )
+}
+
+/// **The shape that stalled a page renders in work linear in it** (MS-20): a
+/// graphics state whose soft mask is a group, set at every one of a page's
+/// fills, has its group decoded once, at the first `gs` that names it, and
+/// not again, so four times the fills decode what one time does — where every
+/// `gs` decoded the group once, and the web-crawl corpus's page that set one
+/// at each of its hundreds of thousands of paths never finished. The page
+/// renders with ink where it fills.
+#[test]
+fn the_shape_that_stalled_a_page_renders_in_work_linear_in_it() {
+    let measure = |fills: usize| {
+        let (document, index) = first_page(masked_fills(fills));
+        let page = document.page(index).expect("a page");
+        let bitmap = page.render(&asking());
+        let stats = bitmap.stats.expect("asked");
+        // The first rectangle, at (0, 0) to (8, 8) in points: its centre,
+        // four points up from the page's foot, is filled.
+        let (x, y) = (4, bitmap.height - 4);
+        let at = (y as usize) * bitmap.stride + (x as usize) * bitmap.components();
+        let ink = bitmap.data[at..at + 3] != [255, 255, 255];
+        (stats, ink)
+    };
+    let (once, ink) = measure(20);
+    assert!(ink, "the masked fill paints");
+    assert_eq!(once.most_decodes_of_one_stream, 1, "{once:?}");
+    // The content and the mask's group, each once.
+    assert_eq!(once.streams_decoded, 2, "{once:?}");
+    let (four, _) = measure(80);
+    assert_eq!(four.streams_decoded, once.streams_decoded, "{four:?}");
+    assert_eq!(four.most_decodes_of_one_stream, 1, "{four:?}");
+    assert!(four.work() <= 4 * once.work(), "{four:?} against {once:?}");
+}
+
 /// A tiling pattern's cell is drawn by a renderer of its own over a scope of
 /// its own, and both count into the page's tally.
 #[test]

@@ -311,7 +311,13 @@ masked once and a clip set under a mask stops masking at `/SMask /None`
 twelve separable and the four non-separable. Group buffers are a budget, not
 just a depth: nesting caps at 16 and the page as a whole at 2 000 buffers,
 because a soft mask that opens further groups branches rather than descends
-— past the budget the group is declined and reported once.
+— past the budget the group is declined and reported once. A graphics state
+is read once a name in its scope, at the first `gs` that sets it — its
+functions and its soft mask's group, whose content is decoded then — and
+every later `gs` of the name takes that reading, the colour spaces
+it repaired reported again, so a page that sets one masked state before each
+of its paths decodes the mask's group once (`Caches::states`, up to 4 096
+names a scope).
 
 **Text render modes** (9.3.6). All eight: fill, stroke and clip are decided
 independently, so mode 1 strokes rather than fills and modes 4–7 accumulate

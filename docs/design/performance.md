@@ -2211,7 +2211,7 @@ outcome of H-137 leaves a save merging, and what A5 and A6 count.
 | --- | --- | --- | --- | --- |
 | A font program | `PageResources::program` keeps it per scope (`Caches::programs`, `crates/tinker-pdf/src/resources.rs`); `program_for` decodes it for each scope that draws a glyph of it | a subset save over *n* pages drawing one face; a render or text of a page whose forms draw the page's fonts | one a scope: *n* over the save's pages, and once more when the cut reads it | P-03.2 |
 | A font's CMaps (`/ToUnicode`, an embedded `/Encoding` CMap and its `usecmap` parents) | `read_cmap` (`crates/tinker-pdf-cos/src/font.rs`), for each font each scope reads | text or a render of a page whose forms use its fonts; a subset save, a scope a page | one a scope | P-03.2 |
-| A form's content | `PageResources::form_from` (`resources.rs`), on every `Do` and every soft mask's `/G` | a render or text of a page showing one form *k* times | *k* | P-03.2 |
+| A form's content | `PageResources::form_from` (`resources.rs`), on every `Do`, and for a soft mask's `/G` once for each name a scope's `gs` sets it by (`Caches::states`) | a render or text of a page showing one form *k* times | *k* | P-03.2 |
 | A Type 3 glyph procedure | `PageResources::type3_glyph` (`resources.rs`), for every glyph shown | a render of a page showing one Type 3 glyph *g* times | *g*, which P-02.4 leaves here | P-03.2 |
 | A deduplication candidate | `dedup::deduplicate` (`crates/tinker-pdf-cos/src/dedup.rs`): once for its digest, and once more for each comparison in a bucket of two or more, every round | a rewrite with `deduplicate_streams`, which every merge is | two a round in a shared bucket | P-03.4 |
 

@@ -120,7 +120,27 @@ struct Caches {
     /// object it spells packed as `num << 16 | gen`, read on the first
     /// question about each. `None` is cached too.
     reserved_fonts: Mutex<HashMap<u64, Option<Arc<cos_font::Font>>>>,
+    /// Each graphics state a `gs` names in this scope, read on the first
+    /// `gs` of the name: its keys, its functions and its soft mask's group,
+    /// whose content is decoded then and not again. A page that sets one
+    /// masked state before each of a hundred thousand paths decoded the
+    /// mask's group at every one of them and stopped making progress
+    /// (MS-20). What reading it repaired is kept beside it and said again at
+    /// each `gs`, as [`CachedImage`] says an image's. `None` is cached too.
+    states: Mutex<HashMap<Vec<u8>, CachedState>>,
 }
+
+/// A graphics state as [`Caches::states`] keeps it.
+struct CachedState {
+    state: Option<Arc<tinker_pdf_content::StateParameters>>,
+    /// The colour spaces reading it repaired, said again at each `gs`.
+    repaired_spaces: Vec<(String, String)>,
+}
+
+/// The most names [`Caches::states`] keeps. A resource table holds what it
+/// holds, so an honest scope never reaches it; past it each `gs` reads its
+/// state again, as before the cache.
+const MAX_CACHED_STATES: usize = 1 << 12;
 
 /// What a scope's `/ColorSpace` subdictionary puts in for each device space
 /// (8.6.5.6): its `/DefaultGray`, `/DefaultRGB` and `/DefaultCMYK`, read as
@@ -2059,20 +2079,29 @@ impl FontSource for PageResources {
     }
 
     fn ext_g_state(&self, name: &[u8]) -> Option<Arc<tinker_pdf_content::StateParameters>> {
-        // The table and the entry are read where they lie, as
-        // `with_property_list` reads them, and the entry's keys once each:
-        // a `gs` before every text object costs the keys its dictionary
-        // writes, with no copy of a table written inline.
-        let resources = self.resources.as_ref()?;
-        let table = resources.get(self.doc.intern(b"ExtGState"))?;
-        read_resolved(&self.doc, table, |table| {
-            let entry = table.as_dict()?.get(self.doc.intern(name))?;
-            read_resolved(&self.doc, entry, |entry| {
-                entry
-                    .as_dict()
-                    .map(|dict| Arc::new(self.state_parameters(dict, name)))
-            })
-        })
+        // Read once a name in this scope ([`Caches::states`]), and every `gs`
+        // of the name handed the same value, as the trait asks.
+        if let Ok(cache) = self.caches.states.lock() {
+            if let Some(hit) = cache.get(name) {
+                self.note_repaired_spaces(&hit.repaired_spaces);
+                return hit.state.clone();
+            }
+        }
+        let before = self.repaired_spaces().len();
+        let state = self.read_ext_g_state(name);
+        let repaired_spaces = self.repaired_spaces().into_iter().skip(before).collect();
+        if let Ok(mut cache) = self.caches.states.lock() {
+            if cache.len() < MAX_CACHED_STATES {
+                cache.insert(
+                    name.to_vec(),
+                    CachedState {
+                        state: state.clone(),
+                        repaired_spaces,
+                    },
+                );
+            }
+        }
+        state
     }
 
     fn optional_content(&self, name: &[u8]) -> Option<Layer> {
@@ -2450,6 +2479,22 @@ impl PageResources {
             .collect();
         (!names.is_empty())
             .then(|| tinker_pdf_content::BlendMode::from_names(names.iter().map(Vec::as_slice)))
+    }
+
+    /// The graphics state `name` selects, read from where it lies: the table
+    /// and the entry as `with_property_list` reads them, and the entry's keys
+    /// once each, with no copy of a table written inline.
+    fn read_ext_g_state(&self, name: &[u8]) -> Option<Arc<tinker_pdf_content::StateParameters>> {
+        let resources = self.resources.as_ref()?;
+        let table = resources.get(self.doc.intern(b"ExtGState"))?;
+        read_resolved(&self.doc, table, |table| {
+            let entry = table.as_dict()?.get(self.doc.intern(name))?;
+            read_resolved(&self.doc, entry, |entry| {
+                entry
+                    .as_dict()
+                    .map(|dict| Arc::new(self.state_parameters(dict, name)))
+            })
+        })
     }
 
     /// `/SMask` (11.6.5.1), as the dictionary `gs` names `name` writes it.
