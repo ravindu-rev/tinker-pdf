@@ -336,7 +336,10 @@ the header, the cross-reference sections, the offsets, the stream extents, the
 trailer — because a rewrite copies the page tree, the annotations and the
 resource dictionaries from its source, and a backwards `/Rect` in somebody's
 invoice belongs to the invoice. A file this engine could not read cleanly
-is not eligible and is counted as neither. What the semantic tier finds in the
+is not eligible and is counted as neither, and its record names the repairs
+that made it so, each kind once with the object it was first raised on: a
+leniency a page's drawing needed counts as surely as one the open needed,
+since objects load lazily. What the semantic tier finds in the
 same rewrites — outline counts that disagree with their own trees, backwards
 annotation rectangles, malformed `/W` arrays — is listed per file and per rule
 in the run's `corpus/report.json`, and belongs to the documents. The pass sees

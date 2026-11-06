@@ -3252,7 +3252,16 @@ fn cleanly_read(doc: &Document) -> Option<&'static str> {
 
 fn strict(out: &mut dyn std::io::Write, doc: &Document) {
     if let Some(why) = cleanly_read(doc) {
-        say!(out, "strict ineligible {why}");
+        // With the repairs that made it so: objects load lazily, so a
+        // leniency a page's drawing needed is a reason as much as one the open
+        // needed, and a file that stops being eligible names what it started
+        // needing rather than only that it did.
+        let warnings = doc.warnings();
+        if warnings.is_empty() {
+            say!(out, "strict ineligible {why}");
+        } else {
+            say!(out, "strict ineligible {why}: {}", repairs(&warnings));
+        }
         return;
     }
 
@@ -3326,6 +3335,34 @@ fn one_line(text: &str) -> String {
 ///
 /// The variant name only: the payloads are byte offsets and object numbers,
 /// which differ per file and would make every count one.
+/// The repairs a document's warnings name, for a reason line: each kind once,
+/// in the order it first arrived, with the object it was first raised on, and
+/// at most [`REPAIRS_NAMED`] of them.
+fn repairs(warnings: &[tinker_pdf::Warning]) -> String {
+    let mut named: Vec<(String, Option<ObjRef>)> = Vec::new();
+    for warning in warnings {
+        let kind = cos_warning_label(warning);
+        if !named.iter().any(|(known, _)| *known == kind) {
+            named.push((kind, warning.object));
+        }
+    }
+    let mut shown: Vec<String> = named
+        .iter()
+        .take(REPAIRS_NAMED)
+        .map(|(kind, object)| match object {
+            Some(object) => format!("{kind} in object {} {}", object.num, object.gen),
+            None => kind.clone(),
+        })
+        .collect();
+    if named.len() > REPAIRS_NAMED {
+        shown.push(format!("{} more", named.len() - REPAIRS_NAMED));
+    }
+    shown.join(", ")
+}
+
+/// How many kinds of repair a reason line names before it counts the rest.
+const REPAIRS_NAMED: usize = 4;
+
 fn cos_warning_label(warning: &tinker_pdf::Warning) -> String {
     let debug = format!("{:?}", warning.kind);
     debug
@@ -4755,6 +4792,73 @@ trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n110\n%%EOF\n"
         let entry = table + 9 + 2 * 20;
         bytes[entry..entry + 10].copy_from_slice(b"0000000004");
         bytes
+    }
+
+    /// A file the strict pass declines says which repairs it needed, each
+    /// kind once with the object it was raised on: a file that stops being
+    /// eligible between two revisions then names what it started needing.
+    #[test]
+    fn an_ineligible_file_names_the_repairs_it_needed() {
+        let doc = Document::open(damaged()).expect("the table is repaired");
+        let warnings = doc.warnings();
+        assert!(!warnings.is_empty(), "the patched entry is a repair");
+        let mut out = Vec::new();
+        strict(&mut out, &doc);
+        let text = String::from_utf8(out).expect("utf-8");
+        let line = text.lines().next().expect("a line");
+        assert!(line.starts_with("strict ineligible the file "), "{line}");
+        let (_, named) = line.split_once(": ").expect("the repairs named");
+        let mut first: Vec<(String, Option<ObjRef>)> = Vec::new();
+        for warning in &warnings {
+            let kind = cos_warning_label(warning);
+            if !first.iter().any(|(known, _)| *known == kind) {
+                first.push((kind, warning.object));
+            }
+        }
+        for (kind, object) in first.iter().take(REPAIRS_NAMED) {
+            let expected = match object {
+                Some(object) => format!("{kind} in object {} {}", object.num, object.gen),
+                None => kind.clone(),
+            };
+            assert!(named.contains(&expected), "{expected} in {line}");
+        }
+    }
+
+    /// Past four kinds, the rest are counted rather than named.
+    #[test]
+    fn a_reason_names_four_repairs_and_counts_the_rest() {
+        let warnings: Vec<tinker_pdf::Warning> = Document::open(damaged())
+            .expect("it opens")
+            .warnings()
+            .into_iter()
+            .take(1)
+            .collect();
+        let one = repairs(&warnings);
+        assert!(!one.contains("more"), "{one}");
+        let kinds = [
+            tinker_pdf::WarningKind::PageTreeCycle,
+            tinker_pdf::WarningKind::PageTreeTruncated,
+            tinker_pdf::WarningKind::MediaBoxMissing,
+            tinker_pdf::WarningKind::PageCountMismatch,
+            tinker_pdf::WarningKind::TreeCycle,
+            tinker_pdf::WarningKind::PageTreeTruncated,
+        ];
+        let many: Vec<tinker_pdf::Warning> = kinds
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| tinker_pdf::Warning {
+                offset: index as u64,
+                object: Some(ObjRef::new(index as u32 + 1, 0)),
+                kind: *kind,
+            })
+            .collect();
+        let named = repairs(&many);
+        assert_eq!(named.matches(" in object ").count(), 4, "{named}");
+        assert!(named.ends_with(", 1 more"), "{named}");
+        assert!(
+            named.starts_with("PageTreeCycle in object 1 0, "),
+            "{named}"
+        );
     }
 
     /// A page of text behind bytes that are not its header: a buffered open
