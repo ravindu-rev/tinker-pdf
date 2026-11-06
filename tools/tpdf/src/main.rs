@@ -3187,6 +3187,9 @@ fn stages(
         say!(out, "time {stage} {}", clock.elapsed().as_micros());
         if let Some(stats) = &bitmap.stats {
             say!(out, "counts {stage} {stats:?}");
+            if let Some(line) = most_decoded(doc.cos(), stage, stats) {
+                say!(out, "{line}");
+            }
         }
         let cancelled = bitmap
             .warnings
@@ -3288,6 +3291,29 @@ fn strict(out: &mut dyn std::io::Write, doc: &Document) {
 }
 
 /// Anything that would break the one-record-per-line format, flattened.
+/// The stream a stage decoded most, where it decoded one more than once: its
+/// reference, how many times, and its dictionary on one line — what the
+/// engine read of it, never its data — so a trace names the object a page
+/// kept decoding, which the count alone cannot.
+fn most_decoded(cos: &CosDocument, stage: &str, stats: &tinker_pdf::Stats) -> Option<String> {
+    let reference = stats.most_decoded_stream?;
+    if stats.most_decodes_of_one_stream < 2 {
+        return None;
+    }
+    let described = match cos.get(reference) {
+        Ok(object) => {
+            let mut text = String::new();
+            write_object(cos, &object, 0, &mut text);
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+        Err(error) => format!("unreadable: {error:?}"),
+    };
+    Some(format!(
+        "decoded {stage} {} {} {} times: {described}",
+        reference.num, reference.gen, stats.most_decodes_of_one_stream
+    ))
+}
+
 fn one_line(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -3641,6 +3667,35 @@ mod tests {
         );
         assert!(record.iter().any(|l| l == "rendered 1"), "{record:#?}");
         assert_eq!(record.last().map(String::as_str), Some("done"));
+    }
+
+    /// A stage that decoded a stream more than once names it, with its
+    /// dictionary on one line; once, or nothing at all, is no finding.
+    #[test]
+    fn a_stream_decoded_more_than_once_is_named_with_its_dictionary() {
+        let doc = document();
+        let cos = doc.cos();
+        let content = (1..cos.xref().len() as u32)
+            .map(|number| ObjRef::new(number, 0))
+            .find(|reference| matches!(cos.get(*reference).as_deref(), Ok(Object::Stream(_))))
+            .expect("the page's content stream");
+        let mut stats = tinker_pdf::Stats::default();
+        assert_eq!(most_decoded(cos, "draw", &stats), None, "nothing decoded");
+        stats.most_decoded_stream = Some(content);
+        stats.most_decodes_of_one_stream = 1;
+        assert_eq!(
+            most_decoded(cos, "draw", &stats),
+            None,
+            "once is no finding"
+        );
+        stats.most_decodes_of_one_stream = 3;
+        let line = most_decoded(cos, "draw", &stats).expect("a stream decoded thrice");
+        assert!(
+            line.starts_with(&format!("decoded draw {} 0 3 times: <<", content.num)),
+            "{line}"
+        );
+        assert!(line.contains("/Length"), "its dictionary: {line}");
+        assert!(!line.contains('\n') && !line.contains("  "), "{line:?}");
     }
 
     fn document() -> Document {

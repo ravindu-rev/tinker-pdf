@@ -635,8 +635,10 @@ save do; and
 `streams_decoded`, each run of a stream's filter chain — the page's content, a
 form's at each `Do`, a tiling pattern's cell, an appearance, an image's
 samples and its soft mask's, a font's program and its CMaps, an ICC profile —
-with `most_decodes_of_one_stream`, the most runs any one stream had, and
-`bytes_decoded`, the bytes the runs returned ([filters](filters.md)).
+with `most_decodes_of_one_stream`, the most runs any one stream had,
+`most_decoded_stream`, the reference of the stream that had them (the lowest
+of several that tie), and `bytes_decoded`, the bytes the runs returned
+([filters](filters.md)).
 `Stats::work()` totals the step counts, which leaves out that maximum and that
 quantity, and two `Stats` add with `+`, a maximum keeping the larger. Every
 render door counts the same way: `Page::render`, `Page::render_form` (the

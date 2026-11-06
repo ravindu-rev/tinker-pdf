@@ -266,7 +266,9 @@ each step or job it drives says so and does nothing without it.
   names it. `cargo xtask corpus-run --trace` runs that file's child alone,
   after the fetch, under 900 seconds: pages one and two, every stage of a
   render announced and timed, the draw stopped at 300 seconds with the counts
-  it reached. The runner prints every line the child wrote, then `trace:` with
+  it reached and, where a stage decoded one stream more than once, a
+  `decoded` line naming the stream it decoded most, how many times, and its
+  dictionary. The runner prints every line the child wrote, then `trace:` with
   the outcome, the phase it stopped in, its last line and, on Linux, the CPU
   time it had used when it was killed (from `/proc/<pid>/stat`), which tells a
   loop from a wait. A path no locked corpus holds is refused by name.

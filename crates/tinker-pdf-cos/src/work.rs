@@ -27,16 +27,27 @@
 //! [`crate::DocumentEditor`] asked to count holds one tally, which the passes
 //! over it count into.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::ops::{Add, AddAssign};
 use std::sync::Mutex;
 
 use crate::object::ObjRef;
 
+/// The lower of two references, either absent: how a tie between two streams
+/// decoded equally often is settled, so that no order of the runs decides it.
+fn lowest(one: Option<ObjRef>, other: Option<ObjRef>) -> Option<ObjRef> {
+    match (one, other) {
+        (Some(one), Some(other)) => Some(one.min(other)),
+        (one, other) => one.or(other),
+    }
+}
+
 /// What one operation counted: the value a door hands back when asked.
 ///
-/// Every field is a public `u64`: a count of steps of one kind, but for one
-/// maximum and one quantity, which say so. **It is `#[non_exhaustive]`** so
+/// Every field is public, and each but [`Stats::most_decoded_stream`] a `u64`:
+/// a count of steps of one kind, but for one maximum, the stream it was reached
+/// on, and one quantity, which say so. **It is `#[non_exhaustive]`** so
 /// that a counter a later row adds — masks rasterised, threads run — is an
 /// addition rather than a break: read a field by name, total the steps with
 /// [`Stats::work`], and sum two with `+`.
@@ -146,6 +157,14 @@ pub struct Stats {
     ///
     /// Counted with `streams_decoded`.
     pub most_decodes_of_one_stream: u64,
+    /// The stream `most_decodes_of_one_stream` was reached on, or `None` where
+    /// nothing was decoded: of the streams decoded that many times, the one
+    /// with the lowest reference, so that it depends on no order the runs
+    /// came in. It names the object a count that grows with a page keeps
+    /// decoding, which the count alone cannot.
+    ///
+    /// Counted with `streams_decoded`.
+    pub most_decoded_stream: Option<ObjRef>,
     /// Bytes the filter chains returned, every run's summed. A quantity rather
     /// than a count of steps, so [`Stats::work`] leaves it out.
     ///
@@ -300,6 +319,14 @@ impl Add for Stats {
             most_decodes_of_one_stream: self
                 .most_decodes_of_one_stream
                 .max(other.most_decodes_of_one_stream),
+            most_decoded_stream: match self
+                .most_decodes_of_one_stream
+                .cmp(&other.most_decodes_of_one_stream)
+            {
+                Ordering::Greater => self.most_decoded_stream,
+                Ordering::Less => other.most_decoded_stream,
+                Ordering::Equal => lowest(self.most_decoded_stream, other.most_decoded_stream),
+            },
             bytes_decoded: self.bytes_decoded.saturating_add(other.bytes_decoded),
         }
     }
@@ -364,7 +391,16 @@ impl Work {
             let runs = *runs;
             let stats = &mut tally.stats;
             stats.streams_decoded = stats.streams_decoded.saturating_add(1);
-            stats.most_decodes_of_one_stream = stats.most_decodes_of_one_stream.max(runs);
+            match runs.cmp(&stats.most_decodes_of_one_stream) {
+                Ordering::Greater => {
+                    stats.most_decodes_of_one_stream = runs;
+                    stats.most_decoded_stream = Some(stream);
+                }
+                Ordering::Equal => {
+                    stats.most_decoded_stream = lowest(stats.most_decoded_stream, Some(stream));
+                }
+                Ordering::Less => {}
+            }
             let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
             stats.bytes_decoded = stats.bytes_decoded.saturating_add(bytes);
         }
@@ -461,8 +497,44 @@ mod tests {
         let stats = work.stats();
         assert_eq!(stats.streams_decoded, 4);
         assert_eq!(stats.most_decodes_of_one_stream, 2, "object 4 twice");
+        assert_eq!(stats.most_decoded_stream, Some(one), "and named");
         assert_eq!(stats.bytes_decoded, 23);
         assert_eq!(stats.work(), 4, "the runs alone are steps");
+        assert_eq!(Work::new().stats().most_decoded_stream, None);
+    }
+
+    /// Two streams decoded equally often are settled by the lower reference,
+    /// whichever reached the count first, and so is a sum of two tallies.
+    #[test]
+    fn a_tie_names_the_lower_reference_in_any_order() {
+        let (low, high) = (ObjRef::new(3, 0), ObjRef::new(9, 0));
+        let first = Work::new();
+        for stream in [high, low] {
+            first.decoded(stream, 1);
+            first.decoded(stream, 1);
+        }
+        let second = Work::new();
+        for stream in [low, high] {
+            second.decoded(stream, 1);
+            second.decoded(stream, 1);
+        }
+        assert_eq!(first.stats().most_decoded_stream, Some(low));
+        assert_eq!(second.stats().most_decoded_stream, Some(low));
+        let only_high = Work::new();
+        only_high.decoded(high, 1);
+        let only_low = Work::new();
+        only_low.decoded(low, 1);
+        assert_eq!(
+            (only_high.stats() + only_low.stats()).most_decoded_stream,
+            Some(low)
+        );
+        assert_eq!(
+            (only_low.stats() + only_high.stats()).most_decoded_stream,
+            Some(low)
+        );
+        // A later run that passes the tie names its own stream.
+        first.decoded(high, 1);
+        assert_eq!(first.stats().most_decoded_stream, Some(high));
     }
 
     #[test]
@@ -477,6 +549,7 @@ mod tests {
         assert_eq!(sum.streams_decoded, 4);
         assert_eq!(sum.bytes_decoded, 11);
         assert_eq!(sum.most_decodes_of_one_stream, 3, "a maximum, not a sum");
+        assert_eq!(sum.most_decoded_stream, Some(ObjRef::new(1, 0)));
         assert_eq!(thrice.stats() + once.stats(), sum, "in either order");
     }
 

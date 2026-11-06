@@ -210,6 +210,7 @@ already carries it.
 | `page_nodes_visited` | a `/Pages` tree node a lookup or a walk read, leaves included, and the page object the linearized or hinted path reads with each ancestor the head holds (`page_alone` and `ancestors_in_the_head` in `pages.rs`) | cos's page walk | built |
 | `streams_decoded` | a run of a stream's filter chain, whatever it returned | cos's two filter-chain entry points and every `Resolve` view | built |
 | `most_decodes_of_one_stream` | the most runs any one stream had in the operation — a maximum, the quantity A5 holds to one | the same | built |
+| `most_decoded_stream` | the reference of the stream that had those runs, the lowest of a tie — what names a stream a page keeps decoding | the same | built |
 | `bytes_decoded` | a byte a filter chain returned — a quantity | the same | built |
 
 `work()` sums every counter that counts a step taken, and leaves out maxima and
