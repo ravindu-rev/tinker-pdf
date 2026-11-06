@@ -244,9 +244,15 @@ pub enum Role {
     /// direction, each cell's lines top first. Its grid is
     /// [`crate::InferredTable`]'s; see [`InferenceWarning::TableSuspected`].
     Table,
-    /// Text the inference could not place: rotated or vertical lines, and the
-    /// margin blocks of a page read with no other page to compare it with.
+    /// Text the inference could not order: a rotated or vertical line, read
+    /// where its stream drew it among the body, and the margin blocks of a
+    /// page read with no other page to compare it with.
     Unplaced,
+    /// Text an `/Artifact` scope (14.8.2.2) drew, read where its stream drew
+    /// it: only on a page inferred with the tree hidden
+    /// ([`InferenceOptions::hide_structure`]), since no other reading keeps
+    /// what such a scope draws, and never furniture, a table or the body.
+    Artifact,
 }
 
 /// Why an inference declined to guess at all.
@@ -605,6 +611,9 @@ struct Draft {
     section: usize,
     column: Option<usize>,
     pieces: Vec<Piece>,
+    /// Whether it is pieces kept where their stream drew them
+    /// ([`in_stream_place`]), which the next such piece of its role joins.
+    placed: bool,
 }
 
 /// The order of `page`, as the stream gave it, every block
@@ -632,6 +641,7 @@ fn declined(
             section: 0,
             column: None,
             pieces,
+            placed: false,
         });
     }
     warnings.push(InferenceWarning::Declined { reason });
@@ -748,7 +758,8 @@ fn infer(
         };
     }
 
-    // Tables first: the characters each held table claims, each claimed once.
+    // Tables first: the characters each held table claims, each claimed once;
+    // never an artifact's, which keeps its stream place.
     let mut claimed: Vec<Option<usize>> = vec![None; flat.len()];
     let mut held_cells: Vec<Vec<Vec<usize>>> = Vec::with_capacity(tables.len());
     for (t, table) in tables.iter().enumerate() {
@@ -756,6 +767,9 @@ fn infer(
         for cell in &table.cells {
             let mut kept = Vec::with_capacity(cell.len());
             for at in cell {
+                if flat.get(*at).is_some_and(|c| c.artifact) {
+                    continue;
+                }
                 if let Some(slot @ None) = claimed.get_mut(*at) {
                     *slot = Some(t);
                     kept.push(*at);
@@ -779,9 +793,12 @@ fn infer(
 
     // The page's lines outside the tables, with the stream index of every
     // character; and, for every character, the line of the page it is on.
+    // What an `/Artifact` scope drew is set aside as pieces that keep their
+    // stream place (MS-16): no furniture, column or body is read from it.
     let mut lines: Vec<Line<'_>> = Vec::new();
     let mut sources: Vec<(usize, &TextLine)> = Vec::new();
     let mut line_at: Vec<usize> = Vec::with_capacity(flat.len());
+    let mut in_place: Vec<(Role, Piece)> = Vec::new();
     let mut next = 0usize;
     for (block, b) in page.blocks.iter().enumerate() {
         for source in &b.lines {
@@ -789,10 +806,13 @@ fn infer(
             next += source.chars.len();
             line_at.extend(all.clone().map(|_| sources.len()));
             sources.push((block, source));
-            let chars: Vec<usize> = all
+            let (marked, chars): (Vec<usize>, Vec<usize>) = all
                 .clone()
                 .filter(|at| claimed.get(*at).is_none_or(Option::is_none))
-                .collect();
+                .partition(|at| flat.get(*at).is_some_and(|c| c.artifact));
+            for run in stream_runs(marked) {
+                in_place.push((Role::Artifact, piece_of(block, run, source, &flat)));
+            }
             if chars.is_empty() && !all.is_empty() {
                 continue;
             }
@@ -1009,6 +1029,7 @@ fn infer(
                 section: 0,
                 column: None,
                 pieces: vec![piece],
+                placed: false,
             })
             .collect()
     };
@@ -1018,32 +1039,133 @@ fn infer(
     for foot in &mut feet {
         foot.section = last;
     }
-    let mut drafts: Vec<Draft> = heads
+    let drafts: Vec<Draft> = heads
         .into_iter()
         .chain(drafts)
         .chain(notes)
         .chain(feet)
         .collect();
 
-    // Lines nothing here orders, last and in stream order.
-    let mut unplaced: Vec<Piece> = angled
-        .iter()
-        .chain(down.iter())
-        .filter_map(|at| lines.get(*at))
-        .map(|line| piece_of(line.block, line.chars.clone(), line.source, &flat))
-        .collect();
-    unplaced.sort_by_key(Piece::first);
-    if !unplaced.is_empty() {
-        let section = drafts.last().map_or(0, |d| d.section);
-        drafts.push(Draft {
-            role: Role::Unplaced,
-            section,
-            column: None,
-            pieces: unplaced,
-        });
+    // Lines nothing here orders, where their stream drew them among the rest.
+    in_place.extend(
+        angled
+            .iter()
+            .chain(down.iter())
+            .filter_map(|at| lines.get(*at))
+            .map(|line| {
+                (
+                    Role::Unplaced,
+                    piece_of(line.block, line.chars.clone(), line.source, &flat),
+                )
+            }),
+    );
+
+    write_out(in_stream_place(drafts, in_place), &flat, count, warnings)
+}
+
+/// `indices`, ascending, cut into runs of consecutive stream positions.
+fn stream_runs(indices: Vec<usize>) -> Vec<Vec<usize>> {
+    let mut runs: Vec<Vec<usize>> = Vec::new();
+    for at in indices {
+        match runs.last_mut() {
+            Some(run) if run.last().is_some_and(|last| last + 1 == at) => run.push(at),
+            _ => runs.push(vec![at]),
+        }
+    }
+    runs
+}
+
+/// `drafts` with each of `placed` set among them where its stream drew it
+/// (MS-16): after the piece holding the last character the stream drew before
+/// it, a draft split there where that piece is not its last, and first where
+/// the stream drew none of theirs before it. Pieces set after one piece keep
+/// the stream's order, one block a role. Every other piece keeps its place,
+/// so a page whose pieces are in stream order stays so with these among them.
+///
+/// `O(n log n)` in the characters: each placed piece finds the character
+/// before it by a binary search over the drafts' characters in stream order.
+fn in_stream_place(drafts: Vec<Draft>, mut placed: Vec<(Role, Piece)>) -> Vec<Draft> {
+    if placed.is_empty() {
+        return drafts;
+    }
+    placed.sort_by_key(|(_, piece)| piece.first());
+    // Each piece of the drafts in order is a slot; each character, its slot.
+    let mut by_stream: Vec<(usize, usize)> = Vec::new();
+    let mut slots = 0usize;
+    for draft in &drafts {
+        for piece in &draft.pieces {
+            by_stream.extend(piece.chars.iter().map(|at| (*at, slots)));
+            slots += 1;
+        }
+    }
+    by_stream.sort_unstable();
+    let mut after: BTreeMap<Option<usize>, Vec<(Role, Piece)>> = BTreeMap::new();
+    for (role, piece) in placed {
+        let first = piece.first();
+        let before = by_stream.partition_point(|(at, _)| *at < first);
+        let slot = before
+            .checked_sub(1)
+            .and_then(|at| by_stream.get(at))
+            .map(|(_, slot)| *slot);
+        after.entry(slot).or_default().push((role, piece));
     }
 
-    write_out(drafts, &flat, count, warnings)
+    let emit = |out: &mut Vec<Draft>, group: Vec<(Role, Piece)>, section: usize| {
+        for (role, piece) in group {
+            match out.last_mut() {
+                Some(last) if last.role == role && last.column.is_none() && last.placed => {
+                    last.pieces.push(piece);
+                }
+                _ => out.push(Draft {
+                    role,
+                    section,
+                    column: None,
+                    pieces: vec![piece],
+                    placed: true,
+                }),
+            }
+        }
+    };
+    let mut out: Vec<Draft> = Vec::with_capacity(drafts.len() + after.len());
+    if let Some(group) = after.remove(&None) {
+        emit(&mut out, group, drafts.first().map_or(0, |d| d.section));
+    }
+    let mut slot = 0usize;
+    for draft in drafts {
+        let Draft {
+            role,
+            section,
+            column,
+            pieces,
+            placed,
+        } = draft;
+        let mut run: Vec<Piece> = Vec::new();
+        for piece in pieces {
+            run.push(piece);
+            let here = slot;
+            slot += 1;
+            if let Some(group) = after.remove(&Some(here)) {
+                out.push(Draft {
+                    role,
+                    section,
+                    column,
+                    pieces: std::mem::take(&mut run),
+                    placed,
+                });
+                emit(&mut out, group, section);
+            }
+        }
+        if !run.is_empty() {
+            out.push(Draft {
+                role,
+                section,
+                column,
+                pieces: run,
+                placed,
+            });
+        }
+    }
+    out
 }
 
 /// The body, ordered: section by section down the page — a section being what
@@ -1249,6 +1371,7 @@ fn push_units(
                 section,
                 column,
                 pieces: unit,
+                placed: false,
             });
         } else {
             loose.extend(unit);
@@ -1348,6 +1471,7 @@ fn push_blocks(
                 section,
                 column,
                 pieces: std::mem::take(&mut current),
+                placed: false,
             });
         }
         current.push(piece);
@@ -1358,6 +1482,7 @@ fn push_blocks(
             section,
             column,
             pieces: current,
+            placed: false,
         });
     }
 }
@@ -1686,6 +1811,7 @@ fn note(pieces: Vec<Piece>, section: usize) -> Draft {
         section,
         column: None,
         pieces,
+        placed: false,
     }
 }
 
@@ -1742,7 +1868,9 @@ impl Margins {
         let bands = Bands::of(frame);
         let mut out = Margins::default();
         for line in page.lines() {
-            if line.chars.is_empty() {
+            // Furniture recurs in what no `/Artifact` scope marked alone, and
+            // what one did is no evidence for or against it (MS-16).
+            if line.chars.iter().all(|c| c.artifact) {
                 continue;
             }
             out.has_text = true;

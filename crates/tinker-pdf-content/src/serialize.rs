@@ -702,6 +702,7 @@ mod tests {
             stream: 0,
             font: font.cloned(),
             stated: None,
+            artifact: false,
         }
     }
 

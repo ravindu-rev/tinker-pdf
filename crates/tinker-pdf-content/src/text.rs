@@ -113,6 +113,10 @@ pub struct TextChar {
     /// carries an `/MCID` or not, and the facade's `Page::text` puts its text
     /// where its glyphs stand.
     pub stated: Option<u32>,
+    /// Whether an `/Artifact` scope (14.8.2.2) drew it: only ever `true` on a
+    /// page read by [`TextDevice::keeping_artifacts`], since every other
+    /// reading drops what such a scope draws.
+    pub artifact: bool,
 }
 
 /// Which way a line runs.
@@ -363,6 +367,10 @@ pub struct TextDevice {
     /// text. The interpreter guarantees one `end_marked_content` per accepted
     /// begin, so this cannot go negative and cannot leak past a form XObject.
     artifacts: usize,
+    /// Whether what an `/Artifact` scope draws is kept, marked
+    /// [`TextChar::artifact`], rather than dropped
+    /// ([`TextDevice::keeping_artifacts`]).
+    keep_artifacts: bool,
     /// One entry per open scope, innermost last.
     ///
     /// `EMC` names no tag and carries no property list, so closing correctly
@@ -486,6 +494,18 @@ impl TextDevice {
     #[must_use]
     pub fn new() -> TextDevice {
         TextDevice::default()
+    }
+
+    /// A device that reads `/Artifact` scopes (14.8.2.2) as content, as an
+    /// untagged reader sees them: each glyph one draws is kept and marked
+    /// [`TextChar::artifact`], and a line is broken at the scope's edges as
+    /// at a dropped scope's, so an artifact's text is lines of its own.
+    #[must_use]
+    pub fn keeping_artifacts() -> TextDevice {
+        TextDevice {
+            keep_artifacts: true,
+            ..TextDevice::default()
+        }
     }
 
     /// Records something extraction had to tolerate.
@@ -1024,7 +1044,8 @@ impl Device for TextDevice {
         if artifact {
             // A line may not straddle the boundary: the artifact's glyphs are
             // dropped, and the ones before it must not be joined to the ones
-            // after as though nothing had been between them.
+            // after as though nothing had been between them; or they are kept,
+            // and are lines of their own.
             self.flush();
             self.artifacts += 1;
         }
@@ -1047,7 +1068,7 @@ impl Device for TextDevice {
     }
 
     fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
-        if self.artifacts > 0 {
+        if self.artifacts > 0 && !self.keep_artifacts {
             return;
         }
         if !glyph.transform.is_finite() || glyph.text.is_empty() {
@@ -1280,6 +1301,7 @@ impl Device for TextDevice {
                 stream: self.mcids.last().map_or(0, |(stream, _)| *stream),
                 font: glyph.font_name.clone(),
                 stated: self.stated.first().copied(),
+                artifact: self.artifacts > 0,
             });
         }
     }

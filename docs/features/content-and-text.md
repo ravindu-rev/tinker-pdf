@@ -724,7 +724,11 @@ permutation back to stream order, never a `TextPage` and never the default
 ([design/reading-order.md](../design/reading-order.md)). A request for
 `Inferred` on a tagged page comes back `Stated`, because a guess is never
 preferred to a statement; `InferenceOptions::hide_structure` reads past the
-tree only so the inference can be measured against it. A ruled table the
+tree only so the inference can be measured against it, and reads what an
+`/Artifact` scope drew as content, each character `TextChar::artifact`, in a
+`Role::Artifact` block where its stream drew it rather than as furniture or
+body. A rotated or vertical line is `Role::Unplaced`, read where its stream
+drew it among the body. A ruled table the
 table inference finds is one `Role::Table` block of an inferred order, read
 in the table's own order (`InferenceWarning::TableSuspected`), and a page
 mostly table, vertical or rotated is declined (`DeclineReason`). `tpdf text

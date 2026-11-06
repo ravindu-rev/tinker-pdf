@@ -119,10 +119,18 @@ questions with `TextDevice`'s own answers, so the page it builds is
 untagged document by `the_inference_reads_the_same_page_text_reads` — and
 keeps the paths and clips for itself, which is where the footnote separators
 and the tables' rules come from. With the tree hidden it reads `/Artifact`
-scopes as content, because an inference measured against a tree has to find
-a running head without the producer's artifact mark telling it to. Line and
-block assembly stay `TextDevice`'s — one assembler, or the structured and
-flat views drift — and anything across pages is read page by page.
+scopes as content (`TextDevice::keeping_artifacts`), each of their characters
+marked `TextChar::artifact` and their lines broken at the scope's edges, and
+the inference reads what such a scope drew where its stream drew it: a
+`Role::Artifact` block, never furniture, a table or the body, set among the
+rest after the piece holding the last character the stream drew before it.
+Furniture is found by its recurring in the text no scope marked, which is all
+of an untagged page's. This is the owner's reading: an inference
+measured against the tree with nothing moved where nothing may move, at the
+price that marked furniture is no longer what grades the furniture an
+untagged page's text is searched for. Line and block assembly stay
+`TextDevice`'s — one assembler, or the structured and flat views drift — and
+anything across pages is read page by page.
 
 ### The inferences
 
@@ -160,8 +168,9 @@ columns reads before them and a paragraph set across the page between two
 column sets reads between them. Inside a column, the text device's blocks
 are kept as units, ordered by their tops, with the stream's order wherever
 two stand level (`ROW_TOLERANCE_EMS`). Columns run right to left when most
-lines carry `TextLine::rtl`. Rotated and vertical lines go last as
-`Unplaced`, and a page that is mostly either is declined. Fewer than
+lines carry `TextLine::rtl`. A rotated or vertical line is `Unplaced` and
+read where its stream drew it, among the body, as an artifact's text is, and
+a page that is mostly either is declined. Fewer than
 `MIN_COLUMN_LINES` lines of body text and no columns are looked for
 (`PageTooSparse`); a gap that came within a factor of two of separating
 columns and did not is `ColumnsAmbiguous`. The constants are ems of the
@@ -369,10 +378,10 @@ column-crossings score is computed over the rest.
    ratchet population fall from the stream's; pair agreement does not fall
    on any corpus; veraPDF's tagged fixtures: zero characters moved; the
    two-column EPUB reftest recovers the spine's order exactly.
-4. Running heads, feet and page numbers across the pages around a page.
-   Exit: precision over the producers' margin artifacts at a recorded floor;
-   recall printed; a single-page document yields `Unplaced` with a warning
-   and no role; the builder book with a running head places it first.
+4. Running heads, feet and page numbers across the pages around a page,
+   found in unmarked text. Exit: a single-page document yields `Unplaced`
+   with a warning and no role; the builder book with an unmarked running
+   head places it first, and with it marked reads it where it was drawn.
 5. Footnotes and reference marks. Exit: precision over `/Note` elements at a
    recorded floor; a builder fixture with two footnotes and their raised
    markers orders them after the body in mark order; a rise of zero

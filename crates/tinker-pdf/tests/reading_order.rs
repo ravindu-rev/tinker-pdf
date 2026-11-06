@@ -28,6 +28,8 @@ mod epub_support;
 mod reading_order_support;
 
 use epub_support::book::styled_book;
+use std::collections::BTreeSet;
+
 use reading_order_support::{pair_agreement, Agreement, Key, Scored};
 use tinker_pdf::reading_order::{COLUMN_GAP_EMS, MIN_COLUMN_LINES};
 use tinker_pdf::{
@@ -750,14 +752,16 @@ fn right_to_left_columns_read_from_the_right() {
 /// top, left or right), the page's number centred at the foot, and between
 /// them two columns of body text drawn line by line across both, tagged
 /// column by column. The furniture is drawn as `/Artifact /Pagination`
-/// (14.8.2.2), which is what a producer that marks it writes; the stream
-/// draws the number first, the body next and the head last.
+/// (14.8.2.2) where `marked`, which is what a producer that marks it writes,
+/// and as plain content where not; the stream draws the number first, the
+/// body next and the head last.
 fn furnished_page(
     builder: &mut DocumentBuilder,
     head: &str,
     head_right: bool,
     number: &str,
     seed: usize,
+    marked: bool,
 ) {
     let rows = 20;
     let runs = two_columns(rows)
@@ -775,11 +779,15 @@ fn furnished_page(
                         x: f64,
                         y: f64,
                         text: &str| {
-            page.raw(
-                format!("/Artifact <</Type /Pagination /Subtype /{subtype}>> BDC\n").as_bytes(),
-            );
+            if marked {
+                page.raw(
+                    format!("/Artifact <</Type /Pagination /Subtype /{subtype}>> BDC\n").as_bytes(),
+                );
+            }
             page.text(b"F1", 9.0, x, y, text);
-            page.raw(b"EMC\n");
+            if marked {
+                page.raw(b"EMC\n");
+            }
         };
         artifact(page, "Footer", 300.0, 40.0, number);
         for &at in &draw {
@@ -793,8 +801,9 @@ fn furnished_page(
     });
 }
 
-/// A six-page book with a verso head, a recto head and page numbers.
-fn furnished_book(pages: usize) -> Document {
+/// A book with a verso head, a recto head and page numbers, its furniture
+/// `marked` or not.
+fn furnished_book(pages: usize, marked: bool) -> Document {
     let mut builder = DocumentBuilder::new();
     builder.add_base_font(b"F1", b"Helvetica");
     for at in 0..pages {
@@ -803,29 +812,52 @@ fn furnished_book(pages: usize) -> Document {
         } else {
             ("Chapter Two: The Gap", true)
         };
-        furnished_page(&mut builder, head, right, &(at + 1).to_string(), at);
+        furnished_page(&mut builder, head, right, &(at + 1).to_string(), at, marked);
     }
     open(builder.finish())
+}
+
+/// The characters of page `index`'s lines that read one of `texts`: the
+/// truth for furniture drawn unmarked, which the fixture knows by its words.
+fn line_keys(doc: &Document, index: u32, texts: &[&str]) -> BTreeSet<Key> {
+    doc.page(index)
+        .expect("a page")
+        .text()
+        .lines()
+        .iter()
+        .filter(|line| texts.contains(&line.text.as_str()))
+        .flat_map(|line| line.chars.iter())
+        .map(reading_order_support::key)
+        .collect()
 }
 
 /// **Running heads and page numbers are found by their recurring, and set
 /// aside first and last.** Six pages, a verso head and a recto head each
 /// recurring on every other page, a page number at each foot counting up,
-/// and two columns of body between them drawn across the page. The truth is
-/// the producer's own `/Artifact /Pagination` marks, read with the tree
-/// hidden; the stream's order calls nothing furniture, so its recall is zero
-/// and the inference's is asserted at one, with precision one.
+/// and two columns of body between them drawn across the page, the furniture
+/// drawn unmarked, as a producer that marks nothing draws it: marked, it
+/// keeps its stream place instead (MS-16). The truth is each page's head and
+/// number, known by their words; the stream's order calls nothing furniture,
+/// so its recall is zero and the inference's is asserted at one, with
+/// precision one.
 #[test]
 fn running_heads_and_page_numbers_are_found_by_recurring_and_set_aside() {
-    let doc = furnished_book(6);
+    let doc = furnished_book(6, false);
     let furniture = [Role::RunningHead, Role::RunningFoot, Role::PageNumber];
     let mut total = reading_order_support::RoleScore::default();
     for index in 0..doc.page_count() {
         let scored = Scored::read(&doc, index).expect("tagged");
-        let truth = reading_order_support::artifact_keys(&doc, index);
-        assert!(
-            !truth.is_empty(),
-            "page {index}: the fixture marks its furniture"
+        let head = if index % 2 == 0 {
+            "A Treatise On Columns"
+        } else {
+            "Chapter Two: The Gap"
+        };
+        let number = (index + 1).to_string();
+        let truth = line_keys(&doc, index, &[head, &number]);
+        assert_eq!(
+            truth.len(),
+            head.chars().count() + number.len(),
+            "page {index}: the head and the number, each a line of the page"
         );
         let score = reading_order_support::role_score(&scored.inferred, &furniture, &truth);
         total = total.plus(score);
@@ -852,12 +884,142 @@ fn running_heads_and_page_numbers_are_found_by_recurring_and_set_aside() {
     assert!(total.recall_at_least(1, 1), "{total:?}");
 }
 
+/// **Marked furniture is read where its stream drew it**, with the tree
+/// hidden (MS-16): the same six pages, their heads and numbers drawn as
+/// `/Artifact /Pagination`, read the number first and the head last, as the
+/// stream drew them, each an `Artifact` block holding exactly the marked
+/// characters, and call nothing furniture; the body between them still reads
+/// down its columns.
+#[test]
+fn marked_furniture_is_read_where_its_stream_drew_it() {
+    let doc = furnished_book(6, true);
+    for index in 0..doc.page_count() {
+        let scored = Scored::read(&doc, index).expect("tagged");
+        let blocks = &scored.inferred.blocks;
+        let first = blocks.first().expect("blocks");
+        let last = blocks.last().expect("blocks");
+        assert_eq!(first.role, Role::Artifact, "page {index}");
+        assert_eq!(first.lines[0].text, (index + 1).to_string());
+        assert_eq!(last.role, Role::Artifact, "page {index}");
+        assert!(
+            ["A Treatise On Columns", "Chapter Two: The Gap"]
+                .contains(&last.lines[0].text.as_str()),
+            "page {index}: {}",
+            last.lines[0].text
+        );
+        assert!(blocks.iter().all(|b| !matches!(
+            b.role,
+            Role::RunningHead | Role::RunningFoot | Role::PageNumber
+        )));
+        let read: BTreeSet<Key> = blocks
+            .iter()
+            .filter(|b| b.role == Role::Artifact)
+            .flat_map(|b| b.lines.iter().flat_map(|l| l.chars.iter()))
+            .map(reading_order_support::key)
+            .collect();
+        assert_eq!(
+            read,
+            reading_order_support::artifact_keys(&doc, index),
+            "page {index}: the artifact blocks hold the marked characters"
+        );
+        assert!(scored.inferred_agreement().at_least(1, 1), "page {index}");
+    }
+}
+
+/// **A book drawn in its reading order moves nothing with its furniture
+/// marked** (MS-16): six pages of one column, each drawing its number at the
+/// foot first, its lines top to bottom and its head last, the two marked
+/// `/Artifact /Pagination`, read with the tree hidden, keep every character
+/// where the stream drew it. Drawn unmarked, the same furniture is found by
+/// its recurring and read first and last.
+#[test]
+fn a_book_drawn_in_reading_order_moves_nothing_with_its_furniture_marked() {
+    let book = |marked: bool| {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F1", b"Helvetica");
+        for at in 0..6 {
+            builder.add_page(612.0, 792.0, |page| {
+                let furniture = |page: &mut tinker_pdf_cos::build::PageBuilder,
+                                 subtype: &str,
+                                 y: f64,
+                                 text: &str| {
+                    if marked {
+                        page.raw(
+                            format!("/Artifact <</Type /Pagination /Subtype /{subtype}>> BDC\n")
+                                .as_bytes(),
+                        );
+                    }
+                    page.text(b"F1", 9.0, 300.0, y, text);
+                    if marked {
+                        page.raw(b"EMC\n");
+                    }
+                };
+                furniture(page, "Footer", 40.0, &(at + 1).to_string());
+                for row in 0..20 {
+                    let y = 700.0 - row as f64 * 14.0;
+                    page.text(b"F1", 10.0, 72.0, y, &prose(at * 100 + row, 70));
+                }
+                furniture(page, "Header", 760.0, "A Treatise On Columns");
+            });
+        }
+        open(builder.finish())
+    };
+    let marked = book(true);
+    for index in 0..marked.page_count() {
+        let order = marked.inferred_order(index, &hidden()).expect("a page");
+        assert_eq!(order.moved(), 0, "page {index}: {}", order.plain_text());
+    }
+    let unmarked = book(false);
+    let order = unmarked.inferred_order(2, &hidden()).expect("page three");
+    assert_eq!(
+        order.blocks.first().map(|b| b.role),
+        Some(Role::RunningHead)
+    );
+    assert_eq!(order.blocks.last().map(|b| b.role), Some(Role::PageNumber));
+    assert!(order.moved() > 0, "{}", order.plain_text());
+}
+
+/// **Artifact text is read where its stream drew it, not where it lies**
+/// (MS-16): a page of one column drawn top to bottom and, after it, a line an
+/// `/Artifact` scope marks, set between the column's first two lines, read
+/// with the tree hidden, stays last, as drawn, and nothing moves.
+#[test]
+fn artifact_text_is_read_where_its_stream_drew_it_not_where_it_lies() {
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F1", b"Helvetica");
+    builder.add_page(612.0, 792.0, |page| {
+        for row in 0..10 {
+            let y = 600.0 - row as f64 * 24.0;
+            page.text(b"F1", 10.0, 72.0, y, &prose(row, 60));
+        }
+        page.raw(b"/Artifact BMC\n");
+        page.text(b"F1", 10.0, 72.0, 588.0, "a note set between two lines");
+        page.raw(b"EMC\n");
+    });
+    let doc = open(builder.finish());
+    let order = doc.inferred_order(0, &hidden()).expect("the page");
+    assert_eq!(order.moved(), 0, "{}", order.plain_text());
+    let last = order.blocks.last().expect("blocks");
+    assert_eq!(last.role, Role::Artifact);
+    assert_eq!(last.lines[0].text, "a note set between two lines");
+    let unmarked = doc
+        .inferred_order(0, &InferenceOptions::default())
+        .expect("the page");
+    assert!(
+        unmarked
+            .plain_text()
+            .lines()
+            .all(|line| line != "a note set between two lines"),
+        "read as an artifact, it is not the page's text"
+    );
+}
+
 /// **One page has nothing to compare**: its margin blocks are `Unplaced`
 /// where they stand, with the warning that says why, and no block is called a
 /// running head or a page number on no evidence.
 #[test]
 fn a_single_page_has_no_running_heads_only_unplaced_margins() {
-    let doc = furnished_book(1);
+    let doc = furnished_book(1, false);
     let order = doc.inferred_order(0, &hidden()).expect("a page");
     assert!(order.blocks.iter().all(|b| !matches!(
         b.role,
@@ -898,6 +1060,7 @@ fn two_pages_confirm_their_numbers_and_not_their_heads() {
             false,
             &(at + 7).to_string(),
             at,
+            false,
         );
     }
     let doc = open(builder.finish());
@@ -1039,10 +1202,15 @@ fn masked_and_roman_page_furniture_is_found() {
 
 /// **The answer for a page does not depend on how it was asked for**: one page
 /// at a time and the whole document at once give the same order, role for
-/// role.
+/// role, with the furniture found across the pages and with it marked.
 #[test]
 fn every_way_of_asking_gives_the_same_order() {
-    let doc = furnished_book(6);
+    for marked in [false, true] {
+        every_way_of_asking_gives_the_same_order_of(&furnished_book(6, marked));
+    }
+}
+
+fn every_way_of_asking_gives_the_same_order_of(doc: &Document) {
     let all = doc.inferred_orders(0..doc.page_count(), &hidden());
     assert_eq!(all.len(), 6);
     for (index, together) in all.iter().enumerate() {
@@ -1450,8 +1618,9 @@ fn a_sparse_page_looks_for_no_columns() {
     const { assert!(MIN_COLUMN_LINES > 2) };
 }
 
-/// A line drawn at an angle is placed last, as `Unplaced`, and named; a page
-/// that is mostly such lines is declined rather than guessed at.
+/// A line drawn at an angle is read where its stream drew it, among the
+/// body, as `Unplaced`, and named; a page that is mostly such lines is
+/// declined rather than guessed at.
 #[test]
 fn rotated_lines_are_unplaced_and_a_rotated_page_is_declined() {
     let rotated = |text: &str, y: f64| {
@@ -1477,28 +1646,54 @@ fn rotated_lines_are_unplaced_and_a_rotated_page_is_declined() {
         }
         page.text(b"F1", 10.0, 72.0, 700.0, "upright");
     });
+    builder.add_page(612.0, 792.0, |page| {
+        for row in 0..6 {
+            if row == 3 {
+                page.raw(rotated("DRAFT", 400.0).as_bytes());
+            }
+            page.text(
+                b"F1",
+                10.0,
+                72.0,
+                700.0 - row as f64 * 12.0,
+                &prose(row, 60),
+            );
+        }
+    });
     let doc = open(builder.finish());
     let order = doc
         .inferred_order(0, &InferenceOptions::default())
         .expect("page one");
     // The text device, not this inference, decides what a line is, and it
     // makes more than one of a word set at 45 degrees; every one of them is
-    // counted and placed last, in the stream's order.
-    let last = order.blocks.last().expect("blocks");
-    assert_eq!(last.role, Role::Unplaced);
-    let unplaced: String = last.lines.iter().map(|l| l.text.as_str()).collect();
+    // counted and read where the stream drew it, first, before the body.
+    let first = order.blocks.first().expect("blocks");
+    assert_eq!(first.role, Role::Unplaced);
+    let unplaced: String = first.lines.iter().map(|l| l.text.as_str()).collect();
     assert_eq!(unplaced, "DRAFT");
     assert!(order.warnings.contains(&InferenceWarning::RotatedText {
-        lines: last.lines.len()
+        lines: first.lines.len()
     }));
     assert!(
-        order
-            .blocks
-            .iter()
-            .rev()
-            .skip(1)
-            .all(|b| b.role == Role::Body),
+        order.blocks.iter().skip(1).all(|b| b.role == Role::Body),
         "the upright body is read as body"
+    );
+    assert_eq!(order.moved(), 0, "{}", order.plain_text());
+
+    // Drawn among the body, it is read among the body, where it was drawn.
+    let order = doc
+        .inferred_order(2, &InferenceOptions::default())
+        .expect("page three");
+    assert_eq!(order.moved(), 0, "{}", order.plain_text());
+    let at = order
+        .blocks
+        .iter()
+        .position(|b| b.role == Role::Unplaced)
+        .expect("the rotated line");
+    assert!(
+        at > 0 && at + 1 < order.blocks.len(),
+        "{at} of {}",
+        order.blocks.len()
     );
 
     let order = doc
@@ -1570,9 +1765,9 @@ fn vertical_pages() -> Document {
     open(out.into_bytes())
 }
 
-/// **A vertical line is placed last, as `Unplaced`, and named; a page that is
-/// mostly vertical is declined** — the order of vertical lines is not a
-/// question this inference answers.
+/// **A vertical line is read where its stream drew it, as `Unplaced`, and
+/// named; a page that is mostly vertical is declined** — the order of
+/// vertical lines is not a question this inference answers.
 #[test]
 fn vertical_lines_are_unplaced_and_a_vertical_page_is_declined() {
     let doc = vertical_pages();
@@ -1597,16 +1792,13 @@ fn vertical_lines_are_unplaced_and_a_vertical_page_is_declined() {
         "{:?}",
         order.warnings
     );
-    let last = order.blocks.last().expect("blocks");
-    assert_eq!(last.role, Role::Unplaced);
-    assert_eq!(last.lines.len(), 1);
-    assert_eq!(last.lines[0].text, "VERTICAL");
-    assert!(order
-        .blocks
-        .iter()
-        .rev()
-        .skip(1)
-        .all(|b| b.role == Role::Body));
+    // Drawn first, it is read first.
+    let first = order.blocks.first().expect("blocks");
+    assert_eq!(first.role, Role::Unplaced);
+    assert_eq!(first.lines.len(), 1);
+    assert_eq!(first.lines[0].text, "VERTICAL");
+    assert!(order.blocks.iter().skip(1).all(|b| b.role == Role::Body));
+    assert_eq!(order.moved(), 0, "{}", order.plain_text());
 
     let order = doc
         .inferred_order(1, &InferenceOptions::default())

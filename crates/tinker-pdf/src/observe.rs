@@ -22,8 +22,9 @@
 //! # The tree hidden
 //!
 //! [`Observed::read`] with `keep_artifacts` set is the page **as an untagged
-//! reader would see it**: an `/Artifact` scope (14.8.2.2) is handed to the text
-//! device under another tag, so its text is extracted rather than dropped.
+//! reader would see it**: the text device keeps what an `/Artifact` scope
+//! (14.8.2.2) draws ([`TextDevice::keeping_artifacts`]), so its text is
+//! extracted rather than dropped, each character marked as an artifact's.
 //! An artifact is part of a file's tagging — the producer saying "this running
 //! head is not content" — and an inference measured with the tree hidden has
 //! to find the running head without being told, which it cannot do if the
@@ -187,7 +188,6 @@ impl Clip {
 /// The tee: a [`TextDevice`] and the ink beside it.
 struct Observer {
     text: TextDevice,
-    keep_artifacts: bool,
     clip: Clip,
     saved: Vec<Clip>,
     /// Each open form's entry: how deep `saved` was and the clip in force.
@@ -209,8 +209,11 @@ struct Observer {
 impl Observer {
     fn new(keep_artifacts: bool) -> Observer {
         Observer {
-            text: TextDevice::new(),
-            keep_artifacts,
+            text: if keep_artifacts {
+                TextDevice::keeping_artifacts()
+            } else {
+                TextDevice::new()
+            },
             clip: Clip::Open,
             saved: Vec::new(),
             forms: Vec::new(),
@@ -405,13 +408,6 @@ impl Device for Observer {
         if !visible {
             self.hidden += 1;
         }
-        // The text device drops what an `/Artifact` scope draws (14.8.2.2);
-        // any other tag it reads as content. See the module documentation.
-        let tag: &[u8] = if self.keep_artifacts && tag == b"Artifact" {
-            b"Artifact (read as content)"
-        } else {
-            tag
-        };
         self.text
             .begin_marked_content(tag, visible, hidden_layer, props);
     }

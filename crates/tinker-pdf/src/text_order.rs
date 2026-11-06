@@ -534,6 +534,7 @@ pub(crate) fn stated_chars(text: &str, glyphs: &[&TextChar], span: Option<u32>) 
                     stream: first.stream,
                     font: first.font.clone(),
                     stated: span.or(first.stated),
+                    artifact: first.artifact,
                 });
                 rest = rest.get(next.len_utf8()..).unwrap_or_default();
             }
@@ -1375,6 +1376,7 @@ mod tests {
             stream: 0,
             font: None,
             stated: None,
+            artifact: false,
         }
     }
 
@@ -1859,6 +1861,7 @@ mod tests {
                         stream: 0,
                         font: None,
                         stated: None,
+                        artifact: false,
                     });
                     along += width;
                 }

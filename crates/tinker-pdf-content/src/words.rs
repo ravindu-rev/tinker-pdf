@@ -540,6 +540,7 @@ mod tests {
             stream: 0,
             font: None,
             stated: None,
+            artifact: false,
         }
     }
 

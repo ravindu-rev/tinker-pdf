@@ -28,14 +28,16 @@
 //! of tagged files whose stream already agrees exactly (which carry no
 //! information about columns); the **column crossings** walking the tree over
 //! the files that remain; and the characters the inference moved, which over
-//! veraPDF's fixtures the design expects to be zero. And **running-head
-//! precision**: of the blocks called a running head, foot or page number, how
-//! many the producer drew as an artifact in a margin band — recall printed
-//! beside it, and neither yet held, for the reason below. **Footnote
-//! precision** likewise, against the producer's `/Note` elements. Both are
-//! over every scored page of the files that mark any, as the design scopes
-//! them, so a call on a page of such a file that marks none counts against
-//! precision rather than being left out.
+//! veraPDF's fixtures the design expects to be zero. And **footnote
+//! precision**: of the blocks called a footnote, how many the producer's
+//! `/Note` elements claim — recall printed beside it, and neither yet held,
+//! for the reason below — over every scored page of the files whose tree has
+//! any, as the design scopes it, so a call on a page of such a file that has
+//! none counts against precision rather than being left out. Running heads,
+//! feet and page numbers are not scored: with the tree hidden, what an
+//! `/Artifact` scope marks is read where its stream drew it and never called
+//! furniture (MS-16, the owner's choice), so the marks that were their truth
+//! are no longer a question the inference answers.
 //!
 //! **No corpus figure has been measured yet.** The fetched corpora were not
 //! reachable where this was written, so the floors table below is empty and
@@ -58,9 +60,7 @@ mod reading_order_support;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use reading_order_support::{
-    furniture_truth, note_keys, role_score, Agreement, Moved, RoleScore, Scored,
-};
+use reading_order_support::{note_keys, role_score, Agreement, Moved, RoleScore, Scored};
 use tinker_pdf::{Document, InferenceOptions, Role, Tag};
 use tinker_pdf_cos::build::{DocumentBuilder, PageBuilder};
 
@@ -174,17 +174,10 @@ struct Totals {
     crossings: usize,
     /// The files those crossings were counted over.
     informative: usize,
-    /// Running heads, feet and page numbers against the artifacts the
-    /// producer drew in the margin bands, over **every scored page of the
-    /// files** that mark any — the design scopes precision by file, so a
-    /// block called furniture on a page of such a file that marks none is a
-    /// call that was wrong, not a page left out.
-    furniture: RoleScore,
-    /// The files that marked any, and the pages scored in them.
-    furnished: usize,
-    furnished_pages: usize,
-    /// Footnotes against the producer's `/Note` elements, over every scored
-    /// page of the files whose tree has any, for the same reason.
+    /// Footnotes against the producer's `/Note` elements, over **every
+    /// scored page of the files** whose tree has any — the design scopes
+    /// precision by file, so a block called a footnote on a page of such a
+    /// file that has none is a call that was wrong, not a page left out.
     notes: RoleScore,
     /// The files that had any, and the pages scored in them.
     noted: usize,
@@ -224,7 +217,7 @@ fn score(doc: &Document, file: &str, list_pages: bool, totals: &mut Totals) {
     let pages = doc.page_count().min(PAGES_PER_FILE);
     let mut file_stream = Agreement::default();
     let mut file_crossings = 0usize;
-    let (mut file_notes, mut file_furniture) = (FileRole::default(), FileRole::default());
+    let mut file_notes = FileRole::default();
     for index in 0..pages {
         let Some(scored) = Scored::read(doc, index) else {
             continue;
@@ -263,22 +256,12 @@ fn score(doc: &Document, file: &str, list_pages: bool, totals: &mut Totals) {
             &[Role::Footnote],
             &note_keys(doc, index),
         ));
-        file_furniture.page(role_score(
-            &scored.inferred,
-            &[Role::RunningHead, Role::RunningFoot, Role::PageNumber],
-            &furniture_truth(doc, index),
-        ));
         file_stream = file_stream.plus(stream);
     }
     file_notes.into_corpus(
         &mut totals.notes,
         &mut totals.noted,
         &mut totals.noted_pages,
-    );
-    file_furniture.into_corpus(
-        &mut totals.furniture,
-        &mut totals.furnished,
-        &mut totals.furnished_pages,
     );
     if file_stream.at_least(1, 1) {
         totals.stream_exact += 1;
@@ -372,16 +355,6 @@ fn the_inference_is_scored_against_every_tagged_files_own_order() {
             t.inferred.score(),
             t.crossings,
             t.informative
-        );
-        println!(
-            "{:<14} furniture: {} of {} blocks called were marked; {} of {} marked characters found, over {} pages of {} files",
-            "",
-            t.furniture.correct,
-            t.furniture.called,
-            t.furniture.found,
-            t.furniture.truth,
-            t.furnished_pages,
-            t.furnished
         );
         println!(
             "{:<14} footnotes: {} of {} blocks called were /Note; {} of {} /Note characters found, over {} pages of {} files",
@@ -497,73 +470,34 @@ fn the_census_holds_its_invariants() {
     assert_eq!(held(&per_corpus, &[("pdfjs", 9, 10)]).len(), 1);
 }
 
-/// Three pages of one tagged file, each a running head over a paragraph: the
-/// first two draw the head as `/Artifact /Pagination`, the third as content.
-fn heads_marked_on_two_pages_of_three() -> Document {
-    let mut builder = DocumentBuilder::new();
-    builder.add_base_font(b"F1", b"Helvetica");
-    for at in 0..3 {
-        builder.add_page(612.0, 792.0, |page| {
-            let head = |page: &mut PageBuilder| {
-                page.text(b"F1", 9.0, 72.0, 760.0, "A Treatise On Columns");
-            };
-            if at < 2 {
-                page.raw(b"/Artifact <</Type /Pagination /Subtype /Header>> BDC\n");
-                head(page);
-                page.raw(b"EMC\n");
-            } else {
-                page.tagged_with(&Tag::new(b"P"), head);
-            }
-            page.tagged_with(&Tag::new(b"P"), |page| {
-                for line in 0..12 {
-                    let y = 600.0 - f64::from(line) * 14.0;
-                    page.text(b"F1", 10.0, 72.0, y, "The body of the page, a line of it.");
-                }
-            });
-        });
-    }
-    open(builder.finish()).expect("the fixture opens")
-}
-
-/// **Furniture precision is over the file, not over the pages that mark
-/// some.** A file marks its running head on two pages of three and draws it
-/// as content on the third, where the inference, finding it recur, calls it a
-/// running head: that call is scored, and wrong — three called, two correct —
-/// where scoring only pages with a mark counted two of two.
-#[test]
-fn furniture_precision_counts_a_call_on_an_unmarked_page() {
-    let doc = heads_marked_on_two_pages_of_three();
-    let mut totals = Totals::default();
-    score(&doc, "heads.pdf", false, &mut totals);
-    assert_eq!(
-        (totals.furniture.called, totals.furniture.correct),
-        (3, 2),
-        "{:?}",
-        totals.furniture
-    );
-    assert!(!totals.furniture.precision_at_least(1, 1));
-}
-
 /// Three pages of one tagged file, each drawing its page number at the foot
 /// before the body and a running head, longer than the number, after it,
-/// both `/Artifact /Pagination`.
-fn furniture_drawn_out_of_place() -> Document {
+/// both `/Artifact /Pagination` where `marked` and plain content where not.
+fn furniture_drawn_out_of_place(marked: bool) -> Document {
     let mut builder = DocumentBuilder::new();
     builder.add_base_font(b"F1", b"Helvetica");
     for at in 1..=3 {
         builder.add_page(612.0, 792.0, |page| {
-            page.raw(b"/Artifact <</Type /Pagination /Subtype /Footer>> BDC\n");
-            page.text(b"F1", 9.0, 300.0, 30.0, &at.to_string());
-            page.raw(b"EMC\n");
+            let furniture = |page: &mut PageBuilder, subtype: &str, x: f64, y: f64, text: &str| {
+                if marked {
+                    page.raw(
+                        format!("/Artifact <</Type /Pagination /Subtype /{subtype}>> BDC\n")
+                            .as_bytes(),
+                    );
+                }
+                page.text(b"F1", 9.0, x, y, text);
+                if marked {
+                    page.raw(b"EMC\n");
+                }
+            };
+            furniture(page, "Footer", 300.0, 30.0, &at.to_string());
             page.tagged_with(&Tag::new(b"P"), |page| {
                 for line in 0..12 {
                     let y = 600.0 - f64::from(line) * 14.0;
                     page.text(b"F1", 10.0, 72.0, y, "The body of the page, a line of it.");
                 }
             });
-            page.raw(b"/Artifact <</Type /Pagination /Subtype /Header>> BDC\n");
-            page.text(b"F1", 9.0, 72.0, 760.0, "A Treatise On Columns");
-            page.raw(b"EMC\n");
+            furniture(page, "Header", 72.0, 760.0, "A Treatise On Columns");
         });
     }
     open(builder.finish()).expect("the fixture opens")
@@ -617,16 +551,25 @@ fn characters_by_role(doc: &Document) -> BTreeMap<String, usize> {
 }
 
 /// **The census names what moved.** On three pages that draw the page
-/// number before the body and a longer running head after it, the inference
-/// reads the head first and the number last, and the characters out of
-/// stream order are the head's and the number's, under `RunningHead` and
-/// `PageNumber` and as artifact text, while `moved()` counts the body's as
-/// well, each an index away from where the stream drew it. On a page drawing
-/// a long lower paragraph before a short upper one, they are the upper
-/// paragraph's, under `Body` and claimed by the tree.
+/// number before the body and a longer running head after it, unmarked, the
+/// inference reads the head first and the number last, and the characters
+/// out of stream order are the head's and the number's, under `RunningHead`
+/// and `PageNumber` and as content the tree does not claim, while `moved()`
+/// counts the body's as well, each an index away from where the stream drew
+/// it. Marked `/Artifact`, the same furniture is read where it was drawn and
+/// nothing moves (MS-16). On a page drawing a long lower paragraph before a
+/// short upper one, they are the upper paragraph's, under `Body` and claimed
+/// by the tree.
 #[test]
 fn what_moved_is_counted_under_the_block_it_was_read_in() {
-    let doc = furniture_drawn_out_of_place();
+    let marked = furniture_drawn_out_of_place(true);
+    let mut totals = Totals::default();
+    score(&marked, "marked.pdf", true, &mut totals);
+    assert_eq!(totals.moved, 0, "{:#?}", totals.moved_pages);
+    let roles = characters_by_role(&marked);
+    assert!(roles.get("Artifact").is_some_and(|n| *n > 0), "{roles:?}");
+
+    let doc = furniture_drawn_out_of_place(false);
     let roles = characters_by_role(&doc);
     let (head, number) = (roles["RunningHead"], roles["PageNumber"]);
     assert!(head > number && number > 0, "{roles:?}");
@@ -643,7 +586,7 @@ fn what_moved_is_counted_under_the_block_it_was_read_in() {
     );
     assert_eq!(
         (what.claimed, what.unclaimed, what.artifact),
-        (0, 0, head + number)
+        (0, head + number, 0)
     );
     assert_eq!(
         totals.moved,
