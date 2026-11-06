@@ -84,7 +84,7 @@ use tinker_pdf::{
     StampPlacement, SubsetOutcome, WriteMode, WriteOptions,
 };
 
-use crate::{open, Options};
+use crate::{open, Options, Reads};
 
 /// Where `encrypt` reads its 48 bytes of randomness when `--entropy` names
 /// no file: the operating system's own source.
@@ -819,7 +819,7 @@ fn takes(options: &Options, command: &str, own: &[&str]) -> Result<(), String> {
 /// P` is a person who took it for the new file's password and would get a
 /// file anybody opens.
 fn open_input(path: &str, options: &Options) -> Result<Document, String> {
-    let doc = open(path, options.password.as_deref(), None)?;
+    let (doc, _) = open(path, Reads::Whole, options.password.as_deref(), None)?;
     if options.password.is_some() && !doc.is_encrypted() {
         return Err(format!(
             "{path} is not encrypted, so --password opens nothing; the passwords a new \

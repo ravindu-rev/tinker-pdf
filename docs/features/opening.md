@@ -322,6 +322,20 @@ header through a window it keeps none of rather than fetching the file, and
 as that open would: not opened on Annex F's head-only path, nothing warned, and
 that level `Trust`.
 
+**`tpdf` reads a file on demand by that rule** (`tools/tpdf/src/source.rs`).
+`info`, `check` without a verdict flag, `text`, `render`, `fields`, `fonts`,
+`images` and `outline` open through a file source — positioned reads, the
+length fixed at open, a read that fails or ends inside that length a
+`SourceMiss` naming its range, the first one kept — ask `answers_as_buffered`
+straight after the open, keep the streamed document when it says yes and read
+the file whole when it says no, so each prints a buffered open's lines. A
+recorded failed read fails the file, `reading {path}: {error} at bytes
+{start}..{end}`, before anything read through the source is printed or
+written: `info`'s and `check`'s lines for the file, each page of the commands
+that go page by page. `objects`, `probe`, `check` with `--strict`, `--pdfa`,
+`--pdfua` or `--pdfx`, and the writing commands read the file whole, once, in
+place, into one buffer of its length that the facade keeps without a copy.
+
 ```rust
 let bytes = std::fs::read("report.pdf")?;
 let doc = tinker_pdf::Document::open(bytes)?;

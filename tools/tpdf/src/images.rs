@@ -65,7 +65,9 @@ pub(crate) fn image_lines(
         let Some(page) = doc.page(index) else {
             continue;
         };
-        for (position, image) in page.images().iter().enumerate() {
+        let images = page.images();
+        crate::sound()?;
+        for (position, image) in images.iter().enumerate() {
             found += 1;
             lines.push(format!(
                 "  page {} #{position} {}",

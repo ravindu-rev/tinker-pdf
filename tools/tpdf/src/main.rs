@@ -13,8 +13,10 @@
 //! sub-command plus flags, which needs no library.
 
 mod images;
+mod source;
 mod writing;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::ExitCode;
@@ -313,7 +315,7 @@ fn main() -> ExitCode {
         "fonts" => run(&options, fonts),
         "images" => run(&options, images::images),
         "outline" => run(&options, outline),
-        "objects" => run(&options, objects),
+        "objects" => run_whole(&options, objects),
         "check" => check(&options),
         "probe" => probe(&options),
         "merge" => writing::print(&options, writing::merge(&options)),
@@ -884,17 +886,42 @@ impl Options {
     }
 }
 
-fn open(
-    path: &str,
-    password: Option<&str>,
-    fonts: Option<&Arc<SimpleFontProvider>>,
-) -> Result<Document, String> {
-    open_bytes(path, read_file(path)?, password, fonts)
+/// How a command reads its file (`docs/design/streaming-open.md`, "Which
+/// commands read on demand").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reads {
+    /// Through a file source, by the rule: kept streamed when the document
+    /// answers as a buffered open of it would, and read whole otherwise.
+    OnDemand,
+    /// Once, in place, into one buffer of the file's length.
+    Whole,
 }
 
-/// The file's bytes, or the line [`open`] reports when there are none.
-fn read_file(path: &str) -> Result<Vec<u8>, String> {
-    std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))
+/// `path` opened as `reads` says, with its faces and its password, and the
+/// file source it reads through when the rule kept it streamed.
+fn open(
+    path: &str,
+    reads: Reads,
+    password: Option<&str>,
+    fonts: Option<&Arc<SimpleFontProvider>>,
+) -> Result<(Document, Option<Arc<source::FileSource>>), String> {
+    let (doc, kept) = match reads {
+        Reads::OnDemand => source::open_on_demand(path).map_err(|unopened| match unopened {
+            source::Unopened::Read(message) => message,
+            source::Unopened::Open(e) => format!("{path}: {e:?}"),
+        })?,
+        Reads::Whole => (
+            Document::open(read_file(path)?).map_err(|e| format!("{path}: {e:?}"))?,
+            None,
+        ),
+    };
+    Ok((prepared(path, doc, password, fonts)?, kept))
+}
+
+/// The file's bytes, read once in place, or the line [`open`] reports when
+/// there are none.
+fn read_file(path: &str) -> Result<Arc<[u8]>, String> {
+    source::read_whole(path)
 }
 
 /// [`open`] after the read: the document, its faces and its password.
@@ -903,11 +930,21 @@ fn read_file(path: &str) -> Result<Vec<u8>, String> {
 /// bytes and leave out what the disk does to fetch them.
 fn open_bytes(
     path: &str,
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
     password: Option<&str>,
     fonts: Option<&Arc<SimpleFontProvider>>,
 ) -> Result<Document, String> {
     let doc = Document::open(bytes).map_err(|e| format!("{path}: {e:?}"))?;
+    prepared(path, doc, password, fonts)
+}
+
+/// An opened document with its faces and its password.
+fn prepared(
+    path: &str,
+    doc: Document,
+    password: Option<&str>,
+    fonts: Option<&Arc<SimpleFontProvider>>,
+) -> Result<Document, String> {
     let doc = match fonts {
         Some(provider) => doc.with_fonts(provider.clone()),
         None => doc,
@@ -923,20 +960,81 @@ fn open_bytes(
     Ok(doc)
 }
 
-/// Runs a command over every file given.
+thread_local! {
+    /// The file the command on this thread reads, and the source it reads it
+    /// through, while the rule kept it streamed: set by [`run_reading`] for one
+    /// file at a time, and asked by [`sound`].
+    static READING: RefCell<Option<(String, Arc<source::FileSource>)>> =
+        const { RefCell::new(None) };
+}
+
+/// The file this thread reads through a source, when it does.
+fn reading_now() -> Option<(String, Arc<source::FileSource>)> {
+    READING.with(|reading| reading.borrow().clone())
+}
+
+/// Fails the file this thread reads when a read through its source failed.
+///
+/// Asked before anything read through the source is printed or written — a
+/// file's `info` and `check` lines, each page of the commands that go page by
+/// page — because a read that missed reads as absent, and a page count or a
+/// page printed after one would be a part-null document's
+/// (`docs/design/streaming-open.md`, "A miss, to a host that cannot fetch").
+fn sound() -> Result<(), String> {
+    sound_of(reading_now().as_ref())
+}
+
+/// [`sound`] for `reading`, as a worker thread holds it.
+fn sound_of(reading: Option<&(String, Arc<source::FileSource>)>) -> Result<(), String> {
+    match reading.and_then(|(path, source)| source.failure().map(|failure| (path, failure))) {
+        Some((path, failure)) => Err(format!(
+            "reading {path}: {} at bytes {}..{}",
+            failure.error, failure.range.start, failure.range.end
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Runs `body` with `path`, read through `source`, as the file this thread
+/// reads.
+fn reading<T>(path: &str, source: Option<Arc<source::FileSource>>, body: impl FnOnce() -> T) -> T {
+    READING.with(|reading| *reading.borrow_mut() = source.map(|s| (path.to_string(), s)));
+    let out = body();
+    READING.with(|reading| *reading.borrow_mut() = None);
+    out
+}
+
+/// Runs a command over every file given, each read on demand.
+fn run(
+    options: &Options,
+    each: fn(&Options, &str, &Document) -> Result<(), String>,
+) -> Result<(), String> {
+    run_reading(options, Reads::OnDemand, each)
+}
+
+/// Runs a command over every file given, each read whole.
+fn run_whole(
+    options: &Options,
+    each: fn(&Options, &str, &Document) -> Result<(), String>,
+) -> Result<(), String> {
+    run_reading(options, Reads::Whole, each)
+}
+
+/// Runs a command over every file given, each read as `reads` says.
 ///
 /// One unreadable file reports itself and the rest still run: a command given
 /// a whole directory is the normal case, and stopping at the first
 /// password-protected file would hide everything after it.
-fn run(
+fn run_reading(
     options: &Options,
+    reads: Reads,
     each: fn(&Options, &str, &Document) -> Result<(), String>,
 ) -> Result<(), String> {
     let fonts = options.font_provider()?;
     let mut failed = 0usize;
     for path in &options.files {
-        let outcome = open(path, options.password.as_deref(), fonts.as_ref())
-            .and_then(|doc| each(options, path, &doc));
+        let outcome = open(path, reads, options.password.as_deref(), fonts.as_ref())
+            .and_then(|(doc, kept)| reading(path, kept, || each(options, path, &doc)));
         if let Err(message) = outcome {
             eprintln!("tpdf: {message}");
             failed += 1;
@@ -951,22 +1049,39 @@ fn run(
 }
 
 fn info(_options: &Options, path: &str, doc: &Document) -> Result<(), String> {
+    for line in info_report(path, doc)? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// What `info` prints for `doc`, once its source has been asked whether every
+/// read behind it was made.
+fn info_report(path: &str, doc: &Document) -> Result<Vec<String>, String> {
+    let lines = info_lines(path, doc);
+    sound()?;
+    Ok(lines)
+}
+
+/// The lines `info` prints for `doc`.
+fn info_lines(path: &str, doc: &Document) -> Vec<String> {
+    let mut lines = Vec::new();
     let metadata = doc.metadata();
-    println!("{path}");
-    println!("  pages       {}", doc.page_count());
-    println!("  version     {}", doc.pdf_version());
-    println!("  ladder      {:?}", doc.ladder_level());
-    println!("  encrypted   {}", doc.is_encrypted());
+    lines.push(path.to_string());
+    lines.push(format!("  pages       {}", doc.page_count()));
+    lines.push(format!("  version     {}", doc.pdf_version()));
+    lines.push(format!("  ladder      {:?}", doc.ladder_level()));
+    lines.push(format!("  encrypted   {}", doc.is_encrypted()));
     if doc.is_encrypted() {
-        println!("  authorized  {:?}", doc.auth_level());
+        lines.push(format!("  authorized  {:?}", doc.auth_level()));
         let permissions = doc.permissions();
-        println!(
+        lines.push(format!(
             "  may         print={} copy={} modify={} annotate={}",
             permissions.print(),
             permissions.copy(),
             permissions.modify(),
             permissions.annotate()
-        );
+        ));
     }
 
     for (label, value) in [
@@ -977,7 +1092,7 @@ fn info(_options: &Options, path: &str, doc: &Document) -> Result<(), String> {
         ("producer", &metadata.producer),
     ] {
         if let Some(value) = value {
-            println!("  {label:11} {value}");
+            lines.push(format!("  {label:11} {value}"));
         }
     }
 
@@ -985,25 +1100,28 @@ fn info(_options: &Options, path: &str, doc: &Document) -> Result<(), String> {
     // /Unknown are different statements, and a line that appeared either way
     // would collapse them back together.
     if let Some(trapped) = metadata.trapped {
-        println!("  {:11} {trapped:?}", "trapped");
+        lines.push(format!("  {:11} {trapped:?}", "trapped"));
     }
 
     if let Some(page) = doc.page(0) {
         let (w, h) = page.size();
-        println!("  first page  {w} x {h} pt, rotated {}", page.rotation());
+        lines.push(format!(
+            "  first page  {w} x {h} pt, rotated {}",
+            page.rotation()
+        ));
     }
 
     let warnings = doc.warnings();
     if !warnings.is_empty() {
-        println!("  warnings    {}", warnings.len());
+        lines.push(format!("  warnings    {}", warnings.len()));
         for warning in warnings.iter().take(10) {
-            println!("    {:?}", warning.kind);
+            lines.push(format!("    {:?}", warning.kind));
         }
         if warnings.len() > 10 {
-            println!("    ... and {} more", warnings.len() - 10);
+            lines.push(format!("    ... and {} more", warnings.len() - 10));
         }
     }
-    Ok(())
+    lines
 }
 
 fn text(options: &Options, _path: &str, doc: &Document) -> Result<(), String> {
@@ -1014,6 +1132,7 @@ fn text(options: &Options, _path: &str, doc: &Document) -> Result<(), String> {
         for index in options.pages(doc) {
             if let Some(page) = doc.page(index) {
                 writer.page(&page.text_frame(), &page.text());
+                sound()?;
                 print!("{}", writer.take());
             }
         }
@@ -1025,10 +1144,13 @@ fn text(options: &Options, _path: &str, doc: &Document) -> Result<(), String> {
             continue;
         };
         if options.tables {
-            print!("{}", page_tables(&page, index));
+            let tables = page_tables(&page, index);
+            sound()?;
+            print!("{tables}");
             continue;
         }
         let (text, label) = page_text(&page, index, options.order)?;
+        sound()?;
         if let (Some(label), false) = (label, options.quiet) {
             eprintln!("{label}");
         }
@@ -1223,6 +1345,9 @@ fn render_pages(
     let next = AtomicUsize::new(0);
     let reports: Mutex<Vec<(usize, Result<String, String>)>> =
         Mutex::new(Vec::with_capacity(pages.len()));
+    // The workers ask the file's source before they write, and the file is
+    // this thread's.
+    let reading = reading_now();
 
     std::thread::scope(|scope| {
         // Scoped, so the workers borrow the document and the queue rather
@@ -1230,7 +1355,7 @@ fn render_pages(
         // only that a `Document` can be *sent*, and what is being relied on
         // here is that one can be *shared*.
         for _ in 0..options.jobs.max(1) {
-            let (next, reports, pages) = (&next, &reports, &pages);
+            let (next, reports, pages, reading) = (&next, &reports, &pages, &reading);
             scope.spawn(move || {
                 loop {
                     let slot = next.fetch_add(1, Ordering::Relaxed);
@@ -1250,13 +1375,15 @@ fn render_pages(
                     });
 
                     let out = format!("{dir}/{stem}-{:04}.png", index + 1);
-                    let report = write_png(&out, &bitmap).map(|()| {
-                        let mut lines = format!("{out} {}x{}\n", bitmap.width, bitmap.height);
-                        for warning in &bitmap.warnings {
-                            lines.push_str(&format!("  {warning:?}\n"));
-                        }
-                        lines
-                    });
+                    let report = sound_of(reading.as_ref())
+                        .and_then(|()| write_png(&out, &bitmap))
+                        .map(|()| {
+                            let mut lines = format!("{out} {}x{}\n", bitmap.width, bitmap.height);
+                            for warning in &bitmap.warnings {
+                                lines.push_str(&format!("  {warning:?}\n"));
+                            }
+                            lines
+                        });
                     reports
                         .lock()
                         .expect("the reports lock")
@@ -1305,6 +1432,7 @@ fn write_png(path: &str, bitmap: &tinker_pdf::Bitmap) -> Result<(), String> {
 
 fn fields(_options: &Options, path: &str, doc: &Document) -> Result<(), String> {
     let found = doc.form_fields();
+    sound()?;
     if found.is_empty() {
         println!("{path}: no form fields");
         return Ok(());
@@ -1348,6 +1476,7 @@ fn fields(_options: &Options, path: &str, doc: &Document) -> Result<(), String> 
 /// when a directory was named.
 fn fonts(options: &Options, path: &str, doc: &Document) -> Result<(), String> {
     let found = doc.fonts();
+    sound()?;
     if found.is_empty() {
         println!("{path}: no fonts");
         return Ok(());
@@ -1383,6 +1512,7 @@ fn fonts(options: &Options, path: &str, doc: &Document) -> Result<(), String> {
         let Some(bytes) = font.program_bytes() else {
             continue;
         };
+        sound()?;
         // Numbered as well as named: two subsets of one face share a name
         // after the tag is stripped, and a run that silently overwrote the
         // first with the second would report a count it did not write.
@@ -1438,6 +1568,7 @@ fn extension(bytes: &[u8]) -> &'static str {
 
 fn outline(_options: &Options, path: &str, doc: &Document) -> Result<(), String> {
     let items = doc.outline();
+    sound()?;
     if items.is_empty() {
         println!("{path}: no outline");
         return Ok(());
@@ -1694,6 +1825,29 @@ fn show_string(string: &tinker_pdf::PdfString) -> String {
 /// This is the corpus pass: it exits non-zero only when a file could not be
 /// opened at all, because a file that opens with warnings is the case the
 /// leniency ladder exists to handle rather than a failure.
+/// How `check` reads its files: whole for a verdict flag, whose passes read
+/// the file's bytes whole, and on demand otherwise.
+fn check_reads(options: &Options) -> Reads {
+    if options.strict || options.pdfa || options.pdfua || options.pdfx {
+        Reads::Whole
+    } else {
+        Reads::OnDemand
+    }
+}
+
+/// The line `check` prints for a file that opened, and the warnings it
+/// counts, taken before the pages are.
+fn checked(path: &str, doc: &Document) -> (String, Vec<tinker_pdf::Warning>) {
+    let warnings = doc.warnings();
+    let pages = doc.page_count();
+    let line = format!(
+        "ok    {path}  {pages} pages, {:?}, {} warnings",
+        doc.ladder_level(),
+        warnings.len()
+    );
+    (line, warnings)
+}
+
 fn check(options: &Options) -> Result<(), String> {
     let fonts = options.font_provider()?;
     let mut failed = 0usize;
@@ -1706,11 +1860,16 @@ fn check(options: &Options) -> Result<(), String> {
     let mut unprintable = 0usize;
     let mut x_unclaimed = 0usize;
 
+    let reads = check_reads(options);
     for path in &options.files {
-        match open(path, options.password.as_deref(), fonts.as_ref()) {
-            Ok(doc) => {
-                let warnings = doc.warnings();
-                let pages = doc.page_count();
+        match open(path, reads, options.password.as_deref(), fonts.as_ref()) {
+            Ok((doc, kept)) => {
+                let (line, warnings) = checked(path, &doc);
+                if let Err(message) = sound_of(kept.map(|s| (path.clone(), s)).as_ref()) {
+                    failed += 1;
+                    println!("FAIL  {message}");
+                    continue;
+                }
                 if !warnings.is_empty() {
                     warned += 1;
                 }
@@ -1726,11 +1885,7 @@ fn check(options: &Options) -> Result<(), String> {
                     invalid += 1;
                 }
                 if !options.quiet {
-                    println!(
-                        "ok    {path}  {pages} pages, {:?}, {} warnings",
-                        doc.ladder_level(),
-                        warnings.len()
-                    );
+                    println!("{line}");
                 }
                 for defect in &defects {
                     println!("      {} {defect}", defect.kind.tier().as_str());
@@ -4412,5 +4567,333 @@ mod tests {
             }
         }
         assert!(lines.contains("dict /Catalog"), "and read: {lines}");
+    }
+
+    // ---- Reading on demand (P-05.4) -------------------------------------------
+
+    /// What `info` may read of [`heavy`]'s four megabytes on demand, in
+    /// requests and in bytes the source handed over: about twice what it reads
+    /// at the tip, seven requests of 6 869 bytes, and under two per cent of
+    /// the file.
+    const INFO_READS: usize = 16;
+    const INFO_BYTES: u64 = 64 << 10;
+
+    /// `bytes` written to a file of this test's, whose path comes back.
+    fn on_disk(name: &str, bytes: &[u8]) -> String {
+        let path =
+            std::env::temp_dir().join(format!("tpdf-demand-{name}-{}.pdf", std::process::id()));
+        std::fs::write(&path, bytes).expect("the fixture is written");
+        path.to_string_lossy().into_owned()
+    }
+
+    /// `pages` pages of about `size` bytes of content each: few objects and
+    /// many bytes, as a scan or a drawing is.
+    fn heavy(pages: usize, size: usize) -> Vec<u8> {
+        let mut content = Vec::with_capacity(size + 16);
+        while content.len() < size {
+            content.extend_from_slice(b"0 0 1 1 re f\n");
+        }
+        let mut builder = DocumentBuilder::new();
+        for _ in 0..pages {
+            builder.add_page(200.0, 100.0, |page| {
+                page.raw(&content);
+            });
+        }
+        builder.finish()
+    }
+
+    /// A tree of `pages` pages between two fillers of `filler` bytes each, so a
+    /// streamed open reads none of it: the head holds the catalog, and the tail
+    /// the table.
+    fn hollow(pages: usize, filler: usize) -> Vec<u8> {
+        let stream = |len: usize| {
+            format!(
+                "<< /Length {len} >>
+stream
+{}
+endstream",
+                "x".repeat(len)
+            )
+        };
+        let kids: Vec<String> = (0..pages).map(|at| format!("{} 0 R", 4 + at)).collect();
+        let mut bodies = vec![
+            "<< /Type /Catalog /Pages 3 0 R >>".to_string(),
+            stream(filler),
+            format!(
+                "<< /Type /Pages /Count {pages} /Kids [{}] >>",
+                kids.join(" ")
+            ),
+        ];
+        for _ in 0..pages {
+            bodies.push("<< /Type /Page /Parent 3 0 R /MediaBox [0 0 200 100] >>".to_string());
+        }
+        bodies.push(stream(filler));
+        let mut bytes = b"%PDF-1.7
+"
+        .to_vec();
+        let mut offsets = Vec::new();
+        for (at, body) in bodies.iter().enumerate() {
+            offsets.push(bytes.len());
+            bytes.extend_from_slice(
+                format!(
+                    "{} 0 obj
+{body}
+endobj
+",
+                    at + 1
+                )
+                .as_bytes(),
+            );
+        }
+        let table = bytes.len();
+        bytes.extend_from_slice(
+            format!(
+                "xref
+0 {}
+0000000000 65535 f 
+",
+                bodies.len() + 1
+            )
+            .as_bytes(),
+        );
+        for offset in &offsets {
+            bytes.extend_from_slice(
+                format!(
+                    "{offset:010} 00000 n 
+"
+                )
+                .as_bytes(),
+            );
+        }
+        bytes.extend_from_slice(
+            format!(
+                "trailer
+<< /Size {} /Root 1 0 R >>
+startxref
+{table}
+%%EOF
+",
+                bodies.len() + 1
+            )
+            .as_bytes(),
+        );
+        bytes
+    }
+
+    /// A catalog and an empty tree whose table's second entry points into the
+    /// first object: a buffered open patches it at open, a streamed one finds
+    /// out at the read.
+    fn damaged() -> Vec<u8> {
+        let mut bytes = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+xref\n0 3\n\
+0000000000 65535 f \n\
+0000000009 00000 n \n\
+0000000058 00000 n \n\
+trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n110\n%%EOF\n"
+            .to_vec();
+        let table = bytes
+            .windows(9)
+            .position(|w| w == b"xref\n0 3\n")
+            .expect("a classic table");
+        let entry = table + 9 + 2 * 20;
+        bytes[entry..entry + 10].copy_from_slice(b"0000000004");
+        bytes
+    }
+
+    /// A page of text behind bytes that are not its header: a buffered open
+    /// shifts every entry, and a streamed one would repair each at its first
+    /// read.
+    fn shifted() -> Vec<u8> {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        builder.add_page(200.0, 100.0, |page| {
+            page.text(b"F0", 12.0, 10.0, 50.0, "on demand");
+        });
+        [
+            b"leading bytes, not a header\n".as_slice(),
+            &builder.finish(),
+        ]
+        .concat()
+    }
+
+    /// Three pages saved linearized, the root `/Pages` node carrying `/Rotate
+    /// 90` when `rotated`, so that page one inherits it.
+    fn linearized(rotated: bool) -> Vec<u8> {
+        let mut builder = DocumentBuilder::new();
+        for _ in 0..3 {
+            builder.add_page(200.0, 100.0, |page| {
+                page.raw(b"0 0 10 10 re f");
+            });
+        }
+        let doc = Document::open(builder.finish()).expect("it opens");
+        let mut editor = doc.editor();
+        if rotated {
+            let pages = editor.intern(b"Pages");
+            let root = editor
+                .catalog()
+                .and_then(|catalog| catalog.get_ref(pages))
+                .expect("a page tree");
+            let Some(Object::Dict(mut tree)) = editor.get(root) else {
+                panic!("the page tree is a dictionary");
+            };
+            tree.insert(editor.intern(b"Rotate"), Object::Int(90));
+            editor.put(root, Object::Dict(tree));
+        }
+        editor.save(&WriteOptions {
+            mode: WriteMode::Rewrite,
+            linearize: true,
+            ..WriteOptions::default()
+        })
+    }
+
+    /// [`linearized`] with an update appended, which leaves the length its
+    /// linearization states behind.
+    fn updated() -> Vec<u8> {
+        let doc = Document::open(linearized(false)).expect("it opens");
+        let mut editor = doc.editor();
+        let _ = editor.set_title("updated");
+        editor.save(&WriteOptions {
+            mode: WriteMode::Incremental,
+            ..WriteOptions::default()
+        })
+    }
+
+    /// **On demand, the buffer's lines.** Over four megabytes of four heavy
+    /// pages, which the rule keeps streamed, `info` prints what a buffered open
+    /// prints, and its reads, counted through the file source, stay inside a
+    /// budget of a small share of the file.
+    #[test]
+    fn info_reads_a_large_file_on_demand_and_says_what_a_buffer_says() {
+        let bytes = heavy(4, 1 << 20);
+        let path = on_disk("large", &bytes);
+        let file = Arc::new(source::FileSource::open(&path).expect("it opens"));
+        let counting = Arc::new(tinker_pdf::CountingSource::new(Arc::clone(&file)));
+        let streamed = source::open_by_rule(
+            &path,
+            Arc::clone(&counting) as Arc<dyn tinker_pdf::ByteSource>,
+        )
+        .expect("it opens");
+        assert!(
+            streamed.cos().is_streamed(),
+            "the rule keeps a file a buffer reads the same"
+        );
+        let lines = info_lines(&path, &streamed);
+        assert_eq!(file.failure(), None, "every read was made");
+        let buffered = Document::open(bytes.clone()).expect("it opens");
+        assert_eq!(lines, info_lines(&path, &buffered));
+        let (reads, read) = (counting.reads(), counting.bytes_read());
+        assert!(
+            reads <= INFO_READS && read <= INFO_BYTES,
+            "info read {read} bytes in {reads} reads of a {}-byte file",
+            bytes.len()
+        );
+        println!(
+            "RAN info on demand: {read} bytes in {reads} reads of a {}-byte file",
+            bytes.len()
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **The rule reads whole where a stream would answer otherwise.** A
+    /// damaged file, which a buffered open patches; one behind leading bytes,
+    /// whose every entry a buffered open shifts; a linearized file updated
+    /// since, whose length is not the one it states; and a linearized file
+    /// whose first page inherits `/Rotate`, which Annex F's head would build
+    /// without it. On demand, `info` and `check` print a buffered open's lines
+    /// for each, and the rotated page renders as a buffered open renders it.
+    #[test]
+    fn the_rule_reads_whole_where_a_stream_would_answer_otherwise() {
+        let rotated = linearized(true);
+        let fixtures = [
+            ("damaged", damaged()),
+            ("shifted", shifted()),
+            ("updated", updated()),
+            ("rotated", rotated.clone()),
+        ];
+        for (name, bytes) in fixtures {
+            let path = on_disk(name, &bytes);
+            let (demand, kept) = open(&path, Reads::OnDemand, None, None).expect("it opens");
+            assert!(kept.is_none(), "{name}: read whole");
+            let buffered = Document::open(bytes).expect("it opens");
+            assert_eq!(
+                info_lines(&path, &demand),
+                info_lines(&path, &buffered),
+                "{name}: info"
+            );
+            assert_eq!(
+                checked(&path, &demand).0,
+                checked(&path, &buffered).0,
+                "{name}: check"
+            );
+            if name == "rotated" {
+                let page = buffered.page(0).expect("a first page");
+                assert_eq!(page.rotation(), 90, "page one inherits its tree's turn");
+                let streamed = Document::open_streaming(Arc::new(tinker_pdf::SliceSource::new(
+                    rotated.clone(),
+                )))
+                .expect("it opens streamed");
+                assert!(
+                    streamed.first_page_end().is_some(),
+                    "a streamed open would answer page one from the head"
+                );
+                assert_eq!(
+                    demand
+                        .page(0)
+                        .expect("a first page")
+                        .render(&RenderOptions::default())
+                        .data,
+                    page.render(&RenderOptions::default()).data,
+                    "the turned page renders as the buffer renders it"
+                );
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// **A failed read fails the file before it prints.** A file the rule
+    /// keeps streamed shrinks after it opened, so the tree `info` counts, which
+    /// the open never read, is no longer there to read: `info` fails the file,
+    /// naming the bytes, and returns before it prints a line.
+    #[test]
+    fn a_failed_read_fails_the_file_before_it_prints() {
+        let bytes = hollow(8, 64 << 10);
+        let path = on_disk("shrinks", &bytes);
+        let (doc, kept) = open(&path, Reads::OnDemand, None, None).expect("it opens");
+        let kept = kept.expect("the rule keeps the file streamed");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_len(16 << 10))
+            .expect("the file shrinks");
+        let printed = reading(&path, Some(kept), || info_report(&path, &doc));
+        let message = printed.expect_err("the file fails");
+        assert!(
+            message.starts_with(&format!("reading {path}: ")) && message.contains(" at bytes "),
+            "{message}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **A verdict flag reads the whole file.** `check --strict` opens the
+    /// linearized file updated since from one buffer, and reports the defects
+    /// a buffered open's validation reports.
+    #[test]
+    fn a_verdict_flag_reads_the_whole_file() {
+        let bytes = updated();
+        let path = on_disk("strict", &bytes);
+        let options =
+            Options::parse(&["--strict".to_string(), path.clone()]).expect("the options parse");
+        assert_eq!(check_reads(&options), Reads::Whole);
+        let (doc, kept) = open(&path, check_reads(&options), None, None).expect("it opens");
+        assert!(kept.is_none() && !doc.cos().is_streamed(), "one buffer");
+        let buffered = Document::open(bytes).expect("it opens");
+        let defects = |doc: &Document| -> Vec<String> {
+            doc.validate().iter().map(ToString::to_string).collect()
+        };
+        assert_eq!(defects(&doc), defects(&buffered));
+        assert_eq!(checked(&path, &doc).0, checked(&path, &buffered).0);
+        let _ = std::fs::remove_file(&path);
     }
 }
