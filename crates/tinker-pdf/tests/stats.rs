@@ -61,7 +61,7 @@ use tinker_pdf::write::{
     save, BilevelCodec, ContinuousCodec, FontPolicy, ImagePolicy, ImageRecoding, SaveOptions, Saved,
 };
 use tinker_pdf::{
-    Bitmap, Document, DocumentBuilder, Page, PdfACoverage, PdfUaCoverage, PdfXCoverage,
+    Bitmap, Document, DocumentBuilder, ObjRef, Page, PdfACoverage, PdfUaCoverage, PdfXCoverage,
     PixelRegion, RenderOptions, SliceSource, Stats, TextOptions, WriteMode, WriteOptions,
 };
 
@@ -115,14 +115,27 @@ fn object(text: &str) -> Vec<u8> {
 }
 
 /// `expected` with the streams an operation decoded on top: each
-/// `(runs, bytes)` is one stream, decoded `runs` times, each run returning
-/// `bytes` bytes. Every entry is a stream of its own, so the most runs any one
-/// stream had is the largest `runs`.
-fn decoding(mut expected: Stats, streams: &[(u64, usize)]) -> Stats {
-    for &(runs, bytes) in streams {
+/// `(object, runs, bytes)` is one stream, object `object` at generation 0,
+/// decoded `runs` times, each run returning `bytes` bytes. Every entry is a
+/// stream of its own, so the most runs any one stream had is the largest
+/// `runs`, and the stream named for them the lowest-numbered of those that
+/// had them, as a tie is settled.
+fn decoding(mut expected: Stats, streams: &[(u32, u64, usize)]) -> Stats {
+    for &(object, runs, bytes) in streams {
         expected.streams_decoded += runs;
-        expected.most_decodes_of_one_stream = expected.most_decodes_of_one_stream.max(runs);
         expected.bytes_decoded += runs * bytes as u64;
+        let stream = ObjRef::new(object, 0);
+        if runs > expected.most_decodes_of_one_stream {
+            expected.most_decodes_of_one_stream = runs;
+            expected.most_decoded_stream = Some(stream);
+        } else if runs > 0
+            && runs == expected.most_decodes_of_one_stream
+            && expected
+                .most_decoded_stream
+                .is_none_or(|named| stream < named)
+        {
+            expected.most_decoded_stream = Some(stream);
+        }
     }
     expected
 }
@@ -238,9 +251,9 @@ fn glyphs_and_an_image_render() -> Stats {
     decoding(
         glyphs_and_an_image_stats(),
         &[
-            (1, glyphs_and_an_image_content().len()),
-            (1, program_len()),
-            (1, SAMPLES.len()),
+            (4, 1, glyphs_and_an_image_content().len()),
+            (7, 1, program_len()),
+            (8, 1, SAMPLES.len()),
         ],
     )
 }
@@ -433,9 +446,9 @@ fn a_form_shown_three_times_builds_its_scope_once() {
     let mut expected = decoding(
         Stats::default(),
         &[
-            (1, FORM_PAGE_CONTENT.len()),
-            (3, form_content(FORM_TEXT).len()),
-            (1, program_len()),
+            (4, 1, FORM_PAGE_CONTENT.len()),
+            (8, 3, form_content(FORM_TEXT).len()),
+            (7, 1, program_len()),
         ],
     );
     expected.glyphs_shown = shown;
@@ -504,7 +517,7 @@ fn render_form_counts_the_scope_it_reads_the_name_in() {
     let distinct = 3;
     let mut expected = decoding(
         Stats::default(),
-        &[(2, form_content(FORM_TEXT).len()), (1, program_len())],
+        &[(8, 2, form_content(FORM_TEXT).len()), (7, 1, program_len())],
     );
     expected.glyphs_shown = shown;
     expected.outlines_filled = shown;
@@ -544,10 +557,10 @@ fn a_profile_two_images_share_is_compiled_once() {
     let mut expected = decoding(
         Stats::default(),
         &[
-            (1, content.len()),
-            (1, SAMPLES.len()),
-            (1, SAMPLES.len()),
-            (1, NOT_A_PROFILE.len()),
+            (4, 1, content.len()),
+            (8, 1, SAMPLES.len()),
+            (9, 1, SAMPLES.len()),
+            (10, 1, NOT_A_PROFILE.len()),
         ],
     );
     // Each image decoded once, the third `Do` finding the first.
@@ -572,7 +585,7 @@ fn every_inline_image_is_decoded() {
     let bytes = fixture("", "", &content, Vec::new());
     let (document, index) = first_page(bytes);
     let page = document.page(index).expect("a page");
-    let mut expected = decoding(Stats::default(), &[(1, content.len())]);
+    let mut expected = decoding(Stats::default(), &[(4, 1, content.len())]);
     expected.images_decoded = 3;
     assert_eq!(counted(&page), expected);
 }
@@ -598,7 +611,11 @@ fn a_pattern_cell_counts_what_it_draws() {
     // decoded once.
     let mut expected = decoding(
         Stats::default(),
-        &[(1, content.len()), (1, CELL.len()), (1, program_len())],
+        &[
+            (4, 1, content.len()),
+            (8, 1, CELL.len()),
+            (7, 1, program_len()),
+        ],
     );
     expected.glyphs_shown = 2;
     expected.outlines_filled = 2;
@@ -621,7 +638,7 @@ fn an_annotation_counts_both_scopes_its_appearance_builds() {
     let shown = ANNOTATION_TEXT.len() as u64;
     let mut drawn = decoding(
         Stats::default(),
-        &[(1, appearance_content().len()), (1, program_len())],
+        &[(9, 1, appearance_content().len()), (7, 1, program_len())],
     );
     drawn.glyphs_shown = shown;
     drawn.outlines_filled = shown;
@@ -631,7 +648,7 @@ fn an_annotation_counts_both_scopes_its_appearance_builds() {
     drawn.glyph_outline_misses = shown;
     drawn.font_program_misses = 1;
     drawn.font_program_hits = shown - 1;
-    let content = (1, 0);
+    let content = (4, 1, 0);
     assert_eq!(
         counted(&page),
         decoding(drawn, &[content]),
@@ -696,7 +713,7 @@ fn a_display_list_counts_through_the_resources_it_keeps() {
     // The interpretation ran when the list was recorded, so the content is
     // not decoded again; `F1`'s program and the image are, at the first
     // outline and the first `Do` the replay meets.
-    let mut expected = decoding(direct, &[(1, program_len()), (1, SAMPLES.len())]);
+    let mut expected = decoding(direct, &[(7, 1, program_len()), (8, 1, SAMPLES.len())]);
     // Nor is a scope built, nor does a glyph ask whether its font is a Type 3
     // font; only a bundled build's substitute requests, made at the first
     // outline, read a dictionary.
@@ -733,7 +750,7 @@ fn a_display_list_counts_the_annotations_it_keeps() {
     // The appearance was decoded, its scopes built and its glyphs asked about
     // their font when the list was recorded; the replay extracts the
     // outlines, reading the program for the first.
-    let mut expected = decoding(Stats::default(), &[(1, program_len())]);
+    let mut expected = decoding(Stats::default(), &[(7, 1, program_len())]);
     expected.glyphs_shown = shown;
     expected.outlines_filled = shown;
     expected.glyph_outline_misses = shown;
@@ -956,7 +973,7 @@ fn text_stats_count_font_resolutions() {
         // image is drawn twice and decoded by nobody.
         let mut expected = decoding(
             Stats::default(),
-            &[(1, glyphs_and_an_image_content().len())],
+            &[(4, 1, glyphs_and_an_image_content().len())],
         );
         // Three fonts read when the scope is built, and one lookup a glyph.
         expected.font_dictionaries_resolved = SHOWN.len() as u64 + shown();
@@ -972,8 +989,8 @@ fn text_stats_count_font_resolutions() {
     let mut expected = decoding(
         Stats::default(),
         &[
-            (1, FORM_PAGE_CONTENT.len()),
-            (3, form_content(FORM_TEXT).len()),
+            (4, 1, FORM_PAGE_CONTENT.len()),
+            (8, 3, form_content(FORM_TEXT).len()),
         ],
     );
     // The page's scope reads its one font, the form's scope its own one once,
@@ -1064,11 +1081,11 @@ fn image_stats_count_the_decodes_made() {
     let mut expected = decoding(
         Stats::default(),
         &[
-            (1, images_content().len()),
-            (1, IMAGES_FORM.len()),
-            (1, SAMPLES.len()),
-            (1, SAMPLES.len()),
-            (1, SAMPLES.len()),
+            (4, 1, images_content().len()),
+            (10, 1, IMAGES_FORM.len()),
+            (8, 1, SAMPLES.len()),
+            (9, 1, SAMPLES.len()),
+            (11, 1, SAMPLES.len()),
         ],
     );
     expected.images_decoded = listed;
@@ -1122,9 +1139,9 @@ fn save_stats_are_none_unless_asked() {
         let mut expected = decoding(
             Stats::default(),
             &[
-                (1 + image_walks, glyphs_and_an_image_content().len()),
-                (2, program_len()),
-                (image_walks, SAMPLES.len()),
+                (4, 1 + image_walks, glyphs_and_an_image_content().len()),
+                (7, 2, program_len()),
+                (8, image_walks, SAMPLES.len()),
             ],
         );
         // Each walk reads the root and the one page.
@@ -1256,11 +1273,19 @@ fn a_merge_reads_its_stats_from_the_save() {
         // of the face's program, an import copying it for each page, at its
         // first glyph. Its cut reads the copies as the editor holds them,
         // unfiltered, and runs no chain.
-        let mut decoded: Vec<(u64, usize)> = (0..4)
-            .flat_map(|part| (0..10).map(move |page| (1, part_content(part, page).len())))
+        // Each is decoded once, so the stream named is the lowest-numbered of
+        // the eighty as the editor numbers its imports, a numbering this test
+        // does not fix: it holds that one of them is named.
+        let mut decoded: Vec<(u32, u64, usize)> = (0..4)
+            .flat_map(|part| (0..10).map(move |page| (0, 1, part_content(part, page).len())))
             .collect();
-        decoded.extend((0..40).map(|_| (1, program_len())));
+        decoded.extend((0..40).map(|_| (0, 1, program_len())));
         let mut expected = decoding(Stats::default(), &decoded);
+        let named = counted
+            .stats
+            .and_then(|stats| stats.most_decoded_stream)
+            .unwrap_or_else(|| panic!("{what}: a stream decoded is named"));
+        expected.most_decoded_stream = Some(named);
         // The font pass walks the merged tree once, its root and forty pages;
         // each page's scope reads its one font, and each glyph its font's
         // dictionary; each scope reads the face's program at its first glyph
@@ -1332,9 +1357,9 @@ fn reading(expected: Stats, content: u64, programs: u64, packets: u64) -> Stats 
     decoding(
         expected,
         &[
-            (content, claiming_content().len()),
-            (programs, program_len()),
-            (packets, CLAIMING_PACKET.len()),
+            (4, content, claiming_content().len()),
+            (7, programs, program_len()),
+            (8, packets, CLAIMING_PACKET.len()),
         ],
     )
 }
@@ -1818,7 +1843,7 @@ fn a_deduplicating_save_counts_the_streams_it_compares() {
     same_save(&counted, &plain, "a deduplicating save");
     let expected = decoding(
         Stats::default(),
-        &[(1, DEFLATED_CONTENT.len()), (1, program_len())],
+        &[(4, 1, DEFLATED_CONTENT.len()), (7, 1, program_len())],
     );
     assert_eq!(counted.stats, Some(expected));
 
