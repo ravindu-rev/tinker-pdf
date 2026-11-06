@@ -277,8 +277,10 @@ each step or job it drives says so and does nothing without it.
   BEFORE AFTER` compares each report with the head's file by file: per
   relation, how many files went from held and how many came back, each file
   whose verdict differs with both details, and the files one report lacks,
-  named and not compared. It refuses two reports of different settings. Each
-  file that went from held to broke on `dpi` is printed object by object,
+  named and not compared. It refuses two reports of different settings. With
+  `--held-to-broke dpi` it prints only a row per file that went from held to
+  broke, its corpus, its path and the file on disk, which the step reads; each
+  is printed object by object,
   dictionaries without stream data, with its probe, and `corpus/against/` is
   kept in the `corpus-report` artifact.
 - **`bands_revision`**, a revision, runs a job of its own on one runner: that

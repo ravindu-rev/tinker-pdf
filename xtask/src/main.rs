@@ -240,6 +240,11 @@ fn main() -> ExitCode {
         "corpus-licences" => one("corpus-licences", corpus::licences(&repo_root(), rest)),
         "corpus-fetch" => one("corpus-fetch", fetch::fetch(&repo_root(), rest)),
         "corpus-run" => one("corpus-run", corpus::run(&repo_root(), rest)),
+        // `--held-to-broke` prints a row per file for a script to read, so
+        // nothing follows the rows: an `ok` line there is one more row.
+        "corpus-diff" if rest.iter().any(|arg| arg == "--held-to-broke") => {
+            quiet("corpus-diff", diff::run(&repo_root(), rest))
+        }
         "corpus-diff" => one("corpus-diff", diff::run(&repo_root(), rest)),
         "corpus-peaks" => one("corpus-peaks", peaks::run(&repo_root(), rest)),
         "bench-check" => one("bench-check", bench::run(&repo_root(), rest)),
@@ -294,6 +299,18 @@ fn one(task: &str, outcome: Result<(), String>) -> ExitCode {
             println!("{task}: ok");
             ExitCode::SUCCESS
         }
+        Err(message) => {
+            eprintln!("{task}: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// [`one`], for a task whose standard output a script reads: nothing is
+/// printed on success, so the output holds the task's own lines alone.
+fn quiet(task: &str, outcome: Result<(), String>) -> ExitCode {
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("{task}: {message}");
             ExitCode::FAILURE
@@ -1088,6 +1105,13 @@ const SPAWNERS: &[(&str, &str)] = &[
          once, before a run spawns it per file. It adjudicates nothing about a \
          document — the question is what this repository's own binary is, and \
          the answer only decides whether to refuse the run",
+    ),
+    (
+        "xtask/tests/corpus_diff.rs",
+        "PERMANENT: runs this revision's own `xtask` binary, which cargo builds \
+         for the test, over two reports the test wrote, to hold what its \
+         standard output carries for the script that reads it. It hosts this \
+         repository's own code and adjudicates nothing about a document",
     ),
     (
         "crates/tinker-pdf/benches/support/cli.rs",
