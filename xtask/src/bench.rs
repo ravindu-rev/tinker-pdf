@@ -164,6 +164,10 @@ pub struct Listed {
     /// dispatches have set one, and an operation with none is reported,
     /// never failed.
     pub paired_band: Option<f64>,
+    /// Why the operation runs outside [`SIZE_WINDOW_MS`], in the owner's
+    /// words (H-163), from the entry's `outside_window`; `None` for every
+    /// operation sized inside it, which `--sizes` holds there.
+    pub outside_window: Option<String>,
 }
 
 /// One group's list of operations, in the order its file declares them.
@@ -615,12 +619,15 @@ pub fn groups(text: &str, path: &str) -> Result<Vec<Group>, BaselineError> {
                 ),
                 None => None,
             };
+            let outside_window = string_after(entry, "\"outside_window\":")
+                .filter(|reason| !reason.trim().is_empty());
             operations.push(Listed {
                 name,
                 unit,
                 per_iteration,
                 calls,
                 paired_band,
+                outside_window,
             });
         }
         if operations.is_empty() {
@@ -735,6 +742,126 @@ fn mean_of(file: &Path) -> Option<f64> {
     let text = std::fs::read_to_string(file).ok()?;
     let mean = &text[text.find("\"mean\"")?..];
     number_after(mean, "point_estimate")
+}
+
+/// The window MS-04 sizes every head-side operation to, in milliseconds:
+/// under its low end a mean is mostly the timer and the harness, over its high
+/// end the suite cannot run ten interleaved rounds inside the paired job's
+/// fifteen minutes. A property of the runner a job lands on, so it is held
+/// there, by `bench-check --sizes`, and never in `cargo test`.
+pub const SIZE_WINDOW_MS: (f64, f64) = (20.0, 300.0);
+
+/// Which side of a comparison an operation's figure was measured on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SizeSide {
+    /// The build under test, which the window holds.
+    Head,
+    /// The planning baseline a factor is taken against, whose operations may
+    /// run longer: the factor is the point.
+    Baseline,
+}
+
+/// Where one operation's mean sits against [`SIZE_WINDOW_MS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Size {
+    /// Inside the window.
+    Inside,
+    /// Under it: a failure on either side.
+    Under,
+    /// Over it on the head side: a failure.
+    Over,
+    /// Outside it, by the owner's word in `baseline.json`: reported.
+    NamedOutside,
+    /// Over it on the baseline side, which may run longer: reported.
+    BaselineLonger,
+}
+
+impl Size {
+    /// Whether `--sizes` fails on it.
+    #[must_use]
+    pub fn fails(self) -> bool {
+        matches!(self, Size::Under | Size::Over)
+    }
+}
+
+/// Where a mean of `millis` sits for an operation measured on `side`, named
+/// outside the window by the owner or not.
+#[must_use]
+pub fn size_of(millis: f64, side: SizeSide, named_outside: bool) -> Size {
+    let (low, high) = SIZE_WINDOW_MS;
+    if (low..=high).contains(&millis) {
+        return Size::Inside;
+    }
+    if named_outside {
+        return Size::NamedOutside;
+    }
+    if millis > high {
+        return match side {
+            SizeSide::Head => Size::Over,
+            SizeSide::Baseline => Size::BaselineLonger,
+        };
+    }
+    Size::Under
+}
+
+/// An operation's throughput in its committed unit, from one iteration's
+/// mean: pages a second, megapixels or megabytes a second, or outlines a
+/// second; `None` for an operation whose unit is `none`, or a mean of nothing.
+#[must_use]
+pub fn throughput(unit: Unit, per_iteration: u64, nanos: f64) -> Option<String> {
+    if nanos <= 0.0 || !nanos.is_finite() {
+        return None;
+    }
+    let per_second = per_iteration as f64 / (nanos / 1_000_000_000.0);
+    Some(match unit {
+        Unit::Pages => format!("{per_second:.1} pages/s"),
+        Unit::Pixels => format!("{:.2} Mpixel/s", per_second / 1_000_000.0),
+        Unit::Bytes => format!("{:.2} MB/s", per_second / 1_000_000.0),
+        Unit::Outlines => format!("{per_second:.0} outlines/s"),
+        Unit::None => return None,
+    })
+}
+
+/// What `--sizes` makes of a run: a line for every operation outside the
+/// window, and the ones that fail it.
+#[derive(Debug, Default, PartialEq)]
+pub struct Sizes {
+    /// Each operation outside the window, with its mean and what it is.
+    pub lines: Vec<String>,
+    /// The ids that fail the check.
+    pub failing: Vec<String>,
+}
+
+/// Holds each measured operation of `now` that `groups` lists to the window,
+/// as a head-side figure.
+#[must_use]
+pub fn sizes(groups: &[Group], now: &BTreeMap<String, f64>) -> Sizes {
+    let mut out = Sizes::default();
+    for group in groups {
+        for listed in &group.operations {
+            let id = group.id(&listed.name);
+            let Some(nanos) = now.get(&id) else {
+                continue;
+            };
+            let millis = nanos / 1_000_000.0;
+            let size = size_of(millis, SizeSide::Head, listed.outside_window.is_some());
+            let said = match size {
+                Size::Inside => continue,
+                Size::Under => "under the window".to_string(),
+                Size::Over => "over the window".to_string(),
+                Size::NamedOutside => format!(
+                    "outside the window by the owner's word: {}",
+                    listed.outside_window.as_deref().unwrap_or_default()
+                ),
+                Size::BaselineLonger => "a baseline side, which may run longer".to_string(),
+            };
+            out.lines.push(format!("  {id}: {millis:.3} ms, {said}"));
+            if size.fails() {
+                out.failing.push(id);
+            }
+        }
+    }
+    out
 }
 
 /// One operation's verdict.
@@ -1618,12 +1745,22 @@ fn run_paired(base: &Path, head: &Path) -> Result<(), String> {
 
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let mut machine_name = None;
+    // `None` holds no window; `Some(false)` fails outside it and
+    // `Some(true)` only reports, the dispatch the figures H-163 is decided on
+    // are read from.
+    let mut sizes_mode: Option<bool> = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
             "--machine" => {
                 index += 1;
                 machine_name = args.get(index).cloned();
+            }
+            "--sizes" => {
+                sizes_mode = Some(args.get(index + 1).map(String::as_str) == Some("report"));
+                if sizes_mode == Some(true) {
+                    index += 1;
+                }
             }
             "--paired" => {
                 let (Some(base), Some(head)) = (args.get(index + 1), args.get(index + 2)) else {
@@ -1654,6 +1791,50 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         );
     }
 
+    // Each operation's throughput in the unit its list commits it to, beside
+    // its mean: a figure a reader can hold against the engine's other claims,
+    // where milliseconds alone say how long the input took and not how much.
+    let listed = groups(&text, BASELINE_PATH).map_err(|e| e.to_string())?;
+    println!("bench-check: throughput, from each operation's committed unit");
+    for group in &listed {
+        for operation in &group.operations {
+            let id = group.id(&operation.name);
+            if let Some(nanos) = now.get(&id) {
+                let rate = throughput(operation.unit, operation.per_iteration, *nanos)
+                    .map(|rate| format!(", {rate}"))
+                    .unwrap_or_default();
+                println!("  {id}: {:.3} ms{rate}", nanos / 1_000_000.0);
+            }
+        }
+    }
+    let sized = sizes_mode.map(|report| (report, sizes(&listed, &now)));
+    if let Some((report, held)) = &sized {
+        let (low, high) = SIZE_WINDOW_MS;
+        println!(
+            "bench-check: sizes, every head-side operation held to {low}-{high} ms{}",
+            if *report {
+                ", reported and not failed"
+            } else {
+                ""
+            }
+        );
+        if held.lines.is_empty() {
+            println!("  every operation measured is inside the window");
+        }
+        for line in &held.lines {
+            println!("{line}");
+        }
+    }
+    let size_failure = match &sized {
+        Some((false, held)) if !held.failing.is_empty() => Some(format!(
+            "outside the {}-{} ms window, and not named outside it by the owner (H-163): {}",
+            SIZE_WINDOW_MS.0,
+            SIZE_WINDOW_MS.1,
+            held.failing.join(", ")
+        )),
+        _ => None,
+    };
+
     let Some(machine) = machines.iter().find(|m| m.name == machine_name) else {
         // Reported, not failed: a machine with no entry has no bar, which is
         // how `ratchet.rs` treats a corpus with no recorded bar.
@@ -1665,7 +1846,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             "bench-check: to record this machine, add an entry to {BASELINE_PATH} \
              with its measured swing"
         );
-        return Ok(());
+        return size_failure.map_or(Ok(()), Err);
     };
 
     // Nothing is spawned: the file `bench.yml` reads its model name from.
@@ -1699,9 +1880,12 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     if outside.is_empty() {
         // No "ok" line here: `main`'s `one` prints one for every task that
         // returns, and two of them read as two checks having passed.
-        return Ok(());
+        return size_failure.map_or(Ok(()), Err);
     }
     let mut message = String::from("slower than the baseline by more than the band:\n");
+    if let Some(sizes) = &size_failure {
+        message = format!("{sizes}\n{message}");
+    }
     for verdict in &outside {
         message.push_str(&format!(
             "  {}: {:.3} ms against {:.3} ms, {:+.2} % of a {} % band\n",
@@ -1742,6 +1926,102 @@ mod tests {
         }
       ]
     }"#;
+
+    /// A group list of three operations, one of them named outside the window.
+    const SIZED: &str = r#"{
+      "groups": [
+        { "group": "write", "operations": [
+          { "name": "rewrite of 100 pages", "unit": "pages", "per_iteration": 100, "calls": 1 },
+          { "name": "inflate 4 MB", "unit": "bytes", "per_iteration": 4000000, "calls": 1 },
+          { "name": "rewrite of 3000 pages", "unit": "pages", "per_iteration": 3000, "calls": 1,
+            "outside_window": "tier P states the input" }
+        ] }
+      ]
+    }"#;
+
+    fn sized(millis: [f64; 3]) -> Sizes {
+        let listed = groups(SIZED, "x").expect("the list parses");
+        let now: BTreeMap<String, f64> = [
+            "write/rewrite of 100 pages",
+            "write/inflate 4 MB",
+            "write/rewrite of 3000 pages",
+        ]
+        .into_iter()
+        .zip(millis)
+        .map(|(id, ms)| (id.to_string(), ms * 1_000_000.0))
+        .collect();
+        sizes(&listed, &now)
+    }
+
+    #[test]
+    fn throughput_is_read_from_the_committed_unit() {
+        assert_eq!(
+            throughput(Unit::Pages, 100, 50_000_000.0).as_deref(),
+            Some("2000.0 pages/s")
+        );
+        assert_eq!(
+            throughput(Unit::Pixels, 2_000_000, 1_000_000_000.0).as_deref(),
+            Some("2.00 Mpixel/s")
+        );
+        assert_eq!(
+            throughput(Unit::Bytes, 4_000_000, 500_000_000.0).as_deref(),
+            Some("8.00 MB/s")
+        );
+        assert_eq!(
+            throughput(Unit::Outlines, 300, 100_000_000.0).as_deref(),
+            Some("3000 outlines/s")
+        );
+        assert_eq!(throughput(Unit::None, 1, 1_000_000.0), None);
+        assert_eq!(throughput(Unit::Pages, 1, 0.0), None);
+        let listed = groups(SIZED, "x").expect("the list parses");
+        assert_eq!(listed[0].operations[1].unit, Unit::Bytes);
+        assert_eq!(listed[0].operations[1].per_iteration, 4_000_000);
+    }
+
+    #[test]
+    fn an_operation_under_twenty_ms_fails_the_size_check() {
+        assert_eq!(size_of(19.9, SizeSide::Head, false), Size::Under);
+        assert_eq!(size_of(20.0, SizeSide::Head, false), Size::Inside);
+        let held = sized([12.0, 150.0, 140.0]);
+        assert_eq!(held.failing, ["write/rewrite of 100 pages"]);
+        assert_eq!(
+            held.lines,
+            ["  write/rewrite of 100 pages: 12.000 ms, under the window"]
+        );
+        // The baseline side may run longer, never shorter.
+        assert_eq!(size_of(5.0, SizeSide::Baseline, false), Size::Under);
+    }
+
+    #[test]
+    fn an_operation_over_three_hundred_ms_fails_it() {
+        assert_eq!(size_of(300.1, SizeSide::Head, false), Size::Over);
+        assert_eq!(size_of(300.0, SizeSide::Head, false), Size::Inside);
+        let held = sized([150.0, 301.0, 140.0]);
+        assert_eq!(held.failing, ["write/inflate 4 MB"]);
+    }
+
+    #[test]
+    fn a_baseline_side_may_run_longer() {
+        let size = size_of(5480.0, SizeSide::Baseline, false);
+        assert_eq!(size, Size::BaselineLonger);
+        assert!(!size.fails());
+        assert!(size_of(5480.0, SizeSide::Head, false).fails());
+    }
+
+    #[test]
+    fn an_operation_named_outside_the_window_is_reported_not_failed() {
+        let held = sized([150.0, 140.0, 5480.0]);
+        assert!(held.failing.is_empty(), "{:?}", held.failing);
+        assert_eq!(
+            held.lines,
+            [
+                "  write/rewrite of 3000 pages: 5480.000 ms, outside the window by the \
+              owner's word: tier P states the input"
+            ]
+        );
+        assert_eq!(size_of(5480.0, SizeSide::Head, true), Size::NamedOutside);
+        assert!(!Size::NamedOutside.fails());
+    }
 
     #[test]
     fn a_baseline_reads() {

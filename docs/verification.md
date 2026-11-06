@@ -1098,6 +1098,17 @@ A band has to be above the machine's own swing or it fails on the machine
 rather than on the code, so `bench-check` refuses an entry that carries no
 measured swing.
 
+`bench-check` prints each operation's throughput beside its mean, in the unit
+its list in `baseline.json` commits it to: pages a second, megapixels or
+megabytes a second, or outlines a second. With `--sizes` it also holds every
+head-side operation to the 20-300 ms window the set is sized to, on the runner
+the job lands on, which is where the window is a fact: an operation outside it
+fails unless its entry names it outside the window by the owner's word
+(`outside_window`, H-163), which is reported; the planning baseline's side of
+a factor may run longer. `bench.yml` runs it so, and a dispatch with
+`sizes_report` lists every operation outside the window with its mean and
+fails on none.
+
 ### The named machine is `ubuntu-latest`
 
 `bench.yml` runs on `ubuntu-latest` and holds every run with

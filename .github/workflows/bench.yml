@@ -47,6 +47,12 @@ on:
           timing it (the `count` job below)
         type: boolean
         default: false
+      sizes_report:
+        description: >-
+          List each operation outside the 20-300 ms window with its mean
+          rather than failing on it, the figures H-163 is decided on (MS-04)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -177,8 +183,15 @@ jobs:
       # `cargo xtask baseline` holds its lists and its entry to the group
       # files, their `[[bench]]` entries and the matrix above, so none of
       # them can drift apart again.
+      # And every operation to the window MS-04 sizes the set to, 20 to 300
+      # ms on this runner, which is where the window is a fact: an operation
+      # outside it that `baseline.json` does not name outside it by the
+      # owner's word fails, and a dispatch with `sizes_report` lists them
+      # instead. Each operation's throughput prints beside its mean.
       - name: Hold it to the baseline
-        run: cargo run -p xtask -- bench-check --machine ubuntu-latest
+        env:
+          SIZES: ${{ inputs.sizes_report && 'report' || '' }}
+        run: cargo run -p xtask -- bench-check --machine ubuntu-latest --sizes $SIZES
 
       - name: Keep the numbers
         if: always()

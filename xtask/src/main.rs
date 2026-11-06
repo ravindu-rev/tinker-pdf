@@ -101,7 +101,13 @@ bindings-parity options:
                                          its children, its phase and its
                                          file-backed share, beside the
                                          committed band. Decides nothing
-  cargo xtask bench-check --machine NAME  hold `cargo bench` to the committed baseline
+  cargo xtask bench-check --machine NAME [--sizes [report]]
+                                         hold `cargo bench` to the committed baseline,
+                                         printing each operation's throughput in
+                                         its committed unit; with --sizes, fail a
+                                         head-side mean outside 20-300 ms that
+                                         baseline.json does not name outside it,
+                                         and with `report`, only list them
   cargo xtask bench-check --paired BASE HEAD
                                          hold the head's ten rounds to the base's:
                                          the median paired ratio against 1 + the
