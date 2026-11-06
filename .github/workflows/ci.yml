@@ -425,6 +425,15 @@ jobs:
       - run: maturin build --release --out dist
         working-directory: bindings/python
       - run: pip install bindings/python/dist/*.whl
+      # The installed wheel renders blank without a face and inked with one,
+      # and its path open reads on demand by the rule. The grep fails the step
+      # on a script that exited 0 having checked nothing.
+      - name: Python, smoked
+        run: |
+          set -o pipefail
+          python bindings/python/tests/wheel_smoke.py testdata/simple-text.pdf \
+            /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf 2>&1 | tee wheel-smoke.log
+          grep -q 'WHEEL-SMOKE: RAN' wheel-smoke.log
       # The npm package, installed into the directory the task looks in.
       - uses: jetli/wasm-pack-action@v0.4.0
       - run: wasm-pack build --target web --release

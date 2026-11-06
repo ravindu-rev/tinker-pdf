@@ -17,6 +17,118 @@ mod graphics;
 mod read;
 mod signatures;
 
+/// The file a path open reads (`docs/design/streaming-open.md`, "A
+/// file-backed source in the hosts that own files"): `tpdf`'s shape, copied,
+/// since this binding builds outside the workspace and cannot depend on a
+/// binary's module.
+mod source {
+    use std::fs::File;
+    use std::io;
+    use std::ops::Range;
+    use std::sync::Arc;
+
+    use tinker_pdf::{ByteSource, Document, OpenError, SourceMiss};
+
+    /// A file, read at offsets. Its length is the open handle's, read once,
+    /// so bytes appended after the open are never read; a read answers its
+    /// whole range or misses, and the call that needed it reads it as absent,
+    /// as every streamed host's does.
+    pub struct FileSource {
+        file: File,
+        len: u64,
+    }
+
+    impl FileSource {
+        pub fn open(path: &str) -> io::Result<FileSource> {
+            let file = File::open(path)?;
+            let len = file.metadata()?.len();
+            Ok(FileSource { file, len })
+        }
+
+        /// `range`, inside the length, in one buffer of its size filled in
+        /// place: no `Vec` is copied into an `Arc`.
+        fn fill(&self, range: Range<u64>) -> io::Result<Arc<[u8]>> {
+            let len = usize::try_from(range.end - range.start)
+                .map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory, "a range past memory"))?;
+            let mut bytes: Arc<[u8]> = std::iter::repeat_n(0u8, len).collect();
+            let Some(buffer) = Arc::get_mut(&mut bytes) else {
+                return Err(io::Error::other("a fresh buffer is shared"));
+            };
+            read_at(&self.file, buffer, range.start)?;
+            Ok(bytes)
+        }
+    }
+
+    impl ByteSource for FileSource {
+        fn len(&self) -> u64 {
+            self.len
+        }
+
+        fn read(&self, range: Range<u64>) -> Result<Arc<[u8]>, SourceMiss> {
+            let end = range.end.min(self.len);
+            if range.start >= end {
+                return Ok(Arc::from(&[][..]));
+            }
+            let wanted = range.start..end;
+            self.fill(wanted.clone()).map_err(|_| SourceMiss::at(wanted))
+        }
+    }
+
+    #[cfg(unix)]
+    fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<()> {
+        use std::os::unix::fs::FileExt;
+        file.read_exact_at(buffer, offset)
+    }
+
+    #[cfg(windows)]
+    fn read_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> io::Result<()> {
+        use std::os::windows::fs::FileExt;
+        while !buffer.is_empty() {
+            match file.seek_read(buffer, offset) {
+                Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+                Ok(read) => {
+                    buffer = &mut buffer[read..];
+                    offset += read as u64;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn read_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut cursor = file;
+        cursor.seek(SeekFrom::Start(offset))?;
+        cursor.read_exact(buffer)
+    }
+
+    /// Why a path open failed: the file would not read, or the engine would
+    /// not open its bytes.
+    pub enum Unopened {
+        Read(io::Error),
+        Open(OpenError),
+    }
+
+    /// `path` opened by the rule: streamed through a file source, kept when it
+    /// answers as a buffered open of its bytes would
+    /// (`CosDocument::answers_as_buffered`, asked before anything else is
+    /// read), and otherwise the file read once, in place, and opened from that
+    /// buffer.
+    pub fn open(path: &str) -> Result<Document, Unopened> {
+        let file = Arc::new(FileSource::open(path).map_err(Unopened::Read)?);
+        if let Ok(document) = Document::open_streaming(Arc::clone(&file) as Arc<dyn ByteSource>) {
+            if document.cos().answers_as_buffered() {
+                return Ok(document);
+            }
+        }
+        let bytes = file.fill(0..file.len).map_err(Unopened::Read)?;
+        Document::open(bytes).map_err(Unopened::Open)
+    }
+}
+
 /// Everything a binding may not invent, gathered where it can be seen.
 ///
 /// Ruling 11: a binding projects the facade and adds no defaults of its own.
@@ -102,11 +214,26 @@ impl PyDocument {
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
-    /// Opens a document from a file.
+    /// Opens a document from a file, on demand: through a file source, kept
+    /// when it answers as an open of its bytes would, and otherwise read
+    /// whole, once, in place. A file that will not read raises as an
+    /// unreadable file raises, and bytes the engine will not open as
+    /// `Document(bytes)` does.
     #[staticmethod]
     fn open(path: &str) -> PyResult<PyDocument> {
-        let bytes = std::fs::read(path)?;
-        PyDocument::new(&bytes)
+        match source::open(path) {
+            Ok(inner) => Ok(PyDocument { inner }),
+            Err(source::Unopened::Read(error)) => Err(error.into()),
+            Err(source::Unopened::Open(error)) => Err(PyValueError::new_err(error.to_string())),
+        }
+    }
+
+    /// Whether the document reads its file on demand rather than from one
+    /// buffer (`Document::is_streamed`): true only for a path open the rule
+    /// kept.
+    #[getter]
+    fn is_streamed(&self) -> bool {
+        self.inner.is_streamed()
     }
 
     /// The number of pages.

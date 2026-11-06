@@ -407,7 +407,13 @@ job is the boundary — and `#![warn(missing_docs)]` does.
 
 **Python** (`bindings/python`, PyO3 directly over the facade — not through
 the C ABI, which would add a second error translation for nothing).
-`tinker_pdf.Document(bytes)`, `page_count`, `page_text(i)`, `render(i,
+`tinker_pdf.Document(bytes)` copies the bytes once; `Document.open(path)`
+reads the file on demand by the rule `tpdf` follows — through a file source
+of positioned reads, kept when `answers_as_buffered` says it answers as its
+bytes would, and otherwise read whole, once, in place — and `is_streamed`
+says which it kept. A file that will not read raises as an unreadable file
+raises; after the open a read that misses reads as absent, as every streamed
+host's does. `page_count`, `page_text(i)`, `render(i,
 dpi=)` returning a bitmap whose `data` is a buffer (`memoryview` into numpy
 or Pillow, zero-copy), `set_fonts(bytes)`. `render` and `page_text` release
 the GIL, so a thread pool over pages is actually parallel. The read surface
@@ -1007,7 +1013,12 @@ packaged.
   `bindings/js/tests/node_smoke.mjs` against an `npm install`ed tarball,
   `bindings/dotnet/tests/Smoke` against a local folder feed with the source
   list cleared so a missing package fails rather than resolving from
-  nuget.org. Each asserts the blank-then-inked render.
+  nuget.org. Each asserts the blank-then-inked render. `wheel_smoke.py`
+  also opens a generated four-megabyte file by path and from its bytes —
+  the same page count and page-one text, and the path open streamed — and
+  a damaged file and a linearized one updated since, whose path opens warn
+  what their bytes warn and are read whole; CI's `bindings-parity` job runs
+  it against the wheel it builds and greps `WHEEL-SMOKE: RAN`.
 - The **write** legs run beside them, from the same installed artefacts:
   `write_parity.py`, `write_parity.mjs` and the Smoke program's third
   argument, each printing `WROTE sha256=<hex>` per script, and

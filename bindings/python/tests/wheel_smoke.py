@@ -25,6 +25,7 @@ one.
 
 import pathlib
 import sys
+import tempfile
 
 import tinker_pdf
 
@@ -68,6 +69,96 @@ def ink(bitmap):
     """Pixels whose first channel is not the white background."""
     pixels = bitmap.data
     return sum(1 for i in range(0, len(pixels), bitmap.components) if pixels[i] != 0xFF)
+
+
+def pdf(bodies):
+    """A PDF of `bodies`, numbered from 1, the first its catalog, with a
+    classic cross-reference table."""
+    out = bytearray(b"%PDF-1.7\n")
+    offsets = []
+    for number, body in enumerate(bodies, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    table = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(bodies) + 1)
+    for offset in offsets:
+        out += b"%010d 00000 n \n" % offset
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+        len(bodies) + 1,
+        table,
+    )
+    return bytes(out)
+
+
+def heavy(pages, size):
+    """`pages` pages of a line of Helvetica text and about `size` bytes of
+    drawing each: few objects and many bytes, as a scan or a drawing is."""
+    font = 3 + 2 * pages
+    kids = b" ".join(b"%d 0 R" % (3 + 2 * at) for at in range(pages))
+    bodies = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Count %d /Kids [%s] >>" % (pages, kids),
+    ]
+    drawing = b"0 0 1 1 re f\n" * (size // 13)
+    for at in range(pages):
+        bodies.append(
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]"
+            b" /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>" % (font, 4 + 2 * at)
+        )
+        content = b"BT /F1 12 Tf 10 50 Td (page %d on demand) Tj ET\n" % (at + 1) + drawing
+        bodies.append(b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream")
+    bodies.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    return pdf(bodies)
+
+
+def damaged():
+    """A catalog and an empty tree whose table's second entry points into the
+    first object, which an open of the bytes patches."""
+    data = bytearray(pdf([b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Count 0 /Kids [] >>"]))
+    entry = data.index(b"xref\n0 3\n") + 9 + 2 * 20
+    data[entry : entry + 10] = b"0000000004"
+    return bytes(data)
+
+
+def updated():
+    """Three pages saved linearized, then a title appended as an update, which
+    leaves the length the linearization states behind."""
+    linearized = tinker_pdf.Document(heavy(3, 0)).editor().save(mode="rewrite", linearize=True)
+    editor = tinker_pdf.Document(linearized).editor()
+    editor.set_title("updated")
+    return editor.save(mode="incremental")
+
+
+def warned(document):
+    return [(w.kind, w.offset, w.object) for w in document.warnings()]
+
+
+def on_demand():
+    """`Document.open(path)` reads on demand by the rule: a file whose bytes
+    open the same streamed stays streamed and answers as its bytes do, and a
+    damaged file and a linearized one updated since are read whole and warn
+    what their bytes warn."""
+    with tempfile.TemporaryDirectory() as directory:
+        data = heavy(4, 1 << 20)
+        path = pathlib.Path(directory) / "heavy.pdf"
+        path.write_bytes(data)
+        by_path = tinker_pdf.Document.open(str(path))
+        by_bytes = tinker_pdf.Document(data)
+        assert by_path.page_count == by_bytes.page_count == 4, (by_path.page_count, by_bytes.page_count)
+        assert by_path.page_text(0) == by_bytes.page_text(0), (by_path.page_text(0), by_bytes.page_text(0))
+        assert "page 1 on demand" in by_path.page_text(0), by_path.page_text(0)
+        assert by_path.is_streamed, "a file its bytes answer for stays on demand"
+        assert not by_bytes.is_streamed
+        print(f"on demand: {len(data)} bytes, {by_path.page_count} pages, streamed")
+        for name, data in [("damaged", damaged()), ("updated", updated())]:
+            path = pathlib.Path(directory) / f"{name}.pdf"
+            path.write_bytes(data)
+            by_path = tinker_pdf.Document.open(str(path))
+            by_bytes = tinker_pdf.Document(data)
+            assert warned(by_path) == warned(by_bytes), (name, warned(by_path), warned(by_bytes))
+            assert not by_path.is_streamed, f"{name}: read whole"
+            print(f"{name}: read whole, {len(warned(by_path))} warnings, as its bytes")
+        del by_path, by_bytes
 
 
 def main(pdf_path, face_path):
@@ -115,7 +206,9 @@ def main(pdf_path, face_path):
     view = memoryview(drawn.data)
     assert view.nbytes == len(drawn.data)
 
-    print("WHEEL-SMOKE: RAN, rendered and inked")
+    on_demand()
+
+    print("WHEEL-SMOKE: RAN, rendered, inked and opened on demand")
 
 
 if __name__ == "__main__":
