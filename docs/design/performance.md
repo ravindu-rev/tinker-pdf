@@ -784,9 +784,10 @@ places.
 
 #### The triggers
 
-- **Every pull request**, H-111's default: head the merge commit the event
-  checks out, base that commit's first parent, the target branch's tip it was
-  made on, so the pair is the pull request's change and nothing else.
+- **Every pull request**, which H-111 weighs against a schedule: head the
+  merge commit the event checks out, base that commit's first parent, the
+  target branch's tip it was made on, so the pair is the pull request's
+  change and nothing else.
 - **Every push to `develop`**: every change goes to `develop` with no pull
   request, so this is the trigger that reaches one. Base is the tip the
   push replaced (`github.event.before`) and head the push's tip, so a push of

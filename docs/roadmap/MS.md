@@ -24,7 +24,7 @@ censuses no corpus run has fed.
 
 **Exit criterion.** `cargo xtask bench-check --paired BASE HEAD` reads criterion's `estimates.json`/`sample.json` for both (no second timing), with unit tests including an injected 10 % slowdown that it catches and an A/A pair it passes; a pull-request job runs it in ≤ 15 minutes; each operation's band = worst A/A paired spread over 15 dispatches × 1.5, rounded up to 5 %, floor 5 %, recorded in `verification.md`; the same job builds the MS-04 suite a second time against `61adcde`, the planning baseline, and holds each operation's paired ratio to its committed factor floor, its calibrated targets against the calibration operation run in the job, and its relations (tier P's Gate column)
 
-**Doc:** `design/performance.md` (owed) · **Depends on:** MS-04, H-109 (the bands), H-111 (default: every pull request)
+**Doc:** `design/performance.md` (owed) · **Depends on:** MS-04, H-109 (the bands), H-111 (paused: neither trigger is built until it is answered)
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
