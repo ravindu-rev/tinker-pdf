@@ -229,7 +229,8 @@ fn a_child_that_stops_mid_record_is_a_crash_rather_than_a_pass() {
 /// scanner that stopped recognising what the file carries.
 #[test]
 fn a_file_whose_record_is_cut_still_counts_for_what_it_carries() {
-    let (dir, files) = synthetic_corpus("cut", &[("aa-good", "pass"), ("bb-truncates", "truncate")]);
+    let (dir, files) =
+        synthetic_corpus("cut", &[("aa-good", "pass"), ("bb-truncates", "truncate")]);
     let results = corpus::run_files(
         &stub(),
         &dir,
