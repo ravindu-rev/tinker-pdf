@@ -711,11 +711,10 @@ fn stated(
 /// A run an element's `/ActualText` states has no characters of its own;
 /// its text is stood on the characters the replaced content draws, each on
 /// the glyph whose text it continues with and the rest on their box, as
-/// `Page::text` stands a property list's (ruling 14, which the owner widened
-/// to a cell's element under H-166). A cell any of whose stated text
-/// replaces content that draws nothing that reads keeps no characters,
-/// since none could spell its text; what its subtree draws still bounds its
-/// quad.
+/// `Page::text` stands a property list's (ruling 14). A cell any of whose
+/// stated text replaces content that draws nothing that reads keeps no
+/// characters, since none could spell its text; what its subtree draws
+/// still bounds its quad.
 fn cell_chars(runs: &[ElementRun]) -> (Vec<TextChar>, Vec<TextChar>) {
     let mut chars = Vec::new();
     let mut drawn = Vec::new();
