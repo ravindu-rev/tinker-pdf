@@ -3358,7 +3358,7 @@ fn one_line(text: &str) -> String {
 fn repairs(warnings: &[tinker_pdf::Warning]) -> String {
     let mut named: Vec<(String, Option<ObjRef>)> = Vec::new();
     for warning in warnings {
-        let kind = cos_warning_label(warning);
+        let kind = repair_label(warning);
         if !named.iter().any(|(known, _)| *known == kind) {
             named.push((kind, warning.object));
         }
@@ -3379,6 +3379,32 @@ fn repairs(warnings: &[tinker_pdf::Warning]) -> String {
 
 /// How many kinds of repair a reason line names before it counts the rest.
 const REPAIRS_NAMED: usize = 4;
+
+/// A repair as a strict reason names it: its kind, and the variant the
+/// kind carries where it carries one, so `Filter(AdlerMismatch)` says which
+/// of the filters' leniencies a stream needed where `Filter` alone does not
+/// (MS-22). No field's value is named, so two repairs of one kind are one.
+fn repair_label(warning: &tinker_pdf::Warning) -> String {
+    variant_names(&format!("{:?}", warning.kind))
+}
+
+/// The variant names at the head of a `Debug` rendering: the outer one, and
+/// inside its parentheses the next where one begins there.
+fn variant_names(debug: &str) -> String {
+    let name: String = debug
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    if name.is_empty() {
+        return "Unknown".to_string();
+    }
+    match debug[name.len()..].strip_prefix('(') {
+        Some(inner) if inner.starts_with(|c: char| c.is_ascii_uppercase()) => {
+            format!("{name}({})", variant_names(inner))
+        }
+        _ => name,
+    }
+}
 
 fn cos_warning_label(warning: &tinker_pdf::Warning) -> String {
     let debug = format!("{:?}", warning.kind);
@@ -4827,7 +4853,7 @@ trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n110\n%%EOF\n"
         let (_, named) = line.split_once(": ").expect("the repairs named");
         let mut first: Vec<(String, Option<ObjRef>)> = Vec::new();
         for warning in &warnings {
-            let kind = cos_warning_label(warning);
+            let kind = repair_label(warning);
             if !first.iter().any(|(known, _)| *known == kind) {
                 first.push((kind, warning.object));
             }
@@ -4839,6 +4865,24 @@ trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n110\n%%EOF\n"
             };
             assert!(named.contains(&expected), "{expected} in {line}");
         }
+    }
+
+    /// A filter's repair is named by its own leniency, a kind with fields
+    /// by its name alone, and a value in parentheses not at all.
+    #[test]
+    fn a_repair_is_named_by_its_variants_and_never_its_values() {
+        assert_eq!(
+            variant_names("Filter(AdlerMismatch)"),
+            "Filter(AdlerMismatch)"
+        );
+        assert_eq!(
+            variant_names("Filter(Predictor(ShortRow))"),
+            "Filter(Predictor(ShortRow))"
+        );
+        assert_eq!(variant_names("XrefRepaired { at: 5 }"), "XrefRepaired");
+        assert_eq!(variant_names("Truncated(5)"), "Truncated");
+        assert_eq!(variant_names("PageTreeCycle"), "PageTreeCycle");
+        assert_eq!(variant_names(""), "Unknown");
     }
 
     /// Past four kinds, the rest are counted rather than named.
