@@ -610,6 +610,33 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// `cargo xtask corpus-names REPORT...`: each report's corpora given, in the
+/// bar of its settings, the files each relation broke on there, read from a
+/// report its bar's own revision wrote, so no count moves (MS-18).
+pub fn names(root: &Path, args: &[String]) -> Result<(), String> {
+    if args.is_empty() {
+        return Err("corpus-names takes one report or more".to_string());
+    }
+    for path in args {
+        if path.starts_with("--") {
+            return Err(format!("unknown option `{path}`"));
+        }
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        let report = crate::diff::parse(&text).map_err(|e| format!("{path}: {e}"))?;
+        let bar_path = ratchet_path(&report.fonts);
+        let bar =
+            std::fs::read_to_string(root.join(bar_path)).map_err(|e| format!("{bar_path}: {e}"))?;
+        let (written, lines) = ratchet::name_broken(&bar, &report)
+            .map_err(|e| format!("{path} into {bar_path}: {e}"))?;
+        std::fs::write(root.join(bar_path), written).map_err(|e| format!("{bar_path}: {e}"))?;
+        println!("corpus-names: {path} into {bar_path}");
+        for line in lines {
+            println!("{line}");
+        }
+    }
+    Ok(())
+}
+
 /// The bar `--record` writes from a run's own, `recorded`: its time figures
 /// and peak bands are `committed`'s, carried over unchanged, since each is
 /// several dispatches' and never one run's (MS-07, MS-19).

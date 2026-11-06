@@ -392,7 +392,13 @@ be asked of every file at once. `tpdf probe` checks three in-process, on the
 first page, and reports **four** judgements — `rotate` is judged twice, against
 the budget that decides pass or fail and again against a tighter line that
 decides nothing — and `corpus/ratchet.json` records how many files each was
-asked of beside how many it held on. What declines a relation for a file is a
+asked of beside how many it held on, and which files it broke on by path, so
+a check whose relation falls names each file it broke on that the bar does
+not list, with what its child measured, and a rise names each listed file
+that holds now. A bar recorded before the lists compares by count and says
+it names no file; `cargo xtask corpus-names REPORT...` gives one its lists
+from a report of its own revision, refusing a report whose tallies are not
+the bar's, so no count moves. What declines a relation for a file is a
 property of the document, so how many files it was asked of is a function of
 the corpus rather than of the machine; the per-file report carries each
 document's `cost` — bytes, objects and first-page pixels.

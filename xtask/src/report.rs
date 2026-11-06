@@ -242,6 +242,24 @@ impl CorpusReport {
         self.metamorphic(|verdict| verdict.held())
     }
 
+    /// The files `relation` broke on, by path, sorted, so a bar that lists
+    /// them is the same bytes whatever order the run finished them in.
+    pub fn metamorphic_broke(&self, relation: &str) -> Vec<String> {
+        let mut broke: Vec<String> = self
+            .files
+            .iter()
+            .filter(|file| {
+                matches!(
+                    file.metamorphic.get(relation),
+                    Some(crate::runner::MetaVerdict::Broke(_))
+                )
+            })
+            .map(|file| file.path.clone())
+            .collect();
+        broke.sort();
+        broke
+    }
+
     fn metamorphic(
         &self,
         wanted: fn(&crate::runner::MetaVerdict) -> bool,
@@ -670,11 +688,20 @@ impl Run {
                             |(name, compared)| {
                                 let held =
                                     corpus.metamorphic_held().get(&name).copied().unwrap_or(0);
+                                // The files it broke on, by path, so a check
+                                // that loses one names it (MS-18).
+                                let broke = corpus.metamorphic_broke(&name);
                                 (
                                     name,
                                     Json::object([
                                         ("compared", Json::count(compared)),
                                         ("held", Json::count(held)),
+                                        (
+                                            "broke",
+                                            Json::Array(
+                                                broke.into_iter().map(Json::string).collect(),
+                                            ),
+                                        ),
                                     ]),
                                 )
                             },

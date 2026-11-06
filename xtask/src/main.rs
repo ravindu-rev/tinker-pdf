@@ -101,6 +101,11 @@ bindings-parity options:
                                          its children, its phase and its
                                          file-backed share, beside the
                                          committed band. Decides nothing
+  cargo xtask corpus-names REPORT...     give each relation of the report's
+                                         corpora, in the bar of its settings,
+                                         the files it broke on, from a report
+                                         of the bar's own revision whose
+                                         tallies are the bar's; refuses others
   cargo xtask corpus-peaks --record BAR --revision REV RUN=REPORT...
                                          write BAR's peak bands from three
                                          dispatches' reports at REV, each the
@@ -247,6 +252,7 @@ fn main() -> ExitCode {
         }
         "corpus-diff" => one("corpus-diff", diff::run(&repo_root(), rest)),
         "corpus-peaks" => one("corpus-peaks", peaks::run(&repo_root(), rest)),
+        "corpus-names" => one("corpus-names", corpus::names(&repo_root(), rest)),
         "bench-check" => one("bench-check", bench::run(&repo_root(), rest)),
         "synth-face" => one("synth-face", synth_face(rest)),
         "help" | "-h" | "--help" => {

@@ -48,10 +48,11 @@
 //! land in the same slot as a no-faces figure would either look like a large
 //! improvement or bake in a bar no plain run can clear.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::json::Json;
 use crate::report::Run;
+use crate::runner::MetaVerdict;
 
 /// One corpus's recorded bar.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,6 +73,14 @@ pub struct Bar {
     /// a bar recorded before a relation existed simply has no entry for it,
     /// and a run that adds one is an improvement rather than a refusal.
     pub metamorphic: BTreeMap<String, (u64, u64)>,
+    /// Per relation, the files it broke on when the bar was recorded, by
+    /// path: `compared` less `held` of them (MS-18).
+    ///
+    /// A count alone cannot say which file a relation lost, so a check that
+    /// falls by one has to rebuild an older revision to find it. A relation
+    /// with no list here — every relation of a bar recorded before the lists —
+    /// compares by count and says it names no file.
+    pub broke_on: BTreeMap<String, BTreeSet<String>>,
     /// What the structure tree walk reached (ISO 32000-1 14.7), or `None` in a
     /// bar recorded before the walk existed.
     ///
@@ -704,20 +713,44 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
                 ));
                 continue;
             }
+            let listed = bar.broke_on.get(relation);
             if !holds(*held_before, *compared_before, held, compared) {
-                out.regressions.push(format!(
+                let mut message = format!(
                     "{}: `{relation}` held on {held}/{compared}, worse than the \
                      recorded {held_before}/{compared_before}",
                     bar.name
-                ));
+                );
+                match listed {
+                    Some(listed) => {
+                        let lost = broken_unlisted(corpus, relation, listed);
+                        if !lost.is_empty() {
+                            message.push_str(&format!(
+                                "; it broke on, and the bar does not list: {}",
+                                lost.join(", ")
+                            ));
+                        }
+                    }
+                    None => message.push_str("; the bar names no file it broke on"),
+                }
+                out.regressions.push(message);
             } else if u128::from(held) * u128::from(*compared_before)
                 > u128::from(*held_before) * u128::from(compared)
             {
-                out.improvements.push(format!(
+                let mut message = format!(
                     "{}: `{relation}` held on {held}/{compared}, up from \
                      {held_before}/{compared_before}",
                     bar.name
-                ));
+                );
+                if let Some(listed) = listed {
+                    let back = held_listed(corpus, relation, listed);
+                    if !back.is_empty() {
+                        message.push_str(&format!(
+                            "; it holds now on, as the bar listed it broken: {}",
+                            back.join(", ")
+                        ));
+                    }
+                }
+                out.improvements.push(message);
             }
             if !holds(*compared_before, bar.total, compared, total) {
                 out.regressions.push(format!(
@@ -1036,6 +1069,148 @@ pub fn carry_times(committed: &Json, recorded: Json) -> Json {
     Json::Object(top)
 }
 
+/// The files `corpus` broke `relation` on that `listed` does not name, each
+/// with what its child measured.
+fn broken_unlisted(
+    corpus: &crate::report::CorpusReport,
+    relation: &str,
+    listed: &BTreeSet<String>,
+) -> Vec<String> {
+    corpus
+        .files
+        .iter()
+        .filter_map(|file| match file.metamorphic.get(relation) {
+            Some(MetaVerdict::Broke(detail)) if !listed.contains(&file.path) => {
+                Some(if detail.is_empty() {
+                    file.path.clone()
+                } else {
+                    format!("{} ({detail})", file.path)
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The files `listed` names that `corpus` now holds `relation` on.
+fn held_listed(
+    corpus: &crate::report::CorpusReport,
+    relation: &str,
+    listed: &BTreeSet<String>,
+) -> Vec<String> {
+    corpus
+        .files
+        .iter()
+        .filter(|file| {
+            listed.contains(&file.path)
+                && matches!(file.metamorphic.get(relation), Some(MetaVerdict::Held(_)))
+        })
+        .map(|file| file.path.clone())
+        .collect()
+}
+
+/// `cargo xtask corpus-names`: `bar`'s text with each relation of every corpus
+/// `report` holds given the list of files it broke on there, read from that
+/// report; with a line per corpus saying what was listed (MS-18).
+///
+/// For a bar recorded before the lists, from a report its own revision wrote
+/// under its settings: every relation's tally in the report must be the
+/// bar's, or the report is refused by name, so no count moves. A corpus the
+/// report lacks keeps its bar as it is.
+pub fn name_broken(
+    bar: &str,
+    report: &crate::diff::Report,
+) -> Result<(String, Vec<String>), String> {
+    let committed = parse(bar).map_err(|e| format!("the bar: {e}"))?;
+    let root = crate::json::parse(bar)?;
+    let settings = root.get("settings");
+    let dpi = match settings.and_then(|settings| settings.get("dpi")) {
+        Some(Json::Number(dpi)) => format!("{dpi}"),
+        _ => return Err("the bar's `settings` have no `dpi`".to_string()),
+    };
+    if dpi != report.dpi || committed.fonts != report.fonts {
+        return Err(format!(
+            "the report ran at dpi {} with fonts `{}` and the bar at dpi {dpi} with fonts `{}`",
+            report.dpi, report.fonts, committed.fonts
+        ));
+    }
+    let Json::Object(mut top) = root else {
+        return Err("the bar is not an object".to_string());
+    };
+    let mut refusals = Vec::new();
+    let mut lists: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+    let mut lines = Vec::new();
+    for (corpus, files) in &report.corpora {
+        let Some(entry) = committed.bars.iter().find(|bar| &bar.name == corpus) else {
+            refusals.push(format!("{corpus}: the report has it and the bar does not"));
+            continue;
+        };
+        let mut relations = BTreeMap::new();
+        for (relation, (compared, held)) in &entry.metamorphic {
+            let verdicts = files.values().filter_map(|verdicts| verdicts.get(relation));
+            let asked = verdicts.clone().filter(|v| v.verdict != "skipped").count() as u64;
+            let holding = verdicts.clone().filter(|v| v.verdict == "held").count() as u64;
+            if (asked, holding) != (*compared, *held) {
+                refusals.push(format!(
+                    "{corpus}: the report holds `{relation}` on {holding}/{asked} and the bar \
+                     on {held}/{compared}; a list read from another tally would move a count"
+                ));
+                continue;
+            }
+            let broke: Vec<String> = files
+                .iter()
+                .filter(|(_, verdicts)| {
+                    verdicts
+                        .get(relation)
+                        .is_some_and(|verdict| verdict.verdict == "broke")
+                })
+                .map(|(path, _)| path.clone())
+                .collect();
+            lines.push(format!(
+                "  {corpus} `{relation}`: {} files listed, {held}/{compared} unchanged",
+                broke.len()
+            ));
+            relations.insert(relation.clone(), broke);
+        }
+        lists.insert(corpus.clone(), relations);
+    }
+    if !refusals.is_empty() {
+        return Err(format!(
+            "no list was written:\n  refused: {}",
+            refusals.join("\n  refused: ")
+        ));
+    }
+    if let Some(Json::Array(corpora)) = top.get_mut("corpora") {
+        for corpus in corpora.iter_mut() {
+            let Json::Object(fields) = corpus else {
+                continue;
+            };
+            let Some(relations) = fields
+                .get("name")
+                .and_then(Json::as_str)
+                .and_then(|name| lists.get(name))
+                .cloned()
+            else {
+                continue;
+            };
+            let Some(Json::Object(entries)) = fields.get_mut("metamorphic") else {
+                continue;
+            };
+            for (relation, broke) in relations {
+                if let Some(Json::Object(entry)) = entries.get_mut(&relation) {
+                    entry.insert(
+                        "broke".to_string(),
+                        Json::Array(broke.iter().map(Json::string).collect()),
+                    );
+                }
+            }
+        }
+    }
+    let text = Json::Object(top).to_pretty();
+    parse(&text).map_err(|e| format!("the bar written does not read back: {e}"))?;
+    Ok((text, lines))
+}
+
 /// The bar `--record` writes, with `committed`'s peak bands and the runs they
 /// were read from carried over unchanged, and none of `recorded`'s own
 /// (MS-19).
@@ -1224,6 +1399,23 @@ fn parse_time(object: &Json, name: &str, time_runs: Option<&TimeRuns>) -> Result
     Ok(TimeBar { total, runs })
 }
 
+/// A relation's `broke` list: paths, none twice.
+fn broke_list(list: &Json, name: &str, relation: &str) -> Result<BTreeSet<String>, String> {
+    let items = list
+        .as_array()
+        .ok_or_else(|| format!("`{name}`'s `{relation}` has a `broke` that is not a list"))?;
+    let mut paths = BTreeSet::new();
+    for item in items {
+        let path = item
+            .as_str()
+            .ok_or_else(|| format!("`{name}`'s `{relation}` lists a file that is not a path"))?;
+        if !paths.insert(path.to_string()) {
+            return Err(format!("`{name}`'s `{relation}` lists `{path}` twice"));
+        }
+    }
+    Ok(paths)
+}
+
 /// Reads a committed ratchet.
 pub fn parse(text: &str) -> Result<Ratchet, String> {
     let json = crate::json::parse(text)?;
@@ -1283,6 +1475,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
         let strict_eligible = count("strict_eligible")?;
         let strict_clean = count("strict_clean")?;
         let mut metamorphic = BTreeMap::new();
+        let mut broke_on = BTreeMap::new();
         if let Some(Json::Object(relations)) = entry.get("metamorphic") {
             for (relation, verdict) in relations {
                 let read = |key: &str| -> Result<u64, String> {
@@ -1298,6 +1491,18 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
                     ));
                 }
                 metamorphic.insert(relation.clone(), (compared, held));
+                if let Some(list) = verdict.get("broke") {
+                    let paths = broke_list(list, &name, relation)?;
+                    let broke = compared - held;
+                    if paths.len() as u64 != broke {
+                        return Err(format!(
+                            "`{name}`'s `{relation}` lists {} files it broke on, where \
+                             {compared} compared less {held} held is {broke}",
+                            paths.len()
+                        ));
+                    }
+                    broke_on.insert(relation.clone(), paths);
+                }
             }
         }
         if passed > total || degraded > total {
@@ -1446,6 +1651,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
             strict_eligible,
             strict_clean,
             metamorphic,
+            broke_on,
             tagged,
             capabilities,
             peak,
@@ -1703,6 +1909,7 @@ mod tests {
                 strict_eligible: total,
                 strict_clean: total,
                 metamorphic: BTreeMap::new(),
+                broke_on: BTreeMap::new(),
                 tagged: None,
                 capabilities: BTreeMap::new(),
                 peak: None,
@@ -1714,6 +1921,172 @@ mod tests {
             time_runs: None,
             peak_runs: None,
         }
+    }
+
+    /// A run of `pdfjs`'s three files whose `dpi` verdicts are `verdicts`, in
+    /// file order, `x` the detail each broken one gives.
+    fn relation_run(verdicts: [&str; 3]) -> Run {
+        let mut run = run("pdfjs", 3, 0, 0);
+        for (file, verdict) in run.corpora[0].files.iter_mut().zip(verdicts) {
+            let verdict = match verdict {
+                "held" => MetaVerdict::Held(String::new()),
+                "broke" => MetaVerdict::Broke("x".to_string()),
+                _ => MetaVerdict::Skipped("not asked".to_string()),
+            };
+            file.metamorphic.insert("dpi".to_string(), verdict);
+        }
+        run
+    }
+
+    /// A bar of `pdfjs` holding `dpi` on `held` of 3, its list `broke` where
+    /// one is given.
+    fn relation_bar(held: u64, broke: Option<&[&str]>) -> Ratchet {
+        let mut committed = bar("pdfjs", 3, 3, 0);
+        committed.bars[0]
+            .metamorphic
+            .insert("dpi".to_string(), (3, held));
+        if let Some(broke) = broke {
+            committed.bars[0].broke_on.insert(
+                "dpi".to_string(),
+                broke.iter().map(|path| (*path).to_string()).collect(),
+            );
+        }
+        committed
+    }
+
+    #[test]
+    fn a_relation_that_falls_names_the_file_it_lost() {
+        let out = compare(
+            &relation_bar(2, Some(&["1.pdf"])),
+            &relation_run(["held", "broke", "broke"]),
+            false,
+        );
+        let message = out
+            .regressions
+            .iter()
+            .find(|r| r.contains("`dpi` held on 1/3"))
+            .unwrap_or_else(|| panic!("{:?}", out.regressions));
+        assert!(
+            message.ends_with("; it broke on, and the bar does not list: 2.pdf (x)"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_listed_file_that_holds_now_is_named_as_better() {
+        let out = compare(
+            &relation_bar(1, Some(&["1.pdf", "2.pdf"])),
+            &relation_run(["held", "held", "broke"]),
+            false,
+        );
+        assert!(!out.failed(), "{:?}", out.regressions);
+        assert!(
+            out.improvements.iter().any(|line| line
+                .ends_with("; it holds now on, as the bar listed it broken: 1.pdf")),
+            "{:?}",
+            out.improvements
+        );
+    }
+
+    #[test]
+    fn a_list_its_counts_disagree_with_is_refused() {
+        let text = |broke: &str| {
+            format!(
+                r#"{{"schema":2,"complete":true,"settings":{{"fonts":"none"}},
+                "corpora":[{{"name":"pdfjs","total":3,"passed":3,"degraded":0,
+                "strict_eligible":3,"strict_clean":3,
+                "metamorphic":{{"dpi":{{"compared":3,"held":2,"broke":[{broke}]}}}}}}]}}"#
+            )
+        };
+        let read = parse(&text(r#""1.pdf""#)).expect("one listed of one broken");
+        assert_eq!(
+            read.bars[0].broke_on.get("dpi"),
+            Some(&BTreeSet::from(["1.pdf".to_string()]))
+        );
+        let none = parse(&text("")).expect_err("none listed of one broken");
+        assert!(none.contains("lists 0 files"), "{none}");
+        let twice = parse(&text(r#""1.pdf","1.pdf""#)).expect_err("one listed twice");
+        assert!(twice.contains("twice"), "{twice}");
+    }
+
+    #[test]
+    fn a_bar_without_lists_compares_by_count_and_says_so() {
+        let out = compare(
+            &relation_bar(2, None),
+            &relation_run(["held", "broke", "broke"]),
+            false,
+        );
+        assert!(
+            out.regressions
+                .iter()
+                .any(|r| r.contains("`dpi` held on 1/3")
+                    && r.ends_with("; the bar names no file it broke on")),
+            "{:?}",
+            out.regressions
+        );
+        let level = compare(
+            &relation_bar(2, None),
+            &relation_run(["held", "held", "broke"]),
+            false,
+        );
+        assert!(!level.failed(), "{:?}", level.regressions);
+    }
+
+    #[test]
+    fn corpus_names_refuses_a_report_whose_tallies_are_not_the_bars() {
+        // A bar recorded before the lists: each relation keeps its counts alone.
+        let mut recorded = relation_run(["held", "held", "broke"]).to_ratchet_json("n");
+        if let Json::Object(top) = &mut recorded {
+            if let Some(Json::Array(corpora)) = top.get_mut("corpora") {
+                for corpus in corpora {
+                    if let Json::Object(fields) = corpus {
+                        if let Some(Json::Object(relations)) = fields.get_mut("metamorphic") {
+                            for relation in relations.values_mut() {
+                                if let Json::Object(entry) = relation {
+                                    entry.remove("broke");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let committed = recorded.to_pretty();
+        let without = parse(&committed).expect("a bar");
+        assert!(without.bars[0].broke_on.is_empty(), "{committed}");
+        let report = |verdicts: [&str; 3]| {
+            let files: Vec<String> = verdicts
+                .iter()
+                .enumerate()
+                .map(|(index, verdict)| {
+                    format!(
+                        r#"{{"path":"{index}.pdf","outcome":"passed",
+                        "metamorphic":{{"dpi":{{"verdict":"{verdict}","detail":"x"}}}}}}"#
+                    )
+                })
+                .collect();
+            crate::diff::parse(&format!(
+                r#"{{"schema":2,"settings":{{"dpi":72,"fonts":"none"}},
+                "corpora":[{{"name":"pdfjs","files":[{}]}}]}}"#,
+                files.join(",")
+            ))
+            .expect("a report")
+        };
+        let refused = name_broken(&committed, &report(["held", "broke", "broke"]))
+            .expect_err("a report holding one where the bar holds two");
+        assert!(
+            refused.contains("pdfjs: the report holds `dpi` on 1/3 and the bar on 2/3"),
+            "{refused}"
+        );
+        let (written, lines) = name_broken(&committed, &report(["held", "held", "broke"]))
+            .expect("the bar's own tally");
+        assert_eq!(lines, ["  pdfjs `dpi`: 1 files listed, 2/3 unchanged"]);
+        let read = parse(&written).expect("the bar reads back");
+        assert_eq!(read.bars[0].metamorphic.get("dpi"), Some(&(3, 2)));
+        assert_eq!(
+            read.bars[0].broke_on.get("dpi"),
+            Some(&BTreeSet::from(["2.pdf".to_string()]))
+        );
     }
 
     /// A run of ten files, each opened in `open` µs, whose twenty pages took
