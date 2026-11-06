@@ -700,6 +700,22 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # A book that is not the bytes its pin names fails the fetch by name:
+      # held here on a synthetic file against a wrong digest, so the check is
+      # shown to fail before it is trusted to pass.
+      - name: A book that is not the pinned one fails by name
+        run: |
+          dir=$(mktemp -d)
+          printf 'not the book' > "$dir/sample-trees.epub"
+          printf '%s  %s\n' 0000000000000000000000000000000000000000000000000000000000000000 \
+            sample-trees.epub > "$dir/pins"
+          if sh crates/tinker-pdf/tests/epub/verify-pins.sh "$dir" "$dir/pins" > "$dir/out" 2>&1; then
+            cat "$dir/out"
+            echo "::error::a book with the wrong digest was let through"
+            exit 1
+          fi
+          cat "$dir/out"
+          grep -q 'sample-trees.epub is not the pinned book' "$dir/out"
       - name: Fetch the corpus that cannot be committed
         run: sh crates/tinker-pdf/tests/epub/fetch-corpus.sh
       - name: Read the fetched corpus

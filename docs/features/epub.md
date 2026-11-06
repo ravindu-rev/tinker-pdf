@@ -1158,7 +1158,9 @@ rather than zero.
   passing — and `TINKER_EPUB_CORPUS_REQUIRED=1` makes a skip a failure. It
   prints `epub-corpus: RAN` / `SKIPPED` so the CI job goes red on a skip.
   The job prints the `MANIFEST.tsv` its fetch writes, each book's size and
-  SHA-256, since the public-domain library's books are fetched unpinned, and
+  SHA-256, and the fetch holds every book to the digest
+  `tests/epub/PINNED.sha256` names, failing by name on one that differs, so
+  the figures `epub_fetched.rs` pins are the pinned books'; and
   `the_unimplemented_property_census` sums each book's
   `UnimplementedProperty` counts per property, highest first: the order CD-01
   lands its properties in.

@@ -130,6 +130,15 @@ done
 } >MANIFEST.tsv
 
 echo "epub-corpus: fetched $(ls -1 ./*.epub | wc -l | tr -d ' ') books into $dest"
+
+# ---- the pins -----------------------------------------------------------------
+#
+# Every book is held to the SHA-256 `PINNED.sha256` names: a book the library
+# regenerated fails the fetch by name, and is re-pinned in a reviewed
+# commit with the figures it changes, so `epub_fetched.rs`'s are never read
+# from bytes nobody pinned. After the manifest, so a failed run still says
+# what it got.
+sh "$repo/crates/tinker-pdf/tests/epub/verify-pins.sh" "$dest"
 abs=$(cd "$dest" && pwd)
 echo "epub-corpus: set TINKER_EPUB_CORPUS=$abs to run the tests over them"
 echo "epub-corpus: the path must be ABSOLUTE -- a test binary runs from its"

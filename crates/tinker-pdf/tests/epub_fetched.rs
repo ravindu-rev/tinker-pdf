@@ -1007,7 +1007,37 @@ fn the_css_property_census() {
     );
     println!("  {union:?}");
     assert!(sheets > 0, "the census read no stylesheet at all");
+    // Every book is the bytes `epub/PINNED.sha256` names, so a sheet or a
+    // property fewer is one this build stopped reading.
+    assert!(
+        sheets >= STYLESHEETS_FLOOR,
+        "{sheets} stylesheets read, under the pinned books' {STYLESHEETS_FLOOR}"
+    );
+    assert!(
+        union.len() >= PROPERTIES_FLOOR,
+        "{} distinct properties read, under the pinned books' {PROPERTIES_FLOOR}",
+        union.len()
+    );
 }
+
+/// The pinned books' stylesheets and the distinct properties they name, as
+/// the `epub-corpus` job of CI run 42181215562 read them: floors, since a
+/// reader that reads more is no worse.
+const STYLESHEETS_FLOOR: usize = 53;
+const PROPERTIES_FLOOR: usize = 84;
+
+/// Each property the pinned books ask of CSS that the layout does not
+/// implement, and how many elements asked, as that run read them: ceilings,
+/// since a count falls as CD-01 lands a property and a landing lowers its
+/// own; a count over its ceiling, or a property not here, is a book this
+/// build reads worse.
+const UNIMPLEMENTED_CEILINGS: &[(&str, usize)] = &[
+    ("text-align", 2542),
+    ("font", 435),
+    ("white-space", 243),
+    ("word-wrap", 81),
+    ("quotes", 6),
+];
 
 /// **What the fetched books ask of CSS that this build does not lay out**,
 /// the census CD-01 orders its landings by.
@@ -1051,6 +1081,19 @@ fn the_unimplemented_property_census() {
     );
     for (property, elements) in &totals {
         println!("    {property:32} {elements}");
+    }
+    for (property, elements) in &totals {
+        let ceiling = UNIMPLEMENTED_CEILINGS
+            .iter()
+            .find(|(pinned, _)| pinned == property)
+            .map(|(_, ceiling)| *ceiling);
+        match ceiling {
+            None => panic!("{property} is unimplemented on {elements} elements and was on none"),
+            Some(ceiling) => assert!(
+                *elements <= ceiling,
+                "{property} is unimplemented on {elements} elements, over its ceiling of {ceiling}"
+            ),
+        }
     }
 }
 

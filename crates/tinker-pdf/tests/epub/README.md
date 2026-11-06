@@ -155,6 +155,17 @@ destination inside the working tree that is not under `target/`, because a
 convenience that put unredistributable books where `git add -A` can reach them
 is a licence violation committed by accident.
 
+**Every book is pinned by SHA-256** in `PINNED.sha256`, and the fetch ends with
+`verify-pins.sh`, which fails by name on a book that is not the bytes its pin
+names, on a fetched book with no pin, and on a pinned book that did not
+arrive. Project Gutenberg regenerates a book when its text is corrected, so a
+pin moves: the book is re-pinned in a reviewed commit, together with whatever
+of `epub_fetched.rs`'s pinned figures the new bytes change, and the job is red
+until then. The figures held to the pinned books are the CSS census's
+stylesheets and distinct properties, as floors, and the unimplemented-property
+census's counts, as ceilings, each lowered by the landing of its property; the
+job's log records the rest each run, with the manifest of what it read.
+
 `crates/tinker-pdf/tests/epub_fetched.rs` reads `TINKER_EPUB_CORPUS` and prints
 **`epub-corpus: RAN`** or **`epub-corpus: SKIPPED`**; the CI job greps for the
 second and goes red. A skipped test exits 0 and reads exactly like a pass, and
