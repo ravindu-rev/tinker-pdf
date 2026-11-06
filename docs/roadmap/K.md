@@ -190,3 +190,16 @@ K-08 extends the mechanism to every new rendered surface.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | K-19.1 | ci | Fetch PngSuite in CI and run `png_suite.rs` with its banner required. | `.github/workflows/ci.yml` | The job's run prints `RAN` for `png_suite.rs` and is green. | — |
+
+## K-20 — A `render_page` input that draws one form past its group budget
+
+**A `render_page` input that draws one form past its group budget** — the `fuzz-seeds` job of CI run 42223962796 at `fa2d1b8b` (job 127912623441) fails on a `render_page` input its twenty-second mutating session generated and timed out on after 29 seconds: `timeout-d23ad1794a4b38164ae2878c035080b11f1d4777`, 1 851 bytes, kept as the run's `fuzz-seed-crashes` artifact. Its page's three `q … Q` blocks set three graphics states, the last naming as its soft mask's `/G` the page's own content stream, and draw a transparency-group form (`/Grp`) and a knockout form (`/Knock`) whose dictionary the mutation broke. Counted, a render at the target's 12 dpi decodes `/Knock`'s stream 136 577 times and hits the image cache 136 576 times, where one interpretation's group runs are bounded at 2 000 (`MAX_GROUP_RUNS`) and its depth at 16 (`MAX_FORM_DEPTH`), so some path draws the page's content past both. It is not the push's: without the state cache `b2514dd5` added the same render decodes 273 155 streams, the cache halving them and leaving the draws as they were, and the job's earlier runs did not happen on the input.
+
+**Exit criterion.** the input renders, extracts and writes SVG under the target's own calls in work its group budget bounds, held by a counted test that fails before the fix; the input committed as a `render_page` seed; the `fuzz-seeds` job green on `develop`
+
+**Doc:** [features/rendering.md](../features/rendering.md) · **Depends on:** —
+
+| Step | Kind | What | Where | Exit | Depends on |
+| --- | --- | --- | --- | --- | --- |
+| K-20.1 | test | Name the path. Commit the input under `fuzz/corpus/render_page/`, and a counted test in `crates/tinker-pdf/tests/stats.rs` that renders it at 12 dpi and asserts its `streams_decoded` and `image_hits` within what `MAX_GROUP_RUNS` allows one render, failing now; record here which draw starts the interpretation that runs past the budget. *Note:* The input is one this repository's CI generated, not a corpus file. | `fuzz/corpus/render_page/`, `crates/tinker-pdf/tests/stats.rs`, `docs/roadmap/K.md` | The test fails on `develop` with the counts above, and this row names the path. | — |
+| K-20.2 | fix | Bound the named path by the page's group budget, so that no draw restarts the work the budget counts. | the named path's file, `crates/tinker-pdf/tests/stats.rs`, `docs/features/rendering.md` | K-20.1's test passes and fails with the fix reverted; every fingerprint and golden holds; the next CI run's `fuzz-seeds` job is green. | K-20.1 |

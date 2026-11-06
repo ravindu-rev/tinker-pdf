@@ -9,7 +9,7 @@ e-invoices.
 
 ## SD-01 — PDF/A validation, complete
 
-**PDF/A validation, complete**: the 39 staged rules and every machine-checkable clause of parts 1a/1b, 2a/2b/2u, 3a/3b/3u and 4/4e/4f, each finding with clause, test number and object path
+**PDF/A validation, complete**: the 39 staged rules and every machine-checkable clause of parts 1a/1b, 2a/2b/2u, 3a/3b/3u and 4/4e/4f, each finding with clause, test number and object path. `corpus.yml` run 42224015226 at `fa2d1b8b` reads the bar at `pass agreed 830, pass disagreed 1, fail agreed 1198, fail disagreed 342`, the one false positive `6-1-2-t01-pass-a.pdf`'s `HeaderVersionNotInPart`, over 84 ledger rows with no disagreement uncovered and none stale.
 
 **Exit criterion.** the staged count reaches zero one ledger class at a time; agreement ratcheted up and the false-positive count held at 830 of 831 or better by `pdfa_ledger.rs` nightly
 
@@ -78,7 +78,7 @@ e-invoices.
 
 ## SD-04 — PDF/UA validation, complete
 
-**PDF/UA validation, complete**: the table grid (milestone 3's other half), part 2's annotations and 7.18's residue (milestone 4), real content (5), UA-2 specifics (6), the ledger and the writer's claim (7), the font clauses that need the glyph list as data; WTPDF 1.0's accessibility and reuse conformance
+**PDF/UA validation, complete**: the table grid (milestone 3's other half), part 2's annotations and 7.18's residue (milestone 4), real content (5), UA-2 specifics (6), the ledger and the writer's claim (7), the font clauses that need the glyph list as data; WTPDF 1.0's accessibility and reuse conformance. `corpus.yml` run 42224015226 at `fa2d1b8b` reads caught 176, abstained 63 and false alarms 0 over the 195 conforming files; the ten fail files under UA-1 7.1, 7.2 and 7.5 and UA-2 5 and 8.2 that left caught for abstained beside the 33 false alarms were caught by the same misread width, which a symbolic subset no longer gives.
 
 **Exit criterion.** a rule group that decides the decidable clauses and abstains by name on the rest: the next nightly `pdfua.rs` records caught, abstained and false-alarm counts — the false alarms first, held at zero over the 195 conforming files; each new rule a fixture and twin — schedulable as M halves, one per milestone left
 
