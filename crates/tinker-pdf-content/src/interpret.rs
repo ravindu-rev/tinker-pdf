@@ -551,7 +551,7 @@ const MAX_FORM_DEPTH: u32 = 16;
 /// that keeps no buffer — the text device, the image lister — declines every
 /// group and runs them all. So every reading of such a page paid for the
 /// whole tree, and one that also paid per element written, the SVG writer,
-/// did not finish (MS-21).
+/// did not finish.
 ///
 /// This is the same budget in the interpreter, for every device: spent and
 /// never refunded, so a page cannot recover budget by unwinding and going
