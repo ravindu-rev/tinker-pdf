@@ -155,14 +155,14 @@ implied by a percentage.
 1. The `tinker-pdf-shape` crate: `GDEF`/`GSUB`/`GPOS` parsing,
    coverage/classdef, extension and chaining-context lookups. Exit: the aots
    fixture suite per lookup type in `tests/aots.rs`; the `shape` fuzz target
-   (arbitrary face bytes and text) in the nightly fuzz job;
-   `#![deny(clippy::float_arithmetic)]` compiles.
+   (arbitrary face bytes and text), run under `cargo fuzz` on Linux as a
+   change's local proof; `#![deny(clippy::float_arithmetic)]` compiles.
 2. The default shaper: `cmap` via `tinker_pdf_font::Sfnt`, `ccmp`/`liga`,
    GPOS `kern`/`mark`/`mkmk`, cluster mapping. Exit: the text-rendering-tests
    CMAP/GSUB/GPOS sections as committed fixtures; shaping fingerprints
-   reproduced by the determinism CI legs
-   ([features/determinism.md](../features/determinism.md)) on all four
-   targets.
+   reproduced on every measured target
+   ([features/determinism.md](../features/determinism.md)): Linux and Windows
+   in CI's tests, `wasm32-wasip1` under wasmtime locally.
 3. UAX #9: level resolution, bracket pairs, per-line `reorder`, mirroring.
    Exit: `BidiTest.txt` and `BidiCharacterTest.txt` conformance tests through
    the same entry point consumers call, in the `uax14_conformance.rs`
@@ -195,7 +195,7 @@ implied by a percentage.
 - `DocumentBuilder::glyph_run` and `Glyph` in
   `crates/tinker-pdf-cos/src/build.rs` (milestone 7 is wiring, not new
   machinery).
-- The determinism fingerprint suite and CI legs
+- The determinism fingerprint suite and the targets it is measured on
   ([features/determinism.md](../features/determinism.md)), which milestone 2
   extends.
 - The conformance-fixture discipline of
@@ -211,6 +211,6 @@ implied by a percentage.
 | **Ruling 13 leaves scripts without a conformance fixture unadjudicated.** Shaping can be deterministic, plausible and wrong, and nothing fires | Those scripts are listed by name in the feature doc as shaped-but-unverified; the number that matters is how many sections pass, asserted with its count, not a percentage against another engine |
 | Two measurement paths disagree — the exact failure `metrics.rs` warns about, with three paths (`Metrics`, `Shaper`, the renderer) | One path owns a run, asserted by test (milestone 6); creation writes the shaper's own advances through `glyph_run`, so what was measured is what is drawn |
 | Re-shaping at unsafe line breaks goes quadratic or breaks Arabic joining across lines | `safe_to_break` flags per glyph; re-shape only the boundary runs; a pinned test breaks inside a joined word under `word-break: break-all` and asserts forms and cost |
-| Float creep silently breaks the cross-target contract | Integer font units end to end; `clippy::float_arithmetic` denied in the crate; fingerprints on all four targets from milestone 2, divergence is build-stopping |
+| Float creep silently breaks the cross-target contract | Integer font units end to end; `clippy::float_arithmetic` denied in the crate; fingerprints on every measured target from milestone 2 — Linux and Windows in CI's tests, `wasm32-wasip1` locally — and a divergence fails them |
 | Unicode version skew between the crates' vendored UCD | One pinned version, asserted by a header-comparison test; upgrades touch every `data/ucd` tree in one commit |
 | Malformed `GSUB`/`GPOS` from untrusted faces (cycles, out-of-range offsets) | Ruling 1 via the fuzz target from milestone 1; lookup recursion depth and total-substitution budgets in the crate's `limits`, typed warnings on refusal per rulings 2 and 10 |

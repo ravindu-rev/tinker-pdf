@@ -190,9 +190,9 @@ package that ships a read-only `cdylib` fails its own release pipeline.
    primitives.
 5. The .NET wrapper: the five `SafeHandle`s, `Editor`/`Builder` classes and
    the status-to-`PdfException` mapping.
-6. Parity, validation and CI: the recorded write hashes,
-   `cargo xtask bindings-parity`, the strict-validator leg and the release
-   smoke gates.
+6. Parity and validation: the recorded write hashes,
+   `cargo xtask bindings-parity`, run locally with `--require-all` once every
+   surface is built, the strict-validator leg and the release smoke gates.
 
 ## Dependencies
 

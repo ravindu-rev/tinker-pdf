@@ -130,8 +130,8 @@ directions.
 `crates/tinker-pdf/tests/pdfx_census.rs` reads every file of every fetched
 corpus and prints each PDF/X claim with the level it is read as; it asserts
 that a file claiming nothing gets an empty verdict, and that a real claim to a
-validated level has no finding nobody has read. It runs nightly in
-`corpus.yml` and honours `TINKER_CORPUS_REQUIRED`.
+validated level has no finding nobody has read. It runs locally over the
+fetched corpora and honours `TINKER_CORPUS_REQUIRED`.
 
 ## What is not measured
 

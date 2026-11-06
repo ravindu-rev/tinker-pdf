@@ -124,6 +124,9 @@ your data is wrong, and those are different bugs in different places.
 
 ## Nothing is published
 
-`dotnet add package TinkerPdf` does not work: nothing is published. The
-pipeline runs as a dry run; the facade does not freeze before 0.1.0
+`dotnet add package TinkerPdf` does not work: nothing is published.
+[`release.yml`](../../.github/workflows/release.yml) pushes the package to
+NuGet when the owner merges `develop` into `main` at a workspace version that
+has no `v<version>` tag, and a merge that leaves the version as it is
+publishes nothing; the facade does not freeze before 0.1.0
 ([`docs/architecture.md`](../../docs/architecture.md)).

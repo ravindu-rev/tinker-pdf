@@ -33,7 +33,7 @@ directory, and that is the point of it.
   `TINKER_COMMONMARK_SPEC=<absolute path it prints> cargo test -p tinker-pdf
   --test commonmark_spec -- --nocapture`. `TINKER_COMMONMARK_SPEC_FAILURES=1`
   prints every failing example; `TINKER_COMMONMARK_SPEC_REQUIRED=1` makes a
-  skip a failure, which is what the `commonmark-spec` CI job sets.
+  skip a failure, and a local run that proves a change to the reader sets it.
 - **The floor is 651 of 652** (`PASSING`), every section whole but *Entity and
   numeric character references* (16 of 17). Example 25 names five HTML5-only
   entities (`&Dcaron;`, `&HilbertSpace;`, `&DifferentialD;`,

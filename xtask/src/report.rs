@@ -541,7 +541,7 @@ impl Run {
                         // can say `dpi held on 572 of 580, worse than the
                         // recorded 572 of 579` and nothing in the run says
                         // *which* file — which makes the number a verdict
-                        // rather than a lead, and `corpus.yml` keeps this
+                        // rather than a lead, and a corpus run keeps this
                         // report precisely so a moved bar can be followed up.
                         if !file.metamorphic.is_empty() {
                             fields.push((
@@ -870,10 +870,10 @@ impl Run {
             "{:<14} {:>6} rewritten  {:>6} validate strictly",
             "strict", eligible, clean
         ));
-        // The time axis's line for the run, which each bar's step in
-        // `corpus.yml` greps as it greps `strict`: a child that wrote no spans
-        // leaves every figure empty, and that must read as a run that
-        // measured no time rather than as a run with none to report.
+        // The time axis's line for the run, which is read as `strict` is: a
+        // child that wrote no spans leaves every figure empty, and that must
+        // read as a run that measured no time rather than as a run with none
+        // to report.
         let (pages, files) = self
             .corpora
             .iter()

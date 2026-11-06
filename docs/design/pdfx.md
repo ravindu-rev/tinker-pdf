@@ -360,7 +360,7 @@ structural one find nothing, and the shape matches the published files*.
   route leaves the intent's space unknown) applies here unchanged.
 - **The corpus machinery** — `corpora.lock` pins a `zip` archive with no
   upstream commit (SafeDocs), which is the shape both suites need, and
-  `corpus.yml` runs `pdfx_census.rs` nightly.
+  `pdfx_census.rs` runs locally over what `cargo xtask corpus-fetch` fetches.
 - **`PageBuilder::set_trim_box` / `set_art_box`** — do not exist.
 - **The recording device** (`crates/tinker-pdf-content/src/record.rs`) —
   only if X-4's transparency restrictions turn on graphics state; not needed
@@ -377,7 +377,7 @@ structural one find nothing, and the shape matches the published files*.
 | --- | --- |
 | **A rule that never fires passes every check this design has.** The suites are pass-only, the real claims are unannotated, and a fixture built here fires the rule its author expected | Named rather than closed. Every rule has a near-miss twin, and a rule that fires on a suite file is a false positive by definition |
 | A rule transcribed from the application notes disagrees with the standard the notes defer to | Every rule cites the note's section it was transcribed from, so a later reading of the part knows which rules to revisit. There is no PDF/X ledger, because there is no annotated file to disagree with |
-| The Ghent package's terms turn out to forbid fetching into a CI cache | Milestone 2 waits on the terms; Altona's are read and compatible with `redistribute = no` |
+| The Ghent package's terms turn out to forbid fetching into the corpus cache | Milestone 2 waits on the terms; Altona's are read and compatible with `redistribute = no` |
 | Real claims are too few to catch a rule that is too strict | `pdfx_census.rs` reads every fetched file, asserts an empty verdict for every file that claims nothing, holds a real claim to a validated level to no finding nobody has read, and prints how many files that held over |
 | The writer's shape comparison against a suite file is mistaken for a conformance verdict | The test's name and the feature doc say "shape", and the comparison is over dictionary keys and containment, never over a boolean the suite does not publish |
 | X-4 rules get written from clause titles | Every PDF/X-4 clause is an `Unread` gap in `PDFX_UNREAD` by its 15930-7 title, and milestone 7 opens only when a part's text is in hand |

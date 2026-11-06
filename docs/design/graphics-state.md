@@ -512,9 +512,11 @@ what a render shows, is its applying row's.
    page in `determinism.rs`'s table; in the default and `bundled-fonts`
    builds.
 5. **The row's corpus half, which no step holds.** The exit criterion's
-   `rotate` and `crop` relations are re-run over the corpus by `corpus.yml`'s
-   three `corpus-run --check` steps on a run that carries K-01.5, each at or
-   above its committed bar; corpora run only in CI.
+   `rotate` and `crop` relations are re-run over the corpus by the three local
+   `cargo xtask corpus-run --check` runs — no faces, `--fonts synthetic` and
+   `--fonts bundled` — on a revision that carries K-01.5, each at or above its
+   committed bar; the corpora are fetched for them by `cargo xtask
+   corpus-fetch` and never committed.
 
 ## Risks
 

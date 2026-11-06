@@ -457,14 +457,16 @@ can diverge, and ruling 11's point is that a binding has nothing to diverge
 package is `tinker-pdf-js`, name and version derived from `Cargo.toml` so
 `cargo xtask versions` has no extra manifest to police. `release.yml` gates
 the gzipped `.wasm` at 2.5 MiB, with every predefined CMap in; `cmap-predefined`
-off is the switch for a host that renders no CJK. Between releases, `ci.yml`'s
-`footprint` job builds the same `.wasm` with the release's command once per
+off is the switch for a host that renders no CJK. Between releases the
+footprint is local proof: the same `.wasm` is built with the release's command,
+`wasm-pack build --release --target web --out-dir pkg bindings/js`, once per
 build profile — the default, and `bundled-fonts`, which the crate forwards to
-the facade as it forwards `cmap-predefined` — measures each with the release's
-`gzip -9`, and hands the size to `cargo xtask footprint`, which holds it to the
-profile's figure in `bindings/js/footprint.json` plus that figure's measured
-tolerance. Neither profile has a figure yet, so the job names both
-`--unrecorded` and prints their sizes rather than holding them.
+the facade as it forwards `cmap-predefined` — and each is measured with the
+release's `gzip -9` and handed to `cargo xtask footprint --profile <p>
+--gzipped <bytes>`, which holds it to the profile's figure in
+`bindings/js/footprint.json` plus that figure's measured tolerance. Neither
+profile has a figure yet, so a run names both `--unrecorded` and prints their
+sizes rather than holding them.
 
 **.NET** (`bindings/dotnet`, C# over the C ABI). Every native handle lives
 in a `SafeHandle`, so a document or bitmap is released exactly once even if
@@ -546,9 +548,10 @@ lines, both directions, to the rule that the string is the arm's own name
   written to the part of it that is the same in JDK 21 — where it is a
   preview API, compiled with `--enable-preview --release 21` and run with
   `--enable-preview` — and JDK 22, where it is final and **Java 22 and later
-  drop the flag**. CI runs JDK 21, so the 22 claim rests on the API's
-  documented equivalence, not on a run; `cargo xtask
-  bindings-parity` reads `javac -version` and picks the flags. Every downcall
+  drop the flag**. `cargo xtask bindings-parity` reads `javac -version` and
+  picks the flags, so its local run proves the JDK the machine has, and the
+  other JDK's claim rests on the API's documented equivalence, not on a run.
+  Every downcall
   in `Native.java` is generated from the header, one line each; structs are
   written field by field at the offsets `layout.rs` pins; streaming is three
   upcall stubs in an arena the document owns, released after it.
@@ -562,7 +565,7 @@ copy, which would be a second transcription to drift), a `TinkerPdf` target
 covering the core — open, text, render, validate, authenticate, the form
 fill and save, the builder — and a `Smoke`
 executable written to the same blank-then-inked pattern. It has no parity
-program, is not in `bindings-parity` and has no CI job; the read surface,
+program and is not in `bindings-parity`; the read surface,
 document operations, signatures and streaming are owed, and so is a first
 build.
 
@@ -684,10 +687,11 @@ a surface that ran, exited zero and printed no `WROTE sha256=` at all — is the
 one that gets shipped, because a script that silently does nothing looks
 exactly like a passing one; both exit non-zero. A surface whose artefact is not
 installed on the machine is **SKIPPED**, by name and with the reason, and the
-run says how many ran and how many did not (ruling 13), so a job that quietly
+run says how many ran and how many did not (ruling 13), so a run that quietly
 found no interpreter cannot pass. `--require-all` turns every skip into a
-failure, and that is what `ci.yml`'s `bindings-parity` job passes after
-building and installing every artefact and setting up Go, Ruby and JDK 21. The
+failure, and that is what the local run that proves a change to the bindings
+passes, after building and installing every artefact with Go, Ruby and a JDK
+on `PATH`. The
 three bindings over the C ABI are skipped, by name, when the release library is
 not built or their toolchain is not on `PATH`; Java's compile is a step that
 must succeed first, so a binding that does not compile fails rather than skips.
@@ -714,17 +718,27 @@ change read as a determinism regression to whoever opened that file next. One
 place, and every surface compared to *it* rather than to each other, so a
 legitimate writer change is one recorded update instead of seven flaky suites.
 
-**Packaging, built and dry-run, nothing published.** `cargo run -p xtask --
+**Packaging, and the release on the owner's merge.** `cargo run -p xtask --
 release` walks wheel, npm package, NuGet package and crates in an order
 computed from the manifests. The dry run is the default and `--execute` is
 the flag that publishes, because a half-published release cannot be
-retracted from crates.io. **Nothing is published to any registry**: the
-facade does not freeze before 0.1.0, and a published package invites
-dependence on an API that is explicitly unstable. In `release.yml` a tag
-builds every artefact and publishes none — publishing needs a
-`workflow_dispatch` carrying `publish: true` — and a final job counts the
-three abi3 wheels, the npm package's `.wasm` and the `.nupkg` and fails unless
-all are there.
+retracted from crates.io. **Nothing is published to any registry**, and the
+facade does not freeze before 0.1.0. `release.yml` runs on every push to
+`main`, which is the owner's merge of `develop`, and has no other trigger:
+CI's tests first, then a preflight — `cargo xtask check`, and whether the
+workspace version already has a `v<version>` tag. A merge that does not change
+the version releases nothing. For an untagged version it packages the crates
+and verifies them against each other; builds an abi3 wheel per platform
+(Linux, Windows, macOS), the npm package, held to its 2.5 MiB gzipped gate
+and installed and rendered in Node, and the NuGet package with its three
+native libraries (linux-x64, win-x64, osx-arm64); runs the browser demo's
+check; and a final job counts the three abi3 wheels, the npm package's
+`.wasm` and the `.nupkg` and fails unless all are there. Then it publishes:
+the crates to crates.io in dependency order by `cargo xtask release --execute
+--only crates`, the wheels to PyPI with `maturin upload --skip-existing`, the
+npm package unless npm already has that version, and the NuGet package with
+`--skip-duplicate`; and last it tags the commit `v<version>` and makes a
+GitHub release.
 
 `cargo publish --dry-run` resolves dependencies against the live index, and
 nothing named `tinker-pdf-*` is published there, so every crate above the
@@ -923,9 +937,10 @@ nothing but rustc. The `extern "C"` items under `crates/tinker-pdf-ffi/src/`
 remain the contract and the header is their spelling. Two things keep a
 committed generated file from drifting: `tests/header.rs` reads both as text
 and fails when an export is missing from the header or a declaration names
-nothing — it spawns nothing (ruling 13) — and CI's `bindings` job regenerates
-the header and fails on any difference, which is what catches a signature that
-moved under an unchanged name. The .NET binding's P/Invoke declarations and
+nothing — it spawns nothing (ruling 13) — and the bindings' local proof
+regenerates the header with cbindgen 0.29.4 and fails on any difference from
+the committed one, which is what catches a signature that moved under an
+unchanged name. The .NET binding's P/Invoke declarations and
 the Ruby binding's `extern` lines are worked transcriptions of it, the Java
 binding's downcalls are generated from it, Go compiles against it and Swift
 imports it as a module. What a transcription cannot see from the header is a
@@ -959,8 +974,8 @@ packaged.
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |
 | Streaming in Ruby | `TinkerPdf::Document` has no streaming open; every other function is there | `tpdf_document_open_streaming` takes its vtable **by value**, and Fiddle passes no struct by value; and the engine calls `read` from whatever thread is working, where a Ruby block would run without the GVL. A by-pointer variant on the C ABI would answer the first and not the second | [opening](opening.md) |
-| Swift beyond its core | the core only, no parity program, no CI | never compiled; widening unverified source would only widen what nobody has run | [ROADMAP.md](../ROADMAP.md) |
-| Published packages | `pip install` / `npm install` / `dotnet add package` do not work, and Go, Ruby, Java and Swift have no package at all | the facade is unstable before 0.1.0 | [ROADMAP.md](../ROADMAP.md) |
+| Swift beyond its core | the core only, no parity program, not in `bindings-parity` | never compiled; widening unverified source would only widen what nobody has run | [ROADMAP.md](../ROADMAP.md) |
+| Published packages | `pip install` / `npm install` / `dotnet add package` do not work, and Go, Ruby, Java and Swift have no package at all | `release.yml` publishes the wheels, the npm package and the NuGet package only on the owner's merge of `develop` into `main` at a workspace version with no `v<version>` tag; the Go, Ruby, Java and Swift bindings have no packaging | [ROADMAP.md](../ROADMAP.md) |
 
 ## Verified
 
@@ -1006,8 +1021,10 @@ packaged.
   different mistakes), an unsigned document answering "none" rather than
   failing, an anchor that is not a certificate refused and not kept, the
   instant ignored unless the flag says otherwise, and signatures outliving
-  the document they came from. The crate type-checks in CI on every commit (the bindings
-  and fuzz crates are outside the workspace, so CI checks them explicitly).
+  the document they came from. CI's tests build and run the crate on every
+  pull request; the bindings and fuzz crates are outside the workspace, so
+  the bindings' local proof builds each binding, and `cargo xtask fuzz`,
+  inside `cargo xtask check`, checks the fuzz crate.
 - Smoke tests run against an *installed* artifact, never the source tree:
   `bindings/python/tests/wheel_smoke.py` against a `pip install`ed wheel,
   `bindings/js/tests/node_smoke.mjs` against an `npm install`ed tarball,
@@ -1017,8 +1034,9 @@ packaged.
   also opens a generated four-megabyte file by path and from its bytes —
   the same page count and page-one text, and the path open streamed — and
   a damaged file and a linearized one updated since, whose path opens warn
-  what their bytes warn and are read whole; CI's `bindings-parity` job runs
-  it against the wheel it builds and greps `WHEEL-SMOKE: RAN`.
+  what their bytes warn and are read whole; the bindings' local proof runs
+  it against the wheel it builds, and `release.yml` runs it against each
+  platform's wheel and greps `WHEEL-SMOKE: RAN`.
 - The **write** legs run beside them, from the same installed artefacts:
   `write_parity.py`, `write_parity.mjs` and the Smoke program's third
   argument, each printing `WROTE sha256=<hex>` per script, and

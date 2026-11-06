@@ -24,8 +24,8 @@
 #   expected answer that moved is not one.
 #
 # The test prints `vp8-test-vectors: RAN` or `vp8-test-vectors: SKIPPED`, and
-# CI's `vp8-vectors` job greps for both, because a skip exits 0 and reads
-# exactly like a pass (CONTRIBUTING's RAN / SKIPPED rule).
+# a local run reads which, because a skip exits 0 and reads exactly like a
+# pass (CONTRIBUTING's RAN / SKIPPED rule).
 
 set -eu
 

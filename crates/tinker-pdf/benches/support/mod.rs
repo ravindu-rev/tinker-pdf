@@ -26,16 +26,16 @@
 //!
 //! Each group of the benchmark set (`docs/design/performance.md`, MS-04) is
 //! one file, `benches/<group>.rs`, and one `[[bench]]` in `Cargo.toml`, so
-//! `cargo bench -p tinker-pdf --bench render` measures one group and
-//! `bench.yml` runs one job a group. A group file opens one group,
+//! `cargo bench -p tinker-pdf --bench render` measures one group. A group
+//! file opens one group,
 //! `Group::new(c, "<group>")`, named for its group, so every id is
 //! `<group>/<name>`, and declares each operation through
 //! [`Group::operation`], with what each iteration processes ([`Per`]) and its
 //! routine on the [`Op`] it is handed. `baseline.json` lists the same names in the same order, each
 //! with its unit, what an iteration covers (`per_iteration`) and how many
 //! calls an iteration makes (`calls`). `cargo xtask baseline` holds the
-//! `[[bench]]` entries, each file's names, its list and `bench.yml`'s count
-//! for the group to each other, and refuses a group file that opens a
+//! `[[bench]]` entries, each file's names and its list to each other, and
+//! refuses a group file that opens a
 //! criterion group or calls `bench_function` itself, which count mode could
 //! not run.
 //!

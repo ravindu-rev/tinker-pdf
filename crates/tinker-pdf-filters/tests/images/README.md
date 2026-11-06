@@ -87,7 +87,7 @@ transform read the VP8L header bits that say the fixture has one.
 another decoder's.** Each layer is held to the nearest thing it has that this
 repository does not own an implementation of. The VP8 planes are held exactly
 to the WebM project's published test-vector MD5s (`src/webp/vp8/tests.rs`,
-fetched by `tests/vp8-vectors/fetch.sh` and run by CI's `vp8-vectors` job),
+fetched by `tests/vp8-vectors/fetch.sh` and run locally),
 since RFC 6386 ends at Y, U and V; the colour conversion is held to BT.601's
 matrix and the chroma upsampler to its 9:3:3:1 weights, worked out in exact
 arithmetic beside them. What is left for the files here is the container, the

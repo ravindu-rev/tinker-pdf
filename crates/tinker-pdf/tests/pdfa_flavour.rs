@@ -440,8 +440,8 @@ fn census_of_the_flavours_the_corpus_claims() {
     // except deliberately. The other eight are drift that predates this
     // session -- the four fixture corpora alone now give 2 474 against the
     // 2 466 recorded here, measured by moving the shard out of `corpus/files`
-    // and running this again. Nothing caught it because this census is not one
-    // of the four `corpus.yml` ran; all thirteen run there now.
+    // and running this again. Nothing caught it because this census was not
+    // one of the four a corpus run ran; all thirteen run in one.
     assert_eq!(with_claim, 2495, "files declaring a PDF/A part");
     assert_eq!(
         agreed, 2148,

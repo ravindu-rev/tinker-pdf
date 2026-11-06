@@ -20,8 +20,7 @@
 //! nothing. Point it at the tree with `TINKER_CORPUS`; the default is
 //! `corpus/files` beside the workspace. With `TINKER_CORPUS_REQUIRED` set, a
 //! missing corpus is a failure rather than a skip, as the other censuses
-//! read it. The nightly `corpus.yml` job runs both, beside every other census,
-//! since 26 September 2026 — until then neither ran anywhere but by hand.
+//! read it. A local corpus run runs both, beside every other census.
 //!
 //! # The payload half, and what it has not yet measured
 //!
@@ -34,7 +33,7 @@
 //! cut by either bound. **The per-family counts have not been measured**: the
 //! fetched corpora were not available in the container that wrote them, so
 //! there are no floors on them yet, and the roadmap row says the corpus count
-//! per family is owed. The first nightly run prints them; the floors follow
+//! per family is owed. The first local corpus run prints them; the floors follow
 //! from it.
 //!
 //! # What adjudicates what

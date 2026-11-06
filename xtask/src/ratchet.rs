@@ -189,8 +189,8 @@ pub struct PeakBar {
     pub files: u64,
 }
 
-/// How many dispatches set a bar's peak bands: three runs of `corpus.yml` on
-/// `develop` at one revision, read by `corpus-peaks --record` (MS-19).
+/// How many runs set a bar's peak bands: three corpus runs at one revision,
+/// read by `corpus-peaks --record` (MS-19).
 ///
 /// A band from one run would set the bar on whichever machine that run landed
 /// on, the reason a time figure is five runs' and never one's.
@@ -225,8 +225,8 @@ pub struct TaggedBar {
     pub orphans: u64,
 }
 
-/// How many runs set a corpus's time figures: five dispatches of `corpus.yml`
-/// at one revision (MS-07).
+/// How many runs set a corpus's time figures: five corpus runs at one
+/// revision (MS-07).
 pub const TIME_RUNS: usize = 5;
 
 /// The narrowest band a time figure is held to, in percent.

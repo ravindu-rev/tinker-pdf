@@ -305,7 +305,8 @@ container sniff, the head and its content — and never the main table, and the
 same pages saved without linearization cost five, within the bytes of their
 tail, their cross-reference section and page one's objects plus a chunk a
 request; `streaming_open.rs` holds both counts exactly, beside the ceilings of
-six and twelve, on all four targets. `CountingSource::link_time(latency,
+six and twelve, on linux and windows in CI's tests and on `wasm32-wasip1`
+locally. `CountingSource::link_time(latency,
 bits_per_second)` turns its counts into the time a link would take — a
 latency a request and the bytes over the bandwidth, computed and never slept
 — and the open group's bench row times page one as its work plus that link
@@ -408,8 +409,9 @@ The tests that cover opening ([verification](../verification.md)):
   values by ruling 12, which is why the enum stays `Copy + PartialEq + Eq`.
 - **Fuzzing** — `cos_document` (the whole file parser, every ladder rung
   reachable from arbitrary bytes, plus a bounded page-tree walk) and
-  `cos_object` are fuzz targets, run briefly in CI on every
-  commit over committed seed corpora.
+  `cos_object` are fuzz targets, run on Linux as a change's local proof over
+  committed seed corpora: a seed replay and a twenty-second mutating session
+  each, longer sessions by hand.
 - **Corpus** — the ratcheted corpus run
   ([verification](../verification.md)) opens and renders the fetched corpora;
   the canonical fixtures in
@@ -493,8 +495,8 @@ The tests that cover opening ([verification](../verification.md)):
   (CC-BY-SA 4.0, so never committed); it also asserts it reads the same
   examples the tag's `spec_tests.py --dump-tests` writes as `spec.json`, by a
   recorded fingerprint. It holds a counted floor of exact passes (`PASSING`)
-  and every section but the entity one whole (`WHOLE_SECTIONS`); the
-  `commonmark-spec` CI job greps its `RAN`
+  and every section but the entity one whole (`WHOLE_SECTIONS`); a local run
+  that proves a change to the reader prints its `RAN`
   banner. `tests/markdown.rs` runs on every `cargo test`: reader answers worked
   out from the rules, a Markdown document pixel for pixel the XHTML it
   translates to, raw HTML and malformed UTF-8 counted, and both caps fired.

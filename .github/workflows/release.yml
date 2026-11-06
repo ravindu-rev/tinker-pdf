@@ -1,19 +1,30 @@
-# One tag, four artefacts.
+# A merge to `main` releases: one version, four artefacts.
 #
-# Plan 13 specifies the shape and plan 26 specifies the safety property: every
-# step has a dry-run mode, and **the default is the dry run**. A tag builds
-# every artefact and uploads none of them; publishing needs a deliberate
-# `workflow_dispatch` with `publish: true`. A half-published release cannot be
-# retracted from crates.io, and this repository has never published anything.
+# Every push to `main` — the owner's merge of `develop` — runs CI's tests
+# first (`ci.yml`, called), then asks one question: does the workspace
+# version have a `v<version>` tag yet? If it does, that version is released
+# and the run stops there. If it does not, every artefact is built and
+# checked — the crates packaged and verified against each other, an abi3
+# wheel per platform, the npm package, the NuGet package with three native
+# libraries, the browser demo — and then published: the crates to crates.io
+# in dependency order, the wheels to PyPI, the package to npm and to NuGet,
+# and last the tag and a GitHub release. So a merge that does not change the
+# version releases nothing, and the version is the switch.
+#
+# Publishing is resumable: crates.io's "already uploaded" counts as a step
+# done (`cargo xtask release`), the wheels and the NuGet package are pushed
+# with their tools' skip-existing flags, the npm package is published only
+# when its version is not on npm, and the tag is written only after all four
+# registries have the version, so a run that fails part-way is finished by
+# the next push to `main` or a re-run.
 #
 # ## The hazard this file is written against
 #
-# `cargo test` with a filter matching nothing prints `0 passed` and exits 0.
-# The `wasm-determinism` job in ci.yml, and the oracle jobs beside it, are all
-# written to *prove they ran* for that reason. A release job is the same hazard
-# with worse consequences: a job that builds nothing, uploads nothing and
-# reports success is indistinguishable from one that worked, and the thing it
-# is claiming is precisely that four artefacts exist.
+# `cargo test` with a filter matching nothing prints `0 passed` and exits 0. A
+# release job is the same hazard with worse consequences: a job that builds
+# nothing, uploads nothing and reports success is indistinguishable from one
+# that worked, and the thing it is claiming is precisely that four artefacts
+# exist.
 #
 # So every artefact job ends by asserting the artefact is there and is the
 # right shape -- an abi3 tag in the wheel's filename, a `.wasm` in the npm
@@ -24,36 +35,62 @@ name: Release
 
 on:
   push:
-    tags: ['v*']
-  # The only way to actually publish, and it is not the default value.
-  workflow_dispatch:
-    inputs:
-      publish:
-        description: 'Publish to the registries. Cannot be undone on crates.io.'
-        type: boolean
-        default: false
+    branches: [main]
+
+# Two merges in quick succession release one after the other, never at once.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
 jobs:
-  # Nothing is built until the four manifests agree about the version, and
-  # until the tag agrees with them. This is `cargo xtask versions` plus the
-  # tag comparison, and it is deliberately the cheapest job in the file: a
-  # version mismatch found here costs a minute, and found after the wheel
-  # matrix costs a release.
+  # The unit and integration tests, exactly as a pull request runs them.
+  tests:
+    uses: ./.github/workflows/ci.yml
+
+  # Whether there is anything to release, and nothing built until the
+  # manifests agree about the version: `cargo xtask check`, which holds every
+  # manifest to the workspace version, and the release plan held to the tag
+  # the version names. The cheapest job in the file: a mismatch found here
+  # costs a minute, and found after the wheel matrix costs a release.
   preflight:
+    needs: tests
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Every tag, so the question below is answered from the repository.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo run -p xtask -- check
-      - name: The tag and the workspace version are the same number
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: The workspace version, and whether it is released
+        id: version
         run: |
-          cargo run -p xtask -- release --plan --tag "${GITHUB_REF_NAME}"
+          set -o pipefail
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "tinker-pdf") | .version')
+          test -n "$version" || { echo "::error::no tinker-pdf version in the workspace"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/v$version" > /dev/null; then
+            echo "v$version is tagged, so it is released: nothing to do"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$version is not tagged: releasing it"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: The version and its tag are the same number
+        if: steps.version.outputs.release == 'true'
+        run: cargo run -p xtask -- release --plan --tag "v${{ steps.version.outputs.version }}"
 
   # The fifteen crates, packaged and *verified*, against each other rather
   # than against crates.io.
@@ -71,6 +108,7 @@ jobs:
   # published before this one" rather than either narrower or wider.
   crates:
     needs: preflight
+    if: needs.preflight.outputs.release == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -99,6 +137,7 @@ jobs:
   # that it is built, installed and *rendered through* on three platforms.
   wheels:
     needs: preflight
+    if: needs.preflight.outputs.release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -192,6 +231,7 @@ jobs:
   # gap 25) is what says so.
   npm:
     needs: preflight
+    if: needs.preflight.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -252,6 +292,7 @@ jobs:
   # matrix and gathered by the job below.
   natives:
     needs: preflight
+    if: needs.preflight.outputs.release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -289,7 +330,8 @@ jobs:
 
   # Plan 26 milestone 5, second half: one package carrying all three.
   nuget:
-    needs: natives
+    needs: [preflight, natives]
+    if: needs.preflight.outputs.release == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -357,6 +399,7 @@ jobs:
   # `<canvas>` exists outside a browser.
   demo:
     needs: preflight
+    if: needs.preflight.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -377,7 +420,7 @@ jobs:
             /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf 2>&1 | tee demo.log
           grep -q 'DEMO-RENDER: RAN' demo.log
 
-  # Plan 26 milestone 6: **one tag produces all four artefacts.**
+  # Plan 26 milestone 6: **one release produces all four artefacts.**
   #
   # This job exists because the four above can each pass while producing
   # nothing anybody can install, and because a workflow with four green ticks
@@ -407,25 +450,82 @@ jobs:
           test "$nupkg"  -eq 1 || { echo "::error::$nupkg nupkg files, expected 1"; exit 1; }
           echo "RELEASE-ARTEFACTS: ALL FOUR PRESENT"
 
-  # The only job in this file that can publish, and it does not run on a tag.
-  #
-  # `cargo xtask release --execute` is one command because the ordering,
-  # the version check and the resumability all live in xtask, where they are
-  # tested. A workflow re-expressing them in YAML would be a second
-  # implementation of the rule that decides which crate uploads first, and the
-  # consequence of the two disagreeing is not recoverable.
+  # The only job in this file that publishes, and only once every artefact
+  # above is built, checked and counted. What it publishes is what those jobs
+  # built and tested from this commit: the crates by `cargo xtask release`,
+  # whose order, version check and "already uploaded" handling are tested
+  # there rather than restated here; the three wheels, the npm package and the
+  # NuGet package as the matrix made them, since no one machine builds every
+  # platform's. The tag and the GitHub release come last, so a version is
+  # tagged only once every registry has it.
   publish:
-    needs: artefacts
-    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    needs: [preflight, artefacts]
+    if: needs.preflight.outputs.release == 'true'
     runs-on: ubuntu-latest
     environment: registries
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Publish, in dependency order, halting on the first failure
-        run: cargo run -p xtask -- release --execute --tag "${GITHUB_REF_NAME}"
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0'
+      - uses: actions/download-artifact@v4
+        with:
+          path: artefacts
+      - name: The crates, to crates.io in dependency order, halting on the first failure
+        run: cargo run -p xtask -- release --execute --only crates --tag "v$VERSION"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - name: The three wheels, to PyPI
+        run: |
+          python -m pip install --quiet maturin
+          maturin upload --skip-existing artefacts/wheel-*/*.whl
+        env:
           MATURIN_PYPI_TOKEN: ${{ secrets.MATURIN_PYPI_TOKEN }}
+      - name: The wasm package, to npm
+        working-directory: artefacts/npm-package
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          test "$version" = "$VERSION" \
+            || { echo "::error::the npm package is $version, the workspace $VERSION"; exit 1; }
+          if npm view "$name@$version" version > /dev/null 2>&1; then
+            echo "$name@$version is on npm already"
+          else
+            npm publish --access public
+          fi
+        env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: The NuGet package, to NuGet
+        run: |
+          dotnet nuget push artefacts/nuget-package/*.nupkg \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
+        env:
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+      - name: The tag, and a GitHub release carrying the wheels and the NuGet package
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "tinker-pdf $VERSION" "$GITHUB_SHA"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" \
+            artefacts/wheel-*/*.whl artefacts/nuget-package/*.nupkg \
+            --title "tinker-pdf $VERSION" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

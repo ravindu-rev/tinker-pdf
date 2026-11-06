@@ -8,8 +8,33 @@ down as a claim.
 
 `cargo test --workspace` runs every crate's unit tests, its integration tests
 under `tests/` and its doc tests. The censuses that walk the fetched corpora
-are `#[ignore]`d there and run in `corpus.yml`; a test that reads anything else
-that cannot be committed prints a `RAN` or `SKIPPED` banner (below).
+are `#[ignore]`d there and run in a local corpus run; a test that reads
+anything else that cannot be committed prints a `RAN` or `SKIPPED` banner
+(below).
+
+## Where each check runs
+
+**CI runs the unit and integration tests, on every pull request, and nothing
+else** (`.github/workflows/ci.yml`): `cargo test --workspace`, the font crate
+and the facade without their default features, and the facade with
+`bundled-fonts`, on Linux and Windows. A merge to `main` runs the same tests
+before it releases (below). Nothing is scheduled.
+
+**Everything else is local proof**, run by whoever makes a change and
+recorded in the roadmap row it closes:
+
+| Check | How it runs |
+| --- | --- |
+| The gates — fmt, clippy, the tests, the determinism and shaping fingerprints, the examples, `cargo xtask check` | `python3 -I tools/gates.py` |
+| Fuzzing, on Linux | `cargo fuzz build`, then `cargo fuzz run <target> fuzz/corpus/<target> -- -max_total_time=20 -timeout=20` a target |
+| The fingerprints on `wasm32-wasip1` | the roster's tests with `--target wasm32-wasip1`, wasmtime as the runner |
+| The corpora | `cargo xtask corpus-fetch`, then `cargo xtask corpus-run --check` |
+| The benches | `cargo bench -p tinker-pdf`, then `cargo xtask bench-check --machine NAME` |
+| Peak memory, on Linux | `cargo test --release -p tinker-pdf --test peak_memory -- --ignored`, in both builds |
+| The bindings | each surface built, then `cargo xtask bindings-parity --require-all` |
+| The wasm footprint | `wasm-pack build --release --target web --out-dir pkg bindings/js`, then `cargo xtask footprint` |
+| Licences | `cargo deny check` |
+| The oracle suites — the EPUB corpus, the VP8 vectors, the CommonMark spec, PngSuite | their fetch scripts, then their tests |
 
 ## Never panic, fuzz-enforced
 
@@ -17,14 +42,12 @@ Ruling 1 makes a fuzz crash a release blocker. cargo-fuzz targets in
 `fuzz/fuzz_targets/` cover every input format, each landing in the same change
 as its parser, and each has a seed corpus of its own name in `fuzz/corpus/`.
 
-CI runs them twice over. On every push to `main` or `develop` and every pull
-request, `ci.yml`'s `fuzz-seeds` job builds every target and mutates for twenty
-seconds from each seed corpus (`-max_total_time=20`). The nightly `fuzz.yml`
-runs each target longer, in a job of its own — 600 seconds unless a dispatch
-names another figure — and attaches the crashing input or the minimised
-corpus. It reads its matrix off `fuzz/fuzz_targets/`, so that a target nobody
-runs cannot exist. Its schedule runs the default branch, `main`; `develop` is
-fuzzed by dispatching it there.
+They run locally, on Linux. `cargo fuzz build` builds every target, and
+`cargo fuzz run <target> fuzz/corpus/<target> -- -max_total_time=20
+-timeout=20` replays a target's seeds and mutates from them for twenty
+seconds; a longer session is the same command with a longer
+`-max_total_time`. A change to a parser runs its target before it lands, and
+an input a session finds is committed as a seed of that target.
 
 `cff_subset` is the one target that fuzzes a **writer**. Its assertion is
 not "it did not panic": whatever the subsetter emits must parse with this
@@ -117,10 +140,10 @@ release blocker, and **a fuzzer that does not build cannot crash**: the rule
 would read as satisfied while being unenforceable.
 
 So `cargo xtask fuzz` — and therefore `cargo xtask check` — runs `cargo check`
-over `fuzz/`'s own manifest and fails with the compiler's own error, and CI's
-`fuzz-targets` job does the same. It is `cargo check` rather than
-`cargo fuzz build` because the question is whether the *types* still agree; it
-runs on stable and needs no sanitizer, and `fuzz-seeds` builds them for real.
+over `fuzz/`'s own manifest and fails with the compiler's own error. It is
+`cargo check` rather than `cargo fuzz build` because the question is whether
+the *types* still agree; it runs on stable and needs no sanitizer, and
+`cargo fuzz build` builds them for real.
 
 ### What a green fuzz run does not mean
 
@@ -161,10 +184,10 @@ bars asking another decoder. Everywhere else the check exists and is somewhere
 else, and each header names where.
 
 **A green mutating session is not evidence that a defect is absent.**
-`fuzz-seeds` replays each corpus and then mutates from it for the rest of its
-twenty seconds, so an input it reports was generated on the runner rather than
-committed, and a session that ends clean is a record of what that session
-happened to reach. Coverage is uneven by design, too: a hardened password hash
+A twenty-second session replays the target's corpus and then mutates from it
+for the rest of its time, so an input it reports was generated by the session
+rather than committed, and a session that ends clean is a record of what that
+session happened to reach. Coverage is uneven by design, too: a hardened password hash
 runs a few executions a second where an ASCII filter runs tens of thousands,
 and a clean result at the first rate is not the same evidence as one at the
 second. A committed seed corpus replayed on stable by an ordinary test is
@@ -188,9 +211,9 @@ where that format's arithmetic lives. Each seed states which it is and the test
 asserts it, so a seed that quietly stopped parsing cannot sit in the corpus
 looking like coverage it does not give.
 
-Fuzzers need nightly, so a **hostile-input sweep runs on stable on every
-commit**: seeded xorshift mutation of the real fixtures, driven as an
-ordinary test (`crates/tinker-pdf/tests/hostile_input.rs`).
+Fuzzers need nightly, so a **hostile-input sweep runs on stable with the
+tests, on every pull request**: seeded xorshift mutation of the real fixtures,
+driven as an ordinary test (`crates/tinker-pdf/tests/hostile_input.rs`).
 
 ## Determinism, fingerprinted
 
@@ -217,8 +240,8 @@ distributor. Licences per corpus are generated by `cargo xtask corpus-licences`
 into [corpus/README.md](../corpus/README.md).
 
 `cargo xtask corpus-run` opens and renders every file of every corpus, one
-child process a file, and `corpus.yml` runs it nightly on `main`, and on
-`develop` by dispatch, against three committed bars. The first,
+child process a file, run locally over the corpora `corpus-fetch` wrote and
+against three committed bars. The first,
 `corpus/ratchet.json`, is at 72 dpi with no font provider. Each file gets 180
 seconds before its child is killed, unless its corpus states a timeout of its
 own in the lock: SafeDocs carries `timeout = 240`, because a timeout is a
@@ -252,17 +275,16 @@ before `phase render` are read, since a kill can cut the last line in half.
 Its outcome, its missing peak and every verdict, span and join count stay a
 finished child's alone.
 
-The census step holds every census it names to its own banner:
-`pdfa-ledger: RAN ...`, `structure-census: RAN ...`. It names the fetched
-corpora in `TINKER_CORPUS` and sets `TINKER_CORPUS_REQUIRED`, under which a
-census that finds no corpus fails by name rather than skipping, and it greps each census's banner, so a census that
-read nothing fails the step. `streaming_open.rs`'s three corpus tests are not
-`#[ignore]`d, so the step runs them by name in a command of its own.
+The censuses run with the fetched corpora named in `TINKER_CORPUS` and
+`TINKER_CORPUS_REQUIRED` set, under which a census that finds no corpus fails
+by name rather than skipping, and each prints its own banner —
+`pdfa-ledger: RAN ...`, `structure-census: RAN ...` — which is what says it
+read them. `streaming_open.rs`'s three corpus tests are not `#[ignore]`d and
+run by name.
 
-`corpus.yml`'s dispatch takes three inputs, each empty on the nightly, and
-each step or job it drives says so and does nothing without it.
+Three more readings are made when a row asks for one.
 
-- **`trace`**, a file as `<corpus>/<path>` with the path as `report.json`
+- **A trace**, of a file as `<corpus>/<path>` with the path as `report.json`
   names it. `cargo xtask corpus-run --trace` runs that file's child alone,
   after the fetch, under 900 seconds: pages one and two, every stage of a
   render announced and timed, the draw stopped at 300 seconds with the counts
@@ -272,28 +294,25 @@ each step or job it drives says so and does nothing without it.
   the outcome, the phase it stopped in, its last line and, on Linux, the CPU
   time it had used when it was killed (from `/proc/<pid>/stat`), which tells a
   loop from a wait. A path no locked corpus holds is refused by name.
-- **`against`**, a revision. After the three bars, that revision's own runner
-  and child — the head's runner refuses an older child's records by their
-  version — run the reported-breakage corpus in the three settings over the
-  corpora the job fetched, into `corpus/against/`. `cargo xtask corpus-diff
+- **Another revision's verdicts.** That revision's own runner and child,
+  built in a worktree of their own — the head's runner refuses an older
+  child's records by their version — run the reported-breakage corpus in the
+  three settings over the same fetched corpora, into `corpus/against/`.
+  `cargo xtask corpus-diff
   BEFORE AFTER` compares each report with the head's file by file: per
   relation, how many files went from held and how many came back, each file
   whose verdict differs with both details, and the files one report lacks,
   named and not compared. It refuses two reports of different settings. With
   `--held-to-broke dpi` it prints only a row per file that went from held to
-  broke, its corpus, its path and the file on disk, which the step reads; each
-  is printed object by object,
-  dictionaries without stream data, with its probe, and `corpus/against/` is
-  kept in the `corpus-report` artifact.
-- **`bands_revision`**, a revision, runs a job of its own on one runner: that
-  revision's code and the head's each run the five corpora with no faces, one
-  after the other, over one fetch, and `cargo xtask corpus-peaks REPORT...`
-  prints each corpus's largest peak in both reports, with its file, the
-  children reporting, the phase that reached it and its file-backed share,
-  beside the committed band, and the job prints each revision's `tpdf` size.
-  It prints and decides nothing; the two reports
-  are kept in the `corpus-peaks` artifact. `cargo xtask corpusjob` holds each
-  job's checks to its own fetch.
+  broke, its corpus, its path and the file on disk; each is then printed
+  object by object, dictionaries without stream data, with its probe.
+- **Another revision's peaks.** That revision's code and the head's each run
+  the five corpora with no faces, one after the other, over one fetch on one
+  machine, and `cargo xtask corpus-peaks REPORT...` prints each corpus's
+  largest peak in both reports, with its file, the children reporting, the
+  phase that reached it and its file-backed share, beside the committed band,
+  with each revision's `tpdf` size beside them. It prints and decides
+  nothing.
 
 Encrypted fixtures are opened with the passwords their upstreams state. `tpdf`
 tries the empty password and nothing else, which is right for a tool and wrong
@@ -360,14 +379,14 @@ count and each page's render (`tpdf probe`'s `time` lines), and per corpus the
 run reports pages a second at its dpi, the mean open-and-count latency, and the
 50th, 95th and 99th percentile page render over the corpus's pages, with its
 ten slowest files under their `/Producer`. A bar's time figures come from five
-dispatches at one revision and never from one run, so `--record` carries them
+runs at one revision and never from one run, so `--record` carries them
 over unchanged; `--check` holds each figure to the band those five set, refuses
 a run at another dpi or job count, and reads a bar without them as new.
 [design/performance.md](design/performance.md) has the band rule.
 
-**A peak band is three dispatches'.** `cargo xtask corpus-peaks --record BAR
+**A peak band is three runs'.** `cargo xtask corpus-peaks --record BAR
 --revision REV RUN=REPORT...` writes each corpus's `peak` in a bar from the
-reports of three `corpus.yml` dispatches on `develop` at one revision: the
+reports of three corpus runs at one revision: the
 largest of their maxima, over the children they agree reported one, with the
 runs, the hosts they landed on and their revision in the bar's `peak_runs`.
 It refuses, each by name, runs under other settings than the bar's, runs that
@@ -378,10 +397,12 @@ to no band is written with the reason in its place,
 `--unheld CORPUS=REASON` giving it, and `--check` prints that corpus's
 largest peak beside the reason and compares it with nothing, as
 `peak_memory.tsv` holds a case it names `unheld`. Every band in the three
-bars is the hosted runner's, read from the three dispatches each bar's
-`peak_runs` names. `corpus-run --record` writes no peak from its own run and
-carries each committed band, each unheld reason and `peak_runs` over
-unchanged, as it does the time figures.
+bars, and every time figure, is the hosted runner's, read from the runs each
+bar names; held against another machine, `--check` measures that machine as
+much as the code, so a time or peak line of a local run is read beside the
+machine before it is read as the engine. `corpus-run --record` writes no peak
+from its own run and carries each committed band, each unheld reason and
+`peak_runs` over unchanged, as it does the time figures.
 
 **Where a peak is reached.** On Linux each child writes the kernel's
 high-water mark as each phase of its work ends — `open`, `scan`, `render`,
@@ -482,7 +503,7 @@ producers emitted, published normative data (Adobe's CMap resources, the
 Unicode character database), and the committed output of a tool that was run
 once, which is a dated measurement rather than a check.
 
-No test and no CI job in this repository invokes an outside program to
+No test in this repository invokes an outside program to
 adjudicate a document, and `cargo xtask oracles` keeps that from eroding:
 every file that spawns a program has a row in its `SPAWNERS` table saying why,
 a file that spawns without one fails the build, and so does a row whose file
@@ -769,23 +790,33 @@ thousands of documents nobody here authored.
 
 **A check that can be absent is red, not green.** A missing binary, an
 unfetched corpus or a skipped test exits 0 and reads exactly like a pass, so
-every job that depends on something being present prints a `RAN` / `SKIPPED`
-line, or a count of what it measured, and greps its own log. The jobs that
-fetch what cannot be committed need it most: what they read can fail to arrive
-as well as fail to read, and both look like a green tick. In the corpus job the
-grep proves the strict pass ran, because a child that skipped it would leave
-every file "not eligible", which reads as a run that measured nothing rather
-than as a regression. The native `test` matrix greps its own log too: a leg
-that runs the suite inside `cargo test --workspace` says nothing about whether
-`determinism.rs` was one of the tests it ran. The same rule holds for CI's own
-tooling: every use of `taiki-e/install-action` names its tool explicitly, a
-spelling that cannot lose its argument.
+every check that depends on something being present prints a `RAN` /
+`SKIPPED` line, or a count of what it measured, and a local run of it reads
+that line before it counts as proof. The checks that fetch what cannot be
+committed need it most: what they read can fail to arrive as well as fail to
+read, and both look like a green tick. In a corpus run the strict pass's line
+proves it ran, because a child that skipped it would leave every file "not
+eligible", which reads as a run that measured nothing rather than as a
+regression; the gates' `determinism` and `shaping` gates require the lines
+naming each fingerprint test, because a suite that ran says nothing about
+whether a given test was in it, and `cargo xtask determinism` holds every
+roster test to being a `#[test]` with no `#[ignore]`.
 
 ## The release
 
-`release.yml` runs on a `v*` tag and on a `workflow_dispatch`, and only a
-dispatch carrying `publish: true` reaches its `publish` job, so a tag push
-builds and stages every package and publishes nothing.
+A merge to `main` releases. `release.yml` runs on every push to `main`: CI's
+tests first, then `cargo xtask check` and one question, whether the workspace
+version has a `v<version>` tag yet. If it has, the run stops: that version is
+released, and a merge that does not change the version releases nothing. If
+it has not, every artefact is built and checked — the crates packaged and
+verified against each other, an abi3 wheel for Linux, Windows and macOS, the
+npm package under its size gate, the NuGet package with three native
+libraries, the browser demo — and counted, and then published: the crates to
+crates.io in dependency order (`cargo xtask release --execute --only
+crates`), the wheels to PyPI, the package to npm and to NuGet, each skipping
+what the registry already has, and last the tag and a GitHub release, so a
+version is tagged only once every registry holds it and a run that fails part
+way is finished by the next.
 `cargo run -p xtask -- release --local-registry` makes the crates stage
 provable: `cargo publish --dry-run` resolves a crate's workspace dependencies
 against the live index, so each crate is verified instead against the unpacked
@@ -860,13 +891,11 @@ input rather than of a machine, and the guard suite bans `Instant::now` and
 
 They live in `crates/tinker-pdf/benches/` instead — one file a group over a
 shared `support/` module, under criterion, which is exempt tooling by name and
-whose plotting stack is switched off. `cargo bench` runs weekly in
-`bench.yml`, one job a group, and keeps its numbers as artefacts; it is
-scheduled rather than gating, because a hosted runner swings widely between
-two runs of identical code and a benchmark that fails a pull request on that
-teaches people to ignore it. A scheduled workflow runs the default branch,
-`main`, and a `workflow_dispatch` is how `develop` is measured. The useful
-mode is criterion's own comparison, which needs two revisions on one machine:
+whose plotting stack is switched off. `cargo bench` runs locally, one group at
+a time with `--bench <group>`, and never on a pull request: a machine swings
+between two runs of identical code, and a benchmark that fails a pull request
+on that teaches people to ignore it. The useful mode is criterion's own
+comparison, which needs two revisions on one machine:
 
 ```sh
 cargo bench -p tinker-pdf -- --save-baseline before
@@ -882,9 +911,9 @@ binary's profile directory, one child per call, its output kept in the
 operation's own directory and its exit status checked every time, and the
 operation's assertions read what that child wrote. It is the one file under
 `benches/` that `cargo xtask oracles` lets start a program: the child is this
-repository's own, so it hosts and adjudicates nothing. `bench.yml` builds the
-release `tpdf` before it measures, and `cargo test --benches` needs a debug
-one built first.
+repository's own, so it hosts and adjudicates nothing. A timed run needs the
+release `tpdf` built before it measures, and `cargo test --benches` needs a
+debug one built first.
 
 **A bench binary also counts.** Started with
 `TINKER_BENCH_COUNT=<group>/<name>` and `TINKER_BENCH_ITERATIONS=<n>`, it
@@ -900,32 +929,22 @@ a group file that reaches criterion's own `bench_function` or
 criterion alone; its input and call are the text group's
 `text of 5 dense pages`, which count mode runs.
 
-**The count job counts each operation's instructions.** A dispatch of
-`bench.yml` with `count` set runs the `count` job instead of the timing one,
-and a schedule never does: one job a group, but `open` in six parts and
-`write` in five, each part every sixth or fifth operation of its group's list
-in `baseline.json` from its own. Each builds the release bench binary and
-`tpdf`, then runs every operation of its share in count mode under cachegrind
-(`--cache-sim=no`, every child traced, so a CLI operation's `tpdf` counts with
-the bench), at one iteration and at two, twice over: the second count less the
-first is one warm iteration's instructions. A run that does not exit 0 and
-print its `RAN` line, a process with no count, or a part with no operation
-fails the job. Each operation's two figures, their spread — the larger less
-the smaller, over the smaller — and its seconds go to the log and to the job's
-`counts.tsv` as each is counted, so a job the limit cuts off keeps them, and
-the job's time to its `job.tsv`. The `counted` job then fails unless the jobs
-counted every operation of the set exactly once, and keeps the set as one
-`counts.tsv` beside every job's time in `jobs.tsv`, in the `counted-set`
-artefact, kept 90 days. cachegrind is in the dev-tooling exemption
+**A count run counts each operation's instructions.** The release bench
+binary and `tpdf` are built, and every operation of the set runs in count mode
+under cachegrind (`--cache-sim=no`, every child traced, so a CLI operation's
+`tpdf` counts with the bench), at one iteration and at two, twice over: the
+second count less the first is one warm iteration's instructions. A run that
+does not exit 0 and print its `RAN` line, or a process with no count, fails
+the run. Each operation's two figures, their spread — the larger less the
+smaller, over the smaller — and its seconds are kept as each is counted, so a
+run cut off keeps what it counted. cachegrind is in the dev-tooling exemption
 ([architecture](architecture.md)): it executes the bench and judges no
 document. `calibration` has no count mode, and its input and call are the
 text group's `text of 5 dense pages`.
 
-Dispatch 41204196780 counted all 141 operations of the set. Each job counts
-its share twice at one revision, which is what a base and a head cost, so its
-time is the time of one pair. `open` and `write` count in parts because,
-whole, their jobs would take 29 201 s and 20 557 s, past the 300 minutes a job
-may run:
+Run 41204196780 counted all 141 operations of the set, a share at a time,
+each share twice at one revision, which is what a base and a head cost, so a
+share's time is the time of one pair:
 
 | Job | Operations | Seconds |
 | --- | ---: | ---: |
@@ -959,8 +978,8 @@ process does besides its iterations, which the counter counts as well:
 The two counts of 123 of the 141 operations differ, so a count is not a
 property of the code and the input alone. Those of two differ by more than
 1 %, more than a 1 % rule can resolve, and those of four others did in
-dispatch 41068883186, which counted 138 of the set; which operations pass 1 %
-moves from one dispatch to the next:
+run 41068883186, which counted 138 of the set; which operations pass 1 %
+moves from one run to the next:
 
 | Operation | 41068883186 | 41204196780 |
 | --- | ---: | ---: |
@@ -972,7 +991,7 @@ moves from one dispatch to the next:
 | `write/edit an annotation, save, reopen, 1000 pages` | 1.1968 % | 0.2429 % |
 
 They stay in the set, and how a gate holds them is H-78's, for the owner.
-Every count of dispatch 41204196780, by the names and inputs the set had
+Every count of run 41204196780, by the names and inputs the set had
 when it ran:
 
 | Operation | First | Second | Spread |
@@ -1126,9 +1145,6 @@ in 0.5.1 is a *missing* baseline directory, and a regression prints
 "Performance has regressed" and exits 0. `bench-check` reads criterion's own
 `estimates.json` — its numbers, not a second timing — and holds each operation
 to a committed figure and a band in `crates/tinker-pdf/benches/baseline.json`.
-Each group's job also counts the criterion lines in its log against the count
-its matrix entry gives, so a group that measured fewer operations than it
-declares fails.
 
 A band has to be above the machine's own swing or it fails on the machine
 rather than on the code, so `bench-check` refuses an entry that carries no
@@ -1137,22 +1153,23 @@ measured swing.
 `bench-check` prints each operation's throughput beside its mean, in the unit
 its list in `baseline.json` commits it to: pages a second, megapixels or
 megabytes a second, or outlines a second. With `--sizes` it also holds every
-head-side operation to the 20-300 ms window the set is sized to, on the runner
-the job lands on, which is where the window is a fact: an operation outside it
-fails unless its entry names it outside the window by the owner's word
+head-side operation to the 20-300 ms window the set is sized to, on the
+machine it runs on, which is where the window is a fact: an operation outside
+it fails unless its entry names it outside the window by the owner's word
 (`outside_window`), which is reported; the planning baseline's side of
-a factor may run longer. `bench.yml` runs it so, and a dispatch with
-`sizes_report` lists every operation outside the window with its mean and
-fails on none.
+a factor may run longer. `--sizes report` lists every operation outside the
+window with its mean and fails on none.
 
 ### The named machine is `ubuntu-latest`
 
-`bench.yml` runs on `ubuntu-latest` and holds every run with
-`bench-check --machine ubuntu-latest`. Its figures are criterion's own
-`mean.point_estimate`, read out of the `estimates.json` each run uploads as an
-artefact — nothing re-times anything, and the runner hosts this code rather
-than judging it (ruling 13). `baseline.json` lists the dispatches its figures
-were taken from.
+The committed entry is `ubuntu-latest`'s, the hosted runner its fifteen runs
+landed on, and `bench-check --machine ubuntu-latest` holds a run to it. Its
+figures are criterion's own `mean.point_estimate`, read out of each run's
+`estimates.json` — nothing re-times anything, and the machine hosts this code
+rather than judging it (ruling 13). `baseline.json` lists the runs its figures
+were taken from. A local machine is another machine: with no entry of its own
+it is reported and not failed, and its own entry, measured as this one was,
+is what holds it.
 
 **Three choices in the entry, and the reason for each.**
 
@@ -1180,8 +1197,8 @@ floor, and a later measurement may have to raise them.
 
 **`ubuntu-latest` is a fleet and not a machine.** Runs of one revision fall
 into groups on hardware the log does not name, and much of a spread is that
-split rather than noise, so `bench.yml` writes `/proc/cpuinfo`'s model name and
-the CPU count into `bench.log`, so that a measurement can attribute the split
+split rather than noise, so a run records `/proc/cpuinfo`'s model name and the
+CPU count beside its figures, so that a measurement can attribute the split
 rather than band it.
 
 **A pair is judged on its rounds.** `cargo xtask bench-check --paired BASE
@@ -1203,7 +1220,7 @@ is reported, never failed.
 **A pinned machine names its host.** An entry for one host held still
 carries `cpu`, that host's `/proc/cpuinfo` model name, and `held`, the
 frequency and core isolation it is held at, and `bench-check --machine NAME`
-reads this host's model name the way `bench.yml` logs it and refuses to
+reads this host's model name from `/proc/cpuinfo` and refuses to
 compare when it is not the entry's: a run that lands on another host is
 refused by name rather than judged against figures it did not set. A fleet
 names no model, so `ubuntu-latest` compares on any host.
@@ -1217,8 +1234,7 @@ on one machine, which needs no band because it changes nothing but the code.
 **The entry is checked, not just written.** `cargo xtask baseline` — part of
 `cargo run -p xtask -- check`, so it fails a build — holds the files that carry
 each group's list of operations to each other: a `[[bench]]` declares each
-group file, the file defines the group's operations, `bench.yml`'s matrix gives
-the count its job's guard holds the log to, and `baseline.json` lists them, in
+group file, the file defines the group's operations, and `baseline.json` lists them, in
 the file's order and each with its unit, and records a figure for each or names
 it unmeasured. It refuses a name criterion would record under another key — one
 holding any of the ten characters it writes as `_`, or longer than the 64 bytes
@@ -1266,16 +1282,13 @@ live, and it holds what they stand on.
   is.
 - **No clock**: `the_guard_suite_reads_no_clock` fails on a clock in any
   source the suite is built from or names.
-- **On four targets**: each native `test` leg runs `guards.rs` and
-  `guard_allocations.rs` in both builds — the default in `cargo test
-  --workspace`, `bundled-fonts` in the facade's own run of that build — and
-  greps each run's log for `every_guard_is_landed_or_owed` and
-  `the_tally_counts_the_same_on_every_target` by name, and `wasm-determinism`
-  runs both on `wasm32-wasip1` under wasmtime with the same greps. The native
-  legs read the logs of runs they make anyway rather than building the facade
-  again, a build the hosted Linux runner has no disk for. Those two are in the determinism roster
-  ([determinism](features/determinism.md)), and a guard a row lands later joins
-  the greps in that row's commit.
+- **On three targets**: CI's tests run `guards.rs` and
+  `guard_allocations.rs` on Linux and Windows in both builds — the default in
+  `cargo test --workspace`, `bundled-fonts` in the facade's own run of that
+  build — and they run on `wasm32-wasip1` under wasmtime locally.
+  `every_guard_is_landed_or_owed` and `the_tally_counts_the_same_on_every_target`
+  are in the determinism roster ([determinism](features/determinism.md)), and a
+  guard a row lands later joins the roster in that row's commit.
 
 ## Peak memory, a process a case
 
@@ -1294,8 +1307,9 @@ so a figure holds the operation and its input and never the generator.
 The parent holds each case to its build's figure in `peak_memory.tsv`, the
 default and `bundled-fonts` builds each with their own, plus the 2 % the corpus
 bars give their peaks, and fails a case the table has no line for. Each figure
-is the larger of two CI runs' peaks, the runs and the spread between them
-recorded in the table. A case whose two runs spread by 2 % or more is named
+is the larger of two runs' peaks on the hosted Linux image, the runs and the
+spread between them recorded in the table, so a local run on another machine
+reads its peaks beside that machine. A case whose two runs spread by 2 % or more is named
 `unheld`, by the owner's word (H-78): it is measured and printed and held to
 nothing, which is the twenty pages rendered on four threads, whose peak moves
 with how the pages are scheduled; an eighth case runs it again with the
@@ -1317,9 +1331,8 @@ own unit tests hold on every target, and
 sees what the child holds. The child is this test binary, so the file is a
 `SPAWNERS` row: it hosts one case a process and adjudicates nothing.
 
-`ci.yml`'s `peak-memory` job runs it on the hosted Linux image, in release and
-in both builds, holds every case to the table, and greps its `RAN` line and
-each of the seven cases' lines.
+It runs locally in release and in both builds, holds every case to the
+table, and prints its `RAN` line and each case's line.
 
 ## The examples, run rather than compiled
 
@@ -1327,9 +1340,10 @@ each of the seven cases' lines.
 render, extract, edit, create, convert, parallel. Each runs with no arguments
 against a committed fixture, so trying one needs no corpus and no download.
 
-CI **runs each of them and greps its output**, which is the same rule as
-everywhere else on this page: `cargo clippy --all-targets` already compiles
-them, and a program that compiles and prints nothing is indistinguishable from
-one that works. The greps assert content — `the original, untouched` from the
-incremental save, `read back page 1 says` from the writer reading back what it
-wrote — so an example reduced to an error message fails the job.
+The gates' `examples` gate **runs each of them and reads its output**, which
+is the same rule as everywhere else on this page: `cargo clippy --all-targets`
+already compiles them, and a program that compiles and prints nothing is
+indistinguishable from one that works. The gate asserts content — `the
+original, untouched` from the incremental save, `read back page 1 says` from
+the writer reading back what it wrote — so an example reduced to an error
+message fails it.

@@ -980,10 +980,11 @@ wants the reason to survive it.
   compares the MD5 of its I420 planes with the one published beside it. The
   vectors carry no licence, so they are not committed: `tests/vp8-vectors/fetch.sh`
   fetches that commit into `target/` and checks every file against
-  `tests/vp8-vectors/SHA256SUMS`, and CI's `vp8-vectors` job runs it, sets
-  `TINKER_VP8_VECTORS_REQUIRED=1` (a missing set is then a failure, and so is
-  any set that is not the pinned 61 files and 182 key frames) and greps for
-  `vp8-test-vectors: RAN`. RFC 6386 ends at the planes, so the conversion to
+  `tests/vp8-vectors/SHA256SUMS`, and the test runs locally over what it
+  fetched, with `TINKER_VP8_VECTORS_REQUIRED=1` set (a missing set is then a
+  failure, and so is any set that is not the pinned 61 files and 182 key
+  frames); a run that proves the decoder prints `vp8-test-vectors: RAN`.
+  RFC 6386 ends at the planes, so the conversion to
   RGB is held beside them to what it claims: BT.601's limited-range matrix,
   worked out in exact integer arithmetic over all 2^24 inputs, which
   `yuv_to_rgb` meets to within one level; the upsampler's 9:3:3:1 weights, to within one; and

@@ -122,7 +122,7 @@ impl Element for Node {
 /// at a constant address, so the second visit is a cycle; anything else comes
 /// back at an address one segment deeper, so only the depth cap can stop it.
 /// Neither is a soft failure — a build missing either guard hangs rather than
-/// returning a wrong answer, and the nightly's `-timeout` is what reports it.
+/// returning a wrong answer, and a session's `-timeout` is what reports it.
 struct Always(Vec<u8>);
 
 impl ImportResolver for Always {

@@ -21,9 +21,8 @@
 //! key frame reads — so each is a still picture as a WebP would hold it, and
 //! its MD5 is the published answer for it. That makes this the one check of
 //! the lossy decoder whose expected answers are published data rather than
-//! this repository's own reading of the RFC, and CI's `vp8-vectors` job runs
-//! it on every push with `TINKER_VP8_VECTORS_REQUIRED=1` and greps for
-//! [`VECTORS_RAN`]. Without the variable the test prints [`VECTORS_SKIPPED`]
+//! this repository's own reading of the RFC, and a local run sets
+//! `TINKER_VP8_VECTORS_REQUIRED=1` and reads [`VECTORS_RAN`]. Without the variable the test prints [`VECTORS_SKIPPED`]
 //! and passes, as `png_suite.rs` does; with the switch set the absence is a
 //! failure, and so is any vector set that is not the pinned commit's 61 files
 //! and 182 key frames.

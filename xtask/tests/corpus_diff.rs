@@ -1,6 +1,6 @@
-//! `cargo xtask corpus-diff --held-to-broke` is read by `corpus.yml` row by
-//! row, each row a corpus, a path and the file on disk, so what it prints on
-//! standard output is those rows and nothing else.
+//! `cargo xtask corpus-diff --held-to-broke` is read row by row, each row a
+//! corpus, a path and the file on disk, so what it prints on standard output
+//! is those rows and nothing else.
 
 use std::path::PathBuf;
 use std::process::Command;

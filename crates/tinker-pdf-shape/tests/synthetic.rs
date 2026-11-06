@@ -1022,7 +1022,7 @@ fn write_the_fuzz_seeds() {
 /// `x86_64-pc-windows-msvc`, so `cargo fuzz run` is a Linux job. This is the
 /// part of it that does not need a fuzzer — the seeds, the two entry paths and
 /// the determinism assertion — so a seed that starts panicking is caught by
-/// `cargo test` on every platform rather than only by the nightly run.
+/// `cargo test` on every platform rather than only in a fuzzing session.
 #[test]
 fn every_fuzz_seed_shapes_without_panicking() {
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/shape");

@@ -160,17 +160,18 @@ is a licence violation committed by accident.
 names, on a fetched book with no pin, and on a pinned book that did not
 arrive. Project Gutenberg regenerates a book when its text is corrected, so a
 pin moves: the book is re-pinned in a reviewed commit, together with whatever
-of `epub_fetched.rs`'s pinned figures the new bytes change, and the job is red
-until then. The figures held to the pinned books are the CSS census's
-stylesheets and distinct properties, as floors, and the unimplemented-property
-census's counts, as ceilings, each lowered by the landing of its property; the
-job's log records the rest each run, with the manifest of what it read.
+of `epub_fetched.rs`'s pinned figures the new bytes change, and the local run
+over the books fails until then. The figures held to the pinned books are the
+CSS census's stylesheets and distinct properties, as floors, and the
+unimplemented-property census's counts, as ceilings, each lowered by the
+landing of its property; the run prints the rest, and `MANIFEST.tsv`, which the
+fetch writes beside the books, records what it read.
 
 `crates/tinker-pdf/tests/epub_fetched.rs` reads `TINKER_EPUB_CORPUS` and prints
-**`epub-corpus: RAN`** or **`epub-corpus: SKIPPED`**; the CI job greps for the
-second and goes red. A skipped test exits 0 and reads exactly like a pass, and
-the corpus is not in the repository, so its books can fail to arrive as well as
-fail to read, and both look like a green tick.
+**`epub-corpus: RAN`** or **`epub-corpus: SKIPPED`**; a run that prints the
+second has read no book and proves nothing. A skipped test exits 0 and reads
+exactly like a pass, and the corpus is not in the repository, so its books can
+fail to arrive as well as fail to read, and both look like a green tick.
 
 `TINKER_EPUB_CORPUS` **must be an absolute path.** A test binary's working
 directory is its *crate* root, not the workspace root, so
@@ -182,8 +183,8 @@ refuses a relative one outright under the flag below.
 `TINKER_EPUB_CORPUS_REQUIRED=1` turns a skip into a **failure**, because a
 banner is not a gate — one line in a wall of build output reads exactly like a
 test that ran. It is opt-in so that a contributor with no network can still run
-`cargo test`, and CI sets it, so a job that means to measure the books cannot
-go green over none.
+`cargo test`, and the local run over the fetched books sets it, so a run that
+means to measure the books cannot pass over none.
 
 The samples are chosen by what each is the only example of, not by size:
 `wasteland-otf-obf` and `wasteland-woff-obf` are the only real input for the

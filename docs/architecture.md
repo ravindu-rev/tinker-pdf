@@ -16,12 +16,13 @@ These are given; this document states each boundary, not the argument.
   ours. The only exemption is dev/build/binding tooling that never ships in
   a user's artifact and never touches document bytes at runtime: `proptest`,
   `criterion`, `cargo-fuzz`, `PyO3`, `wasm-bindgen`, `maturin`, `csbindgen`,
-  and cachegrind, the host instruction counter `bench.yml`'s count job runs
-  the benchmark set under, admitted as H-16's default admits it: it executes
-  the bench and judges no document.
+  and cachegrind, the host instruction counter the benchmark set's count
+  mode runs under, admitted as H-16's default admits it: it executes the
+  bench and judges no document.
   Anything else — including "just a small helper" like a hash or a
-  bit-reader — is out, and `cargo-deny` fails the build on such crates by
-  name (`deny.toml`). The policy lives in CI, not in review vigilance.
+  bit-reader — is out, and `cargo deny check` fails on such crates by name
+  (`deny.toml`). The policy lives in that check, run locally as a change's
+  licence proof, not in review vigilance.
 - **`wasm32-unknown-unknown` is a first-class target.** No C toolchain
   exists anywhere, so the wasm build is a plain `cargo build`. The facade
   takes bytes, never paths, for the same reason.
@@ -160,8 +161,9 @@ text-extraction path never links a rasterizer — the seam is load-bearing,
 not decorative (ruling 7). `tinker-pdf` is the facade and the only
 user-facing crate (ruling 11).
 
-Dependency direction is enforced: `cargo xtask dag` diffs `cargo metadata`
-against the declared graph in CI and fails on any new edge. It exists
+Dependency direction is enforced: `cargo xtask dag`, part of `cargo xtask
+check`, which the gates and `release.yml`'s preflight run, diffs `cargo
+metadata` against the declared graph and fails on any new edge. It exists
 because nothing else can catch this — an undeclared edge compiles.
 Convenient shortcuts between crates are how seams die.
 
@@ -319,7 +321,7 @@ Three things exercise the claim:
   reading its text and rendering it, against the serial answer page by page.
 - `crates/tinker-pdf/examples/parallel.rs` is those dozen lines, as an
   embedder would write them, checking every page from the pool byte for byte
-  against the same page drawn serially. CI runs it.
+  against the same page drawn serially. The gates run it.
 - `tpdf render --jobs N` is the same pool in the command-line tool, with the
   property that makes it usable: results are buffered per page and printed
   in page order after the join, so `--jobs 8` and `--jobs 1` write the same

@@ -726,7 +726,7 @@ fn measure(images: &[Image], tally: &mut Tally) {
 /// arithmetic and not its API (ruling 11). The original is held at its exact
 /// boundary by `the_render_path_measures_a_jbig2_decode_against_its_own_image`
 /// in `jbig2.rs`, so a change there fails a test that runs on every commit,
-/// and this copy is what lets the nightly census say whether the change
+/// and this copy is what lets the census say whether the change
 /// refuses a real document.
 fn render_budget(width: u32, height: u32) -> u64 {
     let globals = 2 * MAX_JBIG2_SYMBOL_PIXELS / MAX_JBIG2_WORK_MULTIPLE;

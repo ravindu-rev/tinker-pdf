@@ -27,8 +27,9 @@ chased:
   precise: `sqrt`, `floor`, `ceil`, `round`, `trunc` and `abs` **are**
   correctly rounded by the standard and may be used freely; only the
   transcendental family diverges between libms, and last-ulp differences
-  become visible pixels after quantization. `cargo xtask libm` fails the
-  build if a pixel-path crate calls a platform transcendental.
+  become visible pixels after quantization. `cargo xtask libm`, part of
+  `cargo xtask check`, fails if a pixel-path crate calls a platform
+  transcendental.
 - **No environment-dependent behavior**: no locale-sensitive parsing, no
   hash-map iteration order on any output path, no time or randomness in the
   render path. Where a step count or level count is computed from geometry,
@@ -83,8 +84,8 @@ with the default options and nothing else, and its table is the one place a
 determinism bug shows, so a row meaning "this page, but differently" does not
 join it. Each is hashed the same way and floored by ink the same way, and the
 same file holds that the defaults did not move: the blend grid's default render
-there is this table's `analytic_blend`, copied. The `wasm32-wasip1` leg does
-not run that file, so on that target those hashes are claimed, not measured.
+there is this table's `analytic_blend`, copied. The local `wasm32-wasip1` run
+takes that file as well.
 
 Beside them, **document byte-hashes** pin the writer as well as the renderer:
 a synthesised PDF, a synthesised fixed-layout document and a synthesised book
@@ -104,21 +105,25 @@ reflowable book, whose pagination is a function of the open options.
 
 | Target | Measured by |
 | --- | --- |
-| `x86_64-unknown-linux-gnu` | `test (ubuntu-latest)` |
-| `x86_64-pc-windows-msvc` | `test (windows-latest)` |
-| `aarch64-apple-darwin` | `test (macos-14)` |
-| `wasm32-wasip1` | `wasm-determinism`, under wasmtime |
+| `x86_64-unknown-linux-gnu` | CI's tests, `ubuntu-latest` |
+| `x86_64-pc-windows-msvc` | CI's tests, `windows-latest` |
+| `aarch64-apple-darwin` | nothing: claimed, not measured |
+| `wasm32-wasip1` | the local run, under wasmtime |
 
-All four are measured on every CI run. Between them they vary everything
+CI's tests measure the two native targets on every pull request. The
+`wasm32-wasip1` run is local proof, made by whoever changes what a fingerprint
+covers: each fingerprint test built with `--target wasm32-wasip1` and run with
+wasmtime as the runner. `aarch64-apple-darwin` is run nowhere, so on it the
+contract is claimed. Between them the three measured targets vary everything
 below the arithmetic — a different `std`, allocator and linker — and
 `wasm32-wasip1` varies width as well: 64-bit against 32-bit, where a `usize`
 assumption would show.
 
-Each leg greps a log for every fingerprint test by name — `determinism.rs`'s
-own run, and on the native legs `cargo test --workspace`'s for the rest: a
-green tick is not evidence that a test ran, and an `#[ignore]` added one
-afternoon would look identical, where a test's name in the log beside `ok` is.
-That is
+A green tick is not evidence that a test ran, and an `#[ignore]` added one
+afternoon would look identical, so a fingerprint test is held to running by
+the roster below rather than by a reading of any log: `cargo xtask
+determinism` fails on an entry that is not an un-ignored `#[test]` in its
+file. That is
 [verification.md](../verification.md)'s "a check that can be absent is red,
 not green".
 
@@ -128,12 +133,11 @@ byte hashes and its display list's replay of every fingerprinted page;
 `pdfa_writer.rs`'s archival hash; `epub_shaped.rs`'s shaped page;
 `render_options.rs`'s pinned ink, transparent and premultiplied, and
 hard-edged output; the shaper's two fingerprints; and the guard suite's
-roster of guards and the work counts it pins (`guards.rs`), which each
-native leg runs in both builds and `wasm-determinism` under wasmtime, beside
-`guard_allocations.rs`; and the requests page one costs over a streamed open,
-linearized and not (`streaming_open.rs`). `cargo xtask
-determinism`, part of `cargo xtask check`, holds each to be a `#[test]` in its
-file with no `#[ignore]`, grepped as passing by the native `test` legs and the
-`wasm-determinism` job, and every test those jobs grep to be in the roster. A
-row that lands a fingerprint adds its roster entry and its greps in one
-commit.
+roster of guards and the work counts it pins (`guards.rs`), which CI's tests
+run in each build they test and the local `wasm32-wasip1` run under wasmtime,
+beside `guard_allocations.rs`; and the requests page one costs over a streamed
+open, linearized and not (`streaming_open.rs`). `cargo xtask
+determinism`, part of `cargo xtask check` — which the gates run, and
+`release.yml`'s preflight before anything is built — holds each to be a
+`#[test]` in its file with no `#[ignore]`. A row that lands a fingerprint adds
+its roster entry in the same commit.

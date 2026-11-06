@@ -462,8 +462,8 @@ a question about targets rather than about annotations (ruling 6).
   censuses, of annotations and of fonts, run with `-- --ignored --nocapture`,
   printing `RAN`/`SKIPPED` so a missing corpus cannot read as
   a pass, with floors at recorded counts, honouring
-  `TINKER_CORPUS_REQUIRED`, and run nightly by `corpus.yml`. The annotation
-  census also counts the payloads per family, asserts
+  `TINKER_CORPUS_REQUIRED`, and run locally over the fetched corpora. The
+  annotation census also counts the payloads per family, asserts
   that each covered subtype reads into its own family (a second transcription
   of 12.5.6's grouping) and that neither listing bound touches a corpus page;
   the per-family counts are printed and hold no floors.

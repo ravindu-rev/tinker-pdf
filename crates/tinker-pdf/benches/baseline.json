@@ -2,9 +2,9 @@
   "note": [
     "The speed ratchet's committed figures, read by `cargo xtask bench-check",
     "--machine NAME` and held by `cargo xtask baseline` to the group files",
-    "`benches/<group>.rs`, their `[[bench]]` entries and `bench.yml`'s",
-    "matrix. Every figure under `machines` is one criterion computed and wrote",
-    "into its own estimates.json on the runner; nothing re-times anything. See",
+    "`benches/<group>.rs` and their `[[bench]]` entries. Every figure under",
+    "`machines` is one criterion computed and wrote into its own",
+    "estimates.json on the machine it names; nothing re-times anything. See",
     "docs/verification.md, 'Clocks: outside the suite, and not nowhere'.",
     "",
     "`groups` lists each group's operations in the order its file declares",

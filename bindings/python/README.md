@@ -96,7 +96,10 @@ invent randomness.
 
 ## Nothing is published
 
-`pip install tinker-pdf` does not work: nothing is published. The pipeline
-runs as a dry run; the facade does not freeze before 0.1.0
+`pip install tinker-pdf` does not work: nothing is published.
+[`release.yml`](../../.github/workflows/release.yml) uploads the wheels to
+PyPI when the owner merges `develop` into `main` at a workspace version that
+has no `v<version>` tag, and a merge that leaves the version as it is
+publishes nothing; the facade does not freeze before 0.1.0
 ([`docs/architecture.md`](../../docs/architecture.md)), and the version number
 says what the API is worth depending on.

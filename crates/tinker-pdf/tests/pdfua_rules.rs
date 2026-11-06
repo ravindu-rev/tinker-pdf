@@ -24,7 +24,7 @@
 //! that breaks that symmetry, over files somebody else annotated; the rules
 //! these fixtures hold were written where the corpus was not reachable, and
 //! its false-alarm count over the 195 conforming fixtures is owed by the next
-//! nightly run.
+//! local corpus run.
 
 use tinker_pdf::{ConformanceFinding, Document, FindingKind, PdfUaCoverage, PdfUaPart};
 

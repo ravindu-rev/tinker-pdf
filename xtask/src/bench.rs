@@ -5,9 +5,7 @@
 //! Criterion compares against a saved baseline perfectly well and **never exits
 //! non-zero when it loses**. The only failure path in 0.5.1 is a *missing*
 //! baseline directory; a regression prints "Performance has regressed" and the
-//! process exits 0. `bench.yml` had been scheduled weekly since it was written
-//! on the strength of that comparison, so the job was reporting rather than
-//! gating, and the roadmap's own row said so.
+//! process exits 0, so a run that leaned on it would report rather than gate.
 //!
 //! So the comparison this repository ratchets on is one it owns. It reads
 //! criterion's own `estimates.json` — the numbers criterion computed, not a
@@ -62,16 +60,17 @@
 //! # Why one list a group
 //!
 //! The benchmark set is one file a group, `benches/<group>.rs`, each its own
-//! `[[bench]]`, and `bench.yml` runs one job a group (MS-04). So the baseline
-//! lists each group's operations ahead of its machines, in the order the
+//! `[[bench]]`, and `cargo bench --bench <group>` measures one group (MS-04).
+//! So the baseline lists each group's operations ahead of its machines, in the
+//! order the
 //! group's file declares them, each with its unit, what one iteration covers
 //! and how many calls it makes ([`Listed`]). A machine entry names the
 //! operations it has no figure for yet ([`Machine::unmeasured`]): before the
 //! lists, an entry short of any operation was refused outright, so no
 //! operation could join the set until the whole set was measured again, and a
 //! hole the entry names is one nobody can miss. [`check`] holds the
-//! `[[bench]]` entries, each file's names, its list, `bench.yml`'s count for
-//! the group and every machine entry to each other.
+//! `[[bench]]` entries, each file's names, its list and every machine entry to
+//! each other.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -99,14 +98,6 @@ pub const BENCH_DIR: &str = "crates/tinker-pdf/benches";
 
 /// The manifest that declares each group file a `[[bench]]`.
 pub const BENCH_MANIFEST: &str = "crates/tinker-pdf/Cargo.toml";
-
-/// The weekly job, one entry of its matrix a group, whose guard counts how
-/// many of the group's operations reported.
-pub const WORKFLOW_PATH: &str = ".github/workflows/bench.yml";
-
-/// The guard each job of the matrix runs, comparing the criterion lines it
-/// counted with its own entry's `count`.
-pub const GUARD: &str = "-eq ${{ matrix.count }}";
 
 /// The ten characters criterion 0.5.1 writes as `_` in each part of an
 /// operation's directory (`make_filename_safe`, its `src/report.rs`).
@@ -241,8 +232,7 @@ pub struct Machine {
 /// One host, held still: what a pinned machine's entry says it is.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pinned {
-    /// The host's CPU, as `/proc/cpuinfo`'s first `model name` line gives it
-    /// and `bench.yml` writes it into `bench.log`.
+    /// The host's CPU, as `/proc/cpuinfo`'s first `model name` line gives it.
     pub cpu: String,
     /// The frequency and core isolation it is held at, as its entry states
     /// them.
@@ -888,8 +878,7 @@ impl Verdict {
     }
 }
 
-/// The host's CPU, as `/proc/cpuinfo`'s first `model name` line gives it:
-/// the line `bench.yml` writes into `bench.log`, read the same way.
+/// The host's CPU, as `/proc/cpuinfo`'s first `model name` line gives it.
 #[must_use]
 pub fn host_model(cpuinfo: &str) -> Option<String> {
     cpuinfo.lines().find_map(|line| {
@@ -1002,30 +991,6 @@ pub const GROUP_OPENED: &str = "Group::new(c, ";
 /// counts that input and call as the text group's operation.
 pub const FROZEN: &[&str] = &["calibration"];
 
-/// Each entry of `bench.yml`'s matrix: its `group`, and the `count` under it
-/// — how many criterion lines that group's job insists on seeing.
-///
-/// The guard is the one thing in that file that carries a count, and a count
-/// in a shell script is exactly the kind that drifts: it read `time:+\[` for
-/// a fortnight and matched nothing, and it said six for a day after
-/// `engine.rs` had seven. One job a group now, so one count a group.
-#[must_use]
-pub fn guard_counts(workflow: &str) -> Vec<(String, Option<u32>)> {
-    let mut entries: Vec<(String, Option<u32>)> = Vec::new();
-    for line in workflow.lines().map(str::trim) {
-        if let Some(group) = line.strip_prefix("- group:") {
-            entries.push((group.trim().to_string(), None));
-        } else if let Some(count) = line.strip_prefix("count:") {
-            if let Some(entry) = entries.last_mut() {
-                if entry.1.is_none() {
-                    entry.1 = count.trim().parse().ok();
-                }
-            }
-        }
-    }
-    entries
-}
-
 /// The name of every `[[bench]]` a manifest declares, in its order.
 #[must_use]
 pub fn bench_targets(manifest: &str) -> Vec<String> {
@@ -1123,16 +1088,10 @@ fn once(names: &[String]) -> Vec<&String> {
 /// What `cargo xtask check` holds the speed ratchet to.
 ///
 /// The files carry one list of operations a group — each `[[bench]]` names a
-/// group file, the file defines the group's operations, `bench.yml`'s matrix
-/// counts them, and the baseline lists them and records a figure for each
-/// or names it unmeasured — and nothing else makes them agree. Each of the
-/// two ways they had drifted apart while they were one file failed on the
-/// runner, weekly, for as long as nobody read the log: the guard counted six
-/// after the seventh operation landed, and the baseline the path names did
-/// not exist at all, so the step that promises to "report and not fail for a
-/// machine with no entry" exited 1 on every run instead.
-///
-/// So the agreement is checked where a build can fail on it.
+/// group file, the file defines the group's operations, and the baseline lists
+/// them and records a figure for each or names it unmeasured — and nothing
+/// else makes them agree. So the agreement is checked where a build can fail
+/// on it.
 pub fn check(root: &Path) -> Result<(), Vec<String>> {
     let mut problems = Vec::new();
 
@@ -1313,62 +1272,6 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
                      operations in different orders; a list is in the order its \
                      file declares them"
                 ));
-            }
-        }
-    }
-
-    // One matrix entry a group, counting what the group's file defines.
-    match std::fs::read_to_string(root.join(WORKFLOW_PATH)) {
-        Err(error) => problems.push(format!("cannot read {WORKFLOW_PATH}: {error}")),
-        Ok(workflow) => {
-            if !workflow.contains(GUARD) {
-                problems.push(format!(
-                    "{WORKFLOW_PATH} has no `{GUARD}` guard; a job whose bench \
-                     compiled and measured nothing exits 0"
-                ));
-            }
-            let entries = guard_counts(&workflow);
-            for (index, (group, count)) in entries.iter().enumerate() {
-                if entries[..index].iter().any(|(other, _)| other == group) {
-                    problems.push(format!(
-                        "{WORKFLOW_PATH}'s matrix names `{group}` twice; one job a \
-                         group, counting all of it"
-                    ));
-                    continue;
-                }
-                if !targets.contains(group) {
-                    problems.push(format!(
-                        "{WORKFLOW_PATH}'s matrix has an entry for `{group}`, which \
-                         {BENCH_MANIFEST} declares no `[[bench]]` for"
-                    ));
-                    continue;
-                }
-                let Some(count) = count else {
-                    problems.push(format!(
-                        "{WORKFLOW_PATH}'s matrix entry for `{group}` has no `count`; \
-                         its job's guard would compare against nothing"
-                    ));
-                    continue;
-                };
-                if let Some((_, file, names)) = defined.iter().find(|(g, _, _)| g == group) {
-                    if *count as usize != names.len() {
-                        problems.push(format!(
-                            "{WORKFLOW_PATH} requires {count} criterion lines of the \
-                             `{group}` job and `{file}` defines {} operations; a guard \
-                             that disagrees with its file passes on the smaller number \
-                             or fails every run",
-                            names.len()
-                        ));
-                    }
-                }
-            }
-            for target in &targets {
-                if !entries.iter().any(|(group, _)| group == target) {
-                    problems.push(format!(
-                        "{WORKFLOW_PATH}'s matrix has no entry for the `{target}` \
-                         group; no job measures it"
-                    ));
-                }
             }
         }
     }
@@ -1848,7 +1751,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         return size_failure.map_or(Ok(()), Err);
     };
 
-    // Nothing is spawned: the file `bench.yml` reads its model name from.
+    // Nothing is spawned: the host's model name is read from the file itself.
     host_allows(
         machine,
         std::fs::read_to_string("/proc/cpuinfo").ok().as_deref(),
@@ -2184,9 +2087,8 @@ mod tests {
     }
 
     /// The one that catches drift in the tree rather than in a fixture: the
-    /// committed baseline, the group files and their `[[bench]]` entries, and
-    /// the counts `bench.yml`'s matrix guards, held to each other as they
-    /// stand.
+    /// committed baseline, the group files and their `[[bench]]` entries, held
+    /// to each other as they stand.
     #[test]
     fn the_committed_baseline_agrees_with_the_tree() {
         if let Err(problems) = check(&repo_root()) {
@@ -2275,24 +2177,6 @@ mod tests {
     }
 
     #[test]
-    fn the_guard_counts_are_read_out_of_the_workflows_matrix() {
-        assert_eq!(
-            guard_counts(MATRIX),
-            vec![
-                ("open".to_string(), Some(1)),
-                ("render".to_string(), Some(2))
-            ]
-        );
-        // An entry with no count is read as one, so `check` can say so; a
-        // commented entry is no entry.
-        assert_eq!(
-            guard_counts("          - group: open\n          # - group: text\n"),
-            vec![("open".to_string(), None)]
-        );
-        assert_eq!(guard_counts("cargo bench -p tinker-pdf\n"), vec![]);
-    }
-
-    #[test]
     fn the_bench_targets_are_read_out_of_the_manifest() {
         assert_eq!(
             bench_targets(&format!(
@@ -2366,7 +2250,6 @@ mod tests {
         manifest: String,
         files: Vec<(String, String)>,
         baseline: String,
-        workflow: String,
     }
 
     const MANIFEST: &str = r#"[package]
@@ -2445,22 +2328,6 @@ fn render(c: &mut Criterion) {
   ]
 }"#;
 
-    const MATRIX: &str = r#"jobs:
-  bench:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - group: open
-            count: 1
-          - group: render
-            count: 2
-    steps:
-      - run: |
-          cargo bench -p tinker-pdf --bench ${{ matrix.group }} 2>&1 | tee -a bench.log
-          test "$(grep -Ec 'time: +\[' bench.log)" -eq ${{ matrix.count }}
-"#;
-
     impl Tree {
         /// Two groups that agree: `open` with one operation and `render`
         /// with two, beside the support module, which is no group.
@@ -2476,7 +2343,6 @@ fn render(c: &mut Criterion) {
                     ),
                 ],
                 baseline: LISTS.to_string(),
-                workflow: MATRIX.to_string(),
             }
         }
 
@@ -2511,9 +2377,6 @@ fn render(c: &mut Criterion) {
                 std::fs::write(benches.join(name), source).expect("a file");
             }
             std::fs::write(root.join(BASELINE_PATH), &self.baseline).expect("a file");
-            let workflow = root.join(WORKFLOW_PATH);
-            std::fs::create_dir_all(workflow.parent().expect("a directory")).expect("a directory");
-            std::fs::write(workflow, &self.workflow).expect("a file");
             root
         }
 
@@ -2634,7 +2497,6 @@ fn render(c: &mut Criterion) {
                             "    group.operation(\"fill 300 anti-aliased paths at 150 dpi\", \
                              |op| {});\n    group.finish();",
                         );
-                        tree.workflow = tree.workflow.replace("count: 2", "count: 3");
                     },
                     "benchmarks `fill 300 anti-aliased paths at 150 dpi`, which the `render` list",
                 ),
@@ -2646,7 +2508,6 @@ fn render(c: &mut Criterion) {
                             "    group.operation(\"render text at 150 dpi\", |op| {});\n",
                             "",
                         );
-                        tree.workflow = tree.workflow.replace("count: 2", "count: 1");
                     },
                     "holds `render text at 150 dpi`, which `crates/tinker-pdf/benches/render.rs` \
                      does not benchmark",
@@ -2677,7 +2538,6 @@ fn render(c: &mut Criterion) {
                             "    group.operation(\"open a 3-page document\", |op| {});\n    \
                              group.finish();",
                         );
-                        tree.workflow = tree.workflow.replace("count: 1", "count: 2");
                     },
                     "benchmarks `open a 3-page document` twice",
                 ),
@@ -2704,10 +2564,6 @@ fn render(c: &mut Criterion) {
                              group.operation(\"extract a page of text\", |op| {});\n"
                                 .to_string(),
                         ));
-                        tree.workflow = tree.workflow.replace(
-                            "    steps:",
-                            "          - group: text\n            count: 1\n    steps:",
-                        );
                     },
                     "no list for the `text` group",
                 ),
@@ -2754,101 +2610,6 @@ fn render(c: &mut Criterion) {
                         );
                     },
                     "opens no group",
-                ),
-            ],
-        );
-    }
-
-    /// The guard is the one count in `bench.yml`, and a count in a shell
-    /// script is exactly the kind that drifts: it said six for a day after
-    /// `engine.rs` had seven. One job a group now, so one count a group, each
-    /// held to its file — short, and long, which fails every run instead —
-    /// and refused on that count alone.
-    #[test]
-    fn a_group_guard_counting_short_is_refused() {
-        let mut wrong = Vec::new();
-        for (index, (shape, count, words)) in [
-            (
-                "the render job counts one of its two",
-                "count: 1",
-                "requires 1 criterion lines of the `render` job and \
-                 `crates/tinker-pdf/benches/render.rs` defines 2 operations",
-            ),
-            (
-                "the render job counts three of its two",
-                "count: 3",
-                "requires 3 criterion lines of the `render` job and \
-                 `crates/tinker-pdf/benches/render.rs` defines 2 operations",
-            ),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let mut tree = Tree::agreeing();
-            tree.workflow = tree.workflow.replace("count: 2", count);
-            let problems = tree.problems(&format!("guard-{index}"));
-            if problems.len() != 1 || !problems[0].contains(words) {
-                wrong.push(format!(
-                    "{shape}: not refused for `{words}` alone: {problems:?}"
-                ));
-            }
-        }
-        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-    }
-
-    /// The matrix's other ways of not following the groups: a group no job
-    /// measures, a job for no group, a group measured twice, an entry with no
-    /// count, and a guard that reads no count at all.
-    #[test]
-    fn a_matrix_that_does_not_follow_the_groups_is_refused() {
-        refuses(
-            "matrix",
-            &[
-                (
-                    "a group no entry names",
-                    |tree| {
-                        tree.workflow = tree
-                            .workflow
-                            .replace("          - group: render\n            count: 2\n", "");
-                    },
-                    "no entry for the `render` group",
-                ),
-                (
-                    "an entry for a group no `[[bench]]` declares",
-                    |tree| {
-                        tree.workflow = tree.workflow.replace(
-                            "    steps:",
-                            "          - group: text\n            count: 1\n    steps:",
-                        );
-                    },
-                    "an entry for `text`",
-                ),
-                (
-                    "a group named by two entries",
-                    |tree| {
-                        tree.workflow = tree.workflow.replace(
-                            "    steps:",
-                            "          - group: open\n            count: 1\n    steps:",
-                        );
-                    },
-                    "names `open` twice",
-                ),
-                (
-                    "an entry with no count",
-                    |tree| {
-                        tree.workflow = tree.workflow.replace(
-                            "          - group: open\n            count: 1\n",
-                            "          - group: open\n",
-                        );
-                    },
-                    "entry for `open` has no `count`",
-                ),
-                (
-                    "a guard that compares against a number of its own",
-                    |tree| {
-                        tree.workflow = tree.workflow.replace("-eq ${{ matrix.count }}", "-eq 3");
-                    },
-                    "no `-eq ${{ matrix.count }}` guard",
                 ),
             ],
         );
@@ -3193,9 +2954,6 @@ fn render(c: &mut Criterion) {
             .baseline
             .replace("\"group\": \"open\"", &format!("\"group\": \"{group}\""))
             .replace("\"open/open", &format!("\"{group}/open"));
-        tree.workflow = tree
-            .workflow
-            .replace("group: open", &format!("group: {group}"));
         let problems = tree.problems("rewrite-group");
         if !problems
             .iter()

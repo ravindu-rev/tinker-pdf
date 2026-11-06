@@ -90,9 +90,9 @@ const NOTHING_MAY_MOVE: &str = "verapdf";
 /// Floors on the inference's pair agreement, as `(corpus, agreeing, pairs)`
 /// — a fraction compared by cross-multiplication.
 ///
-/// **Empty, because nothing has been measured**: the first nightly run of
-/// `corpus.yml` prints the figures, and they are recorded here, with the
-/// date, by the commit that reads them.
+/// **Empty, because nothing has been measured**: the first local corpus run
+/// prints the figures, and they are recorded here by the commit that reads
+/// them.
 const INFERRED_FLOORS: &[(&str, u64, u64)] = &[];
 
 fn required() -> bool {

@@ -164,7 +164,7 @@ keys a simple font takes a width from, the `/Widths` entry the code falls on,
 the descriptor's `/MissingWidth`, a Type 0 font's descendant's `/DW` and
 `/W`), with what each abstaining verdict named printed beside the counts, and the
 caught count held
-to a floor recorded from a run. It runs nightly in `corpus.yml`, finds
+to a floor recorded from a run. It runs locally over the fetched corpora, finds
 `corpus/files` without `TINKER_CORPUS`, and honours `TINKER_CORPUS_REQUIRED`.
 
 `pdfua.rs` also runs the validator over this engine's own output — an EPUB it

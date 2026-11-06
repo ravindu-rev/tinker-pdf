@@ -1177,9 +1177,9 @@ So it is fetched rather than committed:
 `crates/tinker-pdf-filters/tests/vp8-vectors/fetch.sh` fetches commit
 `8afcf0579a9d5221ff892dd197af21ac3d56962d` (2013-06-06, the repository's last)
 into `target/`, and checks each of the 122 files it reads against the SHA-256
-recorded in `SHA256SUMS` beside the script on 2026-10-02. CI's `vp8-vectors`
-job runs both, and nothing of the vectors reaches the tree or a built
-artefact.
+recorded in `SHA256SUMS` beside the script on 2026-10-02. The script and the
+test that reads what it fetched run locally, and nothing of the vectors
+reaches the tree or a built artefact.
 
 No typefaces beyond the twelve above. Symbol and ZapfDingbats — the two of the
 standard 14 that are not text faces — have no Liberation equivalent, and

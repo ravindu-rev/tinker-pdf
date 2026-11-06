@@ -16,7 +16,7 @@
 //! where producers under-tag, and **asserted zero for veraPDF**, where
 //! everything is tagged. Header evidence is read off the table found over
 //! each stated one. **No floor is held**: no figure has been measured, and
-//! the floors are owed to the first nightly run.
+//! the floors are owed to the first local corpus run.
 //!
 //! ```text
 //! cargo xtask corpus-fetch
@@ -34,7 +34,7 @@
 //! to re-derive them. **It has not run anywhere yet**: the fetched corpora
 //! were not reachable where it was written. So the design's figures are
 //! printed beside what the run measures, as `DESIGN_RECORDED`, and are not
-//! asserted; the first nightly run either confirms them or says by how much
+//! asserted; the first local corpus run either confirms them or says by how much
 //! they were wrong, and the floors follow from it. Asserted whatever the
 //! corpus holds: every stated table reads without a panic, every cell the
 //! join gives characters to spells its text with them, and no table is

@@ -714,7 +714,7 @@ fn unpointed(text: &str) -> String {
 /// **A bracketed run and the full stop after it read as written in
 /// right-to-left text.**
 ///
-/// `sample-regime-anticancer-arabic.epub`, a book of CI's `epub-corpus` job,
+/// `sample-regime-anticancer-arabic.epub`, a book of the fetched EPUB corpus,
 /// holds the shape from character 20 963; read wrong, it reports
 /// `Missing ").وقد…"`, `Extra ")وقد…"`. Three mechanisms, none of them where
 /// a mark is drawn, hold each shape here, pointed and mark-free alike, in

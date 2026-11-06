@@ -579,13 +579,13 @@ measured byte count. The ceilings are the row's promise; the committed counts
 are what catch a request added under them.
 
 Each prints a `RAN` line with its counts and runs in MS-01's guard suite on
-linux, windows, macos and `wasm32-wasip1`. The fixtures draw paths and no text,
-so one build. The committed counts are three requests for the linearized page
-— the sniff, the head, the content — and five for the twin: the sniff, the
-head, the tail with the table and its trailer, the chunk holding the catalog,
-the page tree and the page, and the content. Both tests are in K-07's
-determinism roster, since each claims for every target a count measured on
-one.
+linux and windows in CI's tests and on `wasm32-wasip1` locally. The fixtures
+draw paths and no text, so one build. The committed counts are three requests
+for the linearized page — the sniff, the head, the content — and five for the
+twin: the sniff, the head, the tail with the table and its trailer, the chunk
+holding the catalog, the page tree and the page, and the content. Both tests
+are in K-07's determinism roster, since each claims for every target a count
+measured on one.
 
 #### The link time is computed, never slept
 
@@ -620,7 +620,7 @@ Its link part, and its twin's, from MS-08.3's counts:
    every byte budget in `streaming_open.rs` unchanged.
 2. MS-08.3: the counted guard in `streaming_open.rs` — the linearized first
    page and the unlinearized twin, each held to its ceiling and its committed
-   count — in MS-01's guard suite on four targets.
+   count — in MS-01's guard suite on the three targets it is measured on.
 3. MS-08.4: the link model and the bench row.
 
 ### Risks
@@ -1056,6 +1056,6 @@ same way.
 | A miss half-poisons state (a `Null` cached because bytes were absent) | Invariant stated and tested: `SourceMiss` propagates, never converts to a value; the store publishes only completed parses (`a_miss_never_publishes_a_null_the_host_could_still_fix`, `crates/tinker-pdf-cos/tests/streaming.rs`) |
 | Hint tables lie (attacker-controlled) and misdirect reads | Hints accelerate, never decide: `parse_at`'s header check stays mandatory; a failed check falls back to the generic path with a typed warning; all digit/width fields bounds-checked as `limits.rs` does elsewhere |
 | Deferred validation makes `ladder_level()` access-pattern-dependent | The provisional/completed split is explicit API, both documented; the completion call restores the eager answer, and a test asserts provisional-then-complete equals whole-buffer open (`completing_validation_restores_the_verdict_a_buffer_would_have_given`) |
-| Byte budgets rot as the open path evolves | Budgets are committed constants in `streaming_open.rs`, checked in CI |
+| Byte budgets rot as the open path evolves | Budgets are committed constants in `streaming_open.rs`, checked by CI's tests on every pull request |
 | Chunk granularity choices leak into output | Chunking affects only which ranges are fetched, never values; the `ShreddedSource` run in `streaming_determinism.rs` is the regression trap |
 | wasm retry loops livelock on a host that never feeds the range | The miss names its exact range; the facade result is a finite set of needs per call, and a test drives the loop to completion in a bounded number of host round trips |

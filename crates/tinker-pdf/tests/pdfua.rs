@@ -8,8 +8,8 @@
 //! ```
 //!
 //! With `TINKER_CORPUS` unset the census looks for `corpus/files` beside the
-//! workspace, which is where `cargo xtask corpus-fetch` writes and where the
-//! nightly `corpus.yml` leaves it. **It did not, until the validator landed**:
+//! workspace, which is where `cargo xtask corpus-fetch` writes. **It did not,
+//! until the validator landed**:
 //! it read `TINKER_CORPUS` and nothing else, the nightly job sets no such
 //! variable, and so the step that lists this census ran it as a skip every
 //! night. A census nobody runs is a sentence in a file.

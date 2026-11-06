@@ -269,7 +269,8 @@ Cyrillic, and `en-12` reported under part 1 and admitted under parts 2 and 3.
 
 `pdfa_ledger.rs` is the census, which walks the fetched corpus and asserts in
 both directions that the ledger accounts for every disagreement. It runs
-nightly in `corpus.yml`.
+locally over the corpora `cargo xtask corpus-fetch` fetches, with
+`TINKER_CORPUS` set.
 
 ## What is lost, and it is real
 

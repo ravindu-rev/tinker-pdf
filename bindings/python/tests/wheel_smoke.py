@@ -35,7 +35,7 @@ import tinker_pdf
 `auto` resolves through this list. It is a list rather than a fallback to
 "render without a face" on purpose: a missing face would otherwise turn the
 inked half of this test into a skip, and a skip exits 0 and reads exactly like
-a pass -- the failure mode `qpdf-oracle` and `wasm-determinism` are both
+a pass -- the failure mode every RAN / SKIPPED banner in this repository is
 written to avoid.
 """
 FACES = [

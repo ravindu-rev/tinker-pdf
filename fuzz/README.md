@@ -42,7 +42,8 @@ cargo +nightly fuzz run cos_document
 cargo +nightly fuzz run cos_document -- -max_total_time=3600   # a long soak
 ```
 
-*Compiling* them needs neither, and CI does it on every push:
+*Compiling* them needs neither, and `cargo xtask fuzz` — inside `cargo
+xtask check` — does it:
 
 ```sh
 cargo check --manifest-path fuzz/Cargo.toml --all-targets

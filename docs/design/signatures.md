@@ -406,7 +406,7 @@ signatures are checked by the strict structural validator, and the signing suite
 re-digests the returned `/ByteRange` spans.
 
 **What none of that establishes:** that anyone else accepts the signature. Under ruling 13 no
-CI job may ask a validator, so:
+check may ask a validator, so:
 
 > A signature everything in-tree accepts may still be rejected by real validators.
 

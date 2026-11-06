@@ -14,9 +14,9 @@
 #
 # The destination defaults to `target/epub-corpus`, which `.gitignore` already
 # covers. `crates/tinker-pdf/tests/epub_fetched.rs` reads `TINKER_EPUB_CORPUS`
-# and prints `epub-corpus: RAN` or `epub-corpus: SKIPPED`; CI greps for the
-# second and goes red, because gap 20 found that a skipped oracle exits 0 and
-# reads exactly like a pass. That grep matters more here than for any earlier
+# and prints `epub-corpus: RAN` or `epub-corpus: SKIPPED`; a local run sets
+# `TINKER_EPUB_CORPUS_REQUIRED=1`, under which the second is a failure, because
+# a skipped oracle exits 0 and reads exactly like a pass. That grep matters more here than for any earlier
 # oracle: these files are not in the repository, so the test over them can fail
 # to run for a second reason as well as the first.
 #

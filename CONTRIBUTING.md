@@ -13,9 +13,13 @@ That is the whole prerequisite list: `rustup`, and nothing else. Keeping it
 that way is a feature, not an accident — see [README](README.md) for what
 this engine is.
 
-`python3 -I tools/gates.py` runs every gate CI's `test` job runs, in its
-order, and prints one line per gate; name gates to run only those
-(`--list` names them). Each gate's whole output is kept in
+`python3 -I tools/gates.py` runs the local gates — fmt, clippy, the tests,
+the determinism and shaping fingerprints, the examples and `cargo xtask check`
+— and prints one line per gate; name gates to run only those (`--list` names
+them). CI runs the tests alone, on every pull request, and a merge to `main`
+runs them again before it releases; everything else
+[docs/verification.md](docs/verification.md) lists is run locally, as a
+change's proof. Each gate's whole output is kept in
 `target/gates/<gate>.log`, and a gate that fails prints its failing tests,
 its first compiler errors and the lines it had to print and did not. It
 needs Python 3; the build does not.
@@ -41,8 +45,8 @@ cargo test -p tinker-pdf --no-default-features
 `tinker-pdf-ffi` depend on the facade with its defaults and cargo unifies
 features across everything in one build. It passes, and it proves nothing.
 
-`wasm32-unknown-unknown` is a first-class target and CI builds it on every
-push:
+`wasm32-unknown-unknown` is a first-class target, built locally as a
+change's proof:
 
 ```bash
 rustup target add wasm32-unknown-unknown
@@ -86,7 +90,7 @@ you are looking at.
    of parsing, filters, crypto, fonts, colour, layout or rasterization. Dev,
    build and binding tooling (proptest, criterion, cargo-fuzz, PyO3,
    wasm-bindgen, maturin, csbindgen, and cachegrind, the instruction counter
-   `bench.yml`'s count job runs) is exempt and never ships inside the
+   the benches' count mode runs under) is exempt and never ships inside the
    engine. A new dependency on anything else needs a
    [docs/architecture.md](docs/architecture.md) amendment first — the
    boundary is defined there.
@@ -138,24 +142,26 @@ Fixtures in `testdata/` were generated with mutool (see
 [`testdata/README.md`](testdata/README.md)); do not modify them — committed
 goldens and parity tests assume their exact bytes.
 
-External corpora are fetched in CI, never committed. They are *inputs* —
+External corpora are fetched locally with `cargo xtask corpus-fetch`, never
+committed. They are *inputs* —
 documents real producers emitted — and ruling 13 keeps them for exactly that
 reason.
 
 **No test may spawn a program.** Ruling 13: nothing outside this repository
 renders, parses, validates or measures a document as evidence.
 `cargo xtask oracles` holds that boundary with a build failure, and it is
-part of `cargo xtask check`, so a `Command::new` in a test fails CI unless
-its file is listed in `SPAWNERS` with the reason it may. Every row there is
+part of `cargo xtask check`, so a `Command::new` in a test fails the gates
+and the release unless its file is listed in `SPAWNERS` with the reason it
+may. Every row there is
 `PERMANENT` and none adjudicates a document: `rustc` to prove a type refuses
 a state, `curl`, `tar` and `unzip` to fetch corpora this repository then
 verifies against its own SHA-256, `cargo` to build and publish, and the
 corpus child, a workspace binary built from the same revision. A row whose
 file has stopped spawning fails the check too.
 
-A skipped test exits 0 and reads exactly like a pass, so every job that
-depends on something being present greps its own output for a `RAN` banner
-and fails without one.
+A skipped test exits 0 and reads exactly like a pass, so every check that
+depends on something being present prints a `RAN` banner, and a run without
+one is no proof.
 
 ## Commits and licensing
 

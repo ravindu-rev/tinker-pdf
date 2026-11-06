@@ -399,7 +399,7 @@ fn written_names(css: &[u8], into: &mut std::collections::BTreeSet<String>) {
 /// eight stylesheets of the six books milestone 1 had, and over every `.css`
 /// entry of all nine committed books. The fetched half cannot be re-run in a
 /// tree that does not hold the fetched corpus, and is left to
-/// `epub_fetched.rs`'s nightly job rather than restated here.
+/// `epub_fetched.rs`'s run over the fetched corpus rather than restated here.
 #[test]
 fn the_committed_stylesheets_write_this_many_distinct_property_names() {
     const ALL: &[&str] = &[

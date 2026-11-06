@@ -28,17 +28,13 @@ usage:
   cargo xtask fuzz      check the fuzz roster against `fuzz_targets`, the seed
                         corpora and `fuzz/Cargo.toml`, which must agree
   cargo xtask baseline  check the speed baseline's list for each group against
-                        its file `benches/<group>.rs`, its `[[bench]]` and the
-                        count `bench.yml`'s matrix guards for it
-  cargo xtask corpusjob check that every check of `corpus.yml` after the
-                        fetch runs whatever the check before it returned
+                        its file `benches/<group>.rs` and its `[[bench]]`
   cargo xtask footprint check that every figure in bindings/js/footprint.json
                         carries its tolerance, date and run
   cargo xtask determinism
                         check that every cross-target fingerprint test in
-                        the roster runs un-ignored and is grepped by name in
-                        the native test legs and the wasm-determinism job
-  cargo xtask check     all eleven of the above
+                        the roster is a test and runs un-ignored
+  cargo xtask check     all ten of the above
 
   cargo xtask release [options]  publish to crates.io, PyPI, npm and NuGet
 
@@ -197,7 +193,6 @@ fn main() -> ExitCode {
         "fuzz" => report("fuzz", fuzzaudit::run(&repo_root()).map(|_| ())),
         "versions" => report("versions", version::check(&repo_root())),
         "baseline" => report("baseline", bench::check(&repo_root())),
-        "corpusjob" => report("corpusjob", check_corpus_job()),
         "determinism" => report("determinism", determinism::check(&repo_root())),
         "footprint" if rest.is_empty() => report("footprint", footprint::check(&repo_root())),
         "footprint" => one("footprint", footprint::run(&repo_root(), rest)),
@@ -210,7 +205,6 @@ fn main() -> ExitCode {
             let conflicts = check_conflicts();
             let fuzz = fuzzaudit::check(&repo_root());
             let baseline = bench::check(&repo_root());
-            let corpus_job = check_corpus_job();
             let figures = footprint::check(&repo_root());
             let roster = determinism::check(&repo_root());
             let mut problems = dag.err().unwrap_or_default();
@@ -221,7 +215,6 @@ fn main() -> ExitCode {
             problems.extend(conflicts.err().unwrap_or_default());
             problems.extend(fuzz.err().unwrap_or_default());
             problems.extend(baseline.err().unwrap_or_default());
-            problems.extend(corpus_job.err().unwrap_or_default());
             problems.extend(figures.err().unwrap_or_default());
             problems.extend(roster.err().unwrap_or_default());
             report(
@@ -1503,140 +1496,6 @@ fn check_conflicts() -> Result<(), Vec<String>> {
     }
 }
 
-/// `cargo xtask corpusjob` — every check of `corpus.yml` after the fetch runs
-/// whatever the check before it returned.
-///
-/// A step with no `if:` runs only while every step before it has succeeded, so
-/// a red census skipped all three bars after it, and a red bar the bars after
-/// it, while the workflow's own comment said the bars were kept apart so that
-/// one failing would not stop the other from being measured (MS-11.4). Each
-/// check after the fetch carries [`AFTER_THE_FETCH`]: the corpora must be
-/// there to read, and nothing else before it decides. The report's upload
-/// keeps `if: always()`, which is wider still.
-fn check_corpus_job() -> Result<(), Vec<String>> {
-    let path = repo_root().join(CORPUS_WORKFLOW);
-    let text =
-        std::fs::read_to_string(&path).map_err(|e| vec![format!("{CORPUS_WORKFLOW}: {e}")])?;
-    corpus_checks_run_on_their_own(&text)
-}
-
-const CORPUS_WORKFLOW: &str = ".github/workflows/corpus.yml";
-
-/// A step as the corpus job's rule reads it: its name, its `id` and its `if`.
-type WorkflowStep = (String, Option<String>, Option<String>);
-
-/// The condition each check after the fetch carries.
-const AFTER_THE_FETCH: &str = "${{ !cancelled() && steps.fetch.outcome == 'success' }}";
-
-/// The rule over a workflow's text: in each job, a step has `id: fetch`,
-/// and every step after it carries [`AFTER_THE_FETCH`] or `always()`.
-///
-/// The workflow is read as this repository writes it rather than as YAML in
-/// general: a job is a key two spaces in, a step begins at a `- ` six spaces
-/// in under its `steps:`, its keys are the one on that line and those eight
-/// spaces in, and comments and blank lines belong to no step. Each job's
-/// checks are held to its own fetch: a second job that fetches the corpora
-/// for itself builds and checks out before it, which are no check's business.
-/// A job whose steps it cannot find is a problem, not a pass.
-fn corpus_checks_run_on_their_own(text: &str) -> Result<(), Vec<String>> {
-    let mut jobs: Vec<(String, Vec<WorkflowStep>)> = Vec::new();
-    let mut job = String::new();
-    let mut in_steps = false;
-    for line in text.lines() {
-        let body = line.trim_start();
-        if body.is_empty() || body.starts_with('#') {
-            continue;
-        }
-        let indent = line.len() - body.len();
-        if indent == 2 {
-            if let Some(name) = body.strip_suffix(':') {
-                job = name.to_string();
-            }
-        }
-        if indent == 4 && body == "steps:" {
-            jobs.push((job.clone(), Vec::new()));
-            in_steps = true;
-            continue;
-        }
-        if !in_steps {
-            continue;
-        }
-        if indent < 6 {
-            in_steps = false;
-            continue;
-        }
-        let Some((_, steps)) = jobs.last_mut() else {
-            continue;
-        };
-        let key_value = if indent == 6 {
-            let Some(item) = body.strip_prefix("- ") else {
-                continue;
-            };
-            steps.push((String::new(), None, None));
-            item
-        } else if indent == 8 {
-            body
-        } else {
-            continue;
-        };
-        let (Some(step), Some((key, value))) = (steps.last_mut(), key_value.split_once(':')) else {
-            continue;
-        };
-        let value = value.trim().to_string();
-        match key.trim() {
-            "name" => step.0 = value,
-            "uses" if step.0.is_empty() => step.0 = value,
-            "id" => step.1 = Some(value),
-            "if" => step.2 = Some(value),
-            _ => {}
-        }
-    }
-
-    if jobs.is_empty() {
-        jobs.push((String::new(), Vec::new()));
-    }
-    let mut problems: Vec<String> = Vec::new();
-    for (job, steps) in &jobs {
-        let Some(fetch) = steps.iter().position(|s| s.1.as_deref() == Some("fetch")) else {
-            problems.push(format!(
-                "{CORPUS_WORKFLOW}: in job `{job}`, no step has `id: fetch`, so no check can \
-                 ask whether the corpora are there"
-            ));
-            continue;
-        };
-        let after = &steps[fetch + 1..];
-        if after.is_empty() {
-            problems.push(format!(
-                "{CORPUS_WORKFLOW}: in job `{job}`, no step follows the fetch, so the job \
-                 checks nothing"
-            ));
-            continue;
-        }
-        problems.extend(
-            after
-                .iter()
-                .filter(|(_, _, condition)| {
-                    !matches!(condition.as_deref(), Some(c) if c == AFTER_THE_FETCH || c == "always()" || c == "${{ always() }}")
-                })
-                .map(|(name, _, condition)| match condition {
-                    None => format!(
-                        "{CORPUS_WORKFLOW}: '{name}' has no `if:`, so a red check before it \
-                         skips it; give it `if: {AFTER_THE_FETCH}`"
-                    ),
-                    Some(other) => format!(
-                        "{CORPUS_WORKFLOW}: '{name}' has `if: {other}`, not `if: \
-                         {AFTER_THE_FETCH}`"
-                    ),
-                }),
-        );
-    }
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(problems)
-    }
-}
-
 /// Whether a line is one of git's conflict markers.
 ///
 /// The space is load-bearing on both. Git writes `<<<<<<< ` and `>>>>>>> `
@@ -1932,143 +1791,5 @@ mod conflict_tests {
         assert!(!is_conflict_marker("<<<<<<<"));
         // Not at the start of the line.
         assert!(!is_conflict_marker("    <<<<<<< HEAD"));
-    }
-}
-
-#[cfg(test)]
-mod corpus_job_tests {
-    use super::{check_corpus_job, corpus_checks_run_on_their_own, AFTER_THE_FETCH};
-
-    /// The rule over the committed workflow, which is the point of it.
-    #[test]
-    fn every_corpus_check_after_the_fetch_runs_on_its_own() {
-        if let Err(problems) = check_corpus_job() {
-            panic!("corpus.yml:\n{}", problems.join("\n"));
-        }
-    }
-
-    /// A job as `corpus.yml` writes one: a build, the fetch, two checks and
-    /// the report, each check's condition given by the caller.
-    fn job(fixtures: &str, census: &str) -> String {
-        format!(
-            "jobs:\n  corpus:\n    runs-on: ubuntu-latest\n    steps:\n      \
-             - uses: actions/checkout@v4\n      \
-             - name: Build\n        run: cargo build\n\n      \
-             # A comment that says if: always() and is no step's key.\n      \
-             - name: Fetch the pinned corpora\n        id: fetch\n        run: fetch\n      \
-             - name: Hold the fixtures\n{fixtures}        run: |\n          cargo test\n      \
-             - name: Hold every census\n{census}        run: cargo test\n      \
-             - name: Keep the per-file report\n        if: always()\n        uses: upload\n"
-        )
-    }
-
-    fn condition(value: &str) -> String {
-        format!("        if: {value}\n")
-    }
-
-    #[test]
-    fn checks_that_carry_the_condition_pass() {
-        let text = job(&condition(AFTER_THE_FETCH), &condition(AFTER_THE_FETCH));
-        assert_eq!(corpus_checks_run_on_their_own(&text), Ok(()));
-    }
-
-    #[test]
-    fn a_check_with_no_condition_is_named() {
-        let text = job(&condition(AFTER_THE_FETCH), "");
-        let problems = corpus_checks_run_on_their_own(&text).unwrap_err();
-        assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(
-            problems[0].contains("'Hold every census' has no `if:`"),
-            "{problems:?}"
-        );
-    }
-
-    #[test]
-    fn a_check_with_another_condition_is_named() {
-        let text = job(&condition("success()"), &condition(AFTER_THE_FETCH));
-        let problems = corpus_checks_run_on_their_own(&text).unwrap_err();
-        assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(
-            problems[0].contains("'Hold the fixtures' has `if: success()`"),
-            "{problems:?}"
-        );
-    }
-
-    /// The steps before the fetch, and a comment that mentions `if:`, are no
-    /// check's business.
-    #[test]
-    fn steps_before_the_fetch_and_comments_are_not_read_as_checks() {
-        let text = job(&condition(AFTER_THE_FETCH), &condition(AFTER_THE_FETCH));
-        assert!(text.contains("- name: Build\n        run:"));
-        assert_eq!(corpus_checks_run_on_their_own(&text), Ok(()));
-    }
-
-    #[test]
-    fn a_job_without_the_fetch_id_fails() {
-        let text = job(&condition(AFTER_THE_FETCH), &condition(AFTER_THE_FETCH))
-            .replace("        id: fetch\n", "");
-        let problems = corpus_checks_run_on_their_own(&text).unwrap_err();
-        assert!(
-            problems[0].contains("no step has `id: fetch`"),
-            "{problems:?}"
-        );
-    }
-
-    #[test]
-    fn a_job_with_nothing_after_the_fetch_fails() {
-        let text = "jobs:\n  corpus:\n    steps:\n      - name: Fetch\n        id: fetch\n        run: fetch\n";
-        let problems = corpus_checks_run_on_their_own(text).unwrap_err();
-        assert!(
-            problems[0].contains("no step follows the fetch"),
-            "{problems:?}"
-        );
-    }
-
-    /// A second job with a fetch of its own -- MS-19's, which runs two
-    /// revisions' corpora on one runner -- is held to that fetch: the
-    /// checkouts and builds before it are no check's business, and a check
-    /// after it with no condition is named.
-    #[test]
-    fn a_second_job_is_held_to_its_own_fetch() {
-        let first = job(&condition(AFTER_THE_FETCH), &condition(AFTER_THE_FETCH));
-        let second = |peaks: &str| {
-            format!(
-                "  bands:\n    runs-on: ubuntu-latest\n    steps:\n      \
-                 - uses: actions/checkout@v4\n      \
-                 - name: Build the revision\n        run: cargo build\n      \
-                 - name: Fetch the pinned corpora\n        id: fetch\n        run: fetch\n      \
-                 - name: Print the peaks\n{peaks}        run: cargo xtask corpus-peaks\n"
-            )
-        };
-        let both = format!("{first}{}", second(&condition(AFTER_THE_FETCH)));
-        assert_eq!(corpus_checks_run_on_their_own(&both), Ok(()));
-
-        let unheld = format!("{first}{}", second(""));
-        let problems = corpus_checks_run_on_their_own(&unheld).unwrap_err();
-        assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(
-            problems[0].contains("'Print the peaks' has no `if:`"),
-            "{problems:?}"
-        );
-
-        let fetchless = format!(
-            "{first}{}",
-            second(&condition(AFTER_THE_FETCH)).replace("        id: fetch\n", "")
-        );
-        let problems = corpus_checks_run_on_their_own(&fetchless).unwrap_err();
-        assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(
-            problems[0].contains("in job `bands`, no step has `id: fetch`"),
-            "{problems:?}"
-        );
-    }
-
-    /// A workflow read as nothing, a job at another indentation, does not
-    /// pass by finding no checks to hold.
-    #[test]
-    fn a_workflow_whose_steps_are_not_found_fails() {
-        let text = job(&condition(AFTER_THE_FETCH), &condition(AFTER_THE_FETCH))
-            .replace("\n      ", "\n     ");
-        assert!(corpus_checks_run_on_their_own(&text).is_err());
     }
 }

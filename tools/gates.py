@@ -1,13 +1,13 @@
-"""Run the checks CI's `test` job runs, and print one line per gate.
+"""Run the local gates, and print one line per gate.
 
 usage: python3 -I tools/gates.py [GATE ...] [--first] [--log DIR] [--list]
 
-The gates are the steps of the `test` job in `.github/workflows/ci.yml`, in
-its order: fmt; clippy; the workspace's tests; the determinism and shaping
-fingerprints, with the lines their legs grep for; the font crate and the
-facade without default features; the facade with `bundled-fonts`, and its
-clippy; the seven examples, each with the line it must print; and `xtask
-check`. Name gates to run only those.
+The gates are a change's local proof, in this order: fmt; clippy; the
+workspace's tests; the determinism and shaping fingerprints, with the lines
+that say they ran; the font crate and the facade without default features;
+the facade with `bundled-fonts`, and its clippy; the seven examples, each
+with the line it must print; and `xtask check`. CI runs the test gates alone,
+on pull requests (`.github/workflows/ci.yml`). Name gates to run only those.
 
 Each gate's whole output goes to `target/gates/<gate>.log`. The screen gets
 one line per gate, ok or FAIL with its time and, for tests, the counts; a
@@ -42,7 +42,7 @@ FMT_DIFF = re.compile(r'^Diff in (\S+?)(?::(\d+):| at line (\d+):)$', re.M)
 EXAMPLES = [('open', 'pages     3'), ('render', 'rendered  '), ('extract', 'Tinker fixture'),
             ('edit', 'the original, untouched'), ('create', 'read back page 1 says'),
             ('convert', 'as a document'), ('parallel', 'byte-identical to the serial render')]
-# (name, [(command, lines it must print, whether it must print anything)]), as ci.yml's test job runs them
+# (name, [(command, lines it must print, whether it must print anything)])
 GATES = [
     ('fmt', [(['cargo', 'fmt', '--all', '--', '--check'], [], False)]),
     ('clippy', [(['cargo', 'clippy', '--workspace', '--all-targets', '--', '-D', 'warnings'], [], False)]),

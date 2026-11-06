@@ -20,7 +20,8 @@ cargo run -p tinker-pdf --example open -- some-file.pdf
 | `convert` | an EPUB, XPS or comic archive read as a document |
 | `parallel` | every page rendered on threads the *caller* owns, checked against the serial render |
 
-They are ordinary cargo examples, so `cargo clippy --workspace --all-targets`
-compiles them and CI runs every one of them and checks its output. An example
+They are ordinary cargo examples, so CI's `cargo test --workspace` compiles
+them on every pull request, and the gates (`python3 -I tools/gates.py`) run
+every one of them and check its output. An example
 that compiles and does nothing is the same green tick as one that works, which
 is the hazard [verification.md](../../../docs/verification.md) names.

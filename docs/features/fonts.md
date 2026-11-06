@@ -361,7 +361,7 @@ whose every glyph from 32 up is a filled box, so it answers *was a face
 available* and nothing else; and `corpus/ratchet-bundled.json` with the
 bundled faces. The synthetic face exists so the measurement can be reproduced
 anywhere: no licence, no download, the same bytes on every machine, and no
-dependence on what a runner image happens to ship.
+dependence on the fonts a machine happens to have installed.
 
 The bundled bar counts a symbolic font the engine could not read — an
 embedded face with `/Flags` bit 3 set — as undrawn, where the synthetic face

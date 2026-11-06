@@ -295,7 +295,8 @@ counted as inversions by a merge sort (held to arithmetic by
 characters are matched across the two extractions by origin and text, the
 k-th repeat to the k-th, and `the_score_sees_a_shuffled_page` holds the
 instrument seeing disorder. `reading_order_census.rs` is the corpus census,
-`#[ignore]`d, in `corpus.yml`'s census step, printing `RAN`/`SKIPPED`; it
+`#[ignore]`d and run locally over the fetched corpora, printing
+`RAN`/`SKIPPED`; it
 asserts what holds whatever the corpus holds — every inferred order a
 permutation, a floor only on the ratchet population, every floor in
 `INFERRED_FLOORS` met by cross-multiplication as `corpus/ratchet.json`'s
@@ -398,8 +399,8 @@ column-crossings score is computed over the rest.
   table reconstruction.
 - **`StructureTree::text_for_page`** — the claimed-character join the
   scores are computed over.
-- **The census step of `corpus.yml`** — where `reading_order_census.rs`
-  runs.
+- **The local census run** — where `reading_order_census.rs` runs, over the
+  corpora `cargo xtask corpus-fetch` fetches.
 - **The EPUB pipeline's multi-column layout and `epub_float_order.rs`.**
 - **[design/table-reconstruction.md](table-reconstruction.md)** — the
   `TableSuspected` handoff; tables first, then order, on a page that has

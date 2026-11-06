@@ -216,10 +216,10 @@ aligned pass) and reads each as one block in the permutation's order.
 
 ## The adjudicator, and the scores
 
-**Stated against inferred, with the tree hidden.** `table_census.rs`, in
-`corpus.yml`'s census step, counts the table family per corpus by
-`standard_type`, runs over every tagged file with a `Table`, and for each
-page with a stated table:
+**Stated against inferred, with the tree hidden.** `table_census.rs`, a
+census run locally over the fetched corpora, counts the table family per
+corpus by `standard_type`, runs over every tagged file with a `Table`, and for
+each page with a stated table:
 
 1. **Found.** Whether an inferred table's bounds overlap the stated table's
    claimed-character quad by at least half. Recall over stated tables, per

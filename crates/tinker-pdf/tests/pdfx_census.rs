@@ -8,8 +8,7 @@
 //! ```
 //!
 //! With `TINKER_CORPUS` unset the census looks for `corpus/files` beside the
-//! workspace, which is where `cargo xtask corpus-fetch` writes and where the
-//! nightly `corpus.yml` leaves it.
+//! workspace, which is where `cargo xtask corpus-fetch` writes.
 //!
 //! # What this can measure, which is one direction only
 //!
@@ -32,7 +31,7 @@
 //!
 //! Every claim is printed with the flavour this build reads it as, which is
 //! the milestone's exit criterion. **No count here is a floor**: the census
-//! was written where the corpora are not reachable, and the first nightly run
+//! was written where the corpora are not reachable, and the first local corpus run
 //! owes the numbers. The design's own reading of the version strings found
 //! `PDF/X-4`, `PDF/X-3:2002`, `PDF/X-1:2001` and an empty one — none a level
 //! these rules run under — so the second assertion may hold vacuously, and the

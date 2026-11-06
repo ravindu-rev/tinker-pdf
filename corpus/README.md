@@ -2,11 +2,12 @@
 
 External corpora are FETCHED, never committed. [`corpora.lock`](corpora.lock)
 pins each one by archive checksum, and the four fetched from a forge by
-upstream commit as well; CI restores from a cache keyed on that file. Nothing
-from any corpus enters git — size aside, redistribution rights are per-file
-murky in every real-world PDF collection, and a pin plus a checksum reproduces
-the set without this project becoming a distributor. The reasoning is
-[`docs/verification.md`](../docs/verification.md).
+upstream commit as well; `cargo xtask corpus-fetch` fetches them locally into
+`corpus/cache` and takes a cached archive only while it verifies against that
+file. Nothing from any corpus enters git — size aside, redistribution rights
+are per-file murky in every real-world PDF collection, and a pin plus a
+checksum reproduces the set without this project becoming a distributor. The
+reasoning is [`docs/verification.md`](../docs/verification.md).
 
 ## The fifth corpus is not a test suite
 
@@ -97,8 +98,9 @@ and is now settled by deleting the budget. Both earlier versions are in git.
 ## Licences
 
 Generated from the lock by `cargo run -p xtask -- corpus-licences`, and checked
-against this file by `--check` in CI, so a corpus cannot be added without its
-terms reaching the file a person reads.
+against this file by `--check`, run locally beside `cargo deny check` as a
+change's licence proof, so a corpus cannot be added without its terms reaching
+the file a person reads.
 
 | Corpus | What it exercises | Upstream licence | Pinned by | Redistributed here? |
 | --- | --- | --- | --- | --- |

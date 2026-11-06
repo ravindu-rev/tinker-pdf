@@ -144,7 +144,8 @@ segment-header reader **written from clause 7.2 and sharing nothing with
 with that reader by construction, including wherever it is wrong.
 `crates/tinker-pdf/tests/jbig2_attribution.rs` answers the other question,
 which only the decoder can: why this build refused a file, by
-`Jbig2Refusal`. Both run in CI's corpus jobs.
+`Jbig2Refusal`. Both run locally over the fetched corpora, with the other
+corpus censuses.
 
 ### What the evidence can adjudicate
 

@@ -1156,9 +1156,9 @@ rather than zero.
   an **absolute** path — a test binary runs from its crate directory, so a
   relative one resolves under `crates/tinker-pdf/` and every sweep skips while
   passing — and `TINKER_EPUB_CORPUS_REQUIRED=1` makes a skip a failure. It
-  prints `epub-corpus: RAN` / `SKIPPED` so the CI job goes red on a skip.
-  The job prints the `MANIFEST.tsv` its fetch writes, each book's size and
-  SHA-256, and the fetch holds every book to the digest
+  prints `epub-corpus: RAN` / `SKIPPED`, and a run that prints the second
+  has read no book. The fetch writes `MANIFEST.tsv` beside the books, each
+  book's size and SHA-256, and holds every book to the digest
   `tests/epub/PINNED.sha256` names, failing by name on one that differs, so
   the figures `epub_fetched.rs` pins are the pinned books'; and
   `the_unimplemented_property_census` sums each book's

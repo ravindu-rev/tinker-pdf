@@ -135,7 +135,7 @@ validator runs on untrusted input, so ruling 1 binds it: every rule returns
 findings or nothing, never panics, and the hostile-input sweep
 (`crates/tinker-pdf/tests/hostile_input.rs`) calls the validator whole and
 with the syntax and metadata groups alone, so mutated fixtures exercise the
-rules on every commit.
+rules on every `cargo test`.
 
 **The bar is the corpus's own annotations.** The veraPDF corpus is
 unusual, and this whole design leans on why: it is *atomic* (one clause per
@@ -148,8 +148,8 @@ files, the original PDF/A-1b conformance suite; the corpus's PDF/UA, TWG and
 ISO 32000 fixtures make no PDF/A claim, and scoring them would measure the
 measurement — compares verdict to annotation, and prints the agreement per
 clause group. It asserts the bar is not empty, because a census rooted in the
-wrong directory excludes every file and prints `0/0`, and it runs nightly in
-`corpus.yml`.
+wrong directory excludes every file and prints `0/0`, and it runs locally over
+the fetched corpus.
 
 Each disagreement is classified and recorded rather than averaged away, in
 `crates/tinker-pdf/tests/pdfa_ledger.tsv`: our bug (fix), a known staged rule
@@ -642,8 +642,8 @@ correctly even though `WriteOptions` cannot be *asked* for one.
   `/StructTreeRoot` a second time.
 - **`tinker-pdf-xml`** — one of ruling 8's leaf crates, a facade dependency,
   with the doc comment on `xmp_metadata` deciding where the parse happens.
-- **Corpus machinery** — `corpus/corpora.lock` pins the veraPDF corpus, and
-  `corpus.yml` runs the census nightly.
+- **Corpus machinery** — `corpus/corpora.lock` pins the veraPDF corpus,
+  `cargo xtask corpus-fetch` fetches it, and the census runs locally over it.
 - **[features/writing.md](../features/writing.md)** — the writer whose
   builder this extends, and the strict structural validator beside it.
 

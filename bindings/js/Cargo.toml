@@ -25,7 +25,7 @@ crate-type = ["cdylib", "rlib"]
 default = ["cmap-predefined"]
 cmap-predefined = ["tinker-pdf/cmap-predefined"]
 # Forwarded for the same reason: it is a footprint profile, and the wasm this
-# crate builds is the one whose size the footprint job measures.
+# crate builds is the one whose size `cargo xtask footprint` holds.
 bundled-fonts = ["tinker-pdf/bundled-fonts"]
 
 [dependencies]
