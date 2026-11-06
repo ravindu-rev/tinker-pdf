@@ -1208,13 +1208,24 @@ fn census_of_the_corpus_rewrite_subsets() {
 //
 // PROGRAM_CARRIERS (2 180), PROGRAM_BYTES_BEFORE (669 086 159), the CFF
 // census's six pins and the seven properties held on the run.
+//
+// **Six pins are run 42224015226's**, as the owner approved them (H-78,
+// MS-26): 77 programs went from cut to `SubsetNotSmaller` together when a
+// symbolic TrueType font came to select its glyph by its code first
+// (`sfnt_selection` in `src/resources.rs`). An office suite's subset holds
+// just the glyphs its document draws; asked the character first, a space
+// drew a letter and the cut dropped the space's glyph the pages draw, where
+// asked the code every glyph it holds is drawn and the subset is the face,
+// so the program is written whole: 5 888 -> 5 811 cut and compared,
+// 4 944 -> 5 021 whole, 3 428 -> 3 505 not smaller, 5 487 -> 5 410 /Length1
+// declarations checked, and 401 529 738 -> 401 957 637 bytes after.
 const SYNTHESISED: u32 = 2;
 const DOCUMENTS: u32 = 5597;
 const PROGRAM_CARRIERS: u32 = 2180;
-const CUT: u32 = 5888;
-const LEFT_WHOLE: u32 = 4944;
-const REASON_COUNTS: [u32; 8] = [553, 3428, 602, 176, 102, 0, 10, 73];
+const CUT: u32 = 5811;
+const LEFT_WHOLE: u32 = 5021;
+const REASON_COUNTS: [u32; 8] = [553, 3505, 602, 176, 102, 0, 10, 73];
 const PROGRAM_BYTES_BEFORE: u64 = 669_086_159;
-const PROGRAM_BYTES_AFTER: u64 = 401_529_738;
-const GLYPH_COUNTS_COMPARED: u32 = 5888;
-const LENGTH1_CHECKED: u32 = 5487;
+const PROGRAM_BYTES_AFTER: u64 = 401_957_637;
+const GLYPH_COUNTS_COMPARED: u32 = 5811;
+const LENGTH1_CHECKED: u32 = 5410;
