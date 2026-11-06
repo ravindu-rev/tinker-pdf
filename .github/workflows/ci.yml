@@ -711,6 +711,12 @@ jobs:
           TINKER_EPUB_CORPUS_REQUIRED: "1"
         run: |
           set -o pipefail
+          # What this run read, book by book, with its SHA-256 (MS-13): the
+          # public-domain library regenerates a book when its text is
+          # corrected and is fetched unpinned, so a figure is read against
+          # the bytes this manifest names.
+          echo "epub-corpus: MANIFEST"
+          cat "$TINKER_EPUB_CORPUS/MANIFEST.tsv"
           cargo test -p tinker-pdf --test epub_fetched -- --nocapture \
             2>&1 | tee epub-corpus.log
           # The skip is checked first and on its own, so the reason reaches the

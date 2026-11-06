@@ -1009,6 +1009,51 @@ fn the_css_property_census() {
     assert!(sheets > 0, "the census read no stylesheet at all");
 }
 
+/// **What the fetched books ask of CSS that this build does not lay out**,
+/// the census CD-01 orders its landings by.
+///
+/// Each book's report names every property its layout met and does not
+/// implement, with how many elements asked for it
+/// ([`ArchiveWarning::UnimplementedProperty`]). Summed over the corpus and
+/// sorted highest first, those counts say which property costs the most
+/// books the most: an element that asked, not a sheet that mentioned, which
+/// is what the CSS census above counts.
+#[test]
+fn the_unimplemented_property_census() {
+    let books = fetched!("the unimplemented property census");
+    let mut totals: Vec<(&'static str, usize)> = Vec::new();
+    for (name, bytes) in &books {
+        let doc = Document::open(bytes.clone()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        let report = doc.archive().expect("a book carries a report");
+        let mut properties = 0usize;
+        let mut elements = 0usize;
+        for warning in report.warnings() {
+            let ArchiveWarning::UnimplementedProperty {
+                property,
+                elements: count,
+            } = warning
+            else {
+                continue;
+            };
+            properties += 1;
+            elements += count;
+            match totals.iter_mut().find(|(known, _)| *known == *property) {
+                Some((_, total)) => *total += count,
+                None => totals.push((*property, *count)),
+            }
+        }
+        println!("  {name:44} {properties} properties, {elements} elements");
+    }
+    totals.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    println!(
+        "  {} distinct properties unimplemented, highest first:",
+        totals.len()
+    );
+    for (property, elements) in &totals {
+        println!("    {property:32} {elements}");
+    }
+}
+
 fn bump(counts: &mut Vec<(&'static str, usize)>, key: &'static str) {
     match counts.iter_mut().find(|(k, _)| *k == key) {
         Some((_, n)) => *n += 1,
