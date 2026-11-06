@@ -302,17 +302,27 @@ fn indexed(doc: &CosDocument) -> Option<Arc<PageIndex>> {
 /// Builds the document's page index with one walk, counted, which raises the
 /// walk's warnings this once — and `/Count`'s, where the root's disagrees with
 /// what the walk found.
+///
+/// A walk during which a load missed read part of the tree as null, as a miss
+/// reads, and a miss never publishes: its pages are this call's answer, kept
+/// nowhere and warned about not at all, so the next call walks again once the
+/// host has supplied the bytes.
 fn build(doc: &CosDocument, work: Option<&Work>) -> Arc<PageIndex> {
+    let misses = doc.misses();
     let pages = collect_walked(doc, limits::MAX_PAGES, work);
     let claimed = doc
         .catalog()
         .and_then(|root| root.get_ref(Name::PAGES))
         .and_then(|tree| doc.get(tree).ok())
         .and_then(|node| node.as_dict().and_then(|d| d.get_int(Name::COUNT)));
-    if claimed.is_some_and(|claimed| u64::try_from(claimed).ok() != Some(pages.len() as u64)) {
+    let index = Arc::new(PageIndex::new(pages));
+    if doc.misses() != misses {
+        return index;
+    }
+    if claimed.is_some_and(|claimed| u64::try_from(claimed).ok() != Some(index.pages.len() as u64))
+    {
         doc.warn(WarningKind::PageCountMismatch);
     }
-    let index = Arc::new(PageIndex::new(pages));
     doc.page_index().lock_safe().index = Some(Arc::clone(&index));
     index
 }

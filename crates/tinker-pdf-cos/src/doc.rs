@@ -27,6 +27,7 @@
 use core::fmt;
 use core::ops::Range;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use tinker_pdf_crypto::handler::FileKey;
@@ -303,6 +304,10 @@ pub struct CosDocument {
     /// beside the object store so every clone of a `Document` shares it, and
     /// dropped with the store by `install_security`.
     page_index: Mutex<crate::pages::IndexSlot>,
+    /// How many loads have missed: read as null because their bytes were not
+    /// available, and so not published. What a walk built over loads is kept
+    /// only when this did not move under it (`crate::pages`).
+    misses: AtomicU64,
     /// Where the hint tables said an object was.
     ///
     /// Consulted after the first-page table and before the main one, so a page
@@ -568,6 +573,7 @@ impl CosDocument {
             linearized,
             page_hints: Mutex::new(HintState::Untried),
             page_index: Mutex::new(crate::pages::IndexSlot::default()),
+            misses: AtomicU64::new(0),
             hinted: RwLock::new(HashMap::new()),
             completed: OnceLock::new(),
             store: SlotStore::new(),
@@ -1014,6 +1020,11 @@ impl CosDocument {
     /// The page index's slot (`crate::pages`).
     pub(crate) fn page_index(&self) -> &Mutex<crate::pages::IndexSlot> {
         &self.page_index
+    }
+
+    /// How many loads have missed so far, on every thread.
+    pub(crate) fn misses(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
     }
 
     /// The document catalog (7.7.2), resolved from the trailer's `/Root`.
@@ -1723,6 +1734,7 @@ impl CosDocument {
             // bytes were absent, not because the object is; publishing it
             // would give every later read the miss's answer forever, and the
             // host that goes and fetches the range would never see it change.
+            self.misses.fetch_add(1, Ordering::Relaxed);
             return Arc::new(object);
         }
         self.store.publish(num, Arc::new(object))

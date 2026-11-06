@@ -61,7 +61,9 @@ it is built, a lookup copies its page out of it and a read of every page reads
 it, without walking again, and the walk's warnings are raised that once. No
 lookup builds it, so a viewer paging through a streamed file's hint tables
 never fetches the pages it does not show. A password drops it with every
-object read before it, and the next count builds it again from plaintext.
+object read before it, and the next count builds it again from plaintext; a
+count during which a streamed read missed keeps nothing, so the count after
+the host has the bytes walks the tree again.
 
 **One page by index**, before the pages are counted, descends by `/Count`
 rather than walking: from the root,

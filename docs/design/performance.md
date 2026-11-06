@@ -2064,7 +2064,11 @@ drops it with the store and the object streams: an index read over ciphertext
 holds inherited `/Resources` whose strings were never decrypted, and a tree
 in an encrypted object stream reads as no pages at all, so the next count
 after a password builds it again from plaintext (`encrypt_on_save.rs`
-`the_page_index_is_dropped_when_a_password_arrives`).
+`the_page_index_is_dropped_when_a_password_arrives`). **A walk that missed
+keeps nothing**: a load whose bytes a streamed source did not have reads as
+null and is never published, so a count during which one missed answers from
+its own walk and keeps no index, and the count after the host has supplied the
+bytes walks again (`streaming.rs` `a_count_that_missed_keeps_no_page_index`).
 
 **A count raises the page-tree warnings once**, by the walk that builds the
 index: `PageTreeCycle`, `PageTreeTruncated`, `MediaBoxMissing` and

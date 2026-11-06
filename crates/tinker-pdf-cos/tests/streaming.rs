@@ -511,3 +511,70 @@ fn a_miss_never_publishes_a_null_the_host_could_still_fix() {
         "the null was remembered, so the retry read the miss's answer"
     );
 }
+
+/// A count whose walk missed keeps no page index: the pages it found are that
+/// call's answer, and the count after the host has fed the bytes walks again
+/// and finds them all. The two pages sit in a chunk of their own between two
+/// fillers, so the open reads none of them.
+#[test]
+fn a_count_that_missed_keeps_no_page_index() {
+    let filler = |len: usize| {
+        let mut body = format!("<< /Length {len} >>\nstream\n").into_bytes();
+        body.extend(std::iter::repeat_n(b'x', len));
+        body.extend_from_slice(b"\nendstream");
+        body
+    };
+    let chunk = CHUNK_SIZE as usize;
+    let bodies: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 2 /Kids [4 0 R 5 0 R] >>".to_vec(),
+        filler(3 * chunk),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 100] >>".to_vec(),
+        filler(3 * chunk),
+    ];
+    let mut bytes = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (at, body) in bodies.iter().enumerate() {
+        offsets.push(bytes.len());
+        bytes.extend_from_slice(format!("{} 0 obj\n", at + 1).as_bytes());
+        bytes.extend_from_slice(body);
+        bytes.extend_from_slice(b"\nendobj\n");
+    }
+    let table = bytes.len();
+    bytes.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", bodies.len() + 1).as_bytes(),
+    );
+    for offset in &offsets {
+        bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    bytes.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n",
+            bodies.len() + 1
+        )
+        .as_bytes(),
+    );
+    let hole = (offsets[3] / chunk * chunk) as u64..((offsets[5] / chunk + 1) * chunk) as u64;
+    assert!(
+        offsets[2] < hole.start as usize && (hole.end as usize) < table,
+        "the pages' chunk holds neither the head nor the table"
+    );
+
+    let source = Arc::new(Fed::new(bytes.clone()));
+    source.feed(0..hole.start);
+    source.feed(hole.end..bytes.len() as u64);
+    let doc = CosDocument::open_source(Arc::clone(&source) as Arc<dyn ByteSource>)
+        .expect("it opens without the pages' bytes");
+    assert!(
+        tinker_pdf_cos::pages::count(&doc) < 2,
+        "a walk without the pages' bytes cannot find both"
+    );
+    assert!(!source.take_missed().is_empty(), "the walk missed");
+    source.feed(hole);
+    assert_eq!(
+        tinker_pdf_cos::pages::count(&doc),
+        2,
+        "fed, the next count walks again rather than reading a kept index"
+    );
+}
