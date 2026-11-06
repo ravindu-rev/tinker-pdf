@@ -290,7 +290,8 @@ each step or job it drives says so and does nothing without it.
   after the other, over one fetch, and `cargo xtask corpus-peaks REPORT...`
   prints each corpus's largest peak in both reports, with its file, the
   children reporting, the phase that reached it and its file-backed share,
-  beside the committed band. It prints and decides nothing; the two reports
+  beside the committed band, and the job prints each revision's `tpdf` size.
+  It prints and decides nothing; the two reports
   are kept in the `corpus-peaks` artifact. `cargo xtask corpusjob` holds each
   job's checks to its own fetch.
 
@@ -378,7 +379,10 @@ writes no peak from its own run and carries each committed band and
 
 **Where a peak is reached.** On Linux each child writes the kernel's
 high-water mark as each phase of its work ends — `open`, `scan`, `render`,
-`strict`, `metamorphic` — and, before its `peak`, the file-backed part of its
+`strict`, `metamorphic`, and inside the last the render the relations compare
+with (`meta-base`), each relation's rewrite, reopen and render
+(`meta-rotate-rewrite` to `meta-crop-render`) and the doubled render
+(`meta-dpi`) — and, before its `peak`, the file-backed part of its
 resident set, which is the binary's own pages rather than what the document
 cost. The report keeps both per file, and each corpus's `peak` line names the
 file that reached the largest peak, the first phase whose mark reads it and

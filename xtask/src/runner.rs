@@ -1267,6 +1267,44 @@ mod tests {
         assert_eq!(quiet.rss_file, None);
     }
 
+    /// The metamorphic phase's parts mark their own high-water marks (MS-23),
+    /// read in the order they ran like any phase's, so the first to reach a
+    /// peak names the part that reached it.
+    #[test]
+    fn each_part_of_the_metamorphic_phase_is_marked() {
+        let parts = [
+            ("strict", 90_000_000u64),
+            ("meta-base", 91_000_000),
+            ("meta-rotate-rewrite", 104_000_000),
+            ("meta-rotate-reopen", 110_000_000),
+            ("meta-rotate-render", 120_000_000),
+            ("meta-crop-rewrite", 120_000_000),
+            ("meta-crop-reopen", 120_000_000),
+            ("meta-crop-render", 120_000_000),
+            ("meta-dpi", 120_000_000),
+            ("metamorphic", 120_000_000),
+        ];
+        let lines: Vec<String> = parts
+            .iter()
+            .map(|(phase, bytes)| format!("hwm {phase} {bytes}"))
+            .chain(["peak 120000000".to_string()])
+            .collect();
+        let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let result = parse_record(&marked(&lines)).expect("complete");
+        let read: Vec<(&str, u64)> = result
+            .marks
+            .iter()
+            .map(|(phase, bytes)| (phase.as_str(), *bytes))
+            .collect();
+        assert_eq!(read, parts);
+        let first = result
+            .marks
+            .iter()
+            .find(|(_, bytes)| Some(*bytes) >= result.peak)
+            .map(|(phase, _)| phase.as_str());
+        assert_eq!(first, Some("meta-rotate-render"));
+    }
+
     /// A killed child's last line is kept beside the phase it announced: a
     /// record cut inside page one's render reads `page 1/5` for both, and one
     /// cut after the render returned keeps its time as the last line.

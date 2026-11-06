@@ -436,6 +436,10 @@ jobs:
         run: |
           cargo run --release -p xtask -- corpus-peaks \
             corpus/peaks-head.json corpus/peaks-revision.json
+          # Each revision's child, whose own pages are a peak's file-backed
+          # share: how much of a small file's peak the binary's growth is.
+          echo "corpus-peaks: the head's tpdf is $(stat -c %s target/release/tpdf) bytes"
+          echo "corpus-peaks: the revision's tpdf is $(stat -c %s bands/target/release/tpdf) bytes"
 
       - name: Keep both reports
         if: always()

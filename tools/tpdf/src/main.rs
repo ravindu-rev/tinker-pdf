@@ -2337,6 +2337,10 @@ fn metamorphic(
         return;
     };
     let base = page.render(&render);
+    // Each part of the phase marks its high-water mark, so a peak reached in
+    // it says which part reached it: the render the relations compare with,
+    // each relation's rewrite, reopen and render, and the doubled render.
+    mark(out, "meta-base");
     // A page that came back empty is a page the relations cannot speak about:
     // every one of them holds trivially over nothing.
     if base.width == 0 || base.height == 0 {
@@ -2366,11 +2370,11 @@ fn metamorphic(
             // which is several seconds of silence on a large file — and is
             // where a rewrite that does not terminate stops.
             say!(out, "phase meta-rotate");
-            let turned = rotation(doc, &base, &render, fonts);
+            let turned = rotation(out, doc, &base, &render, fonts);
             turned.judged(ROTATE_BUDGET).print(out, "rotate");
             turned.judged(ROTATE_WATCH).print(out, ROTATE_WATCH_NAME);
             say!(out, "phase meta-crop");
-            cropping(doc, &page, &base, &render, fonts).print(out, "crop");
+            cropping(out, doc, &page, &base, &render, fonts).print(out, "crop");
         }
         Some(why) => {
             Relation::Skipped(why).print(out, "rotate");
@@ -2381,6 +2385,7 @@ fn metamorphic(
     // `dpi` rewrites nothing, so it is asked of every document that rendered.
     say!(out, "phase meta-dpi");
     resolution(&page, &base, &render).print(out, "dpi");
+    mark(out, "meta-dpi");
 }
 
 /// One pixel of a bitmap, as three channels.
@@ -2404,6 +2409,7 @@ fn differs(a: (i32, i32, i32), b: (i32, i32, i32)) -> bool {
 /// and not a budget — and it catches every place a rotation is applied to the
 /// geometry and not to the clip, or to the text and not to the images.
 fn rotation(
+    out: &mut dyn std::io::Write,
     doc: &Document,
     base: &Bitmap,
     render: &RenderOptions,
@@ -2413,9 +2419,13 @@ fn rotation(
     if !editor.rotate_page(0, 90) {
         return Measured::Skipped("the page would not rotate");
     }
-    let Ok(turned) = Document::open(editor.save(&WriteOptions::default())) else {
+    let rewritten = editor.save(&WriteOptions::default());
+    drop(editor);
+    mark(out, "meta-rotate-rewrite");
+    let Ok(turned) = Document::open(rewritten) else {
         return Measured::Skipped("the rotated document would not reopen");
     };
+    mark(out, "meta-rotate-reopen");
     // **With the same faces**, and this is not a detail. The relation compares
     // two renders of one document, so the two must be rendered under the same
     // conditions; reopening without the provider gave the rotated copy no way
@@ -2430,6 +2440,7 @@ fn rotation(
         return Measured::Skipped("the rotated document lost its page");
     };
     let rotated = page.render(render);
+    mark(out, "meta-rotate-render");
 
     if rotated.width != base.height || rotated.height != base.width {
         return Measured::Broke(format!(
@@ -2456,6 +2467,7 @@ fn rotation(
 /// being rendered, so the comparison needs no resampling: every pixel of the
 /// cropped render has a pixel of the full one it must equal exactly.
 fn cropping(
+    out: &mut dyn std::io::Write,
     doc: &Document,
     page: &Page,
     base: &Bitmap,
@@ -2487,9 +2499,13 @@ fn cropping(
     if !editor.set_crop_box(0, x0 + inset_x, y0 + inset_y, x1 - inset_x, y1 - inset_y) {
         return Relation::Skipped("the crop box would not be set");
     }
-    let Ok(cropped) = Document::open(editor.save(&WriteOptions::default())) else {
+    let rewritten = editor.save(&WriteOptions::default());
+    drop(editor);
+    mark(out, "meta-crop-rewrite");
+    let Ok(cropped) = Document::open(rewritten) else {
         return Relation::Skipped("the cropped document would not reopen");
     };
+    mark(out, "meta-crop-reopen");
     // With the same faces, for `rotation`'s reason.
     let cropped = match fonts {
         Some(provider) => cropped.with_fonts(provider.clone()),
@@ -2499,6 +2515,7 @@ fn cropping(
         return Relation::Skipped("the cropped document lost its page");
     };
     let small = page.render(render);
+    mark(out, "meta-crop-render");
     if small.width == 0 || small.height == 0 {
         return Relation::Skipped("the cropped page rendered to nothing");
     }
