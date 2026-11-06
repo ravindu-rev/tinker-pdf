@@ -514,6 +514,9 @@ impl StructureTree {
             claimed: BTreeSet::new(),
             nodes: Vec::new(),
             warnings: Vec::new(),
+            collect: false,
+            replacing: None,
+            replaced: BTreeMap::new(),
         };
         join.kids(&self.kids, None, 0, false);
 
@@ -578,12 +581,16 @@ impl StructureTree {
     /// sequence once **per call**, so the cost of a call is the page plus the
     /// subtrees walked, and a caller asks for every element it wants in one
     /// call: a call per table was the page's characters times its tables.
+    ///
+    /// Each run comes with what an element's `/ActualText` replaces on the
+    /// page — the characters its subtree draws, which the structured view
+    /// leaves out — so a reader can stand the text on them.
     pub(crate) fn element_runs(
         &self,
         elements: &[&StructElement],
         index: u32,
         page: &TextPage,
-    ) -> Vec<Vec<StructuredNode>> {
+    ) -> Vec<Vec<ElementRun>> {
         let mut join = Join {
             index,
             unpaged_is_here: self.page_count <= 1,
@@ -592,16 +599,43 @@ impl StructureTree {
             claimed: BTreeSet::new(),
             nodes: Vec::new(),
             warnings: Vec::new(),
+            collect: true,
+            replacing: None,
+            replaced: BTreeMap::new(),
         };
         elements
             .iter()
             .map(|element| {
                 join.nodes.clear();
+                join.replaced.clear();
                 join.element(element, 0, false);
+                let mut replaced = std::mem::take(&mut join.replaced);
                 std::mem::take(&mut join.nodes)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(at, node)| ElementRun {
+                        node,
+                        replaced: replaced.remove(&at).unwrap_or_default(),
+                    })
+                    .collect()
             })
             .collect()
     }
+}
+
+/// A run [`StructureTree::element_runs`] hands a reader of particular
+/// elements, with what an element's `/ActualText` replaces.
+#[derive(Clone, Debug)]
+pub(crate) struct ElementRun {
+    /// The run as the structured view has it.
+    pub(crate) node: StructuredNode,
+    /// For a run an element's `/ActualText` states, the characters its
+    /// subtree claims on the page, in the order the walk claims them; empty
+    /// for every other run. The structured view keeps a run like this one
+    /// without characters (ruling 14 stands a property list's text on its
+    /// glyphs and no element's); a table cell stands the text on these, as
+    /// the owner chose under H-166.
+    pub(crate) replaced: Vec<TextChar>,
 }
 
 /// A page's text in structure order (14.8).
@@ -1850,6 +1884,16 @@ struct Join<'a> {
     /// [`Walk::warn`] does it — an `/MCR` per paragraph is an honest page, so
     /// a per-reference leniency has to be bounded like every other.
     warnings: Vec<StructureWarning>,
+    /// Whether an element's `/ActualText` keeps the characters its subtree
+    /// claims, for [`StructureTree::element_runs`]; the structured view
+    /// keeps none.
+    collect: bool,
+    /// The characters the `/ActualText` subtree being walked claims, while
+    /// [`Join::collect`] keeps them.
+    replacing: Option<Vec<TextChar>>,
+    /// What each element's `/ActualText` replaced, by the index of its node
+    /// in [`Join::nodes`].
+    replaced: BTreeMap<usize, Vec<TextChar>>,
 }
 
 impl Join<'_> {
@@ -1966,6 +2010,11 @@ impl Join<'_> {
         let key = self.resolve(mcid, stream, owner);
         self.claimed.insert(key);
         if suppressed {
+            if let Some(collected) = self.replacing.as_mut() {
+                if let Some(chars) = self.by_mcid.get(&key) {
+                    collected.extend(chars.iter().cloned());
+                }
+            }
             return;
         }
         // 14.9.4: an `/ActualText` on the *property list* replaces exactly the
@@ -2004,7 +2053,9 @@ impl Join<'_> {
         // without it, an element on page 40 is read on every page.
         if !suppressed {
             if let Some(actual) = &element.actual_text {
-                if self.holds(element) {
+                let at = self.nodes.len();
+                let held = self.holds(element);
+                if held {
                     self.nodes.push(StructuredNode {
                         raw_type: element.raw_type.clone(),
                         standard_type: element.standard_type.clone(),
@@ -2017,7 +2068,18 @@ impl Join<'_> {
                         chars: Vec::new(),
                     });
                 }
+                // An `/ActualText` subtree is walked suppressed, so nothing
+                // inside it opens a second collection.
+                let keep = self.collect && held;
+                if keep {
+                    self.replacing = Some(Vec::new());
+                }
                 self.kids(&element.kids, Some(element), depth + 1, true);
+                if keep {
+                    if let Some(chars) = self.replacing.take() {
+                        self.replaced.insert(at, chars);
+                    }
+                }
                 return;
             }
         }

@@ -421,7 +421,14 @@ holds more spans than extraction states. An
 `/ActualText` on a structure element stays the structured view's: an
 element can span lines and pages, where a line has no place for it, and its
 run has no characters. It reads on a page that holds what it replaces — the
-element's `/Pg` or a sequence its subtree claims there — and on no other.
+element's `/Pg` or a sequence its subtree claims there — and on no other. A
+stated table cell stands an element's text on the glyphs its replaced
+content draws on the page, by the rule a span's stands on its own (ruling
+14, as the owner widened it), so a cell's characters spell its text; a cell
+whose replaced content draws nothing that reads keeps no characters, and
+its quad encloses what its subtree draws either way
+(`tables.rs`'s `a_cell_whose_label_an_element_states_is_spelled_by_its_characters`,
+`a_cell_whose_label_draws_no_glyph_has_no_characters`).
 (`text_logical_order.rs`'s `a_line_a_span_states_whole_reads_as_its_text`,
 `a_span_inside_a_left_to_right_line_stands_where_its_glyphs_do`,
 `a_span_inside_a_right_to_left_line_is_one_unit_of_its_order`,

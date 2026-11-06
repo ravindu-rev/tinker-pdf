@@ -79,7 +79,7 @@ use tinker_pdf_content::{Quad, TextChar, TextPage};
 use tinker_pdf_cos::{ObjRef, TableScope};
 
 use crate::observe::{Fill, Observed};
-use crate::structure::{self, StructElement, StructKid, StructuredNode};
+use crate::structure::{self, ElementRun, StructElement, StructKid, TextSource};
 use crate::Page;
 
 /// How many rules one page may contribute to table reconstruction.
@@ -343,13 +343,18 @@ pub struct StatedCell {
     pub id: Option<Vec<u8>>,
     /// The cell's text on this page, its runs in structure order.
     pub text: String,
-    /// The characters the cell claims on this page. A property list's
-    /// `/ActualText` keeps the characters [`crate::Page::text`] stands it on,
-    /// each on the glyph it replaces (ruling 14); empty where its text is an
-    /// element's `/ActualText`, or a property list's whose glyphs read nothing
-    /// (14.9.4), or it draws nothing here.
+    /// The characters the cell claims on this page, which spell
+    /// [`StatedCell::text`]. A property list's `/ActualText` keeps the
+    /// characters [`crate::Page::text`] stands it on, each on the glyph it
+    /// replaces (ruling 14), and an element's is stood on the glyphs its
+    /// replaced content draws by the same rule. Empty where some stated text
+    /// in the cell replaces content that draws nothing that reads — a
+    /// property list's or an element's (14.9.4) — since no characters could
+    /// spell it, or where the cell draws nothing here.
     pub chars: Vec<TextChar>,
-    /// The quad enclosing `chars`; `None` when there are none.
+    /// The quad enclosing what the cell's subtree draws on this page, its
+    /// characters' and those of any content a stated text replaces; `None`
+    /// when it draws nothing.
     pub quad: Option<Quad>,
 }
 
@@ -518,9 +523,9 @@ impl Page {
         let mut out = Vec::new();
         for (table, rows) in &tables {
             let count = rows.iter().map(Vec::len).sum();
-            let runs: Vec<Vec<StructuredNode>> = runs.by_ref().take(count).collect();
-            let here =
-                table.page == Some(index) || runs.iter().flatten().any(|n| !n.text.is_empty());
+            let runs: Vec<Vec<ElementRun>> = runs.by_ref().take(count).collect();
+            let here = table.page == Some(index)
+                || runs.iter().flatten().any(|run| !run.node.text.is_empty());
             if here {
                 out.push(stated(table, rows, &runs));
             }
@@ -595,7 +600,7 @@ fn rows_of(table: &StructElement) -> Vec<Vec<&StructElement>> {
 fn stated(
     table: &StructElement,
     rows: &[Vec<&StructElement>],
-    runs: &[Vec<StructuredNode>],
+    runs: &[Vec<ElementRun>],
 ) -> StatedTable {
     let cell_count: usize = rows.iter().map(Vec::len).sum();
     // A table of `n` cells has at most `n` columns that any cell starts in.
@@ -604,6 +609,7 @@ fn stated(
     let mut warnings = Vec::new();
     let mut cells = Vec::with_capacity(cell_count);
     let mut widths = vec![0i64; rows.len() + 1];
+    let mut drawn_in_table: Vec<TextChar> = Vec::new();
     let mut runs = runs.iter();
     for (row, elements) in rows.iter().enumerate() {
         let mut cursor = 0usize;
@@ -647,8 +653,10 @@ fn stated(
             cursor = column.saturating_add(col_span);
 
             let nodes = runs.next().map(Vec::as_slice).unwrap_or_default();
-            let text: String = nodes.iter().map(|n| n.text.as_str()).collect();
-            let chars: Vec<TextChar> = nodes.iter().flat_map(|n| n.chars.iter().cloned()).collect();
+            let text: String = nodes.iter().map(|run| run.node.text.as_str()).collect();
+            let (chars, drawn) = cell_chars(nodes);
+            let quad = enclosing(drawn.iter());
+            drawn_in_table.extend(drawn);
             cells.push(StatedCell {
                 row,
                 column,
@@ -662,7 +670,7 @@ fn stated(
                 scope: attributes.and_then(|a| a.scope),
                 headers: attributes.map(|a| a.headers.clone()).unwrap_or_default(),
                 id: element.id.clone(),
-                quad: enclosing(chars.iter()),
+                quad,
                 text,
                 chars,
             });
@@ -690,11 +698,48 @@ fn stated(
         element: table.reference,
         rows: rows.len(),
         columns,
-        quad: enclosing(cells.iter().flat_map(|c| c.chars.iter())),
+        quad: enclosing(drawn_in_table.iter()),
         cells,
         summary: table.table.as_ref().and_then(|a| a.summary.clone()),
         warnings,
     }
+}
+
+/// A cell's characters, and every character its subtree draws on the page,
+/// from its runs.
+///
+/// A run an element's `/ActualText` states has no characters of its own;
+/// its text is stood on the characters the replaced content draws, each on
+/// the glyph whose text it continues with and the rest on their box, as
+/// `Page::text` stands a property list's (ruling 14, which the owner widened
+/// to a cell's element under H-166). A cell any of whose stated text
+/// replaces content that draws nothing that reads keeps no characters,
+/// since none could spell its text; what its subtree draws still bounds its
+/// quad.
+fn cell_chars(runs: &[ElementRun]) -> (Vec<TextChar>, Vec<TextChar>) {
+    let mut chars = Vec::new();
+    let mut drawn = Vec::new();
+    let mut spelled = true;
+    for run in runs {
+        let node = &run.node;
+        let stated = node.source == TextSource::ActualText && node.chars.is_empty();
+        if !stated || node.text.is_empty() {
+            chars.extend(node.chars.iter().cloned());
+            drawn.extend(node.chars.iter().cloned());
+            continue;
+        }
+        drawn.extend(run.replaced.iter().cloned());
+        let glyphs: Vec<&TextChar> = run.replaced.iter().filter(|c| !c.text.is_empty()).collect();
+        if glyphs.is_empty() {
+            spelled = false;
+            continue;
+        }
+        chars.extend(crate::text_order::stated_chars(&node.text, &glyphs, None));
+    }
+    if !spelled {
+        chars.clear();
+    }
+    (chars, drawn)
 }
 
 /// The axis-aligned quad enclosing `chars`, or `None` for none with a finite

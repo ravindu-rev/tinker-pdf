@@ -446,7 +446,7 @@ fn state_in_place(line: &mut TextLine, stated: Stated<'_>) -> bool {
                         .then(|| stated_direction(text, None));
                     let here = held.iter().filter_map(|k| chars.get(*k)).collect();
                     let glyphs = stated.glyphs(span, here, direction);
-                    out.extend(stated_chars(text, &glyphs, span));
+                    out.extend(stated_chars(text, &glyphs, Some(span)));
                 }
             }
         }
@@ -468,7 +468,12 @@ const MAX_GLYPH_TEXT: usize = 16;
 /// the text where it is drawn and the structure tree's order holds; and a
 /// character no glyph draws on the span's box. Each step asks each length of
 /// glyph text up to [`MAX_GLYPH_TEXT`] once, so it is linear in the text.
-fn stated_chars(text: &str, glyphs: &[&TextChar], span: u32) -> Vec<TextChar> {
+///
+/// `span` is the page's number for the span, which each character carries
+/// as [`TextChar::stated`]; `None` for a text the page did not number, an
+/// element's `/ActualText` a table cell stands on its glyphs, where each
+/// character keeps its glyph's own.
+pub(crate) fn stated_chars(text: &str, glyphs: &[&TextChar], span: Option<u32>) -> Vec<TextChar> {
     let Some(first) = glyphs.first() else {
         return Vec::new();
     };
@@ -513,7 +518,9 @@ fn stated_chars(text: &str, glyphs: &[&TextChar], span: u32) -> Vec<TextChar> {
                     queue.pop_front();
                 }
                 let mut c = (*glyph).clone();
-                c.stated = Some(span);
+                if span.is_some() {
+                    c.stated = span;
+                }
                 out.push(c);
                 rest = rest.get(end..).unwrap_or_default();
             }
@@ -526,7 +533,7 @@ fn stated_chars(text: &str, glyphs: &[&TextChar], span: u32) -> Vec<TextChar> {
                     mcid: first.mcid,
                     stream: first.stream,
                     font: first.font.clone(),
-                    stated: Some(span),
+                    stated: span.or(first.stated),
                 });
                 rest = rest.get(next.len_utf8()..).unwrap_or_default();
             }
@@ -1270,7 +1277,7 @@ fn logical_line_reading(
         let text = stated.text(span);
         let direction = stated_direction(text, declared);
         let glyphs = stated.glyphs(span, line.chars.iter().collect(), Some(direction));
-        let chars = stated_chars(text, &glyphs, span);
+        let chars = stated_chars(text, &glyphs, Some(span));
         line.chars = chars;
         line.text = line.chars.iter().map(|c| c.text.as_str()).collect();
         line.rtl = declared.map_or_else(
@@ -1317,7 +1324,7 @@ fn logical_line_reading(
                     at.sort_unstable();
                     let here = at.iter().filter_map(|k| chars.get(*k)).collect();
                     let glyphs = stated.glyphs(span, here, Some(reading.direction));
-                    out.extend(stated_chars(stated.text(span), &glyphs, span));
+                    out.extend(stated_chars(stated.text(span), &glyphs, Some(span)));
                 }
                 None => out.extend(cluster.iter().filter_map(|at| chars.get(*at)).cloned()),
             }

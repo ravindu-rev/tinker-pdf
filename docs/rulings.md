@@ -545,7 +545,12 @@ instead of living in one feature's head.
     direction or else its first strong character's; a span holding part of
     a line is one unit of the line's order and stands for its text there;
     and each character of the text stands on the glyph of the span that
-    draws it, in the order the line reads its glyphs. A page that says
+    draws it, in the order the line reads its glyphs. The owner widened the
+    last to a stated table cell (H-166): where a cell's text is in part a
+    structure *element's* `/ActualText`, the table reader stands that text
+    on the glyphs its replaced content draws by the same rule, and a cell
+    whose replaced content draws nothing that reads keeps no characters;
+    the structured view still gives an element's text none. A page that says
     neither reads as the rest of this ruling reads it, to the byte, and the
     lines each *What it reads otherwise* and *What it leaves* names are such
     a page's.

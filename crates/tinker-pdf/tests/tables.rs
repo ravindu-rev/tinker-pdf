@@ -345,6 +345,127 @@ fn a_cell_whose_label_a_property_list_states_is_spelled_by_its_characters() {
     );
 }
 
+/// The page [`a_bulleted_cell`] builds, with the bullet's `/ActualText` on
+/// the `Lbl` **element** rather than on its sequence's property list, and
+/// `bullet` the content the label draws inside its sequence.
+fn a_cell_whose_label_its_element_states(bullet: &str) -> Vec<u8> {
+    let content = format!(
+        "/Lbl << /MCID 0 >> BDC {bullet} EMC\n\
+         /LBody << /MCID 1 >> BDC BT /F0 12 Tf 12 40 Td ( Bullet One) Tj ET EMC\n"
+    );
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 5 0 R /MarkInfo << /Marked true >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 60] /StructParents 0\n\
+   /Resources << /Font << /F0 4 0 R >> >> /Contents 6 0 R >>\nendobj\n\
+4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n\
+5 0 obj\n<< /Type /StructTreeRoot /K 10 0 R >>\nendobj\n\
+6 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+10 0 obj\n<< /S /Table /Pg 3 0 R /K [11 0 R] >>\nendobj\n\
+11 0 obj\n<< /S /TR /Pg 3 0 R /K [12 0 R] >>\nendobj\n\
+12 0 obj\n<< /S /TD /Pg 3 0 R /K [13 0 R] >>\nendobj\n\
+13 0 obj\n<< /S /L /Pg 3 0 R /K [14 0 R] >>\nendobj\n\
+14 0 obj\n<< /S /LI /Pg 3 0 R /K [15 0 R 16 0 R] >>\nendobj\n\
+15 0 obj\n<< /S /Lbl /Pg 3 0 R /ActualText <FEFFF0B7> /K [0] >>\nendobj\n\
+16 0 obj\n<< /S /LBody /Pg 3 0 R /K [1] >>\nendobj\n\
+trailer\n<< /Size 17 /Root 1 0 R >>\n%%EOF\n",
+        content.len()
+    )
+    .into_bytes()
+}
+
+/// **A cell whose label an element states is spelled by its characters**, as
+/// the owner chose under H-166. The structured view gives an element's
+/// `/ActualText` no characters (`tagged_pdf.rs` holds that); the table
+/// reader stands it on the glyph the label draws, so the cell's text,
+/// `\u{F0B7} Bullet One`, is its characters' and its quad encloses the
+/// bullet.
+#[test]
+fn a_cell_whose_label_an_element_states_is_spelled_by_its_characters() {
+    let doc = open(a_cell_whose_label_its_element_states(
+        "BT /F0 12 Tf 5 40 Td (\\267) Tj ET",
+    ));
+    let tables = stated(&doc);
+    assert_eq!(tables.len(), 1, "one stated table");
+    let cell = &tables[0].1.cells[0];
+    assert_eq!(cell.text, "\u{F0B7} Bullet One");
+    let spelled: String = cell.chars.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(spelled, cell.text, "spelled by its characters");
+
+    let page = doc.page(0).expect("a page");
+    let text = page.text();
+    let bullet = text
+        .lines()
+        .iter()
+        .flat_map(|line| line.chars.iter())
+        .find(|c| c.mcid == Some(0))
+        .expect("the bullet's glyph");
+    let (x0, y0, x1, y1) = bullet.quad.bounds();
+    let stood = cell
+        .chars
+        .first()
+        .expect("the label's character")
+        .quad
+        .bounds();
+    assert_eq!(stood, (x0, y0, x1, y1), "the label stands on its glyph");
+    let (cx0, cy0, cx1, cy1) = cell.quad.expect("the cell's quad").bounds();
+    assert!(
+        cx0 <= x0 && cy0 <= y0 && x1 <= cx1 && y1 <= cy1,
+        "the cell's quad {:?} encloses the bullet's {:?}",
+        (cx0, cy0, cx1, cy1),
+        (x0, y0, x1, y1)
+    );
+
+    // The structured view is unchanged: the element's run has no
+    // characters.
+    let structured = doc
+        .structure()
+        .expect("a tree")
+        .text_for_page(0, &page.text());
+    let label = structured
+        .nodes
+        .iter()
+        .find(|node| node.text == "\u{F0B7}")
+        .expect("the label's run");
+    assert!(label.chars.is_empty(), "{label:?}");
+}
+
+/// **A cell whose label draws no glyph has no characters.** The bullet is a
+/// filled square rather than a glyph, so nothing the label replaces reads,
+/// and no characters could spell `\u{F0B7} Bullet One`: the cell keeps none,
+/// and its quad still encloses what its subtree draws.
+#[test]
+fn a_cell_whose_label_draws_no_glyph_has_no_characters() {
+    let doc = open(a_cell_whose_label_its_element_states("5 40 6 6 re f"));
+    let tables = stated(&doc);
+    assert_eq!(tables.len(), 1, "one stated table");
+    let cell = &tables[0].1.cells[0];
+    assert_eq!(cell.text, "\u{F0B7} Bullet One");
+    assert!(cell.chars.is_empty(), "{:?}", cell.chars);
+
+    let page = doc.page(0).expect("a page");
+    let text = page.text();
+    let body: Vec<_> = text
+        .lines()
+        .iter()
+        .flat_map(|line| line.chars.iter())
+        .filter(|c| c.mcid == Some(1))
+        .collect();
+    assert!(!body.is_empty(), "the body's characters");
+    let (cx0, cy0, cx1, cy1) = cell.quad.expect("the cell's quad").bounds();
+    for c in body {
+        let (x0, y0, x1, y1) = c.quad.bounds();
+        assert!(
+            cx0 <= x0 && cy0 <= y0 && x1 <= cx1 && y1 <= cy1,
+            "the cell's quad {:?} encloses ` Bullet One`'s {:?}",
+            (cx0, cy0, cx1, cy1),
+            (x0, y0, x1, y1)
+        );
+    }
+    assert_eq!(tables[0].1.quad, cell.quad, "and so does the table's");
+}
+
 /// **A table is stated only on the page that holds it.** A two-page document
 /// whose second page holds a table, a `Span` in its cell stating
 /// `/ActualText`, states the table there and on no other page: the element's
