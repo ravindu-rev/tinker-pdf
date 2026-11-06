@@ -106,12 +106,15 @@ bindings-parity options:
                                          the files it broke on, from a report
                                          of the bar's own revision whose
                                          tallies are the bar's; refuses others
-  cargo xtask corpus-peaks --record BAR --revision REV RUN=REPORT...
+  cargo xtask corpus-peaks --record BAR --revision REV
+      [--unheld CORPUS=REASON]... RUN=REPORT...
                                          write BAR's peak bands from three
                                          dispatches' reports at REV, each the
                                          largest of their maxima, and name the
                                          runs; refuses other settings, another
-                                         denominator and a spread of 2 %
+                                         denominator and a spread of 2 %, but
+                                         writes a corpus the owner holds to no
+                                         band as unheld, with the reason
   cargo xtask bench-check --machine NAME [--sizes [report]]
                                          hold `cargo bench` to the committed baseline,
                                          printing each operation's throughput in

@@ -97,6 +97,12 @@ pub struct Bar {
     /// absent key is an improvement rather than a refusal and no committed
     /// file has to be rewritten to stay readable.
     pub peak: Option<PeakBar>,
+    /// The owner's word that this corpus's peak is held to nothing, and why:
+    /// a bar's `peak` written `{"unheld": "<reason>"}` (H-78). The check
+    /// prints the corpus's largest peak beside the reason and holds it to no
+    /// band, as `peak_memory.tsv` holds a case it names `unheld`; `None`
+    /// wherever the corpus has a band or never had one.
+    pub peak_unheld: Option<String>,
     /// How many files carried each capability the child's scanner names, or an
     /// empty map in a bar recorded before this axis existed.
     ///
@@ -159,6 +165,13 @@ pub struct Bar {
 /// that admits two percent of a memory ceiling still refuses every regression
 /// anybody is going to write: the caps this ratchet is a backstop for are
 /// counted in megabytes, not in kilobytes.
+///
+/// The three dispatches a bar's bands are read from ([`PEAK_RUNS`]) agree
+/// well inside that two percent for nearly every corpus, and
+/// `corpus-peaks --record` refuses a corpus whose three maxima spread by
+/// [`PEAK_TOLERANCE_PERCENT`] or more: such a corpus is the owner's to judge,
+/// and one the owner holds to nothing carries its reason in place of a band
+/// ([`Bar::peak_unheld`]).
 /// How far above a recorded peak a run may sit before it is a regression.
 ///
 /// Measured rather than chosen: see [`PeakBar`]. Two percent is above both
@@ -877,6 +890,15 @@ pub fn compare(before: &Ratchet, now: &Run, strict: bool) -> Comparison {
         // every other axis in this file is a ratio.
         let now_peak = corpus.peak();
         match bar.peak {
+            // Held to nothing by the owner's word: printed, never compared.
+            _ if bar.peak_unheld.is_some() => out.notes.push(format!(
+                "{}: the largest peak resident set is {} bytes over {} children, held to no band by \
+                 the owner's word: {}",
+                bar.name,
+                now_peak.bytes,
+                now_peak.files,
+                bar.peak_unheld.as_deref().unwrap_or_default()
+            )),
             // No bar, and nothing measured either. Said rather than passed
             // over, because a corpus whose children report no peak is a run
             // that is already incomplete — `corpus::run` puts that in
@@ -1590,12 +1612,24 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
                 Some(tagged)
             }
         };
+        let mut peak_unheld = None;
         let peak = match entry.get("peak") {
             // Absent is a bar recorded before the measurement existed, which
             // is every bar committed today. `SCHEMA` stays 2 for exactly this:
             // no committed file has to be rewritten to stay readable, and none
             // of them can be regressed against on an axis they never measured.
             None => None,
+            // The owner's word that the corpus is held to nothing (H-78), and
+            // why: a reason of nothing is no word at all.
+            Some(object) if object.get("unheld").is_some() => {
+                let reason = object
+                    .get("unheld")
+                    .and_then(Json::as_str)
+                    .filter(|reason| !reason.trim().is_empty())
+                    .ok_or_else(|| format!("`{name}`'s `peak` is unheld with no reason"))?;
+                peak_unheld = Some(reason.to_string());
+                None
+            }
             Some(object) => {
                 let read = |key: &str| -> Result<u64, String> {
                     object
@@ -1655,6 +1689,7 @@ pub fn parse(text: &str) -> Result<Ratchet, String> {
             tagged,
             capabilities,
             peak,
+            peak_unheld,
             time,
             outcomes,
         });
@@ -1913,6 +1948,7 @@ mod tests {
                 tagged: None,
                 capabilities: BTreeMap::new(),
                 peak: None,
+                peak_unheld: None,
                 time: None,
                 outcomes: BTreeMap::new(),
             }],
@@ -2459,6 +2495,70 @@ mod tests {
             !recorded.to_pretty().contains("\"p50_micros\": 7777"),
             "the run's own figure was written"
         );
+    }
+
+    /// **Every committed peak band names the runs it was read from**
+    /// (MS-19): each of the three bars carries its `peak_runs`, three
+    /// dispatches at one revision, and each corpus a band read from them or
+    /// the owner's reason for holding it to none.
+    #[test]
+    fn every_committed_peak_band_names_the_runs_it_was_read_from() {
+        for path in [
+            crate::corpus::RATCHET_PATH,
+            crate::corpus::RATCHET_FONTS_PATH,
+            crate::corpus::RATCHET_BUNDLED_PATH,
+        ] {
+            let text = std::fs::read_to_string(crate::repo_root().join(path))
+                .unwrap_or_else(|e| panic!("{path}: {e}"));
+            let bar = parse(&text).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let runs = bar
+                .peak_runs
+                .unwrap_or_else(|| panic!("{path} names no runs its peak bands were read from"));
+            assert_eq!(runs.dispatches.len(), PEAK_RUNS, "{path}");
+            assert!(!runs.revision.trim().is_empty(), "{path}");
+            for corpus in &bar.bars {
+                assert!(
+                    corpus.peak.is_some() || corpus.peak_unheld.is_some(),
+                    "{path}: `{}` has neither a peak band nor the owner's reason for none",
+                    corpus.name
+                );
+            }
+        }
+    }
+
+    /// **A peak the owner holds to nothing is printed and never compared**:
+    /// a run far above any band of an unheld corpus is no regression, and its
+    /// peak and the reason are said; a reason of nothing is refused.
+    #[test]
+    fn an_unheld_peak_is_printed_and_held_to_nothing() {
+        let mut committed = bar("verapdf", 10, 10, 0);
+        committed.bars[0].peak_unheld = Some("spread between runs (MS-27)".to_string());
+        let mut now = run("verapdf", 10, 0, 0);
+        for file in &mut now.corpora[0].files {
+            file.peak = Some(1 << 40);
+        }
+        let outcome = compare(&committed, &now, true);
+        assert!(
+            !outcome
+                .regressions
+                .iter()
+                .any(|line| line.contains("peak resident set")),
+            "{:?}",
+            outcome.regressions
+        );
+        assert!(
+            outcome.notes.iter().any(|line| line.contains(
+                "verapdf: the largest peak resident set is 1099511627776 bytes over 10 children, \
+                 held to no band by the owner's word: spread between runs (MS-27)"
+            )),
+            "{:?}",
+            outcome.notes
+        );
+        let text = r#"{"schema": 2, "complete": true, "settings": {"fonts": "none"},
+            "corpora": [{"name": "verapdf", "total": 1, "passed": 1, "degraded": 0,
+              "strict_eligible": 1, "strict_clean": 1, "peak": {"unheld": " "}}]}"#;
+        let refused = parse(text).expect_err("an unheld peak with no reason");
+        assert!(refused.contains("unheld with no reason"), "{refused}");
     }
 
     /// The three bars committed today go on reading as bars: a time block

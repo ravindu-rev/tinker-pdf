@@ -373,9 +373,15 @@ runs, the hosts they landed on and their revision in the bar's `peak_runs`.
 It refuses, each by name, runs under other settings than the bar's, runs that
 disagree on a corpus's children or report fewer than its band does, and maxima
 that spread by `PEAK_TOLERANCE_PERCENT` or more; such a spread or denominator
-is the owner's to judge (H-78), never banded wider. `corpus-run --record`
-writes no peak from its own run and carries each committed band and
-`peak_runs` over unchanged, as it does the time figures.
+is the owner's to judge (H-78), never banded wider. A corpus the owner holds
+to no band is written with the reason in its place,
+`--unheld CORPUS=REASON` giving it, and `--check` prints that corpus's
+largest peak beside the reason and compares it with nothing, as
+`peak_memory.tsv` holds a case it names `unheld`. Every band in the three
+bars is the hosted runner's, read from the three dispatches each bar's
+`peak_runs` names. `corpus-run --record` writes no peak from its own run and
+carries each committed band, each unheld reason and `peak_runs` over
+unchanged, as it does the time figures.
 
 **Where a peak is reached.** On Linux each child writes the kernel's
 high-water mark as each phase of its work ends — `open`, `scan`, `render`,

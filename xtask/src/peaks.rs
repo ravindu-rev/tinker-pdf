@@ -226,6 +226,19 @@ pub fn record(
     revision: &str,
     runs: &[(String, String)],
 ) -> Result<(String, Vec<String>), String> {
+    record_unheld(bar, revision, runs, &BTreeMap::new())
+}
+
+/// [`record`], with each corpus `unheld` names held to no band by the
+/// owner's word (H-78): its maxima are read and said, and its `peak` is
+/// written `{"unheld": "<reason>"}` in place of a band, whatever they spread
+/// by. A name the bar has no corpus of is refused.
+pub fn record_unheld(
+    bar: &str,
+    revision: &str,
+    runs: &[(String, String)],
+    unheld: &BTreeMap<String, String>,
+) -> Result<(String, Vec<String>), String> {
     let committed = crate::ratchet::parse(bar).map_err(|e| format!("the bar: {e}"))?;
     let Json::Object(mut top) = json::parse(bar)? else {
         return Err("the bar is not an object".to_string());
@@ -284,6 +297,13 @@ pub fn record(
         }
     }
 
+    for name in unheld.keys() {
+        if committed.bars.iter().all(|corpus| &corpus.name != name) {
+            refusals.push(format!(
+                "`--unheld` names {name}, which the bar has no corpus of"
+            ));
+        }
+    }
     let mut bands: BTreeMap<String, PeakBar> = BTreeMap::new();
     let mut lines = Vec::new();
     for corpus in &committed.bars {
@@ -300,6 +320,17 @@ pub fn record(
             }
         }
         if maxima.is_empty() || maxima.len() != dispatched.len() {
+            continue;
+        }
+        if let Some(reason) = unheld.get(name) {
+            let each: Vec<String> = maxima
+                .iter()
+                .map(|(id, largest)| format!("{} in run {id} ({})", largest.bytes, largest.file))
+                .collect();
+            lines.push(format!(
+                "  {name}: held to no band by the owner's word ({reason}); maxima {}",
+                each.join(", ")
+            ));
             continue;
         }
         let children = maxima[0].1.children;
@@ -388,11 +419,18 @@ pub fn record(
             let Json::Object(fields) = corpus else {
                 continue;
             };
-            let band = fields
+            let name = fields
                 .get("name")
                 .and_then(Json::as_str)
-                .and_then(|name| bands.get(name))
-                .copied();
+                .map(str::to_string);
+            if let Some(reason) = name.as_ref().and_then(|name| unheld.get(name)) {
+                fields.insert(
+                    "peak".to_string(),
+                    Json::object([("unheld", Json::string(reason))]),
+                );
+                continue;
+            }
+            let band = name.as_ref().and_then(|name| bands.get(name)).copied();
             if let Some(band) = band {
                 fields.insert(
                     "peak".to_string(),
@@ -425,15 +463,27 @@ pub fn record(
     Ok((text, lines))
 }
 
-/// `cargo xtask corpus-peaks --record BAR --revision REV RUN=REPORT...`.
+/// `cargo xtask corpus-peaks --record BAR --revision REV
+/// [--unheld CORPUS=REASON]... RUN=REPORT...`.
 fn record_from(args: &[String]) -> Result<(), String> {
     let mut bar = None;
     let mut revision = None;
     let mut runs = Vec::new();
+    let mut unheld = BTreeMap::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--record" => bar = Some(args.next().ok_or("`--record` takes the bar to write")?),
+            "--unheld" => {
+                let held = args
+                    .next()
+                    .ok_or("`--unheld` takes CORPUS=REASON, the owner's word")?;
+                let (corpus, reason) = held
+                    .split_once('=')
+                    .filter(|(corpus, reason)| !corpus.is_empty() && !reason.trim().is_empty())
+                    .ok_or_else(|| format!("`{held}` is not CORPUS=REASON"))?;
+                unheld.insert(corpus.to_string(), reason.to_string());
+            }
             "--revision" => {
                 revision = Some(
                     args.next()
@@ -453,7 +503,8 @@ fn record_from(args: &[String]) -> Result<(), String> {
     let bar = bar.ok_or("`--record` takes the bar to write")?;
     let revision = revision.ok_or("`--record` takes `--revision`, the revision the runs ran at")?;
     let text = std::fs::read_to_string(bar).map_err(|e| format!("{bar}: {e}"))?;
-    let (written, lines) = record(&text, revision, &runs).map_err(|e| format!("{bar}: {e}"))?;
+    let (written, lines) =
+        record_unheld(&text, revision, &runs, &unheld).map_err(|e| format!("{bar}: {e}"))?;
     std::fs::write(bar, written).map_err(|e| format!("{bar}: {e}"))?;
     let ids: Vec<&str> = runs.iter().map(|(id, _)| id.as_str()).collect();
     println!(
@@ -699,6 +750,39 @@ mod tests {
         .expect_err("fewer children than the band");
         assert!(
             refused.contains("pdfjs: the runs' maxima are over 2 children and its band over 3"),
+            "{refused}"
+        );
+    }
+
+    /// **A corpus the owner holds to nothing is written with the reason**
+    /// (H-78): a spread that would be refused is read and said, the corpus's
+    /// `peak` names the reason in place of a band, and a name the bar has
+    /// no corpus of is refused.
+    #[test]
+    fn an_unheld_corpus_is_written_with_its_reason_and_no_band() {
+        let runs = three([
+            dispatch(72, &[1000]),
+            dispatch(72, &[1100]),
+            dispatch(72, &[1000]),
+        ]);
+        let unheld = BTreeMap::from([("pdfjs".to_string(), "spread (MS-27)".to_string())]);
+        let (written, lines) =
+            record_unheld(&bar(1), "0123abcd", &runs, &unheld).expect("held to no band");
+        let read = crate::ratchet::parse(&written).expect("the bar reads back");
+        assert_eq!(read.bars[0].peak, None);
+        assert_eq!(read.bars[0].peak_unheld.as_deref(), Some("spread (MS-27)"));
+        assert_eq!(
+            lines,
+            [
+                "  pdfjs: held to no band by the owner's word (spread (MS-27)); \
+              maxima 1000 in run 100 (0.pdf), 1100 in run 101 (0.pdf), 1000 in run 102 (0.pdf)"
+            ]
+        );
+        let elsewhere = BTreeMap::from([("qpdf".to_string(), "a reason".to_string())]);
+        let refused =
+            record_unheld(&bar(1), "0123abcd", &runs, &elsewhere).expect_err("no such corpus");
+        assert!(
+            refused.contains("`--unheld` names qpdf, which the bar has no corpus of"),
             "{refused}"
         );
     }

@@ -237,7 +237,7 @@
       },
       "passed": 974,
       "peak": {
-        "bytes": 924184576,
+        "bytes": 924418048,
         "files": 974
       },
       "strict_clean": 841,
@@ -284,8 +284,7 @@
       },
       "passed": 2907,
       "peak": {
-        "bytes": 55377920,
-        "files": 2907
+        "unheld": "its three runs' maxima spread by 8.8 % (H-78, MS-27)"
       },
       "strict_clean": 2891,
       "strict_eligible": 2891,
@@ -330,7 +329,7 @@
       },
       "passed": 631,
       "peak": {
-        "bytes": 226009088,
+        "bytes": 229236736,
         "files": 637
       },
       "strict_clean": 487,
@@ -373,8 +372,7 @@
       },
       "passed": 7,
       "peak": {
-        "bytes": 15114240,
-        "files": 7
+        "unheld": "its three runs' maxima spread by 2.7 % (H-78, MS-27)"
       },
       "strict_clean": 6,
       "strict_eligible": 6,
@@ -422,7 +420,7 @@
       },
       "passed": 997,
       "peak": {
-        "bytes": 511832064,
+        "bytes": 563470336,
         "files": 1000
       },
       "strict_clean": 899,
@@ -438,6 +436,23 @@
   ],
   "limits": [],
   "note": "Pass rate per corpus. `passed` means a bitmap came back for every page without crashing or timing out (ruling 2) — a placeholder counts. `degraded` is the second axis: files that rendered with something reported. Measured WITHOUT font faces: this engine bundles none, so `degraded` here is dominated by documents that embed no font and therefore draw no text. It is a fact about this build's font policy as much as about the engine. Re-measure with --fonts synthetic to see the other number. `strict_eligible` and `strict_clean` are ruling 13's third axis, and they are about the *writer*: every file this engine read cleanly is rewritten in memory and the rewrite is validated against ISO 32000 read strictly. Only the structural tier counts — the header, the cross-reference sections, the offsets, the stream extents, the trailer — because a rewrite copies the page tree, the annotations and the resource dictionaries from its source, and a defect there belongs to the source. A file this engine could not read cleanly is not eligible and is counted as neither. `metamorphic` is the fourth axis (roadmap step 7): relations that must hold between two renders of one file, which need no ground truth. `rotate` turns the page a quarter and requires the transposition; `crop` moves the page box and requires the sub-rectangle of the full render, exactly; `dpi` renders at twice the scale, box-filters down and requires agreement. Each records `compared` beside `held`, because a relation that declines the hard files is not a relation that held — and `rotate` and `crop` are asked only of files this engine read cleanly, since a rewrite of a repaired document compares two repairs. What none of them catches is a defect that commutes with the transformation: a colour converted wrongly is converted equally wrongly at both resolutions and both rotations, and every row stays green. Compared by integer cross-multiplication, never as floats: passed_now * total_before >= passed_before * total_now.",
+  "peak_runs": {
+    "dispatches": [
+      {
+        "host": "AMD EPYC 9V74 80-Core Processor, 4 logical CPUs",
+        "id": "42224005013"
+      },
+      {
+        "host": "AMD EPYC 9V45 96-Core Processor, 4 logical CPUs",
+        "id": "42224010171"
+      },
+      {
+        "host": "AMD EPYC 9V45 96-Core Processor, 4 logical CPUs",
+        "id": "42224015226"
+      }
+    ],
+    "revision": "fa2d1b8b87f3a12186b3b937894501b5c7c14328"
+  },
   "schema": 2,
   "settings": {
     "dpi": 72,
