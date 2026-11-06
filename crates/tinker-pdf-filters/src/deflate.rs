@@ -38,6 +38,85 @@ const MIN_MATCH: usize = 3;
 const MAX_CHAIN: usize = 128;
 /// Buckets in the match-finder's hash table.
 const HASH_SIZE: usize = 1 << 15;
+/// A table entry that names no position. No offset reaches it: offsets stay
+/// below [`OFFSET_LIMIT`].
+const EMPTY: u32 = u32::MAX;
+/// The offset no position is held at: one about to reach it moves the base.
+const OFFSET_LIMIT: usize = 1 << 31;
+
+/// The match finder's tables: `head`, the newest position of each hash
+/// bucket, and the ring, the position before each one in its bucket, at slot
+/// `position mod WINDOW`. Both have a fixed length, so the finder's scratch is
+/// the same whatever the input's length.
+///
+/// A slot is overwritten only by the position a whole window later, and a
+/// walk stops at the first candidate further back than the window, so every
+/// slot a walk reads holds the predecessor of the candidate it reached: the
+/// ring visits the candidates a table of one entry an input byte visited, in
+/// the same order.
+///
+/// A position is held as a `u32` offset from `base`. Before an offset would
+/// reach [`OFFSET_LIMIT`], the base moves forward by that less one window:
+/// every entry has the move subtracted, and one it takes below zero, older
+/// than the window and so beyond any walk, becomes [`EMPTY`]. An input of any
+/// length never wraps a position (`docs/design/performance.md`, P-04).
+struct Finder {
+    head: Vec<u32>,
+    ring: Vec<u32>,
+    base: usize,
+}
+
+impl Finder {
+    fn new() -> Finder {
+        Finder {
+            head: vec![EMPTY; HASH_SIZE],
+            ring: vec![EMPTY; WINDOW],
+            base: 0,
+        }
+    }
+
+    /// The position `offset` names, unless it names none.
+    fn position(&self, offset: u32) -> Option<usize> {
+        (offset != EMPTY).then(|| self.base + offset as usize)
+    }
+
+    /// The newest position in `bucket`.
+    fn first(&self, bucket: usize) -> Option<usize> {
+        self.position(self.head[bucket])
+    }
+
+    /// The position before `position` in its bucket.
+    fn next(&self, position: usize) -> Option<usize> {
+        self.position(self.ring[position % WINDOW])
+    }
+
+    /// Enters `position`, which hashed to `bucket`, at the front of its chain.
+    fn insert(&mut self, bucket: usize, position: usize) {
+        if position - self.base >= OFFSET_LIMIT {
+            self.move_base();
+        }
+        self.ring[position % WINDOW] = self.head[bucket];
+        self.head[bucket] = (position - self.base) as u32;
+    }
+
+    /// Moves the base forward by [`OFFSET_LIMIT`] less one window.
+    fn move_base(&mut self) {
+        let step = (OFFSET_LIMIT - WINDOW) as u32;
+        for entry in self.head.iter_mut().chain(self.ring.iter_mut()) {
+            *entry = match *entry {
+                offset if offset == EMPTY || offset < step => EMPTY,
+                offset => offset - step,
+            };
+        }
+        self.base += step as usize;
+    }
+
+    /// The bytes the tables hold.
+    #[cfg(test)]
+    fn scratch(&self) -> usize {
+        (self.head.capacity() + self.ring.capacity()) * core::mem::size_of::<u32>()
+    }
+}
 
 /// Writes bits least-significant-first, as deflate requires.
 struct BitWriter {
@@ -269,11 +348,10 @@ fn deflate_fixed(input: &[u8]) -> Vec<u8> {
     w.write(1, 1);
     w.write(0b01, 2);
 
-    // head[h] is the most recent position hashing to h; prev[i] is the
-    // position before i that hashed the same. Together they are a chain
-    // ordered nearest-first.
-    let mut head = vec![usize::MAX; HASH_SIZE];
-    let mut prev = vec![usize::MAX; input.len()];
+    // Each bucket's positions, a chain ordered nearest-first.
+    let mut finder = Finder::new();
+    #[cfg(test)]
+    tests::note_scratch(&finder);
 
     let mut at = 0usize;
     while at < input.len() {
@@ -281,11 +359,11 @@ fn deflate_fixed(input: &[u8]) -> Vec<u8> {
 
         if at + MIN_MATCH <= input.len() {
             let bucket = hash3(input, at);
-            let mut candidate = head[bucket];
+            let mut next = finder.first(bucket);
             let limit = at.saturating_sub(WINDOW);
             let mut tries = 0usize;
 
-            while candidate != usize::MAX && candidate >= limit && tries < MAX_CHAIN {
+            while let Some(candidate) = next.filter(|&c| c >= limit && tries < MAX_CHAIN) {
                 tries += 1;
                 let max_len = MAX_MATCH.min(input.len() - at);
                 let mut len = 0usize;
@@ -300,7 +378,7 @@ fn deflate_fixed(input: &[u8]) -> Vec<u8> {
                         break;
                     }
                 }
-                candidate = prev[candidate];
+                next = finder.next(candidate);
             }
         }
 
@@ -324,9 +402,7 @@ fn deflate_fixed(input: &[u8]) -> Vec<u8> {
             for i in 0..best_len {
                 let pos = at + i;
                 if pos + MIN_MATCH <= input.len() {
-                    let bucket = hash3(input, pos);
-                    prev[pos] = head[bucket];
-                    head[bucket] = pos;
+                    finder.insert(hash3(input, pos), pos);
                 }
             }
             at += best_len;
@@ -334,9 +410,7 @@ fn deflate_fixed(input: &[u8]) -> Vec<u8> {
             let (code, bits) = fixed_literal_code(u16::from(input[at]));
             w.write_code(code, bits);
             if at + MIN_MATCH <= input.len() {
-                let bucket = hash3(input, at);
-                prev[at] = head[bucket];
-                head[bucket] = at;
+                finder.insert(hash3(input, at), at);
             }
             at += 1;
         }
@@ -352,6 +426,17 @@ fn deflate_fixed(input: &[u8]) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::{flate_decode, Limits};
+    use std::cell::Cell;
+
+    thread_local! {
+        /// The bytes the last finder this thread built holds.
+        static SCRATCH: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Notes what `finder` holds, for the test that reads it.
+    pub(super) fn note_scratch(finder: &Finder) {
+        SCRATCH.with(|scratch| scratch.set(finder.scratch()));
+    }
 
     fn round_trip(input: &[u8]) {
         let compressed = zlib_compress(input);
@@ -453,5 +538,152 @@ mod tests {
     fn long_input_round_trips() {
         let input: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
         round_trip(&input);
+    }
+
+    /// The encoder as it was before the ring, its chain one entry an input
+    /// byte, kept to hold the ring to the bytes it gave.
+    fn deflate_fixed_by_vector(input: &[u8]) -> Vec<u8> {
+        let mut w = BitWriter::new();
+        w.write(1, 1);
+        w.write(0b01, 2);
+        let mut head = vec![usize::MAX; HASH_SIZE];
+        let mut prev = vec![usize::MAX; input.len()];
+        let mut at = 0usize;
+        while at < input.len() {
+            let (mut best_len, mut best_dist) = (0usize, 0usize);
+            if at + MIN_MATCH <= input.len() {
+                let bucket = hash3(input, at);
+                let mut candidate = head[bucket];
+                let limit = at.saturating_sub(WINDOW);
+                let mut tries = 0usize;
+                while candidate != usize::MAX && candidate >= limit && tries < MAX_CHAIN {
+                    tries += 1;
+                    let max_len = MAX_MATCH.min(input.len() - at);
+                    let mut len = 0usize;
+                    while len < max_len && input[candidate + len] == input[at + len] {
+                        len += 1;
+                    }
+                    if len > best_len {
+                        best_len = len;
+                        best_dist = at - candidate;
+                        if len == max_len {
+                            break;
+                        }
+                    }
+                    candidate = prev[candidate];
+                }
+            }
+            if best_len >= MIN_MATCH {
+                let (sym, extra_bits, base) = length_symbol(best_len);
+                let (code, bits) = fixed_literal_code(sym);
+                w.write_code(code, bits);
+                if extra_bits > 0 {
+                    w.write((best_len - base) as u32, extra_bits);
+                }
+                let (dsym, dextra, dbase) = distance_symbol(best_dist);
+                w.write_code(dsym, 5);
+                if dextra > 0 {
+                    w.write((best_dist - dbase) as u32, dextra);
+                }
+                for i in 0..best_len {
+                    let pos = at + i;
+                    if pos + MIN_MATCH <= input.len() {
+                        let bucket = hash3(input, pos);
+                        prev[pos] = head[bucket];
+                        head[bucket] = pos;
+                    }
+                }
+                at += best_len;
+            } else {
+                let (code, bits) = fixed_literal_code(u16::from(input[at]));
+                w.write_code(code, bits);
+                if at + MIN_MATCH <= input.len() {
+                    let bucket = hash3(input, at);
+                    prev[at] = head[bucket];
+                    head[bucket] = at;
+                }
+                at += 1;
+            }
+        }
+        let (code, bits) = fixed_literal_code(256);
+        w.write_code(code, bits);
+        w.finish()
+    }
+
+    /// `len` deterministic pseudo-random bytes.
+    fn noise(len: usize, mut state: u64) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect()
+    }
+
+    /// The ring visits the candidates the vector visited, in its order, so the
+    /// compressed bytes are the same: on noise, on repetition, and on blocks a
+    /// window long, one less and one more, repeated to four windows, whose
+    /// matches sit at the window's edge and just past it.
+    #[test]
+    fn the_ring_finds_what_the_vector_found() {
+        let mut inputs = vec![
+            noise(3 * WINDOW, 0x2545_F491_4F6C_DD1D),
+            b"the quick brown fox ".repeat(10_000),
+        ];
+        for block in [WINDOW - 1, WINDOW, WINDOW + 1] {
+            inputs.push(noise(block, block as u64).repeat(4 * WINDOW / block + 1));
+        }
+        for input in &inputs {
+            let ring = deflate_fixed(input);
+            assert_eq!(
+                ring,
+                deflate_fixed_by_vector(input),
+                "{} bytes compressed differently",
+                input.len()
+            );
+            round_trip(input);
+        }
+    }
+
+    /// The finder's tables are the same size for 64 KiB of input and for
+    /// 64 MiB: two tables of one window's entries, and nothing an input byte.
+    #[test]
+    fn the_match_finder_keeps_a_fixed_ring_whatever_the_input_length() {
+        let mut held = Vec::new();
+        for len in [64 << 10, 64 << 20] {
+            let input: Vec<u8> = (0..len).map(|i| (i * 7 + i / 251) as u8).collect();
+            let _ = deflate(&input);
+            held.push(SCRATCH.with(Cell::get));
+        }
+        assert_eq!(held[0], held[1], "the scratch grew with the input");
+        assert_eq!(held[0], 2 * WINDOW * 4, "two tables of a window's u32s");
+    }
+
+    /// A base that moves keeps every position within the window and empties
+    /// what is older: positions entered either side of the offset limit read
+    /// back as they were entered, and the oldest is gone.
+    #[test]
+    fn a_moved_base_keeps_the_window_and_empties_what_is_older() {
+        let mut finder = Finder::new();
+        let start = OFFSET_LIMIT - 8;
+        let old = start - WINDOW;
+        finder.insert(0, old);
+        for position in start..start + 16 {
+            finder.insert(0, position);
+        }
+        let mut seen = Vec::new();
+        let mut next = finder.first(0);
+        while let Some(position) = next {
+            seen.push(position);
+            next = finder.next(position);
+        }
+        let want: Vec<usize> = (start..start + 16).rev().collect();
+        assert_eq!(
+            seen, want,
+            "the window's positions, newest first, and not the old one"
+        );
+        assert_eq!(finder.base, OFFSET_LIMIT - WINDOW, "the base moved once");
     }
 }

@@ -19,7 +19,9 @@ fixed-Huffman and dynamic-Huffman blocks (RFC 1951), the zlib wrapper
 is absent. The encoder exists too: `deflate.rs` is a hash-chain LZ77 match
 finder feeding fixed Huffman codes, with a stored block whenever that is
 smaller — it is what compresses every stream the writer emits, object streams
-included. LZWDecode (7.4.4) covers 9-to-12-bit variable codes, Clear/EOD and
+included. The finder's chains live in two tables of one window's entries, a
+bucket's newest position and a ring of each position's predecessor, so what
+it holds is the same 256 KiB whatever the input's length. LZWDecode (7.4.4) covers 9-to-12-bit variable codes, Clear/EOD and
 both `/EarlyChange` values. ASCIIHexDecode (7.4.2), ASCII85Decode (7.4.3) and
 RunLengthDecode (7.4.5) round out the set, and the Table 10 predictors
 (7.4.4.4) implement `/Predictor 2` (TIFF horizontal) and the five PNG row
