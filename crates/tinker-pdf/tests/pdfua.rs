@@ -95,6 +95,121 @@ fn false_alarm_line(path: &Path, findings: &[ConformanceFinding]) -> String {
     format!("{} — {}", path.display(), findings.join("; "))
 }
 
+/// What the font a `GlyphWidthInconsistent` finding names states about a
+/// code's width, appended to its false alarm: the keys a simple font takes
+/// a width from, the `/Widths` entry the code falls on, the descriptor's
+/// `/MissingWidth`, and a Type 0 font's descendant's `/W` and `/DW` (MS-14).
+/// A false alarm's fields say only that the dictionary and the program
+/// disagree; these say which width the dictionary stated.
+fn width_sources(doc: &Document, findings: &[ConformanceFinding]) -> String {
+    let cos = doc.cos();
+    let mut out = String::new();
+    for finding in findings {
+        let (FindingKind::GlyphWidthInconsistent { code, .. }, Some(object)) =
+            (&finding.kind, finding.object)
+        else {
+            continue;
+        };
+        let Ok(font) = cos.get(object) else {
+            continue;
+        };
+        let Some(dict) = font.as_dict() else {
+            continue;
+        };
+        let mut said = vec![format!("font {object}")];
+        for key in ["Subtype", "BaseFont", "FirstChar", "LastChar", "Encoding"] {
+            if let Some(value) = entry(cos, dict, key) {
+                said.push(format!("/{key} {}", shown(cos, &value, 0)));
+            }
+        }
+        let first = entry(cos, dict, "FirstChar").and_then(|v| v.as_int());
+        if let (Some(first), Some(widths)) = (first, entry(cos, dict, "Widths")) {
+            if let Some(widths) = widths.as_array() {
+                let at = i64::from(*code) - first;
+                let width = usize::try_from(at)
+                    .ok()
+                    .and_then(|at| widths.get(at))
+                    .map_or_else(|| "none".to_string(), |w| shown(cos, w, 0));
+                said.push(format!("/Widths has {} entries, [{at}] {width}", widths.len()));
+            }
+        }
+        if let Some(descriptor) = entry(cos, dict, "FontDescriptor") {
+            if let Some(missing) = descriptor
+                .as_dict()
+                .and_then(|descriptor| entry(cos, descriptor, "MissingWidth"))
+            {
+                said.push(format!("/MissingWidth {}", shown(cos, &missing, 0)));
+            }
+        }
+        if let Some(descendants) = entry(cos, dict, "DescendantFonts") {
+            if let Some(Some(descendant)) = descendants.as_array().map(|all| all.first()) {
+                let descendant = resolved(cos, descendant);
+                if let Some(descendant) = descendant.as_dict() {
+                    for key in ["Subtype", "DW", "W", "CIDToGIDMap"] {
+                        if let Some(value) = entry(cos, descendant, key) {
+                            said.push(format!("descendant /{key} {}", shown(cos, &value, 0)));
+                        }
+                    }
+                }
+            }
+        }
+        out.push_str(&format!(" [code {code}: {}]", said.join(", ")));
+    }
+    out
+}
+
+/// `key`'s value in `dict`, followed through one reference.
+fn entry(
+    cos: &tinker_pdf_cos::CosDocument,
+    dict: &tinker_pdf_cos::Dict,
+    key: &str,
+) -> Option<tinker_pdf_cos::Object> {
+    dict.iter()
+        .find(|(name, _)| cos.name_bytes(*name).as_deref() == Some(key.as_bytes()))
+        .map(|(_, value)| resolved(cos, value))
+}
+
+/// An object, or what a reference names.
+fn resolved(cos: &tinker_pdf_cos::CosDocument, value: &tinker_pdf_cos::Object) -> tinker_pdf_cos::Object {
+    match value {
+        tinker_pdf_cos::Object::Ref(target) => cos
+            .get(*target)
+            .map(|object| (*object).clone())
+            .unwrap_or(tinker_pdf_cos::Object::Null),
+        other => other.clone(),
+    }
+}
+
+/// An object as short text: names spelled, arrays cut after twenty-four
+/// entries, a dictionary or a stream named by its kind.
+fn shown(cos: &tinker_pdf_cos::CosDocument, value: &tinker_pdf_cos::Object, depth: u32) -> String {
+    use tinker_pdf_cos::Object;
+    match value {
+        Object::Null => "null".to_string(),
+        Object::Bool(b) => b.to_string(),
+        Object::Int(i) => i.to_string(),
+        Object::Real(r) => r.to_string(),
+        Object::Name(name) => format!(
+            "/{}",
+            String::from_utf8_lossy(&cos.name_bytes(*name).unwrap_or_default())
+        ),
+        Object::String(_) => "(string)".to_string(),
+        Object::Array(items) if depth < 2 => {
+            let shown_items: Vec<String> = items
+                .iter()
+                .take(24)
+                .map(|item| shown(cos, item, depth + 1))
+                .collect();
+            let more = if items.len() > 24 { " ..." } else { "" };
+            format!("[{}{more}]", shown_items.join(" "))
+        }
+        Object::Array(items) => format!("[{} entries]", items.len()),
+        Object::Dict(_) => "<<dictionary>>".to_string(),
+        Object::Stream(_) => "stream".to_string(),
+        Object::Ref(target) => format!("{target} R"),
+    }
+}
+
 /// Every finding kind the validator reported on one opened document, in the
 /// order it reported them, each once.
 fn findings_of(doc: &Document) -> Vec<String> {
@@ -231,7 +346,11 @@ fn the_implemented_clauses_catch_failures_and_never_conforming_files() {
         if *expected {
             conforming += 1;
             if !fired.is_empty() {
-                false_alarms.push(false_alarm_line(path, &verdict.findings));
+                false_alarms.push(format!(
+                    "{}{}",
+                    false_alarm_line(path, &verdict.findings),
+                    width_sources(&doc, &verdict.findings)
+                ));
             }
             continue;
         }

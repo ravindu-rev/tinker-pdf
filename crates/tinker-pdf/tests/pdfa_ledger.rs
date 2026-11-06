@@ -541,6 +541,10 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
     let mut bar = Tally::default();
     let mut false_positives: Vec<(String, Vec<String>)> = Vec::new();
     let mut false_negatives: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // What this build reported on each failing file it caught, so that a row
+    // the run finds stale is judged on why its files are caught now: by the
+    // rule it was written for, or by another finding.
+    let mut caught: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut unopenable = 0usize;
     let mut annotated = 0usize;
 
@@ -604,7 +608,13 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
                     verdict.findings.iter().map(ToString::to_string).collect(),
                 ));
             }
-            (false, false) => bar.fail_agreed += 1,
+            (false, false) => {
+                bar.fail_agreed += 1;
+                caught.insert(
+                    relative.clone(),
+                    verdict.findings.iter().map(ToString::to_string).collect(),
+                );
+            }
             (false, true) => {
                 bar.fail_disagreed += 1;
                 // Keyed by *subclause*, because one reason covering a whole
@@ -749,6 +759,17 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
         uncovered.len(),
         stale.len()
     );
+    // A stale row is judged on why its files no longer disagree, so each
+    // failing file under it is printed with what this build reported on it.
+    for subject in &stale {
+        println!("  stale: {subject}");
+        for (path, findings) in caught
+            .iter()
+            .filter(|(path, _)| path.starts_with(subject.as_str()))
+        {
+            println!("    {path}: {}", findings.join("; "));
+        }
+    }
     assert!(
         uncovered.is_empty(),
         "disagreements with no ledger row — every one of these needs a class \

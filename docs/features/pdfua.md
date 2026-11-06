@@ -158,8 +158,11 @@ per test, one finding of one kind under one clause.
 `crates/tinker-pdf/tests/pdfua.rs` is the census against the veraPDF corpus's
 annotated PDF/UA fixtures, through the facade: caught, abstained, and
 **false alarms, which must be zero** — the hard assertion — each printed
-beside its path with every finding's clause, object and kind with its fields,
-with what each abstaining verdict named printed beside the counts, and the
+beside its path with every finding's clause, object and kind with its fields
+(and, for a font-metrics finding, the width sources its font states: the
+keys a simple font takes a width from, the `/Widths` entry the code falls on,
+the descriptor's `/MissingWidth`, a Type 0 font's descendant's `/DW` and
+`/W`), with what each abstaining verdict named printed beside the counts, and the
 caught count held
 to a floor recorded from a run. It runs nightly in `corpus.yml`, finds
 `corpus/files` without `TINKER_CORPUS`, and honours `TINKER_CORPUS_REQUIRED`.

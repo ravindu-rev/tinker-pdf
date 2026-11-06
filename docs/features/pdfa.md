@@ -210,7 +210,8 @@ does not run reports nothing, so a `staged` row covers a failing file nothing
 caught and never a conforming file this build reported; only a `bug` or a
 `reading` row covers that, and a `staged` row with no uncaught failure under
 it is stale. Each false positive prints beside its path with every finding's
-clause, object and kind.
+clause, object and kind, and each stale row prints the failing files under it
+with what this build reported on each, the evidence a stale row is judged on.
 
 One `pass` fixture is a recorded **reading**: ISO 19005-1 6.1.2 says the
 header consists of `%PDF-1.n`, the fixture carries `%PDF-2.0`, and this build
