@@ -82,9 +82,22 @@ def details(text, repo):
         follows = loc and not ERROR.search(text, m.end(), loc.start())
         out.append(m.group(1) + (f' ({loc.group(1)})' if follows else ''))
     for m in list(FMT_DIFF.finditer(text))[:SHOWN]:
-        path = os.path.relpath(m.group(1), repo) if os.path.isabs(m.group(1)) else m.group(1)
-        out.append(f'fmt would change {path} at line {m.group(2) or m.group(3)}')
+        out.append(f'fmt would change {shown(m.group(1), repo)} at line {m.group(2) or m.group(3)}')
     return out
+
+
+def shown(path, repo):
+    """`path` relative to the repository where it is inside it. rustfmt on
+    Windows names files by their extended-length form, `\\\\?\\C:\\...`, which
+    `os.path.relpath` refuses to relate to `C:\\...` as another mount."""
+    if path.startswith('\\\\?\\'):
+        path = path[4:]
+    if not os.path.isabs(path):
+        return path
+    try:
+        return os.path.relpath(path, repo)
+    except ValueError:
+        return path
 
 
 def resolve(argv):
