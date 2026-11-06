@@ -12,7 +12,7 @@ rows. Form JavaScript has its own tier, next.
 
 **Per-subtype annotation payloads** — the measurement
 
-**Exit criterion.** the per-family counts from the census's first nightly run, recorded here and held as floors
+**Exit criterion.** the per-family counts from the census's first local run over the fetched corpora, recorded here and held as floors
 
 **Doc:** — · **Depends on:** MS-13
 

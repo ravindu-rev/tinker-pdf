@@ -116,7 +116,7 @@ is checked for breaks and documented by examples that run.
 | --- | --- | --- | --- | --- | --- |
 | SU-08.1 | build | The object-stream policy on `WriteOptions`: keep each object in the stream it came from, disable, or generate. | `crates/tinker-pdf-cos/src/write.rs`, `crates/tinker-pdf-cos/src/objstm.rs`, `crates/tinker-pdf/tests/determinism.rs` | Each policy held to a fixture: keep preserves each object's stream membership, disable writes none, generate packs every eligible object. | — |
 | SU-08.2 | build | A static-identifier switch for tests, the content-derived `/ID` stated as the default, and a switch for a newline before `endstream`. | `crates/tinker-pdf-cos/src/write.rs`, `crates/tinker-pdf/tests/determinism.rs` | Each switch held to a fixture; with the static switch, writes of two different documents carry the documented constant. | — |
-| SU-08.3 | ci | Reproducible output stated as a guarantee and checked: the same inputs and options written on four targets, the three operating systems and wasm, and the hashes compared. | `.github/workflows/ci.yml`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/determinism.md` | On a CI run on `develop` the four targets' hashes are byte-identical for every determinism fixture under every switch; the guarantee is written in `determinism.md`. | SU-08.1, SU-08.2, MS-11 |
+| SU-08.3 | test | Reproducible output stated as a guarantee and checked: the same inputs and options written on every target and the hashes compared. | `crates/tinker-pdf/tests/determinism.rs`, `docs/features/determinism.md` | The hashes are byte-identical for every determinism fixture under every switch, under `cargo test` on Linux and Windows (CI runs it on every pull request) and under `--target wasm32-wasip1` locally, recorded here; the guarantee is written in `determinism.md`. | SU-08.1, SU-08.2, MS-11 |
 
 ## SU-09 — Version management
 
@@ -175,7 +175,7 @@ is checked for breaks and documented by examples that run.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SU-12.1 | ci | `cargo xtask bindings-coverage`: every public facade item listed against the C ABI and each binding, generated from the facade's public items and each surface's exports, failing on a gap that is neither in `features/bindings.md`'s refusal table nor in an owed list naming the step of this row that closes it. | `xtask/src/coverage.rs` (new), `xtask/src/main.rs`, `docs/features/bindings.md`, `.github/workflows/ci.yml` | The check runs in CI on `develop`; today's gaps are each owed to a step below by name; a facade item added with no projection and no owed or refused entry fails it. | MS-11 |
+| SU-12.1 | ci | `cargo xtask bindings-coverage`: every public facade item listed against the C ABI and each binding, generated from the facade's public items and each surface's exports, failing on a gap that is neither in `features/bindings.md`'s refusal table nor in an owed list naming the step of this row that closes it. | `xtask/src/coverage.rs` (new), `xtask/src/main.rs`, `docs/features/bindings.md` | The check runs in the gates, within `cargo xtask check`; today's gaps are each owed to a step below by name; a facade item added with no projection and no owed or refused entry fails it. | MS-11 |
 | SU-12.2 | design | Add the read half to `docs/design/bindings-write.md`: how read-only items project (iterators, borrowed data, verdicts and their warnings), and the recipient callback public-key opening needs beside SG-09.4's signing, timestamper and entropy callbacks. | `docs/design/bindings-write.md` | The section exists, names the steps below that follow it. | — |
 | SU-12.3 | build | Builder text and fonts on every surface: `PageBuilder::glyphs` and `text_pieces`, `DocumentBuilder::add_cid_font` and `glyph_run`. | `crates/tinker-pdf-ffi/src/graphics.rs`, `crates/tinker-pdf-ffi/include/tinker_pdf.h`, `bindings/dotnet`, `bindings/go`, `bindings/java`, `bindings/ruby`, `bindings/python`, `bindings/js`, `crates/tinker-pdf/examples/write_parity.rs` | Each item answers through the C ABI, .NET, Go, Ruby, Java, Python and JavaScript; a new parity line prints the recorded hash on every surface; the area's owed entries leave the coverage check. | SU-12.1 |
 | SU-12.4 | build | Builder shading and colour on every surface: `PageBuilder::shading`, `add_shading`, `add_shading_pattern`, `add_icc_color_space` with `set_fill_icc`, `set_stroke_icc` and `ImageColorSpace::Icc`, and the CIE writer: `CieSpace`, `add_cie_color_space`, `set_fill_cie`, `set_stroke_cie`, `ImageColorSpace::Cie` and `ImageColorSpace::Lab`. | `crates/tinker-pdf-ffi/src/graphics.rs`, `crates/tinker-pdf-ffi/include/tinker_pdf.h`, `bindings/dotnet`, `bindings/go`, `bindings/java`, `bindings/ruby`, `bindings/python`, `bindings/js`, `crates/tinker-pdf/examples/write_parity.rs` | Each item answers through the C ABI, .NET, Go, Ruby, Java, Python and JavaScript; a new parity line prints the recorded hash on every surface; the area's owed entries leave the coverage check. | SU-12.1 |
@@ -198,20 +198,20 @@ is checked for breaks and documented by examples that run.
 | SU-12.21 | build | Redaction and search on every surface. | `crates/tinker-pdf-ffi/src/docops.rs`, `crates/tinker-pdf-ffi/src/read.rs`, `crates/tinker-pdf-ffi/include/tinker_pdf.h`, `bindings/dotnet`, `bindings/go`, `bindings/java`, `bindings/ruby`, `bindings/python`, `bindings/js`, `crates/tinker-pdf/examples/write_parity.rs` | Each item answers through the C ABI, .NET, Go, Ruby, Java, Python and JavaScript; a new parity line prints the recorded hash on every surface; the area's owed entries leave the coverage check. | SU-12.1, SU-12.2 |
 | SU-12.22 | build | Text structure on every surface: the structured-text writers, reading order and tables, and font listing. | `crates/tinker-pdf-ffi/src/read.rs`, `crates/tinker-pdf-ffi/include/tinker_pdf.h`, `bindings/dotnet`, `bindings/go`, `bindings/java`, `bindings/ruby`, `bindings/python`, `bindings/js`, `crates/tinker-pdf/examples/write_parity.rs` | Each item answers through the C ABI, .NET, Go, Ruby, Java, Python and JavaScript; a new read parity line prints the recorded hash on every surface; the area's owed entries leave the coverage check. | SU-12.1, SU-12.2 |
 | SU-12.23 | build | Rendering pieces and reports on every surface: `render_form` and `render_annotation`, the layer listing, and the subset report. | `crates/tinker-pdf-ffi/src/read.rs`, `crates/tinker-pdf-ffi/include/tinker_pdf.h`, `bindings/dotnet`, `bindings/go`, `bindings/java`, `bindings/ruby`, `bindings/python`, `bindings/js`, `crates/tinker-pdf/examples/write_parity.rs` | Each item answers through the C ABI, .NET, Go, Ruby, Java, Python and JavaScript; a new parity line prints the recorded hash on every surface; the area's owed entries leave the coverage check. | SU-12.1, SU-12.2 |
-| SU-12.24 | ci | Nothing owed: the coverage check and `bindings-parity` green across every surface, the .NET column read from its CI leg, which is H-104's alternative. | `xtask/src/coverage.rs` (new), `xtask/src/parity.rs`, `.github/workflows/ci.yml`, `docs/features/bindings.md` | On a CI run on `develop`, `bindings-coverage` lists every facade item as projected or refused by name with no owed entry, and `bindings-parity --require-all` prints every recorded hash on every surface. | SU-12.3, SU-12.4, SU-12.5, SU-12.6, SU-12.7, SU-12.8, SU-12.9, SU-12.10, SU-12.11, SU-12.12, SU-12.13, SU-12.14, SU-12.15, SU-12.16, SU-12.17, SU-12.18, SU-12.19, SU-12.20, SU-12.21, SU-12.22, SU-12.23 |
+| SU-12.24 | ci | Nothing owed: the coverage check and `bindings-parity` green across every surface, the .NET column read from a local run where the .NET SDK exists (H-104). | `xtask/src/coverage.rs` (new), `xtask/src/parity.rs`, `docs/features/bindings.md` | In a local run, recorded here, `bindings-coverage` lists every facade item as projected or refused by name with no owed entry, and `bindings-parity --require-all` prints every recorded hash on every surface. | SU-12.3, SU-12.4, SU-12.5, SU-12.6, SU-12.7, SU-12.8, SU-12.9, SU-12.10, SU-12.11, SU-12.12, SU-12.13, SU-12.14, SU-12.15, SU-12.16, SU-12.17, SU-12.18, SU-12.19, SU-12.20, SU-12.21, SU-12.22, SU-12.23 |
 
 ## SU-13 — A Swift binding that has been built; Ruby's streaming open
 
 **A Swift binding that has been built; Ruby's streaming open**
 
-**Exit criterion.** Swift built on a macOS CI leg, its smoke run and a parity program printing the recorded hashes, wired into `bindings-parity` and CI, and widened to the header; Ruby's streaming open through a by-pointer vtable on the C ABI with callbacks that are safe off the Ruby thread, or kept refused by name
+**Exit criterion.** Swift built on a Mac (H-103), its smoke run and a parity program printing the recorded hashes, wired into `bindings-parity`, and widened to the header, recorded here; Ruby's streaming open through a by-pointer vtable on the C ABI with callbacks that are safe off the Ruby thread, or kept refused by name
 
 **Doc:** — · **Depends on:** H-103
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SU-13.1 | ci | A macOS CI leg with a Swift toolchain, building the SwiftPM package over the committed header and running its smoke program. | `.github/workflows/ci.yml`, `bindings/swift` | On a CI run on `develop` the package builds and its smoke program runs. | H-103, MS-11 |
-| SU-13.2 | build | Swift widened to the whole header, with a parity program printing the recorded hashes, wired into `bindings-parity`. | `bindings/swift`, `xtask/src/parity.rs`, `.github/workflows/ci.yml` | On the macOS leg Swift calls every function the header exports and prints every recorded hash. | SU-13.1 |
+| SU-13.1 | ci | The SwiftPM package built on a Mac with a Swift toolchain, over the committed header, and its smoke program run. | `bindings/swift` | In a local run on a Mac, recorded here, the package builds and its smoke program runs. | H-103, MS-11 |
+| SU-13.2 | build | Swift widened to the whole header, with a parity program printing the recorded hashes, wired into `bindings-parity`. | `bindings/swift`, `xtask/src/parity.rs` | In a local run on a Mac, recorded here, Swift calls every function the header exports and prints every recorded hash. | SU-13.1 |
 | SU-13.3 | build | Ruby's streaming open through a by-pointer vtable on the C ABI with callbacks safe off the Ruby thread, or kept refused by name. | `crates/tinker-pdf-ffi/src/lib.rs`, `crates/tinker-pdf-ffi/include/tinker_pdf.h`, `bindings/ruby`, `docs/features/bindings.md` | Ruby opens a fixture from a streaming source to the recorded read hash and calls all 221 functions, or the refusal stays in the refusal table with its reason. | — |
 
 ## SU-14 — Binding ergonomics
@@ -233,15 +233,15 @@ is checked for breaks and documented by examples that run.
 
 **More platforms**: a C++ header-only wrapper over the C ABI; Android through JNI and an AAR per ABI; an iOS XCFramework
 
-**Exit criterion.** each prints the recorded hashes in `bindings-parity` on its platform's CI leg
+**Exit criterion.** each prints the recorded hashes in `bindings-parity` in a local run on its platform, recorded here
 
 **Doc:** — · **Depends on:** SU-13
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SU-15.1 | build | A C++ header-only wrapper over the C ABI, with handles that release themselves and status as exceptions, and its parity program. | `bindings/cpp` (new), `xtask/src/parity.rs`, `.github/workflows/ci.yml` | On its CI leg the wrapper prints the recorded hashes in `bindings-parity`. | — |
-| SU-15.2 | build | Android through JNI over the C ABI and an AAR per ABI, with its parity program on an emulator leg. | `bindings/android` (new), `xtask/src/parity.rs`, `.github/workflows/ci.yml` | On its CI leg the AAR's parity program prints the recorded hashes. | — |
-| SU-15.3 | build | An iOS XCFramework with the Swift package over it, and its parity program on a simulator leg. | `bindings/swift`, `xtask/src/parity.rs`, `.github/workflows/ci.yml` | On its CI leg the parity program prints the recorded hashes. | SU-13.2 |
+| SU-15.1 | build | A C++ header-only wrapper over the C ABI, with handles that release themselves and status as exceptions, and its parity program. | `bindings/cpp` (new), `xtask/src/parity.rs` | In a local run, recorded here, the wrapper prints the recorded hashes in `bindings-parity`. | — |
+| SU-15.2 | build | Android through JNI over the C ABI and an AAR per ABI, with its parity program on an emulator. | `bindings/android` (new), `xtask/src/parity.rs` | In a local run on an emulator, recorded here, the AAR's parity program prints the recorded hashes. | — |
+| SU-15.3 | build | An iOS XCFramework with the Swift package over it, and its parity program on a simulator. | `bindings/swift`, `xtask/src/parity.rs` | In a local run on a simulator, recorded here, the parity program prints the recorded hashes. | SU-13.2 |
 
 ## SU-16 — A high-level convenience layer per binding
 
@@ -260,25 +260,25 @@ is checked for breaks and documented by examples that run.
 
 **Packaging, the machine half**: crates.io and docs.rs (a publishing policy for leaf crates), wheels for manylinux and musllinux (x86-64 and aarch64), macOS universal2, Windows x64 and arm64 with type stubs, npm with a SIMD variant and the worker helper, NuGet with every runtime identifier, Maven Central classifiers and an FFM variant, a Go module with prebuilt static libraries, native gems, a SwiftPM XCFramework, recipes for conda, Homebrew, the major distributions, a container image and winget, pkg-config and CMake files, vcpkg and Conan ports, a versioned shared object
 
-**Exit criterion.** a release dry run (`workflow_dispatch` without `publish`) builds and installs every artefact on its platform and renders a page
+**Exit criterion.** a `release.yml` run on `main` builds and installs every artefact on its platform and renders a page
 
 **Doc:** — · **Depends on:** H-113, H-115
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SU-17.1 | ci | crates.io and docs.rs: a publishing policy for leaf crates written, and every crate packaged in publishing order with docs.rs metadata. | `Cargo.toml`, `.github/workflows/ci.yml`, `CONTRIBUTING.md` | `cargo package` succeeds for every crate in publishing order in a CI job on `develop`, and the policy names which leaf crates publish. | H-113, MS-11 |
-| SU-17.2 | ci | Wheels for manylinux and musllinux on x86-64 and aarch64, macOS universal2, and Windows x64 and arm64, with type stubs. | `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `bindings/python/pyproject.toml` | A CI job on `develop` builds each wheel and installs and smoke-runs it on its platform. | H-113, MS-11 |
-| SU-17.3 | ci | npm with a SIMD variant and the worker helper. | `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `bindings/js` | A CI job packs both wasm variants with the worker helper and runs the smoke test from the packed tarball. | SU-14.2, H-113 |
-| SU-17.4 | ci | NuGet with every runtime identifier. | `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `bindings/dotnet` | A CI job packs every runtime identifier and a smoke project restores the package from a local feed on each platform. | H-113 |
-| SU-17.5 | ci | Maven Central classifiers and an FFM variant, a Go module with prebuilt static libraries, and native gems. | `.github/workflows/ci.yml`, `.github/workflows/release.yml`, `bindings/java`, `bindings/go`, `bindings/ruby` | CI jobs build each artefact and a smoke program consumes it on each platform. | H-113, H-115 |
-| SU-17.6 | ci | A SwiftPM XCFramework, recipes for conda, Homebrew and the major distributions, a container image, and winget. | `packaging` (new), `.github/workflows/ci.yml`, `bindings/swift` | Each recipe builds in CI from the source archive and its package runs the smoke test; the container image runs `tpdf` on a fixture. | SU-15.3, H-115 |
-| SU-17.7 | ci | pkg-config and CMake files, and vcpkg and Conan ports, over SU-18.2's versioned shared object. | `packaging` (new), `crates/tinker-pdf-ffi/Cargo.toml`, `.github/workflows/ci.yml` | A C program finds the library through pkg-config, through CMake and through each port in CI. | SU-18.2 |
+| SU-17.1 | ci | crates.io and docs.rs: a publishing policy for leaf crates written, and every crate packaged in publishing order with docs.rs metadata. | `Cargo.toml`, `CONTRIBUTING.md` | `cargo package` succeeds for every crate in publishing order in a local dry run (`cargo xtask release --only crates --local-registry`), recorded here, and the policy names which leaf crates publish. | H-113, MS-11 |
+| SU-17.2 | ci | Wheels for manylinux and musllinux on x86-64 and aarch64, macOS universal2, and Windows x64 and arm64, with type stubs. | `.github/workflows/release.yml`, `bindings/python/pyproject.toml` | The release run on `main` builds each wheel and installs and smoke-runs it on its platform. | H-113, MS-11 |
+| SU-17.3 | ci | npm with a SIMD variant and the worker helper. | `.github/workflows/release.yml`, `bindings/js` | The release run on `main` packs both wasm variants with the worker helper and runs the smoke test from the packed tarball. | SU-14.2, H-113 |
+| SU-17.4 | ci | NuGet with every runtime identifier. | `.github/workflows/release.yml`, `bindings/dotnet` | The release run on `main` packs every runtime identifier and a smoke project restores the package from a local feed on each platform. | H-113 |
+| SU-17.5 | ci | Maven Central classifiers and an FFM variant, a Go module with prebuilt static libraries, and native gems. | `.github/workflows/release.yml`, `bindings/java`, `bindings/go`, `bindings/ruby` | The release run on `main` builds each artefact and a smoke program consumes it on each platform. | H-113, H-115 |
+| SU-17.6 | ci | A SwiftPM XCFramework, recipes for conda, Homebrew and the major distributions, a container image, and winget. | `packaging` (new), `bindings/swift` | Each recipe builds locally from the source archive and its package runs the smoke test; the container image runs `tpdf` on a fixture, recorded here. | SU-15.3, H-115 |
+| SU-17.7 | ci | pkg-config and CMake files, and vcpkg and Conan ports, over SU-18.2's versioned shared object. | `packaging` (new), `crates/tinker-pdf-ffi/Cargo.toml` | A C program finds the library through pkg-config, through CMake and through each port in a local run, recorded here. | SU-18.2 |
 
 ## SU-18 — API stability, checked
 
-**API stability, checked**: a semver diff of the facade in CI, versioned C structures with size fields and a versioned shared object, a deprecation window, an MSRV policy, a changelog, experimental markers
+**API stability, checked**: a semver diff of the facade, run locally, versioned C structures with size fields and a versioned shared object, a deprecation window, an MSRV policy, a changelog, experimental markers
 
-**Exit criterion.** the CI diff fails on an unannounced break; every C structure carries its size; the MSRV built in CI
+**Exit criterion.** the semver diff, run locally, fails on an unannounced break; every C structure carries its size; the MSRV built locally, recorded here
 
 **Doc:** — · **Depends on:** H-114, H-16 (tool allowlist)
 
@@ -286,39 +286,39 @@ is checked for breaks and documented by examples that run.
 | --- | --- | --- | --- | --- | --- |
 | SU-18.1 | doc | A deprecation window, an MSRV policy, a changelog, and experimental markers. | `CONTRIBUTING.md`, `CHANGELOG.md` (new), `crates/tinker-pdf/src/lib.rs` | Each policy is written; experimental items carry the marker and are left out of the diff. | — |
 | SU-18.2 | build | Versioned C structures, each carrying its size as its first field and checked on entry, and a versioned shared object. | `crates/tinker-pdf-ffi/src/lib.rs`, `crates/tinker-pdf-ffi/include/tinker_pdf.h`, `crates/tinker-pdf-ffi/cbindgen.toml`, `crates/tinker-pdf-ffi/tests/layout.rs` | Every `#[repr(C)]` structure carries its size and one passed short is refused by status; the built library carries its versioned name. | — |
-| SU-18.3 | ci | A semver diff of the facade against the frozen release, in CI. | `.github/workflows/ci.yml`, `xtask/src/main.rs` | The CI diff fails on a break not announced in the changelog. | H-16, H-114, SU-18.1 |
-| SU-18.4 | ci | The MSRV built in CI. | `.github/workflows/ci.yml`, `Cargo.toml` | A CI leg builds the workspace at the stated MSRV on `develop`. | SU-18.1, MS-11 |
+| SU-18.3 | ci | A semver diff of the facade against the frozen release, run locally. | `xtask/src/main.rs` | The diff, run locally, fails on a break not announced in the changelog, recorded here. | H-16, H-114, SU-18.1 |
+| SU-18.4 | ci | The MSRV built locally. | `Cargo.toml` | A local build of the workspace at the stated MSRV succeeds, recorded here. | SU-18.1, MS-11 |
 
 ## SU-19 — The documentation set
 
-**The documentation set**: rustdoc examples everywhere; a guide and a task cookbook ("fill a form", "sign with a key file", "make PDF/A"); per-binding references; runnable examples per binding in CI; manual pages; a catalogue of every typed warning with its meaning and remedy; a browser playground on the wasm build
+**The documentation set**: rustdoc examples everywhere; a guide and a task cookbook ("fill a form", "sign with a key file", "make PDF/A"); per-binding references; runnable examples per binding, run locally; manual pages; a catalogue of every typed warning with its meaning and remedy; a browser playground on the wasm build
 
-**Exit criterion.** every example compiles and runs in CI; the warning catalogue is generated from the source and fails on an undocumented variant
+**Exit criterion.** every example compiles under CI's tests and runs in a local run, recorded here; the warning catalogue is generated from the source and fails on an undocumented variant
 
 **Doc:** — · **Depends on:** —
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | SU-19.1 | build | Rustdoc examples on every public facade item, run as doctests, and a check listing the items without one. | `crates/tinker-pdf/src/lib.rs`, `xtask/src/doc_examples.rs` (new), `xtask/src/main.rs` | The check fails on a public item without an example; doctests pass in both builds in CI. | — |
-| SU-19.2 | doc | A guide and a task cookbook, fill a form, sign with a key file, make PDF/A and the rest, each recipe a compiled example. | `docs/guide` (new), `crates/tinker-pdf/examples`, `docs/README.md` | Every recipe's code compiles and runs in CI. | — |
-| SU-19.3 | doc | Per-binding references and runnable examples per binding. | `bindings/dotnet`, `bindings/go`, `bindings/java`, `bindings/ruby`, `bindings/python`, `bindings/js`, `.github/workflows/ci.yml` | Every binding example runs in CI. | — |
+| SU-19.2 | doc | A guide and a task cookbook, fill a form, sign with a key file, make PDF/A and the rest, each recipe a compiled example. | `docs/guide` (new), `crates/tinker-pdf/examples`, `docs/README.md` | Every recipe's code compiles under CI's tests and runs in the gates' examples gate. | — |
+| SU-19.3 | doc | Per-binding references and runnable examples per binding. | `bindings/dotnet`, `bindings/go`, `bindings/java`, `bindings/ruby`, `bindings/python`, `bindings/js` | Every binding example runs in a local run, recorded here. | — |
 | SU-19.4 | doc | Manual pages for `tpdf`, generated from SU-01.1's verb table. | `tools/tpdf/src/main.rs`, `tools/tpdf/man` (new) | A page per verb is generated and a verb without one fails the generator. | SU-01.1 |
-| SU-19.5 | build | A catalogue of every typed warning with its meaning and remedy, generated from the source. | `xtask/src/warnings.rs` (new), `docs/warnings.md` (new), `docs/README.md` | The generator fails on a warning variant without a meaning and remedy, and CI regenerates the catalogue and fails on a difference. | — |
-| SU-19.6 | build | A browser playground on the wasm build: examples edited and run against the JavaScript binding. | `bindings/js/demo`, `.github/workflows/ci.yml` | A headless-browser test runs each playground example and gets the binding's output. | — |
+| SU-19.5 | build | A catalogue of every typed warning with its meaning and remedy, generated from the source. | `xtask/src/warnings.rs` (new), `docs/warnings.md` (new), `docs/README.md` | The generator fails on a warning variant without a meaning and remedy, and `cargo xtask check`, in the gates, regenerates the catalogue and fails on a difference. | — |
+| SU-19.6 | build | A browser playground on the wasm build: examples edited and run against the JavaScript binding. | `bindings/js/demo` | A headless-browser test runs each playground example and gets the binding's output, in a local run recorded here. | — |
 
 ## SU-20 — Supply-chain evidence
 
 **Supply-chain evidence**: an SBOM per artefact, build provenance, signed releases, attestations on publishing, a reproducible-build check
 
-**Exit criterion.** the release dry run emits each and a second build reproduces the artefacts' hashes
+**Exit criterion.** a `release.yml` run on `main` emits each and a second build reproduces the artefacts' hashes
 
 **Doc:** — · **Depends on:** SU-17
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SU-20.1 | ci | An SBOM per artefact and build provenance, emitted by the release workflow. | `.github/workflows/release.yml` | The workflow's jobs write an SBOM and a provenance statement for every artefact, checked by a CI job that runs the same steps without publishing. | SU-17.1, SU-17.2, SU-17.3, SU-17.4, SU-17.5, SU-17.6, SU-17.7 |
-| SU-20.2 | ci | Signed releases and attestations on publishing. | `.github/workflows/release.yml` | The publishing jobs sign each artefact and attach an attestation, verified by the job that runs them without publishing. | SU-20.1, H-115 |
-| SU-20.3 | ci | A reproducible-build check: each artefact built a second time and compared by hash. | `.github/workflows/release.yml`, `.github/workflows/ci.yml` | A second build reproduces every artefact's hash, or each difference is fixed by class. | SU-17.1, SU-17.2, SU-17.3, SU-17.4, SU-17.5, SU-17.6, SU-17.7 |
+| SU-20.1 | ci | An SBOM per artefact and build provenance, emitted by the release workflow. | `.github/workflows/release.yml` | The workflow's jobs write an SBOM and a provenance statement for every artefact, checked by a `release.yml` run at a version already tagged, which runs the same steps without publishing. | SU-17.1, SU-17.2, SU-17.3, SU-17.4, SU-17.5, SU-17.6, SU-17.7 |
+| SU-20.2 | ci | Signed releases and attestations on publishing. | `.github/workflows/release.yml` | The publishing jobs sign each artefact and attach an attestation, verified by a `release.yml` run at a version already tagged, which runs them without publishing. | SU-20.1, H-115 |
+| SU-20.3 | ci | A reproducible-build check: each artefact built a second time and compared by hash. | `.github/workflows/release.yml` | A second build reproduces every artefact's hash, or each difference is fixed by class. | SU-17.1, SU-17.2, SU-17.3, SU-17.4, SU-17.5, SU-17.6, SU-17.7 |
 
 ## SU-21 — Warning, progress and log callbacks across the C ABI
 
@@ -344,7 +344,7 @@ is checked for breaks and documented by examples that run.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | SU-22.1 | build | Feature gates per format and capability: PDF only, each container, HTML and CSS, SVG, scripts, signing, OCR. | `Cargo.toml`, `crates/tinker-pdf/Cargo.toml`, `crates/tinker-pdf/src/lib.rs` | Each gated build compiles and passes its own tests. | — |
-| SU-22.2 | ci | Each gated build a footprint profile in MS-06's ratchet. | `.github/workflows/ci.yml`, `bindings/js/footprint.json` | CI builds every gated profile on `develop`, runs its tests, and reports its footprint against its committed figure. | SU-22.1, MS-06.3 |
+| SU-22.2 | ci | Each gated build a footprint profile in MS-06's ratchet. | `bindings/js/footprint.json` | A local run builds every gated profile, runs its tests, and `cargo xtask footprint` reports its footprint against its committed figure, recorded here. | SU-22.1, MS-06.3 |
 
 ## SU-23 — A reference web viewer
 
@@ -362,7 +362,7 @@ is checked for breaks and documented by examples that run.
 | SU-23.4 | build | Annotations, layers and the signatures panel. | `bindings/js/viewer` (new), `bindings/js/tests` | Each panel lists what the facade lists for each fixture. | SU-23.1 |
 | SU-23.5 | build | The accessibility tree panel over SD-09. | `bindings/js/viewer` (new), `bindings/js/tests` | The panel lists each tagged fixture's tree as SD-09 gives it. | SU-23.1, SD-09 |
 | SU-23.6 | build | Progressive rendering through RC-15. | `bindings/js/viewer` (new), `bindings/js/tests` | A large page renders in budgeted steps and the final pixels equal a single render's. | SU-23.1, RC-15.4 |
-| SU-23.7 | test | The browser-driven test exercising each panel on each committed fixture, in CI. | `bindings/js/tests`, `.github/workflows/ci.yml` | On a CI run on `develop` the test opens each committed fixture and exercises each panel. | SU-23.2, SU-23.3, SU-23.4, SU-23.5, SU-23.6 |
+| SU-23.7 | test | The browser-driven test exercising each panel on each committed fixture, run locally. | `bindings/js/tests` | In a local run, recorded here, the test opens each committed fixture and exercises each panel. | SU-23.2, SU-23.3, SU-23.4, SU-23.5, SU-23.6 |
 
 ## SU-24 — Desktop and mobile viewer applications
 
@@ -375,6 +375,6 @@ is checked for breaks and documented by examples that run.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | SU-24.1 | design | Create `docs/design/viewers.md`: the platforms, the toolkit for each over a binding, what each application shares with SU-23's viewer, packaging, and milestones with smoke tests. | `docs/design/viewers.md` (new) | The doc exists in the design-doc order, names SU-24.2 to SU-24.5's exit tests. | SU-23 |
-| SU-24.2 | build | The desktop application for Linux, Windows and macOS: open, render, navigate and search. | `apps/desktop` (new), `.github/workflows/ci.yml` | Its smoke test opens, renders and searches the committed fixtures on each desktop CI leg. | SU-24.1 |
-| SU-24.3 | build | The Android application over SU-15.2's AAR. | `apps/android` (new), `.github/workflows/ci.yml` | Its smoke test opens, renders and searches the committed fixtures on an emulator leg. | SU-24.1, SU-15.2 |
-| SU-24.4 | build | The iOS application over SU-15.3's XCFramework. | `apps/ios` (new), `.github/workflows/ci.yml` | Its smoke test opens, renders and searches the committed fixtures on a simulator leg. | SU-24.1, SU-15.3 |
+| SU-24.2 | build | The desktop application for Linux, Windows and macOS: open, render, navigate and search. | `apps/desktop` (new) | Its smoke test opens, renders and searches the committed fixtures in a local run on each desktop platform, recorded here. | SU-24.1 |
+| SU-24.3 | build | The Android application over SU-15.2's AAR. | `apps/android` (new) | Its smoke test opens, renders and searches the committed fixtures on an emulator, in a local run recorded here. | SU-24.1, SU-15.2 |
+| SU-24.4 | build | The iOS application over SU-15.3's XCFramework. | `apps/ios` (new) | Its smoke test opens, renders and searches the committed fixtures on a simulator, in a local run recorded here. | SU-24.1, SU-15.3 |

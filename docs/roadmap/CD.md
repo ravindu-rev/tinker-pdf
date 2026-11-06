@@ -122,8 +122,8 @@ refusal table, and the layout engine's reach toward print-grade HTML.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| CD-07.1 | test | A producer's book declaring `@layer`, found under H-107, run through the reader. | `corpus/corpora.lock`, `crates/tinker-pdf/tests/epub_fetched.rs` | On a dispatched run on `develop` the book draws with no unexpected warning, its result pinned. | H-107, MS-11 |
-| CD-07.2 | test | A producer's book carrying `.woff` or `.woff2`, found under H-107, run through the reader. | `corpus/corpora.lock`, `crates/tinker-pdf/tests/epub_fetched.rs` | On a dispatched run on `develop` the book draws with no unexpected warning, its faces used, its result pinned. | H-107, MS-11 |
+| CD-07.1 | test | A producer's book declaring `@layer`, found under H-107, run through the reader. | `corpus/corpora.lock`, `crates/tinker-pdf/tests/epub_fetched.rs` | In a local run over the fetched corpora, recorded here, the book draws with no unexpected warning, its result pinned. | H-107, MS-11 |
+| CD-07.2 | test | A producer's book carrying `.woff` or `.woff2`, found under H-107, run through the reader. | `corpus/corpora.lock`, `crates/tinker-pdf/tests/epub_fetched.rs` | In a local run over the fetched corpora, recorded here, the book draws with no unexpected warning, its faces used, its result pinned. | H-107, MS-11 |
 
 ## CD-08 — SVG in the spine
 

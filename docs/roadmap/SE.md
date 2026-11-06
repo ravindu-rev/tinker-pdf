@@ -20,7 +20,7 @@ reconstruction — each a typed report before it is a removal.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | SE-01.1 | build | Encryption on save below R6, behind an explicit legacy option with a typed weakness warning: R4 with AES-128 and RC4 at 40 and 128 bits, `/O` and `/U` by Algorithms 3 to 5. | `crates/tinker-pdf-cos/src/security.rs`, `crates/tinker-pdf/src/write.rs`, `crates/tinker-pdf/tests/legacy_encryption.rs` (new), `docs/features/encryption.md` | `legacy_encryption.rs` (new): outputs of each revision reopen through the reader with the expected streams in clear, and the warning is raised. | H-18 |
-| SE-01.2 | test | A corpus check: for each file `corpus/passwords.tsv` lists at R2 to R4, `/O` and `/U` computed from the file's own parameters and known password and compared with its bytes. | `crates/tinker-pdf/tests/legacy_encryption_census.rs` (new), `.github/workflows/corpus.yml` | The check prints `RAN` and passes for every listed file on a dispatched run on `develop`. | SE-01.1, MS-11 |
+| SE-01.2 | test | A corpus check: for each file `corpus/passwords.tsv` lists at R2 to R4, `/O` and `/U` computed from the file's own parameters and known password and compared with its bytes. | `crates/tinker-pdf/tests/legacy_encryption_census.rs` (new) | The check prints `RAN` and passes for every listed file in a local run over the fetched corpora, recorded here. | SE-01.1, MS-11 |
 
 ## SE-02 — AES-256-GCM crypt filters
 

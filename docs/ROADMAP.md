@@ -25,7 +25,7 @@ and its row is narrowed to it.
   `linearized_files_from_the_qpdf_corpus_render_page_one_from_their_heads`
   fails with `bundled-fonts` where the qpdf corpus is fetched: some files
   draw a page one other than the buffered open draws. The default build
-  draws the same page, and CI's `test` job, which has no corpus, skips it.
+  draws the same page, and CI, which fetches no corpus, skips it.
 - **A line of a right-to-left paragraph read alone.** The reader puts each
   line in logical order by itself, so a line of an Arabic paragraph that
   opens with `25٪`, on a page that does not state its text, reads
@@ -63,7 +63,7 @@ that depends on it.
 ## Rows and steps
 
 A **row** is a capability, a gap or a defect: its title and what it is, its
-**exit criterion** (the first-party test or CI job that shows it done), its
+**exit criterion** (the first-party test or local proof that shows it done), its
 design **Doc** where it has one, and what it **Depends on**. Its **steps**
 are its work, each one change with its tests, in a table: the step, its
 kind, what it does, where it lands, its exit test, and what it depends on.
@@ -74,8 +74,8 @@ kind, what it does, where it lands, its exit test, and what it depends on.
 | `build` | new capability: code and its tests | named tests |
 | `fix` | corrected behaviour | the test that shows the defect, now passing |
 | `test` | conformance data, fixtures, a harness or a suite, no engine change | the suite runs and prints its `RAN` banner where it can skip |
-| `measure` | a census or benchmark whose committed output is a number | the committed output and the test or job that regenerates it |
-| `ci` | a workflow under `.github/workflows/` or an `xtask` job | the job exists and its run is green |
+| `measure` | a census or benchmark whose committed output is a number | the committed output and the test or local run that regenerates it |
+| `ci` | a local proof's tooling and its run (an `xtask` task or a command [verification.md](verification.md) gives), or a step of the release workflow | the tooling exists and its run is green: a local run recorded in the row, or `release.yml`'s run on `main` |
 | `doc` | documentation only | the doc, and any example compiles and runs |
 
 A step can start once everything its **Depends on** names is done: the steps
@@ -94,9 +94,15 @@ a choice inside a step; so is anything a change would cost that works today.
 - A row whose exit can never go green, for a reason outside this
   repository's power, moves to [roadmap/NG.md](roadmap/NG.md) with that
   reason.
-- An exit criterion is a first-party test or CI job (ruling 13): an outside
-  program may host the code, fetch bytes for it or generate a fixture once,
-  and never says whether an output is right.
+- An exit criterion is a first-party test or a local proof (ruling 13). CI
+  runs the unit and integration tests on every pull request, on Linux and
+  Windows, and `release.yml` releases on the owner's merge to `main`; every
+  other check (fuzzing, the corpora, the benches, peak memory, the bindings'
+  parity, the wasm footprint and fingerprints, licences and the oracle
+  suites) is run locally by whoever makes the change, as
+  [verification.md](verification.md) gives it, and recorded in the row it
+  closes. An outside program may host the code, fetch bytes for it or
+  generate a fixture once, and never says whether an output is right.
 - A new capability brings its speed row into the benchmark set (MS-04) and
   its determinism fingerprint (K-07).
 
@@ -105,11 +111,10 @@ a choice inside a step; so is anything a change would cost that works today.
 Take the first step in this list whose **Depends on** is done; a step that
 waits on the owner is passed over until the owner decides.
 
-1. **The MS tier** from where it stands: MS-16 to MS-19, MS-22, and MS-24 to
+1. **The MS tier** from where it stands: MS-18, MS-22, MS-24, MS-25 and
    MS-27, MS-04, MS-06 and MS-02, in that order. MS-01.9 closes MS-01 once the P rows that land
    its guards have.
-2. **K-06** (the `jbig2` fuzz target), **K-20** (a `render_page` input past its
-   group budget) and **K-02** (default colour spaces).
+2. **K-06** (the `jbig2` fuzz target) and **K-02** (default colour spaces).
 3. **P-01 to P-05** and **P-28**.
 
 Then the capability tiers in the order of the table above, with signatures'

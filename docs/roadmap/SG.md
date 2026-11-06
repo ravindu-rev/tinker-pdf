@@ -46,7 +46,7 @@ deterministic by default.
 | SG-02.4 | build | Verification extended to P-521 and compressed points, retiring `Unchecked::UnsupportedKey` for them. | `crates/tinker-pdf-crypto/src/ecdsa.rs`, `crates/tinker-pdf-pki/src/cms.rs`, `docs/features/signatures.md` | Wycheproof's verification vectors pass on P-521 and with compressed points. | SG-02.3 |
 | SG-02.5 | build | Signing with RFC 6979 deterministic nonces by default and caller entropy as a hedged option. | `crates/tinker-pdf-crypto/src/ecdsa.rs`, `crates/tinker-pdf-crypto/tests/ecdsa_sign.rs` (new) | `ecdsa_sign.rs` (new): RFC 6979 A.2.5 to A.2.7's signatures are reproduced byte for byte for every digest the appendix lists. | SG-02.3, H-92 |
 | SG-02.6 | test | CAVP's generation and Wycheproof's ECDSA vectors on the NIST curves, Brainpool's deterministic signatures verified, and a signed document fingerprinted. | `crates/tinker-pdf-crypto/tests/ecdsa_sign.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | The vectors pass; every deterministic Brainpool signature over RFC 6979's messages verifies; the signed document's bytes are identical on every K-07 target. | SG-02.4, SG-02.5, K-07.1, H-92 |
-| SG-02.7 | measure | The speed targets: a P-256 signature at most 0.5 ms, P-384 1.2 ms, P-521 2.5 ms and Brainpool P-256 1 ms, constant-time, as calibrated tier-P targets. | `crates/tinker-pdf/benches/sign.rs`, `crates/tinker-pdf/benches/baseline.json` | MS-02's paired job holds the four targets. | SG-02.6, MS-04, MS-02 |
+| SG-02.7 | measure | The speed targets: a P-256 signature at most 0.5 ms, P-384 1.2 ms, P-521 2.5 ms and Brainpool P-256 1 ms, constant-time, as calibrated tier-P targets. | `crates/tinker-pdf/benches/sign.rs`, `crates/tinker-pdf/benches/baseline.json` | MS-02's paired comparison, run locally, holds the four targets, recorded here. | SG-02.6, MS-04, MS-02 |
 
 ## SG-03 — Ed25519 and Ed448
 
@@ -146,7 +146,7 @@ deterministic by default.
 
 **Signing across the C ABI and every binding**: in-engine keys need no callback (key bytes and passphrase in, signed bytes out); two-phase deferred signing (a placeholder and digest out with resumable state, then CMS or a raw signature in, without re-serialising) for keys the engine never sees; and a signing callback across the C ABI, with timestamper and entropy callbacks beside it
 
-**Exit criterion.** `bindings-parity` prints the hash of a deterministically signed document (PKCS#1 v1.5 and RFC 6979), identical through C, Python, JavaScript, .NET, Go, Ruby and Java, by each of the three routes
+**Exit criterion.** a local `cargo xtask bindings-parity --require-all` prints the hash of a deterministically signed document (PKCS#1 v1.5 and RFC 6979), identical through C, Python, JavaScript, .NET, Go, Ruby and Java, by each of the three routes, recorded here
 
 **Doc:** [design/bindings-write.md](../design/bindings-write.md) (amend) · **Depends on:** SG-06, H-28, H-34
 
@@ -158,7 +158,7 @@ deterministic by default.
 | SG-09.4 | build | Signing, timestamper and entropy callbacks across the C ABI. | `crates/tinker-pdf-ffi/src/lib.rs`, `crates/tinker-pdf-ffi/tests/signing.rs` (new) | A C test host's callbacks sign, timestamp and supply entropy, and the outputs verify. | SG-09.3 |
 | SG-09.5 | build | Python and JavaScript project the three routes over the facade. | `bindings/python`, `bindings/js` | Each binding's test signs by each route and prints the document's hash. | SG-09.4 |
 | SG-09.6 | build | .NET, Go, Ruby and Java project the three routes over the C ABI. | `bindings/dotnet`, `bindings/go`, `bindings/ruby`, `bindings/java` | Each binding's test signs by each route and prints the document's hash. | SG-09.4 |
-| SG-09.7 | ci | `bindings-parity` compares the deterministically signed document's hash across every binding and route. | `.github/workflows/ci.yml` | `bindings-parity` prints one hash for C, Python, JavaScript, .NET, Go, Ruby and Java by each of the three routes (PKCS#1 v1.5 and RFC 6979), green on `develop`. | SG-09.5, SG-09.6, MS-11 |
+| SG-09.7 | ci | `cargo xtask bindings-parity` compares the deterministically signed document's hash across every binding and route. | `docs/verification.md` | A local `cargo xtask bindings-parity --require-all` prints one hash for C, Python, JavaScript, .NET, Go, Ruby and Java by each of the three routes (PKCS#1 v1.5 and RFC 6979), recorded here. | SG-09.5, SG-09.6, MS-11 |
 
 ## SG-10 — Revocation, parsed and evaluated
 
@@ -416,27 +416,26 @@ deterministic by default.
 
 **A PKCS#11 signing provider** for keys held in tokens, smart cards and HSMs: a `RawSigner` for `tpdf sign` and the bindings that loads the PKCS#11 module a caller names, finds a key by label or id, and signs SG-06's to-be-signed attributes — kept outside the engine crates, as FT-13's font provider is, because loading a module needs the platform's loader and `unsafe`
 
-**Exit criterion.** CI signs `testdata/` fixtures through a software token that holds a generated key (an outside program hosts the key and executes the operation; it judges nothing) and the engine's own verdict verifies every output; a refused operation, a wrong PIN and a missing key are typed errors; `tpdf sign --pkcs11` runs it; real hardware is H-117's confirmation
+**Exit criterion.** a local run signs `testdata/` fixtures through a software token that holds a generated key (an outside program hosts the key and executes the operation; it judges nothing) and the engine's own verdict verifies every output, recorded here; a refused operation, a wrong PIN and a missing key are typed errors; `tpdf sign --pkcs11` runs it; real hardware is H-117's confirmation
 
 **Doc:** — · **Depends on:** SG-06, SG-08, H-34
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | SG-27.1 | build | A PKCS#11 `RawSigner` outside the engine crates: the module a caller names loaded, a key found by label or id, and SG-06's to-be-signed attributes signed; a refused operation, a wrong PIN and a missing key typed errors. | `tools/pkcs11-signer/Cargo.toml` (new), `tools/pkcs11-signer/src/lib.rs` (new), `Cargo.toml`, `docs/architecture.md` | Unit tests with a mock module return each typed error; the crate is outside the engine's `unsafe` ban as `docs/architecture.md` records. | SG-06.6, H-34 |
-| SG-27.2 | ci | A CI job signing `testdata/` fixtures through a software token holding a generated key, the outside program only hosting the key and executing the operation. | `.github/workflows/ci.yml`, `tools/pkcs11-signer/tests/token.rs` (new) | The job signs every fixture through the token and the engine's verdict verifies each output, green on `develop`. | SG-27.1, MS-11 |
-| SG-27.3 | build | `tpdf sign --pkcs11`, and the provider offered to the bindings. | `tools/tpdf/src/main.rs`, `tools/tpdf/Cargo.toml`, `bindings/python` | The CI job's token signs through the CLI and through Python, and the outputs verify. | SG-27.2, SG-08 |
+| SG-27.2 | test | A test signing `testdata/` fixtures through a software token holding a generated key, run locally, the outside program only hosting the key and executing the operation. | `tools/pkcs11-signer/tests/token.rs` (new) | A local run of `token.rs` signs every fixture through the token and the engine's verdict verifies each output, recorded here. | SG-27.1, MS-11 |
+| SG-27.3 | build | `tpdf sign --pkcs11`, and the provider offered to the bindings. | `tools/tpdf/src/main.rs`, `tools/tpdf/Cargo.toml`, `bindings/python` | Locally, SG-27.2's token signs through the CLI and through Python, and the outputs verify, recorded here. | SG-27.2, SG-08 |
 
 ## SG-28 — Operating-system key stores as signing providers
 
 **Operating-system key stores as signing providers**: Windows CNG and its certificate store, the macOS keychain, and the Android Keystore through the Android binding — each a `RawSigner` outside the engine crates, the key never leaving the store
 
-**Exit criterion.** CI legs on Windows and macOS generate a non-exportable key into the runner's own store, sign `testdata/` fixtures through it, and the engine's verdict verifies the outputs; the Android provider signs in the AAR's emulator test; only a signature value crosses from the store
+**Exit criterion.** local runs on Windows and macOS generate a non-exportable key into the machine's own store, sign `testdata/` fixtures through it, and the engine's verdict verifies the outputs, recorded here; the Android provider signs in the AAR's emulator test, run locally; only a signature value crosses from the store
 
 **Doc:** — · **Depends on:** SG-27, SU-15, H-34
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SG-28.1 | build | A Windows CNG `RawSigner` over its certificate store, outside the engine crates, the key never leaving the store. | `tools/keystore-signer/Cargo.toml` (new), `tools/keystore-signer/src/windows.rs` (new), `tools/keystore-signer/src/lib.rs` (new), `Cargo.toml` | A Windows CI leg generates a non-exportable key into the runner's store, signs `testdata/` fixtures through it, and the verdict verifies the outputs. | SG-27.3, H-34 |
-| SG-28.2 | build | A macOS keychain `RawSigner`. | `tools/keystore-signer/src/macos.rs` (new) | A macOS CI leg does the same through the runner's keychain. | SG-28.1 |
+| SG-28.1 | build | A Windows CNG `RawSigner` over its certificate store, outside the engine crates, the key never leaving the store. | `tools/keystore-signer/Cargo.toml` (new), `tools/keystore-signer/src/windows.rs` (new), `tools/keystore-signer/src/lib.rs` (new), `Cargo.toml` | A local run on Windows generates a non-exportable key into the machine's store, signs `testdata/` fixtures through it, and the verdict verifies the outputs, recorded here. | SG-27.3, H-34 |
+| SG-28.2 | build | A macOS keychain `RawSigner`. | `tools/keystore-signer/src/macos.rs` (new) | A local run on macOS does the same through the machine's keychain, recorded here. | SG-28.1 |
 | SG-28.3 | build | An Android Keystore `RawSigner` through the Android binding. | `tools/keystore-signer/src/android.rs` (new), `bindings/java` | The AAR's emulator test signs through the Keystore and the verdict verifies. | SG-28.1, SU-15 |
-| SG-28.4 | ci | The Windows, macOS and Android legs in CI. | `.github/workflows/ci.yml` | All three legs are green on `develop`, and only a signature value crosses from each store. | SG-28.2, SG-28.3, MS-11 |
