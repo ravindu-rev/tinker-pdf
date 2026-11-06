@@ -165,7 +165,7 @@ pub struct Listed {
     /// never failed.
     pub paired_band: Option<f64>,
     /// Why the operation runs outside [`SIZE_WINDOW_MS`], in the owner's
-    /// words (H-163), from the entry's `outside_window`; `None` for every
+    /// words, from the entry's `outside_window`; `None` for every
     /// operation sized inside it, which `--sizes` holds there.
     pub outside_window: Option<String>,
 }
@@ -1746,8 +1746,7 @@ fn run_paired(base: &Path, head: &Path) -> Result<(), String> {
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let mut machine_name = None;
     // `None` holds no window; `Some(false)` fails outside it and
-    // `Some(true)` only reports, the dispatch the figures H-163 is decided on
-    // are read from.
+    // `Some(true)` only reports, the dispatch the set is sized from.
     let mut sizes_mode: Option<bool> = None;
     let mut index = 0;
     while index < args.len() {
@@ -1827,7 +1826,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     }
     let size_failure = match &sized {
         Some((false, held)) if !held.failing.is_empty() => Some(format!(
-            "outside the {}-{} ms window, and not named outside it by the owner (H-163): {}",
+            "outside the {}-{} ms window, and not named outside it by the owner: {}",
             SIZE_WINDOW_MS.0,
             SIZE_WINDOW_MS.1,
             held.failing.join(", ")

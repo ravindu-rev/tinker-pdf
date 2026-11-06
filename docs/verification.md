@@ -1140,7 +1140,7 @@ megabytes a second, or outlines a second. With `--sizes` it also holds every
 head-side operation to the 20-300 ms window the set is sized to, on the runner
 the job lands on, which is where the window is a fact: an operation outside it
 fails unless its entry names it outside the window by the owner's word
-(`outside_window`, H-163), which is reported; the planning baseline's side of
+(`outside_window`), which is reported; the planning baseline's side of
 a factor may run longer. `bench.yml` runs it so, and a dispatch with
 `sizes_report` lists every operation outside the window with its mean and
 fails on none.

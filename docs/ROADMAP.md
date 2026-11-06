@@ -105,8 +105,8 @@ a choice inside a step; so is anything a change would cost that works today.
 Take the first step in this list whose **Depends on** is done; a step that
 waits on the owner is passed over until the owner decides.
 
-1. **The MS tier** from where it stands: MS-16 to MS-19, MS-22 to MS-26,
-   MS-04, MS-06 and MS-02, in that order. MS-01.9 closes MS-01 once the P rows that land
+1. **The MS tier** from where it stands: MS-16 to MS-19, MS-22, and MS-24 to
+   MS-27, MS-04, MS-06 and MS-02, in that order. MS-01.9 closes MS-01 once the P rows that land
    its guards have.
 2. **K-06** (the `jbig2` fuzz target), **K-20** (a `render_page` input past its
    group budget) and **K-02** (default colour spaces).

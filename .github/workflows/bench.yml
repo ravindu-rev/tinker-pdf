@@ -50,7 +50,7 @@ on:
       sizes_report:
         description: >-
           List each operation outside the 20-300 ms window with its mean
-          rather than failing on it, the figures H-163 is decided on (MS-04)
+          rather than failing on it, the figures the set is sized from (MS-04)
         type: boolean
         default: false
 
