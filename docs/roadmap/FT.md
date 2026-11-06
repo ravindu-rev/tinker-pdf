@@ -747,7 +747,7 @@ list, each held to first-party evidence.
 
 **Inferred reading order for untagged pages** — columns, running heads, footnotes — labelled as inferred, plus a region segmentation API
 
-**Exit criterion.** an opt-in `ReadingOrder::Inferred` that is never the default, held to the 1 078 tagged corpus files (`corpus/ratchet.json`'s `tagged.files` summed over five corpora) by inferring with the tree hidden and scoring against it, with the archival validator's corpus's 589 one-paragraph fixtures as the set where nothing may move rather than as the population; floors recorded in `INFERRED_FLOORS`
+**Exit criterion.** an opt-in `ReadingOrder::Inferred` that is never the default, held to the 1 078 tagged corpus files (`corpus/ratchet.json`'s `tagged.files` summed over five corpora) by inferring with the tree hidden and scoring against it, with the archival validator's corpus's 589 tagged conformance fixtures — nearly all one page, a few of two, and the suite's own manual scored to the 16-page cap — as the set where nothing may move, every character counted (H-165), rather than as the population; floors recorded in `INFERRED_FLOORS`
 
 **Doc:** [design/reading-order.md](../design/reading-order.md) · **Depends on:** MS-13
 
