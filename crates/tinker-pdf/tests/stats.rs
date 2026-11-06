@@ -1792,9 +1792,12 @@ fn decodes_are_counted_per_stream_and_operation() {
     );
 }
 
-/// A save that deduplicates streams decodes each stream with a filter once to
-/// compare it, and counts it; with no pass to run, that is all it decodes.
-/// The bytes are the uncounted save's.
+/// A save that deduplicates streams decodes, to compare them, the streams
+/// whose dictionary another shares and whose stored bytes differ, each once,
+/// and counts them: here the content and the program, each `/Filter
+/// /FlateDecode` alone. The form, alone in its dictionary, has nothing to be
+/// compared with and is not decoded. With no pass to run, that is all it
+/// decodes. The bytes are the uncounted save's.
 #[test]
 fn a_deduplicating_save_counts_the_streams_it_compares() {
     let document = Document::open(deflated_page()).expect("the fixture opens");
@@ -1815,11 +1818,7 @@ fn a_deduplicating_save_counts_the_streams_it_compares() {
     same_save(&counted, &plain, "a deduplicating save");
     let expected = decoding(
         Stats::default(),
-        &[
-            (1, DEFLATED_CONTENT.len()),
-            (1, program_len()),
-            (1, form_content(FORM_TEXT).len()),
-        ],
+        &[(1, DEFLATED_CONTENT.len()), (1, program_len())],
     );
     assert_eq!(counted.stats, Some(expected));
 
