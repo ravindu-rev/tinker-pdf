@@ -240,12 +240,19 @@ exit criterion, and it is the only third-party statement about reading order
 that exists at this scale.
 
 **The population is chosen, not summed.** veraPDF's tagged files are
-conformance fixtures, a page with one paragraph on it, where every order
-agrees with every other; scoring them would report agreement the inference
-did nothing to earn. The ratchet population is the tagged files of pdfjs and
-SafeDocs (`RATCHET_POPULATION`), and veraPDF's tagged fixtures are the set
-where the inference must not *move* anything (`NOTHING_MAY_MOVE`), because
-there is nothing to move.
+conformance fixtures whose orders agree with one another almost everywhere;
+scoring them would report agreement the inference did nothing to earn. The
+ratchet population is the tagged files of pdfjs and SafeDocs
+(`RATCHET_POPULATION`), and veraPDF's tagged fixtures are the set where the
+inference must not *move* anything (`NOTHING_MAY_MOVE`). The set is not one
+paragraph a file: nearly every fixture is a single page, a few have two, and
+the suite's own manual runs past the census's sixteen-page cap. What moves
+there is artifact text, which the tree does not claim: the manual's running
+feet, read last as the inference reads furniture, its body artifacts and a
+table read where the page shows them, and on a few one-page fixtures lines
+the inference leaves unplaced. No character the tree claims leaves the order
+its stream drew it in, so whether the set holds what the tree claims or
+every character is the owner's ruling (H-165).
 
 Four scores, each printed per corpus:
 

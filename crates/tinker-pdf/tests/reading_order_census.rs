@@ -43,8 +43,8 @@
 //! the corpus holds ([`held`]): the population is split by corpus name as the
 //! design requires — pdfjs and SafeDocs are the ratchet population, and a
 //! floor on any other corpus fails — **not one character moves on veraPDF's
-//! one-paragraph fixtures**, the set where nothing may move (reading-order
-//! milestone 3's exit, owed its first run), every floor recorded is met, and
+//! tagged conformance fixtures**, the set where nothing may move
+//! (reading-order milestone 3's exit), every floor recorded is met, and
 //! every inferred order is a permutation of the page it was inferred over.
 //!
 //! # Ruling 13
@@ -77,9 +77,14 @@ const PAGES_PER_FILE: u32 = 16;
 /// The corpora whose tagged files are the population the scores stand for.
 const RATCHET_POPULATION: &[&str] = &["pdfjs", "safedocs"];
 
-/// The corpus whose tagged files are one-paragraph conformance fixtures:
-/// where the inference must not move anything, because there is nothing to
-/// move, and never part of an average.
+/// The corpus whose tagged files are conformance fixtures, the set where
+/// the inference must not move anything and never part of an average.
+///
+/// Not one paragraph a file: nearly every one is a single page, a few have
+/// two, and the suite's own manual is long enough to be scored to the
+/// sixteen-page cap. That manual carries running feet the inference reads
+/// last, artifact text it reads where the page shows it, and columns; the
+/// census names each page it moves a character on.
 const NOTHING_MAY_MOVE: &str = "verapdf";
 
 /// Floors on the inference's pair agreement, as `(corpus, agreeing, pairs)`
