@@ -26,11 +26,14 @@
 # 98 439 168 bytes in the default build and 88 715 264 and 77 705 216 with the
 # bundled faces, a spread of 19.1 % and 14.2 %: its peak moves with how the
 # pages are scheduled, so it is held to nothing until MS-25 makes it steady.
+# png-20-on-4-one-arena is the same case under one allocator arena, unheld,
+# its runs MS-25's evidence.
 
 default	png-300	88739840
 default	jpeg-300	138256384
 default	jpx-72	231350272
 default	png-20-on-4	unheld
+default	png-20-on-4-one-arena	unheld
 default	text-10000	31047680
 default	merge-4x100	528793600
 default	open-23mb	28991488
@@ -38,6 +41,7 @@ bundled-fonts	png-300	88317952
 bundled-fonts	jpeg-300	138153984
 bundled-fonts	jpx-72	231383040
 bundled-fonts	png-20-on-4	unheld
+bundled-fonts	png-20-on-4-one-arena	unheld
 bundled-fonts	text-10000	30760960
 bundled-fonts	merge-4x100	528838656
 bundled-fonts	open-23mb	29278208

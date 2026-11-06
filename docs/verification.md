@@ -1287,8 +1287,11 @@ is the larger of two CI runs' peaks, the runs and the spread between them
 recorded in the table. A case whose two runs spread by 2 % or more is named
 `unheld`, by the owner's word (H-78): it is measured and printed and held to
 nothing, which is the twenty pages rendered on four threads, whose peak moves
-with how the pages are scheduled. `TINKER_PEAK_RECORD` prints each case's line
-for the table instead of holding it:
+with how the pages are scheduled; an eighth case runs it again with the
+platform allocator held to one arena (`MALLOC_ARENA_MAX=1`), also unheld, so
+two runs say whether the spread is the allocator's or the schedule's.
+`TINKER_PEAK_RECORD` prints each case's line for the table instead of holding
+it:
 
 ```sh
 TINKER_PEAK_RECORD=1 cargo test --release -p tinker-pdf --test peak_memory -- --ignored --nocapture

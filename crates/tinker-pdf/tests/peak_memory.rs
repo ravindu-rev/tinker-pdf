@@ -63,15 +63,25 @@ const BUILD: &str = if cfg!(feature = "bundled-fonts") {
 const BUILDS: [&str; 2] = ["default", "bundled-fonts"];
 
 /// The cases, in the order a run measures them.
-const CASES: [&str; 7] = [
+///
+/// `png-20-on-4-one-arena` is `png-20-on-4` again with the platform
+/// allocator held to one arena (`MALLOC_ARENA_MAX=1`), which a child reads at
+/// its start: beside the case as it is, its two runs say whether the case's
+/// spread is the arenas four threads allocate from or the order its pages
+/// are drawn in (MS-25).
+const CASES: [&str; 8] = [
     "png-300",
     "jpeg-300",
     "jpx-72",
     "png-20-on-4",
+    "png-20-on-4-one-arena",
     "text-10000",
     "merge-4x100",
     "open-23mb",
 ];
+
+/// The suffix that runs a case's child under one allocator arena.
+const ONE_ARENA: &str = "-one-arena";
 
 /// What a child prints before its case and its peak.
 const REPORT: &str = "peak-memory-case";
@@ -203,7 +213,9 @@ fn write_inputs(case: &str, dir: &Path) {
         "png-300" => write("png-300.pdf", &inputs::dense(1, 0)),
         "jpeg-300" => write("jpeg-300.pdf", &inputs::jpeg_page()),
         "jpx-72" => write("jpx-72.pdf", &inputs::jpx_page()),
-        "png-20-on-4" => write("png-20-on-4.pdf", &inputs::dense(20, 0)),
+        "png-20-on-4" | "png-20-on-4-one-arena" => {
+            write("png-20-on-4.pdf", &inputs::dense(20, 0));
+        }
         "text-10000" => write("text-10000.pdf", &inputs::small(10_000)),
         "merge-4x100" => {
             for seed in 0..4 {
@@ -223,7 +235,8 @@ fn write_inputs(case: &str, dir: &Path) {
 /// reports.
 fn run_child(case: &str, dir: &Path) -> u64 {
     let exe = std::env::current_exe().expect("the test binary's own path");
-    let output = Command::new(&exe)
+    let mut command = Command::new(&exe);
+    command
         .args([
             "peak_memory_child",
             "--exact",
@@ -232,7 +245,11 @@ fn run_child(case: &str, dir: &Path) -> u64 {
             "--test-threads=1",
         ])
         .env("TINKER_PEAK_CASE", case)
-        .env("TINKER_PEAK_INPUT", dir)
+        .env("TINKER_PEAK_INPUT", dir);
+    if case.ends_with(ONE_ARENA) {
+        command.env("MALLOC_ARENA_MAX", "1");
+    }
+    let output = command
         .output()
         .unwrap_or_else(|error| panic!("{} did not start: {error}", exe.display()));
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -296,7 +313,7 @@ fn perform(case: &str, dir: &Path) {
         }
         // Tier P's '20 pages at 150 dpi to PNG' on four workers, run on this
         // process's own scoped threads, each taking the next page as it frees.
-        "png-20-on-4" => {
+        "png-20-on-4" | "png-20-on-4-one-arena" => {
             let doc = open("png-20-on-4.pdf");
             let pages = doc.page_count();
             assert_eq!(pages, 20, "the input's pages");
@@ -378,7 +395,7 @@ fn peak_memory_child() {
 /// Every case, a process each, held to this build's figures or, with the
 /// record switch set, printed for the table.
 #[test]
-#[ignore = "seven processes, one rendering at 300 dpi and one reading ten thousand pages: a \
+#[ignore = "eight processes, one rendering at 300 dpi and one reading ten thousand pages: a \
             release binary's run"]
 fn peak_memory_of_every_case() {
     if !cfg!(target_os = "linux") {
@@ -470,7 +487,7 @@ fn the_committed_table_names_every_case_in_both_builds() {
                 .unwrap_or_else(|| panic!("{case}: no line for the {build} build"));
             assert_eq!(
                 line.bytes.is_none(),
-                case == "png-20-on-4",
+                case.starts_with("png-20-on-4"),
                 "{case} in the {build} build"
             );
         }

@@ -236,8 +236,9 @@ jobs:
           for build in "" "--features bundled-fonts"; do
             cargo test --release -p tinker-pdf $build --test peak_memory \
               -- --ignored --nocapture 2>&1 | tee peak.log
-            grep -q 'RAN: peak memory, 7 cases a process each' peak.log
-            for case in png-300 jpeg-300 jpx-72 png-20-on-4 text-10000 merge-4x100 open-23mb; do
+            grep -q 'RAN: peak memory, 8 cases a process each' peak.log
+            for case in png-300 jpeg-300 jpx-72 png-20-on-4 png-20-on-4-one-arena \
+                text-10000 merge-4x100 open-23mb; do
               grep -Pq "^(default|bundled-fonts)\t$case\t[1-9][0-9]*$" peak.log
             done
             # The measured table, for the TSV.
