@@ -102,6 +102,16 @@ pub fn replay<D: Device + ?Sized>(events: &[Event], device: &mut D) -> Replayed 
                     device.group_budget_spent();
                     continue;
                 }
+                Event::RecursionRefused => {
+                    done.delivered += 1;
+                    device.recursion_refused();
+                    continue;
+                }
+                Event::NestedBudgetSpent => {
+                    done.delivered += 1;
+                    device.nested_budget_spent();
+                    continue;
+                }
                 _ => {}
             }
             done.skipped += 1;
@@ -186,6 +196,8 @@ pub fn replay<D: Device + ?Sized>(events: &[Event], device: &mut D) -> Replayed 
             Event::EndSoftMask => device.end_soft_mask(),
             Event::ClearSoftMask => device.clear_soft_mask(),
             Event::GroupBudgetSpent => device.group_budget_spent(),
+            Event::RecursionRefused => device.recursion_refused(),
+            Event::NestedBudgetSpent => device.nested_budget_spent(),
         }
     }
     done

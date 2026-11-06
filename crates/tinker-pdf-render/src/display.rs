@@ -646,6 +646,22 @@ impl Device for DisplayRecorder {
         }
     }
 
+    /// Recorded for the same reason as the group budget's notice.
+    fn recursion_refused(&mut self) {
+        if !self.overflowed {
+            self.events.recursion_refused();
+            self.count();
+        }
+    }
+
+    /// Recorded for the same reason as the group budget's notice.
+    fn nested_budget_spent(&mut self) {
+        if !self.overflowed {
+            self.events.nested_budget_spent();
+            self.count();
+        }
+    }
+
     /// Yes once the budget is passed: nothing more would be kept, so nothing
     /// more is worth interpreting. Never otherwise — cancellation is the
     /// replaying renderer's, not the recording's (see the module

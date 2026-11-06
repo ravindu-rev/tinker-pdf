@@ -207,3 +207,31 @@ fn an_unmapped_code_draws_nothing() {
     ));
     assert_eq!(inked(&bitmap), 0);
 }
+
+/// A glyph whose procedure shows the same glyph has no last run (9.6.5):
+/// showing itself twice, it was two to the sixteenth runs inside the depth
+/// cap. The procedure's own identity says it is already running, so it draws
+/// once, and the render says the repeat was refused.
+#[test]
+fn a_glyph_that_shows_itself_draws_once_and_says_so() {
+    // The procedure fills its glyph's lower half, then shows itself twice at
+    // the size of the whole glyph, over the same square and the next.
+    let bitmap = render(document(
+        "1000 0 d0 0 0 1000 500 re f BT /F0 1000 Tf (aa) Tj ET",
+        "[0.001 0 0 0.001 0 0]",
+        "BT /F0 50 Tf 10 20 Td (a) Tj ET",
+    ));
+    assert!(
+        bitmap
+            .warnings
+            .contains(&tinker_pdf::RenderWarning::RecursiveContent),
+        "{:?}",
+        bitmap.warnings
+    );
+    // The lower half of a 50-point glyph, at the page's default scale.
+    assert!(
+        inked(&bitmap) > 500,
+        "the glyph's own fill drew: {}",
+        inked(&bitmap)
+    );
+}

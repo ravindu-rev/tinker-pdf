@@ -270,6 +270,24 @@ pub enum RenderWarning {
         /// How many buffers were opened before the budget ran out.
         opened: u32,
     },
+    /// A form, a soft mask's group or a Type 3 glyph procedure named itself
+    /// while it was running, directly or through others, and was drawn once
+    /// (8.10).
+    ///
+    /// A cycle has no last run: drawn as written it never finishes, and a
+    /// depth cap ends it only after two or more runs to the sixteenth when it
+    /// branches. The repeat is passed over at its first appearance, which is
+    /// the page every reader can draw.
+    RecursiveContent,
+    /// A page ran its forms, soft masks' groups and Type 3 glyph procedures
+    /// more times over than one interpretation runs, and the runs past the
+    /// budget were not drawn (`NESTED_WORK_FLOOR`, `NESTED_WORK_RATE`).
+    ///
+    /// A budget scaled to the content the page holds: every stream the page
+    /// reaches still runs once, and what is passed over is further runs of
+    /// content already drawn — a tree of forms each drawing the next many
+    /// times, which no depth cap bounds.
+    NestedBudgetSpent,
     /// The render stopped because it was cancelled.
     Cancelled,
     /// A [`PixelRegion`] reached past the edge of the page, so the part that
@@ -816,6 +834,12 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// See [`Renderer::with_antialias`].
     antialias: bool,
     missing_fonts: u32,
+    /// Whether the interpreter refused a nested stream that named itself, for
+    /// [`RenderWarning::RecursiveContent`].
+    recursion_refused: bool,
+    /// Whether the interpreter spent its nested-content budget, for
+    /// [`RenderWarning::NestedBudgetSpent`].
+    nested_budget_spent: bool,
     /// Glyphs shown and outlines painted, for [`Renderer::finish_counted`].
     counts: RenderCounts,
     /// Glyph outlines accumulated by text clipping modes 4–7, applied at `ET`.
@@ -919,6 +943,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             tolerance: 0.2,
             antialias: true,
             missing_fonts: 0,
+            recursion_refused: false,
+            nested_budget_spent: false,
             counts: RenderCounts::default(),
             text_clip: None,
             text_clip_requested: false,
@@ -1179,6 +1205,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             self.warnings.push(RenderWarning::GroupBudgetSpent {
                 opened: self.admission.buffers(),
             });
+        }
+        if self.recursion_refused {
+            self.warnings.push(RenderWarning::RecursiveContent);
+        }
+        if self.nested_budget_spent {
+            self.warnings.push(RenderWarning::NestedBudgetSpent);
         }
         // The flag, not the token. Asking the token here reports a page that
         // was drawn in full as cancelled whenever the caller's timeout lost
@@ -3280,6 +3312,16 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
     /// as [`RenderWarning::GroupBudgetSpent`], as it does for its own.
     fn group_budget_spent(&mut self) {
         self.admission.note_budget_spent();
+    }
+
+    /// Said at the end as [`RenderWarning::RecursiveContent`].
+    fn recursion_refused(&mut self) {
+        self.recursion_refused = true;
+    }
+
+    /// Said at the end as [`RenderWarning::NestedBudgetSpent`].
+    fn nested_budget_spent(&mut self) {
+        self.nested_budget_spent = true;
     }
 }
 

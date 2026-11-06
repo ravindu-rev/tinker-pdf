@@ -987,9 +987,14 @@ trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
 /// is three to the sixteenth. A depth cap is not a work cap, which is the
 /// same lesson `MAX_TILE_WORK` records one layer down for tiling patterns.
 ///
+/// It is also a cycle, and that is what stops it: the mask's group is object
+/// 4, and once it runs, a `gs` inside it that sets the mask again finds
+/// object 4 already running and runs it no further. No path through the page
+/// runs a stream inside itself, and no budget is reached.
+///
 /// The assertion is the warning rather than a clock. A timing test would fail
-/// on a slow machine and pass on a fast one with the budget removed; the
-/// warning says the budget was reached, which is the thing that bounds the
+/// on a slow machine and pass on a fast one with the refusal removed; the
+/// warning says the cycle was refused, which is the thing that bounds the
 /// work.
 #[test]
 fn a_soft_mask_that_names_its_own_page_is_bounded_and_says_so() {
@@ -999,11 +1004,16 @@ fn a_soft_mask_that_names_its_own_page_is_bounded_and_says_so() {
     let bitmap = page.render(&tinker_pdf::RenderOptions::default());
 
     assert!(
-        bitmap
+        bitmap.warnings.contains(&RenderWarning::RecursiveContent),
+        "the refusal is what stops this page, so it has to say it stopped: {:?}",
+        bitmap.warnings
+    );
+    assert!(
+        !bitmap
             .warnings
             .iter()
-            .any(|w| matches!(w, tinker_pdf::RenderWarning::GroupBudgetSpent { .. })),
-        "the budget is what stops this page, so it has to say it stopped: {:?}",
+            .any(|w| matches!(w, RenderWarning::GroupBudgetSpent { .. })),
+        "and the page is bounded well inside the group budget: {:?}",
         bitmap.warnings
     );
 
@@ -1015,22 +1025,11 @@ fn a_soft_mask_that_names_its_own_page_is_bounded_and_says_so() {
     );
 }
 
-/// The seed above with 252 bytes mutated by a fuzzing run, and every reading
-/// the `render_page` target makes of it.
-///
-/// The mutation broke object 6's length, so the knockout group reads on into
-/// a copy of the page's content: it draws itself twice and leaves a `q` open
-/// each time. Depth alone let that be two to the sixteenth runs in every
-/// reading, a device that declines groups running them all as content, and
-/// the open `q` cost the SVG writer an element per run it never popped, so
-/// `to_svg` did not return. The interpreter now closes what a nested stream
-/// leaves open and spends every group's run from the page's group budget,
-/// whatever the device answers; the render and the SVG writer both say the
-/// budget ran out.
-#[test]
-fn a_soft_mask_mutated_past_its_seed_is_bounded_in_every_reading() {
-    let bytes =
-        include_bytes!("../../../fuzz/corpus/render_page/soft-mask-mutated-past-its-seed.pdf");
+/// Every reading the `render_page` fuzz target makes of `bytes`' first page,
+/// returning what the render at the target's 12 dpi and the SVG writer
+/// reported. The display list's replay is asserted to report as the render
+/// does.
+fn every_reading(bytes: &[u8]) -> (Vec<RenderWarning>, Vec<tinker_pdf::SvgWarning>) {
     let doc = Document::open(bytes.to_vec()).expect("it opens, damaged as it is");
     let page = doc.page(0).expect("a page");
 
@@ -1053,26 +1052,110 @@ fn a_soft_mask_mutated_past_its_seed_is_bounded_in_every_reading() {
     }
     let _ = page.images();
 
-    let bitmap = page.render(&RenderOptions::at_dpi(12.0));
-    assert!(
-        bitmap
-            .warnings
-            .iter()
-            .any(|w| matches!(w, RenderWarning::GroupBudgetSpent { .. })),
-        "the render says the budget stopped it: {:?}",
-        bitmap.warnings
+    let options = RenderOptions::at_dpi(12.0);
+    let bitmap = page.render(&options);
+    assert_eq!(
+        page.display_list().render(&options).warnings,
+        bitmap.warnings,
+        "the replay reports as the render does"
     );
 
-    let mut options = tinker_pdf::SvgOptions::default();
-    options.raster_scale = 0.25;
-    let svg = page.to_svg(&options);
+    let mut svg = tinker_pdf::SvgOptions::default();
+    svg.raster_scale = 0.25;
+    (bitmap.warnings, page.to_svg(&svg).warnings)
+}
+
+/// Whether the SVG writer said the render's `warning`.
+fn svg_says(warnings: &[tinker_pdf::SvgWarning], warning: &RenderWarning) -> bool {
+    warnings
+        .iter()
+        .any(|w| matches!(w, tinker_pdf::SvgWarning::Render(said) if said == warning))
+}
+
+/// The seed above with 252 bytes mutated by a fuzzing run, and every reading
+/// the `render_page` target makes of it.
+///
+/// The mutation broke object 6's length, so the knockout group reads on into
+/// a copy of the page's content: it draws itself twice and leaves a `q` open
+/// each time. Depth alone let that be two to the sixteenth runs in every
+/// reading, a device that declines groups running them all as content, and
+/// the open `q` cost the SVG writer an element per run it never popped, so
+/// `to_svg` did not return. The interpreter closes what a nested stream
+/// leaves open, and refuses the group where it is already running, whatever
+/// the device answers; the render and the SVG writer both say so.
+#[test]
+fn a_soft_mask_mutated_past_its_seed_is_bounded_in_every_reading() {
+    let (render, svg) = every_reading(include_bytes!(
+        "../../../fuzz/corpus/render_page/soft-mask-mutated-past-its-seed.pdf"
+    ));
+    let cycle = RenderWarning::RecursiveContent;
+    assert!(render.contains(&cycle), "the render says so: {render:?}");
     assert!(
-        svg.warnings.iter().any(|w| matches!(
-            w,
-            tinker_pdf::SvgWarning::Render(RenderWarning::GroupBudgetSpent { .. })
-        )),
-        "and so does the SVG writer: {:?}",
-        svg.warnings
+        svg_says(&svg, &cycle),
+        "and so does the SVG writer: {svg:?}"
+    );
+}
+
+/// The same seed mutated another way (K-20): `/Knock`'s dictionary broken so
+/// that it is a plain form rather than a group, its stream reading on into two
+/// copies of the page's operators that each draw it. No group budget was
+/// spent on it, so depth alone bounded it, at two to the sixteenth runs in
+/// every reading; refused where it is already running, it draws once on any
+/// path, and the render and the SVG writer say so.
+/// `stats.rs` counts the work.
+#[test]
+fn a_form_that_reads_into_the_page_that_draws_it_is_bounded_in_every_reading() {
+    let (render, svg) = every_reading(include_bytes!(
+        "../../../fuzz/corpus/render_page/form-reads-into-the-page-that-draws-it.pdf"
+    ));
+    let cycle = RenderWarning::RecursiveContent;
+    assert!(render.contains(&cycle), "the render says so: {render:?}");
+    assert!(
+        svg_says(&svg, &cycle),
+        "and so does the SVG writer: {svg:?}"
+    );
+}
+
+/// A tree of distinct transparency groups, each drawing the next twice: no
+/// cycle, and two to the twelfth runs inside the depth cap. The page's group
+/// budget is what stops it, and the render and the SVG writer say so.
+#[test]
+fn a_tree_of_groups_past_the_budget_says_so_in_every_reading() {
+    // Objects 6 to 16, each naming the next as `/N`; the last fills.
+    let mut extra = String::new();
+    for object in 6..=16 {
+        let (resources, content) = if object < 16 {
+            (
+                format!("/Resources << /XObject << /N {} 0 R >> >>", object + 1),
+                "/N Do /N Do",
+            )
+        } else {
+            (String::new(), "0 0 1 rg 0 0 60 60 re f")
+        };
+        extra.push_str(&format!(
+            "{object} 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 60 60] \
+             {TRANSPARENCY} {resources}\n   /Length {} >>\nstream\n{content}\nendstream\nendobj\n",
+            content.len()
+        ));
+    }
+    let bytes = page(
+        &format!("{TRANSPARENCY} /Resources << /XObject << /N 6 0 R >> >>"),
+        "",
+        "/N Do /N Do",
+        &extra,
+        "",
+    );
+    let (render, svg) = every_reading(&bytes);
+    let spent = |w: &RenderWarning| matches!(w, RenderWarning::GroupBudgetSpent { .. });
+    assert!(render.iter().any(spent), "the render says so: {render:?}");
+    assert!(
+        svg.iter()
+            .any(|w| matches!(w, tinker_pdf::SvgWarning::Render(said) if spent(said))),
+        "and so does the SVG writer: {svg:?}"
+    );
+    assert!(
+        !render.contains(&RenderWarning::RecursiveContent),
+        "and nothing in it is a cycle: {render:?}"
     );
 }
 

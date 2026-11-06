@@ -340,6 +340,13 @@ pub enum Event {
     /// The interpreter's group budget ran out
     /// ([`Device::group_budget_spent`]): no group or mask after it was run.
     GroupBudgetSpent,
+    /// A nested stream named itself while it ran and was not run again
+    /// there ([`Device::recursion_refused`]).
+    RecursionRefused,
+    /// The interpreter's nested-content budget ran out
+    /// ([`Device::nested_budget_spent`]): no nested stream after it was run
+    /// again.
+    NestedBudgetSpent,
 }
 
 /// Which trait method an [`Event`] came from, with the payload dropped.
@@ -390,6 +397,10 @@ pub enum EventKind {
     ClearSoftMask,
     /// [`Event::GroupBudgetSpent`].
     GroupBudgetSpent,
+    /// [`Event::RecursionRefused`].
+    RecursionRefused,
+    /// [`Event::NestedBudgetSpent`].
+    NestedBudgetSpent,
 }
 
 impl Event {
@@ -417,6 +428,8 @@ impl Event {
             Event::EndSoftMask => EventKind::EndSoftMask,
             Event::ClearSoftMask => EventKind::ClearSoftMask,
             Event::GroupBudgetSpent => EventKind::GroupBudgetSpent,
+            Event::RecursionRefused => EventKind::RecursionRefused,
+            Event::NestedBudgetSpent => EventKind::NestedBudgetSpent,
         }
     }
 
@@ -831,6 +844,18 @@ impl Device for RecordingDevice {
     fn group_budget_spent(&mut self) {
         if self.capture.structure {
             self.events.push(Event::GroupBudgetSpent);
+        }
+    }
+
+    fn recursion_refused(&mut self) {
+        if self.capture.structure {
+            self.events.push(Event::RecursionRefused);
+        }
+    }
+
+    fn nested_budget_spent(&mut self) {
+        if self.capture.structure {
+            self.events.push(Event::NestedBudgetSpent);
         }
     }
 

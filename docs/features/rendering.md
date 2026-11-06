@@ -422,9 +422,9 @@ cancellation might, never more (`display_list.rs`'s
 
 **A page too large to retain is drawn the direct way.** A recording keeps
 every call with its own copy of the state and the path, so what it holds is
-the interpreter's *work*, and work multiplies through forms: a short file of
-forms each invoking the next several times records without bound, where a
-direct render holds one canvas. So the recording has a budget,
+the interpreter's *work*, and work multiplies through forms: a page that
+draws a heavy form a few hundred times records hundreds of times what it
+holds, where a direct render holds one canvas. So the recording has a budget,
 `tinker_pdf_render::MAX_DISPLAY_LIST_BYTES` (64 MiB), counted by
 `kept_bytes` — each event's size, its state, its path at 56 bytes a segment,
 and every name, string, inline image and mask-group stream it copies. Past
@@ -434,9 +434,12 @@ the interpreter to stop, and the list is **not retained**
 `Page::render` and every `to_svg` interprets the page into the writer —
 the same output at a direct render's cost, never a partial picture
 (`display_list.rs`'s `a_page_too_large_to_retain_is_drawn_the_direct_way`, at
-the cap's own value, and `the_review_s_fan_out_of_forms_is_not_retained`).
-What the cap bounds is memory: the time a fan of forms costs is the
-interpreter's, which bounds how deep forms nest and not how wide they fan.
+the cap's own value). What the cap bounds is memory. The time a fan of forms
+costs is the interpreter's, whose nested-content budget bounds how wide forms
+fan as well as how deep they nest ([content and text](content-and-text.md)):
+a short file of forms each invoking the next several times stops where that
+budget does, in a recording as in a render, and its list is retained
+(`the_review_s_fan_out_of_forms_is_bounded_where_it_is_read`).
 
 **A page as SVG.** `Page::to_svg` writes SVG 1.1 through a third `Device`
 (`crates/tinker-pdf/src/svg_out.rs`), fed by replaying the page's display list
@@ -801,6 +804,8 @@ defect to hide in.
 | A pattern whose cell cannot be read, or a lattice past 65 536 positions / 16.7 Mpx / 33.5 Mpx | `RenderWarning::UnsupportedPattern` | Unpainted reads as missing; `/Pattern`'s nominal black reads as content and hides the gap | [rulings](../rulings.md) |
 | A colour space whose parameters no space can mean, read the nearest way that does: a `/Lab` `/Range` pair written backwards, read as the span it covers; and a default colour space 8.6.5.6 does not allow — a `/Lab`, `/Indexed` or `/Pattern` one, one with another number of components than its device space, one that is no colour space — refused, the device space drawn as without it; and a JPEG's or JPEG 2000 image's `/ColorSpace` with another number of components than its samples, refused, the image drawn in the codec's own colour | `RenderWarning::RepairedColorSpace { name, reason }`, `reason` `LabRangeUnordered`; for a default, `name` the default's own (`DefaultRGB`) and `reason` `DefaultSpaceFamily`, `DefaultSpaceComponents` or `DefaultSpaceUnreadable`; for such an image, `name` the image's (`inline` for an inline one) and `reason` `ImageSpaceComponents`; once a render | Drawn *and* named (ruling 10). Named where the space is reached through the page's resources or a tiling cell's, as every tolerance the resource layer reports is; **not** through a form XObject's or an annotation appearance's own `/Resources`, which keep what they tolerate to themselves — a font a form's own resources cannot resolve goes unreported the same way | [rulings](../rulings.md) |
 | A layer the default configuration turns off | `RenderWarning::HiddenOptionalContent` | Correct behaviour, reported all the same — the one leniency a reader cannot see | [rulings](../rulings.md) |
+| A form, a soft mask's group or a Type 3 glyph procedure that names itself while it runs, directly or through the others, drawn once | `RenderWarning::RecursiveContent`, and `SvgWarning::Render` of it from `to_svg` | A cycle has no last run; refused at its first repeat by the stream's identity, the page is what every reader can draw, where the depth cap ended a branching cycle only after two or more runs to the sixteenth | [content and text](content-and-text.md) |
+| Nested runs past the interpreter's budget for nested content — 4 MiB, and 4 096 bytes for every byte of content the page reaches — past which no stream that has already run is run again | `RenderWarning::NestedBudgetSpent`, and `SvgWarning::Render` of it from `to_svg` | A tree of distinct forms or glyph procedures, each drawing the next many times, is no cycle and no group; every stream the page holds still runs once, so what is passed over is repeats of content already drawn | [content and text](content-and-text.md) |
 | More than 2 000 transparency-group buffers on one page, or more than 2 000 groups and soft masks' groups run in one stream, past which the interpreter runs no more of either | `RenderWarning::GroupBudgetSpent`, and `SvgWarning::Render` of it from `to_svg` | A budget, not a depth: branching group and soft-mask recursion stays inside any depth cap, and every reading of the page — text, images, SVG — is bounded by the same walk | [rulings](../rulings.md) |
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |

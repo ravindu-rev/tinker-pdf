@@ -643,6 +643,69 @@ fn the_shape_that_stalled_a_page_renders_in_work_linear_in_it() {
     assert!(four.work() <= 4 * once.work(), "{four:?} against {once:?}");
 }
 
+/// **A form whose stream reads on into the page that draws it renders in
+/// work the page bounds** (K-20). The `render_page` input a fuzzing run made
+/// of `soft-mask-names-its-own-page.pdf`, kept as a seed: its mutation broke
+/// `/Knock`'s dictionary, so `/Knock` (object 6) is a plain form rather than
+/// a group, and its stream reads on past its length into two copies of the
+/// page's operators — each drawing `/Grp`, drawing `/Knock` itself, and
+/// setting `/GM`, whose soft mask's group is the page's content (object 4).
+/// A depth cap alone let `/Knock` run two to the sixteenth times. Refused
+/// where it is already running, as the mask's group is, a reading is a walk
+/// of a few copies of the page:
+///
+/// - the render runs the page's content once, `/Knock` twice (from the page
+///   and from the mask's group the page sets) and the mask's group three
+///   times (from each of `/Knock`'s copies, and from the page) — eight
+///   copies of the page's operators, each drawing `/Grp` once and asking for
+///   `/Knock` once;
+/// - text and image extraction decline the mask, as a device that keeps no
+///   pixels does, so they run the page's content and `/Knock` once each, and
+///   ask for `/Knock` three times.
+///
+/// The stream decodes follow from the list above: the page's content once,
+/// the mask's group once at the graphics state that names it, and `/Knock`
+/// at each `Do`, the refused ones included, since a form's identity comes
+/// with its content. `/Grp` names no form, so each copy draws it as an image,
+/// decoded at the first and kept.
+#[test]
+fn a_form_that_draws_itself_renders_in_work_its_page_bounds() {
+    let bytes = include_bytes!(
+        "../../../fuzz/corpus/render_page/form-reads-into-the-page-that-draws-it.pdf"
+    );
+    let document = Document::open(bytes.to_vec()).expect("it opens, damaged as it is");
+    let page = document.page(0).expect("a page");
+
+    let bitmap = page.render(&RenderOptions {
+        stats: true,
+        ..RenderOptions::at_dpi(12.0)
+    });
+    let stats = bitmap.stats.expect("asked");
+    assert_eq!(stats.streams_decoded, 1 + 1 + 8, "{stats:?}");
+    assert_eq!(
+        stats.most_decoded_stream,
+        Some(ObjRef { num: 6, gen: 0 }),
+        "{stats:?}"
+    );
+    assert_eq!(stats.most_decodes_of_one_stream, 8, "{stats:?}");
+    assert_eq!((stats.image_misses, stats.image_hits), (1, 7), "{stats:?}");
+    assert!(
+        bitmap
+            .warnings
+            .contains(&tinker_pdf::RenderWarning::RecursiveContent),
+        "{:?}",
+        bitmap.warnings
+    );
+
+    for (what, stats) in [
+        ("text", page.text_counted(&TextOptions::default()).1),
+        ("images", page.images_counted().1),
+    ] {
+        assert_eq!(stats.streams_decoded, 1 + 1 + 3, "{what}: {stats:?}");
+        assert_eq!(stats.most_decodes_of_one_stream, 3, "{what}: {stats:?}");
+    }
+}
+
 /// A tiling pattern's cell is drawn by a renderer of its own over a scope of
 /// its own, and both count into the page's tally.
 #[test]

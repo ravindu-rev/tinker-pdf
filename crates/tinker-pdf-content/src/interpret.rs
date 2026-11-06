@@ -12,6 +12,7 @@ use crate::state::{
 };
 use crate::tokenizer::{Token, Tokenizer};
 use core::mem;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tinker_pdf_color::Function;
 use tinker_pdf_cos::decode_text_string;
@@ -61,6 +62,25 @@ pub struct Form {
     /// of this crate, and an identity is all a device needs. Packing rather
     /// than the object number alone because 7.3.10 makes `num gen` the
     /// reference, and a regenerated object reuses the number.
+    pub stream: u64,
+}
+
+/// A Type 3 glyph's procedure, which the interpreter is about to run (9.6.5).
+///
+/// A struct rather than a tuple for [`Form`]'s reason: adding
+/// [`Type3Glyph::stream`] forced every implementor to supply it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Type3Glyph {
+    /// The decoded procedure, a content stream.
+    pub content: Vec<u8>,
+    /// The font's `/FontMatrix`, mapping glyph space into text space.
+    pub matrix: Matrix,
+    /// The procedure's own indirect reference, packed as [`Form::stream`]
+    /// packs a form's, and `0` when the caller reached it without one.
+    ///
+    /// It is what tells a procedure that shows its own glyph — which would
+    /// run itself for ever, and is run once — from one that shows another
+    /// glyph of its font.
     pub stream: u64,
 }
 
@@ -406,7 +426,8 @@ pub trait FontSource {
         None
     }
 
-    /// A Type 3 glyph procedure and the font's `/FontMatrix` (9.6.5).
+    /// A Type 3 glyph procedure, with the font's `/FontMatrix` and the
+    /// procedure's identity (9.6.5).
     ///
     /// A Type 3 glyph is a content stream, not an outline: it can fill, stroke,
     /// draw images, do anything a page can. So it is *run*, the way a form
@@ -415,7 +436,7 @@ pub trait FontSource {
     ///
     /// `None` for every other kind of font, which is what keeps the ordinary
     /// path unchanged.
-    fn type3_glyph(&self, font: &[u8], code: u32) -> Option<(Vec<u8>, Matrix)> {
+    fn type3_glyph(&self, font: &[u8], code: u32) -> Option<Type3Glyph> {
         let _ = (font, code);
         None
     }
@@ -544,8 +565,10 @@ const MAX_FORM_DEPTH: u32 = 16;
 ///
 /// [`MAX_FORM_DEPTH`] bounds how deep the nesting goes and not how much work
 /// it is, which are different numbers the moment the recursion *branches*: a
-/// group form whose content draws itself twice is two to the sixteenth runs
-/// inside the depth. A device that holds group buffers declines the ones past
+/// group form whose content draws another twice, each drawing another twice,
+/// is two to the sixteenth runs inside the depth — and a group that draws
+/// itself is refused as a cycle only where it has an identity
+/// ([`Form::stream`]). A device that holds group buffers declines the ones past
 /// its own budget, the renderer at two thousand, and that bounded its buffers
 /// and not the walk: a declined group still runs as content, and a device
 /// that keeps no buffer — the text device, the image lister — declines every
@@ -560,6 +583,42 @@ const MAX_FORM_DEPTH: u32 = 16;
 /// group run; past the budget neither is offered, and the device hears
 /// [`Device::group_budget_spent`] once.
 pub const MAX_GROUP_RUNS: u32 = 2000;
+
+/// The floor of the budget one interpretation spends on nested content, in
+/// bytes: forms, soft masks' groups and Type 3 glyph procedures (8.10,
+/// 11.6.5.2, 9.6.5).
+///
+/// [`MAX_FORM_DEPTH`] bounds how deep nested content goes and
+/// [`MAX_GROUP_RUNS`] how many groups run, and neither bounds the plain forms
+/// and glyph procedures most nested content is: a chain of sixteen forms, each
+/// drawing the next ten times, is ten to the sixteenth runs inside the depth.
+/// A stream already running in its own ancestry is not run again there, which
+/// leaves trees, and a tree is bounded by its size only through a budget.
+///
+/// The budget is this floor and [`NESTED_WORK_RATE`] bytes for every byte of
+/// content the interpretation has reached — its own stream, and each nested
+/// stream's length the first time it is reached — and each run spends its
+/// stream's length and [`NESTED_RUN_COST`]. A rate rather than one number,
+/// because reuse is what forms and glyphs are for: a figure of a million
+/// plotted markers runs one marker's few bytes a million times, and a cap
+/// high enough for it would let a few hostile kilobytes run for minutes.
+/// Under a rate a page may run what it holds four thousand times over, and a
+/// file of a few kilobytes about the floor.
+///
+/// Spent and never refunded. Reaching a stream raises the budget by more than
+/// its run costs, so the first run of a stream with content and an identity
+/// always fits: what the budget passes over is only content that has already
+/// run once. Past it the device hears [`Device::nested_budget_spent`] once.
+pub const NESTED_WORK_FLOOR: u64 = 4 << 20;
+
+/// What [`NESTED_WORK_FLOOR`]'s budget grows by for every byte of content an
+/// interpretation reaches.
+pub const NESTED_WORK_RATE: u64 = 4096;
+
+/// What one nested run spends from [`NESTED_WORK_FLOOR`]'s budget beyond its
+/// stream's length: a run is a lookup, a decode and a saved state before its
+/// first byte, so a tree of empty forms is bounded too.
+pub const NESTED_RUN_COST: u64 = 256;
 
 /// A `BDC`'s property list, in the two forms 14.6.2 gives it.
 ///
@@ -718,6 +777,12 @@ pub fn interpret<D: Device, F: FontSource>(
         streams: Vec::new(),
         group_runs: 0,
         group_budget_told: false,
+        procedures: Vec::new(),
+        recursion_told: false,
+        reached_streams: BTreeSet::new(),
+        reached: u64::try_from(content.len()).unwrap_or(u64::MAX),
+        nested_spent: 0,
+        nested_budget_told: false,
     };
     interp.run(content);
     // 14.6.2: a stream may end with scopes still open, and a device left
@@ -765,6 +830,21 @@ struct Interpreter<'d, D: Device, F: FontSource> {
     group_runs: u32,
     /// Whether the device has heard [`Device::group_budget_spent`].
     group_budget_told: bool,
+    /// The Type 3 glyph procedures being run, innermost last, by
+    /// [`Type3Glyph::stream`]: with `streams`, the ancestry a nested stream is
+    /// refused in when it is already running there.
+    procedures: Vec<u64>,
+    /// Whether the device has heard [`Device::recursion_refused`].
+    recursion_told: bool,
+    /// The nested streams whose length is in `reached`.
+    reached_streams: BTreeSet<u64>,
+    /// Bytes of content this interpretation has reached: its own stream and
+    /// each nested stream once, which [`NESTED_WORK_RATE`] scales.
+    reached: u64,
+    /// Bytes of the nested-content budget spent ([`NESTED_WORK_FLOOR`]).
+    nested_spent: u64,
+    /// Whether the device has heard [`Device::nested_budget_spent`].
+    nested_budget_told: bool,
 }
 
 impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
@@ -1716,6 +1796,58 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         false
     }
 
+    /// Whether `stream` is already running in the ancestry of what runs now —
+    /// a form, a soft mask's group or a Type 3 glyph procedure that names
+    /// itself, directly or through others — telling the device, the first
+    /// time (8.10). A stream without an identity is never one.
+    ///
+    /// A cycle has no last run, so the depth cap was all that ended one, and a
+    /// cycle that branches is two or more runs to the sixteenth inside it:
+    /// refused at its first repeat, it draws once.
+    fn recursing(&mut self, stream: u64) -> bool {
+        if stream == 0 || !(self.streams.contains(&stream) || self.procedures.contains(&stream)) {
+            return false;
+        }
+        if !self.recursion_told {
+            self.recursion_told = true;
+            self.device.recursion_refused();
+        }
+        true
+    }
+
+    /// Whether the nested-content budget ([`NESTED_WORK_FLOOR`]) has room
+    /// for a run of `len` bytes of `stream`, counting the stream into what
+    /// the interpretation has reached the first time it is asked about, and
+    /// telling the device, the first time it has none.
+    fn nested_work_left(&mut self, stream: u64, len: usize) -> bool {
+        let len = u64::try_from(len).unwrap_or(u64::MAX);
+        if stream != 0 && self.reached_streams.insert(stream) {
+            self.reached = self.reached.saturating_add(len);
+        }
+        let budget =
+            NESTED_WORK_FLOOR.saturating_add(self.reached.saturating_mul(NESTED_WORK_RATE));
+        let after = self
+            .nested_spent
+            .saturating_add(len)
+            .saturating_add(NESTED_RUN_COST);
+        if after <= budget {
+            return true;
+        }
+        if !self.nested_budget_told {
+            self.nested_budget_told = true;
+            self.device.nested_budget_spent();
+        }
+        false
+    }
+
+    /// Spends a run of `len` bytes from the nested-content budget.
+    fn spend_nested_work(&mut self, len: usize) {
+        self.nested_spent = self
+            .nested_spent
+            .saturating_add(u64::try_from(len).unwrap_or(u64::MAX))
+            .saturating_add(NESTED_RUN_COST);
+    }
+
     /// Hands a recorded `W`/`W*` to the device, now that the path has ended.
     fn apply_pending_clip(&mut self, path: &[PathSegment]) {
         if let Some(even_odd) = self.pending_clip.take() {
@@ -1838,10 +1970,18 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         if self.depth >= MAX_FORM_DEPTH {
             return;
         }
+        // 8.10: a form that names itself while it runs — directly, or through
+        // other forms, masks or glyphs — draws once.
+        if self.recursing(form.stream) {
+            return;
+        }
         // A group form spends from the page's group budget whether or not the
         // device holds the group, because its content runs either way.
         let group_form = form.group.is_some();
         if group_form && !self.group_run_left() {
+            return;
+        }
+        if !self.nested_work_left(form.stream, form.content.len()) {
             return;
         }
         let id = self.fonts.font_id(name);
@@ -1855,6 +1995,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         if group_form {
             self.group_runs += 1;
         }
+        self.spend_nested_work(form.content.len());
         let outer = nested.map(|scope| mem::replace(&mut self.fonts, Scope::Owned(scope)));
         // 8.6.5.6 reads a default in "the current resource dictionary", which
         // inside a form with resources of its own is those: the page's
@@ -1992,10 +2133,18 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         if self.depth >= MAX_FORM_DEPTH {
             return;
         }
-        // The page's group budget: a mask group that names its own page
-        // opens more masks each time it runs, and a branching walk is bounded
-        // by a budget rather than a depth (`MAX_GROUP_RUNS`).
+        // A mask group that sets its own mask while it runs — the shape of a
+        // `/G` naming the page whose `gs` sets it — runs once.
+        if self.recursing(mask.form.stream) {
+            return;
+        }
+        // The page's group budget: a mask group that opens other masks opens
+        // more each time it runs, and a branching walk is bounded by a budget
+        // rather than a depth (`MAX_GROUP_RUNS`).
         if !self.group_run_left() {
+            return;
+        }
+        if !self.nested_work_left(mask.form.stream, mask.form.content.len()) {
             return;
         }
 
@@ -2029,6 +2178,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
         );
         if accepted {
             self.group_runs += 1;
+            self.spend_nested_work(mask.form.content.len());
             // 8.10.2 still clips the group to its box, and 11.6.6 still
             // resets the alphas and the blend mode inside it — a mask group
             // is a transparency group, whatever `/G`'s own `/Group` says.
@@ -2176,8 +2326,20 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
             // glyph space, which the font matrix maps into text space — so the
             // matrix goes *inside* the transform that places the glyph, not
             // outside it.
-            if let Some((proc_bytes, font_matrix)) = self.fonts.type3_glyph(&font_name, code) {
-                if self.depth < MAX_FORM_DEPTH {
+            if let Some(glyph) = self.fonts.type3_glyph(&font_name, code) {
+                let font_matrix = glyph.matrix;
+                // A procedure that shows its own glyph while it runs, directly
+                // or through other glyphs and forms, draws once; and every run
+                // spends from the nested-content budget.
+                if self.depth < MAX_FORM_DEPTH
+                    && !self.recursing(glyph.stream)
+                    && self.nested_work_left(glyph.stream, glyph.content.len())
+                {
+                    self.spend_nested_work(glyph.content.len());
+                    let pushed = glyph.stream != 0;
+                    if pushed {
+                        self.procedures.push(glyph.stream);
+                    }
                     let saved_gs = self.gs.clone();
                     let saved_text = self.text_matrix;
                     let saved_line = self.line_matrix;
@@ -2194,8 +2356,7 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     self.gs.ctm = font_matrix.then(&transform);
                     self.depth += 1;
                     self.device.save_state();
-                    let inner = proc_bytes.clone();
-                    self.run(&inner);
+                    self.run(&glyph.content);
                     self.close_open_marked_content();
                     self.close_open_saves();
                     self.device.restore_state();
@@ -2207,6 +2368,9 @@ impl<D: Device, F: FontSource> Interpreter<'_, D, F> {
                     self.gs = saved_gs;
                     self.text_matrix = saved_text;
                     self.line_matrix = saved_line;
+                    if pushed {
+                        self.procedures.pop();
+                    }
                 }
 
                 // The advance still comes from /Widths, which are in glyph
@@ -2611,16 +2775,15 @@ mod tests {
                 })
             })
         }
-        fn type3_glyph(&self, font: &[u8], _code: u32) -> Option<(Vec<u8>, Matrix)> {
-            (font == b"T3").then(|| {
-                (
-                    self.glyph.to_vec(),
-                    Matrix {
-                        a: 0.001,
-                        d: 0.001,
-                        ..Matrix::IDENTITY
-                    },
-                )
+        fn type3_glyph(&self, font: &[u8], _code: u32) -> Option<Type3Glyph> {
+            (font == b"T3").then(|| Type3Glyph {
+                content: self.glyph.to_vec(),
+                matrix: Matrix {
+                    a: 0.001,
+                    d: 0.001,
+                    ..Matrix::IDENTITY
+                },
+                stream: 0,
             })
         }
     }
@@ -2713,10 +2876,11 @@ mod tests {
         );
     }
 
-    /// A group that draws itself twice is two to the sixteenth runs inside
-    /// the form depth. The page's group budget stops the walk at
-    /// [`MAX_GROUP_RUNS`] whether the device holds groups or declines them —
-    /// a declined group still runs as content — and tells the device once.
+    /// A group that draws itself twice, with no identity to be refused as a
+    /// cycle by, is two to the sixteenth runs inside the form depth. The
+    /// page's group budget stops the walk at [`MAX_GROUP_RUNS`] whether the
+    /// device holds groups or declines them — a declined group still runs as
+    /// content — and tells the device once.
     #[test]
     fn a_group_that_draws_itself_spends_the_page_group_budget() {
         for groups in [false, true] {
@@ -2770,6 +2934,270 @@ mod tests {
         crate::replay::replay(accepting.events(), &mut replayed);
         assert_eq!(replayed.count(EventKind::BeginSoftMask), 1);
         assert_eq!(replayed.count(EventKind::GroupBudgetSpent), 1);
+    }
+
+    /// A source whose streams have identities, for cycles and the
+    /// nested-content budget: forms by name, each with an identity and the
+    /// content a test gives; `/M`, a graphics state whose soft mask's group a
+    /// test gives; and the font `/T3`, each of whose codes' procedures a test
+    /// gives, with the identity `0x100` and the code.
+    struct Named {
+        forms: Vec<(Vec<u8>, u64, Vec<u8>)>,
+        mask: Option<(u64, Vec<u8>)>,
+        glyphs: Vec<(u32, Vec<u8>)>,
+    }
+
+    impl Named {
+        fn forms(forms: &[(&str, u64, &str)]) -> Named {
+            Named {
+                forms: forms
+                    .iter()
+                    .map(|&(name, stream, content)| {
+                        (
+                            name.as_bytes().to_vec(),
+                            stream,
+                            content.as_bytes().to_vec(),
+                        )
+                    })
+                    .collect(),
+                mask: None,
+                glyphs: Vec::new(),
+            }
+        }
+
+        fn glyphs(glyphs: Vec<(u32, Vec<u8>)>) -> Named {
+            Named {
+                forms: Vec::new(),
+                mask: None,
+                glyphs,
+            }
+        }
+    }
+
+    impl FontSource for Named {
+        fn decode(&self, _font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            bytes
+                .iter()
+                .map(|&b| (u32::from(b), char::from(b).to_string(), 500.0))
+                .collect()
+        }
+        fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+            (0.0, 880.0, -1000.0)
+        }
+        fn form(&self, name: &[u8]) -> Option<Form> {
+            let (_, stream, content) = self.forms.iter().find(|(n, _, _)| n == name)?;
+            Some(Form {
+                content: content.clone(),
+                matrix: Matrix::IDENTITY,
+                bbox: None,
+                group: None,
+                stream: *stream,
+            })
+        }
+        fn ext_g_state(&self, name: &[u8]) -> Option<Arc<StateParameters>> {
+            let (stream, content) = self.mask.as_ref().filter(|_| name == b"M")?;
+            Some(Arc::new(StateParameters {
+                soft_mask: Some(SoftMask::Group(Box::new(MaskGroup {
+                    form: Form {
+                        content: content.clone(),
+                        matrix: Matrix::IDENTITY,
+                        bbox: None,
+                        group: None,
+                        stream: *stream,
+                    },
+                    luminosity: true,
+                    backdrop: None,
+                    transfer: None,
+                }))),
+                ..StateParameters::default()
+            }))
+        }
+        fn type3_glyph(&self, font: &[u8], code: u32) -> Option<Type3Glyph> {
+            if font != b"T3" {
+                return None;
+            }
+            let (_, content) = self.glyphs.iter().find(|(c, _)| *c == code)?;
+            Some(Type3Glyph {
+                content: content.clone(),
+                matrix: Matrix {
+                    a: 0.001,
+                    d: 0.001,
+                    ..Matrix::IDENTITY
+                },
+                stream: 0x100 + u64::from(code),
+            })
+        }
+    }
+
+    /// 8.10: a form that draws itself has no last run, and one that draws
+    /// itself twice is two to the sixteenth runs inside the depth cap. Its
+    /// identity says it is already running, so it draws once, and the device
+    /// hears so once — in a replay too, since the notice is about the
+    /// interpretation.
+    #[test]
+    fn a_form_that_draws_itself_draws_once() {
+        let fonts = Named::forms(&[("F", 7, "/F Do /F Do 0 0 1 1 re f")]);
+        let mut device = RecordingDevice::new();
+        interpret(b"/F Do", Matrix::IDENTITY, &mut device, &fonts);
+        assert_eq!(device.count(EventKind::BeginForm), 1);
+        assert_eq!(device.count(EventKind::FillPath), 1);
+        assert_eq!(device.count(EventKind::RecursionRefused), 1);
+
+        let mut replayed = RecordingDevice::new();
+        crate::replay::replay(device.events(), &mut replayed);
+        assert_eq!(replayed.count(EventKind::RecursionRefused), 1);
+    }
+
+    /// The same through another form: each draws once in each run the page
+    /// asks for — a form the page draws twice is no cycle — and the device
+    /// hears of the cycle once however often it repeats.
+    #[test]
+    fn a_cycle_through_another_form_draws_each_once() {
+        let fonts = Named::forms(&[
+            ("A", 7, "/B Do 0 0 1 1 re f"),
+            ("B", 8, "/A Do /A Do 1 1 1 1 re f"),
+        ]);
+        let mut device = RecordingDevice::new();
+        interpret(b"/A Do /A Do", Matrix::IDENTITY, &mut device, &fonts);
+        assert_eq!(
+            device.count(EventKind::BeginForm),
+            4,
+            "A and B, for each of the page's two"
+        );
+        assert_eq!(device.count(EventKind::FillPath), 4);
+        assert_eq!(device.count(EventKind::RecursionRefused), 1);
+    }
+
+    /// A soft mask whose group sets the same mask — the shape of a `/G` that
+    /// names the page whose `gs` sets it — runs its group once, with no
+    /// budget spent to stop it; and so does a cycle through a form inside the
+    /// group.
+    #[test]
+    fn a_mask_whose_group_sets_it_again_runs_once() {
+        let answers = Answers {
+            soft_masks: true,
+            ..Answers::default()
+        };
+        let mut fonts = Named::forms(&[("F", 6, "/M gs 0 0 1 1 re f")]);
+        fonts.mask = Some((4, b"/M gs 1 1 1 1 re f".to_vec()));
+        let mut device = RecordingDevice::new().answering(answers);
+        interpret(b"/M gs", Matrix::IDENTITY, &mut device, &fonts);
+        assert_eq!(device.count(EventKind::BeginSoftMask), 1);
+        assert_eq!(device.count(EventKind::RecursionRefused), 1);
+        assert_eq!(device.count(EventKind::GroupBudgetSpent), 0);
+
+        fonts.mask = Some((4, b"/F Do".to_vec()));
+        let mut device = RecordingDevice::new().answering(answers);
+        interpret(b"/M gs", Matrix::IDENTITY, &mut device, &fonts);
+        assert_eq!(device.count(EventKind::BeginSoftMask), 1);
+        assert_eq!(device.count(EventKind::BeginForm), 1);
+        assert_eq!(device.count(EventKind::FillPath), 1);
+        assert_eq!(device.count(EventKind::RecursionRefused), 1);
+    }
+
+    /// 9.6.5: a glyph whose procedure shows itself draws once, as a form that
+    /// draws itself does.
+    #[test]
+    fn a_glyph_that_shows_itself_draws_once() {
+        let fonts = Named::glyphs(vec![(
+            u32::from(b'a'),
+            b"BT /T3 1 Tf (aa) Tj ET 0 0 1000 1000 re f".to_vec(),
+        )]);
+        let mut device = RecordingDevice::new();
+        interpret(
+            b"BT /T3 10 Tf (a) Tj ET",
+            Matrix::IDENTITY,
+            &mut device,
+            &fonts,
+        );
+        assert_eq!(device.count(EventKind::FillPath), 1);
+        assert_eq!(device.count(EventKind::RecursionRefused), 1);
+    }
+
+    /// The nested-content budget a tree of `count` streams of one `length`
+    /// reached from `page` allows, in runs.
+    fn runs_the_budget_allows(page: &[u8], count: u64, length: u64) -> u64 {
+        let reached = page.len() as u64 + count * length;
+        (NESTED_WORK_FLOOR + NESTED_WORK_RATE * reached) / (length + NESTED_RUN_COST)
+    }
+
+    /// Sixteen distinct forms, each drawing the next twice, are no cycle and
+    /// two to the sixteenth runs inside the depth cap. The nested-content
+    /// budget stops the tree where its floor and its rate on the content
+    /// reached say — every form the same length, so every run costs the same
+    /// — while every form still runs once, and the device hears so once, in a
+    /// replay too.
+    #[test]
+    fn a_tree_of_forms_spends_the_nested_budget() {
+        let names: Vec<String> = (0..16).map(|i| format!("F{i:02}")).collect();
+        let mut forms = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            let content = match names.get(i + 1) {
+                Some(next) => format!("/{next} Do /{next} Do"),
+                None => "0 0 1 1 re f   ".to_string(),
+            };
+            forms.push((
+                name.clone().into_bytes(),
+                100 + i as u64,
+                content.into_bytes(),
+            ));
+        }
+        let length = forms[0].2.len();
+        assert!(forms.iter().all(|(_, _, content)| content.len() == length));
+        let fonts = Named {
+            forms,
+            mask: None,
+            glyphs: Vec::new(),
+        };
+        let page = b"/F00 Do";
+        let mut device = RecordingDevice::new();
+        interpret(page, Matrix::IDENTITY, &mut device, &fonts);
+
+        let runs = device.count(EventKind::BeginForm) as u64;
+        assert_eq!(runs, runs_the_budget_allows(page, 16, length as u64));
+        assert!(runs < (1 << 16) - 1, "the whole tree is more");
+        assert_eq!(device.count(EventKind::NestedBudgetSpent), 1);
+        for name in &names {
+            assert!(
+                device.of_kind(EventKind::BeginForm).any(|event| matches!(
+                    event,
+                    Event::BeginForm { name: ran, .. } if ran == name.as_bytes()
+                )),
+                "{name} ran once at least"
+            );
+        }
+
+        let mut replayed = RecordingDevice::new();
+        crate::replay::replay(device.events(), &mut replayed);
+        assert_eq!(replayed.count(EventKind::NestedBudgetSpent), 1);
+    }
+
+    /// The same for Type 3 glyphs: sixteen procedures, each showing the next
+    /// twice, spend the same budget, and the last of them still draws.
+    #[test]
+    fn a_tree_of_glyphs_spends_the_nested_budget() {
+        let codes: Vec<u8> = (b'a'..b'a' + 16).collect();
+        let mut glyphs = Vec::new();
+        for (i, &code) in codes.iter().enumerate() {
+            let content = match codes.get(i + 1) {
+                Some(&next) => format!("BT /T3 1 Tf ({0}{0}) Tj ET", char::from(next)),
+                None => "0 0 1000 1000 re f    ".to_string(),
+            };
+            glyphs.push((u32::from(code), content.into_bytes()));
+        }
+        let length = glyphs[0].1.len();
+        assert!(glyphs.iter().all(|(_, content)| content.len() == length));
+        let fonts = Named::glyphs(glyphs);
+        let page = b"BT /T3 10 Tf (a) Tj ET";
+        let mut device = RecordingDevice::new();
+        interpret(page, Matrix::IDENTITY, &mut device, &fonts);
+
+        // Each run saves the device's state once, around its procedure.
+        let runs = device.count(EventKind::SaveState) as u64;
+        assert_eq!(runs, runs_the_budget_allows(page, 16, length as u64));
+        assert!(runs < (1 << 16) - 1, "the whole tree is more");
+        assert_eq!(device.count(EventKind::NestedBudgetSpent), 1);
+        assert!(device.count(EventKind::FillPath) > 0, "the leaf drew");
     }
 
     /// A form that is not a transparency group is not offered at all.

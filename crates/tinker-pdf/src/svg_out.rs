@@ -1487,6 +1487,18 @@ impl Device for Writer<'_> {
         }));
     }
 
+    /// A nested stream that named itself was written once: said as the
+    /// renderer says it.
+    fn recursion_refused(&mut self) {
+        self.warn(SvgWarning::Render(RenderWarning::RecursiveContent));
+    }
+
+    /// The interpreter passed runs over for its nested-content budget: said
+    /// as the renderer says it.
+    fn nested_budget_spent(&mut self) {
+        self.warn(SvgWarning::Render(RenderWarning::NestedBudgetSpent));
+    }
+
     /// Yes once the budget is spent: nothing more would be written, so
     /// nothing more is worth replaying or interpreting.
     fn is_cancelled(&self) -> bool {

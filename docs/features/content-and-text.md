@@ -79,14 +79,33 @@ closed, at the device too, before control returns — so no nested stream, and
 not the page's own content before an annotation's appearance, leaves a device
 clipping or masking what is drawn next by its state (8.4.2, 14.6.2).
 Recursion of all three kinds stops at a shared depth cap, and a depth is not
-a bound on work once the recursion branches, so transparency groups and soft
-masks' groups also spend from a page budget (`MAX_GROUP_RUNS`, 2 000 runs a
-stream, at any depth): a group form spends whether or not the device holds
-the group, since its content runs either way; a mask spends when the device
-accepts it; past the budget neither is run, and the device is told once
-(`Device::group_budget_spent`), which the renderer and the SVG writer report
-as `GroupBudgetSpent`. Hostile streams meet bounds throughout — operand
-stack, save stack, path length — rather than allocation.
+a bound on work once the recursion branches, so three more bounds hold it.
+A stream already running in its own ancestry is not run again there (8.10):
+a form, a soft mask's group or a Type 3 glyph procedure that names itself,
+directly or through the others — a mask whose `/G` is the page that sets it,
+a glyph whose procedure shows itself — draws once, told by its identity
+(`Form::stream`, `Type3Glyph::stream`; a stream without one is never taken
+for a cycle), and the device is told once (`Device::recursion_refused`).
+Transparency groups and soft masks' groups spend from a page budget
+(`MAX_GROUP_RUNS`, 2 000 runs a stream, at any depth): a group form spends
+whether or not the device holds the group, since its content runs either
+way; a mask spends when the device accepts it; past the budget neither is
+run, and the device is told once (`Device::group_budget_spent`). And every
+nested run — forms, masks' groups and glyph procedures alike — spends from a
+budget scaled to the content the interpretation reaches: 4 MiB
+(`NESTED_WORK_FLOOR`) and 4 096 bytes (`NESTED_WORK_RATE`) for every byte of
+its own stream and of each nested stream the first time it is reached, each
+run spending its stream's length and 256 bytes (`NESTED_RUN_COST`). A tree of
+distinct forms each drawing the next many times is no cycle and no group,
+and this is what bounds it, in proportion to what the file holds rather than
+to a number that would let a few hostile kilobytes run for minutes. Reaching
+a stream raises the budget by more than its run costs, so every stream with
+content and an identity runs once whatever has been spent: what the budget
+passes over is further runs of content already drawn, and the device is told
+once (`Device::nested_budget_spent`). The renderer and the SVG writer report
+the three as `RecursiveContent`, `GroupBudgetSpent` and `NestedBudgetSpent`.
+Hostile streams meet bounds throughout — operand stack, save stack, path
+length — rather than allocation.
 
 **Marked content and optional content.** `BMC`/`BDC`/`EMC` scopes reach the
 device with their tag, their own visibility and — when hidden — the layer's
@@ -922,6 +941,8 @@ crate has an API of its own; see [architecture](../architecture.md).
 | A font resource the page names but the build cannot resolve | `TextWarning::UnknownFont { name }` | emitted by `Page::text()`, deduplicated, naming which resource — absence stays distinguishable from emptiness | ruling 2, [rulings](../rulings.md) |
 | A code with no `/ToUnicode` entry and no encoding that names it | `TextWarning::UnmappedCode { code }` | the typed vocabulary for a per-code guess; a glyph that decodes to no text at all is dropped from the page rather than invented | 9.10.3 |
 | Form XObject / Type 3 / soft-mask nesting past 16 levels | `MAX_FORM_DEPTH` | recursion is refused rather than allowed to overflow the stack | 8.10 |
+| A form, a soft mask's group or a Type 3 glyph procedure run again inside itself, directly or through the others | `Device::recursion_refused` | a cycle has no last run: refused at its first repeat, by the stream's identity, it draws once, where the depth cap ended it only after two or more runs to the sixteenth | 8.10 |
+| Nested runs past 4 MiB and 4 096 bytes for every byte of content reached, each run its stream's length and 256 bytes | `NESTED_WORK_FLOOR`, `NESTED_WORK_RATE`, `NESTED_RUN_COST`, said to the device as `Device::nested_budget_spent` | a tree of distinct forms or glyph procedures, each drawing the next many times, is no cycle and no group, and only a budget bounds it; scaled to what the file holds, it lets a page run its content four thousand times over, and a stream's first run always fits, so only further runs of content already drawn are passed over | 8.10, 9.6.5 |
 | More than 2 000 transparency groups and soft masks' groups run in one stream | `MAX_GROUP_RUNS`, said to the device as `Device::group_budget_spent` | a budget, not a depth: a group that draws itself twice is two to the sixteenth runs inside the depth cap, and a device that declines groups still runs each one's content | 11.6.6 |
 | More than 4 096 open marked-content scopes | `MAX_MARKED_CONTENT_DEPTH` | scopes past the cap go unreported, and unreported means *visible* — a runaway stream must not hide a page | 14.6.2 |
 | Text shaping while **reading** — Arabic joining, ligature substitution | — | the producer positioned every glyph and re-shaping them would be wrong; a ligature extracts as whatever its `/ToUnicode` says. Bidi *reordering* is not refused: ruling 14 puts a right-to-left line into logical order | [design/shaping.md](../design/shaping.md) |

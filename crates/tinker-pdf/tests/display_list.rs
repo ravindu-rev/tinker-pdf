@@ -539,13 +539,15 @@ fn a_page_too_large_to_retain_is_drawn_the_direct_way() {
 
 /// **The review's own page**: ten forms, each invoking the next four times,
 /// the last filling a small square — about two kilobytes that recorded
-/// 1 310 719 calls and 635 MB before the budget. Recorded now, it stops at
-/// the budget and keeps nothing. Not rendered here: a direct render of a
-/// million fills is the interpreter's own cost — it bounds how deep forms
-/// nest, not how wide they fan — and a time exposure this list no longer adds
-/// memory to.
+/// 1 310 719 calls and 635 MB before the recording had a budget. A tree of
+/// forms is no cycle and no group, and the interpreter's nested-content
+/// budget bounds how wide forms fan as well as how deep they nest, in every
+/// reading: the recording stops where that budget does, at no more than four
+/// calls for each run it allows — a begin, the box's clip, the leaf's fill,
+/// an end — and is retained, and its replay draws the direct render's pixels
+/// and says what it says.
 #[test]
-fn the_review_s_fan_out_of_forms_is_not_retained() {
+fn the_review_s_fan_out_of_forms_is_bounded_where_it_is_read() {
     let mut objects: Vec<Vec<u8>> = Vec::new();
     for k in 0..10u32 {
         let (content, resources) = if k == 0 {
@@ -565,6 +567,33 @@ fn the_review_s_fan_out_of_forms_is_not_retained() {
     let bytes = page_with("/N Do", 10, 10, "<< /XObject << /N 14 0 R >> >>", &refs);
     assert!(bytes.len() < 3_000, "{} bytes", bytes.len());
     let document = Document::open(bytes).expect("it opens");
-    let list = document.page(0).expect("a page").display_list();
-    assert!(!list.is_retained() && list.is_empty(), "{list:?}");
+    let page = document.page(0).expect("a page");
+    let list = page.display_list();
+
+    // The page's content and each form once, and the cheapest run, the
+    // leaf's, for the most runs the budget allows.
+    let leaf = "0 0 1 rg 1 1 2 2 re f".len() as u64;
+    let reached = "/N Do".len() as u64 + 9 * "/N Do ".repeat(4).len() as u64 + leaf;
+    let runs = (tinker_pdf_content::NESTED_WORK_FLOOR
+        + tinker_pdf_content::NESTED_WORK_RATE * reached)
+        / (leaf + tinker_pdf_content::NESTED_RUN_COST);
+    assert!(list.is_retained(), "{list:?}");
+    assert!(
+        list.len() as u64 <= 4 * runs,
+        "{list:?} against {runs} runs"
+    );
+
+    let options = RenderOptions::default();
+    let direct = page.render(&options);
+    assert!(
+        direct.warnings.contains(&RenderWarning::NestedBudgetSpent),
+        "{:?}",
+        direct.warnings
+    );
+    let replayed = list.render(&options);
+    assert_eq!(
+        (replayed.width, replayed.height, &replayed.warnings),
+        (direct.width, direct.height, &direct.warnings)
+    );
+    assert!(replayed.data == direct.data, "the same pixels");
 }

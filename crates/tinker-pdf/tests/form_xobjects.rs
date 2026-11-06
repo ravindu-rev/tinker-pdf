@@ -274,3 +274,77 @@ trailer\n<< /Size 10 /Root 1 0 R >>\n%%EOF\n";
          white ({got}), and no resources at all would leave the page unpainted"
     );
 }
+
+/// Sixteen distinct forms, each drawing the next twice, are no cycle and two
+/// to the sixteenth runs inside the depth cap. The nested-content budget
+/// stops the tree where its floor and its rate on the content the page holds
+/// say, and the render, its display list's replay and the SVG writer each say
+/// so — while every form still runs once, so the last of them, which fills
+/// the page's lower-left point, draws.
+#[test]
+fn a_tree_of_forms_past_the_nested_budget_says_so_in_every_reading() {
+    use tinker_pdf::{RenderWarning, SvgWarning};
+
+    // Objects 5 to 20, each naming the next as `/N`; the last fills.
+    let mut forms = String::new();
+    for object in 5..=20 {
+        let (resources, content) = if object < 20 {
+            (
+                format!("/Resources << /XObject << /N {} 0 R >> >>", object + 1),
+                "/N Do /N Do",
+            )
+        } else {
+            (String::new(), "0 0 1 1 re f")
+        };
+        forms.push_str(&format!(
+            "{object} 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 40 40] {resources}\n\
+             /Length {} >>\nstream\n{content}\nendstream\nendobj\n",
+            content.len()
+        ));
+    }
+    let page_content = "/N Do";
+    let bytes = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+   /Resources << /XObject << /N 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{page_content}\nendstream\nendobj\n\
+{forms}\
+trailer\n<< /Size 21 /Root 1 0 R >>\n%%EOF\n",
+        page_content.len()
+    );
+
+    let doc = Document::open(bytes.into_bytes()).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let options = RenderOptions::at_dpi(72.0);
+    let bitmap = page.render(&options);
+    assert!(
+        bitmap.warnings.contains(&RenderWarning::NestedBudgetSpent),
+        "the render says so: {:?}",
+        bitmap.warnings
+    );
+    assert!(
+        !bitmap.warnings.contains(&RenderWarning::RecursiveContent),
+        "and nothing in it is a cycle: {:?}",
+        bitmap.warnings
+    );
+    assert_eq!(
+        pixel(&bitmap, 0, bitmap.height - 1),
+        (0, 0, 0),
+        "the last form drew its point"
+    );
+    assert_eq!(
+        page.display_list().render(&options).warnings,
+        bitmap.warnings,
+        "the replay says it as the render does"
+    );
+    let svg = page.to_svg(&tinker_pdf::SvgOptions::default());
+    assert!(
+        svg.warnings
+            .iter()
+            .any(|w| matches!(w, SvgWarning::Render(RenderWarning::NestedBudgetSpent))),
+        "and so does the SVG writer: {:?}",
+        svg.warnings
+    );
+}

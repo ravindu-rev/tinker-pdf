@@ -970,7 +970,7 @@ impl FontSource for Recorded {
         }))
     }
 
-    fn type3_glyph(&self, font: &[u8], code: u32) -> Option<(Vec<u8>, Matrix)> {
+    fn type3_glyph(&self, font: &[u8], code: u32) -> Option<tinker_pdf_content::Type3Glyph> {
         let procedure = self.inner.type3_glyph(font, code)?;
         // A Type 3 font written directly into the resources has no object;
         // [`note_scope`] names it instead.
@@ -980,7 +980,7 @@ impl FontSource for Recorded {
             }
         }
         // The procedure runs in this scope, and paints with what it names.
-        self.cells(&procedure.0, &self.inner);
+        self.cells(&procedure.content, &self.inner);
         Some(procedure)
     }
 

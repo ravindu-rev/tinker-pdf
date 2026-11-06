@@ -342,6 +342,28 @@ pub trait Device {
     /// [`MAX_GROUP_RUNS`]: crate::MAX_GROUP_RUNS
     fn group_budget_spent(&mut self) {}
 
+    /// A form, a soft mask's group or a Type 3 glyph procedure named itself
+    /// while it was running, directly or through others, and the interpreter
+    /// did not run it again there (8.10): said once per interpretation,
+    /// before the first repeat it passes over.
+    ///
+    /// The stream ran once, which is what a cycle can be drawn as; the
+    /// default ignores the notice.
+    fn recursion_refused(&mut self) {}
+
+    /// The interpreter has spent its budget for nested content — forms, soft
+    /// masks' groups and Type 3 glyph procedures, [`NESTED_WORK_FLOOR`] and
+    /// [`NESTED_WORK_RATE`] — and from here on runs again none it has
+    /// already run: said once per interpretation, before the first run it
+    /// passes over.
+    ///
+    /// A device that reports what it could not draw reports this; the default
+    /// ignores it.
+    ///
+    /// [`NESTED_WORK_FLOOR`]: crate::NESTED_WORK_FLOOR
+    /// [`NESTED_WORK_RATE`]: crate::NESTED_WORK_RATE
+    fn nested_budget_spent(&mut self) {}
+
     /// Whether interpretation should stop — a cancellation hook checked
     /// between operators.
     fn is_cancelled(&self) -> bool {

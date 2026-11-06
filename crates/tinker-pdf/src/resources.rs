@@ -1925,7 +1925,7 @@ impl FontSource for PageResources {
         (!name.is_empty()).then(|| Arc::from(name))
     }
 
-    fn type3_glyph(&self, font: &[u8], code: u32) -> Option<(Vec<u8>, Matrix)> {
+    fn type3_glyph(&self, font: &[u8], code: u32) -> Option<tinker_pdf_content::Type3Glyph> {
         // 9.6.5: only a Type 3 font has glyph procedures. Every other kind
         // returns None here, which leaves the ordinary outline path untouched.
         let dict = fonts::font_dict(
@@ -1991,7 +1991,14 @@ impl FontSource for PageResources {
                 })
             })?;
 
-        Some((content, matrix))
+        Some(tinker_pdf_content::Type3Glyph {
+            content,
+            matrix,
+            // The procedure's identity, packed as a form's is, which is what
+            // tells a procedure that shows its own glyph from one that shows
+            // another.
+            stream: crate::structure::stream_id(reference),
+        })
     }
 
     fn form_scope(&self, name: &[u8]) -> Option<Arc<PageResources>> {
