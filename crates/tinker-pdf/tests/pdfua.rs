@@ -130,7 +130,10 @@ fn width_sources(doc: &Document, findings: &[ConformanceFinding]) -> String {
                     .ok()
                     .and_then(|at| widths.get(at))
                     .map_or_else(|| "none".to_string(), |w| shown(cos, w, 0));
-                said.push(format!("/Widths has {} entries, [{at}] {width}", widths.len()));
+                said.push(format!(
+                    "/Widths has {} entries, [{at}] {width}",
+                    widths.len()
+                ));
             }
         }
         if let Some(descriptor) = entry(cos, dict, "FontDescriptor") {
@@ -170,7 +173,10 @@ fn entry(
 }
 
 /// An object, or what a reference names.
-fn resolved(cos: &tinker_pdf_cos::CosDocument, value: &tinker_pdf_cos::Object) -> tinker_pdf_cos::Object {
+fn resolved(
+    cos: &tinker_pdf_cos::CosDocument,
+    value: &tinker_pdf_cos::Object,
+) -> tinker_pdf_cos::Object {
     match value {
         tinker_pdf_cos::Object::Ref(target) => cos
             .get(*target)
