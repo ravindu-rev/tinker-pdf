@@ -1099,7 +1099,8 @@ const char *tpdf_version(void);
 
 // Opens a document from bytes.
 //
-// The bytes are copied, so the caller may free theirs immediately.
+// The bytes are copied once, into the buffer the document keeps, so the
+// caller may free theirs immediately.
 //
 // # Safety
 //
