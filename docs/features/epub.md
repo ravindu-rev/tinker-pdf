@@ -1157,6 +1157,11 @@ rather than zero.
   relative one resolves under `crates/tinker-pdf/` and every sweep skips while
   passing — and `TINKER_EPUB_CORPUS_REQUIRED=1` makes a skip a failure. It
   prints `epub-corpus: RAN` / `SKIPPED` so the CI job goes red on a skip.
+  The job prints the `MANIFEST.tsv` its fetch writes, each book's size and
+  SHA-256, since the public-domain library's books are fetched unpinned, and
+  `the_unimplemented_property_census` sums each book's
+  `UnimplementedProperty` counts per property, highest first: the order CD-01
+  lands its properties in.
   `INVENTORY.tsv` is recomputed through `tinker-pdf-zip` on every
   `cargo test`; `CONSERVATION.tsv` records each committed book's conserved
   figure, which `epub_conservation.rs` re-measures and holds the file to.
