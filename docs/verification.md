@@ -892,7 +892,7 @@ iteration's. Every operation is declared through the harness's
 a group file that reaches criterion's own `bench_function` or
 `benchmark_group` — all but `calibration.rs`, which is frozen and runs under
 criterion alone; its input and call are the text group's
-`text of 100 dense pages`, which count mode runs.
+`text of 5 dense pages`, which count mode runs.
 
 **The count job counts each operation's instructions.** A dispatch of
 `bench.yml` with `count` set runs the `count` job instead of the timing one,
@@ -913,7 +913,7 @@ counted every operation of the set exactly once, and keeps the set as one
 artefact, kept 90 days. cachegrind is in the dev-tooling exemption
 ([architecture](architecture.md)): it executes the bench and judges no
 document. `calibration` has no count mode, and its input and call are the
-text group's `text of 100 dense pages`.
+text group's `text of 5 dense pages`.
 
 Dispatch 41204196780 counted all 141 operations of the set. Each job counts
 its share twice at one revision, which is what a base and a head cost, so its
@@ -966,7 +966,8 @@ moves from one dispatch to the next:
 | `write/edit an annotation, save, reopen, 1000 pages` | 1.1968 % | 0.2429 % |
 
 They stay in the set, and how a gate holds them is H-78's, for the owner.
-Every count of dispatch 41204196780:
+Every count of dispatch 41204196780, by the names and inputs the set had
+when it ran:
 
 | Operation | First | Second | Spread |
 | --- | ---: | ---: | ---: |

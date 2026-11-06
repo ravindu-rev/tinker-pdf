@@ -4,6 +4,11 @@
 //! `support/mod.rs`'s; `baseline.json`'s `open` list names these operations
 //! in this order. The AES-256 file declares no unit, and criterion keeps a
 //! group's throughput from one operation to the next, so it comes first.
+//!
+//! An operation shorter than the set's 20-300 ms window repeats its call
+//! inside one iteration, as many times as land it near the window's middle
+//! on the hosted runner (`docs/design/performance.md`); its unit counts every
+//! call.
 
 mod support;
 
@@ -26,9 +31,11 @@ fn open(c: &mut Criterion) {
     group.operation("open the AES-256 file", |op| {
         let aes = inputs::aes_file();
         op.iter(|| {
-            let doc = Document::open(Arc::clone(&aes)).expect("it opens");
-            doc.authenticate("").expect("the empty password opens it");
-            black_box(doc.page_count())
+            for _ in 0..6 {
+                let doc = Document::open(Arc::clone(&aes)).expect("it opens");
+                doc.authenticate("").expect("the empty password opens it");
+                black_box(doc.page_count());
+            }
         });
     });
 
@@ -40,35 +47,45 @@ fn open(c: &mut Criterion) {
 
     group.operation("open and count the 23 MB image file", |op| {
         let image = inputs::image_file();
-        op.per(Per::Bytes(image.len() as u64));
+        op.per(Per::Bytes(100 * image.len() as u64));
         op.iter(|| {
-            black_box(
-                Document::open(Arc::clone(&image))
-                    .expect("it opens")
-                    .page_count(),
-            )
+            for _ in 0..100 {
+                black_box(
+                    Document::open(Arc::clone(&image))
+                        .expect("it opens")
+                        .page_count(),
+                );
+            }
         });
     });
 
     group.operation("every page's size, 3000 pages", |op| {
-        op.per(Per::Pages(3000));
-        op.iter(|| black_box(every_page_size(&small_3000)));
+        op.per(Per::Pages(12 * 3000));
+        op.iter(|| {
+            for _ in 0..12 {
+                black_box(every_page_size(&small_3000));
+            }
+        });
     });
 
     group.operation("every page's size, 10000 pages", |op| {
-        op.per(Per::Pages(10000));
-        op.iter(|| black_box(every_page_size(&small_10000)));
+        op.per(Per::Pages(4 * 10000));
+        op.iter(|| {
+            for _ in 0..4 {
+                black_box(every_page_size(&small_10000));
+            }
+        });
     });
 
-    // The image file through the CLI, five children an iteration: tier P's
-    // figure includes the process.
+    // The image file through the CLI, twenty-four children an iteration:
+    // tier P's figure includes the process.
     group.operation("open and count the 23 MB image file, CLI", |op| {
         let image = inputs::image_file();
         let image_pdf = cli::fixture("image.pdf", || image.to_vec());
         let info = Cli::new("open-image-info");
-        op.per(Per::Bytes(5 * image.len() as u64));
+        op.per(Per::Bytes(24 * image.len() as u64));
         op.iter(|| {
-            for _ in 0..5 {
+            for _ in 0..24 {
                 info.run(&[&"info", &image_pdf]);
             }
         });

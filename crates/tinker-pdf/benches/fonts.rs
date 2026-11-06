@@ -123,7 +123,7 @@ fn fonts(c: &mut Criterion) {
         let devanagari_text = inputs::devanagari_paragraph();
         assert_shapes(&face, &devanagari_text, "Devanagari");
         op.iter(|| {
-            for _ in 0..42 {
+            for _ in 0..8 {
                 black_box(shape(&face, &devanagari_text));
             }
         });
@@ -131,9 +131,9 @@ fn fonts(c: &mut Criterion) {
 
     group.operation("outlines of Liberation Serif Regular", |op| {
         assert_outlines(&serif, 2602, "Liberation Serif Regular");
-        op.per(Per::Outlines(12 * 2602));
+        op.per(Per::Outlines(48 * 2602));
         op.iter(|| {
-            for _ in 0..12 {
+            for _ in 0..48 {
                 black_box(outline_face(&serif));
             }
         });
@@ -141,9 +141,9 @@ fn fonts(c: &mut Criterion) {
     group.operation("outlines of Liberation Sans Regular", |op| {
         let sans = inputs::liberation("LiberationSans-Regular.ttf");
         assert_outlines(&sans, 2620, "Liberation Sans Regular");
-        op.per(Per::Outlines(9 * 2620));
+        op.per(Per::Outlines(49 * 2620));
         op.iter(|| {
-            for _ in 0..9 {
+            for _ in 0..49 {
                 black_box(outline_face(&sans));
             }
         });
@@ -151,9 +151,9 @@ fn fonts(c: &mut Criterion) {
     group.operation("outlines of Liberation Mono Regular", |op| {
         let mono = inputs::liberation("LiberationMono-Regular.ttf");
         assert_outlines(&mono, 2423, "Liberation Mono Regular");
-        op.per(Per::Outlines(14 * 2423));
+        op.per(Per::Outlines(51 * 2423));
         op.iter(|| {
-            for _ in 0..14 {
+            for _ in 0..51 {
                 black_box(outline_face(&mono));
             }
         });

@@ -1,8 +1,8 @@
 //! The calibration group: the one operation every calibrated target is a
-//! fraction of, text of 100 dense pages.
+//! fraction of, text of 5 dense pages.
 //!
 //! **This file is frozen.** It is the same input and call as the text
-//! group's `text of 100 dense pages`, written out here rather than shared,
+//! group's `text of 5 dense pages`, written out here rather than shared,
 //! so that nothing a later row adds to the text group or to the support
 //! module can move it; a change to it re-states every calibrated target,
 //! which is the owner's (H-77). The harness and the rules every name here
@@ -19,9 +19,9 @@ use support::{inputs, Per};
 use tinker_pdf::Document;
 
 fn calibration(c: &mut Criterion) {
-    let dense: Arc<[u8]> = inputs::dense(100, 0).into();
+    let dense: Arc<[u8]> = inputs::dense(5, 0).into();
     let held = Document::open(Arc::clone(&dense)).expect("it opens");
-    assert_eq!(held.page_count(), 100, "the dense pages");
+    assert_eq!(held.page_count(), 5, "the dense pages");
     assert!(
         held.page(0)
             .expect("a page")
@@ -34,8 +34,8 @@ fn calibration(c: &mut Criterion) {
     let mut group = c.benchmark_group("calibration");
     group.sampling_mode(SamplingMode::Flat);
 
-    group.throughput(Per::Pages(100).throughput());
-    group.bench_function("text of 100 dense pages", |b| {
+    group.throughput(Per::Pages(5).throughput());
+    group.bench_function("text of 5 dense pages", |b| {
         b.iter(|| {
             let doc = Document::open(Arc::clone(&dense)).expect("it opens");
             let mut read = 0usize;

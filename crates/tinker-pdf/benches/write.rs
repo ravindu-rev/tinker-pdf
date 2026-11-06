@@ -3,6 +3,12 @@
 //! The harness, the sampling and the rules every name here keeps are
 //! `support/mod.rs`'s; `baseline.json`'s `write` list names these operations
 //! in this order.
+//!
+//! An operation shorter than the set's 20-300 ms window repeats its call
+//! inside one iteration, as many times as land it near the window's middle
+//! on the hosted runner (`docs/design/performance.md`), and its unit counts
+//! every page each call wrote; one longer takes a smaller input, named in
+//! the operation.
 
 mod support;
 
@@ -49,7 +55,7 @@ fn write(c: &mut Criterion) {
         saved_reopens(&doc, &rewrite());
         doc
     });
-    let image = LazyCell::new(inputs::image_file);
+    let image = LazyCell::new(inputs::small_image_file);
 
     let mut group = Group::new(c, "write");
 
@@ -68,31 +74,41 @@ fn write(c: &mut Criterion) {
     });
 
     group.operation("rewrite 100 pages", |op| {
-        op.per(Per::Pages(100));
-        op.iter(|| black_box(small_100.editor().save(&rewrite())));
+        op.per(Per::Pages(200 * 100));
+        op.iter(|| {
+            for _ in 0..200 {
+                black_box(small_100.editor().save(&rewrite()));
+            }
+        });
     });
     group.operation("rewrite 1000 pages", |op| {
-        op.per(Per::Pages(1000));
-        op.iter(|| black_box(small_1000.editor().save(&rewrite())));
+        op.per(Per::Pages(20 * 1000));
+        op.iter(|| {
+            for _ in 0..20 {
+                black_box(small_1000.editor().save(&rewrite()));
+            }
+        });
     });
     group.operation("rewrite 3000 pages", |op| {
         let small_3000 = small(3000);
         saved_reopens(&small_3000, &rewrite());
-        op.per(Per::Pages(3000));
-        op.iter(|| black_box(small_3000.editor().save(&rewrite())));
+        op.per(Per::Pages(7 * 3000));
+        op.iter(|| {
+            for _ in 0..7 {
+                black_box(small_3000.editor().save(&rewrite()));
+            }
+        });
     });
 
-    // Ten and seven saves an iteration, which brings each inside the set's
-    // window; the unit counts every page each one wrote.
     group.operation("rewrite 100 pages into object streams", |op| {
         let streams = WriteOptions {
             object_streams: true,
             ..rewrite()
         };
         saved_reopens(&small_100, &streams);
-        op.per(Per::Pages(10 * 100));
+        op.per(Per::Pages(200 * 100));
         op.iter(|| {
-            for _ in 0..10 {
+            for _ in 0..200 {
                 black_box(small_100.editor().save(&streams));
             }
         });
@@ -103,9 +119,9 @@ fn write(c: &mut Criterion) {
             ..rewrite()
         };
         saved_reopens(&small_100, &linear);
-        op.per(Per::Pages(7 * 100));
+        op.per(Per::Pages(75 * 100));
         op.iter(|| {
-            for _ in 0..7 {
+            for _ in 0..75 {
                 black_box(small_100.editor().save(&linear));
             }
         });
@@ -113,28 +129,28 @@ fn write(c: &mut Criterion) {
 
     // The facade's door with its default policies: a rewrite, every
     // embedded program cut to what the pages draw.
-    group.operation("subset-on-save of 100 pages", |op| {
-        let dense = Document::open(inputs::dense(100, 0)).expect("the dense pages open");
+    group.operation("subset-on-save of 4 pages", |op| {
+        let dense = Document::open(inputs::dense(4, 0)).expect("the dense pages open");
         let subset = SaveOptions {
             write: rewrite(),
             ..SaveOptions::default()
         };
         let saved = write::save(&mut dense.editor(), &subset).bytes;
         assert!(
-            saved.len() < inputs::dense(100, 0).len(),
+            saved.len() < inputs::dense(4, 0).len(),
             "the subset file is smaller than the whole face's"
         );
-        assert_eq!(Document::open(saved).expect("it reopens").page_count(), 100);
-        op.per(Per::Pages(100));
+        assert_eq!(Document::open(saved).expect("it reopens").page_count(), 4);
+        op.per(Per::Pages(4));
         op.iter(|| black_box(write::save(&mut dense.editor(), &subset)));
     });
 
     // `tpdf merge`'s shape: the first file's editor, every page of the
     // others imported after its own, saved with stream deduplication and
     // the programs kept as they are.
-    group.operation("merge 4 x 100 pages", |op| {
+    group.operation("merge 4 x 50 pages", |op| {
         let parts: Vec<Document> = (0..4)
-            .map(|seed| Document::open(inputs::dense(100, seed)).expect("a part opens"))
+            .map(|seed| Document::open(inputs::dense(50, seed)).expect("a part opens"))
             .collect();
         let merged = SaveOptions {
             write: WriteOptions {
@@ -161,14 +177,14 @@ fn write(c: &mut Criterion) {
             Document::open(merge())
                 .expect("the merge reopens")
                 .page_count(),
-            400
+            200
         );
-        op.per(Per::Pages(400));
+        op.per(Per::Pages(200));
         op.iter(|| black_box(merge()));
     });
 
-    // Tier P's pair, through the crypto crate's own CBC: the image file's
-    // bytes encrypted once, then each direction timed over them.
+    // Tier P's pair, through the crypto crate's own CBC: the small image
+    // file's bytes encrypted once, then each direction timed over them.
     let key = [0x42u8; 32];
     let iv = [0x24u8; 16];
     let sealed = LazyCell::new(|| {
@@ -183,7 +199,7 @@ fn write(c: &mut Criterion) {
         );
         sealed
     });
-    group.operation("AES-256-CBC decrypt 23 MB", |op| {
+    group.operation("AES-256-CBC decrypt 2.5 MB", |op| {
         op.per(Per::Bytes(image.len() as u64));
         op.iter(|| {
             black_box(tinker_pdf_crypto::aes::cbc_decrypt_with_iv_prefix(
@@ -191,7 +207,7 @@ fn write(c: &mut Criterion) {
             ))
         });
     });
-    group.operation("AES-256-CBC encrypt 23 MB", |op| {
+    group.operation("AES-256-CBC encrypt 2.5 MB", |op| {
         // The decrypt's check, that the key and the IV give the bytes back.
         LazyCell::force(&sealed);
         op.per(Per::Bytes(image.len() as u64));
@@ -203,8 +219,8 @@ fn write(c: &mut Criterion) {
     });
 
     // One annotation's appearance replaced, the change appended as an
-    // incremental update, and the bytes reopened: thirteen times an
-    // iteration over a thousand pages, once over ten.
+    // incremental update, and the bytes reopened: 170 times an iteration over
+    // a thousand pages, 2 700 times over ten.
     let edit = |doc: &Document, form| {
         let mut editor = doc.editor();
         editor.put_stream(form, inputs::square_appearance(doc, 0.2));
@@ -218,9 +234,9 @@ fn write(c: &mut Criterion) {
         let large = Document::open(inputs::annotated(&inputs::small(1000))).expect("it opens");
         let large_form = inputs::first_appearance(&large);
         assert_eq!(edit(&large, large_form).page_count(), 1000);
-        op.per(Per::Pages(13 * 1000));
+        op.per(Per::Pages(170 * 1000));
         op.iter(|| {
-            for _ in 0..13 {
+            for _ in 0..170 {
                 black_box(edit(&large, large_form));
             }
         });
@@ -229,8 +245,12 @@ fn write(c: &mut Criterion) {
         let short = Document::open(inputs::annotated(&inputs::small(10))).expect("it opens");
         let short_form = inputs::first_appearance(&short);
         assert_eq!(edit(&short, short_form).page_count(), 10);
-        op.per(Per::Pages(10));
-        op.iter(|| black_box(edit(&short, short_form)));
+        op.per(Per::Pages(2700 * 10));
+        op.iter(|| {
+            for _ in 0..2700 {
+                black_box(edit(&short, short_form));
+            }
+        });
     });
 
     // ---- through the CLI -----------------------------------------------
@@ -244,9 +264,9 @@ fn write(c: &mut Criterion) {
         let small_100_pdf = cli::fixture("small-100.pdf", || inputs::small(100));
         let rewrite_100 = Cli::new("write-rewrite-100");
         let out_100 = rewrite_100.out("out.pdf");
-        op.per(Per::Pages(4 * 100));
+        op.per(Per::Pages(26 * 100));
         op.iter(|| {
-            for _ in 0..4 {
+            for _ in 0..26 {
                 rewrite_100.run(&[
                     &"merge",
                     &small_100_pdf,
@@ -263,24 +283,26 @@ fn write(c: &mut Criterion) {
         let small_1000_pdf = cli::fixture("small-1000.pdf", || inputs::small(1000));
         let rewrite_1000 = Cli::new("write-rewrite-1000");
         let out_1000 = rewrite_1000.out("out.pdf");
-        op.per(Per::Pages(1000));
+        op.per(Per::Pages(6 * 1000));
         op.iter(|| {
-            rewrite_1000.run(&[
-                &"merge",
-                &small_1000_pdf,
-                &"--out",
-                &out_1000,
-                &"--font-policy",
-                &"keep",
-            ])
+            for _ in 0..6 {
+                rewrite_1000.run(&[
+                    &"merge",
+                    &small_1000_pdf,
+                    &"--out",
+                    &out_1000,
+                    &"--font-policy",
+                    &"keep",
+                ]);
+            }
         });
         assert_eq!(reopened(&out_1000), 1000, "the rewrite's pages");
     });
-    group.operation("subset-on-save of 100 pages, CLI", |op| {
-        let dense_pdf = cli::fixture("dense-100.pdf", || inputs::dense(100, 0));
-        let subset_cli = Cli::new("write-subset-100");
+    group.operation("subset-on-save of 4 pages, CLI", |op| {
+        let dense_pdf = cli::fixture("dense-4.pdf", || inputs::dense(4, 0));
+        let subset_cli = Cli::new("write-subset-4");
         let out_subset = subset_cli.out("out.pdf");
-        op.per(Per::Pages(100));
+        op.per(Per::Pages(4));
         op.iter(|| {
             subset_cli.run(&[
                 &"merge",
@@ -291,7 +313,7 @@ fn write(c: &mut Criterion) {
                 &"subset",
             ])
         });
-        assert_eq!(reopened(&out_subset), 100, "the subset file's pages");
+        assert_eq!(reopened(&out_subset), 4, "the subset file's pages");
         assert!(
             std::fs::metadata(&out_subset)
                 .expect("the subset file")
@@ -300,17 +322,13 @@ fn write(c: &mut Criterion) {
             "the subset file is smaller than the whole face's"
         );
     });
-    group.operation("merge 4 x 100 pages, CLI", |op| {
+    group.operation("merge 4 x 50 pages, CLI", |op| {
         let parts_pdf: Vec<_> = (0..4)
-            .map(|seed| {
-                cli::fixture(&format!("dense-100-{seed}.pdf"), || {
-                    inputs::dense(100, seed)
-                })
-            })
+            .map(|seed| cli::fixture(&format!("dense-50-{seed}.pdf"), || inputs::dense(50, seed)))
             .collect();
-        let merge_cli = Cli::new("write-merge-4x100");
+        let merge_cli = Cli::new("write-merge-4x50");
         let out_merge = merge_cli.out("out.pdf");
-        op.per(Per::Pages(400));
+        op.per(Per::Pages(200));
         op.iter(|| {
             merge_cli.run(&[
                 &"merge",
@@ -324,10 +342,10 @@ fn write(c: &mut Criterion) {
                 &"keep",
             ])
         });
-        assert_eq!(reopened(&out_merge), 400, "the merge's pages");
+        assert_eq!(reopened(&out_merge), 200, "the merge's pages");
     });
-    group.operation("encrypt the 23 MB image file, CLI", |op| {
-        let image_pdf = cli::fixture("image.pdf", || image.to_vec());
+    group.operation("encrypt the 2.5 MB image file, CLI", |op| {
+        let image_pdf = cli::fixture("small-image.pdf", || image.to_vec());
         // A figure must not depend on `/dev/urandom`.
         let entropy = cli::fixture("entropy", || vec![0x5A; 48]);
         let encrypt = Cli::new("write-encrypt-image");

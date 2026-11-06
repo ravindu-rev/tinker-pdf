@@ -8,6 +8,11 @@
 //! a page a chapter, the HTML and Markdown documents have their 20 pages, and
 //! every container fixture's first page renders, from the container and from
 //! its synthesised PDF.
+//!
+//! Each operation is sized into the set's 20-300 ms window on the hosted
+//! runner (`docs/design/performance.md`): the generated books at ten and
+//! thirty chapters, and the shorter operations repeated inside an iteration,
+//! their unit counting every call.
 
 mod support;
 
@@ -75,20 +80,28 @@ fn paginate(op: &mut Op<'_, '_>, book: &Book, calls: u64) {
 }
 
 /// Every one of the `pages` of `doc`, opened once untimed, rendered at
-/// 72 dpi.
-fn render(op: &mut Op<'_, '_>, doc: &Document, pages: u64) {
-    op.per(Per::Pages(pages));
-    op.iter(|| black_box(render_every_page(doc)));
+/// 72 dpi, `calls` times.
+fn render(op: &mut Op<'_, '_>, doc: &Document, pages: u64, calls: u64) {
+    op.per(Per::Pages(calls * pages));
+    op.iter(|| {
+        for _ in 0..calls {
+            black_box(render_every_page(doc));
+        }
+    });
 }
 
-/// `tpdf render` over the committed book `name` at 72 dpi, then what it
-/// wrote held to the book's pages: a PNG a page, in order.
-fn render_book_cli(op: &mut Op<'_, '_>, name: &str, book: &Book) {
+/// `tpdf render` over the committed book `name` at 72 dpi, `calls` times,
+/// then what it wrote held to the book's pages: a PNG a page, in order.
+fn render_book_cli(op: &mut Op<'_, '_>, name: &str, book: &Book, calls: u64) {
     let cli = Cli::new(&format!("layout-render-{name}"));
     let out = cli.out("png");
     let path = inputs::committed_book_path(&format!("{name}.epub"));
-    op.per(Per::Pages(book.pages));
-    op.iter(|| cli.run(&[&"render", &path, &"--out", &out, &"--dpi", &"72"]));
+    op.per(Per::Pages(calls * book.pages));
+    op.iter(|| {
+        for _ in 0..calls {
+            cli.run(&[&"render", &path, &"--out", &out, &"--dpi", &"72"]);
+        }
+    });
     let pngs = cli.pngs(&out);
     assert_eq!(pngs.len() as u64, book.pages, "{name}: a PNG a page");
     for (at, (png, width, height)) in pngs.iter().enumerate() {
@@ -108,6 +121,16 @@ fn generated(chapters: usize) -> (Arc<[u8]>, Document) {
         "the generated book has a page for each of its chapters"
     );
     (bytes, doc)
+}
+
+/// [`open_and_render`] `calls` times an iteration, a page a fixture a call.
+fn containers_rendered(op: &mut Op<'_, '_>, fixtures: &[inputs::Fixture], calls: u64) {
+    op.per(Per::Pages(calls * fixtures.len() as u64));
+    op.iter(|| {
+        for _ in 0..calls {
+            black_box(open_and_render(fixtures));
+        }
+    });
 }
 
 /// Each fixture of one format opened and its first page rendered at 72 dpi:
@@ -171,8 +194,8 @@ fn layout(c: &mut Criterion) {
         Document::open_with(Arc::clone(&book.bytes), &at_box()).expect("the book opens")
     };
 
-    let thousand = LazyCell::new(|| generated(1000));
-    let hundred = LazyCell::new(|| generated(100));
+    let thirty = LazyCell::new(|| generated(30));
+    let ten = LazyCell::new(|| generated(10));
 
     let svg = LazyCell::new(|| containers(inputs::svg_fixtures(), 17));
     let xps = LazyCell::new(|| containers(inputs::xps_fixtures(), 19));
@@ -198,16 +221,17 @@ fn layout(c: &mut Criterion) {
         });
     });
 
-    // Each committed book opened and paginated four times an iteration. One
-    // call a book, each with its name as a literal, because `cargo xtask
-    // baseline` reads a group's names from its `operation` calls.
+    // Each committed book opened and paginated as many times an iteration as
+    // bring it inside the window. One call a book, each with its name as a
+    // literal, because `cargo xtask baseline` reads a group's names from its
+    // `operation` calls.
     group.operation(
         "open and paginate calibre-book-cover.epub at 432x648 pt",
-        |op| paginate(op, &calibre_book_cover, 4),
+        |op| paginate(op, &calibre_book_cover, 18),
     );
     group.operation(
         "open and paginate calibre-book-nocover.epub at 432x648 pt",
-        |op| paginate(op, &calibre_book_nocover, 4),
+        |op| paginate(op, &calibre_book_nocover, 19),
     );
     group.operation(
         "open and paginate calibre-embedded-font.epub at 432x648 pt",
@@ -215,7 +239,7 @@ fn layout(c: &mut Criterion) {
     );
     group.operation(
         "open and paginate kcc-fixed-layout.epub at 432x648 pt",
-        |op| paginate(op, &kcc_fixed_layout, 4),
+        |op| paginate(op, &kcc_fixed_layout, 86),
     );
     group.operation(
         "open and paginate pandoc-book-cover.epub at 432x648 pt",
@@ -234,13 +258,20 @@ fn layout(c: &mut Criterion) {
         |op| paginate(op, &pandoc_embedded_font, 4),
     );
     group.operation("open and paginate pandoc-plates.epub at 432x648 pt", |op| {
-        paginate(op, &pandoc_plates, 4)
+        paginate(op, &pandoc_plates, 17)
     });
 
     // Each committed book's every page, the book opened once untimed.
     group.operation(
         "render every page of calibre-book-cover.epub at 72 dpi",
-        |op| render(op, &opened(&calibre_book_cover), calibre_book_cover.pages),
+        |op| {
+            render(
+                op,
+                &opened(&calibre_book_cover),
+                calibre_book_cover.pages,
+                12,
+            )
+        },
     );
     group.operation(
         "render every page of calibre-book-nocover.epub at 72 dpi",
@@ -249,6 +280,7 @@ fn layout(c: &mut Criterion) {
                 op,
                 &opened(&calibre_book_nocover),
                 calibre_book_nocover.pages,
+                15,
             )
         },
     );
@@ -259,24 +291,32 @@ fn layout(c: &mut Criterion) {
                 op,
                 &opened(&calibre_embedded_font),
                 calibre_embedded_font.pages,
+                7,
             )
         },
     );
     group.operation(
         "render every page of kcc-fixed-layout.epub at 72 dpi",
-        |op| render(op, &opened(&kcc_fixed_layout), kcc_fixed_layout.pages),
+        |op| render(op, &opened(&kcc_fixed_layout), kcc_fixed_layout.pages, 32),
     );
     group.operation(
         "render every page of pandoc-book-cover.epub at 72 dpi",
-        |op| render(op, &opened(&pandoc_book_cover), pandoc_book_cover.pages),
+        |op| render(op, &opened(&pandoc_book_cover), pandoc_book_cover.pages, 9),
     );
     group.operation(
         "render every page of pandoc-book-epub2.epub at 72 dpi",
-        |op| render(op, &opened(&pandoc_book_epub2), pandoc_book_epub2.pages),
+        |op| render(op, &opened(&pandoc_book_epub2), pandoc_book_epub2.pages, 9),
     );
     group.operation(
         "render every page of pandoc-book-nocover.epub at 72 dpi",
-        |op| render(op, &opened(&pandoc_book_nocover), pandoc_book_nocover.pages),
+        |op| {
+            render(
+                op,
+                &opened(&pandoc_book_nocover),
+                pandoc_book_nocover.pages,
+                11,
+            )
+        },
     );
     group.operation(
         "render every page of pandoc-embedded-font.epub at 72 dpi",
@@ -285,18 +325,19 @@ fn layout(c: &mut Criterion) {
                 op,
                 &opened(&pandoc_embedded_font),
                 pandoc_embedded_font.pages,
+                5,
             )
         },
     );
     group.operation("render every page of pandoc-plates.epub at 72 dpi", |op| {
-        render(op, &opened(&pandoc_plates), pandoc_plates.pages)
+        render(op, &opened(&pandoc_plates), pandoc_plates.pages, 13)
     });
 
-    // The generated books: a page a chapter, so a thousand chapters against a
-    // hundred is the linearity relation.
-    group.operation("open and paginate the 1000-chapter book", |op| {
-        let (bytes, _) = &*thousand;
-        op.per(Per::Pages(1000));
+    // The generated books: a page a chapter, so thirty chapters against ten
+    // is the linearity relation, each call's figure against the other's.
+    group.operation("open and paginate the 30-chapter book", |op| {
+        let (bytes, _) = &*thirty;
+        op.per(Per::Pages(30));
         op.iter(|| {
             black_box(
                 Document::open_with(Arc::clone(bytes), &at_box())
@@ -305,22 +346,24 @@ fn layout(c: &mut Criterion) {
             )
         });
     });
-    group.operation("render the 1000-chapter book at 72 dpi", |op| {
-        render(op, &thousand.1, 1000)
+    group.operation("render the 30-chapter book at 72 dpi", |op| {
+        render(op, &thirty.1, 30, 1)
     });
-    group.operation("open and paginate the 100-chapter book", |op| {
-        let (bytes, _) = &*hundred;
-        op.per(Per::Pages(100));
+    group.operation("open and paginate the 10-chapter book", |op| {
+        let (bytes, _) = &*ten;
+        op.per(Per::Pages(2 * 10));
         op.iter(|| {
-            black_box(
-                Document::open_with(Arc::clone(bytes), &at_box())
-                    .expect("it opens")
-                    .page_count(),
-            )
+            for _ in 0..2 {
+                black_box(
+                    Document::open_with(Arc::clone(bytes), &at_box())
+                        .expect("it opens")
+                        .page_count(),
+                );
+            }
         });
     });
-    group.operation("render the 100-chapter book at 72 dpi", |op| {
-        render(op, &hundred.1, 100)
+    group.operation("render the 10-chapter book at 72 dpi", |op| {
+        render(op, &ten.1, 10, 1)
     });
 
     // Markup laid out and written as a PDF.
@@ -330,11 +373,13 @@ fn layout(c: &mut Criterion) {
         let (_, laid) =
             DocumentBuilder::from_html(&report, "", page_box).expect("the report lays out");
         assert_eq!(laid.pages(), 20, "the HTML report's pages");
-        op.per(Per::Pages(20));
+        op.per(Per::Pages(3 * 20));
         op.iter(|| {
-            let (builder, _) =
-                DocumentBuilder::from_html(&report, "", page_box).expect("it lays out");
-            black_box(builder.finish())
+            for _ in 0..3 {
+                let (builder, _) =
+                    DocumentBuilder::from_html(&report, "", page_box).expect("it lays out");
+                black_box(builder.finish());
+            }
         });
     });
     group.operation("the 20-page Markdown document to PDF", |op| {
@@ -347,79 +392,75 @@ fn layout(c: &mut Criterion) {
             20,
             "the Markdown document's pages"
         );
-        op.per(Per::Pages(20));
+        op.per(Per::Pages(3 * 20));
         op.iter(|| {
-            black_box(
-                Document::open_markdown(markdown.as_bytes().to_vec(), &OpenOptions::default())
-                    .expect("it lays out"),
-            )
+            for _ in 0..3 {
+                black_box(
+                    Document::open_markdown(markdown.as_bytes().to_vec(), &OpenOptions::default())
+                        .expect("it lays out"),
+                );
+            }
         });
     });
 
     // Each format a set at a time, every fixture of it in one iteration,
     // beside the same pages from the PDF the facade synthesised for each.
     group.operation("open each SVG fixture, render page 1", |op| {
-        op.per(Per::Pages(svg[0].len() as u64));
-        op.iter(|| black_box(open_and_render(&svg[0])));
+        containers_rendered(op, &svg[0], 4)
     });
     group.operation("render each SVG fixture's synthesised PDF", |op| {
-        op.per(Per::Pages(svg[1].len() as u64));
-        op.iter(|| black_box(open_and_render(&svg[1])));
+        containers_rendered(op, &svg[1], 5)
     });
     group.operation("open each XPS fixture, render page 1", |op| {
-        op.per(Per::Pages(xps[0].len() as u64));
-        op.iter(|| black_box(open_and_render(&xps[0])));
+        containers_rendered(op, &xps[0], 1)
     });
     group.operation("render each XPS fixture's synthesised PDF", |op| {
-        op.per(Per::Pages(xps[1].len() as u64));
-        op.iter(|| black_box(open_and_render(&xps[1])));
+        containers_rendered(op, &xps[1], 1)
     });
     group.operation("open each CBZ fixture, render page 1", |op| {
-        op.per(Per::Pages(cbz[0].len() as u64));
-        op.iter(|| black_box(open_and_render(&cbz[0])));
+        containers_rendered(op, &cbz[0], 8)
     });
     group.operation("render each CBZ fixture's synthesised PDF", |op| {
-        op.per(Per::Pages(cbz[1].len() as u64));
-        op.iter(|| black_box(open_and_render(&cbz[1])));
+        containers_rendered(op, &cbz[1], 14)
     });
 
     // Each committed book's every page through the CLI, read from where it
     // is committed: a PNG a page, as `tpdf render` writes them.
     group.operation(
         "render every page of calibre-book-cover.epub at 72 dpi, CLI",
-        |op| render_book_cli(op, "calibre-book-cover", &calibre_book_cover),
+        |op| render_book_cli(op, "calibre-book-cover", &calibre_book_cover, 1),
     );
     group.operation(
         "render every page of calibre-book-nocover.epub at 72 dpi, CLI",
-        |op| render_book_cli(op, "calibre-book-nocover", &calibre_book_nocover),
+        |op| render_book_cli(op, "calibre-book-nocover", &calibre_book_nocover, 1),
     );
     group.operation(
         "render every page of calibre-embedded-font.epub at 72 dpi, CLI",
-        |op| render_book_cli(op, "calibre-embedded-font", &calibre_embedded_font),
+        |op| render_book_cli(op, "calibre-embedded-font", &calibre_embedded_font, 1),
     );
     group.operation(
         "render every page of kcc-fixed-layout.epub at 72 dpi, CLI",
-        |op| render_book_cli(op, "kcc-fixed-layout", &kcc_fixed_layout),
+        |op| render_book_cli(op, "kcc-fixed-layout", &kcc_fixed_layout, 7),
     );
     group.operation(
         "render every page of pandoc-book-cover.epub at 72 dpi, CLI",
-        |op| render_book_cli(op, "pandoc-book-cover", &pandoc_book_cover),
+        |op| render_book_cli(op, "pandoc-book-cover", &pandoc_book_cover, 1),
     );
     group.operation(
         "render every page of pandoc-book-epub2.epub at 72 dpi, CLI",
-        |op| render_book_cli(op, "pandoc-book-epub2", &pandoc_book_epub2),
+        |op| render_book_cli(op, "pandoc-book-epub2", &pandoc_book_epub2, 1),
     );
     group.operation(
         "render every page of pandoc-book-nocover.epub at 72 dpi, CLI",
-        |op| render_book_cli(op, "pandoc-book-nocover", &pandoc_book_nocover),
+        |op| render_book_cli(op, "pandoc-book-nocover", &pandoc_book_nocover, 1),
     );
     group.operation(
         "render every page of pandoc-embedded-font.epub at 72 dpi, CLI",
-        |op| render_book_cli(op, "pandoc-embedded-font", &pandoc_embedded_font),
+        |op| render_book_cli(op, "pandoc-embedded-font", &pandoc_embedded_font, 1),
     );
     group.operation(
         "render every page of pandoc-plates.epub at 72 dpi, CLI",
-        |op| render_book_cli(op, "pandoc-plates", &pandoc_plates),
+        |op| render_book_cli(op, "pandoc-plates", &pandoc_plates, 1),
     );
 
     group.finish();

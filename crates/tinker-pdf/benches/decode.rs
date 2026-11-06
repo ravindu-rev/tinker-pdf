@@ -3,6 +3,12 @@
 //! The harness, the sampling and the rules every name here keeps are
 //! `support/mod.rs`'s; `baseline.json`'s `decode` list names these operations
 //! in this order.
+//!
+//! Each operation is sized into the set's 20-300 ms window on the hosted
+//! runner (`docs/design/performance.md`): the JPEG decodes at a quarter of a
+//! scan's pixels, the 9/7 codestream at a sixteenth and the lossless 5/3 one
+//! at a sixty-fourth, and the shorter decodes repeated inside an iteration,
+//! their unit counting every call.
 
 mod support;
 
@@ -20,9 +26,15 @@ use tinker_pdf_filters::{
 /// an RGB page at 300 dpi.
 const CEILING: usize = 1 << 28;
 
+/// Width times height.
+fn area((width, height): (u32, u32)) -> u64 {
+    u64::from(width) * u64::from(height)
+}
+
 fn decode(c: &mut Criterion) {
-    let (pixels_w, pixels_h) = inputs::SCAN;
-    let pixels = u64::from(pixels_w) * u64::from(pixels_h);
+    let jpeg_size = inputs::scan_part(2);
+    let irreversible_size = inputs::scan_part(4);
+    let reversible_size = inputs::scan_part(8);
     let limits = Limits::new(CEILING);
 
     // Inflate and LZW, each asserted to give its input back.
@@ -55,16 +67,16 @@ fn decode(c: &mut Criterion) {
 
     // The image codecs, each asserted to decode its whole picture.
     let baseline = LazyCell::new(|| {
-        let baseline = inputs::baseline_jpeg();
+        let baseline = inputs::baseline_jpeg_part(2);
         let image = jpeg_decode(&baseline, CEILING).expect("the JPEG decodes");
-        assert_eq!((image.width, image.height), inputs::SCAN);
-        assert_eq!(image.data.len(), 3 * pixels as usize);
+        assert_eq!((image.width, image.height), jpeg_size);
+        assert_eq!(image.data.len(), 3 * area(jpeg_size) as usize);
         (baseline, image.data)
     });
     // The progressive file is the baseline's coefficients re-scanned, so the
     // two decode to the same samples.
     let progressive = LazyCell::new(|| {
-        let progressive = inputs::committed_data("progressive-2480x3508.jpg");
+        let progressive = inputs::committed_data("progressive-1240x1754.jpg");
         let rescanned = jpeg_decode(&progressive, CEILING).expect("the JPEG decodes");
         assert!(
             rescanned.data == baseline.1,
@@ -73,19 +85,20 @@ fn decode(c: &mut Criterion) {
         progressive
     });
     let irreversible = LazyCell::new(|| {
-        let irreversible = inputs::committed_data("irreversible-2480x3508.jp2");
+        let irreversible = inputs::committed_data("irreversible-620x877.jp2");
         let image = jpx_decode(&irreversible, &limits, &mut Vec::new()).expect("it decodes");
-        assert_eq!((image.width, image.height), inputs::SCAN);
-        assert_eq!(image.samples.len(), 3 * pixels as usize);
+        assert_eq!((image.width, image.height), irreversible_size);
+        assert_eq!(image.samples.len(), 3 * area(irreversible_size) as usize);
         irreversible
     });
     // The lossless codestream is the generator's own picture, exactly.
     let reversible = LazyCell::new(|| {
-        let reversible = inputs::committed_data("reversible-2480x3508.jp2");
+        let reversible = inputs::committed_data("reversible-310x438.jp2");
         let image = jpx_decode(&reversible, &limits, &mut Vec::new()).expect("it decodes");
+        let (width, height) = reversible_size;
         assert!(
-            image.samples == inputs::photo(pixels_w, pixels_h, 0),
-            "the reversible codestream decodes to photo(2480, 3508, 0) exactly"
+            image.samples == inputs::photo(width, height, 0),
+            "the reversible codestream decodes to photo(310, 438, 0) exactly"
         );
         reversible
     });
@@ -133,38 +146,46 @@ fn decode(c: &mut Criterion) {
     let mut group = Group::new(c, "decode");
 
     group.operation("inflate page-like data", |op| {
-        op.per(Per::Bytes(2 * page_like.len() as u64));
+        op.per(Per::Bytes(6 * page_like.len() as u64));
         op.iter(|| {
-            for _ in 0..2 {
+            for _ in 0..6 {
                 black_box(inflate_raw(&deflated, &limits));
             }
         });
     });
     group.operation("inflate near-incompressible data", |op| {
         let (noise, noisy) = &*noise;
-        op.per(Per::Bytes(noise.len() as u64));
-        op.iter(|| black_box(inflate_raw(noisy, &limits)));
+        op.per(Per::Bytes(3 * noise.len() as u64));
+        op.iter(|| {
+            for _ in 0..3 {
+                black_box(inflate_raw(noisy, &limits));
+            }
+        });
     });
     group.operation("LZW decode page-like data", |op| {
-        op.per(Per::Bytes(page_like.len() as u64));
-        op.iter(|| black_box(lzw_decode(&lzw, &limits, true, None)));
+        op.per(Per::Bytes(5 * page_like.len() as u64));
+        op.iter(|| {
+            for _ in 0..5 {
+                let _ = black_box(lzw_decode(&lzw, &limits, true, None));
+            }
+        });
     });
 
-    group.operation("baseline JPEG 2480x3508", |op| {
+    group.operation("baseline JPEG 1240x1754", |op| {
         let (baseline, _) = &*baseline;
-        op.per(Per::Pixels(pixels));
+        op.per(Per::Pixels(area(jpeg_size)));
         op.iter(|| black_box(jpeg_decode(baseline, CEILING)));
     });
-    group.operation("progressive JPEG 2480x3508", |op| {
-        op.per(Per::Pixels(pixels));
+    group.operation("progressive JPEG 1240x1754", |op| {
+        op.per(Per::Pixels(area(jpeg_size)));
         op.iter(|| black_box(jpeg_decode(&progressive, CEILING)));
     });
-    group.operation("irreversible JPEG 2000 2480x3508", |op| {
-        op.per(Per::Pixels(pixels));
+    group.operation("irreversible JPEG 2000 620x877", |op| {
+        op.per(Per::Pixels(area(irreversible_size)));
         op.iter(|| black_box(jpx_decode(&irreversible, &limits, &mut Vec::new())));
     });
-    group.operation("reversible JPEG 2000 2480x3508", |op| {
-        op.per(Per::Pixels(pixels));
+    group.operation("reversible JPEG 2000 310x438", |op| {
+        op.per(Per::Pixels(area(reversible_size)));
         op.iter(|| black_box(jpx_decode(&reversible, &limits, &mut Vec::new())));
     });
 
@@ -175,8 +196,12 @@ fn decode(c: &mut Criterion) {
     });
     group.operation("decode the CCITT G4 page", |op| {
         let (g4, params) = &*g4;
-        op.per(Per::Pixels(scan_pixels()));
-        op.iter(|| black_box(ccitt_decode(g4, params, CEILING)));
+        op.per(Per::Pixels(2 * scan_pixels()));
+        op.iter(|| {
+            for _ in 0..2 {
+                black_box(ccitt_decode(g4, params, CEILING));
+            }
+        });
     });
 
     group.finish();

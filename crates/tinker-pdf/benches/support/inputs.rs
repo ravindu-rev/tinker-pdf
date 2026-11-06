@@ -64,10 +64,18 @@ pub fn three_pages() -> Vec<u8> {
 
 /// One page carrying an axial shading over its whole area.
 pub fn axial() -> Vec<u8> {
+    axial_part(1)
+}
+
+/// [`axial`] on a page a `divisor`th of A4 each way, the shading's axis
+/// with it, so a render draws a `divisor`²th of the pixels the same ramp
+/// takes.
+pub fn axial_part(divisor: u32) -> Vec<u8> {
+    let (width, height) = page_part(divisor);
     let mut builder = DocumentBuilder::new();
     let shading = Shading::Axial {
         color_space: DeviceSpace::Rgb,
-        coords: [0.0, 0.0, 595.0, 842.0],
+        coords: [0.0, 0.0, width, height],
         function: Function::Exponential {
             domain: [0.0, 1.0],
             c0: vec![0.0, 0.1, 0.6],
@@ -77,10 +85,15 @@ pub fn axial() -> Vec<u8> {
         extend: (true, true),
     };
     builder.add_shading(b"S0", &shading);
-    builder.add_page(595.0, 842.0, |page| {
+    builder.add_page(width, height, |page| {
         page.shading(b"S0");
     });
     builder.finish()
+}
+
+/// A page a `divisor`th of A4 each way, in points.
+pub fn page_part(divisor: u32) -> (f64, f64) {
+    (595.0 / f64::from(divisor), 842.0 / f64::from(divisor))
 }
 
 /// Three hundred filled paths with edges on no axis, over a whole page.
@@ -269,6 +282,51 @@ pub fn dense(pages: usize, seed: u64) -> Vec<u8> {
     builder.finish()
 }
 
+/// [`dense`]'s pages a `divisor`th of A4 each way, each holding what of its
+/// page's text fits the same type there: its first `70 / divisor` lines,
+/// each its words up to `78 / divisor` characters, at [`dense`]'s size and
+/// leading, the margins a `divisor`th of its. A render of one draws about a
+/// `divisor`²th of the glyphs and the pixels a dense page does.
+pub fn dense_part(pages: usize, seed: u64, divisor: u32) -> Vec<u8> {
+    let (width, height) = page_part(divisor);
+    let lines = 70 / divisor as usize;
+    let characters = 78 / divisor as usize;
+    let margin = 36.0 / f64::from(divisor);
+    let mut builder = DocumentBuilder::new();
+    builder.set_subset_fonts(false);
+    assert!(
+        builder.add_embedded_font(b"F0", b"LiberationSerif", &serif()),
+        "the face is embedded"
+    );
+    for text in dense_text(pages, seed) {
+        builder.add_page(width, height, |page| {
+            for (at, line) in text.iter().take(lines).enumerate() {
+                let line = words_within(line, characters);
+                let y = height - margin - 11.0 * at as f64;
+                page.encoded_text(b"F0", 9.0, margin, y, (0.0, 0.0), &win_ansi(&line), &line);
+            }
+        });
+    }
+    builder.finish()
+}
+
+/// `line`'s words, as many from its start as `characters` holds, and its
+/// first word whatever its length.
+fn words_within(line: &str, characters: usize) -> String {
+    let mut out = String::new();
+    for word in line.split(' ') {
+        let wanted = out.chars().count() + usize::from(!out.is_empty()) + word.chars().count();
+        if !out.is_empty() && wanted > characters {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
+
 /// [`dense`]'s text, seed 0, in standard-14 Helvetica, unembedded, as a
 /// producer writes it: one `TJ` a line, its words kerned apart.
 pub fn producer(pages: usize) -> Vec<u8> {
@@ -398,44 +456,55 @@ pub fn photo(width: u32, height: u32, seed: u64) -> Vec<u8> {
     out
 }
 
-/// At least 23 000 000 bytes of A4 pages, each covered by an image of its
-/// own, `photo(2480, 3508, page)` coded as a baseline JPEG, so no two pages
-/// share an image a writer could deduplicate. Written once a process.
+/// At least 23 000 000 bytes of [`image_pages`]. Written once a process.
 pub fn image_file() -> Arc<[u8]> {
     static FILE: OnceLock<Arc<[u8]>> = OnceLock::new();
-    Arc::clone(FILE.get_or_init(|| {
-        let mut builder = DocumentBuilder::new();
-        let mut held = 0usize;
-        let mut page = 0u64;
-        while held < 23_000_000 {
-            let samples = photo(2480, 3508, page);
-            let jpeg = tinker_pdf_filters::jpeg_encode(
-                &tinker_pdf_filters::JpegSource {
-                    width: 2480,
-                    height: 3508,
-                    colour: tinker_pdf_filters::JpegSourceColour::Rgb,
-                    stride: 2480 * 3,
-                    data: &samples,
-                },
-                &tinker_pdf_filters::JpegOptions::default(),
-            )
-            .expect("a baseline JPEG");
-            held += jpeg.len();
-            let name = format!("Im{page}");
-            assert!(builder.add_image(name.as_bytes(), &ImageData::Jpeg(&jpeg)));
-            builder.add_page(595.0, 842.0, |p| {
-                p.image(name.as_bytes(), 0.0, 0.0, 595.0, 842.0)
-            });
-            page += 1;
-        }
-        let file = builder.finish();
-        assert!(
-            file.len() >= 23_000_000,
-            "the image file is {} bytes",
-            file.len()
-        );
-        file.into()
-    }))
+    Arc::clone(FILE.get_or_init(|| image_pages(23_000_000).into()))
+}
+
+/// At least 2 400 000 bytes of [`image_pages`], its first page, about a
+/// tenth of [`image_file`]: the file the operations take that [`image_file`]
+/// holds outside the set's window. Written once a process.
+pub fn small_image_file() -> Arc<[u8]> {
+    static FILE: OnceLock<Arc<[u8]>> = OnceLock::new();
+    Arc::clone(FILE.get_or_init(|| image_pages(2_400_000).into()))
+}
+
+/// At least `at_least` bytes of A4 pages, each covered by an image of its
+/// own, `photo(2480, 3508, page)` coded as a baseline JPEG, so no two pages
+/// share an image a writer could deduplicate.
+pub fn image_pages(at_least: usize) -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    let mut held = 0usize;
+    let mut page = 0u64;
+    while held < at_least {
+        let samples = photo(2480, 3508, page);
+        let jpeg = tinker_pdf_filters::jpeg_encode(
+            &tinker_pdf_filters::JpegSource {
+                width: 2480,
+                height: 3508,
+                colour: tinker_pdf_filters::JpegSourceColour::Rgb,
+                stride: 2480 * 3,
+                data: &samples,
+            },
+            &tinker_pdf_filters::JpegOptions::default(),
+        )
+        .expect("a baseline JPEG");
+        held += jpeg.len();
+        let name = format!("Im{page}");
+        assert!(builder.add_image(name.as_bytes(), &ImageData::Jpeg(&jpeg)));
+        builder.add_page(595.0, 842.0, |p| {
+            p.image(name.as_bytes(), 0.0, 0.0, 595.0, 842.0)
+        });
+        page += 1;
+    }
+    let file = builder.finish();
+    assert!(
+        file.len() >= at_least,
+        "the image file is {} bytes",
+        file.len()
+    );
+    file
 }
 
 /// [`image_file`] saved at R6 with both passwords empty and fixed entropy,
@@ -1024,16 +1093,50 @@ pub fn baseline_jpeg() -> Arc<[u8]> {
             &tinker_pdf_filters::JpegOptions::default(),
         )
         .expect("a baseline JPEG");
-        // The source `data/progressive-2480x3508.jpg` was transcoded from, as
-        // `data/README.md` records it: a changed encoder fails here, before
-        // the decode group compares the two.
+        // The JPEG page `tests/peak_memory.rs` holds the peak of is made of
+        // these bytes: a changed encoder fails here, before it moves a peak.
         assert_eq!(
             hex(&sha256(&jpeg)),
             "754c262d187b8459117b897f5d79c97d71062c58ed6ff494b82438d8ed8dcbbc",
-            "baseline_jpeg() is the progressive file's source"
+            "baseline_jpeg() is the peak test's JPEG"
         );
         jpeg.into()
     }))
+}
+
+/// [`SCAN`]'s size a `divisor`th each way: the image of a page
+/// [`page_part`] makes at a scan's resolution.
+pub fn scan_part(divisor: u32) -> (u32, u32) {
+    (SCAN.0 / divisor, SCAN.1 / divisor)
+}
+
+/// [`photo`] at [`scan_part`]'s size, seed 0, as a baseline JPEG under Annex
+/// K's tables. At a divisor of 2 it is the source
+/// `data/progressive-1240x1754.jpg` was transcoded from, as `data/README.md`
+/// records it, and is held to that digest: a changed encoder fails here,
+/// before the decode group compares the two.
+pub fn baseline_jpeg_part(divisor: u32) -> Vec<u8> {
+    let (width, height) = scan_part(divisor);
+    let samples = photo(width, height, 0);
+    let jpeg = tinker_pdf_filters::jpeg_encode(
+        &tinker_pdf_filters::JpegSource {
+            width,
+            height,
+            colour: tinker_pdf_filters::JpegSourceColour::Rgb,
+            stride: width as usize * 3,
+            data: &samples,
+        },
+        &tinker_pdf_filters::JpegOptions::default(),
+    )
+    .expect("a baseline JPEG");
+    if divisor == 2 {
+        assert_eq!(
+            hex(&sha256(&jpeg)),
+            "2dd7f148015119516d79e4ea8b97096f99d20fd3a848e361abc895248ee2475f",
+            "baseline_jpeg_part(2) is the progressive file's source"
+        );
+    }
+    jpeg
 }
 
 /// `bytes` as lower-case hexadecimal.
@@ -1052,25 +1155,29 @@ pub fn committed_data(name: &str) -> Vec<u8> {
 /// as a one-bit `/DeviceGray` sample is. Its width, height and bytes.
 pub fn scan() -> (u32, u32, Arc<[u8]>) {
     static SCAN_PAGE: OnceLock<(u32, u32, Arc<[u8]>)> = OnceLock::new();
-    let (width, height, bytes) = SCAN_PAGE.get_or_init(|| {
-        let doc = Document::open(dense(1, 0)).expect("the text page opens");
-        let bitmap = doc
-            .page(0)
-            .expect("a page")
-            .render(&RenderOptions::at_dpi(300.0));
-        let stride = bitmap.width.div_ceil(8) as usize;
-        let n = bitmap.components();
-        let mut bits = vec![0xFFu8; stride * bitmap.height as usize];
-        for (y, row) in bitmap.data.chunks(bitmap.stride).enumerate() {
-            for (x, pixel) in row.chunks(n).take(bitmap.width as usize).enumerate() {
-                if pixel.iter().take(3).map(|&v| u32::from(v)).sum::<u32>() < 3 * 128 {
-                    bits[y * stride + x / 8] &= !(0x80 >> (x % 8));
-                }
+    let (width, height, bytes) = SCAN_PAGE.get_or_init(|| scan_at(300.0));
+    (*width, *height, Arc::clone(bytes))
+}
+
+/// [`scan`] at `dpi`: the dense text page rendered there and thresholded the
+/// same way.
+pub fn scan_at(dpi: f64) -> (u32, u32, Arc<[u8]>) {
+    let doc = Document::open(dense(1, 0)).expect("the text page opens");
+    let bitmap = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::at_dpi(dpi));
+    let stride = bitmap.width.div_ceil(8) as usize;
+    let n = bitmap.components();
+    let mut bits = vec![0xFFu8; stride * bitmap.height as usize];
+    for (y, row) in bitmap.data.chunks(bitmap.stride).enumerate() {
+        for (x, pixel) in row.chunks(n).take(bitmap.width as usize).enumerate() {
+            if pixel.iter().take(3).map(|&v| u32::from(v)).sum::<u32>() < 3 * 128 {
+                bits[y * stride + x / 8] &= !(0x80 >> (x % 8));
             }
         }
-        (bitmap.width, bitmap.height, bits.into())
-    });
-    (*width, *height, Arc::clone(bytes))
+    }
+    (bitmap.width, bitmap.height, bits.into())
 }
 
 /// [`scan`] coded as ITU-T T.6, as `/CCITTFaxDecode /K -1` reads it.
@@ -1131,10 +1238,16 @@ pub fn jbig2(width: u32, height: u32, bits: &[u8]) -> Vec<u8> {
 
 /// An A4 page covered by one image: `image` placed as `Im0` over the page.
 fn image_page(image: &ImageData<'_>) -> Vec<u8> {
+    image_page_part(image, 1)
+}
+
+/// [`image_page`] on a page a `divisor`th of A4 each way ([`page_part`]).
+fn image_page_part(image: &ImageData<'_>, divisor: u32) -> Vec<u8> {
+    let (width, height) = page_part(divisor);
     let mut builder = DocumentBuilder::new();
     assert!(builder.add_image(b"Im0", image), "the image is placed");
-    builder.add_page(595.0, 842.0, |page| {
-        page.image(b"Im0", 0.0, 0.0, 595.0, 842.0)
+    builder.add_page(width, height, |page| {
+        page.image(b"Im0", 0.0, 0.0, width, height)
     });
     builder.finish()
 }
@@ -1144,26 +1257,39 @@ pub fn jpeg_page() -> Vec<u8> {
     image_page(&ImageData::Jpeg(&baseline_jpeg()))
 }
 
-/// An A4 page covered by [`photo`] at [`SCAN`]'s size, seed 1, Flate-coded.
-pub fn flate_page() -> Vec<u8> {
-    let coded = tinker_pdf_filters::zlib_compress(&photo(SCAN.0, SCAN.1, 1));
-    image_page(&ImageData::Compressed(CompressedImage {
-        width: SCAN.0,
-        height: SCAN.1,
-        bits_per_component: 8,
-        color_space: ImageColorSpace::DeviceRgb,
-        filter: Some(ImageFilter::Flate),
-        data: &coded,
-        color_key_mask: None,
-        soft_mask: None,
-    }))
+/// A page a `divisor`th of A4 each way covered by [`baseline_jpeg_part`].
+pub fn jpeg_page_part(divisor: u32) -> Vec<u8> {
+    image_page_part(&ImageData::Jpeg(&baseline_jpeg_part(divisor)), divisor)
 }
 
-/// An A4 page covered by [`photo`] at [`SCAN`]'s size, seed 0, turned into
-/// ink by formula — black the darkest of the three, each colour the rest of
-/// its complement — Flate-coded under `/ICCBased` over `cmyk-lut.icc`.
-pub fn cmyk_page() -> Vec<u8> {
-    let rgb = photo(SCAN.0, SCAN.1, 0);
+/// A page a `divisor`th of A4 each way covered by [`photo`] at
+/// [`scan_part`]'s size, seed 1, Flate-coded.
+pub fn flate_page(divisor: u32) -> Vec<u8> {
+    let (width, height) = scan_part(divisor);
+    let coded = tinker_pdf_filters::zlib_compress(&photo(width, height, 1));
+    image_page_part(
+        &ImageData::Compressed(CompressedImage {
+            width,
+            height,
+            bits_per_component: 8,
+            color_space: ImageColorSpace::DeviceRgb,
+            filter: Some(ImageFilter::Flate),
+            data: &coded,
+            color_key_mask: None,
+            soft_mask: None,
+        }),
+        divisor,
+    )
+}
+
+/// A page a `divisor`th of A4 each way covered by [`photo`] at
+/// [`scan_part`]'s size, seed 0, turned into ink by formula — black the
+/// darkest of the three, each colour the rest of its complement —
+/// Flate-coded under `/ICCBased` over `cmyk-lut.icc`.
+pub fn cmyk_page(divisor: u32) -> Vec<u8> {
+    let (width, height) = scan_part(divisor);
+    let (page_width, page_height) = page_part(divisor);
+    let rgb = photo(width, height, 0);
     let mut ink = Vec::with_capacity(rgb.len() / 3 * 4);
     for pixel in rgb.chunks(3) {
         let (c, m, y) = (255 - pixel[0], 255 - pixel[1], 255 - pixel[2]);
@@ -1176,8 +1302,8 @@ pub fn cmyk_page() -> Vec<u8> {
     assert!(builder.add_image(
         b"Im0",
         &ImageData::Compressed(CompressedImage {
-            width: SCAN.0,
-            height: SCAN.1,
+            width,
+            height,
             bits_per_component: 8,
             color_space: ImageColorSpace::Icc {
                 resource: b"CS0",
@@ -1189,10 +1315,31 @@ pub fn cmyk_page() -> Vec<u8> {
             soft_mask: None,
         })
     ));
-    builder.add_page(595.0, 842.0, |page| {
-        page.image(b"Im0", 0.0, 0.0, 595.0, 842.0)
+    builder.add_page(page_width, page_height, |page| {
+        page.image(b"Im0", 0.0, 0.0, page_width, page_height)
     });
     builder.finish()
+}
+
+/// A page a quarter of A4 each way covered by the committed 620 × 877
+/// irreversible JPEG 2000 codestream.
+pub fn jpx_page_part() -> Vec<u8> {
+    let codestream = committed_data("irreversible-620x877.jp2");
+    let (width, height) = scan_part(4);
+    image_page_part(
+        &ImageData::Compressed(CompressedImage {
+            width,
+            height,
+            // Neither is written for a codestream, which states both itself.
+            bits_per_component: 8,
+            color_space: ImageColorSpace::DeviceRgb,
+            filter: Some(ImageFilter::Jpx),
+            data: &codestream,
+            color_key_mask: None,
+            soft_mask: None,
+        }),
+        4,
+    )
 }
 
 /// An A4 page covered by the committed irreversible JPEG 2000 codestream.
@@ -1211,45 +1358,53 @@ pub fn jpx_page() -> Vec<u8> {
     }))
 }
 
-/// An A4 page covered by [`scan`], G4-coded.
-pub fn g4_page() -> Vec<u8> {
-    let (width, height, bits) = scan();
+/// A page a `divisor`th of A4 each way covered by [`scan_at`] a `divisor`th
+/// of a scan's resolution, G4-coded.
+pub fn g4_page(divisor: u32) -> Vec<u8> {
+    let (width, height, bits) = scan_at(300.0 / f64::from(divisor));
     let coded = g4(width, height, &bits);
-    image_page(&ImageData::Compressed(CompressedImage {
-        width,
-        height,
-        bits_per_component: 1,
-        color_space: ImageColorSpace::DeviceGray,
-        filter: Some(ImageFilter::CcittFax(CcittParams {
-            k: -1,
-            columns: width,
-            rows: height,
-            ..CcittParams::default()
-        })),
-        data: &coded,
-        color_key_mask: None,
-        soft_mask: None,
-    }))
+    image_page_part(
+        &ImageData::Compressed(CompressedImage {
+            width,
+            height,
+            bits_per_component: 1,
+            color_space: ImageColorSpace::DeviceGray,
+            filter: Some(ImageFilter::CcittFax(CcittParams {
+                k: -1,
+                columns: width,
+                rows: height,
+                ..CcittParams::default()
+            })),
+            data: &coded,
+            color_key_mask: None,
+            soft_mask: None,
+        }),
+        divisor,
+    )
 }
 
-/// An A4 page covered by [`scan`], saved through the image pass's JBIG2
-/// generic coding, the builder having no JBIG2 filter of its own.
+/// A page a `divisor`th of A4 each way covered by [`scan_at`] a `divisor`th
+/// of a scan's resolution, saved through the image pass's JBIG2 generic
+/// coding, the builder having no JBIG2 filter of its own.
 ///
 /// The scan is placed as raw one-bit samples rather than as [`g4_page`]'s G4,
 /// because the pass keeps a new coding only when it is smaller than the
 /// stored one, and a generic region need not beat G4.
-pub fn jbig2_page() -> Vec<u8> {
-    let (width, height, bits) = scan();
-    let raw = image_page(&ImageData::Compressed(CompressedImage {
-        width,
-        height,
-        bits_per_component: 1,
-        color_space: ImageColorSpace::DeviceGray,
-        filter: None,
-        data: &bits,
-        color_key_mask: None,
-        soft_mask: None,
-    }));
+pub fn jbig2_page(divisor: u32) -> Vec<u8> {
+    let (width, height, bits) = scan_at(300.0 / f64::from(divisor));
+    let raw = image_page_part(
+        &ImageData::Compressed(CompressedImage {
+            width,
+            height,
+            bits_per_component: 1,
+            color_space: ImageColorSpace::DeviceGray,
+            filter: None,
+            data: &bits,
+            color_key_mask: None,
+            soft_mask: None,
+        }),
+        divisor,
+    );
     let doc = Document::open(raw).expect("the raw scan page opens");
     let options = SaveOptions {
         write: WriteOptions {

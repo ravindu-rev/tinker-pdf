@@ -95,7 +95,7 @@ planning-time comparison that suggested the number, which is not re-run
 | --- | --- | --- | --- |
 | **counted** | a count of work against a bound, or one count at two sizes | MS-01's guard suite, in `cargo test` on the four targets | the bound in the guard; the guard's entry in the roster in `guards.rs`; the pinned counts in K-07's determinism roster |
 | **factor** | the head's time over `61adcde`'s, paired and interleaved on one runner, against 1 ÷ the operation's committed floor | MS-02's paired job, over MS-04's benchmark set | the floors, placed by MS-02.1; a P row raises its operations' floors in the commit that closes it, and only H-78 lowers one |
-| **calibrated** | an operation the baseline cannot run at all, as a fraction of a calibration operation the same job runs — `61adcde`'s text of 100 dense pages, 751 ms on the planning machine | MS-02's paired job | beside the floors |
+| **calibrated** | an operation the baseline cannot run at all, as a fraction of a calibration operation the same job runs — `61adcde`'s text of 5 dense pages, 37.6 ms on the planning machine (rescaled from 100 pages' 751) | MS-02's paired job | beside the floors |
 | **relation** | two operations of one build, in one run, with no baseline | MS-02's paired job, on the head | beside the floors |
 | **held** | a factor of 1: the operation may not lose time against the baseline | MS-02's paired job | every floor starts at 1 |
 | **peak band** (MS-05) | an operation's peak resident set against a committed band | MS-05's Linux-only test, one first-party probe per case | MS-05's bands |
@@ -542,9 +542,9 @@ against `61adcde` (`docs/roadmap/P.md:29-55`).
   wrote; nothing re-times anything, and no clock enters `cargo test`.
 - **Memory, counts and wasm**, which are MS-05's, MS-01's and MS-10's.
 - **A price.** What gives when the budget cannot hold is H-162's; a floor
-  below 1, a band wider than the A/A rule and any loosened gate are H-78's; a
-  target is H-77's and an input H-163's. This section gives the figures each
-  is decided on and decides none of them.
+  below 1, a band wider than the A/A rule and any loosened gate are H-78's,
+  and a target is H-77's. This section gives the figures each is decided on
+  and decides none of them.
 - **The planning comparison.** H-112's figures stay outside the repository;
   nothing here reads or writes them.
 
@@ -677,9 +677,9 @@ operation is held to what tier P's Gate column gives it
   names — the full-size decode for a quarter-scale one (MS-04, "What later
   rows add") — and the ratio is held to 1 ÷ the factor as a floor is.
 - **calibrated**, where `61adcde` lacks the capability altogether: the head's
-  figure over `61adcde`'s `calibration/text of 100 dense pages` in the same
-  round, against the target over 751 ms (`P.md:43-47`), so 0.5 ms reads as at
-  most 1/1 502.
+  figure over `61adcde`'s `calibration/text of 5 dense pages` in the same
+  round, against the target over 37.6 ms (`P.md:43-48`), so 0.5 ms reads as
+  at most 1/75.1.
 - **a relation**: two operations of the head's group in the same round, the
   ratio of their per-call figures against the bound, in its direction.
 
@@ -731,8 +731,8 @@ than the rule gives is H-78's.
 | A/A bands | each operation's entry: its spread and its band; the fifteen run ids once, beside the calibration | MS-02.7 | approved by H-109; widened by H-78 |
 
 ```json
-"calibration": { "operation": "calibration/text of 100 dense pages",
-                 "planning_ms": 751 },
+"calibration": { "operation": "calibration/text of 5 dense pages",
+                 "planning_ms": 37.6 },
 "paired_runs": { "runner": "ubuntu-latest", "runs": [ ... ] },
 "groups": [
   {
@@ -860,9 +860,8 @@ one has landed.
   needs 330 × 5.48 s, 30.1 minutes — and the three that read 10 000 pages
   are 100.5 s of Σt's 207.7.
 - **At any figures inside MS-04's window**, 138 operations of 20 ms or more
-  cost at least 138 × 330 × 20 ms, 15.2 minutes of rounds, so no answer to
-  H-163 that keeps the set inside the window fits three builds into 15
-  minutes.
+  cost at least 138 × 330 × 20 ms, 15.2 minutes of rounds, so no set inside
+  the window fits three builds into 15 minutes.
 - **The planning baseline's third**, 110 × Σt, is 6.3 hours and never
   shrinks: a P row makes the head faster, and `61adcde` stays what it was.
 
@@ -935,10 +934,10 @@ to it in the commit that adds the capability.
 
 - **A gate on a push or a pull request.** `bench.yml` keeps its dispatch and
   its weekly cron (`bench.yml:24-40`); MS-02's paired job is the gate.
-- **A changed input.** Every operation runs on the input tier P's table
-  states. Which gives for one that cannot fit 20–300 ms at that input is the
-  owner's (H-163); until it is decided the operation keeps its input and is
-  named outside the window.
+- **An input changed for any reason but the window.** An operation's input
+  is the one that brings it inside 20–300 ms on the hosted runner, and tier
+  P's table states its figures rescaled to that input; nothing else moves an
+  input.
 - **Floors, calibrations and relations.** What an operation is lives here;
   how it gates is MS-02.3's to commit beside it, and the thread floors are
   MS-09.3's.
@@ -1066,7 +1065,7 @@ apart. Every operation is declared through `Group::operation`, which runs it
 either way, and `cargo xtask baseline` refuses a group file that calls
 criterion's `bench_function` or `benchmark_group` itself. `calibration.rs` is
 the exception: frozen, it keeps criterion's calls and has no count mode, and
-its input and call are `text/text of 100 dense pages`, which count mode runs.
+its input and call are `text/text of 5 dense pages`, which count mode runs.
 
 #### The inputs
 
@@ -1076,32 +1075,34 @@ target computes the same bytes) and through the tree's own writers elsewhere.
 
 | Input | What it is | How it is written | Tier P's input |
 | --- | --- | --- | --- |
-| `dense(n, seed)` | n A4 pages (595 × 842 pt), each about 5 600 characters of seeded words in 70 lines, drawn from about 80 distinct glyphs with a few accented letters | Liberation Serif Regular (`crates/tinker-pdf-font/data/liberation/`) embedded whole — `add_embedded_font` (`crates/tinker-pdf-cos/src/build.rs:5694`) with `set_subset_fonts(false)` (`:6795`), so subset-on-save has a program to cut | "100 dense pages", "the text page" (`dense(1, 0)`), "20 pages"; 5 600 characters a page is P-02's ≥ 5.6 M characters/s at 1 000 pages/s |
+| `dense(n, seed)` | n A4 pages (595 × 842 pt), each about 5 600 characters of seeded words in 70 lines, drawn from about 80 distinct glyphs with a few accented letters | Liberation Serif Regular (`crates/tinker-pdf-font/data/liberation/`) embedded whole — `add_embedded_font` (`crates/tinker-pdf-cos/src/build.rs:5694`) with `set_subset_fonts(false)` (`:6795`), so subset-on-save has a program to cut | "5 dense pages", "the text page" (`dense(1, 0)`); 5 600 characters a page is P-02's ≥ 5.6 M characters/s at 1 000 pages/s |
+| `dense_part(n, seed, d)` | n pages a d-th of A4 each way (`page_part(d)`), each holding what of its dense page's text fits the same type there: its first 70 / d lines, each its words within 78 / d characters, at `dense`'s size and leading, the margins a d-th of its, so a page draws about a d²-th of the glyphs and the pixels a dense page does | as `dense` | "half-size text pages", "quarter-size pages" |
 | `producer(n)` | the dense pages' text in standard-14 Helvetica, unembedded, one `TJ` a line with kerning numbers | `add_base_font` (`build.rs:5561`) and `PageBuilder::raw` (`:4125`) | the Item's "100 producer-style standard-14 pages" |
-| `small(n)` | n pages of one Helvetica line each, the line `three_pages()` writes | the builder's flat page tree, one `/Kids` of every page (`build.rs:8508-8516`) | "small pages", "10 000-page document", "rewrite 100 / 1 000 / 3 000 pages" |
+| `small(n)` | n pages of one Helvetica line each, the line `three_pages()` writes | the builder's flat page tree, one `/Kids` of every page (`build.rs:8508-8516`) | "small pages", "10 000-page document", "4 000 small pages", "rewrite 100 / 1 000 / 3 000 pages" |
 | `three_pages()` | the document `open/open a 3-page document` opens | `support/inputs.rs` | — |
-| `report(n)` | n A4 pages of two columns of body text in the embedded face, a running head and foot, a page number and one ruled table each; untagged | the builder | "100 text pages", "100 pages" of the analysis rows |
-| `claiming(n)` | `report(n)` tagged (`PageBuilder::tagged`, `build.rs:2980`) under `DocumentBuilder::archival` (`:9047`), claiming PDF/A-2b, PDF/UA-1 and PDF/X-1a:2003 (`set_info`'s `GTS_PDFXVersion`, `:7744`; an output intent, `:3306`, carrying `fuzz/corpus/icc_profile/cmyk-lut.icc`), so each validator runs its rules rather than reporting no claim | the builder | "100 pages" of the validation row |
+| `report(n)` | n A4 pages of two columns of body text in the embedded face, a running head and foot, a page number and one ruled table each; untagged | the builder | "5 text pages", "5 pages" of the analysis rows |
+| `claiming(n)` | `report(n)` tagged (`PageBuilder::tagged`, `build.rs:2980`) under `DocumentBuilder::archival` (`:9047`), claiming PDF/A-2b, PDF/UA-1 and PDF/X-1a:2003 (`set_info`'s `GTS_PDFXVersion`, `:7744`; an output intent, `:3306`, carrying `fuzz/corpus/icc_profile/cmyk-lut.icc`), so each validator runs its rules rather than reporting no claim | the builder | "5 pages" of the validation row |
 | `photo(w, h, seed)` | RGB samples by formula: smooth fields, hard edges and a few levels of seeded noise | `inputs.rs` | the photographic content of every image input |
 | `page_like()` | 1240×1755 RGB (6 528 600 bytes) of text-like marks on white, about a tenth of the pixels inked, by formula — never a render, so it cannot move with the renderer | `inputs.rs`; its length and SHA-256 pinned beside the level-6 counts | "page-like data" |
 | `photo_like()` | `photo(1240, 1755, 0)`, 6 528 600 bytes, pinned the same way | `inputs.rs` | "photo-like data" |
 | `noise()` | 6 528 600 seeded bytes whose deflate stream is between 90 % and 100 % of their length, so inflate decodes coded literals, not stored blocks (asserted) | `inputs.rs` | "incompressible data" |
 | `lzw(bytes)` | 7.4.4's LZW, 9- to 12-bit codes, early change 1, a clear code at 4 096 | an encoder in `inputs.rs`, about sixty lines, round-tripped through `lzw_decode` (`crates/tinker-pdf-filters/src/lib.rs:738`) whenever it runs | LZW-coded page-like data; the tree's only LZW writer packs literals and compresses nothing (`crates/tinker-pdf-filters/src/tiff/tests.rs:376`) |
-| `baseline_jpeg()` | `photo(2480, 3508, 0)` as a baseline JPEG, Annex K's tables | `jpeg_encode` (`crates/tinker-pdf-filters/src/jpeg/encode.rs:819`) | "JPEG decode 2480×3508, baseline" |
-| `scan()` | `dense(1, 0)`'s page rendered at 300 dpi and thresholded to one bit | the renderer | "G4 / JBIG2 scan page" |
+| `baseline_jpeg()`, `baseline_jpeg_part(d)` | `photo(2480, 3508, 0)` as a baseline JPEG, Annex K's tables; and `photo` at `scan_part(d)`'s size, 2480×3508 a d-th each way, the same way | `jpeg_encode` (`crates/tinker-pdf-filters/src/jpeg/encode.rs:819`) | "JPEG decode 1240×1754, baseline" (`baseline_jpeg_part(2)`); the JPEG page `tests/peak_memory.rs` holds the peak of (`baseline_jpeg()`) |
+| `scan()`, `scan_at(dpi)` | `dense(1, 0)`'s page rendered at 300 dpi, or at `dpi`, and thresholded to one bit | the renderer | "G4 / JBIG2 scan page" |
 | `image_file()` | as many A4 pages as reach 23 000 000 bytes, each covered by its own image, `photo(2480, 3508, page)` DCT-coded, so no two pages share an image a writer could deduplicate | `jpeg_encode`, `add_image` (`build.rs:7206`) | "a 23 MB file", "a 23 MB image file" |
+| `small_image_file()` | the first page of `image_file()`'s pages alone, 2 496 733 bytes | the same | "a 2.5 MB image file", and the CBC pair's bytes |
 | `aes_file()` | `image_file()` saved at R6 with both passwords empty and fixed entropy, the file `tpdf encrypt` writes with neither password | `WriteOptions::encryption` (`crates/tinker-pdf-cos/src/write.rs:30-55`, `:124`) | the Item's "an AES-256 file" |
-| `jpeg_page()`, `flate_page()`, `cmyk_page()` | an A4 page covered by one 2480×3508 image: `baseline_jpeg()`; `photo(2480, 3508, 1)` through `zlib_compress` (`deflate.rs:218`); `photo` converted to CMYK by formula and Flate-coded under `/ICCBased` with `cmyk-lut.icc` (`add_icc_color_space`, `build.rs:6356`) | `add_image` | "full-page JPEG", "Flate RGB image page", "an ICC-based CMYK image"; the CMYK image is not DCT-coded, so its operation times the conversion and no JPEG decode |
-| `jpx_page()` | an A4 page covered by `data/`'s irreversible codestream | `ImageFilter::Jpx` (`build.rs:438`) | "full-page JPEG 2000" |
-| `g4_page()`, `jbig2_page()` | an A4 page covered by `scan()`: G4-coded (`ccitt_g4_encode`, `ccitt/encode.rs:386`, as `ImageFilter::CcittFax`); and the same page saved through the image pass's `BilevelCodec::Jbig2Generic` (`crates/tinker-pdf/src/recode.rs:188-197`), the builder having no JBIG2 filter | the builder, then `write::save` | "G4 / JBIG2 scan page" |
-| `paths(5000)`, `curves(2000)` | 3 000 filled polygons and closed curves at fractional coordinates, as `triangles()` draws them, and 2 000 stroked cubic curves, 0.5 to 4 pt wide, each of the nine cap-and-join pairs in turn, every fifth dashed; `curves` is those 2 000 alone | `raw` | "5 000 paths", "that page's 2 000 stroked curves alone" |
-| `triangles()`, `axial()` | the render group's 300 triangles and full-page axial shading | `support/inputs.rs` | "300 triangles", "full-page axial shading" |
+| `jpeg_page()`, `jpeg_page_part(d)`, `flate_page(d)`, `cmyk_page(d)` | a page a d-th of A4 each way (`jpeg_page()` A4 itself) covered by one image at `scan_part(d)`'s size: `baseline_jpeg()` or `baseline_jpeg_part(d)`; `photo` at that size, seed 1, through `zlib_compress` (`deflate.rs:218`); `photo` converted to CMYK by formula and Flate-coded under `/ICCBased` with `cmyk-lut.icc` (`add_icc_color_space`, `build.rs:6356`) | `add_image` | "half-size JPEG page", "quarter-size JPEG page", "Flate RGB image page", "an ICC-based CMYK image"; the CMYK image is not DCT-coded, so its operation times the conversion and no JPEG decode; `jpeg_page()` is the peak test's |
+| `jpx_page()`, `jpx_page_part()` | an A4 page covered by `data/`'s 2480×3508 irreversible codestream, the peak test's; and a page a quarter of A4 each way covered by its 620×877 one | `ImageFilter::Jpx` (`build.rs:438`) | "full-page JPEG 2000" |
+| `g4_page(d)`, `jbig2_page(d)` | a page a d-th of A4 each way covered by `scan_at(300 / d)`: G4-coded (`ccitt_g4_encode`, `ccitt/encode.rs:386`, as `ImageFilter::CcittFax`); and the same page saved through the image pass's `BilevelCodec::Jbig2Generic` (`crates/tinker-pdf/src/recode.rs:188-197`), the builder having no JBIG2 filter | the builder, then `write::save` | "G4 / JBIG2 scan page" |
+| `paths(n)`, `curves(n)` | three in five of n filled polygons and closed curves at fractional coordinates, as `triangles()` draws them, and two in five stroked cubic curves, 0.5 to 4 pt wide, each of the nine cap-and-join pairs in turn, every fifth dashed; `curves(n)` is n such curves alone | `raw` | "250 paths", "100 paths", "the 250-path page's 100 stroked curves alone" |
+| `triangles()`, `axial()`, `axial_part(d)` | the render group's 300 triangles and full-page axial shading, and the same shading over a page a d-th of A4 each way | `support/inputs.rs` | "300 triangles", "axial shading" |
 | `tiling(fills)` | one tiling pattern (`add_tiling_pattern`, `build.rs:6276`) filling an A4 page in one rectangle, or in 50 strips that together cover what the one covers | the builder | "a page filled by one tiling pattern 50 times / once" |
 | `annotated(base)` | `base` with one 100×100 pt square annotation on its first page, appearance included (`DocumentEditor::add_annotation`, `crates/tinker-pdf-cos/src/edit/annotations.rs:214`; `annot::square`, `edit/annot.rs:84`) | the editor | "a changed 100×100 pt annotation", "a 1 000-page file", "a 10-page one" |
-| `book(chapters)` | an EPUB of a heading and one paragraph of about 600 characters a chapter, each chapter a page at the default box, Liberation Serif embedded through `@font-face` in the one stylesheet every chapter links so its glyphs are drawn in both builds | `tests/epub_support`'s OCF writer (`crates/tinker-pdf/tests/epub_support/mod.rs:543`), by path | "a generated 1 000-chapter book", "100 chapters" |
+| `book(chapters)` | an EPUB of a heading and one paragraph of about 600 characters a chapter, each chapter a page at the default box, Liberation Serif embedded through `@font-face` in the one stylesheet every chapter links so its glyphs are drawn in both builds | `tests/epub_support`'s OCF writer (`crates/tinker-pdf/tests/epub_support/mod.rs:543`), by path | "a generated 30-chapter book", "10 chapters" |
 | `html_report()`, `markdown()` | 20 pages each at the default page box. The report is 20 sections, each a heading, two paragraphs and a ruled table of six rows on a page of its own; the Markdown is 20 sections, each a heading, three paragraphs and a list of five items, in one flow, CommonMark having no table | `FromHtml` (`crates/tinker-pdf/src/html.rs:181`); CommonMark for `Document::open_markdown` (`crates/tinker-pdf/src/lib.rs:1472`) | "a generated 20-page HTML report / 20-page Markdown document" |
 | `message()` | 10 000 000 seeded bytes, and their RSA-2048 PKCS #1 v1.5 signature made in the bench with `pss-vect.txt`'s Example 10 key (`crates/tinker-pdf-crypto/tests/data/pkcs1/pss-vect.txt`) through `Modulus::pow` (`crates/tinker-pdf-crypto/src/bignum.rs:468`) | `inputs.rs` | "over 10 MB" |
-| committed | the nine books (`crates/tinker-pdf/tests/epub/`); the mesh and transparency fixtures (`fuzz/corpus/render_page/`); every `.svg` in `crates/tinker-pdf-svg/tests/fixtures/` (17), every `.xps` and `.oxps` under `crates/tinker-pdf/tests/` (19) and every `.cbz` in `crates/tinker-pdf/tests/cbz/` (9); the three Liberation Regular faces; the four bare CFF programs in `fuzz/corpus/cff/` and the `CFF ` tables of the 189 committed OpenType files (185 in `crates/tinker-pdf-shape/data/aots/fonts/`, three text-rendering-tests faces and `fuzz/corpus/sfnt/opentype-cff.otf`); `TestShapeAran.ttf`; `data/`'s three codestreams; the vendored Devanagari face | read by path | as named |
+| committed | the nine books (`crates/tinker-pdf/tests/epub/`); the mesh and transparency fixtures (`fuzz/corpus/render_page/`); every `.svg` in `crates/tinker-pdf-svg/tests/fixtures/` (17), every `.xps` and `.oxps` under `crates/tinker-pdf/tests/` (19) and every `.cbz` in `crates/tinker-pdf/tests/cbz/` (9); the three Liberation Regular faces; the four bare CFF programs in `fuzz/corpus/cff/` and the `CFF ` tables of the 189 committed OpenType files (185 in `crates/tinker-pdf-shape/data/aots/fonts/`, three text-rendering-tests faces and `fuzz/corpus/sfnt/opentype-cff.otf`); `TestShapeAran.ttf`; `data/`'s four codestreams; the vendored Devanagari face | read by path | as named |
 
 #### The operations
 
@@ -1109,106 +1110,109 @@ Each group's table gives the operation's id, its unit and what one
 iteration covers, its input, tier P's figure and gate, where it stands
 against the window, and the step that adds it. Tier P's figures are the
 planning machine's at `61adcde` (`docs/roadmap/P.md:22-28`), in milliseconds
-unless marked; "twin" is an in-process operation the table marks only for the
-CLI, which sits at floor 1 (MS-02.3's note).
+unless marked, rescaled where an operation's input is smaller than tier P's,
+as tier P's table rescales them; "twin" is an in-process operation the table
+marks only for the CLI, which sits at floor 1 (MS-02.3's note).
 
-**Window**, from tier P's figures: *in* — inside 20–300 ms today and at its
-target; *×n* — `calls` n, which keeps it inside both; *above* — over 300 ms
-today, inside at its target; *above, and at target* — over 300 ms even when
-its row lands; *crosses* — over 300 ms today and under 20 ms at its target,
-which no single `calls` can hold; *unmeasured* — tier P has no figure for it
-today, so its `calls` comes from its target where it has one and from
-MS-04.10's measured figure where it has none, and its iteration is written "a
-call". `calls` n is the least that puts n × the target at 25 ms or more, kept
-only where n × today's figure stays at or under 300 ms.
+**Window**, on the hosted runner, as MS-04.9's report-mode dispatch measured
+each operation and MS-04.11 sized it: *in* — one call inside 20–300 ms; *×n*
+— `calls` n, as many calls as bring a shorter call near the window's middle,
+about 75 ms; one over the window takes a smaller input instead — fewer pages,
+chapters or paths, or a part of A4 each way with its text, image or shading —
+chosen the same way. *The seven's* — one of the seven, which keep one call
+and the figures their fifteen dispatches recorded until MS-04.10 retires them
+(below); two of them, `text/extract a page of text` and
+`layout/paginate a book at 432x648 pt`, are MS-24's besides.
 
 **open**
 
 | Id | Unit · an iteration | Input | Tier P: today → target; gate | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `open/open a 3-page document` | bytes · the file a call | `three_pages()` | —; floor 1 | unmeasured | built |
-| `open/open and count the 23 MB image file` | bytes · the file a call | `image_file()` | twin; floor 1 | unmeasured | built |
-| `open/open the AES-256 file` | none | `aes_file()`, authenticated with the empty password (`lib.rs:1722`) and counted | the Item's; floor 1 | unmeasured | built |
-| `open/every page's size, 3000 pages` | pages · 3 000 | `small(3000)`, `page(i)` then `Page::size` (`lib.rs:1773`, `:2198`) for every i | 2 569 → 3; 856× | crosses | built |
-| `open/every page's size, 10000 pages` | pages · 10 000 | `small(10000)` | Θ(n²), about 28 500 from the 3 000-page figure → 10; relation ≤ 3.6 × 3 000 | crosses | built |
-| `open/open and count the 23 MB image file, CLI` | bytes · 5 files | `tpdf info` | 36 → 6; 6× | ×5 | built |
+| `open/open a 3-page document` | bytes · the file a call | `three_pages()` | —; floor 1 | the seven's | built |
+| `open/open and count the 23 MB image file` | bytes · 100 × the file | `image_file()` | twin; floor 1 | ×100 | built |
+| `open/open the AES-256 file` | none · 6 calls | `aes_file()`, authenticated with the empty password (`lib.rs:1722`) and counted | the Item's; floor 1 | ×6 | built |
+| `open/every page's size, 3000 pages` | pages · 12 × 3 000 | `small(3000)`, `page(i)` then `Page::size` (`lib.rs:1773`, `:2198`) for every i | 2 569 → 3; 856× | ×12 | built |
+| `open/every page's size, 10000 pages` | pages · 4 × 10 000 | `small(10000)` | Θ(n²), about 28 500 from the 3 000-page figure → 10; relation ≤ 3.6 × 3 000 | ×4 | built |
+| `open/open and count the 23 MB image file, CLI` | bytes · 24 files | `tpdf info` | 36 → 6; 6× | ×24 | built |
 
 **text**
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `text/text of 100 dense pages` | pages · 100 | `dense(100, 0)`, every page's `text().plain_text()` by index, as `tpdf text` reads them (`tools/tpdf/src/main.rs:973-991`) | 751 → 100; 7.51× | above | built |
-| `text/text of 100 standard-14 pages` | pages · 100 | `producer(100)` | the Item's; floor 1 | above, expected | built |
-| `text/text of 1000 small pages` | pages · 1 000 | `small(1000)` | twin (CLI 350); floor 1 | crosses | built |
-| `text/text of 10000 small pages` | pages · 10 000 | `small(10000)` | twin (CLI 36 000); floor 1 | above | built |
-| `text/structured JSON of 100 pages` | pages · 100 | `dense(100, 0)` through `TextWriter`'s JSON, as `tpdf text --json` (`main.rs:962-972`) | twin (CLI 1 926); floor 1 | above | built |
-| `text/search a phrase over 100 pages from scratch` | pages · 100 | `dense(100, 0)`, `TextPage::search` (`crates/tinker-pdf-content/src/text.rs:265`) | 722 → 110; 6.56× | above | built |
+| `text/text of 5 dense pages` | pages · 5 | `dense(5, 0)`, every page's `text().plain_text()` by index, as `tpdf text` reads them (`tools/tpdf/src/main.rs:973-991`) | 37.6 → 5, rescaled from 100 pages' 751 → 100; 7.51× | in | built |
+| `text/text of 20 standard-14 pages` | pages · 20 | `producer(20)` | the Item's; floor 1 | in | built |
+| `text/text of 1000 small pages` | pages · 2 × 1 000 | `small(1000)` | twin (CLI 350); floor 1 | ×2 | built |
+| `text/text of 4000 small pages` | pages · 4 000 | `small(4000)` | twin (CLI Θ(n²): 36 000 at 10 000 pages); floor 1 | in | built |
+| `text/structured JSON of 5 pages` | pages · 5 | `dense(5, 0)` through `TextWriter`'s JSON, as `tpdf text --json` (`main.rs:962-972`) | twin (CLI 96.3, rescaled from 100 pages' 1 926); floor 1 | in | built |
+| `text/search a phrase over 5 pages from scratch` | pages · 5 | `dense(5, 0)`, `TextPage::search` (`crates/tinker-pdf-content/src/text.rs:265`) | 36.1 → 5.5, rescaled from 100 pages' 722 → 110; 6.56× | in | built |
 | `text/search 100 pages' prebuilt text` | pages · 500 | the 100 `TextPage`s, built once | 36 → 6; 6× | ×5 | built |
-| `text/search 100 pages' prebuilt text, whole words, unaccented` | pages · 300 | the same, `search_with` whole-word and diacritic-insensitive (`search.rs:43-50`, `:108`) | 77 → 12; 6.41× | ×3 | built |
-| `text/text of 100 dense pages, CLI` | pages · 100 | `tpdf text` | 678 → 130; 5.21× | above | built |
-| `text/text of 1000 small pages, CLI` | pages · 1 000 | `tpdf text` | 350 → 15; 23.3× | crosses | built |
-| `text/text of 10000 small pages, CLI` | pages · 10 000 | `tpdf text` | 36 000 → 150; relation ≤ 11 × 1 000 | above | built |
-| `text/structured JSON of 100 pages, CLI` | pages · 100 | `tpdf text --json` | 1 926 → 200; 9.63× | above | built |
+| `text/search 100 pages' prebuilt text, whole words, unaccented` | pages · 200 | the same, `search_with` whole-word and diacritic-insensitive (`search.rs:43-50`, `:108`) | 77 → 12; 6.41× | ×2 | built |
+| `text/text of 5 dense pages, CLI` | pages · 5 | `tpdf text` | 33.9 → 6.5, rescaled from 100 pages' 678 → 130; 5.21× | in | built |
+| `text/text of 1000 small pages, CLI` | pages · 2 × 1 000 | `tpdf text` | 350 → 15; 23.3× | ×2 | built |
+| `text/text of 4000 small pages, CLI` | pages · 4 000 | `tpdf text` | Θ(n²) (36 000 at 10 000 pages) → 60, rescaled from 10 000 pages' 150; relation ≤ 4.4 × 1 000 | in | built |
+| `text/structured JSON of 5 pages, CLI` | pages · 5 | `tpdf text --json` | 96.3 → 10, rescaled from 100 pages' 1 926 → 200; 9.63× | in | built |
 
 **analysis** — every relation's "text of the same pages" is the group's own
 text of the document the operation reads, so all six stay inside the group.
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `analysis/text of the 100 report pages` | pages · 100 | `report(100)` | the relations' denominator; floor 1 | above, expected | built |
-| `analysis/redact a rectangle on each of 100 pages` | pages · 100 | `report(100)`, `redact::apply` on every page of one editor (`crates/tinker-pdf/src/redact.rs:1106`), unsaved: saving is the write group's | not measured; ≤ 1.5 × text | above, expected | built |
-| `analysis/reading order inferred over 100 pages` | pages · 100 | `report(100)`, `Document::inferred_orders` (`crates/tinker-pdf/src/reading_order.rs:484`); the document is untagged, so the default options infer (`:173-176`) | not measured; ≤ 1.5 × text | above, expected | built |
-| `analysis/tables inferred over 100 pages` | pages · 100 | `report(100)`, `Page::tables(TableSource::Inferred)` (`crates/tinker-pdf/src/tables.rs:448`) | not measured; ≤ 1.5 × text | above, expected | built |
-| `analysis/text of the 100 claiming pages` | pages · 100 | `claiming(100)` | the validators' denominator; floor 1 | above, expected | built |
-| `analysis/PDF-A validation of 100 pages` | pages · 100 | `claiming(100)`, `validate_pdfa` (`lib.rs:1990`) | not measured; ≤ 3 × text | above, expected | built |
-| `analysis/PDF-UA validation of 100 pages` | pages · 100 | `validate_pdfua` (`:2020`) | not measured; ≤ 3 × text | above, expected | built |
-| `analysis/PDF-X validation of 100 pages` | pages · 100 | `validate_pdfx` (`:2043`) | not measured; ≤ 3 × text | above, expected | built |
+| `analysis/text of the 5 report pages` | pages · 5 | `report(5)` | the relations' denominator; floor 1 | in | built |
+| `analysis/redact a rectangle on each of 5 pages` | pages · 14 × 5 | `report(5)`, `redact::apply` on every page of one editor a call (`crates/tinker-pdf/src/redact.rs:1106`), unsaved: saving is the write group's | not measured; ≤ 1.5 × text | ×14 | built |
+| `analysis/reading order inferred over 5 pages` | pages · 5 | `report(5)`, `Document::inferred_orders` (`crates/tinker-pdf/src/reading_order.rs:484`); the document is untagged, so the default options infer (`:173-176`) | not measured; ≤ 1.5 × text | in | built |
+| `analysis/tables inferred over 5 pages` | pages · 5 | `report(5)`, `Page::tables(TableSource::Inferred)` (`crates/tinker-pdf/src/tables.rs:448`) | not measured; ≤ 1.5 × text | in | built |
+| `analysis/text of the 5 claiming pages` | pages · 5 | `claiming(5)` | the validators' denominator; floor 1 | in | built |
+| `analysis/PDF-A validation of 5 pages` | pages · 10 × 5 | `claiming(5)`, `validate_pdfa` (`lib.rs:1990`) | not measured; ≤ 3 × text | ×10 | built |
+| `analysis/PDF-UA validation of 5 pages` | pages · 11 × 5 | `validate_pdfua` (`:2020`) | not measured; ≤ 3 × text | ×11 | built |
+| `analysis/PDF-X validation of 5 pages` | pages · 22 × 5 | `validate_pdfx` (`:2043`) | not measured; ≤ 3 × text | ×22 | built |
 
 **render** — a page render is `Page::render` (`lib.rs:2247`) at
-`RenderOptions::at_dpi` (`:724`); "the text page" is `dense(1, 0)`'s page.
+`RenderOptions::at_dpi` (`:724`); "the text page" is `dense(1, 0)`'s page; a
+*half-size* page is half of A4 each way and a *quarter-size* one a quarter
+(`page_part`), its text, image or shading with it.
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `render/the text page at 72 dpi` | pixels · 5 × 595×842 | `dense(1, 0)` | 54 → 6; 9× | ×5 | built |
+| `render/the text page at 72 dpi` | pixels · 2 × 595×842 | `dense(1, 0)` | 54 → 6; 9× | ×2 | built |
 | `render/the text page at 150 dpi` | pixels · 2 × 1240×1755 | `dense(1, 0)` | 88 → 15; 5.86× | ×2 | built |
 | `render/the text page at 300 dpi` | pixels · 2480×3509 | `dense(1, 0)` | 171 → 35; 4.88× | in | built |
-| `render/record the text page's display list` | pages · 21 | `Page::display_list` (`crates/tinker-pdf/src/display.rs:129`) | 6.3 → 1.2; 5.25× | ×21 | built |
-| `render/5000 paths at 150 dpi` | pixels · 1240×1755 | `paths(5000)` | 1 326 → 450; 2.94× | above, and at target | built |
-| `render/5000 paths at 300 dpi` | pixels · 2480×3509 | `paths(5000)` | 3 434 → 1 100; 3.12× | above, and at target | built |
-| `render/the 2000 stroked curves alone at 150 dpi` | pixels · 1240×1755 | `curves(2000)` | not measured apart; as the page; 2.94×, paired with the baseline's same curves | above, expected | built |
+| `render/record the text page's display list` | pages · 5 | `Page::display_list` (`crates/tinker-pdf/src/display.rs:129`) | 6.3 → 1.2; 5.25× | ×5 | built |
+| `render/250 paths at 150 dpi` | pixels · 1240×1755 | `paths(250)` | 66.3 → 22.5, rescaled from 5 000 paths' 1 326 → 450; 2.94× | in | built |
+| `render/100 paths at 300 dpi` | pixels · 2480×3509 | `paths(100)` | 68.7 → 22, rescaled from 5 000 paths' 3 434 → 1 100; 3.12× | in | built |
+| `render/the 100 stroked curves alone at 150 dpi` | pixels · 1240×1755 | `curves(100)`, the 250-path page's curves | not measured apart; as the page; 2.94×, paired with the baseline's same curves | in | built |
 | `render/300 triangles at 150 dpi` | pixels · 2 × 1240×1755 | `triangles()` | 44 → 20; 2.2× | ×2 | MS-04.10 renames the seven's |
 | `render/a full-page axial shading at 150 dpi` | pixels · 1240×1755 | `axial()` | 124–170 → 25; 4.96× | in | MS-04.10 renames the seven's |
-| `render/a full-page axial shading at 300 dpi` | pixels · 2480×3509 | `axial()` | 674 → 90; 7.48× | above | built |
+| `render/an axial shading over a half-size page at 300 dpi` | pixels · 1240×1755 | `axial_part(2)` | 168.5 → 22.5, rescaled from A4's 674 → 90; 7.48× | in | built |
 | `render/the mesh shadings fixture at 150 dpi` | pixels · 7 bitmaps | `fuzz/corpus/render_page/mesh-shadings.pdf` | 18.1 → 4; 4.52× | ×7 | built |
 | `render/the mesh shadings fixture at 300 dpi` | pixels · 3 bitmaps | the same | 43.1 → 10; 4.31× | ×3 | built |
 | `render/the transparency fixture at 150 dpi` | pixels · 9 bitmaps | `fuzz/corpus/render_page/transparency.pdf` | 8.4 → 3; 2.8× | ×9 | built |
-| `render/a page tiled by one pattern fill at 150 dpi` | pixels · 1240×1755 a call | `tiling(1)` | not measured; relation: 50 fills ≤ 1.2 × one; counted | unmeasured | built |
-| `render/a page tiled by 50 pattern fills at 150 dpi` | pixels · 1240×1755 a call | `tiling(50)` | the same relation | unmeasured | built |
-| `render/the 300-dpi text page in 4 bands on 4 threads` | pixels · 3 × 2480×3509 | `dense(1, 0)`, four `RenderOptions::region` bands (`lib.rs:584`), one scoped thread each | relation ≥ 3 × the 1-thread speed (`the text page at 300 dpi`) | ×3 | built |
-| `render/100 text pages at 150 dpi on 1 thread` | pages · 100 | `dense(100, 0)` | 11.4 → 60 pages/s (8 772 → 1 667); 5.26× | above, and at target | built |
-| `render/100 text pages at 150 dpi on 4 threads` | pages · 100 | the same, on `std::thread::scope` over owned pages, as `crates/tinker-pdf/examples/parallel.rs:87` does | 43 → 200 pages/s (2 326 → 500); 4.65×; relation ≥ 3.33 × 1 thread | above, and at target | built |
+| `render/a page tiled by one pattern fill at 150 dpi` | pixels · 1240×1755 a call | `tiling(1)` | not measured; relation: 50 fills ≤ 1.2 × one; counted | in | built |
+| `render/a page tiled by 50 pattern fills at 150 dpi` | pixels · 1240×1755 a call | `tiling(50)` | the same relation | in | built |
+| `render/the 300-dpi text page in 4 bands on 4 threads` | pixels · 2480×3509 | `dense(1, 0)`, four `RenderOptions::region` bands (`lib.rs:584`), one scoped thread each | relation ≥ 3 × the 1-thread speed (`the text page at 300 dpi`) | in | built |
+| `render/8 half-size text pages at 150 dpi on 1 thread` | pages · 8 | `dense_part(8, 0, 2)` | 45.6 → 240 pages/s, rescaled from A4's 11.4 → 60; 5.26× | in | built |
+| `render/8 half-size text pages at 150 dpi on 4 threads` | pages · 8 | the same, on `std::thread::scope` over owned pages, as `crates/tinker-pdf/examples/parallel.rs:87` does | 172 → 800 pages/s, rescaled from A4's 43 → 200; 4.65×; relation ≥ 3.33 × 1 thread | in | built |
 | `render/the annotated text page at 150 dpi` | pixels · 2 × 1240×1755 | `annotated(dense(1, 0))` | the next one's full-page render; floor 1 | ×2 | built |
-| `render/re-render a changed 100x100 pt annotation` | pixels · 3 × 1240×1755 | the same, its appearance replaced, saved and reopened untimed; today the whole page re-renders | relation ≤ 10 % of the full-page render | ×3 today; under 20 at its bound | built |
-| `render/replay the Flate RGB image page at 150 dpi` | pixels · 1240×1755 | `flate_page()`'s display list, recorded once; its renders share the decoded image (`resources.rs:532-546`) | 350 → 40; 8.75× | above | built |
-| `render/an ICC-based CMYK image to sRGB at 300 dpi` | pixels · 2480×3508, the image's | `cmyk_page()`, drawn at the image's own resolution so each sample is converted once | not measured → ≥ 100 Mpixel/s (≤ 87); calibrated | unmeasured | built |
-| `render/the JPEG page at 72 dpi` | pixels · 595×842 | `jpeg_page()` | 652 → 35; 18.6× | above | built |
-| `render/the JPEG page at 300 dpi` | pixels · 2480×3509 | `jpeg_page()` | 1 585 → 150; 10.5× | above | built |
-| `render/a second render of the JPEG page at 300 dpi` | pixels · 2480×3509 | `jpeg_page()`, after the same `Page` rendered at 72 dpi, untimed | not measured; relation ≤ 30 % of the first (`the JPEG page at 300 dpi`) | above, expected | built |
-| `render/the JPEG 2000 page at 72 dpi` | pixels · 595×842 | `jpx_page()` | 2 753 → 250; 11× | above | built |
-| `render/the G4 scan page at 150 dpi` | pixels · 1240×1755 | `g4_page()` | 641 → 50; 12.8× | above | built |
-| `render/the JBIG2 scan page at 150 dpi` | pixels · 1240×1755 | `jbig2_page()` | 875 → 80; 10.9× | above | built |
-| `render/the Flate RGB image page at 72 dpi` | pixels · 595×842 | `flate_page()` | 924 → 230; 4.01× | above | built |
-| `render/the text page to PNG at 150 dpi, CLI` | pixels · 1240×1755 | `tpdf render` | 402 → 70; 5.74× | above | built |
-| `render/the text page to PNG at 300 dpi, CLI` | pixels · 2480×3509 | `tpdf render` | 1 180 → 200; 5.9× | above | built |
-| `render/20 pages to PNG at 150 dpi, 1 job, CLI` | pages · 20 | `tpdf render --jobs 1` | 6 847 → 1 300; 5.26× | above, and at target | built |
-| `render/20 pages to PNG at 150 dpi, 4 jobs, CLI` | pages · 20 | `tpdf render --jobs 4` | 1 743 → 400; 4.35× | above, and at target | built |
+| `render/re-render a changed 100x100 pt annotation` | pixels · 1240×1755 | the same, its appearance replaced, saved and reopened untimed; today the whole page re-renders | relation ≤ 10 % of the full-page render | in | built |
+| `render/replay the half-size Flate RGB image page at 150 dpi` | pixels · 620×878 | `flate_page(2)`'s display list, recorded once; its renders share the decoded image (`resources.rs:532-546`) | 87.5 → 10, rescaled from A4's 350 → 40; 8.75× | in | built |
+| `render/a quarter-size ICC-based CMYK image to sRGB at 300 dpi` | pixels · 620×877, the image's | `cmyk_page(4)`, drawn at the image's own resolution so each sample is converted once | not measured → ≥ 100 Mpixel/s (≤ 5.4); calibrated | in | built |
+| `render/the half-size JPEG page at 72 dpi` | pixels · 298×421 | `jpeg_page_part(2)` | 163 → 8.75, rescaled from A4's 652 → 35; 18.6× | in | built |
+| `render/the quarter-size JPEG page at 300 dpi` | pixels · 620×878 | `jpeg_page_part(4)` | 99.1 → 9.4, rescaled from A4's 1 585 → 150; 10.5× | in | built |
+| `render/a second render of the quarter-size JPEG page at 300 dpi` | pixels · 620×878 | `jpeg_page_part(4)`, after the same `Page` rendered at 72 dpi, untimed | not measured; relation ≤ 30 % of the first (`the quarter-size JPEG page at 300 dpi`) | in | built |
+| `render/the quarter-size JPEG 2000 page at 72 dpi` | pixels · 149×211 | `jpx_page_part()` | 172 → 15.6, rescaled from A4's 2 753 → 250; 11× | in | built |
+| `render/the half-size G4 scan page at 150 dpi` | pixels · 620×878 | `g4_page(2)` | 160 → 12.5, rescaled from A4's 641 → 50; 12.8× | in | built |
+| `render/the half-size JBIG2 scan page at 150 dpi` | pixels · 620×878 | `jbig2_page(2)` | 219 → 20, rescaled from A4's 875 → 80; 10.9× | in | built |
+| `render/the quarter-size Flate RGB image page at 72 dpi` | pixels · 149×211 | `flate_page(4)` | 57.8 → 14.4, rescaled from A4's 924 → 230; 4.01× | in | built |
+| `render/the half-size text page to PNG at 150 dpi, CLI` | pixels · 620×878 | `tpdf render` | 100.5 → 17.5, rescaled from A4's 402 → 70; 5.74× | in | built |
+| `render/the quarter-size text page to PNG at 300 dpi, CLI` | pixels · 620×878 | `tpdf render` | 73.8 → 12.5, rescaled from A4's 1 180 → 200; 5.9× | in | built |
+| `render/8 quarter-size pages to PNG at 150 dpi, 1 job, CLI` | pages · 8 | `tpdf render --jobs 1` | 171 → 32.5, rescaled from 20 A4 pages' 6 847 → 1 300; 5.26× | in | built |
+| `render/8 quarter-size pages to PNG at 150 dpi, 4 jobs, CLI` | pages · 8 | `tpdf render --jobs 4` | 43.6 → 10, rescaled from 20 A4 pages' 1 743 → 400; 4.35× | in | built |
 
 **encode**
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
 | `encode/PNG of the 1240x1755 text page` | pixels · 1240×1755 | the text page's 150-dpi bitmap, rendered once, `Bitmap::to_png` (`lib.rs:832`) | 269 → 40; 6.72× | in | built |
-| `encode/PNG of the near-blank page` | pixels · 2 × 1240×1755 | a 150-dpi bitmap of a page holding one line | 145 → 15; 9.66× | ×2, at 290 today | built |
+| `encode/PNG of the near-blank page` | pixels · 2 × 1240×1755 | a 150-dpi bitmap of a page holding one line | 145 → 15; 9.66× | ×2 | built |
 | `encode/deflate page-like data` | bytes · 6 528 600 | `page_like()`, `deflate` (`deflate.rs:200`) | 40 → 120 MB/s (163 → 54); 3×; size ≤ 1.02 × level 6's, exact | in | built |
 | `encode/deflate photo-like data` | bytes · 6 528 600 | `photo_like()` | 28 → 40 MB/s (233 → 163); 1.4×; size likewise | in | built |
 
@@ -1217,15 +1221,15 @@ text of the document the operation reads, so all six stay inside the group.
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `decode/inflate page-like data` | bytes out · 2 × 6 528 600 | `deflate(page_like())` | 279 → 500 MB/s (23.4 → 13.1 a call); 1.79× | ×2 | built |
-| `decode/inflate near-incompressible data` | bytes out · 6 528 600 | `deflate(noise())` | 141 → 150 MB/s (46.3 → 43.5); 1.06× | in | built |
-| `decode/LZW decode page-like data` | bytes out · 6 528 600 | `lzw(page_like())` | not measured → ≥ 200 MB/s (≤ 32.6); calibrated | unmeasured | built |
-| `decode/baseline JPEG 2480x3508` | pixels · 2480×3508 | `baseline_jpeg()` | 446 → 60; 7.43× | above | built |
-| `decode/progressive JPEG 2480x3508` | pixels · 2480×3508 | `data/progressive-2480x3508.jpg` | 458 → 120; 3.81× | above | built |
-| `decode/irreversible JPEG 2000 2480x3508` | pixels · 2480×3508 | `data/irreversible-2480x3508.jp2` | 2 566 → 1 000; 2.56× | above, and at target | built |
-| `decode/reversible JPEG 2000 2480x3508` | pixels · 2480×3508 | `data/reversible-2480x3508.jp2` | 6 516 → 2 700; 2.41× | above, and at target | built |
+| `decode/inflate page-like data` | bytes out · 6 × 6 528 600 | `deflate(page_like())` | 279 → 500 MB/s (23.4 → 13.1 a call); 1.79× | ×6 | built |
+| `decode/inflate near-incompressible data` | bytes out · 3 × 6 528 600 | `deflate(noise())` | 141 → 150 MB/s (46.3 → 43.5 a call); 1.06× | ×3 | built |
+| `decode/LZW decode page-like data` | bytes out · 5 × 6 528 600 | `lzw(page_like())` | not measured → ≥ 200 MB/s (≤ 32.6 a call); calibrated | ×5 | built |
+| `decode/baseline JPEG 1240x1754` | pixels · 1240×1754 | `baseline_jpeg_part(2)` | 111.5 → 15, rescaled from 2480×3508's 446 → 60; 7.43× | in | built |
+| `decode/progressive JPEG 1240x1754` | pixels · 1240×1754 | `data/progressive-1240x1754.jpg` | 114.5 → 30, rescaled from 2480×3508's 458 → 120; 3.81× | in | built |
+| `decode/irreversible JPEG 2000 620x877` | pixels · 620×877 | `data/irreversible-620x877.jp2` | 160 → 62.5, rescaled from 2480×3508's 2 566 → 1 000; 2.56× | in | built |
+| `decode/reversible JPEG 2000 310x438` | pixels · 310×438 | `data/reversible-310x438.jp2` | 102 → 42.2, rescaled from 2480×3508's 6 516 → 2 700; 2.41× | in | built |
 | `decode/decode the JBIG2 generic page` | pixels · `scan()`'s | `jbig2_generic_encode(scan())` (`jbig2/encode.rs:251`) | 255 → 60; 4.25× | in | built |
-| `decode/decode the CCITT G4 page` | pixels · `scan()`'s | `ccitt_g4_encode(scan())` | 46 → 25; 1.84× | in | built |
+| `decode/decode the CCITT G4 page` | pixels · 2 × `scan()`'s | `ccitt_g4_encode(scan())` | 46 → 25; 1.84× | ×2 | built |
 
 **write** — a rewrite is the editor's save under `WriteMode::Rewrite`, as
 `write/rewrite a document`'s is (`benches/write.rs`); merge and subset-on-save go through
@@ -1234,29 +1238,28 @@ text of the document the operation reads, so all six stay inside the group.
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `write/rewrite 100 pages` | pages · 100 a call | `small(100)` | twin; floor 1 | unmeasured | built |
-| `write/rewrite 1000 pages` | pages · 1 000 | `small(1000)` | twin (CLI 668); floor 1 | above | built |
-| `write/rewrite 3000 pages` | pages · 3 000 | `small(3000)` | 5 480 → 40; 137× | above | built |
-| `write/rewrite 100 pages into object streams` | pages · 10 × 100 | `small(100)`, `object_streams` (`crates/tinker-pdf-cos/src/write.rs:120`) | 2.6; held | ×10 | built |
-| `write/rewrite 100 pages linearized` | pages · 7 × 100 | `small(100)`, `linearize` (`:112`) | 3.7; held | ×7 | built |
-| `write/subset-on-save of 100 pages` | pages · 100 | `dense(100, 0)`, `SaveOptions::default()`: a rewrite, fonts subset (`crates/tinker-pdf/src/write.rs:144-157`) | twin (in-process 1 305); floor 1 | above | built |
-| `write/merge 4 x 100 pages` | pages · 400 | `dense(100, 0..3)`: pages imported with `import_page`, saved with stream deduplication and `FontPolicy::Keep` | 2 855 → 25; 114× | above | built |
-| `write/AES-256-CBC decrypt 23 MB` | bytes · the file | `image_file()`'s bytes, encrypted once, `cbc_decrypt_with_iv_prefix` (`crates/tinker-pdf-crypto/src/aes.rs:238`) | 32 → 150 MB/s (about 719 → 153); 4.68× | above | built |
-| `write/AES-256-CBC encrypt 23 MB` | bytes · the file | the same plain bytes, `cbc_encrypt_with_iv_prefix` (`:289`) | 57 → 80 MB/s (about 404 → 288); 1.4× | above | built |
-| `write/edit an annotation, save, reopen, 1000 pages` | pages · 13 × 1 000 | `annotated(small(1000))`: the appearance replaced (`DocumentEditor::put_stream`, `edit/mod.rs:395`), saved under `WriteMode::Incremental`, the bytes reopened | not measured → ≤ 2 plus output bytes; relation ≤ 2 × the 10-page one | unmeasured, ×13 | built |
-| `write/edit an annotation, save, reopen, 10 pages` | pages · 10 a call | `annotated(small(10))` | the relation's other side | unmeasured | built |
-| `write/rewrite 100 pages, CLI` | pages · 4 × 100 | `tpdf merge`, one input | 14.8 → 8; 1.85× | ×4 | built |
-| `write/rewrite 1000 pages, CLI` | pages · 1 000 | `tpdf merge`, one input | 668 → 60; 11.1× | above | built |
-| `write/subset-on-save of 100 pages, CLI` | pages · 100 | `tpdf merge --font-policy subset` | 1 208 → 120; 10× | above | built |
-| `write/merge 4 x 100 pages, CLI` | pages · 400 | `tpdf merge`, four inputs | 1 008 → 40; 25.2× | above | built |
-| `write/encrypt the 23 MB image file, CLI` | bytes · the file | `tpdf encrypt` | 770 → 150; 5.13× | above | built |
+| `write/rewrite 100 pages` | pages · 200 × 100 | `small(100)` | twin; floor 1 | ×200 | built |
+| `write/rewrite 1000 pages` | pages · 20 × 1 000 | `small(1000)` | twin (CLI 668); floor 1 | ×20 | built |
+| `write/rewrite 3000 pages` | pages · 7 × 3 000 | `small(3000)` | 5 480 → 40; 137× | ×7 | built |
+| `write/rewrite 100 pages into object streams` | pages · 200 × 100 | `small(100)`, `object_streams` (`crates/tinker-pdf-cos/src/write.rs:120`) | 2.6; held | ×200 | built |
+| `write/rewrite 100 pages linearized` | pages · 75 × 100 | `small(100)`, `linearize` (`:112`) | 3.7; held | ×75 | built |
+| `write/subset-on-save of 4 pages` | pages · 4 | `dense(4, 0)`, `SaveOptions::default()`: a rewrite, fonts subset (`crates/tinker-pdf/src/write.rs:144-157`) | twin (in-process 52.2, rescaled from 100 pages' 1 305); floor 1 | in | built |
+| `write/merge 4 x 50 pages` | pages · 200 | `dense(50, 0..3)`: pages imported with `import_page`, saved with stream deduplication and `FontPolicy::Keep` | 1 428 → 12.5, rescaled from 4 × 100's 2 855 → 25; 114× | in | built |
+| `write/AES-256-CBC decrypt 2.5 MB` | bytes · the file | `small_image_file()`'s bytes, encrypted once, `cbc_decrypt_with_iv_prefix` (`crates/tinker-pdf-crypto/src/aes.rs:238`) | 32 → 150 MB/s (about 78 → 16.6); 4.68× | in | built |
+| `write/AES-256-CBC encrypt 2.5 MB` | bytes · the file | the same plain bytes, `cbc_encrypt_with_iv_prefix` (`:289`) | 57 → 80 MB/s (about 43.8 → 31.2); 1.4× | in | built |
+| `write/edit an annotation, save, reopen, 1000 pages` | pages · 170 × 1 000 | `annotated(small(1000))`: the appearance replaced (`DocumentEditor::put_stream`, `edit/mod.rs:395`), saved under `WriteMode::Incremental`, the bytes reopened | not measured → ≤ 2 plus output bytes; relation ≤ 2 × the 10-page one | ×170 | built |
+| `write/edit an annotation, save, reopen, 10 pages` | pages · 2 700 × 10 | `annotated(small(10))` | the relation's other side | ×2 700 | built |
+| `write/rewrite 100 pages, CLI` | pages · 26 × 100 | `tpdf merge`, one input | 14.8 → 8; 1.85× | ×26 | built |
+| `write/rewrite 1000 pages, CLI` | pages · 6 × 1 000 | `tpdf merge`, one input | 668 → 60; 11.1× | ×6 | built |
+| `write/subset-on-save of 4 pages, CLI` | pages · 4 | `tpdf merge --font-policy subset` | 48.3 → 4.8, rescaled from 100 pages' 1 208 → 120; 10× | in | built |
+| `write/merge 4 x 50 pages, CLI` | pages · 200 | `tpdf merge`, four inputs | 504 → 20, rescaled from 4 × 100's 1 008 → 40; 25.2× | in | built |
+| `write/encrypt the 2.5 MB image file, CLI` | bytes · the file | `tpdf encrypt` | 82.8 → 16.1, rescaled from 23 MB's 770 → 150; 5.13× | in | built |
 
 The merge keeps fonts because its target leaves no room for a subset pass —
-40 ms for 400 pages where subset-on-save's is 120 ms for 100 — and
+20 ms for 200 pages where subset-on-save's is 4.8 ms for 4 — and
 subset-on-save measures that pass on its own. The AES pair is tier P's "decrypt
-/ encrypt", whose table states no size; 23 MB is the Item's, so a smaller input
-there would re-state no tier P figure, only the row's text, which is the
-owner's under H-163 all the same.
+/ encrypt", whose table states its targets as rates and no size, so the
+2.5 MB file re-states no tier P figure.
 
 **sign**
 
@@ -1273,21 +1276,21 @@ container's synthesised PDF is `doc.cos().bytes()`
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `layout/open and paginate <book> at 432x648 pt`, one for each of the nine | pages · 4 × the book's | each committed book | 17–22 → 8; 2.12× | ×4 | built |
-| `layout/render every page of <book> at 72 dpi`, nine | pages · the book's | the same | twin (CLI 84–130); floor 1 | in | built |
-| `layout/open and paginate the 1000-chapter book` | pages · its count | `book(1000)` | not measured → ≥ 1 000 pages/s; calibrated; relation ≤ 11 × 100 chapters | above, and at target | built |
-| `layout/render the 1000-chapter book at 72 dpi` | pages · its count | `book(1000)` | not measured → ≥ 300 pages/s; calibrated; the same relation | above, and at target | built |
-| `layout/open and paginate the 100-chapter book` | pages · its count a call | `book(100)` | the relation's other side | unmeasured | built |
-| `layout/render the 100-chapter book at 72 dpi` | pages · its count | `book(100)` | the relation's other side; 333 at 300 pages/s | above, and at target | built |
-| `layout/the 20-page HTML report to PDF` | pages · 20 | `html_report()`, laid out and finished | not measured → ≤ 60; calibrated | unmeasured | built |
-| `layout/the 20-page Markdown document to PDF` | pages · 20 | `markdown()` | not measured → ≤ 50; calibrated | unmeasured | built |
-| `layout/open each SVG fixture, render page 1` | pages · 17 a call | every committed `.svg`, its first page at 72 dpi | not measured; relation ≤ 1.5 × its synthesised PDF | unmeasured | built |
-| `layout/render each SVG fixture's synthesised PDF` | pages · 17 a call | each one's synthesised PDF, opened from bytes | the relation's other side | unmeasured | built |
-| `layout/open each XPS fixture, render page 1` | pages · 19 a call | every committed `.xps` and `.oxps` | the same relation | unmeasured | built |
-| `layout/render each XPS fixture's synthesised PDF` | pages · 19 a call | the same | its other side | unmeasured | built |
-| `layout/open each CBZ fixture, render page 1` | pages · 9 a call | every committed `.cbz` | the same relation | unmeasured | built |
-| `layout/render each CBZ fixture's synthesised PDF` | pages · 9 a call | the same | its other side | unmeasured | built |
-| `layout/render every page of <book> at 72 dpi, CLI`, nine | pages · the book's | `tpdf render` | 84–130 → 40; 2.1× | in | built |
+| `layout/open and paginate <book> at 432x648 pt`, one for each of the nine | pages · n × the book's | each committed book, n opens a call: 18, 19 and 17 for `calibre-book-cover`, `calibre-book-nocover` and `pandoc-plates`, 86 for `kcc-fixed-layout`, 4 for the rest | 17–22 → 8; 2.12× | ×4 to ×86 | built |
+| `layout/render every page of <book> at 72 dpi`, nine | pages · n × the book's | the same, every page n times a call: 12, 15, 7, 32, 9, 9, 11, 5 and 13 in the order the nine are named below | twin (CLI 84–130); floor 1 | ×5 to ×32 | built |
+| `layout/open and paginate the 30-chapter book` | pages · its count | `book(30)` | not measured → ≥ 1 000 pages/s; calibrated; relation ≤ 3.3 × 10 chapters | in | built |
+| `layout/render the 30-chapter book at 72 dpi` | pages · its count | `book(30)` | not measured → ≥ 300 pages/s; calibrated; the same relation | in | built |
+| `layout/open and paginate the 10-chapter book` | pages · 2 × its count | `book(10)` | the relation's other side | ×2 | built |
+| `layout/render the 10-chapter book at 72 dpi` | pages · its count | `book(10)` | the relation's other side; 33 at 300 pages/s | in | built |
+| `layout/the 20-page HTML report to PDF` | pages · 3 × 20 | `html_report()`, laid out and finished | not measured → ≤ 60; calibrated | ×3 | built |
+| `layout/the 20-page Markdown document to PDF` | pages · 3 × 20 | `markdown()` | not measured → ≤ 50; calibrated | ×3 | built |
+| `layout/open each SVG fixture, render page 1` | pages · 4 × 17 | every committed `.svg`, its first page at 72 dpi | not measured; relation ≤ 1.5 × its synthesised PDF | ×4 | built |
+| `layout/render each SVG fixture's synthesised PDF` | pages · 5 × 17 | each one's synthesised PDF, opened from bytes | the relation's other side | ×5 | built |
+| `layout/open each XPS fixture, render page 1` | pages · 19 | every committed `.xps` and `.oxps` | the same relation | in | built |
+| `layout/render each XPS fixture's synthesised PDF` | pages · 19 | the same | its other side | in | built |
+| `layout/open each CBZ fixture, render page 1` | pages · 8 × 9 | every committed `.cbz` | the same relation | ×8 | built |
+| `layout/render each CBZ fixture's synthesised PDF` | pages · 14 × 9 | the same | its other side | ×14 | built |
+| `layout/render every page of <book> at 72 dpi, CLI`, nine | pages · the book's, 7 times for `kcc-fixed-layout` | `tpdf render` | 84–130 → 40; 2.1× | in; `kcc-fixed-layout` ×7 | built |
 
 The nine books are `calibre-book-cover`, `calibre-book-nocover`,
 `calibre-embedded-font`, `kcc-fixed-layout`, `pandoc-book-cover`,
@@ -1310,13 +1313,13 @@ caller makes one (`crates/tinker-pdf-shape/src/shape.rs:270`, `:426`;
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `fonts/outlines of Liberation Serif Regular` | outlines · 12 × 2 602 | the face, parsed and every glyph outlined | 2.1; held | ×12 | built |
-| `fonts/outlines of Liberation Sans Regular` | outlines · 9 × 2 620 | the same | 3.0; held | ×9 | built |
-| `fonts/outlines of Liberation Mono Regular` | outlines · 14 × 2 423 | the same | 1.8; held | ×14 | built |
-| `fonts/outlines of every committed CFF program` | outlines · 2 × every program's | the 193 programs | not measured → ≥ 1 M outlines a second; calibrated | unmeasured, ×2 | built |
-| `fonts/shape 1000 characters of Latin` | none · 125 calls | Liberation Serif Regular | not measured → ≤ 0.2; calibrated | unmeasured, ×125 | built |
-| `fonts/shape 1000 characters of Arabic` | none · 50 calls | `TestShapeAran.ttf` | not measured → ≤ 0.5; calibrated | unmeasured, ×50 | built |
-| `fonts/shape 1000 characters of Devanagari` | none · 42 calls | the vendored face | not measured → ≤ 0.6; calibrated | unmeasured, ×42 | built |
+| `fonts/outlines of Liberation Serif Regular` | outlines · 48 × 2 602 | the face, parsed and every glyph outlined | 2.1; held | ×48 | built |
+| `fonts/outlines of Liberation Sans Regular` | outlines · 49 × 2 620 | the same | 3.0; held | ×49 | built |
+| `fonts/outlines of Liberation Mono Regular` | outlines · 51 × 2 423 | the same | 1.8; held | ×51 | built |
+| `fonts/outlines of every committed CFF program` | outlines · 2 × every program's | the 193 programs | not measured → ≥ 1 M outlines a second; calibrated | ×2 | built |
+| `fonts/shape 1000 characters of Latin` | none · 125 calls | Liberation Serif Regular | not measured → ≤ 0.2; calibrated | ×125 | built |
+| `fonts/shape 1000 characters of Arabic` | none · 50 calls | `TestShapeAran.ttf` | not measured → ≤ 0.5; calibrated | ×50 | built |
+| `fonts/shape 1000 characters of Devanagari` | none · 8 calls | the vendored face | not measured → ≤ 0.6; calibrated | ×8 | built |
 
 The 192 programs that parse as plain CFF hold 18 529 glyphs, and every one
 outlines; the 193rd, `fuzz/corpus/sfnt/opentype-cff.otf`, is a fuzz seed
@@ -1329,28 +1332,17 @@ their files (below). **calibration** holds one:
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `calibration/text of 100 dense pages` | pages · 100 | `dense(100, 0)`, the call `text/text of 100 dense pages` makes | 751 on the planning machine (H-112); the operation every calibrated target is a fraction of | above until P-02 | built |
+| `calibration/text of 5 dense pages` | pages · 5 | `dense(5, 0)`, the call `text/text of 5 dense pages` makes | 37.6 on the planning machine, rescaled from 100 pages' 751 (H-112); the operation every calibrated target is a fraction of | in | built |
 
 Its file is frozen: it is the same input and call as the text group's, kept
 apart so that nothing a later row adds to the text group can move it, and a
 change to it re-states every calibrated target, which is the owner's (H-77).
 
-**For MS-04.9's report**, then, tier P's figures put 30 operations above
-300 ms today and inside at their targets, and three more are expected there:
-`text of 100 standard-14 pages`,
-`the 2000 stroked curves alone at 150 dpi` and
-`a second render of the JPEG page at 300 dpi`.
-Eleven stay above even at their targets. Four cross the whole window: both
-`every page's size` operations and both
-`text of 1000 small pages`.
-The eight analysis operations are expected above by their relations' bounds
-over a 751 ms text. That is 56 of the 138 expected outside at tier P's
-inputs. Of the rest, 58 sit inside today and at their targets by tier P's
-figures, 30 of them by their `calls`; 23 have no figure today, nine sized by
-their targets and 14 waiting for MS-04.10's figures; and
-`re-render a changed 100x100 pt annotation`
-is inside today and falls under 20 ms at its bound. The planning machine is
-not the runner, so an operation near 300 ms may fall inside; MS-04.9's dispatch is the list H-163 is decided on.
+**The sizes** are the hosted runner's, not tier P's: an operation that tier
+P's planning figures put inside can fall outside on the runner and the other
+way, so each is sized from what the runner read, and MS-04.10's fifteen
+dispatches confirm every one inside on every run before any figure is
+committed.
 
 #### Fixtures the tree cannot write
 
@@ -1365,20 +1357,23 @@ with its provenance and read like any fixture — no test runs the program, and
 every check on the result is first-party. It is the device
 `crates/tinker-pdf-filters/tests/images/README.md` already uses.
 
-- **The progressive JPEG** is `baseline_jpeg()`'s coefficients re-scanned
-  progressively by an outside program's lossless transcode, so a test holds
-  its decode to `baseline_jpeg()`'s decode sample for sample: the two differ
-  in their scan schedule and nothing else, which is what the
-  baseline/progressive pair is for. `baseline_jpeg()` asserts the SHA-256 the
-  README records as the transcode's source, so a change to the encoder fails
-  there first, a finding rather than a quiet mismatch.
-- **The two JPEG 2000 codestreams** are `photo(2480, 3508, 0)`, written once
-  as a PPM, encoded by an outside JPEG 2000 encoder as JP2 files: one tile,
-  five decomposition levels (P-10 discards two), 64 × 64 code-blocks, one
-  layer, LRCP; the irreversible one at one bit a pixel, the reversible one
-  lossless — so a test holds the reversible decode to `photo(2480, 3508, 0)`
-  exactly, the generator's input being the expected output, and the
-  formula's digest is pinned beside the README's record of it.
+- **The progressive JPEG** is `baseline_jpeg_part(2)`'s coefficients
+  re-scanned progressively by an outside program's lossless transcode, so a
+  test holds its decode to `baseline_jpeg_part(2)`'s decode sample for
+  sample: the two differ in their scan schedule and nothing else, which is
+  what the baseline/progressive pair is for. `baseline_jpeg_part(2)` asserts
+  the SHA-256 the README records as the transcode's source, so a change to
+  the encoder fails there first, a finding rather than a quiet mismatch.
+- **The three JPEG 2000 codestreams** are `photo` at 2480×3508, 620×877 and
+  310×438, seed 0, each written once as a PPM and encoded by an outside JPEG
+  2000 encoder as a JP2 file: one tile, five decomposition levels (P-10
+  discards two), 64 × 64 code-blocks, one layer, LRCP; the two irreversible
+  ones at one bit a pixel, the reversible one lossless — so a test holds the
+  reversible decode to `photo(310, 438, 0)` exactly, the generator's input
+  being the expected output, and the formula's digest is pinned beside the
+  README's record of it. The full-page one is the JPEG 2000 page whose peak
+  `tests/peak_memory.rs` holds; the two smaller ones are the sizes the decode
+  group and the render group's JPEG 2000 page are timed at.
 - **The Devanagari face** is vendored data rather than a fixture: a face
   under OFL-1.1, which the allowlist admits (H-116's default), in
   `crates/tinker-pdf-shape/data/devanagari/` with its `LICENSE`, declared in
@@ -1392,12 +1387,11 @@ every check on the result is first-party. It is the device
 
 `crates/tinker-pdf/benches/data/README.md` records, for each committed file,
 its bytes and SHA-256, how it was coded and the SHA-256 of the input it was
-made from, and never the program that made it; the file names say what each
-is (`progressive-2480x3508.jpg`, `irreversible-2480x3508.jp2`,
-`reversible-2480x3508.jp2`), and `.jpg` and `.jp2` are already binary
-(`.gitattributes:13-14`). The lossless codestream is the largest, at eleven
-megabytes far larger than any other committed JPEG 2000 file, and the README
-states each one's size.
+made from, and the program and the settings that made it; the file names
+say what each is (`progressive-1240x1754.jpg`, `irreversible-2480x3508.jp2`,
+`irreversible-620x877.jp2`, `reversible-310x438.jp2`), and `.jpg` and `.jp2`
+are already binary (`.gitattributes:13-14`). The full-page codestream is the
+largest, at about a megabyte, and the README states each one's size.
 
 #### The CLI operations
 
@@ -1416,16 +1410,16 @@ run.
 
 | Operation | Command | Calls |
 | --- | --- | --- |
-| open and count the 23 MB image file | `tpdf info image.pdf` (`tools/tpdf/src/main.rs:903-957`; P-05's Today is this command) | 5 |
-| text of 100 dense pages / 1000 / 10000 small pages | `tpdf text dense-100.pdf`, `small-1000.pdf`, `small-10000.pdf` | 1 |
-| structured JSON of 100 pages | `tpdf text dense-100.pdf --json` | 1 |
-| the text page to PNG at 150 / 300 dpi | `tpdf render dense-1.pdf --out DIR --dpi 150` / `--dpi 300` | 1 |
-| 20 pages to PNG at 150 dpi, 1 / 4 jobs | `tpdf render dense-20.pdf --out DIR --dpi 150 --jobs 1` / `--jobs 4` | 1 |
-| rewrite 100 / 1000 pages | `tpdf merge small-100.pdf --out OUT.pdf --font-policy keep` / `small-1000.pdf` | 4 / 1 |
-| subset-on-save of 100 pages | `tpdf merge dense-100.pdf --out OUT.pdf --font-policy subset` | 1 |
-| merge 4 x 100 pages | `tpdf merge dense-100-0.pdf dense-100-1.pdf dense-100-2.pdf dense-100-3.pdf --out OUT.pdf --font-policy keep` | 1 |
-| encrypt the 23 MB image file | `tpdf encrypt image.pdf --out OUT.pdf --entropy ENTROPY --font-policy keep` | 1 |
-| render every page of a book at 72 dpi | `tpdf render BOOK.epub --out DIR --dpi 72` | 1 |
+| open and count the 23 MB image file | `tpdf info image.pdf` (`tools/tpdf/src/main.rs:903-957`; P-05's Today is this command) | 24 |
+| text of 5 dense pages / 1000 / 4000 small pages | `tpdf text dense-5.pdf`, `small-1000.pdf`, `small-4000.pdf` | 1 / 2 / 1 |
+| structured JSON of 5 pages | `tpdf text dense-5.pdf --json` | 1 |
+| the half-size text page to PNG at 150 dpi / the quarter-size one at 300 dpi | `tpdf render dense-half-1.pdf --out DIR --dpi 150` / `dense-quarter-1.pdf --dpi 300` | 1 |
+| 8 quarter-size pages to PNG at 150 dpi, 1 / 4 jobs | `tpdf render dense-quarter-8.pdf --out DIR --dpi 150 --jobs 1` / `--jobs 4` | 1 |
+| rewrite 100 / 1000 pages | `tpdf merge small-100.pdf --out OUT.pdf --font-policy keep` / `small-1000.pdf` | 26 / 6 |
+| subset-on-save of 4 pages | `tpdf merge dense-4.pdf --out OUT.pdf --font-policy subset` | 1 |
+| merge 4 x 50 pages | `tpdf merge dense-50-0.pdf dense-50-1.pdf dense-50-2.pdf dense-50-3.pdf --out OUT.pdf --font-policy keep` | 1 |
+| encrypt the 2.5 MB image file | `tpdf encrypt small-image.pdf --out OUT.pdf --entropy ENTROPY --font-policy keep` | 1 |
+| render every page of a book at 72 dpi | `tpdf render BOOK.epub --out DIR --dpi 72` | 1; `kcc-fixed-layout` 7 |
 
 `tpdf` has no rewrite command. `merge` given one input writes that input again
 under `rewrite()` with stream deduplication and nothing else
@@ -1453,7 +1447,7 @@ them:
     "group": "render",
     "operations": [
       { "name": "the text page at 72 dpi", "unit": "pixels",
-        "per_iteration": 2504950, "calls": 5 },
+        "per_iteration": 1001980, "calls": 2 },
       { "name": "the text page at 300 dpi", "unit": "pixels",
         "per_iteration": 8702320, "calls": 1 }
     ]
@@ -1467,9 +1461,9 @@ mean and a call is the mean over `calls`; the bench file declares the same
 figure through criterion's `Throughput`, criterion records it in each
 operation's `benchmark.json`, and `bench-check` refuses a run whose recorded
 figure is not the committed one, so a generator and its list cannot drift
-apart unseen on the runner. An operation named outside the window by the
-owner's word carries `"window": "outside: H-163, <date>"`, which MS-04.9's
-check reads. A machine entry carries `"unmeasured"`, the ids it has no figure
+apart unseen on the runner. An operation the owner names outside the
+window carries `"outside_window"`, its reason, which `bench-check --sizes`
+reports instead of failing; the set names none. A machine entry carries `"unmeasured"`, the ids it has no figure
 for, ahead of its `"operations"`, so a hole is named and never silent. The
 reader cuts the file at `"machines"` first, so no list entry can fall into a
 machine's chunk. MS-02.3 adds each operation's
@@ -1495,44 +1489,41 @@ operation of t costs its warm-up — at least one iteration — and then about t
 larger of 3 s and samples × t: about 4.7 s inside the window, and 11 × t above
 it, ten samples being the least criterion 0.5.1 takes (its `sample_size`
 asserts it). Thirty samples cost the sign, fonts and scripts groups nothing:
-their operations are sized near 25 ms by their targets, and at 100 ms or less
-thirty samples fit the 3 s that ten would take. Each file sets its sample size
+their operations sit near the window's middle, and at 100 ms or less thirty
+samples fit the 3 s that ten would take. Each file sets its sample size
 and times in `criterion_group!`'s `config`, which criterion's command line
 overrides, never on a `BenchmarkGroup`, whose settings would beat the command
 line, so MS-02's rounds can sample differently without editing a file; flat
 sampling, which criterion sets only on a group and which has no command-line
 flag, is the one setting each group makes itself.
 
-At tier P's stated inputs the set cannot run in one 30-minute job. By tier
-P's figures, under this sampling, its 138 operations measure for about 43
-minutes before anything is built, and the three that read 10 000 pages are
-18 of those minutes. So `bench.yml` becomes one job a group, a matrix whose
-every entry names its group and its operation count, each job with its own
-30 minutes; a run's wall time is its slowest job. Every relation tier P
-draws between two operations has both in one group — the analysis group
-carries its own text for that reason — so one job measures both on one host,
-where across two jobs a ratio would measure the fleet (MS-10.1's note).
+Sized into the window, every operation measures for about 4.7 s under this
+sampling, so the set's 143 measure for about eleven minutes before anything is
+built. `bench.yml` runs one job a group, a matrix whose every entry names its
+group and its operation count, each job with its own 30 minutes; a run's wall
+time is its slowest job. Every relation tier P draws between two operations
+has both in one group — the analysis group carries its own text for that
+reason — so one job measures both on one host, where across two jobs a ratio
+would measure the fleet (MS-10.1's note).
 
-| Job | Operations | Measurement, by tier P's figures | Most of it |
-| --- | ---: | ---: | --- |
-| text | 12 | 14.8 min | text of 10 000 small pages, in-process and CLI, 6.6 min each |
-| render | 33 | 8.0 min | 100 pages on one thread, 1.6 min; 20 pages to PNG on one job, 1.3 min |
-| open | 6 | 6.0 min | every page's size over 10 000 pages, 5.2 min |
-| layout | 39 | 5.4 min | the 1 000-chapter book |
-| write | 16 | 3.3 min | rewrite of 3 000 pages, 1.0 min |
-| decode | 9 | 2.3 min | the reversible JPEG 2000, 1.2 min |
-| analysis | 8 | 2.2 min | the three validators |
-| fonts | 7 | 0.5 min | — |
-| encode | 4 | 0.3 min | — |
-| sign | 3 | 0.2 min | — |
-| calibration | 1 | 0.2 min | — |
+| Job | Operations | Measurement |
+| --- | ---: | ---: |
+| layout | 40 | 3.1 min |
+| render | 34 | 2.7 min |
+| write | 17 | 1.3 min |
+| text | 13 | 1.0 min |
+| decode | 9 | 0.7 min |
+| analysis | 8 | 0.6 min |
+| open | 7 | 0.5 min |
+| fonts | 7 | 0.5 min |
+| encode | 4 | 0.3 min |
+| sign | 3 | 0.2 min |
+| calibration | 1 | 0.1 min |
 
-The layout job's not-measured operations are taken at three times their
-targets — the 1 000-chapter book at 3 s to paginate and 10 s to render — and
-the analysis operations at their relations' bounds. Every job measures for
-under half its limit, which leaves at least 15 minutes for its checkout, its
-build and its generators, and a group whose job nears its limit splits by a criterion filter into
-two entries with a count each, never by a changed input. Every job builds
+Every job measures for a small part of its limit, which leaves the rest for
+its checkout, its build and its generators, and a group whose job nears its
+limit splits by a criterion filter into two entries with a count each, never
+by a changed input. Every job builds
 its group's bench in release, as `cargo bench` does, and the five with CLI
 operations build `tpdf` in release first. MS-02's paired job, three builds
 and ten rounds of this set in 15 minutes, is priced in MS-02's section and
@@ -1540,16 +1531,14 @@ H-162's to decide.
 
 #### The window
 
-MS-04.9's `bench-check --sizes` reads each operation's mean from the run's
-estimates — an iteration's, so `calls` included — and fails one outside
-20–300 ms on the head, unless its list names it outside by the owner's word,
-which it reports instead. It runs in each job after the bench, because the
-window is a property of the runner the job landed on and never of
-`cargo test`. One dispatch on `develop` in report mode prints every operation
-outside with its mean; H-163 is
-decided on that list, not on tier P's column. Until it is, every operation keeps
-tier P's input, a fast one runs its `calls`, and MS-04.10 names the slow ones
-outside as H-163 decides.
+`bench-check --sizes` reads each operation's mean from the run's estimates —
+an iteration's, so `calls` included — and fails one outside 20–300 ms on the
+head, unless its list names it outside by the owner's word, which it reports
+instead. It runs in each job after the bench, because the window is a
+property of the runner the job landed on and never of `cargo test`. A
+dispatch on `develop` in report mode prints every operation outside with its
+mean, and the set is sized from that list, the hosted runner's, not from tier
+P's column: a short operation by its `calls`, a long one by a smaller input.
 
 #### The two level-6 byte counts
 
@@ -1582,7 +1571,7 @@ H-78 is asked nothing for them.
 | --- | --- | --- |
 | `open/open a 3-page document` | itself, with `calls` | the set's only in-process open of a small file; P-21's held operation is the CLI's |
 | `render/render text at 150 dpi` | `render/the text page at 150 dpi` | its page draws no glyph; the successor's does |
-| `text/extract a page of text` | `text/text of 100 standard-14 pages` | the same call over standard-14 Helvetica, 100 pages for one |
+| `text/extract a page of text` | `text/text of 20 standard-14 pages` | the same call over standard-14 Helvetica, 20 pages for one |
 | `render/render a full-page axial shading at 150 dpi` | `render/a full-page axial shading at 150 dpi` | the same generator, `axial()` |
 | `render/fill 300 anti-aliased paths at 150 dpi` | `render/300 triangles at 150 dpi` | the same 300 triangles, `triangles()` |
 | `write/rewrite a document` | `write/rewrite 100 pages` | the same call, 100 pages for three |
@@ -1593,8 +1582,8 @@ H-78 is asked nothing for them.
 A row whose capability does not exist yet adds its operation in the commit
 that adds the capability, under an id these rules allow, in the group its
 operation belongs to, listed unmeasured in the machine entry until the next
-fifteen-run measurement (H-109), and sized by `calls` or named outside under
-H-163. Tier P's table and the Item name these:
+fifteen-run measurement (H-109), and sized by `calls` or a smaller input as
+the set's are. Tier P's table and the Item name these:
 
 | Row, step | Operation | Group | Tier P's gate |
 | --- | --- | --- | --- |
@@ -1604,7 +1593,7 @@ H-163. Tier P's table and the Item name these:
 | SG-02, SG-02.7 | `sign/ECDSA P-256 signature`, `sign/ECDSA P-384 signature`, `sign/ECDSA P-521 signature`, `sign/ECDSA Brainpool P-256 signature` | sign | calibrated, ≤ 0.5, 1.2, 2.5 and 1 ms; `calls` 50, 21, 10 and 25 |
 | P-09, P-09.9 | `decode/JPEG decode at quarter scale` | decode | 22.3×, paired with the baseline's full-size decode; `calls` 2 |
 | P-10, P-10.4 | `decode/irreversible JPEG 2000, two levels discarded`, `decode/reversible JPEG 2000, two levels discarded`, and a window decode of each | decode | 25.6× and 36.2×, paired with the baseline's full decode; the windows recorded ungated (H-77) |
-| P-10, P-10.12 | `decode/irreversible JPEG 2000 2480x3508 on 4 threads` | decode | 7.33×, paired with the baseline's one-thread decode |
+| P-10, P-10.12 | `decode/irreversible JPEG 2000 620x877 on 4 threads` | decode | 7.33×, paired with the baseline's one-thread decode |
 | P-04's fast level, P-04.3 | `encode/deflate page-like data, fast level`, `encode/deflate photo-like data, fast level` | encode | 7.5× and 5.27×, at floor 1 until P-04.6 |
 | MS-08, MS-08.4 | `open/first page of the 60-page linearized fixture over a slow link` | open | counted; the time follows from MS-08.3's counts, never slept |
 | P-21, P-21.1 | `open/open a small file, CLI`; `decode/extract a Flate image with predictors`; `write/no-op incremental save of 100 pages` | open, decode, write | held |
@@ -1626,13 +1615,13 @@ to.
 | Two engines generating one input write different bytes, so a pair times two inputs | MS-02's paired job routes every input through the directory `TINKER_BENCH_FIXTURES` names, written by the head first |
 | An input an engine encoder writes moves when the encoder changes (P-04.7's deflate, the JPEG encoder) | The row that changes the encoder names the operations it moved in its commit; the two inputs the level-6 counts describe are formulas pinned by length and digest, so they never move |
 | The run does not fit 30 minutes | One job a group, each measuring under half its limit by tier P's figures; a group nearing its limit splits by a filter, never by its input |
-| Tier P's figures are the planning machine's, so the budget and the window's list are predictions | MS-04.9's dispatch measures the list H-163 is decided on, and an operation outside that it missed goes to H-163 before MS-04.10 commits any figure |
+| Tier P's figures are the planning machine's, so the budget and the window's list are predictions | The set is sized from the hosted runner's own figures, and MS-04.10's fifteen dispatches hold every operation inside on every run before any figure is committed |
 | A repetition count and its committed `per_iteration` drift apart | Criterion's recorded `Throughput` is checked against the list on every run |
 | A CLI operation times a failed child, or a stale `tpdf` | The exit status is checked on every call and a failure panics the bench; `tpdf` is resolved beside the bench binary and built from the same checkout in the same job |
-| The committed codestreams grow the repository and come from a program this project does not own | Three files with their bytes, digests, coding and sources recorded; their decodes are checked first-party, the reversible one against the generator's input and the progressive one against the baseline decode |
+| The committed codestreams grow the repository and come from a program this project does not own | Four files with their bytes, digests, coding and sources recorded; their decodes are checked first-party, the reversible one against the generator's input and the progressive one against the baseline decode |
 | A format's aggregate hides one container fixture's regression | Every fixture is opened and rendered in the operation and asserted in test mode; a figure for each fixture would take ninety operations, which a row that needs one adds |
 | The calibration operation moves | Its file is frozen; a change re-states every calibrated target, which is the owner's (H-77) |
-| A row's speed-up takes an operation under 20 ms | The row raises its `calls` in the commit that raises its floor, with the figure re-measured under H-109, or names it for H-163; the four that cross the window are listed above |
+| A row's speed-up takes an operation under 20 ms | The row raises its `calls` in the commit that raises its floor, with the figure re-measured under H-109 |
 | `ubuntu-latest` is a fleet, and one dispatch's jobs land on different hosts | Each band is per operation over fifteen dispatches, as the committed ones are (`docs/verification.md`, "The named machine is `ubuntu-latest`"); every job logs its CPU model and count, as `bench.yml` does |
 
 ## MS-07 — Corpus throughput and latency ratchet
@@ -2354,8 +2343,8 @@ compares decoded.
    `a6_merge_deduplication_decodes_only_on_a_collision` flips from owed as
    decided, with `two_encodings_of_one_content_merge` renamed and inverted
    or kept.
-6. **P-03.7: the row's close** in MS-02's paired job: subset-on-save of 100
-   pages (CLI) at 10×, merge of 4 × 100 pages at 25.2× CLI and 114×
+6. **P-03.7: the row's close** in MS-02's paired job: subset-on-save of 4
+   pages (CLI) at 10×, merge of 4 × 50 pages at 25.2× CLI and 114×
    in-process, MS-05's merge band at the fixed figure, and A5 and A6 green on
    every target.
 
