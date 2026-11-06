@@ -229,6 +229,11 @@ fn the_fetched_corpora_yield_structure_trees() {
              no PDFs; fetch with `cargo xtask corpus-fetch` and point it at \
              corpus/files"
         );
+        assert!(
+            !required(),
+            "structure-census: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
     println!("{RAN} the structure census ({} files)", files.len());
@@ -360,4 +365,10 @@ fn the_fetched_corpora_yield_structure_trees() {
         "more characters were orphaned ({orphans}) than matched ({matched}): \
          the join, not the corpora, is what would have to be wrong"
     );
+}
+
+/// Whether a missing corpus is a failure rather than a skip: the corpus job
+/// sets `TINKER_CORPUS_REQUIRED`, so a census there cannot pass over nothing.
+fn required() -> bool {
+    std::env::var_os("TINKER_CORPUS_REQUIRED").is_some_and(|value| value != "0")
 }

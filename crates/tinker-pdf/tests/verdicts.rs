@@ -120,7 +120,12 @@ fn unattributed(signature: &tinker_pdf::Signature) -> bool {
 #[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
 fn every_corpus_signature_gets_a_verdict() {
     let Some(root) = corpus_root() else {
-        println!("SKIPPED (no corpus; set TINKER_CORPUS)");
+        println!("verdicts: SKIPPED (no corpus; set TINKER_CORPUS)");
+        assert!(
+            !required(),
+            "verdicts: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
     let mut all = Vec::new();
@@ -133,7 +138,7 @@ fn every_corpus_signature_gets_a_verdict() {
         })
     });
     all.sort();
-    println!("RAN over {} files naming /ByteRange", all.len());
+    println!("verdicts: RAN over {} files naming /ByteRange", all.len());
 
     let anchors = TrustAnchors::new();
     let mut tally = Tally::default();
@@ -365,14 +370,28 @@ fn short<T: std::fmt::Debug>(value: &T) -> String {
 #[ignore = "reads the fetched corpora"]
 fn a_chain_reaches_an_anchor_when_one_is_supplied() {
     let Some(root) = corpus_root() else {
-        println!("SKIPPED (no corpus; set TINKER_CORPUS)");
+        println!("verdicts: SKIPPED (no corpus; set TINKER_CORPUS)");
+        assert!(
+            !required(),
+            "verdicts: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
     let path = root.join("qpdf/qpdf/qtest/qpdf/digitally-signed.pdf");
     let Ok(bytes) = std::fs::read(&path) else {
-        println!("SKIPPED (the qpdf corpus is not fetched)");
+        println!("verdicts: SKIPPED (the qpdf corpus is not fetched)");
+        assert!(
+            !required(),
+            "verdicts: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
+    println!(
+        "verdicts: RAN the chain to a supplied anchor over {}",
+        path.display()
+    );
     let document = Document::open(bytes).expect("opens");
     let signature = document.signatures().into_iter().next().expect("one");
     assert_eq!(signature.coverage, Coverage::WholeFile);
@@ -491,4 +510,10 @@ fn a_signature_whose_contents_are_not_cms_is_unreadable_rather_than_invalid() {
         verdicts[0].document_digest
     );
     assert!(!verdicts[0].is_trusted());
+}
+
+/// Whether a missing corpus is a failure rather than a skip: the corpus job
+/// sets `TINKER_CORPUS_REQUIRED`, so a census there cannot pass over nothing.
+fn required() -> bool {
+    std::env::var_os("TINKER_CORPUS_REQUIRED").is_some_and(|value| value != "0")
 }

@@ -366,8 +366,39 @@ pub fn run_one(
     timeout: Duration,
     extra: &[String],
 ) -> FileResult {
+    trace_one(child, file, relative, timeout, extra).result
+}
+
+/// One child's run as a trace keeps it (MS-20): the file's result, every line
+/// the child wrote, and the CPU time it had used when the runner killed it.
+#[derive(Clone, Debug)]
+pub struct Traced {
+    /// The file's result, as [`run_one`] has it.
+    pub result: FileResult,
+    /// Everything the child wrote to its standard output, cut or not.
+    pub lines: String,
+    /// The seconds of CPU the child had used when the runner killed it, read
+    /// from `/proc/<pid>/stat` on Linux: about the time it was given for a
+    /// loop, and far less for a wait. `None` for a child that ended on its
+    /// own, and off Linux.
+    pub cpu_seconds: Option<f64>,
+}
+
+/// [`run_one`], keeping everything the child wrote and, where the runner
+/// killed it, the CPU time it had used: `corpus-run --trace`'s run.
+pub fn trace_one(
+    child: &Child,
+    file: &Path,
+    relative: &str,
+    timeout: Duration,
+    extra: &[String],
+) -> Traced {
     let started = Instant::now();
-    let empty = |outcome: Outcome, millis: u64| unrecorded(relative, outcome, millis);
+    let empty = |outcome: Outcome, millis: u64| Traced {
+        result: unrecorded(relative, outcome, millis),
+        lines: String::new(),
+        cpu_seconds: None,
+    };
 
     // Both streams go to temporary files rather than to pipes. A pipe whose
     // reader is the same thread that waits for the child deadlocks the moment
@@ -436,6 +467,7 @@ pub fn run_one(
     let stall_window = timeout / 2;
 
     let mut killed = false;
+    let mut cpu_seconds = None;
     let mut said = 0u64;
     let mut last_spoke = started;
     // The capture file's length is checked on its own clock rather than every
@@ -464,6 +496,8 @@ pub fn run_one(
             }
         }
         if started.elapsed() >= timeout {
+            // Read before the kill, while there is a process to read.
+            cpu_seconds = cpu_of(process.id());
             let _ = process.kill();
             let _ = process.wait();
             killed = true;
@@ -485,7 +519,33 @@ pub fn run_one(
     } else {
         Ending::Exited
     };
-    read_child(relative, &stdout, &stderr, millis, ending)
+    let result = read_child(relative, &stdout, &stderr, millis, ending);
+    Traced {
+        result,
+        lines: stdout,
+        cpu_seconds,
+    }
+}
+
+/// The CPU time a running process has used, in seconds, from
+/// `/proc/<pid>/stat`; `None` off Linux or where the line cannot be read.
+fn cpu_of(pid: u32) -> Option<f64> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    cpu_of_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// `utime` and `stime`, fields 14 and 15 of a `/proc/<pid>/stat` line, in
+/// seconds at the hundred ticks a second the kernel reports them in to user
+/// space. Counted from the command name's last closing parenthesis, since the
+/// name may itself hold spaces and parentheses.
+fn cpu_of_stat(stat: &str) -> Option<f64> {
+    let rest = stat.get(stat.rfind(')')? + 1..)?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    let user: u64 = fields.get(11)?.parse().ok()?;
+    let system: u64 = fields.get(12)?.parse().ok()?;
+    Some((user + system) as f64 / 100.0)
 }
 
 /// How a child the runner waited on ended.
@@ -1647,6 +1707,17 @@ mod tests {
         assert_eq!(half.pages, 0);
         assert_eq!(half.capabilities, BTreeSet::from(["jbig2".to_string()]));
         assert_eq!(before_render("probe 7\ntagged tree no\n").tagged, None);
+    }
+
+    /// A killed child's CPU time is read off its `stat` line, past a command
+    /// name that holds the separators itself.
+    #[test]
+    fn the_cpu_time_is_read_off_a_stat_line() {
+        let stat = "4242 (tpdf (probe) x) R 1 4242 4242 0 -1 4194304 100 0 0 0 \
+                    250 50 0 0 20 0 1 0 900 0 0";
+        assert_eq!(cpu_of_stat(stat), Some(3.0));
+        assert_eq!(cpu_of_stat("4242 (tpdf) R 1"), None, "too few fields");
+        assert_eq!(cpu_of_stat("no parenthesis"), None);
     }
 
     /// A verdict this runner does not know is **not** a hold.

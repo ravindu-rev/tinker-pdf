@@ -262,6 +262,61 @@ fn a_file_whose_record_is_cut_still_counts_for_what_it_carries() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A trace runs one file's child alone and prints every line it wrote, then
+/// where it stopped (MS-20). The stub's `stall` writes the document's lines
+/// and the start of page one's render and goes silent: the trace keeps every
+/// line, reads the child as stalled at `page 1/5`, and on Linux says how much
+/// CPU it had used, which tells a loop from a wait.
+#[test]
+fn a_trace_prints_what_the_child_wrote_and_where_it_stalled() {
+    let (dir, files) = synthetic_corpus("trace", &[("aa-stalls", "stall")]);
+    let traced = xtask::runner::trace_one(
+        &stub(),
+        &files[0],
+        "aa-stalls.pdf",
+        Duration::from_secs(3),
+        &[],
+    );
+    assert_eq!(
+        traced.result.outcome,
+        Outcome::Stalled {
+            at: "page 1/5".to_string()
+        }
+    );
+    assert_eq!(traced.result.last.as_deref(), Some("page 1/5"));
+    assert_eq!(traced.cpu_seconds.is_some(), cfg!(target_os = "linux"));
+
+    let printed = corpus::trace_report("synthetic/aa-stalls.pdf", &traced);
+    let lines: Vec<&str> = printed.lines().collect();
+    assert!(lines.contains(&"cap iccbased"), "{printed}");
+    assert!(lines.contains(&"page 1/5"), "{printed}");
+    let last = lines.last().expect("the trace's own line");
+    assert!(
+        last.starts_with(
+            "trace: synthetic/aa-stalls.pdf stalled at \"page 1/5\" last \"page 1/5\" cpu "
+        ),
+        "{last}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A trace names a file by its corpus and its path, and one no locked corpus
+/// holds is refused by name before anything is built or spawned.
+#[test]
+fn a_trace_of_a_path_no_corpus_holds_is_refused() {
+    let root = xtask::repo_root();
+    let trace = |spec: &str| corpus::run(&root, &["--trace".to_string(), spec.to_string()]);
+    let refused = trace("nowhere/a.pdf").expect_err("no such corpus");
+    assert!(refused.contains("`nowhere` is not a corpus"), "{refused}");
+    let refused = trace("pdfjs/no-such-file-here.pdf").expect_err("no such file");
+    assert!(
+        refused.contains("holds no `no-such-file-here.pdf`"),
+        "{refused}"
+    );
+    let refused = trace("pdfjs").expect_err("no path");
+    assert!(refused.contains("<corpus>/<path>"), "{refused}");
+}
+
 /// The timeout is a bound on the run, not merely a label on one file.
 ///
 /// Three hanging files at a 500 ms timeout, run two at a time, must finish in

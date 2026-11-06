@@ -80,6 +80,22 @@ fn main() {
             println!("pages 9");
             println!("cap jbig2");
         }
+        // Writes what a child reads of the document and the start of page
+        // one's render, then goes silent without ending: the shape of a page
+        // whose render never returns, which a trace prints and places.
+        "stall" => {
+            println!("probe {}", xtask::runner::PROBE_VERSION);
+            println!("file {file}");
+            println!("phase open");
+            println!("opened yes");
+            println!("pages 5");
+            println!("cap iccbased");
+            println!("phase render");
+            println!("page 1/5");
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        }
         "unopenable" => {
             println!("probe {}", xtask::runner::PROBE_VERSION);
             println!("file {file}");

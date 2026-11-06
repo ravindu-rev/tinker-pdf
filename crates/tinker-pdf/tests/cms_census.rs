@@ -566,11 +566,19 @@ fn table(title: &str, counts: &BTreeMap<String, usize>) {
 #[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
 fn census_of_the_corpus_cms_blobs() {
     let Some(root) = corpus_root() else {
-        println!("SKIPPED (no corpus; set TINKER_CORPUS)");
+        println!("cms-census: SKIPPED (no corpus; set TINKER_CORPUS)");
+        assert!(
+            !required(),
+            "cms-census: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
     let candidates = files_naming_a_byte_range(&root);
-    println!("RAN over {} files naming /ByteRange\n", candidates.len());
+    println!(
+        "cms-census: RAN over {} files naming /ByteRange\n",
+        candidates.len()
+    );
 
     // ---- pass 1: what the supported path delivers -------------------------
     let mut supported = Tally::default();
@@ -909,4 +917,10 @@ fn display_name(path: &Path, root: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+/// Whether a missing corpus is a failure rather than a skip: the corpus job
+/// sets `TINKER_CORPUS_REQUIRED`, so a census there cannot pass over nothing.
+fn required() -> bool {
+    std::env::var_os("TINKER_CORPUS_REQUIRED").is_some_and(|value| value != "0")
 }

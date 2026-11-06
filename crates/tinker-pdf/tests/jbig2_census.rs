@@ -773,6 +773,11 @@ fn pdfs_under(root: &Path, out: &mut Vec<PathBuf>) {
 fn census_of_the_corpus_jbig2() {
     let Some(root) = corpus_root() else {
         println!("jbig2-census: SKIPPED (no corpus; set TINKER_CORPUS)");
+        assert!(
+            !required(),
+            "jbig2-census: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
     let mut files = Vec::new();
@@ -1171,4 +1176,10 @@ fn census_of_the_corpus_jbig2() {
     for (kind, count) in &total.segments {
         println!("  type {kind:>3}  {count:>6}");
     }
+}
+
+/// Whether a missing corpus is a failure rather than a skip: the corpus job
+/// sets `TINKER_CORPUS_REQUIRED`, so a census there cannot pass over nothing.
+fn required() -> bool {
+    std::env::var_os("TINKER_CORPUS_REQUIRED").is_some_and(|value| value != "0")
 }

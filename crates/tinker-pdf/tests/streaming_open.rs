@@ -911,7 +911,14 @@ fn qpdf_corpus() -> Option<PathBuf> {
 #[test]
 fn linearized_files_from_the_qpdf_corpus_render_page_one_from_their_heads() {
     let Some(dir) = qpdf_corpus() else {
-        println!("SKIPPED linearized corpus render: the qpdf corpus is not fetched");
+        println!(
+            "streaming-open: SKIPPED linearized corpus render: the qpdf corpus is not fetched"
+        );
+        assert!(
+            !required(),
+            "streaming-open: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -975,7 +982,7 @@ fn linearized_files_from_the_qpdf_corpus_render_page_one_from_their_heads() {
     }
 
     println!(
-        "RAN linearized corpus render: {engaged} files opened from their heads, \
+        "streaming-open: RAN linearized corpus render: {engaged} files opened from their heads, \
          {rendered} rendered page one, {matched} drew the buffered page, over {} PDFs",
         files.len()
     );
@@ -1046,7 +1053,14 @@ const PAGE_TWO_NEEDS_THE_MAIN_TABLE: &[&str] = &[
 #[test]
 fn linearized_corpus_files_reach_page_two_without_their_main_tables() {
     let Some(dir) = qpdf_corpus() else {
-        println!("SKIPPED linearized corpus page two: the qpdf corpus is not fetched");
+        println!(
+            "streaming-open: SKIPPED linearized corpus page two: the qpdf corpus is not fetched"
+        );
+        assert!(
+            !required(),
+            "streaming-open: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -1121,7 +1135,7 @@ fn linearized_corpus_files_reach_page_two_without_their_main_tables() {
     }
 
     println!(
-        "RAN linearized corpus page two: {multipage} multipage files, {hinted} reached page two \
+        "streaming-open: RAN linearized corpus page two: {multipage} multipage files, {hinted} reached page two \
          from their heads, {matched} drew the buffered page"
     );
     assert_eq!(
@@ -1150,16 +1164,33 @@ fn linearized_corpus_files_reach_page_two_without_their_main_tables() {
 #[test]
 fn authenticating_reopens_the_hint_tables_a_sealed_document_refused() {
     let Some(dir) = qpdf_corpus() else {
-        println!("SKIPPED sealed hint tables: the qpdf corpus is not fetched");
+        println!("streaming-open: SKIPPED sealed hint tables: the qpdf corpus is not fetched");
+        assert!(
+            !required(),
+            "streaming-open: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
     // Encrypted with an owner password only, so the empty user password opens
     // it -- and thirty pages, so page two is a long way from the head.
     let path = dir.join("enc-R3,V2.pdf");
     let Ok(bytes) = std::fs::read(&path) else {
-        println!("SKIPPED sealed hint tables: {} is absent", path.display());
+        println!(
+            "streaming-open: SKIPPED sealed hint tables: {} is absent",
+            path.display()
+        );
+        assert!(
+            !required(),
+            "streaming-open: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
+    println!(
+        "streaming-open: RAN sealed hint tables over {}",
+        path.display()
+    );
     let source = Arc::new(CountingSource::new(SliceSource::new(bytes.clone())));
     let document = Document::open_streaming(source).expect("it opens");
     assert!(document.is_encrypted(), "the fixture is encrypted");
@@ -1624,4 +1655,10 @@ fn a_linearized_file_behind_leading_junk_still_opens_from_its_head() {
         kinds.contains(&WarningKind::WholeFileFetched),
         "the first-page section's own entries are not shifted, and that is warned: {kinds:?}"
     );
+}
+
+/// Whether a missing corpus is a failure rather than a skip: the corpus job
+/// sets `TINKER_CORPUS_REQUIRED`, so a census there cannot pass over nothing.
+fn required() -> bool {
+    std::env::var_os("TINKER_CORPUS_REQUIRED").is_some_and(|value| value != "0")
 }

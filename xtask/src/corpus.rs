@@ -180,6 +180,10 @@ pub struct RunArgs {
     pub record: bool,
     /// Treat a rise in the degradation rate as a regression too.
     pub strict: bool,
+    /// Run this one file's child alone, `<corpus>/<path>` with the path as
+    /// `report.json` names it, and print every line it wrote and where it
+    /// stopped (MS-20).
+    pub trace: Option<String>,
 }
 
 impl Default for RunArgs {
@@ -201,6 +205,7 @@ impl Default for RunArgs {
             check: false,
             record: false,
             strict: false,
+            trace: None,
         }
     }
 }
@@ -263,6 +268,7 @@ impl RunArgs {
                 "--check" => out.check = true,
                 "--record" => out.record = true,
                 "--strict" => out.strict = true,
+                "--trace" => out.trace = Some(value()?),
                 other => return Err(format!("unknown option `{other}`")),
             }
             index += 1;
@@ -282,6 +288,13 @@ impl RunArgs {
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let args = RunArgs::parse(args)?;
     let corpora = lock::read(root)?;
+    // A traced path is checked before anything is resolved or spawned, so a
+    // path no corpus holds is refused by name rather than by whatever would
+    // have failed first.
+    let traced = match &args.trace {
+        Some(spec) => Some(traced_file(root, &corpora, spec)?),
+        None => None,
+    };
     let (fonts, fonts_path) = resolve_fonts(root, &args)?;
     let child = resolve_child(&args, fonts_path.as_deref())?;
 
@@ -313,6 +326,9 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+    }
+    if let (Some(spec), Some((corpus, relative, file))) = (&args.trace, traced) {
+        return trace(spec, corpus, &relative, &file, &args, &child, &passwords);
     }
 
     let mut limits: Vec<String> = Vec::new();
@@ -716,6 +732,106 @@ pub fn run_files(
         .into_inner()
         .expect("the results lock");
     out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
+/// The arguments a traced child runs with after the run's own: pages one and
+/// two, each render's stages announced and timed, and its draw stopped at
+/// three hundred seconds with the counts it reached (MS-20).
+pub const TRACE_ARGS: [&str; 5] = ["--stages", "--stage-limit", "300", "--pages", "1-2"];
+
+/// The corpus, the path and the file a `--trace` names, as `<corpus>/<path>`
+/// with the path as `report.json` names it; refused by name where no locked
+/// corpus holds it.
+fn traced_file<'a>(
+    root: &Path,
+    corpora: &'a [lock::Corpus],
+    spec: &str,
+) -> Result<(&'a lock::Corpus, String, PathBuf), String> {
+    let (name, relative) = spec
+        .split_once('/')
+        .filter(|(name, relative)| !name.is_empty() && !relative.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "`--trace {spec}` names no file: it takes <corpus>/<path>, the path as \
+                 report.json names it"
+            )
+        })?;
+    let corpus = corpora
+        .iter()
+        .find(|corpus| corpus.name == name)
+        .ok_or_else(|| {
+            format!(
+                "`--trace {spec}`: `{name}` is not a corpus in {}",
+                lock::LOCK_PATH
+            )
+        })?;
+    let file = lock::files_dir(root, corpus).join(relative);
+    if !file.is_file() {
+        return Err(format!(
+            "`--trace {spec}`: corpus `{name}` holds no `{relative}` at {}",
+            file.display()
+        ));
+    }
+    Ok((corpus, relative.to_string(), file))
+}
+
+/// `corpus-run --trace`: one file's child alone, under `--timeout` or its
+/// corpus's own, printing every line it wrote and then where it stopped. Green
+/// whatever the child did: what it printed is the result.
+fn trace(
+    spec: &str,
+    corpus: &lock::Corpus,
+    relative: &str,
+    file: &Path,
+    args: &RunArgs,
+    child: &Child,
+    passwords: &crate::passwords::Passwords,
+) -> Result<(), String> {
+    let timeout = match (args.timeout_explicit, corpus.timeout_seconds) {
+        (false, Some(seconds)) => Duration::from_secs(seconds),
+        _ => args.timeout,
+    };
+    let mut traced_child = child.clone();
+    traced_child
+        .args
+        .extend(TRACE_ARGS.iter().map(|arg| (*arg).to_string()));
+    let extra = match passwords.for_corpus(&corpus.name).get(relative) {
+        Some(password) => vec!["--password".to_string(), (*password).to_string()],
+        None => Vec::new(),
+    };
+    eprintln!(
+        "corpus-run: tracing {spec}, {} s, `{} {}`",
+        timeout.as_secs(),
+        traced_child.program.display(),
+        traced_child.args.join(" ")
+    );
+    let traced = runner::trace_one(&traced_child, file, relative, timeout, &extra);
+    print!("{}", trace_report(spec, &traced));
+    Ok(())
+}
+
+/// What a trace prints: every line the child wrote, then `trace:` with its
+/// outcome, the phase it stopped in, the last line it wrote and the CPU time
+/// it had used when it was killed.
+pub fn trace_report(spec: &str, traced: &runner::Traced) -> String {
+    let mut out = traced.lines.clone();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    let at = match &traced.result.outcome {
+        runner::Outcome::TimedOut { at } | runner::Outcome::Stalled { at } => at.as_str(),
+        _ => "",
+    };
+    out.push_str(&format!(
+        "trace: {spec} {} at {at:?} last {:?} cpu {}, {} ms\n",
+        traced.result.outcome.label(),
+        traced.result.last.as_deref().unwrap_or(""),
+        traced
+            .cpu_seconds
+            .map_or_else(|| "unread".to_string(), |seconds| format!("{seconds:.2} s")),
+        traced.result.millis
+    ));
     out
 }
 

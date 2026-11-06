@@ -62,7 +62,7 @@ fn required() -> bool {
 
 /// The skip, said out loud — and refused when the corpus was required.
 fn skip() {
-    println!("SKIPPED (no corpus; set TINKER_CORPUS)");
+    println!("annotation-census: SKIPPED (no corpus; set TINKER_CORPUS)");
     assert!(
         !required(),
         "TINKER_CORPUS_REQUIRED is set and there is no corpus at TINKER_CORPUS: \
@@ -219,7 +219,10 @@ fn census_of_the_corpus_annotations() {
             candidates.push(path);
         }
     }
-    println!("RAN over {} files naming /Annots", candidates.len());
+    println!(
+        "annotation-census: RAN over {} files naming /Annots",
+        candidates.len()
+    );
     assert!(
         candidates.len() >= 1_000,
         "the fetched corpora carried 1 012 when this was written; found {}",
@@ -522,7 +525,7 @@ fn census_of_the_corpus_fonts() {
         return;
     };
     let files = all_pdfs(&root);
-    println!("RAN over {} corpus files", files.len());
+    println!("annotation-census: RAN over {} corpus files", files.len());
     assert!(
         files.len() >= 5_000,
         "the fetched corpora carried 5 605 files when this was written; found {}",

@@ -524,11 +524,11 @@ impl Tally {
 #[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
 fn agreement_with_the_corpus_annotations_per_clause_group() {
     let Some(root) = corpus_root() else {
+        println!("pdfa-ledger: SKIPPED (no corpus; set TINKER_CORPUS to the fetched corpus/files)");
         assert!(
             !required(),
             "TINKER_CORPUS_REQUIRED is set and there is no corpus at TINKER_CORPUS:              this census would have passed over nothing"
         );
-        println!("SKIPPED (no corpus; set TINKER_CORPUS to the fetched corpus/files)");
         return;
     };
     let mut files = Vec::new();
@@ -619,7 +619,7 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
     }
 
     println!(
-        "RAN over {annotated} annotated files of {} found",
+        "pdfa-ledger: RAN over {annotated} annotated files of {} found",
         files.len()
     );
     if unopenable > 0 {
@@ -767,11 +767,11 @@ fn agreement_with_the_corpus_annotations_per_clause_group() {
 #[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
 fn a_syntax_only_sweep_over_the_whole_corpus() {
     let Some(root) = corpus_root() else {
+        println!("pdfa-ledger: SKIPPED (no corpus; set TINKER_CORPUS to the fetched corpus/files)");
         assert!(
             !required(),
             "TINKER_CORPUS_REQUIRED is set and there is no corpus at TINKER_CORPUS:              this census would have passed over nothing"
         );
-        println!("SKIPPED (no corpus; set TINKER_CORPUS to the fetched corpus/files)");
         return;
     };
     let mut files = Vec::new();
@@ -798,7 +798,7 @@ fn a_syntax_only_sweep_over_the_whole_corpus() {
             *kinds.entry(label).or_default() += 1;
         }
     }
-    println!("RAN a syntax-only sweep over {swept} files");
+    println!("pdfa-ledger: RAN a syntax-only sweep over {swept} files");
     for (kind, count) in &kinds {
         println!("  {kind:<32} {count}");
     }

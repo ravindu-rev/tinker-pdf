@@ -160,6 +160,11 @@ fn pdfs_under(root: &Path, out: &mut Vec<PathBuf>) {
 fn census_of_the_corpus_icc_profiles() {
     let Some(root) = corpus_root() else {
         println!("icc-census: SKIPPED (no corpus; set TINKER_CORPUS)");
+        assert!(
+            !required(),
+            "icc-census: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
     let mut files = Vec::new();
@@ -262,6 +267,11 @@ fn what_the_parser_makes_of_the_corpus_profiles() {
 
     let Some(root) = corpus_root() else {
         println!("icc-reality: SKIPPED (no corpus; set TINKER_CORPUS)");
+        assert!(
+            !required(),
+            "icc-reality: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
     let mut files = Vec::new();
@@ -413,6 +423,11 @@ const REFUSED_SHAPES: [&str; 3] = [
 fn census_of_the_lut_profiles() {
     let Some(root) = corpus_root() else {
         println!("lut-census: SKIPPED (no corpus; set TINKER_CORPUS)");
+        assert!(
+            !required(),
+            "lut-census: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
     let mut files = Vec::new();
@@ -515,6 +530,11 @@ fn what_the_lookup_tables_make_of_ink() {
 
     let Some(root) = corpus_root() else {
         println!("lut-reality: SKIPPED (no corpus; set TINKER_CORPUS)");
+        assert!(
+            !required(),
+            "lut-reality: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
     let mut files = Vec::new();
@@ -633,4 +653,10 @@ fn what_the_lookup_tables_make_of_ink() {
              read wrongly rather than a profile being unusual"
         );
     }
+}
+
+/// Whether a missing corpus is a failure rather than a skip: the corpus job
+/// sets `TINKER_CORPUS_REQUIRED`, so a census there cannot pass over nothing.
+fn required() -> bool {
+    std::env::var_os("TINKER_CORPUS_REQUIRED").is_some_and(|value| value != "0")
 }

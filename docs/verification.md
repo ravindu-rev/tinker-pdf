@@ -252,6 +252,44 @@ before `phase render` are read, since a kill can cut the last line in half.
 Its outcome, its missing peak and every verdict, span and join count stay a
 finished child's alone.
 
+The census step holds every census it names to its own banner:
+`pdfa-ledger: RAN ...`, `structure-census: RAN ...`. It sets
+`TINKER_CORPUS_REQUIRED`, under which a census that finds no corpus fails by
+name rather than skipping, and it greps each census's banner, so a census that
+read nothing fails the step. `streaming_open.rs`'s three corpus tests are not
+`#[ignore]`d, so the step runs them by name in a command of its own.
+
+`corpus.yml`'s dispatch takes three inputs, each empty on the nightly, and
+each step or job it drives says so and does nothing without it.
+
+- **`trace`**, a file as `<corpus>/<path>` with the path as `report.json`
+  names it. `cargo xtask corpus-run --trace` runs that file's child alone,
+  after the fetch, under 900 seconds: pages one and two, every stage of a
+  render announced and timed, the draw stopped at 300 seconds with the counts
+  it reached. The runner prints every line the child wrote, then `trace:` with
+  the outcome, the phase it stopped in, its last line and, on Linux, the CPU
+  time it had used when it was killed (from `/proc/<pid>/stat`), which tells a
+  loop from a wait. A path no locked corpus holds is refused by name.
+- **`against`**, a revision. After the three bars, that revision's own runner
+  and child — the head's runner refuses an older child's records by their
+  version — run the reported-breakage corpus in the three settings over the
+  corpora the job fetched, into `corpus/against/`. `cargo xtask corpus-diff
+  BEFORE AFTER` compares each report with the head's file by file: per
+  relation, how many files went from held and how many came back, each file
+  whose verdict differs with both details, and the files one report lacks,
+  named and not compared. It refuses two reports of different settings. Each
+  file that went from held to broke on `dpi` is printed object by object,
+  dictionaries without stream data, with its probe, and `corpus/against/` is
+  kept in the `corpus-report` artifact.
+- **`bands_revision`**, a revision, runs a job of its own on one runner: that
+  revision's code and the head's each run the five corpora with no faces, one
+  after the other, over one fetch, and `cargo xtask corpus-peaks REPORT...`
+  prints each corpus's largest peak in both reports, with its file, the
+  children reporting, the phase that reached it and its file-backed share,
+  beside the committed band. It prints and decides nothing; the two reports
+  are kept in the `corpus-peaks` artifact. `cargo xtask corpusjob` holds each
+  job's checks to its own fetch.
+
 Encrypted fixtures are opened with the passwords their upstreams state. `tpdf`
 tries the empty password and nothing else, which is right for a tool and wrong
 for a census, so [corpus/passwords.tsv](../corpus/passwords.tsv) carries a row

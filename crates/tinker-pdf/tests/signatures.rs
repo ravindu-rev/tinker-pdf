@@ -393,11 +393,19 @@ fn files_naming_a_byte_range(root: &Path) -> Vec<PathBuf> {
 #[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
 fn census_of_the_corpus_signatures() {
     let Some(root) = corpus_root() else {
-        println!("SKIPPED (no corpus; set TINKER_CORPUS)");
+        println!("signatures: SKIPPED (no corpus; set TINKER_CORPUS)");
+        assert!(
+            !required(),
+            "signatures: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
     let candidates = files_naming_a_byte_range(&root);
-    println!("RAN over {} files naming /ByteRange", candidates.len());
+    println!(
+        "signatures: RAN over {} files naming /ByteRange",
+        candidates.len()
+    );
     assert!(
         candidates.len() >= 25,
         "the fetched corpora carried 25 when this was written; found {}",
@@ -605,4 +613,10 @@ fn census_of_the_corpus_signatures() {
         unreadable.is_empty(),
         "every candidate opened: {unreadable:?}"
     );
+}
+
+/// Whether a missing corpus is a failure rather than a skip: the corpus job
+/// sets `TINKER_CORPUS_REQUIRED`, so a census there cannot pass over nothing.
+fn required() -> bool {
+    std::env::var_os("TINKER_CORPUS_REQUIRED").is_some_and(|value| value != "0")
 }

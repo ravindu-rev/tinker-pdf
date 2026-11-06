@@ -324,13 +324,18 @@ fn declared_by_directory(relative: &str) -> Option<(Part, Option<Level>)> {
 #[ignore = "walks the fetched corpora; run with --ignored --nocapture"]
 fn census_of_the_flavours_the_corpus_claims() {
     let Some(root) = corpus_root() else {
-        println!("SKIPPED (no corpus; set TINKER_CORPUS)");
+        println!("pdfa-flavour: SKIPPED (no corpus; set TINKER_CORPUS)");
+        assert!(
+            !required(),
+            "pdfa-flavour: TINKER_CORPUS_REQUIRED is set and there is no corpus: \
+             this census would have passed over nothing"
+        );
         return;
     };
     let mut files = Vec::new();
     pdfs_under(&root, &mut files);
     files.sort();
-    println!("RAN over {} files", files.len());
+    println!("pdfa-flavour: RAN over {} files", files.len());
 
     let mut claimed: BTreeMap<String, usize> = BTreeMap::new();
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
@@ -455,4 +460,10 @@ fn census_of_the_flavours_the_corpus_claims() {
         "a flavour disagreed with its directory on a file that is not a          deliberate failure: {unexpected:#?}"
     );
     assert_eq!(disagreed, 10, "deliberate version-identification failures");
+}
+
+/// Whether a missing corpus is a failure rather than a skip: the corpus job
+/// sets `TINKER_CORPUS_REQUIRED`, so a census there cannot pass over nothing.
+fn required() -> bool {
+    std::env::var_os("TINKER_CORPUS_REQUIRED").is_some_and(|value| value != "0")
 }
