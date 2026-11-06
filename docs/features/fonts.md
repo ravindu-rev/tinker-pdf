@@ -21,8 +21,15 @@ two ways: a nesting depth of 8 and a total budget of 256 components, because a
 depth cap alone leaves a 64-component self-referencing glyph asking for 64^8
 outlines (ruling 1). Character lookup goes through the font's `cmap`,
 including the 9.6.6.4 route for symbolic fonts whose (3,0) subtable maps codes
-into the private-use block. Hinting is deliberately not interpreted; outlines
-render unhinted with anti-aliasing.
+into the private-use block. A symbolic font asks its `cmap` for the code
+first and for the character its `/ToUnicode` names after, a non-symbolic font
+the other way round: a symbolic font's table is keyed by its codes, and an
+office suite's subset numbers its glyphs in the order the document used them,
+so its space can be code 3 while U+0020, read as a code of the same table,
+reaches a letter. The validators read a glyph's advance through the same
+selection, so such a font's widths are judged against the glyphs it draws.
+Hinting is deliberately not interpreted; outlines render unhinted with
+anti-aliasing.
 
 **CFF / Type 2** (9.6.6). `Cff` parses the INDEX and DICT structures and runs
 Type 2 charstrings — implicit width on the first stack-clearing operator,

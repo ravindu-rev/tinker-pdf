@@ -938,6 +938,129 @@ fn an_embedded_cmaps_collection_is_the_cidfonts() {
 
 // ---- 6.3.6 / 6.2.11.5 / 6.2.10.5: font metrics ------------------------------
 
+/// The tables of a TrueType program, assembled: the offset table, a record
+/// a table sorted by tag, and each table padded to four bytes.
+fn sfnt(mut tables: Vec<(&[u8; 4], Vec<u8>)>) -> Vec<u8> {
+    tables.sort_by_key(|(tag, _)| **tag);
+    let count = tables.len() as u16;
+    let mut out = Vec::new();
+    out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    out.extend_from_slice(&count.to_be_bytes());
+    out.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // searchRange and the rest
+    let mut offset = 12 + 16 * tables.len();
+    let mut body = Vec::new();
+    for (tag, data) in &tables {
+        out.extend_from_slice(*tag);
+        out.extend_from_slice(&0u32.to_be_bytes()); // checksum, unread
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        let padded = data.len().div_ceil(4) * 4;
+        body.extend_from_slice(data);
+        body.resize(body.len() + padded - data.len(), 0);
+        offset += padded;
+    }
+    out.extend_from_slice(&body);
+    out
+}
+
+/// A symbolic subset as an office suite writes one: `.notdef`, a space 250
+/// units wide and a letter 722, empty outlines, and a (1,0) `cmap` keyed by
+/// the subset's own codes, code 3 the space and code 32 the letter — so the
+/// character U+0020 reaches the letter through it, as every such subset whose
+/// space is not code 32 does.
+fn symbolic_subset() -> Vec<u8> {
+    let mut head = vec![0u8; 54];
+    head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes()); // magic
+    head[18..20].copy_from_slice(&1000u16.to_be_bytes()); // unitsPerEm
+    let mut hhea = vec![0u8; 36];
+    hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    hhea[34..36].copy_from_slice(&3u16.to_be_bytes()); // numberOfHMetrics
+    let mut maxp = vec![0u8; 6];
+    maxp[0..4].copy_from_slice(&0x0000_5000u32.to_be_bytes());
+    maxp[4..6].copy_from_slice(&3u16.to_be_bytes()); // numGlyphs
+    let hmtx: Vec<u8> = [500u16, 250, 722]
+        .iter()
+        .flat_map(|advance| [advance.to_be_bytes(), 0u16.to_be_bytes()].concat())
+        .collect();
+    let loca = vec![0u8; 8]; // four short offsets, every outline empty
+    let glyf = vec![0u8; 4];
+    let mut cmap = Vec::new();
+    cmap.extend_from_slice(&0u16.to_be_bytes()); // version
+    cmap.extend_from_slice(&1u16.to_be_bytes()); // numTables
+    cmap.extend_from_slice(&1u16.to_be_bytes()); // platformID: Macintosh
+    cmap.extend_from_slice(&0u16.to_be_bytes()); // encodingID: Roman
+    cmap.extend_from_slice(&12u32.to_be_bytes()); // offset
+    cmap.extend_from_slice(&0u16.to_be_bytes()); // format 0
+    cmap.extend_from_slice(&262u16.to_be_bytes()); // length
+    cmap.extend_from_slice(&0u16.to_be_bytes()); // language
+    let mut glyphs = [0u8; 256];
+    glyphs[3] = 1;
+    glyphs[32] = 2;
+    cmap.extend_from_slice(&glyphs);
+    sfnt(vec![
+        (b"cmap", cmap),
+        (b"glyf", glyf),
+        (b"head", head),
+        (b"hhea", hhea),
+        (b"hmtx", hmtx),
+        (b"loca", loca),
+        (b"maxp", maxp),
+    ])
+}
+
+/// [`symbolic_subset`] in a symbolic TrueType font that draws codes 3 and 32,
+/// its `/ToUnicode` naming code 3 the space and code 32 a `D`, and `space` the
+/// dictionary's width for code 3.
+fn symbolic(space: u32) -> Fixture {
+    let mut fixture = conforming();
+    let mut widths = [500u32; 33];
+    widths[3] = space;
+    widths[32] = 722;
+    let widths: Vec<String> = widths.iter().map(u32::to_string).collect();
+    fixture.font = format!(
+        "/Type /Font /Subtype /TrueType /BaseFont /CAAAAA+Acme /FirstChar 0 \
+         /LastChar 32 /Widths [{}] /FontDescriptor 6 0 R /ToUnicode 8 0 R",
+        widths.join(" ")
+    );
+    fixture.descriptor = fixture.descriptor.replace("/Flags 32", "/Flags 4");
+    fixture.program = Some((String::new(), symbolic_subset()));
+    fixture.content = "BT /F1 12 Tf 10 10 Td <0320> Tj ET".to_string();
+    let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap\n\
+                /CMapName /Fixture-UCS def\n\
+                1 begincodespacerange <00> <FF> endcodespacerange\n\
+                2 beginbfchar <03> <0020> <20> <0044> endbfchar\n\
+                endcmap CMapName currentdict /CMap defineresource pop end end";
+    fixture.extra.push((8, stream("", cmap.as_bytes())));
+    fixture
+}
+
+/// **A symbolic subset's codes are read through its own `cmap`** (MS-14): an
+/// office suite's subset whose space is code 3 and whose code 32 is a letter
+/// is judged at the space's own advance, where reading code 3 as the
+/// character U+0020 reached the letter through that `cmap` and called a
+/// conforming font's widths inconsistent. A width that does disagree with the
+/// space is still a finding, so the rule still reads the program.
+#[test]
+fn a_symbolic_subset_reads_each_code_through_its_own_cmap() {
+    let widths = |fixture: &Fixture| -> Vec<FindingKind> {
+        widths_of(fixture)
+            .into_iter()
+            .map(|(_, kind)| kind)
+            .filter(|kind| matches!(kind, FindingKind::GlyphWidthInconsistent { .. }))
+            .collect()
+    };
+    assert_eq!(widths(&symbolic(250)), []);
+    assert_eq!(
+        widths(&symbolic(600)),
+        [FindingKind::GlyphWidthInconsistent {
+            code: 3,
+            dictionary: 600,
+            program: 250
+        }]
+    );
+}
+
 /// [`conforming`]'s TrueType font with a real program: one face covering `A`
 /// at 1000 units per em, its `A` `advance` units wide, and `widths` as the
 /// dictionary's `/Widths` for code 65.

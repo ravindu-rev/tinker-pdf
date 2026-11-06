@@ -3455,21 +3455,32 @@ impl PageResources {
 
         let text = font.text_of(code);
         let ch = text.chars().next();
-        let stated = match ch {
-            Some(c) => sfnt.glyph_for_char(c).filter(|g| *g != 0),
-            None => None,
-        }
+        let by_text = || ch.and_then(|c| sfnt.glyph_for_char(c)).filter(|g| *g != 0);
         // 9.6.6.4: a symbolic font's codes go through its `cmap`
         // directly rather than through a character — the (3,0)
         // subtable maps the code into the F0xx private-use block,
         // which is what `glyph_for_char` does with a character it is
         // handed. Without this a symbolic face fell straight to the
         // last resort below.
-        .or_else(|| {
+        let by_code = || {
             char::from_u32(code)
                 .and_then(|c| sfnt.glyph_for_char(c))
                 .filter(|g| *g != 0)
-        });
+        };
+        // **A symbolic font asks its code first.** Its `cmap` is keyed by
+        // the codes, and the character a code's `/ToUnicode` names is
+        // another code of the same table: an office suite's subset numbers
+        // its glyphs in the order the document used them, so the space can
+        // be code 3 while code 32, which U+0020 reaches through that table,
+        // is a letter. Asked the character first, every such space drew the
+        // letter, and both validators read the letter's advance against the
+        // space's width (MS-14). A table keyed by Unicode answers the code
+        // with nothing, and the character still decides there.
+        let stated = if font.is_symbolic() {
+            by_code().or_else(by_text)
+        } else {
+            by_text().or_else(by_code)
+        };
         if let Some(glyph) = stated {
             return Some(Selection::stated(glyph));
         }
