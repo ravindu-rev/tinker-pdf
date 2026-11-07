@@ -162,8 +162,11 @@ tiling pattern. The cell is rasterised once into a `/BBox`-sized offscreen
 canvas, with the pattern's own `/Resources`, and blitted across the lattice;
 `PaintType 2` recolours the finished cell with the underlying-space colour
 (8.7.3.3). The lattice is bounded before a pixel exists: 65 536 positions,
-16.7 Mpx per cell buffer, 33.5 Mpx of compositing per fill — past any bound
-the fill paints nothing and names the pattern. A pattern that fills with
+16.7 Mpx per cell buffer, and 33.5 million square points of compositing per
+fill — pixels at 72 dpi, counted in the default space and not in device
+pixels, so a lattice is drawn or refused alike at every scale and a page
+does not lose its pattern at a higher resolution — and past any bound the
+fill paints nothing and names the pattern. A pattern that fills with
 itself terminates at a nesting depth of 4. Shading patterns paint through
 the same shading machinery, and pattern *strokes* route through fill-of-
 outline, so both slots share one warning path and cannot diverge.
@@ -801,7 +804,7 @@ defect to hide in.
 | A page above 67.1 Mpx at the requested scale | `RenderWarning::PageScaledDown` | A whole page smaller beats a fragment at full size (ruling 2) | [rulings](../rulings.md) |
 | A font program that could not be read | `RenderWarning::UnreadableFont` | Its glyphs are not drawn; the rest of the page is | [content and text](content-and-text.md) |
 | A shading that cannot be read into types 1–7 | `RenderWarning::UnsupportedShading` | Reported by type number rather than guessed at | [rulings](../rulings.md) |
-| A pattern whose cell cannot be read, or a lattice past 65 536 positions / 16.7 Mpx / 33.5 Mpx | `RenderWarning::UnsupportedPattern` | Unpainted reads as missing; `/Pattern`'s nominal black reads as content and hides the gap | [rulings](../rulings.md) |
+| A pattern whose cell cannot be read, or a lattice past 65 536 positions, a cell past 16.7 Mpx, or a fill past 33.5 million square points of compositing, the same at every scale | `RenderWarning::UnsupportedPattern` | Unpainted reads as missing; `/Pattern`'s nominal black reads as content and hides the gap | [rulings](../rulings.md) |
 | A colour space whose parameters no space can mean, read the nearest way that does: a `/Lab` `/Range` pair written backwards, read as the span it covers; and a default colour space 8.6.5.6 does not allow — a `/Lab`, `/Indexed` or `/Pattern` one, one with another number of components than its device space, one that is no colour space — refused, the device space drawn as without it; and a JPEG's or JPEG 2000 image's `/ColorSpace` with another number of components than its samples, refused, the image drawn in the codec's own colour | `RenderWarning::RepairedColorSpace { name, reason }`, `reason` `LabRangeUnordered`; for a default, `name` the default's own (`DefaultRGB`) and `reason` `DefaultSpaceFamily`, `DefaultSpaceComponents` or `DefaultSpaceUnreadable`; for such an image, `name` the image's (`inline` for an inline one) and `reason` `ImageSpaceComponents`; once a render | Drawn *and* named (ruling 10). Named where the space is reached through the page's resources or a tiling cell's, as every tolerance the resource layer reports is; **not** through a form XObject's or an annotation appearance's own `/Resources`, which keep what they tolerate to themselves — a font a form's own resources cannot resolve goes unreported the same way | [rulings](../rulings.md) |
 | A layer the default configuration turns off | `RenderWarning::HiddenOptionalContent` | Correct behaviour, reported all the same — the one leniency a reader cannot see | [rulings](../rulings.md) |
 | A form, a soft mask's group or a Type 3 glyph procedure that names itself while it runs, directly or through the others, drawn once | `RenderWarning::RecursiveContent`, and `SvgWarning::Render` of it from `to_svg` | A cycle has no last run; refused at its first repeat by the stream's identity, the page is what every reader can draw, where the depth cap ended a branching cycle only after two or more runs to the sixteenth | [content and text](content-and-text.md) |

@@ -303,7 +303,7 @@ to paths — lives one layer up, in [rendering](rendering.md).
 | --- | --- | --- | --- |
 | A path past 1 048 576 verbs | `MAX_VERBS` (`geom.rs`); further verbs are dropped | A content stream can ask for unbounded geometry; a real page never does | [ruling 1](../rulings.md) |
 | A verb with a non-finite point | dropped at `Path` construction | A NaN cannot be rasterized, and dropping the verb keeps the rest of the path usable | [ruling 1](../rulings.md) |
-| A mesh costing more than 67 108 864 units of work | `MAX_MESH_WORK` (`mesh.rs`); `draw_mesh` returns `None`, reported as `RenderWarning::UnsupportedShading` | Half a mesh reads as an artefact where nothing reads as the gap it is | [rendering](rendering.md) |
+| A mesh costing more than 67 108 864 units of work, counted in the space it is drawn from (pixels at 72 dpi) so the same mesh is drawn or refused alike at every scale | `MAX_MESH_WORK` (`mesh.rs`); `draw_mesh` returns `None`, reported as `RenderWarning::UnsupportedShading` | Half a mesh reads as an artefact where nothing reads as the gap it is | [rendering](rendering.md) |
 | An image under a singular transform | `Transform::invert` returns `None`; the draw paints nothing | A determinant near zero maps the image to a sliver with no useful bits left | `image.rs` |
 | A cancelled render | `RenderWarning::Cancelled` | The sweep stops at the next scanline band, keeping the rows already swept | [rendering](rendering.md) |
 

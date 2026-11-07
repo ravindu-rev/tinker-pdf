@@ -603,6 +603,49 @@ fn tiling_page() -> Vec<u8> {
     builder.finish()
 }
 
+/// The construct the reported-breakage corpus's `issue2177.pdf` draws
+/// (MS-18): a page filled by a coloured tiling pattern whose `/Matrix`
+/// skews it, its cell five steps wide each way, so every point of the page
+/// is under twenty-five cells, drawing paths and colours alone — a filled
+/// triangle and a stroked line.
+fn skewed_tiling_page() -> Vec<u8> {
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_tiling_pattern(
+        b"P1",
+        &TilingPattern {
+            bbox: [0.0, 0.0, 100.0, 100.0],
+            x_step: 20.0,
+            y_step: 20.0,
+            matrix: Some([1.4, 1.0, -0.5, 0.7, 0.0, 0.0]),
+            tiling_type: TilingType::NoDistortion,
+            content: b"0.9 0.2 0.1 rg 0 0 m 15 3 l 4 14 l h f \
+                       0.1 0.5 0.9 RG 2 w 0 0 m 18 18 l S",
+        }
+    ));
+    builder.add_page(225.0, 225.0, |page| {
+        assert!(page.set_fill_pattern(b"P1"));
+        page.raw(b"0 0 225 225 re f\n");
+    });
+    builder.finish()
+}
+
+/// **A skewed tiling pattern holds under a change of scale** (MS-18). Its
+/// lattice is 345 positions of a cell whose device box is 190 by 170 pixels
+/// at 72 dpi, and four times that at 144. The tiling fill's work budget was
+/// counted in device pixels, so the single render drew the pattern and the
+/// doubled one refused it: half the page moved. Counted in square points, a
+/// lattice is drawn or refused alike at every scale, and what moves is the
+/// edges of the cells as each render places them.
+#[test]
+fn a_tiling_pattern_under_a_skewing_matrix_holds_under_a_change_of_scale() {
+    let (moved, total) = dpi_relation(skewed_tiling_page());
+    assert!(
+        share(moved, total) <= DPI_BUDGET,
+        "{moved} of {total} pixels moved ({:.2}%)",
+        share(moved, total) * 100.0
+    );
+}
+
 /// **What a quarter turn moves, which is not what a change of scale moves.**
 ///
 /// The `dpi` sweep below found six of seven constructs at zero. `rotate` is a

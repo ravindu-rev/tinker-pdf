@@ -583,14 +583,23 @@ const MAX_TILES: u64 = 1 << 16;
 /// the render.
 const MAX_TILE_AREA: u64 = 1 << 24;
 
-/// The most pixels one tiling-pattern fill will composite across its whole
-/// lattice.
+/// The most one tiling-pattern fill will composite across its whole lattice,
+/// in square units of the default space the page is drawn from: pixels at
+/// 72 dpi.
 ///
 /// [`MAX_TILES`] alone does not bound the work, because `/XStep` may be much
 /// smaller than `/BBox` — that is a legal, common way to draw an overlapping
 /// weave — and then every cell costs its own area rather than its own step.
 /// The product is what runs away: 65 536 cells each covering a hundredth of
 /// the page is 650 pages' worth of compositing.
+///
+/// Counted in that space rather than in device pixels, because the pixels a
+/// lattice covers grow with the square of the render's scale while the
+/// pattern stays the same pattern: counted in pixels, a page painted its
+/// pattern at 72 dpi and left it out at 144, so whether a document showed
+/// its pattern was decided by the resolution it was asked for. A render at a
+/// higher scale composites more pixels for the same decision, as every paint
+/// does.
 const MAX_TILE_WORK: u64 = 1 << 25;
 
 /// The clip and the soft mask, with their page-frame rectangles, as `q` saves
@@ -979,6 +988,18 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// page. See the `frame` field.
     fn frame_area(&self) -> u64 {
         self.frame.area()
+    }
+
+    /// How many device pixels one square unit of the space `base` maps from
+    /// covers: the render's scale, squared, whatever it turns or mirrors.
+    /// One where `base` collapses the plane, which no page draws through.
+    fn pixels_per_square_unit(&self) -> f64 {
+        let det = (self.base.a * self.base.d - self.base.b * self.base.c).abs();
+        if det.is_finite() && det > 0.0 {
+            det
+        } else {
+            1.0
+        }
     }
 
     /// The rectangle a path's mask would have on a render of the whole page:
@@ -1808,6 +1829,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             triangles: &tessellation.triangles,
             color: &convert,
             stop: Some(&stop),
+            scale: self.pixels_per_square_unit().sqrt(),
         };
         let Some(mut buffer) = draw_mesh_over(&draw, wanted.rect(), whole.rect()) else {
             return false;
@@ -2030,9 +2052,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             return false;
         }
         // The page's frame rather than the canvas, so a tile of a page and
-        // the page take this decision against the same number.
+        // the page take this decision against the same number; and in square
+        // units of the default space rather than in pixels, so a render at
+        // another scale takes it against the same number too.
         let canvas_area = self.frame_area();
-        if tiles.saturating_mul(area.min(canvas_area.max(1))) > MAX_TILE_WORK {
+        let work = tiles.saturating_mul(area.min(canvas_area.max(1)));
+        if work as f64 / self.pixels_per_square_unit() > MAX_TILE_WORK as f64 {
             return false;
         }
         // Every decision above is the page's. Whether any of it lands on
@@ -5264,6 +5289,45 @@ mod tests {
         assert_eq!(tiles.drawn.get(), 1, "441 positions, one rasterization");
         assert_eq!(canvas.pixel(20, 20), Some(Color::rgb(0, 0, 255)));
         assert!(warnings.is_empty(), "nothing to report: {warnings:?}");
+    }
+
+    /// Whether a lattice is affordable is a question about the pattern, so
+    /// every scale answers it alike. A lattice of 1 503 positions, each a
+    /// whole page, fits the work budget at 72 dpi and is drawn at 288 too,
+    /// where its pixels are sixteen times as many — counted in pixels, the
+    /// same page lost its pattern from twice its scale up — and the lattice
+    /// of 24 000 that the budget refuses is refused at both.
+    #[test]
+    fn a_lattice_is_drawn_or_refused_alike_at_every_scale() {
+        for scale in [1.0, 4.0] {
+            let side = (40.0 * scale) as u32;
+            for (xstep, drawn) in [(0.16, true), (0.01, false)] {
+                let tiles = Tiles::new([0.0, 0.0, 40.0, 40.0], xstep, 40.0);
+                let canvas = Canvas::new(side, side, PixelFormat::Rgb8, Color::WHITE);
+                let mut renderer = Renderer::new(canvas, page_transform(40.0, scale), &tiles);
+                interpret(
+                    b"/Pattern cs /T0 scn 0 0 40 40 re f",
+                    Matrix::IDENTITY,
+                    &mut renderer,
+                    &OneChar,
+                );
+                let (canvas, warnings) = renderer.finish();
+                let refused = warnings
+                    .iter()
+                    .any(|w| matches!(w, RenderWarning::UnsupportedPattern { .. }));
+                assert_eq!(refused, !drawn, "step {xstep} at {scale}x: {warnings:?}");
+                let ink = if drawn {
+                    Color::rgb(0, 0, 255)
+                } else {
+                    Color::WHITE
+                };
+                assert_eq!(
+                    canvas.pixel(side / 2, side / 2),
+                    Some(ink),
+                    "step {xstep} at {scale}x"
+                );
+            }
+        }
     }
 
     /// One byte, one code, half an em wide.

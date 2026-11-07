@@ -58,11 +58,18 @@ use crate::geom::{FillRule, Path};
 ///   [`SLIVER_COST`] term, and without it a million degenerate triangles
 ///   stacked on ten pixels would pass a bounding-box budget untouched.
 ///
-/// Sixty-seven million is well above a full-page mesh at 300 dpi, which is
-/// about twenty million. Past it the mesh paints nothing and the caller
-/// reports it, which is the answer `fill_with_tiles` already gives for a
-/// lattice that will not fit: half a mesh reads as an artefact where nothing
-/// reads as the gap it is.
+/// Counted in units of the space the mesh is drawn from — rows and columns
+/// divided by [`MeshDraw::scale`], pixels at 72 dpi — and not in device
+/// pixels, because the pixels a mesh covers grow with the render's scale
+/// while the mesh stays the same mesh: counted in pixels, a page drew its
+/// mesh at 300 dpi and left it out at 600, so whether a document showed it
+/// was decided by the resolution it was asked for.
+///
+/// Sixty-seven million is well above a full-page mesh, which is about 1.2
+/// million at 72 dpi. Past it the mesh paints nothing and the caller reports
+/// it, which is the answer `fill_with_tiles` already gives for a lattice that
+/// will not fit: half a mesh reads as an artefact where nothing reads as the
+/// gap it is.
 pub const MAX_MESH_WORK: u64 = 1 << 26;
 
 /// What one row of a triangle costs the coverage sweep: three edges, at the
@@ -101,6 +108,10 @@ pub struct MeshDraw<'a> {
     /// Asked at each triangle and every sixteenth of its rows, which is the
     /// same scanline-band granularity [`fill`] promises.
     pub stop: Option<&'a dyn Fn() -> bool>,
+    /// Device pixels to one unit of the space the mesh is drawn from, along
+    /// each axis: the render's scale. [`MAX_MESH_WORK`] is counted in that
+    /// space, so the same mesh is drawn or refused alike at every scale.
+    pub scale: f64,
 }
 
 /// One mesh, rasterized.
@@ -201,8 +212,13 @@ pub fn draw_mesh_over(
 
     // The budget first, over the whole mesh, before a pixel is touched: a
     // refusal must not depend on how far the render got — nor on how much of
-    // the picture this caller asked for.
-    let mut work = 0u64;
+    // the picture this caller asked for, nor on the scale it asked for it at.
+    let scale = if draw.scale.is_finite() && draw.scale > 0.0 {
+        draw.scale
+    } else {
+        1.0
+    };
+    let mut work = 0.0f64;
     for triangle in draw.triangles {
         let Some(corners) = corners(draw, triangle) else {
             continue;
@@ -210,11 +226,10 @@ pub fn draw_mesh_over(
         let Some(box_) = clamped_box(&corners, &whole) else {
             continue;
         };
-        let rows = (box_.y1 - box_.y0) as u64;
-        let columns = (box_.x1 - box_.x0) as u64;
-        work = work.saturating_add(rows.saturating_mul(columns));
-        work = work.saturating_add(rows.saturating_mul(SLIVER_COST));
-        if work > MAX_MESH_WORK {
+        let rows = (box_.y1 - box_.y0) as f64 / scale;
+        let columns = (box_.x1 - box_.x0) as f64 / scale;
+        work += rows * columns + rows * SLIVER_COST as f64;
+        if work > MAX_MESH_WORK as f64 {
             return None;
         }
     }
@@ -522,6 +537,7 @@ mod tests {
             triangles,
             color: &color,
             stop: None,
+            scale: 1.0,
         };
         draw_mesh(&draw, 0, 0, size, size).expect("it fits the budget")
     }
@@ -692,6 +708,7 @@ mod tests {
             triangles: &triangles,
             color: &color,
             stop: None,
+            scale: 1.0,
         };
         assert!(
             draw_mesh(&draw, 0, 0, 2000, 2000).is_none(),
@@ -701,6 +718,50 @@ mod tests {
         // And the same mesh into a region only a few rows tall fits, because
         // the budget is charged on the clamped boxes.
         assert!(draw_mesh(&draw, 0, 0, 8, 4).is_some());
+    }
+
+    /// Whether a mesh is affordable is a question about the mesh, so every
+    /// scale answers it alike. Two thousand slivers a hundred units tall fit
+    /// the budget at the space's own scale, and drawn eight times as large —
+    /// eight times the rows their edges cross, more than sixty times the
+    /// pixels in their boxes — they are drawn too, where a budget counted in
+    /// device pixels refused them; forty thousand two thousand units tall are
+    /// refused at both.
+    #[test]
+    fn a_mesh_is_drawn_or_refused_alike_at_every_scale() {
+        for scale in [1.0, 8.0] {
+            for (count, tall, drawn) in [(2_000u32, 100.0, true), (40_000, 2000.0, false)] {
+                let mut positions = Vec::new();
+                let mut values = Vec::new();
+                let mut triangles = Vec::new();
+                for index in 0..count {
+                    let x = f64::from(index % 3);
+                    positions.push((x * scale, 0.0));
+                    positions.push(((x + 0.5) * scale, 0.0));
+                    positions.push((x * scale, tall * scale));
+                    values.extend_from_slice(&[0.0, 0.5, 1.0]);
+                    let base = index * 3;
+                    triangles.push([base, base + 1, base + 2]);
+                }
+                let color = grey;
+                let draw = MeshDraw {
+                    positions: &positions,
+                    values: &values,
+                    components: 1,
+                    triangles: &triangles,
+                    color: &color,
+                    stop: None,
+                    scale,
+                };
+                let width = (4.0 * scale) as u32;
+                let height = (tall * scale) as u32;
+                assert_eq!(
+                    draw_mesh(&draw, 0, 0, width, height).is_some(),
+                    drawn,
+                    "{count} slivers {tall} tall at {scale}x"
+                );
+            }
+        }
     }
 
     /// Ruling 4's weaker half, checked here because a mesh has two passes and
