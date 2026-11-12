@@ -203,7 +203,7 @@ already carries it.
 | --- | --- | --- | --- |
 | `glyphs_shown` | a glyph the interpreter showed the renderer (`Device::show_glyph`, `crates/tinker-pdf-render/src/lib.rs:2847`) | the renderer | built |
 | `outlines_filled` | a glyph outline the renderer built into a path and painted | the renderer | built |
-| `font_dictionaries_resolved` | a font dictionary read: each font `cos_font::from_resources` returns when a scope is built (`crates/tinker-pdf/src/resources.rs:585`), and each `fonts::font_dict` lookup (`crates/tinker-pdf/src/fonts.rs:215`), which `type3_glyph` makes for every glyph (`resources.rs:1428`) | the facade's scopes | built |
+| `font_dictionaries_resolved` | a font dictionary a scope reads: once for each name its content selects a font by — the `/Font` entry, or a reserved name's object, when it is a dictionary — at the first question about the name or about the id another scope over the same dictionary handed out (P-02, "The font table") | the facade's scopes (`PageResources::scope_font`) | built |
 | `images_decoded` | an image decoder run: an image XObject's cache miss, and every inline image, which is never cached (`resources.rs:222-224`); in an image extraction, each entry it lists and every inline image | the facade's scopes | built |
 | a `_hits` and a `_misses` for each of the five caches `Caches` holds — font programs, images, ICC transforms, glyph outlines, form scopes (`resources.rs:63-101`) | a lookup that found an entry, a cached `None` included, or one that did not | the facade's scopes | built |
 | `page_walks` | a walk of the page tree from its root | `collect_upto` itself, for every caller | built |
@@ -468,7 +468,7 @@ lands in the step named, in
 | A2 | redaction | `a2_redaction_is_linear_in_pages` | P-01, P-01.4, landed |
 | A2 | validation | `a2_validation_is_linear_in_pages` | P-01, P-01.3, landed |
 | A2 | a 1 000-chapter book against 100 chapters, beyond the exit's nine | `a2_a_thousand_chapter_book_costs_at_most_eleven_times_a_hundred` | P-18, P-18.5, entered landed |
-| A3 | font dictionaries resolved per page ≤ distinct `/Font` entries used | `a3_fonts_resolved_per_page_are_at_most_the_fonts_it_uses` | P-02, P-02.3 |
+| A3 | font dictionaries resolved per page ≤ distinct `/Font` entries used | `a3_fonts_resolved_per_page_are_at_most_the_fonts_it_uses` | P-02, P-02.3, landed |
 | A4 | glyph masks rasterised ≤ distinct (font, glyph, scale, phase) keys, hit ratio ≥ 98 % on a 5 600-glyph page | `a4_glyph_masks_rasterised_are_at_most_their_distinct_keys` | P-06, P-06.3 |
 | A5 | inflate calls per stream ≤ 1 per operation: a save | `a5_a_save_decodes_each_stream_at_most_once` | P-03, P-03.2 |
 | A5 | a render | `a5_a_render_decodes_each_stream_at_most_once` | P-03, P-03.2 |
@@ -2229,9 +2229,9 @@ step that brings it within bound.
 
 | Question | Asked | What it reads each time | Step |
 | --- | --- | --- | --- |
-| `type3_glyph` | every glyph | the font's dictionary out of `/Font`, copied, with `/Font`, `/Subtype` and the font's name looked up by their bytes; for a Type 3 font, `/Encoding`, `/Differences` walked from its first item, `/CharProcs` and `/FontMatrix` | P-02.3 the kind, P-02.4 the record; P-02.2 the keys, landed |
-| `font_object`, `resource_name`, `selection` | every glyph a save's subset walk records (`subset::show`), and each outline the renderer extracts | `font_ids` scanned for the id and the name copied; `font_object` the `/Font` subdictionary copied too (`font_table`) | P-02.3 |
-| a scope's construction | every scope: a page's, a form's, a pattern cell's, an appearance's, the font rule's | every font its `/Font` names, read with its CMaps (`stats::fonts`), used or not; and `for_one_render` and `bind` copy the two maps it filled for every render and every counting asker | P-02.3 |
+| `type3_glyph` | every glyph | the font's dictionary out of `/Font`, copied, with `/Font`, `/Subtype` and the font's name looked up by their bytes; for a Type 3 font, `/Encoding`, `/Differences` walked from its first item, `/CharProcs` and `/FontMatrix` | P-02.4 the record; P-02.2 the keys and P-02.3 the kind, landed |
+| `font_object`, `resource_name`, `selection` | every glyph a save's subset walk records (`subset::show`), and each outline the renderer extracts | `font_ids` scanned for the id and the name copied; `font_object` the `/Font` subdictionary copied too (`font_table`) | P-02.3, landed |
+| a scope's construction | every scope: a page's, a form's, a pattern cell's, an appearance's, the font rule's | every font its `/Font` names, read with its CMaps (`stats::fonts`), used or not; and `for_one_render` and `bind` copy the two maps it filled for every render and every counting asker | P-02.3, landed |
 | `color_space`, `selected_space` | each `cs` and `CS` that names a resource, three readings; each `sc` and `scn` in one, two | `/ColorSpace`, the entry and its parse | P-02.5 |
 | `function` | each `sh`, each shading pattern's fill | the shading's `/Function`, read and parsed | P-02.5 |
 | `ext_g_state` | each `gs` | nothing: kept by name already (`Caches::states`) | P-02.5 counts it |
@@ -2261,14 +2261,17 @@ to.
   firmly, so a missing font is looked for once.
 
 Beside the entries by name, the table keeps each entry by its id, which is what
-`font_object`, `resource_name`, `selection`, `program` and the renderer's
-outlines are asked by. Every id a question carries was handed out by
-`font_id` on a scope over the same caches, so an id the table does not know is
-one no glyph of the scope carries: a reserved name's id answers by the object
-it spells, as now, and any other id answers nothing. Every font `/Font` binds
-and every reserved name a state gives is kept, which the dictionaries bound;
-the names that select nothing are kept while the table holds fewer than 4 096
-entries, and past that each is looked for again at each question.
+`font_object`, `selection`, `program` and the renderer's outlines are asked
+by. An id the table does not know yet was handed out by another scope over the
+same dictionary — an appearance is drawn over two, the interpreter's and the
+renderer's (`annots::draw_prepared`), and the renderer's is asked for outlines
+by the ids the interpreter's gave — so it is looked for among the scope's
+`/Font` names, whose keys carry the ids, and the font it names read on that
+first question; a reserved name's id answers by the object it spells, and an
+id no name carries answers nothing, kept as firmly. Every font `/Font` binds and every
+reserved name a state gives is kept, which the dictionaries bound; the names
+and ids that select nothing are kept while the table holds fewer than 4 096 of
+each, and past that each is looked for again at each question.
 
 **What reads it.**
 
@@ -2278,7 +2281,7 @@ entries, and past that each is looked for again at each question.
 | `font_id` | the entry's id; a reserved name's id where it has no entry, as now; else 0 |
 | `type3_glyph` | the entry's kind first: a glyph of any other font is answered from it, with nothing read or copied |
 | `font_object` | the entry's reference, by id |
-| `resource_name`, `selection`, `program`, `extract_outline` | the entry by id: its name, its `Font`, and for a program its dictionary — the embedded program's descriptor and a substitute's request (`FontRequest::read`) read from it, not from a second lookup (`fonts::font_dict`) |
+| `selection`, `program`, `extract_outline` | the entry by id: its name, its `Font`, and for a program its dictionary — the embedded program's descriptor and a substitute's request (`FontRequest::read`) read from it, not from a second lookup |
 | `font_objects`, `direct_fonts` | the `/Font` subdictionary itself, unchanged: they list every font a scope names, used or not, which is what lets subsetting say a scope was walked and never showed a font |
 
 **The kind** an entry records is the one `type3_glyph` reads: whether the
@@ -2521,7 +2524,7 @@ cos's `fonts.rs` reads its fonts through `cos_font::from_resources` itself.
 | Risk | Mitigation |
 | --- | --- |
 | A font read on first use answers differently from one read when the scope was built | The same reader (`cos_font::read_in`) over the same dictionary, through the same view; `text_options.rs`, `type3_fonts.rs`, `composite_fonts.rs` and every fingerprint unchanged |
-| An id the table does not know reaches `font_object`, `selection` or `program` | Every id a glyph carries was handed out by `font_id` on a scope over the same caches; a reserved id still answers by its object; every subset test unchanged |
+| An id the table does not know reaches `font_object`, `selection` or `program` | It is looked for among the scope's `/Font` names, whose keys carry the ids, once; a reserved id still answers by its object; every subset test and the annotation suites unchanged |
 | Subsetting stops seeing a font a scope names and never shows | `font_objects` and `direct_fonts` read the `/Font` subdictionary itself, unchanged |
 | A hostile content names a million fonts that are not there | Names that select nothing are kept only while the table holds fewer than 4 096 entries |
 | The Type 3 record and the walk disagree on an odd `/Differences` | `the_type3_table_answers_what_the_walk_answered` over generated arrays with repeated codes, negative and real counters and indirect items, against the walk kept test-only |

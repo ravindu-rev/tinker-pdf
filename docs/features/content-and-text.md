@@ -554,8 +554,8 @@ box each, and `TextWriter` serialises pages as JSON, XML or HTML.
 **Counted work.** `Page::text_counted(&TextOptions)` returns what
 `Page::text_with` returns for the same options, to the byte, with a `Stats` of
 what extracting it did ([rendering](rendering.md) names the counters): the
-fonts the page's scope reads when it is built, the lookup of its font's
-dictionary each glyph makes, each form's scope the interpreter asks for, and
+fonts the page's scope reads, once for each name its content selects a font
+by, each form's scope the interpreter asks for, and
 the streams decoded — the content, and a form's at each `Do` — over a scope
 with no font provider, so a build's bundled faces change nothing.
 `Page::images_counted()` returns `Page::images()`'s list with the same:

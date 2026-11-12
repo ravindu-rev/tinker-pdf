@@ -196,13 +196,16 @@ const ROSTER: &[Guard] = &[
             "P-01.3",
         )
     },
-    owed(
-        "A3",
-        "font dictionaries resolved per page at most the distinct /Font entries used",
-        "a3_fonts_resolved_per_page_are_at_most_the_fonts_it_uses",
-        "P-02",
-        "P-02.3",
-    ),
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A3",
+            "font dictionaries resolved per page at most the distinct /Font entries used",
+            "a3_fonts_resolved_per_page_are_at_most_the_fonts_it_uses",
+            "P-02",
+            "P-02.3",
+        )
+    },
     owed(
         "A4",
         "glyph masks rasterised at most the distinct (font, glyph, scale, phase) keys, \
@@ -1169,6 +1172,77 @@ fn a2_redaction_is_linear_in_pages() {
         }
         edited(&editor)
     });
+}
+
+// ---- A3: the fonts a page reads -------------------------------------------------
+
+/// A3's page: the embedded face under two names, a third font the page names
+/// and never selects, and a form drawn twice whose own `/Resources` name the
+/// face again beside a font the form never selects. 1 the catalog, 2 the page
+/// tree, 3 the page, 4 its content, 5 to 7 the face, 8 the unused font, 9 the
+/// form.
+fn a3_page() -> Vec<u8> {
+    let content = "BT /F1 12 Tf 10 70 Td (Shared) Tj /F2 12 Tf ( twice) Tj ET\n\
+                   q 1 0 0 1 10 10 cm /Fm1 Do Q\nq 1 0 0 1 10 40 cm /Fm1 Do Q\n";
+    let mut objects = vec![
+        object("<< /Type /Catalog /Pages 2 0 R >>"),
+        object("<< /Type /Pages /Count 1 /Kids [3 0 R] >>"),
+        object(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
+             /Resources << /Font << /F1 5 0 R /F2 5 0 R /F3 8 0 R >> /XObject << /Fm1 9 0 R >> >>\n\
+             /Contents 4 0 R >>",
+        ),
+        deflated("", content.as_bytes()),
+    ];
+    objects.extend(face(5));
+    objects.push(object(
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ));
+    objects.push(deflated(
+        "/Type /XObject /Subtype /Form /BBox [0 0 100 20]\n\
+         /Resources << /Font << /F1 5 0 R /F4 8 0 R >> >>",
+        b"BT /F1 10 Tf 2 5 Td (form) Tj ET",
+    ));
+    pdf(&objects)
+}
+
+/// The distinct `/Font` entries [`a3_page`]'s content selects a font by, each
+/// scope's apart: the page's `F1` and `F2`, and the form's `F1`.
+const A3_ENTRIES_USED: u64 = 3;
+
+/// **A3**: the font dictionaries a page's render and its text extraction read
+/// are at most the distinct `/Font` entries its content selects a font by,
+/// whatever the glyphs: a font named twice is read under each name, a font
+/// the page names and never selects is not read, and a form's own scope reads
+/// its own once however often the form is drawn.
+#[test]
+fn a3_fonts_resolved_per_page_are_at_most_the_fonts_it_uses() {
+    let document = Document::open(a3_page()).expect("the A3 page opens");
+    let page = document.page(0).expect("its page");
+    let render = page
+        .render(&RenderOptions {
+            stats: true,
+            ..RenderOptions::default()
+        })
+        .stats
+        .expect("asked");
+    let (text, extraction) = page.text_counted(&TextOptions::default());
+    let read = text.plain_text();
+    for shown in ["Shared", "twice", "form"] {
+        assert!(read.contains(shown), "{shown:?} is read: {read:?}");
+    }
+    assert!(render.glyphs_shown > 0, "the render draws its glyphs");
+    for (door, stats) in [("render", render), ("text", extraction)] {
+        assert!(
+            stats.font_dictionaries_resolved <= A3_ENTRIES_USED,
+            "{door}: {} font dictionaries resolved over {A3_ENTRIES_USED} entries used: {stats:?}",
+            stats.font_dictionaries_resolved
+        );
+        println!(
+            "guard-a3-{door}: RAN {} font dictionaries resolved, at most {A3_ENTRIES_USED}",
+            stats.font_dictionaries_resolved
+        );
+    }
 }
 
 // ---- A5 and A6: a merge's save ------------------------------------------------

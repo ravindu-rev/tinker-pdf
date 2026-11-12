@@ -630,11 +630,12 @@ or a caller builds. `Stats` (`Copy`, `Default`, `Eq`, `#[non_exhaustive]`,
 every field a public `u64`) names them: `glyphs_shown`, every glyph the
 interpreter showed the renderer, and `outlines_filled`, every glyph outline it
 painted, both counted by the renderer, a tiling pattern's cell included;
-`font_dictionaries_resolved`, each font a resource scope reads when it is
-built and each lookup of a font dictionary by name — one a glyph, the
-interpreter asking whether its font is a Type 3 font, and one more for each
-font with no program of its own when there are substitute faces to ask — a
-`bundled-fonts` build's, or a provider given to the document;
+`font_dictionaries_resolved`, each font a resource scope reads — once for
+each name its content selects a font by, the first time the scope is asked
+about the name, and kept for every render over the scope: a font a scope
+names and never selects is not read, a glyph asks the font its scope read
+whether it is a Type 3 font, and a substitute is asked for from the
+dictionary read;
 `images_decoded`, an image XObject's decode on a cache miss and every inline
 image's; and a `_hits` and a `_misses` for each of the five caches a page's
 resources keep — `font_program`, `image`, `icc_transform`, `glyph_outline` and

@@ -72,11 +72,12 @@ pub struct Stats {
     ///
     /// Counted by the renderer, as `glyphs_shown` is.
     pub outlines_filled: u64,
-    /// Font dictionaries read: each font a resource scope resolves when it is
-    /// built, used or not, and each lookup of one font dictionary by its
-    /// resource name — which today is made for every glyph the interpreter
-    /// meets, to ask whether its font is a Type 3 font, and once a font when a
-    /// substitute is requested for it.
+    /// Font dictionaries read: one for each name a resource scope's content
+    /// selects a font by — its `/Font` entry, or the object a graphics
+    /// state's `/Font` names — read the first time the scope is asked about
+    /// the name, or about the id another scope over the same dictionary
+    /// handed out, and kept for every render over the scope. A font a scope
+    /// names and never selects is not read, and no glyph reads one.
     ///
     /// Counted by the facade's resource scopes.
     pub font_dictionaries_resolved: u64,

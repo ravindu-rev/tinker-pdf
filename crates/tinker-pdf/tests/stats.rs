@@ -15,15 +15,19 @@
 //!
 //! What today's code does, once, so the derivations below can cite it:
 //!
-//! - a scope reads every font its `/Font` dictionary names when it is built;
+//! - a scope reads a font the first time its content selects it by a name,
+//!   and keeps it; a font it names and never selects is never read, and a
+//!   scope that is asked by id about a font another scope over the same
+//!   dictionary handed out — an appearance's renderer, after its
+//!   interpreter — reads it at that first question;
 //! - the interpreter asks for each glyph whether its font is a Type 3 font,
-//!   which reads the font's dictionary by name again (`type3_glyph`);
+//!   which the scope answers from the font it read (`type3_glyph`);
 //! - the renderer asks for each glyph's outline, and an outline not yet in
 //!   the scope's cache is extracted from the font's program, which the scope
 //!   reads once a font and keeps — a font with no program, kept as absent too;
-//! - a font with no program of its own asks for a substitute once, reading
-//!   its dictionary for the request: in a `bundled-fonts` build the bundled
-//!   faces answer, and in the default build there is no one to ask;
+//! - a font with no program of its own asks for a substitute once, from the
+//!   dictionary its scope read: in a `bundled-fonts` build the bundled faces
+//!   answer, and in the default build there is no one to ask;
 //! - `Do` on a form asks for its scope twice, the interpreter and the
 //!   renderer each, and a form's scope is built once and kept;
 //! - an image XObject is decoded once a page and kept, an inline image every
@@ -273,8 +277,6 @@ fn glyphs_and_an_image_stats() -> Stats {
             codes.len() as u64
         })
         .sum();
-    let embedded = 1;
-    let without_a_program = fonts - embedded;
     let mut expected = Stats::default();
     expected.glyphs_shown = shown;
     // Every glyph the embedded face has an outline for; the two fonts with no
@@ -284,11 +286,10 @@ fn glyphs_and_an_image_stats() -> Stats {
     } else {
         SHOWN[0].1.len() as u64
     };
-    // The page's scope reads its three fonts, each glyph reads its font's
-    // dictionary to ask whether it is a Type 3 font, and in a bundled build
-    // each font with no program reads its own again to ask for a substitute.
-    expected.font_dictionaries_resolved =
-        fonts + shown + if BUNDLED { without_a_program } else { 0 };
+    // The page's scope reads each of its three fonts at its first glyph; no
+    // glyph reads one again, and a substitute is asked for from the
+    // dictionary read.
+    expected.font_dictionaries_resolved = fonts;
     expected.glyph_outline_misses = distinct;
     expected.glyph_outline_hits = shown - distinct;
     // One program read a font, at its first outline; every other extraction
@@ -453,9 +454,10 @@ fn a_form_shown_three_times_builds_its_scope_once() {
     );
     expected.glyphs_shown = shown;
     expected.outlines_filled = shown;
-    // The page's scope reads its one font, the form's scope its own one once,
-    // and every glyph its font's dictionary.
-    expected.font_dictionaries_resolved = 1 + 1 + shown;
+    // The form's scope reads its one font at its first glyph and keeps it
+    // across the three invocations; the page's names one nothing selects,
+    // which is not read.
+    expected.font_dictionaries_resolved = 1;
     // Each `Do` asks twice; the first ask builds the scope.
     expected.form_scope_misses = 1;
     expected.form_scope_hits = 2 * 3 - 1;
@@ -521,10 +523,9 @@ fn render_form_counts_the_scope_it_reads_the_name_in() {
     );
     expected.glyphs_shown = shown;
     expected.outlines_filled = shown;
-    // The scope the name is read in and the render's own each read the
-    // page's one font; the form's scope reads its own once; every glyph reads
-    // its font's dictionary.
-    expected.font_dictionaries_resolved = 1 + 1 + 1 + shown;
+    // The form's scope reads its own font once; the scope the name is read
+    // in and the render's own name one nothing selects, which neither reads.
+    expected.font_dictionaries_resolved = 1;
     expected.form_scope_misses = 1;
     expected.form_scope_hits = 1;
     expected.glyph_outline_misses = distinct;
@@ -735,8 +736,8 @@ fn a_pattern_cell_counts_what_it_draws() {
     );
     expected.glyphs_shown = 2;
     expected.outlines_filled = 2;
-    // The cell's scope reads its one font; each glyph reads it again.
-    expected.font_dictionaries_resolved = 1 + 2;
+    // The cell's scope reads its one font, at its first glyph.
+    expected.font_dictionaries_resolved = 1;
     expected.glyph_outline_misses = 2;
     expected.font_program_misses = 1;
     expected.font_program_hits = 1;
@@ -758,9 +759,10 @@ fn an_annotation_counts_both_scopes_its_appearance_builds() {
     );
     drawn.glyphs_shown = shown;
     drawn.outlines_filled = shown;
-    // Both of the appearance's scopes read its one font; every glyph reads
-    // it again.
-    drawn.font_dictionaries_resolved = 2 + shown;
+    // Both of the appearance's scopes read its one font: the interpreter's
+    // at its first glyph, the renderer's at its first outline, by the id the
+    // interpreter's handed out.
+    drawn.font_dictionaries_resolved = 2;
     drawn.glyph_outline_misses = shown;
     drawn.font_program_misses = 1;
     drawn.font_program_hits = shown - 1;
@@ -830,11 +832,10 @@ fn a_display_list_counts_through_the_resources_it_keeps() {
     // not decoded again; `F1`'s program and the image are, at the first
     // outline and the first `Do` the replay meets.
     let mut expected = decoding(direct, &[(7, 1, program_len()), (8, 1, SAMPLES.len())]);
-    // Nor is a scope built, nor does a glyph ask whether its font is a Type 3
-    // font; only a bundled build's substitute requests, made at the first
-    // outline, read a dictionary.
-    let without_a_program = 2;
-    expected.font_dictionaries_resolved = if BUNDLED { without_a_program } else { 0 };
+    // Nor is a font read: the recording read the page's three, and a bundled
+    // build's substitute requests, made at the first outline, read the
+    // dictionaries it kept.
+    expected.font_dictionaries_resolved = 0;
     assert_eq!(first, expected, "the first replay");
 
     let second = list.render(&asking()).stats.expect("asked");
@@ -865,8 +866,11 @@ fn a_display_list_counts_the_annotations_it_keeps() {
 
     // The appearance was decoded, its scopes built and its glyphs asked about
     // their font when the list was recorded; the replay extracts the
-    // outlines, reading the program for the first.
+    // outlines, reading the program for the first, and the renderer's scope
+    // the list keeps reads the font the interpreter's read, at that first
+    // outline.
     let mut expected = decoding(Stats::default(), &[(7, 1, program_len())]);
+    expected.font_dictionaries_resolved = 1;
     expected.glyphs_shown = shown;
     expected.outlines_filled = shown;
     expected.glyph_outline_misses = shown;
@@ -1054,21 +1058,15 @@ fn two_renders_at_once_count_apart() {
     }
 }
 
-/// How many glyphs `SHOWN` shows: one a byte, the space included.
-fn shown() -> u64 {
-    SHOWN.iter().map(|(_, text)| text.len() as u64).sum()
-}
-
 /// A page's text, as extraction reports it, for comparing a counted
 /// extraction with an uncounted one: every field, to the bit.
 fn text_of(page: &tinker_pdf::TextPage) -> String {
     format!("{page:?}")
 }
 
-/// Text extraction counts what its scope reads: each font the page's
-/// resources name when the scope is built, the font dictionary each glyph
-/// reads to ask whether it is a Type 3 font, each form's scope the
-/// interpreter asks for, and the content and every form's decoded. Nothing is
+/// Text extraction counts what its scope reads: each font the page's content
+/// selects, once, each form's scope the interpreter asks for, and the
+/// content and every form's decoded. Nothing is
 /// drawn, so nothing else counts. The text is the uncounted text, in either
 /// order.
 #[test]
@@ -1091,8 +1089,8 @@ fn text_stats_count_font_resolutions() {
             Stats::default(),
             &[(4, 1, glyphs_and_an_image_content().len())],
         );
-        // Three fonts read when the scope is built, and one lookup a glyph.
-        expected.font_dictionaries_resolved = SHOWN.len() as u64 + shown();
+        // Three fonts read, each at its first glyph.
+        expected.font_dictionaries_resolved = SHOWN.len() as u64;
         assert_eq!(stats, expected, "{options:?}");
     }
 
@@ -1100,7 +1098,6 @@ fn text_stats_count_font_resolutions() {
     let page = document.page(index).expect("a page");
     let (text, stats) = page.text_counted(&TextOptions::default());
     assert_eq!(text_of(&text), text_of(&page.text()));
-    let shown = 3 * FORM_TEXT.len() as u64;
     // The content, and the form's at each of its three `Do`s.
     let mut expected = decoding(
         Stats::default(),
@@ -1109,9 +1106,9 @@ fn text_stats_count_font_resolutions() {
             (8, 3, form_content(FORM_TEXT).len()),
         ],
     );
-    // The page's scope reads its one font, the form's scope its own one once,
-    // and every glyph its font's dictionary.
-    expected.font_dictionaries_resolved = 1 + 1 + shown;
+    // The form's scope reads its one font once; the page's names one nothing
+    // selects.
+    expected.font_dictionaries_resolved = 1;
     // Only the interpreter asks for the form's scope at each `Do`; the first
     // ask builds it.
     expected.form_scope_misses = 1;
@@ -1216,7 +1213,7 @@ fn image_stats_count_the_decodes_made() {
 /// A save not asked hands back no stats, a counting editor's included, and a
 /// save asked writes the same bytes and reports the same passes. What it
 /// counts is its passes': the font pass walks the page tree, reads each
-/// page's fonts and each glyph's font dictionary, and selects a glyph in the
+/// font a page's content selects, and selects a glyph in the
 /// program of each glyph a font that is an object shows; the image pass walks
 /// the tree when a resolution limit asks it to find placements.
 #[test]
@@ -1263,7 +1260,8 @@ fn save_stats_are_none_unless_asked() {
         // Each walk reads the root and the one page.
         expected.page_walks = 1 + image_walks;
         expected.page_nodes_visited = 2 * expected.page_walks;
-        expected.font_dictionaries_resolved = SHOWN.len() as u64 + shown();
+        // Each of the three fonts read once, at its first glyph.
+        expected.font_dictionaries_resolved = SHOWN.len() as u64;
         // `F1` is the one font that is an object, the others written into the
         // resource dictionary: the first glyph it shows reads its program and
         // the rest find it.
@@ -1403,13 +1401,12 @@ fn a_merge_reads_its_stats_from_the_save() {
             .unwrap_or_else(|| panic!("{what}: a stream decoded is named"));
         expected.most_decoded_stream = Some(named);
         // The font pass walks the merged tree once, its root and forty pages;
-        // each page's scope reads its one font, and each glyph its font's
-        // dictionary; each scope reads the face's program at its first glyph
-        // and finds it at the rest.
+        // each page's scope reads its one font at its first glyph, and its
+        // program there, and finds both at the rest.
         expected.page_walks = editor_walks + 1;
         expected.page_nodes_visited = editor_nodes + 41;
         expected.page_entries_copied = editor_entries;
-        expected.font_dictionaries_resolved = 40 + shown;
+        expected.font_dictionaries_resolved = 40;
         expected.font_program_misses = 40;
         expected.font_program_hits = shown - 40;
         assert_eq!(counted.stats, Some(expected), "{what}");

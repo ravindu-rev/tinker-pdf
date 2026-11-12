@@ -754,7 +754,7 @@ the run, whatever the chain returned — a refusal with no bytes, while a
 reference that names no stream runs no chain and counts nothing — the stream it
 ran on, and the bytes it returned. A `Counting` view over any `Resolve` counts
 the same for code written against the trait, which is how a font's CMaps and
-its `/CIDToGIDMap` are counted while a scope is built. An editor asked to count
+its `/CIDToGIDMap` are counted while a scope reads the font. An editor asked to count
 counts its own decodes (`DocumentEditor::stream_bytes`, and the serializer's
 when a rewrite deduplicates streams), and `stream_bytes_counted` and
 `save_counted` count into a tally the caller carries instead; a stream the

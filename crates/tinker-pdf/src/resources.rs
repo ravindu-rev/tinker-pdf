@@ -56,8 +56,8 @@ struct CachedImage {
 }
 
 /// What a page's resources work out once and every render of the page can
-/// reuse: font programs, decoded images, compiled ICC transforms, glyph
-/// outlines and the nested scopes of forms.
+/// reuse: the fonts its names select, font programs, decoded images, compiled
+/// ICC transforms, glyph outlines and the nested scopes of forms.
 ///
 /// Behind one `Arc` so a retained page can give each render resources of its
 /// own — fresh lists of what that render had to tolerate — over the same
@@ -116,10 +116,12 @@ struct Caches {
     /// cached too. A function written directly into a dictionary has no
     /// object, is a few numbers, and is read where it lies.
     functions: Mutex<HashMap<u64, Option<Arc<Function>>>>,
-    /// The fonts reached by a reserved name (`fonts::state_font`), by the
-    /// object it spells packed as `num << 16 | gen`, read on the first
-    /// question about each. `None` is cached too.
-    reserved_fonts: Mutex<HashMap<u64, Option<Arc<cos_font::Font>>>>,
+    /// The fonts this scope's names select, each read on the first question
+    /// about its name and kept by the name and by the id its glyphs carry
+    /// (`docs/design/performance.md`, P-02, "The font table"). Shared by
+    /// every render over these caches, so a retained page's renders read each
+    /// font once between them.
+    fonts: RwLock<FontTable>,
     /// Each graphics state a `gs` names in this scope, read on the first
     /// `gs` of the name: its keys, its functions and its soft mask's group,
     /// whose content is decoded then and not again. A page that sets one
@@ -141,6 +143,44 @@ struct CachedState {
 /// holds, so an honest scope never reaches it; past it each `gs` reads its
 /// state again, as before the cache.
 const MAX_CACHED_STATES: usize = 1 << 12;
+
+/// One font a scope's content selects, read on the first question about the
+/// name it selects it by (`docs/design/performance.md`, P-02, "The font
+/// table").
+pub(crate) struct ScopeFont {
+    /// The name the content selects it by in this scope.
+    name: Vec<u8>,
+    /// The id the interpreter's glyphs carry: the name's interned id, or a
+    /// reserved name's (`fonts::reserved_id`).
+    id: u64,
+    /// The `/Font` entry's reference, or the object a reserved name spells;
+    /// `None` for a font written into the resource dictionary.
+    object: Option<ObjRef>,
+    /// The font's dictionary as resolved — for an indirect font the
+    /// document's own object, so nothing is copied — which the program and a
+    /// substitute's request are read from.
+    dict: Arc<Object>,
+    /// The font, as `cos_font::read_in` reads it.
+    font: Arc<cos_font::Font>,
+    /// Whether [`FontSource::type3_glyph`] reads it as a Type 3 font: its own
+    /// `/Subtype` the name `/Type3`, as written.
+    type3: bool,
+}
+
+/// A scope's fonts, by the name its content selects each by and by the id
+/// its glyphs carry. A name or an id that selects nothing is kept as `None`
+/// while the table holds fewer than [`MAX_UNREAD_FONT_NAMES`] of each.
+#[derive(Default)]
+struct FontTable {
+    by_name: HashMap<Vec<u8>, Option<Arc<ScopeFont>>>,
+    by_id: HashMap<u64, Option<Arc<ScopeFont>>>,
+}
+
+/// The most names, and ids, that select no font a scope's table keeps. Every
+/// font its `/Font` binds is kept, which the dictionary bounds; past this a
+/// name that selects nothing is looked for again at each question, as before
+/// the table.
+const MAX_UNREAD_FONT_NAMES: usize = 1 << 12;
 
 /// What a scope's `/ColorSpace` subdictionary puts in for each device space
 /// (8.6.5.6): its `/DefaultGray`, `/DefaultRGB` and `/DefaultCMYK`, read as
@@ -291,12 +331,12 @@ impl Selection {
 /// Everything one page's rendering needs from its resources.
 pub struct PageResources {
     doc: Arc<CosDocument>,
-    fonts: HashMap<Vec<u8>, Arc<cos_font::Font>>,
-    font_ids: HashMap<Vec<u8>, u64>,
-    /// Which glyph a code selects, per font, resolved lazily.
+    /// The resource dictionary every name here is read in. Its fonts are read
+    /// on the first question about each (`Caches::fonts`), not when the scope
+    /// is built.
     resources: Option<Dict>,
-    /// Everything worked out once and reusable by every render: programs,
-    /// images, ICC transforms, outlines, form scopes. Shared, so
+    /// Everything worked out once and reusable by every render: fonts,
+    /// programs, images, ICC transforms, outlines, form scopes. Shared, so
     /// [`PageResources::for_one_render`] can hand a render its own lists of
     /// what it tolerated over the same caches.
     caches: Arc<Caches>,
@@ -811,14 +851,12 @@ impl PageResources {
     /// [`PageResources::for_one_render`], counting into `work`: a counted
     /// render's resources over a retained page's caches, and a kept scope
     /// handed to a counting asker ([`PageResources::bind`]). Building it reads
-    /// nothing — the fonts were resolved when the kept scope was — so it counts
+    /// nothing — its fonts are the kept scope's table, shared — so it counts
     /// nothing itself.
     #[must_use]
     pub(crate) fn for_one_render_counted(&self, work: Option<Arc<Work>>) -> PageResources {
         PageResources {
             doc: Arc::clone(&self.doc),
-            fonts: self.fonts.clone(),
-            font_ids: self.font_ids.clone(),
             resources: self.resources.clone(),
             caches: Arc::clone(&self.caches),
             missing_fonts: Mutex::new(Vec::new()),
@@ -901,7 +939,7 @@ impl PageResources {
     }
 
     /// [`PageResources::new`] for an operation counting into `work`: each
-    /// font the dictionary resolves counts, and the scope carries the tally.
+    /// font the scope reads counts, and the scope carries the tally.
     #[must_use]
     pub(crate) fn new_counted(
         doc: &Arc<CosDocument>,
@@ -909,28 +947,9 @@ impl PageResources {
         provider: Option<&Arc<dyn FontProvider>>,
         work: Option<Arc<Work>>,
     ) -> PageResources {
-        let mut fonts = HashMap::new();
-        let mut font_ids = HashMap::new();
-        let mut resources = None;
-
-        if let Some(dict) = page.resources.as_ref() {
-            resources = Some(dict.clone());
-            for (name, font) in stats::fonts(doc, dict, work.as_deref()) {
-                stats::count(work.as_deref(), Counter::FontDictionariesResolved);
-                if let Some(bytes) = doc.name_bytes(name) {
-                    let key = bytes.to_vec();
-                    let id = u64::from(name.id());
-                    font_ids.insert(key.clone(), id);
-                    fonts.insert(key, font);
-                }
-            }
-        }
-
         PageResources {
             doc: doc.clone(),
-            fonts,
-            font_ids,
-            resources,
+            resources: page.resources.clone(),
             caches: Arc::default(),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
@@ -1032,23 +1051,8 @@ impl PageResources {
         provider: Option<&Arc<dyn FontProvider>>,
         work: Option<Arc<Work>>,
     ) -> PageResources {
-        let mut fonts = HashMap::new();
-        let mut font_ids = HashMap::new();
-
-        for (name, font) in stats::fonts(doc, &dict, work.as_deref()) {
-            stats::count(work.as_deref(), Counter::FontDictionariesResolved);
-            if let Some(bytes) = doc.name_bytes(name) {
-                let key = bytes.to_vec();
-                let id = u64::from(name.id());
-                font_ids.insert(key.clone(), id);
-                fonts.insert(key, font);
-            }
-        }
-
         PageResources {
             doc: doc.clone(),
-            fonts,
-            font_ids,
             resources: Some(dict),
             caches: Arc::default(),
             missing_fonts: Mutex::new(Vec::new()),
@@ -1237,8 +1241,8 @@ impl PageResources {
             .resolve_key(dict, Name::RESOURCES)
             .as_dict()
             .cloned()?;
-        // Its fonts count into the asker's tally, but the scope is kept
-        // without one: the cache outlives this operation.
+        // The scope is kept without a tally: the cache outlives this
+        // operation, and each asker's reads count into its own.
         let mut kept = PageResources::from_dict_counted(
             &self.doc,
             own,
@@ -1824,43 +1828,40 @@ impl PageResources {
 /// The document's own program always wins. A substitute is a different face
 /// with different outlines, and preferring it over what the file carries
 /// would change how a correctly embedded document looks.
+///
+/// Both read the dictionary the scope's table holds for the font, so asking
+/// for a substitute reads no font dictionary a second time.
 fn program_for(
     doc: &CosDocument,
-    name: &[u8],
-    resources: &Dict,
-    font: &cos_font::Font,
+    font: &ScopeFont,
     provider: Option<&dyn FontProvider>,
     work: Option<&Work>,
 ) -> Option<Arc<Vec<u8>>> {
-    if let Some(embedded) = embedded_program(doc, name, resources, work) {
+    let dict = font.dict.as_dict()?;
+    if let Some(embedded) = embedded_program(doc, dict, work) {
         return Some(Arc::new(embedded));
     }
 
     let provider = provider?;
-    if !fonts::is_substitutable(font) {
+    if !fonts::is_substitutable(&font.font) {
         return None;
     }
-    let dict = fonts::font_dict(doc, resources, name, work)?;
-    provider.substitute(&FontRequest::read(doc, &dict))
+    provider.substitute(&FontRequest::read(doc, dict))
 }
 
-fn embedded_program(
-    doc: &CosDocument,
-    name: &[u8],
-    resources: &Dict,
-    work: Option<&Work>,
-) -> Option<Vec<u8>> {
-    let (mut font, _) = fonts::text_font(doc, resources, name)?;
-
+fn embedded_program(doc: &CosDocument, font: &Dict, work: Option<&Work>) -> Option<Vec<u8>> {
     // A composite font keeps its program on the descendant.
-    let descendants = doc.resolve_key(&font, Name::DESCENDANT_FONTS);
-    if let Some(first) = descendants.as_array().and_then(<[Object]>::first) {
-        if let Some(dict) = doc.resolve(first).as_dict() {
-            font = dict.clone();
-        }
-    }
+    let descendants = doc.resolve_key(font, Name::DESCENDANT_FONTS);
+    let descendant = descendants
+        .as_array()
+        .and_then(<[Object]>::first)
+        .map(|first| doc.resolve(first));
+    let holder = descendant
+        .as_deref()
+        .and_then(Object::as_dict)
+        .unwrap_or(font);
 
-    let descriptor = doc.resolve_key(&font, Name::FONT_DESCRIPTOR);
+    let descriptor = doc.resolve_key(holder, Name::FONT_DESCRIPTOR);
     let descriptor = descriptor.as_dict()?;
 
     for key in [Name::FONT_FILE2, Name::FONT_FILE3, Name::FONT_FILE] {
@@ -1916,10 +1917,10 @@ impl FontSource for PageResources {
 
     fn font_id(&self, font: &[u8]) -> u64 {
         // A reserved name's id is its reference with the top bit set, the
-        // same in every scope (`fonts::reserved_id`).
-        self.font_ids
-            .get(font)
-            .copied()
+        // same in every scope (`fonts::reserved_id`), whether or not the
+        // object it spells reads as a font.
+        self.scope_font(font)
+            .map(|found| found.id)
             .or_else(|| fonts::reserved_reference(font).map(fonts::reserved_id))
             .unwrap_or(0)
     }
@@ -1935,28 +1936,19 @@ impl FontSource for PageResources {
 
     fn type3_glyph(&self, font: &[u8], code: u32) -> Option<tinker_pdf_content::Type3Glyph> {
         // 9.6.5: only a Type 3 font has glyph procedures. Every other kind
-        // returns None here, which leaves the ordinary outline path untouched.
-        // Read through the counting view when the operation counts, so the
-        // name's lookup is counted as the scope's own are.
-        let resources = self.resources.as_ref()?;
-        let work = self.work.as_deref();
-        let dict = match work {
-            Some(counting) => {
-                fonts::font_dict(&Counting::new(&*self.doc, counting), resources, font, work)
-            }
-            None => fonts::font_dict(&*self.doc, resources, font, work),
-        }?;
-        let subtype = dict
-            .get_name(Name::SUBTYPE)
-            .and_then(|n| self.doc.name_bytes(n))?;
-        if subtype.as_ref() != b"Type3" {
+        // returns None here, which leaves the ordinary outline path untouched,
+        // and is answered from the font the scope read, with nothing read or
+        // copied for the glyph.
+        let found = self.scope_font(font)?;
+        if !found.type3 {
             return None;
         }
+        let dict = found.dict.as_dict()?;
 
         // A Type 3 font addresses its procedures by name, and the only way to
         // get one is the /Encoding /Differences array — there is no built-in
         // encoding for a font whose glyphs the document invented.
-        let encoding = self.doc.resolve_key(&dict, Name::ENCODING);
+        let encoding = self.doc.resolve_key(dict, Name::ENCODING);
         let differences = self.doc.resolve_key(encoding.as_dict()?, Name::DIFFERENCES);
         let differences = differences.as_array()?;
 
@@ -1978,7 +1970,7 @@ impl FontSource for PageResources {
         }
         let name = name?;
 
-        let procs = self.doc.resolve_key(&dict, Name::CHAR_PROCS);
+        let procs = self.doc.resolve_key(dict, Name::CHAR_PROCS);
         let reference = procs.as_dict()?.get_ref(name)?;
         let content = self.decoded(reference).ok()?;
 
@@ -1987,7 +1979,7 @@ impl FontSource for PageResources {
         // its own units, and the matrix is required for that reason.
         let matrix = self
             .doc
-            .resolve_key(&dict, Name::FONT_MATRIX)
+            .resolve_key(dict, Name::FONT_MATRIX)
             .as_array()
             .and_then(|values| {
                 let n = |i: usize| values.get(i).and_then(Object::as_number);
@@ -3252,15 +3244,10 @@ impl PageResources {
             }
         }
         self.count(Counter::FontProgramMisses);
-        let name = self.resource_name(font_id);
-        let built = name.as_ref().and_then(|name| {
-            let font = self.font(name)?;
-            let resources = self.resources.as_ref()?;
+        let built = self.font_by_id(font_id).and_then(|found| {
             program_for(
                 &self.doc,
-                name,
-                resources,
-                &font,
+                &found,
                 self.provider.as_deref(),
                 self.work.as_deref(),
             )
@@ -3271,36 +3258,122 @@ impl PageResources {
         built
     }
 
-    /// The resource name a font id stands for in this scope.
-    fn resource_name(&self, font_id: u64) -> Option<Vec<u8>> {
-        self.font_ids
-            .iter()
-            .find(|(_, id)| **id == font_id)
-            .map(|(name, _)| name.clone())
-            .or_else(|| fonts::reserved_id_reference(font_id).map(fonts::reserved_name))
+    /// The font a text-font name stands for in this scope.
+    fn font(&self, name: &[u8]) -> Option<Arc<cos_font::Font>> {
+        self.scope_font(name).map(|found| Arc::clone(&found.font))
     }
 
-    /// The font a text-font name stands for in this scope: the `/Font` entry
-    /// read when the scope was built, or — for a reserved name a graphics
-    /// state gave (`fonts::state_font`) — the object it spells, read on the
-    /// first question about it.
-    fn font(&self, name: &[u8]) -> Option<Arc<cos_font::Font>> {
-        if let Some(font) = self.fonts.get(name) {
-            return Some(Arc::clone(font));
-        }
-        let reference = fonts::reserved_reference(name)?;
-        let key = (u64::from(reference.num) << 16) | u64::from(reference.gen);
-        if let Ok(cache) = self.caches.reserved_fonts.lock() {
-            if let Some(hit) = cache.get(&key) {
+    /// The font a text-font name selects in this scope (7.8.3): the `/Font`
+    /// entry for the name, or — for a reserved name a graphics state gave
+    /// (`fonts::state_font`) — the object it spells. Read on the first
+    /// question about the name and kept in the scope's table, shared by every
+    /// render over its caches, so no glyph reads a font dictionary.
+    fn scope_font(&self, name: &[u8]) -> Option<Arc<ScopeFont>> {
+        if let Ok(table) = self.caches.fonts.read() {
+            if let Some(hit) = table.by_name.get(name) {
                 return hit.clone();
             }
         }
-        self.count(Counter::FontDictionariesResolved);
-        let read = cos_font::at(&self.doc, reference).map(Arc::new);
-        if let Ok(mut cache) = self.caches.reserved_fonts.lock() {
-            cache.insert(key, read.clone());
+        let read = self.read_scope_font(name).map(Arc::new);
+        if let Ok(mut table) = self.caches.fonts.write() {
+            // Another render over the same caches may have read it
+            // meanwhile; the entry first kept is the one every render holds.
+            if let Some(hit) = table.by_name.get(name) {
+                return hit.clone();
+            }
+            if read.is_some() || table.by_name.len() < MAX_UNREAD_FONT_NAMES {
+                if let Some(found) = &read {
+                    table.by_id.insert(found.id, Some(Arc::clone(found)));
+                }
+                table.by_name.insert(name.to_vec(), read.clone());
+            }
         }
         read
+    }
+
+    /// Reads the font `name` selects, as [`PageResources::scope_font`] keeps
+    /// it: the scope's `/Font` first, so no name that resolves there resolves
+    /// differently, and a reserved name's object after. Counted as a font
+    /// dictionary resolved when a dictionary is read.
+    fn read_scope_font(&self, name: &[u8]) -> Option<ScopeFont> {
+        let bound = self.resources.as_ref().and_then(|resources| {
+            let table = resources.get(Name::FONT)?;
+            read_resolved(&self.doc, table, |table| {
+                let key = self.name(name);
+                let entry = table.as_dict()?.get(key)?;
+                let dict = self.doc.resolve(entry);
+                dict.as_dict()?;
+                Some((u64::from(key.id()), entry.as_objref(), dict))
+            })
+        });
+        let (id, object, dict) = match bound {
+            Some(bound) => bound,
+            None => {
+                let reference = fonts::reserved_reference(name)?;
+                let object = self.doc.get(reference).ok()?;
+                object.as_dict()?;
+                (fonts::reserved_id(reference), Some(reference), object)
+            }
+        };
+        let font_dict = dict.as_dict()?;
+        self.count(Counter::FontDictionariesResolved);
+        // Through the counting view when the operation counts, so the CMaps
+        // reading the font decodes, and any key it spells out, count too.
+        let font = match self.work.as_deref() {
+            Some(work) => cos_font::read_in(&Counting::new(&*self.doc, work), font_dict),
+            None => cos_font::read_in(&*self.doc, font_dict),
+        };
+        let type3 = font_dict
+            .get_name(Name::SUBTYPE)
+            .and_then(|n| self.doc.name_bytes(n))
+            .is_some_and(|subtype| subtype.as_ref() == b"Type3");
+        Some(ScopeFont {
+            name: name.to_vec(),
+            id,
+            object,
+            dict,
+            font: Arc::new(font),
+            type3,
+        })
+    }
+
+    /// The font a font id stands for in this scope.
+    ///
+    /// An id the table has no entry for yet is one another scope over the same
+    /// dictionary handed out — an appearance is drawn over two, the
+    /// interpreter's and the renderer's (`annots::draw_prepared`) — and is
+    /// found among this scope's `/Font` names, whose keys carry the ids, and
+    /// read on that first question; a reserved name's id by the object it
+    /// spells. An id no name carries answers nothing, kept as firmly.
+    fn font_by_id(&self, font_id: u64) -> Option<Arc<ScopeFont>> {
+        if let Ok(table) = self.caches.fonts.read() {
+            if let Some(hit) = table.by_id.get(&font_id) {
+                return hit.clone();
+            }
+        }
+        let name = match fonts::reserved_id_reference(font_id) {
+            Some(reference) => Some(fonts::reserved_name(reference)),
+            None => self.font_name_of(font_id),
+        };
+        let found = name.and_then(|name| self.scope_font(&name));
+        if let Ok(mut table) = self.caches.fonts.write() {
+            if found.is_some() || table.by_id.len() < MAX_UNREAD_FONT_NAMES {
+                table.by_id.entry(font_id).or_insert_with(|| found.clone());
+            }
+        }
+        found
+    }
+
+    /// The name in this scope's `/Font` whose id is `font_id`.
+    fn font_name_of(&self, font_id: u64) -> Option<Vec<u8>> {
+        let table = self.resources.as_ref()?.get(Name::FONT)?;
+        read_resolved(&self.doc, table, |table| {
+            let (key, _) = table
+                .as_dict()?
+                .iter()
+                .find(|(key, _)| u64::from(key.id()) == font_id)?;
+            self.doc.name_bytes(*key).map(|bytes| bytes.to_vec())
+        })
     }
 
     /// This scope's `/Font` subdictionary (7.8.3).
@@ -3331,8 +3404,7 @@ impl PageResources {
         if let Some(reference) = fonts::reserved_id_reference(font_id) {
             return Some(reference);
         }
-        let name = self.resource_name(font_id)?;
-        self.font_table()?.get_ref(self.name(&name))
+        self.font_by_id(font_id)?.object
     }
 
     /// Every font this scope names, by object.
@@ -3398,8 +3470,8 @@ impl PageResources {
         let program = self.program(font_id)?;
 
         // The font's own character mapping decides which glyph a code means.
-        let name = self.resource_name(font_id)?;
-        let font = self.font(&name)?;
+        let found = self.font_by_id(font_id)?;
+        let (name, font) = (&found.name, &found.font);
         let text = font.text_of(code);
         let ch = text.chars().next();
 
@@ -3413,14 +3485,14 @@ impl PageResources {
             if sfnt.table(0x676C_7966).is_none() {
                 if let Some(table) = sfnt.table(0x4346_4620) {
                     if let Some(cff) = Cff::parse(table) {
-                        let chosen = self.cff_selection(&cff, &font, &name, code);
+                        let chosen = self.cff_selection(&cff, font, name, code);
                         return self.cff_outline(&cff, chosen.glyph);
                     }
                 }
                 return None;
             }
 
-            let glyph = self.sfnt_selection(&sfnt, &font, &name, code)?.glyph;
+            let glyph = self.sfnt_selection(&sfnt, font, name, code)?.glyph;
 
             let units = f64::from(sfnt.units_per_em.max(1));
             let outline = glyf::outline(&sfnt, glyph)?;
@@ -3428,7 +3500,7 @@ impl PageResources {
         }
 
         if let Some(cff) = Cff::parse(&program) {
-            let chosen = self.cff_selection(&cff, &font, &name, code);
+            let chosen = self.cff_selection(&cff, font, name, code);
             return self.cff_outline(&cff, chosen.glyph);
         }
 
@@ -3481,18 +3553,18 @@ impl PageResources {
     /// glyph id any subsetter could act on.
     pub(crate) fn selection(&self, font_id: u64, code: u32) -> Option<Selection> {
         let program = self.program(font_id)?;
-        let name = self.resource_name(font_id)?;
-        let font = self.font(&name)?;
+        let found = self.font_by_id(font_id)?;
+        let (name, font) = (&found.name, &found.font);
 
         if let Some(sfnt) = Sfnt::parse(&program) {
             if sfnt.table(0x676C_7966).is_none() {
                 let cff = Cff::parse(sfnt.table(0x4346_4620)?)?;
-                return Some(self.cff_selection(&cff, &font, &name, code));
+                return Some(self.cff_selection(&cff, font, name, code));
             }
-            return self.sfnt_selection(&sfnt, &font, &name, code);
+            return self.sfnt_selection(&sfnt, font, name, code);
         }
         if let Some(cff) = Cff::parse(&program) {
-            return Some(self.cff_selection(&cff, &font, &name, code));
+            return Some(self.cff_selection(&cff, font, name, code));
         }
         None
     }

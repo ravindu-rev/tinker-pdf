@@ -276,7 +276,9 @@ to affect pagination) installs a provider; `Page::render` reports
 undrawn, and `Page::text` — which needs no outlines and consults no provider
 — reports `TextWarning::UnknownFont` and `TextWarning::UnmappedCode` on
 `TextPage::warnings`. Parse-time CMap leniencies land on
-`Document::warnings()` as typed `WarningKind` values. Writing:
+`Document::warnings()` as typed `WarningKind` values when a font is read — by
+a page's render or text the first time its content selects the font, so a
+font a page names and never uses raises none of them there. Writing:
 `DocumentBuilder::add_base_font`, `add_named_font`, `add_embedded_font`,
 `add_cid_font`, `set_subset_fonts`, and `PageBuilder::text` or
 `PageBuilder::glyphs` (glyphs addressed by index, for a composite font).

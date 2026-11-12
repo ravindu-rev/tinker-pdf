@@ -356,19 +356,15 @@ unchanged.
 for in a scope, as a font dictionary and its reference: the scope's `/Font`
 entry for the name, as now; else, when the name is the reserved spelling, the
 object it spells, which each reader reads as it reads a font the scope names
-(`PageResources` through `cos::font::at`,
-`crates/tinker-pdf-cos/src/font.rs:1131`; redaction through the editor);
-else nothing, which is the missing font it is now. The scope's own binding
-is asked first, so no name that resolves now resolves differently.
-`PageResources` keeps a
-reserved name's font beside the fonts its dictionary names, read on the first
-question about it, and every path that reads a font's dictionary by its name
-in the scope — `program_for` and `embedded_program` (`resources.rs:1734-1781`),
-`type3_glyph` through `fonts::font_dict` (`fonts.rs:220`), `font_object`,
-`resource_name` and `selection` — goes through `text_font`, so a reserved
-name's font has a program, outlines, a selection and an object. P-02.3, which
-makes every name's font lazy in one table per scope, takes this as its first
-lazily read entry.
+(`PageResources` through `cos::font::read_in`, in `PageResources::scope_font`;
+redaction through the editor); else nothing, which is the missing font it is
+now. The scope's own binding is asked first, so no name that resolves now
+resolves differently. `PageResources` reads a reserved name's font as it reads
+every name's, into the scope's font table on the first question about it
+(`docs/design/performance.md`, P-02), and every path that reads a font by its
+name or its id in the scope — `program_for` and `embedded_program`,
+`type3_glyph`, `font_object` and `selection` — reads that entry, so a reserved
+name's font has a program, outlines, a selection and an object.
 
 **The id.** A reserved name's `font_id` is its reference with the top bit set
 (`1 << 63 | num << 16 | gen`), which no interned name's id (a `u32`) can be,

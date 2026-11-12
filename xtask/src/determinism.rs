@@ -142,6 +142,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/guards.rs",
         test: "a2_redaction_is_linear_in_pages",
     },
+    // MS-01's A3 guard: the fonts a page's render and text read, at most the
+    // distinct `/Font` entries its content selects a font by.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a3_fonts_resolved_per_page_are_at_most_the_fonts_it_uses",
+    },
     // MS-01's A5 merge leg: no stream decoded twice in a merge's save.
     Fingerprint {
         file: "crates/tinker-pdf/tests/guards.rs",

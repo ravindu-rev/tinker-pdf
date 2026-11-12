@@ -12,14 +12,10 @@
 //! An operation nobody asked about carries none, and every counting site tests
 //! that `Option` and does nothing else.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use tinker_pdf_cos::font::Font;
 pub use tinker_pdf_cos::Stats;
-use tinker_pdf_cos::{
-    font as cos_font, pages as cos_pages, CosDocument, CosError, Counting, Dict, Name, ObjRef,
-};
+use tinker_pdf_cos::{pages as cos_pages, CosDocument, CosError, ObjRef};
 pub(crate) use tinker_pdf_cos::{Counter, Work};
 use tinker_pdf_render::RenderCounts;
 
@@ -75,20 +71,6 @@ pub(crate) fn content(
     work: Option<&Arc<Work>>,
 ) -> Vec<u8> {
     cos_pages::content_bytes_counted(doc, page, work.map(|work| &**work))
-}
-
-/// The fonts a resource dictionary names, each read as a scope reads it; when
-/// the operation is counting, through a view that counts what reading a font
-/// decodes — its CMaps, its `/ToUnicode` and its `/CIDToGIDMap`.
-pub(crate) fn fonts(
-    doc: &CosDocument,
-    resources: &Dict,
-    work: Option<&Work>,
-) -> HashMap<Name, Arc<Font>> {
-    match work {
-        Some(work) => cos_font::from_resources_in(&Counting::new(doc, work), resources),
-        None => cos_font::from_resources(doc, resources),
-    }
 }
 
 /// Adds what a renderer counted — its glyphs shown and outlines painted — to
