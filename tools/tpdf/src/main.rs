@@ -12,6 +12,8 @@
 //! Argument parsing is hand-rolled along with everything else. It is a
 //! sub-command plus flags, which needs no library.
 
+#[cfg(test)]
+mod doubled_peak;
 mod images;
 mod source;
 mod writing;
@@ -2318,6 +2320,7 @@ impl Relation {
 /// `compared` is a function of the corpus and not of the machine.
 fn metamorphic(
     out: &mut dyn std::io::Write,
+    marks: &mut Marks,
     doc: &Document,
     options: &Options,
     fonts: Option<&Arc<SimpleFontProvider>>,
@@ -2339,8 +2342,10 @@ fn metamorphic(
     let base = page.render(&render);
     // Each part of the phase marks its high-water mark, so a peak reached in
     // it says which part reached it: the render the relations compare with,
-    // each relation's rewrite, reopen and render, and the doubled render.
-    mark(out, "meta-base");
+    // each relation's rewrite, reopen and render, and the doubled render. Each
+    // starts from live memory alone ([`release_freed`]), so a part's peak is
+    // its own memory and not what the parts before it left the allocator.
+    marks.mark(out, "meta-base");
     // A page that came back empty is a page the relations cannot speak about:
     // every one of them holds trivially over nothing.
     if base.width == 0 || base.height == 0 {
@@ -2370,11 +2375,11 @@ fn metamorphic(
             // which is several seconds of silence on a large file — and is
             // where a rewrite that does not terminate stops.
             say!(out, "phase meta-rotate");
-            let turned = rotation(out, doc, &base, &render, fonts);
+            let turned = rotation(out, marks, doc, &base, &render, fonts);
             turned.judged(ROTATE_BUDGET).print(out, "rotate");
             turned.judged(ROTATE_WATCH).print(out, ROTATE_WATCH_NAME);
             say!(out, "phase meta-crop");
-            cropping(out, doc, &page, &base, &render, fonts).print(out, "crop");
+            cropping(out, marks, doc, &page, &base, &render, fonts).print(out, "crop");
         }
         Some(why) => {
             Relation::Skipped(why).print(out, "rotate");
@@ -2384,8 +2389,7 @@ fn metamorphic(
     }
     // `dpi` rewrites nothing, so it is asked of every document that rendered.
     say!(out, "phase meta-dpi");
-    resolution(&page, &base, &render).print(out, "dpi");
-    mark(out, "meta-dpi");
+    resolution(out, marks, &page, &base, &render).print(out, "dpi");
 }
 
 /// One pixel of a bitmap, as three channels.
@@ -2410,6 +2414,7 @@ fn differs(a: (i32, i32, i32), b: (i32, i32, i32)) -> bool {
 /// geometry and not to the clip, or to the text and not to the images.
 fn rotation(
     out: &mut dyn std::io::Write,
+    marks: &mut Marks,
     doc: &Document,
     base: &Bitmap,
     render: &RenderOptions,
@@ -2421,11 +2426,11 @@ fn rotation(
     }
     let rewritten = editor.save(&WriteOptions::default());
     drop(editor);
-    mark(out, "meta-rotate-rewrite");
+    marks.mark(out, "meta-rotate-rewrite");
     let Ok(turned) = Document::open(rewritten) else {
         return Measured::Skipped("the rotated document would not reopen");
     };
-    mark(out, "meta-rotate-reopen");
+    marks.mark(out, "meta-rotate-reopen");
     // **With the same faces**, and this is not a detail. The relation compares
     // two renders of one document, so the two must be rendered under the same
     // conditions; reopening without the provider gave the rotated copy no way
@@ -2440,7 +2445,7 @@ fn rotation(
         return Measured::Skipped("the rotated document lost its page");
     };
     let rotated = page.render(render);
-    mark(out, "meta-rotate-render");
+    marks.mark(out, "meta-rotate-render");
 
     if rotated.width != base.height || rotated.height != base.width {
         return Measured::Broke(format!(
@@ -2468,6 +2473,7 @@ fn rotation(
 /// cropped render has a pixel of the full one it must equal exactly.
 fn cropping(
     out: &mut dyn std::io::Write,
+    marks: &mut Marks,
     doc: &Document,
     page: &Page,
     base: &Bitmap,
@@ -2495,17 +2501,22 @@ fn cropping(
         return Relation::Skipped("the page is too small to crop");
     }
 
+    // From live memory alone: the rotated copy, its rewrite and its render
+    // were freed as `rotation` returned, after its last mark, and what they
+    // freed goes back before this rewrite starts, as before the doubled render
+    // ([`doubled`]).
+    release_freed();
     let mut editor = doc.editor();
     if !editor.set_crop_box(0, x0 + inset_x, y0 + inset_y, x1 - inset_x, y1 - inset_y) {
         return Relation::Skipped("the crop box would not be set");
     }
     let rewritten = editor.save(&WriteOptions::default());
     drop(editor);
-    mark(out, "meta-crop-rewrite");
+    marks.mark(out, "meta-crop-rewrite");
     let Ok(cropped) = Document::open(rewritten) else {
         return Relation::Skipped("the cropped document would not reopen");
     };
-    mark(out, "meta-crop-reopen");
+    marks.mark(out, "meta-crop-reopen");
     // With the same faces, for `rotation`'s reason.
     let cropped = match fonts {
         Some(provider) => cropped.with_fonts(provider.clone()),
@@ -2515,7 +2526,7 @@ fn cropping(
         return Relation::Skipped("the cropped document lost its page");
     };
     let small = page.render(render);
-    mark(out, "meta-crop-render");
+    marks.mark(out, "meta-crop-render");
     if small.width == 0 || small.height == 0 {
         return Relation::Skipped("the cropped page rendered to nothing");
     }
@@ -2563,16 +2574,24 @@ fn cropping(
 /// a *grid* mistake — a half-pixel offset, an off-by-one in the page-to-device
 /// transform, a rounding that only shows at one scale — and those move whole
 /// regions rather than edges.
-fn resolution(page: &Page, base: &Bitmap, render: &RenderOptions) -> Relation {
+fn resolution(
+    out: &mut dyn std::io::Write,
+    marks: &mut Marks,
+    page: &Page,
+    base: &Bitmap,
+    render: &RenderOptions,
+) -> Relation {
     // A page big enough that rendering it twice over is the corpus runner's
     // whole budget is one this relation declines rather than times out on.
     if u64::from(base.width) * u64::from(base.height) > 4_000_000 {
+        marks.mark(out, "meta-dpi");
         return Relation::Skipped("the page is too large to render twice");
     }
-    let doubled = page.render(&RenderOptions {
-        scale: render.scale * 2.0,
-        ..render.clone()
-    });
+    let doubled = doubled(page, render);
+    // Marked while the doubled render is held, so the reading holds its
+    // canvas as resident rather than as the kernel's kept figure for memory
+    // already unmapped, which is the one [`Marks`] says can fall short.
+    marks.mark(out, "meta-dpi");
     // **The two renders round their own sizes outward, independently**, so the
     // doubled one can be a pixel short of twice the other: a page 1275.2 pixels
     // wide is 1276 at one scale and 2551 at two, and 2551 is not 2552. The
@@ -2613,6 +2632,24 @@ fn resolution(page: &Page, base: &Bitmap, render: &RenderOptions) -> Relation {
             DPI_BUDGET * 100.0
         ))
     }
+}
+
+/// The render at twice the scale that [`resolution`] compares, made from live
+/// memory alone (MS-27).
+///
+/// What the relations before it freed goes back to the kernel first
+/// ([`release_freed`]). Kept by the allocator, it decided the doubled render's
+/// peak in their place: the render reused it where a freed block was large
+/// enough for its canvas and added its canvas beside it where none was, so
+/// the peak moved from run to run of one document with what the allocator
+/// held. From live memory, the peak is the render's own canvas and work over
+/// the document, the page and the render it is compared with.
+fn doubled(page: &Page, render: &RenderOptions) -> Bitmap {
+    release_freed();
+    page.render(&RenderOptions {
+        scale: render.scale * 2.0,
+        ..render.clone()
+    })
 }
 
 // ---- probe: the record one corpus child writes ---------------------------
@@ -2657,7 +2694,9 @@ const BUNDLED_FACES: bool = cfg!(feature = "bundled-fonts");
 /// depends on how busy the machine was — which is the same defect as a timing
 /// assertion, in a number that is supposed to outlive the machine. Both
 /// branches below read a **high-water mark the kernel maintains**, so the
-/// answer is the same however often anybody asks for it.
+/// answer is the same however often anybody asks for it. On Linux the record
+/// states it no lower than the largest of the probe's own readings, for the
+/// reason [`Marks`] gives.
 ///
 /// Where neither branch applies the caller omits the line rather than printing
 /// a zero. The runner turns that omission into a `limits` entry, so a run that
@@ -2684,9 +2723,9 @@ fn peak_bytes() -> Option<u64> {
     // not forbid `windows-sys` — it is already in the graph under
     // `tempfile`/`proptest` — so this is a choice rather than a workaround.
     //
-    // This is the workspace's only `unsafe`. Every library crate carries
-    // `#![forbid(unsafe_code)]`; the debug CLI does not, and the engine stays
-    // as it was.
+    // This and [`release_freed`]'s call are the CLI's only `unsafe`. Every
+    // engine crate carries `#![forbid(unsafe_code)]`; the debug CLI does not,
+    // and the engine stays as it was.
     #[cfg(windows)]
     {
         use std::ffi::c_void;
@@ -2787,23 +2826,102 @@ fn status_bytes(field: &str) -> Option<u64> {
     }
 }
 
-/// `hwm <phase> <bytes>`: the kernel's high-water mark as a phase of the
-/// probe ends, so a report can say which phase reached a file's peak (MS-19).
-/// Omitted off Linux, as the file-backed share is.
-fn mark(out: &mut dyn std::io::Write, phase: &str) {
-    if let Some(bytes) = status_bytes("VmHWM") {
-        say!(out, "hwm {phase} {bytes}");
+/// The high-water marks a probe reads as its parts end, and the largest of
+/// them (MS-19, MS-27).
+///
+/// **The record's peak is the largest mark the probe read, where the kernel's
+/// own figure reads lower.** A read of the status file states the resident
+/// set as it is at that moment, but the kernel raises its kept high-water mark
+/// only when memory is unmapped or released, from per-CPU counters it folds in
+/// batches, so what it keeps can fall short of a peak a read already saw:
+/// `VmHWM` read after a part had released its memory came back hundreds of
+/// kilobytes under the reading taken as that part ended. A high-water mark
+/// that falls is not one, so `peak` never reads under a mark.
+#[derive(Debug, Default)]
+struct Marks {
+    /// The largest `VmHWM` read so far, in bytes; `None` until one is.
+    highest: Option<u64>,
+}
+
+impl Marks {
+    /// `hwm <phase> <bytes>`: the kernel's high-water mark as a part of the
+    /// probe ends, so a report can say which part reached a file's peak.
+    /// Omitted off Linux, as the file-backed share is.
+    ///
+    /// Then what the allocator holds free goes back to the kernel
+    /// ([`release_freed`]), so the next part starts from live memory alone and
+    /// what its mark adds is its own.
+    fn mark(&mut self, out: &mut dyn std::io::Write, phase: &str) {
+        if let Some(bytes) = status_bytes("VmHWM") {
+            say!(out, "hwm {phase} {bytes}");
+            self.read(bytes);
+        }
+        release_freed();
+    }
+
+    /// Keeps `bytes` if it is the largest reading yet.
+    fn read(&mut self, bytes: u64) {
+        self.highest = Some(self.highest.map_or(bytes, |highest| highest.max(bytes)));
+    }
+
+    /// The peak a record states: the platform's own figure, `measured`, or
+    /// the largest mark where that reads higher; either alone where only one
+    /// was read.
+    fn peak(&self, measured: Option<u64>) -> Option<u64> {
+        match (measured, self.highest) {
+            (Some(measured), Some(highest)) => Some(measured.max(highest)),
+            (measured, highest) => measured.or(highest),
+        }
+    }
+}
+
+/// Hands what the allocator holds free back to the kernel, so the part of the
+/// probe that follows starts from live memory alone (MS-27).
+///
+/// **The platform allocator keeps what a part frees, and what it keeps stays
+/// resident.** glibc's gives the top of its heap back only past a threshold it
+/// raises as it goes, and never a free page below a live allocation, so what
+/// a part leaves behind turns on where each of its allocations landed — and
+/// that moves from run to run with the seeds the engine's hash maps draw and
+/// with where the address space is laid out. A part that followed another
+/// read whatever the allocator happened to keep beside its own memory: the
+/// doubled render of a ten-thousand-page document reused a rewrite's freed
+/// pages on one run and added its whole canvas on the next, and a one-page
+/// document's doubled render sat on a heap top one run trimmed and the next
+/// kept. `malloc_trim(3)` gives back the main heap's top and every whole free
+/// page inside the heaps, and the probe allocates from the main heap alone on
+/// its one thread, so a part's peak is its own memory over what the probe
+/// still holds, whatever the parts before it freed and in whatever order.
+///
+/// glibc's alone: no other target here has the call or the marks, and there
+/// this does nothing.
+fn release_freed() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        extern "C" {
+            /// `malloc_trim(3)`, glibc 2.8 and later: gives back the main
+            /// heap's top beyond `pad` bytes and every whole free page inside
+            /// each arena's heaps, and returns 1 if it released any.
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        // Safe because it takes a byte count and works on the allocator's own
+        // free lists under the allocator's own locks: it releases only memory
+        // no allocation holds, so nothing Rust can reach is touched.
+        unsafe {
+            malloc_trim(0);
+        }
     }
 }
 
 /// The record's memory lines: `rss-file`, the file-backed part of the
 /// resident set (`RssFile`), which tells the binary's own pages from what the
-/// document cost, then `peak`. Each omitted where the platform will not say.
-fn print_peak(out: &mut dyn std::io::Write) {
+/// document cost, then `peak`, never under a mark the probe read ([`Marks`]).
+/// Each omitted where the platform will not say.
+fn print_peak(out: &mut dyn std::io::Write, marks: &Marks) {
     if let Some(bytes) = status_bytes("RssFile") {
         say!(out, "rss-file {bytes}");
     }
-    if let Some(peak) = peak_bytes() {
+    if let Some(peak) = marks.peak(peak_bytes()) {
         say!(out, "peak {peak}");
     }
 }
@@ -2901,7 +3019,7 @@ fn probe_to(
             // file did not open" is a different fact from "this build does not
             // run the pass".
             say!(out, "strict ineligible the file did not open");
-            print_peak(out);
+            print_peak(out, &Marks::default());
             say!(out, "ms {}", started.elapsed().as_millis());
             say!(out, "done");
             return;
@@ -2945,7 +3063,8 @@ fn probe_to(
         "time open {}",
         opening.saturating_add(counting).as_micros()
     );
-    mark(out, "open");
+    let mut marks = Marks::default();
+    marks.mark(out, "open");
 
     // Counted by kind rather than listed: a damaged file can emit tens of
     // thousands of warnings, and the report wants to know which kinds a
@@ -2978,7 +3097,7 @@ fn probe_to(
         // different fact from a document with no structure tree.
         None => say!(out, "tagged tree no"),
     }
-    mark(out, "scan");
+    marks.mark(out, "scan");
 
     let render = RenderOptions {
         annotations: options.annotations,
@@ -3050,7 +3169,7 @@ fn probe_to(
             join.unmarked
         );
     }
-    mark(out, "render");
+    marks.mark(out, "render");
 
     // What this document costs to work on, as properties of the document.
     //
@@ -3078,9 +3197,9 @@ fn probe_to(
 
     say!(out, "phase strict");
     strict(out, &doc);
-    mark(out, "strict");
-    metamorphic(out, &doc, options, fonts);
-    mark(out, "metamorphic");
+    marks.mark(out, "strict");
+    metamorphic(out, &mut marks, &doc, options, fonts);
+    marks.mark(out, "metamorphic");
 
     for (kind, count) in &kinds {
         say!(out, "warn {kind} {count}");
@@ -3093,7 +3212,7 @@ fn probe_to(
     //
     // Omitted where the platform will not say. See [`peak_bytes`] for why that
     // is an omission rather than a zero.
-    print_peak(out);
+    print_peak(out, &marks);
     say!(out, "ms {}", started.elapsed().as_millis());
     say!(out, "done");
 }
@@ -3637,6 +3756,64 @@ mod tests {
             None,
             "another field"
         );
+    }
+
+    /// **A mark read lower than an earlier one lowers nothing** (MS-27): the
+    /// record's peak is the platform's figure or the largest mark, whichever
+    /// is higher, and either alone where only one was read.
+    #[test]
+    fn the_peak_is_never_under_a_mark_the_probe_read() {
+        let mut marks = Marks::default();
+        assert_eq!(marks.peak(None), None, "nothing read");
+        assert_eq!(marks.peak(Some(5)), Some(5), "the platform's figure alone");
+        marks.read(100);
+        marks.read(80);
+        assert_eq!(marks.highest, Some(100), "a lower reading keeps the higher");
+        assert_eq!(
+            marks.peak(Some(90)),
+            Some(100),
+            "the kernel's figure fell short"
+        );
+        assert_eq!(
+            marks.peak(Some(120)),
+            Some(120),
+            "the kernel's figure rose past"
+        );
+        assert_eq!(marks.peak(None), Some(100), "the final read failed");
+    }
+
+    /// **A record states no peak under one of its own marks**: the line the
+    /// runner keeps is no lower than any `hwm` the same child wrote before it.
+    /// Off Linux a record has neither, and there is nothing to hold.
+    #[test]
+    fn a_record_states_no_peak_under_one_of_its_marks() {
+        let mut builder = DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        builder.add_page(200.0, 100.0, |page| {
+            page.text(b"F0", 12.0, 10.0, 50.0, "every part marked");
+        });
+        let record = probe_record(&builder.finish(), &["--dpi", "72"], "marks");
+        let peak = record
+            .iter()
+            .find_map(|line| line.strip_prefix("peak "))
+            .and_then(|bytes| bytes.parse::<u64>().ok());
+        let marks: Vec<u64> = record
+            .iter()
+            .filter_map(|line| line.strip_prefix("hwm "))
+            .filter_map(|rest| rest.split_whitespace().nth(1)?.parse().ok())
+            .collect();
+        if cfg!(target_os = "linux") {
+            let peak = peak.expect("a Linux record states a peak");
+            assert!(
+                !marks.is_empty(),
+                "a Linux record marks its parts: {record:?}"
+            );
+            for mark in &marks {
+                assert!(peak >= *mark, "a peak of {peak} under a mark of {mark}");
+            }
+        } else {
+            assert!(marks.is_empty(), "only Linux marks: {record:?}");
+        }
     }
 
     /// The probe's record of `bytes` under `args`, line by line, as the

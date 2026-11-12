@@ -125,7 +125,7 @@ piece in the list, which lands its code (a bench operation unmeasured), and a
 
 **The list.**
 
-1–100: MS-25.2, MS-27.2, MS-02.4,
+1–100: MS-25.2, MS-02.4,
 P-02.1, P-02.2, P-02.3, P-02.4, P-02.5, P-02.6, P-02.7, P-03.2,
 P-04.3, P-04.4, P-04.5, P-04.7, P-05.5, P-05.8, P-28.1, MS-09.2a, MS-09.3a,
 MS-10.1a, MS-10.2, MS-12.3, K-03.2, K-03.3, K-03.4, K-03.5, K-03.6, K-03.7,

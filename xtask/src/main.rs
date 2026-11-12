@@ -1142,6 +1142,15 @@ const SPAWNERS: &[(&str, &str)] = &[
          and holding it to the committed table is the parent's own",
     ),
     (
+        "tools/tpdf/src/doubled_peak.rs",
+        "PERMANENT: re-executes `tpdf`'s own unit-test binary, built from \
+         this revision, once a generated shape, so that the resident set each \
+         child reads is that shape's doubled render's alone. It hosts one \
+         shape a process and adjudicates nothing: the resident set is the \
+         kernel's figure, and holding the readings to each other is the \
+         parent's own",
+    ),
+    (
         "xtask/src/parity.rs",
         "PERMANENT: spawns `cargo`, `python`, `node` and `dotnet` as *hosts* \
          for this repository's own code. Each loads this engine — as a cargo \

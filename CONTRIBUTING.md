@@ -33,6 +33,9 @@ vendored CMap registry (`THIRDPARTY.md`) into static tables. It reads a
 directory that is in the repository — nothing is downloaded, so an offline
 build and a reproducible one both still work — and the workspace sets
 `opt-level = 2` for build scripts so it costs seconds rather than a minute.
+The CLI's `tools/tpdf/build.rs` runs nothing: on Linux it asks the linker to
+align `tpdf`'s segments to 64 KiB, for the reason
+[docs/verification.md](docs/verification.md) gives under the corpus peaks.
 
 Features are a gate leg, and they cannot be run from the workspace root:
 
@@ -155,9 +158,10 @@ and the release unless its file is listed in `SPAWNERS` with the reason it
 may. Every row there is
 `PERMANENT` and none adjudicates a document: `rustc` to prove a type refuses
 a state, `curl`, `tar` and `unzip` to fetch corpora this repository then
-verifies against its own SHA-256, `cargo` to build and publish, and the
-corpus child, a workspace binary built from the same revision. A row whose
-file has stopped spawning fails the check too.
+verifies against its own SHA-256, `cargo` to build and publish, the corpus
+child, a workspace binary built from the same revision, and a test binary
+re-run as a child of itself so that a measured case has a process of its own.
+A row whose file has stopped spawning fails the check too.
 
 A skipped test exits 0 and reads exactly like a pass, so every check that
 depends on something being present prints a `RAN` banner, and a run without

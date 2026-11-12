@@ -415,6 +415,33 @@ cost. The report keeps both per file, and each corpus's `peak` line names the
 file that reached the largest peak, the first phase whose mark reads it and
 its file-backed share. A bar holds the peak alone.
 
+**Each part's peak is its own memory.** The platform allocator keeps what a
+part of the work frees, resident, and what it keeps turns on where each
+allocation landed, which moves from run to run with the hash seeds the
+engine's maps draw and with the address space's layout. Left there, it
+decides a later part's peak in that part's place — the part reuses it or
+adds its own memory beside it, and the doubled render of one document adds
+its canvas on one run and nothing on the next. On Linux with glibc a child
+therefore hands what the allocator holds free back to the kernel
+(`malloc_trim`) as it reads each mark, and again before the crop's rewrite
+and the doubled render, which start after the part before them has dropped
+its documents, so each part starts from live memory alone; the doubled
+render is marked while it is held. The kernel keeps its high-water
+mark from counters it folds in batches, and it can read under a mark the
+child already took, so `peak` is never under one of the child's own marks.
+And `tpdf`'s loadable segments ask for 64 KiB on Linux
+(`tools/tpdf/build.rs`), the window a page fault maps around itself, so the
+kernel loads the binary at a boundary of that window and each run maps the
+same pages of its code; the shared libraries keep the placement their own
+builds ask for. `tools/tpdf/src/doubled_peak.rs` holds the doubled render to
+its own memory, a process for each of a generated one-page document and a
+ten-thousand-page one: after nothing, after the relations that rewrite, and
+after small blocks freed in the order they were made and in reverse, the
+resident set with the doubled render held reads the same, within a
+mebibyte, under the main arena alone as the probe's one thread allocates.
+`tools/tpdf/tests/load_alignment.rs` reads the segments' alignment from the
+built binary.
+
 ### The fourth axis: relations between two renders
 
 The corpus has no ground truth — nobody here knows what its pages should look
