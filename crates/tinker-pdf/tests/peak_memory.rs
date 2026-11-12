@@ -17,9 +17,10 @@
 //! give their peaks (`PEAK_TOLERANCE_PERCENT`, `xtask/src/ratchet.rs`), and
 //! refuses a case the table has no line for. A line whose bytes read
 //! [`UNHELD`] names a case measured and printed but held to no figure: the
-//! owner's word (H-78) for a case whose runs spread past the tolerance, until
-//! a row makes its peak steady. With `TINKER_PEAK_RECORD` set it prints each
-//! case's line for the table instead of holding it.
+//! owner's word (H-78) for a case whose runs spread past the tolerance, or
+//! whose two runs have not been read, until they are. With
+//! `TINKER_PEAK_RECORD` set it prints each case's line for the table instead
+//! of holding it.
 //!
 //! The child is this test binary, built from the same revision, so this file
 //! is a `SPAWNERS` row in `xtask/src/main.rs`: it hosts one case a process and
@@ -33,7 +34,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 
 /// The benchmark set's generators: the cases use a few of them.
 #[allow(
@@ -65,10 +66,9 @@ const BUILDS: [&str; 2] = ["default", "bundled-fonts"];
 /// The cases, in the order a run measures them.
 ///
 /// `png-20-on-4-one-arena` is `png-20-on-4` again with the platform
-/// allocator held to one arena (`MALLOC_ARENA_MAX=1`), which a child reads at
-/// its start: beside the case as it is, its two runs say whether the case's
-/// spread is the arenas four threads allocate from or the order its pages
-/// are drawn in (MS-25).
+/// allocator held to one arena besides ([`allocator`]), so the threaded
+/// render is held both where its threads allocate from arenas of their own
+/// and where they share one.
 const CASES: [&str; 8] = [
     "png-300",
     "jpeg-300",
@@ -82,6 +82,13 @@ const CASES: [&str; 8] = [
 
 /// The suffix that runs a case's child under one allocator arena.
 const ONE_ARENA: &str = "-one-arena";
+
+/// What the names of the cases drawing their pages on [`WORKERS`] threads
+/// begin with.
+const THREADED: &str = "png-20-on-4";
+
+/// The threads the threaded cases draw their pages on.
+const WORKERS: u32 = 4;
 
 /// What a child prints before its case and its peak.
 const REPORT: &str = "peak-memory-case";
@@ -231,6 +238,33 @@ fn write_inputs(case: &str, dir: &Path) {
     }
 }
 
+/// The platform allocator's settings `case`'s child runs under, as the
+/// environment it is started with: the allocator reads them at the child's
+/// start.
+///
+/// The threaded cases hold glibc's mmap threshold at the 128 KiB it starts
+/// at (`MALLOC_MMAP_THRESHOLD_`), which stops it rising to the size of the
+/// largest mapped block a thread has freed. Left to rise, it rises with the
+/// order the four threads free their pages' buffers, and it decides whether
+/// the next buffer is mapped, and handed back to the kernel when it is freed,
+/// or carved from a thread's arena, which may keep it after it is freed: the
+/// peak then moves with which thread freed first. Held, every block of
+/// 128 KiB or more is mapped and handed back when it is freed, and the peak
+/// is what the waves ([`in_waves`]) hold alive at once.
+/// `png-20-on-4-one-arena` holds the allocator to one arena besides
+/// (`MALLOC_ARENA_MAX`). Every other case runs under the allocator as it
+/// comes.
+fn allocator(case: &str) -> Vec<(&'static str, &'static str)> {
+    let mut settings = Vec::new();
+    if case.starts_with(THREADED) {
+        settings.push(("MALLOC_MMAP_THRESHOLD_", "131072"));
+    }
+    if case.ends_with(ONE_ARENA) {
+        settings.push(("MALLOC_ARENA_MAX", "1"));
+    }
+    settings
+}
+
 /// One child: this binary re-executed to run `case` alone, and the peak it
 /// reports.
 fn run_child(case: &str, dir: &Path) -> u64 {
@@ -245,10 +279,8 @@ fn run_child(case: &str, dir: &Path) -> u64 {
             "--test-threads=1",
         ])
         .env("TINKER_PEAK_CASE", case)
-        .env("TINKER_PEAK_INPUT", dir);
-    if case.ends_with(ONE_ARENA) {
-        command.env("MALLOC_ARENA_MAX", "1");
-    }
+        .env("TINKER_PEAK_INPUT", dir)
+        .envs(allocator(case));
     let output = command
         .output()
         .unwrap_or_else(|error| panic!("{} did not start: {error}", exe.display()));
@@ -277,10 +309,34 @@ fn read_input(dir: &Path, name: &str) -> Arc<[u8]> {
     read().unwrap_or_else(|error| panic!("the input {}: {error}", path.display()))
 }
 
+/// Draws `pages` pages on `workers` scoped threads in waves: worker `k` draws
+/// pages `k`, `k + workers`, … in turn, and every worker waits at each wave's
+/// start until all of them have finished the wave before. The pages alive at
+/// once are then one wave's, the same on every run whichever thread finishes
+/// first, where threads that each took the next page as they freed would hold
+/// a different mix of pages, and of each page's render and encode, from run
+/// to run, and so a different peak.
+fn in_waves(pages: u32, workers: u32, draw: impl Fn(u32, u32) + Sync) {
+    let start = Barrier::new(workers as usize);
+    std::thread::scope(|scope| {
+        for worker in 0..workers {
+            let (start, draw) = (&start, &draw);
+            scope.spawn(move || {
+                for wave in 0..pages.div_ceil(workers) {
+                    start.wait();
+                    let index = wave * workers + worker;
+                    if index < pages {
+                        draw(worker, index);
+                    }
+                }
+            });
+        }
+    });
+}
+
 /// The operation `case` names, on the input its parent wrote into `dir`.
 fn perform(case: &str, dir: &Path) {
     use std::hint::black_box;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use tinker_pdf::write::{self, FontPolicy, ImagePolicy, SaveOptions};
     use tinker_pdf::{Document, RenderOptions, WriteMode, WriteOptions};
 
@@ -312,23 +368,13 @@ fn perform(case: &str, dir: &Path) {
             );
         }
         // Tier P's '20 pages at 150 dpi to PNG' on four workers, run on this
-        // process's own scoped threads, each taking the next page as it frees.
+        // process's own scoped threads in waves of four pages.
         "png-20-on-4" | "png-20-on-4-one-arena" => {
             let doc = open("png-20-on-4.pdf");
             let pages = doc.page_count();
             assert_eq!(pages, 20, "the input's pages");
-            let next = AtomicU32::new(0);
-            std::thread::scope(|scope| {
-                for _ in 0..4 {
-                    let (doc, next) = (&doc, &next);
-                    scope.spawn(move || loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        if index >= pages {
-                            return;
-                        }
-                        black_box(png(doc, index, 150.0));
-                    });
-                }
+            in_waves(pages, WORKERS, |_, index| {
+                black_box(png(&doc, index, 150.0));
             });
         }
         "text-10000" => {
@@ -435,6 +481,69 @@ fn a_child_holding_64_mib_reports_at_least_that() {
     assert!(peak >= 64 << 20, "a peak of {peak} bytes");
 }
 
+/// The waves hold whichever thread finishes first: worker `k` draws pages
+/// `k`, `k + 4`, …, every page once, the last wave short, and no page of a
+/// wave starts until every page of the wave before has finished, though a
+/// wave's last worker draws for the shortest time.
+#[test]
+fn the_threaded_cases_draw_their_pages_in_waves() {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    // A page, the worker drawing it and whether it starts, in the order the
+    // workers come to them.
+    let events = Mutex::new(Vec::new());
+    in_waves(10, WORKERS, |worker, index| {
+        events.lock().expect("the log").push((index, worker, true));
+        std::thread::sleep(Duration::from_millis(u64::from(2 * (WORKERS - worker))));
+        events.lock().expect("the log").push((index, worker, false));
+    });
+    let events = events.into_inner().expect("the log");
+    let mut drawn: Vec<u32> = events
+        .iter()
+        .filter(|&&(_, _, starts)| starts)
+        .map(|&(index, _, _)| index)
+        .collect();
+    drawn.sort_unstable();
+    assert_eq!(drawn, (0..10).collect::<Vec<_>>(), "every page once");
+    for &(index, worker, _) in &events {
+        assert_eq!(
+            worker,
+            index % WORKERS,
+            "page {index} drawn by worker {worker}"
+        );
+    }
+    for (at, &(index, _, starts)) in events.iter().enumerate() {
+        if !starts {
+            continue;
+        }
+        let wave = index / WORKERS;
+        let unfinished = events[at..]
+            .iter()
+            .find(|&&(other, _, other_starts)| !other_starts && other / WORKERS < wave);
+        assert!(
+            unfinished.is_none(),
+            "page {index} of wave {wave} started before {unfinished:?} finished"
+        );
+    }
+}
+
+/// The threaded cases state the allocator they run under, the one-arena one
+/// a single arena besides, and every other case runs under it as it comes.
+#[test]
+fn each_case_states_the_allocator_it_runs_under() {
+    let threshold = ("MALLOC_MMAP_THRESHOLD_", "131072");
+    assert_eq!(allocator("png-20-on-4"), [threshold]);
+    assert_eq!(
+        allocator("png-20-on-4-one-arena"),
+        [threshold, ("MALLOC_ARENA_MAX", "1")]
+    );
+    for case in CASES.iter().filter(|case| !case.starts_with(THREADED)) {
+        assert!(allocator(case).is_empty(), "{case}");
+    }
+    assert!(allocator("hold-64-mib").is_empty());
+}
+
 #[test]
 fn the_status_line_is_read_in_kib() {
     let status =
@@ -475,7 +584,7 @@ fn a_case_named_unheld_is_held_to_nothing() {
 }
 
 /// The committed table reads and names every case in both builds, leaving
-/// unheld only the case whose two runs spread past the tolerance.
+/// unheld only the threaded cases.
 #[test]
 fn the_committed_table_names_every_case_in_both_builds() {
     let committed = figures(TABLE).unwrap_or_else(|error| panic!("{error}"));
@@ -487,7 +596,7 @@ fn the_committed_table_names_every_case_in_both_builds() {
                 .unwrap_or_else(|| panic!("{case}: no line for the {build} build"));
             assert_eq!(
                 line.bytes.is_none(),
-                case.starts_with("png-20-on-4"),
+                case.starts_with(THREADED),
                 "{case} in the {build} build"
             );
         }

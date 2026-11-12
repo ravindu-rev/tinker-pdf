@@ -1304,17 +1304,26 @@ once, into the buffer it opens, performs the one operation and prints the
 `VmHWM` the kernel tracked since exec, read as `tpdf`'s `peak_bytes` reads it,
 so a figure holds the operation and its input and never the generator.
 
+The four threads draw their twenty pages in waves: thread `k` takes pages `k`,
+`k + 4`, …, and each wave starts together and is finished by all four before
+the next starts, so the pages alive at once are one wave's whichever thread
+finishes first. The case states the allocator it runs under, in its child's
+environment: glibc's mmap threshold held at the 128 KiB it starts at
+(`MALLOC_MMAP_THRESHOLD_=131072`), since a threshold left to rise with the
+order the threads free their buffers decides which of the next buffers a
+thread's arena keeps after they are freed, and with it the peak. An eighth
+case runs it again with the allocator held to one arena besides
+(`MALLOC_ARENA_MAX=1`).
+
 The parent holds each case to its build's figure in `peak_memory.tsv`, the
 default and `bundled-fonts` builds each with their own, plus the 2 % the corpus
 bars give their peaks, and fails a case the table has no line for. Each figure
 is the larger of two runs' peaks on the hosted Linux image, the runs and the
 spread between them recorded in the table, so a local run on another machine
-reads its peaks beside that machine. A case whose two runs spread by 2 % or more is named
-`unheld`, by the owner's word (H-78): it is measured and printed and held to
-nothing, which is the twenty pages rendered on four threads, whose peak moves
-with how the pages are scheduled; an eighth case runs it again with the
-platform allocator held to one arena (`MALLOC_ARENA_MAX=1`), also unheld, so
-two runs say whether the spread is the allocator's or the schedule's.
+reads its peaks beside that machine. A case named `unheld`, by the owner's word
+(H-78), is measured and printed and held to nothing: one whose two runs spread
+by 2 % or more, or one whose two runs have not been read, as the two threaded
+cases' have not under their waves and their allocator.
 `TINKER_PEAK_RECORD` prints each case's line for the table instead of holding
 it:
 
@@ -1325,8 +1334,9 @@ TINKER_PEAK_RECORD=1 cargo test --release -p tinker-pdf --test peak_memory -- --
 It is Linux-only, since the peak is read from `/proc`, and `#[ignore]`d, since
 a render at 300 dpi and ten thousand pages of text are a release binary's
 work. What it decides with the numbers — the status line read in KiB, the
-band, the refusal, the line the record switch prints — is plain functions its
-own unit tests hold on every target, and
+band, the refusal, the line the record switch prints — and the allocator each
+case states are plain functions its own unit tests hold on every target, a
+unit test holds the waves on every target with threads, and
 `a_child_holding_64_mib_reports_at_least_that` shows that a child's figure
 sees what the child holds. The child is this test binary, so the file is a
 `SPAWNERS` row: it hosts one case a process and adjudicates nothing.

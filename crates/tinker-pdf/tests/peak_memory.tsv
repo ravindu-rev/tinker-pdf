@@ -22,12 +22,11 @@
 #   bundled-fonts  png-300 0.04 %, jpeg-300 0.01 %, jpx-72 0.12 %,
 #                  text-10000 0.31 %, merge-4x100 0.05 %, open-23mb 0.72 %
 #
-# png-20-on-4, twenty pages rendered on four threads, read 82 636 800 and
-# 98 439 168 bytes in the default build and 88 715 264 and 77 705 216 with the
-# bundled faces, a spread of 19.1 % and 14.2 %: its peak moves with how the
-# pages are scheduled, so it is held to nothing until MS-25 makes it steady.
-# png-20-on-4-one-arena is the same case under one allocator arena, unheld,
-# its runs MS-25's evidence.
+# png-20-on-4, twenty pages rendered on four threads in waves under the
+# allocator its child states, and png-20-on-4-one-arena, the same under one
+# arena besides (`allocator` and `in_waves` in peak_memory.rs), are held to
+# nothing until two local runs of each build read them within 2 % of each
+# other (MS-25.2b).
 
 default	png-300	88739840
 default	jpeg-300	138256384
