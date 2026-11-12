@@ -107,8 +107,8 @@
 
 use crate::jpx;
 use crate::{
-    ccitt, inflate, jpeg, lzw, packbits, predictors, CcittParams, Limits, PredictorParams, Warning,
-    Warnings,
+    ccitt, inflate, jpeg, lzw, packbits, predictors, CcittParams, Limits, PredictorParams, Tail,
+    Warning, Warnings,
 };
 
 // --- the budgets --------------------------------------------------------
@@ -1070,14 +1070,14 @@ impl TiffScan<'_> {
                 coded.get(..n).unwrap_or(coded).to_vec()
             }
             TiffCompression::PackBits => packbits::packbits_bytes(coded, expected, limits, w).0,
-            TiffCompression::Deflate => inflate::flate_bytes(coded, limits, w).0,
+            TiffCompression::Deflate => inflate::flate_bytes(coded, limits, Tail::Nothing, w).0,
             TiffCompression::Lzw => {
                 if old_style_lzw(coded) {
                     w.push(Warning::TiffOldStyleLzw);
                     let repacked = transcode_old_style_lzw(coded);
-                    lzw::lzw_bytes(&repacked, limits, true, w).0
+                    lzw::lzw_bytes(&repacked, limits, true, Tail::Nothing, w).0
                 } else {
-                    lzw::lzw_bytes(coded, limits, true, w).0
+                    lzw::lzw_bytes(coded, limits, true, Tail::Nothing, w).0
                 }
             }
             TiffCompression::ModifiedHuffman

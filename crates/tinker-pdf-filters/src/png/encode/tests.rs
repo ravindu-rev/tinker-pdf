@@ -83,8 +83,12 @@ fn filtered_stream(file: &[u8]) -> Vec<u8> {
             idat.extend_from_slice(&data);
         }
     }
-    let (data, complete) =
-        crate::inflate::flate_bytes(&idat, &CAP, &mut crate::Warnings::default());
+    let (data, complete) = crate::inflate::flate_bytes(
+        &idat,
+        &CAP,
+        crate::Tail::Nothing,
+        &mut crate::Warnings::default(),
+    );
     assert!(complete, "the IDAT zlib stream did not inflate whole");
     data
 }

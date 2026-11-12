@@ -102,7 +102,7 @@
 //! hostile file and the other is serialising a buffer that already exists.
 
 use crate::crc32::Crc32;
-use crate::{inflate, predictor_decode, Limits, PredictorParams, Warning, Warnings};
+use crate::{inflate, predictor_decode, Limits, PredictorParams, Tail, Warning, Warnings};
 
 mod encode;
 
@@ -833,7 +833,8 @@ impl PngScan {
         // which is gap 18a milestone 8's lesson arriving as a warning rather
         // than as a cap.
         let cap = Limits::new(usize::try_from(filtered_len).unwrap_or(usize::MAX));
-        let (filtered, complete_inflate) = inflate::flate_bytes(&self.idat, &cap, &mut w);
+        let (filtered, complete_inflate) =
+            inflate::flate_bytes(&self.idat, &cap, Tail::Nothing, &mut w);
 
         let mut data = vec![0u8; raster_len];
         let mut raster = Raster {

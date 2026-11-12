@@ -32,6 +32,19 @@ terminates the chain, handing back its still-encoded payload tagged with
 ceiling (`Limits`), because a 1 KB flate stream can legally expand to
 gigabytes (ruling 1).
 
+**What follows a filter's end of data** — after the zlib checksum, `>`,
+`~>`, RunLength's 128, or the byte LZW's code 257 ends in — is
+`Warning::TrailingGarbage` only where a byte of it is not white space
+(7.2.3). 7.3.8.1 keeps the end-of-line before `endstream` out of `/Length`,
+and a producer that counts it in hands the filter that marker as the last
+bytes of its input: at the first stage of a chain, or at a later one where a
+stream's bytes were re-encoded whole. That marker holds no data, so reading
+past it is no repair. A lone `~` is not a whole marker, and any byte after it
+is garbage; the four bytes after a deflate stream are its checksum whatever
+they are, and fewer than four are its absence, which costs no data. A PNG's
+image data and a TIFF strip end where their data does, so every byte after
+theirs is garbage.
+
 **JPEG** (DCTDecode, 7.4.8; T.81): baseline (SOF0), extended sequential
 (SOF1) and progressive (SOF2) — spectral selection, successive approximation
 and EOB runs (T.81 G.1.1.1.1) all decode — and the **arithmetic** frames
@@ -848,6 +861,13 @@ wants the reason to survive it.
   arbitrary bytes, and no decoder ever exceeds `Limits::max_output`.
 - `crates/tinker-pdf-filters/tests/containers.rs` — `inflate_raw` and CRC-32
   as their container consumers use them.
+- `crates/tinker-pdf/tests/stream_end_of_line.rs` — generated pages whose
+  content stream and ICC profile are coded through each byte filter, their
+  `/Length` counting the end-of-line before `endstream` in each of its forms
+  and after blanks: each opens, draws and reads its profile with no warning;
+  a chain that re-encoded the marker with its data reads the same; and a byte
+  after the marker that is not white space is still `Filter(TrailingGarbage)`
+  on its stream.
 - `crates/tinker-pdf-filters/tests/jpx_annex_j.rs` — T.800 Annex J.10's
   published 100-byte codestream, decoded to the nine samples J.10.5 states,
   and **the same codestream with its packet headers relocated into a PPM and

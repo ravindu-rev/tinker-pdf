@@ -1,11 +1,6 @@
 //! ASCIIHexDecode (7.4.2) and ASCII85Decode (7.4.3).
 
-use crate::{Limits, Warning, Warnings};
-
-/// 7.2.3, Table 1: the six white-space characters.
-const fn is_white(b: u8) -> bool {
-    matches!(b, 0x00 | 0x09 | 0x0a | 0x0c | 0x0d | 0x20)
-}
+use crate::{is_white, Limits, Tail, Warning, Warnings};
 
 const fn hex_val(b: u8) -> Option<u8> {
     match b {
@@ -30,7 +25,7 @@ pub(crate) fn hex_bytes(input: &[u8], limits: &Limits, w: &mut Warnings) -> (Vec
                     return (out, false);
                 }
             }
-            if i + 1 < input.len() {
+            if Tail::WhiteSpace.garbage(input.get(i + 1..).unwrap_or_default()) {
                 w.push(Warning::TrailingGarbage);
             }
             complete = true;
@@ -90,11 +85,20 @@ pub(crate) fn a85_bytes(input: &[u8], limits: &Limits, w: &mut Warnings) -> (Vec
     while let Some(&b) = input.get(i) {
         i += 1;
         if b == b'~' {
-            // 7.4.3: the EOD is "~>"; a lone '~' still ends the data.
-            if input.get(i).is_some_and(|&c| c == b'>') {
+            // 7.4.3: the EOD is "~>"; a lone '~' still ends the data. White
+            // space after the marker is the stream's end-of-line only where
+            // the marker is whole: after a lone '~' it stands where the '>'
+            // should, so any byte there is garbage.
+            let whole = input.get(i).is_some_and(|&c| c == b'>');
+            if whole {
                 i += 1;
             }
-            if i < input.len() {
+            let tail = if whole {
+                Tail::WhiteSpace
+            } else {
+                Tail::Nothing
+            };
+            if tail.garbage(input.get(i..).unwrap_or_default()) {
                 w.push(Warning::TrailingGarbage);
             }
             saw_eod = true;
@@ -251,6 +255,25 @@ mod tests {
         assert_eq!(w, vec![Warning::TrailingGarbage]);
     }
 
+    /// The end-of-line 7.3.8.1 keeps out of `/Length`, counted in by the
+    /// producer, follows the EOD and is no garbage; a byte that is not white
+    /// space after it still is.
+    #[test]
+    fn hex_white_space_after_the_eod_is_the_streams_own() {
+        for tail in [&b"\n"[..], b"\r\n", b"\r", b" \t\x0c\r\n", b"\x00"] {
+            let mut s = b"48656C6C6F>".to_vec();
+            s.extend_from_slice(tail);
+            let (d, c, w) = hex(&s);
+            assert_eq!(d, b"Hello", "{tail:?}");
+            assert!(c, "{tail:?}");
+            assert!(w.is_empty(), "{tail:?}: {w:?}");
+        }
+        let (d, c, w) = hex(b"48>\r\n65");
+        assert_eq!(d, vec![0x48]);
+        assert!(c);
+        assert_eq!(w, vec![Warning::TrailingGarbage]);
+    }
+
     #[test]
     fn hex_empty_and_eod_only() {
         let (d, c, w) = hex(b">");
@@ -356,6 +379,39 @@ mod tests {
     #[test]
     fn a85_accepts_the_adobe_prefix_and_ignores_the_tail() {
         let (d, c, w) = a85(b"<~9jqo^~>rest");
+        assert_eq!(d, b"Man ");
+        assert!(c);
+        assert_eq!(w, vec![Warning::TrailingGarbage]);
+    }
+
+    /// `~>` and the end-of-line a `/Length` counted in after it, which is
+    /// how a file of the reported-breakage corpus writes its ICC profile: no
+    /// garbage. A byte that is not white space after it still is.
+    #[test]
+    fn a85_white_space_after_the_eod_is_the_streams_own() {
+        for tail in [&b"\n"[..], b"\r\n", b"\r", b" \t\x0c\r\n", b"\x00"] {
+            let mut s = b"9jqo^~>".to_vec();
+            s.extend_from_slice(tail);
+            let (d, c, w) = a85(&s);
+            assert_eq!(d, b"Man ", "{tail:?}");
+            assert!(c, "{tail:?}");
+            assert!(w.is_empty(), "{tail:?}: {w:?}");
+        }
+        let (d, c, w) = a85(b"9jqo^~>\nrest");
+        assert_eq!(d, b"Man ");
+        assert!(c);
+        assert_eq!(w, vec![Warning::TrailingGarbage]);
+    }
+
+    /// A lone `~` ends the data, and the white space after it stands where
+    /// its `>` should: the marker is not whole, so that is garbage.
+    #[test]
+    fn a85_white_space_after_a_lone_tilde_is_garbage() {
+        let (d, c, w) = a85(b"9jqo^~");
+        assert_eq!(d, b"Man ");
+        assert!(c);
+        assert!(w.is_empty(), "{w:?}");
+        let (d, c, w) = a85(b"9jqo^~\n");
         assert_eq!(d, b"Man ");
         assert!(c);
         assert_eq!(w, vec![Warning::TrailingGarbage]);

@@ -1,16 +1,18 @@
 //! LZWDecode (7.4.4): 9→12-bit variable codes, MSB first.
 
-use crate::{Limits, Warning, Warnings};
+use crate::{Limits, Tail, Warning, Warnings};
 
 const CLEAR: u16 = 256;
 const EOD: u16 = 257;
 const FIRST: u16 = 258;
 const MAX_ENTRIES: usize = 4096;
 
+/// LZWDecode's byte layer. `tail` says what may follow the EOD code.
 pub(crate) fn lzw_bytes(
     input: &[u8],
     limits: &Limits,
     early_change: bool,
+    tail: Tail,
     w: &mut Warnings,
 ) -> (Vec<u8>, bool) {
     let mut prefix = vec![0u16; MAX_ENTRIES];
@@ -41,7 +43,10 @@ pub(crate) fn lzw_bytes(
             continue;
         }
         if code == EOD {
-            if total_bits - bitpos >= 8 {
+            // The bits after the code in the byte it ends in are padding;
+            // what followed the data starts at the next whole byte.
+            let after = usize::try_from(bitpos.div_ceil(8)).unwrap_or(usize::MAX);
+            if tail.garbage(input.get(after..).unwrap_or_default()) {
                 w.push(Warning::TrailingGarbage);
             }
             return (out, true);
@@ -159,7 +164,7 @@ mod tests {
 
     fn lzw(input: &[u8]) -> (Vec<u8>, bool, Vec<Warning>) {
         let mut w = Warnings::default();
-        let (d, c) = lzw_bytes(input, &CAP, true, &mut w);
+        let (d, c) = lzw_bytes(input, &CAP, true, Tail::WhiteSpace, &mut w);
         (d, c, w.into_vec())
     }
 
@@ -281,6 +286,37 @@ mod tests {
         assert_eq!(w, vec![Warning::TrailingGarbage]);
     }
 
+    /// The end-of-line 7.3.8.1 keeps out of `/Length`, counted in by the
+    /// producer, follows the byte the EOD code ends in and is no garbage; a
+    /// byte that is not white space after it still is.
+    #[test]
+    fn white_space_after_the_eod_is_the_streams_own() {
+        let enc = pack(&[(256, 9), (u16::from(b'A'), 9), (257, 9)]);
+        for tail in [&b"\n"[..], b"\r\n", b"\r", b" \t\x0c\r\n", b"\x00"] {
+            let mut s = enc.clone();
+            s.extend_from_slice(tail);
+            let (d, c, w) = lzw(&s);
+            assert_eq!(d, b"A", "{tail:?}");
+            assert!(c, "{tail:?}");
+            assert!(w.is_empty(), "{tail:?}: {w:?}");
+        }
+        let mut s = enc;
+        s.extend_from_slice(b"\njunk");
+        assert_eq!(lzw(&s).2, vec![Warning::TrailingGarbage]);
+    }
+
+    /// A TIFF strip ends where its data does, so a byte after its EOD code is
+    /// garbage, white space or not.
+    #[test]
+    fn a_strip_keeps_white_space_after_its_eod_garbage() {
+        let mut s = pack(&[(256, 9), (u16::from(b'A'), 9), (257, 9)]);
+        s.push(b'\n');
+        let mut w = Warnings::default();
+        let (d, c) = lzw_bytes(&s, &CAP, true, Tail::Nothing, &mut w);
+        assert_eq!((d.as_slice(), c), (&b"A"[..], true));
+        assert_eq!(w.into_vec(), vec![Warning::TrailingGarbage]);
+    }
+
     #[test]
     fn the_width_grows_one_code_early_by_default() {
         // 510 single-byte codes fill entries up to 511, which is where
@@ -304,11 +340,11 @@ mod tests {
             pack(&c)
         };
         let mut w = Warnings::default();
-        let (d, c) = lzw_bytes(&early_on, &CAP, true, &mut w);
+        let (d, c) = lzw_bytes(&early_on, &CAP, true, Tail::WhiteSpace, &mut w);
         assert!(c, "{:?}", w.clone().into_vec());
         assert_eq!(d.last(), Some(&b'Z'));
         let mut w = Warnings::default();
-        let (d, c) = lzw_bytes(&early_off, &CAP, false, &mut w);
+        let (d, c) = lzw_bytes(&early_off, &CAP, false, Tail::WhiteSpace, &mut w);
         assert!(c);
         assert_eq!(d.last(), Some(&b'Z'));
     }
@@ -343,7 +379,7 @@ mod tests {
         let limits = Limits::new(3);
         let mut w = Warnings::default();
         let enc = [0x80, 0x0b, 0x60, 0x50, 0x22, 0x0c, 0x0c, 0x85, 0x01];
-        let (d, c) = lzw_bytes(&enc, &limits, true, &mut w);
+        let (d, c) = lzw_bytes(&enc, &limits, true, Tail::WhiteSpace, &mut w);
         assert_eq!(d, b"---");
         assert!(!c);
         assert_eq!(w.into_vec(), vec![Warning::OutputCapHit]);

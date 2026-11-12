@@ -6,7 +6,7 @@
 //! decoder. Back-references read the output `Vec` directly — decoding is to
 //! memory, so the output doubles as the 32 KB window.
 
-use crate::{Limits, Warning, Warnings};
+use crate::{Limits, Tail, Warning, Warnings};
 
 const PRIMARY_BITS: u32 = 9;
 const PRIMARY_SIZE: usize = 1 << PRIMARY_BITS;
@@ -782,8 +782,13 @@ fn adler32(data: &[u8]) -> u32 {
 }
 
 /// FlateDecode's byte layer: a zlib stream when the header says so, raw
-/// deflate when it does not.
-pub(crate) fn flate_bytes(input: &[u8], limits: &Limits, w: &mut Warnings) -> (Vec<u8>, bool) {
+/// deflate when it does not. `tail` says what may follow the stream.
+pub(crate) fn flate_bytes(
+    input: &[u8],
+    limits: &Limits,
+    tail: Tail,
+    w: &mut Warnings,
+) -> (Vec<u8>, bool) {
     if let Some(fdict) = zlib_header(input) {
         if fdict {
             w.push(Warning::FdictIgnored);
@@ -799,16 +804,16 @@ pub(crate) fn flate_bytes(input: &[u8], limits: &Limits, w: &mut Warnings) -> (V
             w.merge(&aw);
             let mut complete = r.complete;
             if complete {
-                let end = start + r.end;
+                let rest = input.get(start + r.end..).unwrap_or_default();
                 // A missing checksum costs no data, so its absence is not
-                // itself a leniency worth recording.
-                if let Some([c0, c1, c2, c3]) = input.get(end..end + 4) {
-                    let want = u32::from_be_bytes([*c0, *c1, *c2, *c3]);
-                    if !fdict && want != adler32(&r.data) {
+                // itself a leniency worth recording. Four bytes after the
+                // data are the checksum, whatever they are.
+                if let Some((checksum, after)) = rest.split_first_chunk::<4>() {
+                    if !fdict && u32::from_be_bytes(*checksum) != adler32(&r.data) {
                         w.push(Warning::AdlerMismatch);
                         complete = false;
                     }
-                    if input.len() > end + 4 {
+                    if tail.garbage(after) {
                         w.push(Warning::TrailingGarbage);
                     }
                 }
@@ -822,7 +827,7 @@ pub(crate) fn flate_bytes(input: &[u8], limits: &Limits, w: &mut Warnings) -> (V
     // this retry is required, not optional.
     w.push(Warning::RawDeflateFallback);
     let r = raw_bytes(input, limits, w);
-    if r.complete && r.end < input.len() {
+    if r.complete && tail.garbage(input.get(r.end..).unwrap_or_default()) {
         w.push(Warning::TrailingGarbage);
     }
     (r.data, r.complete)
@@ -842,7 +847,7 @@ mod tests {
 
     fn flate(input: &[u8]) -> (Vec<u8>, bool, Vec<Warning>) {
         let mut w = Warnings::default();
-        let (d, c) = flate_bytes(input, &CAP, &mut w);
+        let (d, c) = flate_bytes(input, &CAP, Tail::WhiteSpace, &mut w);
         (d, c, w.into_vec())
     }
 
@@ -957,6 +962,71 @@ mod tests {
         assert_eq!(d, b"Hello");
         assert!(c);
         assert_eq!(w, vec![Warning::TrailingGarbage]);
+    }
+
+    /// "Hello", stored, in a zlib wrapper with its checksum.
+    const HELLO: &[u8] = b"\x78\x01\x01\x05\x00\xfa\xffHello\x05\x8c\x01\xf5";
+
+    /// The end-of-line 7.3.8.1 keeps out of `/Length`, which a producer
+    /// counted in, is the last of a stream's bytes and no garbage: in each of
+    /// its three forms, after blanks, and as several blank lines.
+    #[test]
+    fn white_space_after_the_checksum_is_the_streams_own() {
+        for tail in [&b"\n"[..], b"\r\n", b"\r", b" \t\r\n", b"\x00\x0c\n\n"] {
+            let mut s = HELLO.to_vec();
+            s.extend_from_slice(tail);
+            let (d, c, w) = flate(&s);
+            assert_eq!(d, b"Hello", "{tail:?}");
+            assert!(c, "{tail:?}");
+            assert!(w.is_empty(), "{tail:?}: {w:?}");
+        }
+        // Anything else after it is garbage still, white space before it or
+        // not.
+        let mut s = HELLO.to_vec();
+        s.extend_from_slice(b"\r\nx");
+        assert_eq!(flate(&s).2, vec![Warning::TrailingGarbage]);
+    }
+
+    /// A stream with no checksum whose `/Length` counts its end-of-line:
+    /// fewer than four bytes follow the data, so there is no checksum to
+    /// read, and its absence costs no data.
+    #[test]
+    fn an_end_of_line_with_no_checksum_before_it_is_silent() {
+        let bare = &HELLO[..HELLO.len() - 4];
+        for tail in [&b"\n"[..], b"\r\n", b"\r"] {
+            let mut s = bare.to_vec();
+            s.extend_from_slice(tail);
+            let (d, c, w) = flate(&s);
+            assert_eq!(d, b"Hello", "{tail:?}");
+            assert!(c, "{tail:?}");
+            assert!(w.is_empty(), "{tail:?}: {w:?}");
+        }
+    }
+
+    /// A container's coded data ends where its data does: a PNG's image data
+    /// or a TIFF strip keeps any byte after the checksum garbage.
+    #[test]
+    fn a_containers_data_keeps_white_space_after_it_garbage() {
+        let mut w = Warnings::default();
+        let mut s = HELLO.to_vec();
+        s.push(b'\n');
+        let (d, c) = flate_bytes(&s, &CAP, Tail::Nothing, &mut w);
+        assert_eq!((d.as_slice(), c), (&b"Hello"[..], true));
+        assert_eq!(w.into_vec(), vec![Warning::TrailingGarbage]);
+    }
+
+    /// The raw fallback reads what follows its data by the same rule.
+    #[test]
+    fn white_space_after_raw_deflate_is_the_streams_own() {
+        let (d, c, w) = flate(b"\x01\x05\x00\xfa\xffHello\r\n");
+        assert_eq!(d, b"Hello");
+        assert!(c);
+        assert_eq!(w, vec![Warning::RawDeflateFallback]);
+        let (_, _, w) = flate(b"\x01\x05\x00\xfa\xffHello\r\njunk");
+        assert_eq!(
+            w,
+            vec![Warning::RawDeflateFallback, Warning::TrailingGarbage]
+        );
     }
 
     #[test]

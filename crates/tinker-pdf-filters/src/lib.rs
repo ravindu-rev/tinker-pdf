@@ -189,6 +189,13 @@ pub enum Warning {
     /// a final deflate block) appeared.
     EarlyEod,
     /// Bytes remained after the stream's end; they were ignored.
+    ///
+    /// White space after a `/Filter`'s end of data is not this. 7.3.8.1 puts
+    /// an end-of-line marker between a stream's data and `endstream` and
+    /// keeps it out of `/Length`, and a producer that counts it in hands the
+    /// filter that marker as the last bytes of its input, where it holds no
+    /// data. A container's coded data — a PNG's image data, a TIFF strip —
+    /// ends where its data does, and any byte after it is this.
     TrailingGarbage,
     /// `Limits::max_output` was reached; the output is truncated there.
     OutputCapHit,
@@ -577,6 +584,37 @@ impl fmt::Display for Warning {
     }
 }
 
+/// 7.2.3, Table 1: the six white-space characters.
+pub(crate) const fn is_white(b: u8) -> bool {
+    matches!(b, 0x00 | 0x09 | 0x0a | 0x0c | 0x0d | 0x20)
+}
+
+/// What may follow the data a byte layer decodes without being
+/// [`Warning::TrailingGarbage`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Tail {
+    /// A stream's bytes as a `/Filter` reads them, at any stage of its
+    /// chain: they may end in the end-of-line marker 7.3.8.1 keeps out of
+    /// `/Length`, which a producer counted in, or in blanks before it — and a
+    /// stage handed what an earlier one decoded may meet the same marker
+    /// re-encoded with the data. White space after the end of data is no
+    /// garbage.
+    WhiteSpace,
+    /// A container's coded data, which ends where its data does: a PNG's
+    /// image data, a TIFF strip. Any byte after it is garbage.
+    Nothing,
+}
+
+impl Tail {
+    /// Whether `rest`, the bytes after the end of data, are garbage.
+    pub(crate) fn garbage(self, rest: &[u8]) -> bool {
+        match self {
+            Self::WhiteSpace => rest.iter().any(|&b| !is_white(b)),
+            Self::Nothing => !rest.is_empty(),
+        }
+    }
+}
+
 /// Deduplicating warning sink. Keeps first-occurrence order and bounds the
 /// vector by the size of the `Warning` set, so a pathological stream cannot
 /// turn leniency into an allocation attack.
@@ -728,7 +766,7 @@ pub fn flate_decode(
     predictor: Option<&PredictorParams>,
 ) -> Result<Decoded, FilterError> {
     let mut w = Warnings::default();
-    let (data, complete) = inflate::flate_bytes(input, limits, &mut w);
+    let (data, complete) = inflate::flate_bytes(input, limits, Tail::WhiteSpace, &mut w);
     finish(data, complete, predictor, limits, w)
 }
 
@@ -746,7 +784,7 @@ pub fn lzw_decode(
     predictor: Option<&PredictorParams>,
 ) -> Result<Decoded, FilterError> {
     let mut w = Warnings::default();
-    let (data, complete) = lzw::lzw_bytes(input, limits, early_change, &mut w);
+    let (data, complete) = lzw::lzw_bytes(input, limits, early_change, Tail::WhiteSpace, &mut w);
     finish(data, complete, predictor, limits, w)
 }
 
@@ -862,11 +900,12 @@ pub fn apply_chain(
 
         let (data, ok) = match spec.filter {
             Filter::Flate => {
-                let (d, ok) = inflate::flate_bytes(cur, limits, &mut w);
+                let (d, ok) = inflate::flate_bytes(cur, limits, Tail::WhiteSpace, &mut w);
                 stage_predictor(d, ok, spec.predictor.as_ref(), limits, &mut w)?
             }
             Filter::Lzw => {
-                let (d, ok) = lzw::lzw_bytes(cur, limits, spec.early_change, &mut w);
+                let (d, ok) =
+                    lzw::lzw_bytes(cur, limits, spec.early_change, Tail::WhiteSpace, &mut w);
                 stage_predictor(d, ok, spec.predictor.as_ref(), limits, &mut w)?
             }
             Filter::AsciiHex => ascii::hex_bytes(cur, limits, &mut w),
@@ -972,6 +1011,38 @@ mod tests {
                 assert_eq!(d.data, b"abc");
                 assert!(d.complete);
                 assert!(d.warnings.is_empty());
+            }
+            ChainOutput::EncodedImage { .. } => panic!("no codec in chain"),
+        }
+    }
+
+    #[test]
+    fn white_space_is_garbage_only_after_a_containers_data() {
+        for rest in [&b""[..], b"\n", b"\r\n", b"\r", b" \t\x0c\x00"] {
+            assert!(!Tail::WhiteSpace.garbage(rest), "{rest:?}");
+        }
+        assert!(Tail::WhiteSpace.garbage(b"\r\nx"));
+        assert!(!Tail::Nothing.garbage(b""));
+        assert!(Tail::Nothing.garbage(b"\n"));
+    }
+
+    /// A stream re-encoded whole, the end-of-line its `/Length` counted
+    /// with it: each stage of the chain meets white space after its own end
+    /// of data, and neither is garbage.
+    #[test]
+    fn white_space_after_each_stage_of_a_chain_is_the_streams_own() {
+        let chain = [
+            FilterSpec::new(Filter::AsciiHex),
+            FilterSpec::new(Filter::Flate),
+        ];
+        // "Hello", stored in a zlib wrapper, its checksum and a line feed,
+        // in hex, and the hex stream's own end-of-line.
+        let coded = b"7801010500faff48656c6c6f058c01f50a>\r\n";
+        match apply_chain(coded, &chain, &Limits::new(64)).expect("no params to reject") {
+            ChainOutput::Bytes(d) => {
+                assert_eq!(d.data, b"Hello");
+                assert!(d.complete);
+                assert!(d.warnings.is_empty(), "{:?}", d.warnings);
             }
             ChainOutput::EncodedImage { .. } => panic!("no codec in chain"),
         }

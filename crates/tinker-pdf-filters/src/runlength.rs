@@ -1,6 +1,6 @@
 //! RunLengthDecode (7.4.5).
 
-use crate::{Limits, Warning, Warnings};
+use crate::{Limits, Tail, Warning, Warnings};
 
 pub(crate) fn rle_bytes(input: &[u8], limits: &Limits, w: &mut Warnings) -> (Vec<u8>, bool) {
     let mut out = Vec::new();
@@ -11,7 +11,7 @@ pub(crate) fn rle_bytes(input: &[u8], limits: &Limits, w: &mut Warnings) -> (Vec
         // 7.4.5: 128 is EOD, 0..=127 a literal run of tag+1, 129..=255 a
         // repeat of the next byte 257-tag times.
         if tag == 128 {
-            if i < input.len() {
+            if Tail::WhiteSpace.garbage(input.get(i..).unwrap_or_default()) {
                 w.push(Warning::TrailingGarbage);
             }
             return (out, true);
@@ -136,6 +136,25 @@ mod tests {
     #[test]
     fn bytes_after_eod_are_ignored() {
         let (d, c, w) = rle(&[0, b'A', 128, b'j', b'u', b'n', b'k']);
+        assert_eq!(d, b"A");
+        assert!(c);
+        assert_eq!(w, vec![Warning::TrailingGarbage]);
+    }
+
+    /// The end-of-line 7.3.8.1 keeps out of `/Length`, counted in by the
+    /// producer, follows the EOD and is no garbage; a byte that is not white
+    /// space after it still is.
+    #[test]
+    fn white_space_after_eod_is_the_streams_own() {
+        for tail in [&b"\n"[..], b"\r\n", b"\r", b" \t\x0c\r\n", b"\x00"] {
+            let mut s = vec![0, b'A', 128];
+            s.extend_from_slice(tail);
+            let (d, c, w) = rle(&s);
+            assert_eq!(d, b"A", "{tail:?}");
+            assert!(c, "{tail:?}");
+            assert!(w.is_empty(), "{tail:?}: {w:?}");
+        }
+        let (d, c, w) = rle(&[0, b'A', 128, b'\n', b'j']);
         assert_eq!(d, b"A");
         assert!(c);
         assert_eq!(w, vec![Warning::TrailingGarbage]);
