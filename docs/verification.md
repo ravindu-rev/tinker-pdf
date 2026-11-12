@@ -1341,6 +1341,24 @@ once, into the buffer it opens, performs the one operation and prints the
 `VmHWM` the kernel tracked since exec, read as `tpdf`'s `peak_bytes` reads it,
 so a figure holds the operation and its input and never the generator.
 
+The open case's child reads its file as `tpdf info` does instead, through the
+CLI's own open (`tools/tpdf/src/source.rs`, reached by path): on demand, the
+document kept streamed only when it answers as a buffered open of the same
+bytes would, and the pages counted. It asserts that the open kept the document
+streamed, that every read was made, and that it counts the pages the parent's
+buffered open of the bytes counted, which the parent writes beside the file.
+Its figure is then the child's resident floor and what those reads kept,
+rather than the file. `the_open_case_reads_its_file_on_demand` runs that case
+alone and holds its peak below the file's length, which a whole read could not
+be, printing its line and a `RAN` line:
+
+```sh
+cargo test --release -p tinker-pdf --test peak_memory -- --ignored --nocapture the_open_case_reads_its_file_on_demand
+```
+
+`the_open_case_counts_a_file_it_keeps_streamed` performs the case's operation
+in the test's own process, on every target, over a small document.
+
 The four threads draw their twenty pages in waves: thread `k` takes pages `k`,
 `k + 4`, …, and each wave starts together and is finished by all four before
 the next starts, so the pages alive at once are one wave's whichever thread

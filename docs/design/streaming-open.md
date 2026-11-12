@@ -702,9 +702,11 @@ every host keeps the answers a buffered open gives.
   source wasm needs; Go and Java open through
   `tpdf_document_open_streaming` with sources of their own and keep the
   streamed contract they have.
-- **Unix and Windows only.** Those are the source's two arms and what CI builds
-  `tpdf` on (`.github/workflows/ci.yml`); a target with neither fails to
-  compile rather than reading through an arm no run exercises.
+- **Positioned reads on Unix and Windows only.** Those are the source's two
+  positioned arms and what CI builds `tpdf` on (`.github/workflows/ci.yml`).
+  On a target with neither the source reads through the handle's cursor,
+  which two threads would share; no target `tpdf` builds for has threads
+  without a positioned read.
 
 ### Design
 

@@ -10,7 +10,14 @@
 //! (`benches/support/inputs.rs`, one source for both), so a child's peak holds
 //! the operation and the bytes it reads, never the generator that made them.
 //! A child reads its input once, into the buffer it opens, so the bytes are
-//! held once.
+//! held once. The open case's child opens its file as `tpdf info` does
+//! instead, through the CLI's own open (`tools/tpdf/src/source.rs`, included
+//! by path): read on demand, and kept streamed only when it answers as a
+//! buffered open of the same bytes would. It asserts that the open kept it
+//! streamed and that it counts the pages the parent's buffered open of the
+//! bytes counted, written beside the file;
+//! [`the_open_case_reads_its_file_on_demand`] runs that case alone and holds
+//! its peak below the file's length.
 //!
 //! The parent holds each case to its figure for this build in
 //! `peak_memory.tsv` plus [`TOLERANCE_PERCENT`], the tolerance the corpus bars
@@ -43,6 +50,15 @@ use std::sync::{Arc, Barrier};
 )]
 #[path = "../benches/support/inputs.rs"]
 mod inputs;
+
+/// The CLI's own open: the file source `tpdf` reads a file through and the
+/// rule it keeps a streamed document by. The open case calls the open alone.
+#[allow(
+    dead_code,
+    reason = "the open case calls the CLI's open and nothing else"
+)]
+#[path = "../../../tools/tpdf/src/source.rs"]
+mod source;
 
 /// How far over its committed figure a case may read before it fails.
 const TOLERANCE_PERCENT: u64 = 2;
@@ -77,8 +93,18 @@ const CASES: [&str; 8] = [
     "png-20-on-4-one-arena",
     "text-10000",
     "merge-4x100",
-    "open-23mb",
+    OPEN,
 ];
+
+/// The case that opens the 23 MB image file as `tpdf info` opens it.
+const OPEN: &str = "open-23mb";
+
+/// The open case's file.
+const OPEN_FILE: &str = "open-23mb.pdf";
+
+/// What the parent writes beside the open case's file: the pages a buffered
+/// open of its bytes counts, in decimal, which the child's count is held to.
+const OPEN_PAGES: &str = "open-23mb.pages";
 
 /// The suffix that runs a case's child under one allocator arena.
 const ONE_ARENA: &str = "-one-arena";
@@ -199,23 +225,49 @@ fn reported(stdout: &str, case: &str) -> Option<u64> {
     digits[..end].parse().ok()
 }
 
-/// Where the parent writes the cases' inputs: under the directory cargo
-/// gives every test target for its own files.
-fn input_dir() -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("peak-memory");
+/// Where the test `run` writes its cases' inputs: a directory of its own,
+/// under the one cargo gives every test target for its own files, so tests
+/// the harness runs at once never write over the file another's child reads.
+fn input_dir(run: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("peak-memory")
+        .join(run);
     std::fs::create_dir_all(&dir)
         .unwrap_or_else(|error| panic!("the input directory {}: {error}", dir.display()));
     dir
 }
 
+/// `bytes` written to the file `name` in `dir`.
+fn write_input(dir: &Path, name: &str, bytes: &[u8]) {
+    let path = dir.join(name);
+    std::fs::write(&path, bytes)
+        .unwrap_or_else(|error| panic!("the input {}: {error}", path.display()));
+}
+
+/// `bytes` written as the open case's file in `dir`, and beside it the pages
+/// a buffered open of them counts.
+fn write_open_input(dir: &Path, bytes: Arc<[u8]>) {
+    let pages = tinker_pdf::Document::open(Arc::clone(&bytes))
+        .expect("the open case's file opens")
+        .page_count();
+    write_input(dir, OPEN_FILE, &bytes);
+    write_input(dir, OPEN_PAGES, pages.to_string().as_bytes());
+}
+
+/// The pages the parent wrote beside the open case's file in `dir`.
+fn open_pages(dir: &Path) -> u32 {
+    let path = dir.join(OPEN_PAGES);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("the input {}: {error}", path.display()));
+    text.trim()
+        .parse()
+        .unwrap_or_else(|error| panic!("the input {}: `{text}`, {error}", path.display()))
+}
+
 /// Writes `case`'s input files into `dir`, from the benchmark set's
 /// generators.
 fn write_inputs(case: &str, dir: &Path) {
-    let write = |name: &str, bytes: &[u8]| {
-        let path = dir.join(name);
-        std::fs::write(&path, bytes)
-            .unwrap_or_else(|error| panic!("the input {}: {error}", path.display()));
-    };
+    let write = |name: &str, bytes: &[u8]| write_input(dir, name, bytes);
     match case {
         "png-300" => write("png-300.pdf", &inputs::dense(1, 0)),
         "jpeg-300" => write("jpeg-300.pdf", &inputs::jpeg_page()),
@@ -232,7 +284,7 @@ fn write_inputs(case: &str, dir: &Path) {
                 );
             }
         }
-        "open-23mb" => write("open-23mb.pdf", &inputs::image_file()),
+        OPEN => write_open_input(dir, inputs::image_file()),
         "hold-64-mib" => {}
         other => panic!("no case is named {other}"),
     }
@@ -412,8 +464,19 @@ fn perform(case: &str, dir: &Path) {
             };
             black_box(write::save(&mut editor, &options).bytes);
         }
-        "open-23mb" => {
-            black_box(open("open-23mb.pdf").page_count());
+        // What `tpdf info` does to its file: the CLI's own open, which keeps
+        // the document streamed only when it answers as a buffered open of the
+        // same bytes would, and the pages counted, every read made.
+        OPEN => {
+            let path = dir.join(OPEN_FILE);
+            let path = path.to_str().expect("the input's path in UTF-8");
+            let (doc, kept) = source::open_on_demand(path).expect("the input opens");
+            assert!(doc.is_streamed(), "the CLI's open keeps the file streamed");
+            let pages = doc.page_count();
+            let file = kept.expect("the source a streamed document reads through");
+            assert_eq!(file.failure(), None, "every read through the file was made");
+            assert_eq!(pages, open_pages(dir), "the file's pages");
+            black_box(pages);
         }
         "hold-64-mib" => {
             black_box(vec![1u8; 64 << 20]);
@@ -448,7 +511,7 @@ fn peak_memory_of_every_case() {
         println!("SKIPPED: peak memory, read from /proc, which only Linux has");
         return;
     }
-    let dir = input_dir();
+    let dir = input_dir("every-case");
     let mut measured = Vec::new();
     for case in CASES {
         write_inputs(case, &dir);
@@ -477,8 +540,48 @@ fn a_child_holding_64_mib_reports_at_least_that() {
         println!("SKIPPED: peak memory, read from /proc, which only Linux has");
         return;
     }
-    let peak = run_child("hold-64-mib", &input_dir());
+    let peak = run_child("hold-64-mib", &input_dir("hold-64-mib"));
     assert!(peak >= 64 << 20, "a peak of {peak} bytes");
+}
+
+/// MS-05's open case alone: its child opens the 23 MB image file as
+/// `tpdf info` does, asserts that the CLI's open kept it streamed and counts
+/// its pages, and holds less than the file at its peak, which a read of the
+/// whole file could not.
+#[test]
+#[ignore = "starts a child process over the 23 MB image file, as the peak-memory run does"]
+fn the_open_case_reads_its_file_on_demand() {
+    if !cfg!(target_os = "linux") {
+        println!("SKIPPED: peak memory, read from /proc, which only Linux has");
+        return;
+    }
+    let dir = input_dir("open-case");
+    write_inputs(OPEN, &dir);
+    let length = std::fs::metadata(dir.join(OPEN_FILE))
+        .expect("the input's length")
+        .len();
+    let peak = run_child(OPEN, &dir);
+    println!("{}", line(BUILD, OPEN, peak));
+    assert!(
+        peak < length,
+        "a peak of {peak} bytes, not below the {length}-byte file the child opened"
+    );
+    println!(
+        "RAN: the open case in the {BUILD} build, {} pages counted through the CLI's own \
+         open of a {length}-byte file kept streamed, at a peak of {peak} bytes",
+        open_pages(&dir)
+    );
+}
+
+/// The open case's operation, in this process and on every target, over a
+/// small document written as its input: the CLI's open keeps the file
+/// streamed and counts the pages the buffered open wrote beside it.
+#[test]
+fn the_open_case_counts_a_file_it_keeps_streamed() {
+    let dir = input_dir("open-case-in-process");
+    write_open_input(&dir, inputs::small(3).into());
+    assert_eq!(open_pages(&dir), 3, "the buffered open's count");
+    perform(OPEN, &dir);
 }
 
 /// The waves hold whichever thread finishes first: worker `k` draws pages
