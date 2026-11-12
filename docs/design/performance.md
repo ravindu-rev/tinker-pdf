@@ -315,7 +315,9 @@ whose every glyph origin falls on a whole pixel at 72 dpi, so that its
 distinct (glyph, scale, phase) keys at that scale are its 80 glyphs; and four
 documents of 100 pages to merge for A6, the same generator's, whose faces are
 one encoded stream and whose pages' contents all differ, so that a merge's
-deduplication meets one collision a part. Each is written in memory, object
+deduplication meets both halves of its mechanism: the copies of the face the
+imports make, one encoding, and encodings that all differ under the dictionary
+the pages' contents share with the face. Each is written in memory, object
 by object, by the generator itself, so a tree's shape is the generator's
 statement rather than the writer's choice, and each has a test that holds it
 to its shape. Pages carry the least content that exercises their leg, with
@@ -472,7 +474,7 @@ lands in the step named, in
 | A5 | a text extraction | `a5_text_decodes_each_stream_at_most_once` | P-03, P-03.2 |
 | A5 | image extraction, the decode door | `a5_image_extraction_decodes_each_stream_at_most_once` | P-03, P-03.2 |
 | A5 | a merge | `a5_a_merge_decodes_each_stream_at_most_once` | P-03, P-03.4, landed |
-| A6 | merge deduplication decompresses nothing unless encoded length and encoded hash collide | `a6_merge_deduplication_decodes_only_on_a_collision` | P-03, P-03.6, as H-137 is decided |
+| A6 | merge deduplication decodes no byte-identical copy, and each differing encoding under one dictionary once a save (ruling 23) | `a6_merge_deduplication_decodes_no_copy_and_each_differing_encoding_once` | P-03, P-03.6, landed |
 | A7 | IDCT output ≤ 4 × drawn pixels for a quarter-scale draw | `a_jpeg_drawn_at_a_quarter_transforms_four_samples_a_pixel`, in `crates/tinker-pdf/tests/images.rs` | P-09, P-09.8 |
 | A7 | JPX levels decoded ≤ levels needed | `a_jpx_image_drawn_at_a_quarter_decodes_two_levels_fewer`, in `crates/tinker-pdf/tests/jpx_images.rs` | P-10, P-10.8 |
 | A8 | whole-image scratch on the PNG path ≤ 1 × the image | `a8_the_png_path_holds_at_most_one_image_of_scratch` | P-04, P-04.5 |
@@ -2148,8 +2150,9 @@ many times as it is reached: a font program once for every page's scope that
 draws it, a form's content on every `Do`, a Type 3 procedure for every glyph,
 and a merge's deduplication every candidate stream for its digest and again
 for each comparison. This section fixes who holds the decoded bytes for an
-operation and until when, what deduplication buckets and compares, what each
-outcome of H-137 leaves a save merging, and what A5 and A6 count.
+operation and until when, what deduplication buckets and compares, what the
+owner's answer to H-137 (ruling 23) leaves a save merging, and what A5 and A6
+count.
 
 ### Scope
 
@@ -2159,7 +2162,8 @@ outcome of H-137 leaves a save merging, and what A5 and A6 count.
 - **The hash** (P-03.3): XXH64, moved into `tinker-pdf-filters`.
 - **Deduplication on encoded bytes** (P-03.4): the bucket key, the
   byte-for-byte confirmation, and a decode at most once a save.
-- **H-137** (P-03.5, P-03.6): what each answer costs and keeps.
+- **H-137** (P-03.5, P-03.6): what each answer costs and keeps, and the
+  answer ruling 23 gives.
 - **A5's and A6's counted quantities**, and MS-05's merge band (P-03.7).
 
 ### Non-goals
@@ -2230,15 +2234,16 @@ one the archive's Zstandard frame checksum carries, which both
 **The hash only buckets.** Two streams of one bucket merge when their
 comparable dictionaries are equal and their encoded bytes are equal byte for
 byte — undecoded. Equality is decided by bytes, as `dedup.rs`'s module rule
-says of SHA-256 today, so a colliding hash costs a comparison and never a
-wrong merge (`a_colliding_digest_never_merges_different_bytes`, its injected
-digest retyped to a `u64`).
+says, so a colliding hash costs a comparison and never a wrong merge
+(`a_colliding_digest_never_merges_different_bytes`, whose injected digest
+collides on everything).
 
-**What is decoded, and how often.** Under H-137's default (P-03.4), a stream
-whose comparable dictionary matches another's and whose encoding differs is
-compared decoded, as today; each such stream is decoded at most once a save,
+**What is decoded, and how often.** Under ruling 23's answer to H-137, a
+stream whose comparable dictionary matches another's and whose encoding
+differs is compared decoded; each such stream is decoded at most once a save,
 its decoded bytes kept in the pass's map until the pass ends, and counted on
-the save door. Every round after the first reads the map, since redirecting
+the save door. A byte-identical copy merges without a decode, and no other
+stream is decoded. Every round after the first reads the map, since redirecting
 references changes dictionaries and never content.
 
 **The whole-set copy and each round's rebuild stay.** The pass copies the
@@ -2250,12 +2255,19 @@ one copy and one rebuild: two passes over the merged file's bytes, beside
 which the per-stream decodes this row removes are the merge's cost. A later
 round runs only when a merge made two dictionaries equal.
 
-#### H-137: what each answer keeps
+#### H-137: what each answer keeps, and the answer
 
 | Answer | The merges a save still makes | What A6 counts |
 | --- | --- | --- |
-| **Merge on encoded bytes alone** | every pair whose comparable dictionaries and encoded bytes are equal: a face, an image or a form imported once a page or a part; never two encodings of one content, so `two_encodings_of_one_content_merge` becomes `two_encodings_of_one_content_stay_two` | a decode only when two different encodings share a bucket, which is a 64-bit hash collision at one length; over a merge of 4 × 100 pages whose encodings all differ, none |
-| **Keep merging two encodings of one content** (the default until the owner decides) | those, and every pair whose dictionaries match and whose decoded bytes are equal | one decode a save of every stream whose comparable dictionary another shares with a different encoding — every page's content stream of a merge among them — so A6's clause and the merge floors are re-stated under H-77 or H-78, at the figures P-03.5 prices |
+| **Merge on encoded bytes alone** | every pair whose comparable dictionaries and encoded bytes are equal: a face, an image or a form imported once a page or a part; never two encodings of one content, so `two_encodings_of_one_content_merge` would become `two_encodings_of_one_content_stay_two` | a decode only when two different encodings share a bucket, which is a 64-bit hash collision at one length; over a merge of 4 × 100 pages whose encodings all differ, none |
+| **Keep merging two encodings of one content** (ruling 23's answer) | those, and every pair whose dictionaries match and whose decoded bytes are equal | one decode a save of every stream whose comparable dictionary another shares with a different encoding — every page's content stream of a merge among them — and none of a byte-identical copy |
+
+**The answer** (ruling 23): byte-identical encodings merge without decoding,
+and differing encodings keep the decoded comparison, decoded once a save, so
+`two_encodings_of_one_content_merge` holds. A6's clause and the merge floors
+state that mechanism: A6 holds it over the guard suite's merge
+(`a6_merge_deduplication_decodes_no_copy_and_each_differing_encoding_once`),
+and P-03.7 holds the merge of 4 × 50 pages to its floors with it.
 
 **The price** (P-03.5). `dedup.rs`'s ignored
 `h137_prices_the_decoded_comparison_kept_and_dropped` runs the pass both ways,
@@ -2276,8 +2288,7 @@ merge pays nothing for the decoded comparison: the builder writes page
 contents and font programs without a filter, so comparing them runs no
 chain, and the 300 copies of the face its imports make are one encoding,
 merged undecoded. Regenerate with `cargo test -p tinker-pdf-cos --lib h137 --
---ignored --nocapture`, and again with `--release`. P-03.6 lands the owner's
-answer.
+--ignored --nocapture`, and again with `--release`.
 
 #### A5's and A6's counted quantities
 
@@ -2287,15 +2298,20 @@ and holds it to one: a save over a 100-page document drawing one embedded
 face with a `/ToUnicode` on every page; a render and a text extraction of a
 page showing one form three times and one Type 3 glyph fifty times; an image
 extraction through the decode door; and a merge's save (P-03.4). A6 reads
-`streams_decoded` on the save of a merge of the guard suite's four 100-page
-A6 documents, whose faces are one encoded stream and whose pages' contents
-all differ, against the clause H-137 leaves it.
+`streams_decoded`, `most_decodes_of_one_stream` and `bytes_decoded` on the
+save of a merge of the guard suite's four 100-page A6 documents, whose faces
+are one encoded stream and whose pages' contents all differ, and holds them to
+ruling 23's mechanism: each encoding that differs under the dictionary the
+pages' contents share with the face's program is decoded once — the 400
+contents and the face, 401 — and none of the 300 copies of the face the
+imports make, which the bytes decoded show by holding the face once. The
+saved file keeps one program for the face and a content stream a page.
 
 #### MS-05's merge band
 
 MS-05's merge 4 × 100 case is set at the figure the fixed merge peaks at,
 because the row names none (P-03.7): the set copy and the rebuild are its
-largest allocations, and the decoded map holds only the streams the default
+largest allocations, and the decoded map holds only the streams ruling 23
 compares decoded.
 
 ### Milestones
@@ -2318,14 +2334,15 @@ compares decoded.
    every `stream_dedup.rs` test passes unchanged.
 4. **P-03.5: H-137 priced.** Exit: the `#[ignore]`d pricing test in
    `dedup.rs` with its `RAN` banner, and its table committed here.
-5. **P-03.6: the owner's answer.** Exit:
-   `a6_merge_deduplication_decodes_only_on_a_collision` flips from owed as
-   decided, with `two_encodings_of_one_content_merge` renamed and inverted
-   or kept.
+5. **P-03.6: the owner's answer** (ruling 23). Exit:
+   `a6_merge_deduplication_decodes_no_copy_and_each_differing_encoding_once`
+   flips from owed, holding the mechanism the answer keeps, and
+   `two_encodings_of_one_content_merge` stays.
 6. **P-03.7: the row's close** in MS-02's paired run: subset-on-save of 4
-   pages (CLI) at 10×, merge of 4 × 50 pages at 25.2× CLI and 114×
-   in-process, MS-05's merge band at the fixed figure, and A5 and A6 green on
-   every target.
+   pages (CLI) at 10×, merge of 4 × 50 pages — byte-identical encodings
+   merged undecoded, differing ones compared decoded once a save — at 25.2×
+   CLI and 114× in-process, MS-05's merge band at the fixed figure, and A5
+   and A6 green on every target.
 
 ### Risks
 
@@ -2335,7 +2352,7 @@ compares decoded.
 | A hit hides a warning a caller expects | The miss raises the chain's warnings, as a cached object's first read does |
 | The cache raises an operation's peak | An image's samples are not held, and the operation drops it when it returns; MS-05's bands hold the cases it touches |
 | A hash collision merges two different streams | The hash only buckets; equality is decided by bytes |
-| Dropping cross-encoding merges grows files that compress one content twice | H-137 is the owner's, priced by P-03.5 before P-03.6 lands either answer |
+| The decoded comparison ruling 23 keeps costs a merge a decode of every page's content stream | Each is decoded once a save and its bytes held only until the pass ends (A5, A6); P-03.7 holds the merge floors with it, and P-03.5's price shows MS-04's merge running no chain for it, its contents and programs written unfiltered |
 
 ## P-04 — PNG and deflate
 

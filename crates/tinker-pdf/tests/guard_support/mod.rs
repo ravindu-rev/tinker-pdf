@@ -112,6 +112,12 @@ pub fn line(part: usize, page: usize) -> String {
     format!("Part {part}, page {}", page + 1)
 }
 
+/// The content stream of page `page` of part `part`, before it is deflated:
+/// its [`line`] in the embedded face.
+pub fn content(part: usize, page: usize) -> String {
+    format!("BT /F1 12 Tf 10 50 Td ({}) Tj ET", line(part, page))
+}
+
 /// A document of `pages` pages, part `part` of a merge: each page one line of
 /// text in the embedded face from a content stream of its own, every stream
 /// deflated, under one flat page tree, and a packet claiming PDF/A-2b.
@@ -120,8 +126,9 @@ pub fn line(part: usize, page: usize) -> String {
 /// and redaction have glyphs to work on; a rewrite, a rotation, a split and a
 /// merge have pages; and a validation has a claim to judge. Each part draws
 /// its own lines, so two parts' contents differ while their faces are the same
-/// encoded bytes: a merge's deduplication meets one collision a part, the
-/// face, and none among the pages.
+/// encoded bytes: a merge's deduplication meets one encoding of the face in
+/// every copy an import makes of it, and pages' contents whose encodings all
+/// differ under the dictionary the face's program shares with them.
 pub fn document(part: usize, pages: usize) -> Vec<u8> {
     // 1 the catalog, 2 the page tree, 3 to 5 the face, 6 the packet, then each
     // page and its content from 7.
@@ -144,10 +151,7 @@ pub fn document(part: usize, pages: usize) -> Vec<u8> {
              /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
             8 + 2 * at
         )));
-        objects.push(deflated(
-            "",
-            format!("BT /F1 12 Tf 10 50 Td ({}) Tj ET", line(part, at)).as_bytes(),
-        ));
+        objects.push(deflated("", content(part, at).as_bytes()));
     }
     pdf(&objects)
 }

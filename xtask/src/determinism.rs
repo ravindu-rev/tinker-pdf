@@ -147,6 +147,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/guards.rs",
         test: "a5_a_merge_decodes_each_stream_at_most_once",
     },
+    // MS-01's A6 guard: what a merge's deduplication decodes, no byte-identical
+    // copy and each differing encoding under one dictionary once.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a6_merge_deduplication_decodes_no_copy_and_each_differing_encoding_once",
+    },
     // MS-08's counted guard: the requests page one of the linearized fixture
     // and of its unlinearized twin makes, measured once and held on every
     // target beside the row's ceilings.

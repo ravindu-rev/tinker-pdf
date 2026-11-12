@@ -18,9 +18,14 @@
 //! output, and nothing is decoded to say so.
 //!
 //! **Differing encodings under one dictionary are compared decoded**, so two
-//! deflate levels over one font program are still found. Each such stream is
-//! decoded at most once a pass, and its decoded bytes are kept until the pass
-//! ends. Where decoding is anything less than exact — a filter this build
+//! deflate levels over one font program are still found. That is ruling 23's
+//! answer to H-137: the merges a comparison of encodings alone would give up
+//! are kept, at the price of a decode of each stream whose dictionary another
+//! shares under a different encoding, every page's content stream of a merge
+//! among them. Each such stream is decoded at most once a pass, which a save
+//! runs once, and its decoded bytes are kept until the pass ends; a
+//! byte-identical copy merges without a decode, and no other stream is
+//! decoded. Where decoding is anything less than exact — a filter this build
 //! cannot run, an image codec the chain stops at, a decode that warned or hit
 //! the output cap — the stream's stored bytes are compared instead, under a
 //! different tag, so a truncated decode can never make two different streams
@@ -196,8 +201,8 @@ pub(crate) fn deduplicate(
 }
 
 /// [`deduplicate`], comparing differing encodings under one dictionary
-/// decoded or not: the switch H-137 is priced by (P-03.5), which only this
-/// module's tests turn off.
+/// decoded or not. Every save compares them decoded (ruling 23); only this
+/// module's pricing test turns the comparison off, to price what it keeps.
 fn deduplicate_comparing(
     objects: &ObjectSet,
     trailer: &Dict,

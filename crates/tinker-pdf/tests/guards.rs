@@ -20,7 +20,7 @@ mod render_support;
 
 use std::collections::BTreeSet;
 
-use guard_support::{deflated, document, face, line, object, pdf, stream, A2_PAGES};
+use guard_support::{content, deflated, document, face, line, object, pdf, stream, A2_PAGES};
 use tinker_pdf::write::{
     save, BilevelCodec, ContinuousCodec, FontPolicy, ImagePolicy, ImageRecoding, SaveOptions,
 };
@@ -249,13 +249,17 @@ const ROSTER: &[Guard] = &[
             "P-03.4",
         )
     },
-    owed(
-        "A6",
-        "merge deduplication decompresses nothing unless encoded length and encoded hash collide",
-        "a6_merge_deduplication_decodes_only_on_a_collision",
-        "P-03",
-        "P-03.6, as H-137 is decided",
-    ),
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A6",
+            "merge deduplication decodes no byte-identical copy, and each differing encoding \
+             under one dictionary once a save",
+            "a6_merge_deduplication_decodes_no_copy_and_each_differing_encoding_once",
+            "P-03",
+            "P-03.6",
+        )
+    },
     Guard {
         file: "images.rs",
         ..owed(
@@ -1167,17 +1171,13 @@ fn a2_redaction_is_linear_in_pages() {
     });
 }
 
-// ---- A5: each stream decoded at most once an operation -----------------------
+// ---- A5 and A6: a merge's save ------------------------------------------------
 
-/// **A5, a merge**: the four A6 parts merged as `tpdf merge` merges them — the
-/// first the base and every page of the rest imported — and saved with stream
-/// deduplication and fonts kept. No stream is decoded twice in the save. The
-/// face, copied with every imported page, is one encoding and its copies merge
-/// undecoded; each page's content and the face's program share one dictionary,
-/// `/Filter /FlateDecode` alone, and differ in their encodings, so each is
-/// compared decoded, once.
-#[test]
-fn a5_a_merge_decodes_each_stream_at_most_once() {
+/// The four A6 parts merged as `tpdf merge` merges them — the first the base
+/// and every page of the rest imported — and saved with stream deduplication
+/// and fonts kept, counted: with no font pass to run, deduplication is all the
+/// save decodes.
+fn merged() -> tinker_pdf::write::Saved {
     let parts: Vec<Document> = merge_parts()
         .into_iter()
         .map(|bytes| Document::open(bytes).expect("a part opens"))
@@ -1191,7 +1191,7 @@ fn a5_a_merge_decodes_each_stream_at_most_once() {
                 .expect("the page imports");
         }
     }
-    let stats = save(
+    save(
         &mut editor,
         &SaveOptions {
             fonts: FontPolicy::Keep,
@@ -1204,8 +1204,20 @@ fn a5_a_merge_decodes_each_stream_at_most_once() {
             ..SaveOptions::default()
         },
     )
-    .stats
-    .expect("asked");
+}
+
+// ---- A5: each stream decoded at most once an operation -----------------------
+
+/// **A5, a merge**: the four A6 parts merged as `tpdf merge` merges them — the
+/// first the base and every page of the rest imported — and saved with stream
+/// deduplication and fonts kept. No stream is decoded twice in the save. The
+/// face, copied with every imported page, is one encoding and its copies merge
+/// undecoded; each page's content and the face's program share one dictionary,
+/// `/Filter /FlateDecode` alone, and differ in their encodings, so each is
+/// compared decoded, once.
+#[test]
+fn a5_a_merge_decodes_each_stream_at_most_once() {
+    let stats = merged().stats.expect("asked");
     assert_eq!(
         stats.streams_decoded,
         (A6_PARTS * A6_PAGES) as u64 + 1,
@@ -1218,5 +1230,69 @@ fn a5_a_merge_decodes_each_stream_at_most_once() {
     println!(
         "guard-a5-merge: RAN {} decodes, at most {} of one stream",
         stats.streams_decoded, stats.most_decodes_of_one_stream
+    );
+}
+
+// ---- A6: what a merge's deduplication decodes --------------------------------
+
+/// **A6: a merge's deduplication decodes no byte-identical copy, and each
+/// differing encoding under one dictionary once a save** — ruling 23's answer
+/// to H-137: byte-identical encodings merge without decoding, and differing
+/// ones keep the decoded comparison, so that two encodings of one content
+/// still merge. Over the four A6 parts merged as `tpdf merge` saves them, the
+/// face, copied with each of the 300 imported pages, is one encoding: its
+/// copies merge, and the bytes decoded hold the face once. Every page's
+/// content and the face's program share one dictionary, `/Filter
+/// /FlateDecode` alone, in 401 encodings that all differ: each is decoded
+/// once, and none merges with another.
+#[test]
+fn a6_merge_deduplication_decodes_no_copy_and_each_differing_encoding_once() {
+    let saved = merged();
+    let stats = saved.stats.expect("asked");
+    let encodings = (A6_PARTS * A6_PAGES) as u64 + 1;
+    let contents: usize = (0..A6_PARTS)
+        .flat_map(|part| (0..A6_PAGES).map(move |page| content(part, page).len()))
+        .sum();
+    let face = render_support::curvy_font().len();
+    assert_eq!(
+        (
+            stats.streams_decoded,
+            stats.most_decodes_of_one_stream,
+            stats.bytes_decoded,
+        ),
+        (encodings, 1, (contents + face) as u64),
+        "each differing encoding decoded once, the face's among them, and none of its copies"
+    );
+
+    // What the pass made of them: one program for every copy of the face, and
+    // each page's content still an object of its own.
+    let document = Document::open(saved.bytes).expect("the merge reopens");
+    let programs: BTreeSet<tinker_pdf_cos::ObjRef> = document
+        .fonts()
+        .iter()
+        .filter_map(|font| font.program.map(|program| program.stream))
+        .collect();
+    assert_eq!(programs.len(), 1, "the face's copies are one program");
+    let cos = document.cos();
+    let key = cos.intern(b"Contents");
+    let pages: BTreeSet<tinker_pdf_cos::ObjRef> = tinker_pdf_cos::pages::collect(cos)
+        .iter()
+        .map(|page| {
+            let object = cos.get(page.reference).expect("a page");
+            object
+                .as_dict()
+                .and_then(|dict| dict.get_ref(key))
+                .expect("its content")
+        })
+        .collect();
+    assert_eq!(
+        pages.len(),
+        A6_PARTS * A6_PAGES,
+        "no two pages' contents merged"
+    );
+    println!(
+        "guard-a6-merge: RAN {} decodes of {encodings} differing encodings, {} bytes, \
+         one program for the face",
+        stats.streams_decoded, stats.bytes_decoded
     );
 }

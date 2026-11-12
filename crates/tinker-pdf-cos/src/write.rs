@@ -134,20 +134,24 @@ pub struct WriteOptions {
     /// Merge identical streams into one object, on a rewrite.
     ///
     /// Identical means identical: equal dictionaries (`/Length` aside) and
-    /// equal decoded bytes, compared byte for byte — SHA-256 only chooses
-    /// which streams to compare. A wrong merge silently draws one font with
-    /// another's program, so nothing short of equality merges. Only streams
-    /// are merged, never the dictionaries whose object number carries
-    /// identity (pages, annotations, groups, structure elements, signatures),
-    /// nor a stream an `/OBJR` names or a cross-reference or object stream.
-    /// Runs after [`WriteOptions::garbage_collect`].
+    /// equal content, compared byte for byte — XXH64 only chooses which
+    /// streams to compare. Byte-identical encodings merge without a decode;
+    /// differing encodings under one dictionary are compared decoded, each
+    /// once a save, so two encodings of one content merge too (ruling 23). A
+    /// wrong merge silently draws one font with another's program, so nothing
+    /// short of equality merges. Only streams are merged, never the
+    /// dictionaries whose object number carries identity (pages, annotations,
+    /// groups, structure elements, signatures), nor a stream an `/OBJR` names
+    /// or a cross-reference or object stream. Runs after
+    /// [`WriteOptions::garbage_collect`].
     ///
-    /// Off by default: it decodes every filtered stream to compare it, and a
-    /// file whose streams all differ pays that for nothing. Ignored on an
-    /// incremental update, which appends and must not rewrite what a
-    /// signature's revision covers. Unlike the font-subsetting switch this
-    /// type's documentation refuses, this one is acted on here: the pass needs
-    /// the object set and the filters, and this crate has both.
+    /// Off by default: it decodes each stream whose dictionary another shares
+    /// under a different encoding to compare it, and a file whose streams all
+    /// differ pays that for nothing. Ignored on an incremental update, which
+    /// appends and must not rewrite what a signature's revision covers.
+    /// Unlike the font-subsetting switch this type's documentation refuses,
+    /// this one is acted on here: the pass needs the object set and the
+    /// filters, and this crate has both.
     pub deduplicate_streams: bool,
 }
 

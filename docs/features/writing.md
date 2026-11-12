@@ -99,11 +99,15 @@ dictionary's bytes, which carry the filter chain, and by the length and the
 XXH64 of their stored bytes, and two whose stored bytes are equal are one
 stream without a decode — a face imported with every page of a merge is
 merged without running its chain once. **Differing encodings under one
-dictionary are compared decoded**, so two encodings of one content merge;
-each such stream is decoded at most once a save, counted on the save's
-`Stats`, and its decoded bytes kept until the pass ends. A decode that is not
-exact — a filter this build cannot run, an image codec the chain stops at, a
-decode that warned or hit the output cap — compares the stored bytes under a
+dictionary are compared decoded**, so two encodings of one content merge:
+ruling 23's answer to H-137 keeps those merges, at the price of a decode of
+each stream whose dictionary another shares under a different encoding,
+every page's content stream of a merge among them. Each such stream is
+decoded at most once a save, counted on the save's `Stats`, and its decoded
+bytes kept until the pass ends; a byte-identical copy merges without a
+decode, and no other stream is decoded. A decode that is not exact — a filter
+this build cannot run, an image codec the chain stops at, a decode that
+warned or hit the output cap — compares the stored bytes under a
 different tag instead, so a damaged stream that decodes to the same prefix as
 another is never taken for it. Every reference to a duplicate, the trailer's
 included, is pointed at the survivor (the lowest-numbered), and the pass
@@ -112,10 +116,12 @@ drew them equal. Only streams are candidates, so nothing whose object number
 is its identity — a page, an annotation, an optional content group, a
 structure element, a signature dictionary — can be merged; among streams a
 cross-reference or object stream and one an `/OBJR` names (14.7.5.3) are held
-apart. Off by default, because it decodes every filtered stream to compare it;
-ignored on an incremental update, which appends and must not rewrite what a
-signature's revision covers. `DocumentEditor::import_page` copies a
-shared resource per import, and this pass merges the copies **only where
+apart. Off by default, because it decodes each stream whose dictionary
+another shares under a different encoding to compare it, and a file whose
+streams all differ pays that for nothing; ignored on an incremental update,
+which appends and must not rewrite what a signature's revision covers.
+`DocumentEditor::import_page` copies a shared resource per import, and this
+pass merges the copies **only where
 every object the copies' dictionaries name is a stream or is direct**. A copy
 whose dictionary names an indirect object that is not a stream — an indirect
 `/ColorSpace`, `/DecodeParms` or `[/ICCBased …]` array — has that object
@@ -467,7 +473,14 @@ everything, under which only true duplicates merge; four copies of streams
 whose dictionaries differ, which merge with nothing decoded
 (`byte_identical_encodings_merge_undecoded`); the fixed point through
 two forms naming two copies of one image; the trailer redirected; and the
-`/OBJR` and cross-reference holds.
+`/OBJR` and cross-reference holds. What a merge's deduplication decodes is
+the counted guard A6 in `crates/tinker-pdf/tests/guards.rs`
+(`a6_merge_deduplication_decodes_no_copy_and_each_differing_encoding_once`):
+four documents of a hundred pages merged and saved decode none of the copies
+of the face their imports make, and each encoding that differs under the
+dictionary the pages' contents share with the face once, by the save's own
+count; the face's copies leave one program, and every page keeps a content
+stream of its own.
 
 The image pass is `crates/tinker-pdf/tests/image_recode.rs`, and every
 expected answer there is the generator's input or arithmetic done in the file.

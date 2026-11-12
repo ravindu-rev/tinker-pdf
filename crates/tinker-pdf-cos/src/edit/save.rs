@@ -473,6 +473,10 @@ impl DocumentEditor {
     /// through its whole `/Filter` chain when that is exact, and its stored
     /// bytes when it is not.
     ///
+    /// Asked only of a stream whose dictionary another shares under a
+    /// different encoding, and of each at most once a save (ruling 23): a
+    /// byte-identical copy is merged without asking.
+    ///
     /// "Exact" is a decode that raised no warning at all: a filter this build
     /// cannot run, an image codec the chain stops at, damage, and the output
     /// cap each warn, and a truncated decode compared as if whole could make
