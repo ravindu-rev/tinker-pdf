@@ -2143,6 +2143,364 @@ this section.
 | A single lookup pays for the whole tree | No lookup builds; a lookup the index does not answer descends |
 | The serializer grows superlinear unseen | Named above: it counts nothing, and a row that changes its loops counts them |
 
+## P-02 — Resolved-resource cache
+
+*For [ROADMAP](../ROADMAP.md) row P-02.* A page's interpretation asks its
+resource scope the same questions again for every glyph and every operator.
+Each glyph shown asks `type3_glyph` whether its font is a Type 3 font, and the
+scope answers by reading the font's dictionary out of `/Font` again
+(`fonts::font_dict`): the `/Font` subdictionary copied when it is written
+inline, the font's dictionary copied whole with its `/Widths`, and `/Font`,
+`/Subtype` and the font's name looked up in the document's name table by their
+bytes — all to answer "no" for every glyph of every font that is not one. A
+Type 3 glyph walks its font's `/Differences` from the first item to find its
+name. Each `cs`, `sc` and `scn` that names a resource reads its colour space out
+of `/ColorSpace` and parses it again, and each `sh` its shading's function. And
+a scope reads every font its `/Font` names when it is built, used or not. This
+section fixes what one scope resolves once and under which key, the names the
+name table pre-interns, the Type 3 code-to-name reading, what a hit says again
+so that a hit and a miss agree, the counts the row's guards read, and, for each
+of the row's four speed operations and six relations, the path it takes and the
+step that brings it within bound.
+
+### Scope
+
+- **The scope's font table** (P-02.3): each font a scope's content selects,
+  read on the first use of its name, and what an entry holds.
+- **The Type 3 record** (P-02.4): a Type 3 font's codes, procedures and
+  matrix, read on its first glyph.
+- **Colour spaces, functions and graphics states** kept by the scope (P-02.5).
+- **The names the table pre-interns** (P-02.2).
+- **The structured-text writer's numbers** (P-02.6) and **batch inference's
+  page reads** (P-02.7).
+- **A3's counted quantity** and the counters the row adds; the CMap warnings
+  that reading fonts on first use stops raising; and each operation's and
+  relation's path, with the step that brings it within bound.
+
+### Non-goals
+
+- **A font cache shared across scopes or pages.** A name means what its own
+  scope's `/Font` binds it to (7.8.3), so a table is one scope's: two pages
+  that draw one face each read it, and a cache that outlives its scope is
+  P-16's, held to a byte budget.
+- **Font-program parsing**: P-26's. `selection` still parses the program for
+  each code it is asked about.
+- **The decoded-stream cache**: P-03's. A Type 3 procedure is decoded at each
+  glyph (A5), and P-03.2's operation-scoped cache brings that to one.
+- **Search over prebuilt text**: P-24's.
+- **A cache keyed by region** (ruling 5). Every entry here is keyed by a name
+  or an object, so a tile and its page read the same entries.
+- **An XObject's dictionary at each `Do`**: `xobject` copies it out for each
+  question a `Do` asks. No operation of this row draws a form or an image, and
+  P-03.2 keeps a form's content.
+
+### Design
+
+#### What a scope reads again at the tip
+
+| Question | Asked | What it reads each time | Step |
+| --- | --- | --- | --- |
+| `type3_glyph` | every glyph | the font's dictionary out of `/Font`, copied, with `/Font`, `/Subtype` and the font's name looked up by their bytes; for a Type 3 font, `/Encoding`, `/Differences` walked from its first item, `/CharProcs` and `/FontMatrix` | P-02.3 the kind, P-02.4 the record, P-02.2 the keys |
+| `font_object`, `resource_name`, `selection` | every glyph a save's subset walk records (`subset::show`), and each outline the renderer extracts | `font_ids` scanned for the id and the name copied; `font_object` the `/Font` subdictionary copied too (`font_table`) | P-02.3 |
+| a scope's construction | every scope: a page's, a form's, a pattern cell's, an appearance's, the font rule's | every font its `/Font` names, read with its CMaps (`stats::fonts`), used or not; and `for_one_render` and `bind` copy the two maps it filled for every render and every counting asker | P-02.3 |
+| `color_space`, `selected_space` | each `cs` and `CS` that names a resource, three readings; each `sc` and `scn` in one, two | `/ColorSpace`, the entry and its parse | P-02.5 |
+| `function` | each `sh`, each shading pattern's fill | the shading's `/Function`, read and parsed | P-02.5 |
+| `ext_g_state` | each `gs` | nothing: kept by name already (`Caches::states`) | P-02.5 counts it |
+
+#### The font table
+
+**The key** is the name a content selects a font by — `Tf`'s operand, or the
+name `fonts::state_font` gives a graphics state's `/Font` — as bytes, the form
+every `FontSource` question already arrives in. **Its life** is the scope's:
+the table lives in `Caches`, so `for_one_render` and `bind`, which hand a
+render or an asker the scope over its caches, share it rather than copy it; a
+retained page's renders read each font once between them, and a form's kept
+scope (`form_scopes`) keeps its own table, shared by every asker it is handed
+to.
+
+**An entry** is read on the first question about its name, and kept:
+
+- for a name the scope's `/Font` binds to a dictionary: the name's id
+  (`u64::from(name.id())`, the id the interpreter's glyphs carry), the entry's
+  reference — none for a font written inline — the dictionary as resolved,
+  which for an indirect font is the document's own object, so nothing is
+  copied, and the `Font`, read by `cos_font::read_in` through the scope's view,
+  the counting one when the operation counts;
+- for a reserved name (`fonts::reserved_reference`): the same, its id
+  `fonts::reserved_id` and its reference the object it spells;
+- for any other name, or one whose entry is no dictionary: nothing, kept as
+  firmly, so a missing font is looked for once.
+
+Beside the entries by name, the table keeps each entry by its id, which is what
+`font_object`, `resource_name`, `selection`, `program` and the renderer's
+outlines are asked by. Every id a question carries was handed out by
+`font_id` on a scope over the same caches, so an id the table does not know is
+one no glyph of the scope carries: a reserved name's id answers by the object
+it spells, as now, and any other id answers nothing. Every font `/Font` binds
+and every reserved name a state gives is kept, which the dictionaries bound;
+the names that select nothing are kept while the table holds fewer than 4 096
+entries, and past that each is looked for again at each question.
+
+**What reads it.**
+
+| Question | Reads |
+| --- | --- |
+| `decode`, `is_vertical`, `vertical_metrics`, `font_name` | the entry's `Font` |
+| `font_id` | the entry's id; a reserved name's id where it has no entry, as now; else 0 |
+| `type3_glyph` | the entry's kind first: a glyph of any other font is answered from it, with nothing read or copied |
+| `font_object` | the entry's reference, by id |
+| `resource_name`, `selection`, `program`, `extract_outline` | the entry by id: its name, its `Font`, and for a program its dictionary — the embedded program's descriptor and a substitute's request (`FontRequest::read`) read from it, not from a second lookup (`fonts::font_dict`) |
+| `font_objects`, `direct_fonts` | the `/Font` subdictionary itself, unchanged: they list every font a scope names, used or not, which is what lets subsetting say a scope was walked and never showed a font |
+
+**The kind** an entry records is the one `type3_glyph` reads: whether the
+dictionary's own `/Subtype` is the name `/Type3`. It is not `Font::kind`, which
+also follows a `/Subtype` written as a reference, so no glyph's answer moves.
+
+#### The Type 3 record
+
+A Type 3 font's entry is given its record on the font's first glyph, once a
+scope whichever render asks:
+
+- **The codes.** `/Encoding`'s `/Differences`, read with the interpreter's
+  reading, item by item from the first: a counter starts at 0; an integer sets
+  it (`u32::try_from`, so a negative one and one past `u32::MAX` set 0); a real
+  sets it as `as u32` converts it (a negative one and NaN 0, one past the range
+  `u32::MAX`); a name is given to the counter's code, and **the first name a
+  code is given is the one it keeps**; the counter then steps by one, held at
+  `u32::MAX`; every item is resolved before it is read, and an item of any
+  other type is passed over. Names are kept as the array holds them, the
+  symbols of their bytes, never as text. That is not the cos `Font`'s table,
+  which lets a later entry win, passes over an indirect item and keeps lossy
+  `String`s; and the reading `subset.rs`'s `names_of` and `redact.rs`'s
+  `carrying_procedures` mirror is the interpreter's, which does not change, so
+  they keep agreeing.
+- **`/CharProcs`**, resolved, and **`/FontMatrix`**'s six numbers as
+  `type3_glyph` reads them — each a direct number, or no matrix.
+
+A glyph then costs one probe of the codes and one lookup in `/CharProcs`, and
+its procedure is decoded as before. An `/Encoding` that is no dictionary, a
+`/Differences` that is no array and a `/CharProcs` that is no dictionary leave
+a record that answers every code with nothing, as the walk did. The walk is
+kept test-only, and `the_type3_table_answers_what_the_walk_answered` holds the
+record to it.
+
+#### Colour spaces, functions and graphics states
+
+- **A colour space, by name.** `color_space` and `selected_space` keep each
+  resource name's two readings — as painted, which every conversion reads, and
+  as selected, which `resolve_ink`, `initial_color` and `color_components`
+  read: K-02.1's two answers to one selection — each with the repairs reading
+  it noted. A device space named directly is matched by its name, as now, and
+  kept nowhere. `Caches::icc` keeps compiled profiles by stream and stays the
+  one ICC cache.
+- **A function, by object.** The shading and function readers keep each
+  function an object holds in `Caches::functions`, which the graphics states'
+  functions already use, keyed as they are; a function written inline is a few
+  numbers, read where it lies.
+- **A graphics state, by name.** `Caches::states` keeps each `gs` name's state
+  and the repairs its reading noted, and stays as it is.
+
+Each keeps at most 4 096 names, as `Caches::states` does.
+
+#### What a hit says again
+
+A render's lists — the fonts it could not resolve, the images that decoded with
+damage, the colour spaces read with a repair — are that render's own
+(`for_one_render`), so a cache shared between renders says again what its miss
+said, or a render that hits would say less than one that misses.
+
+- **A font**: what reading it tolerated, a CMap's leniencies, is the
+  document's (`Document::warnings`), raised by the read; a render's own list
+  hears of fonts only from `decode`, which names a name no font answers at
+  every question, hit or miss. Nothing is kept beside an entry.
+- **A Type 3 record** says nothing; its procedure's decode raises what that
+  stream's decode raises at each glyph, as now.
+- **A colour space**: the repairs its reading noted (`note_repaired_space`)
+  are kept beside it and noted again at each hit, as `Caches::states` notes a
+  state's, so a render's lists do not depend on whether it hit.
+- **A function** says nothing. **A graphics state** says its repairs again, as
+  now.
+
+#### The names the table pre-interns
+
+`NAMES` gains every key a page of text's interpretation looks up at a glyph or
+an operator, and every key reading a font looks up:
+
+- the resource subdictionaries: `/Font`, `/XObject`, `/ColorSpace`,
+  `/ExtGState`, `/Pattern`, `/Shading` and `/Properties`;
+- `/Subtype`;
+- a font's: `/BaseFont`, `/Encoding`, `/BaseEncoding`, `/Differences`,
+  `/FirstChar`, `/Widths`, `/ToUnicode`, `/FontDescriptor`, `/MissingWidth`,
+  `/Flags`, `/FontFile`, `/FontFile2`, `/FontFile3`, `/DescendantFonts`,
+  `/DW`, `/DW2`, `/W2` and `/CIDToGIDMap`, and a CMap stream's `/UseCMap`
+  (`/W` is pre-interned already, for cross-reference streams);
+- a Type 3 font's: `/CharProcs` and `/FontMatrix`.
+
+`resources.rs`, `fonts.rs` and cos's `font.rs` take them as `Name` constants.
+Every other name a scope looks up by its bytes — a resource name the content
+gives, and a key read inside an XObject, a colour space, a shading, a pattern
+or an inline image — goes through the scope's one helper, `PageResources::name`,
+and the font helpers in `fonts.rs` the scope calls take its view.
+
+**Ids shift.** Pre-interning moves the id of every name a document interns
+after the table's own, and a font's id is its name's. No output carries one: the
+text device compares two glyphs' ids for equality, no `TextChar` carries one,
+no serialization writes one, and every fingerprint hashes pixels, text or
+written bytes. Equality survives the shift, and so does the order of two names
+interned after the table's.
+
+**The counter.** `keys_looked_up` counts each lookup by its bytes of a name the
+table pre-interns — a lookup a constant answers — through `PageResources::name`
+and through the counting view (`Counting::intern`), so a font read through the
+view is seen too. With every reader on those paths taking the constants it
+reads zero, and the name-table lookups the text of a page whose only resources
+are its fonts makes are then the resource names its content uses. A resource
+name the table pre-interns is counted as well — a font named `/Font` — which is
+how the guard's second page shows the counter sees a lookup where there is one.
+
+#### A3's counted quantity, and the counters the row adds
+
+A3 reads `font_dictionaries_resolved` on the render door and the text door for
+one page and holds it to the distinct `/Font` entries the content selects a
+font by, each scope's counted apart — the page's, and each form's that brings
+its own `/Resources`. Its page names a font it never selects, gives one font two
+names, and draws twice a form whose own `/Resources` name the page's font
+again: three entries used, the page's two names and the form's one, whatever
+the glyphs. At the tip the same page counts every font of every scope when the
+scope is built and one more for every glyph.
+
+| Counter | One unit is | Counted in | Step |
+| --- | --- | --- | --- |
+| `keys_looked_up` | a lookup by its bytes of a name the table pre-interns | the facade's scopes, and the counting view | P-02.2 |
+| `font_dictionaries_resolved` | restated: a font dictionary a scope reads, once for each name its content selects a font by — the `/Font` entry, or a reserved name's object — when it is a dictionary | the facade's scopes | P-02.3 |
+| `color_spaces_parsed` | a resource name's colour space a scope reads out of `/ColorSpace` and parses, both its readings at once | the facade's scopes | P-02.5 |
+| `functions_read` | a function an object holds, read and parsed for a shading or a graphics state | the facade's scopes | P-02.5 |
+| `graphics_states_read` | a `gs` name's state read out of `/ExtGState` | the facade's scopes | P-02.5 |
+| `pages_interpreted` | a page's content interpreted for an inference (`Observed::read`), the page's own and a neighbour's | `reading_order.rs` | P-02.7 |
+
+Each is a step, in `Stats::work`, and A2's legs hold them as they hold the rest.
+
+#### The structured-text writer's numbers
+
+`number` renders a finite value as `format!("{value:.3}")` with its trailing
+zeros, its point and a `-0`'s sign trimmed, a `String` for each of the ten
+numbers a character carries. P-02.6 writes the same bytes straight into the
+output. The value scaled by a thousand is rounded by integer arithmetic where
+that rounding is decided exactly — the scaled value below 2^52, and its
+fractional part farther from a half than the scaling's rounding error — and its
+digits are written from the integer; every other value, ties at the fourth
+decimal among them, is written by the formatter itself into the output and
+trimmed there. So no number allocates and none is decided differently.
+`TEXT_FORMAT_VERSION` does not move, because no byte does.
+
+#### Batch inference
+
+`Document::inferred_orders` reads each page once. It walks its range in order
+and keeps what one interpretation of a page gave (`Observed`): its text for
+the page's own inference, and its margin bands for its neighbours'. A page
+ahead of the one being inferred is read when a neighbour first needs its bands
+and its observation kept until its own turn, at most `RUNNING_WINDOW` of them;
+a page behind keeps only its bands, as `MarginCache` keeps them. What a page's
+inference decides does not change, only how often a page is read, so every
+`InferredOrder` is `Page::inferred_order`'s for the page. `tpdf text --order
+inferred` infers its pages through `inferred_orders`, and a page of a tagged
+document keeps `text_in`'s answer, its stated order.
+
+#### Each operation's path, and the step that brings it within bound
+
+Read off MS-04's report-mode figures for the set as MS-04.11 sized it, taken on
+the hosted runner; the factors themselves are held against `61adcde` in
+P-02.8's paired run, and a relation is two operations of one run.
+
+| Operation | Path | What the tip spends that this row removes | Step |
+| --- | --- | --- | --- |
+| Text of 5 dense pages, in-process and CLI | P-01's lookup, the content's decode, one interpretation into the text device through the page's scope, logical order; the CLI adds a process and the writes | at every glyph, a copy of the font's dictionary with its `/Widths`, and three lookups by bytes, to learn the font is not a Type 3 font | P-02.3, with P-02.2's keys |
+| Display-list recording, a text page | the same interpretation into the recorder | the same, at every glyph | P-02.3 |
+| Structured JSON of 5 pages, CLI | the text, then `TextWriter`'s JSON | the text's, and ten `String`s a character; the figures leave the writer too large a share of the operation for the text's steps alone to reach its factor, and the text too large a share for the writer's | P-02.3 for the text and P-02.6 for the writer, both |
+| A phrase searched over 5 pages from scratch | the text, then `TextPage::search` | the text's; the figures put the search itself at a small part of the operation | P-02.3 |
+| Redaction of a rectangle per page ≤ 1.5 × text | `redact::apply`'s own font reading and content walk over the editor (`fonts_in`, `cut_stream`): no `PageResources` | — | none: inside its bound at the tip, with room for the text of the same pages to grow the row's whole text factor faster |
+| Reading order inferred ≤ 1.5 × text | `Observed::read`, one interpretation through a page's scope, for each page and again for each neighbour whose margin bands it reads | over 5 pages ten interpretations, each page's own and a second of every page as a neighbour; past its bound at the tip, the inference's own work a small part of it | P-02.7: one interpretation a page |
+| Tables inferred ≤ 1.5 × text | `Observed::read` once, then the table inference | one interpretation, the text's own path | none: inside at the tip, and every step that makes the text faster makes its interpretation faster by the same work |
+| PDF/A, PDF/UA and PDF/X validation ≤ 3 × text | their rules' own walks (`pdfa/content.rs`), and the font rule's scopes, one a font | — | none: inside at the tip, each with room for the row's whole text factor |
+
+So every relation is inside its bound at the tip or brought inside by a step,
+and none is raised against the row. The CLI rewrite of 100 and 1 000 pages,
+which tier P's Gate column gives P-01 and P-02 together, reads no resource scope
+(`tpdf merge` with `--font-policy keep`): no step of this row moves it, and
+P-02.8 raises its floors on what P-01 and P-03 left.
+
+#### The CMap warnings a page's unused fonts no longer raise
+
+With fonts read on first use, a font a scope names and its content never
+selects is not read by a render, a text extraction, an image extraction, a
+validation's font scopes or a save's subset walk, so the leniencies its CMaps
+need — `PredefinedCMapUnknown`, `PredefinedCMapApproximate`, and the `CMap`
+warnings against its streams — are no longer raised into `Document::warnings`
+on its account. A font the content selects is read at its first glyph and warns
+as it did, after whatever the content raised before it, where building the
+scope raised it first. `Document::fonts` reads no CMap and never raised them.
+None of the suites that assert those warnings reads one from a font its page
+does not use, so none is dropped: `predefined_cmap_warnings.rs`,
+`predefined_cmap_rendering.rs` and `vertical_metrics.rs` show their one font,
+`shaped_forms.rs`'s are the fill's, which cos's appearance writer reads, and
+cos's `fonts.rs` reads its fonts through `cos_font::from_resources` itself.
+
+### Milestones
+
+1. **P-02.1: this section.**
+2. **P-02.2: the keys as constants**, and `keys_looked_up`. Exit: `name.rs`
+   `preinterned_ids_match_constants` covers every new constant;
+   `resource_work.rs` `extracting_a_page_looks_up_no_well_known_key` — a dense
+   page's text, through `Page::text_counted`, looks up no key, and a page whose
+   font is named `/Font` shows the count sees one; every fingerprint,
+   `text_options.rs` and `display_list.rs` unchanged, in both builds.
+3. **P-02.3: the font table.** Exit: `guards.rs`
+   `a3_fonts_resolved_per_page_are_at_most_the_fonts_it_uses` flips from owed
+   and joins K-07's roster; `stats.rs`'s font counts restated to one an entry
+   used; `text_options.rs`, `type3_fonts.rs`, `composite_fonts.rs`, every
+   subset test and every fingerprint unchanged, in both builds; the CMap-warning
+   suites above keep their warnings.
+4. **P-02.4: the Type 3 record.** Exit: `resources.rs`
+   `the_type3_table_answers_what_the_walk_answered` and
+   `differences_are_read_once_per_scope`; `type3_fonts.rs`,
+   `render_differential.rs`'s `a_type3_glyph_draws_what_the_same_path_draws`,
+   and subsetting's and redaction's Type 3 tests unchanged, in both builds.
+5. **P-02.5: colour spaces, functions and graphics states.** Exit:
+   `resource_work.rs` `a_scope_parses_each_named_space_and_state_once`, over a
+   page of a thousand `cs`, `scn`, `sh` and `gs` operators, with the three
+   counters at most the distinct names and objects used; `colour_spaces.rs`,
+   `blend_modes.rs`, `shading_functions.rs`, `soft_mask_clips.rs`,
+   `render_regions.rs` and every fingerprint unchanged, in both builds.
+6. **P-02.6: numbers without allocating.** Exit: `serialize.rs`
+   `numbers_write_what_format_and_trim_wrote` against the old `number`, kept
+   test-only; `text_allocations.rs`
+   `a_character_writes_its_numbers_without_allocating`; `text_serialize.rs` and
+   the CLI's `--json`, `--xml` and `--html` tests unchanged, in both builds.
+7. **P-02.7: one interpretation a page.** Exit: `reading_order.rs`
+   `batch_inference_interprets_each_page_once` — `pages_interpreted` is 40 over
+   40 pages, every `InferredOrder` `Page::inferred_order`'s; the reading-order
+   tests and the CLI's `--order inferred` tests unchanged, in both builds.
+8. **P-02.8: the row's close** in MS-02's paired run: text of 5 dense pages at
+   7.51× in-process and 5.21× CLI, display-list recording at 5.25×, structured
+   JSON of 5 pages (CLI) at 9.63×, a phrase searched from scratch at 6.56×, the
+   CLI rewrite of 100 and 1 000 pages at 1.85× and 11.1×, and the six relations
+   holding; A3 and the row's counted guards green on linux and windows in CI's
+   tests and on `wasm32-wasip1` locally.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| A font read on first use answers differently from one read when the scope was built | The same reader (`cos_font::read_in`) over the same dictionary, through the same view; `text_options.rs`, `type3_fonts.rs`, `composite_fonts.rs` and every fingerprint unchanged |
+| An id the table does not know reaches `font_object`, `selection` or `program` | Every id a glyph carries was handed out by `font_id` on a scope over the same caches; a reserved id still answers by its object; every subset test unchanged |
+| Subsetting stops seeing a font a scope names and never shows | `font_objects` and `direct_fonts` read the `/Font` subdictionary itself, unchanged |
+| A hostile content names a million fonts that are not there | Names that select nothing are kept only while the table holds fewer than 4 096 entries |
+| The Type 3 record and the walk disagree on an odd `/Differences` | `the_type3_table_answers_what_the_walk_answered` over generated arrays with repeated codes, negative and real counters and indirect items, against the walk kept test-only |
+| A hit says less than its miss | A colour space's repairs are kept beside it and noted at each hit, as a graphics state's are; a font's leniencies are the document's, raised by the one read |
+| Warnings a caller saw from a font its page never used stop | Recorded above; no suite asserts one, and `Document::fonts` lists every font without reading its CMaps |
+| An output carries a font id the pre-interning moves | None does; every fingerprint, `text_options.rs` and `display_list.rs` unchanged |
+| The factors are not reached by the six steps | P-02.8's paired run reads every operation against its floor; a floor the steps do not reach is the owner's (H-77), with the counted work beside it, never a lower floor |
+
 ## P-03 — A decoded-stream cache per operation, and deduplication on encoded bytes
 
 *For [ROADMAP](../ROADMAP.md) row P-03.* An operation decodes one stream as
