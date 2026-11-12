@@ -52,19 +52,24 @@ macro_rules! face_bytes {
     };
 }
 
-const SANS: [&[u8]; 4] = [
+// Statics, not consts. A const is a value, and the bytes it points at are
+// emitted again in each crate that compiles a use of it, so a compiler that
+// inlines `face` into a caller's crate carries every face once more. A static
+// has one address, so the faces are carried once whatever the compiler
+// inlines.
+static SANS: [&[u8]; 4] = [
     face_bytes!("LiberationSans-Regular"),
     face_bytes!("LiberationSans-Bold"),
     face_bytes!("LiberationSans-Italic"),
     face_bytes!("LiberationSans-BoldItalic"),
 ];
-const SERIF: [&[u8]; 4] = [
+static SERIF: [&[u8]; 4] = [
     face_bytes!("LiberationSerif-Regular"),
     face_bytes!("LiberationSerif-Bold"),
     face_bytes!("LiberationSerif-Italic"),
     face_bytes!("LiberationSerif-BoldItalic"),
 ];
-const MONO: [&[u8]; 4] = [
+static MONO: [&[u8]; 4] = [
     face_bytes!("LiberationMono-Regular"),
     face_bytes!("LiberationMono-Bold"),
     face_bytes!("LiberationMono-Italic"),
