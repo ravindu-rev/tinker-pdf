@@ -3,31 +3,34 @@
 //!
 //! # Why this exists
 //!
-//! The release was the only thing that measured the wasm. `release.yml`'s
-//! npm job fails above a 2.5 MiB gzipped budget, and nothing between two
-//! releases looked at the size at all, so the work between releases crossed
-//! the budget without anybody seeing which commit did it
-//! (`docs/features/bindings.md` dates the sizes). A figure held on every push
-//! names the commit that moved the number while it is still the newest one.
+//! `release.yml`'s npm job fails above a 2.5 MiB gzipped budget, and it runs
+//! only when the owner's merge releases, so nothing else between two releases
+//! looks at the size: the work between them can cross the budget without
+//! anybody seeing which commit did it. A figure held by the local proof of a
+//! change names the commit that moved the number while it is still the newest
+//! one.
 //!
 //! # Why the size is passed in
 //!
-//! The workflow builds each profile as the release builds it, measures it as
-//! the release measures it, `gzip -9 -c … | wc -c`, and hands the number to
-//! this. So the number held here is the one the release gate reads, and xtask
-//! spawns nothing for it: no `SPAWNERS` row, and no second gzip whose level or
-//! header could differ from the gate's.
+//! A local run builds each profile as the release's npm job builds the wasm,
+//! with the job's `RUSTFLAGS`, measures it as the job measures it,
+//! `gzip -9 -c … | wc -c`, and hands the number to this. So the number held
+//! here is the one the release gate reads, and xtask spawns nothing for it: no
+//! `SPAWNERS` row, and no second gzip whose level or header could differ from
+//! the gate's.
 //!
 //! # Why a tolerance, and why it is measured
 //!
-//! The job builds with whatever `stable` is that day, and a new compiler can
-//! lay the same source out a few bytes differently. A figure held exactly would
-//! fail on the toolchain rather than on the code. So each figure carries the
-//! spread its profile was measured to show with nothing changed, over runs of
-//! the job and under more than one toolchain, with those runs and toolchains
-//! written beside it. A tolerance nobody measured is a guess, so a figure
-//! without one is refused rather than defaulted to zero: zero is a measurement
-//! too, when every build is byte-identical, and then it is written down.
+//! The release builds with whatever `stable` is that day, a local toolchain
+//! kept current floats the same way, and a new compiler can lay the same source
+//! out a few bytes differently. A figure held exactly would fail on the
+//! toolchain rather than on the code. So each figure carries the spread its
+//! profile was measured to show with nothing changed, over clean local builds
+//! of one revision and one more under the previous stable toolchain, with those
+//! runs and toolchains written beside it. A tolerance nobody measured is a
+//! guess, so a figure without one is refused rather than defaulted to zero:
+//! zero is a measurement too, when every build is byte-identical, and then it
+//! is written down.
 //!
 //! # Why it only moves down
 //!
@@ -39,11 +42,11 @@
 //!
 //! # A profile with no figure
 //!
-//! Fails, so a profile the file lost cannot pass as held. A job whose profile
-//! has not been measured yet names it `--unrecorded`, and the size is reported
-//! instead. The switch is refused for a profile the file records, so it leaves
-//! the job in the commit that records the figure rather than staying behind to
-//! excuse the next loss.
+//! Fails, so a profile the file lost cannot pass as held. A run of a profile
+//! not measured yet names it `--unrecorded`, and the size is reported instead.
+//! The switch is refused for a profile the file records, so it leaves the
+//! profile's command in the commit that records the figure rather than staying
+//! behind to excuse the next loss.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -68,7 +71,8 @@ pub struct Figure {
     pub bytes: u64,
     /// The day it was measured, as `YYYY-MM-DD`.
     pub date: String,
-    /// The id of the workflow run that measured it.
+    /// The local run that measured it, as `<revision>@<host>` (see
+    /// [`is_run`]).
     pub run: String,
 }
 
@@ -77,7 +81,8 @@ pub struct Figure {
 pub struct Tolerance {
     /// The widest spread, in bytes. Zero when every build was byte-identical.
     pub bytes: u64,
-    /// The ids of the workflow runs it was measured over.
+    /// The local runs it was measured over, one per build, each numbered
+    /// `#<n>` where one host built the revision more than once.
     pub runs: Vec<String>,
     /// The toolchains those builds were made with.
     pub toolchains: Vec<String>,
@@ -198,8 +203,8 @@ fn read_figure(name: &str, figure: &Json, problems: &mut Vec<String>) -> Option<
         Some(run) if is_run(run) => Some(run.to_string()),
         _ => {
             problems.push(format!(
-                "`{name}`'s figure has no `run`, the id of the workflow run that \
-                 measured it"
+                "`{name}`'s figure has no `run`, the local run that measured it, as \
+                 <revision>@<host>"
             ));
             None
         }
@@ -229,8 +234,8 @@ fn read_tolerance(name: &str, tolerance: &Json, problems: &mut Vec<String>) -> O
     let runs = strings(fields.get("runs"), is_run);
     if runs.is_none() {
         problems.push(format!(
-            "`{name}`'s tolerance names no `runs`, the ids of the workflow runs it \
-             was measured over; a tolerance without them is a guess"
+            "`{name}`'s tolerance names no `runs`, the local runs it was measured \
+             over, each as <revision>@<host>; a tolerance without them is a guess"
         ));
     }
     let toolchains = strings(fields.get("toolchains"), |text| !text.trim().is_empty());
@@ -275,9 +280,37 @@ fn unknown_keys(
     }
 }
 
-/// A workflow run's id: GitHub's are decimal.
+/// A local run: `<revision>@<host>`, the commit it built, as 7 to 40
+/// lowercase hex digits, and the target triple of the host that built it, as
+/// `rustc -vV` prints it, with `#<n>` after it for the nth of several builds
+/// of one revision on one host. The host is part of it because the wasm
+/// carries the paths of the engine's sources, spelled as the host spells a
+/// path.
 fn is_run(text: &str) -> bool {
-    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+    let (run, build) = match text.split_once('#') {
+        Some((run, build)) => (run, Some(build)),
+        None => (text, None),
+    };
+    let Some((revision, host)) = run.split_once('@') else {
+        return false;
+    };
+    let revision_holds = (7..=40).contains(&revision.len())
+        && revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    let host_holds = host.split('-').count() >= 3
+        && host.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        });
+    let build_holds = build.is_none_or(|number| {
+        !number.is_empty()
+            && !number.starts_with('0')
+            && number.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    revision_holds && host_holds && build_holds
 }
 
 /// `YYYY-MM-DD`, and a day the calendar has.
@@ -312,9 +345,9 @@ fn is_date(text: &str) -> bool {
 pub struct Options {
     /// The build profile, as the file names it.
     pub profile: String,
-    /// Its wasm's gzipped size, as the workflow measured it.
+    /// Its wasm's gzipped size, as the local run measured it.
     pub gzipped: u64,
-    /// The workflow run that measured it.
+    /// The local run that measured it, as `<revision>@<host>`.
     pub run: Option<String>,
     /// The day it was measured, `YYYY-MM-DD`.
     pub date: Option<String>,
@@ -326,7 +359,7 @@ pub struct Options {
 
 impl Options {
     /// Reads the task's options. Every value is held to its form here, so a
-    /// size the job failed to measure is refused rather than held as a shrink.
+    /// size the run failed to measure is refused rather than held as a shrink.
     pub fn parse(args: &[String]) -> Result<Options, String> {
         let mut values: BTreeMap<&str, String> = BTreeMap::new();
         let mut options = Options::default();
@@ -387,7 +420,8 @@ impl Options {
         if let Some(run) = values.remove("--run") {
             if !is_run(&run) {
                 return Err(format!(
-                    "`--run` wants the workflow run's id, and `{run}` is not one"
+                    "`--run` wants the local run as <revision>@<host>, the commit it \
+                     built and the host's target triple, and `{run}` is not one"
                 ));
             }
             options.run = Some(run);
@@ -414,22 +448,22 @@ pub fn hold(footprint: &Footprint, options: &Options) -> Result<String, String> 
         if options.unrecorded {
             return Ok(format!(
                 "`{name}` is {now} bytes gzipped and has no figure; reported, not held, \
-                 because the job names it `--unrecorded`"
+                 because the run names it `--unrecorded`"
             ));
         }
         return Err(format!(
             "`{name}` is {now} bytes gzipped and has no figure in {FOOTPRINT_PATH}; a \
              profile the file does not record fails, so one it lost cannot pass as \
-             held, unless the job names it `--unrecorded`"
+             held, unless the run names it `--unrecorded`"
         ));
     };
     let figure = profile.figure.bytes;
     let tolerance = profile.tolerance.bytes;
     if options.unrecorded {
         return Err(format!(
-            "`{name}` has a figure of {figure} bytes and the job names it \
+            "`{name}` has a figure of {figure} bytes and the run names it \
              `--unrecorded`; the switch is for a profile with no figure, and left in \
-             the job it would let this one pass as unrecorded once the file lost it"
+             the command it would let this one pass as unrecorded once the file lost it"
         ));
     }
     let ceiling = figure.saturating_add(tolerance);
@@ -467,7 +501,7 @@ pub fn hold(footprint: &Footprint, options: &Options) -> Result<String, String> 
 
 /// The line that records a size as its profile's figure.
 ///
-/// Complete when the job passed `--run` and `--date`; otherwise the two are
+/// Complete when the run passed `--run` and `--date`; otherwise the two are
 /// left as places to fill, which `--record` refuses as they stand.
 #[must_use]
 pub fn record_line(options: &Options) -> String {
@@ -475,7 +509,7 @@ pub fn record_line(options: &Options) -> String {
         "cargo xtask footprint --profile {} --gzipped {} --run {} --date {} --record",
         options.profile,
         options.gzipped,
-        options.run.as_deref().unwrap_or("<run id>"),
+        options.run.as_deref().unwrap_or("<revision>@<host>"),
         options.date.as_deref().unwrap_or("<YYYY-MM-DD>")
     )
 }
@@ -496,7 +530,7 @@ pub fn record(footprint: &Footprint, options: &Options) -> Result<String, String
     let Some(profile) = footprint.profiles.get(name) else {
         return Err(format!(
             "`{name}` has no figure and no tolerance to keep; a profile's first figure \
-             and its measured tolerance are written by hand from the job's runs, and \
+             and its measured tolerance are written by hand from its local runs, and \
              `--record` only moves a figure whose tolerance it keeps"
         ));
     };
@@ -578,18 +612,25 @@ mod tests {
       "note": ["a note the record keeps"],
       "profiles": {
         "bundled-fonts": {
-          "figure": { "bytes": 2000, "date": "2026-10-30", "run": "40000000002" },
-          "tolerance": { "bytes": 0, "runs": ["40000000002"],
+          "figure": { "bytes": 2000, "date": "2026-10-30",
+                      "run": "0123abc@x86_64-unknown-linux-gnu" },
+          "tolerance": { "bytes": 0, "runs": ["0123abc@x86_64-unknown-linux-gnu"],
                          "toolchains": ["rustc 1.99.1"] }
         },
         "default": {
-          "figure": { "bytes": 1000, "date": "2026-10-30", "run": "40000000001" },
+          "figure": { "bytes": 1000, "date": "2026-10-30",
+                      "run": "0123abc@x86_64-pc-windows-msvc#1" },
           "tolerance": { "bytes": 10,
-                         "runs": ["40000000001", "40000000003", "40000000004"],
+                         "runs": ["0123abc@x86_64-pc-windows-msvc#1",
+                                  "0123abc@x86_64-pc-windows-msvc#2",
+                                  "0123abc@x86_64-pc-windows-msvc#3"],
                          "toolchains": ["rustc 1.99.1", "rustc 1.98.0"] }
         }
       }
     }"#;
+
+    /// A later local run, at another revision.
+    const LATER: &str = "4567def@x86_64-pc-windows-msvc";
 
     fn two() -> Footprint {
         parse(TWO).expect("the fixture holds its shape")
@@ -671,7 +712,7 @@ mod tests {
     #[test]
     fn a_shrink_passes_and_prints_the_new_figure() {
         let options = Options {
-            run: Some("40000000009".to_string()),
+            run: Some(LATER.to_string()),
             date: Some("2026-11-02".to_string()),
             ..sized("default", 990)
         };
@@ -679,8 +720,8 @@ mod tests {
         assert!(said.contains("10 under its figure of 1000"), "{said}");
         assert!(
             said.contains(
-                "cargo xtask footprint --profile default --gzipped 990 --run 40000000009 \
-                 --date 2026-11-02 --record"
+                "cargo xtask footprint --profile default --gzipped 990 \
+                 --run 4567def@x86_64-pc-windows-msvc --date 2026-11-02 --record"
             ),
             "{said}"
         );
@@ -698,7 +739,7 @@ mod tests {
                 "--gzipped",
                 "990",
                 "--run",
-                "40000000009",
+                LATER,
                 "--date",
                 "2026-11-02",
                 "--record",
@@ -714,7 +755,7 @@ mod tests {
             Some(&Figure {
                 bytes: 990,
                 date: "2026-11-02".to_string(),
-                run: "40000000009".to_string(),
+                run: LATER.to_string(),
             }),
             "{written}"
         );
@@ -788,23 +829,24 @@ mod tests {
         assert!(error.contains("1 past its tolerance of 0"), "{error}");
     }
 
-    /// Run outside the job, a shrink still prints the line, with the run and
-    /// the day left as places that `--record` refuses as they stand.
+    /// Run without `--run` and `--date`, a shrink still prints the line, with
+    /// the two left as places that `--record` refuses as they stand.
     #[test]
     fn a_shrink_without_its_run_prints_places_for_it() {
         let said = hold(&two(), &sized("default", 990)).expect("a shrink passes");
         assert!(
-            said.contains("--gzipped 990 --run <run id> --date <YYYY-MM-DD> --record"),
+            said.contains("--gzipped 990 --run <revision>@<host> --date <YYYY-MM-DD> --record"),
             "{said}"
         );
-        for (option, place) in [("--run", "<run id>"), ("--date", "<YYYY-MM-DD>")] {
+        for (option, place) in [("--run", "<revision>@<host>"), ("--date", "<YYYY-MM-DD>")] {
             let words = ["--profile", "default", "--gzipped", "990", option, place];
             assert!(Options::parse(&args(&words)).is_err(), "{place}");
         }
     }
 
-    /// The switch is for a profile with no figure; left in the job past the
-    /// commit that records one, it would excuse the next loss.
+    /// The switch is for a profile with no figure; left in a profile's
+    /// command past the commit that records one, it would excuse the next
+    /// loss.
     #[test]
     fn unrecorded_is_refused_for_a_profile_with_a_figure() {
         let options = Options {
@@ -814,7 +856,7 @@ mod tests {
         let error = hold(&two(), &options).expect_err("the switch outlived its profile");
         assert!(
             error.contains(
-                "`default` has a figure of 1000 bytes and the job names it `--unrecorded`"
+                "`default` has a figure of 1000 bytes and the run names it `--unrecorded`"
             ),
             "{error}"
         );
@@ -826,7 +868,7 @@ mod tests {
     fn record_refuses_growth_even_inside_the_tolerance() {
         for gzipped in [1001, 1010, 1011] {
             let options = Options {
-                run: Some("40000000009".to_string()),
+                run: Some(LATER.to_string()),
                 date: Some("2026-11-02".to_string()),
                 record: true,
                 ..sized("default", gzipped)
@@ -843,7 +885,7 @@ mod tests {
     fn record_needs_the_run_and_its_date() {
         for (run, date) in [
             (None, Some("2026-11-02")),
-            (Some("40000000009"), None),
+            (Some(LATER), None),
             (None, None),
         ] {
             let options = Options {
@@ -860,7 +902,7 @@ mod tests {
     #[test]
     fn record_refuses_a_profile_with_no_tolerance_to_keep() {
         let options = Options {
-            run: Some("40000000009".to_string()),
+            run: Some(LATER.to_string()),
             date: Some("2026-11-02".to_string()),
             record: true,
             ..sized("ocr", 990)
@@ -906,7 +948,56 @@ mod tests {
             (at("run"), None, run),
             (at("run"), Some(Json::string("latest")), run),
             (at("run"), Some(Json::count(40_000_000_001)), run),
+            // A workflow run's id names no revision and no host.
+            (at("run"), Some(Json::string("40000000001")), run),
         ]);
+    }
+
+    /// A local run names the commit it built and the host that built it, so a
+    /// figure says what it is the size of.
+    #[test]
+    fn a_local_run_names_its_revision_and_host() {
+        for run in [
+            "0123abc@x86_64-pc-windows-msvc",
+            "0123abc@x86_64-pc-windows-msvc#1",
+            "0123abc@x86_64-pc-windows-msvc#12",
+            "b325f288c57b5e2ea2f5d2c1f292d2e0add1c86b@aarch64-apple-darwin",
+            "b325f288@x86_64-unknown-linux-gnu",
+            "b325f288@armv7-unknown-linux-gnueabihf",
+        ] {
+            assert!(is_run(run), "{run} is a local run");
+        }
+        for run in [
+            "",
+            "40000000001",
+            "0123abc",
+            "0123abc@",
+            "@x86_64-pc-windows-msvc",
+            // Six digits are too few to name a commit, and forty-one more than
+            // a commit's whole name.
+            "0123ab@x86_64-pc-windows-msvc",
+            "b325f288c57b5e2ea2f5d2c1f292d2e0add1c86b0@x86_64-pc-windows-msvc",
+            // One spelling of a revision, as git prints it.
+            "0123ABC@x86_64-pc-windows-msvc",
+            "0123abg@x86_64-pc-windows-msvc",
+            // A host is a target triple, not a machine's name.
+            "0123abc@windows",
+            "0123abc@build-box",
+            "0123abc@Desktop-X1-Home",
+            "0123abc@x86_64--windows-msvc",
+            "0123abc@x86_64-pc-windows-msvc@x86_64-pc-windows-msvc",
+            "0123abc@x86_64 pc windows msvc",
+            "0123abc@x86_64-pc-windows-msvc.1",
+            // A build is counted from one.
+            "0123abc@x86_64-pc-windows-msvc#",
+            "0123abc@x86_64-pc-windows-msvc#0",
+            "0123abc@x86_64-pc-windows-msvc#01",
+            "0123abc@x86_64-pc-windows-msvc#1#2",
+            "0123abc@x86_64-pc-windows-msvc#one",
+            "0123abc#1@x86_64-pc-windows-msvc",
+        ] {
+            assert!(!is_run(run), "{run:?} is not a local run");
+        }
     }
 
     #[test]
@@ -925,7 +1016,19 @@ mod tests {
                 Some(Json::Array(vec![Json::string("latest")])),
                 runs,
             ),
-            (at("runs"), Some(Json::string("40000000001")), runs),
+            (
+                at("runs"),
+                Some(Json::Array(vec![
+                    Json::string("0123abc@x86_64-pc-windows-msvc#1"),
+                    Json::string("40000000003"),
+                ])),
+                runs,
+            ),
+            (
+                at("runs"),
+                Some(Json::string("0123abc@x86_64-pc-windows-msvc")),
+                runs,
+            ),
             (at("toolchains"), None, toolchains),
             (at("toolchains"), Some(Json::Array(vec![])), toolchains),
             (
@@ -990,14 +1093,14 @@ mod tests {
     }
 
     #[test]
-    fn the_options_read_as_the_job_writes_them() {
+    fn the_options_read_as_a_local_run_writes_them() {
         let options = Options::parse(&args(&[
             "--profile",
             "bundled-fonts",
             "--gzipped",
             "  3412345",
             "--run",
-            "40000000009",
+            LATER,
             "--date",
             "2028-02-29",
             "--unrecorded",
@@ -1008,7 +1111,7 @@ mod tests {
             Options {
                 profile: "bundled-fonts".to_string(),
                 gzipped: 3_412_345,
-                run: Some("40000000009".to_string()),
+                run: Some(LATER.to_string()),
                 date: Some("2028-02-29".to_string()),
                 unrecorded: true,
                 record: false,
@@ -1016,7 +1119,7 @@ mod tests {
         );
     }
 
-    /// A job whose build or gzip failed passes nothing, an empty string or a
+    /// A run whose build or gzip failed passes nothing, an empty string or a
     /// zero; any of them held as a size would pass as a shrink.
     #[test]
     fn a_size_of_nothing_is_refused() {
@@ -1068,6 +1171,10 @@ mod tests {
                 "`--run` wants",
             ),
             (
+                &["--profile", "a", "--gzipped", "1", "--run", "40000000009"],
+                "`--run` wants the local run as <revision>@<host>",
+            ),
+            (
                 &["--profile", "a", "--gzipped", "1", "--date", "2026-13-01"],
                 "`--date` wants",
             ),
@@ -1087,5 +1194,20 @@ mod tests {
         if let Err(problems) = check(&crate::repo_root()) {
             panic!("{FOOTPRINT_PATH}:\n{}", problems.join("\n"));
         }
+    }
+
+    /// A profile's first figure is written by hand, and `--record` writes the
+    /// file back as the reader spells it; spelled any other way, the first
+    /// shrink would rewrite the file whole and hide the one figure it moved.
+    #[test]
+    fn the_committed_file_is_spelled_as_record_writes_it() {
+        let text = std::fs::read_to_string(crate::repo_root().join(FOOTPRINT_PATH))
+            .expect("the committed file reads");
+        let json = json::parse(&text).expect("the committed file is JSON");
+        assert_eq!(
+            json.to_pretty(),
+            text,
+            "{FOOTPRINT_PATH} is not spelled as `--record` writes it"
+        );
     }
 }

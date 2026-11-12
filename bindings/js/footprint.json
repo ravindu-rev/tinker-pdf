@@ -1,25 +1,77 @@
 {
   "note": [
     "Each wasm build profile's gzipped size, held by `cargo xtask footprint",
-    "--profile NAME --gzipped BYTES`. The workflow builds the profile as",
-    "release.yml's npm job builds the wasm, counts `gzip -9 -c ... | wc -c`",
-    "and passes the number in. A size over `figure.bytes` plus",
+    "--profile NAME --gzipped BYTES --run REV@HOST --date DAY`. A local run",
+    "builds the profile as release.yml's npm job builds the wasm, under the",
+    "job's `RUSTFLAGS` of `-D warnings`: `wasm-pack build --release --target",
+    "web --out-dir pkg bindings/js`, followed by `-- --features bundled-fonts`",
+    "for that profile, counts `gzip -9 -c bindings/js/pkg/tinker_pdf_js_bg.wasm",
+    "| wc -c` and passes the number in. A size over `figure.bytes` plus",
     "`tolerance.bytes` fails; a shrink passes and prints the `--record` line",
     "that writes it as the figure, with its run and day, keeping the",
-    "tolerance. A profile with no entry fails unless the job names it",
+    "tolerance. A profile with no entry fails unless the run names it",
     "`--unrecorded`.",
     "",
     "`figure` is one run's measurement: `bytes`, the `date` (YYYY-MM-DD) and",
-    "the `run` id. `tolerance` is measured, never assumed: `bytes` is the",
-    "widest spread of one revision's size over the workflow `runs` it names",
-    "and the `toolchains` they built with, and zero is a measurement too.",
-    "`cargo xtask check` refuses an entry missing any of these, or carrying a",
-    "key nothing reads.",
+    "the `run`, `<revision>@<host>`, the commit it built and the target triple",
+    "of the host that built it, with `#<n>` for the nth build of one revision",
+    "on one host. `tolerance` is measured, never assumed: `bytes` is the",
+    "widest spread of one revision's size over the `runs` it names, five clean",
+    "builds and one more under the previous stable toolchain, and `toolchains`",
+    "names the compilers they built with; zero is a measurement too. A clean",
+    "build deletes `bindings/js/target` and `bindings/js/pkg` first, so each",
+    "compiles the revision anew. `cargo xtask check` refuses an entry missing",
+    "any of these, or carrying a key nothing reads.",
     "",
-    "No profile is recorded yet. Each figure and tolerance comes from the",
-    "footprint job's own runs, not from a local build, and is first written",
-    "by hand with those runs; `--record` only moves a figure whose tolerance",
-    "it keeps."
+    "The wasm carries the paths of the engine's sources as the build saw them,",
+    "so where a checkout sits can move the size as well. A profile's first",
+    "figure and tolerance are written by hand from its runs; `--record` only",
+    "moves a figure whose tolerance it keeps."
   ],
-  "profiles": {}
+  "profiles": {
+    "bundled-fonts": {
+      "figure": {
+        "bytes": 5806235,
+        "date": "2026-11-13",
+        "run": "b629b285@x86_64-pc-windows-msvc#1"
+      },
+      "tolerance": {
+        "bytes": 2269,
+        "runs": [
+          "b629b285@x86_64-pc-windows-msvc#1",
+          "b629b285@x86_64-pc-windows-msvc#2",
+          "b629b285@x86_64-pc-windows-msvc#3",
+          "b629b285@x86_64-pc-windows-msvc#4",
+          "b629b285@x86_64-pc-windows-msvc#5",
+          "b629b285@x86_64-pc-windows-msvc#6"
+        ],
+        "toolchains": [
+          "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+          "rustc 1.98.1 (48a229cea 2026-09-01)"
+        ]
+      }
+    },
+    "default": {
+      "figure": {
+        "bytes": 3424464,
+        "date": "2026-11-13",
+        "run": "b629b285@x86_64-pc-windows-msvc#1"
+      },
+      "tolerance": {
+        "bytes": 5675,
+        "runs": [
+          "b629b285@x86_64-pc-windows-msvc#1",
+          "b629b285@x86_64-pc-windows-msvc#2",
+          "b629b285@x86_64-pc-windows-msvc#3",
+          "b629b285@x86_64-pc-windows-msvc#4",
+          "b629b285@x86_64-pc-windows-msvc#5",
+          "b629b285@x86_64-pc-windows-msvc#6"
+        ],
+        "toolchains": [
+          "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+          "rustc 1.98.1 (48a229cea 2026-09-01)"
+        ]
+      }
+    }
+  }
 }

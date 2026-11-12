@@ -458,15 +458,23 @@ package is `tinker-pdf-js`, name and version derived from `Cargo.toml` so
 `cargo xtask versions` has no extra manifest to police. `release.yml` gates
 the gzipped `.wasm` at 2.5 MiB, with every predefined CMap in; `cmap-predefined`
 off is the switch for a host that renders no CJK. Between releases the
-footprint is local proof: the same `.wasm` is built with the release's command,
-`wasm-pack build --release --target web --out-dir pkg bindings/js`, once per
-build profile — the default, and `bundled-fonts`, which the crate forwards to
-the facade as it forwards `cmap-predefined` — and each is measured with the
-release's `gzip -9` and handed to `cargo xtask footprint --profile <p>
---gzipped <bytes>`, which holds it to the profile's figure in
-`bindings/js/footprint.json` plus that figure's measured tolerance. Neither
-profile has a figure yet, so a run names both `--unrecorded` and prints their
-sizes rather than holding them.
+footprint is local proof: the same `.wasm` is built as the release builds it,
+`wasm-pack build --release --target web --out-dir pkg bindings/js` under the
+release's `RUSTFLAGS=-D warnings`, once per build profile — the default, and
+`bundled-fonts`, which the crate forwards to the facade as it forwards
+`cmap-predefined` and the command takes as `-- --features bundled-fonts` —
+and each is measured with the release's `gzip -9` and handed to
+`cargo xtask footprint --profile <p> --gzipped <bytes> --run <revision>@<host>
+--date <day>`, which holds it to the profile's figure in
+`bindings/js/footprint.json` plus that figure's measured tolerance. A
+figure is the size a clean local build of one revision makes, and its
+tolerance the widest spread of that revision's size over five clean builds and
+one more under the previous stable toolchain, the drift a floating `stable`
+brings, with the runs and both compilers named beside it. Growth past the
+tolerance fails, because a larger figure is the owner's price (ruling 19);
+growth inside it passes unrecorded; a shrink passes and prints the `--record`
+line that lowers the figure. The release's 2.5 MiB gate is the owner's to
+raise, on the default profile's figure.
 
 **.NET** (`bindings/dotnet`, C# over the C ABI). Every native handle lives
 in a `SafeHandle`, so a document or bitmap is released exactly once even if

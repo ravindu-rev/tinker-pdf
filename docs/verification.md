@@ -32,7 +32,7 @@ recorded in the roadmap row it closes:
 | The benches | `cargo bench -p tinker-pdf`, then `cargo xtask bench-check --machine NAME` |
 | Peak memory, on Linux | `cargo test --release -p tinker-pdf --test peak_memory -- --ignored`, in both builds |
 | The bindings | each surface built, then `cargo xtask bindings-parity --require-all` |
-| The wasm footprint | `wasm-pack build --release --target web --out-dir pkg bindings/js`, then `cargo xtask footprint` |
+| The wasm footprint | each profile built as `release.yml`'s npm job builds it, `RUSTFLAGS='-D warnings' wasm-pack build --release --target web --out-dir pkg bindings/js`, with `-- --features bundled-fonts` for that profile, then `cargo xtask footprint --profile NAME --gzipped BYTES --run REV@HOST --date DAY`, the bytes `gzip -9 -c bindings/js/pkg/tinker_pdf_js_bg.wasm \| wc -c` |
 | Licences | `cargo deny check` |
 | The oracle suites — the EPUB corpus, the VP8 vectors, the CommonMark spec, PngSuite | their fetch scripts, then their tests |
 

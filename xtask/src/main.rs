@@ -141,10 +141,10 @@ bindings-parity options:
 footprint options:
   --profile NAME  the build profile, as the file names it
   --gzipped BYTES its wasm's size as `gzip -9 -c ... | wc -c` counts it. The
-                  workflow measures it and passes it in, so this spawns
+                  local run measures it and passes it in, so this spawns
                   nothing. A size over the figure plus the tolerance fails; a
                   shrink passes and prints the `--record` line that takes it
-  --run ID        the workflow run that measured it, and
+  --run REV@HOST  the commit the local run built and its host's triple, and
   --date DAY      the day, as YYYY-MM-DD: the `--record` line carries both
   --unrecorded    a profile with no figure is reported rather than failed.
                   Refused for a profile that has one, so the switch cannot

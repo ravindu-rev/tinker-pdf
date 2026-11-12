@@ -56,18 +56,6 @@ censuses no corpus run has fed.
 | --- | --- | --- | --- | --- | --- |
 | MS-04.10 | measure | Measure the set on the named machine by the 15-run rule: fifteen local `cargo bench` runs on it at one revision, every operation inside 20–300 ms on every run, as the set is sized (one outside on any run is sized the same way before any figure is committed), each operation's fastest figure, swing and band into the named machine's entry in place of the seven's, and `docs/verification.md`'s table replaced. *Note:* H-109 approves the bands. The seven's figures leave with the seven; one retired with no successor in the set is H-78's to approve. The planning number is committed beside the generators, in `benches/support/inputs.rs`, and is not measured here. The set is sized from run 42198682268's figures: report-mode run 42278564726 at `c7f821a6` lists the seven alone outside the window, `open/open a 3-page document`, `text/extract a page of text`, `render/render text at 150 dpi`, `write/rewrite a document` and `layout/paginate a book at 432x648 pt` under it, which keep one call and their figures until this step retires them. | `crates/tinker-pdf/benches/baseline.json`, `crates/tinker-pdf/benches`, `docs/verification.md` | `cargo xtask baseline` holds the bench files and `baseline.json` to one list per group with no operation unmeasured; `every_committed_band_fires_at_its_own_edge_and_not_before` pushes on every band; all fifteen runs pass the entry they set and the sizes check. | H-109, MS-24.2, MS-04.10a |
 
-## MS-06 — A footprint ratchet, per build profile
-
-**A footprint ratchet, per build profile**
-
-**Exit criterion.** a local run builds the wasm exactly as `release.yml` does for each profile (default, `bundled-fonts`, and each new profile a row adds — `script`, `ocr`) and `cargo xtask footprint` fails when the gzipped size grows past the committed figure plus a measured tolerance, recorded here; shrinking is free and records the new figure
-
-**Doc:** — · **Depends on:** — (the budget itself is H-04)
-
-| Step | Kind | What | Where | Exit | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| MS-06.3 | measure | Record each profile's figure and tolerance: the gzipped size of one revision as the local `wasm-pack` build makes it, and as tolerance the widest spread of that revision's size across five local builds and a build made with the same command under the previous stable toolchain, the drift a floating `stable` brings; into `footprint.json` with both toolchain versions, after which the local check passes no `--unrecorded`, and `docs/features/bindings.md`'s dated size updated beside it. *Note:* A tolerance of zero bytes is a measurement too, if every build is byte-identical. The figures are measured sizes, not a budget: the budget is H-04's, whose default is to ratchet at the measured size while the release gate stays red. | `bindings/js/footprint.json`, `docs/features/bindings.md`, `docs/verification.md` | `footprint.json` carries both profiles with figure, tolerance, date and runs; a local `cargo xtask footprint` run for each profile passes no `--unrecorded`, holds both and is green, recorded here. | MS-06.2 |
-
 ## MS-07 — Corpus throughput and latency ratchet
 
 **Corpus throughput and latency ratchet**
