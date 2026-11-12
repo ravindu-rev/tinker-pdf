@@ -1192,6 +1192,32 @@ it fails unless its entry names it outside the window by the owner's word
 a factor may run longer. `--sizes report` lists every operation outside the
 window with its mean and fails on none.
 
+**Some relations are held inside one run.** A relation whose entry is marked
+`in_one_run` is a floor `bench-check --machine NAME` holds on every run,
+whatever the machine and whether or not it has an entry, from that run's own
+estimates and with no band: its operation's per-call time over its other's,
+against its bound, each ratio printed beside its floor. They are MS-09's
+scaling floors — the `threads` group's 2 and 4 jobs at least 1.9 and 3.6
+times as fast as one job, its 8 jobs at least 0.95 times as fast as 4 on a
+run that recorded four logical CPUs, and the render group's four bands at
+least 2.6 times as fast as its one-thread 300-dpi page — and only the owner
+lowers one (H-78). The paired run's rounds leave them to this check. When it
+measures a group, the harness writes `host.json` into the group's directory
+beside the estimates criterion writes there: the logical CPUs
+`std::thread::available_parallelism` counts and the CPU as the OS names it,
+`/proc/cpuinfo`'s first model name or Windows' `PROCESSOR_IDENTIFIER`, and
+`bench-check` prints both beside the group's relations. A relation that names
+`cpus` is armed only on a run whose group recorded that many: on another
+count it is reported as not armed, and in a run that recorded none it fails.
+A relation of a group that ran fails when an estimate it reads is missing;
+one whose group did not run at all, no estimate of its and no `host.json`,
+is reported.
+
+Criterion 0.5.1 on Windows trims each part of an operation's directory at
+its end and lowercases it, so a name holding a capital is recorded under
+another key there; `bench-check` reads each directory, in a plain run and in
+a pair's rounds alike, as the listed id it was made from.
+
 ### The named machine is `ubuntu-latest`
 
 The committed entry is `ubuntu-latest`'s, the hosted runner its fifteen runs
@@ -1229,9 +1255,9 @@ floor, and a later measurement may have to raise them.
 
 **`ubuntu-latest` is a fleet and not a machine.** Runs of one revision fall
 into groups on hardware the log does not name, and much of a spread is that
-split rather than noise, so a run records `/proc/cpuinfo`'s model name and the
-CPU count beside its figures, so that a measurement can attribute the split
-rather than band it.
+split rather than noise, so each group's run records its host beside its
+figures, in the group's `host.json`, so that a measurement can attribute the
+split rather than band it.
 
 **A pair is judged on its rounds.** `cargo xtask bench-check --paired BASE
 HEAD` holds a head's rounds to a base's, timing nothing a second time. Each
@@ -1265,7 +1291,8 @@ operation once, ahead of its groups, with `planning_ms`, its figure on the
 planning machine — so a target reads as the same fraction on whatever machine
 the run is on. A relation holds two of the head's operations of one group in
 one round: one's time `at_most` so many times the other's, or its
-`speedup_at_least` so many times over the other. An operation tier P's table
+`speedup_at_least` so many times over the other; one marked `in_one_run` is a
+plain run's instead, held inside each run as above. An operation tier P's table
 does not list, such as the in-process twin of a CLI-marked one, sits at a
 floor of 1.
 
@@ -1341,7 +1368,8 @@ each group's list of operations to each other: a `[[bench]]` declares each
 group file, the file defines the group's operations, and `baseline.json` lists
 them, in the file's order and each with its unit and its gate, and records a
 figure for each or names it unmeasured. It refuses an operation with no gate, a
-gate outside the format — a floor under 1 among them — a relation naming no
+gate outside the format — a floor under 1 among them, and a relation armed on
+a CPU count that is not held inside one run — a relation naming no
 other operation of its group, and a calibrated target with no calibration
 operation the lists hold to be a fraction of. It refuses a name criterion would
 record under another key — one holding any of the ten characters it writes as

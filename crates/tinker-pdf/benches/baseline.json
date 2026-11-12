@@ -28,7 +28,11 @@
     "`relations` each name another operation of its group, `to`, and hold its",
     "time `at_most` that many times the other's, or its `speedup_at_least` over",
     "the other at that many times. An operation tier P's table does not list",
-    "sits at a floor of 1.",
+    "sits at a floor of 1. A relation marked `in_one_run` is a floor",
+    "`bench-check --machine` holds inside every plain run, from that run's",
+    "estimates, and the paired run's rounds leave it alone; one that also",
+    "names `cpus` is armed only on a run whose group recorded that many",
+    "logical CPUs in its `host.json`.",
     "",
     "`nanos` is the FASTEST mean of the stated runs, not their average: the",
     "comparison is one-sided, faster is never a failure, so the bar worth",
@@ -144,7 +148,8 @@
         { "name": "the 300-dpi text page in 4 bands on 4 threads", "unit": "pixels",
           "per_iteration": 8702320, "calls": 1,
           "gate": { "floor": 1, "relations": [
-            { "to": "the text page at 300 dpi", "speedup_at_least": 3 } ] } },
+            { "to": "the text page at 300 dpi", "speedup_at_least": 3 },
+            { "to": "the text page at 300 dpi", "speedup_at_least": 2.6, "in_one_run": true } ] } },
         { "name": "8 half-size text pages at 150 dpi on 1 thread", "unit": "pages",
           "per_iteration": 8, "calls": 1, "gate": { "floor": 1 } },
         { "name": "8 half-size text pages at 150 dpi on 4 threads", "unit": "pages",
@@ -436,11 +441,20 @@
         { "name": "24 quarter-size text pages to PNG at 150 dpi, 1 job, CLI", "unit": "pages",
           "per_iteration": 24, "calls": 1, "gate": { "floor": 1 } },
         { "name": "24 quarter-size text pages to PNG at 150 dpi, 2 jobs, CLI", "unit": "pages",
-          "per_iteration": 24, "calls": 1, "gate": { "floor": 1 } },
+          "per_iteration": 24, "calls": 1,
+          "gate": { "floor": 1, "relations": [
+            { "to": "24 quarter-size text pages to PNG at 150 dpi, 1 job, CLI",
+              "speedup_at_least": 1.9, "in_one_run": true } ] } },
         { "name": "24 quarter-size text pages to PNG at 150 dpi, 4 jobs, CLI", "unit": "pages",
-          "per_iteration": 24, "calls": 1, "gate": { "floor": 1 } },
+          "per_iteration": 24, "calls": 1,
+          "gate": { "floor": 1, "relations": [
+            { "to": "24 quarter-size text pages to PNG at 150 dpi, 1 job, CLI",
+              "speedup_at_least": 3.6, "in_one_run": true } ] } },
         { "name": "24 quarter-size text pages to PNG at 150 dpi, 8 jobs, CLI", "unit": "pages",
-          "per_iteration": 24, "calls": 1, "gate": { "floor": 1 } }
+          "per_iteration": 24, "calls": 1,
+          "gate": { "floor": 1, "relations": [
+            { "to": "24 quarter-size text pages to PNG at 150 dpi, 4 jobs, CLI",
+              "speedup_at_least": 0.95, "in_one_run": true, "cpus": 4 } ] } }
       ]
     }
   ],

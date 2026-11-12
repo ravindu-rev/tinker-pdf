@@ -49,6 +49,9 @@
 //! not hold, reported as new and never held to its band. So every name is
 //! printable ASCII, at most 64 bytes and free of those ten characters
 //! (`PDF-A`, not `PDF/A`), and `cargo xtask baseline` refuses one that is not.
+//! On Windows criterion also trims each part at its end and lowercases it,
+//! and `cargo xtask bench-check` reads such a directory back as the name it
+//! was made from.
 //!
 //! # Inputs are built when an operation needs them
 //!
@@ -73,6 +76,16 @@
 //! An operation whose iterations each take an input criterion leaves out of
 //! its time ([`Op::iter_batched`]) counts that setup too, since nothing
 //! outside the process can tell its instructions from the routine's.
+//!
+//! # The host
+//!
+//! When it measures a group, the harness writes [`HOST_RECORD`] into the
+//! group's directory, beside the estimates criterion writes there: the
+//! logical CPUs the process may use, as `std::thread::available_parallelism`
+//! counts them, and the CPU as the OS names it, each left out where the host
+//! gives none. The process that times the group writes it, so it is that
+//! run's own, and `cargo xtask bench-check` prints it beside the group's
+//! relations held inside one run and arms one named for a CPU count on it.
 //!
 //! # The planning baseline
 //!
@@ -117,6 +130,7 @@ pub mod cli;
 pub mod inputs;
 
 use std::hint::black_box;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use criterion::measurement::WallTime;
@@ -194,6 +208,86 @@ fn count_mode() -> Option<(String, u64)> {
     Some((operation, iterations))
 }
 
+/// The record of the host a group's run is on, which the harness writes
+/// into the group's directory under [`criterion_home`] and `cargo xtask
+/// bench-check` reads there.
+pub const HOST_RECORD: &str = "host.json";
+
+/// Where criterion 0.5.1 writes a run's estimates, found as it finds it
+/// (`criterion-0.5.1/src/lib.rs:135-145`): `CRITERION_HOME`, then
+/// `CARGO_TARGET_DIR`'s `criterion/`, then the target directory this bench
+/// was built in, which is the one criterion asks `cargo metadata` for; and
+/// on `wasm32-wasip1`, where criterion can ask nothing, `target/criterion`.
+fn criterion_home() -> PathBuf {
+    if let Some(home) = std::env::var_os("CRITERION_HOME") {
+        return PathBuf::from(home);
+    }
+    if let Some(target) = std::env::var_os("CARGO_TARGET_DIR") {
+        return PathBuf::from(target).join("criterion");
+    }
+    if cfg!(target_os = "wasi") {
+        return PathBuf::from("target/criterion");
+    }
+    Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .parent()
+        .map_or_else(|| PathBuf::from("target"), Path::to_path_buf)
+        .join("criterion")
+}
+
+/// The CPU as the host's OS names it: `/proc/cpuinfo`'s first model name,
+/// or Windows' `PROCESSOR_IDENTIFIER`; `None` where neither is there.
+fn host_cpu() -> Option<String> {
+    let named = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|cpuinfo| {
+            cpuinfo.lines().find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                (key.trim() == "model name").then(|| value.trim().to_string())
+            })
+        });
+    named
+        .or_else(|| std::env::var("PROCESSOR_IDENTIFIER").ok())
+        .filter(|cpu| !cpu.trim().is_empty())
+}
+
+/// `text` as a JSON string.
+fn json_string(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if u32::from(c) < 0x20 => out.push_str(&format!("\\u{:04x}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The group `group`'s [`HOST_RECORD`], in its directory under
+/// [`criterion_home`]: the logical CPUs this process may use, as
+/// `std::thread::available_parallelism` counts them, and [`host_cpu`], each
+/// left out where the host gives none.
+fn record_host(group: &str) {
+    let mut fields = Vec::new();
+    if let Ok(cpus) = std::thread::available_parallelism() {
+        fields.push(format!("\"cpus\": {cpus}"));
+    }
+    if let Some(cpu) = host_cpu() {
+        fields.push(format!("\"cpu\": {}", json_string(&cpu)));
+    }
+    let dir = criterion_home().join(group);
+    std::fs::create_dir_all(&dir)
+        .and_then(|()| {
+            std::fs::write(
+                dir.join(HOST_RECORD),
+                format!("{{ {} }}\n", fields.join(", ")),
+            )
+        })
+        .unwrap_or_else(|error| panic!("the host record in {}: {error}", dir.display()));
+}
+
 /// One group of the set as its file declares it: criterion's group, flat
 /// sampled, or in count mode the one operation `TINKER_BENCH_COUNT` names.
 pub struct Group<'c> {
@@ -212,8 +306,9 @@ enum Mode<'c> {
 }
 
 impl<'c> Group<'c> {
-    /// The group `id`: criterion's group, sampled flat, or in count mode the
-    /// group's one operation asked for, run outside criterion.
+    /// The group `id`: criterion's group, sampled flat, its host recorded
+    /// beside its estimates, or in count mode the group's one operation asked
+    /// for, run outside criterion.
     pub fn new(c: &'c mut Criterion, id: &str) -> Group<'c> {
         let mode = match count_mode() {
             Some((operation, iterations)) => Mode::Count {
@@ -221,6 +316,7 @@ impl<'c> Group<'c> {
                 iterations,
             },
             None => {
+                record_host(id);
                 let mut group = c.benchmark_group(id);
                 group.sampling_mode(SamplingMode::Flat);
                 Mode::Measure(group)

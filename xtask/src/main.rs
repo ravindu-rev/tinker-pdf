@@ -117,7 +117,16 @@ bindings-parity options:
                                          its committed unit; with --sizes, fail a
                                          head-side mean outside 20-300 ms that
                                          baseline.json does not name outside it,
-                                         and with `report`, only list them
+                                         and with `report`, only list them. On
+                                         every run, whatever the machine, hold
+                                         the relations baseline.json keeps
+                                         inside one run, each ratio printed
+                                         beside its floor: the threads group's 2
+                                         and 4 jobs at least 1.9x and 3.6x one
+                                         job, its 8 jobs at least 0.95x four on
+                                         a run that recorded four CPUs, and the
+                                         render group's four bands at least
+                                         2.6x one thread
   cargo xtask bench-check --paired BASE HEAD
                                          hold the head's ten rounds to the base's:
                                          the median paired ratio against 1 + the
@@ -1663,6 +1672,40 @@ mod tests {
             !text.contains("{timeout}"),
             "a placeholder is left unfilled"
         );
+    }
+
+    /// `bench-check`'s usage text names every relation the committed
+    /// baseline holds inside one run, by its floor, and the CPU count the
+    /// one armed on a count is armed on.
+    #[test]
+    fn the_usage_text_names_every_relation_held_inside_one_run() {
+        let root = repo_root();
+        let text = std::fs::read_to_string(root.join(bench::BASELINE_PATH))
+            .expect("the committed baseline");
+        let lists = bench::groups(&text, bench::BASELINE_PATH).expect("it parses");
+        let held = bench::in_one_run(&lists, &BTreeMap::new(), &BTreeMap::new());
+        assert!(!held.is_empty(), "no relation is held inside one run");
+        let text = usage();
+        for relation in &held {
+            let (bench::Bound::SpeedupAtLeast(floor) | bench::Bound::AtMost(floor)) =
+                relation.bound;
+            assert!(
+                text.contains(&format!("{floor}x")),
+                "the usage text does not name `{}`'s floor of {floor}",
+                relation.id
+            );
+            if let Some(cpus) = relation.cpus {
+                let named = match cpus {
+                    4 => "four CPUs".to_string(),
+                    other => format!("{other} CPUs"),
+                };
+                assert!(
+                    text.contains(&named),
+                    "the usage text does not name the {cpus} CPUs that arm `{}`",
+                    relation.id
+                );
+            }
+        }
     }
 
     /// The check runs against this repository, which is the point of it.

@@ -931,7 +931,7 @@ to it in the commit that adds the capability.
   input.
 - **Floors, calibrations and relations.** What an operation is lives here;
   how it gates is MS-02.3's to commit beside it, and the thread floors are
-  MS-09.3's.
+  MS-09's, relations held inside one run (`docs/verification.md`).
 - **Memory and wasm.** MS-05's probe, `tests/peak_memory.rs`, builds its
   cases from these inputs and keeps its own bands. MS-10.1 builds this set for
   `wasm32-wasip1` and runs it under a wasm runtime, less the operations it
@@ -1000,9 +1000,11 @@ rule is recorded under another key, reported "new, with no recorded figure"
 and never held to its band. Every name is therefore ASCII, at most 64 bytes,
 free of those ten characters (PDF-A, not PDF/A; 9-7 is spelled irreversible),
 and writes its numbers unspaced ("3000 pages"). A name says what the input is
-and never how often it is repeated. On Windows criterion also lowercases each
-part (`criterion-0.5.1/src/report.rs:103-104`), and nothing here undoes it, so
-a run there reports every name with a capital as new.
+and never how often it is repeated. On Windows criterion also trims each
+part at its end and lowercases it (`criterion-0.5.1/src/report.rs:92-104`),
+and `bench-check` reads each such directory, in a plain run and in a pair's
+rounds, as the listed id it was made from (`xtask/src/bench.rs`,
+`listed_id`).
 
 **The unit** is what an iteration processes: pages, pixels (printed as
 Mpixel/s), bytes (MB/s, a megabyte being 10⁶ bytes), outlines (tier P states
@@ -1181,7 +1183,7 @@ text of the document the operation reads, so all six stay inside the group.
 | `render/the transparency fixture at 150 dpi` | pixels · 9 bitmaps | `fuzz/corpus/render_page/transparency.pdf` | 8.4 → 3; 2.8× | ×9 | built |
 | `render/a page tiled by one pattern fill at 150 dpi` | pixels · 1240×1755 a call | `tiling(1)` | not measured; relation: 50 fills ≤ 1.2 × one; counted | in | built |
 | `render/a page tiled by 50 pattern fills at 150 dpi` | pixels · 1240×1755 a call | `tiling(50)` | the same relation | in | built |
-| `render/the 300-dpi text page in 4 bands on 4 threads` | pixels · 2480×3509 | `dense(1, 0)`, four `RenderOptions::region` bands (`lib.rs:584`), one scoped thread each | relation ≥ 3 × the 1-thread speed (`the text page at 300 dpi`) | in | built |
+| `render/the 300-dpi text page in 4 bands on 4 threads` | pixels · 2480×3509 | `dense(1, 0)`, four `RenderOptions::region` bands (`lib.rs:584`), one scoped thread each | relation ≥ 3 × the 1-thread speed (`the text page at 300 dpi`); MS-09's floor inside one run ≥ 2.6 × it | in | built |
 | `render/8 half-size text pages at 150 dpi on 1 thread` | pages · 8 | `dense_part(8, 0, 2)` | 45.6 → 240 pages/s, rescaled from A4's 11.4 → 60; 5.26× | in | built |
 | `render/8 half-size text pages at 150 dpi on 4 threads` | pages · 8 | the same, on `std::thread::scope` over owned pages, as `crates/tinker-pdf/examples/parallel.rs:87` does | 172 → 800 pages/s, rescaled from A4's 43 → 200; 4.65×; relation ≥ 3.33 × 1 thread | in | built |
 | `render/the annotated text page at 150 dpi` | pixels · 2 × 1240×1755 | `annotated(dense(1, 0))` | the next one's full-page render; floor 1 | ×2 | built |
@@ -1331,14 +1333,17 @@ window by that record and three pages for each of eight jobs. No run has
 timed them, so the named machine's entry names all four unmeasured and their
 window is *counted*. They embed their face, so every glyph is drawn.
 The 300-dpi page in four bands is the render group's, beside the one-thread
-render it is held against there, so it is timed once.
+render it is held against there, so it is timed once. The scaling floors
+are relations `bench-check --machine` holds inside every plain run, the
+oversubscription one armed only where the group's run recorded four logical
+CPUs (`docs/verification.md`).
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
 | `threads/24 quarter-size text pages to PNG at 150 dpi, 1 job, CLI` | pages · 24 | `dense_part(24, 0, 4)`, `tpdf render --jobs 1` | —; floor 1 | counted | built |
-| `threads/24 quarter-size text pages to PNG at 150 dpi, 2 jobs, CLI` | pages · 24 | the same, `--jobs 2` | —; floor 1 | counted | built |
-| `threads/24 quarter-size text pages to PNG at 150 dpi, 4 jobs, CLI` | pages · 24 | the same, `--jobs 4` | —; floor 1 | counted | built |
-| `threads/24 quarter-size text pages to PNG at 150 dpi, 8 jobs, CLI` | pages · 24 | the same, `--jobs 8` | —; floor 1 | counted | built |
+| `threads/24 quarter-size text pages to PNG at 150 dpi, 2 jobs, CLI` | pages · 24 | the same, `--jobs 2` | —; floor 1; inside one run ≥ 1.9 × 1 job | counted | built |
+| `threads/24 quarter-size text pages to PNG at 150 dpi, 4 jobs, CLI` | pages · 24 | the same, `--jobs 4` | —; floor 1; inside one run ≥ 3.6 × 1 job | counted | built |
+| `threads/24 quarter-size text pages to PNG at 150 dpi, 8 jobs, CLI` | pages · 24 | the same, `--jobs 8` | —; floor 1; inside one run ≥ 0.95 × 4 jobs, on four CPUs | counted | built |
 
 **scripts** and **OCR** have no operation of MS-04's own; their rows create
 their files (below). **calibration** holds one:

@@ -88,6 +88,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::json::{self, Json};
+
 /// Where the committed baseline lives.
 ///
 /// Hand-written, and key order is load-bearing. The calibration comes first,
@@ -221,13 +223,31 @@ impl Bound {
     }
 }
 
-/// A relation: the other operation of the group, and the bound.
+/// Where a relation is held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Within {
+    /// Over the head's ten rounds in the paired run, by the regression
+    /// pair's rule: tier P's relations.
+    Rounds,
+    /// Inside one plain run, by `bench-check --machine`, from that run's own
+    /// estimates and with no band: MS-09's scaling floors.
+    OneRun {
+        /// The logical CPU count a run's group must have recorded for it to
+        /// be armed, or `None` for every run.
+        cpus: Option<u32>,
+    },
+}
+
+/// A relation: the other operation of the group, the bound, and where it is
+/// held.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Relation {
     /// The other operation's name in the group.
     pub to: String,
     /// What the two per-call times are held to.
     pub bound: Bound,
+    /// Over the paired run's rounds, or inside one run.
+    pub within: Within,
 }
 
 /// One operation's gate: what holds it against the planning baseline, and
@@ -785,7 +805,10 @@ const AGAINST: [&str; 4] = ["floor", "held", "calibrated_ms", "calibrated_per_se
 /// `paired_with`, the operation of its group the planning baseline runs in
 /// its place; and `relations`, an array of objects each naming the other
 /// operation in `to` and one bound above 0, `at_most` or
-/// `speedup_at_least`. Why it is outside the format, otherwise.
+/// `speedup_at_least`, and held over the paired run's rounds unless it says
+/// `in_one_run`, `true`, beside which `cpus`, a whole number of one or more,
+/// arms it only on a run that recorded that many. Why it is outside the
+/// format, otherwise.
 fn gate_in(object: &str, per_call: Option<f64>) -> Result<Gate, String> {
     // The relations' own keys never reach the gate's, wherever the array
     // stands among them.
@@ -890,7 +913,47 @@ fn gate_in(object: &str, per_call: Option<f64>) -> Result<Gate, String> {
                     ))
                 }
             };
-            out.push(Relation { to, bound });
+            let in_one_run = match relation.find(IN_ONE_RUN) {
+                None => false,
+                Some(at)
+                    if relation[at + IN_ONE_RUN.len()..]
+                        .trim_start()
+                        .starts_with("true") =>
+                {
+                    true
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "the relation to `{to}` gives `in_one_run` other than `true`; one \
+                         held over the paired run's rounds names none"
+                    ))
+                }
+            };
+            let cpus = if relation.contains(CPUS) {
+                match integer_after(relation, "cpus").and_then(|cpus| u32::try_from(cpus).ok()) {
+                    Some(cpus) if cpus >= 1 => Some(cpus),
+                    _ => {
+                        return Err(format!(
+                            "the relation to `{to}` is armed on `cpus` that are no whole \
+                             number of one or more"
+                        ))
+                    }
+                }
+            } else {
+                None
+            };
+            let within = match (in_one_run, cpus) {
+                (true, cpus) => Within::OneRun { cpus },
+                (false, None) => Within::Rounds,
+                (false, Some(_)) => {
+                    return Err(format!(
+                        "the relation to `{to}` is armed on the run's `cpus` and not held \
+                         `in_one_run`: a group's run records its CPUs, and the paired \
+                         run's rounds hold a relation on any"
+                    ))
+                }
+            };
+            out.push(Relation { to, bound, within });
         }
     }
     let paired_with = match own
@@ -920,6 +983,13 @@ const PAIRED_WITH: &str = "\"paired_with\":";
 
 /// The key a gate's relations follow.
 const RELATIONS: &str = "\"relations\":";
+
+/// The key that holds a relation inside one run rather than over the paired
+/// run's rounds.
+const IN_ONE_RUN: &str = "\"in_one_run\":";
+
+/// The key that arms a relation held inside one run on a CPU count.
+const CPUS: &str = "\"cpus\":";
 
 /// The text inside the braces of the object that opens `text`, whitespace
 /// before it allowed, and what follows its closing brace; `None` when no
@@ -1074,6 +1144,61 @@ fn mean_of(file: &Path) -> Option<f64> {
     let text = std::fs::read_to_string(file).ok()?;
     let mean = &text[text.find("\"mean\"")?..];
     number_after(mean, "point_estimate")
+}
+
+/// The listed id of `ids` that criterion 0.5.1 records under the directory
+/// `found`: `found` itself, or else the one id whose every part it trims at
+/// its end and lowercases into `found`, as it makes each part of a directory
+/// on Windows (`make_filename_safe`, its `src/report.rs`); `None` for a
+/// directory no listed id makes, or two do.
+#[must_use]
+pub fn listed_id<'a>(found: &str, ids: &'a [String]) -> Option<&'a String> {
+    if let Some(id) = ids.iter().find(|id| id.as_str() == found) {
+        return Some(id);
+    }
+    let folded = |id: &str| {
+        id.split('/')
+            .map(|part| part.trim_end().to_lowercase())
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+    let mut making = ids.iter().filter(|id| folded(id) == found);
+    let one = making.next()?;
+    making.next().is_none().then_some(one)
+}
+
+/// One run's estimates, keyed by the directory criterion recorded each
+/// under, keyed instead by the id of `lists` each is for ([`listed_id`]): a
+/// directory named exactly for its id keeps it, one criterion folded on
+/// Windows takes the id it was made from where no exact one holds that id,
+/// and one no listed id makes keeps its own key.
+#[must_use]
+pub fn by_listed_id(now: BTreeMap<String, f64>, lists: &[Group]) -> BTreeMap<String, f64> {
+    let ids: Vec<String> = lists
+        .iter()
+        .flat_map(|list| {
+            list.operations
+                .iter()
+                .map(|operation| list.id(&operation.name))
+        })
+        .collect();
+    let mut out = BTreeMap::new();
+    let mut folded = Vec::new();
+    for (found, nanos) in now {
+        if ids.contains(&found) {
+            out.insert(found, nanos);
+        } else {
+            folded.push((found, nanos));
+        }
+    }
+    for (found, nanos) in folded {
+        let key = match listed_id(&found, &ids) {
+            Some(id) if !out.contains_key(id) => id.clone(),
+            _ => found,
+        };
+        out.entry(key).or_insert(nanos);
+    }
+    out
 }
 
 /// The window MS-04 sizes every head-side operation to, in milliseconds:
@@ -1286,6 +1411,249 @@ pub fn compare(
         }
     }
     (outside, inside, unrecorded)
+}
+
+/// The file the bench harness writes into each group's directory under
+/// criterion's when it measures the group, beside the estimates criterion
+/// writes there: the host the run is on (`benches/support/mod.rs`).
+pub const HOST_RECORD: &str = "host.json";
+
+/// What a group's run recorded of its host.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Host {
+    /// The logical CPUs the process could use, as
+    /// `std::thread::available_parallelism` counted them; `None` where the
+    /// record gives none.
+    pub cpus: Option<u32>,
+    /// The CPU as the host's OS names it, where it names one.
+    pub cpu: Option<String>,
+}
+
+/// The host record of each group `lists` holds, read from under `root`,
+/// criterion's directory, by group. A group with no record is left out; a
+/// record that does not read is kept with nothing in it, so its group still
+/// counts as run and a floor armed on its CPUs cannot be told armed.
+#[must_use]
+pub fn hosts(root: &Path, lists: &[Group]) -> BTreeMap<String, Host> {
+    let mut out = BTreeMap::new();
+    for list in lists {
+        let Ok(text) = std::fs::read_to_string(root.join(&list.name).join(HOST_RECORD)) else {
+            continue;
+        };
+        let record = json::parse(&text).ok();
+        let field = |key: &str| record.as_ref().and_then(|record| record.get(key));
+        out.insert(
+            list.name.clone(),
+            Host {
+                cpus: field("cpus")
+                    .and_then(Json::as_u64)
+                    .and_then(|cpus| u32::try_from(cpus).ok())
+                    .filter(|cpus| *cpus >= 1),
+                cpu: field("cpu").and_then(Json::as_str).map(str::to_string),
+            },
+        );
+    }
+    out
+}
+
+/// What one run made of a relation held inside it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Reading {
+    /// Both per-call figures read: the operation's over the other's.
+    Ratio(f64),
+    /// Armed on another CPU count than the group's run recorded: what it
+    /// recorded, and the ratio where both figures were read. Reported, never
+    /// failed.
+    NotArmed {
+        /// The CPUs the group's run recorded.
+        cpus: u32,
+        /// The ratio, where both figures were read.
+        ratio: Option<f64>,
+    },
+    /// The group ran and the run holds no estimate for these ids.
+    Missing(Vec<String>),
+    /// Armed on a CPU count, and the group's run recorded none.
+    NoCpus,
+    /// The group did not run: no estimate of its and no host record.
+    NotRun,
+}
+
+/// One relation held inside one run, and what the run made of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InRun {
+    /// The operation whose relation it is, as `<group>/<name>`.
+    pub id: String,
+    /// The other operation, as `<group>/<name>`.
+    pub to: String,
+    /// What the two per-call times are held to.
+    pub bound: Bound,
+    /// The CPU count that arms it, or `None` for every run.
+    pub cpus: Option<u32>,
+    /// What the run made of it.
+    pub reading: Reading,
+}
+
+impl InRun {
+    /// Whether the run fails on it: a ratio beyond its bound, an estimate it
+    /// reads missing from a group that ran, or a CPU count it is armed on
+    /// that the group's run did not record.
+    #[must_use]
+    pub fn fails(&self) -> bool {
+        match &self.reading {
+            Reading::Ratio(ratio) => *ratio > self.bound.limit(),
+            Reading::Missing(_) | Reading::NoCpus => true,
+            Reading::NotArmed { .. } | Reading::NotRun => false,
+        }
+    }
+
+    /// The line `bench-check` prints for it: the ratio, read in its bound's
+    /// direction, beside its floor, and the two operations.
+    #[must_use]
+    pub fn line(&self) -> String {
+        let read = |ratio: f64| match self.bound {
+            Bound::SpeedupAtLeast(_) => format!("{:.3} x as fast, ", 1.0 / ratio),
+            Bound::AtMost(_) => format!("{ratio:.3} x the time, "),
+        };
+        let bound = match self.bound {
+            Bound::SpeedupAtLeast(floor) => format!("floor {floor}"),
+            Bound::AtMost(most) => format!("at most {most}"),
+        };
+        let armed = self
+            .cpus
+            .map(|cpus| format!(" on {cpus} CPUs"))
+            .unwrap_or_default();
+        let (ratio, said) = match &self.reading {
+            Reading::Ratio(ratio) => (
+                read(*ratio),
+                if self.fails() { ", FAILS" } else { "" }.to_string(),
+            ),
+            Reading::NotArmed { cpus, ratio } => (
+                ratio.map(read).unwrap_or_default(),
+                format!(", not armed: the run recorded {cpus}"),
+            ),
+            Reading::Missing(ids) => (
+                String::new(),
+                format!(
+                    ", FAILS: the run has no estimate for {}",
+                    ids.iter()
+                        .map(|id| format!("`{id}`"))
+                        .collect::<Vec<_>>()
+                        .join(" or ")
+                ),
+            ),
+            Reading::NoCpus => (
+                String::new(),
+                ", FAILS: the group's run recorded no CPU count".to_string(),
+            ),
+            Reading::NotRun => (
+                String::new(),
+                ", reported: the group did not run".to_string(),
+            ),
+        };
+        format!(
+            "  {ratio}{bound}{armed}{said}  {}, against `{}`",
+            self.id, self.to
+        )
+    }
+}
+
+/// Whether `list`'s group ran: `now` holds an estimate of one of its
+/// operations, or `hosts` its host record.
+fn ran(list: &Group, now: &BTreeMap<String, f64>, hosts: &BTreeMap<String, Host>) -> bool {
+    hosts.contains_key(&list.name)
+        || list
+            .operations
+            .iter()
+            .any(|operation| now.contains_key(&list.id(&operation.name)))
+}
+
+/// Every relation `lists` holds inside one run, in the lists' order, read
+/// from one run's estimates by listed id, `now`, each figure a call's — an
+/// iteration's mean over its operation's `calls` — and armed by `hosts`,
+/// what each group's run recorded of its host.
+///
+/// A relation of a group that did not run is reported; one of a group that
+/// ran is read, and an estimate it reads that the run lacks is named.
+#[must_use]
+pub fn in_one_run(
+    lists: &[Group],
+    now: &BTreeMap<String, f64>,
+    hosts: &BTreeMap<String, Host>,
+) -> Vec<InRun> {
+    let mut out = Vec::new();
+    for list in lists {
+        let ran = ran(list, now, hosts);
+        let per_call = |name: &str| -> Option<f64> {
+            let calls = list
+                .operations
+                .iter()
+                .find(|operation| operation.name == name)
+                .map_or(1, |operation| operation.calls);
+            now.get(&list.id(name)).map(|nanos| nanos / calls as f64)
+        };
+        for operation in &list.operations {
+            let Some(gate) = &operation.gate else {
+                continue;
+            };
+            for relation in &gate.relations {
+                let Within::OneRun { cpus } = relation.within else {
+                    continue;
+                };
+                let id = list.id(&operation.name);
+                let to = list.id(&relation.to);
+                let ratio: Result<f64, Vec<String>> =
+                    match (per_call(&operation.name), per_call(&relation.to)) {
+                        (Some(own), Some(other)) => Ok(own / other),
+                        (own, other) => Err([(own, &id), (other, &to)]
+                            .into_iter()
+                            .filter(|(figure, _)| figure.is_none())
+                            .map(|(_, id)| id.clone())
+                            .collect()),
+                    };
+                let recorded = hosts.get(&list.name).and_then(|host| host.cpus);
+                let reading = match (ran, cpus, recorded) {
+                    (false, _, _) => Reading::NotRun,
+                    (true, Some(_), None) => Reading::NoCpus,
+                    (true, Some(wanted), Some(cpus)) if wanted != cpus => Reading::NotArmed {
+                        cpus,
+                        ratio: ratio.ok(),
+                    },
+                    _ => match ratio {
+                        Ok(ratio) => Reading::Ratio(ratio),
+                        Err(missing) => Reading::Missing(missing),
+                    },
+                };
+                out.push(InRun {
+                    id,
+                    to,
+                    bound: relation.bound,
+                    cpus,
+                    reading,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// What `bench-check` prints of a group's host record, for a group with a
+/// relation held inside one run.
+fn host_line(list: &Group, now: &BTreeMap<String, f64>, hosts: &BTreeMap<String, Host>) -> String {
+    let group = &list.name;
+    match hosts.get(group) {
+        Some(Host {
+            cpus: Some(cpus),
+            cpu,
+        }) => format!(
+            "  `{group}` ran on {cpus} logical CPUs{}",
+            cpu.as_ref().map_or(String::new(), |cpu| format!(", {cpu}"))
+        ),
+        Some(Host { cpus: None, .. }) => {
+            format!("  `{group}` recorded its host and no CPU count")
+        }
+        None if ran(list, now, hosts) => format!("  `{group}` ran and recorded no host"),
+        None => format!("  `{group}` did not run"),
+    }
 }
 
 /// Every string literal handed to `.<method>(` in `source`, whitespace
@@ -1886,10 +2254,6 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
     }
 }
 
-/// `cargo xtask bench-check --machine NAME`.
-///
-/// Reads `target/criterion` and the committed baseline, and fails when an
-/// operation is slower than its recorded figure by more than the band.
 /// How many rounds a paired run times each operation in on each side: a sign
 /// test of eight slower rounds in ten needs ten.
 pub const ROUNDS: usize = 10;
@@ -2112,7 +2476,8 @@ pub struct Planned {
 /// gate in `lists`, the head's: a floor or a held operation by its ratio to
 /// the planning baseline's figure for it, a calibrated one by its ratio to
 /// the planning baseline's figure for `calibration` in the same round, and
-/// each relation by the head's two figures in the same round.
+/// each relation held over the rounds by the head's two figures in the same
+/// round; a relation held inside one run is left to `bench-check --machine`.
 ///
 /// Refused when a side's rounds are not whole, an operation the lists hold
 /// has no gate or no figure on the head, a floor or a held operation has
@@ -2195,6 +2560,12 @@ pub fn against_planning(
             });
             read.push(against);
             for relation in &gate.relations {
+                // A floor held inside one run is a plain run's, read by
+                // `bench-check --machine` from that run's estimates: the
+                // rounds hold tier P's relations.
+                if relation.within != Within::Rounds {
+                    continue;
+                }
                 let to = list.id(&relation.to);
                 let Some(other) = list.operations.iter().find(|o| o.name == relation.to) else {
                     return Err(format!(
@@ -2336,22 +2707,24 @@ fn check_samples(file: &Path) -> Result<(), String> {
 }
 
 /// Every operation one round of one build timed: each `<group>/<name>/new/`
-/// under `dir`, its `estimates.json`'s mean over the `calls` its side's list
-/// gives it, its `sample.json` checked.
+/// under `dir`, read as the listed id criterion made its directory of
+/// ([`listed_id`]), its `estimates.json`'s mean over the `calls` its side's
+/// list gives it, its `sample.json` checked.
 fn read_round(dir: &Path, calls: &BTreeMap<String, u64>) -> Result<BTreeMap<String, f64>, String> {
     let mut found = BTreeMap::new();
     collect(dir, &mut Vec::new(), &mut found);
+    let ids: Vec<String> = calls.keys().cloned().collect();
     let mut round = BTreeMap::new();
-    for (id, mean) in found {
-        let Some(calls) = calls.get(&id) else {
+    for (key, mean) in found {
+        let Some((id, calls)) = listed_id(&key, &ids).and_then(|id| calls.get_key_value(id)) else {
             return Err(format!(
-                "{} times `{id}`, which its side's lists do not name, so a call's time \
+                "{} times `{key}`, which its side's lists do not name, so a call's time \
                  cannot be read",
                 dir.display()
             ));
         };
-        check_samples(&dir.join(&id).join("new").join("sample.json"))?;
-        round.insert(id, mean / *calls as f64);
+        check_samples(&dir.join(&key).join("new").join("sample.json"))?;
+        round.insert(id.clone(), mean / *calls as f64);
     }
     Ok(round)
 }
@@ -2452,6 +2825,15 @@ fn run_paired(base: &Path, head: &Path) -> Result<(), String> {
     Err(message)
 }
 
+/// `cargo xtask bench-check`: with `--paired`, a pair's rounds; otherwise
+/// `--machine NAME`, one plain run.
+///
+/// A plain run reads `target/criterion`, each estimate by the listed id its
+/// directory was made from, and the committed baseline: it prints each
+/// operation's throughput, holds the window with `--sizes`, holds every
+/// relation the lists keep inside one run, whatever the machine, and fails
+/// when an operation is slower than the machine's recorded figure by more
+/// than its band.
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let mut machine_name = None;
     // `None` holds no window; `Some(false)` fails outside it and
@@ -2505,8 +2887,10 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     let path = root.join(BASELINE_PATH);
     let text = std::fs::read_to_string(&path).unwrap_or_default();
     let machines = parse(&text, BASELINE_PATH).map_err(|e| e.to_string())?;
+    let listed = groups(&text, BASELINE_PATH).map_err(|e| e.to_string())?;
 
-    let now = measured(&root.join("target").join("criterion"));
+    let criterion = root.join("target").join("criterion");
+    let now = by_listed_id(measured(&criterion), &listed);
     if now.is_empty() {
         return Err(
             "target/criterion holds no estimates; run `cargo bench -p tinker-pdf` first"
@@ -2517,7 +2901,6 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     // Each operation's throughput in the unit its list commits it to, beside
     // its mean: a figure a reader can hold against the engine's other claims,
     // where milliseconds alone say how long the input took and not how much.
-    let listed = groups(&text, BASELINE_PATH).map_err(|e| e.to_string())?;
     println!("bench-check: throughput, from each operation's committed unit");
     for group in &listed {
         for operation in &group.operations {
@@ -2548,14 +2931,53 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             println!("{line}");
         }
     }
-    let size_failure = match &sized {
-        Some((false, held)) if !held.failing.is_empty() => Some(format!(
-            "outside the {}-{} ms window, and not named outside it by the owner: {}",
-            SIZE_WINDOW_MS.0,
-            SIZE_WINDOW_MS.1,
-            held.failing.join(", ")
-        )),
-        _ => None,
+    // What fails the run whatever the machine: the window, when asked for,
+    // and every relation held inside one run.
+    let mut failures: Vec<String> = Vec::new();
+    if let Some((false, held)) = &sized {
+        if !held.failing.is_empty() {
+            failures.push(format!(
+                "outside the {}-{} ms window, and not named outside it by the owner: {}",
+                SIZE_WINDOW_MS.0,
+                SIZE_WINDOW_MS.1,
+                held.failing.join(", ")
+            ));
+        }
+    }
+
+    let hosts = hosts(&criterion, &listed);
+    let relations = in_one_run(&listed, &now, &hosts);
+    if !relations.is_empty() {
+        println!("bench-check: relations held inside this run, each ratio beside its floor");
+        for list in &listed {
+            if relations
+                .iter()
+                .any(|relation| relation.id.starts_with(&format!("{}/", list.name)))
+            {
+                println!("{}", host_line(list, &now, &hosts));
+            }
+        }
+        for relation in &relations {
+            println!("{}", relation.line());
+        }
+    }
+    let unmet: Vec<String> = relations
+        .iter()
+        .filter(|relation| relation.fails())
+        .map(InRun::line)
+        .collect();
+    if !unmet.is_empty() {
+        failures.push(format!(
+            "a relation held inside one run is not met:\n{}",
+            unmet.join("\n")
+        ));
+    }
+    let settled = |failures: Vec<String>| {
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("\n"))
+        }
     };
 
     let Some(machine) = machines.iter().find(|m| m.name == machine_name) else {
@@ -2569,7 +2991,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             "bench-check: to record this machine, add an entry to {BASELINE_PATH} \
              with its measured swing"
         );
-        return size_failure.map_or(Ok(()), Err);
+        return settled(failures);
     };
 
     // Nothing is spawned: the host's model name is read from the file itself.
@@ -2603,12 +3025,9 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     if outside.is_empty() {
         // No "ok" line here: `main`'s `one` prints one for every task that
         // returns, and two of them read as two checks having passed.
-        return size_failure.map_or(Ok(()), Err);
+        return settled(failures);
     }
     let mut message = String::from("slower than the baseline by more than the band:\n");
-    if let Some(sizes) = &size_failure {
-        message = format!("{sizes}\n{message}");
-    }
     for verdict in &outside {
         message.push_str(&format!(
             "  {}: {:.3} ms against {:.3} ms, {:+.2} % of a {} % band\n",
@@ -2619,7 +3038,8 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
             verdict.band_percent
         ));
     }
-    Err(message)
+    failures.push(message);
+    Err(failures.join("\n"))
 }
 
 /// The repository root, as the other tasks resolve it.
@@ -4190,7 +4610,8 @@ fn render(c: &mut Criterion) {
 
     /// A head's lists for the planning pair: a floor of 2 and a floor of 1
     /// related to it, a held operation and a four-band one held to a
-    /// speed-up over it, a target in milliseconds and one as a rate, the
+    /// speed-up over it, and to a floor held inside one run, which the
+    /// rounds leave alone; a target in milliseconds and one as a rate, the
     /// rate related to an operation with a band of its own, and the
     /// calibration, at the 751 ms tier P rescaled its 37.6 from.
     const GATED: &str = r#"{
@@ -4213,7 +4634,8 @@ fn render(c: &mut Criterion) {
       { "name": "the 300-dpi text page in 4 bands on 4 threads", "unit": "pixels",
         "per_iteration": 8702320, "calls": 1,
         "gate": { "floor": 1, "relations": [
-          { "to": "the text page at 300 dpi", "speedup_at_least": 4 } ] },
+          { "to": "the text page at 300 dpi", "speedup_at_least": 4 },
+          { "to": "the text page at 300 dpi", "speedup_at_least": 5, "in_one_run": true } ] },
         "paired": { "spread_percent": 3.0, "band_percent": 5 } },
       { "name": "an ICC-based CMYK image to sRGB", "unit": "pixels",
         "per_iteration": 543740, "calls": 1, "gate": { "calibrated_ms": 0.5 },
@@ -4340,7 +4762,9 @@ fn render(c: &mut Criterion) {
     }
 
     /// The figures that hold every gate hold every gate, by both readings,
-    /// and what the planning baseline timed for no gate is reported.
+    /// and what the planning baseline timed for no gate is reported. The
+    /// four bands' floor held inside one run, five times as fast, which
+    /// these figures would cross, is a plain run's and no gate here.
     #[test]
     fn a_head_that_holds_every_gate_passes_both_readings() {
         let planned = planned(|_, _| None);
@@ -4349,6 +4773,14 @@ fn render(c: &mut Criterion) {
             assert!(!judged.fails() && !judged.beyond_as_written(), "{judged:?}");
         }
         assert!(planned.unread.is_empty(), "{:?}", planned.unread);
+        assert!(
+            !planned
+                .judged
+                .iter()
+                .any(|judged| judged.gate.starts_with("at least 5 x")),
+            "a relation held inside one run is judged over the rounds: {:?}",
+            planned.judged
+        );
     }
 
     /// A floor f holds the head's per-call time over the planning
@@ -4676,6 +5108,18 @@ fn render(c: &mut Criterion) {
                     },
                     "relates `render a full-page axial shading at 150 dpi` to itself",
                 ),
+                (
+                    "a relation held inside one run, to an operation nobody lists",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            "{ \"to\": \"render text at 150 dpi\", \"at_most\": 25 }",
+                            "{ \"to\": \"render nothing at all\", \"speedup_at_least\": 2, \
+                             \"in_one_run\": true }",
+                        );
+                    },
+                    "relates `render a full-page axial shading at 150 dpi` to `render \
+                     nothing at all`, which it does not hold",
+                ),
             ],
         );
     }
@@ -4740,6 +5184,45 @@ fn render(c: &mut Criterion) {
                         );
                     },
                     "names both `at_most` and `speedup_at_least`",
+                ),
+                (
+                    "a relation held over the rounds and armed on the run's CPUs",
+                    |tree| {
+                        tree.baseline = tree
+                            .baseline
+                            .replace(", \"at_most\": 25 }", ", \"at_most\": 25, \"cpus\": 4 }");
+                    },
+                    "is armed on the run's `cpus` and not held `in_one_run`",
+                ),
+                (
+                    "a relation held inside one run other than by `true`",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            ", \"at_most\": 25 }",
+                            ", \"at_most\": 25, \"in_one_run\": false }",
+                        );
+                    },
+                    "gives `in_one_run` other than `true`",
+                ),
+                (
+                    "a relation armed on no CPUs",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            ", \"at_most\": 25 }",
+                            ", \"at_most\": 25, \"in_one_run\": true, \"cpus\": 0 }",
+                        );
+                    },
+                    "is armed on `cpus` that are no whole number of one or more",
+                ),
+                (
+                    "a relation armed on a fraction of a CPU",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            ", \"at_most\": 25 }",
+                            ", \"at_most\": 25, \"in_one_run\": true, \"cpus\": 2.5 }",
+                        );
+                    },
+                    "is armed on `cpus` that are no whole number of one or more",
                 ),
                 (
                     "a rate for an operation whose unit counts nothing",
@@ -5010,6 +5493,474 @@ fn render(c: &mut Criterion) {
                 .as_ref()
                 .and_then(|gate| gate.paired_with.as_deref()),
             Some("render text at 150 dpi")
+        );
+    }
+
+    // ---- relations held inside one run ---------------------------------------
+
+    /// Lists whose relations are held inside one run: the threads group's 2
+    /// and 4 jobs at least 1.9 and 3.6 times as fast as one, and its 8 at
+    /// least 0.95 times as fast as 4 on four CPUs; and the render group's
+    /// four bands at least 2.6 times as fast as one thread, beside tier P's
+    /// 3, which the paired run's rounds hold. The one-thread page makes two
+    /// calls an iteration, so its figure is a call's. And a machine, which
+    /// the file needs and which no run below is held to.
+    const ONE_RUN: &str = r#"{
+  "groups": [
+    { "group": "threads", "operations": [
+      { "name": "1 job", "unit": "pages", "per_iteration": 24, "calls": 1,
+        "gate": { "floor": 1 } },
+      { "name": "2 jobs", "unit": "pages", "per_iteration": 24, "calls": 1,
+        "gate": { "floor": 1, "relations": [
+          { "to": "1 job", "speedup_at_least": 1.9, "in_one_run": true } ] } },
+      { "name": "4 jobs", "unit": "pages", "per_iteration": 24, "calls": 1,
+        "gate": { "floor": 1, "relations": [
+          { "to": "1 job", "speedup_at_least": 3.6, "in_one_run": true } ] } },
+      { "name": "8 jobs", "unit": "pages", "per_iteration": 24, "calls": 1,
+        "gate": { "floor": 1, "relations": [
+          { "to": "4 jobs", "speedup_at_least": 0.95, "in_one_run": true,
+            "cpus": 4 } ] } } ] },
+    { "group": "render", "operations": [
+      { "name": "the text page at 300 dpi", "unit": "pixels",
+        "per_iteration": 17404640, "calls": 2, "gate": { "held": true } },
+      { "name": "the 300-dpi text page in 4 bands on 4 threads", "unit": "pixels",
+        "per_iteration": 8702320, "calls": 1,
+        "gate": { "floor": 1, "relations": [
+          { "to": "the text page at 300 dpi", "speedup_at_least": 3 },
+          { "to": "the text page at 300 dpi", "speedup_at_least": 2.6,
+            "in_one_run": true } ] } } ] }
+  ],
+  "machines": [
+    { "machine": "example", "runs": 5, "swing_percent": 3.0, "band_percent": 12.0,
+      "recorded": "5 September 2026",
+      "operations": [
+        { "id": "open/open a 3-page document", "nanos": 11921.0,
+          "swing_percent": 3.0, "band_percent": 10.0 } ] }
+  ]
+}"#;
+
+    const JOB_1: &str = "threads/1 job";
+    const JOBS_2: &str = "threads/2 jobs";
+    const JOBS_4: &str = "threads/4 jobs";
+    const JOBS_8: &str = "threads/8 jobs";
+    const ONE_THREAD: &str = "render/the text page at 300 dpi";
+    const IN_BANDS: &str = "render/the 300-dpi text page in 4 bands on 4 threads";
+
+    /// A run that holds every floor, in nanoseconds an iteration: 2 jobs
+    /// 1.95 times as fast as one, 4 jobs 3.7 times, 8 jobs as fast as 4,
+    /// and four bands 2.7 times as fast as one thread's call, which is half
+    /// its iteration.
+    fn holding_run() -> BTreeMap<String, f64> {
+        [
+            (JOB_1, 195_000_000.0),
+            (JOBS_2, 100_000_000.0),
+            (JOBS_4, 52_702_702.7),
+            (JOBS_8, 52_702_702.7),
+            (ONE_THREAD, 540_000_000.0),
+            (IN_BANDS, 100_000_000.0),
+        ]
+        .into_iter()
+        .map(|(id, nanos)| (id.to_string(), nanos))
+        .collect()
+    }
+
+    /// [`holding_run`] with each id of `changes` at its figure, or left out
+    /// for `None`.
+    fn run_with(changes: &[(&str, Option<f64>)]) -> BTreeMap<String, f64> {
+        let mut now = holding_run();
+        for (id, nanos) in changes {
+            match nanos {
+                Some(nanos) => now.insert(id.to_string(), *nanos),
+                None => now.remove(*id),
+            };
+        }
+        now
+    }
+
+    /// The threads group's host record, on `cpus` CPUs.
+    fn on_cpus(cpus: u32) -> BTreeMap<String, Host> {
+        BTreeMap::from([(
+            "threads".to_string(),
+            Host {
+                cpus: Some(cpus),
+                cpu: None,
+            },
+        )])
+    }
+
+    /// What [`ONE_RUN`]'s relations held inside one run make of `now`.
+    fn held(now: &BTreeMap<String, f64>, hosts: &BTreeMap<String, Host>) -> Vec<InRun> {
+        in_one_run(&groups(ONE_RUN, "x").expect("the lists parse"), now, hosts)
+    }
+
+    /// The one relation of `id` held inside one run.
+    fn held_by<'a>(held: &'a [InRun], id: &str) -> &'a InRun {
+        let found: Vec<&InRun> = held.iter().filter(|relation| relation.id == id).collect();
+        assert_eq!(found.len(), 1, "{id}: {held:?}");
+        found[0]
+    }
+
+    /// `bench-check --machine` over a root holding `lists` as its committed
+    /// baseline and `now` as criterion's estimates, the threads group's host
+    /// record on `cpus` CPUs or none for `None`, the root then removed.
+    fn checked(
+        tag: &str,
+        lists: &str,
+        now: &BTreeMap<String, f64>,
+        cpus: Option<u32>,
+    ) -> Result<(), String> {
+        let root =
+            std::env::temp_dir().join(format!("tinker-one-run-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let baseline = root.join(BASELINE_PATH);
+        std::fs::create_dir_all(baseline.parent().expect("a parent")).expect("a directory");
+        std::fs::write(&baseline, lists).expect("a file");
+        let criterion = root.join("target").join("criterion");
+        for (id, mean) in now {
+            let new = criterion.join(id).join("new");
+            std::fs::create_dir_all(&new).expect("a directory");
+            std::fs::write(
+                new.join("estimates.json"),
+                format!("{{\"mean\":{{\"point_estimate\":{mean},\"standard_error\":0.0}}}}"),
+            )
+            .expect("a file");
+        }
+        if let Some(cpus) = cpus {
+            let threads = criterion.join("threads");
+            std::fs::create_dir_all(&threads).expect("a directory");
+            std::fs::write(
+                threads.join(HOST_RECORD),
+                format!("{{ \"cpus\": {cpus}, \"cpu\": \"AMD EPYC 7763 64-Core Processor\" }}\n"),
+            )
+            .expect("a file");
+        }
+        let verdict = run(&root, &["--machine".to_string(), "nowhere".to_string()]);
+        std::fs::remove_dir_all(&root).ok();
+        verdict
+    }
+
+    /// A floor holds the operation's per-call time over its other's to the
+    /// floor's inverse, inside one run and with no band: 2 jobs 1.95 times
+    /// as fast as one pass 1.9 and 1.84 times fail it, by name, while 4 jobs
+    /// and four bands beside it pass; a figure is a call's, so the
+    /// one-thread page's two calls an iteration halve its figure; and tier
+    /// P's relation beside a floor is the rounds', never read here. The
+    /// committed file holds the row's floors, each held inside one run.
+    #[test]
+    fn a_ratio_under_its_floor_fails() {
+        let holds = held(&holding_run(), &on_cpus(4));
+        assert_eq!(holds.len(), 4, "{holds:?}");
+        for relation in &holds {
+            assert!(!relation.fails(), "{}", relation.line());
+        }
+        let Reading::Ratio(bands) = held_by(&holds, IN_BANDS).reading else {
+            panic!("the bands are read");
+        };
+        assert!((1.0 / bands - 2.7).abs() < 1e-9, "a call's figure: {bands}");
+        assert_eq!(held_by(&holds, IN_BANDS).bound, Bound::SpeedupAtLeast(2.6));
+
+        let under = held(&run_with(&[(JOBS_2, Some(106_000_000.0))]), &on_cpus(4));
+        let two = held_by(&under, JOBS_2);
+        assert!(two.fails(), "{}", two.line());
+        assert!(
+            two.line().contains("1.840 x as fast, floor 1.9, FAILS"),
+            "{}",
+            two.line()
+        );
+        assert_eq!(under.iter().filter(|relation| relation.fails()).count(), 1);
+        let slow_bands = held(&run_with(&[(IN_BANDS, Some(105_000_000.0))]), &on_cpus(4));
+        assert!(
+            held_by(&slow_bands, IN_BANDS).fails(),
+            "2.57 x is under 2.6"
+        );
+
+        assert_eq!(checked("holds", ONE_RUN, &holding_run(), Some(4)), Ok(()));
+        let failed = checked(
+            "under",
+            ONE_RUN,
+            &run_with(&[(JOBS_2, Some(106_000_000.0))]),
+            Some(4),
+        )
+        .expect_err("1.84 x is under 1.9");
+        assert!(
+            failed.contains(&format!("FAILS  {JOBS_2}, against `{JOB_1}`")),
+            "{failed}"
+        );
+        assert!(!failed.contains(JOBS_4), "{failed}");
+
+        let text =
+            std::fs::read_to_string(repo_root().join(BASELINE_PATH)).expect("the committed file");
+        let committed = in_one_run(
+            &groups(&text, BASELINE_PATH).expect("it parses"),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        let floors: Vec<(String, String, Bound, Option<u32>)> = committed
+            .into_iter()
+            .map(|relation| (relation.id, relation.to, relation.bound, relation.cpus))
+            .collect();
+        let jobs = |jobs: &str| {
+            format!("threads/24 quarter-size text pages to PNG at 150 dpi, {jobs}, CLI")
+        };
+        assert_eq!(
+            floors,
+            [
+                (
+                    IN_BANDS.to_string(),
+                    ONE_THREAD.to_string(),
+                    Bound::SpeedupAtLeast(2.6),
+                    None
+                ),
+                (
+                    jobs("2 jobs"),
+                    jobs("1 job"),
+                    Bound::SpeedupAtLeast(1.9),
+                    None
+                ),
+                (
+                    jobs("4 jobs"),
+                    jobs("1 job"),
+                    Bound::SpeedupAtLeast(3.6),
+                    None
+                ),
+                (
+                    jobs("8 jobs"),
+                    jobs("4 jobs"),
+                    Bound::SpeedupAtLeast(0.95),
+                    Some(4)
+                ),
+            ]
+        );
+    }
+
+    /// The oversubscription floor, 8 jobs at least 0.95 times as fast as 4,
+    /// is armed on a run whose group recorded four logical CPUs and on no
+    /// other: there 8 jobs 10 % slower than 4 fail it and 3 % slower pass
+    /// it; on two, eight or 32 CPUs the same figures are reported, not
+    /// armed, and the floors armed on every run are read beside it; and a
+    /// run whose group ran and recorded no CPU count fails it, since whether
+    /// it is armed cannot be told. The lists read the arming as written, and
+    /// the harness writes the record `bench-check` reads.
+    #[test]
+    fn the_oversubscription_floor_is_armed_only_on_four_cpus() {
+        let slower = run_with(&[(JOBS_8, Some(52_702_702.7 * 1.10))]);
+        let armed = held(&slower, &on_cpus(4));
+        let eight = held_by(&armed, JOBS_8);
+        assert_eq!(eight.cpus, Some(4));
+        assert!(eight.fails(), "{}", eight.line());
+        assert!(
+            eight
+                .line()
+                .contains("0.909 x as fast, floor 0.95 on 4 CPUs, FAILS"),
+            "{}",
+            eight.line()
+        );
+        let close = held(
+            &run_with(&[(JOBS_8, Some(52_702_702.7 * 1.03))]),
+            &on_cpus(4),
+        );
+        assert!(!held_by(&close, JOBS_8).fails(), "0.97 x is over 0.95");
+
+        for cpus in [2, 8, 32] {
+            let elsewhere = held(&slower, &on_cpus(cpus));
+            let eight = held_by(&elsewhere, JOBS_8);
+            assert!(
+                matches!(
+                    eight.reading,
+                    Reading::NotArmed { cpus: recorded, ratio: Some(_) } if recorded == cpus
+                ),
+                "{cpus} CPUs: {:?}",
+                eight.reading
+            );
+            assert!(!eight.fails(), "{}", eight.line());
+            assert!(
+                eight
+                    .line()
+                    .contains(&format!("not armed: the run recorded {cpus}")),
+                "{}",
+                eight.line()
+            );
+            assert!(matches!(
+                held_by(&elsewhere, JOBS_2).reading,
+                Reading::Ratio(_)
+            ));
+        }
+
+        let unrecorded = held(&holding_run(), &BTreeMap::new());
+        let eight = held_by(&unrecorded, JOBS_8);
+        assert_eq!(eight.reading, Reading::NoCpus);
+        assert!(eight.fails(), "{}", eight.line());
+        assert!(
+            !held_by(&unrecorded, JOBS_2).fails(),
+            "the floors armed on every run are read"
+        );
+
+        assert_eq!(checked("thirty-two", ONE_RUN, &slower, Some(32)), Ok(()));
+        let failed = checked("four", ONE_RUN, &slower, Some(4)).expect_err("armed on four");
+        assert!(
+            failed.contains(&format!("FAILS  {JOBS_8}, against `{JOBS_4}`")),
+            "{failed}"
+        );
+        let failed = checked("none", ONE_RUN, &holding_run(), None).expect_err("no CPU count");
+        assert!(failed.contains("recorded no CPU count"), "{failed}");
+
+        let lists = groups(ONE_RUN, "x").expect("the lists parse");
+        let within = |group: usize, operation: usize| -> Vec<Within> {
+            lists[group].operations[operation]
+                .gate
+                .as_ref()
+                .map(|gate| {
+                    gate.relations
+                        .iter()
+                        .map(|relation| relation.within)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(within(0, 3), [Within::OneRun { cpus: Some(4) }]);
+        assert_eq!(within(0, 1), [Within::OneRun { cpus: None }]);
+        assert_eq!(
+            within(1, 1),
+            [Within::Rounds, Within::OneRun { cpus: None }]
+        );
+
+        let harness =
+            std::fs::read_to_string(repo_root().join(BENCH_DIR).join("support").join("mod.rs"))
+                .expect("the harness");
+        assert!(
+            harness.contains(&format!("const HOST_RECORD: &str = \"{HOST_RECORD}\";")),
+            "the harness writes the record `bench-check` reads"
+        );
+    }
+
+    /// A relation of a group that ran is read whole or fails: with the
+    /// one-job figure missing, both relations that read it fail by its
+    /// name; with the 2-job figure missing, its own does; and with every
+    /// figure of the group missing and its host recorded, every one does.
+    /// A group that did not run at all, no figure of its and no host
+    /// record, is reported, while the group beside it that ran is read.
+    #[test]
+    fn a_relation_missing_an_estimate_fails() {
+        let no_one = held(&run_with(&[(JOB_1, None)]), &on_cpus(4));
+        for id in [JOBS_2, JOBS_4] {
+            let relation = held_by(&no_one, id);
+            assert_eq!(relation.reading, Reading::Missing(vec![JOB_1.to_string()]));
+            assert!(relation.fails(), "{}", relation.line());
+            assert!(
+                relation
+                    .line()
+                    .contains(&format!("FAILS: the run has no estimate for `{JOB_1}`")),
+                "{}",
+                relation.line()
+            );
+        }
+        assert!(!held_by(&no_one, JOBS_8).fails(), "8 jobs reads 4");
+
+        let no_two = held(&run_with(&[(JOBS_2, None)]), &on_cpus(4));
+        assert_eq!(
+            held_by(&no_two, JOBS_2).reading,
+            Reading::Missing(vec![JOBS_2.to_string()])
+        );
+
+        let gone = [
+            (JOB_1, None),
+            (JOBS_2, None),
+            (JOBS_4, None),
+            (JOBS_8, None),
+        ];
+        let recorded = held(&run_with(&gone), &on_cpus(4));
+        for id in [JOBS_2, JOBS_4, JOBS_8] {
+            let relation = held_by(&recorded, id);
+            assert!(
+                matches!(relation.reading, Reading::Missing(_)),
+                "{relation:?}"
+            );
+            assert!(relation.fails());
+        }
+
+        let not_run = held(&run_with(&gone), &BTreeMap::new());
+        for id in [JOBS_2, JOBS_4, JOBS_8] {
+            let relation = held_by(&not_run, id);
+            assert_eq!(relation.reading, Reading::NotRun);
+            assert!(!relation.fails());
+            assert!(
+                relation.line().contains("reported: the group did not run"),
+                "{}",
+                relation.line()
+            );
+        }
+        assert!(matches!(
+            held_by(&not_run, IN_BANDS).reading,
+            Reading::Ratio(_)
+        ));
+        assert_eq!(checked("not-run", ONE_RUN, &run_with(&gone), None), Ok(()));
+        let failed = checked("gone", ONE_RUN, &run_with(&gone), Some(4))
+            .expect_err("the group ran and holds no figure");
+        assert!(
+            failed.contains(&format!(
+                "no estimate for `{JOBS_2}` or `{JOB_1}`  {JOBS_2}, against `{JOB_1}`"
+            )),
+            "{failed}"
+        );
+    }
+
+    /// Criterion 0.5.1 on Windows trims each part of an operation's
+    /// directory at its end and lowercases it, so a name holding a capital
+    /// is recorded under another key there. Each such directory is read
+    /// back as the listed id it was made from, by a plain run and by a
+    /// pair's rounds alike; a directory named exactly for its id wins over
+    /// a folded one, and one no listed id makes keeps its own key.
+    #[test]
+    fn a_directory_criterion_folds_on_windows_is_read_as_its_listed_id() {
+        let lists = ONE_RUN
+            .replace("\"1 job\"", "\"1 job, CLI\"")
+            .replace("\"2 jobs\"", "\"2 jobs, CLI\"");
+        let listed = groups(&lists, "x").expect("the lists parse");
+        let now: BTreeMap<String, f64> = [
+            ("threads/1 job, cli", 195_000_000.0),
+            ("threads/2 jobs, cli", 100_000_000.0),
+            ("threads/2 jobs, CLI", 90_000_000.0),
+            ("elsewhere/an operation nobody lists", 5.0),
+        ]
+        .into_iter()
+        .map(|(id, nanos)| (id.to_string(), nanos))
+        .collect();
+        let read = by_listed_id(now, &listed);
+        assert_eq!(read.get("threads/1 job, CLI"), Some(&195_000_000.0));
+        assert_eq!(
+            read.get("threads/2 jobs, CLI"),
+            Some(&90_000_000.0),
+            "the exact directory wins"
+        );
+        assert_eq!(read.get("threads/2 jobs, cli"), Some(&100_000_000.0));
+        assert_eq!(read.get("elsewhere/an operation nobody lists"), Some(&5.0));
+        let two = in_one_run(&listed, &read, &on_cpus(4))
+            .into_iter()
+            .find(|relation| relation.id == "threads/2 jobs, CLI")
+            .expect("the 2-job floor");
+        assert_eq!(two.reading, Reading::Ratio(90_000_000.0 / 195_000_000.0));
+
+        let ids = [
+            "threads/1 job, CLI".to_string(),
+            "threads/1 JOB, cli".to_string(),
+        ];
+        assert_eq!(
+            listed_id("threads/1 job, cli", &ids),
+            None,
+            "two ids fold to it"
+        );
+
+        let side = stage_side(
+            "folded",
+            &paired_lists(1).replace("render text at 150 dpi", "render text at 150 DPI"),
+            &["render/render text at 150 dpi", TEXT_72],
+            base_nanos,
+        );
+        let (rounds, _) = read_side(&side).expect("the folded side reads");
+        std::fs::remove_dir_all(&side).ok();
+        assert_eq!(
+            rounds.rounds[0].get("render/render text at 150 DPI"),
+            Some(&1_000_000.0)
         );
     }
 }
