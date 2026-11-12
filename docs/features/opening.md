@@ -189,7 +189,12 @@ Level 1 (`LadderLevel::Trust`) uses the tables as written. Level 2
 (`Patch`) repairs a lying entry from the repair scanner — one forward pass
 matching `digits ws digits ws obj` at token boundaries, skipping stream
 bodies so `N G obj` sequences inside stream data never poison the index —
-and keeps the rest of the table. Level 3 (`Rescan`) discards the tables
+and keeps the rest of the table. The pass is linear in the file: each
+keyword it looks for (`obj`, `trailer`, `endstream`) remembers its next hit
+and is searched for again only once the pass has moved past it, so a file
+with no `trailer` after its objects, as one whose cross-reference sections
+are streams has none, is looked through once rather than once an object.
+Level 3 (`Rescan`) discards the tables
 entirely: no usable `startxref`, an unlocatable `/Root`, or four-plus
 validation failures that are also a majority. The scan index becomes truth
 and a trailer is synthesised if the file's own is gone. The ladder is
@@ -392,6 +397,15 @@ The tests that cover opening ([verification](../verification.md)):
 - **`crates/tinker-pdf-cos/tests/corrupt.rs`** — the ladder on damage built
   byte by byte: truncated tails, junk before `%PDF-`, lying offsets, dead
   `startxref`, each asserting the exact rung and the exact warning.
+- **`crates/tinker-pdf-cos/src/repair.rs`** — the repair pass's work
+  counted, in the bytes its keyword searches look through, over a damaged
+  file of 1 000 objects and one of 20 000: no `trailer` among the first
+  seven-eighths, a run of trailers after them, and the last eighth streams
+  cut short of their `endstream`. Every object is found where it starts,
+  the work stays within three looks through the file, and twenty times the
+  objects costs at most about twenty times the work
+  (`the_index_costs_work_linear_in_the_objects`); a remembered search
+  answers what a fresh one does, cursor forward or back.
 - **`crates/tinker-pdf-cos/tests/strict_validator.rs`** — the ladder read
   from the other side. `validate` opens a file with every leniency counted as
   a defect and walks the cross-reference sections out of the bytes, so it

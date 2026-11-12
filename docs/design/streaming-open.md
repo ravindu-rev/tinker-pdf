@@ -1039,7 +1039,6 @@ same way.
 | The windowed verdict costs a read per run of nearby object headers, so a file of many small objects pays close to one read of itself at open | Kept by nothing, against a whole-file read kept for the life of the document; the 23 MB file has a handful of objects, and a figure that moves names the change |
 | The test binary's own resident floor, which nothing here has measured, leaves the 10 MB band less room than `tpdf`'s floor does | MS-05.3 records the case before P-05.9 holds it; a floor over the band is not a reason to widen the band |
 | `CosDocument::bytes()` materialises a streamed document through `Backing::whole` rather than `fetch_whole`, so a save, a signature's byte range or a verdict over one pulls the whole file without the `WholeFileFetched` that a repair warns | Not this row's: P-05's hosts read whole for every verdict flag and every writing command, so none of them meets it; named for the row that owns ruling 10's declarations |
-| The repair scanner's index takes time quadratic in a file's objects: `ScanIndex::build` looks for the next `trailer` from every object it finds, which on a file with one trailer at its end is a search to the end each time | Not this row's, and the gate makes it rarer: a streamed document builds the index only when a buffered open of the same bytes would, and the rule reads every such file whole, where it pays what a buffered open pays. Named for the row that owns the scanner |
 
 ## Dependencies
 

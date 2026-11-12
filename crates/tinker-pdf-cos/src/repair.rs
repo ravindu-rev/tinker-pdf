@@ -11,6 +11,13 @@
 //! `endstream` recovery a normal read would use, so `N G obj` byte sequences
 //! *inside* stream data never enter the index.
 //!
+//! The pass is linear in the buffer. It asks for the next `obj`, `trailer`
+//! and `endstream` at a cursor that only moves forward, and each keyword's
+//! search ([`Searches`]) remembers its next hit, so it looks again only once
+//! the cursor has passed that hit. Asked afresh at every object, the search
+//! for a `trailer` would look to the end of a file whose cross-reference
+//! sections are streams once for every object the file holds.
+//!
 //! The pass parses into a scratch sink whose warnings are dropped. A scanned
 //! object that is never read should not describe its own damage in the
 //! document's warning list; the repairs that are actually used warn at the
@@ -23,11 +30,33 @@ use crate::lexer::{is_regular, is_whitespace};
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object};
 use crate::parse::parse_indirect_at;
-use crate::streams::resolve_extent;
+use crate::streams::resolve_extent_in;
 use crate::warn::{WarningKind, WarningSink};
 
+#[cfg(test)]
+thread_local! {
+    /// The bytes [`find_from`] has looked through, on this thread.
+    static EXAMINED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
 /// The first occurrence of `needle` in `hay` at or after `from`.
+///
+/// **Counted here, in every search, rather than in the pass**, so that a
+/// pass which goes back to searching afresh at every hit is counted whoever
+/// writes it: under `cfg(test)` the bytes from `from` to the end of the hit,
+/// or to the end of `hay` when there is none, are added to the count a test
+/// holds the repair pass to. Everywhere else it is nothing.
 pub(crate) fn find_from(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    let found = first_from(hay, needle, from);
+    #[cfg(test)]
+    EXAMINED.with(|examined| {
+        let end = found.map_or(hay.len(), |p| p.saturating_add(needle.len()));
+        examined.set(examined.get().saturating_add(end.saturating_sub(from)));
+    });
+    found
+}
+
+fn first_from(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
     let Some(&first) = needle.first() else {
         return Some(from.min(hay.len()));
     };
@@ -128,18 +157,101 @@ fn digits(bytes: &[u8]) -> Option<u64> {
 
 /// The next `N G obj` header at or after `from`, as an offset.
 pub(crate) fn next_object_header(buf: &[u8], from: u64) -> Option<u64> {
-    let mut i = usize::try_from(from).unwrap_or(usize::MAX).min(buf.len());
-    while let Some(p) = find_from(buf, b"obj", i) {
-        if boundary_after(buf, p + 3) {
-            if let Some((start, _, _)) = header_before_obj(buf, p) {
-                if start >= from {
-                    return Some(start);
-                }
+    Searches::new(buf).next_object_header(from)
+}
+
+/// One keyword's forward search over one buffer, which remembers its last
+/// answer.
+///
+/// A search from `from` that found the keyword at `hit` has shown that it
+/// does not occur in `from..hit`, so it answers every later search from
+/// anywhere in `from..=hit` without looking again; one that found nothing
+/// answers every later search at or after `from`. The searches that answer a
+/// cursor which only moves forward therefore look through the buffer about
+/// once between them, however often it asks.
+#[derive(Clone, Copy, Debug)]
+struct NextHit {
+    needle: &'static [u8],
+    /// The last search that looked: where it started, and what it found.
+    last: Option<(usize, Option<usize>)>,
+}
+
+impl NextHit {
+    const fn new(needle: &'static [u8]) -> NextHit {
+        NextHit { needle, last: None }
+    }
+
+    /// What [`find_from`] answers for `from`.
+    fn find(&mut self, buf: &[u8], from: usize) -> Option<usize> {
+        if let Some((start, hit)) = self.last {
+            if start <= from && hit.is_none_or(|at| from <= at) {
+                return hit;
             }
         }
-        i = p + 1;
+        let hit = find_from(buf, self.needle, from);
+        self.last = Some((from, hit));
+        hit
     }
-    None
+}
+
+/// The keyword searches of a forward walk over one buffer: the next `obj`,
+/// `trailer` and `endstream` at or after a position, each remembering its
+/// next hit ([`NextHit`]).
+///
+/// Every answer is the one [`find_from`] gives; only the looking is saved.
+pub(crate) struct Searches<'a> {
+    buf: &'a [u8],
+    obj: NextHit,
+    trailer: NextHit,
+    endstream: NextHit,
+}
+
+impl<'a> Searches<'a> {
+    pub(crate) const fn new(buf: &'a [u8]) -> Searches<'a> {
+        Searches {
+            buf,
+            obj: NextHit::new(b"obj"),
+            trailer: NextHit::new(b"trailer"),
+            endstream: NextHit::new(b"endstream"),
+        }
+    }
+
+    /// The buffer searched.
+    pub(crate) const fn buf(&self) -> &'a [u8] {
+        self.buf
+    }
+
+    /// The first `obj` at or after `from`.
+    pub(crate) fn next_obj(&mut self, from: usize) -> Option<usize> {
+        self.obj.find(self.buf, from)
+    }
+
+    /// The first `trailer` at or after `from`.
+    pub(crate) fn next_trailer(&mut self, from: usize) -> Option<usize> {
+        self.trailer.find(self.buf, from)
+    }
+
+    /// The first `endstream` at or after `from`.
+    pub(crate) fn next_endstream(&mut self, from: usize) -> Option<usize> {
+        self.endstream.find(self.buf, from)
+    }
+
+    /// The next `N G obj` header at or after `from`, as an offset.
+    pub(crate) fn next_object_header(&mut self, from: u64) -> Option<u64> {
+        let buf = self.buf;
+        let mut i = usize::try_from(from).unwrap_or(usize::MAX).min(buf.len());
+        while let Some(p) = self.next_obj(i) {
+            if boundary_after(buf, p + 3) {
+                if let Some((start, _, _)) = header_before_obj(buf, p) {
+                    if start >= from {
+                        return Some(start);
+                    }
+                }
+            }
+            i = p + 1;
+        }
+        None
+    }
 }
 
 /// Where one object was found, and which generation the file spelled there.
@@ -225,11 +337,12 @@ impl ScanIndex {
     pub(crate) fn build(buf: &[u8], dn: &DocNames) -> ScanIndex {
         let mut index = ScanIndex::default();
         let mut scratch = WarningSink::new();
+        let mut search = Searches::new(buf);
         let mut i = 0usize;
 
         loop {
-            let obj_hit = find_from(buf, b"obj", i);
-            let trailer_hit = find_from(buf, b"trailer", i);
+            let obj_hit = search.next_obj(i);
+            let trailer_hit = search.next_trailer(i);
             let next = match (obj_hit, trailer_hit) {
                 (None, None) => break,
                 (Some(a), None) => Hit::Object(a),
@@ -238,7 +351,7 @@ impl ScanIndex {
                 (Some(_), Some(b)) => Hit::Trailer(b),
             };
             let advanced = match next {
-                Hit::Object(p) => index.take_object(buf, p, dn, &mut scratch),
+                Hit::Object(p) => index.take_object(&mut search, p, dn, &mut scratch),
                 Hit::Trailer(p) => index.take_trailer(buf, p, dn, &mut scratch),
             };
             // Always advance: a hit that produced nothing must not be retried.
@@ -250,11 +363,12 @@ impl ScanIndex {
 
     fn take_object(
         &mut self,
-        buf: &[u8],
+        search: &mut Searches<'_>,
         at: usize,
         dn: &DocNames,
         scratch: &mut WarningSink,
     ) -> usize {
+        let buf = search.buf();
         if !boundary_after(buf, at + 3) {
             return at + 3;
         }
@@ -293,14 +407,15 @@ impl ScanIndex {
 
         match parsed.object.as_stream() {
             Some(stream) => {
-                let range = resolve_extent(buf, stream.data_start, stream.len_hint, None, scratch);
+                let range =
+                    resolve_extent_in(search, stream.data_start, stream.len_hint, None, scratch);
                 let end = usize::try_from(range.end)
                     .unwrap_or(usize::MAX)
                     .min(buf.len());
                 // Past the data and past the `endstream` that closed it, so a
                 // second copy of the keyword inside the next object's data is
                 // never mistaken for this one's.
-                match find_from(buf, b"endstream", end) {
+                match search.next_endstream(end) {
                     Some(p) => p + b"endstream".len(),
                     None => end,
                 }
@@ -388,5 +503,129 @@ mod tests {
         assert_eq!(next_object_header(buf, 0), Some(0));
         assert_eq!(next_object_header(buf, 1), Some(19));
         assert_eq!(next_object_header(buf, 20), None);
+    }
+
+    #[test]
+    fn a_remembered_search_answers_as_a_fresh_one() {
+        let buf: &[u8] = b"1 0 obj << /Length 2 >> stream\nobjtrailer\nendstream endobj\n\
+            trailer << /Size 3 >> 2 0 obj (endstream) endobj trailer";
+        let fresh = |from: usize| {
+            [
+                find_from(buf, b"obj", from),
+                find_from(buf, b"trailer", from),
+                find_from(buf, b"endstream", from),
+            ]
+        };
+        let asked = |search: &mut Searches<'_>, from: usize| {
+            [
+                search.next_obj(from),
+                search.next_trailer(from),
+                search.next_endstream(from),
+            ]
+        };
+        // Forward, where the remembered hits answer; then backward from past
+        // the buffer's end, where every search looks again.
+        let forward: Vec<usize> = (0..buf.len() + 2).collect();
+        let back: Vec<usize> = forward.iter().rev().copied().collect();
+        for order in [forward, back] {
+            let mut search = Searches::new(buf);
+            for &from in &order {
+                assert_eq!(
+                    asked(&mut search, from),
+                    fresh(from),
+                    "searching from {from}"
+                );
+            }
+            let mut headers = Searches::new(buf);
+            for &from in &order {
+                let from = from as u64;
+                assert_eq!(
+                    headers.next_object_header(from),
+                    Searches::new(buf).next_object_header(from),
+                    "the next header from {from}"
+                );
+            }
+        }
+    }
+
+    /// A damaged file of `objects` objects, and where each one starts: the
+    /// damage that makes each of the pass's searches look to the end of the
+    /// file when it is asked afresh at every hit.
+    ///
+    /// Its first seven-eighths are an original revision's objects in four
+    /// shapes — a dictionary, a string, a stream whose `/Length` is right and
+    /// one whose `/Length` is indirect — with no `trailer` among them, so the
+    /// next `trailer` from any of them is past them all. An eighth as many
+    /// `trailer` dictionaries follow, so the next `obj` from any of them is
+    /// past them all. The last eighth is an update whose cross-reference
+    /// section was a stream and whose streams were cut short of their
+    /// `endstream`, so the next `endstream` from any of them is none at all.
+    /// Objects are numbered from 100 000, so that each shape is the same
+    /// length in every file and twenty times the objects is twenty times the
+    /// bytes.
+    fn damaged(objects: u32) -> (Vec<u8>, Vec<(u32, u64)>) {
+        const SHAPES: [&[u8]; 4] = [
+            b"<< /Type /Annot /Subtype /Text /Rect [0 0 1 1] >>\nendobj\n",
+            b"(a string)\nendobj\n",
+            b"<< /Length 18 >>\nstream\nq 1 0 0 1 0 0 cm Q\nendstream\nendobj\n",
+            b"<< /Length 100000 0 R >>\nstream\nq 1 0 0 1 0 0 cm Q\nendstream\nendobj\n",
+        ];
+        const CUT: &[u8] = b"<< /Length 18 >>\nstream\nq 1 0 0 1 0 0 cm Q\n";
+        const TRAILER: &[u8] = b"trailer\n<< /Size 120001 /Root 100000 0 R >>\n";
+        let original = objects - objects / 8;
+        let mut file = b"%PDF-1.7\n".to_vec();
+        let mut starts = Vec::new();
+        for k in 0..objects {
+            if k == original {
+                for _ in original..objects {
+                    file.extend_from_slice(TRAILER);
+                }
+            }
+            let num = 100_000 + k;
+            starts.push((num, file.len() as u64));
+            file.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+            let shape = SHAPES[k as usize % SHAPES.len()];
+            file.extend_from_slice(if k < original { shape } else { CUT });
+        }
+        (file, starts)
+    }
+
+    /// The index over `file`, and the bytes its searches looked through.
+    fn counted(file: &[u8]) -> (ScanIndex, usize) {
+        let names = DocNames::new();
+        EXAMINED.with(|examined| examined.set(0));
+        let index = ScanIndex::build(file, &names);
+        (index, EXAMINED.with(core::cell::Cell::get))
+    }
+
+    #[test]
+    fn the_index_costs_work_linear_in_the_objects() {
+        let work = |objects: u32| {
+            let (file, starts) = damaged(objects);
+            let (index, examined) = counted(&file);
+            // What the pass finds is what the file holds: every object where
+            // it starts, so each cut stream ended at the next header, and
+            // every trailer read.
+            let found: Vec<(u32, u64)> = index.objects().map(|(n, h)| (n, h.offset)).collect();
+            assert_eq!(found, starts, "the objects of a file of {objects}");
+            assert_eq!(index.trailers.len(), objects as usize / 8);
+            // Three keywords, each looked for through the file once at most.
+            assert!(
+                examined <= 3 * file.len(),
+                "the index over {objects} objects looked through {examined} bytes of a \
+                 file of {}",
+                file.len()
+            );
+            examined
+        };
+        let small = work(1_000);
+        let large = work(20_000);
+        // Twenty times the objects, at most about twenty times the work. A
+        // pass that searched for the next `trailer` afresh at every object
+        // would make twenty times the searches over twenty times the bytes.
+        assert!(
+            large <= 21 * small,
+            "twenty times the objects cost {large} bytes looked through against {small}"
+        );
     }
 }

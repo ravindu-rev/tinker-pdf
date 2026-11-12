@@ -15,7 +15,7 @@ use crate::doc::{CosDocument, CosError, DocNames};
 use crate::limits;
 use crate::name::Name;
 use crate::object::{Dict, ObjRef, Object, StreamObj};
-use crate::repair::{find_from, next_object_header};
+use crate::repair::Searches;
 use crate::store::{LockExt, ResolveCtx};
 use crate::warn::{WarningKind, WarningSink};
 use crate::work::Work;
@@ -70,6 +70,21 @@ pub(crate) fn resolve_extent(
     object: Option<ObjRef>,
     sink: &mut WarningSink,
 ) -> Range<u64> {
+    resolve_extent_in(&mut Searches::new(buf), data_start, declared, object, sink)
+}
+
+/// [`resolve_extent`] through a caller's [`Searches`], for a caller that
+/// walks the buffer forward and asks again further on. The repair pass is
+/// one: searching afresh, it would look to the end of the buffer for every
+/// stream that has lost its `endstream`.
+pub(crate) fn resolve_extent_in(
+    search: &mut Searches<'_>,
+    data_start: u64,
+    declared: Option<u64>,
+    object: Option<ObjRef>,
+    sink: &mut WarningSink,
+) -> Range<u64> {
+    let buf = search.buf();
     let len = buf.len() as u64;
     let start = data_start.min(len);
     if let Some(declared) = declared {
@@ -80,7 +95,7 @@ pub(crate) fn resolve_extent(
     }
 
     let from = usize::try_from(start).unwrap_or(usize::MAX).min(buf.len());
-    match find_from(buf, b"endstream", from) {
+    match search.next_endstream(from) {
         Some(keyword) => {
             // One EOL before the keyword belongs to the file syntax, not to
             // the data (7.3.8.2).
@@ -103,7 +118,7 @@ pub(crate) fn resolve_extent(
             start..end
         }
         None => {
-            let end = next_object_header(buf, start).unwrap_or(len);
+            let end = search.next_object_header(start).unwrap_or(len);
             sink.warn_at(start, object, WarningKind::StreamEndstreamMissing);
             start..end.max(start)
         }
