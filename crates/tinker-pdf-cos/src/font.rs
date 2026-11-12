@@ -626,7 +626,7 @@ fn read_cmap<R: Resolve + ?Sized>(doc: &R, r: ObjRef, sink: &mut WarningSink) ->
         let at = sources.iter().find(|(s, _)| s == source).map(|(_, r)| *r)?;
         let object = doc.get(at).ok()?;
         let stream_dict = object.as_dict()?;
-        let key = doc.intern(b"UseCMap");
+        let key = Name::USE_CMAP;
 
         // Table 120: `/UseCMap` is a name or a stream, and only a stream is
         // an indirect reference.
@@ -689,7 +689,7 @@ pub fn read(doc: &CosDocument, dict: &Dict) -> Font {
 #[must_use]
 pub fn read_in<R: Resolve + ?Sized>(doc: &R, dict: &Dict) -> Font {
     let subtype = doc
-        .resolve_key(dict, doc.intern(b"Subtype"))
+        .resolve_key(dict, Name::SUBTYPE)
         .as_name()
         .and_then(|n| doc.name_bytes(n))
         .map(|b| b.to_vec())
@@ -703,7 +703,7 @@ pub fn read_in<R: Resolve + ?Sized>(doc: &R, dict: &Dict) -> Font {
     };
 
     let base_font = doc
-        .resolve_key(dict, doc.intern(b"BaseFont"))
+        .resolve_key(dict, Name::BASE_FONT)
         .as_name()
         .and_then(|n| doc.name_bytes(n))
         .map(|b| String::from_utf8_lossy(&b).into_owned())
@@ -757,7 +757,7 @@ fn read_to_unicode<R: Resolve + ?Sized>(
     dict: &Dict,
     sink: &mut WarningSink,
 ) -> Option<CMap> {
-    let r = dict.get_ref(doc.intern(b"ToUnicode"))?;
+    let r = dict.get_ref(Name::TO_UNICODE)?;
     read_cmap(doc, r, sink)
 }
 
@@ -770,7 +770,7 @@ fn read_encoding<R: Resolve + ?Sized>(
     font: &mut Font,
     sink: &mut WarningSink,
 ) {
-    let key = doc.intern(b"Encoding");
+    let key = Name::ENCODING;
 
     let named = |bytes: &[u8], font: &mut Font, sink: &mut WarningSink| match bytes {
         b"WinAnsiEncoding" => {
@@ -841,7 +841,7 @@ fn read_encoding<R: Resolve + ?Sized>(
     let Some(enc) = value.as_dict() else { return };
 
     if let Some(base) = doc
-        .resolve_key(enc, doc.intern(b"BaseEncoding"))
+        .resolve_key(enc, Name::BASE_ENCODING)
         .as_name()
         .and_then(|n| doc.name_bytes(n))
     {
@@ -850,7 +850,7 @@ fn read_encoding<R: Resolve + ?Sized>(
 
     // 9.6.6.1: /Differences is a flat array of numbers and names, where each
     // number restarts the code counter.
-    let diffs = doc.resolve_key(enc, doc.intern(b"Differences"));
+    let diffs = doc.resolve_key(enc, Name::DIFFERENCES);
     if let Some(items) = diffs.as_array() {
         let mut code = 0u32;
         for item in items {
@@ -872,11 +872,11 @@ fn read_encoding<R: Resolve + ?Sized>(
 
 fn read_simple<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font, base_font: &str) {
     let first = doc
-        .resolve_key(dict, doc.intern(b"FirstChar"))
+        .resolve_key(dict, Name::FIRST_CHAR)
         .as_int()
         .unwrap_or(0);
 
-    let widths = doc.resolve_key(dict, doc.intern(b"Widths"));
+    let widths = doc.resolve_key(dict, Name::WIDTHS);
     if let Some(items) = widths.as_array() {
         for (i, item) in items.iter().enumerate() {
             let resolved = doc.resolve(item);
@@ -890,14 +890,14 @@ fn read_simple<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font, base_
 
     if let Some(desc) = descriptor(doc, dict) {
         font.missing_width = doc
-            .resolve_key(&desc, doc.intern(b"MissingWidth"))
+            .resolve_key(&desc, Name::MISSING_WIDTH)
             .as_number()
             .unwrap_or(0.0);
         // 9.8.2 Table 121: bit 3 is the symbolic flag.
-        if let Some(flags) = doc.resolve_key(&desc, doc.intern(b"Flags")).as_int() {
+        if let Some(flags) = doc.resolve_key(&desc, Name::FLAGS).as_int() {
             font.symbolic = flags & 0b100 != 0;
         }
-        font.program = embedded_program(doc, &desc);
+        font.program = embedded_program(&desc);
     }
 
     // Standard-14 metrics only matter when the document gave none of its own.
@@ -912,7 +912,7 @@ fn read_simple<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font, base_
 
 fn read_composite<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font) {
     // 9.7.1: exactly one descendant, in an array.
-    let descendants = doc.resolve_key(dict, doc.intern(b"DescendantFonts"));
+    let descendants = doc.resolve_key(dict, Name::DESCENDANT_FONTS);
     let Some(first) = descendants.as_array().and_then(<[Object]>::first).cloned() else {
         return;
     };
@@ -922,12 +922,12 @@ fn read_composite<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font) {
     };
 
     font.default_width = doc
-        .resolve_key(cid_font, doc.intern(b"DW"))
+        .resolve_key(cid_font, Name::DW)
         .as_number()
         .unwrap_or(1000.0);
 
     // 9.7.4.3: /W is [ c [w1 w2 ...] ] or [ cfirst clast w ], mixed freely.
-    let w = doc.resolve_key(cid_font, doc.intern(b"W"));
+    let w = doc.resolve_key(cid_font, Name::W);
     if let Some(items) = w.as_array() {
         let values: Vec<Arc<Object>> = items.iter().map(|o| doc.resolve(o)).collect();
         let mut i = 0usize;
@@ -976,7 +976,7 @@ fn read_composite<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font) {
     // [880 -1000], which is why a font that gives no vertical metrics at all
     // still has them: falling back to the horizontal advance is not one of
     // the options the spec offers.
-    let dw2 = doc.resolve_key(cid_font, doc.intern(b"DW2"));
+    let dw2 = doc.resolve_key(cid_font, Name::DW2);
     if let Some(items) = dw2.as_array() {
         let at = |i: usize| {
             items
@@ -995,7 +995,7 @@ fn read_composite<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font) {
     // /W's stride does not fail; it silently assigns each CID the number
     // belonging to a third of the way into some later one's entry, and every
     // CID after the first entry gets metrics that are not its own.
-    let w2 = doc.resolve_key(cid_font, doc.intern(b"W2"));
+    let w2 = doc.resolve_key(cid_font, Name::W2);
     if let Some(items) = w2.as_array() {
         let values: Vec<Arc<Object>> = items.iter().map(|o| doc.resolve(o)).collect();
         let mut i = 0usize;
@@ -1053,7 +1053,7 @@ fn read_composite<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font) {
     // identity, which is what `None` here stands for. A reference that does
     // not decode is the identity too: a font that draws its glyphs off by an
     // unknown permutation would be worse than one that draws them in order.
-    if let Some(reference) = cid_font.get_ref(doc.intern(b"CIDToGIDMap")) {
+    if let Some(reference) = cid_font.get_ref(Name::CID_TO_GID_MAP) {
         if let Ok(mut bytes) = doc.stream_decoded(reference) {
             // The table is indexed by a CID and yields a two-byte glyph
             // index, so nothing past CID 65535 can ever be looked up. A
@@ -1064,18 +1064,18 @@ fn read_composite<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font) {
     }
 
     if let Some(desc) = descriptor(doc, cid_font) {
-        if let Some(flags) = doc.resolve_key(&desc, doc.intern(b"Flags")).as_int() {
+        if let Some(flags) = doc.resolve_key(&desc, Name::FLAGS).as_int() {
             font.symbolic = flags & 0b100 != 0;
         }
         // 9.7.4: the descendant carries the descriptor, so this is the only
         // place a composite font's program can be found. `Font::program`
         // answers for either kind without the caller knowing which.
-        font.program = embedded_program(doc, &desc);
+        font.program = embedded_program(&desc);
     }
 }
 
 fn descriptor<R: Resolve + ?Sized>(doc: &R, dict: &Dict) -> Option<Arc<Dict>> {
-    let value = doc.resolve_key(dict, doc.intern(b"FontDescriptor"));
+    let value = doc.resolve_key(dict, Name::FONT_DESCRIPTOR);
     value.as_dict().map(|d| Arc::new(d.clone()))
 }
 
@@ -1087,13 +1087,13 @@ fn descriptor<R: Resolve + ?Sized>(doc: &R, dict: &Dict) -> Option<Arc<Dict>> {
 /// present with a null value is a key absent — `get_ref` answers `None` for
 /// anything that is not an indirect reference, and a font program is always
 /// one because it is a stream.
-fn embedded_program<R: Resolve + ?Sized>(doc: &R, desc: &Dict) -> Option<EmbeddedProgram> {
+fn embedded_program(desc: &Dict) -> Option<EmbeddedProgram> {
     for (name, key) in [
-        (&b"FontFile2"[..], ProgramKey::FontFile2),
-        (b"FontFile3", ProgramKey::FontFile3),
-        (b"FontFile", ProgramKey::FontFile),
+        (Name::FONT_FILE2, ProgramKey::FontFile2),
+        (Name::FONT_FILE3, ProgramKey::FontFile3),
+        (Name::FONT_FILE, ProgramKey::FontFile),
     ] {
-        if let Some(stream) = desc.get_ref(doc.intern(name)) {
+        if let Some(stream) = desc.get_ref(name) {
             return Some(EmbeddedProgram { stream, key });
         }
     }
@@ -1115,7 +1115,7 @@ pub fn from_resources_in<R: Resolve + ?Sized>(
     resources: &Dict,
 ) -> HashMap<Name, Arc<Font>> {
     let mut out = HashMap::new();
-    let value = doc.resolve_key(resources, doc.intern(b"Font"));
+    let value = doc.resolve_key(resources, Name::FONT);
     let Some(fonts) = value.as_dict() else {
         return out;
     };

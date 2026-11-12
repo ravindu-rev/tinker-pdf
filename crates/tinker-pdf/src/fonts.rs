@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use tinker_pdf_cos::{CosDocument, Dict, Font, ObjRef, Object, Resolve};
+use tinker_pdf_cos::{CosDocument, Dict, Font, Name, ObjRef, Object, Resolve};
 
 use crate::stats::{self, Counter, Work};
 
@@ -61,7 +61,7 @@ impl FontRequest {
     pub fn read(doc: &CosDocument, font: &Dict) -> FontRequest {
         // A composite font keeps its descriptor on the descendant.
         let mut font = font.clone();
-        let descendants = doc.resolve_key(&font, doc.intern(b"DescendantFonts"));
+        let descendants = doc.resolve_key(&font, Name::DESCENDANT_FONTS);
         if let Some(first) = descendants.as_array().and_then(<[Object]>::first) {
             if let Some(dict) = doc.resolve(first).as_dict() {
                 font = dict.clone();
@@ -69,7 +69,7 @@ impl FontRequest {
         }
 
         let base_font = font
-            .get_name(doc.intern(b"BaseFont"))
+            .get_name(Name::BASE_FONT)
             .and_then(|n| doc.name_bytes(n))
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_default();
@@ -83,10 +83,10 @@ impl FontRequest {
             _ => base_font,
         };
 
-        let descriptor = doc.resolve_key(&font, doc.intern(b"FontDescriptor"));
+        let descriptor = doc.resolve_key(&font, Name::FONT_DESCRIPTOR);
         let flags = descriptor
             .as_dict()
-            .and_then(|d| d.get_int(doc.intern(b"Flags")))
+            .and_then(|d| d.get_int(Name::FLAGS))
             .unwrap_or(0);
 
         // The name is consulted as well as the flags, because plenty of
@@ -212,13 +212,15 @@ impl FontProvider for SimpleFontProvider {
     }
 }
 
-/// Reads the font dictionary a resource name selects, for building a request.
+/// Reads the font dictionary a resource name selects, for building a request,
+/// through `doc` — the counting view when the operation counts, so that the
+/// name's lookup is seen as the scope's other lookups are.
 ///
 /// Counted as a font dictionary resolved into `work` when the operation is
 /// counting, found or not: the lookup is the step.
 #[must_use]
-pub(crate) fn font_dict(
-    doc: &CosDocument,
+pub(crate) fn font_dict<R: Resolve + ?Sized>(
+    doc: &R,
     resources: &Dict,
     name: &[u8],
     work: Option<&Work>,
@@ -245,7 +247,7 @@ pub(crate) fn state_font<R: Resolve + ?Sized>(
     resources: &Dict,
     reference: ObjRef,
 ) -> Vec<u8> {
-    let table = doc.resolve_key(resources, doc.intern(b"Font"));
+    let table = doc.resolve_key(resources, Name::FONT);
     let bound = table.as_dict().and_then(|table| {
         table
             .iter()
@@ -266,9 +268,9 @@ pub(crate) fn font_of_state<R: Resolve + ?Sized>(
     resources: &Dict,
     state: &[u8],
 ) -> Option<(Vec<u8>, f64)> {
-    let table = doc.resolve_key(resources, doc.intern(b"ExtGState"));
+    let table = doc.resolve_key(resources, Name::EXT_G_STATE);
     let entry = doc.resolve(table.as_dict()?.get(doc.intern(state))?);
-    let value = doc.resolve(entry.as_dict()?.get(doc.intern(b"Font"))?);
+    let value = doc.resolve(entry.as_dict()?.get(Name::FONT)?);
     let [font, size] = value.as_array()? else {
         return None;
     };
@@ -315,7 +317,7 @@ pub(crate) fn text_font<R: Resolve + ?Sized>(
     resources: &Dict,
     name: &[u8],
 ) -> Option<(Dict, Option<ObjRef>)> {
-    let table = doc.resolve_key(resources, doc.intern(b"Font"));
+    let table = doc.resolve_key(resources, Name::FONT);
     if let Some(entry) = table
         .as_dict()
         .and_then(|table| table.get(doc.intern(name)))

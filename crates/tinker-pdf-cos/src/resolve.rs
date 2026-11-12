@@ -126,14 +126,16 @@ impl Resolve for CosDocument {
 }
 
 /// A view that counts: each stream it decodes counts into an operation's
-/// tally, and everything it reads is the view underneath's, read the way
-/// that view reads it.
+/// tally, and so does each key it is asked to look up by its bytes where a
+/// constant stands for it; everything it reads is the view underneath's, read
+/// the way that view reads it.
 ///
 /// Code written against [`Resolve`] counts its decodes when it is handed
 /// this view instead of the one under it — a font's CMaps and its
-/// `/CIDToGIDMap`, read while a scope is built, are counted that way. Over a
-/// [`crate::DocumentEditor`] that counts its own decodes, wrap it in none:
-/// each decode would count twice.
+/// `/CIDToGIDMap`, read while a scope resolves it, are counted that way, and
+/// so is every key reading the font spells out rather than takes as a
+/// [`Name`] constant. Over a [`crate::DocumentEditor`] that counts its own
+/// decodes, wrap it in none: each decode would count twice.
 pub struct Counting<'a, R: Resolve + ?Sized> {
     inner: &'a R,
     work: &'a Work,
@@ -182,8 +184,15 @@ impl<R: Resolve + ?Sized> Resolve for Counting<'_, R> {
         self.inner.catalog()
     }
 
+    /// The view underneath's symbol, counted as a key looked up by its bytes
+    /// when it is one the table pre-interns ([`Name::is_preinterned`]): a
+    /// lookup its constant would have answered.
     fn intern(&self, bytes: &[u8]) -> Name {
-        self.inner.intern(bytes)
+        let name = self.inner.intern(bytes);
+        if name.is_preinterned() {
+            self.work.add(crate::work::Counter::KeysLookedUp, 1);
+        }
+        name
     }
 
     fn name_bytes(&self, name: Name) -> Option<Arc<[u8]>> {
@@ -280,5 +289,19 @@ mod tests {
         let stats = work.stats();
         assert_eq!(stats.streams_decoded, 1, "the refusal alone ran a chain");
         assert_eq!(stats.bytes_decoded, 0);
+    }
+
+    /// A pre-interned key looked up by its bytes counts, the symbol being the
+    /// constant's; any other name looked up does not.
+    #[test]
+    fn a_key_looked_up_by_its_bytes_counts_and_a_resource_name_does_not() {
+        let doc = document();
+        let work = Work::new();
+        let view = Counting::new(&doc, &work);
+        assert_eq!(view.intern(b"Font"), Name::FONT);
+        assert_eq!(view.intern(b"Type"), Name::TYPE);
+        assert_eq!(view.intern(b"F0"), doc.intern(b"F0"));
+        assert_eq!(work.stats().keys_looked_up, 2);
+        assert_eq!(work.stats().work(), 2);
     }
 }

@@ -136,6 +136,18 @@ pub struct Stats {
     /// index answers returns. Counted beside `page_nodes_visited`, since a page
     /// read out of the index stands in for the nodes a walk would read to it.
     pub page_entries_copied: u64,
+    /// Lookups of a pre-interned name by its bytes: a key the document's name
+    /// table holds at a fixed id ([`crate::NAMES`]), looked up where its
+    /// [`crate::Name`] constant answers without the table — or a resource
+    /// name that happens to spell one, such as a font named `/Font`. None
+    /// while every reader on a counted path takes the constants, which is
+    /// what makes a key spelled out at every glyph or operator show.
+    ///
+    /// Counted by the facade's resource scopes, for every name they look up
+    /// by its bytes, and by every reader handed the counting view
+    /// ([`crate::resolve::Counting`]) — a font read while a scope resolves
+    /// it among them.
+    pub keys_looked_up: u64,
     /// Runs of a stream's filter chain: each time an operation read a
     /// stream's bytes decoded, whatever the chain returned — a refusal, and
     /// output stopped at the decode ceiling, included. A stream read twice is
@@ -212,6 +224,8 @@ pub enum Counter {
     PageNodesVisited,
     /// [`Stats::page_entries_copied`].
     PageEntriesCopied,
+    /// [`Stats::keys_looked_up`].
+    KeysLookedUp,
 }
 
 impl Stats {
@@ -241,6 +255,7 @@ impl Stats {
             self.page_walks,
             self.page_nodes_visited,
             self.page_entries_copied,
+            self.keys_looked_up,
             self.streams_decoded,
         ]
         .into_iter()
@@ -267,6 +282,7 @@ impl Stats {
             Counter::PageWalks => &mut self.page_walks,
             Counter::PageNodesVisited => &mut self.page_nodes_visited,
             Counter::PageEntriesCopied => &mut self.page_entries_copied,
+            Counter::KeysLookedUp => &mut self.keys_looked_up,
         }
     }
 }
@@ -315,6 +331,7 @@ impl Add for Stats {
             page_entries_copied: self
                 .page_entries_copied
                 .saturating_add(other.page_entries_copied),
+            keys_looked_up: self.keys_looked_up.saturating_add(other.keys_looked_up),
             streams_decoded: self.streams_decoded.saturating_add(other.streams_decoded),
             most_decodes_of_one_stream: self
                 .most_decodes_of_one_stream
@@ -421,7 +438,7 @@ mod tests {
     use super::*;
 
     /// Every counter, so a test of one property covers them all.
-    const ALL: [Counter; 17] = [
+    const ALL: [Counter; 18] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::FontDictionariesResolved,
@@ -439,6 +456,7 @@ mod tests {
         Counter::PageWalks,
         Counter::PageNodesVisited,
         Counter::PageEntriesCopied,
+        Counter::KeysLookedUp,
     ];
 
     #[test]

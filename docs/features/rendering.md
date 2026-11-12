@@ -643,7 +643,11 @@ resources keep — `font_program`, `image`, `icc_transform`, `glyph_outline` and
 `page_entries_copied`, each page a lookup or a read of every page copies out
 of the page index a count built ([document model](document-model.md)), which
 no render makes and a page lookup, a count, the validators, an editor and a
-save do; and
+save do; `keys_looked_up`, each lookup by its bytes of a name the document's
+name table pre-interns — a key read where its `Name` constant answers without
+the table, which no reader on a counted path does, or a resource name that
+spells one, such as a font named `/Font` — counted by the resource scopes and
+by a font read through them; and
 `streams_decoded`, each run of a stream's filter chain — the page's content, a
 form's at each `Do`, a tiling pattern's cell, an appearance, an image's
 samples and its soft mask's, a font's program and its CMaps, an ICC profile —

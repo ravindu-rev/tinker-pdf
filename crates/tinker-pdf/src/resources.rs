@@ -12,8 +12,8 @@ use tinker_pdf_content::{
     Device, DeviceDefaults, FontSource, Layer, MarkedProps, Matrix, PathSegment, Rgb,
 };
 use tinker_pdf_cos::{
-    decode_text_string, font as cos_font, limits, pages as cos_pages, CosDocument, Dict, Name,
-    ObjRef, Object,
+    decode_text_string, font as cos_font, limits, pages as cos_pages, CosDocument, Counting, Dict,
+    Name, ObjRef, Object,
 };
 use tinker_pdf_filters::{
     ccitt_decode, jbig2_decode, jpeg_decode, CcittParams, Jbig2Params, JpegColor,
@@ -747,9 +747,9 @@ impl PageResources {
         read: impl FnOnce(&Dict) -> R,
     ) -> Option<R> {
         let resources = self.resources.as_ref()?;
-        let table = resources.get(self.doc.intern(b"Properties"))?;
+        let table = resources.get(Name::PROPERTIES)?;
         read_resolved(&self.doc, table, |table| {
-            let entry = table.as_dict()?.get(self.doc.intern(name))?;
+            let entry = table.as_dict()?.get(self.name(name))?;
             read_resolved(&self.doc, entry, |list| list.as_dict().map(read))
         })
     }
@@ -853,6 +853,20 @@ impl PageResources {
     /// Counts one step of `counter` into the tally, when there is one.
     fn count(&self, counter: Counter) {
         stats::count(self.work.as_deref(), counter);
+    }
+
+    /// The symbol for `bytes` in the document's name table: every name this
+    /// scope looks up by its bytes — a resource name its content gives, and a
+    /// key that is not one of the pre-interned [`Name`] constants — comes
+    /// here, so that a lookup a constant would have answered is counted as a
+    /// key looked up (`Stats::keys_looked_up`) when the operation counts
+    /// (`docs/design/performance.md`, P-02).
+    fn name(&self, bytes: &[u8]) -> Name {
+        let name = self.doc.intern(bytes);
+        if name.is_preinterned() {
+            self.count(Counter::KeysLookedUp);
+        }
+        name
     }
 
     /// `r`'s bytes through its filter chain, the run counted into the tally
@@ -978,20 +992,20 @@ impl PageResources {
     ) -> Option<tinker_pdf_content::GroupSpace> {
         let object = self.doc.get(page.reference).ok()?;
         let dict = object.as_dict()?;
-        let group = self.doc.resolve_key(dict, self.doc.intern(b"Group"));
+        let group = self.doc.resolve_key(dict, self.name(b"Group"));
         let group = group.as_dict()?;
         // 11.6.6: the subtype is checked rather than the key's presence, for
         // the reason `form_from` checks it — 8.10.3's `/S /Reference` group is
         // a different thing wearing the same key.
         let subtype = self
             .doc
-            .resolve_key(group, self.doc.intern(b"S"))
+            .resolve_key(group, self.name(b"S"))
             .as_name()
             .and_then(|n| self.doc.name_bytes(n))?;
         if subtype.as_ref() != b"Transparency" {
             return None;
         }
-        let cs = group.get(self.doc.intern(b"CS")).cloned()?;
+        let cs = group.get(self.name(b"CS")).cloned()?;
         self.parse_space(&cs, 0, b"Group").map(group_space)
     }
 
@@ -1058,9 +1072,9 @@ impl PageResources {
     /// `/PatternType` deciding the kind is the one thing they must agree on.
     fn pattern_entry(&self, name: &[u8]) -> Option<(Dict, Option<ObjRef>)> {
         let resources = self.resources.as_ref()?;
-        let table = self.doc.resolve_key(resources, self.doc.intern(b"Pattern"));
+        let table = self.doc.resolve_key(resources, Name::PATTERN);
         let table = table.as_dict()?;
-        let key = self.doc.intern(name);
+        let key = self.name(name);
         let reference = table.get_ref(key);
         let entry = self.doc.resolve_key(table, key);
         Some((entry.as_dict()?.clone(), reference))
@@ -1077,7 +1091,7 @@ impl PageResources {
         let (dict, reference) = self.pattern_entry(name)?;
         let kind = self
             .doc
-            .resolve_key(&dict, self.doc.intern(b"PatternType"))
+            .resolve_key(&dict, self.name(b"PatternType"))
             .as_int();
         (kind == Some(1)).then_some(reference).flatten()
     }
@@ -1106,7 +1120,7 @@ impl PageResources {
     /// stream's default space (8.7.3.1).
     fn pattern_matrix(&self, dict: &Dict) -> Matrix {
         self.doc
-            .resolve_key(dict, self.doc.intern(b"Matrix"))
+            .resolve_key(dict, self.name(b"Matrix"))
             .as_array()
             .map(|a| {
                 a.iter()
@@ -1134,7 +1148,7 @@ impl PageResources {
     fn tiling_pattern(&self, dict: &Dict, matrix: Matrix) -> PatternPaint {
         let number = |key: &[u8]| {
             self.doc
-                .resolve_key(dict, self.doc.intern(key))
+                .resolve_key(dict, self.name(key))
                 .as_number()
                 .filter(|v| v.is_finite())
         };
@@ -1143,7 +1157,7 @@ impl PageResources {
         // given in either order (7.9.5), as they may on a form's `/BBox`.
         let bbox = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"BBox"))
+            .resolve_key(dict, self.name(b"BBox"))
             .as_array()
             .and_then(|values| {
                 let n = |i: usize| {
@@ -1165,7 +1179,7 @@ impl PageResources {
         // cell painted in its own colours is the reading that loses nothing.
         let uncolored = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"PaintType"))
+            .resolve_key(dict, self.name(b"PaintType"))
             .as_int()
             .unwrap_or(1)
             == 2;
@@ -1212,7 +1226,7 @@ impl PageResources {
     fn build_form_resources(&self, dict: &Dict) -> Option<Arc<PageResources>> {
         let subtype = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"Subtype"))
+            .resolve_key(dict, Name::SUBTYPE)
             .as_name()
             .and_then(|n| self.doc.name_bytes(n))?;
         if subtype.as_ref() != b"Form" {
@@ -1220,7 +1234,7 @@ impl PageResources {
         }
         let own = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"Resources"))
+            .resolve_key(dict, Name::RESOURCES)
             .as_dict()
             .cloned()?;
         // Its fonts count into the asker's tally, but the scope is kept
@@ -1246,7 +1260,7 @@ impl PageResources {
         let (dict, _) = self.xobject(name)?;
         Some(
             self.doc
-                .resolve_key(&dict, self.doc.intern(b"Subtype"))
+                .resolve_key(&dict, Name::SUBTYPE)
                 .as_name()
                 .and_then(|n| self.doc.name_bytes(n))
                 .map(|bytes| bytes.to_vec()),
@@ -1255,9 +1269,9 @@ impl PageResources {
 
     pub(crate) fn xobject(&self, name: &[u8]) -> Option<(Dict, tinker_pdf_cos::ObjRef)> {
         let resources = self.resources.as_ref()?;
-        let value = self.doc.resolve_key(resources, self.doc.intern(b"XObject"));
+        let value = self.doc.resolve_key(resources, Name::XOBJECT);
         let dict = value.as_dict()?;
-        let reference = dict.get_ref(self.doc.intern(name))?;
+        let reference = dict.get_ref(self.name(name))?;
         let object = self.doc.get(reference).ok()?;
         let stream = object.as_dict()?.clone();
         Some((stream, reference))
@@ -1302,10 +1316,8 @@ impl PageResources {
         // `/CalGray` as `/G` was drawn in DeviceGray, gamma and white point
         // unread.
         let entry = self.resources.as_ref().and_then(|resources| {
-            let table = self
-                .doc
-                .resolve_key(resources, self.doc.intern(b"ColorSpace"));
-            table.as_dict()?.get(self.doc.intern(name)).cloned()
+            let table = self.doc.resolve_key(resources, Name::COLOR_SPACE);
+            table.as_dict()?.get(self.name(name)).cloned()
         });
         match entry {
             Some(entry) => self.read_space(&entry, 0, name, how),
@@ -1350,9 +1362,7 @@ impl PageResources {
         let Some(resources) = self.resources.as_ref() else {
             return defaults;
         };
-        let table = self
-            .doc
-            .resolve_key(resources, self.doc.intern(b"ColorSpace"));
+        let table = self.doc.resolve_key(resources, Name::COLOR_SPACE);
         let Some(table) = table.as_dict() else {
             return defaults;
         };
@@ -1362,7 +1372,7 @@ impl PageResources {
             (b"DefaultCMYK", ColorSpace::DeviceCmyk),
         ];
         for (key, device) in families {
-            let Some(entry) = table.get(self.doc.intern(key)) else {
+            let Some(entry) = table.get(self.name(key)) else {
                 continue;
             };
             let refusal = match self.read_space(entry, 0, key, Reading::SELECTED) {
@@ -1436,10 +1446,8 @@ impl PageResources {
                 // while `Page::images` listed the space it names.
                 resource if how.inline => {
                     let entry = self.resources.as_ref().and_then(|resources| {
-                        let table = self
-                            .doc
-                            .resolve_key(resources, self.doc.intern(b"ColorSpace"));
-                        table.as_dict()?.get(self.doc.intern(resource)).cloned()
+                        let table = self.doc.resolve_key(resources, Name::COLOR_SPACE);
+                        table.as_dict()?.get(self.name(resource)).cloned()
                     })?;
                     let how = Reading {
                         inline: false,
@@ -1461,7 +1469,7 @@ impl PageResources {
                 let stream = items.get(1).map(|o| self.doc.resolve(o))?;
                 let n = stream
                     .as_dict()
-                    .and_then(|d| d.get_int(self.doc.intern(b"N")))
+                    .and_then(|d| d.get_int(Name::N))
                     .unwrap_or(3);
                 let components = n.clamp(1, 4) as usize;
 
@@ -1572,7 +1580,7 @@ impl PageResources {
                     .and_then(|d| self.numbers(d, b"WhitePoint", 3))
                     .map_or(WHITE_D50, |v| [v[0], v[1], v[2]]);
                 let gamma = dict
-                    .map(|d| self.doc.resolve_key(d, self.doc.intern(b"Gamma")))
+                    .map(|d| self.doc.resolve_key(d, self.name(b"Gamma")))
                     .and_then(|g| g.as_number())
                     .unwrap_or(1.0);
                 Some(ColorSpace::CalGray { white, gamma })
@@ -1610,7 +1618,7 @@ impl PageResources {
                 let range = params
                     .as_ref()
                     .and_then(|p| p.as_dict())
-                    .map(|d| self.doc.resolve_key(d, self.doc.intern(b"Range")))
+                    .map(|d| self.doc.resolve_key(d, self.name(b"Range")))
                     .and_then(|r| {
                         let values: Vec<f64> =
                             r.as_array()?.iter().filter_map(Object::as_number).collect();
@@ -1640,7 +1648,7 @@ impl PageResources {
     /// white point, and the clause's default is a better answer than two of
     /// its three axes.
     fn numbers(&self, dict: &tinker_pdf_cos::Dict, key: &[u8], count: usize) -> Option<Vec<f64>> {
-        let value = self.doc.resolve_key(dict, self.doc.intern(key));
+        let value = self.doc.resolve_key(dict, self.name(key));
         let values: Vec<f64> = value
             .as_array()?
             .iter()
@@ -1667,17 +1675,17 @@ impl PageResources {
     ) -> Result<Option<Shading>, i64> {
         let kind = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"ShadingType"))
+            .resolve_key(dict, self.name(b"ShadingType"))
             .as_int()
             .unwrap_or(0);
 
-        let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
+        let space = self.doc.resolve_key(dict, Name::COLOR_SPACE);
         let space = self
             .parse_space(&space, 0, name)
             .unwrap_or(ColorSpace::DeviceRgb);
         let function = self.function(dict).unwrap_or(Function::Identity);
 
-        let coords = self.doc.resolve_key(dict, self.doc.intern(b"Coords"));
+        let coords = self.doc.resolve_key(dict, self.name(b"Coords"));
         let coords: Vec<f64> = coords
             .as_array()
             .map(|a| {
@@ -1687,7 +1695,7 @@ impl PageResources {
             })
             .unwrap_or_default();
 
-        let extend = self.doc.resolve_key(dict, self.doc.intern(b"Extend"));
+        let extend = self.doc.resolve_key(dict, self.name(b"Extend"));
         let extend = extend
             .as_array()
             .map(|a| {
@@ -1700,7 +1708,7 @@ impl PageResources {
 
         match kind {
             1 => {
-                let domain = self.doc.resolve_key(dict, self.doc.intern(b"Domain"));
+                let domain = self.doc.resolve_key(dict, self.name(b"Domain"));
                 let domain: Vec<f64> = domain
                     .as_array()
                     .map(|a| {
@@ -1754,7 +1762,7 @@ impl PageResources {
 
         let integer = |key: &[u8]| {
             self.doc
-                .resolve_key(dict, self.doc.intern(key))
+                .resolve_key(dict, self.name(key))
                 .as_int()
                 .unwrap_or(0)
         };
@@ -1766,17 +1774,17 @@ impl PageResources {
         // instead cuts the stream up wrongly from the first vertex on.
         let has_function = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"Function"))
+            .resolve_key(dict, self.name(b"Function"))
             .as_dict()
             .is_some()
             || self
                 .doc
-                .resolve_key(dict, self.doc.intern(b"Function"))
+                .resolve_key(dict, self.name(b"Function"))
                 .as_array()
                 .is_some();
         let components = if has_function { 1 } else { space.components() };
 
-        let decode = self.doc.resolve_key(dict, self.doc.intern(b"Decode"));
+        let decode = self.doc.resolve_key(dict, self.name(b"Decode"));
         let decode: Vec<(f64, f64)> = decode
             .as_array()
             .map(|a| {
@@ -1845,18 +1853,18 @@ fn embedded_program(
     let (mut font, _) = fonts::text_font(doc, resources, name)?;
 
     // A composite font keeps its program on the descendant.
-    let descendants = doc.resolve_key(&font, doc.intern(b"DescendantFonts"));
+    let descendants = doc.resolve_key(&font, Name::DESCENDANT_FONTS);
     if let Some(first) = descendants.as_array().and_then(<[Object]>::first) {
         if let Some(dict) = doc.resolve(first).as_dict() {
             font = dict.clone();
         }
     }
 
-    let descriptor = doc.resolve_key(&font, doc.intern(b"FontDescriptor"));
+    let descriptor = doc.resolve_key(&font, Name::FONT_DESCRIPTOR);
     let descriptor = descriptor.as_dict()?;
 
-    for key in [b"FontFile2".as_slice(), b"FontFile3", b"FontFile"] {
-        if let Some(reference) = descriptor.get_ref(doc.intern(key)) {
+    for key in [Name::FONT_FILE2, Name::FONT_FILE3, Name::FONT_FILE] {
+        if let Some(reference) = descriptor.get_ref(key) {
             if let Ok(bytes) = doc.stream_decoded_counted(reference, work) {
                 if !bytes.is_empty() {
                     return Some(bytes);
@@ -1928,14 +1936,18 @@ impl FontSource for PageResources {
     fn type3_glyph(&self, font: &[u8], code: u32) -> Option<tinker_pdf_content::Type3Glyph> {
         // 9.6.5: only a Type 3 font has glyph procedures. Every other kind
         // returns None here, which leaves the ordinary outline path untouched.
-        let dict = fonts::font_dict(
-            &self.doc,
-            self.resources.as_ref()?,
-            font,
-            self.work.as_deref(),
-        )?;
+        // Read through the counting view when the operation counts, so the
+        // name's lookup is counted as the scope's own are.
+        let resources = self.resources.as_ref()?;
+        let work = self.work.as_deref();
+        let dict = match work {
+            Some(counting) => {
+                fonts::font_dict(&Counting::new(&*self.doc, counting), resources, font, work)
+            }
+            None => fonts::font_dict(&*self.doc, resources, font, work),
+        }?;
         let subtype = dict
-            .get_name(self.doc.intern(b"Subtype"))
+            .get_name(Name::SUBTYPE)
             .and_then(|n| self.doc.name_bytes(n))?;
         if subtype.as_ref() != b"Type3" {
             return None;
@@ -1944,10 +1956,8 @@ impl FontSource for PageResources {
         // A Type 3 font addresses its procedures by name, and the only way to
         // get one is the /Encoding /Differences array — there is no built-in
         // encoding for a font whose glyphs the document invented.
-        let encoding = self.doc.resolve_key(&dict, self.doc.intern(b"Encoding"));
-        let differences = self
-            .doc
-            .resolve_key(encoding.as_dict()?, self.doc.intern(b"Differences"));
+        let encoding = self.doc.resolve_key(&dict, Name::ENCODING);
+        let differences = self.doc.resolve_key(encoding.as_dict()?, Name::DIFFERENCES);
         let differences = differences.as_array()?;
 
         let mut current = 0u32;
@@ -1968,7 +1978,7 @@ impl FontSource for PageResources {
         }
         let name = name?;
 
-        let procs = self.doc.resolve_key(&dict, self.doc.intern(b"CharProcs"));
+        let procs = self.doc.resolve_key(&dict, Name::CHAR_PROCS);
         let reference = procs.as_dict()?.get_ref(name)?;
         let content = self.decoded(reference).ok()?;
 
@@ -1977,7 +1987,7 @@ impl FontSource for PageResources {
         // its own units, and the matrix is required for that reason.
         let matrix = self
             .doc
-            .resolve_key(&dict, self.doc.intern(b"FontMatrix"))
+            .resolve_key(&dict, Name::FONT_MATRIX)
             .as_array()
             .and_then(|values| {
                 let n = |i: usize| values.get(i).and_then(Object::as_number);
@@ -2009,7 +2019,7 @@ impl FontSource for PageResources {
         let (dict, reference) = self.xobject(name)?;
         let subtype = self
             .doc
-            .resolve_key(&dict, self.doc.intern(b"Subtype"))
+            .resolve_key(&dict, Name::SUBTYPE)
             .as_name()
             .and_then(|n| self.doc.name_bytes(n))?;
         if subtype.as_ref() != b"Form" {
@@ -2119,9 +2129,9 @@ impl FontSource for PageResources {
         // The table and the entry are read where they lie, as
         // `with_property_list` reads them: every `/OC` `BDC` asks.
         let resources = self.resources.as_ref()?;
-        let table = resources.get(self.doc.intern(b"Properties"))?;
+        let table = resources.get(Name::PROPERTIES)?;
         read_resolved(&self.doc, table, |table| {
-            let entry = table.as_dict()?.get(self.doc.intern(name))?;
+            let entry = table.as_dict()?.get(self.name(name))?;
             let label = String::from_utf8_lossy(name).into_owned();
             Some(self.optional.layer_of(&self.doc, entry, &label))
         })
@@ -2132,7 +2142,7 @@ impl FontSource for PageResources {
         // XObject, and is read from the XObject's own dictionary rather than
         // from /Properties.
         let (dict, _) = self.xobject(name)?;
-        let entry = dict.get(self.doc.intern(b"OC"))?.clone();
+        let entry = dict.get(self.name(b"OC"))?.clone();
         let label = String::from_utf8_lossy(name).into_owned();
         Some(self.optional.layer_of(&self.doc, &entry, &label))
     }
@@ -2366,7 +2376,7 @@ impl PageResources {
             };
             // A threshold array is a stream's data, reached by reference.
             let thresholds = || value.as_stream().and(reference);
-            let transfer = match dict.get(self.doc.intern(b"TransferFunction")) {
+            let transfer = match dict.get(self.name(b"TransferFunction")) {
                 None => None,
                 Some(raw) => read_resolved(&self.doc, raw, |value| {
                     self.state_transfer(raw, value, false)
@@ -2374,7 +2384,7 @@ impl PageResources {
             };
             match int(b"HalftoneType")? {
                 1 => {
-                    let spot = dict.get(self.doc.intern(b"SpotFunction"))?;
+                    let spot = dict.get(self.name(b"SpotFunction"))?;
                     let spot =
                         read_resolved(&self.doc, spot, |value| self.spot_function(spot, value))?;
                     Some(Halftone::Screen {
@@ -2493,9 +2503,9 @@ impl PageResources {
     /// once each, with no copy of a table written inline.
     fn read_ext_g_state(&self, name: &[u8]) -> Option<Arc<tinker_pdf_content::StateParameters>> {
         let resources = self.resources.as_ref()?;
-        let table = resources.get(self.doc.intern(b"ExtGState"))?;
+        let table = resources.get(Name::EXT_G_STATE)?;
         read_resolved(&self.doc, table, |table| {
-            let entry = table.as_dict()?.get(self.doc.intern(name))?;
+            let entry = table.as_dict()?.get(self.name(name))?;
             read_resolved(&self.doc, entry, |entry| {
                 entry
                     .as_dict()
@@ -2517,7 +2527,7 @@ impl PageResources {
         let mask = value.as_dict()?;
 
         // `/G` is required, and is a form XObject with a transparency group.
-        let reference = mask.get_ref(self.doc.intern(b"G"))?;
+        let reference = mask.get_ref(self.name(b"G"))?;
         let group_dict = self.doc.get(reference).ok()?.as_dict()?.clone();
         let form = self.form_from(&group_dict, reference, name, Contents::ThisScope)?;
 
@@ -2527,7 +2537,7 @@ impl PageResources {
         // and a mask that fails to parse is a mask that hides nothing.
         let luminosity = self
             .doc
-            .resolve_key(mask, self.doc.intern(b"S"))
+            .resolve_key(mask, self.name(b"S"))
             .as_name()
             .and_then(|n| self.doc.name_bytes(n))
             .is_none_or(|s| s.as_ref() != b"Alpha");
@@ -2537,7 +2547,7 @@ impl PageResources {
         // every other unnamed space in this engine does.
         let backdrop = self
             .doc
-            .resolve_key(mask, self.doc.intern(b"BC"))
+            .resolve_key(mask, self.name(b"BC"))
             .as_array()
             .map(|values| {
                 let components: Vec<f64> = values
@@ -2546,9 +2556,9 @@ impl PageResources {
                     .collect();
                 let space = self
                     .doc
-                    .resolve_key(&group_dict, self.doc.intern(b"Group"))
+                    .resolve_key(&group_dict, self.name(b"Group"))
                     .as_dict()
-                    .and_then(|g| g.get(self.doc.intern(b"CS")).cloned())
+                    .and_then(|g| g.get(self.name(b"CS")).cloned())
                     .and_then(|cs| self.parse_space(&cs, 0, name));
                 let (r, g, b) = match space {
                     Some(space) => space.to_rgb(&components),
@@ -2565,7 +2575,7 @@ impl PageResources {
         // reference; sampled to 256 entries, since the mask applies it per
         // pixel.
         let transfer = mask
-            .get(self.doc.intern(b"TR"))
+            .get(self.name(b"TR"))
             .and_then(|raw| self.state_function(raw))
             .map(|function| sample_transfer(&function));
 
@@ -2663,11 +2673,11 @@ impl GlyphSource for PageResources {
         let Some(resources) = self.resources.as_ref() else {
             return Ok(None);
         };
-        let table = self.doc.resolve_key(resources, self.doc.intern(b"Shading"));
+        let table = self.doc.resolve_key(resources, Name::SHADING);
         let Some(table) = table.as_dict() else {
             return Ok(None);
         };
-        let key = self.doc.intern(name);
+        let key = self.name(name);
         let reference = table.get_ref(key);
         let entry = self.doc.resolve_key(table, key);
         let Some(dict) = entry.as_dict() else {
@@ -2683,7 +2693,7 @@ impl GlyphSource for PageResources {
         // 8.7.3.3: type 1 is a tiling pattern, type 2 a shading pattern.
         let kind = self
             .doc
-            .resolve_key(&dict, self.doc.intern(b"PatternType"))
+            .resolve_key(&dict, self.name(b"PatternType"))
             .as_int()
             .unwrap_or(0);
         // 8.7.3.1: the pattern matrix maps pattern space to the *default*
@@ -2696,7 +2706,7 @@ impl GlyphSource for PageResources {
         match kind {
             1 => Some(self.tiling_pattern(&dict, matrix)),
             2 => {
-                let key = self.doc.intern(b"Shading");
+                let key = Name::SHADING;
                 let reference = dict.get_ref(key);
                 let shading = self.doc.resolve_key(&dict, key);
                 let shading = shading.as_dict()?;
@@ -2732,7 +2742,7 @@ impl GlyphSource for PageResources {
         // invokes it.
         let own = self
             .doc
-            .resolve_key(&dict, self.doc.intern(b"Resources"))
+            .resolve_key(&dict, Name::RESOURCES)
             .as_dict()
             .cloned();
         let nested;
@@ -2961,7 +2971,7 @@ impl PageResources {
         // 8.10.2: /Matrix maps the form's space into the one that invoked it.
         let matrix = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"Matrix"))
+            .resolve_key(dict, self.name(b"Matrix"))
             .as_array()
             .and_then(|values| {
                 let n = |i: usize| values.get(i).and_then(Object::as_number);
@@ -2980,7 +2990,7 @@ impl PageResources {
         // rather than no form.
         let bbox = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"BBox"))
+            .resolve_key(dict, self.name(b"BBox"))
             .as_array()
             .and_then(|values| {
                 let n = |i: usize| values.get(i).and_then(|v| self.doc.resolve(v).as_number());
@@ -2996,12 +3006,12 @@ impl PageResources {
         // presence.
         let group = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"Group"))
+            .resolve_key(dict, self.name(b"Group"))
             .as_dict()
             .and_then(|group| {
                 let subtype = self
                     .doc
-                    .resolve_key(group, self.doc.intern(b"S"))
+                    .resolve_key(group, self.name(b"S"))
                     .as_name()
                     .and_then(|n| self.doc.name_bytes(n))?;
                 if subtype.as_ref() != b"Transparency" {
@@ -3012,12 +3022,12 @@ impl PageResources {
                 Some(tinker_pdf_content::Group {
                     isolated: self
                         .doc
-                        .resolve_key(group, self.doc.intern(b"I"))
+                        .resolve_key(group, self.name(b"I"))
                         .as_bool()
                         .unwrap_or(false),
                     knockout: self
                         .doc
-                        .resolve_key(group, self.doc.intern(b"K"))
+                        .resolve_key(group, self.name(b"K"))
                         .as_bool()
                         .unwrap_or(false),
                     // 11.6.6: `/CS` names the space the group's contents are
@@ -3027,7 +3037,7 @@ impl PageResources {
                     // it this way — then reduced to the shape a compositor
                     // needs.
                     space: group
-                        .get(self.doc.intern(b"CS"))
+                        .get(self.name(b"CS"))
                         .cloned()
                         .and_then(|cs| self.group_colour_space(&cs, name, contents))
                         .map(group_space),
@@ -3063,7 +3073,7 @@ impl PageResources {
     /// Reads a `/Function` entry, which is one function or an array of them,
     /// one per output component (7.10).
     fn function(&self, dict: &Dict) -> Option<Function> {
-        let key = self.doc.intern(b"Function");
+        let key = self.name(b"Function");
         let value = self.doc.resolve_key(dict, key);
         if let Some(items) = value.as_array() {
             // 7.10.1: every member supplies one output component. Reading only
@@ -3098,7 +3108,7 @@ impl PageResources {
         let dict = resolved.as_dict()?;
 
         let numbers = |key: &[u8]| -> Vec<f64> {
-            let value = self.doc.resolve_key(dict, self.doc.intern(key));
+            let value = self.doc.resolve_key(dict, self.name(key));
             value
                 .as_array()
                 .map(|a| {
@@ -3114,7 +3124,7 @@ impl PageResources {
 
         let kind = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"FunctionType"))
+            .resolve_key(dict, self.name(b"FunctionType"))
             .as_int()?;
 
         match kind {
@@ -3131,13 +3141,13 @@ impl PageResources {
                     c1: if c1.is_empty() { vec![1.0] } else { c1 },
                     n: self
                         .doc
-                        .resolve_key(dict, self.doc.intern(b"N"))
+                        .resolve_key(dict, Name::N)
                         .as_number()
                         .unwrap_or(1.0),
                 })
             }
             3 => {
-                let value = self.doc.resolve_key(dict, self.doc.intern(b"Functions"));
+                let value = self.doc.resolve_key(dict, self.name(b"Functions"));
                 let functions: Vec<Function> = value
                     .as_array()
                     .map(|a| {
@@ -3174,7 +3184,7 @@ impl PageResources {
                     size: numbers(b"Size").iter().map(|v| *v as usize).collect(),
                     bits: self
                         .doc
-                        .resolve_key(dict, self.doc.intern(b"BitsPerSample"))
+                        .resolve_key(dict, self.name(b"BitsPerSample"))
                         .as_int()
                         .unwrap_or(8) as u32,
                     encode: pairs(&numbers(b"Encode")),
@@ -3297,7 +3307,7 @@ impl PageResources {
     fn font_table(&self) -> Option<Dict> {
         let resources = self.resources.as_ref()?;
         self.doc
-            .resolve_key(resources, self.doc.intern(b"Font"))
+            .resolve_key(resources, Name::FONT)
             .as_dict()
             .cloned()
     }
@@ -3322,7 +3332,7 @@ impl PageResources {
             return Some(reference);
         }
         let name = self.resource_name(font_id)?;
-        self.font_table()?.get_ref(self.doc.intern(&name))
+        self.font_table()?.get_ref(self.name(&name))
     }
 
     /// Every font this scope names, by object.
@@ -3344,14 +3354,12 @@ impl PageResources {
         // size]`), which this scope's content may select as `Tf` selects one
         // `/Font` names.
         if let Some(resources) = self.resources.as_ref() {
-            let states = self
-                .doc
-                .resolve_key(resources, self.doc.intern(b"ExtGState"));
+            let states = self.doc.resolve_key(resources, Name::EXT_G_STATE);
             for (_, entry) in states.as_dict().into_iter().flat_map(Dict::iter) {
                 let state = self.doc.resolve(entry);
                 let font = state
                     .as_dict()
-                    .and_then(|state| state.get(self.doc.intern(b"Font")))
+                    .and_then(|state| state.get(Name::FONT))
                     .map(|font| self.doc.resolve(font));
                 let reference = font
                     .as_deref()
@@ -3692,12 +3700,8 @@ impl PageResources {
         name: &[u8],
     ) -> Vec<u8> {
         let parms = self.decode_parms(dict);
-        let int = |key: &[u8]| parms.as_ref().and_then(|p| p.get_int(self.doc.intern(key)));
-        let flag = |key: &[u8]| {
-            parms
-                .as_ref()
-                .and_then(|p| p.get_bool(self.doc.intern(key)))
-        };
+        let int = |key: &[u8]| parms.as_ref().and_then(|p| p.get_int(self.name(key)));
+        let flag = |key: &[u8]| parms.as_ref().and_then(|p| p.get_bool(self.name(key)));
 
         // Table 11: `/Rows` is the height of the coded image. It is optional,
         // and the image's own `/Height` is what it means when it is absent —
@@ -3788,7 +3792,7 @@ impl PageResources {
         // whole payload is in one place and say nothing about why.
         let globals = self
             .decode_parms(dict)
-            .and_then(|parms| match parms.get(self.doc.intern(b"JBIG2Globals")) {
+            .and_then(|parms| match parms.get(self.name(b"JBIG2Globals")) {
                 Some(Object::Ref(r)) => self.decoded(*r).ok(),
                 _ => None,
             })
@@ -3934,10 +3938,8 @@ impl PageResources {
         named: Option<ColorSpace>,
         name: &[u8],
     ) -> Result<DecodedImage, String> {
-        let smask_in_data = dict.get_int(self.doc.intern(b"SMaskInData")).unwrap_or(0);
-        let image_mask = dict
-            .get_bool(self.doc.intern(b"ImageMask"))
-            .unwrap_or(false);
+        let smask_in_data = dict.get_int(self.name(b"SMaskInData")).unwrap_or(0);
+        let image_mask = dict.get_bool(self.name(b"ImageMask")).unwrap_or(false);
         if image_mask {
             // 8.9.6.2 makes a stencil one bit per sample with no colour space;
             // 8.9.5.4 forbids the combination outright. Refusing by name beats
@@ -4178,7 +4180,7 @@ impl PageResources {
 
         let subtype = self
             .doc
-            .resolve_key(&dict, self.doc.intern(b"Subtype"))
+            .resolve_key(&dict, Name::SUBTYPE)
             .as_name()
             .and_then(|n| self.doc.name_bytes(n));
         if subtype.as_deref() != Some(b"Image".as_slice()) {
@@ -4187,7 +4189,7 @@ impl PageResources {
 
         let int = |key: &[u8]| {
             self.doc
-                .resolve_key(&dict, self.doc.intern(key))
+                .resolve_key(&dict, self.name(key))
                 .as_int()
                 .unwrap_or(0)
         };
@@ -4205,7 +4207,7 @@ impl PageResources {
         // producers use it most.
         let interpolate = self
             .doc
-            .resolve_key(&dict, self.doc.intern(b"Interpolate"))
+            .resolve_key(&dict, self.name(b"Interpolate"))
             .as_bool()
             .unwrap_or(false);
 
@@ -4216,7 +4218,7 @@ impl PageResources {
         // without a word.
         let decode: Vec<(f64, f64)> = self
             .doc
-            .resolve_key(&dict, self.doc.intern(b"Decode"))
+            .resolve_key(&dict, self.name(b"Decode"))
             .as_array()
             .map(|a| {
                 a.iter()
@@ -4271,7 +4273,7 @@ impl PageResources {
         // colour. Without the fill colour here it reads as black-on-nothing.
         let is_mask = self
             .doc
-            .resolve_key(&dict, self.doc.intern(b"ImageMask"))
+            .resolve_key(&dict, self.name(b"ImageMask"))
             .as_bool()
             .unwrap_or(false);
 
@@ -4372,7 +4374,7 @@ impl PageResources {
     /// array, which is what lets such a file reach a page as its own compressed
     /// bytes instead of being decoded into an `/SMask`.
     fn color_key(&self, dict: &Dict, n: usize, bpc: u32) -> Option<Vec<(u32, u32)>> {
-        let value = self.doc.resolve_key(dict, self.doc.intern(b"Mask"));
+        let value = self.doc.resolve_key(dict, self.name(b"Mask"));
         let items = value.as_array()?;
         if n == 0 || items.len() != n * 2 {
             return None;
@@ -4535,7 +4537,7 @@ impl PageResources {
     fn decode_inline(&self, dict: &Dict, data: &[u8]) -> Result<DecodedImage, String> {
         let int = |key: &[u8]| {
             self.doc
-                .resolve_key(dict, self.doc.intern(key))
+                .resolve_key(dict, self.name(key))
                 .as_int()
                 .unwrap_or(0)
         };
@@ -4547,7 +4549,7 @@ impl PageResources {
 
         let is_mask = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"ImageMask"))
+            .resolve_key(dict, self.name(b"ImageMask"))
             .as_bool()
             .unwrap_or(false);
         // 8.9.6.2: a mask is one bit per sample whatever /BPC claims.
@@ -4561,7 +4563,7 @@ impl PageResources {
         // rewritten the short form, so only the long one is looked for here.
         let interpolate = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"Interpolate"))
+            .resolve_key(dict, self.name(b"Interpolate"))
             .as_bool()
             .unwrap_or(false);
 
@@ -4570,7 +4572,7 @@ impl PageResources {
         // this — which is the mistake the XObject path made until gap 16.
         let decode: Vec<(f64, f64)> = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"Decode"))
+            .resolve_key(dict, self.name(b"Decode"))
             .as_array()
             .map(|a| {
                 a.iter()
@@ -4669,7 +4671,7 @@ impl PageResources {
     /// The `/ColorSpace` an image XObject's dictionary names, read as a space
     /// painted in (8.9.5, 8.6.5.6), or `None` where it names none this reads.
     fn image_space(&self, dict: &Dict, name: &[u8]) -> Option<ColorSpace> {
-        let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
+        let space = self.doc.resolve_key(dict, Name::COLOR_SPACE);
         self.parse_space(&space, 0, name)
     }
 
@@ -4677,7 +4679,7 @@ impl PageResources {
     /// `/ColorSpace` resource by name, or an `/Indexed` array over one of
     /// those — each remapped as an image XObject's space is (8.6.5.6).
     fn inline_space(&self, dict: &Dict) -> Option<ColorSpace> {
-        let space = self.doc.resolve_key(dict, self.doc.intern(b"ColorSpace"));
+        let space = self.doc.resolve_key(dict, Name::COLOR_SPACE);
         let inline = Reading {
             inline: true,
             ..self.painted()
@@ -4687,7 +4689,7 @@ impl PageResources {
 
     /// The `/SMask` of an image, decoded (11.6.5.3).
     fn soft_mask(&self, dict: &Dict) -> Option<DecodedImage> {
-        let reference = dict.get_ref(self.doc.intern(b"SMask"))?;
+        let reference = dict.get_ref(self.name(b"SMask"))?;
         let object = self.doc.get(reference).ok()?;
         let mask = object.as_dict()?.clone();
         // A mask that is itself masked is not a thing the spec allows, and
@@ -4715,7 +4717,7 @@ impl PageResources {
     ) -> Option<crate::PageImage> {
         let subtype = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"Subtype"))
+            .resolve_key(dict, Name::SUBTYPE)
             .as_name()
             .and_then(|n| self.doc.name_bytes(n));
         if subtype.as_deref() != Some(b"Image".as_slice()) {
@@ -4740,7 +4742,7 @@ impl PageResources {
         let space = if stencil {
             None
         } else {
-            dict.get(self.doc.intern(b"ColorSpace"))
+            dict.get(Name::COLOR_SPACE)
                 .map(|space| self.describe_space(space, false, 0))
         };
         // A mask's and a soft mask's samples are opacity, never colour, so
@@ -4818,7 +4820,7 @@ impl PageResources {
         name_refusals(&mut image, refusals);
 
         if depth == 0 {
-            let mask_key = self.doc.intern(b"Mask");
+            let mask_key = self.name(b"Mask");
             // 8.9.6.3 and 8.9.6.4: `/Mask` is a stencil-mask stream or a
             // colour-key *array*, and a reference can name either — so what
             // decides is the object the reference reaches, not that it is one.
@@ -4849,7 +4851,7 @@ impl PageResources {
                     .color_key(dict, usize::from(image.components), bpc)
                     .map(crate::ImageMask::ColorKey);
             }
-            if let Some(r) = dict.get_ref(self.doc.intern(b"SMask")) {
+            if let Some(r) = dict.get_ref(self.name(b"SMask")) {
                 let mask = self.doc.get(r).ok();
                 if let Some(mask) = mask.as_deref().and_then(Object::as_dict) {
                     image.soft_mask = Some(Box::new(self.extract_at(mask, r, b"", depth + 1)));
@@ -4873,7 +4875,7 @@ impl PageResources {
         let space = if stencil {
             None
         } else {
-            dict.get(self.doc.intern(b"ColorSpace"))
+            dict.get(Name::COLOR_SPACE)
                 .map(|space| self.describe_space(space, true, 0))
         };
         let (substituted, refusals) = self.painted_image_space(dict, true);
@@ -4932,7 +4934,7 @@ impl PageResources {
         name_refusals(&mut image, refusals);
         // 8.9.7: an inline image's `/Mask` can only be the colour-key array,
         // since there is nothing inline a reference could name.
-        if dict.get(self.doc.intern(b"Mask")).is_some() {
+        if dict.get(self.name(b"Mask")).is_some() {
             image.mask = self
                 .color_key(dict, usize::from(image.components), bpc)
                 .map(crate::ImageMask::ColorKey);
@@ -4947,7 +4949,7 @@ impl PageResources {
     fn geometry(&self, dict: &Dict) -> (u32, u32, bool, u32) {
         let int = |key: &[u8]| {
             self.doc
-                .resolve_key(dict, self.doc.intern(key))
+                .resolve_key(dict, self.name(key))
                 .as_int()
                 .unwrap_or(0)
         };
@@ -4955,7 +4957,7 @@ impl PageResources {
         let height = int(b"Height").clamp(0, 1 << 16) as u32;
         let stencil = self
             .doc
-            .resolve_key(dict, self.doc.intern(b"ImageMask"))
+            .resolve_key(dict, self.name(b"ImageMask"))
             .as_bool()
             .unwrap_or(false);
         let bpc = if stencil {
@@ -4969,7 +4971,7 @@ impl PageResources {
     /// `/Decode` as written, in pairs (8.9.5.2).
     fn decode_array(&self, dict: &Dict) -> Vec<(f64, f64)> {
         self.doc
-            .resolve_key(dict, self.doc.intern(b"Decode"))
+            .resolve_key(dict, self.name(b"Decode"))
             .as_array()
             .map(|a| {
                 a.iter()
@@ -5002,10 +5004,7 @@ impl PageResources {
         inline: bool,
     ) -> (Option<crate::ImageSpace>, Vec<String>) {
         let (_, _, stencil, _) = self.geometry(dict);
-        let Some(space) = dict
-            .get(self.doc.intern(b"ColorSpace"))
-            .filter(|_| !stencil)
-        else {
+        let Some(space) = dict.get(Name::COLOR_SPACE).filter(|_| !stencil) else {
             return (None, Vec::new());
         };
         if self.defaults().is_inert() {
@@ -5033,10 +5032,8 @@ impl PageResources {
             _ => return None,
         };
         let resources = self.resources.as_ref()?;
-        let table = self
-            .doc
-            .resolve_key(resources, self.doc.intern(b"ColorSpace"));
-        table.as_dict()?.get(self.doc.intern(key)).cloned()
+        let table = self.doc.resolve_key(resources, Name::COLOR_SPACE);
+        table.as_dict()?.get(self.name(key)).cloned()
     }
 
     /// The one describer, as stated or, with `painting`, as this scope paints
@@ -5100,10 +5097,8 @@ impl PageResources {
             return match bytes.as_ref() {
                 other if inline => {
                     let entry = self.resources.as_ref().and_then(|resources| {
-                        let table = self
-                            .doc
-                            .resolve_key(resources, self.doc.intern(b"ColorSpace"));
-                        table.as_dict()?.get(self.doc.intern(other)).cloned()
+                        let table = self.doc.resolve_key(resources, Name::COLOR_SPACE);
+                        table.as_dict()?.get(self.name(other)).cloned()
                     });
                     match entry {
                         // A resource entry is the space itself, so it is read
@@ -5142,11 +5137,11 @@ impl PageResources {
                 let header = items.get(1).map(|o| self.doc.resolve(o));
                 let dict = header.as_deref().and_then(Object::as_dict);
                 let components = dict
-                    .and_then(|d| d.get_int(self.doc.intern(b"N")))
+                    .and_then(|d| d.get_int(Name::N))
                     .unwrap_or(0)
                     .clamp(0, 255) as u8;
                 let alternate = dict
-                    .and_then(|d| d.get(self.doc.intern(b"Alternate")))
+                    .and_then(|d| d.get(self.name(b"Alternate")))
                     .map(|a| Box::new(self.describe(a, inline, depth + 1, None)));
                 let profile = stream
                     .and_then(|r| self.decoded(r).ok())
@@ -5237,7 +5232,7 @@ impl PageResources {
                     white: triple(dict.as_ref(), b"WhitePoint", WHITE_D50),
                     gamma: dict
                         .as_ref()
-                        .map(|d| self.doc.resolve_key(d, self.doc.intern(b"Gamma")))
+                        .map(|d| self.doc.resolve_key(d, self.name(b"Gamma")))
                         .and_then(|g| g.as_number())
                         .unwrap_or(1.0),
                 }

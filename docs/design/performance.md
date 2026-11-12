@@ -208,6 +208,7 @@ already carries it.
 | a `_hits` and a `_misses` for each of the five caches `Caches` holds — font programs, images, ICC transforms, glyph outlines, form scopes (`resources.rs:63-101`) | a lookup that found an entry, a cached `None` included, or one that did not | the facade's scopes | built |
 | `page_walks` | a walk of the page tree from its root | `collect_upto` itself, for every caller | built |
 | `page_nodes_visited` | a `/Pages` tree node a lookup or a walk read, leaves included, and the page object the linearized or hinted path reads with each ancestor the head holds (`page_alone` and `ancestors_in_the_head` in `pages.rs`) | cos's page walk | built |
+| `keys_looked_up` | a lookup by its bytes of a name the name table pre-interns (`Name::is_preinterned`): a key read where its constant answers, or a resource name that spells one (P-02) | the facade's scopes (`PageResources::name`) and the counting view (`Counting::intern`) | built |
 | `streams_decoded` | a run of a stream's filter chain, whatever it returned | cos's two filter-chain entry points and every `Resolve` view | built |
 | `most_decodes_of_one_stream` | the most runs any one stream had in the operation — a maximum, the quantity A5 holds to one | the same | built |
 | `most_decoded_stream` | the reference of the stream that had those runs, the lowest of a tie — what names a stream a page keeps decoding | the same | built |
@@ -2204,7 +2205,7 @@ step that brings it within bound.
 
 | Question | Asked | What it reads each time | Step |
 | --- | --- | --- | --- |
-| `type3_glyph` | every glyph | the font's dictionary out of `/Font`, copied, with `/Font`, `/Subtype` and the font's name looked up by their bytes; for a Type 3 font, `/Encoding`, `/Differences` walked from its first item, `/CharProcs` and `/FontMatrix` | P-02.3 the kind, P-02.4 the record, P-02.2 the keys |
+| `type3_glyph` | every glyph | the font's dictionary out of `/Font`, copied, with `/Font`, `/Subtype` and the font's name looked up by their bytes; for a Type 3 font, `/Encoding`, `/Differences` walked from its first item, `/CharProcs` and `/FontMatrix` | P-02.3 the kind, P-02.4 the record; P-02.2 the keys, landed |
 | `font_object`, `resource_name`, `selection` | every glyph a save's subset walk records (`subset::show`), and each outline the renderer extracts | `font_ids` scanned for the id and the name copied; `font_object` the `/Font` subdictionary copied too (`font_table`) | P-02.3 |
 | a scope's construction | every scope: a page's, a form's, a pattern cell's, an appearance's, the font rule's | every font its `/Font` names, read with its CMaps (`stats::fonts`), used or not; and `for_one_render` and `bind` copy the two maps it filled for every render and every counting asker | P-02.3 |
 | `color_space`, `selected_space` | each `cs` and `CS` that names a resource, three readings; each `sc` and `scn` in one, two | `/ColorSpace`, the entry and its parse | P-02.5 |
