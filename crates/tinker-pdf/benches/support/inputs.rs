@@ -11,6 +11,10 @@
 //! rest are the benchmark set's (`docs/design/performance.md`, "The inputs"),
 //! written by formula where the bytes are pinned: seeded integer arithmetic
 //! and no float, so every target computes the same bytes.
+//!
+//! Beside the encode group's two deflate inputs sit the level-6 byte counts
+//! tier P holds their deflate to ([`LevelSix`]), which a test reads by the
+//! same path.
 
 use std::sync::{Arc, OnceLock};
 
@@ -959,10 +963,53 @@ pub const SCAN: (u32, u32) = (2480, 3508);
 /// The bytes of [`page_like`] and [`photo_like`]: 1240 by 1755 RGB.
 pub const PAGE_BYTES: usize = 1240 * 1755 * 3;
 
+/// A level-6 byte count, tier P's planning number for one of the encode
+/// group's two deflate inputs (ruling 17): the ratio level's deflate of that
+/// input is held to at most 1.02 times it. It carries the length and SHA-256
+/// of the bytes it was taken on.
+///
+/// Each count was computed once by a reference deflate outside the engine,
+/// over the bytes its generator returns: a raw RFC 1951 stream, as
+/// `tinker_pdf_filters::deflate` writes, at level 6's parameters — a 32 KiB
+/// window, memory level 8 and the default strategy. It is never measured
+/// again against a build and nothing in the tree runs level 6: a count states
+/// a target and judges no output. A count describes its bytes alone, so each
+/// generator asserts them of its own output and a generator changed under
+/// its count fails there first; a moved digest is a finding, never re-pinned.
+pub struct LevelSix {
+    /// How many bytes a level-6 deflate gives on the input.
+    pub count: usize,
+    /// The input's length.
+    pub length: usize,
+    /// The input's SHA-256, in lower-case hexadecimal.
+    pub sha256: &'static str,
+}
+
+impl LevelSix {
+    /// Whether `bytes` are the input this count was taken on.
+    pub fn describes(&self, bytes: &[u8]) -> bool {
+        bytes.len() == self.length && hex(&sha256(bytes)) == self.sha256
+    }
+}
+
+/// [`page_like`]'s level-6 count.
+pub const PAGE_LIKE_LEVEL_SIX: LevelSix = LevelSix {
+    count: 88_264,
+    length: PAGE_BYTES,
+    sha256: "64165ddc859a4924f3f18fb4c8a6ca237c56580bf90a9aa6a48c0b24ad3e590c",
+};
+
+/// [`photo_like`]'s level-6 count.
+pub const PHOTO_LIKE_LEVEL_SIX: LevelSix = LevelSix {
+    count: 4_759_080,
+    length: PAGE_BYTES,
+    sha256: "6f4014bf78787788f40d868b63e1fb05d2ee79b1884b39ca788addda04549d08",
+};
+
 /// 1240 by 1755 RGB of text-like marks on white, about a tenth of the
 /// pixels inked: lines of glyph-sized boxes in words, each box drawn in a
 /// stroke pattern, by formula — never a render, so it cannot move with the
-/// renderer.
+/// renderer. The bytes [`PAGE_LIKE_LEVEL_SIX`] was taken on, asserted.
 pub fn page_like() -> Vec<u8> {
     let (width, height) = (1240usize, 1755usize);
     let mut out = vec![255u8; PAGE_BYTES];
@@ -987,13 +1034,23 @@ pub fn page_like() -> Vec<u8> {
         }
         top += 24;
     }
+    assert!(
+        PAGE_LIKE_LEVEL_SIX.describes(&out),
+        "page_like() is the bytes its level-6 count was taken on"
+    );
     out
 }
 
 /// [`photo`] at 1240 by 1755, seed 0: the photo-like data the encode and
-/// decode groups compress.
+/// decode groups compress. The bytes [`PHOTO_LIKE_LEVEL_SIX`] was taken on,
+/// asserted.
 pub fn photo_like() -> Vec<u8> {
-    photo(1240, 1755, 0)
+    let out = photo(1240, 1755, 0);
+    assert!(
+        PHOTO_LIKE_LEVEL_SIX.describes(&out),
+        "photo_like() is the bytes its level-6 count was taken on"
+    );
+    out
 }
 
 /// [`PAGE_BYTES`] seeded bytes that deflate to between 90 % and 100 % of

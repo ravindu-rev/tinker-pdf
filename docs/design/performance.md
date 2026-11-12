@@ -931,7 +931,7 @@ to it in the commit that adds the capability.
   compiles for that target and reads its committed inputs by path, which the
   runtime's directory grant reaches.
 - **A number an outside program measures.** The level-6 byte counts are
-  brought in once (H-112), and no outside program runs while the set does
+  brought in once (ruling 17), and no outside program runs while the set does
   (ruling 13): a fixture an outside program made once is bytes with its
   provenance.
 - **A capability the tree lacks.** Its row adds its operation, in the commit
@@ -955,9 +955,9 @@ crates/tinker-pdf/benches/
 
 One `[[bench]]` per group file, `harness = false`. `inputs.rs`
 holds no criterion type, no clock and no spawn, so a test reaches it by path
-alone — MS-05's probe, `tests/peak_memory.rs`, for its cases and P-04's
-`deflate_size.rs` for the level-6 counts (P-04.1's exit) — without compiling
-the harness or the child. `cli.rs` is the only file here that calls `Command::new`, so it is the
+alone — MS-05's probe, `tests/peak_memory.rs`, for its cases, and
+`tests/level_six_counts.rs` and P-04.4's `deflate_size.rs` for the level-6
+counts — without compiling the harness or the child. `cli.rs` is the only file here that calls `Command::new`, so it is the
 one `SPAWNERS` row `cargo xtask oracles` needs (`xtask/src/main.rs:984-1048`,
 `:1076-1079`). Every input is generated in memory except what `data/` and
 the tree already hold, and a CLI operation's files are written once a process
@@ -1521,20 +1521,24 @@ column: a short operation by its `calls`, a long one by a smaller input.
 #### The two level-6 byte counts
 
 Tier P holds the deflate ratio level to 1.02 times the size level 6's
-parameters give each of the two inputs, exactly, and says that size is
-recorded once, when MS-04 commits it, as a planning number
-(`docs/roadmap/P.md:96-97`, `:137-142`; H-112). They live in
-`benches/support/inputs.rs`, as two constants beside `page_like()` and
-`photo_like()`, each with the date it was brought in and the length and
-SHA-256 of the bytes it was taken on, which each generator asserts of its own
-output. Not in `baseline.json`, which holds a machine's times and is read as
-such: a byte count is neither. Beside the generators, because a count is a
-fact about those bytes alone, and a generator changed under it would leave it
-describing other bytes — so the digest fails the generator first, and a moved
-digest is a finding, never re-pinned. MS-04.10 commits them, dated, as the
-owner brings them in under H-112; P-04.4's `deflate_size.rs` reads them by
-path. Nothing in the tree runs level 6: no first-party encoder has it, and an
-outside one may not decide a build (ruling 13).
+parameters give each of the two inputs, exactly: a planning number, computed
+once by a reference deflate outside the engine and never measured again
+against a build (`docs/roadmap/P.md:96-97`, `:137-141`; ruling 17). They live
+in `benches/support/inputs.rs` as `PAGE_LIKE_LEVEL_SIX` and
+`PHOTO_LIKE_LEVEL_SIX`, two `LevelSix` constants beside `page_like()` and
+`photo_like()`. Each holds the length of the raw RFC 1951 stream level 6's
+parameters give on its input — a 32 KiB window, memory level 8 and the
+default strategy, with no RFC 1950 wrapper, since `deflate`, the call the
+encode group times, writes none — and the length and SHA-256 of the bytes it
+was taken on, which each generator asserts of its own output.
+Not in `baseline.json`, which holds a machine's times and is read as such: a
+byte count is neither. Beside the generators, because a count is a fact about
+those bytes alone, and a generator changed under it would leave it describing
+other bytes — so the digest fails the generator first, and a moved digest is
+a finding, never re-pinned. `tests/level_six_counts.rs` reaches them by path
+and runs both generators under `cargo test`; P-04.4's `deflate_size.rs` reads
+them the same way. Nothing in the tree runs level 6: no first-party encoder
+has it, and an outside one may not decide a build (ruling 13).
 
 #### How the seven retire
 
@@ -2479,9 +2483,9 @@ MS-04's generators by path, as `tests/peak_memory.rs` does
 (`#[path = "../benches/support/inputs.rs"]`), builds `page_like()` and
 `photo_like()` — each asserting its own length and SHA-256 — deflates each at
 the ratio level through `tinker_pdf_filters`, and asserts
-`100 × len ≤ 102 × count` in integers against the two counts MS-04.10 commits
-beside the generators (H-112). No level-6 encoder runs: the counts are
-committed numbers.
+`100 × len ≤ 102 × count` in integers against the two counts committed beside
+the generators, `PAGE_LIKE_LEVEL_SIX.count` and `PHOTO_LIKE_LEVEL_SIX.count`
+(ruling 17). No level-6 encoder runs: the counts are committed numbers.
 
 #### The written bytes P-04.7 moves
 
