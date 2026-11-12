@@ -429,7 +429,7 @@ fn render(c: &mut Criterion) {
     );
     // Drawn at the image's own resolution, so each sample is converted once:
     // the unit is the image's samples.
-    group.operation(
+    group.calibrated(
         "a quarter-size ICC-based CMYK image to sRGB at 300 dpi",
         |op| {
             let cmyk_page = image_page(inputs::cmyk_page(4), SampleCodec::Stream);

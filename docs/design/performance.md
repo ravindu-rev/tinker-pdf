@@ -630,16 +630,18 @@ generated, or committed and read by path — from that directory, writing it
 there first if it is absent. Round 1 runs the head first, so the first
 process to need an input is the head's: all three builds are timed on the
 head's bytes, and each generator runs once in the whole run rather than once
-a process.
+a process. The calibration's input is the one left each build's own:
+`calibration.rs` is frozen, and `61adcde`'s figure for it measures the
+machine, which a later change to the head's builder must not move (H-77).
 An input a base or `61adcde` process cannot read leaves that operation's
 rounds missing on that side. MS-04 left this to MS-02 (its "Files" and
 "Risks"); it widens MS-04's directory from the CLI operations' files to
-every input, and MS-02.4 writes it.
+every input, and MS-02.4b writes it.
 
 A process that times one operation must build nothing for the rest of its
 group, so an operation's input and any state it starts from are built the
 first time criterion calls its routine and kept for the rest of the process
-(MS-02.4 again).
+(MS-02.4b again).
 
 #### The verdict
 
@@ -760,16 +762,18 @@ places.
 #### The head's bench files on `61adcde`
 
 - **The `cfg`**, `tinker_planning_baseline`, is set for that build alone,
-  through `RUSTFLAGS`, with no `-D warnings` beside it: `61adcde` is frozen,
-  and a lint a later stable adds must not fail it. Its `tpdf` builds in the
-  same target directory under the same flags, so the engine compiles once for
-  both. Under the `cfg` each bench
+  through `RUSTFLAGS` beside a `--check-cfg` naming it, with no
+  `-D warnings`: `61adcde` is frozen, and a lint a later stable adds must not
+  fail it. Its `tpdf` builds in the same target directory under the same
+  flags, so the engine compiles once for both. Under the `cfg` each bench
   file's operation bodies call `61adcde`'s facade; the generators need no
-  arm, calling only what that revision exposes (MS-04, "Files").
+  arm, calling only what that revision exposes (MS-04, "Files"). An
+  operation that revision lacks altogether is declared with
+  `Group::calibrated`, which the build leaves out.
 - **The declaration.** The head declares the `cfg` to `check-cfg` in
   `crates/tinker-pdf/Cargo.toml`, or `unexpected_cfgs` fails its clippy
-  under `-D warnings`. No `Cargo.toml` in the tree has a `[lints]` table or
-  declares a `cfg`.
+  under `-D warnings`: a `[lints.rust]` table, the one in the tree, standing
+  above the `[[bench]]` entries, so the copy takes the entries alone.
 - **The copy.** The head's `crates/tinker-pdf/benches/` replaces
   `61adcde`'s whole, `engine.rs` and `baseline.json` with it, and the head's
   `[[bench]]` entries replace that revision's one

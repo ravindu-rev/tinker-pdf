@@ -950,7 +950,9 @@ an operation of another group, or an iteration count missing or no number,
 fails by name. It reads no clock, so nothing timed reaches an instruction
 count of the process, and a run of `n + 1` less a run of `n` is one
 iteration's. Every operation is declared through the harness's
-`Group::operation`, so each runs both ways, and `cargo xtask baseline` refuses
+`Group::operation`, or through `Group::calibrated`, which declares through it
+outside the planning baseline's build, so each runs both ways, and
+`cargo xtask baseline` refuses
 a group file that reaches criterion's own `bench_function` or
 `benchmark_group` — all but `calibration.rs`, which is frozen and runs under
 criterion alone; its input and call are the text group's
@@ -1277,6 +1279,44 @@ the rounds cannot judge is refused rather than reported: an operation the
 head's lists hold and the head did not time, a floor or a held operation the
 planning baseline did not time, and a calibrated one beside which the planning
 baseline timed no calibration.
+
+**The planning baseline builds the head's bench files.** `61adcde` is checked
+out beside the head, its own `crates/tinker-pdf/benches/` replaced by the
+head's and its `[[bench]]` entry by the head's entries, and built under
+`--cfg tinker_planning_baseline`, which the head's `crates/tinker-pdf/Cargo.toml`
+declares to `check-cfg` and the planning build declares on its own command
+line. Under the `cfg` an operation's body calls what `61adcde`'s facade has:
+where the head calls what that revision lacks, an item marked with the `cfg`
+computes the same thing from what it has. An operation the planning baseline
+lacks altogether is declared through `Group::calibrated`, which that build
+leaves out, and its gate holds it against the calibration operation instead;
+an operation whose gate names `paired_with` is one the planning baseline
+cannot express, and its arm there runs the named operation of its group under
+its id. `cargo xtask baseline` holds each declaration to its gate: a
+calibrated operation is declared `calibrated`, every other through
+`operation`, and a pairing names another operation of its group that has a
+side of its own. The build sets no `-D warnings`, since a lint a later stable
+adds must not fail a frozen revision, and that revision's own `tpdf` builds in
+the same target directory under the same flags, for the CLI-marked
+operations. Nothing here is a spawner: the checkout and the builds are the
+local run's own commands.
+
+```sh
+git worktree add --detach ../planning 61adcde
+rm -r ../planning/crates/tinker-pdf/benches
+cp -r crates/tinker-pdf/benches ../planning/crates/tinker-pdf/benches
+sed -i '/^\[\[bench\]\]$/,$d' ../planning/crates/tinker-pdf/Cargo.toml
+sed -n '/^\[\[bench\]\]$/,$p' crates/tinker-pdf/Cargo.toml >> ../planning/crates/tinker-pdf/Cargo.toml
+cd ../planning
+export RUSTFLAGS="--cfg tinker_planning_baseline --check-cfg cfg(tinker_planning_baseline)"
+cargo build -p tpdf
+cargo test -p tinker-pdf --benches
+```
+
+The two `sed` lines rely on the `[[bench]]` entries being the last of each
+manifest. The last command runs every operation with a side on the planning
+baseline once, beside a debug `tpdf`; a timed run builds both with
+`--release`.
 
 **A pinned machine names its host.** An entry for one host held still
 carries `cpu`, that host's `/proc/cpuinfo` model name, and `held`, the

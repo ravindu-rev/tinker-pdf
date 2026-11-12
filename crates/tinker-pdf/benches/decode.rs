@@ -31,6 +31,29 @@ fn area((width, height): (u32, u32)) -> u64 {
     u64::from(width) * u64::from(height)
 }
 
+/// The generic page's parameters: no globals, and the work its decode may
+/// do measured against its output ceiling.
+#[cfg(not(tinker_planning_baseline))]
+fn jbig2_params(width: u32, height: u32) -> Jbig2Params<'static> {
+    Jbig2Params {
+        globals: &[],
+        width,
+        height,
+        work_ceiling: None,
+    }
+}
+
+/// The same parameters on the planning baseline, whose `Jbig2Params` has no
+/// work ceiling of its own.
+#[cfg(tinker_planning_baseline)]
+fn jbig2_params(width: u32, height: u32) -> Jbig2Params<'static> {
+    Jbig2Params {
+        globals: &[],
+        width,
+        height,
+    }
+}
+
 fn decode(c: &mut Criterion) {
     let jpeg_size = inputs::scan_part(2);
     let irreversible_size = inputs::scan_part(4);
@@ -128,12 +151,7 @@ fn decode(c: &mut Criterion) {
     let jbig2 = LazyCell::new(|| {
         let (width, height, bits) = &*scan;
         let jbig2 = inputs::jbig2(*width, *height, bits);
-        let params = Jbig2Params {
-            globals: &[],
-            width: *width,
-            height: *height,
-            work_ceiling: None,
-        };
+        let params = jbig2_params(*width, *height);
         let page = jbig2_decode(&jbig2, &params, CEILING, &mut Vec::new()).expect("decodes");
         let black_is_1: Vec<u8> = bits.iter().map(|b| !b).collect();
         assert!(
@@ -162,7 +180,7 @@ fn decode(c: &mut Criterion) {
             }
         });
     });
-    group.operation("LZW decode page-like data", |op| {
+    group.calibrated("LZW decode page-like data", |op| {
         op.per(Per::Bytes(5 * page_like.len() as u64));
         op.iter(|| {
             for _ in 0..5 {

@@ -335,7 +335,7 @@ fn layout(c: &mut Criterion) {
 
     // The generated books: a page a chapter, so thirty chapters against ten
     // is the linearity relation, each call's figure against the other's.
-    group.operation("open and paginate the 30-chapter book", |op| {
+    group.calibrated("open and paginate the 30-chapter book", |op| {
         let (bytes, _) = &*thirty;
         op.per(Per::Pages(30));
         op.iter(|| {
@@ -346,7 +346,7 @@ fn layout(c: &mut Criterion) {
             )
         });
     });
-    group.operation("render the 30-chapter book at 72 dpi", |op| {
+    group.calibrated("render the 30-chapter book at 72 dpi", |op| {
         render(op, &thirty.1, 30, 1)
     });
     group.operation("open and paginate the 10-chapter book", |op| {
@@ -367,7 +367,7 @@ fn layout(c: &mut Criterion) {
     });
 
     // Markup laid out and written as a PDF.
-    group.operation("the 20-page HTML report to PDF", |op| {
+    group.calibrated("the 20-page HTML report to PDF", |op| {
         let report = inputs::html_report();
         let page_box = inputs::default_box();
         let (_, laid) =
@@ -382,7 +382,7 @@ fn layout(c: &mut Criterion) {
             }
         });
     });
-    group.operation("the 20-page Markdown document to PDF", |op| {
+    group.calibrated("the 20-page Markdown document to PDF", |op| {
         let markdown = inputs::markdown();
         let markdown_doc =
             Document::open_markdown(markdown.as_bytes().to_vec(), &OpenOptions::default())

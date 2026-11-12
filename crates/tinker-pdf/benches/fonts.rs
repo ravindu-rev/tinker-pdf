@@ -96,7 +96,7 @@ fn fonts(c: &mut Criterion) {
     // First, because they have no unit: a throughput set on a group stays on
     // it for every operation after, and a shaped paragraph is none of the
     // units.
-    group.operation("shape 1000 characters of Latin", |op| {
+    group.calibrated("shape 1000 characters of Latin", |op| {
         let face = Sfnt::parse(&serif).expect("Liberation Serif parses");
         let latin_text = inputs::latin_paragraph();
         assert_shapes(&face, &latin_text, "Latin");
@@ -106,7 +106,7 @@ fn fonts(c: &mut Criterion) {
             }
         });
     });
-    group.operation("shape 1000 characters of Arabic", |op| {
+    group.calibrated("shape 1000 characters of Arabic", |op| {
         let arabic = inputs::shape_face("text-rendering-tests/fonts/TestShapeAran.ttf");
         let face = Sfnt::parse(&arabic).expect("TestShapeAran parses");
         let arabic_text = inputs::arabic_paragraph();
@@ -117,7 +117,7 @@ fn fonts(c: &mut Criterion) {
             }
         });
     });
-    group.operation("shape 1000 characters of Devanagari", |op| {
+    group.calibrated("shape 1000 characters of Devanagari", |op| {
         let devanagari = inputs::shape_face("devanagari/NotoSansDevanagari-Regular.ttf");
         let face = Sfnt::parse(&devanagari).expect("Noto Sans Devanagari parses");
         let devanagari_text = inputs::devanagari_paragraph();
@@ -158,7 +158,7 @@ fn fonts(c: &mut Criterion) {
             }
         });
     });
-    group.operation("outlines of every committed CFF program", |op| {
+    group.calibrated("outlines of every committed CFF program", |op| {
         let named = inputs::cff_programs();
         assert_eq!(named.len(), 193, "the committed CFF programs");
         let refused: Vec<&str> = named

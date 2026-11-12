@@ -30,7 +30,8 @@
 //! file opens one group,
 //! `Group::new(c, "<group>")`, named for its group, so every id is
 //! `<group>/<name>`, and declares each operation through
-//! [`Group::operation`], with what each iteration processes ([`Per`]) and its
+//! [`Group::operation`], or [`Group::calibrated`] for one the planning
+//! baseline lacks, with what each iteration processes ([`Per`]) and its
 //! routine on the [`Op`] it is handed. `baseline.json` lists the same names in the same order, each
 //! with its unit, what an iteration covers (`per_iteration`) and how many
 //! calls an iteration makes (`calls`). `cargo xtask baseline` holds the
@@ -72,6 +73,21 @@
 //! An operation whose iterations each take an input criterion leaves out of
 //! its time ([`Op::iter_batched`]) counts that setup too, since nothing
 //! outside the process can tell its instructions from the routine's.
+//!
+//! # The planning baseline
+//!
+//! Tier P holds the head against `61adcde`, the planning baseline, and the
+//! paired run builds this directory there in place of that revision's own
+//! benches, with the head's `[[bench]]` entries, under
+//! `--cfg tinker_planning_baseline`, which `Cargo.toml` declares to
+//! `check-cfg`. Under it an operation's body calls what `61adcde`'s facade
+//! has: where the head calls what that revision lacks, an item or arm
+//! marked with the `cfg` computes the same thing from what it has. An
+//! operation the planning baseline lacks altogether is declared with
+//! [`Group::calibrated`], which that build leaves out: its gate in
+//! `baseline.json` holds it against the calibration operation the planning
+//! baseline times instead. `cargo xtask baseline` holds each declaration to
+//! its gate.
 //!
 //! # The seven
 //!
@@ -253,6 +269,17 @@ impl<'c> Group<'c> {
              in that one's: declare its own, or move it before the first that has one"
         );
         self.united |= op.per;
+    }
+
+    /// The operation `name`, which the planning baseline lacks: declared as
+    /// [`Group::operation`] declares one, except in the planning baseline's
+    /// build (`tinker_planning_baseline`), which leaves it out, since its
+    /// gate in `baseline.json` holds it against the calibration operation
+    /// that build times instead.
+    pub fn calibrated(&mut self, name: &str, define: impl FnOnce(&mut Op<'_, 'c>)) {
+        if !cfg!(tinker_planning_baseline) {
+            self.operation(name, define);
+        }
     }
 
     /// The group's end: criterion's, or in count mode a failure naming the

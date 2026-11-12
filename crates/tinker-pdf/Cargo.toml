@@ -108,6 +108,15 @@ tinker-pdf-css = { workspace = true }
 # `ALLOWED` carries the argument for this one too.
 tinker-pdf-layout = { workspace = true }
 
+# The planning baseline, `61adcde`, builds the bench files below in place of
+# its own under `--cfg tinker_planning_baseline` (`benches/support/mod.rs`),
+# and a `cfg` rustc is not told of is an `unexpected_cfgs` warning, which
+# clippy's `-D warnings` fails. This table stands above the `[[bench]]`
+# entries because the planning build copies those entries alone, from the
+# first to the manifest's end.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(tinker_planning_baseline)"] }
+
 # Wall-clock benchmarks, outside the suite on purpose — see the module note in
 # `benches/support/mod.rs`. One `[[bench]]` a group, each `benches/<name>.rs`,
 # so `cargo bench --bench <name>` measures one group; `cargo xtask baseline`

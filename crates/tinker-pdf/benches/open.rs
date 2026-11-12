@@ -116,12 +116,32 @@ fn open(c: &mut Criterion) {
                         .expect("page one")
                         .render(&RenderOptions::default()),
                 );
-                source.link_time(Duration::from_millis(50), 10_000_000)
+                link_time(&source)
             });
         },
     );
 
     group.finish();
+}
+
+/// What `source`'s reads cost over the slow link: 50 ms a request at
+/// 10 Mbit/s.
+#[cfg(not(tinker_planning_baseline))]
+fn link_time(source: &CountingSource<SliceSource>) -> Duration {
+    source.link_time(Duration::from_millis(50), 10_000_000)
+}
+
+/// The same link's cost on the planning baseline, whose `CountingSource`
+/// counts the reads and their bytes and has no `link_time`: the reads times
+/// the latency, and each byte at 800 ns, as `link_time` sums them.
+#[cfg(tinker_planning_baseline)]
+fn link_time(source: &CountingSource<SliceSource>) -> Duration {
+    let reads = u32::try_from(source.reads()).unwrap_or(u32::MAX);
+    Duration::from_millis(50)
+        .saturating_mul(reads)
+        .saturating_add(Duration::from_nanos(
+            source.bytes_read().saturating_mul(800),
+        ))
 }
 
 /// `small(pages)`, its page count asserted.

@@ -236,6 +236,11 @@ pub struct Relation {
 pub struct Gate {
     /// A floor, held, or a calibrated target.
     pub against: Against,
+    /// The operation of its group the planning baseline runs in its place,
+    /// under its id, where that revision cannot express it and the Gate
+    /// column pairs it with another (`paired_with`); `None` where the
+    /// planning baseline runs the operation itself.
+    pub paired_with: Option<String>,
     /// Each relation, in the order the entry gives them.
     pub relations: Vec<Relation>,
 }
@@ -776,9 +781,11 @@ const AGAINST: [&str; 4] = ["floor", "held", "calibrated_ms", "calibrated_per_se
 /// `none`): exactly one of `floor`, a number of 1 or more; `held`, `true`;
 /// `calibrated_ms`, a target above 0 in milliseconds a call; and
 /// `calibrated_per_second`, a target above 0 in its unit a second, read as
-/// the milliseconds a call takes at that rate; and `relations`, an array of
-/// objects each naming the other operation in `to` and one bound above 0,
-/// `at_most` or `speedup_at_least`. Why it is outside the format, otherwise.
+/// the milliseconds a call takes at that rate; beside a floor or held,
+/// `paired_with`, the operation of its group the planning baseline runs in
+/// its place; and `relations`, an array of objects each naming the other
+/// operation in `to` and one bound above 0, `at_most` or
+/// `speedup_at_least`. Why it is outside the format, otherwise.
 fn gate_in(object: &str, per_call: Option<f64>) -> Result<Gate, String> {
     // The relations' own keys never reach the gate's, wherever the array
     // stands among them.
@@ -886,11 +893,30 @@ fn gate_in(object: &str, per_call: Option<f64>) -> Result<Gate, String> {
             out.push(Relation { to, bound });
         }
     }
+    let paired_with = match own
+        .contains(PAIRED_WITH)
+        .then(|| string_after(own, PAIRED_WITH).filter(|name| !name.is_empty()))
+    {
+        None => None,
+        Some(None) => return Err("`paired_with` names no operation".to_string()),
+        Some(Some(_)) if matches!(against, Against::Calibrated(_)) => {
+            return Err(
+                "a calibrated operation has no side on the planning baseline, so \
+                 nothing runs in its place"
+                    .to_string(),
+            )
+        }
+        Some(named) => named,
+    };
     Ok(Gate {
         against,
+        paired_with,
         relations: out,
     })
 }
+
+/// The key the operation a planning baseline runs in another's place follows.
+const PAIRED_WITH: &str = "\"paired_with\":";
 
 /// The key a gate's relations follow.
 const RELATIONS: &str = "\"relations\":";
@@ -1279,18 +1305,51 @@ pub fn literals_passed_to(source: &str, method: &str) -> Vec<String> {
 /// no method's, such as [`GROUP_OPENED`].
 #[must_use]
 pub fn literals_after(source: &str, prefix: &str) -> Vec<String> {
+    literals_at(source, prefix)
+        .into_iter()
+        .map(|(_, literal)| literal)
+        .collect()
+}
+
+/// [`literals_after`]'s literals, each with the byte offset in `source` of
+/// its opening quote.
+fn literals_at(source: &str, prefix: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
-    let mut rest = source;
-    while let Some(at) = rest.find(prefix) {
-        rest = rest[at + prefix.len()..].trim_start();
+    let mut from = 0;
+    while let Some(at) = source[from..].find(prefix) {
+        from += at + prefix.len();
+        let rest = source[from..].trim_start();
         let Some(literal) = rest.strip_prefix('"') else {
             continue;
         };
+        let opened = source.len() - rest.len();
         let Some(end) = literal.find('"') else { break };
-        out.push(literal[..end].to_string());
-        rest = &literal[end..];
+        out.push((opened, literal[..end].to_string()));
+        from = opened + 1 + end;
     }
     out
+}
+
+/// Each operation a group file declares through the harness, in the order
+/// it declares them, and whether it declares it with `calibrated`, which the
+/// planning baseline's build leaves out (`benches/support/mod.rs`): the
+/// literals handed to `.operation(` and to `.calibrated(`.
+#[must_use]
+pub fn declared(source: &str) -> Vec<(String, bool)> {
+    let mut found: Vec<(usize, String, bool)> = literals_at(source, ".operation(")
+        .into_iter()
+        .map(|(at, name)| (at, name, false))
+        .chain(
+            literals_at(source, ".calibrated(")
+                .into_iter()
+                .map(|(at, name)| (at, name, true)),
+        )
+        .collect();
+    found.sort_by_key(|(at, ..)| *at);
+    found
+        .into_iter()
+        .map(|(_, name, calibrated)| (name, calibrated))
+        .collect()
 }
 
 /// How a group file opens its group: the harness's own, whose operations run
@@ -1405,9 +1464,11 @@ fn once(names: &[String]) -> Vec<&String> {
 ///
 /// The files carry one list of operations a group — each `[[bench]]` names a
 /// group file, the file defines the group's operations, and the baseline lists
-/// them and records a figure for each or names it unmeasured — and nothing
-/// else makes them agree. So the agreement is checked where a build can fail
-/// on it.
+/// them, gates each and records a figure for each or names it unmeasured —
+/// and nothing else makes them agree. So the agreement is checked where a
+/// build can fail on it, each file's declarations held to the gates as well:
+/// a calibrated operation is declared `calibrated`, which the planning
+/// baseline's build leaves out, and every other has a side there.
 pub fn check(root: &Path) -> Result<(), Vec<String>> {
     let mut problems = Vec::new();
 
@@ -1424,8 +1485,10 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
     }
 
     // Each `[[bench]]` is a group file that opens its group and names its
-    // operations, and each group file is a `[[bench]]`.
+    // operations, and each group file is a `[[bench]]`. Beside each file's
+    // names, the ones it declares `calibrated`.
     let mut defined: Vec<(String, String, Vec<String>)> = Vec::new();
+    let mut left_to_calibration: Vec<(String, String, Vec<String>)> = Vec::new();
     for target in &targets {
         let file = format!("{BENCH_DIR}/{target}.rs");
         let source = match std::fs::read_to_string(root.join(&file)) {
@@ -1470,11 +1533,23 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
                 }
             }
         }
-        let names = if frozen {
+        let declarations: Vec<(String, bool)> = if frozen {
             literals_passed_to(&source, "bench_function")
+                .into_iter()
+                .map(|name| (name, false))
+                .collect()
         } else {
-            literals_passed_to(&source, "operation")
+            declared(&source)
         };
+        let names: Vec<String> = declarations.iter().map(|(name, _)| name.clone()).collect();
+        left_to_calibration.push((
+            target.clone(),
+            file.clone(),
+            declarations
+                .into_iter()
+                .filter_map(|(name, calibrated)| calibrated.then_some(name))
+                .collect(),
+        ));
         if names.is_empty() {
             problems.push(format!(
                 "`{file}` names no operation; a benchmark file with nothing in it \
@@ -1613,6 +1688,64 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
                 };
                 if let Against::Calibrated(_) = gate.against {
                     calibrated.push(list.id(&operation.name));
+                }
+                // The other operation's figure the planning baseline takes in
+                // this one's place is one of its group.
+                if let Some(paired) = &gate.paired_with {
+                    let other = list.operations.iter().find(|other| &other.name == paired);
+                    if paired == &operation.name {
+                        problems.push(format!(
+                            "the `{}` list pairs `{}` with itself",
+                            list.name, operation.name
+                        ));
+                    } else if other.is_none() {
+                        problems.push(format!(
+                            "the `{}` list pairs `{}` with `{paired}`, which it does not \
+                             hold; the planning baseline runs an operation of the group \
+                             in its place",
+                            list.name, operation.name
+                        ));
+                    } else if other
+                        .and_then(|other| other.gate.as_ref())
+                        .is_some_and(|other| matches!(other.against, Against::Calibrated(_)))
+                    {
+                        problems.push(format!(
+                            "the `{}` list pairs `{}` with `{paired}`, which the planning \
+                             baseline lacks: its gate is calibrated",
+                            list.name, operation.name
+                        ));
+                    }
+                }
+                // A calibrated operation is one the planning baseline lacks,
+                // so its file leaves it out of that build, and every other
+                // one has a side there.
+                let declared_calibrated = left_to_calibration
+                    .iter()
+                    .find(|(group, ..)| group == &list.name)
+                    .map(|(_, file, names)| (file, names.contains(&operation.name)));
+                match (declared_calibrated, gate.against) {
+                    (Some((file, false)), Against::Calibrated(_))
+                        if defined.iter().any(|(group, _, names)| {
+                            group == &list.name && names.contains(&operation.name)
+                        }) =>
+                    {
+                        problems.push(format!(
+                            "`{file}` declares `{}` with `operation` and its gate in \
+                             {BASELINE_PATH} is calibrated: the planning baseline lacks \
+                             it, so the file declares it with `calibrated`, which that \
+                             build leaves out",
+                            operation.name
+                        ));
+                    }
+                    (Some((file, true)), Against::Floor(_) | Against::Held) => {
+                        problems.push(format!(
+                            "`{file}` declares `{}` with `calibrated`, which the planning \
+                             baseline's build leaves out, and its gate in {BASELINE_PATH} \
+                             holds it against that baseline's own figure for it",
+                            operation.name
+                        ));
+                    }
+                    _ => {}
                 }
                 for relation in &gate.relations {
                     if relation.to == operation.name {
@@ -2018,9 +2151,16 @@ pub fn against_planning(
             }
             // What the planning baseline's side of it is: its own figure
             // for the operation, or its calibration's.
+            let in_its_place = gate.paired_with.as_ref().map_or(String::new(), |other| {
+                format!(", the {PLANNING} running `{}` in its place", list.id(other))
+            });
             let (against, bound, named) = match gate.against {
-                Against::Floor(floor) => (id.clone(), 1.0 / floor, format!("floor {floor}")),
-                Against::Held => (id.clone(), 1.0, "held".to_string()),
+                Against::Floor(floor) => (
+                    id.clone(),
+                    1.0 / floor,
+                    format!("floor {floor}{in_its_place}"),
+                ),
+                Against::Held => (id.clone(), 1.0, format!("held{in_its_place}")),
                 Against::Calibrated(ms) => {
                     let calibration = calibration.ok_or_else(|| {
                         format!("`{id}` is calibrated, and the head's lists name no calibration")
@@ -3098,10 +3238,11 @@ fn render(c: &mut Criterion) {
     }
 
     /// Count mode runs what `Group::operation` declares and nothing else, so
-    /// its table is the names each group file hands `operation`. In the tree
-    /// that table is every group's list, name for name and in order, but the
-    /// frozen group's, whose file declares nothing through it; and a group
-    /// file that reaches criterion's own `bench_function` or
+    /// its table is the names each group file hands `operation`, directly or
+    /// through `calibrated`, which declares through it on the head. In the
+    /// tree that table is every group's list, name for name and in order, but
+    /// the frozen group's, whose file declares nothing through it; and a
+    /// group file that reaches criterion's own `bench_function` or
     /// `benchmark_group` is refused, by the call.
     #[test]
     fn every_operation_runs_in_count_mode() {
@@ -3112,7 +3253,10 @@ fn render(c: &mut Criterion) {
         for list in &lists {
             let file = format!("{BENCH_DIR}/{}.rs", list.name);
             let source = std::fs::read_to_string(root.join(&file)).expect("the group's file");
-            let declared = literals_passed_to(&source, "operation");
+            let declared: Vec<String> = declared(&source)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
             if FROZEN.contains(&list.name.as_str()) {
                 assert!(
                     declared.is_empty(),
@@ -4661,7 +4805,211 @@ fn render(c: &mut Criterion) {
                     },
                     "it gives no `planning_ms` above 0",
                 ),
+                (
+                    "a calibrated operation paired with another",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            "\"gate\": { \"held\": true }",
+                            "\"gate\": { \"calibrated_ms\": 5, \"paired_with\": \
+                             \"render a full-page axial shading at 150 dpi\" }",
+                        );
+                    },
+                    "a calibrated operation has no side on the planning baseline",
+                ),
             ],
+        );
+    }
+
+    /// The calibration [`Tree::agreeing`]'s lists name in the shapes below:
+    /// its render group's held operation.
+    const TREE_CALIBRATION: &str = "  \"calibration\": { \"operation\": \
+                                    \"render/render text at 150 dpi\", \"planning_ms\": 37.6 },\n  \
+                                    \"groups\": [";
+
+    /// The planning baseline times every operation its gate holds against
+    /// it and leaves each calibrated one to the calibration. In the committed
+    /// tree a calibrated operation is declared with `calibrated`, which that
+    /// build leaves out, every other with `operation` (the frozen group's
+    /// through criterion's own call, which both builds run), and a pairing
+    /// names another operation of its group with a side of its own. And
+    /// `cargo xtask baseline` refuses each side removed: an operation held
+    /// against the baseline left out of its build, a calibrated one given a
+    /// side there, and a pairing with an operation its group does not hold,
+    /// with itself, or with one the planning baseline lacks.
+    #[test]
+    fn every_operation_has_a_baseline_side_or_a_calibration() {
+        let root = repo_root();
+        let text = std::fs::read_to_string(root.join(BASELINE_PATH)).expect("the committed file");
+        let lists = groups(&text, BASELINE_PATH).expect("it parses");
+        let (mut sides, mut calibrated) = (0, 0);
+        let mut wrong = Vec::new();
+        for list in &lists {
+            let file = format!("{BENCH_DIR}/{}.rs", list.name);
+            let source = std::fs::read_to_string(root.join(&file)).expect("the group's file");
+            let declarations: Vec<(String, bool)> = if FROZEN.contains(&list.name.as_str()) {
+                literals_passed_to(&source, "bench_function")
+                    .into_iter()
+                    .map(|name| (name, false))
+                    .collect()
+            } else {
+                declared(&source)
+            };
+            for operation in &list.operations {
+                let gate = operation.gate.as_ref().expect("every operation is gated");
+                let left_out = declarations
+                    .iter()
+                    .find(|(name, _)| name == &operation.name)
+                    .map(|(_, left_out)| *left_out);
+                match (gate.against, left_out) {
+                    (Against::Calibrated(_), Some(true)) => calibrated += 1,
+                    (Against::Floor(_) | Against::Held, Some(false)) => sides += 1,
+                    (against, left_out) => wrong.push(format!(
+                        "{}/{}: {against:?}, left out of the planning build: {left_out:?}",
+                        list.name, operation.name
+                    )),
+                }
+                if let Some(paired) = &gate.paired_with {
+                    let side = list
+                        .operations
+                        .iter()
+                        .find(|other| &other.name == paired)
+                        .and_then(|other| other.gate.as_ref())
+                        .is_some_and(|other| !matches!(other.against, Against::Calibrated(_)));
+                    if paired == &operation.name || !side {
+                        wrong.push(format!(
+                            "{}/{} is paired with `{paired}`",
+                            list.name, operation.name
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        let listed: usize = lists.iter().map(|list| list.operations.len()).sum();
+        assert_eq!(sides + calibrated, listed);
+        assert!(
+            sides > 0 && calibrated > 0,
+            "{sides} with a side, {calibrated} calibrated"
+        );
+
+        refuses(
+            "sides",
+            &[
+                (
+                    "an operation held against the planning baseline, left out of its build",
+                    |tree| {
+                        let source = tree.file("render.rs");
+                        *source = source.replace(
+                            "group.operation(\"render text at 150 dpi\"",
+                            "group.calibrated(\"render text at 150 dpi\"",
+                        );
+                    },
+                    "declares `render text at 150 dpi` with `calibrated`, which the planning \
+                     baseline's build leaves out",
+                ),
+                (
+                    "a calibrated operation given a side on the planning baseline",
+                    |tree| {
+                        tree.baseline = tree
+                            .baseline
+                            .replace(
+                                "  \"groups\": [",
+                                "  \"calibration\": { \"operation\": \
+                                 \"open/open a 3-page document\", \"planning_ms\": 37.6 },\n  \
+                                 \"groups\": [",
+                            )
+                            .replace(
+                                "\"gate\": { \"held\": true }",
+                                "\"gate\": { \"calibrated_ms\": 5 }",
+                            );
+                    },
+                    "declares `render text at 150 dpi` with `operation` and its gate in \
+                     crates/tinker-pdf/benches/baseline.json is calibrated",
+                ),
+                (
+                    "a pairing with an operation the group does not hold",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            "\"gate\": { \"floor\": 1, \"relations\"",
+                            "\"gate\": { \"floor\": 1, \"paired_with\": \
+                             \"open a 3-page document\", \"relations\"",
+                        );
+                    },
+                    "pairs `render a full-page axial shading at 150 dpi` with `open a \
+                     3-page document`, which it does not hold",
+                ),
+                (
+                    "a pairing with itself",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            "\"gate\": { \"floor\": 1, \"relations\"",
+                            "\"gate\": { \"floor\": 1, \"paired_with\": \
+                             \"render a full-page axial shading at 150 dpi\", \"relations\"",
+                        );
+                    },
+                    "pairs `render a full-page axial shading at 150 dpi` with itself",
+                ),
+                (
+                    "a pairing with an operation the planning baseline lacks",
+                    |tree| {
+                        tree.baseline = tree
+                            .baseline
+                            .replace(
+                                "  \"groups\": [",
+                                "  \"calibration\": { \"operation\": \
+                                 \"open/open a 3-page document\", \"planning_ms\": 37.6 },\n  \
+                                 \"groups\": [",
+                            )
+                            .replace(
+                                "\"gate\": { \"held\": true }",
+                                "\"gate\": { \"calibrated_ms\": 5 }",
+                            )
+                            .replace(
+                                "\"gate\": { \"floor\": 1, \"relations\"",
+                                "\"gate\": { \"floor\": 1, \"paired_with\": \
+                                 \"render text at 150 dpi\", \"relations\"",
+                            );
+                        let source = tree.file("render.rs");
+                        *source = source.replace(
+                            "group.operation(\"render text at 150 dpi\"",
+                            "group.calibrated(\"render text at 150 dpi\"",
+                        );
+                    },
+                    "with `render text at 150 dpi`, which the planning baseline lacks",
+                ),
+            ],
+        );
+
+        // Their neighbour, which passes: a calibrated operation declared with
+        // `calibrated` against a calibration with a side, and a pairing with
+        // an operation of the group that has one.
+        let mut tree = Tree::agreeing();
+        tree.baseline = tree
+            .baseline
+            .replace("  \"groups\": [", TREE_CALIBRATION)
+            .replacen(
+                "\"gate\": { \"floor\": 1 }",
+                "\"gate\": { \"calibrated_ms\": 5 }",
+                1,
+            )
+            .replace(
+                "\"gate\": { \"floor\": 1, \"relations\"",
+                "\"gate\": { \"floor\": 1, \"paired_with\": \"render text at 150 dpi\", \
+                 \"relations\"",
+            );
+        let source = tree.file("open.rs");
+        *source = source.replace(
+            "group.operation(\"open a 3-page document\"",
+            "group.calibrated(\"open a 3-page document\"",
+        );
+        assert_eq!(tree.problems("sided"), Vec::<String>::new());
+        let parsed = groups(&tree.baseline, "x").expect("it parses");
+        assert_eq!(
+            parsed[1].operations[1]
+                .gate
+                .as_ref()
+                .and_then(|gate| gate.paired_with.as_deref()),
+            Some("render text at 150 dpi")
         );
     }
 }
