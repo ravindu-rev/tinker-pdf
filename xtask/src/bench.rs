@@ -71,16 +71,30 @@
 //! hole the entry names is one nobody can miss. [`check`] holds the
 //! `[[bench]]` entries, each file's names, its list and every machine entry to
 //! each other.
+//!
+//! # Why the gates sit in the lists
+//!
+//! Tier P states every target against one revision, `61adcde`, the planning
+//! baseline, and its Gate column says how a run on any machine checks it: a
+//! factor floor, held, a target calibrated against an operation the planning
+//! baseline times beside it, or a relation between two operations of one
+//! build. Those belong to an operation and not to a machine, so each
+//! operation's list entry carries its own [`Gate`], where the machine reader,
+//! which cuts its entries at `"machine":` and `"id":`, never reaches it.
+//! [`check`] refuses an operation with no gate, so none joins the set unheld
+//! against the baseline, and [`against_planning`] holds a head's rounds to the
+//! planning baseline's by them.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Where the committed baseline lives.
 ///
-/// Hand-written, and key order is load-bearing. The lists come first and the
-/// machines after them: [`parse`] reads machines only after `"machines":` and
-/// [`groups`] reads lists only before it, so no list entry can fall into a
-/// machine's chunk. Within the machines, `"machine"` is deliberately the first
+/// Hand-written, and key order is load-bearing. The calibration comes first,
+/// then the lists, and the machines after them: [`calibration`] reads only
+/// what lies before `"groups":`, [`parse`] reads machines only after
+/// `"machines":` and [`groups`] reads lists only before it, so no list entry,
+/// and no gate inside one, can fall into a machine's chunk. Within the machines, `"machine"` is deliberately the first
 /// key of every entry: [`parse`] cuts them into entries at that key, so a
 /// field written *above* it falls in the previous entry's chunk and is refused
 /// as absent; an entry's `"unmeasured"` comes before its `"operations"`, which
@@ -159,6 +173,82 @@ pub struct Listed {
     /// words, from the entry's `outside_window`; `None` for every
     /// operation sized inside it, which `--sizes` holds there.
     pub outside_window: Option<String>,
+    /// What the planning baseline pair holds it to, from the entry's
+    /// `gate`: tier P's Gate column. `None` where the entry has none, which
+    /// [`check`] refuses in the tree and a side read for its `calls` alone
+    /// never asks for.
+    pub gate: Option<Gate>,
+}
+
+/// What an operation's time is held to against the planning baseline,
+/// `61adcde`, in the paired run that builds it beside the head: tier P's
+/// Gate column, transcribed into the operation's `gate`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Against {
+    /// A factor floor: the head's per-call time over the planning
+    /// baseline's, round by round, at most 1 ÷ the floor. Floors start at
+    /// 1, a P row raises its operations' to the column's factors in the
+    /// commit that closes it, and only the owner lowers one (H-78).
+    Floor(f64),
+    /// Held: a floor of 1 that no row raises.
+    Held,
+    /// Calibrated, for an operation the planning baseline lacks: its target
+    /// in milliseconds on the planning machine, held as that fraction of the
+    /// [`Calibration`] operation the planning baseline timed in the same
+    /// round.
+    Calibrated(f64),
+}
+
+/// How one operation's per-call time is held to another's of its group,
+/// both timed by the head in the same round.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Bound {
+    /// Its time at most this many times the other's.
+    AtMost(f64),
+    /// At least this many times as fast as the other: the other's time at
+    /// least this many times its own.
+    SpeedupAtLeast(f64),
+}
+
+impl Bound {
+    /// The most its time may be over the other's.
+    #[must_use]
+    pub fn limit(self) -> f64 {
+        match self {
+            Bound::AtMost(times) => times,
+            Bound::SpeedupAtLeast(times) => 1.0 / times,
+        }
+    }
+}
+
+/// A relation: the other operation of the group, and the bound.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Relation {
+    /// The other operation's name in the group.
+    pub to: String,
+    /// What the two per-call times are held to.
+    pub bound: Bound,
+}
+
+/// One operation's gate: what holds it against the planning baseline, and
+/// its relations to the other operations of its group.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gate {
+    /// A floor, held, or a calibrated target.
+    pub against: Against,
+    /// Each relation, in the order the entry gives them.
+    pub relations: Vec<Relation>,
+}
+
+/// The operation every calibrated target is a fraction of, named once
+/// ahead of the groups: the planning baseline's figure for it is what a
+/// target in milliseconds was stated against.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Calibration {
+    /// Its id, `<group>/<name>`.
+    pub operation: String,
+    /// Its time on the planning machine, in milliseconds.
+    pub planning_ms: f64,
 }
 
 /// One group's list of operations, in the order its file declares them.
@@ -320,6 +410,17 @@ pub enum BaselineError {
         /// Which field.
         key: &'static str,
     },
+    /// A listed operation's `gate` is there and outside the format.
+    Gate {
+        /// Which group's list.
+        group: String,
+        /// Which operation.
+        name: String,
+        /// What is wrong with it.
+        why: String,
+    },
+    /// The calibration named ahead of the groups is outside the format.
+    Calibration(String),
 }
 
 impl core::fmt::Display for BaselineError {
@@ -409,6 +510,14 @@ impl core::fmt::Display for BaselineError {
                     "the `{group}` list holds an operation with no readable `{key}`"
                 ),
             },
+            BaselineError::Gate { group, name, why } => write!(
+                f,
+                "the `{group}` list gives `{name}` a gate outside the format: {why}"
+            ),
+            BaselineError::Calibration(why) => write!(
+                f,
+                "the calibration ahead of the groups is outside the format: {why}"
+            ),
         }
     }
 }
@@ -611,6 +720,20 @@ pub fn groups(text: &str, path: &str) -> Result<Vec<Group>, BaselineError> {
             };
             let outside_window = string_after(entry, "\"outside_window\":")
                 .filter(|reason| !reason.trim().is_empty());
+            let per_call = (unit != Unit::None).then(|| per_iteration as f64 / calls as f64);
+            let gate = match entry.find(GATE) {
+                Some(at) => Some(
+                    object_at(&entry[at + GATE.len()..])
+                        .ok_or_else(|| "no object follows `gate`".to_string())
+                        .and_then(|(object, _)| gate_in(object, per_call))
+                        .map_err(|why| BaselineError::Gate {
+                            group: group.clone(),
+                            name: name.clone(),
+                            why,
+                        })?,
+                ),
+                None => None,
+            };
             operations.push(Listed {
                 name,
                 unit,
@@ -618,6 +741,7 @@ pub fn groups(text: &str, path: &str) -> Result<Vec<Group>, BaselineError> {
                 calls,
                 paired_band,
                 outside_window,
+                gate,
             });
         }
         if operations.is_empty() {
@@ -635,6 +759,198 @@ pub fn groups(text: &str, path: &str) -> Result<Vec<Group>, BaselineError> {
         return Err(BaselineError::NoGroups(path.to_string()));
     }
     Ok(groups)
+}
+
+/// The key an operation's gate follows in its list entry.
+const GATE: &str = "\"gate\":";
+
+/// The key the calibration follows, ahead of the groups.
+const CALIBRATION: &str = "\"calibration\":";
+
+/// The keys of which a gate names exactly one: what holds it against the
+/// planning baseline.
+const AGAINST: [&str; 4] = ["floor", "held", "calibrated_ms", "calibrated_per_second"];
+
+/// One gate, read from the text inside its braces, for an operation one
+/// call of which processes `per_call` of its unit (`None` for the unit
+/// `none`): exactly one of `floor`, a number of 1 or more; `held`, `true`;
+/// `calibrated_ms`, a target above 0 in milliseconds a call; and
+/// `calibrated_per_second`, a target above 0 in its unit a second, read as
+/// the milliseconds a call takes at that rate; and `relations`, an array of
+/// objects each naming the other operation in `to` and one bound above 0,
+/// `at_most` or `speedup_at_least`. Why it is outside the format, otherwise.
+fn gate_in(object: &str, per_call: Option<f64>) -> Result<Gate, String> {
+    // The relations' own keys never reach the gate's, wherever the array
+    // stands among them.
+    let (own, relations) = match object.find(RELATIONS) {
+        Some(at) => {
+            let (inside, after) = enclosed(&object[at + RELATIONS.len()..], '[', ']')
+                .ok_or_else(|| "no array follows `relations`".to_string())?;
+            (format!("{}{after}", &object[..at]), Some(inside))
+        }
+        None => (object.to_string(), None),
+    };
+    let own = own.as_str();
+    let named: Vec<&str> = AGAINST
+        .into_iter()
+        .filter(|key| own.contains(&format!("\"{key}\":")))
+        .collect();
+    let against = match named.as_slice() {
+        ["floor"] => match number_after(own, "floor") {
+            Some(floor) if floor >= 1.0 => Against::Floor(floor),
+            Some(floor) => {
+                return Err(format!(
+                    "a floor of {floor}, under 1, lets it lose time against the planning \
+                     baseline, which only the owner grants (H-78)"
+                ))
+            }
+            None => return Err("`floor` is no number".to_string()),
+        },
+        ["held"] => {
+            let at = own.find("\"held\":").unwrap_or_default() + "\"held\":".len();
+            if !own[at..].trim_start().starts_with("true") {
+                return Err("`held` is not `true`".to_string());
+            }
+            Against::Held
+        }
+        ["calibrated_ms"] => match number_after(own, "calibrated_ms") {
+            Some(ms) if ms > 0.0 => Against::Calibrated(ms),
+            _ => return Err("`calibrated_ms` is no number above 0".to_string()),
+        },
+        ["calibrated_per_second"] => {
+            let Some(per_call) = per_call else {
+                return Err(
+                    "a rate is a quantity a second, and the unit `none` counts none: \
+                     give `calibrated_ms`"
+                        .to_string(),
+                );
+            };
+            match number_after(own, "calibrated_per_second") {
+                Some(rate) if rate > 0.0 => Against::Calibrated(per_call / rate * 1_000.0),
+                _ => return Err("`calibrated_per_second` is no number above 0".to_string()),
+            }
+        }
+        [] => {
+            return Err(format!(
+                "it names none of {}, so nothing holds it against the planning baseline",
+                AGAINST.map(|key| format!("`{key}`")).join(", ")
+            ))
+        }
+        _ => {
+            return Err(format!(
+                "it names {}, and an operation is held one way",
+                named
+                    .iter()
+                    .map(|key| format!("`{key}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ))
+        }
+    };
+    let mut out = Vec::new();
+    if let Some(mut rest) = relations {
+        loop {
+            rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == ',');
+            if rest.is_empty() {
+                break;
+            }
+            let (relation, after) =
+                object_at(rest).ok_or_else(|| "a relation is no object".to_string())?;
+            rest = after;
+            let to = string_after(relation, "\"to\":")
+                .filter(|to| !to.is_empty())
+                .ok_or_else(|| "a relation names no operation in `to`".to_string())?;
+            let bound = match (
+                relation
+                    .contains("\"at_most\":")
+                    .then(|| number_after(relation, "at_most")),
+                relation
+                    .contains("\"speedup_at_least\":")
+                    .then(|| number_after(relation, "speedup_at_least")),
+            ) {
+                (Some(Some(times)), None) if times > 0.0 => Bound::AtMost(times),
+                (None, Some(Some(times))) if times > 0.0 => Bound::SpeedupAtLeast(times),
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "the relation to `{to}` names both `at_most` and \
+                         `speedup_at_least`"
+                    ))
+                }
+                _ => {
+                    return Err(format!(
+                        "the relation to `{to}` names no bound above 0, `at_most` or \
+                         `speedup_at_least`"
+                    ))
+                }
+            };
+            out.push(Relation { to, bound });
+        }
+    }
+    Ok(Gate {
+        against,
+        relations: out,
+    })
+}
+
+/// The key a gate's relations follow.
+const RELATIONS: &str = "\"relations\":";
+
+/// The text inside the braces of the object that opens `text`, whitespace
+/// before it allowed, and what follows its closing brace; `None` when no
+/// object opens there or it never closes.
+fn object_at(text: &str) -> Option<(&str, &str)> {
+    enclosed(text, '{', '}')
+}
+
+/// The text between `open`, which opens `text` once whitespace is passed,
+/// and the `close` that matches it, and what follows that; `None` when
+/// `open` is not there or never closes. A character inside a string
+/// literal is the string's.
+fn enclosed(text: &str, open: char, close: char) -> Option<(&str, &str)> {
+    let body = text.trim_start().strip_prefix(open)?;
+    let mut depth = 1usize;
+    let mut quoted = false;
+    for (at, c) in body.char_indices() {
+        if c == '"' {
+            quoted = !quoted;
+        } else if quoted {
+            continue;
+        } else if c == open {
+            depth += 1;
+        } else if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some((&body[..at], &body[at + c.len_utf8()..]));
+            }
+        }
+    }
+    None
+}
+
+/// Reads the calibration the committed baseline names ahead of its groups,
+/// `"calibration": { "operation": "<group>/<name>", "planning_ms": <ms> }`,
+/// or `None` when it names none.
+pub fn calibration(text: &str) -> Result<Option<Calibration>, BaselineError> {
+    let end = text
+        .find("\"groups\":")
+        .or_else(|| text.find(MACHINES))
+        .unwrap_or(text.len());
+    let Some(at) = text[..end].find(CALIBRATION) else {
+        return Ok(None);
+    };
+    let refused = |why: &str| BaselineError::Calibration(why.to_string());
+    let (object, _) = object_at(&text[at + CALIBRATION.len()..end])
+        .ok_or_else(|| refused("no object follows `calibration`"))?;
+    let operation = string_after(object, "\"operation\":")
+        .filter(|operation| operation.contains('/'))
+        .ok_or_else(|| refused("it names no operation as `<group>/<name>` in `operation`"))?;
+    let planning_ms = number_after(object, "planning_ms")
+        .filter(|ms| *ms > 0.0)
+        .ok_or_else(|| refused("it gives no `planning_ms` above 0"))?;
+    Ok(Some(Calibration {
+        operation,
+        planning_ms,
+    }))
 }
 
 /// The first string literal after `key`, or after the cursor when `key` is
@@ -1274,6 +1590,85 @@ pub fn check(root: &Path) -> Result<(), Vec<String>> {
                 ));
             }
         }
+
+        // Each operation's gate, tier P's Gate column: one for every
+        // operation, each relation to another of its group, and a
+        // calibrated one against a calibration the file names.
+        let calibration = calibration(&text)
+            .map_err(|error| problems.push(error.to_string()))
+            .ok()
+            .flatten();
+        let mut calibrated = Vec::new();
+        for list in lists {
+            for operation in &list.operations {
+                let Some(gate) = &operation.gate else {
+                    problems.push(format!(
+                        "the `{}` list gives `{}` no gate; every operation is held \
+                         against the planning baseline as tier P's Gate column holds \
+                         it, by a floor, held or a calibrated target, or the paired \
+                         run has nothing to hold it to",
+                        list.name, operation.name
+                    ));
+                    continue;
+                };
+                if let Against::Calibrated(_) = gate.against {
+                    calibrated.push(list.id(&operation.name));
+                }
+                for relation in &gate.relations {
+                    if relation.to == operation.name {
+                        problems.push(format!(
+                            "the `{}` list relates `{}` to itself",
+                            list.name, operation.name
+                        ));
+                    } else if !list
+                        .operations
+                        .iter()
+                        .any(|other| other.name == relation.to)
+                    {
+                        problems.push(format!(
+                            "the `{}` list relates `{}` to `{}`, which it does not hold; \
+                             a relation compares two operations of one group, timed by \
+                             one build in one round",
+                            list.name, operation.name, relation.to
+                        ));
+                    }
+                }
+            }
+        }
+        match &calibration {
+            None => {
+                for id in &calibrated {
+                    problems.push(format!(
+                        "{BASELINE_PATH} calibrates `{id}` and names no calibration \
+                         ahead of its groups, so the target has nothing to be a \
+                         fraction of"
+                    ));
+                }
+            }
+            Some(calibration) => {
+                let own = lists.iter().find_map(|list| {
+                    list.operations
+                        .iter()
+                        .find(|operation| list.id(&operation.name) == calibration.operation)
+                });
+                match own.map(|operation| operation.gate.as_ref()) {
+                    None => problems.push(format!(
+                        "{BASELINE_PATH} calibrates against `{}`, which no list holds",
+                        calibration.operation
+                    )),
+                    Some(Some(Gate {
+                        against: Against::Calibrated(_),
+                        ..
+                    })) => problems.push(format!(
+                        "{BASELINE_PATH} calibrates against `{}`, whose own gate is \
+                         calibrated; the calibration is the planning baseline's to \
+                         time, so it is held against that baseline",
+                        calibration.operation
+                    )),
+                    Some(_) => {}
+                }
+            }
+        }
     }
 
     // Each machine's figures: its swing the worst of them, and every listed
@@ -1394,22 +1789,28 @@ pub struct Pair {
     pub band_percent: Option<f64>,
 }
 
+/// The median of `ratios`: the mean of the two middle ones of an even count,
+/// so of the fifth and the sixth of ten; 1 for none.
+fn median(ratios: &[f64]) -> f64 {
+    let mut sorted = ratios.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let middle = sorted.len() / 2;
+    if sorted.is_empty() {
+        return 1.0;
+    }
+    if sorted.len() % 2 == 0 {
+        (sorted[middle - 1] + sorted[middle]) / 2.0
+    } else {
+        sorted[middle]
+    }
+}
+
 impl Pair {
     /// The median of the ratios: the mean of the two middle ones of an even
     /// count, so of the fifth and the sixth of ten.
     #[must_use]
     pub fn median(&self) -> f64 {
-        let mut sorted = self.ratios.clone();
-        sorted.sort_by(f64::total_cmp);
-        let middle = sorted.len() / 2;
-        if sorted.is_empty() {
-            return 1.0;
-        }
-        if sorted.len() % 2 == 0 {
-            (sorted[middle - 1] + sorted[middle]) / 2.0
-        } else {
-            sorted[middle]
-        }
+        median(&self.ratios)
     }
 
     /// How many rounds the head was slower in: a ratio above 1.
@@ -1448,33 +1849,8 @@ pub struct Paired {
 /// operation a side timed is missing from one of that side's rounds: a
 /// missing round is a pair the sign test cannot count.
 pub fn pair(base: &Side, head: &Side, bands: &BTreeMap<String, f64>) -> Result<Paired, String> {
-    let ids = |side: &Side, which: &str| -> Result<Vec<String>, String> {
-        if side.rounds.len() != ROUNDS {
-            return Err(format!(
-                "the {which} holds {} rounds, and a pair needs {ROUNDS}",
-                side.rounds.len()
-            ));
-        }
-        let mut all: Vec<String> = side
-            .rounds
-            .iter()
-            .flat_map(|round| round.keys().cloned())
-            .collect();
-        all.sort();
-        all.dedup();
-        for id in &all {
-            if let Some(at) = side.rounds.iter().position(|round| !round.contains_key(id)) {
-                return Err(format!(
-                    "the {which} timed `{id}` and has no figure for it in round {}: a \
-                     missing round is refused, never paired around",
-                    at + 1
-                ));
-            }
-        }
-        Ok(all)
-    };
-    let base_ids = ids(base, "base")?;
-    let head_ids = ids(head, "head")?;
+    let base_ids = timed(base, "base")?;
+    let head_ids = timed(head, "head")?;
     let mut paired = Paired::default();
     for id in &head_ids {
         if !base_ids.contains(id) {
@@ -1495,6 +1871,296 @@ pub fn pair(base: &Side, head: &Side, bands: &BTreeMap<String, f64>) -> Result<P
         .filter(|id| !head_ids.contains(id))
         .collect();
     Ok(paired)
+}
+
+/// Every id `side` timed, sorted, once its rounds are held whole: refused
+/// when it has other than [`ROUNDS`] rounds, or an id it timed is missing
+/// from one of them, since a missing round is a pair the sign test cannot
+/// count. `which` names the side in the refusal.
+fn timed(side: &Side, which: &str) -> Result<Vec<String>, String> {
+    if side.rounds.len() != ROUNDS {
+        return Err(format!(
+            "the {which} holds {} rounds, and a pair needs {ROUNDS}",
+            side.rounds.len()
+        ));
+    }
+    let mut all: Vec<String> = side
+        .rounds
+        .iter()
+        .flat_map(|round| round.keys().cloned())
+        .collect();
+    all.sort();
+    all.dedup();
+    for id in &all {
+        if let Some(at) = side.rounds.iter().position(|round| !round.contains_key(id)) {
+            return Err(format!(
+                "the {which} timed `{id}` and has no figure for it in round {}: a \
+                 missing round is refused, never paired around",
+                at + 1
+            ));
+        }
+    }
+    Ok(all)
+}
+
+/// The name the planning baseline goes by in a report and a refusal.
+pub const PLANNING: &str = "planning baseline `61adcde`";
+
+/// One gate of one operation, judged on the ten rounds of the head and the
+/// planning baseline: each round's ratio, the bound it is held to and the
+/// band beside it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Judged {
+    /// The operation whose gate it is.
+    pub id: String,
+    /// The gate, as the report names it.
+    pub gate: String,
+    /// Round by round, the operation's per-call time over the time its gate
+    /// holds it against.
+    pub ratios: Vec<f64>,
+    /// The most a round's ratio may be.
+    pub bound: f64,
+    /// The band its median is held to beyond the bound, in per cent, or
+    /// `None` before one is set: then it is reported and not judged. A
+    /// relation's is the wider of its two operations' bands, and it has
+    /// none until both have one.
+    pub band_percent: Option<f64>,
+}
+
+impl Judged {
+    /// The median of the ratios, as [`Pair::median`] takes it.
+    #[must_use]
+    pub fn median(&self) -> f64 {
+        median(&self.ratios)
+    }
+
+    /// How many rounds lie beyond the bound.
+    #[must_use]
+    pub fn beyond(&self) -> usize {
+        self.ratios
+            .iter()
+            .filter(|ratio| **ratio > self.bound)
+            .count()
+    }
+
+    /// Tier P's own reading of the gate: the median beyond the bound, with
+    /// no band and no sign test. Reported beside [`Judged::fails`]: with
+    /// the two builds equally fast, a floor of 1 read this way fails about
+    /// one run in two.
+    #[must_use]
+    pub fn beyond_as_written(&self) -> bool {
+        self.median() > self.bound
+    }
+
+    /// Whether the gate fails the run: the regression pair's rule held to
+    /// the bound in place of 1, its median beyond the bound by more than
+    /// its band and at least [`SLOWER_TO_FAIL`] of its rounds beyond it.
+    #[must_use]
+    pub fn fails(&self) -> bool {
+        self.band_percent.is_some_and(|band| {
+            self.median() > self.bound * (1.0 + band / 100.0) && self.beyond() >= SLOWER_TO_FAIL
+        })
+    }
+}
+
+/// What holding a head to the planning baseline finds: each gate judged,
+/// and the ids the planning baseline timed that no gate reads, which are
+/// reported.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Planned {
+    /// Every gate of every operation the head's lists hold, in their order.
+    pub judged: Vec<Judged>,
+    /// Ids the planning baseline timed that no floor and no calibration
+    /// reads.
+    pub unread: Vec<String>,
+}
+
+/// Holds the head's rounds to the planning baseline's by each operation's
+/// gate in `lists`, the head's: a floor or a held operation by its ratio to
+/// the planning baseline's figure for it, a calibrated one by its ratio to
+/// the planning baseline's figure for `calibration` in the same round, and
+/// each relation by the head's two figures in the same round.
+///
+/// Refused when a side's rounds are not whole, an operation the lists hold
+/// has no gate or no figure on the head, a floor or a held operation has
+/// none on the planning baseline, or a calibrated one has no calibration
+/// to read: a gate the data says can be judged and the rounds cannot is a
+/// fault, never a pass.
+pub fn against_planning(
+    planning: &Side,
+    head: &Side,
+    lists: &[Group],
+    calibration: Option<&Calibration>,
+) -> Result<Planned, String> {
+    let planning_ids = timed(planning, PLANNING)?;
+    let head_ids = timed(head, "head")?;
+    let ratios = |numerator: (&Side, &str), denominator: (&Side, &str)| -> Vec<f64> {
+        (0..ROUNDS)
+            .map(|round| {
+                numerator.0.rounds[round][numerator.1] / denominator.0.rounds[round][denominator.1]
+            })
+            .collect()
+    };
+    let mut planned = Planned::default();
+    let mut read: Vec<String> = Vec::new();
+    for list in lists {
+        for operation in &list.operations {
+            let id = list.id(&operation.name);
+            let gate = operation
+                .gate
+                .as_ref()
+                .ok_or_else(|| format!("the head's lists give `{id}` no gate"))?;
+            if !head_ids.contains(&id) {
+                return Err(format!(
+                    "the head did not time `{id}`, which its lists gate: an operation \
+                     the gate data says can be judged and the rounds cannot is refused"
+                ));
+            }
+            // What the planning baseline's side of it is: its own figure
+            // for the operation, or its calibration's.
+            let (against, bound, named) = match gate.against {
+                Against::Floor(floor) => (id.clone(), 1.0 / floor, format!("floor {floor}")),
+                Against::Held => (id.clone(), 1.0, "held".to_string()),
+                Against::Calibrated(ms) => {
+                    let calibration = calibration.ok_or_else(|| {
+                        format!("`{id}` is calibrated, and the head's lists name no calibration")
+                    })?;
+                    (
+                        calibration.operation.clone(),
+                        ms / calibration.planning_ms,
+                        format!(
+                            "calibrated at {ms} ms of `{}`'s {} ms",
+                            calibration.operation, calibration.planning_ms
+                        ),
+                    )
+                }
+            };
+            if !planning_ids.contains(&against) {
+                return Err(if against == id {
+                    format!(
+                        "`{id}` is held against the {PLANNING}, which did not time it: \
+                         its mapping onto that revision is missing, and an operation \
+                         whose gate names a baseline side is refused without one"
+                    )
+                } else {
+                    format!("`{id}` is calibrated against `{against}`, which the {PLANNING} did not time")
+                });
+            }
+            planned.judged.push(Judged {
+                id: id.clone(),
+                gate: named,
+                ratios: ratios((head, &id), (planning, &against)),
+                bound,
+                band_percent: operation.paired_band,
+            });
+            read.push(against);
+            for relation in &gate.relations {
+                let to = list.id(&relation.to);
+                let Some(other) = list.operations.iter().find(|o| o.name == relation.to) else {
+                    return Err(format!(
+                        "`{id}` is related to `{to}`, which the head's lists do not hold"
+                    ));
+                };
+                if !head_ids.contains(&to) {
+                    return Err(format!(
+                        "`{id}` is related to `{to}`, which the head did not time"
+                    ));
+                }
+                planned.judged.push(Judged {
+                    id: id.clone(),
+                    gate: match relation.bound {
+                        Bound::AtMost(times) => format!("at most {times} x `{to}`"),
+                        Bound::SpeedupAtLeast(times) => {
+                            format!("at least {times} x as fast as `{to}`")
+                        }
+                    },
+                    ratios: ratios((head, &id), (head, &to)),
+                    bound: relation.bound.limit(),
+                    band_percent: match (operation.paired_band, other.paired_band) {
+                        (Some(one), Some(two)) => Some(one.max(two)),
+                        _ => None,
+                    },
+                });
+            }
+        }
+    }
+    planned.unread = planning_ids
+        .into_iter()
+        .filter(|id| !read.contains(id))
+        .collect();
+    Ok(planned)
+}
+
+/// `bench-check --paired --planning PLANNING HEAD`: the head's rounds held
+/// to the planning baseline's by each operation's gate in the head's
+/// lists, every reading printed. A gate with its band fails the run as the
+/// regression pair's rule says; one without is reported. Nothing is timed a
+/// second time.
+fn run_planning(planning: &Path, head: &Path) -> Result<(), String> {
+    let (planning_side, _) = read_side(planning)?;
+    let (head_side, head_lists) = read_side(head)?;
+    let lists_path = head.join("baseline.json");
+    let text = std::fs::read_to_string(&lists_path)
+        .map_err(|error| format!("{}: {error}", lists_path.display()))?;
+    let calibration = calibration(&text).map_err(|error| error.to_string())?;
+    let planned = against_planning(
+        &planning_side,
+        &head_side,
+        &head_lists,
+        calibration.as_ref(),
+    )?;
+    println!(
+        "bench-check --paired --planning: {} gates over {ROUNDS} rounds, {} against the \
+         {PLANNING} in {}",
+        planned.judged.len(),
+        head.display(),
+        planning.display()
+    );
+    for judged in &planned.judged {
+        let band = judged
+            .band_percent
+            .map_or("no band yet: reported".to_string(), |band| {
+                format!("band {band} %")
+            });
+        println!(
+            "  median {:.4} against {:.4}, {:2}/{ROUNDS} beyond, {} as written, {band}{}  \
+             {}: {}",
+            judged.median(),
+            judged.bound,
+            judged.beyond(),
+            if judged.beyond_as_written() {
+                "beyond"
+            } else {
+                "inside"
+            },
+            if judged.fails() { ", FAILS" } else { "" },
+            judged.id,
+            judged.gate
+        );
+    }
+    for id in &planned.unread {
+        println!("  the {PLANNING}'s alone, reported, not judged: {id}");
+    }
+    let failing: Vec<&Judged> = planned.judged.iter().filter(|j| j.fails()).collect();
+    if failing.is_empty() {
+        return Ok(());
+    }
+    let mut message = format!(
+        "beyond its gate against the {PLANNING} by more than the band in at least \
+         {SLOWER_TO_FAIL} of {ROUNDS} rounds:\n"
+    );
+    for judged in failing {
+        message.push_str(&format!(
+            "  {}, {}: median {:.4} against {:.4}, {}/{ROUNDS} rounds beyond, band {} %\n",
+            judged.id,
+            judged.gate,
+            judged.median(),
+            judged.bound,
+            judged.beyond(),
+            judged.band_percent.unwrap_or_default()
+        ));
+    }
+    Err(message)
 }
 
 /// The ten iteration counts and the samples of one `sample.json`, refused
@@ -1665,13 +2331,28 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
                 }
             }
             "--paired" => {
-                let (Some(base), Some(head)) = (args.get(index + 1), args.get(index + 2)) else {
-                    return Err("bench-check --paired needs BASE HEAD".to_string());
+                let planning = args.get(index + 1).map(String::as_str) == Some("--planning");
+                let at = index + 1 + usize::from(planning);
+                let (Some(base), Some(head)) = (args.get(at), args.get(at + 1)) else {
+                    return Err(if planning {
+                        "bench-check --paired --planning needs PLANNING HEAD".to_string()
+                    } else {
+                        "bench-check --paired needs BASE HEAD".to_string()
+                    });
                 };
-                if args.len() != index + 3 || machine_name.is_some() {
-                    return Err("bench-check --paired BASE HEAD takes nothing else".to_string());
+                if args.len() != at + 2 || machine_name.is_some() {
+                    return Err(if planning {
+                        "bench-check --paired --planning PLANNING HEAD takes nothing else"
+                            .to_string()
+                    } else {
+                        "bench-check --paired BASE HEAD takes nothing else".to_string()
+                    });
                 }
-                return run_paired(Path::new(base), Path::new(head));
+                return if planning {
+                    run_planning(Path::new(base), Path::new(head))
+                } else {
+                    run_paired(Path::new(base), Path::new(head))
+                };
             }
             other => return Err(format!("unknown option `{other}`")),
         }
@@ -2289,22 +2970,24 @@ fn render(c: &mut Criterion) {
 "#;
 
     const LISTS: &str = r#"{
-  "note": ["Two groups whose files, lists and counts agree."],
+  "note": ["Two groups whose files, lists, counts and gates agree."],
   "groups": [
     {
       "group": "open",
       "operations": [
         { "name": "open a 3-page document", "unit": "bytes",
-          "per_iteration": 10985, "calls": 1 }
+          "per_iteration": 10985, "calls": 1, "gate": { "floor": 1 } }
       ]
     },
     {
       "group": "render",
       "operations": [
         { "name": "render text at 150 dpi", "unit": "pixels",
-          "per_iteration": 2176200, "calls": 1 },
+          "per_iteration": 2176200, "calls": 1, "gate": { "held": true } },
         { "name": "render a full-page axial shading at 150 dpi", "unit": "pixels",
-          "per_iteration": 2176200, "calls": 1 }
+          "per_iteration": 2176200, "calls": 1,
+          "gate": { "floor": 1, "relations": [
+            { "to": "render text at 150 dpi", "at_most": 25 } ] } }
       ]
     }
   ],
@@ -2864,7 +3547,8 @@ fn render(c: &mut Criterion) {
                     |tree| {
                         tree.baseline = tree.baseline.replace(
                             "      \"operations\": [\n        { \"name\": \"open a 3-page document\", \
-                             \"unit\": \"bytes\",\n          \"per_iteration\": 10985, \"calls\": 1 }\n      ]",
+                             \"unit\": \"bytes\",\n          \"per_iteration\": 10985, \"calls\": 1, \
+                             \"gate\": { \"floor\": 1 } }\n      ]",
                             "      \"operations\": []",
                         );
                     },
@@ -3356,5 +4040,628 @@ fn render(c: &mut Criterion) {
         assert_eq!(run_paired(&base, &head), Ok(()));
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&head).ok();
+    }
+
+    // ---- the gates against the planning baseline ------------------------------
+
+    /// A head's lists for the planning pair: a floor of 2 and a floor of 1
+    /// related to it, a held operation and a four-band one held to a
+    /// speed-up over it, a target in milliseconds and one as a rate, the
+    /// rate related to an operation with a band of its own, and the
+    /// calibration, at the 751 ms tier P rescaled its 37.6 from.
+    const GATED: &str = r#"{
+  "calibration": { "operation": "calibration/text of 100 dense pages",
+                   "planning_ms": 751 },
+  "groups": [
+    { "group": "open", "operations": [
+      { "name": "every page's size, 3000 pages", "unit": "pages",
+        "per_iteration": 3000, "calls": 1, "gate": { "floor": 2 },
+        "paired": { "spread_percent": 3.0, "band_percent": 5 } },
+      { "name": "every page's size, 10000 pages", "unit": "pages",
+        "per_iteration": 10000, "calls": 1,
+        "gate": { "floor": 1, "relations": [
+          { "to": "every page's size, 3000 pages", "at_most": 3.6 } ] },
+        "paired": { "spread_percent": 6.0, "band_percent": 10 } } ] },
+    { "group": "render", "operations": [
+      { "name": "the text page at 300 dpi", "unit": "pixels",
+        "per_iteration": 8702320, "calls": 1, "gate": { "held": true },
+        "paired": { "spread_percent": 3.0, "band_percent": 5 } },
+      { "name": "the 300-dpi text page in 4 bands on 4 threads", "unit": "pixels",
+        "per_iteration": 8702320, "calls": 1,
+        "gate": { "floor": 1, "relations": [
+          { "to": "the text page at 300 dpi", "speedup_at_least": 4 } ] },
+        "paired": { "spread_percent": 3.0, "band_percent": 5 } },
+      { "name": "an ICC-based CMYK image to sRGB", "unit": "pixels",
+        "per_iteration": 543740, "calls": 1, "gate": { "calibrated_ms": 0.5 },
+        "paired": { "spread_percent": 3.0, "band_percent": 5 } } ] },
+    { "group": "decode", "operations": [
+      { "name": "inflate page-like data", "unit": "bytes",
+        "per_iteration": 6528600, "calls": 1, "gate": { "floor": 1 },
+        "paired": { "spread_percent": 3.0, "band_percent": 5 } },
+      { "name": "LZW decode page-like data", "unit": "bytes",
+        "per_iteration": 32643000, "calls": 5,
+        "gate": { "relations": [ { "to": "inflate page-like data", "at_most": 2 } ],
+                  "calibrated_per_second": 200000000 } } ] },
+    { "group": "calibration", "operations": [
+      { "name": "text of 100 dense pages", "unit": "pages",
+        "per_iteration": 100, "calls": 1, "gate": { "floor": 1 },
+        "paired": { "spread_percent": 3.0, "band_percent": 5 } } ] }
+  ],
+  "machines": []
+}"#;
+
+    const SIZES_3000: &str = "open/every page's size, 3000 pages";
+    const SIZES_10000: &str = "open/every page's size, 10000 pages";
+    const PAGE_300: &str = "render/the text page at 300 dpi";
+    const BANDS: &str = "render/the 300-dpi text page in 4 bands on 4 threads";
+    const CMYK: &str = "render/an ICC-based CMYK image to sRGB";
+    const INFLATE: &str = "decode/inflate page-like data";
+    const LZW: &str = "decode/LZW decode page-like data";
+    const CALIBRATION_100: &str = "calibration/text of 100 dense pages";
+
+    /// What the planning baseline times: every operation but the two it
+    /// leaves to calibration.
+    const PLANNED_IDS: [&str; 6] = [
+        SIZES_3000,
+        SIZES_10000,
+        PAGE_300,
+        BANDS,
+        INFLATE,
+        CALIBRATION_100,
+    ];
+
+    /// What the head times: all of it.
+    const HEAD_IDS: [&str; 8] = [
+        SIZES_3000,
+        SIZES_10000,
+        PAGE_300,
+        BANDS,
+        CMYK,
+        INFLATE,
+        LZW,
+        CALIBRATION_100,
+    ];
+
+    /// The planning baseline's per-call figure for each operation, in every
+    /// round.
+    fn planning_figure(id: &str, _round: usize) -> f64 {
+        match id {
+            SIZES_3000 => 2_000_000.0,
+            SIZES_10000 => 10_000_000.0,
+            CALIBRATION_100 => 1_502_000.0,
+            _ => 1_000_000.0,
+        }
+    }
+
+    /// A head's per-call figure for each operation that holds every gate:
+    /// the floor of 2 met exactly, the relations at their bounds and the
+    /// calibrated targets inside theirs.
+    fn holding(id: &str, _round: usize) -> f64 {
+        match id {
+            SIZES_3000 | SIZES_10000 | PAGE_300 | INFLATE => 1_000_000.0,
+            BANDS => 250_000.0,
+            CMYK => 1_000.0,
+            LZW => 60_000.0,
+            _ => 1_502_000.0,
+        }
+    }
+
+    /// Ten rounds of `ids`, each operation's figure in round r `figure(id,
+    /// r)`.
+    fn side_of(ids: &[&str], figure: impl Fn(&str, usize) -> f64) -> Side {
+        Side {
+            rounds: (1..=ROUNDS)
+                .map(|round| {
+                    ids.iter()
+                        .map(|id| (id.to_string(), figure(id, round)))
+                        .collect()
+                })
+                .collect(),
+        }
+    }
+
+    /// The head `head` held against the planning baseline by [`GATED`].
+    fn planned_with(
+        planning: impl Fn(&str, usize) -> f64,
+        head: impl Fn(&str, usize) -> f64,
+    ) -> Result<Planned, String> {
+        let lists = groups(GATED, "x").expect("the lists parse");
+        let calibration = calibration(GATED).expect("it reads").expect("one is named");
+        against_planning(
+            &side_of(&PLANNED_IDS, planning),
+            &side_of(&HEAD_IDS, head),
+            &lists,
+            Some(&calibration),
+        )
+    }
+
+    /// The head `head` against [`planning_figure`], every gate held but
+    /// what `changed` returns a figure for.
+    fn planned(changed: impl Fn(&str, usize) -> Option<f64>) -> Planned {
+        planned_with(planning_figure, |id, round| {
+            changed(id, round).unwrap_or_else(|| holding(id, round))
+        })
+        .expect("the sides are judged")
+    }
+
+    /// The one gate of `id` whose name starts with `kind`.
+    fn gate_of<'a>(planned: &'a Planned, id: &str, kind: &str) -> &'a Judged {
+        let found: Vec<&Judged> = planned
+            .judged
+            .iter()
+            .filter(|judged| judged.id == id && judged.gate.starts_with(kind))
+            .collect();
+        assert_eq!(found.len(), 1, "{id}, {kind}: {:?}", planned.judged);
+        found[0]
+    }
+
+    /// The figures that hold every gate hold every gate, by both readings,
+    /// and what the planning baseline timed for no gate is reported.
+    #[test]
+    fn a_head_that_holds_every_gate_passes_both_readings() {
+        let planned = planned(|_, _| None);
+        assert_eq!(planned.judged.len(), 11, "{:?}", planned.judged);
+        for judged in &planned.judged {
+            assert!(!judged.fails() && !judged.beyond_as_written(), "{judged:?}");
+        }
+        assert!(planned.unread.is_empty(), "{:?}", planned.unread);
+    }
+
+    /// A floor f holds the head's per-call time over the planning
+    /// baseline's to 1 ÷ f: a floor of 2 fails 0.55 against a band of 5 %
+    /// and holds 0.5. Between 1 ÷ f and its band tier P's own reading is
+    /// beyond and the gate holds; and the sign test asks for eight rounds
+    /// of ten beyond it. Held is a floor of 1.
+    #[test]
+    fn a_floor_fails_a_ratio_above_its_inverse() {
+        let at = |figure: f64| planned(move |id, _| (id == SIZES_3000).then_some(figure));
+        let fails = at(1_100_000.0);
+        let floor = gate_of(&fails, SIZES_3000, "floor 2");
+        assert_eq!(floor.bound, 0.5);
+        assert!((floor.median() - 0.55).abs() < 1e-12);
+        assert_eq!(floor.beyond(), 10);
+        assert!(floor.fails() && floor.beyond_as_written());
+
+        let met = at(1_000_000.0);
+        let floor = gate_of(&met, SIZES_3000, "floor 2");
+        assert_eq!(floor.median(), 0.5);
+        assert!(!floor.fails() && !floor.beyond_as_written());
+
+        let inside = at(1_030_000.0);
+        let floor = gate_of(&inside, SIZES_3000, "floor 2");
+        assert!(floor.beyond_as_written(), "0.515 is beyond 0.5 as written");
+        assert!(!floor.fails(), "and inside its band of 5 %");
+
+        let rounds = |slower: usize| {
+            planned(move |id, round| {
+                (id == SIZES_3000).then_some(if round <= slower {
+                    1_200_000.0
+                } else {
+                    800_000.0
+                })
+            })
+        };
+        let seven = rounds(7);
+        let floor = gate_of(&seven, SIZES_3000, "floor 2");
+        assert!((floor.median() - 0.6).abs() < 1e-12);
+        assert_eq!(floor.beyond(), 7);
+        assert!(
+            !floor.fails(),
+            "seven rounds of ten beyond pass the sign test"
+        );
+        assert!(gate_of(&rounds(8), SIZES_3000, "floor 2").fails());
+
+        let held = |figure: f64| planned(move |id, _| (id == PAGE_300).then_some(figure));
+        let slower = held(1_100_000.0);
+        let gate = gate_of(&slower, PAGE_300, "held");
+        assert_eq!(gate.bound, 1.0);
+        assert!(gate.fails(), "held is a floor of 1");
+        assert!(!gate_of(&held(1_040_000.0), PAGE_300, "held").fails());
+
+        // A floored operation the planning baseline did not time is a fault
+        // of the mapping, refused rather than reported.
+        let refused = against_planning(
+            &side_of(&PLANNED_IDS[1..], planning_figure),
+            &side_of(&HEAD_IDS, holding),
+            &groups(GATED, "x").expect("the lists parse"),
+            calibration(GATED).expect("it reads").as_ref(),
+        )
+        .expect_err("no baseline side");
+        assert!(
+            refused.contains(&format!("`{SIZES_3000}` is held against the {PLANNING}")),
+            "{refused}"
+        );
+    }
+
+    /// A calibrated target is the head's per-call time over the planning
+    /// baseline's figure for the calibration in the same round, held to the
+    /// target over the calibration's planning figure: 0.5 ms of a 751 ms
+    /// calibration reads as at most 1/1 502 of it, whatever the machine's
+    /// own figure for the calibration is that round. A target stated as a
+    /// rate is the time one call takes at it. And the committed file states
+    /// tier P's own calibration and targets.
+    #[test]
+    fn a_calibrated_target_is_held_as_a_fraction_of_the_calibration_operation() {
+        let held = planned(|_, _| None);
+        let cmyk = gate_of(&held, CMYK, "calibrated");
+        assert_eq!(cmyk.bound, 1.0 / 1502.0);
+        assert_eq!(cmyk.median(), 1.0 / 1502.0);
+        assert!(!cmyk.fails() && !cmyk.beyond_as_written());
+
+        // The machine slows by the round, and the head with it: each round
+        // is read against its own calibration, so every round is at the
+        // bound.
+        let drifting = |calibration_by_round: bool| {
+            planned_with(
+                move |id, round| match id {
+                    CALIBRATION_100 if calibration_by_round => 1_502_000.0 * round as f64,
+                    _ => planning_figure(id, round),
+                },
+                move |id, round| match id {
+                    CMYK => 1_000.0 * round as f64,
+                    _ => holding(id, round),
+                },
+            )
+            .expect("the sides are judged")
+        };
+        let same_round = drifting(true);
+        let cmyk = gate_of(&same_round, CMYK, "calibrated");
+        assert_eq!(cmyk.beyond(), 0, "{:?}", cmyk.ratios);
+        assert!(!cmyk.fails());
+        let round_one = drifting(false);
+        let cmyk = gate_of(&round_one, CMYK, "calibrated");
+        assert_eq!(cmyk.beyond(), 9, "{:?}", cmyk.ratios);
+        assert!(cmyk.fails(), "a calibration that stood still would fail it");
+
+        let slower = planned(|id, _| (id == CMYK).then_some(1_073.0));
+        assert!(gate_of(&slower, CMYK, "calibrated").fails());
+
+        // 200 MB/s over one call's 6 528 600 bytes is 32.643 ms.
+        let lzw = gate_of(&held, LZW, "calibrated");
+        assert!((lzw.bound - 32.643 / 751.0).abs() < 1e-15, "{}", lzw.bound);
+
+        let refused = against_planning(
+            &side_of(&PLANNED_IDS[..5], planning_figure),
+            &side_of(&HEAD_IDS, holding),
+            &groups(GATED, "x").expect("the lists parse"),
+            calibration(GATED).expect("it reads").as_ref(),
+        )
+        .expect_err("no calibration timed");
+        assert!(
+            refused.contains(&format!(
+                "`{CMYK}` is calibrated against `{CALIBRATION_100}`, which the {PLANNING} \
+                 did not time"
+            )),
+            "{refused}"
+        );
+
+        let text =
+            std::fs::read_to_string(repo_root().join(BASELINE_PATH)).expect("the committed file");
+        assert_eq!(
+            calibration(&text).expect("it reads"),
+            Some(Calibration {
+                operation: "calibration/text of 5 dense pages".to_string(),
+                planning_ms: 37.6,
+            })
+        );
+        let lists = groups(&text, BASELINE_PATH).expect("it parses");
+        let against = |group: &str, name: &str| {
+            lists
+                .iter()
+                .find(|list| list.name == group)
+                .and_then(|list| list.operations.iter().find(|o| o.name == name))
+                .and_then(|operation| operation.gate.as_ref())
+                .map(|gate| gate.against)
+        };
+        assert_eq!(
+            against(
+                "render",
+                "a quarter-size ICC-based CMYK image to sRGB at 300 dpi"
+            ),
+            Some(Against::Calibrated(5.4))
+        );
+        let Some(Against::Calibrated(lzw)) = against("decode", "LZW decode page-like data") else {
+            panic!("LZW is calibrated");
+        };
+        assert!((lzw - 32.643).abs() < 1e-9, "{lzw}");
+    }
+
+    /// A relation holds the head's per-call times of two operations of a
+    /// group, in one round, to its bound: 10 000 pages at most 3.6 times
+    /// 3 000, which fails past 3.6 by the wider of the two bands; four
+    /// bands at least 4 times as fast as one thread; and one whose
+    /// operations do not both carry a band is reported.
+    #[test]
+    fn a_relation_fails_when_its_bound_is_crossed() {
+        let at = |figure: f64| planned(move |id, _| (id == SIZES_10000).then_some(figure));
+        let crossed = at(4_000_000.0);
+        let relation = gate_of(&crossed, SIZES_10000, "at most 3.6");
+        assert_eq!(relation.bound, 3.6);
+        assert_eq!(relation.band_percent, Some(10.0), "the wider of 5 and 10");
+        assert!(relation.fails() && relation.beyond_as_written());
+        let within = at(3_800_000.0);
+        let relation = gate_of(&within, SIZES_10000, "at most 3.6");
+        assert!(relation.beyond_as_written() && !relation.fails());
+        assert!(!gate_of(&at(3_600_000.0), SIZES_10000, "at most 3.6").beyond_as_written());
+        // The floor beside it reads the planning baseline's 10 000 pages,
+        // which the relation does not.
+        assert!(!gate_of(&crossed, SIZES_10000, "floor 1").fails());
+
+        let bands = |figure: f64| planned(move |id, _| (id == BANDS).then_some(figure));
+        let slow = bands(280_000.0);
+        let speedup = gate_of(&slow, BANDS, "at least 4 x as fast");
+        assert_eq!(speedup.bound, 0.25);
+        assert!(speedup.fails(), "3.57 times as fast is not 4");
+        assert!(!gate_of(&bands(255_000.0), BANDS, "at least 4 x as fast").fails());
+
+        let unbanded = planned(|id, _| (id == LZW).then_some(3_000_000.0));
+        let relation = gate_of(&unbanded, LZW, "at most 2");
+        assert_eq!(relation.band_percent, None);
+        assert!(relation.beyond_as_written() && !relation.fails());
+    }
+
+    /// The gates read off the rounds on disk, as `bench-check --paired
+    /// --planning` reads them: each figure a call's, so 10 000 pages at
+    /// four calls an iteration against 3 000 at twelve fails a relation an
+    /// iteration's figures would pass; the run fails by the gate's name and
+    /// passes a head that holds every gate.
+    #[test]
+    fn the_planning_pair_is_read_from_its_rounds() {
+        let lists = GATED
+            .replace(
+                "\"per_iteration\": 3000, \"calls\": 1",
+                "\"per_iteration\": 36000, \"calls\": 12",
+            )
+            .replace(
+                "\"per_iteration\": 10000, \"calls\": 1",
+                "\"per_iteration\": 40000, \"calls\": 4",
+            );
+        let calls = |id: &str| match id {
+            SIZES_3000 => 12.0,
+            SIZES_10000 => 4.0,
+            LZW => 5.0,
+            _ => 1.0,
+        };
+        let planning = stage_side("gates-planning", &lists, &PLANNED_IDS, |id, round| {
+            Some(planning_figure(id, round) * calls(id))
+        });
+        let stage_head = |tag: &str, per_call: fn(&str, usize) -> f64| {
+            stage_side(tag, &lists, &HEAD_IDS, move |id, round| {
+                Some(per_call(id, round) * calls(id))
+            })
+        };
+        let holds = stage_head("gates-holds", holding);
+        let fails = stage_head("gates-fails", |id, round| {
+            if id == SIZES_10000 {
+                4_000_000.0
+            } else {
+                holding(id, round)
+            }
+        });
+        let path = |dir: &Path| dir.display().to_string();
+        let ran = |head: &Path| {
+            run(
+                &repo_root(),
+                &[
+                    "--paired".to_string(),
+                    "--planning".to_string(),
+                    path(&planning),
+                    path(head),
+                ],
+            )
+        };
+        let held = ran(&holds);
+        let failed = ran(&fails);
+        let usage = run(
+            &repo_root(),
+            &[
+                "--paired".to_string(),
+                "--planning".to_string(),
+                path(&planning),
+            ],
+        );
+        for dir in [&planning, &holds, &fails] {
+            std::fs::remove_dir_all(dir).ok();
+        }
+        assert_eq!(held, Ok(()));
+        let message = failed.expect_err("4 x 3 000 pages a call is past 3.6");
+        assert!(
+            message.contains(&format!("{SIZES_10000}, at most 3.6 x `{SIZES_3000}`")),
+            "{message}"
+        );
+        assert_eq!(message.matches("rounds beyond").count(), 1, "{message}");
+        assert_eq!(
+            usage,
+            Err("bench-check --paired --planning needs PLANNING HEAD".to_string())
+        );
+    }
+
+    /// Every operation carries a gate, so the paired run has something to
+    /// hold each to, and one with none is refused by name.
+    #[test]
+    fn an_operation_with_no_gate_is_refused() {
+        let mut tree = Tree::agreeing();
+        tree.baseline = tree.baseline.replace(
+            "\"calls\": 1, \"gate\": { \"held\": true } }",
+            "\"calls\": 1 }",
+        );
+        let problems = tree.problems("ungated");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("the `render` list gives `render text at 150 dpi` no gate"),
+            "{problems:?}"
+        );
+    }
+
+    /// A relation compares two operations of one group, so one naming an
+    /// operation its group does not hold, another group's included, or
+    /// naming its own operation, is refused.
+    #[test]
+    fn a_relation_naming_an_unknown_operation_is_refused() {
+        refuses(
+            "relation",
+            &[
+                (
+                    "an operation nobody lists",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            "{ \"to\": \"render text at 150 dpi\"",
+                            "{ \"to\": \"render nothing at all\"",
+                        );
+                    },
+                    "relates `render a full-page axial shading at 150 dpi` to `render \
+                     nothing at all`, which it does not hold",
+                ),
+                (
+                    "another group's operation",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            "{ \"to\": \"render text at 150 dpi\"",
+                            "{ \"to\": \"open a 3-page document\"",
+                        );
+                    },
+                    "to `open a 3-page document`, which it does not hold",
+                ),
+                (
+                    "its own operation",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            "{ \"to\": \"render text at 150 dpi\"",
+                            "{ \"to\": \"render a full-page axial shading at 150 dpi\"",
+                        );
+                    },
+                    "relates `render a full-page axial shading at 150 dpi` to itself",
+                ),
+            ],
+        );
+    }
+
+    /// Each way a gate or the calibration can stand outside the format,
+    /// refused by what is wrong with it.
+    #[test]
+    fn a_gate_outside_the_format_is_refused() {
+        refuses(
+            "gate-format",
+            &[
+                (
+                    "a gate holding it no way",
+                    |tree| {
+                        tree.baseline = tree
+                            .baseline
+                            .replace("\"gate\": { \"held\": true }", "\"gate\": { }");
+                    },
+                    "names none of `floor`, `held`, `calibrated_ms`, `calibrated_per_second`",
+                ),
+                (
+                    "a gate holding it two ways",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            "\"gate\": { \"held\": true }",
+                            "\"gate\": { \"held\": true, \"floor\": 2 }",
+                        );
+                    },
+                    "names `floor` and `held`, and an operation is held one way",
+                ),
+                (
+                    "a floor under 1",
+                    |tree| {
+                        tree.baseline = tree.baseline.replacen(
+                            "\"gate\": { \"floor\": 1 }",
+                            "\"gate\": { \"floor\": 0.5 }",
+                            1,
+                        );
+                    },
+                    "a floor of 0.5, under 1",
+                ),
+                (
+                    "held other than true",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace("\"held\": true", "\"held\": false");
+                    },
+                    "`held` is not `true`",
+                ),
+                (
+                    "a relation with no bound",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(", \"at_most\": 25 }", " }");
+                    },
+                    "the relation to `render text at 150 dpi` names no bound above 0",
+                ),
+                (
+                    "a relation with both bounds",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            ", \"at_most\": 25 }",
+                            ", \"at_most\": 25, \"speedup_at_least\": 2 }",
+                        );
+                    },
+                    "names both `at_most` and `speedup_at_least`",
+                ),
+                (
+                    "a rate for an operation whose unit counts nothing",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            "\"unit\": \"bytes\",\n          \"per_iteration\": 10985, \
+                             \"calls\": 1, \"gate\": { \"floor\": 1 }",
+                            "\"unit\": \"none\",\n          \"per_iteration\": 1, \
+                             \"calls\": 1, \"gate\": { \"calibrated_per_second\": 5 }",
+                        );
+                    },
+                    "the unit `none` counts none",
+                ),
+                (
+                    "a calibrated target with no calibration",
+                    |tree| {
+                        tree.baseline = tree.baseline.replacen(
+                            "\"gate\": { \"floor\": 1 }",
+                            "\"gate\": { \"calibrated_ms\": 5 }",
+                            1,
+                        );
+                    },
+                    "calibrates `open/open a 3-page document` and names no calibration",
+                ),
+                (
+                    "a calibration no list holds",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            "  \"groups\": [",
+                            "  \"calibration\": { \"operation\": \"open/nothing\", \
+                             \"planning_ms\": 37.6 },\n  \"groups\": [",
+                        );
+                    },
+                    "calibrates against `open/nothing`, which no list holds",
+                ),
+                (
+                    "a calibration calibrated against itself",
+                    |tree| {
+                        tree.baseline = tree
+                            .baseline
+                            .replace(
+                                "  \"groups\": [",
+                                "  \"calibration\": { \"operation\": \
+                                 \"open/open a 3-page document\", \"planning_ms\": 37.6 },\n  \
+                                 \"groups\": [",
+                            )
+                            .replacen(
+                                "\"gate\": { \"floor\": 1 }",
+                                "\"gate\": { \"calibrated_ms\": 5 }",
+                                1,
+                            );
+                    },
+                    "whose own gate is calibrated",
+                ),
+                (
+                    "a calibration with no planning figure",
+                    |tree| {
+                        tree.baseline = tree.baseline.replace(
+                            "  \"groups\": [",
+                            "  \"calibration\": { \"operation\": \
+                             \"open/open a 3-page document\" },\n  \"groups\": [",
+                        );
+                    },
+                    "it gives no `planning_ms` above 0",
+                ),
+            ],
+        );
     }
 }

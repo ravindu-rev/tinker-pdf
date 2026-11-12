@@ -1217,6 +1217,40 @@ alone timed is reported, not judged; a missing round, or a round sampled
 otherwise, is refused; and an operation whose list carries no `paired` band
 is reported, never failed.
 
+**Each operation carries its gate against the planning baseline.** Tier P
+states every target against `61adcde`, the planning baseline, and its Gate
+column says how each is checked ([roadmap/P.md](roadmap/P.md)); each
+operation's entry in `baseline.json` carries that as its `gate`. A `floor`
+holds the head's per-call time over the planning baseline's, round by round,
+to 1 ÷ the floor: floors start at 1, a P row raises its operations' to the
+column's factors in the commit that closes it, and only the owner lowers one
+(H-78). `held` is a floor of 1 that no row raises. An operation the planning
+baseline lacks is calibrated: its target, in milliseconds a call
+(`calibrated_ms`) or as the rate tier P states, in its unit a second
+(`calibrated_per_second`), is held as a fraction of the planning baseline's
+figure for the calibration operation in the same round — the file names that
+operation once, ahead of its groups, with `planning_ms`, its figure on the
+planning machine — so a target reads as the same fraction on whatever machine
+the run is on. A relation holds two of the head's operations of one group in
+one round: one's time `at_most` so many times the other's, or its
+`speedup_at_least` so many times over the other. An operation tier P's table
+does not list, such as the in-process twin of a CLI-marked one, sits at a
+floor of 1.
+
+`cargo xtask bench-check --paired --planning PLANNING HEAD` reads the planning
+baseline's rounds and the head's as `--paired` reads a base's and a head's,
+and holds every gate by the regression pair's rule with the gate's bound in
+place of 1: a gate fails when the median of its ten ratios is beyond the bound
+by more than the operation's band and at least eight of the rounds are beyond
+the bound, a relation taking the wider of its two operations' bands. Tier P's
+own reading — the median against the bound alone — is printed beside it: with
+the two builds equally fast, a floor of 1 read that way fails about one run in
+two. A gate whose operations carry no band is reported, never failed. A gate
+the rounds cannot judge is refused rather than reported: an operation the
+head's lists hold and the head did not time, a floor or a held operation the
+planning baseline did not time, and a calibrated one beside which the planning
+baseline timed no calibration.
+
 **A pinned machine names its host.** An entry for one host held still
 carries `cpu`, that host's `/proc/cpuinfo` model name, and `held`, the
 frequency and core isolation it is held at, and `bench-check --machine NAME`
@@ -1234,14 +1268,17 @@ on one machine, which needs no band because it changes nothing but the code.
 **The entry is checked, not just written.** `cargo xtask baseline` — part of
 `cargo run -p xtask -- check`, so it fails a build — holds the files that carry
 each group's list of operations to each other: a `[[bench]]` declares each
-group file, the file defines the group's operations, and `baseline.json` lists them, in
-the file's order and each with its unit, and records a figure for each or names
-it unmeasured. It refuses a name criterion would record under another key — one
-holding any of the ten characters it writes as `_`, or longer than the 64 bytes
-it keeps — since a name it rewrites is reported as new and never held to its
-band. Every band in the committed file is pushed against from both sides by a
-unit test, because a band nobody has ever crossed is a number nobody has
-checked.
+group file, the file defines the group's operations, and `baseline.json` lists
+them, in the file's order and each with its unit and its gate, and records a
+figure for each or names it unmeasured. It refuses an operation with no gate, a
+gate outside the format — a floor under 1 among them — a relation naming no
+other operation of its group, and a calibrated target with no calibration
+operation the lists hold to be a fraction of. It refuses a name criterion would
+record under another key — one holding any of the ten characters it writes as
+`_`, or longer than the 64 bytes it keeps — since a name it rewrites is
+reported as new and never held to its band. Every band in the committed file is
+pushed against from both sides by a unit test, because a band nobody has ever
+crossed is a number nobody has checked.
 
 ## Counted work, guarded
 

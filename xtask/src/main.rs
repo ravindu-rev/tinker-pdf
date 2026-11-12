@@ -122,6 +122,16 @@ bindings-parity options:
                                          hold the head's ten rounds to the base's:
                                          the median paired ratio against 1 + the
                                          band, and eight slower rounds of ten
+  cargo xtask bench-check --paired --planning PLANNING HEAD
+                                         hold the head's ten rounds to the planning
+                                         baseline's by each operation's gate in
+                                         baseline.json: a floor, held, or a target
+                                         calibrated against the planning baseline's
+                                         calibration operation, and each relation
+                                         between two of the head's operations; the
+                                         median beyond the bound by more than the
+                                         band, eight rounds of ten beyond it, and
+                                         tier P's reading beside it
   cargo xtask footprint --profile NAME --gzipped BYTES [options]
                                          hold a profile's gzipped wasm to its
                                          figure in bindings/js/footprint.json

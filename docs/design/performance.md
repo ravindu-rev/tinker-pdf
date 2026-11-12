@@ -725,7 +725,7 @@ alone. H-109 approves the bands; a band wider than the rule gives is H-78's.
 | --- | --- | --- | --- |
 | Each operation's floor, 1 to start, or held | its entry in `baseline.json`'s group list, as `gate`, beside its unit (MS-04, "`baseline.json`'s lists") | MS-02.3, from tier P's Gate column | raised by a P row in its closing commit; lowered only by H-78 |
 | The operation `61adcde` runs in another's place | the same `gate`, naming it; the bench files' `cfg` arm runs it | MS-02.3 and MS-02.4 | the row that adds the operation |
-| Calibrated targets | the same `gate`, in milliseconds; the calibration operation and its 751 ms named once, ahead of the groups | MS-02.3 | re-stated by H-77; loosened by H-78 |
+| Calibrated targets | the same `gate`, in milliseconds a call or as the rate tier P states; the calibration operation and its 37.6 ms named once, ahead of the groups | MS-02.3 | re-stated by H-77; loosened by H-78 |
 | Relations | the same `gate`: the other operation of the group, the bound and its direction | MS-02.3 | as calibrated targets |
 | A/A bands | each operation's entry: its spread and its band; the fifteen runs named once, beside the calibration | MS-02.7 | approved by H-109; widened by H-78 |
 
@@ -749,7 +749,7 @@ alone. H-109 approves the bands; a band wider than the rule gives is H-78's.
 ```
 
 The block shows the shape, not measured figures. The reader cuts entries
-at `"machine":` and `"id":` (`xtask/src/bench.rs:243`, `:272`), which no key
+at `"machine":` and `"id":` (`xtask/src/bench.rs:542`, `:612`), which no key
 here contains. `cargo xtask baseline` refuses an operation with no gate and a
 relation naming an unknown operation (MS-02.3), and a band without its runs
 and spread (MS-02.7). H-112's planning comparison is in none of these
@@ -984,7 +984,7 @@ written through `raw`.
 `Group::new(c, "<group>")`, named for its group, and names each operation in
 it through `Group::operation`.
 `bench.rs` keys every estimate by the directory criterion wrote it under
-(`xtask/src/bench.rs:359-385`), and criterion 0.5.1 makes each part of that
+(`xtask/src/bench.rs:1013-1044`), and criterion 0.5.1 makes each part of that
 path filename-safe — it replaces `?`, `"`, `/`, `\`, `*`, `<`, `>`, `:`, `|`
 and `^` with `_` and cuts the part at 64 bytes — so a name that breaks either
 rule is recorded under another key, reported "new, with no recorded figure"
