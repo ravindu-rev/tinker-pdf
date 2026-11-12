@@ -232,11 +232,11 @@ preflight — that the standards tier's conversions need.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | FO-10.1 | design | Create `docs/design/flattening.md`: which objects take part in transparency, path booleans and atomic regions, regions computed as vectors and areas rasterised at a set resolution, text kept or outlined, overprint (RC-03), the stated tolerance, and the PDF/A-1 and PDF/X-1a rules the output passes. | `docs/design/flattening.md` (new) | The doc exists in the design-doc order, names FO-10.2 to FO-10.11's exit tests and the tolerance. | RC-03.4, RC-03.8 |
-| FO-10.2 | build | Transparency analysis: each object classed by its soft mask, blend mode, opacity and group. | `crates/tinker-pdf/src/flatten/mod.rs` (new), `crates/tinker-pdf/src/flatten/analyse.rs` (new), `crates/tinker-pdf/src/lib.rs` | Unit tests: fixtures' objects are classed as the test expects. | FO-10.1 |
+| FO-10.2 | build | Transparency analysis: each object classed by its soft mask, blend mode, opacity and group. | `crates/tinker-pdf/src/flatten/mod.rs` (new), `crates/tinker-pdf/src/flatten/analyse.rs` (new), `crates/tinker-pdf/src/lib.rs` | Unit tests: fixtures' objects are classed as the test expects. | FO-10.1, ED-01.8 |
 | FO-10.3 | build | Polygon booleans on flattened paths: intersection, difference and union with exact winding. | `crates/tinker-pdf-raster/src/boolean.rs` (new), `crates/tinker-pdf-raster/src/lib.rs` | Unit tests: result areas equal those computed in the test for every case, degenerate ones included. | FO-10.1 |
 | FO-10.4 | build | Curves through the booleans within a stated flattening tolerance, robust against near-coincident edges. | `crates/tinker-pdf-raster/src/boolean.rs` (new) | Unit tests: curved operands give areas within the tolerance; a property test finds no failure. | FO-10.3 |
 | FO-10.5 | build | Atomic regions: the planar map of overlapping transparent objects. | `crates/tinker-pdf/src/flatten/regions.rs` (new) | Unit tests: fixtures' regions equal the expected ones. | FO-10.2, FO-10.4 |
-| FO-10.6 | build | Simple regions flattened to opaque vector fills with their blended colour computed. | `crates/tinker-pdf/src/flatten/regions.rs` (new), `crates/tinker-pdf/tests/flatten.rs` (new) | `flatten.rs` (new): constant-colour fixtures render within the tolerance of the original, computed per pixel. | FO-10.5 |
+| FO-10.6 | build | Simple regions flattened to opaque vector fills with their blended colour computed. | `crates/tinker-pdf/src/flatten/regions.rs` (new), `crates/tinker-pdf/tests/flatten.rs` (new) | `flatten.rs` (new): constant-colour fixtures render within the tolerance of the original, computed per pixel. | FO-10.5, ED-01.9, ED-01.10, ED-01.14 |
 | FO-10.7 | build | Complex areas (gradients, images and masks under transparency) rasterised at the set resolution and placed under clips. | `crates/tinker-pdf/src/flatten/raster.rs` (new), `crates/tinker-pdf/tests/flatten.rs` (new) | Complex fixtures render within the tolerance per pixel. | FO-10.6 |
 | FO-10.8 | build | Vector text kept where nothing transparent covers it, and the outline-text option through ED-05. | `crates/tinker-pdf/src/flatten/regions.rs` (new), `crates/tinker-pdf/tests/flatten.rs` (new) | Kept text still extracts; outlined text renders within the tolerance; both builds. | FO-10.6, ED-05 |
 | FO-10.9 | build | Overprint-aware flattening. | `crates/tinker-pdf/src/flatten/regions.rs` (new), `crates/tinker-pdf/tests/flatten.rs` (new) | Overprinting fixtures render within the tolerance under RC-03's simulation. | FO-10.6 |
@@ -267,9 +267,9 @@ preflight — that the standards tier's conversions need.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | FO-12a.1 | build | An XPS package: content types, relationships and fixed documents and pages, with paths and images. | `crates/tinker-pdf/src/xps_out.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/xps_output.rs` (new) | `xps_output.rs` (new): path and image fixtures re-open through the XPS reader and render byte-identically to the source. | FO-11 |
-| FO-12a.2 | build | Glyphs with embedded, obfuscated fonts. | `crates/tinker-pdf/src/xps_out.rs` (new), `crates/tinker-pdf/tests/xps_output.rs` (new) | Text fixtures re-open, render byte-identically and extract their text, in both builds. | FO-12a.1 |
+| FO-12a.2 | build | Glyphs with embedded, obfuscated fonts. | `crates/tinker-pdf/src/xps_out.rs` (new), `crates/tinker-pdf/tests/xps_output.rs` (new) | Text fixtures re-open, render byte-identically and extract their text, in both builds. | FO-12a.1, FT-11.7 |
 | FO-12a.3 | build | Gradients, opacity and clips, and what XPS cannot express flattened through FO-10. | `crates/tinker-pdf/src/xps_out.rs` (new), `crates/tinker-pdf/tests/xps_output.rs` (new) | Every fingerprint fixture re-opens and renders byte-identically to its source. | FO-12a.2, FO-10 |
-| FO-12a.4 | build | `tpdf convert --to xps`. | `tools/tpdf/src/main.rs`, `docs/features/xps.md` | A CLI test writes a package that re-opens to the facade's render. | FO-12a.3 |
+| FO-12a.4 | build | `tpdf convert --to xps`. | `tools/tpdf/src/main.rs`, `docs/features/xps.md` | A CLI test writes a package that re-opens to the facade's render. | FO-12a.3, FO-17.3 |
 
 ## FO-12b — An EPUB writer
 
@@ -284,9 +284,9 @@ preflight — that the standards tier's conversions need.
 | FO-12b.1 | design | Create `docs/design/epub-writer.md`: the EPUB 3 package, content from the structure tree or FT-30's inferred order, styles to CSS, images and fonts carried, and first-party re-opening as the check. | `docs/design/epub-writer.md` (new) | The doc exists in the design-doc order, names FO-12b.2 to FO-12b.6's exit tests. | FT-30 |
 | FO-12b.2 | build | The OCF container, the package document and the navigation document from the outline. | `crates/tinker-pdf/src/epub_out.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/epub_output.rs` (new) | `epub_output.rs` (new): written packages re-open through the EPUB reader with their navigation. | FO-12b.1, FO-11 |
 | FO-12b.3 | build | XHTML content from the structure tree, text styles as CSS. | `crates/tinker-pdf/src/epub_out.rs` (new), `crates/tinker-pdf/tests/epub_output.rs` (new) | A tagged committed document written as EPUB re-opens with its text in its order. | FO-12b.2 |
-| FO-12b.4 | build | Images and fonts carried, fonts obfuscated as OCF states. | `crates/tinker-pdf/src/epub_out.rs` (new), `crates/tinker-pdf/tests/epub_output.rs` (new) | The re-opened book draws its images and fonts. | FO-12b.3 |
+| FO-12b.4 | build | Images and fonts carried, fonts obfuscated as OCF states. | `crates/tinker-pdf/src/epub_out.rs` (new), `crates/tinker-pdf/tests/epub_output.rs` (new) | The re-opened book draws its images and fonts. | FO-12b.3, FT-11.7 |
 | FO-12b.5 | build | Untagged documents written in FT-30's inferred order. | `crates/tinker-pdf/src/epub_out.rs` (new), `crates/tinker-pdf/tests/epub_output.rs` (new) | An untagged document re-opens with its text in the inferred order. | FO-12b.3 |
-| FO-12b.6 | build | `tpdf convert --to epub` and a fingerprint of one written book. | `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/epub.md` | The command writes `testdata/` fixtures to the facade's output; the fingerprint holds on every K-07 target; in the default and `bundled-fonts` builds. | FO-12b.4, FO-12b.5, K-07 |
+| FO-12b.6 | build | `tpdf convert --to epub` and a fingerprint of one written book. | `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/epub.md` | The command writes `testdata/` fixtures to the facade's output; the fingerprint holds on every K-07 target; in the default and `bundled-fonts` builds. | FO-12b.4, FO-12b.5, K-07, FO-17.3 |
 
 ## FO-12c — tar and 7z writers
 
@@ -313,7 +313,7 @@ preflight — that the standards tier's conversions need.
 | FO-13.1 | build | Soft masks written as SVG masks, luminosity and alpha, retiring `SvgWarning::SoftMaskRefused`. | `crates/tinker-pdf/src/svg_out.rs`, `crates/tinker-pdf/tests/svg_output.rs` | `svg_output.rs`: masked fixtures re-opened through the in-tree SVG reader render within the stated tolerance of the page. | — |
 | FO-13.2 | build | Non-Normal blend modes and knockout groups expressed, retiring `BlendModeRefused` and `KnockoutRefused`. | `crates/tinker-pdf/src/svg_out.rs`, `crates/tinker-pdf/tests/svg_output.rs` | Blend and knockout fixtures re-opened render within the tolerance. | FO-13.1 |
 | FO-13.3 | build | Shadings and patterns as SVG gradients and patterns where exact, rasterised with `Rasterised` only where not. | `crates/tinker-pdf/src/svg_out.rs`, `crates/tinker-pdf/tests/svg_output.rs` | Exact cases write gradients and patterns and render within the tolerance; inexact ones are named. | FO-13.1 |
-| FO-13.4 | build | Text as text or as paths by option, and repeated images reused. | `crates/tinker-pdf/src/svg_out.rs`, `crates/tinker-pdf/tests/svg_output.rs`, `docs/features/rendering.md` | Text fixtures render within the tolerance either way and extract as text when kept; a repeated image is written once. | FO-13.1 |
+| FO-13.4 | build | Text as text or as paths by option, and repeated images reused. | `crates/tinker-pdf/src/svg_out.rs`, `crates/tinker-pdf/tests/svg_output.rs`, `docs/features/rendering.md` | Text fixtures render within the tolerance either way and extract as text when kept; a repeated image is written once. | FO-13.1, FT-11.7 |
 | FO-13.5 | test | Every fingerprint fixture written as SVG and re-opened. | `crates/tinker-pdf/tests/svg_output.rs` | Every fingerprint fixture's SVG re-opened through the in-tree SVG reader renders within the stated tolerance of the page. | FO-13.2, FO-13.3, FO-13.4 |
 
 ## FO-14a — DOCX export
@@ -397,10 +397,10 @@ preflight — that the standards tier's conversions need.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | FO-15a.1 | design | Create `docs/design/html-export.md`: positioned selectable text in embedded web fonts with corrected `cmap`s, vector art as SVG or background images, per page or one file, the outline as navigation, and re-layout through the engine's HTML path as the check. | `docs/design/html-export.md` (new) | The doc exists in the design-doc order, names FO-15a.2 to FO-15a.5's exit tests and the tolerance. | FO-13 |
-| FO-15a.2 | build | WOFF and WOFF2 writers, WOFF2's tables transformed and compressed through FO-18, each font's `cmap` corrected so every used glyph maps to its text. | `crates/tinker-pdf-font/src/woff_write.rs` (new), `crates/tinker-pdf-font/src/lib.rs` | Unit tests: written fonts re-read through the in-tree WOFF readers; every used glyph maps to its text. | FO-15a.1, FO-18 |
+| FO-15a.2 | build | WOFF and WOFF2 writers, WOFF2's tables transformed and compressed through FO-18, each font's `cmap` corrected so every used glyph maps to its text. | `crates/tinker-pdf-font/src/woff_write.rs` (new), `crates/tinker-pdf-font/src/lib.rs` | Unit tests: written fonts re-read through the in-tree WOFF readers; every used glyph maps to its text. | FO-15a.1, FO-18, FT-11.7 |
 | FO-15a.3 | build | Page HTML: text runs absolutely positioned in those fonts, with their sizes and transforms. | `crates/tinker-pdf/src/html_out.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/html_output.rs` (new) | `html_output.rs` (new): every glyph's text extracts from the HTML re-laid out by the engine's HTML path. | FO-15a.2 |
 | FO-15a.4 | build | Vector art as SVG through FO-13, or as a background image. | `crates/tinker-pdf/src/html_out.rs` (new), `crates/tinker-pdf/tests/html_output.rs` (new) | The HTML re-laid out by the engine's HTML path renders within the stated tolerance of the page. | FO-15a.3 |
-| FO-15a.5 | build | Per-page files or one file, the outline as navigation, `tpdf convert --to html`, and a fingerprint. | `crates/tinker-pdf/src/html_out.rs` (new), `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/writing.md` | Both layouts write and re-lay out within the tolerance; the navigation equals the outline; the fingerprint holds on every K-07 target; in the default and `bundled-fonts` builds. | FO-15a.4, K-07 |
+| FO-15a.5 | build | Per-page files or one file, the outline as navigation, `tpdf convert --to html`, and a fingerprint. | `crates/tinker-pdf/src/html_out.rs` (new), `tools/tpdf/src/main.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/writing.md` | Both layouts write and re-lay out within the tolerance; the navigation equals the outline; the fingerprint holds on every K-07 target; in the default and `bundled-fonts` builds. | FO-15a.4, K-07, FO-17.3 |
 
 ## FO-15b — Accessible HTML from tagged PDF
 
@@ -413,7 +413,7 @@ preflight — that the standards tier's conversions need.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | FO-15b.1 | build | Accessible HTML from tagged PDF: standard structure types mapped to HTML, attributes to CSS, alternate text, MathML and table headers. *Note:* Its own module beside FO-15a's `html_out.rs`: this writes the structure tree as semantic HTML, that positioned runs in embedded fonts, and the two share only HTML escaping, which whichever lands second takes from the other rather than writing its own. | `crates/tinker-pdf/src/accessible_html.rs` (new), `crates/tinker-pdf/tests/accessible_html.rs` (new), `docs/features/writing.md` | `accessible_html.rs` (new): each committed tagged document's HTML re-read yields the structure tree's order, headings, lists and tables. | — |
-| FO-15b.2 | build | `tpdf convert --to html --accessible`. | `tools/tpdf/src/main.rs` | A CLI test writes a tagged fixture's HTML equal to the facade's. | FO-15b.1 |
+| FO-15b.2 | build | `tpdf convert --to html --accessible`. | `tools/tpdf/src/main.rs` | A CLI test writes a tagged fixture's HTML equal to the facade's. | FO-15b.1, FO-17.3 |
 
 ## FO-15c — Hybrid HTML
 
@@ -479,7 +479,7 @@ preflight — that the standards tier's conversions need.
 | --- | --- | --- | --- | --- | --- |
 | FO-19.1 | build | EMF output from the display list: paths, fills and strokes, text, bitmaps, clips and transforms. | `crates/tinker-pdf/src/metafile/emf_write.rs` (new), `crates/tinker-pdf/tests/emf_output.rs` (new) | `emf_output.rs` (new): records hold to the specification; every written file re-reads through FI-36's reader to the same drawing. | FI-36 |
 | FO-19.2 | build | EMF+ records in dual mode: gradients, transparency and hints. | `crates/tinker-pdf/src/metafile/emf_write.rs` (new), `crates/tinker-pdf/tests/emf_output.rs` (new) | Dual-mode files re-read through FI-36 to the same drawing in both modes. | FO-19.1 |
-| FO-19.3 | build | `tpdf convert --to emf`. | `tools/tpdf/src/main.rs` | A CLI test writes a fixture whose drawing re-reads as the facade's. | FO-19.2 |
+| FO-19.3 | build | `tpdf convert --to emf`. | `tools/tpdf/src/main.rs` | A CLI test writes a fixture whose drawing re-reads as the facade's. | FO-19.2, FO-17.3 |
 
 ## FO-20 — A JPEG XR encoder
 

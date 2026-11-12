@@ -90,13 +90,13 @@ K-08 extends the mechanism to every new rendered surface.
 
 **The nightly `jbig2` fuzz failure** — reproduce on `develop`, fix or show it fixed; ruling 1 makes it a release blocker
 
-**Exit criterion.** every target clean in seven local sessions of 600 seconds each (`cargo fuzz run <target> fuzz/corpus/<target> -- -max_total_time=600`), recorded here; the crashing input committed to the seed corpus
+**Exit criterion.** every target clean in seven local sessions of 600 seconds each (`cargo fuzz run <target> fuzz/corpus/<target> -- -max_total_time=600`), recorded here
 
 **Doc:** — · **Depends on:** MS-11
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| K-06.2 | test | Show rather than infer the nightly's own crashing input: fetch the `crash-jbig2` artifact (`fuzz/artifacts/jbig2/`) of the latest red scheduled `fuzz.yml` run on `main`, replay it against `develop`'s fuzz build, and commit it as a seed pinned by its refusal unless it is byte-identical to one already committed. *Note:* One input the fuzzer generated in this repository's own CI, not a corpus. Artifacts are kept 30 days (`.github/workflows/fuzz.yml:111`), so this runs within 30 days of the last red night. If the input shows a defect `develop` has not fixed, that is a `fix` before this step closes. | `fuzz/corpus/jbig2`, `crates/tinker-pdf-filters/tests/jbig2_seeds.rs`, `docs/verification.md` | `jbig2_seeds.rs` `the_nightly_s_own_input_is_refused_by_name` (new) replays that input, or names the committed seed it equals, and asserts the refusal `develop` gives it, printing its `RAN` line; `verification.md`'s `jbig2` row names the run it came from in place of 'inferred from the shape rather than shown'. | — |
+| K-06.2 | test | Close the row on local sessions: no scheduled run's `crash-jbig2` artifact survives, so the nightly's input cannot be shown; every fuzz target runs clean in seven local sessions of 600 seconds each (`cargo fuzz run <target> fuzz/corpus/<target> -- -max_total_time=600`, a scratch directory first so no new input lands in the committed seeds), and `verification.md`'s `jbig2` row says what the sessions show. *Note:* A session that finds an input is a `fix` before this step closes, its input committed as a seed pinned by its refusal. | `docs/verification.md`, `docs/roadmap/K.md` | Every target's seven sessions finish clean, recorded here, and K-06 leaves the roadmap. | — |
 
 ## K-07 — Determinism for every subsystem the roadmap adds
 

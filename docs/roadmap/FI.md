@@ -529,7 +529,7 @@ it.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | FI-20b.1 | build | SM3. | `crates/tinker-pdf-crypto/src/sm3.rs` (new), `crates/tinker-pdf-crypto/src/lib.rs` | Unit tests: the published GM/T vectors pass. | — |
-| FI-20b.2 | build | SM2 signature verification and constant-time signing. | `crates/tinker-pdf-crypto/src/sm2.rs` (new) | Unit tests: the published GM/T vectors pass; an operation-count test shows signing's counts independent of the key. | FI-20b.1 |
+| FI-20b.2 | build | SM2 signature verification and constant-time signing. | `crates/tinker-pdf-crypto/src/sm2.rs` (new) | Unit tests: the published GM/T vectors pass; an operation-count test shows signing's counts independent of the key. | FI-20b.1, SG-01.2, SG-02.3 |
 | FI-20b.3 | build | OFD signatures verified with SM2 and SM3. | `crates/tinker-pdf/src/ofd/signature.rs` (new), `crates/tinker-pdf/tests/ofd.rs` (new), `docs/features/signatures.md` | Signed OFDs generated in the test verify; a tampered one fails. | FI-20b.2, FI-20a |
 
 ## FI-21 — Compound files and mail

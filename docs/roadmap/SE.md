@@ -151,7 +151,7 @@ reconstruction — each a typed report before it is a removal.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SE-11.1 | build | An active-content report: every script by place, launch action, URL with its domain, remote go-to target, embedded executable by magic number, rich media, XFA script, submission target and external stream, with counts of the keys triage watches. *Note:* The report joins SE-09.1's audit in `audit.rs`. | `crates/tinker-pdf/src/audit.rs` (new), `crates/tinker-pdf/tests/active_content.rs` (new), `docs/features/editing.md` | `active_content.rs` (new): a fixture planting each item lists it exactly once. | AN-20, SE-09.1 |
+| SE-11.1 | build | An active-content report: every script by place, launch action, URL with its domain, remote go-to target, embedded executable by magic number, rich media, XFA script, submission target and external stream, with counts of the keys triage watches. *Note:* The report joins SE-09.1's audit in `audit.rs`. | `crates/tinker-pdf/src/audit.rs` (new), `crates/tinker-pdf/tests/active_content.rs` (new), `docs/features/editing.md` | `active_content.rs` (new): a fixture planting each item lists it exactly once. | AN-20, SE-09.1, AN-27.2 |
 | SE-11.2 | build | `tpdf audit` printing the report as text and JSON. | `tools/tpdf/src/main.rs` | CLI tests print the planted fixture's report as the facade gives it. | SE-11.1 |
 
 ## SE-12 — Content disarm and reconstruction
@@ -178,7 +178,7 @@ reconstruction — each a typed report before it is a removal.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SE-13.1 | build | `sanitise` grows the full scrub: thumbnails, hidden text, links, field values reset, review replies, applied redactions and XMP alone, each a flag. | `crates/tinker-pdf-cos/src/edit/sanitise.rs`, `crates/tinker-pdf/tests/sanitise_flags.rs` (new), `docs/features/editing.md` | `sanitise_flags.rs` (new): each new flag is held to a fixture. | SE-09 |
+| SE-13.1 | build | `sanitise` grows the full scrub: thumbnails, hidden text, links, field values reset, review replies, applied redactions and XMP alone, each a flag. | `crates/tinker-pdf-cos/src/edit/sanitise.rs`, `crates/tinker-pdf/tests/sanitise_flags.rs` (new), `docs/features/editing.md` | `sanitise_flags.rs` (new): each new flag is held to a fixture. | SE-09, ED-36d.2 |
 
 ## SE-14 — Encrypted and multi-volume archives
 

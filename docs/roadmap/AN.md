@@ -18,7 +18,7 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-01.2 | measure | Hold the per-family counts as floors in the census, and record them in the roadmap row's place in the feature doc. | `crates/tinker-pdf/tests/annotation_census.rs`, `docs/features/editing.md` | The census fails when a family's count falls below its committed floor and passes at AN-01.1's figures; the feature doc quotes them with the run. | — |
+| AN-01.2 | measure | Hold the per-family counts as floors in the census, and record them in the roadmap row's place in the feature doc. | `crates/tinker-pdf/tests/annotation_census.rs`, `docs/features/editing.md` | The census fails when a family's count falls below its committed floor and passes at AN-01.1's figures; the feature doc quotes them with the run. | MS-13.5 |
 
 ## AN-02 — Appearances for the subtypes no dictionary determines
 
@@ -301,7 +301,7 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-17.1 | build | A signature field signed from the form layer: an empty field found by name and signed through SG-06's path, its widget given the signature's appearance. | `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/src/signature.rs`, `crates/tinker-pdf/tests/signature_fields.rs` (new), `docs/features/forms.md` | `signature_fields.rs` (new) `a_field_signed_through_the_form_layer_verifies`: a field created, signed and verified through the form layer gives the verdict the signing path gives. | SG-06.6, AN-14 |
+| AN-17.1 | build | A signature field signed from the form layer: an empty field found by name and signed through SG-06's path, its widget given the signature's appearance. | `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/src/signature.rs`, `crates/tinker-pdf/tests/signature_fields.rs` (new), `docs/features/forms.md` | `signature_fields.rs` (new) `a_field_signed_through_the_form_layer_verifies`: a field created, signed and verified through the form layer gives the verdict the signing path gives. | SG-06.6, AN-14.3 |
 | AN-17.2 | build | Clearing a signature field from the form layer through SG-17's operation, retiring the refusal in the forms doc. | `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/signature_fields.rs` (new), `docs/features/forms.md` | `a_cleared_field_signs_again`: the cleared field carries no value, earlier signatures still verify, and it signs again. | AN-17.1, SG-17.1 |
 
 ## AN-18 — Page templates
@@ -328,7 +328,7 @@ rows. Form JavaScript has its own tier, next.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | AN-19.1 | build | Submit payloads: field selection (include and exclude lists, empty fields) in HTML-form, FDF, XFDF or PDF format, by GET or POST, handed to the host as bytes, URL and method. | `crates/tinker-pdf/src/form_actions.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/submit.rs` (new), `docs/features/forms.md` | `submit.rs` (new) `payloads_equal_their_computation`: each combination's bytes, URL and method equal those computed in the test from 12.7.6.2's rules. | AN-20 |
-| AN-19.2 | build | The rest of the submit flags: coordinates, incremental appends, annotations and canonical dates. | `crates/tinker-pdf/src/form_actions.rs` (new), `crates/tinker-pdf/tests/submit.rs` (new) | `every_flag_shapes_the_payload`: each flag's payload equals the test's computation. | AN-19.1 |
+| AN-19.2 | build | The rest of the submit flags: coordinates, incremental appends, annotations and canonical dates. | `crates/tinker-pdf/src/form_actions.rs` (new), `crates/tinker-pdf/tests/submit.rs` (new) | `every_flag_shapes_the_payload`: each flag's payload equals the test's computation. | AN-19.1, AN-08.3 |
 | AN-19.3 | build | Reset with field lists, and import data applied from an FDF the host supplies. | `crates/tinker-pdf/src/form_actions.rs` (new), `crates/tinker-pdf/tests/submit.rs` (new) | `reset_and_import`: values after reset and import equal the test's computation. | AN-19.1 |
 
 ## AN-20 — Every action typed
@@ -355,7 +355,7 @@ rows. Form JavaScript has its own tier, next.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| AN-21.1 | build | A template filled from CSV or JSON rows into one document per row, or into one document of all copies with fields renamed per copy. | `crates/tinker-pdf/src/form_batch.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/form_batch.rs` (new), `docs/features/forms.md` | `form_batch.rs` (new) `n_rows_make_n_filled_documents`: N rows produce N documents (or N copies) whose field values equal the rows. | AN-14 |
+| AN-21.1 | build | A template filled from CSV or JSON rows into one document per row, or into one document of all copies with fields renamed per copy. | `crates/tinker-pdf/src/form_batch.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/form_batch.rs` (new), `docs/features/forms.md` | `form_batch.rs` (new) `n_rows_make_n_filled_documents`: N rows produce N documents (or N copies) whose field values equal the rows. | AN-14, ED-13.4 |
 | AN-21.2 | build | A form created from a JSON description of its fields. | `crates/tinker-pdf/src/form_batch.rs` (new), `crates/tinker-pdf/tests/form_batch.rs` (new) | `a_form_from_json_re_reads_to_its_description`: the created form's fields re-read to the description and validate strictly. | AN-21.1 |
 | AN-21.3 | build | `tpdf forms fill` and `reset`. | `tools/tpdf/src/main.rs`, `tools/tpdf/src/writing.rs` | Both commands run over `testdata/` fixtures to the facade's output. | AN-21.1 |
 
@@ -409,7 +409,7 @@ rows. Form JavaScript has its own tier, next.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | AN-25.1 | design | Create `docs/design/form-detection.md`: candidates from a flat page's vectors (boxes, underlines, comb cells, checkboxes), labels found by FT-30's reading order, naming, field kinds, and the recall and precision floor with how generated flat forms measure it. | `docs/design/form-detection.md` (new) | The doc exists in the design-doc order, states the floor, names AN-25.2 to AN-25.5's exit tests. | FT-30 |
-| AN-25.2 | build | Candidates found: boxes and underlines from the page's paths, comb runs of equal cells, and checkbox squares. | `crates/tinker-pdf/src/form_detect.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/form_detection.rs` (new) | `form_detection.rs` (new) `candidates_are_found`: generated flat forms' candidates are found with recall and precision at or above the design's floor. | AN-25.1 |
+| AN-25.2 | build | Candidates found: boxes and underlines from the page's paths, comb runs of equal cells, and checkbox squares. | `crates/tinker-pdf/src/form_detect.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/form_detection.rs` (new) | `form_detection.rs` (new) `candidates_are_found`: generated flat forms' candidates are found with recall and precision at or above the design's floor. | AN-25.1, FT-26.2 |
 | AN-25.3 | build | Labels associated by reading order and proximity, and names made from them, safe and unique. | `crates/tinker-pdf/src/form_detect.rs` (new), `crates/tinker-pdf/tests/form_detection.rs` (new) | `labels_name_their_fields`: names match the generated labels at the design's floor. | AN-25.2 |
 | AN-25.4 | build | Detections turned into fields (text, comb text with its length, check box) through AN-14's creation. | `crates/tinker-pdf/src/form_detect.rs` (new), `crates/tinker-pdf/tests/form_detection.rs` (new) | `detected_fields_meet_the_floor`: generated flat forms with known fields are detected with recall and precision at or above the floor, and every created field fills. | AN-25.3, AN-14 |
 | AN-25.5 | build | `tpdf forms detect`, the speed row and a fingerprint of one detected form. | `tools/tpdf/src/main.rs`, `crates/tinker-pdf/benches/analysis.rs`, `crates/tinker-pdf/tests/determinism.rs`, `docs/features/forms.md` | The command runs over `testdata/` fixtures to the facade's output; the speed row is in the benchmark set; the fingerprint holds on every K-07 target. | AN-25.4, MS-04.8, K-07 |
@@ -425,7 +425,7 @@ rows. Form JavaScript has its own tier, next.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | AN-26.1 | build | Spell checking of field values against a host-supplied dictionary: words split at the layout crate's word boundaries, misspellings reported with their field and position. | `crates/tinker-pdf/src/spelling.rs` (new), `crates/tinker-pdf/src/lib.rs`, `crates/tinker-pdf/tests/spelling.rs` (new), `docs/features/forms.md` | `spelling.rs` (new) `fields_flag_exactly_the_planted_misspellings`: a host dictionary flags exactly the misspellings planted in field fixtures. | — |
-| AN-26.2 | build | Comments checked the same way: annotations' `/Contents` and rich text. | `crates/tinker-pdf/src/spelling.rs` (new), `crates/tinker-pdf/tests/spelling.rs` (new) | `comments_flag_exactly_the_planted_misspellings`: planted misspellings in comments are flagged exactly. | AN-26.1 |
+| AN-26.2 | build | Comments checked the same way: annotations' `/Contents` and rich text. | `crates/tinker-pdf/src/spelling.rs` (new), `crates/tinker-pdf/tests/spelling.rs` (new) | `comments_flag_exactly_the_planted_misspellings`: planted misspellings in comments are flagged exactly. | AN-26.1, AN-16.1 |
 
 ## AN-27 — XFA read
 

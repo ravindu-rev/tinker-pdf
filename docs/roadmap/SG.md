@@ -26,9 +26,9 @@ deterministic by default.
 | SG-01.2 | build | The bignum's constant-time path: fixed-window Montgomery exponentiation with every table entry read, no branch or index on a secret. | `crates/tinker-pdf-crypto/src/bignum.rs` | An operation-count test (counters under `cfg(test)`) shows branch and lookup counts independent of the exponent's bits. | SG-01.1 |
 | SG-01.3 | test | The signature-generation vectors vendored with provenance: NIST CAVP's PKCS#1 v1.5 and PSS vectors and the Wycheproof RSA signature vectors (Apache-2.0), with their licence records. | `crates/tinker-pdf-crypto/tests/data/cavp/rsa_siggen15.rsp` (new), `THIRDPARTY.md`, `.gitattributes`, `crates/tinker-pdf-crypto/tests/data/cavp/rsa_siggen_pss.rsp` (new), `crates/tinker-pdf-crypto/tests/data/wycheproof` (new), `crates/tinker-pdf-crypto/tests/rsa_sign.rs` (new) | The vectors load in a test that prints their counts; their licence is recorded. | SG-01.1, H-92 |
 | SG-01.4 | build | The RSA private operation by CRT with blinding from caller entropy, and key material zeroised on drop. | `crates/tinker-pdf-crypto/src/rsa.rs`, `crates/tinker-pdf-crypto/src/bignum.rs` | Unit tests: the CRT result equals the plain private operation on every vector key; a blinded run equals an unblinded one; a key's limbs read zero after drop in a test harness. | SG-01.2 |
-| SG-01.5 | build | PKCS#1 v1.5 signature generation over SHA-256, SHA-384, SHA-512 and SHA-512/256, the digest the caller's choice. | `crates/tinker-pdf-crypto/src/rsa.rs`, `crates/tinker-pdf-crypto/tests/rsa_sign.rs` (new) | `rsa_sign.rs` (new): CAVP's PKCS#1 v1.5 generation vectors and Wycheproof's signature vectors pass for every SHA-2 digest they cover. | SG-01.3, SG-01.4 |
+| SG-01.5 | build | PKCS#1 v1.5 signature generation over SHA-256, SHA-384, SHA-512 and SHA-512/256, the digest the caller's choice. | `crates/tinker-pdf-crypto/src/rsa.rs`, `crates/tinker-pdf-crypto/tests/rsa_sign.rs` (new) | `rsa_sign.rs` (new): CAVP's PKCS#1 v1.5 generation vectors and Wycheproof's signature vectors pass for every SHA-2 digest they cover. | SG-01.3, SG-01.4, SG-04.2 |
 | SG-01.6 | build | RSASSA-PSS generation, the salt fixed for vectors or drawn from caller entropy. *Note:* The salt from the caller is H-33's default. | `crates/tinker-pdf-crypto/src/rsa.rs`, `crates/tinker-pdf-pki/src/pss.rs`, `crates/tinker-pdf-crypto/tests/rsa_sign.rs` (new) | CAVP's PSS vectors with a fixed salt pass for every SHA-2 digest. | SG-01.5 |
-| SG-01.7 | test | The SHA-3 pairs of both schemes once SG-04's digests exist. | `crates/tinker-pdf-crypto/tests/rsa_sign.rs` (new) | The SHA-3 vectors pass for PKCS#1 v1.5 and PSS. | SG-01.6, SG-04 |
+| SG-01.7 | test | The SHA-3 pairs of both schemes once SG-04's digests exist. | `crates/tinker-pdf-crypto/tests/rsa_sign.rs` (new) | The SHA-3 vectors pass for PKCS#1 v1.5 and PSS. | SG-01.6, SG-04.1 |
 
 ## SG-02 — ECDSA signing on P-256, P-384, P-521 and Brainpool P256r1, P384r1 and P512r1
 
@@ -111,6 +111,7 @@ deterministic by default.
 | SG-06.4 | build | A signature timestamp through the host `Timestamper` as an unsigned attribute. | `crates/tinker-pdf-pki/src/cms.rs`, `crates/tinker-pdf-pki/src/tsp.rs`, `crates/tinker-pdf/tests/signing.rs` | `timestamped_signatures_verify`: the verdict reports the timestamp `Ok`. | SG-06.3 |
 | SG-06.5 | build | The `RawSigner` seam: the host returns a raw signature over the to-be-signed attributes. | `crates/tinker-pdf/src/signature.rs`, `crates/tinker-pdf/tests/signing.rs` | `raw_signer_outputs_verify`: a test host's raw signatures give outputs that verify, byte-identical to in-engine signing with the same deterministic key. | SG-06.3 |
 | SG-06.6 | test | RFC 5652's structures transcribed as tests, and a deterministically signed document fingerprinted. | `crates/tinker-pdf-pki/tests/cms_structures.rs` (new), `crates/tinker-pdf/tests/determinism.rs` | The transcribed structures encode and decode as the RFC states; the fingerprint holds on every K-07 target. | SG-06.4, SG-06.5, K-07 |
+| SG-06.8 | doc | Close the row on the interoperability record: the owner's measurement of signed output read by outside validators and viewers (H-68) is committed as data, and `docs/features/signatures.md` says what it claims and what it does not; then SG-06 leaves the roadmap. *Note:* SG-06.7, the watch step that held this exit, left with the CI workflows. | `docs/features/signatures.md`, `docs/roadmap/SG.md` | The record is committed and the doc names it. | SG-06.6, H-68 |
 
 ## SG-07 — PAdES baseline levels B-B, B-T, B-LT and B-LTA
 
@@ -174,6 +175,7 @@ deterministic by default.
 | SG-10.2 | build | CRLs parsed (RFC 5280 §5) and evaluated (§6.3): issuing distribution points, delta CRLs, reasons and indirect CRLs, through SG-11's revocation hook. | `crates/tinker-pdf-pki/src/crl.rs` (new), `crates/tinker-pdf-pki/src/lib.rs`, `crates/tinker-pdf-pki/tests/pkits.rs` (new) | `pkits.rs` (new): the NIST interoperability suite's CRL cases pass. | SG-10.1, SG-11.6 |
 | SG-10.3 | build | OCSP responses evaluated (RFC 6960): responder authorisation, `id-pkix-ocsp-nocheck`, `thisUpdate` and `nextUpdate` against the validation time, and nonces; request bytes built for the host to send. | `crates/tinker-pdf-pki/src/ocsp.rs` (new), `crates/tinker-pdf-pki/tests/ocsp.rs` (new) | `ocsp.rs` (new): RFC 6960's structures, transcribed, and responses generated once (dated, bytes only) evaluate as stated. | SG-10.2, H-106 |
 | SG-10.4 | build | AIA and distribution-point URLs extracted, `adbe-revocationInfoArchival` read and written, and the verdict consulting the DSS. | `crates/tinker-pdf-pki/src/x509.rs`, `crates/tinker-pdf-pki/src/cms.rs`, `crates/tinker-pdf/src/signature.rs`, `crates/tinker-pdf/tests/revocation.rs` (new), `docs/features/signatures.md` | `revocation.rs` (new): URLs extract as written; the archival attribute round-trips; a document whose DSS revokes the signer gets the revoked verdict. | SG-10.3 |
+| SG-10.6 | measure | Close the row on the corpora (ruling 15): a local census over the fetched corpora evaluates every embedded revocation datum (CRLs and OCSP responses in `/DSS` and in CMS) and commits its counts and verdicts as the census's floors; then SG-10 leaves the roadmap. *Note:* SG-10.5, the watch step that held this exit, left with the corpus workflow. | `crates/tinker-pdf/tests/`, `docs/roadmap/SG.md` | The census prints `RAN` and holds its committed floors, recorded here. | SG-10.4 |
 
 ## SG-11 — Certification path validation, complete
 
@@ -271,6 +273,7 @@ deterministic by default.
 | SG-16.2 | build | A handwritten signature image with alpha, and a vector logo from an SVG or a page (ED-48). | `crates/tinker-pdf/src/signature.rs`, `crates/tinker-pdf/tests/signature_appearances.rs` (new) | Each is a K-08 golden awaiting H-73; the alpha becomes a soft mask. | SG-16.1, ED-48 |
 | SG-16.3 | build | Localised dates and signer names in any script, through a CID font and shaping (ED-45). | `crates/tinker-pdf/src/signature.rs`, `crates/tinker-pdf/tests/signature_appearances.rs` (new) | Non-Latin names extract as written in both builds; dates follow the stated locale's pattern. | SG-16.1, ED-45 |
 | SG-16.4 | build | A preview of the appearance before signing. | `crates/tinker-pdf/src/signature.rs`, `crates/tinker-pdf/tests/signature_appearances.rs` (new) | The preview renders equal to the signed appearance. | SG-16.1 |
+| SG-16.6 | test | Close the row on its goldens: each appearance layout's golden family, reviewed by the owner (H-73), committed under K-08's rules; then SG-16 leaves the roadmap. *Note:* SG-16.5, the watch step that held this exit, left with the CI workflows. | `crates/tinker-pdf/tests/`, `docs/roadmap/SG.md` | Each layout's family is committed with the owner's review recorded here. | SG-16.4, H-73 |
 
 ## SG-17 — Clear a signature
 
@@ -300,6 +303,7 @@ deterministic by default.
 | SG-18.4 | build | Incremental-saving attacks, signature wrapping and `/ByteRange` tricks detected. | `crates/tinker-pdf/src/revision_attacks.rs` (new), `crates/tinker-pdf/tests/revision_analysis.rs` (new) | A fixture per class is flagged. | SG-18.2 |
 | SG-18.5 | build | A visual diff of the signed revision against the final one in the report, through ED-23. | `crates/tinker-pdf/src/revision_attacks.rs` (new), `crates/tinker-pdf/tests/revision_analysis.rs` (new) | A shadow fixture's report carries the regions ED-23 finds between the signed and final renders. | SG-18.3 |
 | SG-18.6 | build | The analysis on by default in the verdict. | `crates/tinker-pdf/src/signature.rs`, `crates/tinker-pdf/tests/revision_analysis.rs` (new), `docs/features/signatures.md` | The default verdict flags every attack fixture and none of the benign incremental-edit fixtures. | SG-18.4, SG-18.5 |
+| SG-18.8 | measure | Close the row on the corpora (ruling 15): a local census over the fetched corpora runs revision analysis on every file with an incremental update and flags none of the benign ones, each flagged file named; then SG-18 leaves the roadmap. *Note:* SG-18.7, the watch step that held this exit, left with the corpus workflow. | `crates/tinker-pdf/tests/`, `docs/roadmap/SG.md` | The census prints `RAN` and flags no benign edit, recorded here. | SG-18.6 |
 
 ## SG-19 — Usage-rights signatures
 
@@ -410,7 +414,7 @@ deterministic by default.
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| SG-26.2 | measure | The census's first figures recorded and pinned as floors. | `crates/tinker-pdf/tests/verdicts.rs`, `docs/features/signatures.md` | The census fails below its committed floors and passes at SG-26.1's figures; the feature doc quotes them with the run. | — |
+| SG-26.2 | measure | The census's first figures recorded and pinned as floors. | `crates/tinker-pdf/tests/verdicts.rs`, `docs/features/signatures.md` | The census fails below its committed floors and passes at SG-26.1's figures; the feature doc quotes them with the run. | MS-13.4 |
 
 ## SG-27 — A PKCS#11 signing provider
 

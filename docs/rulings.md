@@ -180,7 +180,10 @@ instead of living in one feature's head.
 11. **The facade is the only public surface.** Binds
     [bindings](features/bindings.md). Bindings and the C ABI project the
     `tinker-pdf` crate 1:1; no binding adds logic, caching or defaults of
-    its own. If a binding needs behavior, the facade grows it first.
+    its own. If a binding needs behavior, the facade grows it first. The
+    one other crate a binding may project is `tools/sysfonts`, the host's
+    system-font provider kept outside the engine crates, projected 1:1 the
+    same way (ruling 23, H-24).
 
 12. **Own the parity tests verbatim.** Binds
     [verification.md](verification.md). `tinker_parity.rs` ports the host
@@ -666,6 +669,145 @@ instead of living in one feature's head.
     page is read along its own baseline, as it reads unturned; the owner took
     the price, that a paragraph read whole only where a turn cut its lines
     otherwise reads as its twin, whatever its twin reads.
+
+15. **Every exit is a local proof.** Binds
+    [verification](verification.md) and the [roadmap](ROADMAP.md). An exit
+    that says CI runs a test on every pull request is met by the same test
+    run locally — natively on Windows, on Linux in a container, and on
+    `wasm32-wasip1` under wasmtime — and recorded in its row; CI runs the
+    tests again when the owner merges `develop` into `main`, and no pull
+    request is opened and no workflow dispatched to meet an exit. Corpora are
+    fetched by `cargo xtask corpus-fetch` into the ignored `corpus/` folders,
+    fetched again only when `corpus/corpora.lock` changes, run locally and
+    never committed. Benchmark figures are the local machine's, in its own
+    `baseline.json` entry, taken with nothing else running on it; a step
+    that only adds an operation lands it unmeasured.
+
+16. **A measured figure lives in committed data, never in prose.** Binds
+    every doc. A count, a time, a size or a band that a run measures is
+    committed in the data or test file that holds it — `baseline.json`, the
+    ratchet files, a census's floors, a TSV — beside the command that
+    regenerates it; a doc states the rule the figure is held to and names
+    the file, and the run, its revision and its day go in the commit
+    message. A step whose text puts a figure or a date in a doc writes it to
+    that file instead.
+
+17. **A band the fifteen-run rule computes is approved in advance.** Binds
+    the benches ([verification](verification.md)). The bands
+    `verification.md`'s rule gives — each operation's spread half again as
+    wide, rounded up to the next 5 %, never under 5 % — are committed
+    without a further approval; a wider band or a lowered floor stays the
+    owner's (H-78). The planning number P-04 is held to is the byte count a
+    level-6 deflate gives on each of MS-04's page-like and photo-like
+    inputs, computed once by a reference deflate outside the engine and never
+    measured again against a build: it states a target and judges no output.
+
+18. **Vendored data carries a licence the allowlist already admits.** Binds
+    every crate that vendors data and every test suite. Test vectors, faces
+    and data tables enter the repository only under a licence `deny.toml`
+    admits; data under any other licence is fetched locally for a test and
+    never committed, or its licence goes to the owner first.
+
+19. **Each wasm build profile holds its own footprint budget.** Binds
+    [bindings](features/bindings.md). The default profile keeps the
+    release's 2.5 MiB gzipped gate. Data a capability needs beyond it — CJK
+    and fallback faces, the script engine, OCR models, locale data — goes in
+    an opt-in profile, each held at its first measured size and tolerance
+    (MS-06); raising the default profile's gate is the owner's, on MS-06's
+    measured figure.
+
+20. **Private-key operations run in the engine, on constant-time paths.**
+    Binds [signatures](features/signatures.md) and every crate that holds a
+    secret. The engine signs and decrypts with the keys it is handed: every
+    operation on a secret operand runs on a path whose branches and memory
+    accesses do not depend on the secret, entropy is the caller's, and key
+    material is zeroised when it is dropped. The algorithms and key formats
+    are tier SG's list; nonces are RFC 6979's deterministic ones, hedged on
+    request; a PSS salt is the caller's; keys cross the C ABI and the
+    bindings as bytes and a passphrase, never logged, with `RawSigner` and
+    two-phase signing for a key held elsewhere; the signing callback is the
+    C ABI's one callback for a key it does not hold, a script host's
+    requests are queued, and warnings and progress cross as callbacks.
+
+21. **Implementers read specifications and published format documentation,
+    never another implementation.** Binds every capability row. Only
+    planning reads other engines' public documentation and source listings,
+    and only to inventory capabilities; no implementer reads another
+    implementation's code, nothing is copied, paraphrased or ported, and no
+    other engine's name enters the repository outside the provenance files.
+    Where a format's only definition is another tool's published
+    documentation of its output, an implementer may read that documentation,
+    never the tool's code, and records the source in the provenance file,
+    the format named by its role.
+
+22. **A shading may differ from its clause's expression by at most one level
+    in 255.** Binds [rendering](features/rendering.md). Axial and radial
+    parameters stepped along a scanline, mesh colour stepped along a span
+    and sampled functions read from tables (P-14) evaluate ISO 32000-1
+    8.7.4.5.3 to 8.7.4.5.5 by increments and tables instead of at every
+    pixel. A shaded pixel stays within one level of 255 of the expression
+    evaluated directly, the analytic tier's shading assertions hold that
+    bound in place of equality, and a fingerprint or golden the mechanism
+    moves is reviewed by the owner before it is committed (H-76, H-133).
+
+23. **The owner's answers stand as rules.** Binds every row and step that
+    names one. Each owner row below left the roadmap on the answer written
+    here, and a step that lands the owner's answer to one lands this. The
+    earlier rulings answer the rest: ruling 17 is H-109's and H-112's, ruling
+    18 H-92's and H-116's, ruling 19 H-04's, ruling 20 H-09's, ruling 21
+    H-06's and ruling 22 H-139's.
+
+    | Row | Question | Answer |
+    | --- | --- | --- |
+    | H-05 | The roadmap's scope | as written, in the order the roadmap's Order of work gives |
+    | H-07 | The never-name rule's reach | the roadmap names no PDF engine, viewer, validator or document tool, each corpus named by its role; the provenance files (`corpus/corpora.lock`, `corpus/README.md`, `THIRDPARTY.md`) keep the names, because recording provenance is their job; fixture bytes untouched |
+    | H-08 | The parity amendment | ruling 3 as amended; `architecture.md`'s locked decisions stand, with their pointers to SD-18 and P-15 |
+    | H-10 | The save doors and `check_save` | `check_save` and `check_decrypt` projected everywhere; the doors as they are |
+    | H-11 | Redaction clause (a): Type 3 procedures | owed work (ED-35) |
+    | H-12 | Redaction clause (d) and annotation looks | drawn from a design this repository states, each a reviewed golden |
+    | H-13 | A book's `@page` | an opt-in option honours it; the caller's box is the default; HTML creation honours `@page` |
+    | H-14 | PDF 2.0's `/Lab` transparency group | composited in Lab with a typed warning |
+    | H-16 | The hard rules against the speed mandate | `forbid(unsafe_code)` stays; safe, auto-vectorisable code; a facade pool behind `Parallelism::Serial` by default; a host instruction counter on the bench machine admitted as a dev tool (it executes the code and judges nothing) |
+    | H-17 | The regular-expression syntax | a documented linear-time subset |
+    | H-18 | Writing weak encryption (R4 AES-128, RC4) | behind an explicit legacy option with a typed weakness warning; R5 never written |
+    | H-19 | An archival profile on rewrite | the refusal channel added before 0.1.0 |
+    | H-20 | Lossy and fax codecs; partial image redaction | the caller names the policy; redaction recodes losslessly |
+    | H-24 | System fonts in the CLI and bindings | a host provider in `tools/sysfonts`, outside the engine crates; ruling 11 admits it |
+    | H-25 | A password seam for encrypted archives | beside the PDF password path |
+    | H-26 | EPUB scripting; vendor DRM | scripting deny-by-default as form scripts; DRM refused |
+    | H-27 | Trust and revocation | no bundled roots; host-supplied lists; the engine builds requests and the host fetches |
+    | H-28 | Callbacks across the C ABI | ruling 20 |
+    | H-29 | ECDH and other recipient shapes | added with the signing work |
+    | H-30 | JPEG XR encoding and JPEG 2000 Part 2 | last in their tiers |
+    | H-31 | SVG filters | exact mappings as vectors, the rest rasterised as an option |
+    | H-32 | Signing scope | ruling 20: tier SG's list |
+    | H-33 | Entropy and nonces | ruling 20 |
+    | H-34 | Key material across the C ABI and bindings | ruling 20 |
+    | H-35 | "Complete" for form JavaScript | the 2025 editions of ECMA-262 and ECMA-402, complete, with empty exclusion lists; a later edition becomes the target as new milestone rows when it is published; the whole object model the published API reference and ISO 21757-1 describe |
+    | H-36 | Document code in a server-side library | a complete engine, deny by default, hosts opt in per trigger |
+    | H-37 | The host-facing script APIs | each a typed host request behind FJ-14's gates, the collaboration, network, database and mail objects included; a policy may deny any of them at run time, by name |
+    | H-38 | OCR scope | printed text first (Latin, then Cyrillic and Greek, Arabic and Hebrew, Indic, CJK); handwriting last |
+    | H-39 | OCR models and training data | trained here from data with known licences |
+    | H-40 | OCR models bundled or host-supplied | host-supplied models; one small bundled Latin model behind the `ocr` profile |
+    | H-41 | The writer's PDF/UA claim | made only on the caller's explicit assertion that a person reviewed the meaning clauses |
+    | H-42 | PNG output and the CLI's jobs | the fast level for rendered output; `--jobs 1` |
+    | H-43 | Native CPU baselines for distributed binaries | the baseline build only |
+    | H-44 | wasm build flags | `+simd128` by default with a plain fallback; no threaded build |
+    | H-45 | Profile-guided optimisation | not adopted |
+    | H-48 | Document-AI features | out of the roadmap |
+    | H-77 | The performance targets | the table's targets, factors, calibrations and relations gate as written in MS-02's paired comparison; an approval may tighten or re-state one, and loosening one is H-78's |
+    | H-135 | A device CMYK colour under `/DefaultCMYK` | an ink render keeps a `k` colour's own components; the light render substitutes the default |
+    | H-136 | Native against wasm for K-04 | the replay form: K-04.11 as written, its inputs drawn from three targets that each carry a coverage figure |
+    | H-137 | Merge deduplication across encodings | byte-identical encodings merge without decoding; differing encodings keep the decoded comparison, decoded once a save, so `two_encodings_of_one_content_merge` holds; A6 and the merge floors state that mechanism |
+    | H-140 | A 16-bit sample | the row as written: the top byte is today's 8-bit arithmetic, bit for bit, the low byte refines it, and no 8-bit fingerprint or golden moves |
+    | H-143 | Kashida justification | kashida and `JSTF` justify a line only under the `text-justify` value FT-07e.1 assigns them; under `auto` a line is justified over its spaces |
+    | H-145 | Canonical combining order in Brahmic runs | lands only if FT-08.2 finds it loses no passing case; otherwise the gap stays, recorded in `docs/features/fonts.md` with its price |
+    | H-146 | A case the vendored face cannot produce | nothing is declined: such a case stays in `TRIAGE` and `PASSING`'s shortfall |
+    | H-147 | Metric-matched substitution | opt-in: FT-14.2 to FT-14.4 land behind the switch, off, and no fingerprint, golden or pinned render moves |
+    | FT-01.3 | A substituted face for a composite font | read through its registry collection only, never by CID as a glyph index: an Identity-ordered CIDFontType2 with no `/ToUnicode` draws `.notdef` and reports `UnreadableFont` even where the host's face is the document's own; the owner took that price |
+    | ED-06a.3 | A recoloured shading under a non-linear conversion | exact wherever the shading's own function can carry the conversion (a Type 4 calculator composed with it); a mesh's per-vertex colours are resampled, subdividing until the worst deviation is within one level of 255, which is reported |
+    | ED-24.1 | The optimisation presets | every preset lossless; presets differ in resolution caps, font subsetting and object streams |
+    | ED-36e.2–ED-36e.4 | Redaction residue outside the content | scrubbed by default — links and annotations in the area, field values and annotation `/Contents`, `/ActualText`, `/Alt` and `/E`, outline titles, named destinations and attachments — with a typed opt-out naming each place kept; `tpdf redact` inherits it |
 
 ## How to add a ruling
 

@@ -38,7 +38,9 @@ rulings, which override everything. The owner is Ravindu Wijegunawardhana.
 - If a change would make something that works today worse, stop and ask the
   owner. Their decision goes into [docs/rulings.md](docs/rulings.md) as a
   rule.
-- Test corpora are never downloaded; they run only in CI.
+- Test corpora are fetched with `cargo xtask corpus-fetch` into the ignored
+  `corpus/` folders and run locally (ruling 15); nothing from them is
+  committed.
 
 ## Docs
 
