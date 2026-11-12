@@ -1142,6 +1142,25 @@ enum TpdfStatus tpdf_document_open_streaming(struct TpdfSourceVtable vtable,
 // `doc` must have come from one of the open calls.
 int tpdf_document_is_streamed(const struct TpdfDocument *doc);
 
+// Whether this document answers as an open of the same bytes from a buffer
+// would (`CosDocument::answers_as_buffered`): 1 for a document opened from
+// bytes and, for a streamed one, only when it did not open on Annex F's
+// head-only path, has warned nothing and its completed validation is
+// `Trust`; 0 otherwise, and for a null handle.
+//
+// The question a host that owns a file asks to open it by the rule `tpdf`
+// follows (`docs/design/streaming-open.md`, *One rule for every path open*):
+// straight after [`tpdf_document_open_streaming`], before anything else is
+// read, keep the streamed document when this answers 1, and otherwise open
+// the file's bytes with [`tpdf_document_open`]. A yes or no, since the C ABI
+// has no ladder. Asking reads the validation's windows through the source
+// and keeps none of them; a window the source could not supply answers 0.
+//
+// # Safety
+//
+// `doc` must be a live handle or null.
+int tpdf_document_answers_as_buffered(const struct TpdfDocument *doc);
+
 // Frees a document handle. Null is accepted and does nothing.
 //
 // # Safety

@@ -133,6 +133,7 @@ public final class Smoke {
     static void streamed(byte[] data) {
         try (Document document = Document.openStreaming(new Memory(data, false))) {
             check(document.isStreamed() && document.pageCount() == 3, "a streamed open is streamed, three pages");
+            check(document.answersAsBuffered(), "a streamed open of a clean file answers as its bytes do");
             check(document.pageText(0).contains("Tinker fixture"), "streamed text");
         }
         expectStatus(() -> Document.openStreaming(new Memory(data, true)), TinkerPdf.Status.SOURCE_MISS,

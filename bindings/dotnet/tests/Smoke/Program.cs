@@ -15,6 +15,11 @@
 // rendering it without `SetFonts` returns a correctly sized, entirely blank
 // bitmap. "A bitmap of the right size came back" passes on a package whose
 // renderer does nothing at all.
+//
+// Then `OpenFile`'s read on demand is held to `Open(bytes)`: over a generated
+// four-megabyte file it is streamed and reads the same, and over a damaged
+// file and a linearized one updated since it reads the file whole and warns
+// what the bytes warn.
 
 using System;
 using System.Collections.Generic;
@@ -87,7 +92,182 @@ if (pixels.Length != (int)drawn.Stride * (int)drawn.Height)
     throw new Exception($"the pixel span is {pixels.Length} bytes");
 }
 
-Console.WriteLine("DOTNET-SMOKE: RAN, rendered and inked");
+// ---- a path opened on demand ------------------------------------------------
+//
+// `OpenFile` reads a file on demand by the rule `tpdf` and the Python binding
+// follow: a file whose streamed open answers as its bytes would stays
+// streamed and answers as its bytes do, and a damaged file and a linearized
+// one updated since are read whole and warn what their bytes warn. The files
+// are written by formula, as `wheel_smoke.py` writes them.
+
+static byte[] Ascii(string text) => System.Text.Encoding.ASCII.GetBytes(text);
+
+// A PDF of `bodies`, numbered from 1, the first its catalog, with a classic
+// cross-reference table.
+static byte[] Pdf(IReadOnlyList<byte[]> bodies)
+{
+    var output = new MemoryStream();
+    output.Write(Ascii("%PDF-1.7\n"));
+    var offsets = new List<long>();
+    for (var number = 1; number <= bodies.Count; number++)
+    {
+        offsets.Add(output.Length);
+        output.Write(Ascii($"{number} 0 obj\n"));
+        output.Write(bodies[number - 1]);
+        output.Write(Ascii("\nendobj\n"));
+    }
+    var table = output.Length;
+    output.Write(Ascii($"xref\n0 {bodies.Count + 1}\n0000000000 65535 f \n"));
+    foreach (var offset in offsets)
+    {
+        output.Write(Ascii($"{offset:D10} 00000 n \n"));
+    }
+    output.Write(Ascii(
+        $"trailer\n<< /Size {bodies.Count + 1} /Root 1 0 R >>\nstartxref\n{table}\n%%EOF\n"));
+    return output.ToArray();
+}
+
+// `pages` pages of a line of Helvetica text and about `size` bytes of drawing
+// each: few objects and many bytes, as a scan or a drawing is.
+static byte[] Heavy(int pages, int size)
+{
+    var font = 3 + 2 * pages;
+    var kids = new List<string>();
+    for (var at = 0; at < pages; at++)
+    {
+        kids.Add($"{3 + 2 * at} 0 R");
+    }
+    var bodies = new List<byte[]>
+    {
+        Ascii("<< /Type /Catalog /Pages 2 0 R >>"),
+        Ascii($"<< /Type /Pages /Count {pages} /Kids [{string.Join(" ", kids)}] >>"),
+    };
+    var drawing = new System.Text.StringBuilder();
+    for (var square = 0; square < size / 13; square++)
+    {
+        drawing.Append("0 0 1 1 re f\n");
+    }
+    for (var at = 0; at < pages; at++)
+    {
+        bodies.Add(Ascii(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]" +
+            $" /Resources << /Font << /F1 {font} 0 R >> >> /Contents {4 + 2 * at} 0 R >>"));
+        var content = $"BT /F1 12 Tf 10 50 Td (page {at + 1} on demand) Tj ET\n{drawing}";
+        bodies.Add(Ascii($"<< /Length {content.Length} >>\nstream\n{content}\nendstream"));
+    }
+    bodies.Add(Ascii("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"));
+    return Pdf(bodies);
+}
+
+// A catalog and an empty tree whose table's entry for the tree points into the
+// header, which an open of the bytes patches.
+static byte[] Damaged()
+{
+    var data = Pdf(new[]
+    {
+        Ascii("<< /Type /Catalog /Pages 2 0 R >>"),
+        Ascii("<< /Type /Pages /Count 0 /Kids [] >>"),
+    });
+    var table = Ascii("xref\n0 3\n");
+    var at = data.AsSpan().IndexOf(table) + table.Length + 2 * 20;
+    Ascii("0000000004").CopyTo(data, at);
+    return data;
+}
+
+// Three pages saved linearized, then a title appended as an update, which
+// leaves the length the linearization states behind.
+static byte[] Updated()
+{
+    byte[] linearized;
+    using (var plain = Document.Open(Heavy(3, 0)))
+    using (var editor = plain.CreateEditor())
+    {
+        linearized = editor.Save(new WriteOptions { Mode = WriteMode.Rewrite, Linearize = true });
+    }
+    using var saved = Document.Open(linearized);
+    using var update = saved.CreateEditor();
+    update.SetInfo(InfoKey.Title, "updated");
+    return update.Save(new WriteOptions { Mode = WriteMode.Incremental });
+}
+
+// Every warning a document has raised, as its kind, place and sentence.
+static List<string> Warned(Document document)
+{
+    var lines = new List<string>();
+    using var warnings = document.ReadWarnings();
+    for (uint index = 0; index < warnings.Count; index++)
+    {
+        var (offset, objectRef) = warnings.Location(index);
+        var at = objectRef is null ? "-" : $"{objectRef.Value.Object}.{objectRef.Value.Generation}";
+        lines.Add($"{warnings.Kind(index)} {offset} {at} {warnings.Message(index)}");
+    }
+    return lines;
+}
+
+static void OnDemand()
+{
+    var directory = Directory.CreateTempSubdirectory("tinker-pdf-smoke-");
+    try
+    {
+        var data = Heavy(4, 1 << 20);
+        var path = Path.Combine(directory.FullName, "heavy.pdf");
+        File.WriteAllBytes(path, data);
+        using (var byPath = Document.OpenFile(path))
+        using (var byBytes = Document.Open(data))
+        {
+            if (byPath.PageCount != 4 || byBytes.PageCount != 4)
+            {
+                throw new Exception($"pages {byPath.PageCount} by path, {byBytes.PageCount} from bytes");
+            }
+            var text = byPath.PageText(0);
+            if (text != byBytes.PageText(0) || !text.Contains("page 1 on demand", StringComparison.Ordinal))
+            {
+                throw new Exception($"page one reads {text} by path and {byBytes.PageText(0)} from bytes");
+            }
+            if (!byPath.IsStreamed)
+            {
+                throw new Exception("a file its bytes answer for stays on demand");
+            }
+            if (byBytes.IsStreamed)
+            {
+                throw new Exception("a document opened from bytes is not streamed");
+            }
+            Console.WriteLine($"on demand: {data.Length} bytes, {byPath.PageCount} pages, streamed");
+        }
+        foreach (var (name, bytes) in new[] { ("damaged", Damaged()), ("updated", Updated()) })
+        {
+            var file = Path.Combine(directory.FullName, name + ".pdf");
+            File.WriteAllBytes(file, bytes);
+            using var byPath = Document.OpenFile(file);
+            using var byBytes = Document.Open(bytes);
+            var fromPath = Warned(byPath);
+            var fromBytes = Warned(byBytes);
+            if (string.Join("\n", fromPath) != string.Join("\n", fromBytes))
+            {
+                throw new Exception(
+                    $"{name}: warned [{string.Join("; ", fromPath)}] by path and " +
+                    $"[{string.Join("; ", fromBytes)}] from bytes");
+            }
+            if (name == "damaged" && fromPath.Count == 0)
+            {
+                throw new Exception("damaged: an open of its bytes patches its table, and says so");
+            }
+            if (byPath.IsStreamed)
+            {
+                throw new Exception($"{name}: read whole");
+            }
+            Console.WriteLine($"{name}: read whole, {fromPath.Count} warnings, as its bytes");
+        }
+    }
+    finally
+    {
+        directory.Delete(recursive: true);
+    }
+}
+
+OnDemand();
+
+Console.WriteLine("DOTNET-SMOKE: RAN, rendered, inked and opened on demand");
 
 // ---- the write leg (gap 32 milestone 5) ------------------------------------
 //

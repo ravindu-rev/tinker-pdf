@@ -163,6 +163,9 @@ func streamed(data []byte) {
 	if !document.IsStreamed() || document.PageCount() != 3 {
 		fail("a streamed open is streamed and has three pages")
 	}
+	if !document.AnswersAsBuffered() {
+		fail("a streamed open of a clean file answers as its bytes do")
+	}
 	if text, err := document.PageText(0); err != nil || !strings.Contains(text, "Tinker fixture") {
 		fail("streamed text %q %v", text, err)
 	}

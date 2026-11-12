@@ -71,6 +71,7 @@ final class Native {
     static final MethodHandle tpdf_document_open = function("tpdf_document_open", INT, ADDRESS, LONG, ADDRESS);
     static final MethodHandle tpdf_document_open_streaming = function("tpdf_document_open_streaming", INT, VTABLE, ADDRESS, ADDRESS);
     static final MethodHandle tpdf_document_is_streamed = function("tpdf_document_is_streamed", INT, ADDRESS);
+    static final MethodHandle tpdf_document_answers_as_buffered = function("tpdf_document_answers_as_buffered", INT, ADDRESS);
     static final MethodHandle tpdf_document_free = procedure("tpdf_document_free", ADDRESS);
     static final MethodHandle tpdf_document_page_count = function("tpdf_document_page_count", INT, ADDRESS);
     static final MethodHandle tpdf_document_is_encrypted = function("tpdf_document_is_encrypted", INT, ADDRESS);

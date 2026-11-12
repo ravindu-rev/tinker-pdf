@@ -6,7 +6,9 @@ is released exactly once even if an exception unwinds past it. Scope, design
 and packaging: [`docs/features/bindings.md`](../../docs/features/bindings.md).
 
 ```csharp
-using var document = Document.Open(File.ReadAllBytes("file.pdf"));
+// Read on demand where an open of the file's bytes would answer the same, and
+// read whole otherwise; document.IsStreamed says which.
+using var document = Document.OpenFile("file.pdf");
 Console.WriteLine(document.PageText(0));
 
 // The engine bundles no font faces and reads no font directories, so a
@@ -75,7 +77,10 @@ quietly taking something of the same name from nuget.org.
 
 As in the Python and JavaScript smoke tests, the render is asserted twice —
 blank without a face, inked with one — because `testdata/simple-text.pdf`
-embeds no font program and this engine bundles no faces.
+embeds no font program and this engine bundles no faces. Then, as
+`wheel_smoke.py` does, it holds `OpenFile` to `Open(bytes)`: a generated
+four-megabyte file is streamed and reads the same, and a damaged file and a
+linearized one updated since are read whole and warn what their bytes warn.
 
 ## Writing, and proving it is the same engine
 

@@ -35,6 +35,14 @@ const (
 // IsStreamed is whether the document's bytes come from a Source.
 func (d *Document) IsStreamed() bool { return C.tpdf_document_is_streamed(d.ptr) != 0 }
 
+// AnswersAsBuffered is whether the document answers as an open of its bytes
+// would: always for one opened from bytes, and for a streamed one only when
+// it did not open on Annex F's head-only path, has warned nothing and its
+// completed validation is Trust.
+func (d *Document) AnswersAsBuffered() bool {
+	return C.tpdf_document_answers_as_buffered(d.ptr) != 0
+}
+
 // MayPrint is whether the document permits printing at the level reached.
 // PDF permissions are advisory.
 func (d *Document) MayPrint() bool { return C.tpdf_document_may_print(d.ptr) != 0 }

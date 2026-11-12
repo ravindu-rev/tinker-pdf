@@ -9,11 +9,14 @@
 // Handle lifetime is the whole job of this wrapper. Every native handle lives
 // in a SafeHandle, so a document or bitmap is released exactly once even if an
 // exception unwinds past it, and the pixel span a caller gets is tied to the
-// bitmap that owns it.
+// bitmap that owns it. The one thing it owns besides is a file: `OpenFile`
+// reads one at offsets behind the streaming seam, by the rule every host's
+// path open follows (docs/design/streaming-open.md).
 
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace TinkerPdf;
 
@@ -364,6 +367,18 @@ internal static partial class Native
 
     [DllImport(Library)]
     internal static extern int tpdf_document_open(byte[] bytes, nuint len, out IntPtr doc);
+
+    // The streaming seam. The vtable crosses by value, three function
+    // pointers laid out as `layout.rs` pins `TpdfSourceVtable`.
+    [DllImport(Library)]
+    internal static extern int tpdf_document_open_streaming(
+        SourceVtableRaw vtable, IntPtr ctx, out IntPtr doc);
+
+    [DllImport(Library)]
+    internal static extern int tpdf_document_is_streamed(IntPtr doc);
+
+    [DllImport(Library)]
+    internal static extern int tpdf_document_answers_as_buffered(IntPtr doc);
 
     [DllImport(Library)]
     internal static extern void tpdf_document_free(IntPtr doc);
@@ -860,6 +875,18 @@ internal struct ImageRaw
     internal nuint DataLen;
 }
 
+/// <summary>
+/// <c>TpdfSourceVtable</c>: its <c>len</c>, <c>read</c> and <c>free</c>, three
+/// function pointers in that order.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct SourceVtableRaw
+{
+    internal IntPtr Len;
+    internal IntPtr Read;
+    internal IntPtr Free;
+}
+
 internal sealed class DocumentHandle : SafeHandle
 {
     internal DocumentHandle() : base(IntPtr.Zero, ownsHandle: true) { }
@@ -870,6 +897,153 @@ internal sealed class DocumentHandle : SafeHandle
     {
         Native.tpdf_document_free(handle);
         return true;
+    }
+}
+
+/// <summary>
+/// A file read at offsets, behind <c>tpdf_document_open_streaming</c>'s vtable.
+/// </summary>
+/// <remarks>
+/// The engine calls <c>read</c> from whatever thread is working, and from
+/// several at once, so every read names its own offset to
+/// <see cref="RandomAccess"/> and none moves a cursor another shares. The
+/// length is the file's at open, which every offset in the document is
+/// measured against, so bytes appended later are never read. A read answers
+/// its whole range or misses: one that fails, or ends inside that length
+/// because the file shrank, returns a negative count, and the call that
+/// needed the bytes reads them as absent. The engine holds a
+/// <see cref="GCHandle"/> to the source as its context, which the vtable's
+/// <c>free</c> releases with the file. No exception crosses into the engine.
+/// </remarks>
+internal sealed class FileSource
+{
+    private readonly FileStream _file;
+    private readonly SafeFileHandle _handle;
+    private readonly long _length;
+
+    private FileSource(FileStream file)
+    {
+        _file = file;
+        _handle = file.SafeFileHandle;
+        _length = file.Length;
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate ulong LenCallback(IntPtr ctx);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate long ReadCallback(IntPtr ctx, ulong offset, IntPtr output, ulong capacity);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void FreeCallback(IntPtr ctx);
+
+    // Held for the life of the process: the engine calls through these
+    // pointers, from any thread, for as long as any streamed document lives.
+    private static readonly LenCallback LenOf = Len;
+    private static readonly ReadCallback ReadOf = Read;
+    private static readonly FreeCallback FreeOf = Free;
+
+    private static readonly SourceVtableRaw Vtable = new()
+    {
+        Len = Marshal.GetFunctionPointerForDelegate(LenOf),
+        Read = Marshal.GetFunctionPointerForDelegate(ReadOf),
+        Free = Marshal.GetFunctionPointerForDelegate(FreeOf),
+    };
+
+    /// <summary>
+    /// <paramref name="path"/> opened through the vtable: the document's raw
+    /// handle, or zero when the streamed open failed.
+    /// </summary>
+    /// <remarks>
+    /// Shared for reading, writing and deletion, as <c>std::fs::File</c>
+    /// opens the CLI's and Python's sources, so saving over the path while
+    /// the document lives never throws. Throws as opening the file throws.
+    /// </remarks>
+    internal static IntPtr Open(string path)
+    {
+        var file = new FileStream(path, new FileStreamOptions
+        {
+            Mode = FileMode.Open,
+            Access = FileAccess.Read,
+            Share = FileShare.ReadWrite | FileShare.Delete,
+            Options = FileOptions.RandomAccess,
+            BufferSize = 0,
+        });
+        GCHandle context;
+        try
+        {
+            context = GCHandle.Alloc(new FileSource(file));
+        }
+        catch
+        {
+            file.Dispose();
+            throw;
+        }
+        // The engine owns the context from here: it calls `free` when the
+        // document is freed, or before this returns when the open fails.
+        var status = Native.tpdf_document_open_streaming(
+            Vtable, GCHandle.ToIntPtr(context), out var raw);
+        return status == 0 ? raw : IntPtr.Zero;
+    }
+
+    private static FileSource Of(IntPtr ctx) => (FileSource)GCHandle.FromIntPtr(ctx).Target!;
+
+    private static ulong Len(IntPtr ctx)
+    {
+        try
+        {
+            return (ulong)Of(ctx)._length;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private static long Read(IntPtr ctx, ulong offset, IntPtr output, ulong capacity)
+    {
+        try
+        {
+            var source = Of(ctx);
+            var length = (ulong)source._length;
+            var wanted = offset < length ? Math.Min(capacity, length - offset) : 0;
+            var done = 0UL;
+            while (done < wanted)
+            {
+                var count = (int)Math.Min(wanted - done, (ulong)int.MaxValue);
+                int read;
+                unsafe
+                {
+                    var into = new Span<byte>((byte*)output + done, count);
+                    read = RandomAccess.Read(source._handle, into, (long)(offset + done));
+                }
+                if (read <= 0)
+                {
+                    return -1;
+                }
+                done += (ulong)read;
+            }
+            return (long)done;
+        }
+        catch
+        {
+            return -1;
+        }
+    }
+
+    private static void Free(IntPtr ctx)
+    {
+        try
+        {
+            var context = GCHandle.FromIntPtr(ctx);
+            var source = (FileSource)context.Target!;
+            context.Free();
+            source._file.Dispose();
+        }
+        catch
+        {
+            // Nothing unwinds into the engine.
+        }
     }
 }
 
@@ -1249,8 +1423,43 @@ public sealed partial class Document : IDisposable
         return new Document(raw);
     }
 
-    /// <summary>Opens a document from a file.</summary>
-    public static Document OpenFile(string path) => Open(File.ReadAllBytes(path));
+    /// <summary>
+    /// Opens a document from a file, reading it on demand wherever an open of
+    /// its bytes would answer the same.
+    /// </summary>
+    /// <remarks>
+    /// The file is opened through the streaming seam and read at offsets, and
+    /// the document is kept when it answers as an open of the file's bytes
+    /// would (<c>tpdf_document_answers_as_buffered</c>, asked before anything
+    /// else is read), as <see cref="IsStreamed"/> then says. Otherwise the file
+    /// is read whole and opened as <see cref="Open"/> opens bytes, so a damaged
+    /// or a linearized file answers and warns as its bytes do. A file that
+    /// will not open or read throws as <see cref="File.ReadAllBytes"/> throws.
+    /// After the open, a read the file can no longer answer, because it shrank
+    /// or the disk failed, reads as absent for the call that needed it, and
+    /// the next call asks again.
+    /// </remarks>
+    public static Document OpenFile(string path)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        var raw = FileSource.Open(path);
+        if (raw != IntPtr.Zero)
+        {
+            var streamed = new Document(raw);
+            if (Native.tpdf_document_answers_as_buffered(raw) != 0)
+            {
+                return streamed;
+            }
+            streamed.Dispose();
+        }
+        return Open(File.ReadAllBytes(path));
+    }
+
+    /// <summary>
+    /// Whether the document reads its file on demand: true for one
+    /// <see cref="OpenFile"/> kept streamed, false for one opened from bytes.
+    /// </summary>
+    public bool IsStreamed => Native.tpdf_document_is_streamed(_handle.DangerousGetHandle()) != 0;
 
     /// <summary>The number of pages.</summary>
     public uint PageCount => Native.tpdf_document_page_count(_handle.DangerousGetHandle());

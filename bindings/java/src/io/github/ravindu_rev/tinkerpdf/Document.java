@@ -95,6 +95,16 @@ public final class Document implements AutoCloseable {
         return Native.callInt(Native.tpdf_document_is_streamed, pointer) != 0;
     }
 
+    /**
+     * Whether the document answers as an open of its bytes would: always for
+     * one opened from bytes, and for a streamed one only when it did not open
+     * on Annex F's head-only path, has warned nothing and its completed
+     * validation is {@code Trust}.
+     */
+    public boolean answersAsBuffered() {
+        return Native.callInt(Native.tpdf_document_answers_as_buffered, pointer) != 0;
+    }
+
     public boolean isEncrypted() {
         return Native.callInt(Native.tpdf_document_is_encrypted, pointer) != 0;
     }

@@ -71,6 +71,7 @@ end
 fail!('an unencrypted document is not encrypted') if document.encrypted?
 fail!('an unencrypted document may be printed') unless document.may_print?
 fail!('a document opened from bytes is not streamed') if document.streamed?
+fail!('a document opened from bytes answers as its bytes do') unless document.answers_as_buffered?
 size = document.page_size(0)
 fail!("page size #{size}") unless size == [595.0, 842.0]
 begin

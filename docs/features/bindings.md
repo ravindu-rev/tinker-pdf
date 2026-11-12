@@ -81,9 +81,17 @@ free theirs at once; Python's `Document(bytes)` and JavaScript's
 
 **The streaming seam** (Annex F): `tpdf_document_open_streaming`,
 which takes a `TpdfSourceVtable` of `len` / `read` / `free` plus an opaque
-context, and `tpdf_document_is_streamed`. Function pointers rather than a
-struct carrying data, because a vtable is what every host language already
-knows how to build — `ctypes` in Python,
+context, `tpdf_document_is_streamed`, and `tpdf_document_answers_as_buffered`,
+the question the rule of a path open asks
+([design/streaming-open.md](../design/streaming-open.md), *One rule for every
+path open*): 1 when the document answers as an open of its bytes from a buffer
+would — always for one opened from bytes, and for a streamed one only when it
+did not open on Annex F's head-only path, has warned nothing and its completed
+validation is `Trust` — and 0 otherwise, as for a null handle. A host that owns
+a file asks it straight after the streamed open, keeps the document on 1 and
+opens the file's bytes on 0: a yes or no, since the C ABI has no ladder.
+Function pointers rather than a struct carrying data, because a vtable is what
+every host language already knows how to build — `ctypes` in Python,
 `Marshal.GetFunctionPointerForDelegate` in C#, three functions in C.
 
 Two things about it are worth stating here rather than only in the header.
@@ -478,7 +486,19 @@ raise, on the default profile's figure.
 
 **.NET** (`bindings/dotnet`, C# over the C ABI). Every native handle lives
 in a `SafeHandle`, so a document or bitmap is released exactly once even if
-an exception unwinds past it. `Document.Open(bytes)`, `PageCount`,
+an exception unwinds past it. `Document.OpenFile(path)` reads the file on
+demand by the rule `tpdf` follows. The file is a `FileStream` shared for
+reading, writing and deletion, as `std::fs::File` opens the CLI's and Python's
+sources, read at offsets through `RandomAccess`, so the engine's threads share
+no cursor, its length fixed at open; it sits behind
+`tpdf_document_open_streaming`'s vtable, whose three callbacks are delegates
+held for the life of the process and whose context is a `GCHandle` the
+vtable's `free` releases with the file. The document is kept when
+`tpdf_document_answers_as_buffered` says so; otherwise the file is read whole
+with `File.ReadAllBytes` and opened as bytes, and `IsStreamed` says which. A
+file that will not open or read throws as `File.ReadAllBytes` throws; after
+the open a read that misses reads as absent, as every streamed host's does.
+`Document.Open(bytes)`, `PageCount`,
 `PageText(i)`, `Render(i, scale)` with `bitmap.Pixels` as a
 `ReadOnlySpan<byte>` valid while the bitmap lives, `SetFonts(bytes)`,
 `ReadSignatures()` and `VerifySignatures(anchors, at)` — the last taking a
@@ -1044,7 +1064,11 @@ packaged.
   a damaged file and a linearized one updated since, whose path opens warn
   what their bytes warn and are read whole; the bindings' local proof runs
   it against the wheel it builds, and `release.yml` runs it against each
-  platform's wheel and greps `WHEEL-SMOKE: RAN`.
+  platform's wheel and greps `WHEEL-SMOKE: RAN`. The .NET Smoke program
+  holds `OpenFile` to `Open(bytes)` over three files made the same way,
+  comparing each file's `ReadWarnings()` by kind, place and sentence,
+  before it prints `DOTNET-SMOKE: RAN`; it runs locally against the packed
+  package, and `release.yml` runs it against the package it builds.
 - The **write** legs run beside them, from the same installed artefacts:
   `write_parity.py`, `write_parity.mjs` and the Smoke program's third
   argument, each printing `WROTE sha256=<hex>` per script, and

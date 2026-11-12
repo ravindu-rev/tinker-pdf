@@ -752,6 +752,31 @@ pub unsafe extern "C" fn tpdf_document_is_streamed(doc: *const TpdfDocument) -> 
     c_int::from(doc.inner.is_streamed())
 }
 
+/// Whether this document answers as an open of the same bytes from a buffer
+/// would (`CosDocument::answers_as_buffered`): 1 for a document opened from
+/// bytes and, for a streamed one, only when it did not open on Annex F's
+/// head-only path, has warned nothing and its completed validation is
+/// `Trust`; 0 otherwise, and for a null handle.
+///
+/// The question a host that owns a file asks to open it by the rule `tpdf`
+/// follows (`docs/design/streaming-open.md`, *One rule for every path open*):
+/// straight after [`tpdf_document_open_streaming`], before anything else is
+/// read, keep the streamed document when this answers 1, and otherwise open
+/// the file's bytes with [`tpdf_document_open`]. A yes or no, since the C ABI
+/// has no ladder. Asking reads the validation's windows through the source
+/// and keeps none of them; a window the source could not supply answers 0.
+///
+/// # Safety
+///
+/// `doc` must be a live handle or null.
+#[no_mangle]
+pub unsafe extern "C" fn tpdf_document_answers_as_buffered(doc: *const TpdfDocument) -> c_int {
+    let Some(doc) = (unsafe { doc.as_ref() }) else {
+        return 0;
+    };
+    c_int::from(doc.inner.cos().answers_as_buffered())
+}
+
 /// Frees a document handle. Null is accepted and does nothing.
 ///
 /// # Safety
@@ -7498,6 +7523,65 @@ endobj
         let status =
             unsafe { tpdf_document_open_streaming(vtable(), ptr::null_mut(), ptr::null_mut()) };
         assert_eq!(status, TpdfStatus::BadArgument);
+    }
+
+    /// A catalog and an empty tree whose table's entry for the tree points
+    /// into the header: an open of the bytes patches it, where a streamed
+    /// open trusts the table until a read reaches the entry.
+    fn damaged() -> Vec<u8> {
+        let mut bytes = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+xref\n0 3\n\
+0000000000 65535 f \n\
+0000000009 00000 n \n\
+0000000058 00000 n \n\
+trailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n110\n%%EOF\n"
+            .to_vec();
+        let table = bytes
+            .windows(9)
+            .position(|w| w == b"xref\n0 3\n")
+            .expect("a classic table");
+        let entry = table + 9 + 2 * 20;
+        bytes[entry..entry + 10].copy_from_slice(b"0000000004");
+        bytes
+    }
+
+    /// The rule's question crosses: a clean document served through the
+    /// vtable answers as its bytes would, and a damaged one, whose open from
+    /// bytes patches its table, does not; a document opened from bytes always
+    /// does, and a null handle does not.
+    #[test]
+    fn a_streamed_document_says_whether_it_answers_as_buffered() {
+        for (name, bytes, answers) in [
+            ("clean", fixture("simple-text.pdf"), 1),
+            ("damaged", damaged(), 0),
+        ] {
+            install(bytes.clone(), u64::MAX);
+            let mut doc = ptr::null_mut();
+            let status =
+                unsafe { tpdf_document_open_streaming(vtable(), ptr::null_mut(), &raw mut doc) };
+            assert_eq!(status, TpdfStatus::Ok, "{name}: {}", last_error());
+            assert_eq!(unsafe { tpdf_document_is_streamed(doc) }, 1, "{name}");
+            assert_eq!(
+                unsafe { tpdf_document_answers_as_buffered(doc) },
+                answers,
+                "{name}, streamed"
+            );
+            unsafe { tpdf_document_free(doc) };
+
+            let mut buffered = ptr::null_mut();
+            let status =
+                unsafe { tpdf_document_open(bytes.as_ptr(), bytes.len(), &raw mut buffered) };
+            assert_eq!(status, TpdfStatus::Ok, "{name}: {}", last_error());
+            assert_eq!(
+                unsafe { tpdf_document_answers_as_buffered(buffered) },
+                1,
+                "{name}, from bytes"
+            );
+            unsafe { tpdf_document_free(buffered) };
+        }
+        assert_eq!(unsafe { tpdf_document_answers_as_buffered(ptr::null()) }, 0);
     }
 
     // -----------------------------------------------------------------------

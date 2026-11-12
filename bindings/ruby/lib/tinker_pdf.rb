@@ -228,6 +228,7 @@ module TinkerPdf
     extern 'int tpdf_verdict_weakness(const void *verdicts, uint32_t index, uint32_t weakness, int *out)'
 
     extern 'int tpdf_document_is_streamed(const void *doc)'
+    extern 'int tpdf_document_answers_as_buffered(const void *doc)'
     extern 'int tpdf_document_is_encrypted(const void *doc)'
     extern 'int tpdf_document_authenticate(void *doc, const char *password, int *out_level)'
     extern 'int tpdf_document_may_print(const void *doc)'
@@ -755,6 +756,9 @@ module TinkerPdf
     end
 
     def streamed? = !Native.tpdf_document_is_streamed(@pointer).zero?
+    # Whether the document answers as an open of its bytes would: always, for
+    # a document this binding opens, since it opens bytes and nothing else.
+    def answers_as_buffered? = !Native.tpdf_document_answers_as_buffered(@pointer).zero?
     def encrypted? = !Native.tpdf_document_is_encrypted(@pointer).zero?
     def may_print? = !Native.tpdf_document_may_print(@pointer).zero?
 
