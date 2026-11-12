@@ -429,6 +429,19 @@
         { "name": "outlines of every committed CFF program", "unit": "outlines",
           "per_iteration": 37058, "calls": 2, "gate": { "calibrated_per_second": 1000000 } }
       ]
+    },
+    {
+      "group": "threads",
+      "operations": [
+        { "name": "24 quarter-size text pages to PNG at 150 dpi, 1 job, CLI", "unit": "pages",
+          "per_iteration": 24, "calls": 1, "gate": { "floor": 1 } },
+        { "name": "24 quarter-size text pages to PNG at 150 dpi, 2 jobs, CLI", "unit": "pages",
+          "per_iteration": 24, "calls": 1, "gate": { "floor": 1 } },
+        { "name": "24 quarter-size text pages to PNG at 150 dpi, 4 jobs, CLI", "unit": "pages",
+          "per_iteration": 24, "calls": 1, "gate": { "floor": 1 } },
+        { "name": "24 quarter-size text pages to PNG at 150 dpi, 8 jobs, CLI", "unit": "pages",
+          "per_iteration": 24, "calls": 1, "gate": { "floor": 1 } }
+      ]
     }
   ],
   "machines": [
@@ -580,7 +593,11 @@
         "fonts/outlines of Liberation Serif Regular",
         "fonts/outlines of Liberation Sans Regular",
         "fonts/outlines of Liberation Mono Regular",
-        "fonts/outlines of every committed CFF program"
+        "fonts/outlines of every committed CFF program",
+        "threads/24 quarter-size text pages to PNG at 150 dpi, 1 job, CLI",
+        "threads/24 quarter-size text pages to PNG at 150 dpi, 2 jobs, CLI",
+        "threads/24 quarter-size text pages to PNG at 150 dpi, 4 jobs, CLI",
+        "threads/24 quarter-size text pages to PNG at 150 dpi, 8 jobs, CLI"
       ],
       "operations": [
         {

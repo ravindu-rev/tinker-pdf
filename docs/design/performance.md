@@ -892,8 +892,9 @@ column, before MS-02.6 builds the run.
 ## MS-04 — The benchmark set, replacing the seven
 
 In this design, `cargo bench` times every operation of tier P's target
-table that the tree can run, and the row's own, in thirteen groups of one file
-each: 138 operations over inputs the benches generate or the tree holds, each
+table that the tree can run, and the row's own, in fourteen groups of one file
+each, MS-09's `threads` among them: 147 operations over inputs the benches
+generate or the tree holds, each
 held by `cargo xtask bench-check --machine` to the band its machine's entry in
 `baseline.json` records, from a local `cargo bench -p tinker-pdf` on that
 machine. MS-02's paired run, MS-05's probe, MS-09's thread group, MS-10's wasm
@@ -903,10 +904,10 @@ to it in the commit that adds the capability.
 
 ### Scope
 
-- **The thirteen groups**: open, text, analysis, render, encode, decode,
-  write, sign, layout, fonts, scripts, OCR and calibration, one bench file
-  each over a shared support module; scripts and OCR arrive with the rows that
-  add their operations.
+- **The fourteen groups**: open, text, analysis, render, encode, decode,
+  write, sign, layout, fonts, threads, scripts, OCR and calibration, one bench
+  file each over a shared support module; scripts and OCR arrive with the rows
+  that add their operations, and threads is MS-09's.
 - **Every operation** of tier P's table (`docs/roadmap/P.md:63-135`) and of
   the row's Item whose capability exists: its criterion id, its unit and what
   one iteration covers, its input beside the input the table states, and where
@@ -955,7 +956,8 @@ crates/tinker-pdf/benches/
   support/inputs.rs  every generator, and the two level-6 byte counts
   support/cli.rs     the one spawner: this revision's tpdf, as a child
   open.rs  text.rs  analysis.rs  render.rs  encode.rs  decode.rs  write.rs
-  sign.rs  layout.rs  fonts.rs  scripts.rs  ocr.rs  calibration.rs
+  sign.rs  layout.rs  fonts.rs  threads.rs  scripts.rs  ocr.rs
+  calibration.rs
   data/              the inputs the tree cannot write, and README.md
   baseline.json
 ```
@@ -1318,6 +1320,26 @@ whose table the parser refuses, so it costs its refusal and adds no outline,
 and the group's setup asserts all three counts. At a million outlines a
 second the 18 529 take under 19 ms, so `calls` 2.
 
+**threads** — MS-09's: the CLI's pool, `tpdf render --jobs`
+(`tools/tpdf/src/main.rs:1338`), over one input on 1, 2, 4 and 8 jobs, so how
+the pool scales is a ratio between operations one run times in one process
+on one host. The input is cut by area rather than by count: a page drawn to
+PNG through `tpdf` costs its render and its PNG, each in proportion to its
+area, as the count record in `docs/verification.md` gives them for the text
+page, so the group draws 24 quarter-size pages, one job's call inside the
+window by that record and three pages for each of eight jobs. No run has
+timed them, so the named machine's entry names all four unmeasured and their
+window is *counted*. They embed their face, so every glyph is drawn.
+The 300-dpi page in four bands is the render group's, beside the one-thread
+render it is held against there, so it is timed once.
+
+| Id | Unit · an iteration | Input | Tier P | Window | Step |
+| --- | --- | --- | --- | --- | --- |
+| `threads/24 quarter-size text pages to PNG at 150 dpi, 1 job, CLI` | pages · 24 | `dense_part(24, 0, 4)`, `tpdf render --jobs 1` | —; floor 1 | counted | built |
+| `threads/24 quarter-size text pages to PNG at 150 dpi, 2 jobs, CLI` | pages · 24 | the same, `--jobs 2` | —; floor 1 | counted | built |
+| `threads/24 quarter-size text pages to PNG at 150 dpi, 4 jobs, CLI` | pages · 24 | the same, `--jobs 4` | —; floor 1 | counted | built |
+| `threads/24 quarter-size text pages to PNG at 150 dpi, 8 jobs, CLI` | pages · 24 | the same, `--jobs 8` | —; floor 1 | counted | built |
+
 **scripts** and **OCR** have no operation of MS-04's own; their rows create
 their files (below). **calibration** holds one:
 
@@ -1406,6 +1428,7 @@ run.
 | structured JSON of 5 pages | `tpdf text dense-5.pdf --json` | 1 |
 | the half-size text page to PNG at 150 dpi / the quarter-size one at 300 dpi | `tpdf render dense-half-1.pdf --out DIR --dpi 150` / `dense-quarter-1.pdf --dpi 300` | 1 |
 | 8 quarter-size pages to PNG at 150 dpi, 1 / 4 jobs | `tpdf render dense-quarter-8.pdf --out DIR --dpi 150 --jobs 1` / `--jobs 4` | 1 |
+| 24 quarter-size text pages to PNG at 150 dpi, 1 / 2 / 4 / 8 jobs | `tpdf render dense-quarter-24.pdf --out DIR --dpi 150 --jobs 1` / `--jobs 2` / `--jobs 4` / `--jobs 8` | 1 |
 | rewrite 100 / 1000 pages | `tpdf merge small-100.pdf --out OUT.pdf --font-policy keep` / `small-1000.pdf` | 26 / 6 |
 | subset-on-save of 4 pages | `tpdf merge dense-4.pdf --out OUT.pdf --font-policy subset` | 1 |
 | merge 4 x 50 pages | `tpdf merge dense-50-0.pdf dense-50-1.pdf dense-50-2.pdf dense-50-3.pdf --out OUT.pdf --font-policy keep` | 1 |
@@ -1470,7 +1493,7 @@ operation as both measured and unmeasured.
 
 | Groups | Samples | Warm-up | Measurement | Mode |
 | --- | ---: | ---: | ---: | --- |
-| open, text, analysis, render, encode, decode, write, layout, OCR, calibration | 10 | 1 s | 3 s | flat |
+| open, text, analysis, render, encode, decode, write, layout, threads, OCR, calibration | 10 | 1 s | 3 s | flat |
 | sign, fonts, scripts | 30 | 1 s | 3 s | flat |
 
 The window puts every operation at 20 ms or more, where criterion's linear
@@ -1489,8 +1512,9 @@ sampling, which criterion sets only on a group and which has no command-line
 flag, is the one setting each group makes itself.
 
 Sized into the window, every operation measures for about 4.7 s under this
-sampling, so the set's 143 measure for about eleven minutes before anything is
-built, group after group in one local `cargo bench -p tinker-pdf`. Every
+sampling, so the set's 147 measure for about eleven and a half minutes before
+anything is built, group after group in one local `cargo bench -p tinker-pdf`.
+Every
 relation tier P draws between two operations has both in one group — the
 analysis group carries its own text for that reason — so one bench binary
 measures both, in one process on one host (MS-10.1's note).
@@ -1506,11 +1530,12 @@ measures both, in one process on one host (MS-10.1's note).
 | open | 7 | 0.5 min |
 | fonts | 7 | 0.5 min |
 | encode | 4 | 0.3 min |
+| threads | 4 | 0.3 min |
 | sign | 3 | 0.2 min |
 | calibration | 1 | 0.1 min |
 
 A run builds each group's bench in release, as `cargo bench` does, and builds
-`tpdf` in release first for the five groups with CLI operations. MS-02's
+`tpdf` in release first for the six groups with CLI operations. MS-02's
 paired run, three builds and ten rounds of this set, is priced in MS-02's
 section.
 
@@ -1586,7 +1611,6 @@ the set's are. Tier P's table and the Item name these:
 | P-04's fast level, P-04.3 | `encode/deflate page-like data, fast level`, `encode/deflate photo-like data, fast level` | encode | 7.5× and 5.27×, at floor 1 until P-04.6 |
 | MS-08, MS-08.4 | `open/first page of the 60-page linearized fixture over a slow link` | open | counted; the time follows from MS-08.3's counts, never slept |
 | P-21, P-21.1 | `open/open a small file, CLI`; `decode/extract a Flate image with predictors`; `write/no-op incremental save of 100 pages` | open, decode, write | held |
-| MS-09, MS-09.2 | the `threads` group: 100 text pages at 150 dpi on 1, 2, 4 and 8 threads through the CLI's pool, and the 300-dpi page on one thread and in four bands | `threads`, a fourteenth file | relations inside one run (MS-09.3) |
 
 Tier P's "Time to first page over a source with 50 ms latency at 10 Mbit/s,
 the 60-page linearized fixture" cannot be a name — it holds a `/` and runs
@@ -1603,7 +1627,7 @@ to.
 | A cache a later row adds turns a cold operation warm | An iteration opens its document from bytes; only an operation whose name says so starts from prebuilt state |
 | Two engines generating one input write different bytes, so a pair times two inputs | MS-02's paired run routes every input through the directory `TINKER_BENCH_FIXTURES` names, written by the head first |
 | An input an engine encoder writes moves when the encoder changes (P-04.7's deflate, the JPEG encoder) | The row that changes the encoder names the operations it moved in its commit; the two inputs the level-6 counts describe are formulas pinned by length and digest, so they never move |
-| A run of the set takes too long to make as a change's proof | Every operation sized into 20–300 ms, so the set measures for about eleven minutes before a build |
+| A run of the set takes too long to make as a change's proof | Every operation sized into 20–300 ms, so the set measures for about eleven and a half minutes before a build |
 | Tier P's figures are the planning machine's, so the budget and the window's list are predictions | The set is sized from the hosted runner's own figures, and MS-04.10's fifteen runs hold every operation inside on every run before any figure is committed |
 | A repetition count and its committed `per_iteration` drift apart | Criterion's recorded `Throughput` is checked against the list on every run |
 | A CLI operation times a failed child, or a stale `tpdf` | The exit status is checked on every call and a failure panics the bench; `tpdf` is resolved beside the bench binary and built from the same checkout in the same run |

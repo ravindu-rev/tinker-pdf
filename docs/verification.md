@@ -931,8 +931,11 @@ cargo bench -p tinker-pdf -- --baseline before
 
 and `--bench <group>` narrows either to one group's file.
 
-Twenty-three operations time `tpdf` itself: tier P marks them CLI, their
-figures include the process, and `tpdf` has no library half.
+Twenty-seven operations time `tpdf` itself: those tier P marks CLI, and the
+`threads` group's four, which time the CLI's pool, `tpdf render --jobs`, on
+1, 2, 4 and 8 jobs over one input, so that how the pool scales is a ratio
+between operations of one run. Their figures include the process, and
+`tpdf` has no library half.
 `benches/support/cli.rs` runs this revision's binary from beside the bench
 binary's profile directory, one child per call, its output kept in the
 operation's own directory and its exit status checked every time, and the

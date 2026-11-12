@@ -167,3 +167,7 @@ harness = false
 [[bench]]
 name = "fonts"
 harness = false
+
+[[bench]]
+name = "threads"
+harness = false
