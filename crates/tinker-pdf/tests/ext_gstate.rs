@@ -7,9 +7,9 @@
 //! `i`). Each twin renders byte-identical, degenerate operands and a `Q`
 //! included, and each applied key's page also differs from the page without
 //! it, so a pair that agrees because neither applies anything fails. A key the
-//! engine stores for the row that applies it (`/SM`, `/OP`, ...) moves no
+//! engine stores for the row that applies it (`/OP`, `/AIS`, ...) moves no
 //! pixel yet, so its page draws as the page without it; the function keys
-//! draw as applied.
+//! and `/SM` draw as applied.
 //!
 //! `/CA`, `/ca`, `/BM` and `/SMask` have no operator twin; their pages are held
 //! to pinned pixels.
@@ -29,6 +29,11 @@ fn document(states: &str, contents: &[&str]) -> Vec<u8> {
 
 /// [`document`], with `extra` as objects 5 onwards, for `states` to name.
 fn document_with(states: &str, extra: &[String], contents: &[&str]) -> Vec<u8> {
+    document_in(&format!("<< /ExtGState << {states} >> >>"), extra, contents)
+}
+
+/// [`document_with`], the shared `/Resources` written whole as `resources`.
+fn document_in(resources: &str, extra: &[String], contents: &[&str]) -> Vec<u8> {
     let first = 5 + extra.len();
     let kids: Vec<String> = (0..contents.len())
         .map(|i| format!("{} 0 R", first + 2 * i))
@@ -41,7 +46,7 @@ fn document_with(states: &str, extra: &[String], contents: &[&str]) -> Vec<u8> {
             contents.len(),
             kids.join(" ")
         ),
-        format!("<< /ExtGState << {states} >> >>"),
+        resources.to_string(),
         format!(
             "<< /Type /XObject /Subtype /Form /BBox [0 0 40 40] \
              /Group << /S /Transparency /CS /DeviceGray >> /Length {} >>\n\
@@ -199,7 +204,6 @@ fn every_scalar_key_set_by_gs_draws_as_its_twin() {
         ("/FL 5", "5 i", false),
     ];
     let stored = [
-        "/SM 0.5",
         "/SA true",
         "/OP true",
         "/op false",
@@ -386,6 +390,77 @@ fn every_function_key_draws_as_applied() {
         "ext-gstate-functions: RAN {} keys and three mask transfers",
         keys.len()
     );
+}
+
+/// Object 5 for [`document_in`]: a grey Coons patch over the square (10, 10)
+/// to (22, 22), its net on the thirds and its corners 1, 0, 1 and 0 — a
+/// saddle, whose colour a grid of triangles misses at every cell's centre.
+fn saddle_patch() -> String {
+    // Eight bits a coordinate through `/Decode [0 255 ...]`: each raw value is
+    // the point it names.
+    let points: [(u8, u8); 12] = [
+        (10, 10),
+        (10, 14),
+        (10, 18),
+        (10, 22),
+        (14, 22),
+        (18, 22),
+        (22, 22),
+        (22, 18),
+        (22, 14),
+        (22, 10),
+        (18, 10),
+        (14, 10),
+    ];
+    let mut data = vec![0u8];
+    for (x, y) in points {
+        data.extend([x, y]);
+    }
+    data.extend([255, 0, 255, 0]);
+    let hex: String = data
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .chain(core::iter::once(">".to_string()))
+        .collect();
+    format!(
+        "<< /ShadingType 6 /ColorSpace /DeviceGray /BitsPerCoordinate 8 \
+         /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 255 0 255 0 1] \
+         /Filter /ASCIIHexDecode /Length {} >>\nstream\n{hex}\nendstream",
+        hex.len()
+    )
+}
+
+/// **`/SM` draws as applied** (RC-08.4,
+/// `docs/design/device-dependent-state.md`): a small Coons patch whose colour
+/// is a saddle is cut finer under `/SM 0.01` than its length alone cuts it,
+/// so its page differs from the page without the key; `/SM 1` asks nothing a
+/// grid does not already meet; and a stroke under `/SM 0.01`, with no shading
+/// to smooth, draws as the page without it.
+#[test]
+fn smoothness_draws_as_applied() {
+    let resources = "<< /ExtGState << /Fine << /SM 0.01 >> /Coarse << /SM 1 >> >> \
+                     /Shading << /Sh 5 0 R >> >>";
+    let pages = [
+        "/Fine gs /Sh sh".to_string(),
+        "/Coarse gs /Sh sh".to_string(),
+        "/Sh sh".to_string(),
+        format!("4 w /Fine gs {STROKE}"),
+        format!("4 w {STROKE}"),
+    ];
+    let contents: Vec<&str> = pages.iter().map(String::as_str).collect();
+    let bitmaps = render_all(document_in(resources, &[saddle_patch()], &contents));
+    let [fine, coarse, without, stroke, plain] = [0, 1, 2, 3, 4].map(|at| &bitmaps[at]);
+    assert!(
+        without.data.iter().any(|&byte| byte != 255),
+        "the patch is on the page"
+    );
+    assert_ne!(
+        fine.data, without.data,
+        "/SM 0.01: the patch draws as the page without it"
+    );
+    assert_eq!(coarse.data, without.data, "/SM 1 moved the patch");
+    assert_eq!(stroke.data, plain.data, "/SM moved a stroke");
+    println!("ext-gstate-smoothness: RAN a patch under two /SM values and a stroke");
 }
 
 /// **Every halftone key draws as the page without it**, until the row that

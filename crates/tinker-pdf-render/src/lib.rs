@@ -3180,6 +3180,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 alpha,
                 mode,
                 &set,
+                state.stored_parameters().smoothness,
             );
         }
 
@@ -3266,6 +3267,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// `shape_area` is `area` without the soft mask, the region the mesh's
     /// shape is recorded over for the plane (11.6.4.3), and `set` what the
     /// paint takes from the device-dependent state.
+    ///
+    /// `smoothness` is the `/SM` in force (10.7.3): a patch is subdivided until
+    /// its colour is within it as well as by its device length
+    /// ([`Mesh::tessellate`]). The count is a function of the patch and the
+    /// page's transform alone, so a tile cuts the page's mesh (ruling 5).
     #[allow(clippy::too_many_arguments)]
     fn paint_mesh(
         &mut self,
@@ -3277,8 +3283,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         alpha: f64,
         mode: RasterBlend,
         set: &DeviceSet,
+        smoothness: Option<f64>,
     ) -> bool {
-        let Some(tessellation) = mesh.tessellate(&to_device) else {
+        let Some(tessellation) = mesh.tessellate(&to_device, smoothness) else {
             return false;
         };
         if tessellation.triangles.is_empty() {
@@ -5407,6 +5414,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 alpha,
                 mode,
                 &set,
+                state.stored_parameters().smoothness,
             ) {
                 tally(&mut self.counts.drawn_shadings);
             } else {

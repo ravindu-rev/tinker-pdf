@@ -993,3 +993,461 @@ fn a_flattened_tile_is_the_page_under_it() {
         }
     }
 }
+
+// ---- smoothness (10.7.3) -------------------------------------------------------
+
+/// Packs values of a fixed bit width, most significant bit first: 8.7.4.5.5's
+/// vertex stream, written out as `ASCIIHexDecode` text.
+#[derive(Default)]
+struct Bits {
+    data: Vec<u8>,
+    bit: u32,
+}
+
+impl Bits {
+    fn push(&mut self, value: u64, bits: u32) {
+        for index in (0..bits).rev() {
+            if self.bit == 0 {
+                self.data.push(0);
+            }
+            if let Some(byte) = self.data.last_mut() {
+                *byte |= (((value >> index) & 1) as u8) << (7 - self.bit);
+            }
+            self.bit = (self.bit + 1) % 8;
+        }
+    }
+
+    /// 8.7.4.5.7 pads each patch of a type 6 or 7 stream to a byte, and
+    /// 8.7.4.5.5 each vertex of a type 4 one.
+    fn align(&mut self) {
+        self.bit = 0;
+    }
+
+    fn hex(&self) -> String {
+        let mut out: String = self.data.iter().map(|byte| format!("{byte:02X}")).collect();
+        out.push('>');
+        out
+    }
+}
+
+/// The smoothness page, 32 points square; the patch on it, 12 points square
+/// with its lower-left corner at (10, 10), so at 72 dpi its edges are pixel
+/// boundaries and each of its 144 pixels is wholly inside it.
+const SMOOTH_PAGE: u32 = 32;
+const SMOOTH_AT: f64 = 10.0;
+const SMOOTH_SIDE: f64 = 12.0;
+
+/// The packing every stream below shares. Sixteen bits a number, read through
+/// `/Decode` as a quarter of its raw value for a coordinate (`raw × 16383.75 /
+/// 65535`, which IEEE 754 rounds to `raw / 4` exactly) and a 256th for a colour
+/// or a parametric value: every point and every corner value written below is
+/// one of those, so each reads back as the number the test wrote.
+const SMOOTH_KEYS: &str = "/BitsPerCoordinate 16 /BitsPerComponent 16 /BitsPerFlag 8 \
+                           /Decode [0 16383.75 0 16383.75 0 255.99609375]";
+
+/// The patch's corner colours, `c1` to `c4`: 1, 0, 1, 0 — a saddle, all
+/// bilinear term (`|c1 − c2 + c3 − c4| = 2`, the most a component inside its
+/// range can make) and nothing a triangle carries.
+const SADDLE: [f64; 4] = [1.0, 0.0, 1.0, 0.0];
+
+/// The patch's colour at `(u, v)`: 8.7.4.5.7's bilinear interpolation of
+/// [`SADDLE`], in the order the renderer evaluates its grid.
+fn saddle(u: f64, v: f64) -> f64 {
+    let [c1, c2, c3, c4] = SADDLE;
+    (1.0 - u) * (1.0 - v) * c1 + (1.0 - u) * v * c2 + u * v * c3 + u * (1.0 - v) * c4
+}
+
+/// `value` as the raw sixteen bits `/Decode` reads back as it, `scale` raw
+/// units to one: a quarter point, or a 256th of a colour.
+fn raw(value: f64, scale: f64) -> u64 {
+    let raw = value * scale;
+    assert!(
+        raw.fract() == 0.0 && (0.0..65536.0).contains(&raw),
+        "{value} is not a whole {scale}th"
+    );
+    raw as u64
+}
+
+/// One flat patch's record, flag 0: the square `(x0, y0)` to `(x1, y1)`, its
+/// twelve boundary points on its thirds in 8.7.4.5.7's spiral order, a tensor
+/// patch's four interior points on the thirds too, and `corners` at `c1` to
+/// `c4`. `u` runs along `x` and `v` along `y`, so `c1` is at `(x0, y0)`, `c2`
+/// at `(x0, y1)`, `c3` at `(x1, y1)` and `c4` at `(x1, y0)`.
+fn flat_patch(out: &mut Bits, tensor: bool, rect: (f64, f64, f64, f64), corners: [f64; 4]) {
+    let (x0, y0, x1, y1) = rect;
+    let x = |i: u32| x0 + (x1 - x0) * f64::from(i) / 3.0;
+    let y = |j: u32| y0 + (y1 - y0) * f64::from(j) / 3.0;
+    let mut points = vec![
+        (x(0), y(0)),
+        (x(0), y(1)),
+        (x(0), y(2)),
+        (x(0), y(3)),
+        (x(1), y(3)),
+        (x(2), y(3)),
+        (x(3), y(3)),
+        (x(3), y(2)),
+        (x(3), y(1)),
+        (x(3), y(0)),
+        (x(2), y(0)),
+        (x(1), y(0)),
+    ];
+    if tensor {
+        // p11, p12, p22, p21 (8.7.4.5.8).
+        points.extend([(x(1), y(1)), (x(1), y(2)), (x(2), y(2)), (x(2), y(1))]);
+    }
+    out.push(0, 8);
+    for (px, py) in points {
+        out.push(raw(px, 4.0), 16);
+        out.push(raw(py, 4.0), 16);
+    }
+    for corner in corners {
+        out.push(raw(corner, 256.0), 16);
+    }
+    out.align();
+}
+
+/// The whole saddle patch, as one record.
+fn whole_patch(tensor: bool) -> Bits {
+    let mut out = Bits::default();
+    let far = SMOOTH_AT + SMOOTH_SIDE;
+    flat_patch(&mut out, tensor, (SMOOTH_AT, SMOOTH_AT, far, far), SADDLE);
+    out
+}
+
+/// The saddle patch cut by the test into `n` by `n` patches, each a cell of
+/// the grid the renderer cuts the whole one into at `n` steps a side, its
+/// corners the saddle's colour there, in the order the renderer walks its
+/// grid — along `u`, and along `v` inside it. Each is at most three pixels a
+/// side, so its device length asks for one step and it is drawn as the cell's
+/// two triangles; the whole patch drawn at `n` steps draws exactly these.
+fn cut_patch(n: u32) -> Bits {
+    let mut out = Bits::default();
+    let at = |i: u32| SMOOTH_AT + SMOOTH_SIDE * f64::from(i) / f64::from(n);
+    let t = |i: u32| f64::from(i) / f64::from(n);
+    for i in 0..n {
+        for j in 0..n {
+            flat_patch(
+                &mut out,
+                false,
+                (at(i), at(j), at(i + 1), at(j + 1)),
+                [
+                    saddle(t(i), t(j)),
+                    saddle(t(i), t(j + 1)),
+                    saddle(t(i + 1), t(j + 1)),
+                    saddle(t(i + 1), t(j)),
+                ],
+            );
+        }
+    }
+    out
+}
+
+/// A grey patch shading of `kind` over `stream`, its corners carrying
+/// parametric values through `function` where one is given.
+fn patch_shading(kind: u32, function: Option<&str>, data: &Bits) -> String {
+    let function = function.map_or(String::new(), |f| format!("/Function {f} "));
+    stream(
+        &format!(
+            "/ShadingType {kind} /ColorSpace /DeviceGray {function}{SMOOTH_KEYS} \
+             /Filter /ASCIIHexDecode"
+        ),
+        &data.hex(),
+    )
+}
+
+/// The smoothness page: `/S gs /Sh sh`, `/S` setting `state` and the shading
+/// object 6, `extra[0]`, with any further objects after it.
+fn smooth_page(state: &str, extra: &[String]) -> Vec<u8> {
+    page(
+        SMOOTH_PAGE,
+        SMOOTH_PAGE,
+        &format!("<< /ExtGState << /S << {state} >> >> /Shading << /Sh 6 0 R >> >>"),
+        "/S gs /Sh sh",
+        extra,
+    )
+}
+
+/// The steps a side the design's rule gives a patch
+/// (`docs/design/device-dependent-state.md`), computed here: its device
+/// length's count — the least power of two `n` with `3n` at least the longest
+/// edge's control-polygon leg sum, `edge` pixels — and under a smoothness the
+/// least `n` whose bilinear error, `measure / (4 n²)`, is within it read in 0
+/// to 1 and no finer than 1/255; the larger, at most 32.
+fn rule_steps(edge: f64, measure: f64, smoothness: Option<f64>) -> u32 {
+    let mut steps = 1u32;
+    while 3.0 * f64::from(steps) < edge && steps < 32 {
+        steps *= 2;
+    }
+    if let Some(smoothness) = smoothness {
+        let tolerance = smoothness.clamp(0.0, 1.0).max(1.0 / 255.0);
+        let mut colour = 1u32;
+        while 4.0 * f64::from(colour * colour) * tolerance < measure && colour < 32 {
+            colour *= 2;
+        }
+        steps = steps.max(colour);
+    }
+    steps
+}
+
+/// How far each pixel of the patch strays from its colour evaluated here, in
+/// levels of 255: the largest, over the patch's 144 pixels, each read at its
+/// centre's `(u, v)`.
+fn worst_error(bitmap: &Bitmap) -> f64 {
+    let mut worst = 0.0f64;
+    let first = SMOOTH_AT as u32;
+    let last = (SMOOTH_AT + SMOOTH_SIDE) as u32;
+    for py in first..last {
+        for px in first..last {
+            // Device y counts down from the top of the page.
+            let x = f64::from(px) + 0.5;
+            let y = f64::from(SMOOTH_PAGE) - (f64::from(py) + 0.5);
+            let (u, v) = ((x - SMOOTH_AT) / SMOOTH_SIDE, (y - SMOOTH_AT) / SMOOTH_SIDE);
+            let at = py as usize * bitmap.stride + px as usize * bitmap.components();
+            let error = (f64::from(bitmap.data[at]) - 255.0 * saddle(u, v)).abs();
+            worst = worst.max(error);
+        }
+    }
+    worst
+}
+
+/// **Smoothness bounds a patch's colour error** (10.7.3): a 12-pixel Coons
+/// patch whose colour is a saddle — all bilinear term — asks four steps a
+/// side of its length, which leaves its colour eight levels out at a cell's
+/// centre. Under `/SM 0.02` and `/SM 0.005` it subdivides to the eight and
+/// sixteen steps the rule gives, computed here: each renders byte for byte as
+/// the patch cut by the test into that many cells, and every pixel is within
+/// the smoothness of the saddle evaluated here, a level allowed for the
+/// byte's rounding. Without `/SM`, and under 1 or more, it is cut by its
+/// length alone; 0 and a negative value read as the finest, one level; a
+/// tensor patch of the same net, and a patch carrying its colour as a
+/// parametric value, take the same rule — the function's slope weighing the
+/// value, so a quarter of the identity asks for half the steps.
+#[test]
+fn smoothness_bounds_a_patch_s_colour_error() {
+    let options = RenderOptions::default();
+    let whole = |state: &str| {
+        render(
+            smooth_page(state, &[patch_shading(6, None, &whole_patch(false))]),
+            &options,
+        )
+    };
+    let cut = |n: u32| {
+        render(
+            smooth_page("", &[patch_shading(6, None, &cut_patch(n))]),
+            &options,
+        )
+    };
+
+    // The rule's counts for this patch: an edge of 12 pixels, a bilinear term
+    // of 2 in a range of 1.
+    let steps = |smoothness| rule_steps(SMOOTH_SIDE, 2.0, smoothness);
+    assert_eq!(steps(None), 4, "the length's count");
+    assert_eq!(steps(Some(0.02)), 8);
+    assert_eq!(steps(Some(0.005)), 16);
+
+    let plain = whole("");
+    assert_eq!(
+        plain.data,
+        cut(4).data,
+        "without /SM: the length's four steps"
+    );
+    let coarse = worst_error(&plain);
+    assert!(
+        coarse > 255.0 * 0.02 + 1.0,
+        "the saddle strays {coarse} levels at four steps, within what the test asks"
+    );
+    for smoothness in [0.02, 0.005] {
+        let smoothed = whole(&format!("/SM {smoothness}"));
+        let n = steps(Some(smoothness));
+        assert_eq!(
+            smoothed.data,
+            cut(n).data,
+            "/SM {smoothness}: not the patch cut into {n} steps a side"
+        );
+        let error = worst_error(&smoothed);
+        assert!(
+            error <= 255.0 * smoothness + 1.0,
+            "/SM {smoothness}: a pixel strays {error} levels from the saddle"
+        );
+    }
+
+    // The readings of what 10.7.3's range does not hold.
+    assert_eq!(whole("/SM 1").data, plain.data, "1 asks nothing more");
+    assert_eq!(whole("/SM 7").data, plain.data, "past 1 is 1");
+    let finest = cut(16);
+    assert_eq!(steps(Some(0.0)), 16);
+    assert_eq!(whole("/SM 0").data, finest.data, "0 is the finest");
+    assert_eq!(whole("/SM -2").data, finest.data, "under 0 is the finest");
+
+    // A tensor patch with its interior on the thirds is the same surface.
+    let tensor = render(
+        smooth_page("/SM 0.005", &[patch_shading(7, None, &whole_patch(true))]),
+        &options,
+    );
+    assert_eq!(tensor.data, finest.data, "a tensor patch under /SM 0.005");
+
+    // The saddle carried as a parametric value: through the identity it is the
+    // colour patch; through a quarter of it the slope is a quarter, the
+    // measure a half, and 0.005 asks for eight steps a side.
+    let identity = "<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>";
+    let quarter = "<< /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [0.25] /N 1 >>";
+    let through = |function: &str, state: &str, data: &Bits| {
+        render(
+            smooth_page(state, &[patch_shading(6, Some(function), data)]),
+            &options,
+        )
+    };
+    assert_eq!(
+        through(identity, "/SM 0.005", &whole_patch(false)).data,
+        through(identity, "", &cut_patch(16)).data,
+        "the identity's patch under /SM 0.005"
+    );
+    assert_eq!(rule_steps(SMOOTH_SIDE, 0.5, Some(0.005)), 8);
+    assert_eq!(
+        through(quarter, "/SM 0.005", &whole_patch(false)).data,
+        through(quarter, "", &cut_patch(8)).data,
+        "a quarter of the identity under /SM 0.005"
+    );
+}
+
+/// **Smoothness moves no byte of a shading it does not approximate**: a
+/// function-based, an axial and a radial shading are evaluated at every pixel,
+/// and a free-form and a lattice mesh interpolate their vertices as
+/// 8.7.4.5.5 defines them, so under the finest `/SM` each draws as it does
+/// without it.
+#[test]
+fn smoothness_moves_no_shading_it_does_not_approximate() {
+    let options = RenderOptions::default();
+    // Two triangles over the patch's square, the saddle's corners at their
+    // vertices: four vertices for the lattice, six for the free-form mesh.
+    let far = SMOOTH_AT + SMOOTH_SIDE;
+    let corner = |x: f64, y: f64, value: f64, flag: bool, out: &mut Bits| {
+        if flag {
+            out.push(0, 8);
+        }
+        out.push(raw(x, 4.0), 16);
+        out.push(raw(y, 4.0), 16);
+        out.push(raw(value, 256.0), 16);
+        if flag {
+            out.align();
+        }
+    };
+    let mut free = Bits::default();
+    for (x, y, value) in [
+        (SMOOTH_AT, SMOOTH_AT, 1.0),
+        (far, SMOOTH_AT, 0.0),
+        (SMOOTH_AT, far, 0.0),
+        (far, SMOOTH_AT, 0.0),
+        (far, far, 1.0),
+        (SMOOTH_AT, far, 0.0),
+    ] {
+        corner(x, y, value, true, &mut free);
+    }
+    let mut lattice = Bits::default();
+    for (x, y, value) in [
+        (SMOOTH_AT, SMOOTH_AT, 1.0),
+        (far, SMOOTH_AT, 0.0),
+        (SMOOTH_AT, far, 0.0),
+        (far, far, 1.0),
+    ] {
+        corner(x, y, value, false, &mut lattice);
+    }
+    let lattice_keys = "/BitsPerCoordinate 16 /BitsPerComponent 16 /VerticesPerRow 2 \
+                        /Decode [0 16383.75 0 16383.75 0 255.99609375]";
+    let ramp = "/Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >>";
+    let shadings = [
+        (
+            "function-based",
+            vec![
+                "<< /ShadingType 1 /ColorSpace /DeviceGray /Domain [0 32 0 32] \
+                 /Function 7 0 R >>"
+                    .to_string(),
+                stream(
+                    "/FunctionType 4 /Domain [0 32 0 32] /Range [0 1]",
+                    "{ mul 1024 div }",
+                ),
+            ],
+        ),
+        (
+            "axial",
+            vec![format!(
+                "<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 32 32] {ramp} \
+                 /Extend [true true] >>"
+            )],
+        ),
+        (
+            "radial",
+            vec![format!(
+                "<< /ShadingType 3 /ColorSpace /DeviceRGB /Coords [16 16 2 16 16 14] {ramp} \
+                 /Extend [true true] >>"
+            )],
+        ),
+        (
+            "free-form",
+            vec![stream(
+                &format!(
+                    "/ShadingType 4 /ColorSpace /DeviceGray {SMOOTH_KEYS} /Filter /ASCIIHexDecode"
+                ),
+                &free.hex(),
+            )],
+        ),
+        (
+            "lattice",
+            vec![stream(
+                &format!(
+                    "/ShadingType 5 /ColorSpace /DeviceGray {lattice_keys} \
+                     /Filter /ASCIIHexDecode"
+                ),
+                &lattice.hex(),
+            )],
+        ),
+    ];
+    for (what, extra) in shadings {
+        let without = render(smooth_page("", &extra), &options);
+        assert!(
+            without.data.iter().any(|&byte| byte != 255),
+            "the {what} shading painted nothing"
+        );
+        assert_eq!(
+            render(smooth_page("/SM 0", &extra), &options).data,
+            without.data,
+            "the {what} shading moved under /SM"
+        );
+    }
+}
+
+/// **A smoothed tile is the page under it** (ruling 5): the count smoothness
+/// asks of a patch is a function of the patch alone, and its length's of the
+/// page's transform, so a tile cuts the page's mesh and is its rectangle of
+/// the page byte for byte.
+#[test]
+fn a_smoothed_tile_is_the_page_under_it() {
+    let doc = Document::open(smooth_page(
+        "/SM 0.005",
+        &[patch_shading(6, None, &whole_patch(false))],
+    ))
+    .expect("it opens");
+    let page = doc.page(0).expect("a page");
+    for scale in [1.0, 2.0] {
+        let options = RenderOptions {
+            scale,
+            ..RenderOptions::default()
+        };
+        let whole = page.render(&options);
+        let side = whole.width;
+        for (x, y, w, h) in [(0, 0, 13, 17), (13, 9, 11, 7), (5, 15, side - 5, side - 15)] {
+            let tile = page.render(&RenderOptions {
+                region: Some(PixelRegion::new(x, y, w, h)),
+                ..options.clone()
+            });
+            for row in 0..h {
+                let from = (y + row) as usize * whole.stride + x as usize * 3;
+                assert_eq!(
+                    &tile.data[row as usize * tile.stride..][..w as usize * 3],
+                    &whole.data[from..from + w as usize * 3],
+                    "tile ({x}, {y}) row {row} at {scale}x"
+                );
+            }
+        }
+    }
+}

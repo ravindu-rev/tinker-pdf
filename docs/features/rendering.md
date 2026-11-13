@@ -1501,7 +1501,7 @@ transfer functions, and the halftone and its origin — travel in the state as
 one shared `StoredParameters` value with the rendering intent, which flat
 colours apply, `None` while every one has its initial value, so a
 `q` copies one word more and a copy allocates nothing. The transfer functions,
-black generation and undercolour removal, and flatness are applied
+black generation and undercolour removal, flatness and smoothness are applied
 ([design/device-dependent-state.md](../design/device-dependent-state.md)); the
 rest move no pixel until their rows apply them.
 
@@ -1520,6 +1520,28 @@ coarser). The flattener's rule is unchanged, only its tolerance is the state's
 `a_text_clip_flattens_each_glyph_at_its_own_flatness`,
 `a_glyph_mask_is_kept_per_flatness`,
 `a_flattened_tile_is_the_page_under_it`).
+
+**Smoothness** (`/SM`, 10.7.3) bounds the colour error where the renderer
+approximates a shading's colour, which is a Coons or tensor patch alone: a
+patch's colour is bilinear over its parameters (8.7.4.5.7) and the grid of
+triangles it is drawn as carries it linearly, so at `n` steps a side the grid
+misses at most `|c₁ − c₂ + c₃ − c₄| / (4 n²)` of a component's range, at a
+cell's centre. Under `/SM` a patch takes the larger of its device-length count
+and the least power of two whose error is within the smoothness for every
+component, at most 32, decided in 16.16 fixed point (`Mesh::tessellate`,
+ruling 4). A component's range is the span its space converts within — 0 to
+1, an `/Indexed` index's 0 to `hival`, Lab's L\* 0 to 100 and a\* and b\* their
+`/Range` — and a patch carrying a parametric value is weighed by its
+function's slope, sampled once a mesh at 256 intervals over the values its
+patches' corners span. `/SM` is read in 0 to 1 and no finer than one level of
+255; unset, or not a number, it is the device's own and a patch is cut by its
+length alone, as before. Types 1 to 3 are evaluated at every pixel and types 4
+and 5 interpolate their vertices as 8.7.4.5.5 defines them, so `/SM` moves
+none of them; the count reads the patch and the page's transform alone, so a
+tile cuts the page's mesh (`device_state.rs`'s
+`smoothness_bounds_a_patch_s_colour_error`,
+`smoothness_moves_no_shading_it_does_not_approximate`,
+`a_smoothed_tile_is_the_page_under_it`).
 
 **Transfer functions** (`/TR2` over `/TR`, 10.5) are kept per point, as
 11.7.5.2 has them: each elementary object writes, where its shape is not zero,

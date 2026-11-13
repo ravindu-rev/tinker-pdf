@@ -15,6 +15,16 @@
 //! coarse at 300 dpi or far too fine at a thumbnail. So [`Mesh`] holds patches
 //! and [`Mesh::tessellate`] takes the matrix.
 //!
+//! # Smoothness
+//!
+//! A patch's colour is bilinear over its parameters (8.7.4.5.7) and a triangle
+//! of the grid carries it linearly, so the grid misses the bilinear term.
+//! `/SM` (10.7.3) bounds that error: under it a patch takes the larger of its
+//! device-length count and the count whose colour error is within the
+//! smoothness, `docs/design/device-dependent-state.md`'s rule. Triangles
+//! approximate nothing it bounds — 8.7.4.5.5 defines their colour as the
+//! linear interpolation they are drawn with — so it reaches patches alone.
+//!
 //! # Determinism
 //!
 //! Ruling 4. Two things here could have made a mesh render differently on a
@@ -26,7 +36,9 @@
 //!   it **once** into 16.16 fixed point, and then compares integers. The loop
 //!   doubles its threshold rather than halving the length, because shifting
 //!   truncates and a length a hair over the threshold would stop one step
-//!   short;
+//!   short. The count smoothness asks for, [`colour_steps`], is the same kind
+//!   of decision: a colour measure built from the operations IEEE 754 pins
+//!   exactly, cast once, and compared as integers;
 //! - the count of vertices a stream yields. That is decided by bit arithmetic
 //!   on `u64` and by `usize` comparisons against caps that are constants, so
 //!   it does not depend on float rounding at all.
@@ -70,8 +82,20 @@ pub const MAX_MESH_TRIANGLES: usize = 1 << 17;
 ///
 /// A power of two, because [`patch_steps`] reaches it by doubling. Thirty-two
 /// steps is 2 048 triangles for one patch, which is finer than any patch that
-/// fits on a page needs.
+/// fits on a page needs. It caps the count smoothness asks for too
+/// ([`colour_steps`]), whatever `/SM` asks.
 const MAX_PATCH_STEPS: u32 = 32;
+
+/// The finest colour tolerance smoothness subdivides a patch to: one level of
+/// 255, below which an 8-bit component's error cannot change a byte
+/// (10.7.3 lets a device hold "internal limits on the maximum and minimum
+/// tolerances attainable").
+const FINEST_SMOOTHNESS: f64 = 1.0 / 255.0;
+
+/// How many intervals a mesh's function is sampled over to measure its slope
+/// for smoothness ([`sampled_slope`]): as many as a transfer function's table
+/// has entries less one.
+const SLOPE_INTERVALS: u32 = 256;
 
 /// The device-space length one subdivision step aims at, in pixels.
 ///
@@ -168,8 +192,17 @@ impl Mesh {
     /// `fill_with_tiles` gives about a lattice: half a mesh reads as a
     /// rendering artefact, where nothing painted plus a warning naming the
     /// type reads as the gap it is.
+    ///
+    /// `smoothness` is the `/SM` in force (10.7.3), the colour error a patch's
+    /// grid may leave as a fraction of each component's range: read in 0 to 1
+    /// and no finer than one level of 255 ([`FINEST_SMOOTHNESS`]), and `None`,
+    /// or a number that is not finite, is the device's own — each patch
+    /// subdivided by its device length alone, as before. Under it a patch
+    /// takes the larger of its device-length count and [`colour_steps`]'s,
+    /// capped at [`MAX_PATCH_STEPS`]. It moves no triangle of a type 4 or 5
+    /// mesh, which interpolates its vertices as 8.7.4.5.5 defines it.
     #[must_use]
-    pub fn tessellate(&self, to_device: &Matrix) -> Option<Tessellation> {
+    pub fn tessellate(&self, to_device: &Matrix, smoothness: Option<f64>) -> Option<Tessellation> {
         if !to_device.is_finite() {
             return None;
         }
@@ -192,17 +225,25 @@ impl Mesh {
         }
         out.triangles.extend_from_slice(&self.triangles);
 
+        let smooth = if self.patches.is_empty() {
+            None
+        } else {
+            Smooth::of(self, smoothness)
+        };
         for patch in &self.patches {
-            self.tessellate_patch(patch, to_device, &mut out)?;
+            self.tessellate_patch(patch, to_device, smooth.as_ref(), &mut out)?;
         }
         Some(out)
     }
 
-    /// Subdivides one patch onto a square grid and appends its triangles.
+    /// Subdivides one patch onto a square grid and appends its triangles:
+    /// as finely as its device length asks, and as its colour asks where
+    /// `smooth` holds a smoothness.
     fn tessellate_patch(
         &self,
         patch: &Patch,
         to_device: &Matrix,
+        smooth: Option<&Smooth>,
         out: &mut Tessellation,
     ) -> Option<()> {
         // The control net in device space: the subdivision is chosen from how
@@ -217,7 +258,11 @@ impl Mesh {
             }
         }
 
-        let steps = patch_steps(&net);
+        // Both counts are powers of two, so the larger is one too.
+        let steps = match smooth {
+            Some(smooth) => patch_steps(&net).max(smooth.steps(&patch.corners, self.components)),
+            None => patch_steps(&net),
+        };
         let span = (steps as usize).checked_add(1)?;
         let vertices = span.checked_mul(span)?;
         let triangles = (steps as usize)
@@ -356,6 +401,172 @@ fn patch_steps(net: &[[(f64, f64); 4]; 4]) -> u32 {
         threshold = threshold.saturating_mul(2);
     }
     steps
+}
+
+/// What `/SM` asks of a mesh's patches (10.7.3): the tolerance, and what one
+/// unit of each colour input's bilinear term costs the colour, in fractions of
+/// a component's range.
+struct Smooth {
+    /// The colour error a patch's grid may leave, as a fraction of each
+    /// component's range.
+    tolerance: f64,
+    /// Per colour input: 1 over its component's range, or, for the one
+    /// parametric value a `/Function` takes, the function's sampled slope over
+    /// each output's range, the steepest ([`sampled_slope`]).
+    weights: Vec<f64>,
+}
+
+impl Smooth {
+    /// What `smoothness` asks of `mesh`, or `None` where it asks nothing:
+    /// unset, or not a finite number.
+    fn of(mesh: &Mesh, smoothness: Option<f64>) -> Option<Smooth> {
+        let tolerance = smoothness_tolerance(smoothness)?;
+        let weights = match &mesh.function {
+            Some(function) => vec![sampled_slope(mesh, function)],
+            None => (0..mesh.components)
+                .map(|index| 1.0 / component_range(&mesh.space, index))
+                .collect(),
+        };
+        Some(Smooth { tolerance, weights })
+    }
+
+    /// The count a patch whose corner inputs are `corners` (`components` a
+    /// corner, in `c1` to `c4`'s order) takes for its colour to be within the
+    /// tolerance.
+    ///
+    /// The error is the bilinear term's (8.7.4.5.7): over a cell `h` of the
+    /// parameter on a side, a triangle carrying the corners linearly misses
+    /// `|c₁ − c₂ + c₃ − c₄| × h² / 4` at most, at the cell's centre. So the
+    /// measure is that coefficient for each input, weighted into a fraction of
+    /// its colour's range, and the largest — 10.7.3's "the maximum independent
+    /// error shall be used".
+    fn steps(&self, corners: &[f64], components: usize) -> u32 {
+        let mut measure = 0.0f64;
+        for (input, weight) in self.weights.iter().enumerate() {
+            let at = |corner: usize| {
+                corner
+                    .checked_mul(components)
+                    .and_then(|start| start.checked_add(input))
+                    .and_then(|index| corners.get(index))
+                    .copied()
+                    .unwrap_or(0.0)
+            };
+            let error = (at(0) - at(1) + at(2) - at(3)).abs() * weight;
+            // A comparison NaN answers false to, so a nonsense corner adds
+            // nothing rather than poisoning the measure.
+            if error > measure {
+                measure = error;
+            }
+        }
+        colour_steps(measure, self.tolerance)
+    }
+}
+
+/// `/SM` as a colour tolerance: 10.7.3's "fraction of the range of the colour
+/// component, from 0.0 to 1.0", read in that range and no finer than
+/// [`FINEST_SMOOTHNESS`]. `None`, and a number that is not finite, are the
+/// device's own, which asks nothing of a patch's colour.
+fn smoothness_tolerance(smoothness: Option<f64>) -> Option<f64> {
+    let value = smoothness.filter(|value| value.is_finite())?;
+    Some(value.clamp(0.0, 1.0).max(FINEST_SMOOTHNESS))
+}
+
+/// How many pieces each edge of a patch is broken into for its colour to be
+/// within `tolerance`: the least power of two `n`, up to
+/// [`MAX_PATCH_STEPS`], whose error `measure / (4 n²)` is within it — that is,
+/// `measure ≤ 4 n² × tolerance`.
+///
+/// The same fixed-point decision as [`patch_steps`] (ruling 4): the measure
+/// and the allowance at one step are each cast **once** into 16.16, and the
+/// loop compares integers, the allowance multiplied by four at each doubling
+/// rather than the measure divided. A measure that is not a number reads as
+/// zero, one step; one past the fixed-point range reads as its largest value,
+/// the cap.
+fn colour_steps(measure: f64, tolerance: f64) -> u32 {
+    let fixed = |value: f64| (value * 65536.0).clamp(0.0, i64::MAX as f64) as i64;
+    let measure = fixed(measure);
+    let mut allowance = fixed(4.0 * tolerance);
+    let mut steps = 1u32;
+    while allowance < measure && steps < MAX_PATCH_STEPS {
+        steps *= 2;
+        allowance = allowance.saturating_mul(4);
+    }
+    steps
+}
+
+/// The span of a colour component's values, which smoothness is a fraction
+/// of (10.7.3): an `/Indexed` index's `0` to `hival` (8.6.6.3), Lab's L\* `0`
+/// to `100` and its a\* and b\* their `/Range` (8.6.5.4), and every other
+/// space's components `0` to `1` — the range each converts within. A span of
+/// nothing, or one that is not a number, reads as 1.
+fn component_range(space: &ColorSpace, index: usize) -> f64 {
+    let span = match space {
+        ColorSpace::Indexed { high, .. } => f64::from(*high),
+        ColorSpace::Lab { range } => match index {
+            0 => 100.0,
+            1 => (range[1] - range[0]).abs(),
+            _ => (range[3] - range[2]).abs(),
+        },
+        _ => 1.0,
+    };
+    if span.is_finite() && span > 0.0 {
+        span
+    } else {
+        1.0
+    }
+}
+
+/// The steepest `function` rises or falls over the parametric values `mesh`'s
+/// patches' corners span, as a fraction of each output's component range per
+/// unit of the parameter: the function evaluated at [`SLOPE_INTERVALS`] equal
+/// intervals across the span, each output's change over an interval over the
+/// interval and its range, the largest.
+///
+/// A patch's parametric value is bilinear like a colour, so its grid's error
+/// in the parameter is the bilinear term's, and the colour's error is within
+/// this slope times it as nearly as sampling can tell — 10.7.3's NOTE 1 says
+/// as much of a function known only by its samples. Measured once a mesh,
+/// over the whole span, so every patch is held to the steepest part. A span
+/// of nothing, or one that is not finite, has no slope to measure.
+fn sampled_slope(mesh: &Mesh, function: &Function) -> f64 {
+    let (low, high) = mesh
+        .patches
+        .iter()
+        .flat_map(|patch| patch.corners.iter())
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), value| {
+            (low.min(*value), high.max(*value))
+        });
+    if !(low.is_finite() && high.is_finite() && high > low) {
+        return 0.0;
+    }
+    let span = high - low;
+    let intervals = f64::from(SLOPE_INTERVALS);
+    let mut previous = Vec::new();
+    let mut current = Vec::new();
+    function.eval_into(&[low], &mut previous);
+    let mut steepest = 0.0f64;
+    for step in 1..=SLOPE_INTERVALS {
+        let t = low + span * f64::from(step) / intervals;
+        function.eval_into(&[t], &mut current);
+        for (output, (before, after)) in previous.iter().zip(current.iter()).enumerate() {
+            let rise = (after - before).abs() / component_range(&mesh.space, output);
+            if rise > steepest {
+                steepest = rise;
+            }
+        }
+        core::mem::swap(&mut previous, &mut current);
+    }
+    if steepest == 0.0 {
+        return 0.0; // A flat function, however narrow its span.
+    }
+    // An interval so narrow the quotient leaves the finite is as steep as
+    // anything can be: the cap.
+    let slope = steepest / (span / intervals);
+    if slope.is_finite() {
+        slope
+    } else {
+        f64::MAX
+    }
 }
 
 /// How a mesh shading's vertex stream is packed (Tables 79 to 82).
@@ -1225,7 +1436,7 @@ mod tests {
         let mesh =
             read_mesh(&p, &flat_patch_stream(6), ColorSpace::DeviceGray, None).expect("it reads");
 
-        let tessellation = mesh.tessellate(&Matrix::IDENTITY).expect("it fits");
+        let tessellation = mesh.tessellate(&Matrix::IDENTITY, None).expect("it fits");
         let steps = 16u32; // 30 units of Manhattan leg-sum per edge, at 3 per step
         assert_eq!(
             tessellation.triangles.len(),
@@ -1259,12 +1470,12 @@ mod tests {
             read_mesh(&p, &flat_patch_stream(6), ColorSpace::DeviceGray, None).expect("it reads");
 
         let small = mesh
-            .tessellate(&Matrix::scale(0.05, 0.05))
+            .tessellate(&Matrix::scale(0.05, 0.05), None)
             .expect("it fits")
             .triangles
             .len();
         let large = mesh
-            .tessellate(&Matrix::scale(4.0, 4.0))
+            .tessellate(&Matrix::scale(4.0, 4.0), None)
             .expect("it fits")
             .triangles
             .len();
@@ -1334,6 +1545,339 @@ mod tests {
                 components.color(&cmyk, &mut ShadingScratch::default()),
                 "{cmyk:?}"
             );
+        }
+    }
+
+    // ---- smoothness (10.7.3) ------------------------------------------------
+
+    /// A flat patch thirty units on a side, its control net on the thirds, in
+    /// `space` with `components` inputs a corner and `corners` in `c1` to
+    /// `c4`'s order.
+    fn flat_patch_mesh(
+        space: ColorSpace,
+        function: Option<Function>,
+        components: usize,
+        corners: Vec<f64>,
+    ) -> Mesh {
+        let mut points = [[(0.0, 0.0); 4]; 4];
+        for (u, row) in points.iter_mut().enumerate() {
+            for (v, slot) in row.iter_mut().enumerate() {
+                *slot = (10.0 * f64::from(u as u32), 10.0 * f64::from(v as u32));
+            }
+        }
+        Mesh {
+            kind: 6,
+            space,
+            function,
+            components,
+            positions: Vec::new(),
+            values: Vec::new(),
+            triangles: Vec::new(),
+            patches: vec![Patch { points, corners }],
+        }
+    }
+
+    /// The cells a side squared that `mesh` is cut into at a twentieth of its
+    /// size — a patch a pixel and a half across, whose device length asks for
+    /// one — under `smoothness`.
+    fn cells(mesh: &Mesh, smoothness: Option<f64>) -> usize {
+        mesh.tessellate(&Matrix::scale(0.05, 0.05), smoothness)
+            .expect("it fits")
+            .triangles
+            .len()
+            / 2
+    }
+
+    /// The cells the design's rule gives a patch whose bilinear term is
+    /// `measure` of its range (`docs/design/device-dependent-state.md`): the
+    /// least power of two `n`, at most 32, whose error `measure / (4 n²)` is
+    /// within the smoothness read in 0 to 1 and no finer than 1/255; `n²`.
+    fn rule(measure: f64, smoothness: f64) -> usize {
+        let tolerance = smoothness.clamp(0.0, 1.0).max(1.0 / 255.0);
+        let mut n = 1u32;
+        while 4.0 * f64::from(n * n) * tolerance < measure && n < 32 {
+            n *= 2;
+        }
+        (n * n) as usize
+    }
+
+    /// **Smoothness subdivides a patch until its colour is within it**: the
+    /// grey corners 0, 1/3, 2/3 and 1 leave a bilinear term of 2/3, and at a
+    /// size whose length asks for one cell each tolerance takes the least
+    /// power of two the rule gives, computed here. The device's own, and 1,
+    /// ask nothing more; past 1 reads as 1, 0 and under it as the finest, a
+    /// tolerance finer than one level of 255 as that level, and a number that
+    /// is not finite as none.
+    #[test]
+    fn smoothness_subdivides_a_patch_to_its_colour_tolerance() {
+        let mesh = flat_patch_mesh(
+            ColorSpace::DeviceGray,
+            None,
+            1,
+            vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0],
+        );
+        assert_eq!(cells(&mesh, None), 1, "the device's own asks nothing");
+        for smoothness in [1.0, 0.2, 0.05, 0.01, 1.0 / 255.0] {
+            assert_eq!(
+                cells(&mesh, Some(smoothness)),
+                rule(2.0 / 3.0, smoothness),
+                "/SM {smoothness}"
+            );
+        }
+        assert_eq!(cells(&mesh, Some(1.0)), 1);
+        assert_eq!(cells(&mesh, Some(0.05)), 4, "two a side");
+        assert_eq!(cells(&mesh, Some(0.01)), 64, "eight a side");
+        let finest = cells(&mesh, Some(1.0 / 255.0));
+        assert_eq!(cells(&mesh, Some(2.0)), 1, "past 1 is 1");
+        assert_eq!(cells(&mesh, Some(0.0)), finest, "0 is the finest");
+        assert_eq!(cells(&mesh, Some(-3.0)), finest, "under 0 is the finest");
+        assert_eq!(cells(&mesh, Some(1e-6)), finest, "finer than a level");
+        assert_eq!(cells(&mesh, Some(f64::NAN)), 1, "not a number");
+        assert_eq!(cells(&mesh, Some(f64::INFINITY)), 1, "nor infinity");
+
+        // The same patch read from a stream takes the same counts.
+        let mut p = params(6, 8, 8);
+        p.decode = vec![(0.0, 30.0), (0.0, 30.0), (0.0, 1.0)];
+        let read =
+            read_mesh(&p, &flat_patch_stream(6), ColorSpace::DeviceGray, None).expect("it reads");
+        for smoothness in [0.05, 0.01] {
+            assert_eq!(
+                cells(&read, Some(smoothness)),
+                cells(&mesh, Some(smoothness))
+            );
+        }
+    }
+
+    /// **Smoothness only adds steps, and stops at the cap**: at full size the
+    /// device length's sixteen a side stand under a tolerance that asks for
+    /// eight, and a grey stretched by its `/Decode` to a thousand times its
+    /// range takes 32 a side at the finest, however few its length asks for.
+    #[test]
+    fn smoothness_adds_steps_up_to_the_cap() {
+        let mesh = flat_patch_mesh(
+            ColorSpace::DeviceGray,
+            None,
+            1,
+            vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0],
+        );
+        let full = |smoothness| {
+            mesh.tessellate(&Matrix::IDENTITY, smoothness)
+                .expect("it fits")
+                .triangles
+                .len()
+                / 2
+        };
+        assert_eq!(full(None), 256, "sixteen a side from the length");
+        assert_eq!(
+            full(Some(1.0 / 255.0)),
+            256,
+            "the colour's eight do not lower it"
+        );
+
+        let stretched = flat_patch_mesh(
+            ColorSpace::DeviceGray,
+            None,
+            1,
+            vec![0.0, 1000.0 / 3.0, 2000.0 / 3.0, 1000.0],
+        );
+        assert_eq!(cells(&stretched, Some(1.0 / 255.0)), 32 * 32, "capped");
+        assert_eq!(rule(2000.0 / 3.0, 1.0 / 255.0), 32 * 32);
+    }
+
+    /// **A patch with no bilinear term takes its device count**: corners that
+    /// change along one parameter alone are carried exactly by the triangles,
+    /// so no tolerance asks for a step more.
+    #[test]
+    fn a_patch_whose_colour_is_linear_takes_its_device_count() {
+        let ramp = flat_patch_mesh(ColorSpace::DeviceGray, None, 1, vec![0.0, 0.0, 1.0, 1.0]);
+        for smoothness in [None, Some(1.0), Some(0.01), Some(0.0)] {
+            assert_eq!(cells(&ramp, smoothness), 1, "{smoothness:?}");
+        }
+    }
+
+    /// **A triangle mesh takes nothing from smoothness**: 8.7.4.5.5 defines its
+    /// colour as the linear interpolation it is drawn with, so the finest
+    /// tolerance leaves its triangles, positions and values as they were.
+    #[test]
+    fn a_triangle_mesh_takes_nothing_from_smoothness() {
+        let mut writer = BitWriter::new();
+        for (x, y, grey) in [(0u64, 0u64, 0u64), (255, 0, 255), (0, 255, 128)] {
+            writer.push(0, 8);
+            writer.push(x, 8);
+            writer.push(y, 8);
+            writer.push(grey, 8);
+            writer.align();
+        }
+        let mesh =
+            read_mesh(&params(4, 8, 8), &writer.data, ColorSpace::DeviceGray, None).expect("reads");
+        let plain = mesh.tessellate(&Matrix::IDENTITY, None).expect("it fits");
+        let smooth = mesh
+            .tessellate(&Matrix::IDENTITY, Some(1.0 / 255.0))
+            .expect("it fits");
+        assert_eq!(plain.triangles, smooth.triangles);
+        assert_eq!(plain.positions, smooth.positions);
+        assert_eq!(plain.values, smooth.values);
+    }
+
+    /// **A component's range is what its tolerance is a fraction of**: Lab's
+    /// L\* over 0 to 100 and its a\* over its `/Range`, and an `/Indexed`
+    /// index over 0 to `hival`, each with a bilinear term two thirds of its
+    /// range, take the grey patch's counts; L\* moving a hundredth as far
+    /// takes far fewer.
+    #[test]
+    fn a_component_s_range_scales_its_tolerance() {
+        let grey = flat_patch_mesh(
+            ColorSpace::DeviceGray,
+            None,
+            1,
+            vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0],
+        );
+        let lab = |corners: [[f64; 3]; 4]| {
+            flat_patch_mesh(
+                ColorSpace::Lab {
+                    range: [-128.0, 127.0, -128.0, 127.0],
+                },
+                None,
+                3,
+                corners.iter().flatten().copied().collect(),
+            )
+        };
+        let lightness = lab([
+            [0.0, 0.0, 0.0],
+            [100.0 / 3.0, 0.0, 0.0],
+            [200.0 / 3.0, 0.0, 0.0],
+            [100.0, 0.0, 0.0],
+        ]);
+        let red_green = lab([
+            [50.0, -128.0, 0.0],
+            [50.0, -43.0, 0.0],
+            [50.0, 42.0, 0.0],
+            [50.0, 127.0, 0.0],
+        ]);
+        let indexed = flat_patch_mesh(
+            ColorSpace::Indexed {
+                base: Box::new(ColorSpace::DeviceGray),
+                lookup: (0..=255u8).collect(),
+                high: 255,
+            },
+            None,
+            1,
+            vec![0.0, 85.0, 170.0, 255.0],
+        );
+        for smoothness in [0.05, 0.01, 1.0 / 255.0] {
+            let want = cells(&grey, Some(smoothness));
+            assert_eq!(
+                cells(&lightness, Some(smoothness)),
+                want,
+                "L* at {smoothness}"
+            );
+            assert_eq!(
+                cells(&red_green, Some(smoothness)),
+                want,
+                "a* at {smoothness}"
+            );
+            assert_eq!(
+                cells(&indexed, Some(smoothness)),
+                want,
+                "index at {smoothness}"
+            );
+        }
+        let faint = lab([
+            [0.0, 0.0, 0.0],
+            [1.0 / 3.0, 0.0, 0.0],
+            [2.0 / 3.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ]);
+        assert_eq!(
+            cells(&faint, Some(0.01)),
+            1,
+            "a hundredth of L* asks nothing"
+        );
+        assert_eq!(cells(&grey, Some(0.01)), 64);
+    }
+
+    /// **A function's slope weighs its parametric value**: a patch whose
+    /// corners carry `t` through `/Function` takes the counts its outputs'
+    /// error asks for — an identity's the grey patch's, a quarter's fewer, a
+    /// square's (slope near 2 at the top of the span) more — and a flat
+    /// function, or corners that are all one value, take none.
+    #[test]
+    fn a_function_s_slope_weighs_its_parametric_value() {
+        let through = |c1: f64, n: f64| {
+            flat_patch_mesh(
+                ColorSpace::DeviceGray,
+                Some(Function::Exponential {
+                    domain: (0.0, 1.0),
+                    c0: vec![0.0],
+                    c1: vec![c1],
+                    n,
+                }),
+                1,
+                vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0],
+            )
+        };
+        let grey = flat_patch_mesh(
+            ColorSpace::DeviceGray,
+            None,
+            1,
+            vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0],
+        );
+        for smoothness in [0.05, 0.01] {
+            assert_eq!(
+                cells(&through(1.0, 1.0), Some(smoothness)),
+                cells(&grey, Some(smoothness)),
+                "the identity at {smoothness}"
+            );
+        }
+        let quarter = through(0.25, 1.0);
+        assert_eq!(cells(&quarter, Some(0.05)), rule(2.0 / 3.0 * 0.25, 0.05));
+        assert_eq!(cells(&quarter, Some(0.05)), 1);
+        assert_eq!(cells(&quarter, Some(0.01)), 16);
+        let square = through(1.0, 2.0);
+        assert_eq!(
+            cells(&square, Some(0.05)),
+            16,
+            "four a side, where t takes two"
+        );
+        assert_eq!(cells(&grey, Some(0.05)), 4);
+
+        let flat = through(0.0, 1.0);
+        assert_eq!(cells(&flat, Some(1.0 / 255.0)), 1, "a flat function");
+        let level = flat_patch_mesh(
+            ColorSpace::DeviceGray,
+            Some(Function::Exponential {
+                domain: (0.0, 1.0),
+                c0: vec![0.0],
+                c1: vec![1.0],
+                n: 1.0,
+            }),
+            1,
+            vec![0.5; 4],
+        );
+        assert_eq!(
+            cells(&level, Some(1.0 / 255.0)),
+            1,
+            "one value at every corner"
+        );
+    }
+
+    /// **The colour count is a fixed-point power of two**: nothing measured is
+    /// one step, a measure exactly at an allowance stops there, a measure that
+    /// is not a number is one step, and one past every allowance is the cap.
+    #[test]
+    fn the_colour_count_is_a_fixed_point_power_of_two() {
+        assert_eq!(colour_steps(0.0, 0.01), 1);
+        assert_eq!(colour_steps(1.0, 0.25), 1, "exactly 4 × 1² × 0.25");
+        assert_eq!(colour_steps(4.0, 0.25), 2, "exactly 4 × 2² × 0.25");
+        assert_eq!(colour_steps(4.5, 0.25), 4);
+        assert_eq!(colour_steps(f64::NAN, 0.01), 1);
+        assert_eq!(colour_steps(f64::INFINITY, 0.01), 32);
+        assert_eq!(colour_steps(1e300, 1.0), 32);
+        let mut previous = 0;
+        for tenth in 0..400 {
+            let steps = colour_steps(f64::from(tenth) / 10.0, 0.01);
+            assert!(steps.is_power_of_two() && steps >= previous, "{tenth}");
+            previous = steps;
         }
     }
 }

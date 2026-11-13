@@ -298,6 +298,16 @@ per object:
   keeps the page's mesh (`draw_mesh_over`, ruling 5). `/SM` is read in 0 to 1,
   and no finer than one level of 255, below which the error cannot change a
   byte.
+- **The measure.** A component's range is the span its space converts
+  within: 0 to 1, an `/Indexed` index's 0 to `hival`, Lab's L\* 0 to 100 and
+  a\* and b\* their `/Range`. A patch carrying a parametric value is weighed by
+  its function's slope, sampled once a mesh: the function at 256 equal
+  intervals over the values the mesh's patches' corners span, each output's
+  change over an interval divided by the interval and its range, the steepest
+  — 10.7.3's NOTE 1 says a conversion known by its samples is known that well.
+  The count (`colour_steps`) is the least power of two `n` with the measure at
+  most `4 n²` times the tolerance: the measure and the allowance at one step
+  cast once into 16.16, the allowance quadrupled at each doubling.
 
 ### Stroke adjustment (`/SA`, 10.7.5)
 
