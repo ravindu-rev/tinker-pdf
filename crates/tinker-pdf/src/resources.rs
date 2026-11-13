@@ -31,6 +31,7 @@ use tinker_pdf_render::{
 use crate::fonts::{self, FontProvider, FontRequest};
 use crate::optional::OptionalContent;
 use crate::stats::{self, Counter, Work};
+use crate::Usage;
 
 /// Extracted glyph outlines, keyed by font identity and character code.
 ///
@@ -548,7 +549,9 @@ impl Selection {
 /// font pass — carries into every resource scope it reads
 /// (`docs/design/performance.md`, P-03, "The cache: who holds it, and its
 /// key"): the streams it has decoded, so that it decodes each once however
-/// many of its scopes read it, and its tally, when it is counting.
+/// many of its scopes read it, its tally, when it is counting, and the
+/// optional-content states its scopes read, bound once for the usage it
+/// names (`docs/design/render-usage.md`).
 ///
 /// Made by the door the operation goes through and cloned into every scope it
 /// builds; a scope a scope makes inherits its maker's. A scope a cache keeps
@@ -566,26 +569,55 @@ pub(crate) struct Operation {
     streams: Option<Arc<DecodedStreams>>,
     /// The tally, when the operation is counting.
     work: Option<Arc<Work>>,
+    /// What the operation renders for (`crate::RenderOptions::usage`):
+    /// `None` for a render naming none and for every operation that is not a
+    /// render.
+    usage: Option<Usage>,
+    /// The optional-content states every scope the operation opens reads,
+    /// bound by the first that asks (ISO 32000-2 8.11.4.4): the default
+    /// configuration's initial states, and its `/AS` entries for `usage` over
+    /// them. Shared by every clone, so the page's scope, each form's, each
+    /// tiling cell's and each appearance's read one binding.
+    optional: Arc<OnceLock<OptionalContent>>,
 }
 
 impl Operation {
     /// A new operation, which has decoded nothing yet, counting into `work`
-    /// when it is counting.
+    /// when it is counting, and naming no usage.
     pub(crate) fn new(work: Option<Arc<Work>>) -> Operation {
+        Operation::rendering(work, None)
+    }
+
+    /// A render's operation: [`Operation::new`], for a render naming
+    /// `usage`, whose scopes read the states that usage gives.
+    pub(crate) fn rendering(work: Option<Arc<Work>>, usage: Option<Usage>) -> Operation {
         Operation {
             streams: Some(Arc::new(DecodedStreams::new())),
             work,
+            usage,
+            optional: Arc::default(),
         }
     }
 
     /// No operation: what a scope a cache keeps holds between the operations
     /// that ask for it. Nothing counts, and every stream is decoded as it is
-    /// read.
+    /// read; asked about optional content itself, it binds the initial states
+    /// for itself.
     pub(crate) fn none() -> Operation {
         Operation {
             streams: None,
             work: None,
+            usage: None,
+            optional: Arc::default(),
         }
+    }
+
+    /// The optional-content states the operation's scopes read, bound from
+    /// `doc` the first time any of them asks, and the same binding every time
+    /// after.
+    pub(crate) fn optional(&self, doc: &CosDocument) -> &OptionalContent {
+        self.optional
+            .get_or_init(|| OptionalContent::bind_for(doc, self.usage))
     }
 
     /// The tally, when the operation is counting.
@@ -677,20 +709,14 @@ pub struct PageResources {
     /// not apply — text inside a pattern would silently lose its substitute
     /// face while the same text beside it kept one.
     provider: Option<Arc<dyn FontProvider>>,
-    /// Which optional-content layers the document's default configuration
-    /// shows (8.11).
-    ///
-    /// Bound here, once, rather than looked up per `BDC`: the catalog is
-    /// already in reach through `doc`, the answer cannot change during a
-    /// render — this build has no layer-toggle API to change it with — and a
-    /// page that marks every drawing operator would otherwise walk
-    /// `/OCProperties` thousands of times for one constant.
-    optional: Arc<OptionalContent>,
     /// The operation these resources serve: the streams it has decoded,
-    /// which every stream this scope reads is read through, and its tally
+    /// which every stream this scope reads is read through, its tally
     /// when it is counting (`docs/design/performance.md`) — the fonts this
     /// scope resolves, the image decoders it runs and every lookup in its
-    /// caches count into it.
+    /// caches count into it — and the optional-content states every `BDC`
+    /// and every XObject's `/OC` this scope is asked about reads, bound once
+    /// for the operation rather than walked per `BDC`
+    /// ([`Operation::optional`]).
     ///
     /// Its tally is `None` for every operation nobody asked about, and then
     /// every counting site below tests it and does nothing else. A scope
@@ -1635,17 +1661,22 @@ impl PageResources {
     /// it, as that render's own decode would have.
     #[must_use]
     pub(crate) fn for_one_render(&self) -> PageResources {
-        self.for_one_render_counted(None)
+        self.for_one_render_counted(None, None)
     }
 
-    /// [`PageResources::for_one_render`], counting into `work`: a counted
-    /// render's resources over a retained page's caches. A render is an
-    /// operation of its own, so it reads what it decodes into streams of its
-    /// own, dropped with it. Building it reads nothing — its fonts are the
+    /// [`PageResources::for_one_render`], counting into `work`, for a render
+    /// naming `usage`: a counted render's resources over a retained page's
+    /// caches. A render is an operation of its own, so it reads what it
+    /// decodes into streams of its own, dropped with it, and binds its own
+    /// optional-content states. Building it reads nothing — its fonts are the
     /// kept scope's table, shared — so it counts nothing itself.
     #[must_use]
-    pub(crate) fn for_one_render_counted(&self, work: Option<Arc<Work>>) -> PageResources {
-        self.serving(Operation::new(work))
+    pub(crate) fn for_one_render_counted(
+        &self,
+        work: Option<Arc<Work>>,
+        usage: Option<Usage>,
+    ) -> PageResources {
+        self.serving(Operation::rendering(work, usage))
     }
 
     /// These resources over the same dictionary and caches, serving `op`:
@@ -1662,7 +1693,6 @@ impl PageResources {
             image_capture: Mutex::new(None),
             unresolved: Mutex::new(None),
             provider: self.provider.clone(),
-            optional: Arc::clone(&self.optional),
             op,
         }
     }
@@ -1814,7 +1844,6 @@ impl PageResources {
             image_capture: Mutex::new(None),
             unresolved: Mutex::new(None),
             provider: provider.cloned(),
-            optional: Arc::new(OptionalContent::bind(doc)),
             op,
         }
     }
@@ -3026,7 +3055,11 @@ impl FontSource for PageResources {
         read_resolved(&self.doc, table, |table| {
             let entry = table.as_dict()?.get(self.name(name))?;
             let label = String::from_utf8_lossy(name).into_owned();
-            Some(self.optional.layer_of(&self.doc, entry, &label))
+            Some(
+                self.op
+                    .optional(&self.doc)
+                    .layer_of(&self.doc, entry, &label),
+            )
         })
     }
 
@@ -3037,7 +3070,11 @@ impl FontSource for PageResources {
         let (dict, _) = self.xobject(name)?;
         let entry = dict.get(self.name(b"OC"))?.clone();
         let label = String::from_utf8_lossy(name).into_owned();
-        Some(self.optional.layer_of(&self.doc, &entry, &label))
+        Some(
+            self.op
+                .optional(&self.doc)
+                .layer_of(&self.doc, &entry, &label),
+        )
     }
 
     fn marked_content_properties(&self, name: &[u8]) -> Option<MarkedProps> {

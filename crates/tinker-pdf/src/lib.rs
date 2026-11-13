@@ -732,6 +732,22 @@ pub struct RenderOptions {
     /// that did not ask pays one untaken branch at each place that would
     /// count, beside the two additions a glyph the renderer makes either way.
     pub stats: bool,
+    /// What the render is for — [`Usage::View`], [`Usage::Print`] or
+    /// [`Usage::Export`] — or `None`, the default.
+    ///
+    /// Named, the document's default optional-content configuration applies
+    /// its `/AS` entries for that event over the initial states it gives its
+    /// groups (ISO 32000-2 8.11.4.4): a group whose `/Usage` says
+    /// `/PrintState /OFF`, listed in a print entry, is off in a print render.
+    /// An entry's `/View`, `/Print` and `/Export` categories are read; a
+    /// category with no entry in a group's `/Usage`, and one this build does
+    /// not read, recommends nothing, and a group is on only if every
+    /// recommendation it has is. With none, every group is in the initial
+    /// state the configuration gives it — the render every page has always
+    /// drawn. Either way the states are bound once a render, and every scope
+    /// it opens reads them: its forms, its tiling cells, its annotations'
+    /// appearances. `docs/design/render-usage.md` reads the clauses.
+    pub usage: Option<Usage>,
     /// The threads a render may spend. [`Parallelism::Serial`] by default.
     ///
     /// Spent on the pages of [`Document::render_pages`], each page rendered
@@ -762,7 +778,33 @@ impl Default for RenderOptions {
             transparent: false,
             premultiplied: false,
             stats: false,
+            usage: None,
             parallelism: Parallelism::Serial,
+        }
+    }
+}
+
+/// How a render will be used: the three events a document's usage
+/// application dictionaries name (ISO 32000-2 8.11.4.4, Table 101), "one of
+/// View, Print, or Export". See [`RenderOptions::usage`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Usage {
+    /// Viewed on a screen: the `/AS` entries whose `/Event` is `/View`.
+    View,
+    /// Printed: the entries whose `/Event` is `/Print`.
+    Print,
+    /// Saved to a format that does not support optional content, a raster
+    /// image among them: the entries whose `/Event` is `/Export`.
+    Export,
+}
+
+impl Usage {
+    /// The `/Event` name a usage application dictionary gives this usage.
+    pub(crate) fn event(self) -> &'static [u8] {
+        match self {
+            Usage::View => b"View",
+            Usage::Print => b"Print",
+            Usage::Export => b"Export",
         }
     }
 }
@@ -2665,11 +2707,12 @@ impl Page {
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
         if matches!(options.parallelism, Parallelism::Threads(threads) if threads >= 2) {
-            return self.display_list().render(options);
+            return self.display_list_for(options.usage).render(options);
         }
         // The operation is made before the content is decoded, so the decode
-        // counts too.
-        let op = resources::Operation::new(stats::tally(options.stats));
+        // counts too; it binds the optional-content states the render's usage
+        // gives once, for every scope the render opens.
+        let op = resources::Operation::rendering(stats::tally(options.stats), options.usage);
         let content = stats::content(&self.doc, &self.inner, op.work());
         self.render_layer(options, None, op, |renderer, resources| {
             interpret(&content, Matrix::IDENTITY, renderer, resources);

@@ -554,7 +554,10 @@ drawn by a renderer of its own, with a cache of its own. Path-route glyphs and
 Type 3 procedures bypass it.
 
 **Optional content** (8.11). The catalog's `/OCProperties` `/D`
-configuration is resolved once at bind: `/BaseState` sets every group in
+configuration is resolved once a render, by the render's operation, and every
+scope the render opens — the page's, each form's, each tiling cell's and each
+annotation appearance's — reads that one binding (`optional.rs`'s
+`one_render_binds_one_configuration`): `/BaseState` sets every group in
 `/OCGs` and `/ON`/`/OFF` name the exceptions (8.11.4.3 Table 101), OCMDs
 honour all four `/P` policies and `/VE` visibility expressions (8.11.2.3,
 capped at depth 16 and 256 operands), and `/OC` on both XObject kinds hides
@@ -573,6 +576,33 @@ too), `/OCGs` and `/P` — are read where they lie rather than copied at each
 `BDC`, which would cost the page's sequences times a long array beside or
 under any of them (`tests/property_list_work.rs`).
 
+**A render names its usage** (ISO 32000-2 8.11.4.4,
+[design/render-usage.md](../design/render-usage.md)). `RenderOptions::usage`
+is `None` by default, and then every group is in the initial state `/D` gives
+it, the render every page has always drawn. Naming `Usage::View`,
+`Usage::Print` or `Usage::Export` applies `/D`'s `/AS` entries whose `/Event`
+is that usage over the initial states: each group an entry's `/OCGs` lists is
+recommended a state by each of the entry's `/Category` names its `/Usage`
+answers — `/View`'s `/ViewState`, `/Print`'s `/PrintState` and `/Export`'s
+`/ExportState`, whichever event's entry names them — and a group with any
+recommendation is on only if every one it has, across every entry of the
+event, is on. A category with no entry in a group's `/Usage`, or no state in
+it, recommends nothing, and so does every category this build does not read
+— `/Zoom`, `/Language` and `/User` need inputs a render does not have yet, and
+`/CreatorInfo` and `/PageElement` carry no state — so a group nothing
+recommended keeps `/D`'s state. A print render applies print's entries over
+the initial states, as a printing application's render of the document as
+opened, not view's first. What is malformed — an `/AS` or a `/Category` that
+is no array, an entry that is no dictionary or names no known `/Event`, a
+`/Usage` or a category that is no dictionary, a state that is neither `/ON`
+nor `/OFF` — recommends nothing and leaves its group as `/D` set it
+(`optional_content.rs`'s
+`a_print_usage_render_of_an_ocmd_with_print_usage_is_its_d_twin`,
+`each_usage_and_state_category_renders_as_its_d_twin`,
+`recommendations_combine_and_what_is_malformed_leaves_d` and
+`a_usages_states_reach_every_scope_a_render_opens`). Text and image
+extraction, `to_svg`, a save's passes and the validators name no usage and
+read the initial states, bound once an operation as a render binds them.
 **Page geometry.** `page_view_transform` applies `/Rotate` (7.7.3.3,
 normalised to quarter turns) and the `/CropBox` origin, so the bitmap is the
 page's displayed size. Pixel dimensions round *outward* — a page never loses
@@ -652,7 +682,14 @@ are open, the group-buffer budget), never on a pixel or a scale. A group or
 soft mask whose buffer misses the canvas is accepted over no pixels for the
 same reason ([rulings](../rulings.md) 5). Annotations are recorded with the
 resource scope each appearance resolves in and replayed when the options ask
-for them. **The warnings are the replay's own.** The kept resources are also
+for them. **A list draws its own usage**: the recorded calls carry the
+optional-content states of the usage the list was recorded for —
+`Page::display_list`'s none, or the one `Page::display_list_for` names
+(`DisplayList::usage`) — so a render naming that usage replays the list and
+one naming another draws the direct way, through `Page::render`; and a list
+recorded for a usage writes SVG by interpreting the page again, since SVG
+draws no usage's states (`display_list.rs`'s
+`a_list_draws_another_usage_the_direct_way`). **The warnings are the replay's own.** The kept resources are also
 where a render writes down what it tolerated, so each replay gets resources of
 its own over the list's caches (`PageResources::for_one_render`): a cached
 image brings back the damage, or the codec failure, its first decode

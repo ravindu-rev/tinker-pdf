@@ -9,7 +9,7 @@
 //! that hides content correctly for the wrong reason is exactly the failure
 //! this gap exists to prevent.
 
-use tinker_pdf::{Bitmap, Document, RenderOptions, RenderWarning};
+use tinker_pdf::{Bitmap, Document, RenderOptions, RenderWarning, Usage};
 
 /// A 40x40 page with one optional content group at 5 0 R, called
 /// "Construction lines".
@@ -584,5 +584,429 @@ fn a_hidden_scope_still_runs_the_operators_inside_it() {
         ink_bounds(&bitmap),
         Some((0, 0, 19, 39)),
         "and the fill is at full size, so the q/Q balanced"
+    );
+}
+
+// ---- Rendering for a usage (RC-13.2) ----------------------------------------
+
+/// A 40x40 page whose optional content group 5 is "Construction lines" with
+/// `usage` as its `/Usage` dictionary's entries, and whose catalog's `/D` is
+/// `d`, around `content` and the page resources `resources`; `objects` follow
+/// from 6.
+fn with_usage(d: &str, usage: &str, resources: &str, content: &str, objects: &str) -> Vec<u8> {
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R] /D << {d} >> >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+   /Resources << {resources} >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /OCG /Name (Construction lines) /Usage << {usage} >> >>\nendobj\n\
+{objects}\
+trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n",
+        content.len()
+    )
+    .into_bytes()
+}
+
+/// The first page of `bytes`, rendered for `usage`.
+fn render_for(bytes: &[u8], usage: Option<Usage>) -> Bitmap {
+    Document::open(bytes.to_vec())
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions {
+            usage,
+            ..RenderOptions::default()
+        })
+}
+
+/// Holds two renders to one picture: the same size, the same bytes and the
+/// same warnings.
+#[track_caller]
+fn same_render(got: &Bitmap, want: &Bitmap, what: &str) {
+    assert_eq!((got.width, got.height), (want.width, want.height), "{what}");
+    assert!(got.data == want.data, "{what}: the pixels differ");
+    assert_eq!(got.warnings, want.warnings, "{what}: the warnings differ");
+}
+
+/// `/D`'s body, setting group 5 on or off.
+fn d_with(on: bool) -> String {
+    format!("/{} [5 0 R]", if on { "ON" } else { "OFF" })
+}
+
+/// **A print-usage render of an OCMD over groups whose `/Usage /Print
+/// /PrintState` is `/OFF` is its `/D` twin** (RC-13.2, ISO 32000-2
+/// 8.11.4.4): under an `/AS` entry for print, both groups the membership
+/// dictionary names are off in a print render, so the red rectangle it marks
+/// is hidden there exactly as on the same page whose `/D` turns both groups
+/// off and says nothing of usage; and a view render, an export render and a
+/// render naming no usage draw it as the page always has, both groups on.
+#[test]
+fn a_print_usage_render_of_an_ocmd_with_print_usage_is_its_d_twin() {
+    let as_print = "/AS [<< /Event /Print /Category [/Print] /OCGs [5 0 R 6 0 R] >>]";
+    let page = |d: &str| {
+        with_usage(
+            d,
+            "/Print << /PrintState /OFF >>",
+            "/Properties << /MC0 7 0 R >>",
+            TWO_RECTANGLES,
+            "6 0 obj\n<< /Type /OCG /Name (Second) /Usage << /Print << /PrintState /OFF >> >> >>\nendobj\n\
+             7 0 obj\n<< /Type /OCMD /OCGs [5 0 R 6 0 R] /P /AnyOn >>\nendobj\n",
+        )
+    };
+    let original = page(&format!("/ON [5 0 R 6 0 R] {as_print}"));
+    let printed = render_for(&original, Some(Usage::Print));
+    assert_eq!(
+        pixel(&printed, 25, 20),
+        vec![255, 255, 255],
+        "hidden in print"
+    );
+    assert_eq!(
+        pixel(&printed, 5, 20),
+        vec![0, 255, 0],
+        "the unmarked rectangle paints"
+    );
+    let twin = render_for(&page("/OFF [5 0 R 6 0 R]"), None);
+    same_render(&printed, &twin, "print usage against its /D twin");
+
+    let as_before = render_for(&page("/ON [5 0 R 6 0 R]"), None);
+    assert_eq!(pixel(&as_before, 25, 20), vec![255, 0, 0], "both groups on");
+    for usage in [None, Some(Usage::View), Some(Usage::Export)] {
+        same_render(
+            &render_for(&original, usage),
+            &as_before,
+            &format!("{usage:?}: as before"),
+        );
+    }
+}
+
+/// What a render of `bytes` for `usage` must equal: its twin, the page whose
+/// `/D` sets group 5 to `expected` and has no `/AS`.
+#[track_caller]
+fn renders_as_its_twin(bytes: &[u8], usage: Option<Usage>, expected: bool, what: &str) {
+    let twin = with_usage(
+        &d_with(expected),
+        "",
+        "/Properties << /MC0 5 0 R >>",
+        TWO_RECTANGLES,
+        "",
+    );
+    same_render(&render_for(bytes, usage), &render_for(&twin, None), what);
+}
+
+/// **Each usage and state category renders as its `/D` twin** (RC-13.2):
+/// for every usage a render names, every event an `/AS` entry names, every
+/// state category it lists and both states, over a group `/D` turns on and
+/// one it turns off, a render equals the page whose `/D` is written as the
+/// states 8.11.4.4 gives — the entry's state where its event is the render's
+/// usage, and `/D`'s own elsewhere and with no usage.
+#[test]
+fn each_usage_and_state_category_renders_as_its_d_twin() {
+    let usages = [Usage::View, Usage::Print, Usage::Export];
+    let mut cases = 0;
+    for event in usages {
+        let event_name = format!("{event:?}");
+        for category in ["View", "Print", "Export"] {
+            for state in [true, false] {
+                for initially in [true, false] {
+                    let bytes = with_usage(
+                        &format!(
+                            "{} /AS [<< /Event /{event_name} /Category [/{category}] /OCGs [5 0 R] >>]",
+                            d_with(initially)
+                        ),
+                        &format!(
+                            "/{category} << /{category}State /{} >>",
+                            if state { "ON" } else { "OFF" }
+                        ),
+                        "/Properties << /MC0 5 0 R >>",
+                        TWO_RECTANGLES,
+                        "",
+                    );
+                    for usage in usages.map(Some).into_iter().chain([None]) {
+                        let expected = if usage == Some(event) {
+                            state
+                        } else {
+                            initially
+                        };
+                        renders_as_its_twin(
+                            &bytes,
+                            usage,
+                            expected,
+                            &format!(
+                                "a {event_name} entry's {category} state {state} over {initially}, \
+                                 rendered for {usage:?}"
+                            ),
+                        );
+                        cases += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(cases, 3 * 3 * 2 * 2 * 4, "every case ran");
+}
+
+/// **Recommendations combine as 8.11.4.4 says, and what is malformed leaves
+/// the group as `/D` set it** (RC-13.2): a group is on only if every
+/// recommendation it has, across its entry's categories and across every
+/// entry of the event, is on; a category with no entry, or no state, in its
+/// usage dictionary recommends nothing, and so does one this build does not
+/// read; and each malformed shape — an `/AS` that is no array, an entry that
+/// is no dictionary or names no event this build knows, a `/Category` that is
+/// absent or no array, a `/Usage` or a category that is no dictionary, a
+/// state that is neither name — is the `/D` twin, in a print render.
+#[test]
+fn recommendations_combine_and_what_is_malformed_leaves_d() {
+    let print = Some(Usage::Print);
+    let entry =
+        |categories: &str| format!("<< /Event /Print /Category [{categories}] /OCGs [5 0 R] >>");
+    // (what, /D's state, /AS, the group's usage entries, the state expected)
+    let cases: Vec<(&str, bool, String, &str, bool)> =
+        vec![
+        (
+            "two categories, both on",
+            false,
+            format!("[{}]", entry("/View /Print")),
+            "/View << /ViewState /ON >> /Print << /PrintState /ON >>",
+            true,
+        ),
+        (
+            "two categories, one off",
+            true,
+            format!("[{}]", entry("/View /Print")),
+            "/View << /ViewState /ON >> /Print << /PrintState /OFF >>",
+            false,
+        ),
+        (
+            "two entries of the event, one off",
+            true,
+            format!("[{} {}]", entry("/View"), entry("/Print")),
+            "/View << /ViewState /ON >> /Print << /PrintState /OFF >>",
+            false,
+        ),
+        (
+            "two entries of the event, both on",
+            false,
+            format!("[{} {}]", entry("/View"), entry("/Print")),
+            "/View << /ViewState /ON >> /Print << /PrintState /ON >>",
+            true,
+        ),
+        (
+            "a category the group has no entry for, beside one it has",
+            true,
+            format!("[{}]", entry("/Export /Print")),
+            "/Print << /PrintState /OFF >>",
+            false,
+        ),
+        ("no PrintState", false, format!("[{}]", entry("/Print")), "/Print << >>", false),
+        ("no PrintState, on", true, format!("[{}]", entry("/Print")), "/Print << >>", true),
+        (
+            "a zoom category this build does not read",
+            true,
+            format!("[{}]", entry("/Zoom")),
+            "/Zoom << /min 4 >>",
+            true,
+        ),
+        (
+            "categories that carry no state",
+            false,
+            format!("[{}]", entry("/CreatorInfo /PageElement /Language /User")),
+            "/CreatorInfo << /Creator (x) /Subtype /Artwork >> /PageElement << /Subtype /HF >> \
+             /Language << /Lang (en-US) >> /User << /Type /Ind /Name (x) >>",
+            false,
+        ),
+        ("an /AS that is no array", true, "5".to_string(), "/Print << /PrintState /OFF >>", true),
+        (
+            "an entry that is no dictionary",
+            true,
+            "[5 [/Print]]".to_string(),
+            "/Print << /PrintState /OFF >>",
+            true,
+        ),
+        (
+            "an event this build does not know",
+            true,
+            "[<< /Event /Display /Category [/Print] /OCGs [5 0 R] >>]".to_string(),
+            "/Print << /PrintState /OFF >>",
+            true,
+        ),
+        (
+            "no event",
+            true,
+            "[<< /Category [/Print] /OCGs [5 0 R] >>]".to_string(),
+            "/Print << /PrintState /OFF >>",
+            true,
+        ),
+        (
+            "a category that is no array",
+            true,
+            "[<< /Event /Print /Category /Print /OCGs [5 0 R] >>]".to_string(),
+            "/Print << /PrintState /OFF >>",
+            true,
+        ),
+        (
+            "no category",
+            true,
+            "[<< /Event /Print /OCGs [5 0 R] >>]".to_string(),
+            "/Print << /PrintState /OFF >>",
+            true,
+        ),
+        (
+            "no groups",
+            true,
+            "[<< /Event /Print /Category [/Print] >>]".to_string(),
+            "/Print << /PrintState /OFF >>",
+            true,
+        ),
+        (
+            "a category entry that is no dictionary",
+            true,
+            format!("[{}]", entry("/Print")),
+            "/Print /OFF",
+            true,
+        ),
+        (
+            "a state that is neither name",
+            false,
+            format!("[{}]", entry("/Print")),
+            "/Print << /PrintState /Maybe >>",
+            false,
+        ),
+        (
+            "a state written as a string",
+            true,
+            format!("[{}]", entry("/Print")),
+            "/Print << /PrintState (OFF) >>",
+            true,
+        ),
+    ];
+    for (what, initially, auto_state, usage_entries, expected) in &cases {
+        let bytes = with_usage(
+            &format!("{} /AS {auto_state}", d_with(*initially)),
+            usage_entries,
+            "/Properties << /MC0 5 0 R >>",
+            TWO_RECTANGLES,
+            "",
+        );
+        renders_as_its_twin(&bytes, print, *expected, what);
+        renders_as_its_twin(&bytes, None, *initially, &format!("{what}, no usage"));
+    }
+
+    // A `/Usage` that is no dictionary at all.
+    let bytes = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R] /D << /ON [5 0 R] \
+/AS [<< /Event /Print /Category [/Print] /OCGs [5 0 R] >>] >> >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+   /Resources << /Properties << /MC0 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{TWO_RECTANGLES}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /OCG /Name (Construction lines) /Usage 7 >>\nendobj\n\
+trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n",
+        TWO_RECTANGLES.len()
+    )
+    .into_bytes();
+    renders_as_its_twin(&bytes, print, true, "a /Usage that is no dictionary");
+}
+
+/// **A usage's states reach every scope a render opens** (RC-13.2): a
+/// form's own content marking the group, a form whose `/OC` names it, a
+/// tiling pattern's cell marking it and an annotation's appearance marking
+/// it each hide in a print render where the group's print state is off, as
+/// on the page whose `/D` turns the group off — the one binding of the
+/// render read by the page's scope, each form's, the cell's and the
+/// appearance's.
+#[test]
+fn a_usages_states_reach_every_scope_a_render_opens() {
+    let properties = "/Properties << /MC0 5 0 R >>";
+    let marked = "/OC /MC0 BDC 1 0 0 rg 0 0 10 10 re f EMC";
+    let page = |d: &str| {
+        let content = "0 1 0 rg 0 30 40 10 re f\n\
+                       q 1 0 0 1 0 0 cm /Fm Do Q\n\
+                       q 1 0 0 1 12 0 cm /Hid Do Q\n\
+                       /Pattern cs /P0 scn 24 0 10 10 re f";
+        let form = |extra: &str| {
+            format!(
+                "<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] {extra} \
+                 /Resources << {properties} >> /Length {} >>\nstream\n{marked}\nendstream",
+                marked.len()
+            )
+        };
+        let cell = format!(
+            "<< /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 10 10] /XStep 10 /YStep 10 \
+             /Resources << {properties} >> /Length {} >>\nstream\n{marked}\nendstream",
+            marked.len()
+        );
+        let shown = "1 0 0 rg 0 0 10 10 re f";
+        let objects = format!(
+            "6 0 obj\n{}\nendobj\n\
+             7 0 obj\n{}\nendobj\n\
+             8 0 obj\n{cell}\nendobj\n\
+             9 0 obj\n<< /Type /Annot /Subtype /Square /Rect [30 12 40 22] /AP << /N 10 0 R >> >>\nendobj\n\
+             10 0 obj\n{}\nendobj\n",
+            form(""),
+            format!(
+                "<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /OC 5 0 R /Length {} >>\nstream\n{shown}\nendstream",
+                shown.len()
+            ),
+            form(""),
+        );
+        let mut bytes = with_usage(
+            d,
+            "/Print << /PrintState /OFF >>",
+            &format!("{properties} /XObject << /Fm 6 0 R /Hid 7 0 R >> /Pattern << /P0 8 0 R >>"),
+            content,
+            &objects,
+        );
+        // The page carries the annotation.
+        let at = bytes
+            .windows(b"/Contents 4 0 R".len())
+            .position(|window| window == b"/Contents 4 0 R")
+            .expect("the page dictionary");
+        bytes.splice(at..at, b"/Annots [9 0 R] ".iter().copied());
+        bytes
+    };
+    let original = page("/ON [5 0 R] /AS [<< /Event /Print /Category [/Print] /OCGs [5 0 R] >>]");
+    let printed = render_for(&original, Some(Usage::Print));
+    // The page's foot is the bottom of the picture: user y 0 to 10 is rows
+    // 30 to 40, and the annotation's /Rect, 12 to 22 up, rows 18 to 28.
+    for (x, y) in [(5, 5), (35, 5)] {
+        assert_eq!(pixel(&printed, x, y), vec![0, 255, 0], "the unmarked band");
+    }
+    for (what, x, y) in [
+        ("the form's marked content", 5, 35),
+        ("the form the group hides", 17, 35),
+        ("the tiling cell's marked content", 29, 35),
+        ("the appearance's marked content", 35, 23),
+    ] {
+        assert_eq!(
+            pixel(&printed, x, y),
+            vec![255, 255, 255],
+            "{what}: hidden in print"
+        );
+    }
+    same_render(
+        &printed,
+        &render_for(&page("/OFF [5 0 R]"), None),
+        "every scope against the /D twin",
+    );
+    let viewed = render_for(&original, Some(Usage::View));
+    for (what, x, y) in [
+        ("the form's marked content", 5, 35),
+        ("the form the group hides", 17, 35),
+        ("the tiling cell's marked content", 29, 35),
+        ("the appearance's marked content", 35, 23),
+    ] {
+        assert_eq!(
+            pixel(&viewed, x, y),
+            vec![255, 0, 0],
+            "{what}: drawn in view"
+        );
+    }
+    same_render(
+        &viewed,
+        &render_for(&page("/ON [5 0 R]"), None),
+        "view usage as before",
     );
 }

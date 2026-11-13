@@ -13,7 +13,7 @@
 //! and a recording made with any other answer holds states the renderer
 //! never sees.
 
-use tinker_pdf::{CancelToken, Document, RenderOptions, RenderWarning};
+use tinker_pdf::{CancelToken, Document, RenderOptions, RenderWarning, Usage};
 
 mod render_support;
 
@@ -596,4 +596,88 @@ fn the_review_s_fan_out_of_forms_is_bounded_where_it_is_read() {
         (direct.width, direct.height, &direct.warnings)
     );
     assert!(replayed.data == direct.data, "the same pixels");
+}
+
+/// A 40 x 40 page whose group `/P` is on in `/D` and off in print, under an
+/// `/AS` entry for print: a red square in the group, a blue one outside it.
+fn print_usage_page() -> Vec<u8> {
+    let content = "/OC /P BDC 1 0 0 rg 0 0 20 20 re f EMC 0 0 1 rg 20 0 20 20 re f";
+    format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R] /D << /ON [5 0 R] \
+/AS [<< /Event /Print /Category [/Print] /OCGs [5 0 R] >>] >> >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 40]\n\
+   /Resources << /Properties << /P 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /OCG /Name (Screen only) /Usage << /Print << /PrintState /OFF >> >> >>\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+        content.len()
+    )
+    .into_bytes()
+}
+
+/// Holds a list's render to the direct render of the same options: the same
+/// size, pixels and warnings.
+#[track_caller]
+fn same_bitmap(got: &tinker_pdf::Bitmap, want: &tinker_pdf::Bitmap, what: &str) {
+    assert_eq!((got.width, got.height), (want.width, want.height), "{what}");
+    assert!(got.data == want.data, "{what}: the pixels differ");
+    assert_eq!(got.warnings, want.warnings, "{what}: the warnings differ");
+}
+
+/// **A list draws its own usage, and another the direct way** (RC-13.2): a
+/// list carries the optional-content states of the usage it was recorded
+/// for, so a list recorded for no usage draws a print render as a direct
+/// print render does, hiding what print hides, and one recorded for print
+/// replays a print render and draws one naming no usage, or view, the direct
+/// way; each equals the direct render of the same options, and a list
+/// recorded for print writes the SVG no usage's states give.
+#[test]
+fn a_list_draws_another_usage_the_direct_way() {
+    let document = Document::open(print_usage_page()).expect("it opens");
+    let page = document.page(0).expect("a page");
+    let usage = |usage| RenderOptions {
+        usage,
+        ..RenderOptions::default()
+    };
+    let (none, view, print) = (
+        usage(None),
+        usage(Some(Usage::View)),
+        usage(Some(Usage::Print)),
+    );
+    let printed = page.render(&print);
+    let plain = page.render(&none);
+    assert!(
+        printed.data != plain.data,
+        "the print state hides the red square"
+    );
+
+    let list = page.display_list();
+    assert_eq!(list.usage(), None);
+    assert!(list.is_retained(), "{list:?}");
+    for (what, options) in [("no usage", &none), ("view", &view), ("print", &print)] {
+        same_bitmap(
+            &list.render(options),
+            &page.render(options),
+            &format!("a list for no usage, rendered for {what}"),
+        );
+    }
+
+    let for_print = page.display_list_for(Some(Usage::Print));
+    assert_eq!(for_print.usage(), Some(Usage::Print));
+    assert!(for_print.is_retained(), "{for_print:?}");
+    for (what, options) in [("print", &print), ("no usage", &none), ("view", &view)] {
+        same_bitmap(
+            &for_print.render(options),
+            &page.render(options),
+            &format!("a list for print, rendered for {what}"),
+        );
+    }
+    let options = tinker_pdf::SvgOptions::default();
+    assert_eq!(
+        for_print.to_svg(&options).markup,
+        page.to_svg(&options).markup,
+        "SVG draws no usage's states"
+    );
 }

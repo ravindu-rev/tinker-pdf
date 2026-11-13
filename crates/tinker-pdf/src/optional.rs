@@ -4,9 +4,11 @@
 //! A layer is how a file carries a CAD drawing's construction lines, a map's
 //! alternate languages, a proof's annotation overlay. The catalog's
 //! `/OCProperties` `/D` configuration says which of them a reader shows when
-//! it opens the file with no further instruction, and that is the whole of
-//! what this module answers. Toggling one afterwards is a separate feature —
-//! plan 08 defers it — and nothing here mutates.
+//! it opens the file with no further instruction, and its `/AS` entries how
+//! a view, a print or an export adjusts that (ISO 32000-2 8.11.4.4), for a
+//! render that names its usage; that is the whole of what this module
+//! answers, once a render (`docs/design/render-usage.md`). Toggling a layer
+//! afterwards is a separate feature, and nothing here mutates.
 //!
 //! # Everything not understood is visible
 //!
@@ -25,6 +27,7 @@ use tinker_pdf_content::Layer;
 use tinker_pdf_cos::{decode_text_string, CosDocument, Dict, ObjRef, Object};
 
 use crate::resources::{read_key, read_resolved};
+use crate::Usage;
 
 /// How deep a `/VE` visibility expression may nest before it is refused
 /// (8.11.2.3).
@@ -36,11 +39,12 @@ const MAX_EXPRESSION_DEPTH: u32 = 16;
 /// How many members of a `/VE` or `/OCGs` list are examined.
 const MAX_OPERANDS: usize = 256;
 
-/// The document's default optional-content configuration, resolved once.
+/// The document's default optional-content configuration, resolved once,
+/// for one usage or for none.
 ///
 /// Built at bind time from the catalog, not consulted per operator: the
-/// answer for a given group cannot change during a render, because this build
-/// has no layer-toggle API to change it with.
+/// answer for a given group cannot change during a render, whose usage is
+/// fixed before it starts and which no layer-toggle API reaches.
 #[derive(Debug, Default)]
 pub(crate) struct OptionalContent {
     /// Every group the configuration has an opinion about, and that opinion.
@@ -62,11 +66,22 @@ pub(crate) struct OptionalContent {
 }
 
 impl OptionalContent {
-    /// Reads the catalog's `/OCProperties` `/D` configuration (8.11.4.3).
+    /// Reads the catalog's `/OCProperties` `/D` configuration (8.11.4.3): the
+    /// initial state of every group, which a render naming no usage draws.
     ///
     /// A document without `/OCProperties` — which is nearly all of them —
     /// yields an empty set, and an empty set says every layer is visible.
     pub(crate) fn bind(doc: &CosDocument) -> OptionalContent {
+        OptionalContent::bind_for(doc, None)
+    }
+
+    /// [`OptionalContent::bind`] for a render naming `usage`: the initial
+    /// states, and over them the configuration's `/AS` entries whose
+    /// `/Event` is the usage's (ISO 32000-2 8.11.4.4,
+    /// `docs/design/render-usage.md`). With no usage, the initial states.
+    pub(crate) fn bind_for(doc: &CosDocument, usage: Option<Usage>) -> OptionalContent {
+        #[cfg(test)]
+        binds::counted();
         let mut states = BTreeMap::new();
 
         let Some(catalog) = doc.catalog() else {
@@ -103,6 +118,12 @@ impl OptionalContent {
         }
         for reference in refs_of(doc, &default, b"OFF") {
             states.insert(reference, false);
+        }
+
+        if let Some(usage) = usage {
+            for (reference, on) in recommendations(doc, &default, usage) {
+                states.insert(reference, on);
+            }
         }
 
         OptionalContent {
@@ -332,6 +353,152 @@ fn refs_of(doc: &CosDocument, dict: &Dict, key: &[u8]) -> Vec<ObjRef> {
     }
 }
 
+/// How many of a usage application dictionary's `/Category` names are read.
+/// Table 100 defines nine usage entries, three of which carry a state this
+/// build reads.
+const MAX_CATEGORIES: usize = 16;
+
+/// The state each group a usage's `/AS` entries name is set to (ISO 32000-2
+/// 8.11.4.4): `configuration`'s entries whose `/Event` is `usage`'s, each
+/// group's recommendations across all of them combined.
+///
+/// "For each of the groups in OCGs, the entries in its usage dictionary …
+/// specified by Category shall be examined to yield a recommended state for
+/// the group. If all the entries yield a recommended state of ON, the group's
+/// state shall be set to ON; otherwise, its state shall be set to OFF", and a
+/// group in several entries "shall be ON only if all categories in all the
+/// usage application dictionaries it appears in have a state of ON". A
+/// category with no entry in a group's `/Usage` recommends nothing — the
+/// clause's example: "Object 4 has none; therefore, it is not affected by
+/// zoom level changes" — so a group is here only where something recommended
+/// a state for it, and every other group keeps the one `/D` gave it.
+///
+/// Whatever is malformed recommends nothing and so leaves its group as `/D`
+/// set it: an `/AS` that is not an array, an entry that is not a dictionary,
+/// an `/Event` that is none of the three, a `/Category` missing or not an
+/// array. Every array is read a bounded way in, and every value where it
+/// lies.
+fn recommendations(
+    doc: &CosDocument,
+    configuration: &Dict,
+    usage: Usage,
+) -> BTreeMap<ObjRef, bool> {
+    let mut recommended = BTreeMap::new();
+    read_key(doc, configuration, b"AS", |entries| {
+        let Some(entries) = entries.as_array() else {
+            return;
+        };
+        for entry in entries.iter().take(MAX_OPERANDS) {
+            read_resolved(doc, entry, |entry| {
+                if let Some(entry) = entry.as_dict() {
+                    recommend(doc, entry, usage, &mut recommended);
+                }
+            });
+        }
+    });
+    recommended
+}
+
+/// One usage application dictionary's recommendations, added to
+/// `recommended`, where a group already recommended OFF stays OFF.
+fn recommend(
+    doc: &CosDocument,
+    entry: &Dict,
+    usage: Usage,
+    recommended: &mut BTreeMap<ObjRef, bool>,
+) {
+    let event = read_key(doc, entry, b"Event", |event| name_of(doc, event));
+    if event.as_deref() != Some(usage.event()) {
+        return;
+    }
+    let Some(categories) = read_key(doc, entry, b"Category", |categories| {
+        categories.as_array().map(|names| {
+            names
+                .iter()
+                .take(MAX_CATEGORIES)
+                .filter_map(|name| read_resolved(doc, name, |name| name_of(doc, name)))
+                .collect::<Vec<_>>()
+        })
+    }) else {
+        return;
+    };
+    // Table 101: `/OCGs` defaults to "an empty array, indicating that no
+    // groups shall be affected".
+    for group in refs_of(doc, entry, b"OCGs") {
+        let Ok(object) = doc.get(group) else {
+            continue;
+        };
+        let Some(dict) = object.as_dict() else {
+            continue;
+        };
+        read_key(doc, dict, b"Usage", |usage_dict| {
+            let Some(usage_dict) = usage_dict.as_dict() else {
+                return;
+            };
+            for category in &categories {
+                if let Some(on) = category_state(doc, usage_dict, category) {
+                    let all_on = recommended.entry(group).or_insert(true);
+                    *all_on = *all_on && on;
+                }
+            }
+        });
+    }
+}
+
+/// What one category of a group's usage dictionary recommends: `Some(true)`
+/// for ON and `Some(false)` for OFF, `None` where it recommends nothing.
+///
+/// The three categories whose state is an event's (8.11.4.4): "View: The
+/// state shall be the value of the ViewState entry", "Print: The state shall
+/// be the value of the PrintState entry. If PrintState is not present, the
+/// state of the optional content group shall be left unchanged", "Export:
+/// The state shall be the value of the ExportState entry". `/Zoom`,
+/// `/Language` and `/User` need a magnification, the caller's languages and
+/// the caller's identity, which RC-14 gives a render, and `/CreatorInfo` and
+/// `/PageElement` carry no state, so each recommends nothing here, as an
+/// absent entry does; so does a state that is neither `/ON` nor `/OFF`.
+fn category_state(doc: &CosDocument, usage: &Dict, category: &[u8]) -> Option<bool> {
+    let (entry, state): (&[u8], &[u8]) = match category {
+        b"View" => (b"View", b"ViewState"),
+        b"Print" => (b"Print", b"PrintState"),
+        b"Export" => (b"Export", b"ExportState"),
+        _ => return None,
+    };
+    read_key(doc, usage, entry, |entry| {
+        let entry = entry.as_dict()?;
+        read_key(doc, entry, state, |value| {
+            match name_of(doc, value)?.as_slice() {
+                b"ON" => Some(true),
+                b"OFF" => Some(false),
+                _ => None,
+            }
+        })
+    })
+}
+
+/// Configurations bound, counted for the guard that a render binds one:
+/// compiled only under `cfg(test)` and kept per thread, so tests running side
+/// by side cannot add into each other's.
+#[cfg(test)]
+pub(crate) mod binds {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static BINDS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// One configuration bound.
+    pub(crate) fn counted() {
+        BINDS.with(|binds| binds.set(binds.get() + 1));
+    }
+
+    /// The binds counted on this thread since the last time, which starts the
+    /// count again from zero.
+    pub(crate) fn take() -> u64 {
+        BINDS.with(|binds| binds.replace(0))
+    }
+}
+
 /// The name `object` is, as bytes; `None` for anything else.
 fn name_of(doc: &CosDocument, object: &Object) -> Option<Vec<u8>> {
     object
@@ -355,7 +522,8 @@ fn collect(items: &[Object]) -> Vec<ObjRef> {
 
 #[cfg(test)]
 mod tests {
-    use super::OptionalContent;
+    use super::{binds, OptionalContent};
+    use crate::Usage;
     use std::sync::Arc;
     use tinker_pdf_cos::{CosDocument, ObjRef, Object};
 
@@ -670,5 +838,300 @@ trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n"
                 .layer_of(&doc, &objref(12), "?")
                 .visible
         );
+    }
+
+    /// A document listing groups 10, 11 and 13, group 13 carrying `usage`
+    /// as its `/Usage` entries, and `/D`'s body `d`.
+    fn usage_document(d: &str, usage: &str, extra: &str) -> Arc<CosDocument> {
+        document(
+            &format!("/OCProperties << /OCGs [10 0 R 11 0 R 13 0 R] /D << {d} >> >>"),
+            &format!(
+                "13 0 obj\n<< /Type /OCG /Name (Gamma) /Usage << {usage} >> >>\nendobj\n{extra}"
+            ),
+        )
+    }
+
+    /// Group `num`'s state under `oc`, `None` where the configuration says
+    /// nothing of it.
+    fn state(oc: &OptionalContent, num: u32) -> Option<bool> {
+        oc.group_state(ObjRef { num, gen: 0 })
+    }
+
+    /// The usages a render can name, and none.
+    const USAGES: [Option<Usage>; 4] = [
+        None,
+        Some(Usage::View),
+        Some(Usage::Print),
+        Some(Usage::Export),
+    ];
+
+    /// **A usage applies its own event's entries and no other's** (ISO
+    /// 32000-2 8.11.4.4): one entry for each event, each turning group 13 the
+    /// way its category's state says, over a `/D` that turns it off; a
+    /// render naming no usage keeps the initial state, and groups no entry
+    /// names keep theirs under every usage.
+    #[test]
+    fn a_usage_applies_its_own_events_entries_and_no_others() {
+        let doc = usage_document(
+            "/OFF [11 0 R 13 0 R] /AS [\
+             << /Event /View /Category [/View] /OCGs [13 0 R] >>\
+             << /Event /Print /Category [/Print] /OCGs [13 0 R] >>\
+             << /Event /Export /Category [/Export] /OCGs [13 0 R] >>]",
+            "/View << /ViewState /ON >> /Print << /PrintState /ON >> /Export << /ExportState /OFF >>",
+            "",
+        );
+        for (usage, gamma) in [
+            (None, false),
+            (Some(Usage::View), true),
+            (Some(Usage::Print), true),
+            (Some(Usage::Export), false),
+        ] {
+            let oc = OptionalContent::bind_for(&doc, usage);
+            assert_eq!(state(&oc, 13), Some(gamma), "{usage:?}");
+            assert_eq!(state(&oc, 10), Some(true), "{usage:?}: untouched");
+            assert_eq!(state(&oc, 11), Some(false), "{usage:?}: untouched");
+        }
+        // `bind` is the initial states.
+        assert_eq!(state(&OptionalContent::bind(&doc), 13), Some(false));
+    }
+
+    /// **A group is on only if every recommendation it has is**: across its
+    /// entry's categories and across entries of the event; a category with no
+    /// entry, or no state, recommends nothing, and a group with no
+    /// recommendation keeps `/D`'s state.
+    #[test]
+    fn every_recommendation_must_be_on() {
+        let print = Some(Usage::Print);
+        // (/D's body, /AS, group 13's usage entries, 13 in print)
+        let cases = [
+            (
+                "",
+                "[<< /Event /Print /Category [/View /Print] /OCGs [13 0 R] >>]",
+                "/View << /ViewState /OFF >> /Print << /PrintState /ON >>",
+                Some(false),
+            ),
+            (
+                "/OFF [13 0 R]",
+                "[<< /Event /Print /Category [/View /Print] /OCGs [13 0 R] >>]",
+                "/View << /ViewState /ON >> /Print << /PrintState /ON >>",
+                Some(true),
+            ),
+            (
+                "",
+                "[<< /Event /Print /Category [/Print] /OCGs [13 0 R] >> \
+                  << /Event /Print /Category [/View] /OCGs [11 0 R 13 0 R] >>]",
+                "/View << /ViewState /OFF >> /Print << /PrintState /ON >>",
+                Some(false),
+            ),
+            (
+                "/OFF [13 0 R]",
+                "[<< /Event /Print /Category [/Export /Print] /OCGs [13 0 R] >>]",
+                "/Print << /PrintState /ON >>",
+                Some(true),
+            ),
+            (
+                "/OFF [13 0 R]",
+                "[<< /Event /Print /Category [/Print] /OCGs [13 0 R] >>]",
+                "/Print << /Subtype /Watermark >>",
+                Some(false),
+            ),
+            (
+                "",
+                "[<< /Event /Print /Category [/Zoom /Language /User /CreatorInfo /PageElement] \
+                  /OCGs [13 0 R] >>]",
+                "/Zoom << /max 0.5 >> /Language << /Lang (xx) >> /User << /Type /Ind /Name (x) >>",
+                Some(true),
+            ),
+        ];
+        for (index, (d, auto_state, usage, expected)) in cases.iter().enumerate() {
+            let doc = usage_document(&format!("{d} /AS {auto_state}"), usage, "");
+            assert_eq!(
+                state(&OptionalContent::bind_for(&doc, print), 13),
+                *expected,
+                "case {index}"
+            );
+        }
+        // Group 11 has no `/Usage`: listed in the third case's view entry,
+        // it recommends nothing and stays on.
+        let doc = usage_document(
+            "/AS [<< /Event /Print /Category [/View] /OCGs [11 0 R] >>]",
+            "",
+            "",
+        );
+        assert_eq!(
+            state(&OptionalContent::bind_for(&doc, print), 11),
+            Some(true)
+        );
+    }
+
+    /// **Whatever is malformed leaves the group as `/D` set it**, in every
+    /// usage: an `/AS` that is no array, entries that are no dictionaries, an
+    /// unknown or absent `/Event`, a `/Category` absent or no array, an
+    /// absent `/OCGs`, a usage or a category that is no dictionary, a state
+    /// that is neither name.
+    #[test]
+    fn whatever_is_malformed_leaves_d() {
+        let cases = [
+            ("/AS 5", "/Print << /PrintState /OFF >>"),
+            ("/AS (no)", "/Print << /PrintState /OFF >>"),
+            ("/AS [5 /Print (x) [1 2]]", "/Print << /PrintState /OFF >>"),
+            (
+                "/AS [<< /Event /Printing /Category [/Print] /OCGs [13 0 R] >>]",
+                "/Print << /PrintState /OFF >>",
+            ),
+            (
+                "/AS [<< /Event (Print) /Category [/Print] /OCGs [13 0 R] >>]",
+                "/Print << /PrintState /OFF >>",
+            ),
+            (
+                "/AS [<< /Category [/Print] /OCGs [13 0 R] >>]",
+                "/Print << /PrintState /OFF >>",
+            ),
+            (
+                "/AS [<< /Event /Print /Category /Print /OCGs [13 0 R] >>]",
+                "/Print << /PrintState /OFF >>",
+            ),
+            (
+                "/AS [<< /Event /Print /OCGs [13 0 R] >>]",
+                "/Print << /PrintState /OFF >>",
+            ),
+            (
+                "/AS [<< /Event /Print /Category [/Print] >>]",
+                "/Print << /PrintState /OFF >>",
+            ),
+            (
+                "/AS [<< /Event /Print /Category [/Print] /OCGs [13 0 R] >>]",
+                "/Print /OFF",
+            ),
+            (
+                "/AS [<< /Event /Print /Category [/Print] /OCGs [13 0 R] >>]",
+                "/Print << /PrintState /off >>",
+            ),
+            (
+                "/AS [<< /Event /Print /Category [/Print] /OCGs [13 0 R] >>]",
+                "/Print << /PrintState 0 >>",
+            ),
+        ];
+        for (auto_state, usage) in cases {
+            let doc = usage_document(&format!("/ON [13 0 R] {auto_state}"), usage, "");
+            for render in USAGES {
+                assert_eq!(
+                    state(&OptionalContent::bind_for(&doc, render), 13),
+                    Some(true),
+                    "{auto_state} with {usage}, {render:?}"
+                );
+            }
+        }
+        // A `/Usage` that is no dictionary, and an entry reached by reference.
+        let doc = document(
+            "/OCProperties << /OCGs [10 0 R 13 0 R] /D << /AS [14 0 R] >> >>",
+            "13 0 obj\n<< /Type /OCG /Name (Gamma) /Usage 10 >>\nendobj\n\
+             14 0 obj\n<< /Event /Print /Category [/Print] /OCGs [10 0 R 13 0 R] >>\nendobj\n",
+        );
+        let oc = OptionalContent::bind_for(&doc, Some(Usage::Print));
+        assert_eq!(state(&oc, 13), Some(true), "a /Usage that is no dictionary");
+        assert_eq!(state(&oc, 10), Some(true), "10 has no /Usage");
+    }
+
+    /// An entry reached by reference applies, and a group `/OCGs` does not
+    /// list takes its recommendation as a listed one does, as `/D`'s own
+    /// `/ON` and `/OFF` reach one.
+    #[test]
+    fn an_indirect_entry_applies_and_an_unlisted_group_takes_its_state() {
+        let doc = document(
+            "/OCProperties << /OCGs [10 0 R] /D << /AS 14 0 R >> >>",
+            "13 0 obj\n<< /Type /OCG /Name (Unlisted) /Usage << /Export << /ExportState /OFF >> >> >>\nendobj\n\
+             14 0 obj\n[15 0 R]\nendobj\n\
+             15 0 obj\n<< /Event /Export /Category [/Export] /OCGs [13 0 R] >>\nendobj\n",
+        );
+        assert_eq!(
+            state(&OptionalContent::bind_for(&doc, Some(Usage::Export)), 13),
+            Some(false)
+        );
+        assert_eq!(
+            state(&OptionalContent::bind_for(&doc, None), 13),
+            None,
+            "never mentioned"
+        );
+        assert!(OptionalContent::bind(&doc).is_visible(ObjRef { num: 13, gen: 0 }));
+    }
+
+    /// A page whose content, a form's, a tiling cell's and an annotation's
+    /// appearance each mark content with group 10, which the default
+    /// configuration's print entry turns off: every scope a render opens asks
+    /// about optional content.
+    fn every_scope_page() -> Vec<u8> {
+        let marked = "/OC /L BDC 0 0 2 2 re f EMC";
+        let props = "/Properties << /L 10 0 R >>";
+        let stream = |dict: &str| {
+            format!(
+                "<< {dict} /Resources << {props} >> /Length {} >>\nstream\n{marked}\nendstream",
+                marked.len()
+            )
+        };
+        let content = format!("{marked} /Fm Do /Pattern cs /P0 scn 10 0 10 10 re f");
+        format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [10 0 R] \
+/D << /AS [<< /Event /Print /Category [/Print] /OCGs [10 0 R] >>] >> >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 30 30] /Annots [8 0 R]\n\
+   /Resources << {props} /XObject << /Fm 6 0 R >> /Pattern << /P0 7 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+6 0 obj\n{}\nendobj\n\
+7 0 obj\n{}\nendobj\n\
+8 0 obj\n<< /Type /Annot /Subtype /Square /Rect [20 20 30 30] /AP << /N 9 0 R >> >>\nendobj\n\
+9 0 obj\n{}\nendobj\n\
+10 0 obj\n<< /Type /OCG /Name (Alpha) /Usage << /Print << /PrintState /OFF >> >> >>\nendobj\n\
+trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n",
+            content.len(),
+            stream("/Type /XObject /Subtype /Form /BBox [0 0 5 5]"),
+            stream("/PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 5 5] /XStep 5 /YStep 5"),
+            stream("/Type /XObject /Subtype /Form /BBox [0 0 5 5]"),
+        )
+        .into_bytes()
+    }
+
+    /// **One render binds one configuration** (RC-13.2): a render whose page,
+    /// form, tiling cell and annotation appearance each ask about optional
+    /// content binds the states once, named usage or none, where each scope
+    /// bound them for itself; so do a text extraction and a display list's
+    /// recording, each one operation; a replay of the list's own usage binds
+    /// once too, for the tiling cell it interprets as it draws it, and a
+    /// render of another usage is a direct render, binding once.
+    #[test]
+    fn one_render_binds_one_configuration() {
+        let doc = crate::Document::open(every_scope_page()).expect("it opens");
+        let page = doc.page(0).expect("a page");
+        for usage in USAGES {
+            binds::take();
+            let bitmap = page.render(&crate::RenderOptions {
+                usage,
+                ..crate::RenderOptions::default()
+            });
+            assert_eq!(binds::take(), 1, "a render for {usage:?}");
+            assert_eq!(
+                bitmap.warnings.iter().any(|warning| matches!(
+                    warning,
+                    crate::RenderWarning::HiddenOptionalContent { .. }
+                )),
+                usage == Some(Usage::Print),
+                "{usage:?}: print hides the layer, nothing else does"
+            );
+        }
+        binds::take();
+        let _ = page.text();
+        assert_eq!(binds::take(), 1, "a text extraction");
+
+        let list = page.display_list_for(Some(Usage::Print));
+        assert_eq!(binds::take(), 1, "the list's recording");
+        let print = crate::RenderOptions {
+            usage: Some(Usage::Print),
+            ..crate::RenderOptions::default()
+        };
+        let _ = list.render(&print);
+        assert_eq!(binds::take(), 1, "a replay, for the cell it draws");
+        let _ = list.render(&crate::RenderOptions::default());
+        assert_eq!(binds::take(), 1, "another usage, the direct way");
     }
 }

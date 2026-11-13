@@ -37,6 +37,16 @@
 //! resolves in, and replayed only when [`RenderOptions::annotations`] asks —
 //! after the content, as `Page::render` draws them.
 //!
+//! # A list draws its own usage
+//!
+//! The visibility the interpreter decided for each optional-content scope is
+//! in the recorded calls, and it is the visibility of the usage the list was
+//! recorded for (`docs/design/render-usage.md`): no usage for
+//! [`Page::display_list`], the one it names for [`Page::display_list_for`].
+//! A render naming the list's usage replays it; one naming another draws the
+//! direct way, through [`Page::render`], so its pixels are the direct
+//! render's whatever the list holds.
+//!
 //! # Why a replay's warnings are its own
 //!
 //! The resources a list keeps are also where a render's tolerances are
@@ -95,10 +105,11 @@ use tinker_pdf_raster::image::{image_bounds_in, Transform};
 use tinker_pdf_render::{DisplayRecorder, Renderer};
 
 use crate::annots::{self, Recorded};
-use crate::resources::PageResources;
+use crate::resources::{Operation, PageResources};
 use crate::stats::Counter;
 use crate::{
-    handed_back, Bitmap, Met, Page, Parallelism, PixelRegion, RenderOptions, RenderWarning, View,
+    handed_back, Bitmap, Met, Page, Parallelism, PixelRegion, RenderOptions, RenderWarning, Usage,
+    View,
 };
 
 /// A page interpreted once, to be drawn as often and at as many scales as a
@@ -123,6 +134,10 @@ pub struct DisplayList {
     /// Whether the calls are kept: false when recording them passed
     /// `MAX_DISPLAY_LIST_BYTES`, and every render is then a direct one.
     retained: bool,
+    /// The usage the list was recorded for, whose optional-content states
+    /// the recorded calls carry; a render naming another draws the direct
+    /// way.
+    usage: Option<Usage>,
 }
 
 impl Page {
@@ -146,12 +161,32 @@ impl Page {
     /// `tinker_pdf_render::MAX_DISPLAY_LIST_BYTES` is not retained: the list
     /// keeps nothing and every render of it is a direct one, which is the
     /// same bitmap ([`DisplayList::is_retained`]).
+    ///
+    /// The list is recorded for no usage: it replays a render naming none
+    /// ([`RenderOptions::usage`]), and draws one naming a usage the direct
+    /// way. [`Page::display_list_for`] records for a usage.
     #[must_use]
     pub fn display_list(&self) -> DisplayList {
+        self.display_list_for(None)
+    }
+
+    /// [`Page::display_list`], recorded for `usage`: the calls carry the
+    /// optional-content states that usage gives (ISO 32000-2 8.11.4.4), so
+    /// the list replays a render naming `usage` and draws one naming any
+    /// other the direct way. [`Page::to_svg`]'s states are no usage's, so a
+    /// list recorded for one writes SVG by interpreting the page again.
+    #[must_use]
+    pub fn display_list_for(&self, usage: Option<Usage>) -> DisplayList {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
-        // The recording is an operation of its own; the resources it reads
-        // through are kept past it, and serve none afterwards.
-        let resources = PageResources::new(&self.doc, &self.inner, self.fonts.as_ref());
+        // The recording is an operation of its own, binding the usage's
+        // states; the resources it reads through are kept past it, and serve
+        // none afterwards.
+        let resources = PageResources::new_in(
+            &self.doc,
+            &self.inner,
+            self.fonts.as_ref(),
+            Operation::rendering(None, usage),
+        );
         let mut recorder = DisplayRecorder::new();
         interpret(&content, Matrix::IDENTITY, &mut recorder, &resources);
         // Nothing has been drawn through these resources yet, so everything
@@ -182,6 +217,7 @@ impl Page {
                 interpreted_missing: Vec::new(),
                 interpreted_repairs: Vec::new(),
                 retained: false,
+                usage,
             };
         }
         DisplayList {
@@ -192,6 +228,7 @@ impl Page {
             interpreted_missing,
             interpreted_repairs,
             retained: true,
+            usage,
         }
     }
 }
@@ -211,12 +248,16 @@ impl DisplayList {
     /// render that runs to its end, the same warnings.
     ///
     /// A list that is not retained ([`DisplayList::is_retained`]) draws by
-    /// calling [`Page::render`], on the caller.
+    /// calling [`Page::render`], on the caller, and so does a render naming
+    /// a usage other than the one the list was recorded for
+    /// ([`DisplayList::usage`]): its calls carry that usage's
+    /// optional-content states.
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
-        if !self.retained {
+        if !self.retained || options.usage != self.usage {
             // On the caller: a page asked for in bands asks its list for
-            // them, and a list that keeps nothing draws it the direct way.
+            // them, and a list that keeps nothing, or another usage's
+            // states, draws it the direct way.
             return self.page.render(&RenderOptions {
                 parallelism: Parallelism::Serial,
                 ..options.clone()
@@ -227,7 +268,7 @@ impl DisplayList {
         }
         let resources = self
             .resources
-            .for_one_render_counted(crate::stats::tally(options.stats));
+            .for_one_render_counted(crate::stats::tally(options.stats), self.usage);
         self.page
             .render_layer_with(options, None, &resources, |renderer, resources| {
                 self.replay_onto(options, renderer, resources);
@@ -330,7 +371,9 @@ impl DisplayList {
                 };
                 work.add(place, 1);
             }
-            let resources = self.resources.for_one_render_counted(work.clone());
+            let resources = self
+                .resources
+                .for_one_render_counted(work.clone(), self.usage);
             let band_options = RenderOptions {
                 region: Some(*band),
                 parallelism: Parallelism::Serial,
@@ -451,6 +494,14 @@ impl DisplayList {
     /// The page the list was recorded from.
     pub(crate) fn page(&self) -> &Page {
         &self.page
+    }
+
+    /// The usage the list was recorded for ([`Page::display_list_for`]),
+    /// `None` for [`Page::display_list`]'s. A render naming it replays the
+    /// list; one naming another draws the direct way.
+    #[must_use]
+    pub fn usage(&self) -> Option<Usage> {
+        self.usage
     }
 
     /// The resources a replay resolves names in.
@@ -926,6 +977,7 @@ impl core::fmt::Debug for DisplayList {
         f.debug_struct("DisplayList")
             .field("page", &self.page.index())
             .field("retained", &self.retained)
+            .field("usage", &self.usage)
             .field("calls", &self.content.len())
             .field("annotations", &self.annotations.len())
             .finish()

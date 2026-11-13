@@ -346,13 +346,15 @@ impl DisplayList {
     ///
     /// A list that is not retained ([`DisplayList::is_retained`]) has no
     /// recording to replay, so the page is interpreted into the writer
-    /// directly, as [`Page::render`] interprets it into the renderer.
+    /// directly, as [`Page::render`] interprets it into the renderer; and so
+    /// is one recorded for a usage ([`DisplayList::usage`]), whose calls carry
+    /// that usage's optional-content states where SVG draws no usage's.
     #[must_use]
     pub fn to_svg(&self, options: &SvgOptions) -> Svg {
         let page = self.page();
         let (width, height) = page.size();
         let base = page_view_transform(page.crop_box(), page.rotation(), 1.0);
-        if !self.is_retained() {
+        if !self.is_retained() || self.usage().is_some() {
             let resources = PageResources::new(&page.doc, &page.inner, page.fonts.as_ref());
             let mut writer = Writer::new(&resources, base, page, options);
             let content = cos_pages::content_bytes(&page.doc, &page.inner);
