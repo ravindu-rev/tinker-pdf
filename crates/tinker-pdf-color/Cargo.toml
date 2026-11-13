@@ -10,3 +10,11 @@ description = "Color spaces and the PDF function interpreter (Types 0, 2, 3, 4)"
 
 [dependencies]
 tinker-pdf-math = { workspace = true }
+
+[build-dependencies]
+# `build.rs` computes the first-party sRGB profile, whose tone curve needs a
+# power: the deterministic one the pixel path uses, so every build host writes
+# the same bytes (`docs/design/icc.md`, RC-19). A build-dependency never
+# reaches a released binary, and the edge is the one `[dependencies]` already
+# has.
+tinker-pdf-math = { workspace = true }

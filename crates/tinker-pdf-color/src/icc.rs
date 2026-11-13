@@ -405,6 +405,24 @@ pub struct Profile {
 /// one.
 pub const PCS_WHITE: [f64; 3] = [63_190.0 / 65_536.0, 1.0, 54_061.0 / 65_536.0];
 
+/// The engine's own sRGB profile (`docs/design/icc.md`, "A first-party sRGB
+/// profile (RC-19)"): an ICC profile of version 2.4.0, class `mntr`, data
+/// space `RGB ` and connection space `XYZ `, which `build.rs` computes from
+/// IEC 61966-2-1's published primaries, D65 white point and transfer
+/// function — the colorants adapted to the D50 PCS white by ICC.1:2001-04
+/// E.1.2's linearized Bradford transform, the three tone curves one sampled
+/// curve of 1 024 entries, the media white the PCS white and `chad` the
+/// adaptation.
+///
+/// Computed, not vendored: no file of anyone else's is read to make it, and
+/// the bytes are one string on every build host, which
+/// `crates/tinker-pdf/tests/determinism.rs` pins. A caller states it where a
+/// profile is stated — as a PDF/A destination profile, or as the stream of an
+/// `/ICCBased` `/DefaultRGB` — and this crate reads it as it reads any:
+/// [`Profile::parse`] gives [`Model::MatrixTrc`], and its transforms take
+/// every colour back to itself within one level.
+pub const SRGB_PROFILE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/srgb.icc"));
+
 impl Profile {
     /// The factors ICC-absolute colorimetry scales a connection-space value
     /// by, channel by channel: the media white over the PCS white, 6.2.3's
@@ -3137,9 +3155,11 @@ pub(crate) mod tests {
     /// sRGB's own primaries, chromatically adapted to D50 — which is what an
     /// sRGB ICC profile stores, because ICC.1 puts the connection space there.
     ///
-    /// These are the numbers in every sRGB profile ever shipped, and they are
-    /// here rather than in the module because they are a *fixture*: the module
-    /// reads whatever a profile says.
+    /// These are the numbers widely published sRGB profiles carry;
+    /// [`SRGB_PROFILE`], computed from IEC 61966-2-1's chromaticities,
+    /// differs from them in the fifth decimal place. They are here rather
+    /// than in the module because they are a *fixture*: the module reads
+    /// whatever a profile says.
     const SRGB_R: [f64; 3] = [0.436_065_674, 0.222_488_403, 0.013_916_015];
     const SRGB_G: [f64; 3] = [0.385_147_095, 0.716_873_169, 0.097_076_416];
     const SRGB_B: [f64; 3] = [0.143_066_406, 0.060_607_910, 0.714_096_069];
@@ -3269,7 +3289,7 @@ pub(crate) mod tests {
             Refusal(IccError),
         }
 
-        let seeds: [(&str, Vec<u8>, Reaches); 10] = [
+        let seeds: [(&str, Vec<u8>, Reaches); 11] = [
             // `D2B0` and `D2B1` naming one multi-process element, a curve
             // set with every segment kind, a matrix and a grid: the seed
             // that reaches the `mpet` reader and its stages.
@@ -3322,6 +3342,14 @@ pub(crate) mod tests {
             ),
             // Three-component matrix/TRC, the commonest profile there is.
             ("srgb-para-curve", srgb_profile(), Reaches::Transform),
+            // The engine's own sRGB profile, as `build.rs` writes it: a
+            // sampled `curv` the three curves share, `desc`'s and `cprt`'s
+            // text types and a `chad` this module does not read.
+            (
+                "srgb-first-party",
+                SRGB_PROFILE.to_vec(),
+                Reaches::Transform,
+            ),
             // The other curve encoding: `curv` with a single gamma word,
             // which is a different branch of `read_curve` from `para`.
             ("rgb-gamma-curve", matrix_profile(), Reaches::Transform),

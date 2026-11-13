@@ -76,6 +76,18 @@ by the profile's media white (`wtpt`) over the PCS white, channel by channel
 grey on a tinted medium draws in its tint, and applied in XYZ to a table's
 value, a stage its grid's nodes evaluate. A media white of D50, or none,
 makes it relative colorimetric's transform itself.
+**The engine's own sRGB profile**, `tinker_pdf_color::icc::SRGB_PROFILE`, is
+computed by the colour crate's `build.rs` from IEC 61966-2-1's published
+primaries, D65 white point and transfer function
+([design/icc.md](../design/icc.md), RC-19): a version 2.4.0 display profile
+whose three colorant columns are adapted to D50 by ICC.1's linearized
+Bradford transform, whose three channels share one tone curve of 1 024
+entries, whose media white is the PCS white and whose `chad` is the
+adaptation. To the CMM it is a profile like any other, a matrix/TRC model
+that takes every grey and every primary back to itself within one level
+(`srgb_profile.rs`), and nothing applies it unasked: a caller states it where
+a profile is stated. Its bytes are computed, not vendored, and are one string
+on every build host.
 A scope compiles a profile stream once, the first time a space it names
 reads it, and keeps the transforms — or the profile's refusal — for every
 render over it; a document with a cache budget keeps them across its

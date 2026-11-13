@@ -28,11 +28,16 @@ Test binaries built with full debug info, and cargo's incremental state, are
 large: on a machine short of disk, run the gates with
 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0`.
 
-One build step is not `rustc`: `tinker-pdf-font/build.rs` compiles Adobe's
+Two build steps are not `rustc`. `tinker-pdf-font/build.rs` compiles Adobe's
 vendored CMap registry (`THIRDPARTY.md`) into static tables. It reads a
 directory that is in the repository — nothing is downloaded, so an offline
 build and a reproducible one both still work — and the workspace sets
 `opt-level = 2` for build scripts so it costs seconds rather than a minute.
+`tinker-pdf-color/build.rs` computes the engine's own sRGB ICC profile from
+IEC 61966-2-1's published numbers (`docs/design/icc.md`, RC-19). It reads
+nothing at all, and its arithmetic is IEEE 754's four operations and
+`tinker-pdf-math`'s power, a build-dependency, so every build host writes the
+same bytes.
 The CLI's `tools/tpdf/build.rs` runs nothing: on Linux it asks the linker to
 align `tpdf`'s segments to 64 KiB, for the reason
 [docs/verification.md](docs/verification.md) gives under the corpus peaks.
