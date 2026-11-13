@@ -1390,6 +1390,20 @@ answer about the whole bitmap, reading the bytes as stored:
 by the canvas's reading of its format. Each walks the rows over `stride` and
 touches none of a row's padding, and on a bitmap that is not a picture — `to_png`'s
 condition — a map changes nothing and a reduction answers `None`.
+`scaled(width, height)` resizes a bitmap through the image sampler's area
+filter, its spans planned in integers: every pixel the average of the
+rectangle of the source it covers, each sample weighted by the area of it
+covered and each byte rounded half up, at any ratio down or up — grown, a
+pixel inside one source pixel is that pixel and one across a boundary the two
+by their share — with no pyramid; every channel of every format takes the
+same weights, colour is averaged premultiplied and handed back as the bitmap
+holds it. `subsampled(x, y)` keeps the first pixel of each `x` by `y` block,
+`ceil(width / x)` by `ceil(height / y)`, every byte as stored. Both return a
+new bitmap with packed rows, the source's format, premultiplied flag and
+warnings and no `stats`; a scale to the bitmap's own size and a subsample by
+one are copies of it, stride and all, and each answers `None` for a bitmap
+that is not a picture, a size or factor of zero, or a result whose bytes
+cannot be allocated.
 
 ```rust
 use tinker_pdf::{Document, RenderOptions, RenderWarning};
@@ -1600,9 +1614,20 @@ defect to hide in.
   relations; gamma at exponents of a half, one and two, whose powers it
   computes exactly in integers. It holds a padded stride unread and unwritten
   and a bitmap that is not a picture refused whole.
+  `a_scaled_render_is_the_area_average_the_test_computes` holds every variant
+  of every golden scaled by halves, thirds, two thirds, five sevenths, double,
+  one and a half, half across and double down, one pixel either side of its
+  own size and to one pixel, every byte the average computed from its
+  definition with rationals in `u128`;
+  `a_subsampled_render_is_the_samples_the_test_takes` holds subsamples by
+  factors that divide each golden and factors that do not, past its extent
+  included; a scale to the same size returns the same bytes, a padded stride
+  scales and subsamples as its packed twin, and the refusals refuse.
   `tinker-pdf-raster`'s `toolbox` tests hold gamma's table to its formula at
-  other exponents and the toolbox's decoding and encoding of each format to
-  the canvas's own.
+  other exponents, the toolbox's decoding and encoding of each format to the
+  canvas's own, and scale and subsample on cases worked by hand; its `image`
+  tests hold `resample`'s planned lines to the rationals and every resampled
+  pixel to an area average written from the definition.
 - SVG output: `crates/tinker-pdf/tests/svg_output.rs` reads every file the
   writer makes back through `tinker-pdf-svg` and compares the scene with what
   the page states, worked out from the content stream's own numbers — a

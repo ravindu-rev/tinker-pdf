@@ -722,6 +722,68 @@ pub fn accumulate_image(
     );
 }
 
+/// The image resampled onto a grid of `width` by `height` pixels that it
+/// covers exactly, each pixel handed to `emit` as its column, its row and the
+/// area filter's colour and alpha for it — the bitmap toolbox's scale
+/// (`docs/design/bitmap-toolbox.md`).
+///
+/// **The sampler's area filter, its spans planned in integers.** A grid the
+/// image covers exactly gives each pixel a rectangle of the image that is a
+/// rational number of samples wide: column `x` of `width` covers
+/// `[x · W / width, (x + 1) · W / width)` of an image `W` samples across, and
+/// row `y` likewise of `H` down, counted from the top row as the image's own
+/// rows are. Each column's and each row's taps are measured exactly, in
+/// `1 / width` and `1 / height` of a sample — the overlap of
+/// `[x · W, (x + 1) · W)` with sample `i`'s `[i · width, (i + 1) · width)` —
+/// and summed by [`area_taps`], the filter [`draw_image`] sums its own taps
+/// with: every sample under the rectangle weighted by how much of it the
+/// rectangle covers, each channel `(Σ w · s + W · H / 2) / (W · H)`, rounded
+/// half up. That holds whichever way an axis goes: a pixel inside one sample
+/// is that sample, and one across a boundary the samples weighted by their
+/// share, as a draw with no `/Interpolate` magnifies.
+///
+/// A draw placed through a matrix finds the same rectangle from a centre the
+/// inverse matrix maps in floating point and quantises to 1/65536 of a sample,
+/// which breaks a tie in the average one way or the other wherever the centre
+/// lands an ulp off; a grid the image covers exactly has no matrix, so its
+/// spans are the rationals themselves. No pyramid is built at any ratio: the
+/// pyramid bounds the *same* image drawn many times, and a resample visits
+/// each sample once a line it reaches.
+///
+/// `false`, with nothing emitted, for an empty image or grid, and for an
+/// image of so many samples that a channel's sum, at most `255 · W · H`,
+/// would not fit 64 bits — past 7 · 10^16 samples, which no buffer holds.
+pub fn resample(
+    image: &ImageSource<'_>,
+    width: u32,
+    height: u32,
+    mut emit: impl FnMut(u32, u32, (u8, u8, u8, u8)),
+) -> bool {
+    if image.width == 0 || image.height == 0 || width == 0 || height == 0 {
+        return false;
+    }
+    // The weights a pixel sums to are `W` across and `H` down, so a channel's
+    // sum is at most `255 · W · H`, which `area_taps` holds in a `u64`.
+    let fits = u64::from(image.width)
+        .checked_mul(u64::from(image.height))
+        .and_then(|samples| samples.checked_mul(255))
+        .is_some();
+    if !fits {
+        return false;
+    }
+    let columns = Lines::exact(width, image.width);
+    let rows = Lines::exact(height, image.height);
+    for y in 0..height {
+        let down = rows.line(y as usize);
+        for x in 0..width {
+            if let Some(sample) = area_taps(image, columns.line(x as usize), down) {
+                emit(x, y, sample);
+            }
+        }
+    }
+    true
+}
+
 /// The device pixels an image draw can reach on a canvas at the origin, as
 /// `(x0, y0, width, height)`.
 ///
@@ -1037,6 +1099,37 @@ impl Lines {
             planned_line();
             let (lo, hi) = ends(line);
             area_line(lo, hi, extent, &mut taps);
+        }
+        starts.push(taps.len());
+        Lines { taps, starts }
+    }
+
+    /// One line for each of `lines` pixels over an axis of `extent` samples
+    /// the pixels cover exactly ([`resample`]): line `n` covers
+    /// `[n · extent, (n + 1) · extent)` and sample `i` covers
+    /// `[i · lines, (i + 1) · lines)`, both in `1 / lines` of a sample, and
+    /// each tap is the overlap of the two — an integer, at most a whole
+    /// sample, `lines`. The ends are below `lines · extent`, under 2^64, and
+    /// an overlap under 2^32.
+    fn exact(lines: u32, extent: u32) -> Lines {
+        let (count, extent) = (u64::from(lines), u64::from(extent));
+        let mut taps = Vec::new();
+        let mut starts = Vec::new();
+        for line in 0..count {
+            starts.push(taps.len());
+            planned_line();
+            let lo = line * extent;
+            let hi = lo + extent;
+            // `extent` is at least one, so `hi - 1` cannot wrap.
+            for index in lo / count..=(hi - 1) / count {
+                let start = index * count;
+                let covered = hi.min(start + count) - lo.max(start);
+                if covered != 0 {
+                    // `index` is below `extent` and `covered` at most `lines`,
+                    // both `u32`s.
+                    taps.push((index as u32, covered as u32));
+                }
+            }
         }
         starts.push(taps.len());
         Lines { taps, starts }
@@ -3555,5 +3648,169 @@ mod tests {
         let (taps, sums, _) = count(coverage, squashed, false);
         assert!(taps > 0, "the reduced draw read its level");
         assert_eq!(sums, 4 * taps, "a reduced draw sums its RGB level");
+    }
+
+    /// **A resample's lines are the rationals themselves**: each line's taps
+    /// sum to the extent, every sample's taps over all the lines sum to a
+    /// whole sample, and no tap is empty — down, up and one to one, at ratios
+    /// that are whole and that are not.
+    #[test]
+    fn a_resample_plans_each_line_exactly() {
+        for (lines, extent) in [
+            (1u32, 1u32),
+            (1, 9),
+            (9, 1),
+            (3, 7),
+            (7, 3),
+            (5, 5),
+            (2, 9),
+            (9, 2),
+            (64, 48),
+            (32, 48),
+            (72, 48),
+        ] {
+            let plan = Lines::exact(lines, extent);
+            let mut per_sample = vec![0u64; extent as usize];
+            for line in 0..lines as usize {
+                let taps = plan.line(line);
+                assert!(!taps.is_empty(), "{lines} over {extent}: line {line}");
+                let sum: u64 = taps.iter().map(|&(_, w)| u64::from(w)).sum();
+                assert_eq!(sum, u64::from(extent), "{lines} over {extent}: line {line}");
+                for &(index, weight) in taps {
+                    assert!(weight > 0 && weight <= lines);
+                    per_sample[index as usize] += u64::from(weight);
+                }
+            }
+            assert!(
+                per_sample.iter().all(|&w| w == u64::from(lines)),
+                "{lines} over {extent}: every sample covered once in all"
+            );
+        }
+    }
+
+    /// The area average, written from its definition with rationals in
+    /// `u128`: the overlap of `[x W, (x + 1) W)` with `[i w, (i + 1) w)` on
+    /// each axis, and every channel's weighted sum rounded half up.
+    fn rational_average(
+        source: &[u8],
+        alpha: &[u8],
+        (sw, sh): (u32, u32),
+        (dw, dh): (u32, u32),
+        (x, y): (u32, u32),
+    ) -> (u8, u8, u8, u8) {
+        let overlaps = |d: u32, dn: u32, sn: u32| -> Vec<(u32, u128)> {
+            let (lo, hi) = (
+                u128::from(d) * u128::from(sn),
+                u128::from(d + 1) * u128::from(sn),
+            );
+            (0..sn)
+                .filter_map(|i| {
+                    let (start, end) = (
+                        u128::from(i) * u128::from(dn),
+                        u128::from(i + 1) * u128::from(dn),
+                    );
+                    let covered = hi.min(end).saturating_sub(lo.max(start));
+                    (covered > 0).then_some((i, covered))
+                })
+                .collect()
+        };
+        let (columns, rows) = (overlaps(x, dw, sw), overlaps(y, dh, sh));
+        let mut sum = [0u128; 4];
+        let mut weight = 0u128;
+        for &(ty, oy) in &rows {
+            for &(tx, ox) in &columns {
+                let at = (ty * sw + tx) as usize;
+                let w = ox * oy;
+                weight += w;
+                for (c, total) in sum.iter_mut().enumerate().take(3) {
+                    *total += w * u128::from(source[at * 3 + c]);
+                }
+                sum[3] += w * u128::from(alpha.get(at).copied().unwrap_or(255));
+            }
+        }
+        let mix = |channel: u128| ((channel * 2 + weight) / (weight * 2)) as u8;
+        (mix(sum[0]), mix(sum[1]), mix(sum[2]), mix(sum[3]))
+    }
+
+    /// **A resample is the area average of what each pixel covers**, every
+    /// pixel of every channel, alpha included, at whole and fractional ratios
+    /// down and up and with the two axes going opposite ways; and one to one
+    /// it is the image.
+    #[test]
+    fn a_resample_is_the_area_average_of_what_each_pixel_covers() {
+        let (sw, sh) = (12u32, 9u32);
+        let rgb = noise((sw * sh * 3) as usize, 5);
+        let alpha = noise((sw * sh) as usize, 11);
+        for with_alpha in [false, true] {
+            let image = ImageSource {
+                width: sw,
+                height: sh,
+                rgb: &rgb,
+                alpha: if with_alpha { &alpha } else { &[] },
+                two_colour: None,
+            };
+            for (dw, dh) in [
+                (6, 3),
+                (4, 9),
+                (8, 6),
+                (24, 18),
+                (18, 27),
+                (5, 7),
+                (7, 5),
+                (3, 20),
+                (12, 9),
+            ] {
+                let mut seen = 0u32;
+                let drawn = resample(&image, dw, dh, |x, y, got| {
+                    seen += 1;
+                    let want = rational_average(&rgb, image.alpha, (sw, sh), (dw, dh), (x, y));
+                    assert_eq!(got, want, "{sw}x{sh} to {dw}x{dh} at ({x}, {y})");
+                });
+                assert!(drawn);
+                assert_eq!(seen, dw * dh, "every pixel of {dw}x{dh} once");
+            }
+            let mut index = 0u32;
+            resample(&image, sw, sh, |x, y, got| {
+                assert_eq!(index, y * sw + x, "row by row");
+                assert_eq!(Some(got), image.texel(x, y), "one to one is the image");
+                index += 1;
+            });
+        }
+    }
+
+    /// A resample with no pixels, of an image with none, or of one whose sums
+    /// a `u64` cannot hold, emits nothing and says so — the last before a
+    /// sample is read, so a buffer that does not hold such an image is never
+    /// reached.
+    #[test]
+    fn a_resample_refuses_what_it_cannot_sum() {
+        let rgb = [1u8, 2, 3];
+        let one = ImageSource {
+            width: 1,
+            height: 1,
+            rgb: &rgb,
+            alpha: &[],
+            two_colour: None,
+        };
+        let mut emitted = 0;
+        assert!(!resample(&one, 0, 4, |_, _, _| emitted += 1));
+        assert!(!resample(&one, 4, 0, |_, _, _| emitted += 1));
+        let empty = ImageSource { width: 0, ..one };
+        assert!(!resample(&empty, 4, 4, |_, _, _| emitted += 1));
+        let vast = ImageSource {
+            width: u32::MAX,
+            height: u32::MAX,
+            rgb: &[],
+            alpha: &[],
+            two_colour: None,
+        };
+        assert!(!resample(&vast, 1, 1, |_, _, _| emitted += 1));
+        assert_eq!(emitted, 0);
+        // At the edge: a sum of 255 W H that fits is resampled.
+        assert!(resample(&one, 3, 2, |_, _, got| {
+            emitted += 1;
+            assert_eq!(got, (1, 2, 3, 255));
+        }));
+        assert_eq!(emitted, 6);
     }
 }

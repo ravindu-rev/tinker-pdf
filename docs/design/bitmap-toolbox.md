@@ -178,27 +178,60 @@ Each is stated as its test computes it, for a tone or colour byte `v`:
 
 ### Scale and subsample (RC-09.3)
 
-**One resampler.** `scaled(width, height)` draws the bitmap as an image onto a
-canvas of the target size through `draw_image`, the unit square mapped to the
-whole canvas: an axis that shrinks is the sampler's area-weighted
-minification, every destination pixel the exact average of the source it
-covers, weighted by how much of each sample it covers; an axis that grows is
-its magnification filter, bilinear. The sampler's weights are linear in a
-sample, so a format of more channels than the sampler's three is drawn as
-three-channel groups over the same weights and gathered back, every channel
-through the same footprint, and alpha rides the sampler's own alpha. **The
-toolbox never takes the pyramid**: a one-off resize integrates exactly at any
-ratio, past 128:1 included, whose cost is the source's samples once —
-the pyramid exists to bound the *same* image drawn many times
-(`docs/design/image-edges.md`), which a resize is not. Colour is averaged
-premultiplied, so a transparent sample's colour carries no weight; a straight
-bitmap is premultiplied for the draw and straightened after. A scale to the
-bitmap's own size is its bytes.
+**One resampler.** `scaled(width, height)` samples the bitmap through the
+image sampler's area filter — `area_taps`, the sum `draw_image` takes every
+area-filtered pixel through — over a grid of the target size that the bitmap
+covers exactly (`tinker_pdf_raster::image::resample`). Destination column `X`
+of `width` covers `[X W / width, (X + 1) W / width)` of a source `W` samples
+across, row `Y` likewise of `H` down, and every sample under that rectangle is
+weighted by the area of it the rectangle covers, so each byte is
+
+    (Σ ox(X, i) · oy(Y, j) · s(i, j) + W H / 2) / (W H)
+
+in integers, `ox(X, i)` the overlap of `[X W, (X + 1) W)` with
+`[i width, (i + 1) width)` — the span and sample `i` measured in
+`1 / width` of a sample — and `oy` the same down in `1 / height`; the weights
+of a pixel sum to `W H`, and the division rounds half up. That is one rule
+down and up, the rule a draw without `/Interpolate` magnifies by: a pixel
+inside one sample is that sample, and one across a boundary is the two
+weighted by their share, so a scale up keeps the picture's edges where a
+bilinear blend would soften every one.
+
+*Why the spans are planned in integers rather than through `draw_image`.* A
+draw maps its unit square through a matrix, finds a pixel's centre through the
+matrix's floating-point inverse, and quantises the span to 1/65536 of a sample;
+`1 / width` is not a binary fraction for most widths, so a centre lands an ulp
+off the rational one, and at a whole ratio, where half of all 2:1 averages are
+exact ties, the ulp decides which way the tie breaks. A scale has no matrix —
+the grid is the bitmap's own, multiplied — so its spans are the rationals
+themselves, measured exactly, and summed by the same filter.
+
+The sampler takes three channels of colour and an alpha, and its weights are
+linear in a sample, so a format of more channels than three is handed over as
+three-channel groups — ink's four as two — over the same weights and gathered
+back, every channel through the same footprint, and alpha rides the sampler's
+own alpha. **The toolbox never takes the pyramid**: a one-off resize
+integrates exactly at any ratio, past 128:1 included, whose cost is the
+source's samples once a line they reach — the pyramid exists to bound the
+*same* image drawn many times (`docs/design/image-edges.md`), which a resize
+is not. A channel's sum is at most `255 W H`, held in 64 bits for any source
+under 7 · 10^16 samples, which no buffer holds; past it the scale is refused.
+Colour is averaged premultiplied, so a transparent sample's colour carries no
+weight; a straight bitmap is premultiplied for the average, `round(c a / 255)`,
+and straightened after, `round(c · 255 / a)`. A scale to the bitmap's own size
+is its bytes, its stride and padding included; a size of zero is no picture,
+`None`, and so is a result whose bytes cannot be allocated, which the toolbox
+reserves fallibly because its size is the caller's to ask for.
 
 `subsampled(x, y)` keeps one sample of each `x` by `y` block, the first: the
 result is `ceil(width / x)` by `ceil(height / y)`, and its pixel `(X, Y)` is
 the source's `(X * x, Y * y)`, every byte as stored. A factor of zero is no
 picture, `None`; a factor of one on both axes is the bitmap.
+
+Both hand back a bitmap whose rows are packed, in the source's format and
+premultiplied state, carrying the source's warnings — the picture is still
+the render they describe — and no `stats`, which counted a render this was
+not.
 
 ### Conversion (RC-09.4)
 
@@ -299,4 +332,5 @@ a tile of a forced-colour page is the page's subregion byte for byte.
 | A padded or short buffer is read past | A bitmap that is not a picture is refused whole, before a byte is touched, and padding is outside every row's slice |
 | Forced colours composited in two colours round differently at every overlap than the coverage they stand for | They are drawn as coverage and tinted once, so the closed form holds by construction |
 | The pyramid's per-level rounding breaks scale's area average past 128:1 | The toolbox never takes it; a one-off resize integrates exactly |
+| A span found through a floating-point inverse breaks the average's ties one way or the other | A scale plans its spans as the rationals they are, in `1 / width` and `1 / height` of a sample, and sums them with the sampler's own filter |
 | Fill-to-stroke reaches a fill whose path is not known | Only path fills become strokes; glyph, image and shading paints are not paths and are drawn as forced colours draw them |

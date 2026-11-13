@@ -4,22 +4,26 @@
 //! is read through `golden_support`'s PPM reader — the goldens are never
 //! rewritten here (H-133) — and laid out in each of the eight pixel formats,
 //! and, where the format has an alpha, with an alpha plane this file lays on,
-//! straight and premultiplied. Each map and each reduction runs over every one
-//! of those, and every byte and every answer is held to the closed form the
-//! design states, computed here from the formula and the canvas's own colour
-//! relations (`tinker_pdf_raster::canvas`), never from the toolbox.
+//! straight and premultiplied. Each map, each reduction, the scale and the
+//! subsample run over every one of those, and every byte and every answer is
+//! held to the closed form the design states, computed here from the formula
+//! and the canvas's own colour relations (`tinker_pdf_raster::canvas`), never
+//! from the toolbox.
 //!
 //! Gamma is taken at exponents of one half, one and two, whose powers this
 //! file computes exactly in integers: `floor(255 * pow(v / 255, g) + 0.5)` is
 //! `round(sqrt(255 v))`, `v` and `(v^2 + 127) / 255` there, and no value of
-//! either lies within a rounding of `pow` of a tie.
+//! either lies within a rounding of `pow` of a tie. A scale's average is
+//! computed from its definition with rationals in `u128`: each pixel's
+//! rectangle of the source, measured in fractions of a sample, against each
+//! sample's.
 
 mod golden_support;
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use tinker_pdf::{Bitmap, Color, PixelFormat};
+use tinker_pdf::{Bitmap, Color, PixelFormat, RenderWarning};
 use tinker_pdf_raster::canvas::{cmyk_to_rgb, lab_bytes, lab_to_rgb, rgb_to_cmyk};
 
 const FORMATS: [PixelFormat; 8] = [
@@ -754,4 +758,311 @@ fn the_ends_of_every_map_are_where_the_design_puts_them() {
             );
         }
     }
+}
+
+// ---- scale and subsample ----------------------------------------------------------
+
+/// The overlaps of line `d` of `count` lines over an axis of `extent`
+/// samples the lines cover exactly, in `1 / count` of a sample: the line
+/// covers `[d * extent, (d + 1) * extent)` and sample `i` covers
+/// `[i * count, (i + 1) * count)`. The definition, with nothing quantised.
+fn overlaps(d: u32, count: u32, extent: u32) -> Vec<(usize, u128)> {
+    let (lo, hi) = (
+        u128::from(d) * u128::from(extent),
+        u128::from(d + 1) * u128::from(extent),
+    );
+    (0..extent)
+        .filter_map(|i| {
+            let start = u128::from(i) * u128::from(count);
+            let covered = hi
+                .min(start + u128::from(count))
+                .saturating_sub(lo.max(start));
+            (covered > 0).then_some((i as usize, covered))
+        })
+        .collect()
+}
+
+/// What a scale should make of a packed `bitmap`: every byte the area average
+/// of the rectangle each pixel covers, every sample under it weighted by the
+/// product of its two overlaps and the sum rounded half up — the colour
+/// premultiplied for the average where the bitmap is straight and
+/// straightened after, the alpha averaged as a channel.
+fn scaled_expected(bitmap: &Bitmap, width: u32, height: u32) -> Vec<u8> {
+    let (sw, sh) = (bitmap.width, bitmap.height);
+    let format = bitmap.format;
+    let components = format.components();
+    let colours = colours(format);
+    let alpha = format.has_alpha();
+    let straight = !bitmap.premultiplied;
+    let columns: Vec<_> = (0..width).map(|x| overlaps(x, width, sw)).collect();
+    let rows: Vec<_> = (0..height).map(|y| overlaps(y, height, sh)).collect();
+    let mut out = Vec::with_capacity(width as usize * height as usize * components);
+    for down in &rows {
+        for across in &columns {
+            let mut sums = [0u128; 5];
+            let mut weight = 0u128;
+            for &(ty, oy) in down {
+                for &(tx, ox) in across {
+                    let at = (ty * sw as usize + tx) * components;
+                    let px = &bitmap.data[at..at + components];
+                    let a = if alpha { px[colours] } else { 255 };
+                    let w = ox * oy;
+                    weight += w;
+                    for c in 0..colours {
+                        let v = if straight {
+                            premultiply(px[c], a)
+                        } else {
+                            px[c]
+                        };
+                        sums[c] += w * u128::from(v);
+                    }
+                    if alpha {
+                        sums[colours] += w * u128::from(a);
+                    }
+                }
+            }
+            let mut pixel = [0u8; 5];
+            for (slot, sum) in pixel.iter_mut().zip(sums).take(components) {
+                *slot = ((2 * sum + weight) / (2 * weight)) as u8;
+            }
+            if straight && alpha {
+                let a = pixel[colours];
+                for c in &mut pixel[..colours] {
+                    *c = straighten(*c, a);
+                }
+            }
+            out.extend_from_slice(&pixel[..components]);
+        }
+    }
+    out
+}
+
+/// The sizes a golden is scaled to: whole and fractional ratios down and up,
+/// the two axes going opposite ways, a hair either side of its own size, and
+/// one pixel, which is the whole picture's average.
+fn targets(width: u32, height: u32) -> Vec<(&'static str, u32, u32)> {
+    vec![
+        ("a half", width / 2, height / 2),
+        ("a third", width / 3, height / 3),
+        ("two thirds", width * 2 / 3, height * 2 / 3),
+        ("five sevenths", width * 5 / 7, height * 5 / 7),
+        ("double", width * 2, height * 2),
+        ("one and a half", width * 3 / 2, height * 3 / 2),
+        ("half across, double down", width / 2, height * 2),
+        ("one less and one more", width - 1, height + 1),
+        ("one pixel", 1, 1),
+    ]
+}
+
+/// What a bitmap a toolbox operation made should carry besides its bytes:
+/// its format, its size, a packed stride, the source's premultiplied flag
+/// and warnings, and no stats.
+fn assert_carried(got: &Bitmap, source: &Bitmap, width: u32, height: u32, what: &str) {
+    assert_eq!(
+        (
+            got.width,
+            got.height,
+            got.format,
+            got.stride,
+            got.premultiplied
+        ),
+        (
+            width,
+            height,
+            source.format,
+            width as usize * source.components(),
+            source.premultiplied
+        ),
+        "{what}: the result's fields"
+    );
+    assert_eq!(got.warnings, source.warnings, "{what}: the warnings travel");
+    assert!(
+        got.stats.is_none(),
+        "{what}: a scaled bitmap counted nothing"
+    );
+}
+
+/// The bitmap as its variants are, with a warning on it to see it carried.
+fn warned(mut bitmap: Bitmap) -> Bitmap {
+    bitmap.warnings = vec![RenderWarning::Cancelled];
+    bitmap
+}
+
+/// **A scaled render is the area average the test computes**: every golden,
+/// in every format, straight and premultiplied, at each of [`targets`] —
+/// whole and fractional ratios, down and up, and the two axes apart — every
+/// byte the average of the rectangle its pixel covers, computed here from the
+/// definition.
+#[test]
+fn a_scaled_render_is_the_area_average_the_test_computes() {
+    let mut held = 0usize;
+    for (name, golden) in goldens() {
+        for bitmap in variants(&golden).into_iter().map(warned) {
+            for (ratio, width, height) in targets(bitmap.width, bitmap.height) {
+                let what = format!(
+                    "{name}, {:?}{}, {ratio} ({width}x{height})",
+                    bitmap.format,
+                    if bitmap.premultiplied {
+                        " premultiplied"
+                    } else {
+                        ""
+                    }
+                );
+                let got = bitmap
+                    .scaled(width, height)
+                    .unwrap_or_else(|| panic!("{what}: a picture scales"));
+                assert_carried(&got, &bitmap, width, height, &what);
+                let want = scaled_expected(&bitmap, width, height);
+                if got.data != want {
+                    let at = got
+                        .data
+                        .iter()
+                        .zip(&want)
+                        .position(|(a, b)| a != b)
+                        .unwrap_or(0);
+                    panic!(
+                        "{what}: byte {at} is {} where the average is {}",
+                        got.data[at], want[at]
+                    );
+                }
+                held += 1;
+            }
+        }
+    }
+    println!("bitmap-toolbox scale: RAN, {held} scales held to the area average");
+}
+
+/// **A scale to the same size returns the same bytes**: every variant, and a
+/// padded one, comes back as it went in, stride and padding included.
+#[test]
+fn a_scale_to_the_same_size_returns_the_same_bytes() {
+    let (_, golden) = goldens().remove(0);
+    for bitmap in variants(&golden) {
+        for source in [bitmap.clone(), padded(&bitmap, 5)] {
+            let same = source
+                .scaled(source.width, source.height)
+                .expect("a picture");
+            assert_eq!(
+                (same.width, same.height, same.stride, same.premultiplied),
+                (
+                    source.width,
+                    source.height,
+                    source.stride,
+                    source.premultiplied
+                ),
+            );
+            assert_eq!(same.data, source.data, "{:?}", source.format);
+        }
+    }
+}
+
+/// The samples a subsample should keep: the first of each `x` by `y` block.
+fn subsampled_expected(bitmap: &Bitmap, x: u32, y: u32) -> Vec<u8> {
+    let components = bitmap.components();
+    let mut out = Vec::new();
+    for row in (0..bitmap.height).step_by(y as usize) {
+        for column in (0..bitmap.width).step_by(x as usize) {
+            let at = row as usize * bitmap.stride + column as usize * components;
+            out.extend_from_slice(&bitmap.data[at..at + components]);
+        }
+    }
+    out
+}
+
+/// **A subsampled render is the samples the test takes**: every golden, in
+/// every format, straight and premultiplied, by whole factors that divide it
+/// and that do not, unequal on the two axes and past its extent, every byte
+/// the first sample of its block as stored; a factor of one on both axes is
+/// the bitmap.
+#[test]
+fn a_subsampled_render_is_the_samples_the_test_takes() {
+    let mut held = 0usize;
+    for (name, golden) in goldens() {
+        for bitmap in variants(&golden).into_iter().map(warned) {
+            let factors = [
+                (2, 2),
+                (3, 2),
+                (2, 5),
+                (7, 3),
+                (bitmap.width, bitmap.height),
+                (bitmap.width + 3, 1),
+                (1, bitmap.height + 1),
+            ];
+            for (x, y) in factors {
+                let what = format!("{name}, {:?}, by {x}x{y}", bitmap.format);
+                let got = bitmap
+                    .subsampled(x, y)
+                    .unwrap_or_else(|| panic!("{what}: a picture subsamples"));
+                let (width, height) = (bitmap.width.div_ceil(x), bitmap.height.div_ceil(y));
+                assert_carried(&got, &bitmap, width, height, &what);
+                assert_eq!(got.data, subsampled_expected(&bitmap, x, y), "{what}");
+                held += 1;
+            }
+            let same = bitmap.subsampled(1, 1).expect("a picture");
+            assert_eq!(same.data, bitmap.data, "{name}: by one is the bitmap");
+            assert_eq!(same.stride, bitmap.stride);
+        }
+    }
+    println!("bitmap-toolbox subsample: RAN, {held} subsamples held to their samples");
+}
+
+/// A padded stride is not read: a padded bitmap scales and subsamples to the
+/// bytes its packed twin does.
+#[test]
+fn a_padded_stride_scales_and_subsamples_as_its_packed_twin() {
+    let (_, golden) = goldens().remove(0);
+    for bitmap in variants(&golden) {
+        let wide = padded(&bitmap, 7);
+        for (_, width, height) in targets(bitmap.width, bitmap.height) {
+            assert_eq!(
+                wide.scaled(width, height).map(|b| b.data),
+                bitmap.scaled(width, height).map(|b| b.data),
+                "{:?} to {width}x{height}",
+                bitmap.format
+            );
+        }
+        for (x, y) in [(2, 2), (3, 5)] {
+            assert_eq!(
+                wide.subsampled(x, y).map(|b| b.data),
+                bitmap.subsampled(x, y).map(|b| b.data),
+                "{:?} by {x}x{y}",
+                bitmap.format
+            );
+        }
+    }
+}
+
+/// Scale and subsample refuse a bitmap that is not a picture, a size or a
+/// factor of zero, and a result too large to hold, rather than handing back
+/// part of one.
+#[test]
+fn scale_and_subsample_refuse_what_is_no_picture() {
+    let (_, golden) = goldens().remove(0);
+    let base = variant(&golden, PixelFormat::Rgba8, false);
+    let mut short = base.clone();
+    short.data.pop();
+    for bitmap in [
+        Bitmap {
+            width: 0,
+            ..base.clone()
+        },
+        Bitmap {
+            height: 0,
+            ..base.clone()
+        },
+        Bitmap {
+            stride: base.stride - 1,
+            ..base.clone()
+        },
+        short,
+    ] {
+        assert!(bitmap.scaled(10, 10).is_none());
+        assert!(bitmap.subsampled(2, 2).is_none());
+    }
+    assert!(base.scaled(0, 10).is_none());
+    assert!(base.scaled(10, 0).is_none());
+    assert!(base.subsampled(0, 1).is_none());
+    assert!(base.subsampled(1, 0).is_none());
+    // More bytes than an address space holds: refused, not attempted.
+    assert!(base.scaled(u32::MAX, u32::MAX).is_none());
 }

@@ -954,6 +954,64 @@ impl Bitmap {
         tinker_pdf_raster::toolbox::is_monochrome(&self.layout(), &self.data)
     }
 
+    /// This bitmap resized to `width` by `height` through the image sampler's
+    /// area filter: every pixel the average of the rectangle of this bitmap it
+    /// covers — `[x · W / width, (x + 1) · W / width)` across, and likewise
+    /// down — each pixel under it weighted by how much of it the rectangle
+    /// covers and each byte rounded half up. That is one rule down and up, at
+    /// any ratio: shrunk, a pixel is an exact average; grown, a pixel inside
+    /// one of this bitmap's is that pixel, and one across a boundary the two
+    /// weighted by their share.
+    ///
+    /// Colour is averaged premultiplied, so a transparent pixel's colour
+    /// carries no weight, and handed back as this bitmap holds it, straight
+    /// or premultiplied; every channel of every format, ink and Lab
+    /// included, takes the same weights, and alpha is averaged as a channel.
+    /// The result's rows are packed, and it keeps this bitmap's format,
+    /// premultiplied flag and warnings; its `stats` is `None`.
+    ///
+    /// A scale to this bitmap's own size is a copy of it, stride and all.
+    /// `None` on a bitmap that is not a picture, `to_png`'s condition, for a
+    /// width or height of zero, and for a result whose bytes cannot be
+    /// allocated.
+    #[must_use]
+    pub fn scaled(&self, width: u32, height: u32) -> Option<Bitmap> {
+        let (layout, data) =
+            tinker_pdf_raster::toolbox::scale(&self.layout(), &self.data, width, height)?;
+        Some(self.with_pixels(layout, data))
+    }
+
+    /// One pixel of each `x` by `y` block of this bitmap, the first: the
+    /// result is `ceil(width / x)` by `ceil(height / y)`, and its pixel
+    /// `(X, Y)` is this bitmap's `(X · x, Y · y)`, every byte as it is stored.
+    /// The result's rows are packed, and it keeps this bitmap's format,
+    /// premultiplied flag and warnings; its `stats` is `None`.
+    ///
+    /// A factor of one on both axes is a copy of this bitmap, stride and all.
+    /// `None` on a bitmap that is not a picture, for a factor of zero, and
+    /// for a result whose bytes cannot be allocated.
+    #[must_use]
+    pub fn subsampled(&self, x: u32, y: u32) -> Option<Bitmap> {
+        let (layout, data) =
+            tinker_pdf_raster::toolbox::subsample(&self.layout(), &self.data, x, y)?;
+        Some(self.with_pixels(layout, data))
+    }
+
+    /// A bitmap of the toolbox's `layout` and `data`, carrying this one's
+    /// warnings: the picture is still the render they describe.
+    fn with_pixels(&self, layout: tinker_pdf_raster::toolbox::Layout, data: Vec<u8>) -> Bitmap {
+        Bitmap {
+            width: layout.width,
+            height: layout.height,
+            format: layout.format,
+            stride: layout.stride,
+            data,
+            warnings: self.warnings.clone(),
+            premultiplied: layout.premultiplied,
+            stats: None,
+        }
+    }
+
     /// This bitmap as a complete PNG file (ISO/IEC 15948), 8 bits a component.
     ///
     /// `None` exactly when the bitmap is not a picture: a zero `width` or

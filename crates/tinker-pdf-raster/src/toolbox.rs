@@ -1,11 +1,13 @@
 //! The bitmap toolbox's arithmetic (`docs/design/bitmap-toolbox.md`): the
-//! per-pixel maps and the reductions, over a buffer of pixels in any
-//! [`PixelFormat`] and stride.
+//! per-pixel maps, the reductions, and scale and subsample, over a buffer of
+//! pixels in any [`PixelFormat`] and stride.
 //!
 //! On `PIXEL_PATHS`, so gamma's table is built through `tinker_pdf_math::pow`
 //! and no transcendental of the platform's reaches a pixel (ruling 4); every
-//! other form is integer arithmetic. `tinker_pdf::Bitmap`'s methods are one
-//! call each into here with the bitmap's own fields, and add nothing.
+//! other form is integer arithmetic, scale's the image sampler's own area
+//! filter over spans planned in integers ([`crate::image::resample`]).
+//! `tinker_pdf::Bitmap`'s methods are one call each into here with the
+//! bitmap's own fields, and add nothing.
 //!
 //! **Each form is the design's, as its test computes it.** A pixel is decoded
 //! to sRGB as [`crate::Canvas::pixel`] decodes one and a colour encoded as a
@@ -15,6 +17,7 @@
 use std::collections::BTreeSet;
 
 use crate::canvas::{cmyk_to_rgb, lab_bytes, lab_to_rgb, rgb_to_cmyk, Color, PixelFormat};
+use crate::image::{resample, ImageSource};
 
 /// What a buffer of pixels is: its format, its size, how far apart its rows
 /// start, and whether its colour is premultiplied by its alpha — the fields
@@ -460,6 +463,182 @@ pub fn is_monochrome(layout: &Layout, data: &[u8]) -> Option<bool> {
     picture.then_some(monochrome)
 }
 
+// ---- scale and subsample ----------------------------------------------------------
+
+/// `len` zeroed bytes, or `None` where so many cannot be had: a result's size
+/// is the caller's to ask for, so it is reserved fallibly rather than assumed.
+fn zeroed(len: usize) -> Option<Vec<u8>> {
+    let mut data = Vec::new();
+    data.try_reserve_exact(len).ok()?;
+    data.resize(len, 0);
+    Some(data)
+}
+
+/// The bitmap resized to `width` by `height` through the image sampler's
+/// area filter ([`resample`]): every pixel of the result the average of the
+/// source rectangle it covers, `[x · W / width, (x + 1) · W / width)` across
+/// by `[y · H / height, (y + 1) · H / height)` down, each sample weighted by
+/// how much of it the rectangle covers and each byte rounded half up — down
+/// or up, at any ratio, with no pyramid.
+///
+/// The sampler takes three channels of colour and an alpha, so the colour is
+/// handed over in groups of three — a grey as one, ink as two — every group
+/// through the same weights, and the alpha rides the sampler's own. Colour is
+/// averaged premultiplied, so a transparent sample's colour carries no
+/// weight: a straight bitmap's colour is premultiplied for the average and
+/// straightened after, `round(c · 255 / a)`, and a premultiplied one's is
+/// averaged as it is stored. A format with no alpha is opaque throughout and
+/// averaged as it is.
+///
+/// A scale to the bitmap's own size is its bytes, stride and all. `None` for
+/// a buffer that is not a picture, a width or height of zero, and a result
+/// whose bytes cannot be had; otherwise the result's layout, its rows packed,
+/// and its bytes.
+#[must_use]
+pub fn scale(layout: &Layout, data: &[u8], width: u32, height: u32) -> Option<(Layout, Vec<u8>)> {
+    if !layout.is_picture(data.len()) || width == 0 || height == 0 {
+        return None;
+    }
+    if (width, height) == (layout.width, layout.height) {
+        return Some((*layout, data.to_vec()));
+    }
+    let format = layout.format;
+    let components = format.components();
+    let colours = colours(format);
+    let alpha = format.has_alpha();
+    let straight = !layout.premultiplied();
+    let stride = (width as usize).checked_mul(components)?;
+    let mut out = zeroed(stride.checked_mul(height as usize)?)?;
+
+    // The source as the sampler holds an image: three bytes of colour a
+    // sample in each group, the second group's last two unused, and a byte
+    // of alpha a sample where the format has one.
+    let samples = (layout.width as usize).checked_mul(layout.height as usize)?;
+    let mut planes = Vec::new();
+    for _ in 0..colours.div_ceil(3) {
+        planes.push(zeroed(samples.checked_mul(3)?)?);
+    }
+    let mut alphas = if alpha { zeroed(samples)? } else { Vec::new() };
+    let mut index = 0usize;
+    each_pixel(layout, data, |pixel| {
+        let a = if alpha {
+            pixel.get(colours).copied().unwrap_or(255)
+        } else {
+            255
+        };
+        for (c, &v) in pixel.iter().take(colours).enumerate() {
+            let v = if straight { premultiply(v, a) } else { v };
+            if let Some(slot) = planes
+                .get_mut(c / 3)
+                .and_then(|plane| plane.get_mut(index * 3 + c % 3))
+            {
+                *slot = v;
+            }
+        }
+        if let Some(slot) = alphas.get_mut(index) {
+            *slot = a;
+        }
+        index += 1;
+        true
+    });
+
+    for (group, plane) in planes.iter().enumerate() {
+        let source = ImageSource {
+            width: layout.width,
+            height: layout.height,
+            rgb: plane,
+            alpha: &alphas,
+            two_colour: None,
+        };
+        let first = group * 3;
+        let count = (colours - first).min(3);
+        let drawn = resample(&source, width, height, |x, y, (r, g, b, a)| {
+            let at = y as usize * stride + x as usize * components;
+            let Some(pixel) = out.get_mut(at..at + components) else {
+                return;
+            };
+            for (slot, value) in pixel.iter_mut().skip(first).zip([r, g, b]).take(count) {
+                *slot = value;
+            }
+            if alpha {
+                if let Some(slot) = pixel.get_mut(colours) {
+                    *slot = a;
+                }
+            }
+        });
+        if !drawn {
+            return None;
+        }
+    }
+
+    // Averaged premultiplied, handed back as the bitmap holds its colour.
+    if straight && alpha {
+        for pixel in out.chunks_exact_mut(components) {
+            let a = pixel.get(colours).copied().unwrap_or(255);
+            for c in pixel.iter_mut().take(colours) {
+                *c = straighten(*c, a);
+            }
+        }
+    }
+    Some((
+        Layout {
+            width,
+            height,
+            stride,
+            ..*layout
+        },
+        out,
+    ))
+}
+
+/// One sample of each `x` by `y` block, the first: the result is
+/// `ceil(W / x)` by `ceil(H / y)`, and its pixel `(X, Y)` is the source's
+/// `(X · x, Y · y)`, every byte as it is stored, alpha and premultiplied
+/// colour alike.
+///
+/// A factor of one on both axes is the bitmap's bytes, stride and all. `None`
+/// for a buffer that is not a picture, a factor of zero, and a result whose
+/// bytes cannot be had; otherwise the result's layout, its rows packed, and
+/// its bytes.
+#[must_use]
+pub fn subsample(layout: &Layout, data: &[u8], x: u32, y: u32) -> Option<(Layout, Vec<u8>)> {
+    if !layout.is_picture(data.len()) || x == 0 || y == 0 {
+        return None;
+    }
+    if (x, y) == (1, 1) {
+        return Some((*layout, data.to_vec()));
+    }
+    let components = layout.format.components();
+    let width = layout.width.div_ceil(x);
+    let height = layout.height.div_ceil(y);
+    let stride = (width as usize).checked_mul(components)?;
+    let mut out = zeroed(stride.checked_mul(height as usize)?)?;
+    for row in 0..height as usize {
+        // `row · y` is a row of the source, and `col · x` a column of it:
+        // both below the extents `ceil` divided, so inside the picture.
+        let start = row * y as usize * layout.stride;
+        for col in 0..width as usize {
+            let from = start + col * x as usize * components;
+            let to = row * stride + col * components;
+            if let (Some(source), Some(target)) = (
+                data.get(from..from + components),
+                out.get_mut(to..to + components),
+            ) {
+                target.copy_from_slice(source);
+            }
+        }
+    }
+    Some((
+        Layout {
+            width,
+            height,
+            stride,
+            ..*layout
+        },
+        out,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,5 +836,146 @@ mod tests {
         let mut translucent = data;
         translucent[14] = 254;
         assert_eq!(is_monochrome(&layout, &translucent), Some(false));
+    }
+
+    /// A packed layout of `format`, `width` by `height`.
+    fn packed_layout(format: PixelFormat, width: u32, height: u32) -> Layout {
+        Layout {
+            format,
+            width,
+            height,
+            stride: width as usize * format.components(),
+            premultiplied: false,
+        }
+    }
+
+    /// **A scale is the area average of what each pixel covers**, worked by
+    /// hand: two samples into one, three into two — two thirds of one sample
+    /// and one third of the next, and the other way round — and two out to
+    /// three, the middle pixel half of each.
+    #[test]
+    fn a_scale_is_the_area_average_of_what_each_pixel_covers() {
+        let grey = |width| packed_layout(PixelFormat::Gray8, width, 1);
+        // (10 + 21) / 2 is 15.5, which rounds up.
+        let (layout, data) = scale(&grey(2), &[10, 21], 1, 1).expect("a picture");
+        assert_eq!((layout.width, layout.height, layout.stride), (1, 1, 1));
+        assert_eq!(data, [16]);
+        // [0, 3) in halves of a sample: 2/3 of the first and 1/3 of the
+        // second, then 1/3 of the second and 2/3 of the third.
+        let (_, data) = scale(&grey(3), &[0, 30, 90], 2, 1).expect("a picture");
+        assert_eq!(data, [10, 70]);
+        // Up: the outer pixels inside one sample each, the middle one across
+        // the boundary, half of each.
+        let (_, data) = scale(&grey(2), &[0, 90], 3, 1).expect("a picture");
+        assert_eq!(data, [0, 45, 90]);
+        // Down one axis and up the other.
+        let layout = packed_layout(PixelFormat::Gray8, 2, 1);
+        let (out, data) = scale(&layout, &[0, 200], 1, 3).expect("a picture");
+        assert_eq!((out.width, out.height), (1, 3));
+        assert_eq!(data, [100, 100, 100]);
+    }
+
+    /// Ink is averaged as two groups of the sampler's three channels, so the
+    /// black ink in the second group takes the same weights as the rest; and
+    /// a format without alpha is averaged as it is.
+    #[test]
+    fn every_channel_of_every_format_takes_the_same_weights() {
+        let ink = packed_layout(PixelFormat::CmykA8, 2, 1);
+        let data = [10, 20, 30, 40, 255, 50, 60, 70, 81, 255];
+        let (_, out) = scale(&ink, &data, 1, 1).expect("a picture");
+        assert_eq!(out, [30, 40, 50, 61, 255], "(40 + 81) / 2 rounds up");
+        let rgb = packed_layout(PixelFormat::Rgb8, 2, 1);
+        let (_, out) = scale(&rgb, &[0, 100, 255, 255, 101, 0], 1, 1).expect("a picture");
+        assert_eq!(out, [128, 101, 128]);
+        let lab = packed_layout(PixelFormat::LabA8, 2, 1);
+        let (_, out) = scale(&lab, &[0, 128, 255, 255, 100, 128, 0, 255], 1, 1).expect("a picture");
+        assert_eq!(out, [50, 128, 128, 255]);
+    }
+
+    /// Colour is averaged premultiplied: a transparent white beside an opaque
+    /// black averages to a half-transparent black, not to grey — straight,
+    /// and the same pair stored premultiplied.
+    #[test]
+    fn a_transparent_sample_s_colour_carries_no_weight() {
+        let straight = packed_layout(PixelFormat::GrayA8, 2, 1);
+        let (out, data) = scale(&straight, &[255, 0, 0, 255], 1, 1).expect("a picture");
+        assert!(!out.premultiplied);
+        assert_eq!(data, [0, 128], "black at half alpha");
+        let premultiplied = Layout {
+            premultiplied: true,
+            ..straight
+        };
+        let (out, data) = scale(&premultiplied, &[0, 0, 0, 255], 1, 1).expect("a picture");
+        assert!(out.premultiplied);
+        assert_eq!(data, [0, 128]);
+        // A half-alpha grey and an opaque white, straight: premultiplied to
+        // 50 and 255, averaged to 153 over an alpha of 192, straightened.
+        let (_, data) = scale(&straight, &[100, 128, 255, 255], 1, 1).expect("a picture");
+        let alpha = (128u32 + 255 + 1) / 2;
+        let colour = (50u32 + 255 + 1) / 2;
+        assert_eq!(
+            data,
+            [((colour * 255 + alpha / 2) / alpha) as u8, alpha as u8]
+        );
+    }
+
+    /// A scale to the bitmap's own size is its bytes, padding and all, and a
+    /// scale with no size or of a buffer that is not a picture is refused.
+    #[test]
+    fn a_scale_to_its_own_size_is_its_bytes_and_nothing_is_refused_partly() {
+        let padded = Layout {
+            stride: 5,
+            ..packed_layout(PixelFormat::Gray8, 3, 2)
+        };
+        let data = [1, 2, 3, 99, 98, 4, 5, 6, 97, 96];
+        let (layout, same) = scale(&padded, &data, 3, 2).expect("a picture");
+        assert_eq!(layout, padded);
+        assert_eq!(same, data);
+        assert_eq!(scale(&padded, &data, 0, 2), None);
+        assert_eq!(scale(&padded, &data, 2, 0), None);
+        assert_eq!(
+            scale(&padded, &data[..7], 1, 1),
+            None,
+            "the last row is cut"
+        );
+        // A padded source scales as its packed twin does: padding is not read.
+        let packed = packed_layout(PixelFormat::Gray8, 3, 2);
+        assert_eq!(
+            scale(&padded, &data, 2, 3).map(|(_, data)| data),
+            scale(&packed, &[1, 2, 3, 4, 5, 6], 2, 3).map(|(_, data)| data)
+        );
+    }
+
+    /// Subsample keeps the first sample of each block, every byte as stored,
+    /// over a result `ceil(W / x)` by `ceil(H / y)`; a factor of one on both
+    /// axes is the bitmap, a factor of zero no picture.
+    #[test]
+    fn a_subsample_keeps_the_first_sample_of_each_block() {
+        let layout = packed_layout(PixelFormat::Gray8, 5, 3);
+        let data: Vec<u8> = (0..15).collect();
+        let (out, kept) = subsample(&layout, &data, 2, 2).expect("a picture");
+        assert_eq!((out.width, out.height, out.stride), (3, 2, 3));
+        assert_eq!(kept, [0, 2, 4, 10, 12, 14]);
+        let (out, kept) = subsample(&layout, &data, 9, 9).expect("a picture");
+        assert_eq!((out.width, out.height), (1, 1));
+        assert_eq!(kept, [0]);
+        let (out, kept) = subsample(&layout, &data, 1, 3).expect("a picture");
+        assert_eq!((out.width, out.height), (5, 1));
+        assert_eq!(kept, [0, 1, 2, 3, 4]);
+        assert_eq!(
+            subsample(&layout, &data, 1, 1),
+            Some((layout, data.clone()))
+        );
+        assert_eq!(subsample(&layout, &data, 0, 1), None);
+        assert_eq!(subsample(&layout, &data, 1, 0), None);
+        assert_eq!(subsample(&layout, &data[..14], 2, 2), None);
+        // Every byte as stored: a premultiplied pixel's colour and alpha.
+        let rgba = Layout {
+            premultiplied: true,
+            ..packed_layout(PixelFormat::Rgba8, 2, 1)
+        };
+        let (out, kept) = subsample(&rgba, &[9, 8, 7, 10, 1, 2, 3, 4], 2, 1).expect("a picture");
+        assert!(out.premultiplied);
+        assert_eq!(kept, [9, 8, 7, 10]);
     }
 }
