@@ -52,6 +52,22 @@ pub struct FontRequest {
     /// reads it; `None` for a simple font, and for a descendant that names
     /// none readably.
     pub character_collection: Option<CharacterCollection>,
+    /// The family class the descriptor's `/Style` states (9.8.3.2): the
+    /// first two bytes of its twelve-byte `/Panose`, which are the `OS/2`
+    /// table's `sFamilyClass` — the class in the high byte, the subclass in
+    /// the low — so a provider compares it with a face's own.
+    ///
+    /// `Some` exactly when [`FontRequest::panose`] is: the two are one
+    /// string, and a `/Style` that is not a dictionary, or a `/Panose` that
+    /// is not a string of twelve bytes, states neither — a classification
+    /// read from part of a string is one the font did not make. Read from
+    /// the descriptor the flags are read from, a composite font's
+    /// descendant's.
+    pub family_class: Option<u16>,
+    /// The PANOSE classification the descriptor's `/Style` states (9.8.3.2):
+    /// the ten bytes after the family class, in the order the `OS/2` table's
+    /// `panose` field holds them.
+    pub panose: Option<[u8; 10]>,
 }
 
 /// 9.8.2 table 123.
@@ -110,6 +126,11 @@ impl FontRequest {
             .as_dict()
             .and_then(|d| d.get_number(doc.intern(b"StemV")));
 
+        let (family_class, panose) = descriptor
+            .as_dict()
+            .and_then(|d| style_panose(doc, d))
+            .map_or((None, None), |(class, panose)| (Some(class), Some(panose)));
+
         FontRequest {
             serif: flags & SERIF != 0,
             fixed_pitch: flags & FIXED_PITCH != 0,
@@ -120,8 +141,27 @@ impl FontRequest {
             italic: flags & ITALIC != 0 || named_italic,
             base_font,
             character_collection,
+            family_class,
+            panose,
         }
     }
+}
+
+/// 9.8.3.2: `/Style`'s one entry, `/Panose`, a twelve-byte string — the two
+/// bytes of the `OS/2` table's `sFamilyClass`, class then subclass, and the
+/// ten of the PANOSE classification. Table 122 lists `/Style` among a
+/// CIDFont's descriptor entries, and a simple font's descriptor that carries
+/// one is read the same way.
+///
+/// `None` for a `/Style` that is not a dictionary, a `/Panose` that is not a
+/// string, and a string of any other length: none of them states a
+/// classification, and part of one is not one.
+fn style_panose(doc: &CosDocument, descriptor: &Dict) -> Option<(u16, [u8; 10])> {
+    let style = doc.resolve_key(descriptor, doc.intern(b"Style"));
+    let panose = doc.resolve_key(style.as_dict()?, doc.intern(b"Panose"));
+    let all = <[u8; 12]>::try_from(panose.as_string()?.bytes.as_slice()).ok()?;
+    let [class, subclass, rest @ ..] = all;
+    Some((u16::from_be_bytes([class, subclass]), rest))
 }
 
 /// Supplies font programs the document does not embed.
@@ -536,6 +576,78 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n";
         assert!(request.serif, "the descendant's flags are read");
         assert!(request.bold, "and the name still applies");
         assert_eq!(request.base_font, "Noto-Bold");
+    }
+
+    /// 9.8.3.2: the family class and the ten PANOSE bytes, from a simple
+    /// font's descriptor and from a composite font's descendant's, which is
+    /// where the flags are read from too.
+    #[test]
+    fn the_descriptor_panose_is_read() {
+        // Class 8 (sans serif), subclass 1, then a PANOSE of a sans face.
+        let (doc, dict) = doc_with(
+            "<< /Type /Font /Subtype /TrueType /BaseFont /Sans /FontDescriptor \
+             << /Flags 32 /Style << /Panose <0801020B0604020202020204> >> >> >>",
+        );
+        let request = FontRequest::read(&doc, &dict);
+        assert_eq!(request.family_class, Some(0x0801));
+        assert_eq!(request.panose, Some([2, 0x0B, 6, 4, 2, 2, 2, 2, 2, 4]));
+
+        let bytes: &[u8] = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+3 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /Mincho-Identity-H\n\
+   /Encoding /Identity-H /DescendantFonts [4 0 R]\n\
+   /FontDescriptor << /Style << /Panose <000000000000000000000000> >> >> >>\nendobj\n\
+4 0 obj\n<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Mincho\n\
+   /FontDescriptor << /Flags 6 /Style << /Panose <01 05 02 02 03 00 00 00 00 00 00 00> >> >> >>\nendobj\n\
+trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n";
+        let doc = CosDocument::open(bytes).expect("it opens");
+        let dict = doc
+            .get(tinker_pdf_cos::ObjRef::new(3, 0))
+            .expect("loads")
+            .as_dict()
+            .cloned()
+            .expect("a dictionary");
+        let request = FontRequest::read(&doc, &dict);
+        assert_eq!(
+            request.family_class,
+            Some(0x0105),
+            "the descendant's descriptor, as 9.8.3.2's own example writes it, \
+             and not the one a Type 0 dictionary has no business carrying"
+        );
+        assert_eq!(request.panose, Some([2, 2, 3, 0, 0, 0, 0, 0, 0, 0]));
+    }
+
+    /// A string of eleven or thirteen bytes, a name, a `/Style` with no
+    /// `/Panose`, one that is not a dictionary and a descriptor with no
+    /// `/Style` at all: each states no classification, and none is made up
+    /// from what is there — neither the family class nor the PANOSE.
+    #[test]
+    fn a_malformed_panose_is_absent_not_guessed() {
+        for style in [
+            "/Style << /Panose <0801020B06040202020202> >>",
+            "/Style << /Panose <0801020B060402020202020400> >>",
+            "/Style << /Panose /Sans >>",
+            "/Style << /Panose [8 1 2 11 6 4 2 2 2 2 2 4] >>",
+            "/Style << >>",
+            "/Style 7",
+            "/Style [<0801020B0604020202020204>]",
+            "",
+        ] {
+            let (doc, dict) = doc_with(&format!(
+                "<< /Type /Font /Subtype /TrueType /BaseFont /Sans \
+                 /FontDescriptor << /Flags 32 {style} >> >>"
+            ));
+            let request = FontRequest::read(&doc, &dict);
+            assert_eq!(request.family_class, None, "{style:?} gave a family class");
+            assert_eq!(request.panose, None, "{style:?} gave a PANOSE");
+        }
+
+        // A font with no descriptor, which the standard 14 are, has nothing
+        // to state either.
+        let (doc, dict) = doc_with("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+        let request = FontRequest::read(&doc, &dict);
+        assert_eq!((request.family_class, request.panose), (None, None));
     }
 
     fn request(bold: bool, italic: bool, symbolic: bool) -> FontRequest {

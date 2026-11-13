@@ -347,7 +347,15 @@ is an integer from zero up — so a provider can choose a face by the
 characters the font's CIDs stand for (`docs/design/fallback-faces.md`). A
 simple font's request, and one whose descendant names no collection
 readably, carries `None`; `SimpleFontProvider` ignores the field.
-`CharacterCollection` is re-exported from the facade.
+`CharacterCollection` is re-exported from the facade. A request also carries
+what the descriptor's `/Style` states (9.8.3.2), from the descriptor the flags
+are read from: `FontRequest::family_class`, the first two bytes of its
+twelve-byte `/Panose` — the `OS/2` table's `sFamilyClass`, class in the high
+byte — and `FontRequest::panose`, the ten PANOSE bytes after them. Both or
+neither: a `/Style` that is not a dictionary, or a `/Panose` that is not a
+string of exactly twelve bytes, gives `None` for each rather than part of a
+classification. Matching on them is a provider's; `SimpleFontProvider` keeps
+choosing by weight and slope.
 
 **A substituted face is read by character** (`docs/design/fallback-faces.md`).
 A face a provider substitutes numbers its glyphs in an order of its own, so
@@ -1905,7 +1913,12 @@ corpora already vendored here. So every name stays on the list.
   font's request carrying its character collection
   (`the_provider_is_told_the_character_collection`), which
   `crates/tinker-pdf-cos/tests/fonts.rs`'s
-  `a_composite_fonts_character_collection_is_read` reads leniently; and a
+  `a_composite_fonts_character_collection_is_read` reads leniently, and a
+  request carrying the family class and PANOSE a simple font's descriptor or
+  a composite font's descendant's states, and neither from eleven bytes
+  (`the_provider_is_told_the_panose`; `fonts.rs`'s
+  `the_descriptor_panose_is_read` and
+  `a_malformed_panose_is_absent_not_guessed`); and a
   substituted face read by character over a face whose glyph at each CID's
   number is a decoy — `a_substituted_face_draws_a_composite_font_by_character_not_by_cid`,
   `an_unreached_cid_draws_notdef_and_reports`,

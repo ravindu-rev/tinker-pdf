@@ -777,6 +777,131 @@ fn a_simple_fonts_request_names_no_character_collection() {
         .all(|request| request.character_collection.is_none()));
 }
 
+/// A page drawing one code in `/F0`, the font dictionary object 5, whose
+/// descriptor is object 6 — or, for a composite font, whose descendant is
+/// object 7 and the descendant's descriptor object 6. Written by hand,
+/// because the builder embeds every font it describes.
+fn described_page(
+    font: &str,
+    descriptor: &str,
+    descendant: Option<&str>,
+    content: &str,
+) -> Vec<u8> {
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
+         /Resources << /Font << /F0 5 0 R >> >> /Contents 4 0 R >>"
+            .to_string(),
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        ),
+        font.to_string(),
+        descriptor.to_string(),
+    ];
+    if let Some(descendant) = descendant {
+        objects.push(descendant.to_string());
+    }
+    let mut out = String::from("%PDF-1.7\n");
+    for (index, object) in objects.iter().enumerate() {
+        out.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+        objects.len() + 1
+    ));
+    out.into_bytes()
+}
+
+/// **The provider is told the PANOSE** (FT-12.2): a font's request carries
+/// the family class and the ten PANOSE bytes its descriptor's `/Style`
+/// states (9.8.3.2) — a simple font's own descriptor, and a composite font's
+/// descendant's — and nothing where the descriptor states none or states it
+/// malformed. A recording provider is the host's, asked before any bundled
+/// face, so this holds in the default and the `bundled-fonts` builds.
+#[test]
+fn the_provider_is_told_the_panose() {
+    use std::sync::Mutex;
+
+    struct Records(Mutex<Vec<FontRequest>>);
+    impl FontProvider for Records {
+        fn substitute(&self, request: &FontRequest) -> Option<Arc<Vec<u8>>> {
+            if let Ok(mut seen) = self.0.lock() {
+                seen.push(request.clone());
+            }
+            None
+        }
+    }
+
+    let asked = |bytes: Vec<u8>| {
+        let records = Arc::new(Records(Mutex::new(Vec::new())));
+        let doc = Document::open(bytes)
+            .expect("it opens")
+            .with_fonts(records.clone());
+        let _ = doc
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        let seen = records.0.lock().expect("not poisoned").clone();
+        assert_eq!(seen.len(), 1, "asked once for the font, got: {seen:?}");
+        seen.into_iter().next().expect("one request")
+    };
+
+    // A sans face of class 8, subclass 1.
+    let simple = asked(described_page(
+        "<< /Type /Font /Subtype /TrueType /BaseFont /Sans /FirstChar 65 \
+         /LastChar 65 /Widths [600] /FontDescriptor 6 0 R >>",
+        "<< /Type /FontDescriptor /FontName /Sans /Flags 32 \
+         /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 \
+         /CapHeight 700 /StemV 80 /Style << /Panose <0801020B0604020202020204> >> >>",
+        None,
+        "BT /F0 24 Tf 20 40 Td (A) Tj ET",
+    ));
+    assert_eq!(simple.base_font, "Sans");
+    assert_eq!(simple.family_class, Some(0x0801));
+    assert_eq!(simple.panose, Some([2, 0x0B, 6, 4, 2, 2, 2, 2, 2, 4]));
+
+    // A composite font's classification is its descendant's, 9.8.3.2's own
+    // example.
+    let composite = asked(described_page(
+        "<< /Type /Font /Subtype /Type0 /BaseFont /Mincho /Encoding /Identity-H \
+         /DescendantFonts [7 0 R] >>",
+        "<< /Type /FontDescriptor /FontName /Mincho /Flags 6 \
+         /FontBBox [0 -120 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 \
+         /CapHeight 740 /StemV 80 /Style << /Panose <01 05 02 02 03 00 00 00 00 00 00 00> >> >>",
+        Some(
+            "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /Mincho \
+             /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >> \
+             /FontDescriptor 6 0 R /DW 1000 >>",
+        ),
+        "BT /F0 24 Tf 20 40 Td <0041> Tj ET",
+    ));
+    assert_eq!(composite.family_class, Some(0x0105));
+    assert_eq!(composite.panose, Some([2, 2, 3, 0, 0, 0, 0, 0, 0, 0]));
+
+    // Eleven bytes state nothing, and nothing is made of them.
+    let short = asked(described_page(
+        "<< /Type /Font /Subtype /TrueType /BaseFont /Sans /FirstChar 65 \
+         /LastChar 65 /Widths [600] /FontDescriptor 6 0 R >>",
+        "<< /Type /FontDescriptor /FontName /Sans /Flags 32 \
+         /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 \
+         /CapHeight 700 /StemV 80 /Style << /Panose <0801020B06040202020202> >> >>",
+        None,
+        "BT /F0 24 Tf 20 40 Td (A) Tj ET",
+    ));
+    assert_eq!((short.family_class, short.panose), (None, None));
+
+    // And a standard-14 font, which has no descriptor, states none either.
+    let mut builder = DocumentBuilder::new();
+    builder.add_base_font(b"F0", b"Times-Roman");
+    builder.add_page(100.0, 50.0, |page| {
+        page.text(b"F0", 12.0, 5.0, 20.0, "x");
+    });
+    let standard = asked(built("panose, a standard font", builder));
+    assert_eq!((standard.family_class, standard.panose), (None, None));
+}
+
 // ---- a substituted face read by character (FT-01.3) -------------------------
 
 mod render_support;
