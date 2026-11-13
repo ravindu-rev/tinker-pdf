@@ -5,13 +5,25 @@
 //! Algorithm 2.B's hardened hash runs CBC with no padding at all and an
 //! explicit IV (7.6.4.3.4).
 //!
-//! The implementation is table-free on purpose: the S-box is a constant array
-//! and the round transforms are arithmetic, so there are no key-dependent
-//! table indices. That is not a claim of constant-time execution — it removes
-//! the most obvious cache-timing surface, and the threat model here (decrypting
-//! a document the caller already possesses) does not include an adversary
-//! measuring our cache.
+//! **Encryption runs on a sliced core** (`docs/design/crypto-throughput.md`).
+//! The state is eight planes of 64-bit words, plane `b` holding bit `b` of
+//! every byte of four blocks; SubBytes is a boolean circuit over the planes
+//! and the linear layers are shifts and XORs, so no table is read at an index
+//! a state byte or a key byte chooses, and nothing branches on either. The
+//! key schedule runs SubWord through the same circuit. The core records, in
+//! test builds, every table it reads and every condition it tests, and a test
+//! holds that record equal over random keys and blocks
+//! (`the_core_reads_no_secret_indexed_table_and_branches_alike`). The circuit
+//! and the cipher are held to FIPS 197 when the crate compiles: the `const`
+//! item below this module's core fails the build if they disagree.
+//!
+//! **Decryption is not a claim of constant-time execution.** The inverse
+//! cipher reads an inverse S-box table at each state byte and multiplies in
+//! GF(2^8) by a loop that branches on the multiplier's bits.
 
+/// FIPS 197's S-box (5.1.1). Encryption never reads it: the circuit in
+/// [`sub_bytes`] is held to it at every input when the crate compiles, and
+/// the inverse cipher reads its inverse.
 const SBOX: [u8; 256] = [
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -45,10 +57,6 @@ fn inv_sbox() -> [u8; 256] {
     inv
 }
 
-fn sub(byte: u8) -> u8 {
-    SBOX.get(usize::from(byte)).copied().unwrap_or(0)
-}
-
 /// Multiplication in GF(2^8) with the AES reduction polynomial 0x11b.
 fn xtime(x: u8) -> u8 {
     (x << 1) ^ if x & 0x80 != 0 { 0x1b } else { 0 }
@@ -68,12 +76,795 @@ fn mul(a: u8, b: u8) -> u8 {
     result
 }
 
-/// An expanded AES key. 128- and 256-bit only: PDF has no use for AES-192.
-#[derive(Clone, Debug)]
-pub struct Aes {
-    /// Round keys, 4 bytes each: 44 words for AES-128, 60 for AES-256.
-    words: Vec<[u8; 4]>,
+// ---------------------------------------------------------------------------
+// The sliced core (`docs/design/crypto-throughput.md`).
+// ---------------------------------------------------------------------------
+
+/// A word of the sliced state: eight planes, plane `b` holding bit `b` of
+/// every byte of four lanes, a lane a block. State byte `(r, c)` (FIPS 197
+/// 3.4: input byte `r + 4c`) of lane `l` is bit `16r + 4c + l` of a plane —
+/// rows outermost, then columns, the lanes innermost — so the state a row
+/// down is each plane rotated by 16, and a column across each row's sixteen
+/// bits rotated by four.
+type Word = [u64; 8];
+
+/// The lanes a word holds.
+const LANES: usize = 4;
+
+/// The rounds of the longer key, which has one round key more.
+const MAX_ROUNDS: usize = 14;
+
+/// What the core records of itself in test builds: each table it reads, as
+/// the table and the index, and each condition it tests, as the site and the
+/// outcome, folded into one digest beside a count of each. Outside test
+/// builds it holds and records nothing, so passing one costs nothing.
+///
+/// Two runs over different keys and blocks that end with one digest read the
+/// same tables at the same indices and took the same branches: none of their
+/// reads or branches moved with a secret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Trace {
+    #[cfg(test)]
+    digest: u64,
+    #[cfg(test)]
+    reads: u64,
+    #[cfg(test)]
+    branches: u64,
+}
+
+impl Trace {
+    /// A trace with nothing recorded.
+    const fn new() -> Trace {
+        Trace {
+            #[cfg(test)]
+            digest: 0xcbf2_9ce4_8422_2325,
+            #[cfg(test)]
+            reads: 0,
+            #[cfg(test)]
+            branches: 0,
+        }
+    }
+
+    /// A read of `table` at `index`.
+    #[inline(always)]
+    const fn read(&mut self, table: u64, index: usize) {
+        #[cfg(test)]
+        {
+            self.reads += 1;
+            self.fold(1, table, index as u64);
+        }
+        #[cfg(not(test))]
+        {
+            let _ = (table, index);
+        }
+    }
+
+    /// A condition tested at `site`, which comes out `taken`, as it returns.
+    #[inline(always)]
+    const fn branch(&mut self, site: u64, taken: bool) -> bool {
+        #[cfg(test)]
+        {
+            self.branches += 1;
+            self.fold(2, site, taken as u64);
+        }
+        #[cfg(not(test))]
+        {
+            let _ = site;
+        }
+        taken
+    }
+
+    /// A choice made at `site` among several ways, `way` the one taken.
+    #[inline(always)]
+    const fn choice(&mut self, site: u64, way: usize) {
+        #[cfg(test)]
+        {
+            self.branches += 1;
+            self.fold(3, site, way as u64);
+        }
+        #[cfg(not(test))]
+        {
+            let _ = (site, way);
+        }
+    }
+
+    /// FNV-1a over an event's kind and its two words.
+    #[cfg(test)]
+    const fn fold(&mut self, kind: u64, first: u64, second: u64) {
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        self.digest = (self.digest ^ kind).wrapping_mul(PRIME);
+        self.digest = (self.digest ^ first).wrapping_mul(PRIME);
+        self.digest = (self.digest ^ second).wrapping_mul(PRIME);
+    }
+}
+
+// The sites the core's conditions are recorded at, and its tables.
+const SITE_LANE: u64 = 1;
+const SITE_BYTE: u64 = 2;
+const SITE_EXCHANGE: u64 = 3;
+const SITE_PLANE: u64 = 4;
+const SITE_ROUND: u64 = 5;
+const SITE_DRIFT: u64 = 6;
+const SITE_KEY_LENGTH: u64 = 7;
+const SITE_KEY_WORD: u64 = 8;
+const SITE_KEY_ROTATE: u64 = 9;
+const SITE_KEY_SUBSTITUTE: u64 = 10;
+const SITE_KEY_ROUND: u64 = 11;
+const SITE_KEY_MOVE: u64 = 12;
+const TABLE_INTERLEAVE: u64 = 101;
+const TABLE_RCON: u64 = 102;
+const TABLE_ROUND_KEY: u64 = 103;
+
+/// The byte of a block that each byte of the two 64-bit words a lane is
+/// loaded as takes, low byte first: the first word the bytes of columns 0
+/// and 2, the second those of columns 1 and 3, row by row, so byte `k` of the
+/// first is `(r, c) = (k / 2, 2(k mod 2))` and of the second one column on.
+///
+/// Loaded so, the bit of weight `2^b` in byte `k` of word `w` — `w` the lane
+/// plus four for the second word — is at position `8k + b`, and [`exchange`],
+/// which swaps the three bits of `b` with the three bits of `w`, puts it at
+/// bit `16r + 4c + l` of plane `b`.
+const INTERLEAVE: [usize; 16] = [0, 8, 1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15];
+
+/// Swaps the bits of `words[a]` at `mask << shift` with those of `words[b]`
+/// at `mask`.
+#[inline(always)]
+const fn swap_move(words: &mut Word, a: usize, b: usize, mask: u64, shift: u32) {
+    let t = ((words[a] >> shift) ^ words[b]) & mask;
+    words[b] ^= t;
+    words[a] ^= t << shift;
+}
+
+/// Over eight words, swaps each of the three bits of a bit's position — of
+/// weight 1, 2 and 4 — with the bit of the same weight of its word's index:
+/// three layers of four swap-moves, each its own inverse and independent of
+/// the others, so this is its own inverse.
+const fn exchange(words: &mut Word, trace: &mut Trace) {
+    let mut i = 0;
+    while trace.branch(SITE_EXCHANGE, i < 4) {
+        swap_move(words, 2 * i, 2 * i + 1, 0x5555_5555_5555_5555, 1);
+        i += 1;
+    }
+    i = 0;
+    while trace.branch(SITE_EXCHANGE, i < 4) {
+        let a = (i & 1) + 4 * (i >> 1);
+        swap_move(words, a, a + 2, 0x3333_3333_3333_3333, 2);
+        i += 1;
+    }
+    i = 0;
+    while trace.branch(SITE_EXCHANGE, i < 4) {
+        swap_move(words, i, i + 4, 0x0f0f_0f0f_0f0f_0f0f, 4);
+        i += 1;
+    }
+}
+
+/// Four blocks, one a lane, into a word.
+const fn slice(blocks: &[[u8; 16]; LANES], trace: &mut Trace) -> Word {
+    let mut words = [0u64; 8];
+    let mut lane = 0;
+    while trace.branch(SITE_LANE, lane < LANES) {
+        let mut k = 0;
+        while trace.branch(SITE_BYTE, k < 8) {
+            trace.read(TABLE_INTERLEAVE, k);
+            trace.read(TABLE_INTERLEAVE, k + 8);
+            words[lane] |= (blocks[lane][INTERLEAVE[k]] as u64) << (8 * k);
+            words[LANES + lane] |= (blocks[lane][INTERLEAVE[k + 8]] as u64) << (8 * k);
+            k += 1;
+        }
+        lane += 1;
+    }
+    exchange(&mut words, trace);
+    words
+}
+
+/// A word back into its four blocks.
+const fn unslice(word: &Word, trace: &mut Trace) -> [[u8; 16]; LANES] {
+    let mut words = *word;
+    exchange(&mut words, trace);
+    let mut blocks = [[0u8; 16]; LANES];
+    let mut lane = 0;
+    while trace.branch(SITE_LANE, lane < LANES) {
+        let mut k = 0;
+        while trace.branch(SITE_BYTE, k < 8) {
+            trace.read(TABLE_INTERLEAVE, k);
+            trace.read(TABLE_INTERLEAVE, k + 8);
+            blocks[lane][INTERLEAVE[k]] = (words[lane] >> (8 * k)) as u8;
+            blocks[lane][INTERLEAVE[k + 8]] = (words[LANES + lane] >> (8 * k)) as u8;
+            k += 1;
+        }
+        lane += 1;
+    }
+    blocks
+}
+
+/// SubBytes (FIPS 197 5.1.1) over every byte of a word: the depth-16 circuit
+/// of 128 gates Boyar and Peralta give for the AES S-box (2012) — a linear
+/// layer of 27 XORs, a non-linear middle of 34 ANDs and 29 XORs computing the
+/// inverse in a tower field, and a linear layer of 30 XORs and 8 more for the
+/// output, four of them XNORs that add the constant 0x63. `u0` and `s0` are
+/// the most significant bits. No table, no branch.
+const fn sub_bytes(x: &mut Word) {
+    let (u0, u1, u2, u3) = (x[7], x[6], x[5], x[4]);
+    let (u4, u5, u6, u7) = (x[3], x[2], x[1], x[0]);
+
+    let t1 = u0 ^ u3;
+    let t2 = u0 ^ u5;
+    let t3 = u0 ^ u6;
+    let t4 = u3 ^ u5;
+    let t5 = u4 ^ u6;
+    let t6 = t1 ^ t5;
+    let t7 = u1 ^ u2;
+    let t8 = u7 ^ t6;
+    let t9 = u7 ^ t7;
+    let t10 = t6 ^ t7;
+    let t11 = u1 ^ u5;
+    let t12 = u2 ^ u5;
+    let t13 = t3 ^ t4;
+    let t14 = t6 ^ t11;
+    let t15 = t5 ^ t11;
+    let t16 = t5 ^ t12;
+    let t17 = t9 ^ t16;
+    let t18 = u3 ^ u7;
+    let t19 = t7 ^ t18;
+    let t20 = t1 ^ t19;
+    let t21 = u6 ^ u7;
+    let t22 = t7 ^ t21;
+    let t23 = t2 ^ t22;
+    let t24 = t2 ^ t10;
+    let t25 = t20 ^ t17;
+    let t26 = t3 ^ t16;
+    let t27 = t1 ^ t12;
+
+    let m1 = t13 & t6;
+    let m2 = t23 & t8;
+    let m3 = t14 ^ m1;
+    let m4 = t19 & u7;
+    let m5 = m4 ^ m1;
+    let m6 = t3 & t16;
+    let m7 = t22 & t9;
+    let m8 = t26 ^ m6;
+    let m9 = t20 & t17;
+    let m10 = m9 ^ m6;
+    let m11 = t1 & t15;
+    let m12 = t4 & t27;
+    let m13 = m12 ^ m11;
+    let m14 = t2 & t10;
+    let m15 = m14 ^ m11;
+    let m16 = m3 ^ m2;
+    let m17 = m5 ^ t24;
+    let m18 = m8 ^ m7;
+    let m19 = m10 ^ m15;
+    let m20 = m16 ^ m13;
+    let m21 = m17 ^ m15;
+    let m22 = m18 ^ m13;
+    let m23 = m19 ^ t25;
+    let m24 = m22 ^ m23;
+    let m25 = m22 & m20;
+    let m26 = m21 ^ m25;
+    let m27 = m20 ^ m21;
+    let m28 = m23 ^ m25;
+    let m29 = m28 & m27;
+    let m30 = m26 & m24;
+    let m31 = m20 & m23;
+    let m32 = m27 & m31;
+    let m33 = m27 ^ m25;
+    let m34 = m21 & m22;
+    let m35 = m24 & m34;
+    let m36 = m24 ^ m25;
+    let m37 = m21 ^ m29;
+    let m38 = m32 ^ m33;
+    let m39 = m23 ^ m30;
+    let m40 = m35 ^ m36;
+    let m41 = m38 ^ m40;
+    let m42 = m37 ^ m39;
+    let m43 = m37 ^ m38;
+    let m44 = m39 ^ m40;
+    let m45 = m42 ^ m41;
+    let m46 = m44 & t6;
+    let m47 = m40 & t8;
+    let m48 = m39 & u7;
+    let m49 = m43 & t16;
+    let m50 = m38 & t9;
+    let m51 = m37 & t17;
+    let m52 = m42 & t15;
+    let m53 = m45 & t27;
+    let m54 = m41 & t10;
+    let m55 = m44 & t13;
+    let m56 = m40 & t23;
+    let m57 = m39 & t19;
+    let m58 = m43 & t3;
+    let m59 = m38 & t22;
+    let m60 = m37 & t20;
+    let m61 = m42 & t1;
+    let m62 = m45 & t4;
+    let m63 = m41 & t2;
+
+    let l0 = m61 ^ m62;
+    let l1 = m50 ^ m56;
+    let l2 = m46 ^ m48;
+    let l3 = m47 ^ m55;
+    let l4 = m54 ^ m58;
+    let l5 = m49 ^ m61;
+    let l6 = m62 ^ l5;
+    let l7 = m46 ^ l3;
+    let l8 = m51 ^ m59;
+    let l9 = m52 ^ m53;
+    let l10 = m53 ^ l4;
+    let l11 = m60 ^ l2;
+    let l12 = m48 ^ m51;
+    let l13 = m50 ^ l0;
+    let l14 = m52 ^ m61;
+    let l15 = m55 ^ l1;
+    let l16 = m56 ^ l0;
+    let l17 = m57 ^ l1;
+    let l18 = m58 ^ l8;
+    let l19 = m63 ^ l4;
+    let l20 = l0 ^ l1;
+    let l21 = l1 ^ l7;
+    let l22 = l3 ^ l12;
+    let l23 = l18 ^ l2;
+    let l24 = l15 ^ l9;
+    let l25 = l6 ^ l10;
+    let l26 = l7 ^ l9;
+    let l27 = l8 ^ l10;
+    let l28 = l11 ^ l14;
+    let l29 = l11 ^ l17;
+
+    x[7] = l6 ^ l24;
+    x[6] = !(l16 ^ l26);
+    x[5] = !(l19 ^ l28);
+    x[4] = l6 ^ l21;
+    x[3] = l20 ^ l22;
+    x[2] = l25 ^ l29;
+    x[1] = !(l13 ^ l27);
+    x[0] = !(l6 ^ l23);
+}
+
+/// Each sixteen-bit row of `x` rotated right by `shift`, a multiple of four
+/// under sixteen: column `c + shift / 4` of each row brought to column `c`.
+#[inline(always)]
+const fn across(x: u64, shift: u32) -> u64 {
+    const ROWS: u64 = 0x0001_0001_0001_0001;
+    let low = (0xffff_u64 >> shift) * ROWS;
+    let high = ((0xffff_u64 << (16 - shift)) & 0xffff) * ROWS;
+    ((x >> shift) & low) | ((x << (16 - shift)) & high)
+}
+
+/// `x` moved `down` rows and `right` columns: the byte at
+/// `(r + down, c + right)` brought to `(r, c)`, both modulo 4.
+#[inline(always)]
+const fn moved(x: u64, down: u32, right: u32) -> u64 {
+    across(x.rotate_right(16 * down), (4 * right) % 16)
+}
+
+/// `MC_(J) = SR^-J ∘ MixColumns ∘ SR^J` (FIPS 197 5.1.3 conjugated): the
+/// mixing of the bytes `(r + i, c + J·i)`, the column of the state the
+/// fixsliced rounds hold read along a diagonal. With `y` the state XORed
+/// with itself moved a row down and `J` columns across, and `s` the sum of
+/// the four bytes of a diagonal — `y` XORed with itself moved two rows and
+/// `2J` columns — the row `2a_0 ⊕ 3a_1 ⊕ a_2 ⊕ a_3` is `xtime(y) ⊕ s ⊕ a_0`,
+/// and `xtime` on planes is a renaming of them and three XORs, the reduction
+/// by 0x1B.
+#[inline(always)]
+const fn mix<const J: u32>(x: &mut Word, trace: &mut Trace) {
+    let mut y = [0u64; 8];
+    let mut b = 0;
+    while trace.branch(SITE_PLANE, b < 8) {
+        y[b] = x[b] ^ moved(x[b], 1, J);
+        b += 1;
+    }
+    let top = y[7];
+    let doubled = [
+        top,
+        y[0] ^ top,
+        y[1],
+        y[2] ^ top,
+        y[3] ^ top,
+        y[4],
+        y[5],
+        y[6],
+    ];
+    b = 0;
+    while trace.branch(SITE_PLANE, b < 8) {
+        let s = y[b] ^ moved(y[b], 2, 2 * J);
+        x[b] ^= doubled[b] ^ s;
+        b += 1;
+    }
+}
+
+/// Round `round`'s mixing: `MC_(round mod 4)`, the round's index public.
+#[inline(always)]
+const fn mix_columns(x: &mut Word, round: usize, trace: &mut Trace) {
+    let drift = round % 4;
+    trace.choice(SITE_DRIFT, drift);
+    match drift {
+        0 => mix::<0>(x, trace),
+        1 => mix::<1>(x, trace),
+        2 => mix::<2>(x, trace),
+        _ => mix::<3>(x, trace),
+    }
+}
+
+/// `SR²`, ShiftRows twice: rows 1 and 3 moved two columns across, rows 0 and
+/// 2 as they stand.
+#[inline(always)]
+const fn shift_rows_twice(x: &mut Word, trace: &mut Trace) {
+    const ROWS_0_2: u64 = 0x0000_ffff_0000_ffff;
+    let mut b = 0;
+    while trace.branch(SITE_PLANE, b < 8) {
+        x[b] = (x[b] & ROWS_0_2) | (across(x[b], 8) & !ROWS_0_2);
+        b += 1;
+    }
+}
+
+/// AddRoundKey (5.1.4) with a key sliced into every lane.
+#[inline(always)]
+const fn add_round_key(x: &mut Word, key: &Word, trace: &mut Trace) {
+    let mut b = 0;
+    while trace.branch(SITE_PLANE, b < 8) {
+        x[b] ^= key[b];
+        b += 1;
+    }
+}
+
+/// An expanded key: FIPS 197 5.2's words, and its round keys each sliced into
+/// every lane of a word for the fixsliced cipher — round key `i` moved by
+/// `SR^-i` for `0 < i < rounds`, the first and the last as they are.
+#[derive(Clone, Copy)]
+struct Expanded {
+    /// 10 for a 16-byte key, 14 for a 32-byte one.
     rounds: usize,
+    /// The schedule's words, four a round key.
+    words: [[u8; 4]; 4 * (MAX_ROUNDS + 1)],
+    /// The cipher's round keys, sliced.
+    enc: [Word; MAX_ROUNDS + 1],
+}
+
+/// FIPS 197 5.2's SubWord through the circuit: the word in lane 0's first
+/// column, sliced, substituted and unsliced.
+const fn sub_word(word: [u8; 4], trace: &mut Trace) -> [u8; 4] {
+    let mut block = [0u8; 16];
+    block[0] = word[0];
+    block[1] = word[1];
+    block[2] = word[2];
+    block[3] = word[3];
+    let mut planes = slice(&[block, [0; 16], [0; 16], [0; 16]], trace);
+    sub_bytes(&mut planes);
+    let out = unslice(&planes, trace);
+    [out[0][0], out[0][1], out[0][2], out[0][3]]
+}
+
+/// FIPS 197 5.2's key expansion of a 16- or 32-byte key, SubWord run through
+/// the circuit, and the round keys sliced; `None` for any other length.
+///
+/// Every branch is on a public count: the key's length, a word's index in the
+/// schedule and a round's. The round constants are read at a round's index.
+const fn expand(key: &[u8], trace: &mut Trace) -> Option<Expanded> {
+    trace.choice(SITE_KEY_LENGTH, key.len());
+    let (nk, rounds) = match key.len() {
+        16 => (4, 10),
+        32 => (8, 14),
+        _ => return None,
+    };
+    let total = 4 * (rounds + 1);
+    let mut words = [[0u8; 4]; 4 * (MAX_ROUNDS + 1)];
+    let mut i = 0;
+    while trace.branch(SITE_KEY_WORD, i < nk) {
+        words[i] = [key[4 * i], key[4 * i + 1], key[4 * i + 2], key[4 * i + 3]];
+        i += 1;
+    }
+    while trace.branch(SITE_KEY_WORD, i < total) {
+        let mut temp = words[i - 1];
+        if trace.branch(SITE_KEY_ROTATE, i % nk == 0) {
+            temp = sub_word([temp[1], temp[2], temp[3], temp[0]], trace);
+            trace.read(TABLE_RCON, i / nk);
+            temp[0] ^= RCON[i / nk];
+        } else if trace.branch(SITE_KEY_SUBSTITUTE, nk > 6 && i % nk == 4) {
+            // 5.2: AES-256 substitutes the fourth word of each group as well.
+            temp = sub_word(temp, trace);
+        }
+        let before = words[i - nk];
+        words[i] = [
+            before[0] ^ temp[0],
+            before[1] ^ temp[1],
+            before[2] ^ temp[2],
+            before[3] ^ temp[3],
+        ];
+        i += 1;
+    }
+
+    let mut enc = [[0u64; 8]; MAX_ROUNDS + 1];
+    let mut round = 0;
+    while trace.branch(SITE_KEY_ROUND, round <= rounds) {
+        let ends = round == 0 || round == rounds;
+        let drift = if trace.branch(SITE_KEY_MOVE, ends) {
+            0
+        } else {
+            round % 4
+        };
+        // `SR^-drift`: byte (r, c) takes the round key's (r, c - drift·r).
+        let mut bytes = [0u8; 16];
+        let mut c = 0;
+        while trace.branch(SITE_BYTE, c < 4) {
+            let mut r = 0;
+            while trace.branch(SITE_BYTE, r < 4) {
+                bytes[r + 4 * c] = words[4 * round + (c + 4 - (drift * r) % 4) % 4][r];
+                r += 1;
+            }
+            c += 1;
+        }
+        enc[round] = slice(&[bytes; LANES], trace);
+        round += 1;
+    }
+    Some(Expanded { rounds, words, enc })
+}
+
+/// FIPS 197 5.1's cipher, fixsliced, over the four lanes of a word: the state
+/// after round `i` held as `SR^-i` of the cipher's, so that round `i` is
+/// SubBytes, `MC_(i mod 4)` and its moved round key, and ShiftRows runs once,
+/// as `SR²`, before the last round key — the round count being 2 modulo 4 for
+/// both key sizes.
+const fn encrypt_word(keys: &Expanded, x: &mut Word, trace: &mut Trace) {
+    trace.read(TABLE_ROUND_KEY, 0);
+    add_round_key(x, &keys.enc[0], trace);
+    let mut round = 1;
+    while trace.branch(SITE_ROUND, round < keys.rounds) {
+        sub_bytes(x);
+        mix_columns(x, round, trace);
+        trace.read(TABLE_ROUND_KEY, round);
+        add_round_key(x, &keys.enc[round], trace);
+        round += 1;
+    }
+    sub_bytes(x);
+    shift_rows_twice(x, trace);
+    trace.read(TABLE_ROUND_KEY, keys.rounds);
+    add_round_key(x, &keys.enc[keys.rounds], trace);
+}
+
+/// A block through the cipher alone in lane 0 of a word.
+const fn encrypt_alone(keys: &Expanded, block: [u8; 16], trace: &mut Trace) -> [u8; 16] {
+    let mut word = slice(&[block, [0; 16], [0; 16], [0; 16]], trace);
+    encrypt_word(keys, &mut word, trace);
+    unslice(&word, trace)[0]
+}
+
+// ---------------------------------------------------------------------------
+// The core held to FIPS 197 when the crate compiles.
+// ---------------------------------------------------------------------------
+
+const fn same(a: &[u8; 16], b: &[u8; 16]) -> bool {
+    let mut at = 0;
+    while at < 16 {
+        if a[at] != b[at] {
+            return false;
+        }
+        at += 1;
+    }
+    true
+}
+
+/// Whether the circuit is FIPS 197's S-box at all 256 inputs: the inputs in
+/// four words of four lanes, each sliced, substituted and unsliced.
+const fn circuit_is_the_table() -> bool {
+    let mut word = 0;
+    while word < 4 {
+        let mut blocks = [[0u8; 16]; LANES];
+        let mut at = 0;
+        while at < 64 {
+            blocks[at / 16][at % 16] = (64 * word + at) as u8;
+            at += 1;
+        }
+        let mut trace = Trace::new();
+        let mut planes = slice(&blocks, &mut trace);
+        sub_bytes(&mut planes);
+        let out = unslice(&planes, &mut trace);
+        at = 0;
+        while at < 64 {
+            if out[at / 16][at % 16] != SBOX[64 * word + at] {
+                return false;
+            }
+            at += 1;
+        }
+        word += 1;
+    }
+    true
+}
+
+/// Whether slicing puts byte `(r, c)` of lane `l` at bit `16r + 4c + l` of
+/// every plane, and unslicing gives every block back.
+const fn slicing_is_the_layout() -> bool {
+    let mut n = 0;
+    while n < 16 {
+        let mut lane = 0;
+        while lane < LANES {
+            let mut blocks = [[0u8; 16]; LANES];
+            blocks[lane][n] = 0xff;
+            let mut trace = Trace::new();
+            let planes = slice(&blocks, &mut trace);
+            let bit = 1u64 << (16 * (n % 4) + 4 * (n / 4) + lane);
+            let mut b = 0;
+            while b < 8 {
+                if planes[b] != bit {
+                    return false;
+                }
+                b += 1;
+            }
+            let back = unslice(&planes, &mut trace);
+            let mut l = 0;
+            while l < LANES {
+                if !same(&back[l], &blocks[l]) {
+                    return false;
+                }
+                l += 1;
+            }
+            lane += 1;
+        }
+        n += 1;
+    }
+    true
+}
+
+/// Whether `key` takes `plain` to `cipher` alone in lane 0 and in all four
+/// lanes abreast, and four different blocks abreast to what each gives alone.
+const fn cipher_vector(key: &[u8], plain: [u8; 16], cipher: [u8; 16]) -> bool {
+    let mut trace = Trace::new();
+    let Some(keys) = expand(key, &mut trace) else {
+        return false;
+    };
+    if !same(&encrypt_alone(&keys, plain, &mut trace), &cipher) {
+        return false;
+    }
+    let mut word = slice(&[plain; LANES], &mut trace);
+    encrypt_word(&keys, &mut word, &mut trace);
+    let abreast = unslice(&word, &mut trace);
+    let mut blocks = [[0u8; 16]; LANES];
+    let mut lane = 0;
+    while lane < LANES {
+        if !same(&abreast[lane], &cipher) {
+            return false;
+        }
+        let mut at = 0;
+        while at < 16 {
+            blocks[lane][at] = plain[at] ^ ((17 * at + 61 * lane + 5) as u8);
+            at += 1;
+        }
+        lane += 1;
+    }
+    let mut word = slice(&blocks, &mut trace);
+    encrypt_word(&keys, &mut word, &mut trace);
+    let together = unslice(&word, &mut trace);
+    lane = 0;
+    while lane < LANES {
+        if !same(
+            &together[lane],
+            &encrypt_alone(&keys, blocks[lane], &mut trace),
+        ) {
+            return false;
+        }
+        lane += 1;
+    }
+    true
+}
+
+/// The S-box circuit, the slicing and the cipher, held to FIPS 197 — the
+/// table, and appendix B's and C.1's AES-128 blocks and C.3's AES-256 — or
+/// the crate does not compile.
+const _: () = {
+    assert!(
+        circuit_is_the_table(),
+        "the S-box circuit is FIPS 197's table"
+    );
+    assert!(
+        slicing_is_the_layout(),
+        "slicing puts each byte at its row, column and lane"
+    );
+    assert!(
+        cipher_vector(
+            &[
+                0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf,
+                0x4f, 0x3c,
+            ],
+            [
+                0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d, 0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37,
+                0x07, 0x34,
+            ],
+            [
+                0x39, 0x25, 0x84, 0x1d, 0x02, 0xdc, 0x09, 0xfb, 0xdc, 0x11, 0x85, 0x97, 0x19, 0x6a,
+                0x0b, 0x32,
+            ],
+        ),
+        "FIPS 197 appendix B"
+    );
+    assert!(
+        cipher_vector(
+            &[
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f,
+            ],
+            [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
+            ],
+            [
+                0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4,
+                0xc5, 0x5a,
+            ],
+        ),
+        "FIPS 197 C.1"
+    );
+    assert!(
+        cipher_vector(
+            &[
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+                0x1c, 0x1d, 0x1e, 0x1f,
+            ],
+            [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff,
+            ],
+            [
+                0x8e, 0xa2, 0xb7, 0xca, 0x51, 0x67, 0x45, 0xbf, 0xea, 0xfc, 0x49, 0x90, 0x4b, 0x49,
+                0x60, 0x89,
+            ],
+        ),
+        "FIPS 197 C.3"
+    );
+};
+
+/// Key expansions made, counted for `the_aesv3_key_is_expanded_once_per_file`:
+/// compiled only under `cfg(test)` and kept per thread, so tests running side
+/// by side cannot add into each other's.
+#[cfg(test)]
+pub(crate) mod expansions {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static MADE: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// One expansion.
+    pub(crate) fn counted() {
+        MADE.with(|made| made.set(made.get() + 1));
+    }
+
+    /// The expansions counted on this thread since the last call, which
+    /// starts the count again from zero.
+    pub(crate) fn take() -> u64 {
+        MADE.with(|made| made.replace(0))
+    }
+}
+
+/// An expanded AES key. 128- and 256-bit only: PDF has no use for AES-192.
+///
+/// Its round keys are written to zero when it is dropped, and its `Debug`
+/// prints none of them.
+#[derive(Clone)]
+pub struct Aes {
+    keys: Expanded,
+}
+
+impl core::fmt::Debug for Aes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Aes([redacted])")
+    }
+}
+
+impl Drop for Aes {
+    /// The round keys wiped, the stores passed through `black_box` and a
+    /// fence so that they are not dropped as writes to memory about to be
+    /// freed; the crate forbids `unsafe`, so no volatile write.
+    fn drop(&mut self) {
+        let Expanded { words, enc, .. } = &mut self.keys;
+        for word in words.iter_mut() {
+            *word = [0; 4];
+        }
+        for planes in enc.iter_mut() {
+            *planes = [0; 8];
+        }
+        let _ = core::hint::black_box(&mut self.keys);
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl Aes {
@@ -82,104 +873,165 @@ impl Aes {
     /// must decide about.
     #[must_use]
     pub fn new(key: &[u8]) -> Option<Self> {
-        let (nk, rounds) = match key.len() {
-            16 => (4usize, 10usize),
-            32 => (8, 14),
-            _ => return None,
-        };
-
-        let total = 4 * (rounds + 1);
-        let mut words: Vec<[u8; 4]> = Vec::with_capacity(total);
-
-        for chunk in key.chunks_exact(4) {
-            let mut w = [0u8; 4];
-            w.copy_from_slice(chunk);
-            words.push(w);
-        }
-
-        for i in nk..total {
-            let mut temp = words.get(i - 1).copied().unwrap_or([0; 4]);
-            if i % nk == 0 {
-                temp.rotate_left(1);
-                for byte in &mut temp {
-                    *byte = sub(*byte);
-                }
-                let rcon = RCON.get(i / nk).copied().unwrap_or(0);
-                if let Some(first) = temp.first_mut() {
-                    *first ^= rcon;
-                }
-            } else if nk > 6 && i % nk == 4 {
-                // FIPS 197 section 5.2: AES-256 substitutes on the fourth word
-                // of each group as well.
-                for byte in &mut temp {
-                    *byte = sub(*byte);
-                }
-            }
-            let prev = words.get(i - nk).copied().unwrap_or([0; 4]);
-            words.push([
-                prev[0] ^ temp[0],
-                prev[1] ^ temp[1],
-                prev[2] ^ temp[2],
-                prev[3] ^ temp[3],
-            ]);
-        }
-
-        Some(Self { words, rounds })
+        let keys = expand(key, &mut Trace::new())?;
+        #[cfg(test)]
+        expansions::counted();
+        Some(Self { keys })
     }
 
-    fn add_round_key(&self, state: &mut [u8; 16], round: usize) {
+    /// One block through the cipher, alone in lane 0 of a word: the
+    /// single-chain path.
+    fn encrypt_block(&self, block: &mut [u8; 16]) {
+        *block = encrypt_alone(&self.keys, *block, &mut Trace::new());
+    }
+
+    fn add_round_key_bytes(&self, state: &mut [u8; 16], round: usize) {
         for (col, chunk) in state.chunks_exact_mut(4).enumerate() {
-            let w = self.words.get(round * 4 + col).copied().unwrap_or([0; 4]);
+            let w = self
+                .keys
+                .words
+                .get(round * 4 + col)
+                .copied()
+                .unwrap_or([0; 4]);
             for (byte, k) in chunk.iter_mut().zip(w.iter()) {
                 *byte ^= k;
             }
         }
     }
 
-    fn encrypt_block(&self, block: &mut [u8; 16]) {
-        self.add_round_key(block, 0);
-
-        for round in 1..=self.rounds {
-            for byte in block.iter_mut() {
-                *byte = sub(*byte);
-            }
-            shift_rows(block);
-            if round != self.rounds {
-                mix_columns(block);
-            }
-            self.add_round_key(block, round);
-        }
-    }
-
     fn decrypt_block(&self, block: &mut [u8; 16], inv: &[u8; 256]) {
-        self.add_round_key(block, self.rounds);
+        let rounds = self.keys.rounds;
+        self.add_round_key_bytes(block, rounds);
 
-        for round in (1..=self.rounds).rev() {
+        for round in (1..=rounds).rev() {
             inv_shift_rows(block);
             for byte in block.iter_mut() {
                 *byte = inv.get(usize::from(*byte)).copied().unwrap_or(0);
             }
-            self.add_round_key(block, round - 1);
+            self.add_round_key_bytes(block, round - 1);
             if round != 1 {
                 inv_mix_columns(block);
             }
         }
     }
-}
 
-/// State is column-major (FIPS 197 section 3.4): byte `i` is row `i % 4`,
-/// column `i / 4`, so row `r` is the bytes at `r`, `r+4`, `r+8`, `r+12`.
-fn shift_rows(state: &mut [u8; 16]) {
-    for row in 1..4usize {
-        let mut tmp = [0u8; 4];
-        for (col, slot) in tmp.iter_mut().enumerate() {
-            *slot = state.get((col + row) % 4 * 4 + row).copied().unwrap_or(0);
-        }
-        for (col, value) in tmp.iter().enumerate() {
-            if let Some(slot) = state.get_mut(col * 4 + row) {
-                *slot = *value;
+    /// CBC with PKCS#7 padding, the IV prefixed — the layout
+    /// [`Aes::cbc_decrypt_with_iv_prefix`] expects. The whole blocks are read
+    /// where they lie, and only the last, which takes the padding, is built.
+    #[must_use]
+    pub fn cbc_encrypt_with_iv_prefix(&self, iv: &[u8; 16], plain: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(16 + plain.len() + 16);
+        out.extend_from_slice(iv);
+        let mut prev = *iv;
+        let mut chunks = plain.chunks_exact(16);
+        for chunk in &mut chunks {
+            for (byte, p) in prev.iter_mut().zip(chunk) {
+                *byte ^= p;
             }
+            self.encrypt_block(&mut prev);
+            out.extend_from_slice(&prev);
         }
+        let rest = chunks.remainder();
+        let pad = 16 - rest.len();
+        let mut last = [pad as u8; 16];
+        if let Some(head) = last.get_mut(..rest.len()) {
+            head.copy_from_slice(rest);
+        }
+        for (byte, p) in prev.iter_mut().zip(last) {
+            *byte ^= p;
+        }
+        self.encrypt_block(&mut prev);
+        out.extend_from_slice(&prev);
+        out
+    }
+
+    /// Decrypts CBC ciphertext whose first 16 bytes are the IV, stripping
+    /// PKCS#7 padding (7.6.2).
+    ///
+    /// Never fails: damage returns the plaintext recovered so far with a
+    /// note, per the leniency policy every reading path in this engine
+    /// follows.
+    #[must_use]
+    pub fn cbc_decrypt_with_iv_prefix(&self, data: &[u8]) -> (Vec<u8>, Vec<AesNote>) {
+        let mut notes = Vec::new();
+        let Some((iv, body)) = data.split_at_checked(16) else {
+            return (Vec::new(), vec![AesNote::TooShort]);
+        };
+        if body.len() < 16 {
+            return (Vec::new(), vec![AesNote::TooShort]);
+        }
+        if body.len() % 16 != 0 {
+            notes.push(AesNote::RaggedTail);
+        }
+
+        let inv = inv_sbox();
+        let mut prev = [0u8; 16];
+        prev.copy_from_slice(iv);
+
+        let mut out = Vec::with_capacity(body.len());
+        for chunk in body.chunks_exact(16) {
+            let mut block = [0u8; 16];
+            block.copy_from_slice(chunk);
+            let cipher = block;
+            self.decrypt_block(&mut block, &inv);
+            for (byte, p) in block.iter_mut().zip(prev.iter()) {
+                *byte ^= p;
+            }
+            out.extend_from_slice(&block);
+            prev = cipher;
+        }
+
+        match out.last().copied() {
+            Some(pad @ 1..=16) if usize::from(pad) <= out.len() => {
+                let keep = out.len() - usize::from(pad);
+                if out.get(keep..).is_some_and(|t| t.iter().all(|&b| b == pad)) {
+                    out.truncate(keep);
+                } else {
+                    notes.push(AesNote::BadPadding);
+                }
+            }
+            _ => notes.push(AesNote::BadPadding),
+        }
+
+        (out, notes)
+    }
+
+    /// CBC encryption with an explicit IV and no padding: Algorithm 2.B's
+    /// inner loop (7.6.4.3.4), where the input is always a whole number of
+    /// blocks; a ragged tail is left out.
+    #[must_use]
+    pub fn cbc_encrypt_no_padding(&self, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(data.len());
+        let mut prev = *iv;
+        for chunk in data.chunks_exact(16) {
+            for (byte, p) in prev.iter_mut().zip(chunk) {
+                *byte ^= p;
+            }
+            self.encrypt_block(&mut prev);
+            out.extend_from_slice(&prev);
+        }
+        out
+    }
+
+    /// CBC decryption with an explicit IV and no padding: how revision 6
+    /// unwraps `/UE` and `/OE` (7.6.4.3.3); a ragged tail is left out.
+    #[must_use]
+    pub fn cbc_decrypt_no_padding(&self, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
+        let inv = inv_sbox();
+        let mut out = Vec::with_capacity(data.len());
+        let mut prev = *iv;
+        for chunk in data.chunks_exact(16) {
+            let mut block = [0u8; 16];
+            block.copy_from_slice(chunk);
+            let cipher = block;
+            self.decrypt_block(&mut block, &inv);
+            for (byte, p) in block.iter_mut().zip(prev.iter()) {
+                *byte ^= p;
+            }
+            out.extend_from_slice(&block);
+            prev = cipher;
+        }
+        out
     }
 }
 
@@ -194,16 +1046,6 @@ fn inv_shift_rows(state: &mut [u8; 16]) {
                 *slot = *value;
             }
         }
-    }
-}
-
-fn mix_columns(state: &mut [u8; 16]) {
-    for col in state.chunks_exact_mut(4) {
-        let [a0, a1, a2, a3] = [col[0], col[1], col[2], col[3]];
-        col[0] = mul(a0, 2) ^ mul(a1, 3) ^ a2 ^ a3;
-        col[1] = a0 ^ mul(a1, 2) ^ mul(a2, 3) ^ a3;
-        col[2] = a0 ^ a1 ^ mul(a2, 2) ^ mul(a3, 3);
-        col[3] = mul(a0, 3) ^ a1 ^ a2 ^ mul(a3, 2);
     }
 }
 
@@ -230,131 +1072,40 @@ pub enum AesNote {
 }
 
 /// Decrypts CBC ciphertext whose first 16 bytes are the IV, stripping PKCS#7
-/// padding (7.6.2).
+/// padding (7.6.2): [`Aes::cbc_decrypt_with_iv_prefix`] under `key`, expanded
+/// for this call.
 ///
 /// Never fails: damage returns the plaintext recovered so far with a note, per
-/// the leniency policy every reading path in this engine follows.
+/// the leniency policy every reading path in this engine follows; a key AES
+/// does not take returns nothing and [`AesNote::TooShort`].
 #[must_use]
 pub fn cbc_decrypt_with_iv_prefix(key: &[u8], data: &[u8]) -> (Vec<u8>, Vec<AesNote>) {
-    let mut notes = Vec::new();
-
     let Some(aes) = Aes::new(key) else {
         return (Vec::new(), vec![AesNote::TooShort]);
     };
-    let Some((iv, body)) = data.split_at_checked(16) else {
-        return (Vec::new(), vec![AesNote::TooShort]);
-    };
-    if body.len() < 16 {
-        return (Vec::new(), vec![AesNote::TooShort]);
-    }
-    if body.len() % 16 != 0 {
-        notes.push(AesNote::RaggedTail);
-    }
-
-    let inv = inv_sbox();
-    let mut prev = [0u8; 16];
-    prev.copy_from_slice(iv);
-
-    let mut out = Vec::with_capacity(body.len());
-    for chunk in body.chunks_exact(16) {
-        let mut block = [0u8; 16];
-        block.copy_from_slice(chunk);
-        let cipher = block;
-        aes.decrypt_block(&mut block, &inv);
-        for (byte, p) in block.iter_mut().zip(prev.iter()) {
-            *byte ^= p;
-        }
-        out.extend_from_slice(&block);
-        prev = cipher;
-    }
-
-    match out.last().copied() {
-        Some(pad @ 1..=16) if usize::from(pad) <= out.len() => {
-            let keep = out.len() - usize::from(pad);
-            if out.get(keep..).is_some_and(|t| t.iter().all(|&b| b == pad)) {
-                out.truncate(keep);
-            } else {
-                notes.push(AesNote::BadPadding);
-            }
-        }
-        _ => notes.push(AesNote::BadPadding),
-    }
-
-    (out, notes)
+    aes.cbc_decrypt_with_iv_prefix(data)
 }
 
 /// Encrypts with CBC and PKCS#7 padding, prefixing the given IV — the layout
-/// [`cbc_decrypt_with_iv_prefix`] expects.
+/// [`cbc_decrypt_with_iv_prefix`] expects: [`Aes::cbc_encrypt_with_iv_prefix`]
+/// under `key`, expanded for this call.
 #[must_use]
 pub fn cbc_encrypt_with_iv_prefix(key: &[u8], iv: &[u8; 16], plain: &[u8]) -> Option<Vec<u8>> {
-    let aes = Aes::new(key)?;
-
-    let pad = 16 - (plain.len() % 16);
-    let mut padded = plain.to_vec();
-    padded.extend(std::iter::repeat_n(pad as u8, pad));
-
-    let mut out = Vec::with_capacity(16 + padded.len());
-    out.extend_from_slice(iv);
-
-    let mut prev = *iv;
-    for chunk in padded.chunks_exact(16) {
-        let mut block = [0u8; 16];
-        block.copy_from_slice(chunk);
-        for (byte, p) in block.iter_mut().zip(prev.iter()) {
-            *byte ^= p;
-        }
-        aes.encrypt_block(&mut block);
-        out.extend_from_slice(&block);
-        prev = block;
-    }
-
-    Some(out)
+    Some(Aes::new(key)?.cbc_encrypt_with_iv_prefix(iv, plain))
 }
 
 /// CBC encryption with an explicit IV and no padding: Algorithm 2.B's inner
 /// loop (7.6.4.3.4), where the input is always a whole number of blocks.
 #[must_use]
 pub fn cbc_encrypt_no_padding(key: &[u8], iv: &[u8; 16], data: &[u8]) -> Option<Vec<u8>> {
-    let aes = Aes::new(key)?;
-
-    let mut out = Vec::with_capacity(data.len());
-    let mut prev = *iv;
-    for chunk in data.chunks_exact(16) {
-        let mut block = [0u8; 16];
-        block.copy_from_slice(chunk);
-        for (byte, p) in block.iter_mut().zip(prev.iter()) {
-            *byte ^= p;
-        }
-        aes.encrypt_block(&mut block);
-        out.extend_from_slice(&block);
-        prev = block;
-    }
-
-    Some(out)
+    Some(Aes::new(key)?.cbc_encrypt_no_padding(iv, data))
 }
 
 /// CBC decryption with an explicit IV and no padding: how revision 6 unwraps
 /// `/UE` and `/OE` (7.6.4.3.3).
 #[must_use]
 pub fn cbc_decrypt_no_padding(key: &[u8], iv: &[u8; 16], data: &[u8]) -> Option<Vec<u8>> {
-    let aes = Aes::new(key)?;
-    let inv = inv_sbox();
-
-    let mut out = Vec::with_capacity(data.len());
-    let mut prev = *iv;
-    for chunk in data.chunks_exact(16) {
-        let mut block = [0u8; 16];
-        block.copy_from_slice(chunk);
-        let cipher = block;
-        aes.decrypt_block(&mut block, &inv);
-        for (byte, p) in block.iter_mut().zip(prev.iter()) {
-            *byte ^= p;
-        }
-        out.extend_from_slice(&block);
-        prev = cipher;
-    }
-
-    Some(out)
+    Some(Aes::new(key)?.cbc_decrypt_no_padding(iv, data))
 }
 
 #[cfg(test)]
@@ -782,5 +1533,100 @@ mod tests {
             let _ = cbc_decrypt_with_iv_prefix(&key, &data);
         }
         assert!(Aes::new(&[0u8; 24]).is_none(), "AES-192 is not offered");
+    }
+
+    /// A stream of bytes for the trace tests: xorshift, deterministic.
+    struct Bytes(u64);
+
+    impl Bytes {
+        fn next(&mut self) -> u8 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            (self.0 >> 24) as u8
+        }
+
+        fn fill(&mut self, bytes: &mut [u8]) {
+            for byte in bytes {
+                *byte = self.next();
+            }
+        }
+    }
+
+    /// **The encryption core reads no secret-indexed table and branches
+    /// alike** (P-13.4).
+    ///
+    /// The core records in test builds every table it reads, as the table and
+    /// the index, and every condition it tests, as the site and the outcome.
+    /// Over random keys of both lengths, and random blocks in every lane —
+    /// one lane filled, as a lone chain fills it, and all four — the key
+    /// expansion leaves one trace for each key length and the cipher one for
+    /// each, so no read is indexed by a key or a state byte and no branch
+    /// turns on one; the traces are not empty, and they do tell two lengths
+    /// apart, whose round counts are public. A read made at a key byte's
+    /// index, through the same trace, comes out differently for two keys:
+    /// the trace sees an index that moves.
+    #[test]
+    fn the_core_reads_no_secret_indexed_table_and_branches_alike() {
+        let mut bytes = Bytes(0x7472_6163_6573_6564);
+        let mut seen = Vec::new();
+        for length in [16usize, 32] {
+            let (mut schedule_of, mut cipher_of): (Option<Trace>, Option<Trace>) = (None, None);
+            for trial in 0..300 {
+                let mut key = vec![0u8; length];
+                bytes.fill(&mut key);
+                let mut blocks = [[0u8; 16]; LANES];
+                let filled = if trial % 2 == 0 { 1 } else { LANES };
+                for block in blocks.iter_mut().take(filled) {
+                    bytes.fill(block);
+                }
+
+                let mut schedule = Trace::new();
+                let keys = expand(&key, &mut schedule).expect("the key expands");
+                let mut cipher = Trace::new();
+                let mut word = slice(&blocks, &mut cipher);
+                encrypt_word(&keys, &mut word, &mut cipher);
+                let out = unslice(&word, &mut cipher);
+                assert_ne!(out, blocks, "the cipher ran");
+
+                assert!(
+                    schedule.reads > 0 && schedule.branches > 0,
+                    "the schedule recorded"
+                );
+                assert!(
+                    cipher.reads > 0 && cipher.branches > 0,
+                    "the cipher recorded"
+                );
+                match (&schedule_of, &cipher_of) {
+                    (Some(first_schedule), Some(first_cipher)) => {
+                        assert_eq!(
+                            schedule, *first_schedule,
+                            "{length}-byte key, trial {trial}: the schedule's reads and branches"
+                        );
+                        assert_eq!(
+                            cipher, *first_cipher,
+                            "{length}-byte key, trial {trial}: the cipher's reads and branches"
+                        );
+                    }
+                    _ => {
+                        schedule_of = Some(schedule);
+                        cipher_of = Some(cipher);
+                    }
+                }
+            }
+            seen.push((schedule_of, cipher_of));
+        }
+        assert_ne!(
+            seen[0], seen[1],
+            "the two key lengths, public, are told apart"
+        );
+
+        let (mut one, mut two) = (Trace::new(), Trace::new());
+        one.read(TABLE_ROUND_KEY, usize::from(0x17u8));
+        two.read(TABLE_ROUND_KEY, usize::from(0xc4u8));
+        assert_ne!(
+            one, two,
+            "a read at a moving index leaves a different trace"
+        );
     }
 }

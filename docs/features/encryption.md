@@ -30,6 +30,19 @@ Algorithm 2.A); R5, the withdrawn draft, reads with a warning and a single
 SHA-256 in place of the rounds ([pdf20-deltas](../pdf20-deltas.md)). Every
 password and hash comparison is constant-time (`constant_time_eq`).
 
+**AES encryption is constant-time** ([design](../design/crypto-throughput.md)).
+It runs on a sliced core: the state is eight planes of 64-bit words, each
+plane one bit of every byte of four blocks, SubBytes a boolean circuit over the
+planes and the linear layers shifts and XORs, so no table is read at an index
+a state or key byte chooses and nothing branches on either; the key schedule
+runs SubWord through the same circuit. A lone CBC chain is one block a pass.
+The circuit and the cipher are held to FIPS 197 when the crate compiles. An
+`Aes` is an expanded key, its round keys wiped when it is dropped and never
+printed, and a `FileKey` expands an `/AESV3` file key once, as it is made, for
+every string and stream of the file; `/AESV2` expands its per-object key an
+object. AES decryption reads an inverse S-box table and branches on the
+multiplier's bits in GF(2^8), so it makes no constant-time claim.
+
 Ciphers are resolved through `/CF`, `/StmF` and `/StrF` (7.6.5 Tables 24
 and 25): `V2` is RC4, `AESV2` is AES-128-CBC with an IV prefix, `AESV3` is
 AES-256-CBC keyed by the file key itself. Before `/V 4` everything is RC4.
@@ -287,9 +300,17 @@ position, the substitution-table, permutation-operation and
 inverse-permutation KATs, and the two multi-block message tests. The five KATs
 are all keyed `K1 = K2 = K3` and all single-block, so between them they cannot
 see EDE3's *order*, the CBC chain, or the 16-byte key bundle at all; the
-three-key file sees the first two and the two-key file the third. `handler.rs`
-pins constant-time comparison and Algorithm 2.B termination, and `lib.rs` the
-`/P -2056` fixture that reads "printing denied, copying permitted" correctly.
+three-key file sees the first two and the two-key file the third. AES
+encryption's circuit, slicing and cipher are held to FIPS 197's S-box at all
+256 inputs and to appendix B's, C.1's and C.3's blocks in every lane by a
+`const` item, so a wrong gate fails the build; and
+`the_core_reads_no_secret_indexed_table_and_branches_alike` (`aes.rs`) records
+every table read and branch the encryption core and its key schedule make,
+one trace over random keys and blocks of each key length. `handler.rs` pins
+constant-time comparison, Algorithm 2.B termination and one expansion of an
+`/AESV3` file key a file (`the_aesv3_key_is_expanded_once_per_file`), and
+`lib.rs` the `/P -2056` fixture that reads "printing denied, copying
+permitted" correctly.
 
 `crates/tinker-pdf-cos/tests/encryption.rs` decrypts real encrypted
 fixtures: user and owner passwords told apart, a wrong password refused,

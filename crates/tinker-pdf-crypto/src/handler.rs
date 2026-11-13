@@ -109,11 +109,30 @@ pub struct HandlerParams {
 pub struct FileKey {
     /// The file encryption key.
     key: Vec<u8>,
+    /// The file key expanded, once, where a method is `/AESV3`, which keys
+    /// every string and stream with the file key itself (7.6.4.3.3); `None`
+    /// where no method is, or where AES does not take the key.
+    aes: Option<aes::Aes>,
     outcome: AuthOutcome,
     revision: i64,
     stream_method: CryptMethod,
     string_method: CryptMethod,
     notes: Vec<HandlerNote>,
+}
+
+/// The expansion `FileKey` keeps: the file key under AES where either method
+/// is `/AESV3`, and nothing otherwise — `/AESV2` keys each object apart
+/// (7.6.2), so it expands an object key an object.
+fn expanded_v3(
+    key: &[u8],
+    stream_method: CryptMethod,
+    string_method: CryptMethod,
+) -> Option<aes::Aes> {
+    if stream_method == CryptMethod::AesV3 || string_method == CryptMethod::AesV3 {
+        aes::Aes::new(key)
+    } else {
+        None
+    }
 }
 
 impl FileKey {
@@ -143,6 +162,7 @@ impl FileKey {
         outcome: AuthOutcome,
     ) -> FileKey {
         FileKey {
+            aes: expanded_v3(&key, stream_method, string_method),
             key,
             outcome,
             revision,
@@ -230,8 +250,13 @@ impl FileKey {
                 aes::cbc_decrypt_with_iv_prefix(&key, data).0
             }
             // 7.6.4.3.3: revision 6 uses the file key directly; there is no
-            // per-object salting.
-            CryptMethod::AesV3 => aes::cbc_decrypt_with_iv_prefix(&self.key, data).0,
+            // per-object salting, so the key is the one expanded with the
+            // file's. One AES does not take decrypts to nothing.
+            CryptMethod::AesV3 => self
+                .aes
+                .as_ref()
+                .map(|aes| aes.cbc_decrypt_with_iv_prefix(data).0)
+                .unwrap_or_default(),
         }
     }
 
@@ -282,10 +307,12 @@ impl FileKey {
                 aes::cbc_encrypt_with_iv_prefix(&key, &self.iv(num, gen, nonce), data)
             }
             // 7.6.4.3.3: revision 6 uses the file key directly; there is no
-            // per-object salting.
-            CryptMethod::AesV3 => {
-                aes::cbc_encrypt_with_iv_prefix(&self.key, &self.iv(num, gen, nonce), data)
-            }
+            // per-object salting, so the key is the one expanded with the
+            // file's.
+            CryptMethod::AesV3 => self
+                .aes
+                .as_ref()
+                .map(|aes| aes.cbc_encrypt_with_iv_prefix(&self.iv(num, gen, nonce), data)),
         }
     }
 
@@ -360,6 +387,7 @@ pub fn authenticate(params: &HandlerParams, password: &[u8]) -> Option<FileKey> 
     let (key, outcome) = key?;
 
     Some(FileKey {
+        aes: expanded_v3(&key, params.stream_method, params.string_method),
         key,
         outcome,
         revision,
@@ -641,12 +669,7 @@ fn check_perms(params: &HandlerParams, key: &[u8], notes: &mut Vec<HandlerNote>)
     };
     // ECB over the single block, which is what CBC with a zero IV amounts to
     // for one block.
-    let _ = aes_key;
-    let Some(plain) =
-        aes::cbc_decrypt_no_padding(key, &[0u8; 16], params.perms.get(..16).unwrap_or(&[]))
-    else {
-        return;
-    };
+    let plain = aes_key.cbc_decrypt_no_padding(&[0u8; 16], params.perms.get(..16).unwrap_or(&[]));
 
     let sentinel_ok = plain.get(9..12) == Some(b"adb");
     let p_ok = match plain.get(..4) {
@@ -818,16 +841,15 @@ mod tests {
         ];
 
         for (method, revision, key_len) in cases {
-            let key = FileKey {
-                key: (0..key_len)
+            let key = FileKey::from_derived(
+                (0..key_len)
                     .map(|i| (i as u8).wrapping_mul(37).wrapping_add(0x5A))
                     .collect(),
-                outcome: AuthOutcome::User,
                 revision,
-                stream_method: method,
-                string_method: method,
-                notes: Vec::new(),
-            };
+                method,
+                method,
+                AuthOutcome::User,
+            );
             for (nonce, plain) in payloads.iter().enumerate() {
                 let sealed = key.encrypt_stream(7, 0, plain);
                 assert_eq!(
@@ -941,6 +963,110 @@ mod tests {
             );
             assert_eq!(key.seals(), sealed, "a {length}-byte key");
         }
+    }
+
+    /// **The AESV3 file key is expanded once a file** (P-13.4).
+    ///
+    /// Key expansions are counted. A file key made with an `/AESV3` method —
+    /// handed over by another handler or reached by authenticating a
+    /// revision-6 file — is expanded once, as it is made, and sealing and
+    /// opening forty streams and forty strings of it expands nothing more,
+    /// asking whether it seals included. A file key whose methods are neither
+    /// expands nothing as it is made, and `/AESV2` still expands an object
+    /// key an object (7.6.2).
+    #[test]
+    fn the_aesv3_key_is_expanded_once_per_file() {
+        let bytes: Vec<u8> = (0..32u8)
+            .map(|i| i.wrapping_mul(29).wrapping_add(7))
+            .collect();
+        let exercise = |file: &FileKey| {
+            for num in 1..=40u32 {
+                let stream = format!("stream {num} of the file").into_bytes();
+                let sealed = file.encrypt_stream(num, 0, &stream);
+                assert_ne!(sealed, stream, "stream {num} sealed");
+                assert_eq!(file.decrypt_stream(num, 0, &sealed), stream, "stream {num}");
+                let string = format!("({num})").into_bytes();
+                let sealed = file.encrypt_string(num, 0, num, &string);
+                assert_eq!(file.decrypt_string(num, 0, &sealed), string, "string {num}");
+            }
+            assert!(file.seals());
+        };
+
+        crate::aes::expansions::take();
+        let file = FileKey::from_derived(
+            bytes.clone(),
+            6,
+            CryptMethod::AesV3,
+            CryptMethod::AesV3,
+            AuthOutcome::User,
+        );
+        assert_eq!(
+            crate::aes::expansions::take(),
+            1,
+            "the file key, expanded as it is made"
+        );
+        exercise(&file);
+        assert_eq!(
+            crate::aes::expansions::take(),
+            0,
+            "no string or stream expanded it again"
+        );
+
+        let built = build_r6(b"user", b"owner", -4, true, &[0x5a; 48]).expect("a handler");
+        let params = HandlerParams {
+            v: 5,
+            r: 6,
+            length_bits: 256,
+            o: built.o,
+            u: built.u,
+            oe: built.oe,
+            ue: built.ue,
+            perms: built.perms,
+            p: -4,
+            id_first: vec![0u8; 16],
+            encrypt_metadata: true,
+            stream_method: CryptMethod::AesV3,
+            string_method: CryptMethod::AesV3,
+        };
+        let opened = authenticate(&params, b"user").expect("the user password opens it");
+        assert_eq!(opened.key(), &built.file_key[..]);
+        crate::aes::expansions::take();
+        exercise(&opened);
+        assert_eq!(
+            crate::aes::expansions::take(),
+            0,
+            "an authenticated file key keeps its expansion"
+        );
+
+        let none = FileKey::from_derived(
+            bytes.clone(),
+            4,
+            CryptMethod::Rc4,
+            CryptMethod::Identity,
+            AuthOutcome::User,
+        );
+        assert_eq!(
+            crate::aes::expansions::take(),
+            0,
+            "no AES method, no expansion"
+        );
+        let _ = none.encrypt_stream(1, 0, b"x");
+
+        let per_object = FileKey::from_derived(
+            bytes[..16].to_vec(),
+            4,
+            CryptMethod::AesV2,
+            CryptMethod::AesV2,
+            AuthOutcome::User,
+        );
+        assert_eq!(crate::aes::expansions::take(), 0);
+        let _ = per_object.encrypt_stream(1, 0, b"x");
+        let _ = per_object.encrypt_stream(2, 0, b"y");
+        assert_eq!(
+            crate::aes::expansions::take(),
+            2,
+            "AESV2: an object key an object"
+        );
     }
 
     #[test]
