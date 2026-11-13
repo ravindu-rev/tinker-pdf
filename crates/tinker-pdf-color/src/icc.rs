@@ -970,7 +970,19 @@ impl Grid {
     /// The grid read at `cells` and `fractions`, one of each an input: the
     /// interpolation every conversion through the grid shares.
     fn read_at(&self, lut: &Lut, cells: &[usize; 4], fractions: &[i64; 4]) -> (u8, u8, u8) {
-        let nodes = self.nodes();
+        self.read_with(lut, self.nodes(), self.encoding.table(), cells, fractions)
+    }
+
+    /// [`Grid::read_at`] over `nodes`, this grid's, and `table`, its
+    /// encoding's: what a row hoists out of its loop.
+    fn read_with(
+        &self,
+        lut: &Lut,
+        nodes: &[AtomicU64],
+        table: &EncodingTable,
+        cells: &[usize; 4],
+        fractions: &[i64; 4],
+    ) -> (u8, u8, u8) {
         let points = self.points;
         let light = match self.inputs {
             1 => {
@@ -1003,7 +1015,6 @@ impl Grid {
                     .map(|c| round_shift((low[c] << 16) + fractions[3] * (high[c] - low[c]), 32))
             }
         };
-        let table = self.encoding.table();
         (
             table.encode(light[0]),
             table.encode(light[1]),
@@ -1742,10 +1753,13 @@ pub struct Transform {
     /// The grid `lut` is read through, where it takes one, three or four
     /// inputs.
     grid: Option<Grid>,
+    /// What a row of 8-bit samples converts through, built at the first row
+    /// ([`Transform::convert_row`]).
+    row: OnceLock<RowTables>,
 }
 
 /// A copy converts as the original does; its grid starts with no node
-/// filled, which no conversion can tell.
+/// filled and its row tables unbuilt, which no conversion can tell.
 impl Clone for Transform {
     fn clone(&self) -> Self {
         Transform {
@@ -1754,7 +1768,36 @@ impl Clone for Transform {
             inputs: self.inputs,
             lut: self.lut.clone(),
             grid: self.grid.clone(),
+            row: OnceLock::new(),
         }
+    }
+}
+
+/// What [`Transform::convert_row`] reads a byte through, one set a
+/// transform (`docs/design/icc.md`, P-22, "The row path").
+enum RowTables {
+    /// A grid over three or four inputs: each byte's cell and 16-bit
+    /// fraction on an axis, every axis having the grid's points. The same
+    /// function [`Grid::read`] locates a component with, at `byte / 255`.
+    Grid(Box<[(usize, i64)]>),
+    /// A matrix/TRC transform: for each channel, each byte's curve entry in
+    /// s15.16, as [`Transform::apply`] reads it.
+    Matrix(Box<[[i64; 256]; 3]>),
+    /// A transform over one input: the colour each byte converts to.
+    Colours(Box<[[u8; 3]]>),
+    /// Any other input count: a pixel at a time through `apply`.
+    Pixels,
+}
+
+/// Which table a row reads, and not its 768 entries.
+impl std::fmt::Debug for RowTables {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RowTables::Grid(_) => "RowTables::Grid",
+            RowTables::Matrix(_) => "RowTables::Matrix",
+            RowTables::Colours(_) => "RowTables::Colours",
+            RowTables::Pixels => "RowTables::Pixels",
+        })
     }
 }
 
@@ -1812,6 +1855,7 @@ impl Transform {
                     inputs: 3,
                     lut: None,
                     grid: None,
+                    row: OnceLock::new(),
                 })
             }
             // A table is already the transform: its curves arrived sampled and
@@ -1826,6 +1870,7 @@ impl Transform {
                     inputs: lut.inputs,
                     grid: Grid::over(&lut),
                     lut: Some(lut),
+                    row: OnceLock::new(),
                 })
             }
             Model::Grey { lab, curve, .. } => {
@@ -1858,6 +1903,7 @@ impl Transform {
                     inputs: 1,
                     lut: None,
                     grid: None,
+                    row: OnceLock::new(),
                 })
             }
         }
@@ -1867,6 +1913,145 @@ impl Transform {
     #[must_use]
     pub const fn inputs(&self) -> usize {
         self.inputs
+    }
+
+    /// Converts every whole pixel of `samples` — [`Transform::inputs`] bytes
+    /// a pixel, each component its byte over 255 — onto the end of `rgb`,
+    /// three bytes a pixel, each the colour [`Transform::apply`] gives the
+    /// same components.
+    ///
+    /// The 8-bit row path (`docs/design/icc.md`, P-22, "The row path"): a
+    /// transform read through a grid over three or four inputs locates each
+    /// byte through one 256-entry table of cell and fraction and reads the
+    /// grid as `apply` does, the nodes and the encoding table fetched once a
+    /// row; a matrix/TRC transform indexes each channel's curve through a
+    /// 256-entry table of the entry `apply` reads, then multiplies and
+    /// encodes as `apply` does, term for term; a transform over one input
+    /// reads a 256-entry table of the colour each byte converts to. The
+    /// tables are built at the first row, once a transform, and a row
+    /// computes in integers with no float and no call of `apply`. Any other
+    /// input count converts a pixel at a time through `apply`. Bytes after
+    /// the last whole pixel are not a pixel and are passed over.
+    pub fn convert_row(&self, samples: &[u8], rgb: &mut Vec<u8>) {
+        let inputs = self.inputs.max(1);
+        rgb.reserve((samples.len() / inputs).saturating_mul(3));
+        match self.row_tables() {
+            RowTables::Grid(axis) => {
+                let (Some(lut), Some(grid)) = (&self.lut, &self.grid) else {
+                    return;
+                };
+                let nodes = grid.nodes();
+                let table = grid.encoding.table();
+                let at = |byte: u8| axis.get(usize::from(byte)).copied().unwrap_or((0, 0));
+                if grid.inputs == 3 {
+                    for pixel in samples.chunks_exact(3) {
+                        let [(c0, f0), (c1, f1), (c2, f2)] =
+                            [at(pixel[0]), at(pixel[1]), at(pixel[2])];
+                        let (r, g, b) =
+                            grid.read_with(lut, nodes, table, &[c0, c1, c2, 0], &[f0, f1, f2, 0]);
+                        rgb.extend_from_slice(&[r, g, b]);
+                    }
+                } else {
+                    for pixel in samples.chunks_exact(4) {
+                        let [(c0, f0), (c1, f1), (c2, f2), (c3, f3)] =
+                            [at(pixel[0]), at(pixel[1]), at(pixel[2]), at(pixel[3])];
+                        let (r, g, b) =
+                            grid.read_with(lut, nodes, table, &[c0, c1, c2, c3], &[f0, f1, f2, f3]);
+                        rgb.extend_from_slice(&[r, g, b]);
+                    }
+                }
+            }
+            RowTables::Matrix(channels) => {
+                for pixel in samples.chunks_exact(3) {
+                    let linear = [
+                        channels[0][usize::from(pixel[0])],
+                        channels[1][usize::from(pixel[1])],
+                        channels[2][usize::from(pixel[2])],
+                    ];
+                    let mut out = [0u8; 3];
+                    for (row, slot) in out.iter_mut().enumerate() {
+                        let mut sum = 0i64;
+                        for (column, value) in linear.iter().enumerate() {
+                            sum += i64::from(self.matrix[row][column]) * value / ONE;
+                        }
+                        *slot = encode_srgb(sum);
+                    }
+                    rgb.extend_from_slice(&out);
+                }
+            }
+            RowTables::Colours(colours) => {
+                for &byte in samples {
+                    let colour = colours.get(usize::from(byte)).copied().unwrap_or([0; 3]);
+                    rgb.extend_from_slice(&colour);
+                }
+            }
+            RowTables::Pixels => {
+                let mut components = vec![0.0f64; inputs];
+                for pixel in samples.chunks_exact(inputs) {
+                    for (slot, &byte) in components.iter_mut().zip(pixel) {
+                        *slot = f64::from(byte) / 255.0;
+                    }
+                    let (r, g, b) = self.apply(&components);
+                    rgb.extend_from_slice(&[r, g, b]);
+                }
+            }
+        }
+    }
+
+    /// The tables [`Transform::convert_row`] reads, built now if no row has
+    /// been converted yet.
+    fn row_tables(&self) -> &RowTables {
+        self.row.get_or_init(|| {
+            #[cfg(test)]
+            tests::ROW_TABLE_BUILDS.with(|count| count.set(count.get() + 1));
+            let component = |byte: u8| f64::from(byte) / 255.0;
+            match (&self.lut, &self.grid) {
+                (Some(lut), Some(grid)) if grid.inputs == 1 => RowTables::Colours(
+                    (0..=u8::MAX)
+                        .map(|byte| {
+                            let (cell, fraction) = locate(component(byte), grid.points);
+                            let (r, g, b) =
+                                grid.read_at(lut, &[cell, 0, 0, 0], &[fraction, 0, 0, 0]);
+                            [r, g, b]
+                        })
+                        .collect(),
+                ),
+                (Some(_), Some(grid)) => RowTables::Grid(
+                    (0..=u8::MAX)
+                        .map(|byte| locate(component(byte), grid.points))
+                        .collect(),
+                ),
+                (None, _) if self.inputs == 3 => {
+                    let mut channels = Box::new([[0i64; 256]; 3]);
+                    for (channel, table) in channels.iter_mut().enumerate() {
+                        let curve = self
+                            .curves
+                            .get(channel.min(self.curves.len().saturating_sub(1)));
+                        for (byte, slot) in (0..=u8::MAX).zip(table.iter_mut()) {
+                            // `apply`'s own reading of a component: its
+                            // curve's entry at the nearest of 4 096, in s15.16.
+                            let entry =
+                                (component(byte) * (CURVE_ENTRIES - 1) as f64).round() as usize;
+                            let sampled = curve
+                                .and_then(|c| c.get(entry.min(CURVE_ENTRIES - 1)))
+                                .copied()
+                                .unwrap_or(0);
+                            *slot = i64::from(sampled) * ONE / 65535;
+                        }
+                    }
+                    RowTables::Matrix(channels)
+                }
+                (None, _) if self.inputs == 1 => RowTables::Colours(
+                    (0..=u8::MAX)
+                        .map(|byte| {
+                            let (r, g, b) = self.evaluate(&[component(byte)]);
+                            [r, g, b]
+                        })
+                        .collect(),
+                ),
+                _ => RowTables::Pixels,
+            }
+        })
     }
 
     /// Converts one colour to 8-bit sRGB.
@@ -2073,6 +2258,9 @@ pub(crate) mod tests {
             const { std::cell::Cell::new(0) };
         /// Every call of [`Transform::apply`] on this thread.
         pub(super) static APPLY_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// Every set of row tables a transform has built on this thread.
+        pub(super) static ROW_TABLE_BUILDS: std::cell::Cell<u64> =
+            const { std::cell::Cell::new(0) };
     }
 
     /// The pipeline evaluations this thread has made since the last call.
@@ -4267,5 +4455,141 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
         let mut backward = backward;
         backward.reverse();
         assert_eq!(backward, expected, "the second thread");
+    }
+
+    // ---- the row path (docs/design/icc.md, P-22, "The row path") -----------
+
+    /// A two-input table, the count no grid is built over: what a row
+    /// converts a pixel at a time.
+    fn two_input_table() -> Transform {
+        let clut: Vec<[u16; 3]> = (0..9usize)
+            .map(|node| {
+                [
+                    (node * 3_571 % 32_768) as u16,
+                    (node * 2_903 % 32_768) as u16,
+                    (node * 1_499 % 32_768) as u16,
+                ]
+            })
+            .collect();
+        let profile =
+            Profile::parse(&lut_profile(b"2CLR", b"XYZ ", mft2(2, 3, &clut))).expect("a table");
+        Transform::compile(&profile, Intent::RelativeColorimetric).expect("a transform")
+    }
+
+    /// `row` holds what `apply` gives each pixel of `samples`, `inputs` bytes
+    /// a pixel, each component its byte over 255.
+    fn row_is_apply(name: &str, transform: &Transform, samples: &[u8], row: &[u8]) {
+        let inputs = transform.inputs();
+        assert_eq!(
+            row.len(),
+            samples.len() / inputs * 3,
+            "{name}: one colour a pixel"
+        );
+        for (pixel, got) in samples.chunks_exact(inputs).zip(row.chunks_exact(3)) {
+            let x: Vec<f64> = pixel.iter().map(|&byte| f64::from(byte) / 255.0).collect();
+            let (r, g, b) = transform.apply(&x);
+            assert_eq!(got, [r, g, b], "{name} at {pixel:?}");
+        }
+    }
+
+    /// **A row of bytes converts as `apply` does.** Every 8-bit input of each
+    /// one- and three-input model P-22.1 priced, and of the one-input and
+    /// two-input tables, and every input of a 17-level lattice over each
+    /// four-input model, converted as rows, is the colour `apply` gives the
+    /// same components: a fill whose components are `k / 255` and an image
+    /// sample `k` are one colour. A partial pixel after the last whole one
+    /// is passed over.
+    #[test]
+    fn a_row_of_bytes_converts_as_apply_does() {
+        let mut models = priced_models();
+        models.push(("a two-input mft2", two_input_table()));
+        for (name, transform) in &models {
+            let inputs = transform.inputs();
+            match inputs {
+                3 => {
+                    for r in 0..=u8::MAX {
+                        for g in 0..=u8::MAX {
+                            let samples: Vec<u8> = (0..=u8::MAX).flat_map(|b| [r, g, b]).collect();
+                            let mut row = Vec::new();
+                            transform.convert_row(&samples, &mut row);
+                            row_is_apply(name, transform, &samples, &row);
+                        }
+                    }
+                }
+                4 => {
+                    let levels: Vec<u8> = (0..17u32).map(|j| ((j * 255 + 8) / 16) as u8).collect();
+                    let mut samples = Vec::with_capacity(17usize.pow(4) * 4);
+                    for &c in &levels {
+                        for &m in &levels {
+                            for &y in &levels {
+                                for &k in &levels {
+                                    samples.extend_from_slice(&[c, m, y, k]);
+                                }
+                            }
+                        }
+                    }
+                    let mut row = Vec::new();
+                    transform.convert_row(&samples, &mut row);
+                    row_is_apply(name, transform, &samples, &row);
+                }
+                _ => {
+                    // One input, or two, every byte of each.
+                    let samples: Vec<u8> = if inputs == 1 {
+                        (0..=u8::MAX).collect()
+                    } else {
+                        (0..=u8::MAX)
+                            .flat_map(|a| (0..=u8::MAX).flat_map(move |b| [a, b]))
+                            .collect()
+                    };
+                    let mut row = Vec::new();
+                    transform.convert_row(&samples, &mut row);
+                    row_is_apply(name, transform, &samples, &row);
+                }
+            }
+            // A partial pixel is no pixel: the row ends at the last whole one.
+            let mut samples = vec![128u8; inputs * 2];
+            samples.push(7);
+            let mut row = Vec::new();
+            transform.convert_row(&samples, &mut row);
+            assert_eq!(row.len(), 6, "{name}: two whole pixels");
+        }
+    }
+
+    /// **A row reads its axis tables and no float**: a transform builds its
+    /// row tables once, at its first row, and converting rows after calls
+    /// `apply` not once — except where no grid or table serves the input
+    /// count, which converts a pixel at a time through it. A copy builds its
+    /// own, once.
+    #[test]
+    fn a_row_reads_its_axis_tables_and_no_float() {
+        let builds = || ROW_TABLE_BUILDS.with(|count| count.replace(0));
+        let applies = || APPLY_CALLS.with(|count| count.replace(0));
+        let mut models = priced_models();
+        models.push(("a two-input mft2", two_input_table()));
+        for (name, transform) in &models {
+            let inputs = transform.inputs();
+            let samples: Vec<u8> = (0..=u8::MAX)
+                .flat_map(|byte| (0..inputs).map(move |channel| byte ^ (channel as u8 * 85)))
+                .collect();
+            let pixels = samples.len() / inputs;
+            let _ = (builds(), applies());
+            let mut rgb = Vec::new();
+            for _ in 0..3 {
+                transform.convert_row(&samples, &mut rgb);
+            }
+            assert_eq!(builds(), 1, "{name}: row tables built once a transform");
+            let expected = if transform.lut.is_some() && transform.grid.is_none() {
+                3 * pixels as u64
+            } else {
+                0
+            };
+            assert_eq!(applies(), expected, "{name}: apply calls over three rows");
+            assert_eq!(rgb.len(), 3 * pixels * 3, "{name}");
+            let copy = transform.clone();
+            copy.convert_row(&samples, &mut rgb);
+            copy.convert_row(&samples, &mut rgb);
+            assert_eq!(builds(), 1, "{name}: a copy builds its own, once");
+            let _ = applies();
+        }
     }
 }

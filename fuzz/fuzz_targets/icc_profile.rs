@@ -56,7 +56,9 @@ fuzz_target!(|data: &[u8]| {
 
 /// A compiled transform must answer for any components a content stream
 /// could name, including the ones outside 0..1 that `scn` is free to write,
-/// and for the wrong number of them, which a malformed `/N` produces.
+/// and for the wrong number of them, which a malformed `/N` produces; and for
+/// a row of every byte value in every channel, which reaches every entry of
+/// the row path's tables (`docs/design/icc.md`, P-22, "The row path").
 fn apply_all(transform: &Transform) {
     for components in [
         [0.0, 0.0, 0.0],
@@ -69,4 +71,20 @@ fn apply_all(transform: &Transform) {
     }
     let _ = transform.apply(&[]);
     let _ = transform.apply(&[0.5]);
+
+    // Each byte in every channel, then against its complement in every
+    // other, then a partial pixel.
+    let inputs = transform.inputs().max(1);
+    let mut samples = Vec::with_capacity(512 * inputs + 1);
+    for byte in 0..=u8::MAX {
+        samples.extend(std::iter::repeat_n(byte, inputs));
+    }
+    for byte in 0..=u8::MAX {
+        for channel in 0..inputs {
+            samples.push(if channel % 2 == 0 { byte } else { !byte });
+        }
+    }
+    samples.push(7);
+    let mut rgb = Vec::new();
+    transform.convert_row(&samples, &mut rgb);
 }

@@ -197,7 +197,9 @@ three sRGB channels share. A lookup-table transform over one, three or four
 inputs is read through an integer grid of that pipeline, its nodes evaluated
 as conversions reach them ([P-22](#p-22--colour-conversion-throughput));
 `Transform::evaluate` is the pipeline itself, which each node and the tests
-run.
+run. `Transform::convert_row` converts a row of 8-bit samples to sRGB bytes
+through tables of 256 entries built at a transform's first row, each pixel
+the colour `apply` gives its components.
 
 **Wiring.** `ColorSpace::Icc { transforms: Arc<Transforms>, components }` is
 built by the `ICCBased` arm from the stream bytes and `/N`. `Transforms` holds
