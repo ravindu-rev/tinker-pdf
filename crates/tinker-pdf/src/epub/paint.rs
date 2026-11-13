@@ -117,7 +117,7 @@ use super::read::PX_TO_PT;
 use super::tagging::{
     ancestry, draw_figure, figure_orders, table_cells, tag_runs, writing_modes, Tagging,
 };
-use super::typeface::FaceSet;
+use super::typeface::{EmbeddedFace, FaceSet};
 use super::xhtml::Dom;
 // `Placed` and not `tinker_pdf_layout::metrics::PlacedGlyph`, which is
 // imported above under that name and is a different thing: layout's is a
@@ -941,8 +941,8 @@ impl Shaper for BookMetrics<'_> {
             let shaped = match chosen {
                 Chosen::Embedded(index) => {
                     self.faces().faces().get(index).and_then(|face| match near {
-                        ("", "") => shape_with(&face.program, slice, font, rtl),
-                        _ => shape_in_context(&face.program, slice, font, rtl, near),
+                        ("", "") => shape_with(face, slice, font, rtl),
+                        _ => shape_in_context(face, slice, font, rtl, near),
                     })
                 }
                 Chosen::Standard(_) => None,
@@ -1003,15 +1003,24 @@ impl BookMetrics<'_> {
 ///
 /// `None` where the bytes are not an sfnt this build reads, which is the same
 /// answer [`EmbeddedFace::advance_em`] gives for the same face and leaves the
-/// caller to fall back.
+/// caller to fall back. The shaper is made with the face's own
+/// [`EmbeddedFace::plans`], so every run the book measures in it shares one
+/// set of stage plans and lookup indexes.
 ///
 /// The scale is `units * size / units_per_em`: one multiply and one divide,
 /// both correctly rounded by IEEE 754, which is where ruling 4's integer
 /// pipeline is allowed to end. Every number is an integer until this line.
-fn shape_with(bytes: &[u8], text: &str, font: &FontRequest<'_>, rtl: bool) -> Option<ShapedText> {
-    let sfnt = Sfnt::parse(bytes)?;
+fn shape_with(
+    face: &EmbeddedFace,
+    text: &str,
+    font: &FontRequest<'_>,
+    rtl: bool,
+) -> Option<ShapedText> {
+    let sfnt = Sfnt::parse(&face.program)?;
     let settings = settings_of(font.kerning, font.features);
-    let shaper = tinker_pdf_shape::Shaper::new(&sfnt).with_settings(&settings);
+    let shaper = tinker_pdf_shape::Shaper::new(&sfnt)
+        .with_settings(&settings)
+        .with_plans(&face.plans);
     let direction = if rtl {
         BaseDirection::RightToLeft
     } else {
@@ -1054,15 +1063,17 @@ fn shape_with(bytes: &[u8], text: &str, font: &FontRequest<'_>, rtl: bool) -> Op
 /// is then shaped in the context this measured it in — so the run's width
 /// here is the sum of what its pieces are drawn at.
 fn shape_in_context(
-    bytes: &[u8],
+    face: &EmbeddedFace,
     text: &str,
     font: &FontRequest<'_>,
     rtl: bool,
     (before, after): (&str, &str),
 ) -> Option<ShapedText> {
-    let sfnt = Sfnt::parse(bytes)?;
+    let sfnt = Sfnt::parse(&face.program)?;
     let settings = settings_of(font.kerning, font.features);
-    let shaper = tinker_pdf_shape::Shaper::new(&sfnt).with_settings(&settings);
+    let shaper = tinker_pdf_shape::Shaper::new(&sfnt)
+        .with_settings(&settings)
+        .with_plans(&face.plans);
     let whole = format!("{before}{text}{after}");
     let own = before.len()..before.len() + text.len();
     let paragraph = Paragraph::new(&whole, own_direction(text));
@@ -5139,7 +5150,7 @@ fn head(text: &str, n: usize) -> String {
 /// space first, so its word is moved right by the extra, which is where the
 /// gap belongs.
 fn shaped_glyphs(
-    program: &[u8],
+    face: &EmbeddedFace,
     text: &str,
     size: f64,
     spacing: (f64, f64),
@@ -5148,10 +5159,13 @@ fn shaped_glyphs(
     direction: BaseDirection,
 ) -> Option<Shaped> {
     let (letter_spacing, word_spacing) = spacing;
-    let sfnt = Sfnt::parse(program)?;
+    let sfnt = Sfnt::parse(&face.program)?;
     let upem = f64::from(sfnt.units_per_em.max(1));
     let scale = |units: i32| f64::from(units) * size / upem;
-    let shaper = tinker_pdf_shape::Shaper::new(&sfnt).with_settings(settings);
+    // The face's own plans, which measuring the book already built.
+    let shaper = tinker_pdf_shape::Shaper::new(&sfnt)
+        .with_settings(settings)
+        .with_plans(&face.plans);
     let (before, after) = context;
     let whole = format!("{before}{text}{after}");
     let own = before.len()..before.len() + text.len();
@@ -5187,7 +5201,7 @@ fn shaped_glyphs(
             }
         }
         if stretches > 1 {
-            return shaped_glyphs(program, text, size, spacing, ("", ""), settings, direction);
+            return shaped_glyphs(face, text, size, spacing, ("", ""), settings, direction);
         }
     }
 
@@ -7323,7 +7337,7 @@ fn draw_shaped(
             if at + 1 == count { context.1 } else { "" },
         );
         let Some(shaped) = shaped_glyphs(
-            &face.program,
+            face,
             piece,
             size,
             (run.letter_spacing * PX_TO_PT, run.word_spacing * PX_TO_PT),

@@ -108,7 +108,7 @@
 mod epub_support;
 mod written_support;
 
-use epub_support::book::{faces_book, faces_book_with, one_face_book};
+use epub_support::book::{chapters_book, faces_book, faces_book_with, one_face_book};
 use epub_support::typeface::{
     origin_of, shown_glyphs, text_objects, Face, Form, Joining, Kern, Ligature, Pair, Placement,
 };
@@ -268,6 +268,45 @@ fn the_arabic_book_paginates_and_its_text_extracts() {
             "{ch:?} did not survive into the page's text: {text:?}"
         );
     }
+}
+
+/// P-26.4: a book shapes through one set of plans per face. A generated
+/// three-chapter Arabic book in one embedded face builds stage plans and
+/// lookup indexes — and exactly as many as its first chapter alone builds,
+/// so no chapter, page, line or run builds one again; and measuring and
+/// painting share them, or the painted chapters would build a second set.
+#[test]
+fn a_face_is_indexed_once_per_book() {
+    let program = arabic_face().build();
+    let faces: [(&str, &[u8]); 1] = [("Fixture Arabic", &program)];
+    // Enough of the line to fill several pages of the narrow box per chapter.
+    let paragraph = vec![LINE; 60].join(" ");
+    let cost = |bodies: &[&str], what: &str| {
+        let bytes = chapters_book(&faces, 24, "", bodies);
+        let doc = synthesised(what, Document::open(bytes).expect("a book"));
+        let cost = doc
+            .archive()
+            .expect("a book")
+            .book_cost()
+            .expect("a book publishes its cost");
+        (doc.page_count(), cost)
+    };
+    let (first_pages, first) = cost(&[&paragraph], "one chapter of Arabic in one face");
+    let (pages, book) = cost(
+        &[&paragraph, &paragraph, &paragraph],
+        "three chapters of Arabic in one face",
+    );
+    assert!(first_pages > 1, "a chapter fills more than one page");
+    assert!(pages >= first_pages * 3, "three chapters, {pages} pages");
+    assert!(
+        first.shaping_plans > 0 && first.shaping_indexes > 0,
+        "the face's text was not shaped through its plans: {first:?}"
+    );
+    assert_eq!(
+        (book.shaping_plans, book.shaping_indexes),
+        (first.shaping_plans, first.shaping_indexes),
+        "a chapter, page or line built a plan or an index again"
+    );
 }
 
 // ---- a right-to-left line in two faces --------------------------------------

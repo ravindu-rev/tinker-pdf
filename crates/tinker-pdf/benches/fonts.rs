@@ -16,18 +16,23 @@ use support::{inputs, Group, Per};
 use tinker_pdf_font::cff::Machine;
 use tinker_pdf_font::{glyf, Cff, Outline, Sfnt};
 use tinker_pdf_shape::bidi::BaseDirection;
-use tinker_pdf_shape::{ShapedRun, Shaper};
+use tinker_pdf_shape::{Plans, ShapedRun, Shaper};
 
-/// One call of a shaping operation: a fresh [`Shaper`] over the face, as
-/// every caller makes one, and the paragraph shaped through it.
-fn shape(face: &Sfnt<'_>, text: &str) -> Vec<ShapedRun> {
-    Shaper::new(face).shape_text(text, BaseDirection::Auto).1
+/// One call of a shaping operation: a [`Shaper`] over the face made with the
+/// face's kept [`Plans`], as every caller makes one, and the paragraph shaped
+/// through it. The plans and indexes are built when the paragraph is first
+/// asserted, before anything is timed, as a caller's are by its first run.
+fn shape(face: &Sfnt<'_>, plans: &Plans, text: &str) -> Vec<ShapedRun> {
+    Shaper::new(face)
+        .with_plans(plans)
+        .shape_text(text, BaseDirection::Auto)
+        .1
 }
 
 /// `text` shaped in `face` holds glyphs, and none of them is `.notdef`.
-fn assert_shapes(face: &Sfnt<'_>, text: &str, script: &str) {
+fn assert_shapes(face: &Sfnt<'_>, plans: &Plans, text: &str, script: &str) {
     assert_eq!(text.chars().count(), 1000, "the {script} paragraph");
-    let runs = shape(face, text);
+    let runs = shape(face, plans, text);
     let glyphs: Vec<u16> = runs
         .iter()
         .flat_map(|run| run.glyphs().iter().map(|glyph| glyph.glyph))
@@ -127,20 +132,22 @@ fn fonts(c: &mut Criterion) {
     group.calibrated("shape 1000 characters of Latin", |op| {
         let face = Sfnt::parse(&serif).expect("Liberation Serif parses");
         let latin_text = inputs::store().text("latin-1000.txt", inputs::latin_paragraph);
-        assert_shapes(&face, &latin_text, "Latin");
+        let plans = Plans::new();
+        assert_shapes(&face, &plans, &latin_text, "Latin");
         op.iter(move || {
             for _ in 0..125 {
-                black_box(shape(&face, &latin_text));
+                black_box(shape(&face, &plans, &latin_text));
             }
         });
     });
     group.calibrated("shape 1000 characters of Arabic", |op| {
         let face = Sfnt::parse(&arabic).expect("TestShapeAran parses");
         let arabic_text = inputs::store().text("arabic-1000.txt", inputs::arabic_paragraph);
-        assert_shapes(&face, &arabic_text, "Arabic");
+        let plans = Plans::new();
+        assert_shapes(&face, &plans, &arabic_text, "Arabic");
         op.iter(move || {
             for _ in 0..50 {
-                black_box(shape(&face, &arabic_text));
+                black_box(shape(&face, &plans, &arabic_text));
             }
         });
     });
@@ -148,10 +155,11 @@ fn fonts(c: &mut Criterion) {
         let face = Sfnt::parse(&devanagari).expect("Noto Sans Devanagari parses");
         let devanagari_text =
             inputs::store().text("devanagari-1000.txt", inputs::devanagari_paragraph);
-        assert_shapes(&face, &devanagari_text, "Devanagari");
+        let plans = Plans::new();
+        assert_shapes(&face, &plans, &devanagari_text, "Devanagari");
         op.iter(move || {
             for _ in 0..8 {
-                black_box(shape(&face, &devanagari_text));
+                black_box(shape(&face, &plans, &devanagari_text));
             }
         });
     });

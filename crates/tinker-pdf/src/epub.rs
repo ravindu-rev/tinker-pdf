@@ -414,7 +414,9 @@ pub const MAX_PAGE_SIDE: f64 = 14_400.0;
 /// Every field is a **book total** rather than a per-document one, because
 /// [`crate::epub::synthesise`] makes one CSS budget and one layout budget for
 /// the whole spine and never refunds either. The two exceptions carry their own
-/// sentence below.
+/// sentence below. The last two count shaping work rather than a cap of this
+/// format's: what the book's embedded faces built of their kept plans and
+/// indexes, which a face builds once whatever the spine's length.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BookCost {
@@ -449,6 +451,33 @@ pub struct BookCost {
     /// a measurement: two hosts that pass different boxes get different numbers
     /// out of the same file, on purpose.
     pub pages: usize,
+    /// Shaping plans the book's embedded faces built: one for each distinct
+    /// `(table, script, language, features)` a stage of its text asked for,
+    /// each built once per face however many runs, lines and pages ask
+    /// again (`tinker_pdf_shape::Plans::plans_built`). Bounded per face by
+    /// `tinker_pdf_shape::Limits::max_index_bytes`.
+    pub shaping_plans: usize,
+    /// Lookup coverage indexes the book's embedded faces built: once per
+    /// lookup a plan names, per face (`tinker_pdf_shape::Plans::indexes_built`).
+    pub shaping_indexes: usize,
+}
+
+/// What a book's embedded faces built of their shaping plans and indexes,
+/// summed: [`BookCost::shaping_plans`] and [`BookCost::shaping_indexes`].
+fn shaping_built(faces: &FaceSet) -> (usize, usize) {
+    let (plans, indexes) = faces
+        .faces()
+        .iter()
+        .fold((0u64, 0u64), |(plans, indexes), face| {
+            (
+                plans.saturating_add(face.plans.plans_built()),
+                indexes.saturating_add(face.plans.indexes_built()),
+            )
+        });
+    (
+        usize::try_from(plans).unwrap_or(usize::MAX),
+        usize::try_from(indexes).unwrap_or(usize::MAX),
+    )
 }
 
 /// What a reflowable book needs decided before it has any pages.
@@ -1055,6 +1084,7 @@ pub fn synthesise(
     let synthesised_bytes = pdf.len();
     // Taken after the last charge and before anything is returned, so the
     // figures are what the whole book cost rather than what one pass did.
+    let (shaping_plans, shaping_indexes) = shaping_built(&faces);
     let cost = BookCost {
         manifest_items: package.items().len(),
         spine_items: package.spine().len(),
@@ -1066,6 +1096,8 @@ pub fn synthesise(
         break_work: layout_budget.breaks(),
         layout_work: layout_budget.layout(),
         pages: total_pages,
+        shaping_plans,
+        shaping_indexes,
     };
     Ok((
         pdf,
@@ -1526,6 +1558,7 @@ pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
         // own `<html lang>` reaches the elements at its top instead.
         None,
     );
+    let (shaping_plans, shaping_indexes) = shaping_built(&faces);
     let cost = BookCost {
         manifest_items: 0,
         spine_items: 1,
@@ -1537,6 +1570,8 @@ pub(crate) fn lay_out_one<R: read::Resources + ?Sized>(
         break_work: layout_budget.breaks(),
         layout_work: layout_budget.layout(),
         pages: total_pages,
+        shaping_plans,
+        shaping_indexes,
     };
     Laid {
         warnings,

@@ -35,9 +35,17 @@
 //! `docs/design/shaping.md`'s answer to its own third risk: *"creation writes
 //! the shaper's own advances through `glyph_run`, so what was measured is what
 //! is drawn"*.
+//!
+//! # One face, one set of plans
+//!
+//! A [`Run`] carries the shaper its caller made rather than the face, so a
+//! caller writing many runs in one face makes each shaper with the face's
+//! [`tinker_pdf_shape::Plans`], kept beside the face's bytes for the whole
+//! document build: each stage's lookups are resolved and each lookup's
+//! coverage indexed once for the face, not once a run
+//! (`docs/design/shaping.md`, *Lookup plans and coverage indexes*).
 
 use tinker_pdf_cos::build::{DocumentBuilder, Glyph, PlacedGlyph};
-use tinker_pdf_font::Sfnt;
 use tinker_pdf_shape::bidi::{reorder, BaseDirection, Paragraph};
 use tinker_pdf_shape::shape::itemize;
 use tinker_pdf_shape::{ShapedRun, Shaper};
@@ -154,9 +162,12 @@ pub struct Run<'a> {
     /// The resource name of a font already registered with
     /// [`DocumentBuilder::add_cid_font`].
     pub font: &'a [u8],
-    /// The same program that font was registered with. A different one would
-    /// name glyph indices the embedded face does not have.
-    pub face: &'a Sfnt<'a>,
+    /// A shaper over the same program that font was registered with — a
+    /// different one would name glyph indices the embedded face does not
+    /// have — made by the caller, with the face's
+    /// [`tinker_pdf_shape::Plans`] where it keeps them, so the runs of one
+    /// document build in one face share their plans and indexes.
+    pub shaper: Shaper<'a>,
     /// The font size, in points.
     pub size: f64,
     /// 9.4.2's text matrix, which puts the run on the page.
@@ -189,13 +200,12 @@ pub struct Run<'a> {
 pub fn write_run(builder: &mut DocumentBuilder, out: &mut Vec<u8>, run: &Run<'_>) -> bool {
     let &Run {
         font,
-        face,
+        shaper,
         size,
         matrix,
         text,
         direction,
     } = run;
-    let shaper = Shaper::new(face);
     let paragraph = Paragraph::new(text, direction);
     let items = itemize(text, &paragraph);
     let levels: Vec<_> = items.iter().map(|item| item.level).collect();

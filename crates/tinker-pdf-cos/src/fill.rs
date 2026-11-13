@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use tinker_pdf_font::{Cff, Sfnt};
 use tinker_pdf_shape::bidi::{reorder, BaseDirection, Paragraph};
 use tinker_pdf_shape::shape::{itemize, Shaper};
-use tinker_pdf_shape::{ShapedGlyph, Tag};
+use tinker_pdf_shape::{Plans, ShapedGlyph, Tag};
 
 use crate::build::{close_array, number};
 use crate::doc::CosDocument;
@@ -181,6 +181,9 @@ struct Shapeable {
     program: Vec<u8>,
     /// Which way back from a glyph to a code.
     path: Path,
+    /// The program's shaping plans and coverage indexes, kept beside it for
+    /// the appearance, so every line of a value shapes through one set.
+    plans: Plans,
 }
 
 /// See [`Shapeable`].
@@ -318,7 +321,11 @@ impl Shapeable {
         } else {
             return Shaping::No;
         };
-        Shaping::Yes(Shapeable { program, path })
+        Shaping::Yes(Shapeable {
+            program,
+            path,
+            plans: Plans::new(),
+        })
     }
 
     /// A simple TrueType font, if it is one the way back can be built for.
@@ -352,6 +359,7 @@ impl Shapeable {
         Shaping::Yes(Shapeable {
             program,
             path: Path::Simple(codes),
+            plans: Plans::new(),
         })
     }
 
@@ -424,7 +432,8 @@ impl Shapeable {
             Shaper::new(face).with_features(VERTICAL_GSUB, &[])
         } else {
             Shaper::new(face)
-        };
+        }
+        .with_plans(&self.plans);
         let direction = if column {
             BaseDirection::LeftToRight
         } else {

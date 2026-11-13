@@ -62,6 +62,28 @@ pub fn faces_book_with(
     attributes: &str,
     body: &str,
 ) -> Vec<u8> {
+    chapters_book(faces, size_px, attributes, &[body])
+}
+
+/// [`faces_book_with`], with one chapter for each of `bodies`, in spine
+/// order, every chapter one paragraph set in the faces' family list. One
+/// chapter is [`faces_book_with`]'s bytes exactly, since that is a caller of
+/// this.
+#[must_use]
+pub fn chapters_book(
+    faces: &[(&str, &[u8])],
+    size_px: u32,
+    attributes: &str,
+    bodies: &[&str],
+) -> Vec<u8> {
+    let mut chapter_items = String::new();
+    let mut spine = String::new();
+    for at in 1..=bodies.len() {
+        chapter_items.push_str(&format!(
+            r#"<item id="c{at}" href="ch{at}.xhtml" media-type="application/xhtml+xml"/>"#
+        ));
+        spine.push_str(&format!(r#"<itemref idref="c{at}"/>"#));
+    }
     let mut items = String::new();
     let mut rules = String::new();
     let mut families: Vec<String> = Vec::with_capacity(faces.len());
@@ -85,34 +107,45 @@ pub fn faces_book_with(
             r#"<dc:title>{title}</dc:title>"#,
             r#"<dc:language>ar</dc:language>"#,
             r#"</metadata><manifest>"#,
-            r#"<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>"#,
+            r#"{chapter_items}"#,
             r#"{items}"#,
-            r#"</manifest><spine><itemref idref="c1"/></spine></package>"#
+            r#"</manifest><spine>{spine}</spine></package>"#
         ),
         title = title,
-        items = items
+        chapter_items = chapter_items,
+        items = items,
+        spine = spine
     );
-    let chapter = format!(
-        concat!(
-            r#"<?xml version="1.0" encoding="utf-8"?>"#,
-            r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>A Chapter</title>"#,
-            r#"<style>{rules}"#,
-            r#" body {{ margin: 0 }}"#,
-            r#" p {{ margin: 0; font-family: {families}; font-size: {size}px; }}</style>"#,
-            r#"</head><body><p{attributes}>{body}</p></body></html>"#
-        ),
-        rules = rules,
-        families = families.join(", "),
-        size = size_px,
-        attributes = attributes,
-        body = body
-    );
+    let chapters: Vec<(String, String)> = bodies
+        .iter()
+        .enumerate()
+        .map(|(at, body)| {
+            let chapter = format!(
+                concat!(
+                    r#"<?xml version="1.0" encoding="utf-8"?>"#,
+                    r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>A Chapter</title>"#,
+                    r#"<style>{rules}"#,
+                    r#" body {{ margin: 0 }}"#,
+                    r#" p {{ margin: 0; font-family: {families}; font-size: {size}px; }}</style>"#,
+                    r#"</head><body><p{attributes}>{body}</p></body></html>"#
+                ),
+                rules = rules,
+                families = families.join(", "),
+                size = size_px,
+                attributes = attributes,
+                body = body
+            );
+            (format!("EPUB/ch{}.xhtml", at + 1), chapter)
+        })
+        .collect();
     let mut entries = vec![
         OcfEntry::stored("mimetype", b"application/epub+zip"),
         OcfEntry::deflated("META-INF/container.xml", CONTAINER_XML.as_bytes()),
         OcfEntry::deflated("EPUB/content.opf", package.as_bytes()),
-        OcfEntry::deflated("EPUB/ch1.xhtml", chapter.as_bytes()),
     ];
+    for (path, chapter) in &chapters {
+        entries.push(OcfEntry::deflated(path, chapter.as_bytes()));
+    }
     let paths: Vec<String> = (0..faces.len())
         .map(|at| format!("EPUB/fonts/face{at}.ttf"))
         .collect();

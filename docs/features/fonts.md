@@ -517,7 +517,14 @@ What it does:
   `Limits::max_index_bytes`, past which it falls back to probing; it starts
   again when handed another face's tables; and it counts what it built
   (`plans_built`, `indexes_built`). A shaper with no `Plans` resolves and
-  probes as it always has.
+  probes as it always has. The engine's own callers keep one per face for as
+  long as they keep its bytes: `tinker_pdf::shaping::Run` carries the shaper
+  its caller made, so a document build writes every run in a face through
+  that face's `Plans`; each of a book's embedded faces keeps its own
+  (`EmbeddedFace::plans`), which measuring, painting and SVG text share, and
+  `BookCost::shaping_plans` and `shaping_indexes` count what a book's faces
+  built; and a form field's shaped appearance keeps one beside the program it
+  decoded, for every line of the value.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so

@@ -58,6 +58,7 @@ use tinker_pdf_css::font_face::{FontFace, FontFormat, FontSource};
 use tinker_pdf_css::property::FontStyle;
 use tinker_pdf_font::woff;
 use tinker_pdf_font::Sfnt;
+use tinker_pdf_shape::Plans;
 
 /// Why a WOFF container did not unpack, re-exported so that a caller matching
 /// on [`FaceDefect::PackedContainer`] does not have to name
@@ -163,6 +164,12 @@ pub struct EmbeddedFace {
     pub program: Vec<u8>,
     /// The PDF resource name this face is registered under.
     pub resource: Vec<u8>,
+    /// The face's shaping plans and coverage indexes, kept beside its
+    /// program for every run the book sets in it: measuring, painting and
+    /// SVG text all shape through this one, so a stage plan is resolved and
+    /// a lookup indexed once per face per book. Built as the book is shaped;
+    /// a clone of the face starts it empty.
+    pub plans: Plans,
 }
 
 impl EmbeddedFace {
@@ -456,6 +463,7 @@ pub fn load<R: Resources + ?Sized>(
                     path,
                     program,
                     resource,
+                    plans: Plans::new(),
                 });
             }
             None => out

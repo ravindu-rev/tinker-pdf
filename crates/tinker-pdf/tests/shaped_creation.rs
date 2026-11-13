@@ -25,7 +25,7 @@ use tinker_pdf::shaping::{place, write_run, Run};
 use tinker_pdf_cos::build::DocumentBuilder;
 use tinker_pdf_font::Sfnt;
 use tinker_pdf_shape::bidi::BaseDirection;
-use tinker_pdf_shape::Shaper;
+use tinker_pdf_shape::{Plans, Shaper};
 
 mod written_support;
 use written_support::authored;
@@ -62,7 +62,7 @@ fn document(face: &Face, text: &str, direction: BaseDirection) -> Vec<u8> {
             &mut content,
             &Run {
                 font: b"C0",
-                face: &sfnt,
+                shaper: Shaper::new(&sfnt),
                 size: 12.0,
                 matrix: [1.0, 0.0, 0.0, 1.0, 20.0, 40.0],
                 text,
@@ -75,6 +75,58 @@ fn document(face: &Face, text: &str, direction: BaseDirection) -> Vec<u8> {
         page.raw(&content);
     });
     builder.finish()
+}
+
+/// P-26.4: the runs one document build writes in one face share the face's
+/// plans. Five runs through shapers made with one `Plans` write the bytes
+/// five runs with none write, and a second build of the same runs builds no
+/// plan or index the first did not.
+#[test]
+fn runs_written_in_one_face_share_its_plans() {
+    let face = arabic_face();
+    let program = face.build();
+    let sfnt = Sfnt::parse(&program).expect("the fixture face is a valid sfnt");
+    let write = |shaper: Shaper<'_>| -> Vec<u8> {
+        let mut builder = DocumentBuilder::new();
+        assert!(builder.add_cid_font(b"C0", b"Fixture", &program));
+        let mut content = Vec::new();
+        for line in 0..5u8 {
+            assert!(
+                write_run(
+                    &mut builder,
+                    &mut content,
+                    &Run {
+                        font: b"C0",
+                        shaper,
+                        size: 12.0,
+                        matrix: [1.0, 0.0, 0.0, 1.0, 20.0, 20.0 + 14.0 * f64::from(line)],
+                        text: SALAM,
+                        direction: BaseDirection::RightToLeft,
+                    },
+                ),
+                "run {line} was written"
+            );
+        }
+        content
+    };
+    let plans = Plans::new();
+    let plain = write(Shaper::new(&sfnt));
+    assert_eq!(
+        write(Shaper::new(&sfnt).with_plans(&plans)),
+        plain,
+        "a kept Plans changed what was written"
+    );
+    let built = (plans.plans_built(), plans.indexes_built());
+    assert!(
+        built.0 > 0 && built.1 > 0,
+        "the face's rlig was planned and indexed"
+    );
+    assert_eq!(write(Shaper::new(&sfnt).with_plans(&plans)), plain);
+    assert_eq!(
+        (plans.plans_built(), plans.indexes_built()),
+        built,
+        "a second build in the same face built again"
+    );
 }
 
 /// The criterion, in one assertion.

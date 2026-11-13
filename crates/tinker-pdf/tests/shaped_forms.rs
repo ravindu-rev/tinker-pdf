@@ -234,6 +234,8 @@ struct Fixture<'a> {
     to_unicode: Option<&'a [u8]>,
     /// The field's `/Q`: 0 left, 1 centred, 2 right (12.7.4.3).
     quadding: i64,
+    /// Whether the field is multi-line: `/Ff` bit 13 (Table 228).
+    multiline: bool,
 }
 
 impl<'a> Fixture<'a> {
@@ -252,6 +254,7 @@ impl<'a> Fixture<'a> {
             program_subtype: None,
             to_unicode: None,
             quadding: 0,
+            multiline: false,
         }
     }
 
@@ -328,9 +331,10 @@ fn form_document(fixture: &Fixture<'_>) -> Arc<CosDocument> {
     pdf.extend_from_slice(b"\nendstream\nendobj\n");
     pdf.extend_from_slice(
         format!(
-            "10 0 obj\n<< /FT /Tx /T (name) /Rect [10 150 190 175] /Q {}\n   \
+            "10 0 obj\n<< /FT /Tx /T (name) /Rect [10 150 190 175] /Q {}{}\n   \
              /Subtype /Widget /Type /Annot >>\nendobj\n",
-            fixture.quadding
+            fixture.quadding,
+            if fixture.multiline { " /Ff 4096" } else { "" }
         )
         .as_bytes(),
     );
@@ -532,6 +536,34 @@ fn an_arabic_value_fills_a_field_with_joined_forms_in_visual_order() {
             "the appearance drew the unjoined form of {ch:?}:\n{content}"
         );
     }
+}
+
+/// A multi-line value is shaped line by line against the one program the
+/// appearance decoded, through one set of plans kept beside it (P-26.4), and
+/// every line draws the codes that line filled alone draws, in order — so the
+/// plans the first line built answer for the lines after it as fresh ones
+/// would.
+#[test]
+fn each_line_of_a_multiline_value_draws_as_it_would_alone() {
+    let face = joining_face();
+    let program = face.build();
+    let single = form_document(&Fixture::named(&program, "/Identity-H"));
+    let multi = form_document(&Fixture {
+        multiline: true,
+        ..Fixture::named(&program, "/Identity-H")
+    });
+    let lines = [WORD, "\u{628}\u{62D}", "\u{62D}\u{645}", WORD];
+    let alone: Vec<(u32, u8)> = lines
+        .iter()
+        .flat_map(|line| codes(&filled(&single, line).1))
+        .collect();
+    assert!(!alone.is_empty(), "the lines drew nothing alone");
+    let (_, content) = filled(&multi, &lines.join("\n"));
+    assert_eq!(
+        codes(&content),
+        alone,
+        "a line of the multi-line value drew otherwise than alone:\n{content}"
+    );
 }
 
 /// A character the face has no glyph for is **named**, not silently replaced.

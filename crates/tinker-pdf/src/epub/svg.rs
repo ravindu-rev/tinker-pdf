@@ -1625,12 +1625,15 @@ fn draw_text(
                     continue;
                 };
                 let mut bytes = Vec::new();
+                // Made with the face's own plans, which the book's text
+                // shares, so an SVG's runs build none of their own.
+                let shaper = tinker_pdf_shape::Shaper::new(&sfnt).with_plans(&face.plans);
                 let written = crate::shaping::write_run(
                     builder,
                     &mut bytes,
                     &crate::shaping::Run {
                         font: &face.resource,
-                        face: &sfnt,
+                        shaper,
                         size: font.size,
                         matrix: [1.0, 0.0, 0.0, 1.0, pen, 0.0],
                         text: slice,
