@@ -186,6 +186,19 @@ table, built through `tinker_pdf_math::pow`, and Lab's arithmetic, through
 `tinker-pdf-color`, are where a platform transcendental would show first, and
 a hash two targets disagree on is a determinism bug there as everywhere.
 
+**A page's separations** are pinned plate by plate:
+`crates/tinker-pdf/tests/separations.rs`'s
+`separations_are_stable_across_targets` draws the separations fixture — four
+spots in fills and a stroke, in text set in an embedded face, in a knockout
+group under a blend mode and an alpha and in a group of DeviceRGB, in an image
+of two spots and a stencil, in an axial ramp and in a mesh, the page the render
+group times (`benches/support/plates.rs`) — through `Page::separations` at
+72 dpi, and hashes each of its eight plates as a render is hashed, the
+dimensions with it, to its own table (`SEPARATION_FINGERPRINTS`), each plate
+floored by ink first and the render held to draw with no warning. The face is
+embedded and every byte of the page is written in the test's support, so one
+table serves both builds and nothing is read at run time.
+
 **A page drawn in bands is the page.**
 `banded_rendering_reproduces_every_fingerprint` renders every page of the
 table as four horizontal bands through `RenderOptions::region`, stacks them
@@ -366,7 +379,8 @@ render of each compiling no transform and rasterising no cell;
 `render_options.rs`'s pinned ink, transparent and premultiplied, hard-edged,
 forced-colour and placed-annotation output and levels, rules and widths;
 `bitmap_toolbox.rs`'s
-toolbox outputs; the shaper's three fingerprints — its shaping, its bidi
+toolbox outputs; `separations.rs`'s plates of the separations fixture; the
+shaper's three fingerprints — its shaping, its bidi
 levels and its columns of mixed orientation, the last shaped through faces
 `crates/tinker-pdf-shape/tests/column_face` builds byte by byte; and the
 guard suite's

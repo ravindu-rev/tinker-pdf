@@ -13,7 +13,10 @@ mod render_support;
 #[path = "../benches/support/plates.rs"]
 mod plates;
 
-use plates::{spot_squares, spots_page, spots_page_of, SpotSquare, SPOTS_BACKDROP, SPOTS_PAGE};
+use plates::{
+    separations_page, spot_squares, spots_page, spots_page_of, SpotSquare, SEPARATIONS_PAGE,
+    SEPARATIONS_SPOTS, SPOTS_BACKDROP, SPOTS_PAGE,
+};
 use render_support::{spot_page, SpotPage, SpotSpaces, SPOT_TINTS};
 use tinker_pdf::{
     Document, Page, PixelRegion, PlateKind, PlateUse, RenderOptions, RenderWarning,
@@ -2317,4 +2320,117 @@ fn a_page_past_the_plate_cap_reports_what_it_left() {
             "{name} keeps a plate its square, drawn through its space's alternate, leaves empty"
         );
     }
+}
+
+// ---- fingerprints (RC-04.16) ------------------------------------------------
+
+/// The separations fixture's plates at 72 dpi, in the order they come back,
+/// each the SHA-256 of the plates' width and height, big-endian, and the
+/// plate's tints — `determinism.rs`'s hash of a render, over one plate. A
+/// value is the one the first target to run this gives, held on every other:
+/// a hash two targets disagree on is a determinism bug, never a table edit.
+const SEPARATION_FINGERPRINTS: [(&str, &str); 8] = [
+    ("Cyan", ""),
+    ("Magenta", ""),
+    ("Yellow", ""),
+    ("Black", ""),
+    ("Gold", ""),
+    ("Silver", ""),
+    ("Teal", ""),
+    ("Plum", ""),
+];
+
+/// The least ink each plate of the separations fixture holds at 72 dpi, in
+/// pixels, in [`SEPARATION_FINGERPRINTS`]' order: the process plates' backdrop
+/// stands under most of the page and yellow has the DeviceRGB fill and group,
+/// while each spot covers several tens of thousands of pixels between its
+/// fills, its text, its group, its image or stencil, the ramp and the mesh,
+/// so a fixture that loses a road to the plates lands under its floor.
+const SEPARATION_INK: [usize; 8] = [
+    100_000, 100_000, 5_000, 100_000, 20_000, 20_000, 20_000, 20_000,
+];
+
+/// **Separations are stable across targets** (RC-04.16; ruling 4).
+///
+/// The separations fixture (`plates::separations_page`, which the render
+/// group times too) puts four spots on their plates by every road a
+/// separations render takes: fills and a stroke, text in an embedded face, a
+/// knockout group under a blend mode and an alpha, a group of DeviceRGB, an
+/// image of two spots and a stencil, an axial ramp and a mesh. Drawn at 72
+/// dpi with the default options, it hands back, with no warning and at the
+/// page's size, the four process plates and the four spots', each holding at
+/// least its floor of ink; and each plate's hash, its dimensions in it, is
+/// its committed value. The face is embedded, so one table serves the
+/// default and the `bundled-fonts` builds alike, and nothing is read at run
+/// time, so `wasm32-wasip1` runs it with no directory. A mismatch prints
+/// every moved line, ready to paste.
+#[test]
+fn separations_are_stable_across_targets() {
+    let doc = Document::open(separations_page()).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    assert_eq!(names(&page), SEPARATIONS_SPOTS, "the fixture's spots");
+
+    let plates = separations(&page, &RenderOptions::default(), &[]);
+    assert!(
+        plates.warnings.is_empty(),
+        "the fixture draws cleanly, its face read: {:?}",
+        plates.warnings
+    );
+    assert_eq!(
+        (plates.width, plates.height),
+        SEPARATIONS_PAGE,
+        "the page at 72 dpi"
+    );
+    let pinned: Vec<&str> = SEPARATION_FINGERPRINTS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect();
+    assert_eq!(
+        plate_names(&plates),
+        pinned,
+        "every plate has a pinned value, or the test passes by not looking"
+    );
+
+    let mut moved = Vec::new();
+    for ((plate, (name, want)), floor) in plates
+        .plates
+        .iter()
+        .zip(SEPARATION_FINGERPRINTS)
+        .zip(SEPARATION_INK)
+    {
+        let inked = plate.tints.iter().filter(|tint| **tint != 0).count();
+        assert!(
+            inked >= floor,
+            "{name} holds ink at {inked} pixels, fewer than its floor of {floor}: the \
+             fixture measures less than it claims, and its hash is evidence of nothing \
+             until that is fixed"
+        );
+        let mut input = Vec::with_capacity(plate.tints.len() + 8);
+        input.extend_from_slice(&plates.width.to_be_bytes());
+        input.extend_from_slice(&plates.height.to_be_bytes());
+        input.extend_from_slice(&plate.tints);
+        let actual: String = tinker_pdf_crypto::sha2::sha256(&input)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        if actual != want {
+            moved.push(format!("    (\"{name}\", \"{actual}\"),"));
+        }
+    }
+    assert!(
+        moved.is_empty(),
+        "{} of the separations fixture's {} plates do not match their committed \
+         fingerprints.\n\n\
+         If two targets disagree, this is a determinism bug: find the arithmetic that is \
+         not target-stable and do not update the table.\n\
+         If the table is being recorded, or this is a deliberate change said in its \
+         commit, paste:\n\n{}\n",
+        moved.len(),
+        SEPARATION_FINGERPRINTS.len(),
+        moved.join("\n")
+    );
+    println!(
+        "separations fingerprints: RAN, {} plates held to their pins",
+        plates.plates.len()
+    );
 }

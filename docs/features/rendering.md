@@ -981,7 +981,10 @@ of seventy spots, with composite and disabled ones, and a page of
 `MAX_PAGE_PIXELS` whose byte bound keeps eleven of thirteen, every plate of
 each to what the page puts there. Both caps are rows of `bounds_ledger.rs`,
 and the `render_page` fuzz target's memory limits hold the plates beside its
-canvas. A plate is not a
+canvas. The separations fixture's eight plates — four spots in fills, text in
+an embedded face, groups, an image, a shading and a mesh — are fingerprinted
+on every target (`separations_are_stable_across_targets`,
+[determinism](determinism.md)). A plate is not a
 `Bitmap`, whose single channel reads as grey light. The format, `allow_cmyk`,
 premultiplication and forced colours say how light comes back and are not
 read, and the page is drawn on the caller's thread whatever `parallelism`

@@ -179,6 +179,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/bitmap_toolbox.rs",
         test: "the_toolbox_is_stable_across_targets",
     },
+    // Every plate of the separations fixture, beside its dimensions: spots
+    // in fills, text, groups, an image, a shading and a mesh (RC-04.16).
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/separations.rs",
+        test: "separations_are_stable_across_targets",
+    },
     // MS-01's guard suite: its roster of guards, and the work counts it pins
     // for every target.
     Fingerprint {

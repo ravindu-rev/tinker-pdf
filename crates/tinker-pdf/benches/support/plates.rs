@@ -187,6 +187,208 @@ pub fn spots_page_of(page: (u32, u32), squares: &[SpotSquare]) -> Vec<u8> {
     pdf(&objects)
 }
 
+/// [`separations_page`]'s size in points: A4.
+pub const SEPARATIONS_PAGE: (u32, u32) = (595, 842);
+
+/// The spots [`separations_page`] names, in the order its resources name
+/// them: its plates after the four process ones.
+pub const SEPARATIONS_SPOTS: [&str; 4] = ["Gold", "Silver", "Teal", "Plum"];
+
+/// The face [`separations_page`] sets its text in, embedded whole, so the
+/// text draws alike in every build, `bundled-fonts` or not, and nothing is
+/// read at run time.
+const FACE: &[u8] =
+    include_bytes!("../../../tinker-pdf-font/data/liberation/LiberationSans-Regular.ttf");
+
+/// `/Gold`, a `/Separation` onto DeviceCMYK.
+const GOLD: &str = "[/Separation /Gold /DeviceCMYK \
+    << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0 0.25 0.9 0.1] /N 1 >>]";
+
+/// `/Plum`, a `/Separation` onto DeviceCMYK.
+const PLUM: &str = "[/Separation /Plum /DeviceCMYK \
+    << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [0.5 0.9 0 0.2] /N 1 >>]";
+
+/// `/DeviceN [/Silver /Teal]` onto DeviceCMYK through object 5.
+const SILVER_TEAL: &str = "[/DeviceN [/Silver /Teal] /DeviceCMYK 5 0 R]";
+
+/// `/DeviceN [/Gold /Plum]` onto DeviceCMYK through object 14.
+const GOLD_PLUM: &str = "[/DeviceN [/Gold /Plum] /DeviceCMYK 14 0 R]";
+
+/// The separations fixture: an A4 page putting four spots on their plates by
+/// every road a separations render takes, over a backdrop of process ink.
+///
+/// - **Flat colours**: a `/Separation` of Gold, a `/DeviceN` of Silver and
+///   Teal and a `/Separation` of Plum filled over one another, a DeviceRGB
+///   fill turned into ink beside them, and a line stroked in Teal.
+/// - **Text** in Liberation Sans embedded whole: a line in Gold, one in Silver
+///   and Teal, one in process black.
+/// - **Groups**: an isolated knockout group of Gold and Silver-and-Teal at a
+///   constant alpha of 0.7, drawn under `Multiply` at 0.6; and an isolated
+///   group of DeviceRGB, in which Gold and Plum composite through their
+///   alternates (11.7.3) and reach the process plates as light turned into
+///   ink.
+/// - **Images**: 32 x 16 samples in a `/DeviceN` of Gold and Plum, drawn
+///   eight times their size, and a 24 x 12 stencil mask painting Silver and
+///   Teal.
+/// - **A shading**: an axial ramp of Plum under a clip, by `sh`.
+/// - **A mesh**: two free-form triangles in Silver and Teal, by `sh`.
+///
+/// Every spot is a plate of a separations render's default plan, so its
+/// plates are the four process ones and [`SEPARATIONS_SPOTS`]'s.
+pub fn separations_page() -> Vec<u8> {
+    let (width, height) = SEPARATIONS_PAGE;
+    let content = format!(
+        "0.08 0.04 0 0.06 k 0 0 {width} {height} re f\n\
+         0.2 0.6 0.4 rg 420 700 140 110 re f\n\
+         /G cs 1 scn 30 720 160 90 re f\n\
+         /DN cs 0.6 0.4 scn 120 690 200 70 re f\n\
+         /P cs 0.75 scn 240 740 150 60 re f\n\
+         /DN CS 0 1 SCN 4 w 30 670 m 300 670 l 560 655 l S\n\
+         BT /F0 30 Tf /G cs 0.85 scn 30 605 Td (Separations, plate by plate) Tj ET\n\
+         BT /F0 18 Tf /DN cs 0.9 0.5 scn 30 575 Td (Silver and teal through one space) Tj ET\n\
+         BT /F0 14 Tf 0 0 0 1 k 30 550 Td (Process black beside them) Tj ET\n\
+         q /GS0 gs /Fm0 Do Q\n\
+         q /Fm1 Do Q\n\
+         q 260 0 0 130 30 260 cm /Im0 Do Q\n\
+         /DN cs 0.3 0.9 scn q 230 0 0 120 330 265 cm /Mk0 Do Q\n\
+         q 30 40 260 190 re W n /Sh0 sh Q\n\
+         q /Sh1 sh Q\n"
+    );
+
+    // Silver s and Teal t onto cyan 0.8t, no magenta, yellow 0.3t and black
+    // 0.4s; Gold g and Plum p onto cyan 0.5p, magenta 0.9p, yellow 0.9g and
+    // black 0.1g. Each program leaves its four inks over its inputs and rolls
+    // the inputs off.
+    let silver_teal = stream(
+        "/FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1]",
+        b"{ dup 0.8 mul 0 2 index 0.3 mul 4 index 0.4 mul 6 4 roll pop pop }",
+    );
+    let gold_plum = stream(
+        "/FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1]",
+        b"{ dup 0.5 mul 1 index 0.9 mul 3 index 0.9 mul 4 index 0.1 mul 6 4 roll pop pop }",
+    );
+
+    let widths = vec!["556"; 95].join(" ");
+    let font = format!(
+        "<< /Type /Font /Subtype /TrueType /BaseFont /LiberationSans \
+         /Encoding /WinAnsiEncoding /FirstChar 32 /LastChar 126 /Widths [{widths}] \
+         /FontDescriptor 7 0 R >>"
+    );
+    let descriptor = "<< /Type /FontDescriptor /FontName /LiberationSans /Flags 32 \
+                      /FontBBox [-1000 -300 2000 1000] /ItalicAngle 0 /Ascent 905 \
+                      /Descent -212 /CapHeight 716 /StemV 80 /FontFile2 8 0 R >>";
+    let program = stream(&format!("/Length1 {}", FACE.len()), FACE);
+
+    // Gold across, Plum down: every sample its own pair.
+    let mut samples = Vec::with_capacity(32 * 16 * 2);
+    for y in 0..16u8 {
+        for x in 0..32u8 {
+            samples.extend_from_slice(&[x * 8, y * 16]);
+        }
+    }
+    let image = stream(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width 32 /Height 16 /BitsPerComponent 8 \
+             /ColorSpace {GOLD_PLUM}"
+        ),
+        &samples,
+    );
+    // A checker of four-sample cells; a sample of 0 paints (8.9.6.2).
+    let mut bits = Vec::with_capacity(3 * 12);
+    for y in 0..12usize {
+        for byte in 0..3usize {
+            let mut packed = 0u8;
+            for bit in 0..8usize {
+                let x = byte * 8 + bit;
+                if (x / 4 + y / 4) % 2 == 1 {
+                    packed |= 0x80 >> bit;
+                }
+            }
+            bits.push(packed);
+        }
+    }
+    let stencil = stream(
+        "/Type /XObject /Subtype /Image /Width 24 /Height 12 /ImageMask true \
+         /BitsPerComponent 1",
+        &bits,
+    );
+
+    let knockout = stream(
+        &format!(
+            "/Type /XObject /Subtype /Form /BBox [0 0 {width} {height}] \
+             /Group << /S /Transparency /I true /K true >> \
+             /Resources << /ColorSpace << /G {GOLD} /DN {SILVER_TEAL} >> \
+             /ExtGState << /GS1 << /ca 0.7 >> >> >>"
+        ),
+        b"/GS1 gs /G cs 0.9 scn 30 410 180 110 re f /DN cs 0.8 0.3 scn 120 430 180 90 re f",
+    );
+    let light = stream(
+        &format!(
+            "/Type /XObject /Subtype /Form /BBox [0 0 {width} {height}] \
+             /Group << /S /Transparency /CS /DeviceRGB /I true >> \
+             /Resources << /ColorSpace << /G {GOLD} /P {PLUM} >> >>"
+        ),
+        b"/G cs 1 scn 360 410 90 110 re f /P cs 0.5 scn 410 430 150 80 re f",
+    );
+
+    let axial = format!(
+        "<< /ShadingType 2 /ColorSpace {PLUM} /Coords [30 0 290 0] \
+         /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >> \
+         /Extend [true true] >>"
+    );
+    // Two triangles, each vertex a flag, two 16-bit coordinates decoded as
+    // points and a byte of each spot.
+    let mut mesh = Vec::with_capacity(6 * 7);
+    for (x, y, silver, teal) in [
+        (320u16, 40u16, 0u8, 255u8),
+        (565, 40, 255, 0),
+        (565, 230, 128, 255),
+        (320, 40, 0, 255),
+        (565, 230, 128, 255),
+        (320, 230, 255, 128),
+    ] {
+        mesh.push(0);
+        mesh.extend_from_slice(&x.to_be_bytes());
+        mesh.extend_from_slice(&y.to_be_bytes());
+        mesh.extend_from_slice(&[silver, teal]);
+    }
+    let triangles = stream(
+        &format!(
+            "/ShadingType 4 /ColorSpace {SILVER_TEAL} /BitsPerCoordinate 16 \
+             /BitsPerComponent 8 /BitsPerFlag 8 /Decode [0 65535 0 65535 0 1 0 1]"
+        ),
+        &mesh,
+    );
+
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] \
+             /Resources << /ColorSpace << /G {GOLD} /DN {SILVER_TEAL} /P {PLUM} >> \
+             /Font << /F0 6 0 R >> \
+             /XObject << /Im0 9 0 R /Mk0 10 0 R /Fm0 11 0 R /Fm1 12 0 R >> \
+             /Shading << /Sh0 13 0 R /Sh1 15 0 R >> \
+             /ExtGState << /GS0 << /BM /Multiply /ca 0.6 /CA 0.6 >> >> >> \
+             /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        stream("", content.as_bytes()),
+        silver_teal,
+        font.into_bytes(),
+        descriptor.as_bytes().to_vec(),
+        program,
+        image,
+        stencil,
+        knockout,
+        light,
+        axial.into_bytes(),
+        gold_plum,
+        triangles,
+    ];
+    pdf(&objects)
+}
+
 /// `level` 255ths as a content stream writes a tint: six decimals, which
 /// `round(255 × t)` takes back to the level.
 fn fraction(level: u8) -> String {
