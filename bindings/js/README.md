@@ -195,6 +195,91 @@ own `catch` is safe.
 view on this surface, and a write API that handed one back would hand it back
 at exactly the moment the caller is about to allocate again.
 
+## The command stream
+
+`PdfDocument.commandStream(index)` hands back a page's drawing as versioned
+bytes ([`docs/design/command-stream.md`](../../docs/design/command-stream.md)),
+and `PdfCommandStream.parse` reads them: `records()` is every record in order,
+a `PdfCommandRecord` of a kind number and `PdfCommandField`s, each its tag
+beside a value — a `BigInt`, a `number`, a `Uint8Array`, a `Float64Array`, a
+`BigUint64Array` or an array of `Uint8Array`s — and `field(name)` reads one by
+the name its kind gives the place (`PdfCommandKind.fields`).
+`PdfCommandStream.fromRecords` writes records back, `toBytes` hands over the
+bytes, and `render(scale)` replays the stream through the engine. A record
+handed to `fromRecords` or to `new PdfCommandRecord` moves into the engine, as
+wasm-bindgen moves every object a `Vec` takes, so make each list for the call.
+
+`replay(device)` hands each record, in the stream's order, to the device's
+method named for its kind (`glyphRun`, `fillPath`, `beginGroup`; a kind the
+build does not know goes to `unknown`), and skips a kind the device has no
+method for. A replay to a `CanvasRenderingContext2D` is a device over that
+projection, written by the host and not shipped: here, fills, strokes and
+clips. A command's state is a reference to the `State` records before it, in
+their order; its path is in the page's space, points with `y` up, the
+transformation already applied.
+
+```js
+import init, { PdfDocument, PdfCommandStream } from 'tinker-pdf-js';
+
+await init();
+const pdf = new PdfDocument(new Uint8Array(await (await fetch('page.pdf')).arrayBuffer()));
+const stream = PdfCommandStream.parse(pdf.commandStream(0));
+const canvas = document.querySelector('canvas');
+const ctx = canvas.getContext('2d');
+const [width, height] = stream.size();
+const scale = canvas.width / width;
+ctx.setTransform(scale, 0, 0, -scale, 0, height * scale);
+
+const states = [];
+const stateOf = (record) => states[Number(record.field('state').value)];
+const colour = (rgb, alpha) => `rgb(${rgb[0]} ${rgb[1]} ${rgb[2]} / ${alpha})`;
+const rule = (record) => (record.field('even-odd').value === 1n ? 'evenodd' : 'nonzero');
+const path = (record) => {
+  const operators = record.field('operators').value;
+  const n = record.field('numbers').value;
+  const out = new Path2D();
+  let at = 0;
+  for (const operator of operators) {
+    if (operator === 0) { out.moveTo(n[at], n[at + 1]); at += 2; }
+    else if (operator === 1) { out.lineTo(n[at], n[at + 1]); at += 2; }
+    else if (operator === 2) { out.bezierCurveTo(n[at], n[at + 1], n[at + 2], n[at + 3], n[at + 4], n[at + 5]); at += 6; }
+    else { out.closePath(); }
+  }
+  return out;
+};
+
+stream.replay({
+  state(record) { states.push(record); },
+  saveState() { ctx.save(); },
+  restoreState() { ctx.restore(); },
+  fillPath(record) {
+    const state = stateOf(record);
+    ctx.fillStyle = colour(state.field('fill colour').value, state.field('fill alpha').value);
+    ctx.fill(path(record), rule(record));
+  },
+  strokePath(record) {
+    const state = stateOf(record);
+    const [a, b, c, d] = state.field('ctm').value;
+    ctx.strokeStyle = colour(state.field('stroke colour').value, state.field('stroke alpha').value);
+    ctx.lineWidth = state.field('line width').value * Math.sqrt(Math.abs(a * d - b * c));
+    ctx.stroke(path(record));
+  },
+  clipPath(record) { ctx.clip(path(record), rule(record)); },
+});
+```
+
+A glyph run's outlines are the stream's `outline` records, an image's samples
+its `imageDecode` records, a shading's its `shadingDefinition`; a device that
+draws them reads those as it reads the paths above.
+[`tests/command_stream.mjs`](tests/command_stream.mjs) decodes a page holding
+every kind of record and writes it back to the facade's bytes, and drives a
+device that hears every kind in the stream's order:
+
+```bash
+cd <a directory where the tarball has been npm install'ed>
+node <repo>/bindings/js/tests/command_stream.mjs
+```
+
 ## Nothing is published
 
 `npm install tinker-pdf-js` does not work: nothing is published.

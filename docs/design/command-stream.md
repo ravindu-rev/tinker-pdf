@@ -389,7 +389,8 @@ over that projection, written in the binding's README, and never binding API.
    every command kind, the commands the cursor reads, encoded back, give the
    facade's bytes; `raw_enum_tests.rs` pins `TpdfCommandKind`'s range and its
    refusal of an undeclared number.
-6. **RC-18.6, Python and JavaScript.** `bindings/python/tests/command_stream.py`
+6. **RC-18.6, landed: Python and JavaScript.**
+   `bindings/python/tests/command_stream.py`
    and `bindings/js/tests/command_stream.mjs` decode and re-encode the stream
    of a page holding every command kind to the facade's bytes, and drive a
    recording device that receives every kind in the order the facade's

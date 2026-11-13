@@ -1,5 +1,5 @@
 //! The read surface beyond pages: `/Info`, the outline, links, attachments,
-//! XMP and warnings, as JavaScript classes.
+//! XMP and warnings, and a page's command stream, as JavaScript classes.
 //!
 //! Each class is the facade's own type with read-only getters (ruling 11):
 //! an absent value is `undefined` and an empty one is an empty string, an
@@ -13,11 +13,16 @@
 //! `setPageTargetView` take, so a view written and read back is the same
 //! object shape.
 
+use js_sys::{Array, BigUint64Array, Float64Array, Function, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
-use tinker_pdf::{Action, DestKind, Destination, Trapped};
+use tinker_pdf::{
+    Action, CommandBudgets, CommandField, CommandKind, CommandRecord, CommandStream, DestKind,
+    Destination, Trapped, Usage,
+};
 
-use crate::PdfDocument;
+use crate::{PdfBitmap, PdfDocument};
 
 /// The `/Info` dictionary (14.3.3), decoded.
 #[wasm_bindgen]
@@ -637,5 +642,578 @@ impl PdfDocument {
             .into_iter()
             .map(|inner| PdfWarning { inner })
             .collect()
+    }
+}
+
+// ---- the command stream (`docs/design/command-stream.md`, RC-18.6) ------------
+
+/// A kind of command-stream record (`docs/design/command-stream.md`, "The
+/// records"): its number on the wire, its name, and what each of its fields
+/// holds, in their places.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct PdfCommandKind {
+    inner: CommandKind,
+}
+
+#[wasm_bindgen]
+impl PdfCommandKind {
+    /// Every kind this build knows, in the order of their numbers.
+    #[wasm_bindgen]
+    pub fn all() -> Vec<PdfCommandKind> {
+        CommandKind::ALL
+            .iter()
+            .map(|&inner| PdfCommandKind { inner })
+            .collect()
+    }
+
+    /// The kind a wire number names, or `undefined` for a number this build
+    /// does not know.
+    #[wasm_bindgen(js_name = fromNumber)]
+    pub fn from_number(number: u32) -> Option<PdfCommandKind> {
+        CommandKind::from_number(number).map(|inner| PdfCommandKind { inner })
+    }
+
+    /// The kind's number on the wire.
+    #[wasm_bindgen(getter)]
+    pub fn number(&self) -> u32 {
+        self.inner.number()
+    }
+
+    /// The kind's name, as the design names it: `"GlyphRun"`.
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.inner.name().to_string()
+    }
+
+    /// What each field holds, in their order.
+    #[wasm_bindgen(getter)]
+    pub fn fields(&self) -> Vec<String> {
+        self.inner
+            .fields()
+            .iter()
+            .map(|field| (*field).to_string())
+            .collect()
+    }
+
+    /// Whether the kind is the codec's — a command, or a definition a state
+    /// is made of — rather than the facade's page and tables.
+    #[wasm_bindgen(getter, js_name = isCodec)]
+    pub fn is_codec(&self) -> bool {
+        self.inner.is_codec()
+    }
+
+    /// Whether the kind is one of a page's recorded calls.
+    #[wasm_bindgen(getter, js_name = isCommand)]
+    pub fn is_command(&self) -> bool {
+        self.inner.is_command()
+    }
+
+    /// The device method a replay calls for a record of this kind: its name
+    /// in lower camel case, `"glyphRun"`.
+    #[wasm_bindgen(getter)]
+    pub fn method(&self) -> String {
+        camel_case(self.inner.name())
+    }
+}
+
+/// `name`, which is in upper camel case, in lower camel case.
+fn camel_case(name: &str) -> String {
+    let mut characters = name.chars();
+    match characters.next() {
+        Some(first) => first.to_ascii_lowercase().to_string() + characters.as_str(),
+        None => String::new(),
+    }
+}
+
+/// One field of a record (`docs/design/command-stream.md`, "The form"): its
+/// tag, and its value as JavaScript holds it.
+///
+/// The tag is kept beside the value, because two fields JavaScript would hold
+/// alike are written apart: an unsigned and a signed integer, each a
+/// `BigInt`, and an absent value and an empty one. Each tag has its
+/// constructor, so a record built here writes the bytes the one read was
+/// written with. A real is a `number`, its bits as written.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct PdfCommandField {
+    inner: CommandField,
+}
+
+#[wasm_bindgen]
+impl PdfCommandField {
+    /// An absent value, tag 0.
+    #[wasm_bindgen]
+    pub fn nothing() -> PdfCommandField {
+        PdfCommandField {
+            inner: CommandField::Nothing,
+        }
+    }
+
+    /// An unsigned integer, tag 1: a `BigInt`.
+    #[wasm_bindgen]
+    pub fn unsigned(value: u64) -> PdfCommandField {
+        PdfCommandField {
+            inner: CommandField::Unsigned(value),
+        }
+    }
+
+    /// A signed integer, tag 2: a `BigInt`.
+    #[wasm_bindgen]
+    pub fn signed(value: i64) -> PdfCommandField {
+        PdfCommandField {
+            inner: CommandField::Signed(value),
+        }
+    }
+
+    /// A real, tag 3.
+    #[wasm_bindgen]
+    pub fn real(value: f64) -> PdfCommandField {
+        PdfCommandField {
+            inner: CommandField::Real(value),
+        }
+    }
+
+    /// Bytes, tag 4: a `Uint8Array`.
+    #[wasm_bindgen]
+    pub fn bytes(value: &[u8]) -> PdfCommandField {
+        PdfCommandField {
+            inner: CommandField::bytes(value),
+        }
+    }
+
+    /// Reals, tag 5: a `Float64Array`.
+    #[wasm_bindgen]
+    pub fn reals(value: Vec<f64>) -> PdfCommandField {
+        PdfCommandField {
+            inner: CommandField::Reals(value),
+        }
+    }
+
+    /// Unsigned integers, tag 6: a `BigUint64Array`.
+    #[wasm_bindgen]
+    pub fn naturals(value: Vec<u64>) -> PdfCommandField {
+        PdfCommandField {
+            inner: CommandField::Naturals(value),
+        }
+    }
+
+    /// Byte strings, tag 7: an array of `Uint8Array`s.
+    ///
+    /// # Errors
+    ///
+    /// An element that is no `Uint8Array`, named by its place.
+    #[wasm_bindgen]
+    pub fn strings(value: &Array) -> Result<PdfCommandField, JsError> {
+        let mut strings = Vec::with_capacity(value.length() as usize);
+        for (at, element) in value.iter().enumerate() {
+            let Some(bytes) = element.dyn_ref::<Uint8Array>() else {
+                return Err(JsError::new(&format!(
+                    "string {at} of a strings field is no Uint8Array"
+                )));
+            };
+            strings.push(bytes.to_vec());
+        }
+        Ok(PdfCommandField {
+            inner: CommandField::Strings(strings),
+        })
+    }
+
+    /// The tag's name, its constructor's: `"nothing"`, `"unsigned"`,
+    /// `"signed"`, `"real"`, `"bytes"`, `"reals"`, `"naturals"` or
+    /// `"strings"`.
+    #[wasm_bindgen(getter, js_name = tagName)]
+    pub fn tag_name(&self) -> String {
+        match self.inner {
+            CommandField::Nothing => "nothing",
+            CommandField::Unsigned(_) => "unsigned",
+            CommandField::Signed(_) => "signed",
+            CommandField::Real(_) => "real",
+            CommandField::Bytes(_) => "bytes",
+            CommandField::Reals(_) => "reals",
+            CommandField::Naturals(_) => "naturals",
+            CommandField::Strings(_) => "strings",
+        }
+        .to_string()
+    }
+
+    /// The tag's number on the wire, 0 to 7.
+    #[wasm_bindgen(getter)]
+    pub fn tag(&self) -> u8 {
+        self.inner.tag()
+    }
+
+    /// The value: `undefined`, a `BigInt`, a `number`, a `Uint8Array`, a
+    /// `Float64Array`, a `BigUint64Array`, or an array of `Uint8Array`s.
+    #[wasm_bindgen(getter)]
+    pub fn value(&self) -> JsValue {
+        match &self.inner {
+            CommandField::Nothing => JsValue::UNDEFINED,
+            CommandField::Unsigned(value) => JsValue::from(*value),
+            CommandField::Signed(value) => JsValue::from(*value),
+            CommandField::Real(value) => JsValue::from_f64(*value),
+            CommandField::Bytes(bytes) => Uint8Array::from(&bytes[..]).into(),
+            CommandField::Reals(reals) => Float64Array::from(&reals[..]).into(),
+            CommandField::Naturals(naturals) => BigUint64Array::from(&naturals[..]).into(),
+            CommandField::Strings(strings) => strings
+                .iter()
+                .map(|string| JsValue::from(Uint8Array::from(&string[..])))
+                .collect::<Array>()
+                .into(),
+        }
+    }
+
+    /// Whether the two encode to the same bytes: a real by its bits.
+    #[wasm_bindgen]
+    pub fn equals(&self, other: &PdfCommandField) -> bool {
+        self.inner == other.inner
+    }
+}
+
+/// One record of a command stream: its kind's number and its fields, in the
+/// places its kind names. A record of a kind this build does not know — one
+/// a newer minor version added — keeps its number and fields, and names no
+/// kind.
+#[wasm_bindgen]
+#[derive(Clone)]
+pub struct PdfCommandRecord {
+    inner: CommandRecord,
+}
+
+#[wasm_bindgen]
+impl PdfCommandRecord {
+    /// A record of the kind numbered `kind` holding `fields`, in their
+    /// places, for `PdfCommandStream.fromRecords`.
+    #[wasm_bindgen(constructor)]
+    pub fn new(kind: u32, fields: Vec<PdfCommandField>) -> PdfCommandRecord {
+        PdfCommandRecord {
+            inner: CommandRecord {
+                kind,
+                fields: fields.into_iter().map(|field| field.inner).collect(),
+            },
+        }
+    }
+
+    /// The kind's number on the wire.
+    #[wasm_bindgen(getter)]
+    pub fn kind(&self) -> u32 {
+        self.inner.kind
+    }
+
+    /// The kind, or `undefined` for a number this build does not know.
+    #[wasm_bindgen(getter, js_name = commandKind)]
+    pub fn command_kind(&self) -> Option<PdfCommandKind> {
+        self.inner
+            .command_kind()
+            .map(|inner| PdfCommandKind { inner })
+    }
+
+    /// The kind's name, or `undefined` for a number this build does not
+    /// know.
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> Option<String> {
+        self.inner
+            .command_kind()
+            .map(|kind| kind.name().to_string())
+    }
+
+    /// What each field holds, by its kind; empty for a kind this build does
+    /// not know.
+    #[wasm_bindgen(getter, js_name = fieldNames)]
+    pub fn field_names(&self) -> Vec<String> {
+        self.inner.command_kind().map_or_else(Vec::new, |kind| {
+            kind.fields()
+                .iter()
+                .map(|field| (*field).to_string())
+                .collect()
+        })
+    }
+
+    /// The fields, in their places.
+    #[wasm_bindgen(getter)]
+    pub fn fields(&self) -> Vec<PdfCommandField> {
+        self.inner
+            .fields
+            .iter()
+            .map(|inner| PdfCommandField {
+                inner: inner.clone(),
+            })
+            .collect()
+    }
+
+    /// The field in the place the kind names `name`, or `undefined` where the
+    /// kind names no such place or the record holds no field there.
+    #[wasm_bindgen]
+    pub fn field(&self, name: &str) -> Option<PdfCommandField> {
+        let kind = self.inner.command_kind()?;
+        let place = kind.fields().iter().position(|field| *field == name)?;
+        self.inner.fields.get(place).map(|inner| PdfCommandField {
+            inner: inner.clone(),
+        })
+    }
+
+    /// Whether the two write the same bytes.
+    #[wasm_bindgen]
+    pub fn equals(&self, other: &PdfCommandRecord) -> bool {
+        self.inner == other.inner
+    }
+}
+
+/// The most a command stream may make a reader hold
+/// (`docs/design/command-stream.md`, "The reader's budgets"), each starting at
+/// the design's default.
+#[wasm_bindgen]
+pub struct PdfCommandBudgets {
+    inner: CommandBudgets,
+}
+
+#[wasm_bindgen]
+impl PdfCommandBudgets {
+    /// The design's defaults.
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> PdfCommandBudgets {
+        PdfCommandBudgets {
+            inner: CommandBudgets::DEFAULT,
+        }
+    }
+
+    /// Records in a stream, nested streams' included: a `BigInt`.
+    #[wasm_bindgen(getter)]
+    pub fn records(&self) -> u64 {
+        self.inner.records
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_records(&mut self, value: u64) {
+        self.inner.records = value;
+    }
+
+    /// Bytes the read holds: a `BigInt`.
+    #[wasm_bindgen(getter)]
+    pub fn bytes(&self) -> u64 {
+        self.inner.bytes
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_bytes(&mut self, value: u64) {
+        self.inner.bytes = value;
+    }
+
+    /// Streams nested in streams: a tiling cell's.
+    #[wasm_bindgen(getter)]
+    pub fn depth(&self) -> u32 {
+        self.inner.depth
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_depth(&mut self, value: u32) {
+        self.inner.depth = value;
+    }
+
+    /// Functions nested in functions, and a calculator's blocks in blocks.
+    #[wasm_bindgen(getter)]
+    pub fn functions(&self) -> u32 {
+        self.inner.functions
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_functions(&mut self, value: u32) {
+        self.inner.functions = value;
+    }
+
+    /// Colour spaces nested in colour spaces, and halftones in halftones.
+    #[wasm_bindgen(getter)]
+    pub fn spaces(&self) -> u32 {
+        self.inner.spaces
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_spaces(&mut self, value: u32) {
+        self.inner.spaces = value;
+    }
+}
+
+impl Default for PdfCommandBudgets {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A page's drawing read from its command stream
+/// (`docs/design/command-stream.md`): its records in order, the bytes they
+/// write back, and its replay through the engine's own renderer.
+///
+/// `replay(device)` hands every record, in the stream's order, to the
+/// device's method named for its kind in lower camel case
+/// (`PdfCommandKind.method`: `glyphRun`, `beginGroup`, `imageDecode`), a
+/// record of a kind this build does not know to its `unknown`; a device
+/// without the method for a kind is not called for it. A refusal of the
+/// bytes is an `Error` with the reader's sentence.
+#[wasm_bindgen]
+pub struct PdfCommandStream {
+    inner: CommandStream,
+}
+
+/// The reader's refusal, as JavaScript throws it.
+fn unread(error: tinker_pdf::CommandStreamError) -> JsError {
+    JsError::new(&error.to_string())
+}
+
+#[wasm_bindgen]
+impl PdfCommandStream {
+    /// Reads a stream under the design's budgets.
+    #[wasm_bindgen]
+    pub fn parse(bytes: &[u8]) -> Result<PdfCommandStream, JsError> {
+        CommandStream::parse(bytes)
+            .map(|inner| PdfCommandStream { inner })
+            .map_err(unread)
+    }
+
+    /// Reads a stream under `budgets`.
+    #[wasm_bindgen(js_name = parseWith)]
+    pub fn parse_with(
+        bytes: &[u8],
+        budgets: &PdfCommandBudgets,
+    ) -> Result<PdfCommandStream, JsError> {
+        CommandStream::parse_with(bytes, &budgets.inner)
+            .map(|inner| PdfCommandStream { inner })
+            .map_err(unread)
+    }
+
+    /// The stream `records` write at this build's version, read back as a
+    /// parse reads it: the encoder.
+    #[wasm_bindgen(js_name = fromRecords)]
+    pub fn from_records(records: Vec<PdfCommandRecord>) -> Result<PdfCommandStream, JsError> {
+        let records: Vec<CommandRecord> = records.into_iter().map(|record| record.inner).collect();
+        CommandStream::from_records(&records)
+            .map(|inner| PdfCommandStream { inner })
+            .map_err(unread)
+    }
+
+    /// Every record before the stream's end, in order.
+    #[wasm_bindgen]
+    pub fn records(&self) -> Vec<PdfCommandRecord> {
+        self.inner
+            .records()
+            .iter()
+            .map(|inner| PdfCommandRecord {
+                inner: inner.clone(),
+            })
+            .collect()
+    }
+
+    /// How many records the stream holds before its end.
+    #[wasm_bindgen(getter)]
+    pub fn length(&self) -> u32 {
+        u32::try_from(self.inner.records().len()).unwrap_or(u32::MAX)
+    }
+
+    /// The stream's bytes, written back at its own version.
+    #[wasm_bindgen(js_name = toBytes)]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.inner.to_bytes()
+    }
+
+    /// The stream's major and minor version, as `[major, minor]`.
+    #[wasm_bindgen(getter)]
+    pub fn version(&self) -> Vec<u16> {
+        let (major, minor) = self.inner.version();
+        vec![major, minor]
+    }
+
+    /// The usage whose optional-content states the stream's calls carry —
+    /// `"view"`, `"print"` or `"export"` — or `undefined` for none.
+    #[wasm_bindgen(getter)]
+    pub fn usage(&self) -> Option<String> {
+        self.inner.usage().map(|usage| {
+            match usage {
+                Usage::View => "view",
+                Usage::Print => "print",
+                Usage::Export => "export",
+            }
+            .to_string()
+        })
+    }
+
+    /// Which page of its document the stream is of.
+    #[wasm_bindgen(getter, js_name = pageIndex)]
+    pub fn page_index(&self) -> u32 {
+        self.inner.page_index()
+    }
+
+    /// The page's size in points after rotation, as `[width, height]`.
+    #[wasm_bindgen]
+    pub fn size(&self) -> Vec<f64> {
+        let (width, height) = self.inner.size();
+        vec![width, height]
+    }
+
+    /// The size in pixels a render at `scale` draws, where 1.0 is 72 dpi, as
+    /// `[width, height]`.
+    #[wasm_bindgen(js_name = pixelSize)]
+    pub fn pixel_size(&self, scale: f64) -> Vec<u32> {
+        let (width, height) = self.inner.pixel_size(&render_options(scale));
+        vec![width, height]
+    }
+
+    /// Draws the page at a scale, where 1.0 is 72 dpi, as a render of it
+    /// draws: the same pixels and the same warnings.
+    #[wasm_bindgen]
+    pub fn render(&self, scale: f64) -> PdfBitmap {
+        PdfBitmap {
+            inner: self.inner.render(&render_options(scale)),
+        }
+    }
+
+    /// Hands every record, in the stream's order, to the method of `device`
+    /// named for its kind (the class documentation), and a record of a kind
+    /// this build does not know to its `unknown`.
+    ///
+    /// # Errors
+    ///
+    /// What a method throws, which ends the replay.
+    #[wasm_bindgen]
+    pub fn replay(&self, device: &JsValue) -> Result<(), JsValue> {
+        for record in self.inner.records() {
+            let method = record
+                .command_kind()
+                .map_or_else(|| "unknown".to_string(), |kind| camel_case(kind.name()));
+            let handler = Reflect::get(device, &JsValue::from_str(&method))?;
+            if let Some(handler) = handler.dyn_ref::<Function>() {
+                let argument = JsValue::from(PdfCommandRecord {
+                    inner: record.clone(),
+                });
+                handler.call1(device, &argument)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A render at `scale`, into RGBA as every render of this binding draws.
+fn render_options(scale: f64) -> tinker_pdf::RenderOptions {
+    tinker_pdf::RenderOptions {
+        scale,
+        format: tinker_pdf::PixelFormat::Rgba8,
+        ..tinker_pdf::RenderOptions::default()
+    }
+}
+
+#[wasm_bindgen]
+impl PdfDocument {
+    /// A page's drawing as a command stream (`Page::command_stream`,
+    /// `docs/design/command-stream.md`): versioned bytes that
+    /// `PdfCommandStream` reads back, draws and writes again.
+    ///
+    /// # Errors
+    ///
+    /// A page index past the document's last.
+    #[wasm_bindgen(js_name = commandStream)]
+    pub fn command_stream(&self, index: u32) -> Result<Vec<u8>, JsError> {
+        let page = self
+            .inner
+            .page(index)
+            .ok_or_else(|| JsError::new("no such page"))?;
+        Ok(page.command_stream())
     }
 }

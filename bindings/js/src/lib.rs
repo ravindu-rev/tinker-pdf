@@ -22,8 +22,8 @@ use wasm_bindgen::prelude::*;
 
 mod read;
 pub use read::{
-    PdfAction, PdfAttachment, PdfDestination, PdfLink, PdfMetadata, PdfOutlineItem, PdfView,
-    PdfWarning,
+    PdfAction, PdfAttachment, PdfCommandBudgets, PdfCommandField, PdfCommandKind, PdfCommandRecord,
+    PdfCommandStream, PdfDestination, PdfLink, PdfMetadata, PdfOutlineItem, PdfView, PdfWarning,
 };
 mod signatures;
 pub use signatures::{PdfSignature, PdfTrustAnchors, PdfVerdict};

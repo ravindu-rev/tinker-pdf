@@ -353,8 +353,51 @@ refusal; it keeps its commands, so it finishes again. A kind or a tag its
 enum does not declare, the end pushed, and null data with a count are
 refused at the push, naming them. A command is read through a pointer the
 caller passes, so Ruby's Fiddle could call every function, and no callback
-crosses the boundary. Python, JavaScript and the four wrappers carry no
-stream yet (the refusal table's row).
+crosses the boundary. The four wrappers carry no stream yet (the refusal
+table's row).
+
+**The command stream in Python and JavaScript** crosses directly from the
+facade, as the rest of their surfaces do, through no C ABI between
+(`bindings/python/src/read.rs`, `bindings/js/src/read.rs`), each a
+projection with no logic of its own. `Document.command_stream(index)` and
+`PdfDocument.commandStream(index)` hand back `Page::command_stream`'s bytes.
+`CommandStream` and `PdfCommandStream` read them — `parse`, and
+`parse_with`/`parseWith` under a `CommandBudgets`/`PdfCommandBudgets` whose
+every budget starts at the design's default — and their refusal is a
+`ValueError` or an `Error` carrying the reader's sentence. `records` is every
+record in order, each a `CommandRecord`/`PdfCommandRecord`: its kind's number
+on the wire, its `CommandKind`/`PdfCommandKind` where the build knows it (its
+name, each field's name, whether it is the codec's and whether a command),
+and its fields, each a `CommandField`/`PdfCommandField` of its tag — `tag`
+the wire's number, `tag_name`/`tagName` its constructor's name — and its
+value: `None`/`undefined`, an `int`/`BigInt`, a `float`/`number`, bytes, a
+list of floats or a `Float64Array`, a list of `int`s or a `BigUint64Array`,
+a list of bytes or an array of `Uint8Array`s, a real by its bits. `field(name)`
+reads a field by the name its kind gives its place. A field is made again by
+its tag's constructor, a record from its kind's number and its fields, and
+`from_records`/`fromRecords` writes them as a stream at this build's version,
+read back as a parse reads it, so a stream decoded into a binding's own types
+and written back is the facade's bytes. `to_bytes`/`toBytes`, `version`,
+`usage`, `page_index`/`pageIndex`, `size`, `pixel_size`/`pixelSize` and
+`render` project the facade's own, the render at a resolution in Python and a
+scale in JavaScript, as each binding's page render takes it. `replay(device)`
+is the device protocol: each record, in the stream's order, is handed to the
+device's method named for its kind — `glyph_run`, `begin_group`,
+`image_decode` in Python, `glyphRun`, `beginGroup`, `imageDecode` in
+JavaScript (`CommandKind.method`), a kind the build does not know to
+`unknown` — a kind the device has no method for is passed over, and an
+exception a method raises ends the replay and is raised. In JavaScript a
+record handed to `fromRecords` or a field to `new PdfCommandRecord` moves into
+the engine, as wasm-bindgen moves every exported object a `Vec` takes. A
+replay to a platform canvas is an example over the projection, never its API:
+JavaScript's README replays a stream to a `CanvasRenderingContext2D`; Python's
+standard library has no canvas that clips, blends or draws a cubic, so its
+surface is the protocol alone. `bindings/python/tests/command_stream.py` and
+`bindings/js/tests/command_stream.mjs` decode and write back the stream of a
+page holding every kind of record, beside a stream of the three a page reaches
+only past a budget or through a recording that composites colorants, to the
+facade's bytes, and drive a recording device that hears every kind in the
+order the facade's decoder gives them; each prints `COMMAND-STREAM: RAN`.
 
 **The write surface, and its shape.** What separates it from the read
 surface is shape, not capability: `DocumentEditor::transaction(|tx| ..)` and
@@ -1095,6 +1138,7 @@ cargo xtask bindings-coverage
 | `Page::render` | `tpdf_page_render` | `Document.render` | `PdfDocument.render_page` |
 | `Page::text` | `tpdf_page_text` | `Document.page_text` | `PdfDocument.page_text` |
 | `Page::size` | `tpdf_page_size` | `Document.page_size` | `PdfDocument.page_width`, `PdfDocument.page_height` |
+| `Page::command_stream` | | `Document.command_stream` | `PdfDocument.command_stream` |
 
 ## Owed
 
@@ -1132,7 +1176,7 @@ cargo xtask bindings-coverage
 | The payloads inside a signature enum — which revision, which defect, whose certificate, how many bits | the enum arm crosses, the payload does not | a C enum has no payload, and a struct invented here to carry one would be this crate spelling something the facade already spells (ruling 11) | [signatures](../design/signatures.md) |
 | Counted work: `RenderOptions::stats`, `Bitmap::stats` and `Stats`; `Document::page_counted`, `Page::text_counted`, `Page::images_counted`, `SaveOptions::stats`, `Saved::stats`, `DocumentEditor::count_work`, `Document::inferred_orders_counted`, `Bitmap::to_png_counted`, and `Document::validate_pdfa_counted`, `Document::validate_pdfua_counted` and `Document::validate_pdfx_counted` | not projected; `tpdf_page_render`, every binding's render, text, save and validation count nothing and hand back no stats | a debt rather than a limit: the C ABI's render takes a scale and a format rather than the options, so asking needs an entry point of its own, as each counted sibling does, and `Stats` is `#[non_exhaustive]` and gains a counter with each row that counts one, so a struct carrying it across needs a layout that can grow. Ruling 11 makes it a debt, and no step of SU-12 owes it yet, so it stands here until one does | [performance](../design/performance.md) |
 | Render parts, placement, usage and layers: `RenderOptions::content`, `RenderOptions::widgets`, `RenderOptions::other_annotations`, `RenderOptions::magnification`, `RenderOptions::usage`, `RenderOptions::layers`, `LayerOptions::*` and `LayerUser::*` | not projected; `tpdf_page_render` and every binding's render draw the page's content and every annotation, as a render naming no usage draws them, at magnification 1, in `/D`'s states | a debt rather than a limit: the C ABI's render takes a scale and a format rather than the options, so each needs an entry point of its own or a struct of options that can grow, as `RenderOptions::stats` does. Ruling 11 makes it a debt, and no step of SU-12 owes it yet, so it stands here until one does | [design/render-usage.md](../design/render-usage.md) |
-| The command stream: `Page::command_stream` and `DisplayList::command_stream`, which write a page's drawing as versioned bytes, and `CommandStream::*`, `CommandRecord::*`, `CommandField::*`, `CommandKind::*`, `CommandBudgets::*`, `CommandStreamError::*`, `COMMAND_STREAM_MAJOR` and `COMMAND_STREAM_MINOR`, which read, draw and write it back | on the C ABI as `src/commands.rs`'s bytes, cursor, fields, accessors, encoder and render, with no display list and no budgets of a caller's; the wrappers, Python and JavaScript hand back no stream and read none | RC-18.6 projects it in Python and JavaScript, and RC-18.7 and RC-18.8 in the wrappers over the C ABI; until each lands, its surface carries no stream | [design](../design/command-stream.md) |
+| The command stream: `Page::command_stream` and `DisplayList::command_stream`, which write a page's drawing as versioned bytes, and `CommandStream::*`, `CommandRecord::*`, `CommandField::*`, `CommandKind::*`, `CommandBudgets::*`, `CommandStreamError::*`, `COMMAND_STREAM_MAJOR` and `COMMAND_STREAM_MINOR`, which read, draw and write it back | on the C ABI as `src/commands.rs`'s bytes, cursor, fields, accessors, encoder and render, with no display list and no budgets of a caller's; in Python and JavaScript as their `CommandStream` classes, records, fields, kinds, budgets and device protocol, with no display list and no record built field by field (`CommandRecord::with`) or read by the facade's typed reader (`CommandRecord::read`); the wrappers hand back no stream and read none | RC-18.7 and RC-18.8 project it in the wrappers over the C ABI; until each lands, its surface carries no stream | [design](../design/command-stream.md) |
 | CommonJS build | none; ESM only | two builds of the engine can diverge; a CommonJS entry that re-exports the one ESM build cannot | [ROADMAP](../ROADMAP.md) SU-14 |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |

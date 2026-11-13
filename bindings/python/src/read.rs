@@ -1,5 +1,5 @@
 //! The read surface beyond pages: `/Info`, the outline, links, attachments,
-//! XMP and warnings, as Python objects.
+//! XMP and warnings, and a page's command stream, as Python objects.
 //!
 //! Each class is the facade's own type with its fields as read-only
 //! attributes (ruling 11): `OutlineItem` keeps its children, `Destination`
@@ -10,9 +10,12 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyFloat, PyList};
 
-use tinker_pdf::{Action, DestKind, Destination, Document, Trapped};
+use tinker_pdf::{
+    Action, CommandBudgets, CommandField, CommandKind, CommandRecord, CommandStream, DestKind,
+    Destination, Document, Trapped, Usage,
+};
 
 /// The `/Info` dictionary (14.3.3), decoded. `None` is the entry absent;
 /// `""` is the producer writing an empty one.
@@ -474,5 +477,544 @@ pub fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyLink>()?;
     module.add_class::<PyAttachment>()?;
     module.add_class::<PyWarning>()?;
+    module.add_class::<PyCommandKind>()?;
+    module.add_class::<PyCommandField>()?;
+    module.add_class::<PyCommandRecord>()?;
+    module.add_class::<PyCommandBudgets>()?;
+    module.add_class::<PyCommandStream>()?;
+    module.add("COMMAND_STREAM_MAJOR", tinker_pdf::COMMAND_STREAM_MAJOR)?;
+    module.add("COMMAND_STREAM_MINOR", tinker_pdf::COMMAND_STREAM_MINOR)?;
     Ok(())
+}
+
+// ---- the command stream (`docs/design/command-stream.md`, RC-18.6) ------------
+
+/// A kind of command-stream record (`docs/design/command-stream.md`, "The
+/// records"): its number on the wire, its name, and what each of its fields
+/// holds, in their places.
+#[pyclass(name = "CommandKind", frozen, eq, hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct PyCommandKind {
+    inner: CommandKind,
+}
+
+#[pymethods]
+impl PyCommandKind {
+    /// Every kind this build knows, in the order of their numbers.
+    #[staticmethod]
+    fn all() -> Vec<PyCommandKind> {
+        CommandKind::ALL
+            .iter()
+            .map(|&inner| PyCommandKind { inner })
+            .collect()
+    }
+
+    /// The kind a wire number names, or `None` for a number this build does
+    /// not know.
+    #[staticmethod]
+    fn from_number(number: u32) -> Option<PyCommandKind> {
+        CommandKind::from_number(number).map(|inner| PyCommandKind { inner })
+    }
+
+    /// The kind's number on the wire.
+    #[getter]
+    fn number(&self) -> u32 {
+        self.inner.number()
+    }
+
+    /// The kind's name, as the design names it: `"GlyphRun"`.
+    #[getter]
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    /// What each field holds, in their order.
+    #[getter]
+    fn fields(&self) -> Vec<&'static str> {
+        self.inner.fields().to_vec()
+    }
+
+    /// Whether the kind is the codec's — a command, or a definition a state
+    /// is made of — rather than the facade's page and tables.
+    #[getter]
+    fn is_codec(&self) -> bool {
+        self.inner.is_codec()
+    }
+
+    /// Whether the kind is one of a page's recorded calls.
+    #[getter]
+    fn is_command(&self) -> bool {
+        self.inner.is_command()
+    }
+
+    /// The device method a replay calls for a record of this kind: its name
+    /// in snake case, `"glyph_run"`.
+    #[getter]
+    fn method(&self) -> String {
+        snake_case(self.inner.name())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<tinker_pdf.CommandKind {} ({})>",
+            self.inner.name(),
+            self.inner.number()
+        )
+    }
+}
+
+/// `name`, which is in upper camel case, in snake case.
+fn snake_case(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for (at, character) in name.chars().enumerate() {
+        if character.is_ascii_uppercase() {
+            if at > 0 {
+                out.push('_');
+            }
+            out.push(character.to_ascii_lowercase());
+        } else {
+            out.push(character);
+        }
+    }
+    out
+}
+
+/// One field of a record (`docs/design/command-stream.md`, "The form"): its
+/// tag, and its value as Python holds it.
+///
+/// The tag is kept beside the value, because two fields Python would hold
+/// alike are written apart: an unsigned and a signed integer, an absent value
+/// and an empty one. Each tag has its constructor, so a record built here
+/// writes the bytes the one read was written with. A real is a Python
+/// `float`, its bits as written, a NaN's payload and a negative zero
+/// included.
+#[pyclass(name = "CommandField", frozen)]
+#[derive(Clone)]
+pub struct PyCommandField {
+    inner: CommandField,
+}
+
+#[pymethods]
+impl PyCommandField {
+    /// An absent value, tag 0.
+    #[staticmethod]
+    fn nothing() -> PyCommandField {
+        PyCommandField {
+            inner: CommandField::Nothing,
+        }
+    }
+
+    /// An unsigned integer, tag 1.
+    #[staticmethod]
+    fn unsigned(value: u64) -> PyCommandField {
+        PyCommandField {
+            inner: CommandField::Unsigned(value),
+        }
+    }
+
+    /// A signed integer, tag 2.
+    #[staticmethod]
+    fn signed(value: i64) -> PyCommandField {
+        PyCommandField {
+            inner: CommandField::Signed(value),
+        }
+    }
+
+    /// A real, tag 3.
+    #[staticmethod]
+    fn real(value: f64) -> PyCommandField {
+        PyCommandField {
+            inner: CommandField::Real(value),
+        }
+    }
+
+    /// Bytes, tag 4.
+    #[staticmethod]
+    fn bytes(value: &[u8]) -> PyCommandField {
+        PyCommandField {
+            inner: CommandField::bytes(value),
+        }
+    }
+
+    /// Reals, tag 5.
+    #[staticmethod]
+    fn reals(value: Vec<f64>) -> PyCommandField {
+        PyCommandField {
+            inner: CommandField::Reals(value),
+        }
+    }
+
+    /// Unsigned integers, tag 6.
+    #[staticmethod]
+    fn naturals(value: Vec<u64>) -> PyCommandField {
+        PyCommandField {
+            inner: CommandField::Naturals(value),
+        }
+    }
+
+    /// Byte strings, tag 7: a list of `bytes`.
+    #[staticmethod]
+    fn strings(value: Vec<Bound<'_, PyBytes>>) -> PyCommandField {
+        PyCommandField {
+            inner: CommandField::Strings(value.iter().map(|s| s.as_bytes().to_vec()).collect()),
+        }
+    }
+
+    /// The tag's name, its constructor's: `"nothing"`, `"unsigned"`,
+    /// `"signed"`, `"real"`, `"bytes"`, `"reals"`, `"naturals"` or
+    /// `"strings"`.
+    #[getter]
+    fn tag_name(&self) -> &'static str {
+        match self.inner {
+            CommandField::Nothing => "nothing",
+            CommandField::Unsigned(_) => "unsigned",
+            CommandField::Signed(_) => "signed",
+            CommandField::Real(_) => "real",
+            CommandField::Bytes(_) => "bytes",
+            CommandField::Reals(_) => "reals",
+            CommandField::Naturals(_) => "naturals",
+            CommandField::Strings(_) => "strings",
+        }
+    }
+
+    /// The tag's number on the wire, 0 to 7.
+    #[getter]
+    fn tag(&self) -> u8 {
+        self.inner.tag()
+    }
+
+    /// The value: `None`, an `int`, a `float`, `bytes`, a list of `float`s,
+    /// a list of `int`s, or a list of `bytes`.
+    #[getter]
+    fn value<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        Ok(match &self.inner {
+            CommandField::Nothing => py.None().into_bound(py),
+            CommandField::Unsigned(value) => value.into_pyobject(py)?.into_any(),
+            CommandField::Signed(value) => value.into_pyobject(py)?.into_any(),
+            CommandField::Real(value) => PyFloat::new(py, *value).into_any(),
+            CommandField::Bytes(bytes) => PyBytes::new(py, bytes).into_any(),
+            CommandField::Reals(reals) => PyList::new(py, reals.iter().copied())?.into_any(),
+            CommandField::Naturals(naturals) => {
+                PyList::new(py, naturals.iter().copied())?.into_any()
+            }
+            CommandField::Strings(strings) => {
+                PyList::new(py, strings.iter().map(|s| PyBytes::new(py, s)))?.into_any()
+            }
+        })
+    }
+
+    /// Equal where the two encode to the same bytes: a real by its bits.
+    fn __eq__(&self, other: &PyCommandField) -> bool {
+        self.inner == other.inner
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<tinker_pdf.CommandField {}>", self.tag_name())
+    }
+}
+
+/// One record of a command stream: its kind's number and its fields, in the
+/// places its kind names. A record of a kind this build does not know — one
+/// a newer minor version added — keeps its number and fields, and names no
+/// kind.
+#[pyclass(name = "CommandRecord", frozen)]
+#[derive(Clone)]
+pub struct PyCommandRecord {
+    inner: CommandRecord,
+}
+
+#[pymethods]
+impl PyCommandRecord {
+    /// A record of the kind numbered `kind` holding `fields`, in their
+    /// places, for [`CommandStream.from_records`](PyCommandStream).
+    #[new]
+    fn new(kind: u32, fields: Vec<PyCommandField>) -> PyCommandRecord {
+        PyCommandRecord {
+            inner: CommandRecord {
+                kind,
+                fields: fields.into_iter().map(|field| field.inner).collect(),
+            },
+        }
+    }
+
+    /// The kind's number on the wire.
+    #[getter]
+    fn kind(&self) -> u32 {
+        self.inner.kind
+    }
+
+    /// The kind, or `None` for a number this build does not know.
+    #[getter]
+    fn command_kind(&self) -> Option<PyCommandKind> {
+        self.inner
+            .command_kind()
+            .map(|inner| PyCommandKind { inner })
+    }
+
+    /// The kind's name, or `None` for a number this build does not know.
+    #[getter]
+    fn name(&self) -> Option<&'static str> {
+        self.inner.command_kind().map(CommandKind::name)
+    }
+
+    /// What each field holds, by its kind; empty for a kind this build does
+    /// not know.
+    #[getter]
+    fn field_names(&self) -> Vec<&'static str> {
+        self.inner
+            .command_kind()
+            .map_or_else(Vec::new, |kind| kind.fields().to_vec())
+    }
+
+    /// The fields, in their places.
+    #[getter]
+    fn fields(&self) -> Vec<PyCommandField> {
+        self.inner
+            .fields
+            .iter()
+            .map(|inner| PyCommandField {
+                inner: inner.clone(),
+            })
+            .collect()
+    }
+
+    /// The field in the place the kind names `name`, or `None` where the kind
+    /// names no such place or the record holds no field there.
+    fn field(&self, name: &str) -> Option<PyCommandField> {
+        let kind = self.inner.command_kind()?;
+        let place = kind.fields().iter().position(|field| *field == name)?;
+        self.inner.fields.get(place).map(|inner| PyCommandField {
+            inner: inner.clone(),
+        })
+    }
+
+    /// Equal where the two write the same bytes.
+    fn __eq__(&self, other: &PyCommandRecord) -> bool {
+        self.inner == other.inner
+    }
+
+    /// How many fields the record holds.
+    fn __len__(&self) -> usize {
+        self.inner.fields.len()
+    }
+
+    fn __repr__(&self) -> String {
+        let name = self
+            .inner
+            .command_kind()
+            .map_or("unknown", CommandKind::name);
+        format!(
+            "<tinker_pdf.CommandRecord {name} ({}) of {} fields>",
+            self.inner.kind,
+            self.inner.fields.len()
+        )
+    }
+}
+
+/// The most a command stream may make a reader hold
+/// (`docs/design/command-stream.md`, "The reader's budgets"). A budget not
+/// named is the design's default.
+#[pyclass(name = "CommandBudgets", get_all, frozen)]
+#[derive(Clone)]
+pub struct PyCommandBudgets {
+    /// Records in a stream, nested streams' included.
+    records: u64,
+    /// Bytes the read holds.
+    bytes: u64,
+    /// Streams nested in streams: a tiling cell's.
+    depth: u32,
+    /// Functions nested in functions, and a calculator's blocks in blocks.
+    functions: u32,
+    /// Colour spaces nested in colour spaces, and halftones in halftones.
+    spaces: u32,
+}
+
+#[pymethods]
+impl PyCommandBudgets {
+    #[new]
+    #[pyo3(signature = (records = None, bytes = None, depth = None, functions = None, spaces = None))]
+    fn new(
+        records: Option<u64>,
+        bytes: Option<u64>,
+        depth: Option<u32>,
+        functions: Option<u32>,
+        spaces: Option<u32>,
+    ) -> PyCommandBudgets {
+        let defaults = CommandBudgets::DEFAULT;
+        PyCommandBudgets {
+            records: records.unwrap_or(defaults.records),
+            bytes: bytes.unwrap_or(defaults.bytes),
+            depth: depth.unwrap_or(defaults.depth),
+            functions: functions.unwrap_or(defaults.functions),
+            spaces: spaces.unwrap_or(defaults.spaces),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<tinker_pdf.CommandBudgets records={} bytes={} depth={} functions={} spaces={}>",
+            self.records, self.bytes, self.depth, self.functions, self.spaces
+        )
+    }
+}
+
+impl PyCommandBudgets {
+    fn to_facade(&self) -> CommandBudgets {
+        CommandBudgets {
+            records: self.records,
+            bytes: self.bytes,
+            depth: self.depth,
+            functions: self.functions,
+            spaces: self.spaces,
+        }
+    }
+}
+
+/// A page's drawing read from its command stream
+/// (`docs/design/command-stream.md`): its records in order, the bytes they
+/// write back, and its replay through the engine's own renderer.
+///
+/// [`CommandStream.replay`](PyCommandStream) hands every record, in the
+/// stream's order, to the device's method named for its kind in snake case
+/// (`CommandKind.method`: `glyph_run`, `begin_group`, `image_decode`), a
+/// record of a kind this build does not know to its `unknown`; a device
+/// without the method for a kind is not called for it. A refusal of the
+/// bytes raises `ValueError` with the reader's sentence.
+#[pyclass(name = "CommandStream", frozen)]
+pub struct PyCommandStream {
+    inner: CommandStream,
+}
+
+/// The reader's refusal, as Python raises it.
+fn unread(error: tinker_pdf::CommandStreamError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+#[pymethods]
+impl PyCommandStream {
+    /// Reads a stream under the design's budgets.
+    #[new]
+    fn new(data: &[u8]) -> PyResult<PyCommandStream> {
+        PyCommandStream::parse(data)
+    }
+
+    /// Reads a stream under the design's budgets.
+    #[staticmethod]
+    fn parse(data: &[u8]) -> PyResult<PyCommandStream> {
+        CommandStream::parse(data)
+            .map(|inner| PyCommandStream { inner })
+            .map_err(unread)
+    }
+
+    /// Reads a stream under `budgets`.
+    #[staticmethod]
+    fn parse_with(data: &[u8], budgets: &PyCommandBudgets) -> PyResult<PyCommandStream> {
+        CommandStream::parse_with(data, &budgets.to_facade())
+            .map(|inner| PyCommandStream { inner })
+            .map_err(unread)
+    }
+
+    /// The stream `records` write at this build's version, read back as a
+    /// parse reads it: the encoder.
+    #[staticmethod]
+    fn from_records(records: Vec<PyCommandRecord>) -> PyResult<PyCommandStream> {
+        let records: Vec<CommandRecord> = records.into_iter().map(|record| record.inner).collect();
+        CommandStream::from_records(&records)
+            .map(|inner| PyCommandStream { inner })
+            .map_err(unread)
+    }
+
+    /// Every record before the stream's end, in order.
+    #[getter]
+    fn records(&self) -> Vec<PyCommandRecord> {
+        self.inner
+            .records()
+            .iter()
+            .map(|inner| PyCommandRecord {
+                inner: inner.clone(),
+            })
+            .collect()
+    }
+
+    /// The stream's bytes, written back at its own version.
+    fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.inner.to_bytes())
+    }
+
+    /// The stream's major and minor version.
+    #[getter]
+    fn version(&self) -> (u16, u16) {
+        self.inner.version()
+    }
+
+    /// The usage whose optional-content states the stream's calls carry —
+    /// `"view"`, `"print"` or `"export"` — or `None` for none.
+    #[getter]
+    fn usage(&self) -> Option<&'static str> {
+        self.inner.usage().map(|usage| match usage {
+            Usage::View => "view",
+            Usage::Print => "print",
+            Usage::Export => "export",
+        })
+    }
+
+    /// Which page of its document the stream is of.
+    #[getter]
+    fn page_index(&self) -> u32 {
+        self.inner.page_index()
+    }
+
+    /// The page's size in points after rotation.
+    #[getter]
+    fn size(&self) -> (f64, f64) {
+        self.inner.size()
+    }
+
+    /// The size in pixels a render at `dpi` draws.
+    #[pyo3(signature = (dpi = 72.0))]
+    fn pixel_size(&self, dpi: f64) -> (u32, u32) {
+        self.inner
+            .pixel_size(&tinker_pdf::RenderOptions::at_dpi(dpi))
+    }
+
+    /// Draws the page at a resolution in dots per inch, as a render of it
+    /// draws: the same pixels and the same warnings.
+    #[pyo3(signature = (dpi = 72.0))]
+    fn render(&self, py: Python<'_>, dpi: f64) -> crate::PyBitmap {
+        let inner = py.detach(|| self.inner.render(&tinker_pdf::RenderOptions::at_dpi(dpi)));
+        crate::PyBitmap { inner }
+    }
+
+    /// Hands every record, in the stream's order, to the method of `device`
+    /// named for its kind (the class documentation), and a record of a kind
+    /// this build does not know to its `unknown`. An exception a method
+    /// raises ends the replay and is raised.
+    fn replay(&self, device: &Bound<'_, PyAny>) -> PyResult<()> {
+        for record in self.inner.records() {
+            let method = record
+                .command_kind()
+                .map_or_else(|| "unknown".to_string(), |kind| snake_case(kind.name()));
+            if device.hasattr(method.as_str())? {
+                let argument = PyCommandRecord {
+                    inner: record.clone(),
+                };
+                device.call_method1(method.as_str(), (argument,))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// How many records the stream holds before its end.
+    fn __len__(&self) -> usize {
+        self.inner.records().len()
+    }
+
+    fn __repr__(&self) -> String {
+        let (major, minor) = self.inner.version();
+        format!(
+            "<tinker_pdf.CommandStream {major}.{minor}, page {}, {} records>",
+            self.inner.page_index(),
+            self.inner.records().len()
+        )
+    }
 }

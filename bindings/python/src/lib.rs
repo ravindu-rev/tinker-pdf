@@ -70,7 +70,8 @@ mod source {
                 return Ok(Arc::from(&[][..]));
             }
             let wanted = range.start..end;
-            self.fill(wanted.clone()).map_err(|_| SourceMiss::at(wanted))
+            self.fill(wanted.clone())
+                .map_err(|_| SourceMiss::at(wanted))
         }
     }
 
@@ -322,6 +323,18 @@ impl PyDocument {
             .ok_or_else(|| PyIndexError::new_err("no such page"))?;
         let inner = py.detach(|| page.render(&tinker_pdf::RenderOptions::at_dpi(dpi)));
         Ok(PyBitmap { inner })
+    }
+
+    /// A page's drawing as a command stream (`Page::command_stream`,
+    /// `docs/design/command-stream.md`): versioned bytes that
+    /// `CommandStream` reads back, draws and writes again.
+    fn command_stream<'py>(&self, py: Python<'py>, index: u32) -> PyResult<Bound<'py, PyBytes>> {
+        let page = self
+            .inner
+            .page(index)
+            .ok_or_else(|| PyIndexError::new_err("no such page"))?;
+        let bytes = py.detach(|| page.command_stream());
+        Ok(PyBytes::new(py, &bytes))
     }
 
     /// The strict structural validator's findings, as rule names (ruling 13).
