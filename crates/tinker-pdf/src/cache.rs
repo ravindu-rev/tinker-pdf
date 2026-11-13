@@ -18,8 +18,9 @@
 //! wherever they are embedded; the recorded drawing of one form under
 //! everything its drawing
 //! reads; a glyph's mask under P-06's key and the anti-aliasing a render
-//! rasterises it with. So **a hit is the bytes a miss computes**, and a page
-//! draws the same pixels whatever was drawn before it.
+//! rasterises it with; a tiling pattern's cell under everything its drawing
+//! reads. So **a hit is the bytes a miss computes**, and a page draws the same
+//! pixels whatever was drawn before it.
 //!
 //! A refusal is kept as firmly as a success, in the words the decode used, and
 //! every entry carries what its computation reported, which every request
@@ -81,12 +82,13 @@ use crate::stats;
 /// keeps nothing past the render that made it**, as it always has: a render's
 /// own resources hold what they decode and go with it. With one stated, the
 /// document keeps what its renders compute — decoded images, compiled ICC
-/// transforms, forms' recorded drawings and glyph masks — across renders,
-/// pages and clones of it, while the bytes fit, evicting the least recently
-/// requested first. **A budget stated at open charges the document's parsed
-/// objects to it too**, in the same order: past the budget an object no
-/// caller holds is dropped and parsed again, to an equal value, when it is
-/// next read. A budget stated on an open document holds its cache alone,
+/// transforms, forms' recorded drawings, glyph masks and tiling patterns'
+/// cells — across renders, pages and clones of it, while the bytes fit,
+/// evicting the least recently requested first. **A budget stated at open
+/// charges the document's parsed objects to it too**, in the same order:
+/// past the budget an object no caller holds is dropped and parsed again, to
+/// an equal value, when it is next read. A budget stated on an open document
+/// holds its cache alone,
 /// since the parsed objects are the open's, shared by every document handed
 /// back from it. A budget of zero is stated and keeps nothing at all: every
 /// request computes again.
@@ -131,8 +133,8 @@ pub(crate) enum Fill<V> {
     /// every later request for the key is handed it, while it fits.
     Keep(V, u64),
     /// A value for this request alone: nothing is kept, and the next request
-    /// for the key computes it again.
-    #[cfg_attr(not(test), allow(dead_code, reason = "a fill that keeps nothing"))]
+    /// for the key computes it again — a cell a cancelled render drew, which
+    /// is not the cell its key names.
     Once(V),
 }
 
@@ -163,6 +165,8 @@ pub(crate) struct Table {
     forms: HashMap<FormKey, Slot<Arc<KeptForm>>>,
     /// Glyph masks.
     masks: HashMap<MaskKey, Slot<Arc<Mask>>>,
+    /// Tiling patterns' cells, and the patterns whose cell would not draw.
+    cells: HashMap<CellKey, Slot<Option<Arc<KeptCell>>>>,
     /// A kind of plain values, for the tests of the machinery itself.
     #[cfg(test)]
     tests: HashMap<u32, Slot<Arc<Vec<u8>>>>,
@@ -181,6 +185,7 @@ impl Entries for Table {
             Key::Icc(key) => remove_ready(&mut self.icc, key),
             Key::Form(key) => remove_ready(&mut self.forms, &**key),
             Key::Mask(key) => remove_ready(&mut self.masks, key),
+            Key::Cell(key) => remove_ready(&mut self.cells, &**key),
             #[cfg(test)]
             Key::Test(key) => remove_ready(&mut self.tests, key),
         }
@@ -222,6 +227,7 @@ pub(crate) enum Key {
     Icc(IccKey),
     Form(Box<FormKey>),
     Mask(MaskKey),
+    Cell(Box<CellKey>),
     #[cfg(test)]
     Test(u32),
 }
@@ -304,6 +310,18 @@ impl Kind for MaskKey {
 
     fn key(&self) -> Key {
         Key::Mask(self.clone())
+    }
+}
+
+impl Kind for CellKey {
+    type Value = Option<Arc<KeptCell>>;
+
+    fn slots(table: &mut Table) -> &mut HashMap<Self, Slot<Self::Value>> {
+        &mut table.cells
+    }
+
+    fn key(&self) -> Key {
+        Key::Cell(Box::new(self.clone()))
     }
 }
 
@@ -408,6 +426,20 @@ impl DocumentCache {
         work: Option<&Work>,
         fill: impl FnOnce() -> Fill<Option<Arc<Transforms>>>,
     ) -> (Option<Arc<Transforms>>, bool) {
+        self.read(key, work, fill)
+    }
+
+    /// The cell of a tiling pattern kept under `key` — or `None` where the
+    /// pattern's cell would not draw — and whether the request found it kept,
+    /// filled as [`DocumentCache::image`] fills an image: single-flight, since
+    /// a cell is a function of its key alone, so renders on several threads
+    /// that reach one cell at once draw it once.
+    pub(crate) fn cell(
+        &self,
+        key: CellKey,
+        work: Option<&Work>,
+        fill: impl FnOnce() -> Fill<Option<Arc<KeptCell>>>,
+    ) -> (Option<Arc<KeptCell>>, bool) {
         self.read(key, work, fill)
     }
 
@@ -844,6 +876,111 @@ pub(crate) struct FormKey {
 pub(crate) struct KeptForm {
     pub(crate) recording: Arc<FormRecording>,
     pub(crate) missing_fonts: Vec<String>,
+}
+
+/// What a tiling pattern's cell is kept under (P-23.2): the pattern's
+/// object; everything of the request the cell's pixels are a function of —
+/// `TileRequest::to_pixels`'s six numbers by their bits, so the device matrix
+/// and the sub-pixel phase are unquantised and a hit is the bytes a miss
+/// draws, the `/BBox` the cell is clipped to by its bits, the buffer's size
+/// and format, the anti-aliasing, the graphics and text levels, the rule at
+/// level 0 and the thinnest stroke the cell is drawn with, and the nesting
+/// depth, which the recursion cap reads; for a pattern that brings no
+/// resources of its own, the scope its names resolve in, its resource
+/// dictionary written exactly ([`Written`]); and the usage the render names,
+/// whose optional-content states the cell's content is shown or hidden by
+/// (8.11.4.4). A `PaintType 2` cell is drawn as its content draws it, a
+/// shape whose colour the fill takes at the blit, so one cell serves every
+/// colour it is filled in.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct CellKey {
+    /// The pattern's stream.
+    pub(crate) pattern: ObjRef,
+    /// Pattern space to the cell's buffer, `a` to `f`, by their bits.
+    pub(crate) to_pixels: [u64; 6],
+    /// The `/BBox` in pattern space, by its bits.
+    pub(crate) bbox: [u64; 4],
+    /// The buffer's width and height.
+    pub(crate) size: (u32, u32),
+    /// The buffer's format.
+    pub(crate) format: tinker_pdf_raster::canvas::PixelFormat,
+    /// Whether the cell's edges are anti-aliased.
+    pub(crate) antialias: bool,
+    /// The graphics and the text level.
+    pub(crate) levels: (u8, u8),
+    /// The rule a pixel is whole or empty by at level 0.
+    pub(crate) hard_edge: tinker_pdf_raster::HardEdge,
+    /// The thinnest stroke, in device pixels, by its bits.
+    pub(crate) thinnest_line: Option<u64>,
+    /// How many tiling patterns are open above the cell.
+    pub(crate) depth: u32,
+    /// The invoking scope's resources, where the pattern resolves its names
+    /// in them; `None` for a pattern with resources of its own.
+    pub(crate) scope: Option<Written>,
+    /// The usage the render names (`crate::RenderOptions::usage`).
+    pub(crate) usage: Option<crate::Usage>,
+}
+
+impl CellKey {
+    /// The bytes the key holds beside its own fields: a scope's resources,
+    /// written.
+    pub(crate) fn held(&self) -> u64 {
+        self.scope
+            .as_ref()
+            .map_or(0, |scope| u64::try_from(scope.len()).unwrap_or(u64::MAX))
+    }
+}
+
+/// A tiling pattern's cell as the document keeps it: the cell, and what its
+/// drawing told the scope its content ran in — fonts it found none for,
+/// images it decoded with damage, colour spaces it read with a repair, images
+/// it drew reduced — which every fill that meets it kept reports again, as
+/// its own drawing would have, beside the cell's own warnings.
+pub(crate) struct KeptCell {
+    /// The cell, its pixels shared.
+    pub(crate) tile: tinker_pdf_render::Tile,
+    /// The fonts the cell's content found none for.
+    pub(crate) missing_fonts: Vec<String>,
+    /// The images it decoded with damage, and what was tolerated.
+    pub(crate) damaged: Vec<(String, String)>,
+    /// The colour spaces it read with a repair, and the repair.
+    pub(crate) repaired: Vec<(String, String)>,
+    /// The images it drew reduced, and the reduction.
+    pub(crate) reduced: Vec<(String, u32)>,
+}
+
+impl KeptCell {
+    /// What the entry is charged beside the cache's own bookkeeping and its
+    /// key: the cell's pixels, the words it says again, and its warnings at
+    /// 64 bytes each.
+    pub(crate) fn bytes(&self) -> u64 {
+        let words = self
+            .missing_fonts
+            .iter()
+            .map(String::len)
+            .chain(
+                self.damaged
+                    .iter()
+                    .map(|(name, what)| name.len() + what.len()),
+            )
+            .chain(
+                self.repaired
+                    .iter()
+                    .map(|(name, what)| name.len() + what.len()),
+            )
+            .chain(self.reduced.iter().map(|(name, _)| name.len() + 4))
+            .sum::<usize>();
+        let warnings = self.tile.warnings.len().saturating_mul(64);
+        u64::try_from(
+            self.tile
+                .canvas
+                .data
+                .len()
+                .saturating_add(words)
+                .saturating_add(warnings),
+        )
+        .unwrap_or(u64::MAX)
+    }
 }
 
 /// What a glyph mask is kept under: P-06's key — the font, the code, the

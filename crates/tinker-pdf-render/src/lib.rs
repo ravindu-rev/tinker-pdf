@@ -460,8 +460,10 @@ pub struct TileRequest {
 /// One rasterized tiling-pattern cell.
 #[derive(Clone, Debug)]
 pub struct Tile {
-    /// The cell's pixels, transparent where it did not paint.
-    pub canvas: Canvas,
+    /// The cell's pixels, transparent where it did not paint. Shared: a
+    /// cell is read and never written once it is drawn, so one a source keeps
+    /// serves every fill it is handed to without a copy.
+    pub canvas: Arc<Canvas>,
     /// Whether every paint of the cell was fully opaque, which 11.7.5.2
     /// asks of a tiling pattern's cell before an object painted with it is
     /// ([`Renderer::painted_opaquely`]).
@@ -8820,7 +8822,12 @@ mod tests {
             self.drawn.set(self.drawn.get() + 1);
             self.size.set((request.width, request.height));
             Some(Tile {
-                canvas: Canvas::new(request.width, request.height, request.format, self.cell),
+                canvas: Arc::new(Canvas::new(
+                    request.width,
+                    request.height,
+                    request.format,
+                    self.cell,
+                )),
                 opaque: true,
                 warnings: Vec::new(),
             })
@@ -8875,7 +8882,7 @@ mod tests {
                 }
             }
             Some(Tile {
-                canvas,
+                canvas: Arc::new(canvas),
                 opaque: true,
                 warnings: Vec::new(),
             })

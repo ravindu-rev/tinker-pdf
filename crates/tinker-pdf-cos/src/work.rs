@@ -340,6 +340,14 @@ pub struct Stats {
     /// Counted by the facade's sample loops, a stream's, an inline image's, a
     /// JPEG's strips and a JPEG 2000 image's samples alike.
     pub image_colours_converted: u64,
+    /// A tiling pattern's cell rasterised: once for each fill no cell the
+    /// document keeps answered (P-23.2), a cell's content run through its
+    /// interpreter into a buffer of its own — so under a stated budget at
+    /// most the distinct (pattern, matrix, phase) keys a document's fills ask
+    /// for, and with none, once a fill.
+    ///
+    /// Counted by the facade's tiling-cell door (`GlyphSource::tile`).
+    pub tiling_cells_rasterised: u64,
     /// A page's text folded and joined in one of the four folds a search
     /// reads it in, its table of offsets back to the glyphs with it: once a
     /// page and fold, at the first search that asks for the fold, which every
@@ -601,6 +609,8 @@ pub enum Counter {
     ShadingFunctionsEvaluated,
     /// [`Stats::image_colours_converted`].
     ImageColoursConverted,
+    /// [`Stats::tiling_cells_rasterised`].
+    TilingCellsRasterised,
     /// [`Stats::stream_seal_passes`].
     StreamSealPasses,
     /// [`Stats::pool_items_on_workers`].
@@ -707,6 +717,7 @@ impl Stats {
             self.operators_run,
             self.shading_functions_evaluated,
             self.image_colours_converted,
+            self.tiling_cells_rasterised,
             self.text_forms_built,
             self.word_boundaries_computed,
             self.search_steps,
@@ -756,6 +767,7 @@ impl Stats {
             Counter::OperatorsRun => &mut self.operators_run,
             Counter::ShadingFunctionsEvaluated => &mut self.shading_functions_evaluated,
             Counter::ImageColoursConverted => &mut self.image_colours_converted,
+            Counter::TilingCellsRasterised => &mut self.tiling_cells_rasterised,
             Counter::StreamSealPasses => &mut self.stream_seal_passes,
             Counter::PoolItemsOnWorkers => &mut self.pool_items_on_workers,
             Counter::PoolItemsOnCaller => &mut self.pool_items_on_caller,
@@ -880,6 +892,9 @@ impl Add for Stats {
             image_colours_converted: self
                 .image_colours_converted
                 .saturating_add(other.image_colours_converted),
+            tiling_cells_rasterised: self
+                .tiling_cells_rasterised
+                .saturating_add(other.tiling_cells_rasterised),
             stream_seal_passes: self
                 .stream_seal_passes
                 .saturating_add(other.stream_seal_passes),
@@ -1083,7 +1098,7 @@ mod tests {
 
     /// Every counter of a step, so a test of one property covers them all;
     /// [`PLACES`] holds the two that count where a part ran.
-    const ALL: [Counter; 41] = [
+    const ALL: [Counter; 42] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::GlyphMasksRasterised,
@@ -1121,6 +1136,7 @@ mod tests {
         Counter::OperatorsRun,
         Counter::ShadingFunctionsEvaluated,
         Counter::ImageColoursConverted,
+        Counter::TilingCellsRasterised,
         Counter::TextFormsBuilt,
         Counter::WordBoundariesComputed,
         Counter::SearchSteps,

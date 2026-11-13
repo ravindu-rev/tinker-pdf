@@ -5060,114 +5060,44 @@ impl GlyphSource for PageResources {
         // content stream. A direct dictionary carrying the keys but no stream
         // has no cell to draw, and declining here is what turns it back into
         // the reported gap it was.
-        let content = self.decoded(reference?).ok()?;
-
-        // 8.7.3.2: the cell's own `/Resources`. Gap 11 recorded that a *form*
-        // XObject's `/Resources` are consulted nowhere in this engine; a
-        // pattern's are, because a cell that names `/F0` almost always means a
-        // font the page never heard of — a pattern is a self-contained
-        // drawing, where a form is usually written beside the page that
-        // invokes it.
-        let own = self
-            .doc
-            .resolve_key(&dict, Name::RESOURCES)
-            .as_dict()
-            .cloned();
-        let nested;
-        let resources: &PageResources = match own {
-            Some(dict) => {
-                nested = PageResources::from_dict_in(
-                    &self.doc,
-                    dict,
-                    self.provider.as_ref(),
-                    self.op.clone(),
-                );
-                &nested
-            }
-            // Falling back to the page's is what a producer that omits the key
-            // is relying on, and it is what every reader does.
-            None => self,
+        let reference = reference?;
+        let Some(cache) = self.op.cache() else {
+            let drawn = self.drawn_cell(&dict, reference, request, None)?;
+            drawn.say_again(self);
+            return Some(drawn.tile);
         };
-
-        let canvas = Canvas::new(
-            request.width,
-            request.height,
-            request.format,
-            Color::TRANSPARENT,
-        );
-        let mut renderer = tinker_pdf_render::Renderer::new(canvas, request.to_pixels, resources)
-            .with_cancel(request.cancel.clone())
-            .with_pattern_depth(request.depth)
-            .with_antialias(request.antialias)
-            .with_levels(request.graphics_bits, request.text_bits)
-            .with_hard_edge(request.hard_edge)
-            .with_thinnest_line(request.thinnest_line);
-
-        // 8.7.3.2: the cell is clipped to its `/BBox`. The buffer is already
-        // that box rounded outward, so this only takes back the part of a
-        // pixel the rounding gave away -- but a hatch is normally drawn with a
-        // line width that deliberately runs past the box so neighbouring cells
-        // join, and without the clip that overshoot lands in the next cell's
-        // gap.
-        let [x0, y0, x1, y1] = request.bbox;
-        let box_path = [
-            PathSegment::MoveTo { x: x0, y: y0 },
-            PathSegment::LineTo { x: x1, y: y0 },
-            PathSegment::LineTo { x: x1, y: y1 },
-            PathSegment::LineTo { x: x0, y: y1 },
-            PathSegment::Close,
-        ];
-        // Pattern space, because `to_pixels` is the renderer's `base` and the
-        // interpreter's CTM starts at the identity below.
-        let state = tinker_pdf_content::GraphicsState::new(Matrix::IDENTITY);
-        renderer.clip_path(&box_path, &state, false);
-
-        tinker_pdf_content::interpret(&content, Matrix::IDENTITY, &mut renderer, resources);
-        // 8.7.3.3: a `PaintType 2` cell is drawn as its content stream draws
-        // it and is only a shape: the renderer composites its coverage in the
-        // `SCN` colour (`Canvas::composite_tinted`), so nothing about colour
-        // is decided here and the cell is the same whatever it is filled in.
-        //
-        // 11.7.5.2 asks whether every object of the cell was fully opaque.
-        let opaque = renderer.painted_opaquely();
-        let (canvas, warnings, counts) = renderer.finish_counted();
-        // The cell's renderer is one of this render's own, so the work it did
-        // is; the calls it drew are a paint of the fill that names the
-        // pattern, not the page's.
-        stats::add_render(self.op.work.as_deref(), counts, stats::Draws::Elsewhere);
-
-        // Ruling 10, and only reachable when the cell had resources of its
-        // own: a font the cell could not resolve, or an image it had to
-        // tolerate, is a fact about the page and the page is the only place a
-        // caller looks.
-        if !std::ptr::eq(resources, self) {
-            if let (Ok(mut mine), names) = (self.missing_fonts.lock(), resources.missing_fonts()) {
-                for name in names {
-                    if mine.len() < 64 && !mine.contains(&name) {
-                        mine.push(name);
-                    }
-                }
+        // A document with a budget keeps the cell (P-23.2): under its pattern
+        // and everything of the request and the scope its pixels are a
+        // function of (`cache::CellKey`), so a hit is the cell a miss draws,
+        // and what its drawing told its scope is kept with it and said again
+        // by every fill that meets it.
+        let key = self.cell_key(&dict, reference, request);
+        let key_bytes = key.held();
+        let (kept, _) = cache.cell(key, self.op.work.as_deref(), || {
+            // Drawn through resources of its own over this scope's caches,
+            // so what it reports is the cell's alone, whatever this render
+            // had reported before it.
+            let serving = self.serving(self.op.clone());
+            let Some(drawn) = self.drawn_cell(&dict, reference, request, Some(&serving)) else {
+                return Fill::Keep(None, 0);
+            };
+            // A cancelled render's cell holds what it drew before it stopped,
+            // which is not the cell its key names: it serves this fill alone.
+            let cancelled = request.cancel.is_cancelled()
+                || drawn
+                    .tile
+                    .warnings
+                    .contains(&tinker_pdf_render::RenderWarning::Cancelled);
+            let cell = Arc::new(drawn);
+            if cancelled {
+                return Fill::Once(Some(cell));
             }
-            if let Ok(mut mine) = self.damaged_images.lock() {
-                for entry in resources.damaged_images() {
-                    if !mine.contains(&entry) {
-                        mine.push(entry);
-                    }
-                }
-            }
-            for entry in resources.repaired_spaces() {
-                self.note_repaired_space(entry);
-            }
-            for entry in resources.reduced_images() {
-                self.note_reduced_image(entry);
-            }
-        }
-
-        Some(tinker_pdf_render::Tile {
-            canvas,
-            warnings,
-            opaque,
-        })
+            let bytes = cell.bytes().saturating_add(key_bytes);
+            Fill::Keep(Some(cell), bytes)
+        });
+        let cell = kept?;
+        cell.say_again(self);
+        Some(cell.tile.clone())
     }
 
     fn inline_image(
@@ -5488,6 +5418,189 @@ impl PageResources {
             Some(b"DCTDecode") | Some(b"DCT") | Some(b"JPXDecode")
         );
         codec && !masked
+    }
+}
+
+impl PageResources {
+    /// The key the cell of the tiling pattern `dict`, object `reference`,
+    /// drawn as `request` asks, is kept under in this scope
+    /// (`cache::CellKey`): the pattern, the request's every field the cell's
+    /// pixels read, this scope's resources where the pattern brings none of
+    /// its own, so that its names resolve in them, and the usage the
+    /// operation binds its optional-content states for.
+    fn cell_key(
+        &self,
+        dict: &Dict,
+        reference: ObjRef,
+        request: &tinker_pdf_render::TileRequest,
+    ) -> cache::CellKey {
+        // The rule `drawn_cell` reads a pattern's own scope by.
+        let owns = self
+            .doc
+            .resolve_key(dict, Name::RESOURCES)
+            .as_dict()
+            .is_some();
+        let to = request.to_pixels;
+        cache::CellKey {
+            pattern: reference,
+            to_pixels: [to.a, to.b, to.c, to.d, to.e, to.f].map(f64::to_bits),
+            bbox: request.bbox.map(f64::to_bits),
+            size: (request.width, request.height),
+            format: request.format,
+            antialias: request.antialias,
+            levels: (request.graphics_bits, request.text_bits),
+            hard_edge: request.hard_edge,
+            thinnest_line: request.thinnest_line.map(f64::to_bits),
+            depth: request.depth,
+            scope: (!owns).then(|| self.written().clone()),
+            usage: self.op.usage(),
+        }
+    }
+
+    /// The cell of the tiling pattern `dict`, object `reference`, drawn into
+    /// the buffer `request` describes, and what its drawing told the scope
+    /// its content ran in: the pattern's own `/Resources` where it brings
+    /// them, and otherwise `scope` — or, where none is handed, this one,
+    /// whose lists the drawing then writes to directly, so nothing is kept
+    /// apart. Counted as one cell rasterised. `None` where the pattern's
+    /// stream will not decode.
+    fn drawn_cell(
+        &self,
+        dict: &Dict,
+        reference: ObjRef,
+        request: &tinker_pdf_render::TileRequest,
+        scope: Option<&PageResources>,
+    ) -> Option<cache::KeptCell> {
+        let content = self.decoded(reference).ok()?;
+        self.count(Counter::TilingCellsRasterised);
+
+        // 8.7.3.2: the cell's own `/Resources`. Gap 11 recorded that a *form*
+        // XObject's `/Resources` are consulted nowhere in this engine; a
+        // pattern's are, because a cell that names `/F0` almost always means a
+        // font the page never heard of — a pattern is a self-contained
+        // drawing, where a form is usually written beside the page that
+        // invokes it.
+        let own = self
+            .doc
+            .resolve_key(dict, Name::RESOURCES)
+            .as_dict()
+            .cloned();
+        let nested;
+        let resources: &PageResources = match own {
+            Some(dict) => {
+                nested = PageResources::from_dict_in(
+                    &self.doc,
+                    dict,
+                    self.provider.as_ref(),
+                    self.op.clone(),
+                );
+                &nested
+            }
+            // Falling back to the invoking scope is what a producer that omits
+            // the key is relying on, and it is what every reader does.
+            None => scope.unwrap_or(self),
+        };
+
+        let canvas = Canvas::new(
+            request.width,
+            request.height,
+            request.format,
+            Color::TRANSPARENT,
+        );
+        let mut renderer = tinker_pdf_render::Renderer::new(canvas, request.to_pixels, resources)
+            .with_cancel(request.cancel.clone())
+            .with_pattern_depth(request.depth)
+            .with_antialias(request.antialias)
+            .with_levels(request.graphics_bits, request.text_bits)
+            .with_hard_edge(request.hard_edge)
+            .with_thinnest_line(request.thinnest_line);
+
+        // 8.7.3.2: the cell is clipped to its `/BBox`. The buffer is already
+        // that box rounded outward, so this only takes back the part of a
+        // pixel the rounding gave away -- but a hatch is normally drawn with a
+        // line width that deliberately runs past the box so neighbouring cells
+        // join, and without the clip that overshoot lands in the next cell's
+        // gap.
+        let [x0, y0, x1, y1] = request.bbox;
+        let box_path = [
+            PathSegment::MoveTo { x: x0, y: y0 },
+            PathSegment::LineTo { x: x1, y: y0 },
+            PathSegment::LineTo { x: x1, y: y1 },
+            PathSegment::LineTo { x: x0, y: y1 },
+            PathSegment::Close,
+        ];
+        // Pattern space, because `to_pixels` is the renderer's `base` and the
+        // interpreter's CTM starts at the identity below.
+        let state = tinker_pdf_content::GraphicsState::new(Matrix::IDENTITY);
+        renderer.clip_path(&box_path, &state, false);
+
+        tinker_pdf_content::interpret(&content, Matrix::IDENTITY, &mut renderer, resources);
+        // 8.7.3.3: a `PaintType 2` cell is drawn as its content stream draws
+        // it and is only a shape: the renderer composites its coverage in the
+        // `SCN` colour (`Canvas::composite_tinted`), so nothing about colour
+        // is decided here and the cell is the same whatever it is filled in.
+        //
+        // 11.7.5.2 asks whether every object of the cell was fully opaque.
+        let opaque = renderer.painted_opaquely();
+        let (canvas, warnings, counts) = renderer.finish_counted();
+        // The cell's renderer is one of this render's own, so the work it did
+        // is; the calls it drew are a paint of the fill that names the
+        // pattern, not the page's.
+        stats::add_render(self.op.work.as_deref(), counts, stats::Draws::Elsewhere);
+
+        // Ruling 10: a font the cell could not resolve, or an image it had to
+        // tolerate, is a fact about the page and the page is the only place a
+        // caller looks. A cell drawn in this scope has told it already.
+        let apart = !std::ptr::eq(resources, self);
+        let told = |list: Vec<(String, String)>| if apart { list } else { Vec::new() };
+        Some(cache::KeptCell {
+            tile: tinker_pdf_render::Tile {
+                canvas: Arc::new(canvas),
+                warnings,
+                opaque,
+            },
+            missing_fonts: if apart {
+                resources.missing_fonts()
+            } else {
+                Vec::new()
+            },
+            damaged: told(resources.damaged_images()),
+            repaired: told(resources.repaired_spaces()),
+            reduced: if apart {
+                resources.reduced_images()
+            } else {
+                Vec::new()
+            },
+        })
+    }
+}
+
+impl cache::KeptCell {
+    /// Says again, to `resources`, what the cell's drawing told the scope its
+    /// content ran in: each font it found none for, each image it decoded
+    /// with damage or drew reduced and each colour space it read with a
+    /// repair, once.
+    fn say_again(&self, resources: &PageResources) {
+        if let Ok(mut mine) = resources.missing_fonts.lock() {
+            for name in &self.missing_fonts {
+                if mine.len() < 64 && !mine.contains(name) {
+                    mine.push(name.clone());
+                }
+            }
+        }
+        if let Ok(mut mine) = resources.damaged_images.lock() {
+            for entry in &self.damaged {
+                if !mine.contains(entry) {
+                    mine.push(entry.clone());
+                }
+            }
+        }
+        for entry in &self.repaired {
+            resources.note_repaired_space(entry.clone());
+        }
+        for entry in &self.reduced {
+            resources.note_reduced_image(entry.clone());
+        }
     }
 }
 

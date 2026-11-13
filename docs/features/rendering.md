@@ -348,7 +348,23 @@ and drawn as its content stream draws it, and the blit composites its
 coverage in the underlying-space colour (`Canvas::composite_tinted`, which
 writes exactly what recolouring the cell and compositing it wrote), so what
 a cell holds is the same whatever colour it is filled in and the colour
-operators inside it reach nothing. The lattice is bounded before a pixel
+operators inside it reach nothing. A document with a budget keeps the cell
+between fills and pages (*The document's cache*, below): under its pattern
+object, `TileRequest::to_pixels` by its bits — the device matrix and the
+sub-pixel phase unquantised, so a hit is the bytes a miss draws — the
+`/BBox` by its bits, the buffer's size and format, the anti-aliasing, the
+levels, the rule at level 0 and the thinnest stroke it is drawn with, the
+nesting depth, the scope its names resolve in where it brings no resources
+of its own, and the usage the render names. So every fill of a pattern under
+one page frame meets one cell, a `PaintType 2` one in every colour it is
+filled in, and the cells rasterised over a document are at most the distinct
+keys its fills ask for (`Stats::tiling_cells_rasterised`, `pattern_cache.rs`'s
+`cell_rasterisations_are_at_most_the_distinct_keys`); another matrix or phase
+is a cell of its own. A kept cell says again what its drawing reported — its
+warnings, and the fonts, damaged images, repaired spaces and images drawn
+reduced its scope was told — a cell a cancelled render drew is never kept,
+and past the budget every fill rasterises its own, as with none. The lattice
+is bounded before a pixel
 exists: 65 536 positions, 16.7 Mpx per cell buffer, and 33.5 million square points of compositing per
 fill — pixels at 72 dpi, counted in the default space and not in device
 pixels, so a lattice is drawn or refused alike at every scale and a page
@@ -1282,7 +1298,9 @@ a miss rasterises whichever render asks. A mask is charged its pixels, its
 key's resources and 64 bytes, is evicted with every other entry in the one
 order, and, made by the render that draws the glyph, is never filled
 single-flight; one evicted and drawn again is rasterised again to the same
-bytes. `Page::render`, `Page::render_form`, `Page::render_annotation`,
+bytes. **A tiling pattern's cell** is kept too (*Patterns*, above), charged
+its pixels, the words it says again and its key's resources, and filled
+single-flight, since a cell is a function of its key alone. `Page::render`, `Page::render_form`, `Page::render_annotation`,
 `Page::display_list`'s recording, `DisplayList::render` and the page walk
 read through it; `Page::to_svg` keeps what it computes for the write alone.
 
@@ -1605,7 +1623,9 @@ dictionary read;
 `images_decoded`, an image XObject's decode on a cache miss and every inline
 image's; `image_colours_converted`, each colour an image's converter asked of
 its space's conversion — a table entry filled, or a pixel no copy, table, row
-path or remembered colour answered; and a `_hits` and a `_misses` for each of
+path or remembered colour answered; `tiling_cells_rasterised`, each tiling
+pattern's cell rasterised for a fill no kept cell answered; and a `_hits` and
+a `_misses` for each of
 the five caches a page's
 resources keep — `font_program`, `image`, `icc_transform`, `glyph_outline` and
 `form_scope`, an image the document's cache keeps counted as `image` and a

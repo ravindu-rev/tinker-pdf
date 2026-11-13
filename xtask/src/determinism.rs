@@ -295,6 +295,17 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "the_icc_page_rendered_twice_through_one_document_is_its_fingerprint",
     },
+    // P-23's cell guard: the cells a document's fills rasterise are at most
+    // their distinct keys, and the tiling page rendered twice through one
+    // document is its fingerprint both times, on every target.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/pattern_cache.rs",
+        test: "cell_rasterisations_are_at_most_the_distinct_keys",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "the_tiling_page_rendered_twice_through_one_document_is_its_fingerprint",
+    },
     // MS-01's A8 guard: the PNG path's whole-image scratch, none, and its
     // peak with the file at most 1.2 x the image.
     Fingerprint {

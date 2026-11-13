@@ -10,7 +10,7 @@ use crate::blend::BlendMode;
 use crate::fill::Mask;
 
 /// How pixels are stored.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PixelFormat {
     /// One byte of grey per pixel.
     Gray8,

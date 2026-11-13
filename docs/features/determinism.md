@@ -282,8 +282,8 @@ patched page's, its SVG output's hashes, its three synthesised documents' byte
 hashes, the first-party sRGB profile's bytes, its display list's replay of
 every fingerprinted page and the same pages drawn through a warm and a
 starved document cache, and under a warm and a starved budget stated at open,
-and the `icc` page twice through one document, its second render compiling no
-transform;
+and the `icc` and `tiling` pages twice through one document, the second
+render of each compiling no transform and rasterising no cell;
 `pdfa_writer.rs`'s archival hash; `epub_shaped.rs`'s shaped page;
 `render_options.rs`'s pinned ink, transparent and premultiplied, hard-edged,
 forced-colour and placed-annotation output and levels, rules and widths;
@@ -294,7 +294,7 @@ run in each build they test and the local `wasm32-wasip1` run under wasmtime,
 beside `guard_allocations.rs`; the colours an image's converter asks of its
 space's conversion and what it allocates for them (`image_conversion.rs`);
 the transforms a document builds over the profiles it embeds
-(`icc_cache.rs`);
+(`icc_cache.rs`) and the cells its fills rasterise (`pattern_cache.rs`);
 and the requests page one costs over a streamed open, linearized and not
 (`streaming_open.rs`). `cargo xtask
 determinism`, part of `cargo xtask check` — which the gates run, and

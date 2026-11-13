@@ -3900,6 +3900,58 @@ fn the_icc_page_rendered_twice_through_one_document_is_its_fingerprint() {
     }
 }
 
+/// **The `tiling` page rendered twice through one document is its
+/// fingerprint both times** (row P-23): under a budget with room for
+/// everything it computes, its first render rasterises its patterns' cells
+/// and keeps them, the second rasterises none and finds every one kept — the
+/// uncoloured cell in the colour each fill gives it — and both hash to the
+/// page's committed fingerprint, on every target the roster runs on.
+///
+/// **Not a new fingerprint**: the table above is untouched, and a page that
+/// disagrees with it here is a finding about the kept cells, never a reason
+/// to edit the table.
+#[test]
+fn the_tiling_page_rendered_twice_through_one_document_is_its_fingerprint() {
+    let fixture = GOLDEN
+        .iter()
+        .find(|fixture| fixture.name == "tiling")
+        .expect("the tiling page is fingerprinted");
+    let want = FINGERPRINTS
+        .iter()
+        .find(|(name, _)| *name == "tiling")
+        .map(|(_, hash)| *hash)
+        .expect("the tiling page has a fingerprint");
+    let (document, at) = opened_under(fixture, CacheLimits::new(256 << 20));
+    let page = document.page(at).expect("a page");
+    let counting = RenderOptions {
+        stats: true,
+        ..RenderOptions::default()
+    };
+    let first = page.render(&counting);
+    let second = page.render(&counting);
+    let (drawn, kept) = (
+        first.stats.expect("a counted render hands its stats back"),
+        second.stats.expect("a counted render hands its stats back"),
+    );
+    assert!(
+        drawn.tiling_cells_rasterised > 0,
+        "the first render rasterised the page's cells: {drawn:?}"
+    );
+    assert_eq!(
+        kept.tiling_cells_rasterised, 0,
+        "the second render rasterised none: {kept:?}"
+    );
+    for (which, bitmap) in [("first", &first), ("second", &second)] {
+        assert_eq!(
+            hashed(fixture, bitmap),
+            want,
+            "the {which} render of the tiling page through one document is not its \
+             fingerprint: a kept cell is what drawing it again draws, so this is a finding \
+             about the cache, never a reason to edit the table"
+        );
+    }
+}
+
 /// `fixture` opened as [`opened`] opens it, with `limits` stated at open, so
 /// that the document's parsed objects are charged to the budget beside its
 /// cache.

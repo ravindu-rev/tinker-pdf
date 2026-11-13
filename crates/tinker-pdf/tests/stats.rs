@@ -832,6 +832,9 @@ fn a_pattern_cell_counts_what_it_draws() {
     // drawn once for the page to repeat, and its clip and glyphs are not
     // the page's calls.
     expected.drawn_fills = 1;
+    // That fill's one cell, rasterised: a document without a budget keeps
+    // no cell, so every render draws its own.
+    expected.tiling_cells_rasterised = 1;
     // The page's canvas; the cell's renderer counts no pixels of its own.
     assert_eq!(counted(&page), drew(expected, PAGE_PIXELS));
 }
