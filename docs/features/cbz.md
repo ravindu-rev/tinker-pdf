@@ -61,7 +61,15 @@ and nothing else. Names decode as UTF-8 under bit 11 and as CP437 otherwise
 (APPNOTE D.1). **Every entry is CRC-32 checked before its bytes are returned,
 and an entry that cannot be checked is refused** — the design copies image
 bytes into the PDF untouched, so the archive's checksum is the only integrity
-evidence those bytes will ever have. Everything is bounded: entries per
+evidence those bytes will ever have. **An entry is checksummed once.** The
+archive remembers each stored or deflated entry whose bytes matched their
+CRC-32, and a later read of it — the single-entry archive probed for a
+FictionBook and then read as a comic — hands the bytes back after the length
+check alone: they are a subslice of the archive or this crate's own inflate
+of one, so they are the bytes that matched. An entry that failed its checksum
+is remembered as nothing and fails again on every read, and an entry read
+through a caller's decoder is checksummed on every read, since a decoder is
+the caller's and may answer otherwise the next time. Everything is bounded: entries per
 archive, bytes per entry, an inflation total per archive that is charged on
 what an entry was *permitted* to produce and never refunded, and name length.
 Everything tolerated is recorded as a typed `ZipWarning`, at most once per

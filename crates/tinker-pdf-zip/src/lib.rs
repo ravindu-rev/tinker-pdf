@@ -655,6 +655,17 @@ pub struct Archive<'a> {
     route: Route,
     warnings: Warnings,
     budget: Budget,
+    /// Each entry, by index, whose bytes have matched their recorded CRC-32
+    /// on a read that can only ever produce those bytes again: a stored
+    /// entry's subslice, or this crate's own inflate of a deflated one. A
+    /// later read of one hands the bytes back without a second pass over
+    /// them. An entry that failed its checksum is never set, so it fails on
+    /// every read, and one read through a caller's decoder is never set,
+    /// since the decoder is the caller's and may answer otherwise next time.
+    verified: Vec<bool>,
+    /// Bytes checksummed, for the test that holds a second read to none.
+    #[cfg(test)]
+    checksummed: u64,
 }
 
 impl<'a> Archive<'a> {
@@ -685,10 +696,13 @@ impl<'a> Archive<'a> {
         let opened = listed.map(|(entries, route)| Self {
             bytes,
             limits: *limits,
+            verified: vec![false; entries.len()],
             entries,
             route,
             warnings,
             budget,
+            #[cfg(test)]
+            checksummed: 0,
         });
         (opened, steps)
     }
@@ -949,12 +963,33 @@ impl<'a> Archive<'a> {
         // buffer to a PDF stream without re-reading it. The resumable form
         // stays worth having for the PNG decoder, whose chunks arrive
         // separately by construction.
+        //
+        // And it is made once an entry. A stored entry's bytes are a subslice
+        // of an archive that cannot change under this borrow, and a deflated
+        // one's are this crate's inflate of such a subslice under the same
+        // ceiling, so bytes that matched their CRC once are those bytes on
+        // every later read, and the length check above is all that read
+        // needs. A caller's decoder is not this crate's, and is checked every
+        // time.
+        let repeatable = matches!(entry.method, Method::Stored | Method::Deflated);
+        if repeatable && self.verified.get(index).copied().unwrap_or(false) {
+            return Ok(data);
+        }
         let computed = crc32(&data);
+        #[cfg(test)]
+        {
+            self.checksummed += data.len() as u64;
+        }
         if computed != declared_crc {
             return Err(EntryError::ChecksumMismatch {
                 declared: declared_crc,
                 computed,
             });
+        }
+        if repeatable {
+            if let Some(slot) = self.verified.get_mut(index) {
+                *slot = true;
+            }
         }
 
         Ok(data)

@@ -89,6 +89,122 @@ fn a_stored_entry_is_borrowed_and_a_deflated_one_is_owned() {
     assert!(matches!(a.read(1).unwrap(), std::borrow::Cow::Owned(_)));
 }
 
+// ---------------------------------------------------------------------------
+// One checksum an entry
+// ---------------------------------------------------------------------------
+
+/// **An entry read twice is checksummed once**: the second read of a stored
+/// and of a deflated entry hands back the same bytes, the stored one still
+/// borrowed, and the bytes checksummed over both reads are each entry's
+/// length once.
+#[test]
+fn an_entry_read_twice_is_checksummed_once() {
+    let stored = b"stored page bytes".to_vec();
+    let deflated = b"deflated deflated deflated deflated".repeat(8);
+    let zip = archive(
+        &[
+            File::stored(b"a.jpg", &stored),
+            File::deflated(b"b.png", &deflated),
+        ],
+        Damage::None,
+    );
+    let mut a = open(&zip).unwrap();
+    assert!(a.entries()[1].compressed_size < a.entries()[1].uncompressed_size);
+
+    for _ in 0..2 {
+        let first = a.read(0).unwrap();
+        assert!(matches!(first, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(&*first, &stored[..]);
+        assert_eq!(&*a.read(1).unwrap(), &deflated[..]);
+    }
+    assert_eq!(
+        a.checksummed,
+        (stored.len() + deflated.len()) as u64,
+        "a second read checksummed its entry again"
+    );
+    assert!(a.warnings().is_empty(), "{:?}", a.warnings());
+}
+
+/// The second read of a deflated entry still inflates, and the archive's
+/// total is still charged for it: what a read is permitted to produce is
+/// what it costs, whether or not its checksum is known.
+#[test]
+fn a_second_read_of_a_deflated_entry_is_charged_as_the_first() {
+    let deflated = b"page page page page page page".repeat(16);
+    let zip = archive(&[File::deflated(b"p.png", &deflated)], Damage::None);
+    let mut a = open(&zip).unwrap();
+    a.read(0).unwrap();
+    assert_eq!(a.inflated(), deflated.len());
+    a.read(0).unwrap();
+    assert_eq!(a.inflated(), 2 * deflated.len());
+    assert_eq!(a.checksummed, deflated.len() as u64);
+}
+
+/// **An entry that failed its checksum stays refused on every read**, and
+/// each read is a checksum again: nothing about it was remembered.
+#[test]
+fn an_entry_that_failed_its_checksum_stays_refused() {
+    for file in [
+        File::stored(b"page01.jpg", b"tampered"),
+        File::deflated(b"page02.png", &b"tampered tampered".repeat(4)),
+    ] {
+        let length = file.data.len() as u64;
+        let zip = archive(&[file], Damage::CorruptCrc);
+        let mut a = open(&zip).unwrap();
+        for _ in 0..3 {
+            assert!(
+                matches!(a.read(0), Err(EntryError::ChecksumMismatch { .. })),
+                "a refused entry was handed over"
+            );
+        }
+        assert_eq!(a.checksummed, 3 * length, "every read checked it again");
+    }
+}
+
+/// An entry read through a caller's decoder is checksummed on every read:
+/// the decoder is the caller's, and one that answered right once may answer
+/// otherwise the next time.
+#[test]
+fn an_entry_read_through_a_decoder_is_checksummed_every_time() {
+    let zip = lzma_archive(b"the right page", lzma_payload(b"\0"));
+    let mut a = open(&zip).unwrap();
+    assert_eq!(
+        a.read_with(0, |_| Ok(b"the right page".to_vec()))
+            .as_deref(),
+        Ok(&b"the right page"[..])
+    );
+    assert!(matches!(
+        a.read_with(0, |_| Ok(b"the wrong page".to_vec())),
+        Err(EntryError::ChecksumMismatch { .. })
+    ));
+    assert_eq!(a.checksummed, 28, "both reads were checked");
+}
+
+/// An entry is remembered by its own index and no other: reading one entry
+/// lends its neighbour nothing, each is checksummed once on its own first
+/// read, and an index past the entries is refused as it always was.
+#[test]
+fn only_the_entry_whose_bytes_matched_is_remembered() {
+    let good = b"good page".to_vec();
+    let zip = archive(
+        &[
+            File::stored(b"good.jpg", &good),
+            File::stored(b"also.jpg", b"another page"),
+        ],
+        Damage::None,
+    );
+    let mut a = open(&zip).unwrap();
+    a.read(0).unwrap();
+    a.read(1).unwrap();
+    a.read(0).unwrap();
+    assert_eq!(
+        a.checksummed,
+        (good.len() + b"another page".len()) as u64,
+        "each entry once, by its own index"
+    );
+    assert_eq!(a.read(7), Err(EntryError::NoSuchEntry));
+}
+
 #[test]
 fn entries_keep_the_order_the_directory_gave_them() {
     // Ordering by name is gap 29's job, in the facade, with a natural sort.
