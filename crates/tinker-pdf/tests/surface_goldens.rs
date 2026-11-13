@@ -885,7 +885,8 @@ fn ocr_layer_alignment() -> Bitmap {
             page.text(b"F0", size, x, y, text);
         }
     });
-    let source = Document::open(builder.finish()).expect("the page of text opens");
+    let source =
+        Document::open(built("the page of text", builder)).expect("the page of text opens");
     let printed = source.page(0).expect("its page");
 
     // The scan: that page at twice the resolution, in grey.
@@ -949,7 +950,8 @@ fn ocr_layer_alignment() -> Bitmap {
     builder.add_page(OCR_PAGE.0, OCR_PAGE.1, |page| {
         page.image(b"Scan", 0.0, 0.0, OCR_PAGE.0, OCR_PAGE.1);
     });
-    let scanned = Document::open(builder.finish()).expect("the scanned page opens");
+    let scanned =
+        Document::open(built("the scanned page", builder)).expect("the scanned page opens");
 
     // The layer, written over it.
     let mut editor = scanned.editor();
