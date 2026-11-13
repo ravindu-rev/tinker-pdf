@@ -7,11 +7,13 @@
 //! then `B2A0`, then the matrix/TRC or grey model inverted, then the other
 //! `B2A*` tables, each passed over where it does not read.
 //!
-//! A `B2A*` table — `mft1` or `mft2` — takes the connection space as its
-//! input: the value is encoded on the way in as the table's type defines it
-//! (`u1Fixed15` XYZ through the table's matrix, or Lab in the table's own
-//! scale), then runs through the input curves, the grid and the output
-//! curves, out to the data space's channels.
+//! A `B2A*` table — `mft1`, `mft2` or v4's `mBA ` — takes the connection
+//! space as its input: the value is encoded on the way in as the table's
+//! type defines it (`u1Fixed15` XYZ, through the table's matrix in an `mft1`
+//! or `mft2`, or Lab in the table's own scale), then runs through its stages
+//! out to the data space's channels — an `mft1`'s or `mft2`'s input curves,
+//! grid and output curves, an `mBA `'s B curves, matrix, M curves, grid and
+//! A curves (ICC.1 10.11).
 //!
 //! A matrix/TRC model is inverted when the transform is built: the inverse of
 //! its colorant columns, computed in `f64` and held in s15.16, and each tone

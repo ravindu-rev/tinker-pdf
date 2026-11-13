@@ -209,8 +209,9 @@ uses it, because `tinker-pdf-color` is on the `PIXEL_PATHS` list that
 `cargo xtask libm` enforces and a platform `powf` in a TRC is precisely the
 cross-target divergence ruling 4 exists to stop. The PCS leg reuses the D50
 XYZ→sRGB path; a LUT profile's connection space is read both as XYZ and as
-v2's legacy 16-bit Lab encoding, which goes through the `finv` machinery
-`lab_to_rgb` owns. A grey profile compiles its one curve to a luminance the
+Lab in the encoding its table type carries ([The connection space each table
+type encodes](#the-connection-space-each-table-type-encodes)), which goes
+through the `finv` machinery `lab_to_rgb` owns. A grey profile compiles its one curve to a luminance the
 three sRGB channels share. A lookup-table transform over one, three or four
 inputs is read through an integer grid of that pipeline, its nodes evaluated
 as conversions reach them ([P-22](#p-22--colour-conversion-throughput));
@@ -487,8 +488,8 @@ the intent is the source's scaling. With `s = (Xmw / Xi, Ymw / Yi, Zmw / Zi)`:
   its greys in the medium's tint under this intent; under the others it stays
   achromatic, its three channels one luminance.
 - **A table** (`mft1`, `mft2`, `mAB `, and a `D2B*` other than `D2B3`): the
-  PCS value it gives — XYZ, or legacy 16-bit Lab taken to XYZ by the
-  relation `lab_to_rgb` runs (`lab_to_xyz`) — scaled per channel, then to
+  PCS value it gives — XYZ, or Lab in its type's encoding taken to XYZ by
+  the relation `lab_to_rgb` runs (`lab_to_xyz`) — scaled per channel, then to
   sRGB as the relative path does. The table is the relative intent's own,
   shared, and only the scaling after it is absolute colorimetric's: a stage
   the nodes of the transform's grid evaluate (P-22), so the absolute
@@ -1047,15 +1048,14 @@ and the encoding is the tag type's, not the profile's:
 
 So only `lut16Type` and `namedColor2Type` keep version 2's legacy scale, as
 ICC.1 6.3.4.2's note 3 says. A table carries its scale (`Lut::lab_scale`):
-an `mft2` decodes and encodes its Lab as legacy and an `mft1` in its own
-8-bit encoding, in both directions. An `mAB `'s is read as legacy, a factor
-of 65 535/65 280 off — `L*` 100 reads 100.39 and `a*` 0 reads 0.5 — which
-RC-20.6 corrects beside the output tables it adds; no committed fingerprint
-or golden paints through a Lab table of `mft1` or `mAB `, so the correction
-moves none. `mft1` under PCSXYZ is read as its 16-bit widening in
+an `mft2` decodes and encodes its Lab as legacy, and an `mft1`, an `mAB `
+and an `mBA ` each component's range over the whole currency — the
+`mft1`'s 8-bit encoding widened — in both directions. Read as legacy, a v4
+table would be a factor of 65 535/65 280 off: `L*` 100 would read 100.39 and
+`a*` 0 would read 0.5. `mft1` under PCSXYZ is read as its 16-bit widening in
 `u1Fixed15`, the reading ICC.1 leaves to the implementation. A curve or grid
-value outside `0..1` is clipped there, as 10.10.5 clips `mAB `'s matrix
-output.
+value outside `0..1` is clipped there, as 10.10.5 and 10.11.3 clip a v4
+matrix's output.
 
 ##### The output transform
 
@@ -1118,9 +1118,21 @@ output.
   in 256ths of a cell, carried through the output curve's steepest stretch,
   and four units for the roundings.
 - **`mBA `** (RC-20.6): 10.11's order, `B` curves, the matrix with offsets
-  (its outputs clipped to `0..1`, and present only with three outputs), `M`
-  curves, the grid, `A` curves, each stage present where its offset is not
-  zero; `mBA ` at an `A2B*` tag stays `NeedsLut`.
+  (its outputs clipped to `0..1`, on the three channels its `M` curves
+  number), `M` curves, the grid, `A` curves, each stage present where its
+  offset is not zero, read into the same evaluator with its matrix and `M`
+  curves before the grid (`MatrixStage::BeforeGrid`) where an `mAB `'s
+  follow it. Its output count is held as an `mft2`'s at a `B2A*` tag, its
+  input count is the PCS's three, its `B` curves are required
+  (`MalformedTag`), and a tag with no grid has as many outputs as inputs
+  (`UnsupportedSpace`); an absent `A` stage is the identity. Its XYZ is
+  `u1Fixed15` with no input matrix of `mft2`'s kind, and its Lab the full
+  range, as `mAB `'s. `mBA ` at an `A2B*` tag stays `NeedsLut`. The table
+  step the known answers hold a channel to is a 256th of the grid's widest
+  neighbouring nodes along each axis, and the eight units a coordinate can
+  be off by after the curves' and the matrix's roundings, carried through
+  the `A` curve's steepest stretch, and four units for the roundings after
+  the grid.
 
 ##### Device links
 

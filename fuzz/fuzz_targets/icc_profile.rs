@@ -13,13 +13,15 @@
 //! evaluates the table's pipeline at each node the colours reach
 //! (`docs/design/icc.md`, P-22), so a hostile table builds its grid here too.
 //! The other direction is compiled for every intent as well: a profile's
-//! transform out of the connection space reads its `B2A*` table into as many
-//! channels as its data space has, or inverts its matrix and its curves when
-//! it is built, where a table declaring more than fifteen outputs, a singular
-//! matrix or a falling curve is a typed refusal (`docs/design/icc.md`, "The
-//! output transform"); and the connection-space value each intent's source
-//! gives, which that transform takes from another profile, is read for
-//! components of every count.
+//! transform out of the connection space reads its `B2A*` table — `mft1`,
+//! `mft2` or v4's `mBA `, whose five stages each sit at an offset of the
+//! tag's own — into as many channels as its data space has, or inverts its
+//! matrix and its curves when it is built, where a table declaring more than
+//! fifteen outputs, a stage past the tag's end, a singular matrix or a
+//! falling curve is a typed refusal (`docs/design/icc.md`, "The output
+//! transform"); and the connection-space value each intent's source gives,
+//! which that transform takes from another profile, is read for components
+//! of every count.
 //!
 //! # What this target checks, and what it does not
 //!

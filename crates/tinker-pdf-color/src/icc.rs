@@ -32,8 +32,9 @@
 //! intent before that intent's `A2B*` table, as ICC.1 8.10.2 a) puts it.
 //!
 //! The other direction, from the connection space to a profile's device
-//! components, is [`Output`]: a matrix/TRC or grey model inverted when it is
-//! built, integer per colour (`docs/design/icc.md`, "The output transform").
+//! components, is [`Output`]: through a `B2A*` table — `mft1`, `mft2` or
+//! v4's `mBA ` — or a matrix/TRC or grey model inverted when it is built and
+//! integer per colour (`docs/design/icc.md`, "The output transform").
 //!
 //! The same census found the versions: v2 2 739, v4 9, v5 2. So v2 is not a
 //! legacy case to tolerate on the way to v4 — it is the case, and the two
@@ -619,10 +620,11 @@ impl Model {
 /// that name one element — the same offset and size, which ICC.1 8.2 lets
 /// every intent share — are one table, read once.
 ///
-/// Beside them the `B2A*` tables, the other direction's (ICC.1 9.2.1 to
-/// 9.2.3): from the connection space to the profile's device channels, kept
-/// unread, as an intent's own `A2B*` table is, until a transform out of the
-/// connection space first selects one ([`Output::compile`]).
+/// Beside them the `B2A*` tables, the other direction's (ICC.1 9.2.6 to
+/// 9.2.8) — `mft1`, `mft2` or v4's `mBA ` — from the connection space to
+/// the profile's device channels, kept unread, as an intent's own `A2B*`
+/// table is, until a transform out of the connection space first selects one
+/// ([`Output::compile`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tables {
     /// For `A2B0`, `A2B1` and `A2B2`, which of `tables` the tag names, or
@@ -919,6 +921,10 @@ impl Profile {
 ///
 /// An `A2B*` table gives the connection space's three channels; a `B2A*`
 /// table, the data space's, up to [`MAX_DEVICE_CHANNELS`].
+///
+/// v4's `mAB ` and `mBA ` read into it too: five optional stages, a curve
+/// set either side of the grid and a matrix with M curves on one side of it
+/// — after the grid in an `mAB `, before it in an `mBA `.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lut {
     inputs: usize,
@@ -926,26 +932,33 @@ pub struct Lut {
     /// Grid points along each axis.
     ///
     /// `mft1` and `mft2` write one count for every axis and this is filled with
-    /// it repeated; `mAB ` writes one per channel and they may differ. Carrying
-    /// the vector either way is what lets one evaluator serve both.
+    /// it repeated; `mAB ` and `mBA ` write one per channel and they may
+    /// differ. Carrying the vector either way is what lets one evaluator serve
+    /// all four.
     grids: Vec<usize>,
-    /// One curve per input channel, sampled. `mAB `'s A curves.
+    /// One curve per input channel, sampled. `mAB `'s A curves, `mBA `'s B
+    /// curves.
     input_tables: Vec<Vec<u16>>,
     /// The product of `grids` entries of `outputs` values, the last axis
     /// fastest. Empty when a v4 tag declares no grid at all.
     clut: Vec<u16>,
-    /// One curve per output channel, sampled. `mAB `'s B curves, and the last
-    /// stage either way.
+    /// One curve per output channel, sampled. `mAB `'s B curves, `mBA `'s A
+    /// curves, and the last stage every way.
     output_tables: Vec<Vec<u16>>,
-    /// `mAB `'s M curves, between the grid and the matrix. `None` in a v2 tag,
-    /// which has no such stage.
+    /// A v4 tag's M curves: in an `mAB ` between the grid and the matrix, in
+    /// an `mBA ` between the matrix and the grid. `None` in a v2 tag, which
+    /// has no such stage.
     m_tables: Option<Vec<Vec<u16>>>,
-    /// `mAB `'s 3×3 matrix and its three offsets, applied after the M curves.
+    /// A v4 tag's 3×3 matrix and its three offsets, its results clipped to
+    /// `0..=1` (10.10.5, 10.11.3): in an `mAB ` after the M curves, in an
+    /// `mBA ` after the B curves.
     ///
     /// Not `mft2`'s matrix, which sits at a fixed offset and applies only when
     /// the *input* is the connection space — at an `A2B*` tag it is not, which
     /// is why the v2 reader steps over it there.
     matrix: Option<[f64; 12]>,
+    /// Which side of the grid [`Lut::matrix`] and [`Lut::m_tables`] run on.
+    matrix_stage: MatrixStage,
     /// `mft1`'s and `mft2`'s 3×3 matrix, row by row, where the table's input
     /// is the connection space in XYZ — a `B2A*` table's — and the matrix is
     /// not the identity: applied to the XYZ before the input curves (10.8).
@@ -965,9 +978,22 @@ enum LabScale {
     /// little past the space (note 3).
     Legacy,
     /// Each component's range over the whole currency: `L*` 100 at `FFFFh`,
-    /// `a*` and `b*` from −128 at 0 to 127 at `FFFFh` — `lut8Type`'s 8-bit
-    /// encoding, `L*` 100 at `FFh` and 0 at `80h`, widened.
+    /// `a*` and `b*` from −128 at 0 to 127 at `FFFFh` — `lutAToBType`'s and
+    /// `lutBToAType`'s (10.10.1, 10.11.1), and `lut8Type`'s 8-bit encoding,
+    /// `L*` 100 at `FFh` and 0 at `80h`, widened.
     Full,
+}
+
+/// Where a table's matrix and M curves run, which its type fixes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatrixStage {
+    /// After the grid, on its three outputs: the M curves, then the matrix,
+    /// then the B curves — `mAB `'s order (10.10.1), and `mft1`'s and
+    /// `mft2`'s, which carry neither stage.
+    AfterGrid,
+    /// Before the grid, on the B curves' three outputs: the matrix, then the
+    /// M curves, then the grid — `mBA `'s order (10.11.1).
+    BeforeGrid,
 }
 
 impl LabScale {
@@ -1047,6 +1073,10 @@ impl Lut {
             let table = &self.input_tables[channel];
             coords.push(interpolate(table, value));
         }
+        // `mBA `'s matrix and M curves, between its B curves and its grid.
+        if self.matrix_stage == MatrixStage::BeforeGrid {
+            self.before_grid(&mut coords);
+        }
 
         // Stage two: the grid. Multilinear over `inputs` axes, which is
         // sixteen corners for the four-channel case the corpus is made of, and
@@ -1104,21 +1134,23 @@ impl Lut {
             }
         }
 
-        // Stage three, v4 only: the M curves and then the matrix. Both are
-        // absent from every `mft1` and `mft2`, so this is a no-op there; and
-        // the matrix is three channels', which a tag carrying one has.
+        // Stage three, `mAB ` only: the M curves and then the matrix. Both
+        // are absent from every `mft1` and `mft2`, so this is a no-op there,
+        // and an `mBA ` ran them before its grid; the matrix is three
+        // channels', which a tag carrying one has.
+        let after_grid = self.matrix_stage == MatrixStage::AfterGrid;
         let mut values = [0.0f64; MAX_DEVICE_CHANNELS];
         for (channel, slot) in values.iter_mut().enumerate().take(self.outputs) {
             let raw = f64::from(mid[channel]) / 65535.0;
             *slot = match &self.m_tables {
-                Some(tables) => match tables.get(channel) {
+                Some(tables) if after_grid => match tables.get(channel) {
                     Some(table) => f64::from(interpolate(table, raw)) / 65535.0,
                     None => raw,
                 },
-                None => raw,
+                _ => raw,
             };
         }
-        if let Some(m) = &self.matrix {
+        if let (Some(m), true) = (&self.matrix, after_grid) {
             let (x, y, z) = (values[0], values[1], values[2]);
             values[0] = m[0] * x + m[1] * y + m[2] * z + m[9];
             values[1] = m[3] * x + m[4] * y + m[5] * z + m[10];
@@ -1133,6 +1165,32 @@ impl Lut {
             *slot = f64::from(interpolate(table, value)) / 65535.0;
         }
         out
+    }
+
+    /// `mBA `'s middle stages, on `coords`, its B curves' three outputs in
+    /// the 16-bit currency: the matrix and its offsets, each result clipped
+    /// to `0..=1` (10.11.3), then each channel through its M curve (10.11.4),
+    /// back in the currency the grid reads. A stage the tag does not carry
+    /// passes its channels through.
+    fn before_grid(&self, coords: &mut [u16]) {
+        let mut values = [0.0f64; 3];
+        for (slot, coordinate) in values.iter_mut().zip(coords.iter()) {
+            *slot = f64::from(*coordinate) / 65535.0;
+        }
+        if let Some(m) = &self.matrix {
+            let [x, y, z] = values;
+            values = [0, 1, 2].map(|row| {
+                (m[3 * row] * x + m[3 * row + 1] * y + m[3 * row + 2] * z + m[9 + row])
+                    .clamp(0.0, 1.0)
+            });
+        }
+        let curves = self.m_tables.as_deref().unwrap_or(&[]);
+        for (channel, coordinate) in coords.iter_mut().enumerate().take(3) {
+            *coordinate = match curves.get(channel) {
+                Some(table) => interpolate(table, values[channel]),
+                None => (values[channel] * 65535.0).round() as u16,
+            };
+        }
     }
 
     /// Channel `channel` of the grid interpolated over the axes from `axis`
@@ -1206,11 +1264,12 @@ impl Lut {
     /// is just under two (10.8, 10.9: `mft1`'s XYZ is the implementation's
     /// own, and read as its widening). Lab by the table's own scale: an
     /// `mft2`'s version 2 legacy encoding, whose full scale is `FF00h` so that
-    /// an eight-bit `FFh` doubles to it exactly, or an `mft1`'s 8-bit one,
-    /// `L*` 100 at `FFh`. Getting the scale wrong shifts every hue by a little
-    /// under half a percent of the range — a plausible picture in slightly
-    /// wrong colours, which is the failure this module's refusals exist to
-    /// avoid.
+    /// an eight-bit `FFh` doubles to it exactly; an `mft1`'s 8-bit one, `L*`
+    /// 100 at `FFh`; an `mAB `'s or `mBA `'s each component's range over the
+    /// whole currency, `L*` 100 at `FFFFh`. Getting the scale wrong shifts
+    /// every hue by a little under half a percent of the range — a plausible
+    /// picture in slightly wrong colours, which is the failure this module's
+    /// refusals exist to avoid.
     fn decode_connection(&self, encoded: [f64; 3]) -> [f64; 3] {
         if self.lab {
             let reach = self.lab_scale.reach();
@@ -2063,15 +2122,17 @@ fn read_model<'a>(
     }
 }
 
-/// An `mft1` or `mft2` tag: ICC.1's two v2 lookup tables, read as the tag
-/// that names it converts — an `A2B*` tag forward, a `B2A*` tag out of the
-/// connection space ([`Direction`]).
+/// A lookup-table tag, read as the tag that names it converts — an `A2B*`
+/// tag forward, a `B2A*` tag out of the connection space ([`Direction`]):
+/// `mft1` or `mft2`, ICC.1's two v2 lookup tables, read here, or v4's `mAB `
+/// forward ([`read_mab`]) and `mBA ` out ([`read_mba`]).
 ///
-/// They differ in exactly two ways — the sample width, and whether the two
-/// curve stages carry their own entry counts or are fixed at 256 — so they are
-/// read by one function with a flag rather than two that drift apart. And in
-/// how each encodes a Lab connection space: an `mft2` in version 2's legacy
-/// 16-bit encoding, an `mft1` in its own 8-bit one (6.3.4.2).
+/// The two v2 tables differ in exactly two ways — the sample width, and
+/// whether the two curve stages carry their own entry counts or are fixed at
+/// 256 — so they are read by one function with a flag rather than two that
+/// drift apart. And in how each encodes a Lab connection space: an `mft2` in
+/// version 2's legacy 16-bit encoding, an `mft1` in its own 8-bit one
+/// (6.3.4.2).
 fn read_lut(data: &[u8], lab: bool, direction: Direction) -> Result<Lut, IccError> {
     #[cfg(test)]
     tests::TABLE_READS.with(|reads| reads.set(reads.get() + 1));
@@ -2079,9 +2140,13 @@ fn read_lut(data: &[u8], lab: bool, direction: Direction) -> Result<Lut, IccErro
     let wide = match (reader.sig(0).ok_or(IccError::MalformedTag)?, direction) {
         (s, _) if &s == b"mft2" => true,
         (s, _) if &s == b"mft1" => false,
-        // `mAB ` is v4's, and a different structure: five optional stages
-        // where v2 has three fixed ones, each carrying its own offset.
+        // `mAB ` and `mBA ` are v4's, and a different structure: five
+        // optional stages where v2 has three fixed ones, each carrying its
+        // own offset, one type a direction.
         (s, Direction::Forward) if &s == b"mAB " => return read_mab(data, lab),
+        (s, Direction::Output { channels }) if &s == b"mBA " => {
+            return read_mba(data, lab, channels)
+        }
         // `mBA ` is the *inverse* direction, and an `A2B*` tag never holds one:
         // it would be a profile saying "here is how to get out of the
         // connection space" at the entry that asks how to get in — and an
@@ -2192,9 +2257,10 @@ fn read_lut(data: &[u8], lab: bool, direction: Direction) -> Result<Lut, IccErro
         input_tables,
         clut,
         output_tables,
-        // v2 has neither stage; `mAB ` is where they come from.
+        // v2 has neither stage; `mAB ` and `mBA ` are where they come from.
         m_tables: None,
         matrix: None,
+        matrix_stage: MatrixStage::AfterGrid,
         input_matrix,
         lab,
         // 6.3.4.2, note 3: only `lut16Type` keeps version 2's legacy
@@ -2296,6 +2362,9 @@ fn sample_curve(curve: &Curve, entries: usize) -> Vec<u16> {
 ///   same number repeated so one evaluator serves both.
 /// - **the stages are functions, not tables.** They are `curv` and `para`
 ///   tags, so they are sampled rather than read.
+///
+/// Its Lab connection space, like `mBA `'s, is each component's range over
+/// the whole currency (10.10.1): `L*` 100 at `FFFFh`, not `mft2`'s `FF00h`.
 fn read_mab(data: &[u8], lab: bool) -> Result<Lut, IccError> {
     let reader = Reader { bytes: data };
     let byte = |at: usize| data.get(at).copied().ok_or(IccError::MalformedTag);
@@ -2309,16 +2378,7 @@ fn read_mab(data: &[u8], lab: bool) -> Result<Lut, IccError> {
         return Err(IccError::UnsupportedSpace);
     }
 
-    let offset = |at: usize| -> Result<usize, IccError> {
-        Ok(reader.u32(at).ok_or(IccError::MalformedTag)? as usize)
-    };
-    let (b_at, matrix_at, m_at, clut_at, a_at) = (
-        offset(12)?,
-        offset(16)?,
-        offset(20)?,
-        offset(24)?,
-        offset(28)?,
-    );
+    let [b_at, matrix_at, m_at, clut_at, a_at] = v4_offsets(&reader)?;
 
     // The A curves are per *input* and the M and B curves per output.
     let input_tables = if a_at == 0 {
@@ -2345,17 +2405,7 @@ fn read_mab(data: &[u8], lab: bool) -> Result<Lut, IccError> {
     } else {
         Some(read_curve_run(data, m_at, outputs)?)
     };
-    let matrix = if matrix_at == 0 {
-        None
-    } else {
-        let mut values = [0.0f64; 12];
-        for (index, slot) in values.iter_mut().enumerate() {
-            *slot = reader
-                .s15fixed16(matrix_at + index * 4)
-                .ok_or(IccError::MalformedTag)?;
-        }
-        Some(values)
-    };
+    let matrix = read_v4_matrix(&reader, matrix_at)?;
     let output_tables = if b_at == 0 {
         // B is the one stage ICC.1 makes required; a tag without it describes
         // no transform at all.
@@ -2373,13 +2423,131 @@ fn read_mab(data: &[u8], lab: bool) -> Result<Lut, IccError> {
         output_tables,
         m_tables,
         matrix,
+        matrix_stage: MatrixStage::AfterGrid,
         input_matrix: None,
         lab,
-        lab_scale: LabScale::Legacy,
+        lab_scale: LabScale::Full,
     })
 }
 
-/// `mAB `'s CLUT: sixteen grid counts, a precision byte, then the table.
+/// **ICC.1's `mBA ` (lutBtoAType): v4's B-to-A transform**, out of the
+/// connection space (10.11).
+///
+/// `mAB `'s five optional stages, run the other way round:
+///
+/// ```text
+///   B curves  ->  matrix  ->  M curves  ->  CLUT  ->  A curves
+/// ```
+///
+/// the header listing their offsets in that same order this time. The B
+/// curves, the matrix and the M curves are the connection space's three
+/// channels', the matrix's results clipped to `0..=1` (10.11.3); the grid
+/// takes them to the data space's channels, one A curve each. A stage whose
+/// offset is zero is absent and passes its channels through, except the B
+/// curves, which ICC.1 makes required; a tag with no grid has as many outputs
+/// as inputs. The output count is held as an `mft2`'s at a `B2A*` tag is: to
+/// [`MAX_DEVICE_CHANNELS`] before any stage is read, then to the data
+/// space's `channels`, the inputs to the connection space's three.
+///
+/// Its Lab connection space, like `mAB `'s, is each component's range over
+/// the whole currency (10.11.1): `L*` 100 at `FFFFh`, `a*` 0 at `8080h`. Its
+/// XYZ is `u1Fixed15`, and there is no input matrix of `mft2`'s kind: the
+/// matrix is a stage of its own.
+fn read_mba(data: &[u8], lab: bool, channels: usize) -> Result<Lut, IccError> {
+    let reader = Reader { bytes: data };
+    let byte = |at: usize| data.get(at).copied().ok_or(IccError::MalformedTag);
+    let inputs = byte(8)? as usize;
+    let outputs = byte(9)? as usize;
+    if inputs == 0 || outputs == 0 || inputs > MAX_LUT_INPUTS {
+        return Err(IccError::MalformedTag);
+    }
+    if outputs > MAX_DEVICE_CHANNELS {
+        return Err(IccError::TooLarge);
+    }
+    if outputs != channels {
+        return Err(IccError::UnsupportedSpace);
+    }
+    if inputs != 3 {
+        return Err(IccError::MalformedTag);
+    }
+
+    let [b_at, matrix_at, m_at, clut_at, a_at] = v4_offsets(&reader)?;
+
+    // B and M curves one an input, A curves one an output.
+    let input_tables = if b_at == 0 {
+        return Err(IccError::MalformedTag);
+    } else {
+        read_curve_run(data, b_at, inputs)?
+    };
+    let matrix = read_v4_matrix(&reader, matrix_at)?;
+    let m_tables = if m_at == 0 {
+        None
+    } else {
+        Some(read_curve_run(data, m_at, inputs)?)
+    };
+    let (grids, clut) = if clut_at == 0 {
+        // No grid: the M stage's channels are the outputs, which only makes
+        // sense when there are as many of one as the other (10.11.5).
+        if inputs != outputs {
+            return Err(IccError::UnsupportedSpace);
+        }
+        (vec![2; inputs], Vec::new())
+    } else {
+        read_mab_clut(data, clut_at, inputs, outputs)?
+    };
+    let output_tables = if a_at == 0 {
+        (0..outputs)
+            .map(|_| sample_curve(&Curve::Identity, V4_CURVE_ENTRIES))
+            .collect()
+    } else {
+        read_curve_run(data, a_at, outputs)?
+    };
+
+    Ok(Lut {
+        inputs,
+        outputs,
+        grids,
+        input_tables,
+        clut,
+        output_tables,
+        m_tables,
+        matrix,
+        matrix_stage: MatrixStage::BeforeGrid,
+        input_matrix: None,
+        lab,
+        lab_scale: LabScale::Full,
+    })
+}
+
+/// A v4 table's five offsets, in the order its header lists them: B curves,
+/// matrix, M curves, CLUT, A curves, each zero where the stage is absent.
+fn v4_offsets(reader: &Reader<'_>) -> Result<[usize; 5], IccError> {
+    let mut offsets = [0usize; 5];
+    for (index, slot) in offsets.iter_mut().enumerate() {
+        *slot = reader.u32(12 + 4 * index).ok_or(IccError::MalformedTag)? as usize;
+    }
+    Ok(offsets)
+}
+
+/// A v4 table's matrix at `at` — nine entries row by row, then three
+/// offsets, each an `s15Fixed16Number` (10.10.5, 10.11.3) — or `None` where
+/// `at` is zero, the stage absent.
+fn read_v4_matrix(reader: &Reader<'_>, at: usize) -> Result<Option<[f64; 12]>, IccError> {
+    if at == 0 {
+        return Ok(None);
+    }
+    let mut values = [0.0f64; 12];
+    for (index, slot) in values.iter_mut().enumerate() {
+        *slot = at
+            .checked_add(index * 4)
+            .and_then(|place| reader.s15fixed16(place))
+            .ok_or(IccError::MalformedTag)?;
+    }
+    Ok(Some(values))
+}
+
+/// A v4 table's CLUT, `mAB `'s and `mBA `'s alike: sixteen grid counts, a
+/// precision byte, then the table.
 fn read_mab_clut(
     data: &[u8],
     at: usize,
@@ -3233,10 +3401,11 @@ fn curve_bytes(curves: &[Vec<u16>]) -> usize {
 
 /// The most bytes reading a lookup table of `raw` bytes can allocate: every
 /// value of its grid and of `mft1`'s and `mft2`'s curves at sixteen bits,
-/// which at most doubles what an eight-bit table spells, and `mAB `'s curves,
-/// each sampled to [`V4_CURVE_ENTRIES`] whatever it spells — at most
-/// [`MAX_LUT_INPUTS`] A curves and three each of M and B — beside the table's
-/// own fields and its grid counts.
+/// which at most doubles what an eight-bit table spells, and a v4 table's
+/// curves, each sampled to [`V4_CURVE_ENTRIES`] whatever it spells — an
+/// `mAB `'s at most [`MAX_LUT_INPUTS`] A curves and three each of M and B,
+/// an `mBA `'s three each of B and M and at most [`MAX_DEVICE_CHANNELS`] A
+/// curves, fewer — beside the table's own fields and its grid counts.
 fn lut_bound(raw: usize) -> usize {
     let curves = (MAX_LUT_INPUTS + 6) * V4_CURVE_ENTRIES * size_of::<u16>();
     raw.saturating_mul(2)
@@ -3625,11 +3794,15 @@ pub(crate) mod tests {
             Refusal(IccError),
         }
 
-        let seeds: [(&str, Vec<u8>, Reaches); 12] = [
+        let seeds: [(&str, Vec<u8>, Reaches); 13] = [
             // A CMYK printer profile carrying both directions over Lab: an
             // `A2B0` of four inks to the connection space and a `B2A0` back,
             // each an `mft2`, the seed that reaches the output tables.
             ("b2a-lut16-cmyk", b2a_seed(), Reaches::Output),
+            // The same profile written the v4 way: an `mAB ` forward and an
+            // `mBA ` back carrying all five of its stages, the seed that
+            // reaches v4's output table.
+            ("b2a-mba-cmyk", mba_seed(), Reaches::Output),
             // `D2B0` and `D2B1` naming one multi-process element, a curve
             // set with every segment kind, a matrix and a grid: the seed
             // that reaches the `mpet` reader and its stages.
@@ -3819,6 +3992,53 @@ pub(crate) mod tests {
                         (((node * 5 + channel * 3) % 17) * 3855) as u16
                     }),
                 ),
+            ],
+        )
+    }
+
+    /// The `b2a-mba-cmyk` seed: [`b2a_seed`]'s profile written the v4 way.
+    /// Its `A2B0` is an `mAB ` of identity A curves, the same graded grid of
+    /// the ink cube's corners and identity B curves; its `B2A0` an `mBA `
+    /// carrying all five stages — B curves of gamma 1.5, 1 and 2, a matrix
+    /// with offsets, M curves of gamma 2, 1 and 0.5, a grid of three points
+    /// on its first axis and two on the others giving four inks, `((7n + 5c)
+    /// mod 23) × 2 849` for node `n`'s channel `c`, and A curves of gamma 1,
+    /// 1.8, 2.2 and 1.
+    fn mba_seed() -> Vec<u8> {
+        let forward = V4Stages {
+            b: identities(3),
+            clut: Some((
+                vec![2; 4],
+                (0..16usize)
+                    .flat_map(|node| [0xFF00 - node.count_ones() as u16 * 0x3000, 0x8000, 0x8000])
+                    .collect(),
+            )),
+            a: identities(4),
+            ..V4Stages::default()
+        };
+        let output = V4Stages {
+            b: vec![gamma(1.5), gamma(1.0), gamma(2.0)],
+            matrix: Some([
+                0.5, 0.25, 0.25, 0.0, 1.0, 0.0, 0.25, 0.0, 0.75, 0.0, 0.0625, -0.0625,
+            ]),
+            m: vec![gamma(2.0), gamma(1.0), gamma(0.5)],
+            clut: Some((
+                vec![3, 2, 2],
+                (0..12usize)
+                    .flat_map(|node| {
+                        (0..4usize)
+                            .map(move |channel| (((node * 7 + channel * 5) % 23) * 2849) as u16)
+                    })
+                    .collect(),
+            )),
+            a: vec![gamma(1.0), gamma(1.8), gamma(2.2), gamma(1.0)],
+        };
+        build(
+            b"CMYK",
+            b"Lab ",
+            &[
+                (*b"A2B0", forward.tag(b"mAB ", 4, 3)),
+                (*b"B2A0", output.tag(b"mBA ", 3, 4)),
             ],
         )
     }
@@ -7405,13 +7625,13 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
     /// so perceptual's and saturation's grids are larger than relative
     /// colorimetric's — one carrying a matrix, three `A2B*` tables and four
     /// `D2B*` pipelines beside a media white that is not D50, so every intent
-    /// compiles its own, and a CMYK profile carrying a `B2A0` beside its
-    /// `A2B0`, the bound read as the set is compiled is at least what the set
-    /// holds once every intent has compiled and converted a colour and a row,
-    /// its grids' nodes allocated and its row tables built, and its transform
-    /// out of the connection space compiled, reading the `B2A*` table into
-    /// the profile the set holds; and the bound only falls as tables are
-    /// read, staying a bound.
+    /// compiles its own, and CMYK profiles carrying a `B2A0` beside their
+    /// `A2B0`, in `mft2` and in v4's `mBA ` and `mAB `, the bound read as the
+    /// set is compiled is at least what the set holds once every intent has
+    /// compiled and converted a colour and a row, its grids' nodes allocated
+    /// and its row tables built, and its transform out of the connection
+    /// space compiled, reading the `B2A*` table into the profile the set
+    /// holds; and the bound only falls as tables are read, staying a bound.
     #[test]
     fn transforms_hold_no_more_than_their_bound() {
         let wider = build(
@@ -7434,7 +7654,7 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
             tags.push((signature, constant_table(3, fallback_value(t))));
         }
         let everything = build(b"RGB ", b"XYZ ", &tags);
-        let profiles: [(&str, Vec<u8>); 8] = [
+        let profiles: [(&str, Vec<u8>); 9] = [
             ("matrix/TRC", matrix_trc(2.2)),
             ("grey", grey(b"XYZ ", 1.8)),
             ("three intents", three_intents_profile()),
@@ -7446,6 +7666,7 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
             ("a wider perceptual table", wider),
             ("a model, tables and pipelines", everything),
             ("a B2A table beside an A2B one", b2a_seed()),
+            ("an mBA table beside an mAB one", mba_seed()),
         ];
         for (what, bytes) in &profiles {
             let profile = Profile::parse(bytes).unwrap_or_else(|e| panic!("{what}: {e:?}"));
@@ -7768,9 +7989,12 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
     /// **Each table type reads Lab in its own scale** (6.3.4.2): an `mft2`
     /// in version 2's legacy encoding, `L*` 100 at `FF00h` and `a*`, `b*` 0
     /// at `8000h`; an `mft1` in its own 8-bit one, `L*` 100 at `FFh` and 0 at
-    /// `80h`, widened. Each decodes its full scale to `L*` 100 and `a*`, `b*`
-    /// 0, and each encodes them back to its own; under XYZ both take
-    /// `u1Fixed15`, 1.0 at `8000h`, through the matrix where one is kept.
+    /// `80h`, widened; an `mAB ` and an `mBA ` in v4's, each component's
+    /// range over the whole currency, `L*` 100 at `FFFFh` and `a*`, `b*` 0 at
+    /// `8080h` (10.10.1, 10.11.1). Each decodes its full scale to `L*` 100
+    /// and `a*`, `b*` 0, and each encodes them back to its own; under XYZ
+    /// every one takes `u1Fixed15`, 1.0 at `8000h`, an `mft2` through its
+    /// matrix where one is kept and an `mBA ` through none.
     #[test]
     fn each_table_type_reads_lab_in_its_own_scale() {
         let legacy = read_lut(
@@ -7813,6 +8037,30 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
             [1.0, 128.0 / 255.0, 128.0 / 255.0],
             "mft1 encodes white",
         );
+        let curves_only = V4Stages {
+            b: identities(3),
+            ..V4Stages::default()
+        };
+        let mab = read_lut(&mab_b_curves_only(), true, Direction::Forward).expect("an mAB");
+        let mba = read_lut(
+            &curves_only.tag(b"mBA ", 3, 3),
+            true,
+            Direction::Output { channels: 3 },
+        )
+        .expect("an mBA");
+        for (table, what) in [(&mab, "mAB"), (&mba, "mBA")] {
+            assert_eq!(table.lab_scale, LabScale::Full, "{what}");
+            close(
+                table.decode_connection([1.0, 32896.0 / 65535.0, 32896.0 / 65535.0]),
+                white,
+                &format!("{what} decodes FFFFh and 8080h"),
+            );
+            close(
+                table.encode_connection(white),
+                [1.0, 128.0 / 255.0, 128.0 / 255.0],
+                &format!("{what} encodes white"),
+            );
+        }
 
         let skewed = [0.5, 0.25, 0.0, 0.0, 1.0, 0.0, 0.25, 0.0, 0.5];
         let xyz = read_lut(
@@ -7833,6 +8081,18 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
             xyz.encode_connection([f64::NAN, 9.0, -1.0]),
             [1.0, 1.0, 0.0],
             "NaN is zero, and the currency holds its ends",
+        );
+        let v4_xyz = read_lut(
+            &curves_only.tag(b"mBA ", 3, 3),
+            false,
+            Direction::Output { channels: 3 },
+        )
+        .expect("an XYZ mBA");
+        assert_eq!(v4_xyz.input_matrix, None, "an mBA's matrix is a stage");
+        close(
+            v4_xyz.encode_connection([0.8, 0.4, 0.2]),
+            [0.8, 0.4, 0.2].map(|v| v * scale),
+            "an mBA's XYZ in u1Fixed15",
         );
     }
 
@@ -7902,5 +8162,295 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
             (value[0] - 100.0).abs() < 1e-9,
             "every node's L* is 100: {value:?}"
         );
+    }
+
+    // ---- v4 tables out of the connection space ------------------------------
+
+    /// A `curv` of no points, ICC.1's identity (10.5).
+    fn identity_curve() -> Vec<u8> {
+        let mut out = b"curv".to_vec();
+        out.extend_from_slice(&[0; 8]);
+        out
+    }
+
+    /// `count` identity curves, a stage that is there and does nothing.
+    fn identities(count: usize) -> Vec<Vec<u8>> {
+        vec![identity_curve(); count]
+    }
+
+    /// A v4 lookup table's stages, as [`V4Stages::tag`] lays them out: each
+    /// curve set a run of curve tags, empty where the stage is absent.
+    #[derive(Clone, Default)]
+    struct V4Stages {
+        b: Vec<Vec<u8>>,
+        /// Nine entries row by row, then three offsets.
+        matrix: Option<[f64; 12]>,
+        m: Vec<Vec<u8>>,
+        /// One grid count an input, and the 16-bit entries, the last input's
+        /// axis fastest.
+        clut: Option<(Vec<u8>, Vec<u16>)>,
+        a: Vec<Vec<u8>>,
+    }
+
+    impl V4Stages {
+        /// The tag: `signature`'s header over `inputs` and `outputs`
+        /// channels, then each stage present in the order the header lists
+        /// their offsets — B, matrix, M, CLUT, A — each curve and stage
+        /// padded to a four-byte boundary.
+        fn tag(&self, signature: &[u8; 4], inputs: u8, outputs: u8) -> Vec<u8> {
+            fn pad(tag: &mut Vec<u8>) {
+                while tag.len() % 4 != 0 {
+                    tag.push(0);
+                }
+            }
+            fn run(tag: &mut Vec<u8>, curves: &[Vec<u8>]) -> u32 {
+                let at = tag.len() as u32;
+                for curve in curves {
+                    tag.extend_from_slice(curve);
+                    pad(tag);
+                }
+                at
+            }
+            let mut tag = signature.to_vec();
+            tag.extend_from_slice(&[0; 4]);
+            tag.extend_from_slice(&[inputs, outputs, 0, 0]);
+            tag.extend_from_slice(&[0; 20]);
+            let mut offsets = [0u32; 5];
+            if !self.b.is_empty() {
+                offsets[0] = run(&mut tag, &self.b);
+            }
+            if let Some(matrix) = self.matrix {
+                offsets[1] = tag.len() as u32;
+                for value in matrix {
+                    let fixed = (value * 65536.0).round() as i32;
+                    tag.extend_from_slice(&(fixed as u32).to_be_bytes());
+                }
+            }
+            if !self.m.is_empty() {
+                offsets[2] = run(&mut tag, &self.m);
+            }
+            if let Some((grids, entries)) = &self.clut {
+                offsets[3] = tag.len() as u32;
+                let mut counts = [0u8; 16];
+                for (slot, count) in counts.iter_mut().zip(grids) {
+                    *slot = *count;
+                }
+                tag.extend_from_slice(&counts);
+                // Two bytes an entry, then three of padding.
+                tag.extend_from_slice(&[2, 0, 0, 0]);
+                for entry in entries {
+                    tag.extend_from_slice(&entry.to_be_bytes());
+                }
+                pad(&mut tag);
+            }
+            if !self.a.is_empty() {
+                offsets[4] = run(&mut tag, &self.a);
+            }
+            for (slot, offset) in offsets.iter().enumerate() {
+                tag[12 + 4 * slot..16 + 4 * slot].copy_from_slice(&offset.to_be_bytes());
+            }
+            tag
+        }
+    }
+
+    /// The offset `tag`'s header gives stage `slot`, in its order: B, matrix,
+    /// M, CLUT, A.
+    fn stage_offset(tag: &[u8], slot: usize) -> usize {
+        let at = 12 + 4 * slot;
+        u32::from_be_bytes([tag[at], tag[at + 1], tag[at + 2], tag[at + 3]]) as usize
+    }
+
+    /// **An `mBA ` is read as the connection space in**, as an `mft2` at a
+    /// `B2A*` tag is: its output count held to [`MAX_DEVICE_CHANNELS`]
+    /// before any stage is read — a header of sixteen outputs and nothing
+    /// after it is too large, not short — then to the data space's channels,
+    /// its input count to the connection space's three. Its B curves are
+    /// required, a tag with no grid has as many outputs as inputs, and a
+    /// stage whose bytes are not all there — curves past the end, a grid of
+    /// one point or of three bytes an entry, a matrix cut short — is
+    /// malformed. At an `A2B*` tag it is refused by name. An `mBA ` of B
+    /// curves alone reads, its matrix and M curves on the grid's input side,
+    /// and passes the connection space through.
+    #[test]
+    fn an_mba_tag_is_read_as_the_connection_space_in() {
+        let read = |tag: &[u8], channels| read_lut(tag, false, Direction::Output { channels });
+        let curves_only = V4Stages {
+            b: identities(3),
+            ..V4Stages::default()
+        };
+        let every = V4Stages {
+            b: identities(3),
+            matrix: Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+            m: identities(3),
+            clut: Some((vec![2, 2, 2], vec![0; 8 * 4])),
+            a: identities(4),
+        };
+        let mut header_only = curves_only.tag(b"mBA ", 3, 16);
+        header_only.truncate(32);
+        let no_grid = V4Stages {
+            clut: None,
+            a: Vec::new(),
+            ..every.clone()
+        };
+        for (tag, channels, expected, what) in [
+            (
+                header_only,
+                4,
+                IccError::TooLarge,
+                "sixteen outputs, refused before a stage is read",
+            ),
+            (
+                every.tag(b"mBA ", 3, 4),
+                3,
+                IccError::UnsupportedSpace,
+                "four outputs for a three-channel space",
+            ),
+            (
+                every.tag(b"mBA ", 4, 4),
+                4,
+                IccError::MalformedTag,
+                "four inputs where the connection space is three",
+            ),
+            (
+                every.tag(b"mBA ", 0, 4),
+                4,
+                IccError::MalformedTag,
+                "no inputs",
+            ),
+            (
+                V4Stages::default().tag(b"mBA ", 3, 3),
+                3,
+                IccError::MalformedTag,
+                "no B curves",
+            ),
+            (
+                no_grid.tag(b"mBA ", 3, 4),
+                4,
+                IccError::UnsupportedSpace,
+                "no grid between three inputs and four outputs",
+            ),
+        ] {
+            assert_eq!(read(&tag, channels), Err(expected), "{what}");
+        }
+
+        let whole = every.tag(b"mBA ", 3, 4);
+        assert!(read(&whole, 4).is_ok(), "every stage, well formed");
+        let mut past_the_end = whole.clone();
+        past_the_end[12..16].copy_from_slice(&(whole.len() as u32).to_be_bytes());
+        let mut one_point = whole.clone();
+        one_point[stage_offset(&whole, 3)] = 1;
+        let mut three_bytes = whole.clone();
+        three_bytes[stage_offset(&whole, 3) + 16] = 3;
+        let mut short_matrix = whole.clone();
+        short_matrix[16..20].copy_from_slice(&((whole.len() - 8) as u32).to_be_bytes());
+        for (tag, what) in [
+            (past_the_end, "B curves past the end"),
+            (one_point, "a grid of one point"),
+            (three_bytes, "three bytes a grid entry"),
+            (short_matrix, "a matrix cut short"),
+        ] {
+            assert_eq!(read(&tag, 4), Err(IccError::MalformedTag), "{what}");
+        }
+        assert_eq!(
+            read_lut(&whole, false, Direction::Forward),
+            Err(IccError::NeedsLut),
+            "an mBA at an A2B tag"
+        );
+
+        let lut = read(&curves_only.tag(b"mBA ", 3, 3), 3).expect("B curves alone");
+        assert_eq!(lut.matrix_stage, MatrixStage::BeforeGrid);
+        assert_eq!(lut.lab_scale, LabScale::Full);
+        assert_eq!((lut.matrix, lut.m_tables.is_none()), (None, true));
+        assert!(lut.clut.is_empty());
+        assert_eq!(lut.outputs(), 3);
+        let x = [0.25, 0.5, 0.75];
+        let got = lut.evaluate(&x);
+        for channel in 0..3 {
+            assert!(
+                (got[channel] - x[channel]).abs() < 2.0 / 65535.0,
+                "identity B curves pass the value through: {got:?}"
+            );
+        }
+    }
+
+    /// **An `mBA ` runs its matrix and M curves before its grid** (10.11).
+    /// B curves of gamma 2; a matrix that turns the channels round with an
+    /// offset on two of them, the third's result below zero and clipped to
+    /// it (10.11.3); M curves of three points bent at their middle; and no
+    /// grid, so the identity A curves its absence leaves: each channel is
+    /// what those three stages give it in that order, within five units of
+    /// the 16-bit currency for the roundings of four sampled curves. With a
+    /// grid of four outputs between identity B curves and A curves of gamma
+    /// 1, 2, 1 and 2, the centre of the connection space's cube reads the
+    /// grid's centre node, each output through its own A curve.
+    #[test]
+    fn an_mba_runs_its_matrix_and_m_curves_before_its_grid() {
+        let bent = |middle: u16| {
+            let mut out = b"curv".to_vec();
+            out.extend_from_slice(&[0; 4]);
+            out.extend_from_slice(&3u32.to_be_bytes());
+            for point in [0, middle, u16::MAX] {
+                out.extend_from_slice(&point.to_be_bytes());
+            }
+            out
+        };
+        let stages = V4Stages {
+            b: vec![gamma(2.0); 3],
+            matrix: Some([0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.25, 0.0, -0.5]),
+            m: vec![bent(0x4000); 3],
+            ..V4Stages::default()
+        };
+        let lut = read_lut(
+            &stages.tag(b"mBA ", 3, 3),
+            false,
+            Direction::Output { channels: 3 },
+        )
+        .expect("B curves, a matrix and M curves");
+        assert_eq!(lut.matrix_stage, MatrixStage::BeforeGrid);
+        let x: [f64; 3] = [0.4, 0.6, 0.9];
+        let b = x.map(|v| v * v);
+        let turned = [b[1] + 0.25, b[2], (b[0] - 0.5).max(0.0)];
+        let quarter = 16384.0 / 65535.0;
+        let want = turned.map(|t| {
+            if t <= 0.5 {
+                t * 2.0 * quarter
+            } else {
+                quarter + (t - 0.5) * 2.0 * (1.0 - quarter)
+            }
+        });
+        let got = lut.evaluate(&x);
+        for channel in 0..3 {
+            assert!(
+                (got[channel] - want[channel]).abs() < 5.0 / 65535.0,
+                "channel {channel}: {got:?} against {want:?}"
+            );
+        }
+
+        let centre = 13;
+        let node: [u16; 4] = [0x4000, 0x8000, 0xC000, 0xFFFF];
+        let mut entries = vec![0u16; 27 * 4];
+        entries[centre * 4..centre * 4 + 4].copy_from_slice(&node);
+        let gridded = V4Stages {
+            b: identities(3),
+            clut: Some((vec![3, 3, 3], entries)),
+            a: vec![gamma(1.0), gamma(2.0), gamma(1.0), gamma(2.0)],
+            ..V4Stages::default()
+        };
+        let lut = read_lut(
+            &gridded.tag(b"mBA ", 3, 4),
+            false,
+            Direction::Output { channels: 4 },
+        )
+        .expect("B curves, a grid and A curves");
+        assert_eq!(lut.outputs(), 4);
+        let got = lut.evaluate(&[0.5, 0.5, 0.5]);
+        let unit = node.map(|value| f64::from(value) / 65535.0);
+        let want = [unit[0], unit[1] * unit[1], unit[2], unit[3] * unit[3]];
+        for channel in 0..4 {
+            assert!(
+                (got[channel] - want[channel]).abs() < 3.0 / 65535.0,
+                "channel {channel}: {got:?} against {want:?}"
+            );
+        }
     }
 }

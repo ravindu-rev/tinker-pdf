@@ -3,9 +3,11 @@
 //! arithmetic recomputed here from ICC.1's own equations — a colorant
 //! matrix's inverse by its cofactors, a tone curve's inverse from its form
 //! (10.5's `curv` gamma and sampled curves, 10.18's `para`), ICC-absolute
-//! colorimetry's media white (6.2.3) and Lab's relation to XYZ (6.4) — and
-//! never from the engine's code. The profiles are built here byte by byte, so
-//! each answer is a statement about the format.
+//! colorimetry's media white (6.2.3), Lab's relation to XYZ (6.4), and a
+//! lookup table's stages in its type's order, `mft1`'s and `mft2`'s (10.8,
+//! 10.9) and `mBA `'s (10.11) — and never from the engine's code. The
+//! profiles are built here byte by byte, so each answer is a statement about
+//! the format.
 //!
 //! A transform out of the connection space reads its device value from
 //! tables: the inverted curve is held at 4 096 evenly spaced values of light
@@ -185,6 +187,25 @@ impl Tone {
             }
         };
         x.clamp(0.0, 1.0)
+    }
+
+    /// The most the curve rises per unit of `x` anywhere on `0..=1`: a gamma
+    /// of one or more at one, a linear foot's slope or its power law's at
+    /// one, a sampled curve's steepest segment; a gamma below one has no
+    /// bound at zero.
+    fn steepest(&self) -> f64 {
+        match self {
+            Tone::Gamma(g) if *g >= 1.0 => *g,
+            Tone::Gamma(_) => f64::INFINITY,
+            Tone::Linear { g, a, b, c, .. } => c.max(g * a * (a + b).max(0.0).powf(g - 1.0)),
+            Tone::Sampled(points) => {
+                points
+                    .windows(2)
+                    .map(|pair| (pair[1] - pair[0]).abs())
+                    .fold(0.0f64, f64::max)
+                    * (points.len() - 1) as f64
+            }
+        }
     }
 }
 
@@ -1231,5 +1252,534 @@ fn an_mft1_lab_table_reads_in_its_own_encoding() {
                 "a*, b* 0 lie at 80h over FFh: {channels:?}"
             );
         }
+    }
+}
+
+// ---- v4 tables out of the connection space ----------------------------------
+//
+// An `mBA ` (`lutBToAType`, ICC.1 10.11) takes the connection space through
+// up to five stages in the order the type names them, the reverse of `mAB `'s:
+// B curves, a matrix with offsets whose results are clipped to 0..=1, M
+// curves, a grid with a point count of its own on each axis, and A curves, one
+// a device channel. Its curves are `curv` and `para` tags. Both v4 types
+// encode a Lab connection space by each component's range over 0..=1 (10.10.1,
+// 10.11.1, 6.3.4.2): `L*` 100 at `FFFFh`, `a*` and `b*` 0 at `8080h`.
+
+/// The identity, row by row.
+const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+/// A stage before an `mBA `'s grid.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Stage {
+    /// The B curves, one an input.
+    B,
+    /// The matrix and its offsets, its results clipped to 0..=1.
+    Matrix,
+    /// The M curves, one an input.
+    M,
+}
+
+/// ICC.1's order for the stages before an `mBA `'s grid (10.11).
+const ICC_ORDER: [Stage; 3] = [Stage::B, Stage::Matrix, Stage::M];
+
+/// A sampled tone of `points` in the 16-bit currency.
+fn sampled(points: &[u16]) -> Tone {
+    Tone::Sampled(points.iter().map(|p| f64::from(*p) / 65535.0).collect())
+}
+
+/// A curve's tag: a `para` of function type 0 for a gamma or 3 for a linear
+/// foot (10.18), a sampled `curv` for sampled points (10.5).
+fn tone_tag(tone: &Tone) -> Vec<u8> {
+    match tone {
+        Tone::Gamma(g) => para_tag(0, &[*g]),
+        Tone::Linear { g, a, b, c, d } => para_tag(3, &[*g, *a, *b, *c, *d]),
+        Tone::Sampled(points) => sampled_tag(
+            &points
+                .iter()
+                .map(|p| (p * 65535.0).round() as u16)
+                .collect::<Vec<u16>>(),
+        ),
+    }
+}
+
+/// A version 4 lookup table out of the connection space, `mBA `: its curves
+/// as [`Tone`]s, each stage empty where the tag does not carry it.
+#[derive(Clone, Debug)]
+struct V4Table {
+    /// One an input; ICC.1 makes them required.
+    b: Vec<Tone>,
+    /// Nine entries row by row, then three offsets, each a whole number of
+    /// s15.16 steps.
+    matrix: Option<[f64; 12]>,
+    /// One an input.
+    m: Vec<Tone>,
+    /// One point count an input; empty where there is no grid.
+    grids: Vec<usize>,
+    /// The grid's entries of `outputs` values, the last input's axis fastest.
+    clut: Vec<u16>,
+    /// One an output.
+    a: Vec<Tone>,
+    outputs: usize,
+}
+
+impl V4Table {
+    /// The `mBA ` tag's bytes.
+    fn tag(&self) -> Vec<u8> {
+        self.tag_as(b"mBA ", 3)
+    }
+
+    /// The tag's bytes under `signature` over `inputs` channels: the header,
+    /// then each stage present in the order the header lists their offsets —
+    /// B, matrix, M, CLUT, A — each curve and stage on a four-byte boundary
+    /// (10.10.1, 10.11.1). An `mAB ` written this way runs its A curves
+    /// first and its B curves last.
+    fn tag_as(&self, signature: &[u8; 4], inputs: u8) -> Vec<u8> {
+        fn pad(out: &mut Vec<u8>) {
+            while out.len() % 4 != 0 {
+                out.push(0);
+            }
+        }
+        fn run(out: &mut Vec<u8>, tones: &[Tone]) -> u32 {
+            let at = out.len() as u32;
+            for tone in tones {
+                out.extend_from_slice(&tone_tag(tone));
+                pad(out);
+            }
+            at
+        }
+        let mut out = signature.to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&[inputs, self.outputs as u8, 0, 0]);
+        out.extend_from_slice(&[0; 20]);
+        let mut offsets = [0u32; 5];
+        if !self.b.is_empty() {
+            offsets[0] = run(&mut out, &self.b);
+        }
+        if let Some(matrix) = self.matrix {
+            offsets[1] = out.len() as u32;
+            for value in matrix {
+                out.extend_from_slice(&s15(value));
+            }
+        }
+        if !self.m.is_empty() {
+            offsets[2] = run(&mut out, &self.m);
+        }
+        if !self.grids.is_empty() {
+            offsets[3] = out.len() as u32;
+            let mut counts = [0u8; 16];
+            for (slot, points) in counts.iter_mut().zip(&self.grids) {
+                *slot = *points as u8;
+            }
+            out.extend_from_slice(&counts);
+            // Two bytes an entry, then three of padding.
+            out.extend_from_slice(&[2, 0, 0, 0]);
+            for value in &self.clut {
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+            pad(&mut out);
+        }
+        if !self.a.is_empty() {
+            offsets[4] = run(&mut out, &self.a);
+        }
+        for (slot, offset) in offsets.iter().enumerate() {
+            out[12 + 4 * slot..16 + 4 * slot].copy_from_slice(&offset.to_be_bytes());
+        }
+        out
+    }
+
+    /// The stages before the grid for `encoded`, three inputs over 0..=1, in
+    /// `order`: each curve read exactly, the matrix as stored, its results
+    /// clipped to 0..=1 (10.11.3). A stage the tag does not carry passes its
+    /// channels through.
+    fn before_grid(&self, encoded: [f64; 3], order: [Stage; 3]) -> [f64; 3] {
+        let mut v = encoded.map(|x| x.clamp(0.0, 1.0));
+        for stage in order {
+            match stage {
+                Stage::B => v = [0, 1, 2].map(|c| self.b[c].forward(v[c])),
+                Stage::M if !self.m.is_empty() => {
+                    v = [0, 1, 2].map(|c| self.m[c].forward(v[c]));
+                }
+                Stage::M => {}
+                Stage::Matrix => {
+                    if let Some(matrix) = self.matrix {
+                        let e = matrix.map(stored);
+                        v = [0, 1, 2].map(|row| {
+                            (e[3 * row] * v[0]
+                                + e[3 * row + 1] * v[1]
+                                + e[3 * row + 2] * v[2]
+                                + e[9 + row])
+                                .clamp(0.0, 1.0)
+                        });
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    /// The grid's cell at `v`, in nodes along each axis, and the fractions
+    /// past it.
+    fn cell(&self, v: [f64; 3]) -> ([usize; 3], [f64; 3]) {
+        let mut base = [0usize; 3];
+        let mut fraction = [0.0f64; 3];
+        for axis in 0..3 {
+            let last = (self.grids[axis] - 1) as f64;
+            let p = v[axis].clamp(0.0, 1.0) * last;
+            let index = (p.floor() as usize).min(self.grids[axis] - 2);
+            base[axis] = index;
+            fraction[axis] = p - index as f64;
+        }
+        (base, fraction)
+    }
+
+    /// Grid node `at`'s channel `o`, over 0..=1.
+    fn node(&self, at: [usize; 3], o: usize) -> f64 {
+        let offset = (at[0] * self.grids[1] + at[1]) * self.grids[2] + at[2];
+        f64::from(self.clut[offset * self.outputs + o]) / 65535.0
+    }
+
+    /// The table's channels for `encoded`, each over 0..=1, recomputed stage
+    /// by stage with the stages before the grid in `order`: the grid
+    /// interpolated multilinearly — or, with none, the M stage's channels as
+    /// they stand — then each output through its A curve.
+    fn evaluate(&self, encoded: [f64; 3], order: [Stage; 3]) -> Vec<f64> {
+        let v = self.before_grid(encoded, order);
+        let grid: Vec<f64> = if self.grids.is_empty() {
+            v.to_vec()
+        } else {
+            let (base, fraction) = self.cell(v);
+            (0..self.outputs)
+                .map(|o| {
+                    let mut value = 0.0;
+                    for corner in 0..8usize {
+                        let bits = [(corner >> 2) & 1, (corner >> 1) & 1, corner & 1];
+                        let weight: f64 = (0..3)
+                            .map(|axis| {
+                                if bits[axis] == 1 {
+                                    fraction[axis]
+                                } else {
+                                    1.0 - fraction[axis]
+                                }
+                            })
+                            .product();
+                        let at = [0, 1, 2].map(|axis| base[axis] + bits[axis]);
+                        value += weight * self.node(at, o);
+                    }
+                    value
+                })
+                .collect()
+        };
+        grid.iter()
+            .enumerate()
+            .map(|(o, &value)| match self.a.get(o) {
+                Some(tone) => tone.forward(value.clamp(0.0, 1.0)),
+                None => value,
+            })
+            .collect()
+    }
+
+    /// One table step for channel `o`, in 16-bit units: along each axis, the
+    /// most two neighbouring nodes differ by anywhere on the grid, over 256 —
+    /// the grid is interpolated in 256ths of a cell — and over the eight units
+    /// a coordinate can be off by after the B curves', the matrix's and the M
+    /// curves' roundings; that carried through the A curve's steepest
+    /// stretch, and four units for the roundings after the grid.
+    fn step(&self, o: usize) -> f64 {
+        let coordinate = 8.0 / 65535.0;
+        let span = if self.grids.is_empty() {
+            coordinate
+        } else {
+            let mut span = 0.0;
+            for axis in 0..3 {
+                let mut widest = 0.0f64;
+                for i in 0..self.grids[0] {
+                    for j in 0..self.grids[1] {
+                        for k in 0..self.grids[2] {
+                            let low = [i, j, k];
+                            if low[axis] + 1 < self.grids[axis] {
+                                let mut high = low;
+                                high[axis] += 1;
+                                widest = widest.max((self.node(high, o) - self.node(low, o)).abs());
+                            }
+                        }
+                    }
+                }
+                span += widest * (1.0 / 256.0 + coordinate * (self.grids[axis] - 1) as f64);
+            }
+            span
+        };
+        let slope = self.a.get(o).map_or(1.0, Tone::steepest);
+        span * slope * 65535.0 + 4.0
+    }
+}
+
+/// A grid of `grids` points along its three axes, `outputs` channels a node:
+/// channel `c` of node `(i, j, k)` rises along each axis at its own rate, as
+/// [`clut`]'s do.
+fn grid_entries(grids: [usize; 3], outputs: usize) -> Vec<u16> {
+    let mut values = Vec::new();
+    let unit = |index: usize, points: usize| index as f64 / (points - 1) as f64;
+    for i in 0..grids[0] {
+        for j in 0..grids[1] {
+            for k in 0..grids[2] {
+                for c in 0..outputs {
+                    let (x, y, z) = (unit(i, grids[0]), unit(j, grids[1]), unit(k, grids[2]));
+                    let weights = [0.5, 0.3, 0.2];
+                    let turn = c % 3;
+                    let mixed = weights[turn] * x
+                        + weights[(turn + 1) % 3] * y * y
+                        + weights[(turn + 2) % 3] * (1.0 - z)
+                        + 0.05 * c as f64;
+                    values.push((mixed.clamp(0.0, 1.0) * 65535.0).round() as u16);
+                }
+            }
+        }
+    }
+    values
+}
+
+/// An `mBA ` with every stage, to four channels: B curves of gamma 2, gamma
+/// 1.5 and four sampled points; a matrix mixing every channel with an offset
+/// on each; M curves of four points, each bent its own way; a grid of three,
+/// four and three points; and A curves of four points, one a channel. A
+/// curve before the matrix bends what it mixes and one after it what it made,
+/// so no two of the stages before the grid commute. Every sampled curve's
+/// points fall on every 341st of the 1 023 steps a v4 curve is sampled in.
+fn every_stage() -> V4Table {
+    V4Table {
+        b: vec![
+            Tone::Gamma(2.0),
+            Tone::Gamma(1.5),
+            sampled(&[0, 30_000, 52_000, 65_535]),
+        ],
+        matrix: Some([
+            0.75, 0.25, 0.0, -0.25, 1.0, 0.25, 0.125, -0.125, 0.875, 0.0625, -0.0625, 0.125,
+        ]),
+        m: vec![
+            sampled(&[0, 8_000, 30_000, 65_535]),
+            sampled(&[0, 40_000, 60_000, 65_535]),
+            sampled(&[10_000, 20_000, 45_000, 65_535]),
+        ],
+        grids: vec![3, 4, 3],
+        clut: grid_entries([3, 4, 3], 4),
+        a: (0..4u16)
+            .map(|c| sampled(&[0, 18_000 + 4_000 * c, 47_000 - 3_000 * c, 65_535]))
+            .collect(),
+        outputs: 4,
+    }
+}
+
+/// XYZ values over most of the cube `u1Fixed15` encodes, from black to 1.7
+/// in each component, past the PCS white.
+fn xyz_cube() -> Vec<[f64; 3]> {
+    let levels = [0.0, 0.15, 0.4, 0.7, 1.0, 1.3, 1.7];
+    let mut values = Vec::new();
+    for x in levels {
+        for y in levels {
+            for z in levels {
+                values.push([x, y, z]);
+            }
+        }
+    }
+    values
+}
+
+/// A profile over XYZ whose `B2A0` is `table`, on [`PAPER`]: CMYK with a
+/// forward table for a table of four outputs, RGB on a matrix/TRC model for
+/// one of three.
+fn mba_profile(table: &V4Table) -> Profile {
+    let (space, mut tags) = if table.outputs == 4 {
+        let forward = forward_table(true, 4, |_| [20_000, 30_000, 25_000]);
+        (b"CMYK", vec![(*b"A2B0", forward.tag())])
+    } else {
+        (b"RGB ", rgb_model(2.2))
+    };
+    tags.extend([(*b"B2A0", table.tag()), (*b"wtpt", xyz_tag(PAPER))]);
+    Profile::parse(&profile(space, b"XYZ ", &tags)).expect("the profile parses")
+}
+
+/// **An `mBA ` tag runs its stages in ICC.1's order** (10.11): B curves, the
+/// matrix and its offsets, its results clipped to 0..=1, M curves, the grid,
+/// A curves. A CMYK profile's `B2A0` carrying all five, stages whose effects
+/// do not commute, takes XYZ in `u1Fixed15` to the four values each stage
+/// recomputed here in that order gives, within one table step, under
+/// perceptual, relative and absolute colorimetric — the last's value divided
+/// by the media white first — and every other order of the three stages
+/// before the grid misses by more than a step somewhere. So do the tag's
+/// shorter forms, each stage present as its offsets say: B curves alone, B
+/// curves with the matrix and M curves, and B curves with the grid and A
+/// curves. At an `A2B*` tag an `mBA ` stays refused by name.
+#[test]
+fn an_mba_tag_runs_its_stages_in_icc_1s_order() {
+    use tinker_pdf_color::icc::IccError;
+    let full = every_stage();
+    let forms = [
+        ("every stage", full.clone()),
+        (
+            "B curves alone",
+            V4Table {
+                matrix: None,
+                m: Vec::new(),
+                grids: Vec::new(),
+                clut: Vec::new(),
+                a: Vec::new(),
+                outputs: 3,
+                ..full.clone()
+            },
+        ),
+        (
+            "B curves, the matrix and M curves",
+            V4Table {
+                grids: Vec::new(),
+                clut: Vec::new(),
+                a: Vec::new(),
+                outputs: 3,
+                ..full.clone()
+            },
+        ),
+        (
+            "B curves, the grid and A curves",
+            V4Table {
+                matrix: None,
+                m: Vec::new(),
+                ..full.clone()
+            },
+        ),
+    ];
+    let values = xyz_cube();
+    for (what, table) in &forms {
+        let parsed = mba_profile(table);
+        for intent in [
+            Intent::Perceptual,
+            Intent::RelativeColorimetric,
+            Intent::AbsoluteColorimetric,
+        ] {
+            let output = Output::compile(&parsed, intent)
+                .unwrap_or_else(|error| panic!("{what}, {intent:?}: {error:?}"));
+            assert_eq!(output.channels(), table.outputs, "{what}");
+            for &pcs in &values {
+                let encoded = Encoding::Xyz.encode(relative_value(pcs, false, intent), IDENTITY);
+                let want = table.evaluate(encoded, ICC_ORDER);
+                let got = output.apply(pcs);
+                assert_eq!(got.channels().len(), table.outputs, "{what}");
+                for (c, (&got, want)) in got.channels().iter().zip(want).enumerate() {
+                    let (want, slack) = (want * 65535.0, table.step(c));
+                    assert!(
+                        (f64::from(got) - want).abs() <= slack,
+                        "{what}, {intent:?}, {pcs:?}, channel {c}: {got}, not {want:.1} within \
+                         {slack:.1}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Every other order of the three stages before the grid misses
+    // somewhere, so the answers above are the order's and not the stages'.
+    let output = Output::compile(&mba_profile(&full), Intent::RelativeColorimetric)
+        .expect("the mBA B2A0 reads");
+    let got: Vec<Vec<u16>> = values
+        .iter()
+        .map(|&pcs| output.apply(pcs).channels().to_vec())
+        .collect();
+    use Stage::{Matrix, B, M};
+    for order in [
+        [B, M, Matrix],
+        [Matrix, B, M],
+        [Matrix, M, B],
+        [M, B, Matrix],
+        [M, Matrix, B],
+    ] {
+        let missed = values.iter().zip(&got).any(|(&pcs, got)| {
+            let want = full.evaluate(Encoding::Xyz.encode(pcs, IDENTITY), order);
+            got.iter()
+                .zip(want)
+                .enumerate()
+                .any(|(c, (&got, want))| (f64::from(got) - want * 65535.0).abs() > full.step(c))
+        });
+        assert!(missed, "{order:?} gives what ICC.1's order does");
+    }
+
+    let misplaced = profile(b"CMYK", b"XYZ ", &[(*b"A2B0", full.tag())]);
+    assert_eq!(
+        Profile::parse(&misplaced),
+        Err(IccError::NeedsLut),
+        "an mBA at an A2B tag"
+    );
+}
+
+/// **A v4 table reads and writes Lab in its own encoding** (10.10.1,
+/// 10.11.1, 6.3.4.2): each component's range over the whole currency, not
+/// `lut16Type`'s legacy scale. Forward, an `mAB ` `A2B0` whose grid's top
+/// node holds `FFFFh`, `8080h` and `8080h` gives `L*` 100 and `a*`, `b*` 0,
+/// where the legacy reading would give 100.39 and 0.5. Out, an `mBA ` `B2A0`
+/// whose three-point grid holds 0, `8000h` and `FFFFh` along each axis takes
+/// `L*` 100 to its top node, 65 535, and `a*`, `b*` 0, which lie at `80h`
+/// over `FFh` of their axes, just past the middle node, to `8080h`, 32 896;
+/// the legacy encoding would take them to about 65 279 and 32 768.
+#[test]
+fn a_v4_table_reads_and_writes_lab_in_its_own_encoding() {
+    let identity = || vec![Tone::Gamma(1.0); 3];
+    let forward = V4Table {
+        b: identity(),
+        matrix: None,
+        m: Vec::new(),
+        grids: vec![2, 2, 2],
+        clut: (0..8)
+            .flat_map(|node| [if node == 7 { 0xFFFF } else { 0 }, 0x8080, 0x8080])
+            .collect(),
+        a: identity(),
+        outputs: 3,
+    };
+    let level = [0u16, 0x8000, 0xFFFF];
+    let out = V4Table {
+        b: identity(),
+        matrix: None,
+        m: Vec::new(),
+        grids: vec![3, 3, 3],
+        clut: (0..27usize)
+            .flat_map(|node| [level[node / 9], level[(node / 3) % 3], level[node % 3]])
+            .collect(),
+        a: identity(),
+        outputs: 3,
+    };
+    let parsed = Profile::parse(&profile(
+        b"RGB ",
+        b"Lab ",
+        &[
+            (*b"A2B0", forward.tag_as(b"mAB ", 3)),
+            (*b"B2A0", out.tag()),
+        ],
+    ))
+    .expect("an RGB/Lab profile");
+
+    let white = parsed
+        .connection_value(Intent::RelativeColorimetric, &[1.0, 1.0, 1.0])
+        .expect("a value");
+    assert!(
+        (white[0] - 100.0).abs() < 0.01 && white[1].abs() < 0.01 && white[2].abs() < 0.01,
+        "the top node reads {white:?}, not L* 100 and a*, b* 0"
+    );
+    let black = parsed
+        .connection_value(Intent::RelativeColorimetric, &[0.0, 0.0, 0.0])
+        .expect("a value");
+    assert!(
+        black[0].abs() < 0.01 && black[1].abs() < 0.01 && black[2].abs() < 0.01,
+        "the bottom node reads {black:?}"
+    );
+
+    let output =
+        Output::compile(&parsed, Intent::RelativeColorimetric).expect("the mBA B2A0 reads");
+    let got = output.apply([100.0, 0.0, 0.0]);
+    let channels = got.channels();
+    assert!(
+        channels[0] >= 65_534,
+        "L* 100 is the top node: {channels:?}"
+    );
+    for channel in &channels[1..] {
+        assert!(
+            channel.abs_diff(0x8080) <= 2,
+            "a*, b* 0 lie at 80h over FFh: {channels:?}"
+        );
     }
 }

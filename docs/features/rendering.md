@@ -36,9 +36,11 @@ version 2's legacy one, `L*` 100 at `FF00h`, an `mft1` in its 8-bit one,
 reads too**, which is five optional stages where v2 has three fixed ones — A
 curves, a grid whose axes may each carry their own point count, M curves, a
 matrix and B curves, run in that order although the header lists their
-offsets in the reverse. A grey profile whose connection space is `Lab` rather
-than `XYZ` reads as well: its one curve gives lightness instead of luminance,
-and the two differ by 8.6.5.4's cube root. A `D2B*` tag's floating-point
+offsets in the reverse — and whose Lab is v4's, each component's range over
+the whole currency, `L*` 100 at `FFFFh` and `a*` 0 at `8080h`. A grey
+profile whose connection space is `Lab` rather than `XYZ` reads as well: its
+one curve gives lightness instead of luminance, and the two differ by
+8.6.5.4's cube root. A `D2B*` tag's floating-point
 transform reads as well (`multiProcessElementsType`: curve sets of formula
 and sampled segments, matrices with offsets and grids), compiled once into
 integer stages, and converts its intent before that intent's `A2B*` table;
@@ -134,7 +136,14 @@ encoded as its type defines it — XYZ in `u1Fixed15` through the table's
 matrix (10.8), Lab in the table's own encoding — through its input curves,
 grid and output curves to as many channels as the data space has; one
 declaring more than fifteen is refused before its curves are read, and one
-of another count than the data space passed over. A matrix/TRC profile's
+of another count than the data space passed over. **v4's `mBA ` reads at a
+`B2A*` tag too**, `mAB `'s five stages the other way round and in the order
+its header lists them: B curves, a matrix with offsets whose results are
+clipped to 0..1, M curves, the grid, and A curves, one a device channel
+(10.11), each present where its offset is not zero, the B curves required
+and a tag with no grid as many outputs as inputs; its XYZ is `u1Fixed15`
+and its Lab v4's, as `mAB `'s. An `mBA ` at an `A2B*` tag, or an `mAB ` at
+a `B2A*` one, is refused as `IccError::NeedsLut`. A matrix/TRC profile's
 columns are inverted when it is built, by their cofactors in `f64`, and held
 in s15.16, and each tone curve is inverted by bisection over its compiled
 table into 4 096 entries read between them in fixed point; a grey profile
