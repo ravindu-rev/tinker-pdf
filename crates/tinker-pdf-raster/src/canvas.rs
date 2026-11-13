@@ -316,6 +316,33 @@ impl Default for Channels {
     }
 }
 
+/// How a source composites each colour channel outside the set in force
+/// ([`Canvas::set_marked`], [`Canvas::set_unmarked`]).
+///
+/// Under `Normal` the two rules write the same bytes: [`Unmarked::Grouped`]'s
+/// source under `Normal` is [`Unmarked::Kept`]'s `B = Cb` worked through
+/// 11.3.6's formula, so the group is the source's own composite, as 11.7.4.3's
+/// third note says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Unmarked {
+    /// The source's own composite with `B(Cb, Cs) = Cb`, whatever the mode:
+    /// over an opaque backdrop the channel is untouched (11.7.4.2), written
+    /// at [`Channels`]. The rule a canvas starts with.
+    #[default]
+    Kept,
+    /// 11.7.4.3's implicit group of the one source, in closed form: the
+    /// source painted under `B = Cb` into a non-isolated, non-knockout group
+    /// over the backdrop, and the group composited under the mode in force.
+    /// The group's result is the source in each marked channel and
+    /// `(1 − αb)·Cs + αb·Cb` in each other one, `αb` the backdrop's alpha,
+    /// at the source's alpha — 11.4.7.2's removal of the backdrop worked
+    /// through — so a channel outside the set composites under the mode, as
+    /// a marked one does, from that colour. Over an opaque backdrop that is
+    /// `B(Cb, Cb)`: `Cb` under `Darken` and `Lighten`, and darker under
+    /// `Multiply`, as the clause's construction computes.
+    Grouped,
+}
+
 /// One spot channel's colour by itself, as the composite of a
 /// [`PixelFormat::Plates`] canvas reads it ([`Canvas::composite_plates_into`]):
 /// at each tint `t`, entry `t`, the light the channel's colorant alone shows
@@ -608,6 +635,10 @@ pub struct Canvas {
     /// [`Channels::ALL`] otherwise, which composites as before any set
     /// existed.
     marked: Channels,
+    /// How a source composites the channels outside `marked`
+    /// ([`Canvas::set_unmarked`]); [`Unmarked::Kept`] until a caller says
+    /// otherwise.
+    unmarked: Unmarked,
 }
 
 impl Canvas {
@@ -634,6 +665,7 @@ impl Canvas {
             approximated_blends: 0,
             ink_tables: None,
             marked: Channels::ALL,
+            unmarked: Unmarked::Kept,
         };
         canvas.clear(background);
         canvas
@@ -845,6 +877,31 @@ impl Canvas {
         self.marked
     }
 
+    /// Puts `rule` in force as how every source composited onto this canvas
+    /// from now on composites the colour channels outside the set in force
+    /// ([`Canvas::set_marked`]), read by every entry that reads the set, and
+    /// hands back the rule that was in force. A canvas starts with
+    /// [`Unmarked::Kept`]; under [`Channels::ALL`] neither rule has a channel
+    /// to apply to, and under `Normal` the two write the same bytes.
+    pub fn set_unmarked(&mut self, rule: Unmarked) -> Unmarked {
+        std::mem::replace(&mut self.unmarked, rule)
+    }
+
+    /// The rule in force ([`Canvas::set_unmarked`]).
+    #[must_use]
+    pub const fn unmarked(&self) -> Unmarked {
+        self.unmarked
+    }
+
+    /// The set in force and the rule for the channels outside it, as
+    /// [`blend_marked`] and [`blend_plates`] read them.
+    const fn marks(&self) -> Marks {
+        Marks {
+            set: self.marked,
+            unmarked: self.unmarked,
+        }
+    }
+
     /// Whether the set in force marks every colour channel this canvas
     /// carries, so a source composites as one with no set: the opaque
     /// shortcuts, which write every channel, are taken only then.
@@ -1010,7 +1067,7 @@ impl Canvas {
                 }
                 let base = (row as usize) * self.stride + (col as usize) * components;
                 let backdrop = self.backdrop_alpha(col, row);
-                let marked = self.marked;
+                let marked = self.marks();
                 if let Some(pixel) = self.data.get_mut(base..base + components) {
                     blend_plates(pixel, &source, effective, channels, mode, backdrop, marked);
                 }
@@ -1040,7 +1097,7 @@ impl Canvas {
         // pixel under `Normal` still keeps its backdrop where it is not
         // marked, so it takes the general composite.
         let whole = self.marks_every_channel();
-        let marked = self.marked;
+        let marked = self.marks();
         for row in y0..y1 {
             for col in x0..x1 {
                 let coverage = u32::from(
@@ -1263,7 +1320,7 @@ impl Canvas {
             return;
         }
         let backdrop = self.backdrop_alpha(x, y);
-        let marked = self.marked;
+        let marked = self.marks();
         blend_marked(
             self.data.get_mut(base..base + components),
             &source,
@@ -1308,7 +1365,7 @@ impl Canvas {
         let components = self.format.components();
         let base = (y as usize) * self.stride + (x as usize) * components;
         let backdrop = self.backdrop_alpha(x, y);
-        let marked = self.marked;
+        let marked = self.marks();
         if let (Some(pixel), Some(source)) = (
             self.data.get_mut(base..base + components),
             source.get(..channels),
@@ -1378,7 +1435,7 @@ impl Canvas {
         let components = self.format.components();
         let base = (y as usize) * self.stride + (x as usize) * components;
         let backdrop = self.backdrop_alpha(x, y);
-        let marked = self.marked;
+        let marked = self.marks();
         if let (Some(pixel), Some(source)) = (
             self.data.get_mut(base..base + components),
             source.get(..channels),
@@ -1578,7 +1635,7 @@ impl Canvas {
             self.approximated_blends = self.approximated_blends.saturating_add(1);
         }
         let whole = self.marks_every_channel();
-        let marked = self.marked;
+        let marked = self.marks();
         for row in y0..y1 {
             if row.wrapping_sub(y0) % STOP_EVERY == 0 && stop.is_some_and(|stop| stop()) {
                 return;
@@ -1669,7 +1726,7 @@ impl Canvas {
         let channels = color_channels(format);
         // Light a source carries becomes ink here by the tables in force.
         let tables = self.ink_tables.clone();
-        let marked = self.marked;
+        let marked = self.marks();
         let mut word = vec![0u8; components];
         for row in y0..y1 {
             if row.wrapping_sub(y0) % STOP_EVERY == 0 && stop.is_some_and(|stop| stop()) {
@@ -3031,7 +3088,43 @@ fn blend(
     mode: BlendMode,
     initial: u32,
 ) {
-    blend_marked(dst, source, alpha, format, mode, initial, Channels::ALL);
+    blend_marked(dst, source, alpha, format, mode, initial, Marks::ALL);
+}
+
+/// The colour channels a source marks and how it composites the others
+/// ([`Canvas::set_marked`], [`Canvas::set_unmarked`]), as [`blend_marked`] and
+/// [`blend_plates`] read them.
+#[derive(Clone, Copy, Debug)]
+struct Marks {
+    set: Channels,
+    unmarked: Unmarked,
+}
+
+impl Marks {
+    /// Every channel marked: the composite before any set existed.
+    const ALL: Marks = Marks {
+        set: Channels::ALL,
+        unmarked: Unmarked::Kept,
+    };
+
+    /// Whether a source under `mode` onto a pixel of `channels` colour
+    /// channels composites as its own implicit group (11.7.4.3): the rule in
+    /// force is [`Unmarked::Grouped`], the set leaves a channel out, and the
+    /// mode is not `Normal`, under which the group is the source's own
+    /// composite and the general one is taken.
+    fn grouped(self, mode: BlendMode, channels: usize) -> bool {
+        self.unmarked == Unmarked::Grouped
+            && mode != BlendMode::Normal
+            && !self.set.covers(channels)
+    }
+}
+
+/// A grouped source's colour in a channel outside the set (11.7.4.3,
+/// [`Unmarked::Grouped`]): the source's `cs` mixed toward the backdrop's `cb`
+/// by the backdrop's alpha `ab`, `(1 − αb)·Cs + αb·Cb` in 255ths — what the
+/// implicit group holds there once 11.4.7.2 has taken its backdrop out.
+fn grouped_channel(cs: u8, cb: u8, ab: u32) -> u8 {
+    (mul255(255 - ab, u32::from(cs)) + mul255(ab, u32::from(cb))).min(255) as u8
 }
 
 /// [`blend`], the source marking the colour channels in `marked` alone
@@ -3044,6 +3137,11 @@ fn blend(
 /// outside the set keeps its backdrop there too. The alpha channel
 /// composites the source's shape whatever the set (11.7.3: one shape and one
 /// opacity a point). With [`Channels::ALL`] every line is [`blend`]'s.
+///
+/// Under [`Unmarked::Grouped`] and a mode other than `Normal` the source is
+/// its own implicit group (11.7.4.3): each channel outside the set takes as
+/// its source the group's colour there ([`grouped_channel`]), and every
+/// channel then blends as a marked one.
 fn blend_marked(
     dst: Option<&mut [u8]>,
     source: &[u8; 5],
@@ -3051,7 +3149,7 @@ fn blend_marked(
     format: PixelFormat,
     mode: BlendMode,
     initial: u32,
-    marked: Channels,
+    marked: Marks,
 ) {
     let Some(dst) = dst else { return };
     #[cfg(test)]
@@ -3069,6 +3167,21 @@ fn blend_marked(
         255
     };
     let backdrop_alpha = own_alpha + mul255(initial, 255 - own_alpha);
+    // 11.7.4.3's implicit group of this one source (`Unmarked::Grouped`): its
+    // result composited under the mode with every channel marked.
+    let grouped: [u8; 5];
+    let (source, marked) = if marked.grouped(mode, channels) {
+        let mut word = *source;
+        for (i, slot) in word.iter_mut().enumerate().take(channels) {
+            if !marked.set.contains(i) {
+                *slot = grouped_channel(*slot, dst.get(i).copied().unwrap_or(0), backdrop_alpha);
+            }
+        }
+        grouped = word;
+        (&grouped, Channels::ALL)
+    } else {
+        (source, marked.set)
+    };
 
     // 11.3.6: the blend function sees the backdrop only to the extent the
     // backdrop is there. Where it is absent the source passes through
@@ -3251,7 +3364,9 @@ fn blend_marked(
 ///
 /// **A channel outside `marked` keeps its backdrop**: `B = Cb` inside the
 /// same formula, as [`blend_marked`] takes it, whatever the mode; with
-/// [`Channels::ALL`] every channel blends as above.
+/// [`Channels::ALL`] every channel blends as above. Under
+/// [`Unmarked::Grouped`] and a mode other than `Normal` the source is its own
+/// implicit group, as [`blend_marked`] takes it.
 fn blend_plates(
     dst: &mut [u8],
     source: &[u8],
@@ -3259,7 +3374,7 @@ fn blend_plates(
     channels: usize,
     mode: BlendMode,
     initial: u32,
-    marked: Channels,
+    marked: Marks,
 ) {
     #[cfg(test)]
     blends::counted();
@@ -3269,6 +3384,25 @@ fn blend_plates(
     let inverse = 255 - alpha;
     let own_alpha = dst.get(channels).map_or(255, |a| u32::from(*a));
     let backdrop_alpha = own_alpha + mul255(initial, 255 - own_alpha);
+    // 11.7.4.3's implicit group of this one source (`Unmarked::Grouped`): its
+    // result composited under the mode with every channel marked. On the
+    // stack, and only when it is asked for: a plates pixel blends here.
+    let grouped: [u8; 4 + MAX_SPOT_PLATES];
+    let (source, marked) = if marked.grouped(mode, channels) {
+        let mut word = [0u8; 4 + MAX_SPOT_PLATES];
+        for (channel, (slot, cs)) in word.iter_mut().zip(source).take(channels).enumerate() {
+            *slot = if marked.set.contains(channel) {
+                *cs
+            } else {
+                grouped_channel(*cs, dst.get(channel).copied().unwrap_or(0), backdrop_alpha)
+            };
+        }
+        grouped = word;
+        let width = channels.min(source.len()).min(grouped.len());
+        (&grouped[..width], Channels::ALL)
+    } else {
+        (source, marked.set)
+    };
     // The colour renormalises against the union alpha; the alpha channel keeps
     // the group's own. They are the same number outside a non-isolated group.
     let union_out = alpha + mul255(backdrop_alpha, inverse);
@@ -6671,6 +6805,160 @@ mod tests {
                     "{mode:?} {format:?}: still through light"
                 );
             }
+        }
+    }
+
+    /// **A grouped source composites as the source its group leaves**
+    /// (RC-03.7, 11.7.4.3): on `CmykA8`, on plates of two spots and on
+    /// `Rgba8`, under every blend mode, a source alpha of 1 and 0.5 and a
+    /// backdrop alpha of 1, 0.5 and 0, a fill under a set leaving channels out
+    /// with [`Unmarked::Grouped`] in force writes the bytes of the same fill
+    /// with every channel marked whose source holds, in each channel the set
+    /// leaves, `(1 − αb)·Cs + αb·Cb`, worked out here — the implicit group's
+    /// result once 11.4.7.2 has taken its backdrop out — and under `Normal`
+    /// the bytes [`Unmarked::Kept`] writes.
+    #[test]
+    fn a_grouped_source_composites_as_the_source_its_group_leaves() {
+        let full = solid(0, 0, 1, 1, 255);
+        let backdrop_tints = [40u8, 90, 160, 210, 70, 230];
+        let source_tints = [200u8, 30, 120, 60, 250, 10];
+        let modes: Vec<BlendMode> = SEPARABLE
+            .into_iter()
+            .chain([
+                BlendMode::Hue,
+                BlendMode::Saturation,
+                BlendMode::Color,
+                BlendMode::Luminosity,
+            ])
+            .collect();
+        for (format, sets) in [
+            (
+                PixelFormat::CmykA8,
+                vec![Channels::of([1]), Channels::of([0, 3]), Channels::NONE],
+            ),
+            (
+                PixelFormat::Plates { spots: spots(2) },
+                vec![
+                    Channels::of([4]),
+                    Channels::of([2, 5]),
+                    Channels::of([0, 1, 2, 3]),
+                    Channels::NONE,
+                ],
+            ),
+            (
+                PixelFormat::Rgba8,
+                vec![Channels::of([0]), Channels::of([1, 2]), Channels::NONE],
+            ),
+        ] {
+            let channels = color_channels(format);
+            // `tints` painted on a canvas of `format`: as ink on `CmykA8`, by
+            // plate on plates, and as the colour on light.
+            let paint =
+                |canvas: &mut Canvas, tints: &[u8], alpha: f64, mode: BlendMode| match format {
+                    PixelFormat::CmykA8 => {
+                        let ink = [tints[0], tints[1], tints[2], tints[3]];
+                        let (r, g, b) = cmyk_to_rgb(ink[0], ink[1], ink[2], ink[3]);
+                        canvas.fill_mask_inked(&full, Color::rgb(r, g, b), Some(ink), alpha, mode);
+                    }
+                    PixelFormat::Rgba8 => {
+                        let colour = Color::rgb(tints[0], tints[1], tints[2]);
+                        canvas.fill_mask_inked(&full, colour, None, alpha, mode);
+                    }
+                    _ => {
+                        let named: Vec<(usize, u8)> = tints.iter().copied().enumerate().collect();
+                        canvas.fill_mask_plates(
+                            &full,
+                            &PlateInk::named(spots(2), &named),
+                            alpha,
+                            mode,
+                        );
+                    }
+                };
+            let start = |ab: u8| {
+                let mut canvas = Canvas::new(1, 1, format, Color::TRANSPARENT);
+                canvas.data[..channels].copy_from_slice(&backdrop_tints[..channels]);
+                canvas.data[channels] = ab;
+                canvas
+            };
+            for &mode in &modes {
+                for alpha in [1.0, 0.5] {
+                    for ab in [255u8, 128, 0] {
+                        for &set in &sets {
+                            let what = format!("{format:?} {mode:?} at {alpha} over {ab}, {set:?}");
+                            let mut grouped = start(ab);
+                            grouped.set_marked(set);
+                            assert_eq!(grouped.set_unmarked(Unmarked::Grouped), Unmarked::Kept);
+                            paint(&mut grouped, &source_tints[..channels], alpha, mode);
+                            assert_eq!(grouped.unmarked(), Unmarked::Grouped, "{what}: in force");
+
+                            let left: Vec<u8> = (0..channels)
+                                .map(|channel| {
+                                    let (cb, cs) = (backdrop_tints[channel], source_tints[channel]);
+                                    if set.contains(channel) {
+                                        cs
+                                    } else {
+                                        (times_wide(255 - u32::from(ab), u32::from(cs))
+                                            + times_wide(u32::from(ab), u32::from(cb)))
+                                        .min(255) as u8
+                                    }
+                                })
+                                .collect();
+                            let mut every = start(ab);
+                            paint(&mut every, &left, alpha, mode);
+                            assert_eq!(grouped.data, every.data, "{what}");
+
+                            if mode == BlendMode::Normal {
+                                let mut kept = start(ab);
+                                kept.set_marked(set);
+                                paint(&mut kept, &source_tints[..channels], alpha, mode);
+                                assert_eq!(grouped.data, kept.data, "{what}: as Kept");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// **Over an opaque backdrop a grouped channel takes the mode against
+    /// itself** (11.7.4.3, read as its construction computes): on plates of
+    /// two spots, an opaque fill marking the first spot alone under
+    /// [`Unmarked::Grouped`] gives that spot the mode's composite of its tint
+    /// and every other channel `B(Cb, Cb)` — darker under `Multiply`, as it
+    /// is under [`Unmarked::Kept`] untouched, and untouched under `Darken`,
+    /// `Lighten` and `Normal` — each worked out here.
+    #[test]
+    fn over_an_opaque_backdrop_a_grouped_channel_takes_the_mode_against_itself() {
+        let full = solid(0, 0, 1, 1, 255);
+        let backdrop_tints = [40u8, 90, 160, 210, 70, 230];
+        let ink = PlateInk::named(spots(2), &[(0, 200), (1, 30), (4, 250), (5, 10)]);
+        let format = PixelFormat::Plates { spots: spots(2) };
+        for mode in [
+            BlendMode::Multiply,
+            BlendMode::Darken,
+            BlendMode::Lighten,
+            BlendMode::Normal,
+        ] {
+            let mut canvas = Canvas::new(1, 1, format, Color::TRANSPARENT);
+            canvas.data[..6].copy_from_slice(&backdrop_tints);
+            canvas.data[6] = 255;
+            canvas.set_marked(Channels::of([4]));
+            canvas.set_unmarked(Unmarked::Grouped);
+            canvas.fill_mask_plates(&full, &ink, 1.0, mode);
+            for (channel, &cb) in backdrop_tints.iter().enumerate() {
+                let against = if channel == 4 { 250 } else { cb };
+                let want = 255 - mode.apply(255 - u32::from(cb), 255 - u32::from(against));
+                assert_eq!(
+                    u32::from(canvas.data[channel]),
+                    want,
+                    "{mode:?} channel {channel}"
+                );
+                if channel != 4 {
+                    let untouched = !matches!(mode, BlendMode::Multiply);
+                    assert_eq!(canvas.data[channel] == cb, untouched, "{mode:?} {channel}");
+                }
+            }
+            assert_eq!(canvas.data[6], 255, "{mode:?}: opaque");
         }
     }
 

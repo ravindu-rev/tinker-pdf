@@ -914,6 +914,13 @@ pub struct GraphicsState {
     pub fill_source: Option<Arc<ColorSource>>,
     /// The same for the stroking colour.
     pub stroke_source: Option<Arc<ColorSource>>,
+    /// Whether the paint this state is handed with is half of the one object
+    /// a path's fill and its stroke make together, `B`, `B*`, `b` or `b*`
+    /// (11.7.4.4): set on the state the fill and then the stroke are handed
+    /// with, where the device composites colorants
+    /// ([`crate::Device::composites_colorants`]), and on no other state, so
+    /// a device that does not composite them is handed no state with it.
+    pub fill_and_stroke: bool,
 }
 
 /// The components a colour was set with and the space they were read in, kept
@@ -968,6 +975,7 @@ impl GraphicsState {
             stored: None,
             fill_source: None,
             stroke_source: None,
+            fill_and_stroke: false,
         }
     }
 

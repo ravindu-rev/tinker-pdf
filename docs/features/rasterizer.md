@@ -488,6 +488,22 @@ plates; `a_full_channel_mask_composites_as_before`;
 `a_channel_set_names_its_channels`; and in `image.rs`,
 `an_image_composites_through_the_channels_in_force`).
 
+*A source's implicit group.* `Canvas::set_unmarked` puts in force how a
+source composites each channel outside the set, read by every entry that
+reads the set. `Unmarked::Kept`, what every canvas starts with, is the rule
+above. `Unmarked::Grouped` is 11.7.4.3's implicit non-isolated, non-knockout
+group of the one source, in closed form: the source composited under `B = Cb`
+into a group over the backdrop leaves, once 11.4.7.2 takes the backdrop out,
+the source in each marked channel and `(1 − αb)·Cs + αb·Cb` in each other
+one, at the source's alpha, `αb` the backdrop's union alpha; so under a mode
+other than `Normal` the blend takes that colour as its source and marks every
+channel, the non-separable modes through light from it. Under `Normal` the two
+rules are one composite, byte for byte, and the general blend is taken as
+before (`a_grouped_source_composites_as_the_source_its_group_leaves`, under
+every mode at two source and three backdrop alphas on `CmykA8`, plates and
+`Rgba8`, against the same fill with every channel marked from the group's
+colour; `over_an_opaque_backdrop_a_grouped_channel_takes_the_mode_against_itself`).
+
 *The opaque composite.* Under `Normal`, with the colour's alpha and the
 state's both whole, onto a canvas that holds no initial backdrop and is not
 ink, `fill_mask_inked` takes a path of its own, reading the mask's rows as

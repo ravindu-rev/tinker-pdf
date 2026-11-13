@@ -185,10 +185,11 @@ the flag of the operation they fill or stroke.
   object (11.7.4.4): with `/OP` and `/op` both true and the two alphas equal,
   inside a non-isolated, non-knockout group in which the fill and the stroke
   are painted at alpha 1 with the overprint blend, the group then composited
-  with the original alpha and blend mode; otherwise inside a non-isolated
-  knockout group in which each is painted with its own alpha, the prevailing
-  blend mode and its own overprint flag, the group then composited at alpha 1
-  under `Normal`.
+  with the original alpha and blend mode; otherwise, where either flag is
+  set, inside a non-isolated knockout group in which each is painted with its
+  own alpha, the prevailing blend mode and its own overprint flag, the group
+  then composited at alpha 1 under `Normal`. With neither flag set the pair is
+  the knockout pair `device-dependent-state.md` composites.
 
 ### Overprint under transparency
 
@@ -213,7 +214,10 @@ marked channel takes the blend mode in force, as every channel does today.
   `B(Cb, Cb)`, which is `Cb` for `Darken` and `Lighten` and is not for
   `Multiply` — a cyan backdrop under a magenta overprinting `Multiply` fill
   darkens where the fill covers it. That is what the clause's construction
-  computes, and it is what this design does.
+  computes, and it is what this design does. The group holds the one object,
+  so the leaf computes its result in closed form (`Unmarked::Grouped`): the
+  object in each marked channel and `(1 − αb)·Cs + αb·Cb` in each other one,
+  11.4.7.2's removal worked through, composited under the mode.
 - **An isolated group** starts from a transparent backdrop, so its first
   paints see `αb = 0` and take `Cs` in every channel: overprint inside it acts
   only on what the group itself painted, and the group then composites every

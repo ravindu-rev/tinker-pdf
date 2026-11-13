@@ -43,7 +43,7 @@ use tinker_pdf_content::{
 
 use tinker_pdf_font::Outline;
 use tinker_pdf_raster::{
-    canvas::{Canvas, Channels, Color, InkTables, MaskKind, PixelFormat, PlateInk},
+    canvas::{Canvas, Channels, Color, InkTables, MaskKind, PixelFormat, PlateInk, Unmarked},
     fill::{
         fill_hard_with, fill_outline, fill_outline_hard, fill_with, FillScratch, HardEdge, Mask,
     },
@@ -1237,6 +1237,11 @@ struct GroupFrame {
     /// opened inside it and never closed is closed before it is, so that the
     /// canvas it closes over is its own buffer, holding its parent.
     masks_open: usize,
+    /// Whether the renderer opened the group itself, around a path's fill
+    /// and its stroke (11.7.4.4, [`Renderer::open_compound`]), rather than
+    /// for a group of the content: it was asked of no admission, so its close
+    /// tells none.
+    implicit: bool,
 }
 
 /// A soft-mask group being rendered (11.6.5.2).
@@ -1784,6 +1789,10 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// channels its colour names; false for every other render, every paint
     /// then marking every channel.
     overprint: bool,
+    /// Whether the last fill painted its path's stroke with it, as the one
+    /// object `B` and its kind paint (11.7.4.4, [`Compound`]): the stroke the
+    /// interpreter hands next for the same object is then painted already.
+    stroked_with_fill: bool,
     /// The bytes of plates the render holds live outside this renderer — for
     /// a tiling cell's renderer, the page's and its open groups'
     /// ([`Renderer::with_held_plates`]); 0 for a page's.
@@ -1909,6 +1918,43 @@ enum Plating {
     /// Nothing at all: 8.6.6.4's `/None`, whose paints have no effect on the
     /// page.
     Nothing,
+}
+
+/// Puts `marks` in force on `canvas`, the canvas drawn on now
+/// (`Canvas::set_marked`), each channel outside them composited as 11.7.4.3
+/// composites an overprinting paint under a blend mode other than `Normal` —
+/// inside the paint's own non-isolated, non-knockout group, composited under
+/// the mode (`Unmarked::Grouped`), which under `Normal` is the paint's own
+/// composite — and hands back what was in force, for [`put_back_marks`].
+fn put_marks(canvas: &mut Canvas, marks: Channels) -> (Channels, Unmarked) {
+    (
+        canvas.set_marked(marks),
+        canvas.set_unmarked(Unmarked::Grouped),
+    )
+}
+
+/// Puts back on `canvas` what [`put_marks`] handed back.
+fn put_back_marks(canvas: &mut Canvas, (marks, unmarked): (Channels, Unmarked)) {
+    canvas.set_marked(marks);
+    canvas.set_unmarked(unmarked);
+}
+
+/// How a path's fill and its stroke make one object (11.7.4.4) where the render
+/// simulates overprint ([`Renderer::compound`]): the group the two are painted
+/// into, which then composites onto what was there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Compound {
+    /// Both overprint flags set and the two alphas equal: a non-isolated,
+    /// non-knockout group in which the fill and then the stroke are painted
+    /// at alpha 1 under `Normal` through the channels each marks — the
+    /// stroke overprinting the fill — composited at the alpha under the
+    /// state's blend mode.
+    Overprinting,
+    /// Any other case with a flag set: a non-isolated knockout group in which
+    /// each is painted with its own alpha, the state's blend mode and its own
+    /// flag — so the stroke overprints the backdrop, not the fill, as the
+    /// clause's third note says — composited at alpha 1 under `Normal`.
+    Knockout,
 }
 
 /// **11.7.5.2's rendering parameters, per point, for a finished page.**
@@ -2119,6 +2165,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             forced: None,
             plan: None,
             overprint: false,
+            stroked_with_fill: false,
             held_plates: 0,
             own_plates,
             text_depth: 0,
@@ -2623,6 +2670,28 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         named.unwrap_or_else(|| Channels::of(0..4))
     }
 
+    /// How a path's fill and its stroke, `B`'s and a glyph's in mode 2 or 6,
+    /// are painted together (11.7.4.4) on the canvas drawn on now: where the
+    /// render simulates overprint on plates by a plan and either slot's flag
+    /// is set, as one object ([`Compound`]); `None` everywhere else, and the
+    /// two are painted one after the other, as every render paints them.
+    fn compound(&self, state: &GraphicsState) -> Option<Compound> {
+        if !self.overprint
+            || self.plan.is_none()
+            || !matches!(self.canvas.format, PixelFormat::Plates { .. })
+        {
+            return None;
+        }
+        let (fill, stroke) = (Overprint::fill(state).on, Overprint::stroke(state).on);
+        if fill && stroke && state.fill_alpha.to_bits() == state.stroke_alpha.to_bits() {
+            Some(Compound::Overprinting)
+        } else if fill || stroke {
+            Some(Compound::Knockout)
+        } else {
+            None
+        }
+    }
+
     /// How colours of `space` reach the canvas drawn on now by plate
     /// (RC-04.13, RC-04.14): on plates by a plan, the space's road to its
     /// tints ([`SpaceTints`]); `None` on every other canvas, and for a space
@@ -2817,7 +2886,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             .as_ref()
             .or(self.clip.as_ref())
             .or(self.soft.as_ref());
-        let marked = self.canvas.set_marked(run.marks);
+        let marked = put_marks(&mut self.canvas, run.marks);
         run.fragments.composite_region_inked(
             &mut self.canvas,
             run.covered,
@@ -2827,7 +2896,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             run.ink,
             Some(&stop),
         );
-        self.canvas.set_marked(marked);
+        put_back_marks(&mut self.canvas, marked);
     }
 
     /// What this render could not see of the page's image runs so far
@@ -3430,6 +3499,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             plate_bytes,
             clip_depth: self.clip_stack.len(),
             masks_open: self.mask_frames.len(),
+            implicit: false,
         };
         self.frame = framed;
 
@@ -3450,6 +3520,65 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             .counts
             .group_buffer_pixels
             .saturating_add(pixels_of(buffer));
+    }
+
+    /// Opens 11.7.4.4's group around a path's fill and its stroke
+    /// ([`Compound`]): a non-isolated buffer over `bounds`, the device-pixel
+    /// box the two paint, within the clip and the canvas — no larger, so a
+    /// page of such paths composites each over its own pixels — closed by
+    /// [`Renderer::close_group`] at `alpha` under `blend` and through the soft
+    /// mask in force, which the two inside are painted without, as a group's
+    /// contents are (11.6.6); a knockout one where `knockout` (11.4.5). Its
+    /// plates are charged at the size it has on a render of the whole page,
+    /// and past [`MAX_PLATE_BYTES`] it composites in ink, as a group does.
+    ///
+    /// It is no group of the content, so no admission is asked: the
+    /// admission's answers are the content's, recorded and replayed, and this
+    /// group opens and closes inside the one call that paints the two.
+    fn open_compound(
+        &mut self,
+        bounds: Option<(f64, f64, f64, f64)>,
+        knockout: bool,
+        alpha: f64,
+        blend: tinker_pdf_content::BlendMode,
+    ) {
+        let (x0, y0, width, height) = paint_region(bounds, self.clip.as_ref(), None, self.device());
+        let framed = region_within(bounds, &[self.clip_bounds], self.frame);
+        let format = Self::alpha_format(self.canvas.format);
+        let (format, plate_bytes) = match self.plates_within_bound(format, framed.area()) {
+            Some(bytes) => (format, bytes),
+            None => (PixelFormat::CmykA8, 0),
+        };
+        let buffer = Canvas::new(width, height, format, Color::TRANSPARENT).at_origin(x0, y0);
+        self.count_group_buffer(&buffer);
+        self.counts.group_bound_pixels = self
+            .counts
+            .group_bound_pixels
+            .saturating_add(pixels_of(&buffer));
+        let parent = std::mem::replace(&mut self.canvas, buffer);
+        self.canvas.adopt_backdrop(parent);
+        let soft = self.soft.take();
+        let frame = GroupFrame {
+            at: (x0, y0),
+            alpha,
+            blend: blend_mode(blend),
+            clip: self.clip.clone(),
+            opaque: alpha >= 1.0
+                && blend == tinker_pdf_content::BlendMode::Normal
+                && soft.is_none(),
+            soft,
+            clip_bounds: self.clip_bounds,
+            soft_bounds: self.soft_bounds.take(),
+            frame: self.frame,
+            knockout,
+            removal: None,
+            plate_bytes,
+            clip_depth: self.clip_stack.len(),
+            masks_open: self.mask_frames.len(),
+            implicit: true,
+        };
+        self.frame = framed;
+        self.groups.push(frame);
     }
 
     /// Whether the innermost open group is a knockout one (11.4.5).
@@ -3487,7 +3616,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let Some(frame) = self.groups.pop() else {
             return;
         };
-        self.admission.end_group();
+        if !frame.implicit {
+            self.admission.end_group();
+        }
         self.clip_stack.truncate(frame.clip_depth);
         self.clip = frame.clip;
         self.clip_bounds = frame.clip_bounds;
@@ -3935,7 +4066,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             self.knockout_restore(&area);
         }
         let held = self.hold_removal(&set.removal);
-        let marked = self.canvas.set_marked(marks);
+        let marked = put_marks(&mut self.canvas, marks);
         // The shape's own rectangle. A shading is evaluated per pixel, so a
         // gradient-filled comma used to run the inverse transform and the
         // function over every pixel of the page to paint two hundred of them.
@@ -3951,7 +4082,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
         for row in y_start..y_end {
             if self.stopping() {
-                self.canvas.set_marked(marked);
+                put_back_marks(&mut self.canvas, marked);
                 self.release_removal(held);
                 self.count_evaluations(&scratch);
                 return true;
@@ -3991,7 +4122,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 }
             }
         }
-        self.canvas.set_marked(marked);
+        put_back_marks(&mut self.canvas, marked);
         self.release_removal(held);
         self.count_evaluations(&scratch);
         true
@@ -4208,10 +4339,10 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 .coverage()
                 .overlap_at((ox, oy), self.canvas.width, self.canvas.height);
         let held = self.hold_removal(&set.removal);
-        let marked = self.canvas.set_marked(marks);
+        let marked = put_marks(&mut self.canvas, marks);
         for row in y_start..y_end {
             if self.stopping() {
-                self.canvas.set_marked(marked);
+                put_back_marks(&mut self.canvas, marked);
                 self.release_removal(held);
                 return true;
             }
@@ -4243,7 +4374,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 }
             }
         }
-        self.canvas.set_marked(marked);
+        put_back_marks(&mut self.canvas, marked);
         self.release_removal(held);
         true
     }
@@ -4537,7 +4668,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         } else {
             Channels::ALL
         };
-        let marked = self.canvas.set_marked(marks);
+        let marked = put_marks(&mut self.canvas, marks);
         // The fill's shape for the plane: the shape where the cells painted
         // (11.6.4.2, 11.6.7), gathered as they are placed.
         let mut cells = Vec::new();
@@ -4551,7 +4682,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             // work it exists for, and `composite` is asked again every sixteen
             // rows inside each cell.
             if self.stopping() {
-                self.canvas.set_marked(marked);
+                put_back_marks(&mut self.canvas, marked);
                 self.release_removal(held);
                 return true;
             }
@@ -4595,7 +4726,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 }
             }
         }
-        self.canvas.set_marked(marked);
+        put_back_marks(&mut self.canvas, marked);
         self.release_removal(held);
         if self.records(set.entry) {
             let shape_area = unmasked.as_ref().unwrap_or(&coverage);
@@ -4820,7 +4951,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         set: &DeviceSet,
     ) {
         let held = self.hold_removal(&set.removal);
-        let marked = self.canvas.set_marked(self.marks(paint, plating));
+        let marks = self.marks(paint, plating);
+        let marked = put_marks(&mut self.canvas, marks);
         match plating {
             Plating::Ink(ink) => self.canvas.fill_mask_plates(mask, ink, alpha, mode),
             Plating::Light => {
@@ -4829,7 +4961,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             }
             Plating::Nothing => {}
         }
-        self.canvas.set_marked(marked);
+        put_back_marks(&mut self.canvas, marked);
         self.release_removal(held);
     }
 
@@ -5258,7 +5390,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         });
         let mut plate_pyramid = PlatePyramid::new();
         if direct {
-            let marked = self.canvas.set_marked(marks);
+            let marked = put_marks(&mut self.canvas, marks);
             if let Some(source) = &source {
                 draw_plate_image(
                     &mut self.canvas,
@@ -5267,7 +5399,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     &mut plate_pyramid,
                     &mut self.scratch,
                 );
-                self.canvas.set_marked(marked);
+                put_back_marks(&mut self.canvas, marked);
                 return;
             }
             let held = removing.then(|| self.canvas.set_ink_tables(set.removal.clone()));
@@ -5275,7 +5407,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             if let Some(previous) = held {
                 self.canvas.set_ink_tables(previous);
             }
-            self.canvas.set_marked(marked);
+            put_back_marks(&mut self.canvas, marked);
             return;
         }
 
@@ -5892,6 +6024,142 @@ fn stroke_style(state: &GraphicsState) -> StrokeStyle {
 }
 
 impl<G: GlyphSource> Renderer<'_, G> {
+    /// Fills `path` under `rule` in the fill slot's paint of `state`: its
+    /// pattern where it names one, 8.7.3, so the fill colour is not used at
+    /// all — painting it would put `/Pattern`'s nominal black over every
+    /// gradient in the document — and otherwise its colour.
+    fn fill_in_slot(&mut self, path: &Path, rule: FillRule, state: &GraphicsState) {
+        if let Some(name) = state.fill_pattern.clone() {
+            self.fill_with_pattern(
+                Shape::Fill(path, rule),
+                &name,
+                state,
+                state.fill_alpha,
+                Paint::fill(state),
+                state.fill_family,
+            );
+            return;
+        }
+        let set = self.device_set(state, state.fill_alpha, state.fill_family, true);
+        self.paint_inked(
+            Shape::Fill(path, rule),
+            Paint::fill(state),
+            state.fill_alpha,
+            blend_mode(state.blend),
+            &set,
+        );
+    }
+
+    /// Strokes `path` with the pen `style`, no thinner than `floor`, in the
+    /// stroke slot's paint of `state`: its pattern where it names one, and
+    /// otherwise its colour.
+    fn stroke_in_slot(
+        &mut self,
+        path: &Path,
+        state: &GraphicsState,
+        style: StrokeStyle,
+        floor: f64,
+    ) {
+        // The dash expansion is the part of a stroke that can run away:
+        // 8.4.3.6 puts no floor on a dash length, so a page-long rule under a
+        // fine array expands into a hundred thousand pieces per segment before
+        // a single row of it is filled.
+        let stop = self.stop_predicate();
+        let outline = self.pen(path, state, style, floor, &stop);
+
+        // 8.7.3: a stroke painted with a pattern takes its paint from the
+        // pattern, exactly as a fill does — and a stroke *is* a fill, of the
+        // outline just computed. So this needs no pattern machinery of its
+        // own; what it needed was to stop asking for `stroke_color`, which for
+        // `/Pattern` is the nominal black the colour crate reports because a
+        // pattern space has no colour of its own. Every gradient-stroked rule
+        // in every document came out solid black, silently.
+        //
+        // The rule is non-zero and is stated rather than defaulted: a stroked
+        // outline overlaps itself at joins, at caps and wherever a path
+        // crosses, and under even-odd every one of those overlaps would be
+        // punched back out into a hole.
+        if let Some(name) = state.stroke_pattern.clone() {
+            // The *stroke* slot's colour, and 8.7.3.3 is why that has to be
+            // said out loud: an uncoloured pattern paints in the colour its
+            // `SCN` operands gave, and this operator's operands went to the
+            // stroking slot. Handing the fill slot's colour instead is a
+            // defect nothing else in the engine can see -- every "the pattern
+            // paints" assertion is satisfied by a cell that paints in *some*
+            // colour.
+            self.fill_with_pattern(
+                outline,
+                &name,
+                state,
+                state.stroke_alpha,
+                Paint::stroke(state),
+                state.stroke_family,
+            );
+            return;
+        }
+
+        let set = self.device_set(state, state.stroke_alpha, state.stroke_family, true);
+        self.paint_inked(
+            outline,
+            Paint::stroke(state),
+            state.stroke_alpha,
+            blend_mode(state.blend),
+            &set,
+        );
+    }
+
+    /// Fills `path` under `rule` and then strokes it with `style`, no thinner
+    /// than `floor`: `B`'s fill and stroke, and a glyph's in mode 2 or 6.
+    /// Where the render simulates overprint and either slot overprints, the
+    /// two are one object (11.7.4.4, [`Compound`]): painted into a
+    /// non-isolated group over the box both reach — at alpha 1 under
+    /// `Normal`, composited at the alpha under the blend mode, where both
+    /// flags are set and the alphas equal; each with its own alpha and the
+    /// blend mode in a knockout group composited at 1 under `Normal`
+    /// otherwise. Everywhere else the stroke is painted over the fill, as it
+    /// always has been.
+    fn fill_and_stroke(
+        &mut self,
+        path: &Path,
+        rule: FillRule,
+        state: &GraphicsState,
+        style: StrokeStyle,
+        floor: f64,
+    ) {
+        let Some(compound) = self.compound(state) else {
+            self.fill_in_slot(path, rule, state);
+            self.stroke_in_slot(path, state, style, floor);
+            return;
+        };
+        // The box both paint: the path's, and its stroke's outline's, which
+        // the pen writes into the scratch the fill then fills from — so it is
+        // penned again to be stroked.
+        let stop = self.stop_predicate();
+        let _ = self.pen(path, state, style.clone(), floor, &stop);
+        let bounds = match (path.bounds(), self.scratch.outline_bounds()) {
+            (Some(a), Some(b)) => Some((a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))),
+            (a, b) => a.or(b),
+        };
+        let inner = match compound {
+            Compound::Overprinting => {
+                self.open_compound(bounds, false, state.fill_alpha, state.blend);
+                std::borrow::Cow::Owned(GraphicsState {
+                    fill_alpha: 1.0,
+                    stroke_alpha: 1.0,
+                    blend: tinker_pdf_content::BlendMode::Normal,
+                    ..state.clone()
+                })
+            }
+            Compound::Knockout => {
+                self.open_compound(bounds, true, 1.0, tinker_pdf_content::BlendMode::Normal);
+                std::borrow::Cow::Borrowed(state)
+            }
+        };
+        self.fill_in_slot(path, rule, &inner);
+        self.stroke_in_slot(path, &inner, style, floor);
+        self.close_group();
+    }
+
     /// A glyph shown ([`Device::show_glyph`]), with the count of glyphs being
     /// shown already raised.
     fn show_glyph_shown(&mut self, glyph: &Glyph, state: &GraphicsState) {
@@ -6094,55 +6362,21 @@ impl<G: GlyphSource> Renderer<'_, G> {
         // are routed, because a mode 2 glyph fills *and* strokes and a
         // half-routed one would paint a black body under a patterned edge —
         // which reads as a rendering bug rather than as a missing capability.
-        if mode.fills() {
-            if let Some(name) = state.fill_pattern.clone() {
-                self.fill_with_pattern(
-                    Shape::Fill(&path, FillRule::NonZero),
-                    &name,
-                    state,
-                    state.fill_alpha,
-                    Paint::fill(state),
-                    state.fill_family,
-                );
-            } else {
-                let set = self.device_set(state, state.fill_alpha, state.fill_family, true);
-                self.paint_inked(
-                    Shape::Fill(&path, FillRule::NonZero),
-                    Paint::fill(state),
-                    state.fill_alpha,
-                    blend_mode(state.blend),
-                    &set,
-                );
+        // 9.3.6 strokes a glyph as a path, so its pen is 8.4.3.2's: the line
+        // width in user space — the CTM's, not the text matrix's. Modes 2 and
+        // 6 fill and stroke it as one object (11.7.4.4).
+        let style = || StrokeStyle {
+            width: state.line_width,
+            ..StrokeStyle::default()
+        };
+        let floor = self.thinnest(true);
+        match (mode.fills(), mode.strokes()) {
+            (true, true) => {
+                self.fill_and_stroke(&path, FillRule::NonZero, state, style(), floor);
             }
-        }
-        if mode.strokes() {
-            // 9.3.6 strokes a glyph as a path, so its pen is 8.4.3.2's: the
-            // line width in user space — the CTM's, not the text matrix's.
-            let style = StrokeStyle {
-                width: state.line_width,
-                ..StrokeStyle::default()
-            };
-            let stop = self.stop_predicate();
-            let outlined = self.pen(&path, state, style, self.thinnest(true), &stop);
-            if let Some(name) = state.stroke_pattern.clone() {
-                self.fill_with_pattern(
-                    outlined,
-                    &name,
-                    state,
-                    state.stroke_alpha,
-                    Paint::stroke(state),
-                    state.stroke_family,
-                );
-            } else {
-                let set = self.device_set(state, state.stroke_alpha, state.stroke_family, true);
-                self.paint_inked(
-                    outlined,
-                    Paint::stroke(state),
-                    state.stroke_alpha,
-                    blend_mode(state.blend),
-                    &set,
-                );
-            }
+            (true, false) => self.fill_in_slot(&path, FillRule::NonZero, state),
+            (false, true) => self.stroke_in_slot(&path, state, style(), floor),
+            (false, false) => {}
         }
         if mode.clips() {
             // 9.3.6: the glyphs of a text object accumulate into one clip that
@@ -6201,6 +6435,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
         self.flush_run();
+        // The stroke a fill paints with it is the next one's, never a later
+        // object's.
+        self.stroked_with_fill = false;
         if self.skips_paint() {
             return;
         }
@@ -6242,29 +6479,17 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             return;
         }
 
-        // 8.7.3: a pattern supplies the paint, so the fill colour is not used
-        // at all. Painting it would put `/Pattern`'s nominal black over every
-        // gradient in the document.
-        if let Some(name) = state.fill_pattern.clone() {
-            self.fill_with_pattern(
-                Shape::Fill(&built, rule),
-                &name,
-                state,
-                state.fill_alpha,
-                Paint::fill(state),
-                state.fill_family,
-            );
+        // 11.7.4.4: `B` and its kind paint the fill and the stroke as one
+        // object where the render simulates overprint and either overprints,
+        // so the stroke the interpreter hands next is painted here with it.
+        if state.fill_and_stroke && self.compound(state).is_some() {
+            tally(&mut self.counts.drawn_strokes);
+            let floor = self.thinnest(false);
+            self.fill_and_stroke(&built, rule, state, stroke_style(state), floor);
+            self.stroked_with_fill = true;
             return;
         }
-
-        let set = self.device_set(state, state.fill_alpha, state.fill_family, true);
-        self.paint_inked(
-            Shape::Fill(&built, rule),
-            Paint::fill(state),
-            state.fill_alpha,
-            blend_mode(state.blend),
-            &set,
-        );
+        self.fill_in_slot(&built, rule, state);
     }
 
     fn clip_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
@@ -6379,6 +6604,11 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // Ends the image run: a run only holds while nothing else draws,
         // which is what keeps its clip, soft mask and alpha constant.
         self.flush_run();
+        // 11.7.4.4: the stroke of the one object `B` paints, which its fill
+        // painted with it.
+        if mem::take(&mut self.stroked_with_fill) && state.fill_and_stroke {
+            return;
+        }
         if self.skips_paint() {
             return;
         }
@@ -6396,53 +6626,8 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // 8.4.3.2: the line width is in user space, and so are the dashes —
         // the pen is stated in user units and `pen` carries it to the device.
         // A hairline still has to cover a pixel to be visible.
-        let style = stroke_style(state);
-        // The dash expansion below is the part of a stroke that can run away:
-        // 8.4.3.6 puts no floor on a dash length, so a page-long rule under a
-        // fine array expands into a hundred thousand pieces per segment before
-        // a single row of it is filled.
-        let stop = self.stop_predicate();
-        let outline = self.pen(&built, state, style, self.thinnest(false), &stop);
-
-        // 8.7.3: a stroke painted with a pattern takes its paint from the
-        // pattern, exactly as a fill does — and a stroke *is* a fill, of the
-        // outline just computed. So this needs no pattern machinery of its
-        // own; what it needed was to stop asking for `stroke_color`, which for
-        // `/Pattern` is the nominal black the colour crate reports because a
-        // pattern space has no colour of its own. Every gradient-stroked rule
-        // in every document came out solid black, silently.
-        //
-        // The rule is non-zero and is stated rather than defaulted: a stroked
-        // outline overlaps itself at joins, at caps and wherever a path
-        // crosses, and under even-odd every one of those overlaps would be
-        // punched back out into a hole.
-        if let Some(name) = state.stroke_pattern.clone() {
-            // The *stroke* slot's colour, and 8.7.3.3 is why that has to be
-            // said out loud: an uncoloured pattern paints in the colour its
-            // `SCN` operands gave, and this operator's operands went to the
-            // stroking slot. Handing the fill slot's colour instead is a
-            // defect nothing else in the engine can see -- every "the pattern
-            // paints" assertion is satisfied by a cell that paints in *some*
-            // colour.
-            self.fill_with_pattern(
-                outline,
-                &name,
-                state,
-                state.stroke_alpha,
-                Paint::stroke(state),
-                state.stroke_family,
-            );
-            return;
-        }
-
-        let set = self.device_set(state, state.stroke_alpha, state.stroke_family, true);
-        self.paint_inked(
-            outline,
-            Paint::stroke(state),
-            state.stroke_alpha,
-            blend_mode(state.blend),
-            &set,
-        );
+        let floor = self.thinnest(false);
+        self.stroke_in_slot(&built, state, stroke_style(state), floor);
     }
 
     fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
@@ -6649,10 +6834,10 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             scratch.tabulate(space, function, 0.0, 1.0, self.page_limit().area());
         }
         let held = self.hold_removal(&set.removal);
-        let marked = self.canvas.set_marked(marks);
+        let marked = put_marks(&mut self.canvas, marks);
         for row in y_start..y_end {
             if self.stopping() {
-                self.canvas.set_marked(marked);
+                put_back_marks(&mut self.canvas, marked);
                 self.release_removal(held);
                 self.count_evaluations(&scratch);
                 return;
@@ -6692,7 +6877,7 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                 }
             }
         }
-        self.canvas.set_marked(marked);
+        put_back_marks(&mut self.canvas, marked);
         self.release_removal(held);
         self.count_evaluations(&scratch);
     }

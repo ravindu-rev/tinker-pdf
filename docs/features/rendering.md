@@ -1177,6 +1177,55 @@ separations and every channel it leaves at the backdrop's; and
 `a_one_sample_image_paints_as_a_flat_fill_of_its_colour`, which also holds
 `/OPM 1` to the fill and not the image).
 
+**Overprint under transparency** (11.7.4.2 to 11.7.4.4; the design's
+"Overprint under transparency"). A paint's constant alpha and soft mask enter
+its composite as its coverage does, and each channel it leaves composites with
+`B = Cb` inside 11.3.6's formula: over an opaque backdrop it keeps the
+backdrop, over one that is not opaque its erasing is reduced in proportion.
+Under a blend mode other than `Normal` an overprinting paint is 11.7.4.3's
+implicit non-isolated, non-knockout group of itself, composited under the
+mode: every set the renderer puts in force carries `Unmarked::Grouped`
+(`Canvas::set_unmarked`), so the leaf composites the group's result in closed
+form — the paint in each channel it marks and `(1 − αb)·Cs + αb·Cb` in each
+other one, `αb` the backdrop's alpha — under the mode with every channel
+marked. Over an opaque backdrop a channel the paint leaves comes out as
+`B(Cb, Cb)`: itself under `Darken` and `Lighten`, darker under `Multiply`, as
+the clause's construction computes. Under `Normal` the group is the paint's
+own composite and no byte moves. Inside a group a paint overprints the
+group's buffer: a non-isolated group's starts from its backdrop's channels,
+so its contents overprint them as they would outside it; an isolated group's
+starts from nothing, so a paint over nothing the group painted takes every
+channel's source, erasing the backdrop when the group composites; and a
+knockout group puts every channel back under each paint before it composites
+(`Canvas::knock_out`), so a paint overprints the group's initial backdrop and
+not the paint before it. A group composites onto its parent through every
+channel. `B`, `B*`, `b`, `b*` and a glyph in text mode 2 or 6 fill and stroke
+as one object (11.7.4.4) where either overprint flag is set: the interpreter
+hands a device compositing colorants `B`'s fill and stroke on a state saying
+so (`GraphicsState::fill_and_stroke`, which a display list and the command
+stream's `State` record carry), and the renderer paints the two into a group
+of its own over the box both reach, which no admission is asked for
+(`Renderer::open_compound`). With both flags set and the two alphas equal it
+is a non-isolated, non-knockout group in which the fill and then the stroke
+are painted at alpha 1 under `Normal`, the stroke overprinting the fill,
+composited at the alpha under the blend mode and through the soft mask;
+otherwise a non-isolated knockout group in which each is painted with its own
+alpha under the blend mode, composited at 1 under `Normal`, so the stroke
+overprints the backdrop and not the fill. With neither flag set the stroke is
+painted over the fill, as every render paints it (`overprint.rs`:
+`overprint_under_transparency_composites_as_designed`, a Gold `/Separation`
+and a DeviceCMYK colour under `/OPM 1` at alpha 0.5, under a soft mask and
+under `Multiply`, Gold overprinting inside isolated and non-isolated groups
+and Teal over Gold inside knockout ones, and `B` and a mode 2 glyph with both
+flags set at equal and at unequal alphas, each pixel the composite the test
+works out from the clauses in 255ths;
+`the_twins_the_clause_makes_equal_under_transparency_render_alike`, a
+non-isolated group's contents against the same contents drawn outside it and
+an overprinting `Darken` paint against the same under `Normal`, with each
+case's page held to its tiles and its display list's replay; `canvas.rs`:
+`a_grouped_source_composites_as_the_source_its_group_leaves` and
+`over_an_opaque_backdrop_a_grouped_channel_takes_the_mode_against_itself`).
+
 **`/Lab` composites in Lab too.** Its components are not in the unit
 interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`
 encodes them into bytes (`L/100`, `(a + 128)/255`, `(b + 128)/255`) and

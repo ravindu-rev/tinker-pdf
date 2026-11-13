@@ -1024,6 +1024,7 @@ impl Exact {
             stroke_source,
             fill_colorants,
             stroke_colorants,
+            fill_and_stroke,
         } = state;
         self.matrix(ctm);
         let crate::state::TextState {
@@ -1163,6 +1164,7 @@ impl Exact {
                 }
             }
         }
+        self.flag(*fill_and_stroke);
         Some(())
     }
 }
@@ -2432,10 +2434,16 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
             b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*" => {
                 let even_odd = op.ends_with(b"*");
                 let path = std::mem::take(&mut self.path);
+                // 11.7.4.4: the fill and the stroke of `B` and its kind are
+                // one object, which a device compositing colorants is told on
+                // the state it is handed both with.
+                let both = matches!(op, b"B" | b"B*" | b"b" | b"b*");
+                self.gs.fill_and_stroke = both && self.colorants;
                 self.device.fill_path(&path, &self.gs, even_odd);
-                if matches!(op, b"B" | b"B*" | b"b" | b"b*") {
+                if both {
                     self.device.stroke_path(&path, &self.gs);
                 }
+                self.gs.fill_and_stroke = false;
                 self.apply_pending_clip(&path);
             }
             b"n" => {
@@ -6017,6 +6025,39 @@ mod tests {
             vec![(0, true), (1, false), (0, true), (0, true)],
             "and their stroking twin"
         );
+    }
+
+    /// **`B` and its kind are one object to a device compositing colorants**
+    /// (11.7.4.4, RC-03.7): `B`, `B*`, `b` and `b*` hand the fill and then
+    /// the stroke a state saying the two paint one object, on a device
+    /// compositing colorants; `f`, `S` and a fill after them hand states that
+    /// do not; and a device compositing none is handed no state saying so.
+    #[test]
+    fn a_fill_and_its_stroke_are_one_object_to_a_device_compositing_colorants() {
+        let source = ColorantSpaces::new(DeviceDefaults::NONE);
+        let content = b"0 0 1 1 re B 0 0 1 1 re B* 0 0 1 1 re b 0 0 1 1 re b*               0 0 1 1 re f 0 0 1 1 re S";
+        for colorants in [true, false] {
+            let mut d = RecordingDevice::new().recording_colorants(colorants);
+            interpret(content, Matrix::IDENTITY, &mut d, &source);
+            let paints: Vec<(EventKind, bool)> = d
+                .events()
+                .iter()
+                .filter(|event| matches!(event.kind(), EventKind::FillPath | EventKind::StrokePath))
+                .map(|event| {
+                    (
+                        event.kind(),
+                        event.state().is_some_and(|state| state.fill_and_stroke),
+                    )
+                })
+                .collect();
+            let (fill, stroke) = (EventKind::FillPath, EventKind::StrokePath);
+            let mut want = Vec::new();
+            for _ in 0..4 {
+                want.extend([(fill, colorants), (stroke, colorants)]);
+            }
+            want.extend([(fill, false), (stroke, false)]);
+            assert_eq!(paints, want, "compositing colorants: {colorants}");
+        }
     }
 
     /// **A colour carries the colorants its space answers** (RC-04.6), beside

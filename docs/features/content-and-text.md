@@ -93,7 +93,11 @@ only where the device composites colorants (`Device::composites_colorants`,
 read once when interpretation starts; a `RecordingDevice` answers it as
 `recording_colorants` says). Every other device's states carry none and the
 resources are asked nothing, so a light render pays nothing for them
-(`a_colour_carries_the_colorants_its_space_answers`).
+(`a_colour_carries_the_colorants_its_space_answers`). On such a device `B`,
+`B*`, `b` and `b*` hand the fill and then the stroke a state whose
+`fill_and_stroke` is set, the two being one object to 11.7.4.4, and every
+other state, and every state on any other device, has it clear
+(`a_fill_and_its_stroke_are_one_object_to_a_device_compositing_colorants`).
 
 **A colour carries sixteen bits beside its bytes**
 (`docs/design/sixteen-bit.md`, ruling 23). The state keeps `fill_wide` and

@@ -57,7 +57,10 @@ pub const MAJOR: u16 = 1;
 
 /// The minor version this build writes, and the newest whose every kind it
 /// knows. Minor 1 appends to [`CommandKind::Colorants`] the tints that are no
-/// ink and not zero (`ColorantTint::zero`); a stream of minor 0 holds none.
+/// ink and not zero (`ColorantTint::zero`), a stream of minor 0 holding none,
+/// and to [`CommandKind::State`] whether it paints a path's fill and stroke
+/// as one object (`GraphicsState::fill_and_stroke`), written only where it
+/// does, so a state record that ends before it reads as not.
 pub const MINOR: u16 = 1;
 
 /// The most glyphs one [`CommandKind::GlyphRun`] holds; a longer run of one
@@ -241,7 +244,7 @@ kinds! {
     3 Stored "Stored" ["rendering intent", "black-point compensation", "stroke overprint", "fill overprint", "overprint mode", "alpha is shape", "text knockout", "flatness", "smoothness", "stroke adjustment", "black generation", "undercolour removal", "transfer", "halftone", "halftone origin"]
     4 Colorants "Colorants" ["kind", "names", "tints", "own inks", "inks", "alternate", "process", "no ink and not zero"]
     5 Source "Source" ["family", "components"]
-    6 State "State" ["ctm", "text numbers", "render mode", "font", "fill alpha", "stroke alpha", "fill colour", "stroke colour", "sixteen bits", "fill ink", "stroke ink", "fill family", "stroke family", "fill colorants", "stroke colorants", "line width", "line cap", "line join", "miter limit", "dashes", "dash phase", "fill space", "stroke space", "fill pattern", "blend", "stroke pattern", "stored", "fill source", "stroke source"]
+    6 State "State" ["ctm", "text numbers", "render mode", "font", "fill alpha", "stroke alpha", "fill colour", "stroke colour", "sixteen bits", "fill ink", "stroke ink", "fill family", "stroke family", "fill colorants", "stroke colorants", "line width", "line cap", "line join", "miter limit", "dashes", "dash phase", "fill space", "stroke space", "fill pattern", "blend", "stroke pattern", "stored", "fill source", "stroke source", "fill and stroke"]
     16 BeginText "BeginText" []
     17 GlyphRun "GlyphRun" ["state", "font id", "font name", "size", "vertical", "codes", "text lengths", "text", "transforms", "advances", "baseline glyphs", "baselines"]
     18 EndText "EndText" []
@@ -978,6 +981,17 @@ impl<'a> Fields<'a> {
             return Ok(&[]);
         }
         self.naturals(at)
+    }
+
+    /// A flag a later minor appended to its kind: the flag where the record
+    /// carries it, and false where the record ends before it — written by an
+    /// earlier minor, or by a writer that writes the flag only where it is
+    /// set.
+    pub fn appended_flag(&self, at: usize) -> Result<bool, CommandError> {
+        if at >= self.fields.len() {
+            return Ok(false);
+        }
+        self.flag(at)
     }
 
     /// A naturals field, or nothing.
@@ -1857,7 +1871,7 @@ impl EventWriter {
         let fill_source = state.fill_source.as_ref().map(|s| self.source(s));
         let stroke_source = state.stroke_source.as_ref().map(|s| self.source(s));
         let t = &state.text;
-        let record = Record::new(CommandKind::State)
+        let mut record = Record::new(CommandKind::State)
             .with(matrix_field(&state.ctm))
             .with(reals(&[
                 t.size,
@@ -1909,6 +1923,11 @@ impl EventWriter {
             .with(reference(stored))
             .with(reference(fill_source))
             .with(reference(stroke_source));
+        // Minor 1, written only where it is set: every other state's record
+        // is the bytes it was.
+        if state.fill_and_stroke {
+            record = record.with(flag(true));
+        }
         self.states.index(record, &mut self.head)
     }
 
@@ -2807,6 +2826,7 @@ impl EventReader {
             stored,
             fill_source: source(27)?,
             stroke_source: source(28)?,
+            fill_and_stroke: fields.appended_flag(29)?,
         };
         let weight = state_weight(&state);
         meter.spend(weight)?;
@@ -3241,6 +3261,7 @@ mod tests {
             && stored_alike(a.stored.as_deref(), b.stored.as_deref())
             && sources_alike(a.fill_source.as_deref(), b.fill_source.as_deref())
             && sources_alike(a.stroke_source.as_deref(), b.stroke_source.as_deref())
+            && a.fill_and_stroke == b.fill_and_stroke
     }
 
     fn sources_alike(a: Option<&ColorSource>, b: Option<&ColorSource>) -> bool {
@@ -3891,6 +3912,79 @@ mod tests {
         }
     }
 
+    /// **A state painting a fill and stroke as one reads back** (minor 1,
+    /// RC-03.7, 11.7.4.4): a fill and a stroke whose state says so read back
+    /// saying so, beside a fill whose state does not; only the state that
+    /// says so carries the field, so every other state's record ends where it
+    /// did before the field existed, and a record carrying it as anything but
+    /// a flag is refused.
+    #[test]
+    fn a_state_painting_a_fill_and_stroke_as_one_reads_back() {
+        let plain = GraphicsState::new(Matrix::IDENTITY);
+        let both = GraphicsState {
+            fill_and_stroke: true,
+            ..plain.clone()
+        };
+        let events = vec![
+            Event::FillPath {
+                path: every_path(),
+                even_odd: false,
+                state: Some(Box::new(both.clone())),
+            },
+            Event::StrokePath {
+                path: every_path(),
+                state: Some(Box::new(both.clone())),
+            },
+            Event::FillPath {
+                path: every_path(),
+                even_odd: true,
+                state: Some(Box::new(plain.clone())),
+            },
+        ];
+        let read = decode_events(&encode_events(&events), &Budgets::DEFAULT).expect("it reads");
+        let flags: Vec<bool> = read
+            .iter()
+            .filter_map(|event| match event {
+                Event::FillPath {
+                    state: Some(state), ..
+                }
+                | Event::StrokePath {
+                    state: Some(state), ..
+                } => Some(state.fill_and_stroke),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(flags, vec![true, true, false]);
+
+        let mut writer = EventWriter::new();
+        for event in &events {
+            writer.event(event);
+        }
+        let (head, body) = writer.finish();
+        let mut records: Vec<Record> = head;
+        records.extend(body);
+        let state = CommandKind::State.number();
+        let lengths: Vec<usize> = records
+            .iter()
+            .filter(|record| record.kind == state)
+            .map(|record| record.fields.len())
+            .collect();
+        assert_eq!(lengths, vec![30, 29], "the field only where it is set");
+
+        let mut bad = records.clone();
+        for record in bad.iter_mut().filter(|r| r.kind == state) {
+            if let Some(field) = record.fields.get_mut(29) {
+                *field = Field::Unsigned(2);
+            }
+        }
+        match decode_events(&write_stream(&bad), &Budgets::DEFAULT) {
+            Err(CommandError::Malformed { what, .. }) => {
+                assert_eq!(what, "field 29 is 2, not a flag");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     /// **A newer minor's unknown record is skipped**, wherever it stands, and
     /// a field a newer minor appends to a known kind is ignored; the same
     /// record in a stream of this minor is refused.
@@ -4138,7 +4232,7 @@ mod tests {
         assert_eq!(CommandKind::from_number(38), None);
         assert_eq!(CommandKind::from_number(80), None);
         assert_eq!(CommandKind::GlyphRun.fields().len(), 12);
-        assert_eq!(CommandKind::State.fields().len(), 29);
+        assert_eq!(CommandKind::State.fields().len(), 30);
     }
 
     /// The xorshift a seeded campaign draws from: the same choices on every

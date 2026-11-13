@@ -853,6 +853,20 @@ pub struct RenderOptions {
     /// non-zero mode off images and shadings. A paint whose flag is clear
     /// erases every plate it names no ink for, and `/None` paints nothing.
     ///
+    /// **Under transparency** (11.7.4.2 to 11.7.4.4) a paint's alpha and soft
+    /// mask weigh what it marks, and a plate it leaves keeps an opaque
+    /// backdrop; under a blend mode other than `Normal` it is its own
+    /// non-isolated, non-knockout group composited under the mode, so a plate
+    /// it leaves takes the mode against itself, darker under `Multiply`.
+    /// Inside a group it overprints the group's buffer — a non-isolated
+    /// group's backdrop, nothing in an isolated one, the initial backdrop in
+    /// a knockout one — and a group composites every plate onto its parent.
+    /// `B` and its kind, and a glyph in text mode 2 or 6, fill and stroke as
+    /// one object where either flag is set: with both set and the two alphas
+    /// equal the stroke overprints the fill and the two composite at the
+    /// alpha under the mode; otherwise the stroke knocks the fill out under
+    /// it and overprints the backdrop.
+    ///
     /// Where a page's spots are more than [`MAX_SPOT_PLATES`], or than keep
     /// its plates inside [`MAX_PLATE_BYTES`] at its size, those past the cap,
     /// in inventory order, are drawn through their alternates on the process

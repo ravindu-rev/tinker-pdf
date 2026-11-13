@@ -14,8 +14,8 @@ mod render_support;
 
 use render_support::{raw_pdf, raw_stream, spot_page, SpotPage, SpotSpaces};
 use tinker_pdf::{
-    Document, ForcedColours, Page, Parallelism, PixelFormat, RenderOptions, RenderWarning,
-    SeparationOptions, Separations,
+    Document, ForcedColours, Page, Parallelism, PixelFormat, PixelRegion, RenderOptions,
+    RenderWarning, SeparationOptions, Separations,
 };
 
 /// The test's own `a × b / 255`, rounded half up: never a tie, 255 being odd.
@@ -652,10 +652,11 @@ fn case_page(content: &str, default_cmyk: bool) -> Document {
 }
 
 /// What a case page holds beyond [`case_page`]'s: entries of its
-/// `/XObject`, `/Shading` and `/Pattern` dictionaries and the objects they
-/// name, numbered from 13.
+/// `/ExtGState`, `/XObject`, `/Shading` and `/Pattern` dictionaries and the
+/// objects they name, numbered from 13.
 #[derive(Default)]
 struct Extra {
+    ext_g_states: String,
     xobjects: String,
     shadings: String,
     patterns: String,
@@ -702,10 +703,10 @@ fn case_page_with(content: &str, default_cmyk: bool, extra: &Extra) -> Document 
         b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
         format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {CASE_PAGE} {CASE_PAGE}] /Resources << \
-             /ColorSpace << {spaces} >> /ExtGState << {states} >> /Font << /F0 5 0 R >> \
+             /ColorSpace << {spaces} >> /ExtGState << {states} {} >> /Font << /F0 5 0 R >> \
              /XObject << /M0 8 0 R {} >> /Pattern << /P0 9 0 R {} >> /Shading << {} >> >> \
              /Contents 4 0 R >>",
-            extra.xobjects, extra.patterns, extra.shadings
+            extra.ext_g_states, extra.xobjects, extra.patterns, extra.shadings
         )
         .into_bytes(),
         raw_stream("", content.as_bytes()),
@@ -754,7 +755,12 @@ fn backdrop_operators() -> String {
 /// in black on a grey page with nothing else — `255 − grey`, since a black
 /// paint over white composites to `255 − c` exactly.
 fn coverage_of(content: &str) -> Vec<u8> {
-    let document = case_page(content, false);
+    coverage_of_with(content, &Extra::default())
+}
+
+/// [`coverage_of`] on a case page holding `extra` too.
+fn coverage_of_with(content: &str, extra: &Extra) -> Vec<u8> {
+    let document = case_page_with(content, false, extra);
     let page = document.page(0).expect("a page");
     let grey = page.render(&RenderOptions {
         format: PixelFormat::Gray8,
@@ -1155,6 +1161,7 @@ fn sampled_extra(space: &Sampled) -> Extra {
                 &mesh,
             ),
         ],
+        ..Extra::default()
     }
 }
 
@@ -1271,6 +1278,521 @@ fn a_one_sample_image_paints_as_a_flat_fill_of_its_colour() {
                     "/OPM 1 reaches the fill and not the image"
                 );
             }
+        }
+    }
+}
+
+// ---- overprint under transparency (RC-03.7) ----------------------------------
+
+/// The Gold a transparency case fills with, at a tint of 0.7, and the
+/// channel it marks.
+fn gold() -> ([u8; 6], [bool; 6]) {
+    (
+        [0, 0, 0, 0, byte(0.7), 0],
+        [false, false, false, false, true, false],
+    )
+}
+
+/// The Teal a transparency case strokes or fills with, at a tint of 0.6,
+/// and the channel it marks.
+fn teal() -> ([u8; 6], [bool; 6]) {
+    (
+        [0, 0, 0, 0, 0, byte(0.6)],
+        [false, false, false, false, false, true],
+    )
+}
+
+/// What the isolated and the non-isolated groups paint: a cyan erasing every
+/// channel over `R1` (4, 4 to 16, 16), then Gold overprinting over `R2` (8, 8
+/// to 20, 20), which covers a quarter of it.
+const GROUPED: &str = "/G0 gs 0.6 0 0 0 k 4 4 12 12 re f /G1 gs /SG cs 0.7 scn 8 8 12 12 re f";
+
+/// [`GROUPED`], and Teal overprinting under `Multiply` over 6, 6 to 12, 12,
+/// through the paint's implicit group (11.7.4.3).
+const GROUPED_MULTIPLIED: &str = "/G0 gs 0.6 0 0 0 k 4 4 12 12 re f /G1 gs /SG cs 0.7 scn \
+                                  8 8 12 12 re f /BM1 gs /ST cs 0.6 scn 6 6 6 6 re f";
+
+/// What the knockout groups paint: Gold over `R1`, then Teal over `R2`, both
+/// overprinting.
+const KNOCKED: &str = "/G1 gs /SG cs 0.7 scn 4 4 12 12 re f /ST cs 0.6 scn 8 8 12 12 re f";
+
+/// The resources a transparency case's forms paint with: the page's Gold
+/// and Teal separations, no overprint and both flags under `/OPM 0`, and
+/// `Multiply`.
+fn form_resources() -> String {
+    let ramp =
+        |c1: &str| format!("<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [{c1}] /N 1 >>");
+    format!(
+        "/Resources << /ColorSpace << /SG [/Separation /Gold /DeviceCMYK {}] \
+         /ST [/Separation /Teal /DeviceCMYK {}] >> /ExtGState << \
+         /G0 << /OP false /op false /OPM 0 >> /G1 << /OP true /op true /OPM 0 >> \
+         /BM1 << /BM /Multiply >> >> >>",
+        ramp("0 0 1 0"),
+        ramp("1 0 0 0")
+    )
+}
+
+/// What the transparency cases' pages hold beyond a case page's: `/H5`, both
+/// alphas 0.5; `/HU`, a fill alpha of 1 and a stroke alpha of 0.5; `/BM1`
+/// `Multiply` and `/BD` `Darken`; `/SM`, a soft mask reading the alpha of a
+/// group (object 13) that fills the page's lower half at alpha 0.5; and
+/// forms painting as groups — [`GROUPED`] isolated (`/GI`, 14) and not
+/// (`/GN`, 15), [`KNOCKED`] in a non-isolated knockout group (`/GK`, 16)
+/// and an isolated one (`/GJ`, 17), and [`GROUPED_MULTIPLIED`] not isolated
+/// (`/GT`, 18).
+fn transparency_extra() -> Extra {
+    let form = |group: &str, content: &str| {
+        raw_stream(
+            &format!(
+                "/Type /XObject /Subtype /Form /BBox [0 0 {CASE_PAGE} {CASE_PAGE}] \
+                 /Group << /S /Transparency {group} >> {}",
+                form_resources()
+            ),
+            content.as_bytes(),
+        )
+    };
+    Extra {
+        ext_g_states: "/H5 << /ca 0.5 /CA 0.5 >> /HU << /ca 1 /CA 0.5 >> \
+                       /BM1 << /BM /Multiply >> /BD << /BM /Darken >> \
+                       /SM << /SMask << /Type /Mask /S /Alpha /G 13 0 R >> >>"
+            .to_string(),
+        xobjects: "/GI 14 0 R /GN 15 0 R /GK 16 0 R /GJ 17 0 R /GT 18 0 R".to_string(),
+        objects: vec![
+            raw_stream(
+                &format!(
+                    "/Type /XObject /Subtype /Form /BBox [0 0 {CASE_PAGE} {CASE_PAGE}] \
+                     /Group << /S /Transparency >> \
+                     /Resources << /ExtGState << /H << /ca 0.5 >> >> >>"
+                ),
+                format!("/H gs 0 g 0 0 {CASE_PAGE} 12 re f").as_bytes(),
+            ),
+            form("/I true", GROUPED),
+            form("", GROUPED),
+            form("/K true", KNOCKED),
+            form("/I true /K true", KNOCKED),
+            form("", GROUPED_MULTIPLIED),
+        ],
+        ..Extra::default()
+    }
+}
+
+/// Whether pixel `at` of a case page lies in the rectangle from user-space
+/// `(x, y)`, `w` by `h`: one pixel a point, the rows counted down from the
+/// top.
+fn inside(at: usize, (x, y, w, h): (u32, u32, u32, u32)) -> bool {
+    let column = (at % CASE_PAGE as usize) as u32;
+    let up = CASE_PAGE - 1 - (at / CASE_PAGE as usize) as u32;
+    (x..x + w).contains(&column) && (y..y + h).contains(&up)
+}
+
+/// `R1` and `R2`, where [`GROUPED`] and [`KNOCKED`] paint.
+const R1: (u32, u32, u32, u32) = (4, 4, 12, 12);
+const R2: (u32, u32, u32, u32) = (8, 8, 12, 12);
+
+/// The plates [`GROUPED`] leaves at pixel `at`, drawn outside a group or in
+/// a non-isolated one — Gold overprinting the cyan where it covers it and
+/// the backdrop elsewhere — or in an isolated one, whose Gold over nothing
+/// the group painted takes every channel's source, erasing the backdrop's
+/// inks, since its first paints see no backdrop (11.4.4).
+fn grouped_plates(at: usize, isolated: bool) -> [u8; 6] {
+    let backdrop = BACKDROP_TINTS.map(byte);
+    let cyan = [byte(0.6), 0, 0, 0, 0, 0];
+    let (gold, _) = gold();
+    match (inside(at, R1), inside(at, R2)) {
+        (false, false) => backdrop,
+        (true, false) => cyan,
+        (true, true) => [cyan[0], 0, 0, 0, gold[4], 0],
+        (false, true) if isolated => gold,
+        (false, true) => {
+            let mut plates = backdrop;
+            plates[4] = gold[4];
+            plates
+        }
+    }
+}
+
+/// The plates [`KNOCKED`] leaves at pixel `at` in a knockout group: Teal
+/// over `R2` composited against the group's initial backdrop, so the Gold
+/// under it is gone (11.4.5) — the page's own Gold in a non-isolated group,
+/// and no ink at all, with every other channel, in an isolated one.
+fn knocked_plates(at: usize, isolated: bool) -> [u8; 6] {
+    let mut plates = if isolated {
+        [0; 6]
+    } else {
+        BACKDROP_TINTS.map(byte)
+    };
+    if inside(at, R2) {
+        plates[5] = teal().0[5];
+    } else if inside(at, R1) {
+        plates[4] = gold().0[4];
+    } else {
+        plates = BACKDROP_TINTS.map(byte);
+    }
+    plates
+}
+
+/// What an overprinting paint of `tints` marking `marks` under `Multiply`
+/// leaves where it covers a pixel by `e`, through its implicit
+/// non-isolated, non-knockout group (11.7.4.3): the group holds the paint in
+/// each marked channel and the backdrop in every other, and composites
+/// under `Multiply`, `B(Cb, Cs)` taken on the tints' complements (11.3.5) —
+/// so every channel the paint leaves is multiplied by itself and comes out
+/// darker, as the design reads the clause.
+fn multiplied(tints: [u8; 6], marks: [bool; 6], e: u8) -> [u8; 6] {
+    let backdrop = BACKDROP_TINTS.map(byte);
+    let mut plates = backdrop;
+    if e == 0 {
+        return plates;
+    }
+    for channel in 0..6 {
+        let cb = backdrop[channel];
+        let source = if marks[channel] { tints[channel] } else { cb };
+        let blended = 255 - times(255 - cb, 255 - source);
+        plates[channel] = times(blended, e) + times(cb, 255 - e);
+    }
+    plates
+}
+
+/// One pixel of a non-isolated group's buffer over the opaque page, as
+/// 11.4 composites it in 255ths, each product rounded: its six tints, over
+/// the backdrop, and the group's own alpha (11.4.4).
+#[derive(Clone, Copy)]
+struct GroupPixel {
+    tints: [u8; 6],
+    alpha: u8,
+}
+
+impl GroupPixel {
+    /// The buffer before anything is painted: the backdrop's tints, at no
+    /// alpha of the group's own.
+    fn start() -> GroupPixel {
+        GroupPixel {
+            tints: BACKDROP_TINTS.map(byte),
+            alpha: 0,
+        }
+    }
+
+    /// 11.3.6's `Normal` composite of `tints`, marking `marks`, at opacity
+    /// `e`: the backdrop's union alpha is 1, so a marked channel is
+    /// `cs·e + cb·(1 − e)` and every other keeps its value; the group's own
+    /// alpha becomes `e + α·(1 − e)`.
+    fn paint(self, tints: [u8; 6], marks: [bool; 6], e: u8) -> GroupPixel {
+        if e == 0 {
+            return self;
+        }
+        let mut next = self;
+        for channel in 0..6 {
+            if marks[channel] {
+                next.tints[channel] =
+                    times(tints[channel], e) + times(self.tints[channel], 255 - e);
+            }
+        }
+        next.alpha = e + times(self.alpha, 255 - e);
+        next
+    }
+
+    /// 11.4.5's knockout under coverage `c`: every channel and the alpha
+    /// weighted back toward the group's initial state, the backdrop at no
+    /// alpha.
+    fn knock(self, c: u8) -> GroupPixel {
+        if c == 0 {
+            return self;
+        }
+        let backdrop = BACKDROP_TINTS.map(byte);
+        let mut next = self;
+        for channel in 0..6 {
+            next.tints[channel] = times(backdrop[channel], c) + times(self.tints[channel], 255 - c);
+        }
+        next.alpha = times(self.alpha, 255 - c);
+        next
+    }
+
+    /// The group's colour once 11.4.7.2 has taken its backdrop out,
+    /// `C = Cn + (Cn − C0)·(α0/αg − α0)` with `α0` 1: the factor
+    /// `⌊255·255/αg⌋ − 255` in 255ths, each channel's correction truncated
+    /// toward zero and the result held to a byte; nothing where the group
+    /// painted nothing.
+    fn removed(self) -> [u8; 6] {
+        if self.alpha == 0 {
+            return self.tints;
+        }
+        let backdrop = BACKDROP_TINTS.map(byte);
+        let factor = 255 * 255 / i64::from(self.alpha) - 255;
+        let mut tints = self.tints;
+        for (channel, slot) in tints.iter_mut().enumerate() {
+            let cn = i64::from(*slot);
+            let c0 = i64::from(backdrop[channel]);
+            *slot = (cn + (cn - c0) * factor / 255).clamp(0, 255) as u8;
+        }
+        tints
+    }
+
+    /// The group composited onto the page's backdrop at the operation's
+    /// alpha `alpha` under `Normal`: each channel `C·e + Cb·(1 − e)`, `e` the
+    /// group's alpha at the operation's.
+    fn composited(self, alpha: u8) -> [u8; 6] {
+        let backdrop = BACKDROP_TINTS.map(byte);
+        let e = times(self.alpha, alpha);
+        if e == 0 {
+            return backdrop;
+        }
+        let colour = self.removed();
+        let mut plates = backdrop;
+        for channel in 0..6 {
+            plates[channel] = times(colour[channel], e) + times(backdrop[channel], 255 - e);
+        }
+        plates
+    }
+}
+
+/// What a path's fill in Gold and its stroke in Teal, both overprinting,
+/// leave as 11.7.4.4's one object, from each pixel's fill and stroke
+/// coverage: with the two alphas equal at 0.5, a non-isolated,
+/// non-knockout group in which the fill and then the stroke are painted at
+/// alpha 1, the stroke overprinting the fill, composited at 0.5; with them
+/// unequal, the fill's 1 and the stroke's 0.5, a non-isolated knockout
+/// group in which each is painted at its own, the stroke knocking the fill
+/// out under it and so overprinting the backdrop (the clause's third note),
+/// composited at 1.
+fn compound_plates(fill: &[u8], stroke: &[u8], equal: bool) -> Vec<[u8; 6]> {
+    let (gold, gold_marks) = gold();
+    let (teal, teal_marks) = teal();
+    fill.iter()
+        .zip(stroke)
+        .map(|(&f, &s)| {
+            if equal {
+                GroupPixel::start()
+                    .paint(gold, gold_marks, f)
+                    .paint(teal, teal_marks, s)
+                    .composited(byte(0.5))
+            } else {
+                GroupPixel::start()
+                    .knock(f)
+                    .paint(gold, gold_marks, f)
+                    .knock(s)
+                    .paint(teal, teal_marks, times(s, byte(0.5)))
+                    .composited(255)
+            }
+        })
+        .collect()
+}
+
+/// **Overprint under transparency composites as designed** (RC-03.7): over
+/// a backdrop with ink in every channel, rendered as `Rgb8` and as
+/// `CmykA8`, each pixel is the composite of the plates the test works out
+/// from the design's *Overprint under transparency*, for a Gold
+/// `/Separation` and a DeviceCMYK colour under `/OPM 1`:
+///
+/// - **at alpha 0.5 and under a soft mask**, the paint's alpha enters as its
+///   coverage does, read off the same paint in black on white, and every
+///   channel it leaves keeps its backdrop;
+/// - **under `Multiply`**, through the paint's implicit group, every channel
+///   it leaves is `B(Cb, Cb)`;
+/// - **inside a non-isolated group** the overprinting Gold leaves the
+///   backdrop's channels as it would outside, and **inside an isolated
+///   one**, over nothing the group painted, erases them;
+/// - **inside a knockout group**, non-isolated and isolated, the Teal over
+///   the Gold composites against the group's initial backdrop, so the Gold
+///   under it is the page's, or gone;
+/// - **`B` and a mode 2 glyph** with both flags set, at equal and at unequal
+///   alphas, paint their fill and stroke as 11.7.4.4's one object, each
+///   coverage read off the same path or glyph filled, clipped by or stroked
+///   in black on white.
+///
+/// The glyph is in an embedded face, so both builds draw these pixels.
+#[test]
+fn overprint_under_transparency_composites_as_designed() {
+    let extra = transparency_extra();
+    let backdrop = backdrop_operators();
+    let square = "4 4 16 16 re f";
+    let whole = coverage_of_with(&format!("0 g {square}"), &extra);
+    let colours = [
+        ("Gold", "G1", "/SG cs 0.7 scn", gold().0, gold().1),
+        (
+            "DeviceCMYK under /OPM 1",
+            "G2",
+            "0.6 0 0.3 0 k",
+            [byte(0.6), 0, byte(0.3), 0, 0, 0],
+            cmyk_marks(true),
+        ),
+    ];
+    let mut cases: Vec<(String, String, Vec<[u8; 6]>)> = Vec::new();
+    for (state, how) in [("H5", "at alpha 0.5"), ("SM", "under a soft mask")] {
+        let opacity = coverage_of_with(&format!("/{state} gs 0 g {square}"), &extra);
+        assert!(
+            opacity.iter().any(|&e| e > 0 && e < 255),
+            "{how}: the paint is partly opaque somewhere"
+        );
+        for (name, flags, colour, tints, marks) in colours {
+            cases.push((
+                format!("{name} {how}"),
+                format!("/{flags} gs /{state} gs {colour} {square}"),
+                opacity
+                    .iter()
+                    .map(|&e| case_plates(tints, true, marks, e))
+                    .collect(),
+            ));
+        }
+    }
+    for (name, flags, colour, tints, marks) in colours {
+        cases.push((
+            format!("{name} under Multiply"),
+            format!("/{flags} gs /BM1 gs {colour} {square}"),
+            whole.iter().map(|&e| multiplied(tints, marks, e)).collect(),
+        ));
+    }
+    let pixels = (CASE_PAGE * CASE_PAGE) as usize;
+    for (name, form, plates) in [
+        (
+            "a non-isolated group",
+            "/GN Do",
+            (0..pixels)
+                .map(|at| grouped_plates(at, false))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "an isolated group",
+            "/GI Do",
+            (0..pixels).map(|at| grouped_plates(at, true)).collect(),
+        ),
+        (
+            "a non-isolated knockout group",
+            "/GK Do",
+            (0..pixels).map(|at| knocked_plates(at, false)).collect(),
+        ),
+        (
+            "an isolated knockout group",
+            "/GJ Do",
+            (0..pixels).map(|at| knocked_plates(at, true)).collect(),
+        ),
+    ] {
+        cases.push((name.to_string(), form.to_string(), plates));
+    }
+    let path_fill = coverage_of_with("0 g 4 4 16 16 re f", &extra);
+    let path_stroke = coverage_of_with("0 G 2 w 4 4 16 16 re S", &extra);
+    let glyph_fill = coverage_of_with(
+        &format!("BT /F0 18 Tf 7 Tr 3 5 Td (B) Tj ET 0 g 0 0 {CASE_PAGE} {CASE_PAGE} re f"),
+        &extra,
+    );
+    let glyph_stroke = coverage_of_with("0 G BT /F0 18 Tf 1 Tr 2 w 3 5 Td (B) Tj ET", &extra);
+    let both = "/G1 gs /SG cs 0.7 scn /ST CS 0.6 SCN 2 w";
+    for (alphas, equal) in [("H5", true), ("HU", false)] {
+        cases.push((
+            format!("B under {alphas}"),
+            format!("{both} /{alphas} gs 4 4 16 16 re B"),
+            compound_plates(&path_fill, &path_stroke, equal),
+        ));
+        cases.push((
+            format!("a mode 2 glyph under {alphas}"),
+            format!("{both} /{alphas} gs BT /F0 18 Tf 2 Tr 3 5 Td (B) Tj ET"),
+            compound_plates(&glyph_fill, &glyph_stroke, equal),
+        ));
+    }
+    for (name, content, plates) in cases {
+        let document = case_page_with(&format!("{backdrop}{content}"), false, &extra);
+        let page = document.page(0).expect("a page");
+        for format in [PixelFormat::Rgb8, PixelFormat::CmykA8] {
+            let bitmap = page.render(&simulated(format));
+            assert_eq!(bitmap.format, format, "{name}");
+            let n = format.components();
+            for (at, &pixel) in plates.iter().enumerate() {
+                assert_eq!(
+                    &bitmap.data[at * n..(at + 1) * n],
+                    case_composite(pixel, format).as_slice(),
+                    "{name} as {format:?}: pixel ({}, {})",
+                    at % CASE_PAGE as usize,
+                    at / CASE_PAGE as usize
+                );
+            }
+        }
+    }
+}
+
+/// Holds every tile of `page` at `options`, 7 and 11 pixels a side, to the
+/// page under it, and the page's display list replayed to the page.
+#[track_caller]
+fn holds_its_tiles_and_its_replay(page: &Page, options: &RenderOptions, what: &str) {
+    let whole = page.render(options);
+    assert_eq!(
+        page.display_list().render(options).data,
+        whole.data,
+        "{what}: replayed from its display list"
+    );
+    let n = whole.format.components();
+    for tile in [7u32, 11] {
+        for top in (0..whole.height).step_by(tile as usize) {
+            for left in (0..whole.width).step_by(tile as usize) {
+                let asked = PixelRegion::new(left, top, tile, tile);
+                let part = page.render(&RenderOptions {
+                    region: Some(asked),
+                    ..options.clone()
+                });
+                let held = asked.clamped_to(whole.width, whole.height);
+                let span = held.width as usize * n;
+                for row in 0..held.height as usize {
+                    let from = ((top as usize + row) * whole.width as usize + left as usize) * n;
+                    assert_eq!(
+                        &part.data[row * span..(row + 1) * span],
+                        &whole.data[from..from + span],
+                        "{what}: a {tile}px tile at ({left}, {top}), row {row}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// **The twins the clause makes equal under transparency render alike**
+/// (RC-03.7): a non-isolated group's contents — a cyan erasing every
+/// channel, Gold overprinting it and the backdrop, and Teal overprinting
+/// both under `Multiply` through its implicit group — render byte for byte
+/// as the same contents drawn outside it; an overprinting `Darken` fill,
+/// glyph and `/OPM 1` fill render as the same paints under `Normal`, every
+/// channel each leaves being opaque and each it marks taking more ink than
+/// the backdrop holds there, so `B(Cb, Cb)` is `Cb` and `B(Cb, Cs)` is
+/// `Cs`; and each transparency case's page drawn in tiles is the page under
+/// them, and replayed from its display list is the page.
+#[test]
+fn the_twins_the_clause_makes_equal_under_transparency_render_alike() {
+    let extra = transparency_extra();
+    let backdrop = backdrop_operators();
+    let page_of = |content: &str| case_page_with(&format!("{backdrop}{content}"), false, &extra);
+    let darkened = [
+        "/G1 gs /SG cs 0.9 scn 4 4 16 16 re f",
+        "/G1 gs /SG cs 0.9 scn BT /F0 18 Tf 3 5 Td (B) Tj ET",
+        "/G2 gs 0.6 0 0.9 0 k 4 4 16 16 re f",
+    ];
+    for format in [PixelFormat::Rgb8, PixelFormat::CmykA8] {
+        let options = simulated(format);
+        let render = |content: &str| {
+            page_of(content)
+                .page(0)
+                .expect("a page")
+                .render(&options)
+                .data
+        };
+        assert_eq!(
+            render("/GT Do"),
+            render(GROUPED_MULTIPLIED),
+            "{format:?}: a non-isolated group's contents and the same outside it"
+        );
+        for paint in darkened {
+            assert_eq!(
+                render(&format!("/BD gs {paint}")),
+                render(paint),
+                "{format:?}: {paint} under Darken and under Normal"
+            );
+        }
+        for content in [
+            "/G1 gs /BM1 gs /SG cs 0.7 scn 4 4 16 16 re f",
+            "/GN Do /GK Do",
+            "/G1 gs /SG cs 0.7 scn /ST CS 0.6 SCN 2 w /H5 gs 4 4 16 16 re B",
+            "/G1 gs /SG cs 0.7 scn /ST CS 0.6 SCN 2 w /HU gs 4 4 16 16 re B",
+            "/G1 gs /SG cs 0.7 scn /ST CS 0.6 SCN 2 w /HU gs BT /F0 18 Tf 2 Tr 3 5 Td (B) Tj ET",
+        ] {
+            let document = page_of(content);
+            let page = document.page(0).expect("a page");
+            holds_its_tiles_and_its_replay(&page, &options, &format!("{content} as {format:?}"));
         }
     }
 }
