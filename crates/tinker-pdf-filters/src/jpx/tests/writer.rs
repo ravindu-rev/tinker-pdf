@@ -286,3 +286,355 @@ pub(crate) fn tile_part(tile: u16, index: u8, parts: u8, header: &[u8], data: &[
     out[6..10].copy_from_slice(&psot.to_be_bytes());
     out
 }
+
+// --- whole codestreams, from chosen coefficients ---------------------------
+
+/// Where one coefficient sits: its component, its resolution counted from
+/// the bottom (so a codestream with fewer levels numbers the bands it shares
+/// with one of more the same way), its subband's orientation, and its
+/// position in the subband's own coordinates (B.5).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct At {
+    pub(crate) component: usize,
+    pub(crate) resolution: usize,
+    pub(crate) orientation: crate::jpx::tier2::Orientation,
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+}
+
+/// One code-block as the writer coded it: its bytes, its passes and the
+/// bit-planes it is missing below `Mb`; `None` for a block of zeros.
+type Coded = Option<(Vec<u8>, u32, u32)>;
+
+/// `spec`'s codestream with every code-block carrying the coefficients
+/// `value` names: each block coded by tier-1's test encoder to the bottom
+/// plane, its packet headers written for one layer in the order the decoder
+/// reads them, and a block whose coefficients are all zero left out of its
+/// packet.
+///
+/// The geometry and the packet order are the decoder's own
+/// (`tier2::layout_for_test`), so this writes what the decoder will look
+/// for. What it is for is holding two paths of the decoder to each other —
+/// a reduced decode against the full decode of a codestream that carries
+/// only the bands it keeps — not adjudicating either. Every magnitude must
+/// fit the `Mb` the writer's QCD gives a subband: `guard_bits + 7` planes.
+pub(crate) fn coded(spec: &Spec, value: &dyn Fn(At) -> i32) -> Vec<u8> {
+    use crate::jpx::codestream::parse;
+    use crate::jpx::tier2::layout_for_test;
+
+    let empty = spec.codestream(&[]);
+    let stream = parse(&empty).expect("the writer's headers parse");
+    let mb = u32::from(spec.guard_bits) + 8 - 1;
+    let mut parts: Vec<(u16, Vec<u8>)> = Vec::new();
+    for t in 0..spec.tile_count() {
+        let (tile, order) = layout_for_test(&stream, t).expect("the writer's tile lays out");
+        let blocks = code_tile(&tile, value, mb);
+        let mut trees = tag_trees(&tile, &blocks);
+        let mut data = Vec::new();
+        for (layer, r, c, p) in order {
+            assert_eq!(layer, 0, "the writer writes one layer");
+            let (r, c, p) = (usize::from(r), usize::from(c), p as usize);
+            write_packet(&tile, &blocks, &mut trees, (c, r, p), &mut data);
+        }
+        parts.push((u16::try_from(t).expect("a tile index"), data));
+    }
+    let tiles: Vec<(u16, &[u8])> = parts.iter().map(|(t, data)| (*t, &data[..])).collect();
+    spec.codestream(&tiles)
+}
+
+/// Every code-block of `tile` coded, by `[component][resolution][band]
+/// [precinct][block]`.
+fn code_tile(
+    tile: &crate::jpx::tier2::Tile,
+    value: &dyn Fn(At) -> i32,
+    mb: u32,
+) -> Vec<Vec<Vec<Vec<Vec<Coded>>>>> {
+    use crate::jpx::tier1::{encoder::encode_code_block, CodingStyle};
+
+    let mut out = Vec::new();
+    for (c, component) in tile.components.iter().enumerate() {
+        let mut by_resolution = Vec::new();
+        for (r, resolution) in component.resolutions.iter().enumerate() {
+            let mut by_band = Vec::new();
+            for band in &resolution.bands {
+                let mut by_precinct = Vec::new();
+                for precinct in &band.precincts {
+                    let mut blocks = Vec::new();
+                    for block in &precinct.blocks {
+                        let (w, h) = (block.width() as usize, block.height() as usize);
+                        let mut values = Vec::with_capacity(w * h);
+                        for y in block.y0..block.y1 {
+                            for x in block.x0..block.x1 {
+                                values.push(value(At {
+                                    component: c,
+                                    resolution: r,
+                                    orientation: band.orientation,
+                                    x,
+                                    y,
+                                }));
+                            }
+                        }
+                        let largest = values.iter().map(|v| v.unsigned_abs()).max();
+                        let planes = largest.map_or(0, |m| 32 - m.leading_zeros());
+                        assert!(planes <= mb, "a coefficient past the writer's Mb");
+                        blocks.push((planes > 0).then(|| {
+                            let (bytes, passes) = encode_code_block(
+                                &values,
+                                w,
+                                h,
+                                planes,
+                                band.orientation,
+                                CodingStyle::default(),
+                            );
+                            (bytes, passes, mb - planes)
+                        }));
+                    }
+                    by_precinct.push(blocks);
+                }
+                by_band.push(by_precinct);
+            }
+            by_resolution.push(by_band);
+        }
+        out.push(by_resolution);
+    }
+    out
+}
+
+/// Each precinct band's inclusion and zero bit-plane trees. One layer, so an
+/// included block's inclusion leaf is 0 and an empty block's is 1; the trees
+/// keep their state across the packets they are read in, as the decoder's
+/// do.
+fn tag_trees(
+    tile: &crate::jpx::tier2::Tile,
+    blocks: &[Vec<Vec<Vec<Vec<Coded>>>>],
+) -> Vec<Vec<Vec<Vec<(TagWriter, TagWriter)>>>> {
+    let mut out = Vec::new();
+    for (c, component) in tile.components.iter().enumerate() {
+        let mut by_resolution = Vec::new();
+        for (r, resolution) in component.resolutions.iter().enumerate() {
+            let mut by_band = Vec::new();
+            for (b, band) in resolution.bands.iter().enumerate() {
+                let mut by_precinct = Vec::new();
+                for (p, precinct) in band.precincts.iter().enumerate() {
+                    let coded = &blocks[c][r][b][p];
+                    let inclusion: Vec<u32> =
+                        coded.iter().map(|k| u32::from(k.is_none())).collect();
+                    let zero: Vec<u32> = coded
+                        .iter()
+                        .map(|k| k.as_ref().map_or(0, |k| k.2))
+                        .collect();
+                    by_precinct.push((
+                        TagWriter::new(precinct.w, precinct.h, &inclusion),
+                        TagWriter::new(precinct.w, precinct.h, &zero),
+                    ));
+                }
+                by_band.push(by_precinct);
+            }
+            by_resolution.push(by_band);
+        }
+        out.push(by_resolution);
+    }
+    out
+}
+
+/// The packet of component `c`, resolution `r` and precinct `p`: its header,
+/// then the bodies in the order the header names them.
+fn write_packet(
+    tile: &crate::jpx::tier2::Tile,
+    blocks: &[Vec<Vec<Vec<Vec<Coded>>>>],
+    trees: &mut [Vec<Vec<Vec<(TagWriter, TagWriter)>>>],
+    (c, r, p): (usize, usize, usize),
+    data: &mut Vec<u8>,
+) {
+    let resolution = &tile.components[c].resolutions[r];
+    let mut header = HeaderBits::default();
+    let mut bodies = Vec::new();
+    let any = resolution.bands.iter().enumerate().any(|(b, band)| {
+        !band.is_empty()
+            && blocks[c][r][b]
+                .get(p)
+                .is_some_and(|coded| coded.iter().any(Option::is_some))
+    });
+    header.bit(u8::from(any));
+    if any {
+        for (b, band) in resolution.bands.iter().enumerate() {
+            if band.is_empty() {
+                continue;
+            }
+            let w = band.precincts[p].w.max(1);
+            let (inclusion, zero) = &mut trees[c][r][b][p];
+            for (i, coded) in blocks[c][r][b][p].iter().enumerate() {
+                let (gx, gy) = (i as u32 % w, i as u32 / w);
+                inclusion.encode(&mut header, gx, gy, 1);
+                let Some((bytes, passes, missing)) = coded else {
+                    continue;
+                };
+                let mut threshold = 1;
+                loop {
+                    zero.encode(&mut header, gx, gy, threshold);
+                    if *missing < threshold {
+                        break;
+                    }
+                    threshold += 1;
+                }
+                header.pass_count(*passes);
+                header.length(bytes.len(), *passes);
+                bodies.extend_from_slice(bytes);
+            }
+        }
+    }
+    data.extend_from_slice(&header.finish());
+    data.extend_from_slice(&bodies);
+}
+
+/// A packet header's bits, with B.10.1's stuffing: after a `0xFF` the next
+/// byte carries seven bits, and a header ending on a `0xFF` is followed by
+/// the byte the decoder skips.
+#[derive(Default)]
+struct HeaderBits {
+    out: Vec<u8>,
+    acc: u8,
+    filled: u32,
+}
+
+impl HeaderBits {
+    fn capacity(&self) -> u32 {
+        if self.out.last() == Some(&0xFF) {
+            7
+        } else {
+            8
+        }
+    }
+
+    fn bit(&mut self, b: u8) {
+        self.acc = (self.acc << 1) | (b & 1);
+        self.filled += 1;
+        if self.filled == self.capacity() {
+            self.out.push(self.acc);
+            self.acc = 0;
+            self.filled = 0;
+        }
+    }
+
+    fn bits(&mut self, value: u32, n: u32) {
+        for k in (0..n).rev() {
+            self.bit(((value >> k) & 1) as u8);
+        }
+    }
+
+    /// B.10.6's code for a number of coding passes.
+    fn pass_count(&mut self, passes: u32) {
+        match passes {
+            1 => self.bit(0),
+            2 => self.bits(0b10, 2),
+            3..=5 => {
+                self.bits(0b11, 2);
+                self.bits(passes - 3, 2);
+            }
+            6..=36 => {
+                self.bits(0b1111, 4);
+                self.bits(passes - 6, 5);
+            }
+            _ => {
+                self.bits(0b1111, 4);
+                self.bits(0b11111, 5);
+                self.bits(passes - 37, 7);
+            }
+        }
+    }
+
+    /// B.10.7.1: `Lblock`, starting at three, raised by as many signalling
+    /// ones as the length needs, then the length in `Lblock + floor(log2
+    /// passes)` bits. One codeword segment, since the writer's code-blocks
+    /// use no style that terminates a pass early.
+    fn length(&mut self, length: usize, passes: u32) {
+        let extra = 31 - passes.leading_zeros();
+        let needed = usize::BITS - length.leading_zeros();
+        let lblock = 3u32.max(needed.saturating_sub(extra));
+        for _ in 3..lblock {
+            self.bit(1);
+        }
+        self.bit(0);
+        self.bits(
+            u32::try_from(length).expect("a segment length"),
+            lblock + extra,
+        );
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.filled > 0 {
+            self.acc <<= self.capacity() - self.filled;
+            self.out.push(self.acc);
+        }
+        if self.out.last() == Some(&0xFF) {
+            self.out.push(0);
+        }
+        self.out
+    }
+}
+
+/// B.10.2's tag tree, from the writing side: the leaves' values known, and
+/// each node's state carried across calls as the decoder carries it across
+/// packets, so asking it to code a leaf against a threshold writes exactly
+/// the bits `TagTree::decode` reads for that question.
+struct TagWriter {
+    /// `(width, offset)` a level, the leaves first.
+    levels: Vec<(u32, usize)>,
+    /// Each node's value (its subtree's minimum), the lowest value not yet
+    /// ruled out, and whether the value has been sent.
+    nodes: Vec<(u32, u32, bool)>,
+}
+
+impl TagWriter {
+    fn new(w: u32, h: u32, leaves: &[u32]) -> TagWriter {
+        let mut levels = Vec::new();
+        let mut values: Vec<u32> = leaves.to_vec();
+        let mut all = Vec::new();
+        let (mut lw, mut lh) = (w, h);
+        while lw > 0 && lh > 0 {
+            levels.push((lw, all.len()));
+            all.extend_from_slice(&values);
+            if lw == 1 && lh == 1 {
+                break;
+            }
+            let (nw, nh) = (lw.div_ceil(2), lh.div_ceil(2));
+            let mut next = vec![u32::MAX; (nw as usize) * (nh as usize)];
+            for y in 0..lh {
+                for x in 0..lw {
+                    let v = values[(y as usize) * (lw as usize) + (x as usize)];
+                    let slot = &mut next[((y / 2) as usize) * (nw as usize) + ((x / 2) as usize)];
+                    *slot = (*slot).min(v);
+                }
+            }
+            values = next;
+            lw = nw;
+            lh = nh;
+        }
+        TagWriter {
+            levels,
+            nodes: all.into_iter().map(|v| (v, 0, false)).collect(),
+        }
+    }
+
+    fn encode(&mut self, out: &mut HeaderBits, x: u32, y: u32, threshold: u32) {
+        let mut low = 0u32;
+        for level in (0..self.levels.len()).rev() {
+            let (lw, offset) = self.levels[level];
+            let idx = offset + ((y >> level) as usize) * (lw as usize) + ((x >> level) as usize);
+            let node = &mut self.nodes[idx];
+            if node.1 < low {
+                node.1 = low;
+            }
+            while node.1 < threshold && !node.2 {
+                if node.1 < node.0 {
+                    out.bit(0);
+                    node.1 += 1;
+                } else {
+                    out.bit(1);
+                    node.2 = true;
+                }
+            }
+            low = node.1;
+        }
+    }
+}

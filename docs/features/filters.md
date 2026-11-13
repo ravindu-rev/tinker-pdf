@@ -318,6 +318,21 @@ coefficients into a plausible image — so everything not implemented is refused
 by name, and two integrity checks (packet lengths, the D.5 segmentation
 symbol) catch a mis-parse before any pixel exists.
 
+**A decode can drop resolution levels.** `jpx_decode_request` takes a
+`JpxRequest` whose `discard` drops the top levels of every tile-component:
+tier-1 decodes no code-block of a dropped resolution, the inverse wavelet
+stops at resolution `N_L - discard`, and the image comes back on the
+reference grid reduced by `2^discard` as T.800 B.5 gives it — every
+coordinate `ceil(x / 2^discard)`, the image area's and each tile's, a
+subsampled component replicated on the reduced grid as on the full one. A
+discard past the fewest levels any tile-component has is clamped to them,
+and `JpxImage::discard` says what was applied. Beside the image comes a
+`JpxCounts`, the levels synthesised and the code-blocks decoded, which a
+caller adds to its own tally (guard A7's leaf half). `jpx_decode` is the
+request at its default, the full image, and every committed codestream's
+decode there is pinned in `tests/jpx_decodes.rs` by its CRC-32
+([design](../design/jpx-speed.md)).
+
 **`BYPASS` and `TERMALL` are two capabilities over one mechanism.** What
 they share is B.10.7.2's *multiple codeword segments*: with either set, a
 code-block's contribution to a packet is signalled as `K` lengths rather than
@@ -802,7 +817,9 @@ where it wants it without a second copy; every check is made before the first
 strip, so a decode that hands one out succeeds;
 `ccitt_decode` (takes `CcittParams`), `jbig2_decode` (takes `Jbig2Params`,
 which carries the `/JBIG2Globals` bytes) and `jpx_decode` (returns
-`JpxImage`), with `jpx_header` beside it: every stage of that decode before
+`JpxImage`) — `jpx_decode_request` the same decode asked for a
+`JpxRequest`, returning the image and a `JpxCounts` — with `jpx_header`
+beside it: every stage of that decode before
 tier-2 and none after, returning a `JpxHeader` — the geometry, output channel
 count, precision, stated colour and opacity a decode would produce. The comic
 path places a `.jp2` page's own bytes as `/JPXDecode` on the strength of it,

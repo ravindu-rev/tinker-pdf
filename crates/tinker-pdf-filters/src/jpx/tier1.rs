@@ -914,7 +914,14 @@ fn charge(work: &mut u64, n: u64) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// Runs tier-1 over every code-block of every tile.
+/// Runs tier-1 over every code-block of every tile that a decode dropping
+/// the top `discard` resolutions keeps, and returns how many code-blocks it
+/// decoded.
+///
+/// A dropped resolution's blocks are never decoded, so they spend nothing:
+/// the budget is charged for the work the decode does. `discard` is already
+/// clamped to the fewest levels any tile-component has, so every
+/// tile-component keeps at least its resolution 0.
 ///
 /// The budget is one total across the whole codestream, because the shape
 /// this guards is a *branching* one: tiles times components times resolutions
@@ -923,13 +930,18 @@ fn charge(work: &mut u64, n: u64) -> Result<(), Refusal> {
 /// product not. `5adf502` landed that lesson one layer up — an 1 851-byte
 /// page that took 19.3 seconds inside a depth cap that never fired — and a
 /// per-code-block cap here would be exactly that mistake again.
-pub(crate) fn decode_tiles(stream: &Codestream<'_>, tiles: &mut [Tile]) -> Result<(), Refusal> {
+pub(crate) fn decode_tiles(
+    stream: &Codestream<'_>,
+    tiles: &mut [Tile],
+    discard: u8,
+) -> Result<u64, Refusal> {
     let mut work = MAX_JPX_WORK;
     // One context array for the whole codestream, reset per code-block. That
     // is what `MqContexts::reset` is for, and the 64 KB it avoids
     // reallocating for JBIG2 is nineteen entries here — what matters is that
     // reset returns to Table D.7 rather than to zero.
     let mut contexts = initial_contexts();
+    let mut decoded = 0u64;
 
     for tile in tiles.iter_mut() {
         let index = tile.index;
@@ -942,19 +954,24 @@ pub(crate) fn decode_tiles(stream: &Codestream<'_>, tiles: &mut [Tile]) -> Resul
                 bypass: coding.bypass(),
                 terminate_all: coding.terminate_all(),
             };
-            for resolution in &mut component.resolutions {
+            let kept = component
+                .resolutions
+                .len()
+                .saturating_sub(usize::from(discard));
+            for resolution in component.resolutions.iter_mut().take(kept) {
                 for band in &mut resolution.bands {
                     let orientation = band.orientation;
                     for precinct in &mut band.precincts {
                         for block in &mut precinct.blocks {
                             decode_one(block, orientation, style, &mut contexts, &mut work)?;
+                            decoded += 1;
                         }
                     }
                 }
             }
         }
     }
-    Ok(())
+    Ok(decoded)
 }
 
 fn decode_one(

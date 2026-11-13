@@ -294,7 +294,7 @@ fn the_fixed_point_97_tracks_an_f64_reference_of_f382() {
             "{name} is supposed to be an irreversible 9/7 fixture"
         );
         let mut tiles = tier2::decode_tiles(&stream).expect("tier-2 runs");
-        tier1::decode_tiles(&stream, &mut tiles).expect("tier-1 runs");
+        tier1::decode_tiles(&stream, &mut tiles, 0).expect("tier-1 runs");
         let precision = stream.siz.components[0].precision;
         let signed = stream.siz.components[0].signed;
 
@@ -302,9 +302,9 @@ fn the_fixed_point_97_tracks_an_f64_reference_of_f382() {
         for tile in &tiles {
             let mut clamped = false;
             let mut fixed =
-                into_samples(ladder::<Fixed>(&stream, tile, 0, &mut clamped).expect("fixed"));
+                into_samples(ladder::<Fixed>(&stream, tile, 0, 0, &mut clamped).expect("fixed"));
             let mut reference = into_samples(
-                ladder::<Reference>(&stream, tile, 0, &mut clamped).expect("reference"),
+                ladder::<Reference>(&stream, tile, 0, 0, &mut clamped).expect("reference"),
             );
             assert!(!clamped, "{name} should not reach E.1's clamp");
             level_shift(&mut fixed, precision, signed);

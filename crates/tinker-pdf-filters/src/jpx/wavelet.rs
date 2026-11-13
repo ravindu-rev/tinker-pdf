@@ -869,7 +869,15 @@ fn synthesise_2d<A: Arith>(plane: &mut Plane<A>, x0: u32, y0: u32) {
 }
 
 /// Reconstruct one tile-component in `A`'s arithmetic: dequantise every
-/// subband, then run the inverse wavelet up the resolution ladder.
+/// subband, then run the inverse wavelet up the resolution ladder, stopping
+/// `discard` resolutions short of the top.
+///
+/// The plane that comes back is resolution `N_L - discard`'s, whose
+/// rectangle is B.5's `ceil(tcx0 / 2^discard)` to `ceil(tcx1 / 2^discard)`
+/// (B-14) — which is the resolution's own `x0..x1`, as tier-2 built it. The
+/// resolutions above it are never dequantised or synthesised. `discard` is
+/// already clamped to the fewest levels any tile-component has, and is
+/// clamped here again to this one's, so it can never leave no resolution.
 ///
 /// `pub(crate)` because the test module instantiates it a third time, with an
 /// `f64` arithmetic that performs F.3.8.2's steps in floating point. That is
@@ -879,6 +887,7 @@ pub(crate) fn ladder<A: Arith>(
     stream: &Codestream<'_>,
     tile: &Tile,
     component: usize,
+    discard: u8,
     clamped: &mut bool,
 ) -> Result<Plane<A>, Refusal> {
     let tc = tile
@@ -906,7 +915,12 @@ pub(crate) fn ladder<A: Arith>(
         samples: Vec::new(),
     };
 
-    for (r, resolution) in tc.resolutions.iter().enumerate() {
+    let kept = tc
+        .resolutions
+        .len()
+        .saturating_sub(usize::from(discard))
+        .max(1);
+    for (r, resolution) in tc.resolutions.iter().enumerate().take(kept) {
         let width = resolution.x1.saturating_sub(resolution.x0);
         let height = resolution.y1.saturating_sub(resolution.y0);
         let mut next = Plane {
@@ -1033,17 +1047,35 @@ pub(crate) fn reconstruct(
     stream: &Codestream<'_>,
     tile: &Tile,
     component: usize,
+    discard: u8,
     clamped: &mut bool,
 ) -> Result<Plane, Refusal> {
     if arithmetic(stream, tile.index, component)? {
         Ok(into_samples(ladder::<Exact>(
-            stream, tile, component, clamped,
+            stream, tile, component, discard, clamped,
         )?))
     } else {
         Ok(into_samples(ladder::<Fixed>(
-            stream, tile, component, clamped,
+            stream, tile, component, discard, clamped,
         )?))
     }
+}
+
+/// The inverse-wavelet levels a decode dropping `discard` resolutions
+/// synthesises for one tile, every component summed: each tile-component's
+/// resolutions above its 0th that the ladder keeps.
+pub(crate) fn levels_synthesised(tile: &Tile, discard: u8) -> u64 {
+    tile.components
+        .iter()
+        .map(|component| {
+            let kept = component
+                .resolutions
+                .len()
+                .saturating_sub(usize::from(discard))
+                .max(1);
+            (kept - 1) as u64
+        })
+        .sum()
 }
 
 /// The first three components of one tile, reconstructed and passed through
@@ -1057,11 +1089,12 @@ pub(crate) fn reconstruct(
 fn transformed<A: Arith>(
     stream: &Codestream<'_>,
     tile: &Tile,
+    discard: u8,
     clamped: &mut bool,
 ) -> Result<Vec<Plane>, Refusal> {
     let mut planes = Vec::with_capacity(3);
     for c in 0..3 {
-        planes.push(ladder::<A>(stream, tile, c, clamped)?);
+        planes.push(ladder::<A>(stream, tile, c, discard, clamped)?);
     }
     colour::inverse_mct(&mut planes)?;
     Ok(planes.into_iter().map(into_samples).collect())
@@ -1078,12 +1111,13 @@ fn transformed<A: Arith>(
 pub(crate) fn reconstruct_tile(
     stream: &Codestream<'_>,
     tile: &Tile,
+    discard: u8,
     clamped: &mut bool,
 ) -> Result<Vec<Plane>, Refusal> {
     let count = stream.siz.components.len();
     if !stream.cod_for(tile.index).mct {
         return (0..count)
-            .map(|c| reconstruct(stream, tile, c, clamped))
+            .map(|c| reconstruct(stream, tile, c, discard, clamped))
             .collect();
     }
     if count < 3 {
@@ -1104,12 +1138,12 @@ pub(crate) fn reconstruct_tile(
         }
     }
     let mut planes = if reversible {
-        transformed::<Exact>(stream, tile, clamped)?
+        transformed::<Exact>(stream, tile, discard, clamped)?
     } else {
-        transformed::<Fixed>(stream, tile, clamped)?
+        transformed::<Fixed>(stream, tile, discard, clamped)?
     };
     for c in 3..count {
-        planes.push(reconstruct(stream, tile, c, clamped)?);
+        planes.push(reconstruct(stream, tile, c, discard, clamped)?);
     }
     Ok(planes)
 }

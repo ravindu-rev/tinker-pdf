@@ -56,7 +56,9 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use tinker_pdf_filters::{jpx_decode, jpx_header, Capability, FilterError, Limits};
+use tinker_pdf_filters::{
+    jpx_decode_request, jpx_header, Capability, FilterError, JpxRequest, Limits,
+};
 
 /// The twelve bytes a JP2 file opens with (T.800 I.5.1), and the empty
 /// `jp2h` needed to make the wrapper a walk rather than a rejection.
@@ -86,6 +88,12 @@ fuzz_target!(|data: &[u8]| {
         _ => 1 << 20,
     };
     let limits = Limits::new(ceiling);
+    // Bits 3 and 4 drop that many resolution levels from the top (T.800
+    // B.5), so the reduced geometry is fuzzed as the full one is: a discard
+    // past a codestream's levels is clamped, never a panic.
+    let request = JpxRequest {
+        discard: (knobs >> 3) & 3,
+    };
 
     // Bit 2 wraps the body in JP2 boxes. PDF permits both a whole JP2 file
     // and a bare codestream (7.4.9) and they take different paths through the
@@ -106,26 +114,30 @@ fuzz_target!(|data: &[u8]| {
     for input in inputs {
         let mut warnings = Vec::new();
         let header = jpx_header(&input, &limits);
-        match jpx_decode(&input, &limits, &mut warnings) {
-            Ok(image) => {
+        match jpx_decode_request(&input, &limits, &request, &mut warnings) {
+            Ok((image, _)) => {
                 let header = header.expect("a file that decodes has a header that reads");
                 assert_eq!(
-                    (
-                        header.width,
-                        header.height,
-                        header.components,
-                        header.precision,
-                        header.opacity
-                    ),
-                    (
-                        image.width,
-                        image.height,
-                        image.components,
-                        image.precision,
-                        image.opacity.is_some()
-                    ),
+                    (header.components, header.precision, header.opacity),
+                    (image.components, image.precision, image.opacity.is_some()),
                     "the header read and the decode disagree about the image"
                 );
+                // The header is the full size. A decode dropping `d` levels
+                // lies on the grid divided by `2^d` and rounded up at both
+                // ends, so each side is within one sample of the full side
+                // halved `d` times, and is the full side at `d` of 0.
+                assert!(
+                    image.discard <= request.discard,
+                    "a decode dropped more levels than it was asked to"
+                );
+                for (full, got) in [(header.width, image.width), (header.height, image.height)] {
+                    let (full, got) = (u64::from(full), u64::from(got));
+                    let d = u32::from(image.discard);
+                    assert!(
+                        (full >> d..=full.div_ceil(1 << d)).contains(&got),
+                        "a reduced side {got} is no side of the full {full} halved {d} times"
+                    );
+                }
                 let bytes = if image.precision > 8 { 2usize } else { 1 };
                 let want = (image.width as usize)
                     .checked_mul(image.height as usize)

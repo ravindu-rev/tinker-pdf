@@ -465,6 +465,39 @@ pub struct JpxImage {
     /// used and un-multiplied, and that rule is ISO 32000-1 8.9.5.4's and
     /// lives beside `/ColorSpace` (ruling 8).
     pub opacity: Option<JpxOpacity>,
+    /// The resolution levels the decode dropped from the top: the request's
+    /// [`JpxRequest::discard`], clamped to the fewest levels any
+    /// tile-component of the codestream has. The image lies on the reference
+    /// grid reduced by `2^discard` (T.800 B.5), so `0` is the full size.
+    pub discard: u8,
+}
+
+/// What a decode is asked for (`docs/design/jpx-speed.md`, "The decode
+/// request").
+///
+/// A plain, hashable value, because it is what a caller's image cache keys
+/// on: a hit must return exactly what a miss computes for the same request.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct JpxRequest {
+    /// Resolution levels to drop from the top. `0` decodes the full size;
+    /// `d` decodes the image on the reference grid reduced by `2^d`, every
+    /// dimension `ceil(x / 2^d)` (T.800 B.5), from the codestream's lower
+    /// resolutions alone. A figure past the fewest levels a tile-component
+    /// has is clamped to it, and [`JpxImage::discard`] says what was applied.
+    pub discard: u8,
+}
+
+/// What one decode did, counted: the leaf's half of guard A7, handed back
+/// as a value because this crate keeps no tally of its own (ruling 8).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JpxCounts {
+    /// Inverse-wavelet levels synthesised, every tile-component of every
+    /// tile summed: a tile-component of `N` levels decoded with `d` dropped
+    /// synthesises `N - d`.
+    pub levels_synthesised: u64,
+    /// Code-blocks tier-1 decoded. A dropped resolution's are not among
+    /// them.
+    pub code_blocks_decoded: u64,
 }
 
 /// The opacity channel `cdef` named, and which of its two types it was.
@@ -516,8 +549,26 @@ pub fn jpx_decode(
     limits: &Limits,
     warnings: &mut Vec<Warning>,
 ) -> Result<JpxImage, FilterError> {
+    jpx_decode_request(input, limits, &JpxRequest::default(), warnings).map(|(image, _)| image)
+}
+
+/// [`jpx_decode`], asked for what `request` names — the full image at
+/// [`JpxRequest::default`], or one with its top levels dropped — and with
+/// what the decode did counted beside the image.
+///
+/// # Errors
+///
+/// [`FilterError::Unsupported`], as [`jpx_decode`] gives it, with the
+/// reason in `warnings`.
+pub fn jpx_decode_request(
+    input: &[u8],
+    limits: &Limits,
+    request: &JpxRequest,
+    warnings: &mut Vec<Warning>,
+) -> Result<(JpxImage, JpxCounts), FilterError> {
     let mut clamped = false;
-    let decoded = decode_inner(input, limits, &mut clamped);
+    let mut counts = JpxCounts::default();
+    let decoded = decode_inner(input, limits, request, &mut clamped, &mut counts);
     let truncated = matches!(&decoded, Ok(image) if image.truncated);
     // Recorded whether the decode went on to succeed or not: E.1's clamp is a
     // leniency, and ruling 10 wants a leniency to survive the result it led
@@ -534,7 +585,7 @@ pub fn jpx_decode(
             if truncated && !warnings.contains(&Warning::JpxTruncated) {
                 warnings.push(Warning::JpxTruncated);
             }
-            Ok(image)
+            Ok((image, counts))
         }
         Err(refusal) => {
             let w = refusal.warning();
@@ -561,7 +612,13 @@ pub fn jpx_decode(
 /// The [`Refusal`] the decode stopped on.
 pub fn jpx_decode_attributed(input: &[u8], limits: &Limits) -> Result<JpxImage, Refusal> {
     let mut clamped = false;
-    decode_inner(input, limits, &mut clamped)
+    decode_inner(
+        input,
+        limits,
+        &JpxRequest::default(),
+        &mut clamped,
+        &mut JpxCounts::default(),
+    )
 }
 
 /// What a JPEG 2000 file says about itself before one sample is decoded.
@@ -637,7 +694,13 @@ pub fn jpx_header(input: &[u8], limits: &Limits) -> Result<JpxHeader, Refusal> {
     })
 }
 
-fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<JpxImage, Refusal> {
+fn decode_inner(
+    input: &[u8],
+    limits: &Limits,
+    request: &JpxRequest,
+    clamped: &mut bool,
+    counts: &mut JpxCounts,
+) -> Result<JpxImage, Refusal> {
     let container = boxes::parse(input)?;
     let stream = codestream::parse(container.codestream)?;
     stream.check_budget(limits)?;
@@ -651,12 +714,25 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
     // that is missing, where "tier-2 and everything after it" named five and
     // would have gone on naming five after tier-2 was written.
     let mut tiles = tier2::decode_tiles(&stream)?;
+    // The levels dropped: the request's, clamped to the fewest any
+    // tile-component has, so every plane comes out at one scale and no
+    // tile-component is asked for a resolution it does not have.
+    let fewest = tiles
+        .iter()
+        .flat_map(|tile| tile.components.iter())
+        .map(|component| component.resolutions.len().saturating_sub(1))
+        .min()
+        .unwrap_or(0);
+    let discard = request
+        .discard
+        .min(u8::try_from(fewest).unwrap_or(MAX_JPX_LEVELS));
     // Tier-1 runs here for the same reason tier-2 does: it is where the
     // second integrity check lives. A stream that signalled segmentation
     // symbols has told the decoder what every cleanup pass must end with, so
     // a code-block that has drifted is named here rather than handed on as
-    // plausible coefficients.
-    tier1::decode_tiles(&stream, &mut tiles)?;
+    // plausible coefficients. A dropped resolution's code-blocks are not
+    // decoded at all.
+    counts.code_blocks_decoded += tier1::decode_tiles(&stream, &mut tiles, discard)?;
 
     // Annex I's boxes and Annex A's components together decide what a channel
     // *is*, and that has to be settled before a single sample is written: a
@@ -688,8 +764,11 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
         return Err(Refusal::Budget("output colour channels"));
     }
 
-    let width = stream.siz.width();
-    let height = stream.siz.height();
+    // T.800 B.5: the image a decode dropping `discard` levels returns lies
+    // on the reference grid reduced by `2^discard`, every coordinate
+    // `ceil(x / 2^discard)` — the image area's and each tile's alike.
+    let grid = Grid::reduced(&stream.siz, discard);
+    let (width, height) = (grid.width, grid.height);
     let stride = plan.colour.len();
     let wide = usize::from(precision > 8) + 1;
     // Re-spent here rather than trusted from `check_budget`, because a
@@ -715,18 +794,20 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
         // Every component of the tile at once, because G.2's transform reads
         // three planes and applying it one plane at a time is not a thing
         // that can be done.
-        let mut planes = wavelet::reconstruct_tile(&stream, tile, clamped)?;
+        let mut planes = wavelet::reconstruct_tile(&stream, tile, discard, clamped)?;
+        counts.levels_synthesised += wavelet::levels_synthesised(tile, discard);
         for (c, plane) in planes.iter_mut().enumerate() {
             let component = &stream.siz.components[c];
             // G.1, and *after* G.2 rather than before it — which is what
             // `reconstruct_tile` having already run makes true here.
             wavelet::level_shift(plane, component.precision, component.signed);
         }
-        let bounds = stream.siz.tile_bounds(u32::from(tile.index));
+        let bounds = grid.tile(stream.siz.tile_bounds(u32::from(tile.index)));
         for (k, channel) in plan.colour.iter().enumerate() {
             blit(
                 &planes,
                 &stream.siz,
+                &grid,
                 bounds,
                 *channel,
                 palette,
@@ -742,6 +823,7 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
             blit(
                 &planes,
                 &stream.siz,
+                &grid,
                 bounds,
                 channel,
                 palette,
@@ -767,7 +849,49 @@ fn decode_inner(input: &[u8], limits: &Limits, clamped: &mut bool) -> Result<Jpx
             premultiplied: plan.premultiplied,
             samples,
         }),
+        discard,
     })
+}
+
+/// The image area on the reference grid a decode writes into: the full grid
+/// at no discard, and T.800 B.5's grid reduced by `2^d` at a discard of `d`.
+struct Grid {
+    /// The reduced `XOsiz` and `YOsiz`: where the image area starts.
+    x0: u32,
+    y0: u32,
+    /// The reduced image's size.
+    width: u32,
+    height: u32,
+    discard: u8,
+}
+
+impl Grid {
+    /// `siz`'s image area reduced by `2^discard`.
+    fn reduced(siz: &codestream::Siz, discard: u8) -> Grid {
+        let (x0, y0) = (reduce(siz.xosiz, discard), reduce(siz.yosiz, discard));
+        Grid {
+            x0,
+            y0,
+            width: reduce(siz.xsiz, discard).saturating_sub(x0),
+            height: reduce(siz.ysiz, discard).saturating_sub(y0),
+            discard,
+        }
+    }
+
+    /// A tile's bounds on the full reference grid, reduced as the image's
+    /// are.
+    fn tile(&self, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
+        let d = self.discard;
+        (reduce(x0, d), reduce(y0, d), reduce(x1, d), reduce(y1, d))
+    }
+}
+
+/// `ceil(v / 2^d)`, B.5's reduction of one reference-grid coordinate. `d` is
+/// at most [`MAX_JPX_LEVELS`], so the divisor fits `u64`.
+fn reduce(v: u32, d: u8) -> u32 {
+    let divisor = 1u64 << d.min(MAX_JPX_LEVELS);
+    // The quotient of a `u32` by at least one fits `u32`.
+    u64::from(v).div_ceil(divisor) as u32
 }
 
 /// Where one channel's samples are going.
@@ -850,9 +974,16 @@ fn normalise(value: i32, from: u8, to: u8, signed: bool) -> u32 {
 /// can map below the component's own first column. Reading the nearest real
 /// sample is what replication means at an edge; reading zero would put a
 /// black line down the left of every such tile.
+///
+/// On a reduced grid (`grid`'s discard of `d`) the same rule runs at the
+/// lower scale: `(x0, y0, x1, y1)` is the tile reduced as B.5 reduces it, the
+/// plane is resolution `N_L - d`'s, and a reduced reference sample `x`
+/// reads component sample `floor(x / XRsiz)` of it, as the full grid's `x`
+/// reads `floor(x / XRsiz)` of the full plane.
 fn blit(
     planes: &[wavelet::Plane],
     siz: &codestream::Siz,
+    grid: &Grid,
     (x0, y0, x1, y1): (u32, u32, u32, u32),
     channel: colour::Channel,
     palette: Option<&boxes::Palette>,
@@ -871,10 +1002,9 @@ fn blit(
         u32::from(component.dx).max(1),
         u32::from(component.dy).max(1),
     );
-    let width = siz.width();
-    let height = siz.height();
+    let (width, height) = (grid.width, grid.height);
     for y in y0..y1 {
-        let Some(py) = y.checked_sub(siz.yosiz) else {
+        let Some(py) = y.checked_sub(grid.y0) else {
             continue;
         };
         if py >= height {
@@ -882,7 +1012,7 @@ fn blit(
         }
         let cy = (y / dy).saturating_sub(plane.y0).min(plane.height - 1);
         for x in x0..x1 {
-            let Some(px) = x.checked_sub(siz.xosiz) else {
+            let Some(px) = x.checked_sub(grid.x0) else {
                 continue;
             };
             if px >= width {

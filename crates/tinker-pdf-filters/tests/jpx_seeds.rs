@@ -32,7 +32,9 @@
 
 use std::path::{Path, PathBuf};
 
-use tinker_pdf_filters::{jpx_decode, jpx_header, Capability, FilterError, Limits};
+use tinker_pdf_filters::{
+    jpx_decode_request, jpx_header, Capability, FilterError, JpxRequest, Limits,
+};
 
 /// The seed directory, from this crate rather than from the working directory.
 fn seeds() -> Option<PathBuf> {
@@ -51,8 +53,9 @@ fn boxed(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
 }
 
 /// The target's own reading of its first byte, restated so a seed means here
-/// exactly what it means there.
-fn inputs_of(data: &[u8]) -> (usize, Vec<Vec<u8>>) {
+/// exactly what it means there: its output ceiling, the levels it drops, and
+/// the inputs it decodes.
+fn inputs_of(data: &[u8]) -> (usize, JpxRequest, Vec<Vec<u8>>) {
     let (control, body) = data.split_at(data.len().min(1));
     let knobs = control.first().copied().unwrap_or(0);
     let ceiling = match knobs & 3 {
@@ -60,6 +63,9 @@ fn inputs_of(data: &[u8]) -> (usize, Vec<Vec<u8>>) {
         1 => 1 << 12,
         2 => 1 << 16,
         _ => 1 << 20,
+    };
+    let request = JpxRequest {
+        discard: (knobs >> 3) & 3,
     };
     let mut inputs: Vec<Vec<u8>> = vec![body.to_vec()];
     if knobs & 4 != 0 {
@@ -72,7 +78,7 @@ fn inputs_of(data: &[u8]) -> (usize, Vec<Vec<u8>>) {
         jp2.extend_from_slice(&boxed(b"jp2c", body));
         inputs.push(jp2);
     }
-    (ceiling, inputs)
+    (ceiling, request, inputs)
 }
 
 /// Every seed either decodes into an image its own geometry describes, or
@@ -101,13 +107,13 @@ fn every_committed_seed_decodes_or_refuses_by_name() {
         }
         let data = std::fs::read(&path).expect("a committed seed");
         files += 1;
-        let (ceiling, inputs) = inputs_of(&data);
+        let (ceiling, request, inputs) = inputs_of(&data);
         let limits = Limits::new(ceiling);
         for input in inputs {
             let mut warnings = Vec::new();
             let header = jpx_header(&input, &limits);
-            match jpx_decode(&input, &limits, &mut warnings) {
-                Ok(image) => {
+            match jpx_decode_request(&input, &limits, &request, &mut warnings) {
+                Ok((image, _)) => {
                     // The target's header-agreement assertion, restated.
                     let header = header.unwrap_or_else(|e| {
                         panic!(
@@ -116,16 +122,23 @@ fn every_committed_seed_decodes_or_refuses_by_name() {
                         )
                     });
                     assert_eq!(
-                        (
-                            header.width,
-                            header.height,
-                            header.components,
-                            header.precision
-                        ),
-                        (image.width, image.height, image.components, image.precision),
+                        (header.components, header.precision),
+                        (image.components, image.precision),
                         "{}: the header read and the decode disagree",
                         path.display()
                     );
+                    // The target's reduced-size assertion, restated.
+                    assert!(image.discard <= request.discard, "{}", path.display());
+                    for (full, got) in [(header.width, image.width), (header.height, image.height)]
+                    {
+                        let (full, got) = (u64::from(full), u64::from(got));
+                        let d = u32::from(image.discard);
+                        assert!(
+                            (full >> d..=full.div_ceil(1 << d)).contains(&got),
+                            "{}: a reduced side {got} is no side of {full} halved {d} times",
+                            path.display()
+                        );
+                    }
                     assert_eq!(
                         header.opacity,
                         image.opacity.is_some(),

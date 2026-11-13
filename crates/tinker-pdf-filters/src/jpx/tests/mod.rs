@@ -25,6 +25,7 @@ mod code_block_styles;
 mod colour;
 mod headers;
 mod packed;
+mod reduced;
 mod refusals;
 mod tier1;
 mod tier2;

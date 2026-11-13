@@ -94,8 +94,8 @@ pub use jpeg::{
     JpegQuantisation, JpegSampling, JpegSink, JpegSource, JpegSourceColour,
 };
 pub use jpx::{
-    jpx_decode, jpx_decode_attributed, jpx_header, JpxColour, JpxHeader, JpxImage,
-    Refusal as JpxRefusal,
+    jpx_decode, jpx_decode_attributed, jpx_decode_request, jpx_header, JpxColour, JpxCounts,
+    JpxHeader, JpxImage, JpxRequest, Refusal as JpxRefusal,
 };
 pub use jxr::{
     jxr_decode, JxrChannels, JxrError, JxrImage, JxrPixelFormat, JxrRefusal, JxrWarning,

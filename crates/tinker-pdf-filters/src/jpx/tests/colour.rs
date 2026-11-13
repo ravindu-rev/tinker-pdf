@@ -240,7 +240,7 @@ fn the_fixed_point_ict_tracks_an_f64_reference_of_g22() {
             "{name} is supposed to be an irreversible three-component fixture"
         );
         let mut tiles = tier2::decode_tiles(&stream).expect("tier-2 runs");
-        tier1::decode_tiles(&stream, &mut tiles).expect("tier-1 runs");
+        tier1::decode_tiles(&stream, &mut tiles, 0).expect("tier-1 runs");
 
         let (mut total, mut differing, mut worst) = (0usize, 0usize, 0i32);
         for tile in &tiles {
@@ -248,9 +248,10 @@ fn the_fixed_point_ict_tracks_an_f64_reference_of_g22() {
             let mut fixed = Vec::new();
             let mut reference = Vec::new();
             for c in 0..3 {
-                fixed.push(ladder::<Fixed>(&stream, tile, c, &mut clamped).expect("fixed"));
-                reference
-                    .push(ladder::<Reference>(&stream, tile, c, &mut clamped).expect("reference"));
+                fixed.push(ladder::<Fixed>(&stream, tile, c, 0, &mut clamped).expect("fixed"));
+                reference.push(
+                    ladder::<Reference>(&stream, tile, c, 0, &mut clamped).expect("reference"),
+                );
             }
             assert!(!clamped, "{name} should not reach E.1's clamp");
             colour::inverse_mct(&mut fixed).expect("the fixed MCT runs");

@@ -221,8 +221,8 @@ pub(crate) struct PrecinctBand {
     pub(crate) blocks: Vec<CodeBlock>,
     /// Code-blocks across and down. The tag trees are over this grid, so a
     /// precinct with no code-blocks has trees with no nodes.
-    w: u32,
-    h: u32,
+    pub(crate) w: u32,
+    pub(crate) h: u32,
     /// B.10.4's inclusion tree.
     inclusion: TagTree,
     /// B.10.5's zero-bit-plane tree.
@@ -622,6 +622,36 @@ pub(crate) fn decode_tiles(stream: &Codestream<'_>) -> Result<Vec<Tile>, Refusal
         tiles.push(tile);
     }
     Ok(tiles)
+}
+
+/// Tile `t`'s geometry and the order its packets are read in, as
+/// `(layer, resolution, component, precinct)`, for the test writer that
+/// encodes whole codestreams from chosen coefficients
+/// (`tests::writer::coded`).
+///
+/// Test-only, and the decoder's own geometry and order rather than a second
+/// derivation of them: what that writer is for is holding two paths of this
+/// decoder to each other, a reduced decode against a full one, and a writer
+/// that laid code-blocks out by a rule of its own could only disagree with
+/// the decoder about the layout, which is not what those tests ask.
+#[cfg(test)]
+pub(crate) fn layout_for_test(
+    stream: &Codestream<'_>,
+    t: u32,
+) -> Result<(Tile, Vec<(u16, u8, u16, u32)>), Refusal> {
+    let mut budget = MAX_JPX_CODE_BLOCKS;
+    let index = u16::try_from(t).map_err(|_| Refusal::Budget("tiles"))?;
+    let tile = build_tile(stream, t, index, &mut budget)?;
+    let cod = stream.cod_for(index).clone();
+    let poc = stream.progression_volumes(index);
+    let order = packet_order(stream, &tile, &cod, poc.as_deref(), &mut budget)?;
+    Ok((
+        tile,
+        order
+            .into_iter()
+            .map(|p| (p.layer, p.resolution, p.component, p.precinct))
+            .collect(),
+    ))
 }
 
 /// B.5 to B.7 for one tile: resolutions, subbands, precincts, code-blocks.
