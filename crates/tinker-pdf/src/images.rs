@@ -5,10 +5,11 @@
 //!
 //! # Why neither existing type is this one
 //!
-//! The renderer's `DecodedImage` is RGB by the time it exists: the colour
-//! conversion is the last step of the decode, so a CMYK scan, an indexed
-//! palette and a spot-colour separation all arrive as three bytes a pixel and
-//! the space they were in is gone. The writer's `ImageData` is the other
+//! The renderer's `DecodedImage` is converted colour by the time it exists:
+//! the colour conversion is the last step of the decode, so a CMYK scan, an
+//! indexed palette and a spot-colour separation all arrive as three bytes a
+//! pixel, or a one-bit image as its two converted colours, and the space they
+//! were in is gone. The writer's `ImageData` is the other
 //! direction — what a caller hands the builder — and carries no placement and
 //! no reference. [`PageImage`] is the read side's own: the samples **before**
 //! any conversion, the space they were written in, and where the page put

@@ -1131,23 +1131,40 @@ impl<'a> Writer<'a> {
         }
         let (w, h) = (image.width, image.height);
         let pixels = (w as usize).saturating_mul(h as usize);
-        if pixels == 0 || image.rgb.len() < pixels.saturating_mul(3) {
+        let held = match &image.two_colour {
+            Some(two) => two.samples.len(),
+            None => image.rgb.len() / 3,
+        };
+        if pixels == 0 || held < pixels {
             return;
         }
         let mut rgba = Vec::with_capacity(pixels.saturating_mul(4));
         let tint = state.fill_color;
-        for index in 0..pixels {
-            let alpha = if image.alpha.is_empty() {
-                255
-            } else {
-                image.alpha.get(index).copied().unwrap_or(255)
-            };
-            if image.stencil {
-                rgba.extend_from_slice(&[tint.r, tint.g, tint.b, alpha]);
-            } else {
-                let at = index * 3;
-                rgba.extend_from_slice(image.rgb.get(at..at + 3).unwrap_or(&[0, 0, 0]));
-                rgba.push(alpha);
+        if let Some(two) = &image.two_colour {
+            // A bilevel image is held as its two colours; its PNG is the image
+            // expanded to them, a sample at a time, each with its own alpha.
+            for &sample in two.samples.iter().take(pixels) {
+                let [r, g, b, alpha] = two.colours[usize::from(sample != 0)];
+                if image.stencil {
+                    rgba.extend_from_slice(&[tint.r, tint.g, tint.b, alpha]);
+                } else {
+                    rgba.extend_from_slice(&[r, g, b, alpha]);
+                }
+            }
+        } else {
+            for index in 0..pixels {
+                let alpha = if image.alpha.is_empty() {
+                    255
+                } else {
+                    image.alpha.get(index).copied().unwrap_or(255)
+                };
+                if image.stencil {
+                    rgba.extend_from_slice(&[tint.r, tint.g, tint.b, alpha]);
+                } else {
+                    let at = index * 3;
+                    rgba.extend_from_slice(image.rgb.get(at..at + 3).unwrap_or(&[0, 0, 0]));
+                    rgba.push(alpha);
+                }
             }
         }
         let Some(png) = png(w, h, w as usize * 4, &rgba) else {
@@ -2109,6 +2126,120 @@ mod tests {
         ] {
             assert_eq!(base64(plain.as_bytes()), coded, "{plain:?}");
         }
+    }
+
+    /// **A two-colour image is written as its RGB expansion.**
+    ///
+    /// A bilevel image held as its two colours writes the markup — and so the
+    /// PNG — the same samples expanded to RGB write, for four colour pairs,
+    /// one with a transparent colour each way round, as an image and as a
+    /// stencil in the fill colour, with and without `/Interpolate`. One
+    /// holding fewer samples than its dimensions claim writes nothing, as an
+    /// RGB image short of its samples writes nothing.
+    #[test]
+    fn a_two_colour_image_is_written_as_its_rgb_expansion() {
+        use tinker_pdf_render::TwoColourSamples;
+
+        let mut builder = tinker_pdf_cos::DocumentBuilder::new();
+        builder.add_page(40.0, 30.0, |page| page.fill_rect(1.0, 1.0, 2.0, 2.0, 0.0));
+        let doc = crate::Document::open(builder.finish()).expect("it opens");
+        let page = doc.page(0).expect("a page");
+        let resources = PageResources::new(&page.doc, &page.inner, None);
+        let write = |image: &DecodedImage, state: &GraphicsState| {
+            let mut writer =
+                Writer::new(&resources, Matrix::IDENTITY, &page, &SvgOptions::default());
+            writer.image(image, state);
+            (writer.defs, writer.body)
+        };
+        let state = GraphicsState {
+            fill_color: tinker_pdf_content::Rgb {
+                r: 200,
+                g: 30,
+                b: 90,
+            },
+            ctm: Matrix {
+                a: 26.0,
+                b: 0.0,
+                c: 0.0,
+                d: 18.0,
+                e: 3.0,
+                f: 4.0,
+            },
+            ..GraphicsState::default()
+        };
+
+        let (width, height) = (13u32, 9u32);
+        let samples: Vec<u8> = (0..width * height)
+            .map(|i| u8::from((i * 7 + i / 5) % 3 == 0))
+            .collect();
+        for colours in [
+            [[0, 0, 0, 255], [255, 255, 255, 255]],
+            [[31, 58, 147, 255], [242, 201, 76, 255]],
+            [[0, 0, 0, 255], [0, 0, 0, 0]],
+            [[0, 0, 0, 0], [250, 9, 128, 255]],
+        ] {
+            let mut rgb = Vec::new();
+            let mut alpha = Vec::new();
+            for &sample in &samples {
+                let [r, g, b, a] = colours[usize::from(sample != 0)];
+                rgb.extend_from_slice(&[r, g, b]);
+                alpha.push(a);
+            }
+            for stencil in [false, true] {
+                for interpolate in [false, true] {
+                    let two = DecodedImage {
+                        width,
+                        height,
+                        rgb: Vec::new(),
+                        alpha: Vec::new(),
+                        two_colour: Some(TwoColourSamples {
+                            samples: samples.clone(),
+                            colours,
+                        }),
+                        stencil,
+                        interpolate,
+                    };
+                    let expanded = DecodedImage {
+                        width,
+                        height,
+                        rgb: rgb.clone(),
+                        alpha: alpha.clone(),
+                        two_colour: None,
+                        stencil,
+                        interpolate,
+                    };
+                    let written = write(&two, &state);
+                    assert!(
+                        !written.0.is_empty() && !written.1.is_empty(),
+                        "{colours:?}, stencil {stencil}: the picture is written"
+                    );
+                    assert_eq!(
+                        written,
+                        write(&expanded, &state),
+                        "{colours:?}, stencil {stencil}, interpolate {interpolate}: \
+                         the two forms write different pictures"
+                    );
+                }
+            }
+        }
+
+        let short = DecodedImage {
+            width,
+            height,
+            rgb: Vec::new(),
+            alpha: Vec::new(),
+            two_colour: Some(TwoColourSamples {
+                samples: samples[..samples.len() - 1].to_vec(),
+                colours: [[0, 0, 0, 255], [255, 255, 255, 255]],
+            }),
+            stencil: false,
+            interpolate: false,
+        };
+        assert_eq!(
+            write(&short, &state),
+            (String::new(), String::new()),
+            "a short image writes nothing"
+        );
     }
 
     /// The caller's budget lowers the cap and never raises it — the half of

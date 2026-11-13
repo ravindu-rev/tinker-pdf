@@ -247,10 +247,24 @@ samples are copied, a grey replicated to three, and none is converted
 (`an_eight_bit_device_image_converts_by_identity`). A one-bit image of one
 component — a fax, a JBIG2 region, a one-bit Flate or uncompressed stream, an
 `/ImageMask` — has two samples: what each becomes through `/Decode`, its
-space and a colour key, or a mask's paint, is worked out once, and the image
-is expanded a byte at a time through a 256-entry table of eight samples
-(`one_bit_samples_expand_through_the_table`). Every other image is read a
-sample at a time through its space.
+space and a colour key, or a mask's paint, is worked out once. Such an image
+is held as those two colours and one byte a sample
+(`DecodedImage::two_colour`), each byte of a row expanded to its eight
+samples' bits through a table, and the rasterizer samples it in one channel
+as it would sample its RGB expansion ([rasterizer](rasterizer.md)), so a
+2480 by 3508 scan is held at one byte a sample rather than three or four, and
+so is the copy the image cache hands out on a hit
+(`a_bilevel_image_is_held_at_one_byte_a_sample`,
+`two_colour_samples_are_the_one_bit_expansion`,
+`a_two_colour_image_blits_as_its_rgb_expansion`). A colour key selecting one
+of the two raw values is that colour's alpha of zero. An image under a soft
+mask, which is composed into its alpha a sample at a time, and one whose
+colour key selects both values are held as RGB, expanded a byte at a time
+through a 256-entry table of eight samples
+(`one_bit_samples_expand_through_the_table`); `Page::to_svg` writes a
+two-colour image's PNG as its RGB expansion
+(`a_two_colour_image_is_written_as_its_rgb_expansion`). Every other image is
+read a sample at a time through its space.
 
 **JPEG and JPEG 2000 images** are drawn in the `/ColorSpace` their
 dictionary names (8.9.5) — a codestream's own colour specification gives way

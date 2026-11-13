@@ -38,7 +38,7 @@ use tinker_pdf_raster::{
     geom::{FillRule, Path},
     image::{
         accumulate_image, draw_image, image_bounds_in, image_coverage, ImageDraw, ImageSource,
-        Pyramid, Transform,
+        Pyramid, Transform, TwoColour,
     },
     mesh::{draw_mesh_over, MeshDraw},
     stroke::{stretches, stroke_mapped_with, stroke_with, LineCap, LineJoin, StrokeStyle},
@@ -409,16 +409,30 @@ pub struct Tile {
 }
 
 /// A decoded image, ready to draw.
+///
+/// Held one of two ways: as RGB, three bytes a sample and a byte of opacity
+/// where a mask gives one, or — for an image whose every sample is one of two
+/// colours, a one-component one-bit image — as those two colours and one byte
+/// a sample ([`DecodedImage::two_colour`]), which the rasterizer samples in
+/// one channel ([`tinker_pdf_raster::TwoColour`]). A 2480 by 3508 scan is
+/// then held at one byte a sample rather than three or four, and so is every
+/// copy a cache hands out.
 #[derive(Clone, Debug)]
 pub struct DecodedImage {
     /// Width in samples.
     pub width: u32,
     /// Height in samples.
     pub height: u32,
-    /// RGB, three bytes per sample, row-major from the top.
+    /// RGB, three bytes per sample, row-major from the top; empty where
+    /// [`Self::two_colour`] holds the samples.
     pub rgb: Vec<u8>,
-    /// Per-sample opacity from a mask; empty means fully opaque.
+    /// Per-sample opacity from a mask; empty means fully opaque. Empty
+    /// where [`Self::two_colour`] holds the samples, whose colours carry
+    /// their own.
     pub alpha: Vec<u8>,
+    /// The image as its two colours and one byte a sample, in place of
+    /// `rgb` and `alpha`; `None` for an image held as RGB.
+    pub two_colour: Option<TwoColourSamples>,
     /// Whether this is a stencil mask (8.9.6.2).
     ///
     /// A stencil carries no colour of its own: it selects where the *current
@@ -433,6 +447,22 @@ pub struct DecodedImage {
     /// screenshot says nothing and means it — so it is carried here rather
     /// than guessed at from the sample count.
     pub interpolate: bool,
+}
+
+/// An image of two colours, decoded: one byte a sample and the two colours
+/// they choose between, the owned form of [`tinker_pdf_raster::TwoColour`].
+///
+/// What a one-component, one-bit image is once its two possible samples have
+/// been converted — a fax, a JBIG2 region, a one-bit Flate or uncompressed
+/// stream, an `/ImageMask` (8.9.6.2), whose paint is opaque and whose rest is
+/// transparent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TwoColourSamples {
+    /// One byte per sample, row-major from the top: zero takes the first of
+    /// [`Self::colours`], any other value the second.
+    pub samples: Vec<u8>,
+    /// Red, green, blue and alpha of a sample of zero, then of any other.
+    pub colours: [[u8; 4]; 2],
 }
 
 /// Where glyph outlines and image data come from, supplied by the caller so
@@ -2604,7 +2634,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 height: image.height,
                 rgb: &image.rgb,
                 alpha: &image.alpha,
-                two_colour: None,
+                // A bilevel image is handed over as it is held, and sampled in
+                // one channel (`TwoColour`).
+                two_colour: image.two_colour.as_ref().map(|two| TwoColour {
+                    samples: &two.samples,
+                    colours: two.colours,
+                }),
             },
             unit_to_device,
             interpolate: image.interpolate,
@@ -4847,6 +4882,7 @@ mod tests {
                 height: 2,
                 rgb: vec![0; 12],
                 alpha: Vec::new(),
+                two_colour: None,
             }))
         }
     }
@@ -5081,6 +5117,7 @@ mod tests {
                 height: 2,
                 rgb: vec![r, g, b, r, g, b, r, g, b, r, g, b],
                 alpha: self.alpha.clone(),
+                two_colour: None,
             }))
         }
     }
@@ -5110,6 +5147,7 @@ mod tests {
                     255, 255, 255, 0, 0, 0,
                 ],
                 alpha: Vec::new(),
+                two_colour: None,
             }))
         }
     }
@@ -5147,6 +5185,146 @@ mod tests {
             "with it they are blended: {} distinct values",
             smoothed.len()
         );
+    }
+
+    /// A source whose `Im0` and `Im1` are one bilevel image, held as its two
+    /// colours or as their RGB expansion.
+    struct Bilevel {
+        two_colour: bool,
+        stencil: bool,
+        interpolate: bool,
+        colours: [[u8; 4]; 2],
+        width: u32,
+        height: u32,
+        samples: Vec<u8>,
+    }
+
+    impl GlyphSource for Bilevel {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            None
+        }
+        fn image(&self, name: &[u8]) -> Result<Option<DecodedImage>, String> {
+            if name != b"Im0" && name != b"Im1" {
+                return Ok(None);
+            }
+            let (width, height) = (self.width, self.height);
+            let (stencil, interpolate) = (self.stencil, self.interpolate);
+            if self.two_colour {
+                return Ok(Some(DecodedImage {
+                    width,
+                    height,
+                    rgb: Vec::new(),
+                    alpha: Vec::new(),
+                    two_colour: Some(TwoColourSamples {
+                        samples: self.samples.clone(),
+                        colours: self.colours,
+                    }),
+                    stencil,
+                    interpolate,
+                }));
+            }
+            let mut rgb = Vec::new();
+            let mut alpha = Vec::new();
+            for &sample in &self.samples {
+                let [r, g, b, a] = self.colours[usize::from(sample != 0)];
+                rgb.extend_from_slice(&[r, g, b]);
+                alpha.push(a);
+            }
+            Ok(Some(DecodedImage {
+                width,
+                height,
+                rgb,
+                alpha,
+                two_colour: None,
+                stencil,
+                interpolate,
+            }))
+        }
+    }
+
+    /// **`blit` draws a bilevel image held as two colours as its RGB
+    /// expansion.**
+    ///
+    /// One 23 by 17 image of runs and noise — some of its bytes neither 0 nor
+    /// 1, and its buffer cut short in one case — drawn magnified, minified,
+    /// as a run of two abutting strips, rotated and past 128:1, as an image
+    /// and as a stencil in the fill colour and its ink, onto an RGB canvas
+    /// and an ink one, for four colour pairs — one with a transparent colour
+    /// each way round — and both values of `/Interpolate`: the canvases are
+    /// byte for byte the same, and so are the warnings.
+    #[test]
+    fn a_two_colour_image_blits_as_its_rgb_expansion() {
+        let (width, height) = (23u32, 17u32);
+        let mut state = 7u32;
+        let full: Vec<u8> = (0..width * height)
+            .map(|i| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                match i % 9 {
+                    0..=3 => u8::from((i / 4) % 3 == 0),
+                    4 => (state >> 24) as u8,
+                    _ => u8::from(state >> 31 == 1),
+                }
+            })
+            .collect();
+        let content: &[u8] = b"0.1 0.9 0.6 0.05 k \
+            q 46 0 0 34 2.3 61.1 cm /Im0 Do Q \
+            q 11.5 0 0 8.5 51.7 80.2 cm /Im0 Do Q \
+            q 7 0 0 5 60 60 cm /Im1 Do Q q 7 0 0 5 67 60 cm /Im1 Do Q \
+            q 20 11 -11 20 30 5 cm /Im0 Do Q \
+            q 0.1 0 0 0.1 70.3 30.4 cm /Im0 Do Q \
+            q 30 0 0 20 50 2 cm /Im0 Do Q";
+        let pairs = [
+            [[0, 0, 0, 255], [255, 255, 255, 255]],
+            [[31, 58, 147, 255], [242, 201, 76, 255]],
+            [[0, 0, 0, 255], [0, 0, 0, 0]],
+            [[0, 0, 0, 0], [250, 9, 128, 255]],
+        ];
+        let mut renders = 0;
+        for stencil in [false, true] {
+            for interpolate in [false, true] {
+                for colours in pairs {
+                    for samples in [&full[..], &full[..full.len() * 2 / 3]] {
+                        for format in [PixelFormat::Rgb8, PixelFormat::CmykA8] {
+                            let render = |two_colour: bool| {
+                                let source = Bilevel {
+                                    two_colour,
+                                    stencil,
+                                    interpolate,
+                                    colours,
+                                    width,
+                                    height,
+                                    samples: samples.to_vec(),
+                                };
+                                let background = if format == PixelFormat::CmykA8 {
+                                    Color::TRANSPARENT
+                                } else {
+                                    Color::WHITE
+                                };
+                                let canvas = Canvas::new(96, 96, format, background);
+                                let mut renderer =
+                                    Renderer::new(canvas, page_transform(96.0, 1.0), &source);
+                                interpret(content, Matrix::IDENTITY, &mut renderer, &NoFonts);
+                                let (canvas, warnings) = renderer.finish();
+                                (canvas.data, warnings)
+                            };
+                            let (two, rgb) = (render(true), render(false));
+                            assert!(
+                                two == rgb,
+                                "stencil {stencil}, interpolate {interpolate}, colours \
+                                 {colours:?}, {} samples on {format:?}: the two forms part",
+                                samples.len()
+                            );
+                            assert!(
+                                two.0.iter().any(|byte| *byte != two.0[0]),
+                                "the draws painted something"
+                            );
+                            renders += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(renders, 64);
     }
 
     fn render_with(content: &[u8], size: u32, source: &OneImage) -> (Canvas, Vec<RenderWarning>) {

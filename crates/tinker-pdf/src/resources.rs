@@ -23,7 +23,8 @@ use tinker_pdf_filters::{
 use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
 use tinker_pdf_raster::canvas::{Canvas, Color};
 use tinker_pdf_render::{
-    DecodedImage, FontIdentity, GlyphSource, Mesh, MeshParams, PatternPaint, Shading, TilingPattern,
+    DecodedImage, FontIdentity, GlyphSource, Mesh, MeshParams, PatternPaint, Shading,
+    TilingPattern, TwoColourSamples,
 };
 
 use crate::fonts::{self, FontProvider, FontRequest};
@@ -766,36 +767,29 @@ fn identity_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<Vec<u8>> {
     Some(rgb)
 }
 
-/// A one-component, one-bit image — a fax, a JBIG2 region, a one-bit Flate or
-/// uncompressed stream, an `/ImageMask` — expanded a byte at a time through a
-/// table, or `None` where the loop has to read the samples.
+/// What the sample loop makes of the two samples of a one-component, one-bit
+/// image — each one's colour, and its alpha, 255 where the image carries none
+/// — or `None` for any other image.
 ///
 /// Such an image has two samples, and everything the loop makes of one is a
 /// function of its bit: the component through `/Decode` by [`component`], the
 /// colour through `ColorSpace::to_rgb`, a mask's paint as that component
 /// below one half (8.9.6.2), and a colour key's test, which is on the raw bit
 /// (8.9.6.4). So the two outcomes are worked out once, by those same
-/// expressions, and a 256-entry table holds each byte's eight samples. A row
-/// begins on a byte (8.9.3), so a row reads `ceil(w / 8)` bytes and keeps its
-/// first `w` samples, and a byte past the stream's end reads as zero, as
-/// [`read_bits`] reads it.
-fn one_bit_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<(Vec<u8>, Vec<u8>)> {
+/// expressions, for [`one_bit_pixels`] and [`two_colour_pixels`] alike.
+fn one_bit_outcomes(layout: &SampleLayout<'_>) -> Option<[([u8; 3], u8); 2]> {
     let SampleLayout {
-        width,
-        height,
         bpc,
         n,
         space,
         decode,
         mask,
         color_key,
+        ..
     } = *layout;
     if bpc != 1 || n != 1 {
         return None;
     }
-
-    // The two outcomes, a sample of 0 and a sample of 1: its colour, and its
-    // alpha where the image carries one.
     let outcome = |bit: u32| -> ([u8; 3], u8) {
         let value = component(space, decode, 0, bit, 1.0);
         if mask {
@@ -809,7 +803,26 @@ fn one_bit_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<(Vec<u8>, Ve
         });
         ([r, g, b], if keyed { 0 } else { 255 })
     };
-    let outcomes = [outcome(0), outcome(1)];
+    Some([outcome(0), outcome(1)])
+}
+
+/// A one-component, one-bit image — a fax, a JBIG2 region, a one-bit Flate or
+/// uncompressed stream, an `/ImageMask` — expanded a byte at a time through a
+/// table, or `None` where the loop has to read the samples.
+///
+/// The two outcomes are [`one_bit_outcomes`]'s, and a 256-entry table holds
+/// each byte's eight samples. A row begins on a byte (8.9.3), so a row reads
+/// `ceil(w / 8)` bytes and keeps its first `w` samples, and a byte past the
+/// stream's end reads as zero, as [`read_bits`] reads it.
+fn one_bit_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<(Vec<u8>, Vec<u8>)> {
+    let outcomes = one_bit_outcomes(layout)?;
+    let SampleLayout {
+        width,
+        height,
+        mask,
+        color_key,
+        ..
+    } = *layout;
     let with_alpha = mask || color_key.is_some();
 
     // Each byte's eight samples, the most significant bit first.
@@ -851,6 +864,101 @@ fn one_bit_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<(Vec<u8>, Ve
         }
     }
     Some((rgb, alpha))
+}
+
+/// Each byte's eight one-bit samples, the most significant bit first, as
+/// bytes of 0 and 1.
+static BIT_SAMPLES: [[u8; 8]; 256] = {
+    let mut table = [[0u8; 8]; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut sample = 0;
+        while sample < 8 {
+            table[byte][sample] = ((byte >> (7 - sample)) & 1) as u8;
+            sample += 1;
+        }
+        byte += 1;
+    }
+    table
+};
+
+/// A one-component, one-bit image held as its two colours and one byte a
+/// sample, or `None` where it is held as RGB.
+///
+/// The colours are [`one_bit_outcomes`]'s — the two [`one_bit_pixels`]
+/// expands, each with its alpha — and a byte of a row becomes its eight
+/// samples' bits through [`BIT_SAMPLES`]: a row reads `ceil(w / 8)` bytes and
+/// keeps its first `w` samples, and a byte past the stream's end reads as
+/// zero, as [`read_bits`] reads it. So the image expanded to RGB is the image
+/// [`one_bit_pixels`] gives, sample for sample, and the rasterizer draws the
+/// one exactly as the other (`tinker_pdf_raster::TwoColour`) at a third or a
+/// quarter of the bytes. A colour key that selects one raw value is that
+/// colour's alpha of zero; one that selects both keeps the RGB form, the
+/// form's rule in `docs/design/image-edges.md` (P-08).
+fn two_colour_pixels(data: &[u8], layout: &SampleLayout<'_>) -> Option<TwoColourSamples> {
+    let [(zero, zero_alpha), (one, one_alpha)] = one_bit_outcomes(layout)?;
+    // A mask reads no colour key, so only an image's key can select both.
+    let keys_both = !layout.mask
+        && layout.color_key.is_some_and(|ranges| {
+            let (lo, hi) = ranges.first().copied().unwrap_or((1, 0));
+            lo == 0 && hi >= 1
+        });
+    if keys_both {
+        return None;
+    }
+
+    let (width, height) = (layout.width as usize, layout.height as usize);
+    let row_bytes = width.div_ceil(8);
+    let mut samples = Vec::with_capacity(width.saturating_mul(height));
+    for row in 0..height {
+        let mut left = width;
+        for at in 0..row_bytes {
+            let byte = row
+                .checked_mul(row_bytes)
+                .and_then(|start| start.checked_add(at))
+                .and_then(|index| data.get(index))
+                .copied()
+                .unwrap_or(0);
+            let take = left.min(8);
+            samples.extend_from_slice(&BIT_SAMPLES[usize::from(byte)][..take]);
+            left -= take;
+        }
+    }
+    Some(TwoColourSamples {
+        samples,
+        colours: [
+            [zero[0], zero[1], zero[2], zero_alpha],
+            [one[0], one[1], one[2], one_alpha],
+        ],
+    })
+}
+
+/// How a decode holds a one-component, one-bit image.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SampleForm {
+    /// As its two colours and one byte a sample, where the image allows it
+    /// ([`two_colour_pixels`]).
+    TwoColour,
+    /// As RGB whatever the image: an image a soft mask applies to, and the
+    /// soft mask itself, which [`apply_soft_mask`] reads and writes as RGB.
+    Rgb,
+}
+
+/// An image's samples as a decode holds them, `(rgb, alpha, two_colour)`: as
+/// two colours and one byte a sample where `form` and the image allow it,
+/// and otherwise as [`image_pixels`] gives them.
+fn decoded_pixels(
+    data: &[u8],
+    layout: &SampleLayout<'_>,
+    form: SampleForm,
+) -> (Vec<u8>, Vec<u8>, Option<TwoColourSamples>) {
+    if form == SampleForm::TwoColour {
+        if let Some(two) = two_colour_pixels(data, layout) {
+            return (Vec::new(), Vec::new(), Some(two));
+        }
+    }
+    let (rgb, alpha) = image_pixels(data, layout);
+    (rgb, alpha, None)
 }
 
 /// The sample loop, a sample at a time: each component read through
@@ -4432,7 +4540,15 @@ impl PageResources {
             return Err(String::from_utf8_lossy(name).into_owned());
         };
         let label = String::from_utf8_lossy(name).into_owned();
-        let mut image = self.decode_image_at(&dict, reference, &label)?;
+        // An image a soft mask applies to is held as RGB, because the mask is
+        // composed into its alpha a sample at a time; any other one-bit image
+        // of one component is held as its two colours.
+        let form = if dict.get_ref(self.name(b"SMask")).is_some() {
+            SampleForm::Rgb
+        } else {
+            SampleForm::TwoColour
+        };
+        let mut image = self.decode_image_at(&dict, reference, &label, form)?;
 
         // 11.6.5.3: /SMask is a greyscale image whose samples are this one's
         // opacity. Without it every soft-masked image — a drop shadow, a
@@ -4717,6 +4833,7 @@ impl PageResources {
             alpha: Vec::new(),
             stencil: false,
             interpolate,
+            two_colour: None,
         })
     }
 
@@ -4834,6 +4951,7 @@ impl PageResources {
             alpha,
             stencil: false,
             interpolate,
+            two_colour: None,
         })
     }
 
@@ -4988,12 +5106,14 @@ impl PageResources {
         .map_err(|e| format!("{e:?}"))
     }
 
-    /// Decodes an image from its dictionary, wherever that came from.
+    /// Decodes an image from its dictionary, wherever that came from, a
+    /// one-bit image of one component held as `form` asks.
     fn decode_image_at(
         &self,
         dict: &Dict,
         reference: tinker_pdf_cos::ObjRef,
         name: &str,
+        form: SampleForm,
     ) -> Result<DecodedImage, String> {
         let dict = dict.clone();
         let name = name.as_bytes();
@@ -5102,7 +5222,7 @@ impl PageResources {
         // because it is a test on the *raw* samples.
         let color_key = self.color_key(&dict, n, bpc);
 
-        let (rgb, alpha) = image_pixels(
+        let (rgb, alpha, two_colour) = decoded_pixels(
             &data,
             &SampleLayout {
                 width,
@@ -5114,6 +5234,7 @@ impl PageResources {
                 mask: is_mask,
                 color_key: color_key.as_deref(),
             },
+            form,
         );
 
         Ok(DecodedImage {
@@ -5123,6 +5244,7 @@ impl PageResources {
             alpha,
             stencil: is_mask,
             interpolate,
+            two_colour,
         })
     }
 
@@ -5376,8 +5498,10 @@ impl PageResources {
         let space = self.inline_space(dict).unwrap_or(ColorSpace::DeviceGray);
         let n = if is_mask { 1 } else { space.components() };
 
-        // An inline image is read with no colour key.
-        let (rgb, alpha) = image_pixels(
+        // An inline image is read with no colour key, and carries no soft
+        // mask (Table 93), so a one-bit image of one component is held as its
+        // two colours.
+        let (rgb, alpha, two_colour) = decoded_pixels(
             &bytes,
             &SampleLayout {
                 width,
@@ -5389,6 +5513,7 @@ impl PageResources {
                 mask: is_mask,
                 color_key: None,
             },
+            SampleForm::TwoColour,
         );
 
         Ok(DecodedImage {
@@ -5398,6 +5523,7 @@ impl PageResources {
             alpha,
             stencil: is_mask,
             interpolate,
+            two_colour,
         })
     }
 
@@ -5426,8 +5552,10 @@ impl PageResources {
         let object = self.doc.get(reference).ok()?;
         let mask = object.as_dict()?.clone();
         // A mask that is itself masked is not a thing the spec allows, and
-        // decoding it through the top-level entry point would recurse.
-        self.decode_image_at(&mask, reference, "SMask").ok()
+        // decoding it through the top-level entry point would recurse. Held
+        // as RGB, which `apply_soft_mask` reads its grey from.
+        self.decode_image_at(&mask, reference, "SMask", SampleForm::Rgb)
+            .ok()
     }
 }
 
@@ -6059,7 +6187,8 @@ fn take_jpx(image: &mut crate::PageImage, jpx: tinker_pdf_filters::JpxImage) {
 /// The mask has its own dimensions and need not match the image's, so it is
 /// sampled by position rather than by index — a 2x2 mask over a 512x512 image
 /// is legal and common, because a mask only has to carry as much detail as its
-/// gradient needs.
+/// gradient needs. Both are held as RGB: an image with a soft mask, and the
+/// mask, are decoded as [`SampleForm::Rgb`].
 fn apply_soft_mask(image: &mut DecodedImage, mask: &DecodedImage) {
     if image.width == 0 || image.height == 0 || mask.width == 0 || mask.height == 0 {
         return;
@@ -6562,6 +6691,328 @@ mod tests {
             }
         }
         assert!(compared > 500_000, "{compared} samples compared");
+    }
+
+    /// **A one-bit image held as its two colours is its RGB form, expanded.**
+    ///
+    /// Every byte value, as rows of every width from one sample to seventeen
+    /// with one row more than the stream holds; DeviceGray and a two-colour
+    /// palette; `/Decode` absent, `[1 0]` and written out as `[0 1]`; as an
+    /// image and as a mask; with no colour key and with keys selecting 0, 1
+    /// and both. Each image held as two colours chooses, sample by sample,
+    /// the colour the RGB form holds and the alpha it holds — opaque where it
+    /// holds none — and holds a byte of 0 or 1 a sample. A key selecting both
+    /// values keeps the RGB form, as does a decode asked for RGB, and an
+    /// image of more than one bit or one component has no two colours.
+    #[test]
+    fn two_colour_samples_are_the_one_bit_expansion() {
+        use super::{decoded_pixels, image_pixels, two_colour_pixels, SampleForm, SampleLayout};
+
+        let bytes: Vec<u8> = (0..=255).collect();
+        let palette = ColorSpace::Indexed {
+            base: Box::new(ColorSpace::DeviceRgb),
+            lookup: vec![31, 58, 147, 242, 201, 76],
+            high: 1,
+        };
+        let spaces = [ColorSpace::DeviceGray, palette];
+        let decodes: [&[(f64, f64)]; 3] = [&[], &[(1.0, 0.0)], &[(0.0, 1.0)]];
+        let both: &[(u32, u32)] = &[(0, 1)];
+        let keys: [Option<&[(u32, u32)]>; 4] = [None, Some(&[(0, 0)]), Some(&[(1, 1)]), Some(both)];
+        let mut compared = 0usize;
+        for width in 1..=17u32 {
+            let row_bytes = width.div_ceil(8) as usize;
+            let height = (bytes.len() / row_bytes) as u32 + 1;
+            let pixels = (width * height) as usize;
+            for space in &spaces {
+                for decode in decodes {
+                    for mask in [false, true] {
+                        for color_key in keys {
+                            let layout = SampleLayout {
+                                width,
+                                height,
+                                bpc: 1,
+                                n: 1,
+                                space,
+                                decode,
+                                mask,
+                                color_key,
+                            };
+                            let what = format!(
+                                "width {width}, {space:?}, /Decode {decode:?}, mask {mask}, \
+                                 key {color_key:?}"
+                            );
+                            let (rgb, alpha) = image_pixels(&bytes, &layout);
+                            assert_eq!(
+                                decoded_pixels(&bytes, &layout, SampleForm::Rgb),
+                                (rgb.clone(), alpha.clone(), None),
+                                "{what}: asked for RGB"
+                            );
+                            let keys_both = !mask && color_key == Some(both);
+                            let Some(two) = two_colour_pixels(&bytes, &layout) else {
+                                assert!(keys_both, "{what}: held as RGB");
+                                assert_eq!(
+                                    decoded_pixels(&bytes, &layout, SampleForm::TwoColour),
+                                    (rgb, alpha, None),
+                                    "{what}: the RGB form stands"
+                                );
+                                continue;
+                            };
+                            assert!(!keys_both, "{what}: a key of both values is RGB");
+                            assert_eq!(two.samples.len(), pixels, "{what}: a byte a sample");
+                            assert!(two.samples.iter().all(|sample| *sample <= 1));
+                            for (index, &sample) in two.samples.iter().enumerate() {
+                                let [r, g, b, a] = two.colours[usize::from(sample != 0)];
+                                assert_eq!(
+                                    rgb.get(index * 3..index * 3 + 3),
+                                    Some(&[r, g, b][..]),
+                                    "{what}: the colour of sample {index}"
+                                );
+                                assert_eq!(
+                                    alpha.get(index).copied().unwrap_or(255),
+                                    a,
+                                    "{what}: the alpha of sample {index}"
+                                );
+                            }
+                            assert_eq!(
+                                decoded_pixels(&bytes, &layout, SampleForm::TwoColour),
+                                (Vec::new(), Vec::new(), Some(two)),
+                                "{what}: the decode holds the two colours"
+                            );
+                            compared += pixels;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(compared > 500_000, "{compared} samples compared");
+
+        // Not one bit of one component: no two colours.
+        for (bpc, n, space) in [
+            (2, 1, ColorSpace::DeviceGray),
+            (8, 1, ColorSpace::DeviceGray),
+            (1, 3, ColorSpace::DeviceRgb),
+        ] {
+            let layout = SampleLayout {
+                width: 9,
+                height: 4,
+                bpc,
+                n,
+                space: &space,
+                decode: &[],
+                mask: false,
+                color_key: None,
+            };
+            assert!(
+                two_colour_pixels(&bytes, &layout).is_none(),
+                "{bpc} bits of {n} components"
+            );
+        }
+    }
+
+    /// A document of bilevel images, one raster many ways, every image 37 by
+    /// 23 samples: `Im0` a JBIG2 generic region, `Im1` a CCITT G4 fax, `Im2`
+    /// one-bit Flate, `Im3` an uncompressed `/ImageMask`, `Im4` a two-colour
+    /// palette, `Im5` one-bit grey under a colour key selecting 0, `Im6` under
+    /// one selecting both, `Im7` under an 8-bit `/SMask`, and `Im8` an 8-bit
+    /// grey image. The raster, packed and 0 for black, comes back too.
+    fn bilevel_document() -> (Vec<u8>, Vec<u8>) {
+        const WIDTH: u32 = 37;
+        const HEIGHT: u32 = 23;
+        let stride = WIDTH.div_ceil(8) as usize;
+        let mut packed = vec![0u8; stride * HEIGHT as usize];
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let black = (x * 3 + y * 5) % 7 < 3 || (x > 20 && y % 4 < 2);
+                if !black {
+                    packed[y as usize * stride + (x / 8) as usize] |= 0x80 >> (x % 8);
+                }
+            }
+        }
+        let fax = tinker_pdf_filters::ccitt_g4_encode(&tinker_pdf_filters::CcittSource {
+            columns: WIDTH,
+            rows: HEIGHT,
+            black_is_1: false,
+            stride,
+            end_of_block: true,
+            data: &packed,
+        })
+        .expect("the raster codes as G4");
+        // T.88 codes 1 for black, in the embedded organisation of Annex D.3: a
+        // page information segment, the region and an end of page.
+        let inverted: Vec<u8> = packed.iter().map(|byte| !byte).collect();
+        let region = tinker_pdf_filters::jbig2_generic_region_segment(
+            &tinker_pdf_filters::Jbig2GenericSource {
+                width: WIDTH,
+                height: HEIGHT,
+                template: 0,
+                tpgdon: true,
+                at: [(3, -1), (-3, -1), (2, -2), (-2, -2)],
+                stride,
+                data: &inverted,
+            },
+            0,
+            0,
+            0,
+        )
+        .expect("the raster codes as a generic region");
+        let segment = |number: u32, kind: u8, data: &[u8]| {
+            let mut out = number.to_be_bytes().to_vec();
+            out.extend_from_slice(&[kind & 0x3F, 0, 1]);
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            out.extend_from_slice(data);
+            out
+        };
+        let mut page_information = WIDTH.to_be_bytes().to_vec();
+        page_information.extend_from_slice(&HEIGHT.to_be_bytes());
+        page_information.extend_from_slice(&[0; 8]);
+        page_information.extend_from_slice(&[0x01, 0, 0]);
+        let mut jbig2 = segment(0, 48, &page_information);
+        jbig2.extend_from_slice(&segment(1, 39, &region));
+        jbig2.extend_from_slice(&segment(2, 49, &[]));
+        let flate = tinker_pdf_filters::zlib_compress(&packed);
+        let grey: Vec<u8> = (0..WIDTH * HEIGHT).map(|i| (i * 7 % 256) as u8).collect();
+
+        let image = |extra: &str, data: &[u8]| {
+            let mut out = format!(
+                "<< /Type /XObject /Subtype /Image /Width {WIDTH} /Height {HEIGHT} {extra} \
+                 /Length {} >>\nstream\n",
+                data.len()
+            )
+            .into_bytes();
+            out.extend_from_slice(data);
+            out.extend_from_slice(b"\nendstream");
+            out
+        };
+        let one_bit = "/ColorSpace /DeviceGray /BitsPerComponent 1";
+        let content = b"q 37 0 0 23 0 0 cm /Im0 Do Q".to_vec();
+        let mut stream = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
+        stream.extend_from_slice(&content);
+        stream.extend_from_slice(b"\nendstream");
+        let objects: Vec<Vec<u8>> = vec![
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+            b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 37 23]\n   \
+              /Resources << /XObject << /Im0 5 0 R /Im1 6 0 R /Im2 7 0 R /Im3 8 0 R \
+              /Im4 9 0 R /Im5 10 0 R /Im6 11 0 R /Im7 12 0 R /Im8 14 0 R >> >>\n   \
+              /Contents 4 0 R >>"
+                .to_vec(),
+            stream,
+            image(&format!("{one_bit} /Filter /JBIG2Decode"), &jbig2),
+            image(
+                &format!(
+                    "{one_bit} /Filter /CCITTFaxDecode \
+                     /DecodeParms << /K -1 /Columns {WIDTH} /Rows {HEIGHT} >>"
+                ),
+                &fax,
+            ),
+            image(&format!("{one_bit} /Filter /FlateDecode"), &flate),
+            image("/ImageMask true /BitsPerComponent 1", &packed),
+            image(
+                "/ColorSpace [/Indexed /DeviceRGB 1 <1f3a93f2c94c>] /BitsPerComponent 1",
+                &packed,
+            ),
+            image(&format!("{one_bit} /Mask [0 0]"), &packed),
+            image(&format!("{one_bit} /Mask [0 1]"), &packed),
+            image(&format!("{one_bit} /SMask 13 0 R"), &packed),
+            image("/ColorSpace /DeviceGray /BitsPerComponent 8", &grey),
+            image("/ColorSpace /DeviceGray /BitsPerComponent 8", &grey),
+        ];
+        let mut out = b"%PDF-1.7\n".to_vec();
+        for (index, object) in objects.iter().enumerate() {
+            out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+            out.extend_from_slice(object);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        (out, packed)
+    }
+
+    /// **A bilevel image is held at one byte a sample.**
+    ///
+    /// The decoded image a JBIG2 region, a CCITT G4 fax and a one-bit Flate
+    /// stream are drawn from holds its two colours and one byte a sample,
+    /// nothing as RGB — and so do an uncompressed `/ImageMask`, a two-colour
+    /// palette, a one-bit image whose colour key selects one value and an
+    /// inline one-bit image — and the copy the image cache hands out on a hit
+    /// is the same. The three codecs decode the one raster to the same
+    /// samples. A one-bit image under a soft mask, or whose colour key
+    /// selects both values, keeps three bytes of colour and one of alpha a
+    /// sample, and an 8-bit grey image its three.
+    #[test]
+    fn a_bilevel_image_is_held_at_one_byte_a_sample() {
+        use tinker_pdf_render::GlyphSource;
+
+        let (bytes, packed) = bilevel_document();
+        let samples = 37 * 23;
+        let doc = crate::Document::open(bytes).expect("it opens");
+        let page = doc.page(0).expect("a page");
+        let res = PageResources::new(&page.doc, &page.inner, None);
+        let held = |image: &tinker_pdf_render::DecodedImage| {
+            image.rgb.len()
+                + image.alpha.len()
+                + image.two_colour.as_ref().map_or(0, |two| two.samples.len())
+        };
+        let decoded = |name: &str| {
+            res.image(name.as_bytes())
+                .unwrap_or_else(|codec| panic!("{name} decodes, not {codec}"))
+                .unwrap_or_else(|| panic!("{name} is an image"))
+        };
+
+        let black_and_white = [[0, 0, 0, 255], [255, 255, 255, 255]];
+        let mut codecs = Vec::new();
+        for (name, colours, stencil) in [
+            ("Im0", black_and_white, false),
+            ("Im1", black_and_white, false),
+            ("Im2", black_and_white, false),
+            ("Im3", [[0, 0, 0, 255], [0, 0, 0, 0]], true),
+            ("Im4", [[31, 58, 147, 255], [242, 201, 76, 255]], false),
+            ("Im5", [[0, 0, 0, 0], [255, 255, 255, 255]], false),
+        ] {
+            let image = decoded(name);
+            assert_eq!(held(&image), samples, "{name}: one byte a sample");
+            assert!(
+                image.rgb.is_empty() && image.alpha.is_empty(),
+                "{name}: nothing held as RGB"
+            );
+            assert_eq!(image.stencil, stencil, "{name}: a stencil or not");
+            let two = image.two_colour.clone().expect("held as two colours");
+            assert_eq!(two.colours, colours, "{name}: its two colours");
+            let hit = decoded(name);
+            assert_eq!(held(&hit), samples, "{name}: the cache's copy");
+            assert_eq!(hit.two_colour, Some(two.clone()), "{name}: is the decode");
+            codecs.push(two.samples);
+        }
+        assert!(
+            codecs[..3].iter().all(|samples| *samples == codecs[0]),
+            "JBIG2, G4 and Flate decode the one raster alike"
+        );
+        assert_eq!(codecs[3], codecs[0], "and so does the uncompressed mask");
+
+        for name in ["Im6", "Im7"] {
+            let image = decoded(name);
+            assert!(image.two_colour.is_none(), "{name}: held as RGB");
+            assert_eq!(held(&image), 4 * samples, "{name}: colour and alpha");
+        }
+        let grey = decoded("Im8");
+        assert!(grey.two_colour.is_none());
+        assert_eq!(held(&grey), 3 * samples, "an 8-bit grey image is RGB");
+
+        let inline = res
+            .inline_image(b"/W 37 /H 23 /CS /G /BPC 1", &packed)
+            .expect("the inline image decodes")
+            .expect("it is an image");
+        assert_eq!(held(&inline), samples, "an inline one-bit image");
+        assert_eq!(
+            inline.two_colour.map(|two| two.samples),
+            Some(codecs[0].clone()),
+            "the same raster again"
+        );
     }
 
     fn expand(dict: &str) -> String {
