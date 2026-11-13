@@ -290,6 +290,12 @@ pub(crate) struct Census {
     /// Sub-scanlines of the region's rows whose crossings do not close: their
     /// windings sum to a value the rule calls inside.
     pub(crate) unclosed: u64,
+    /// Pixels of the region's rows holding a crossing on any of their
+    /// sub-scanlines.
+    pub(crate) cells: u64,
+    /// Runs of pixels holding none, between those and at either end of each
+    /// row.
+    pub(crate) runs: u64,
 }
 
 /// The [`Census`] of a fill over the given region.
@@ -312,7 +318,9 @@ pub(crate) fn census(
     let right = origin + i64::from(width) * 256;
     let (mut active, mut pending) = (Vec::new(), 0usize);
     let mut pixels: Vec<i64> = Vec::new();
+    let mut row_pixels: Vec<i64> = Vec::new();
     for row in active_rows(&edges, y0, height) {
+        row_pixels.clear();
         let row_top = y0.saturating_add(row as i32).saturating_mul(SAMPLES);
         for sample in 0..SAMPLES {
             let sub = row_top.saturating_add(sample);
@@ -337,6 +345,7 @@ pub(crate) fn census(
                 census.unclosed += 1;
             }
             pixels.sort_unstable();
+            row_pixels.extend_from_slice(&pixels);
             let mut at = 0;
             while let Some(&pixel) = pixels.get(at) {
                 let run = pixels
@@ -347,6 +356,19 @@ pub(crate) fn census(
                 }
                 at += run.max(1);
             }
+        }
+        row_pixels.sort_unstable();
+        row_pixels.dedup();
+        census.cells += row_pixels.len() as u64;
+        let mut at = 0;
+        for pixel in &row_pixels {
+            if *pixel > at {
+                census.runs += 1;
+            }
+            at = pixel + 1;
+        }
+        if at < i64::from(width) {
+            census.runs += 1;
         }
     }
     census

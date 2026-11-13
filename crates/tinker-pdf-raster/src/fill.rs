@@ -559,7 +559,7 @@ impl FillScratch {
 
     /// The capacity of every buffer, for [`FillScratch::grown_from`].
     #[cfg(test)]
-    fn capacities(&self) -> [usize; 11] {
+    fn capacities(&self) -> [usize; 12] {
         [
             self.points.capacity(),
             self.ends.capacity(),
@@ -568,6 +568,7 @@ impl FillScratch {
             self.next.capacity(),
             self.active.capacity(),
             self.row.cells.capacity(),
+            self.row.touched.capacity(),
             self.row.heads.capacity(),
             self.row.later.capacity(),
             self.sweep.accumulator.capacity(),
@@ -578,7 +579,7 @@ impl FillScratch {
     /// How many buffers have grown since `held` was taken: each made at least
     /// one allocation, and a fill makes none anywhere else but its mask.
     #[cfg(test)]
-    fn grown_from(&self, held: &[usize; 11]) -> u64 {
+    fn grown_from(&self, held: &[usize; 12]) -> u64 {
         self.capacities()
             .iter()
             .zip(held)
@@ -661,6 +662,8 @@ struct Later {
 struct Row {
     /// One a pixel of the region's width, clear between rows.
     cells: Vec<Cell>,
+    /// A bit a cell, set where the cell holds a crossing; clear between rows.
+    touched: Vec<u64>,
     /// Each lane's winding from the crossings left of the region.
     left: [i32; 16],
     /// Blocks of sixteen list heads, one block a crowded cell.
@@ -677,6 +680,7 @@ impl Default for Row {
     fn default() -> Row {
         Row {
             cells: Vec::new(),
+            touched: Vec::new(),
             left: [0; 16],
             heads: Vec::new(),
             later: Vec::new(),
@@ -692,6 +696,7 @@ impl Row {
     /// changes.
     fn prepare(&mut self, width: usize) {
         self.cells.resize(width, Cell::CLEAR);
+        self.touched.resize(width.div_ceil(64), 0);
         self.left = [0; 16];
         self.heads.clear();
         self.later.clear();
@@ -711,9 +716,13 @@ impl Row {
         if rel >= units {
             return;
         }
-        let Some(cell) = self.cells.get_mut((rel >> 8) as usize) else {
+        let index = (rel >> 8) as usize;
+        let Some(cell) = self.cells.get_mut(index) else {
             return;
         };
+        if let Some(bits) = self.touched.get_mut(index >> 6) {
+            *bits |= 1 << (index & 63);
+        }
         let off = (rel & 255) as u8;
         let bit = 1u16 << lane;
         if cell.lanes & bit == 0 {
@@ -740,6 +749,13 @@ impl Row {
     /// Walks the row's cells left to right into `out`, one byte a cell, and
     /// leaves every cell clear.
     ///
+    /// **Only the cells holding a crossing are visited.** Between two of them
+    /// no lane's winding changes, so every pixel there has the same byte; the
+    /// walk jumps from one set bit of [`Row::touched`] to the next and writes
+    /// the run between as one slice fill (`solid`). A run ends at the first
+    /// cell holding a crossing on any lane, so a pixel that reaches 255 only by
+    /// the clamp still goes through its cell.
+    ///
     /// The walk carries each lane's winding at its position and the count of
     /// lanes the rule calls inside. A cell with no crossing is `16 × inside`:
     /// each lane inside covers its 256 units. A cell with crossings starts
@@ -754,6 +770,7 @@ impl Row {
     fn convert(&mut self, rule: FillRule, out: &mut [u8]) {
         let Row {
             cells,
+            touched,
             left,
             heads,
             later,
@@ -762,62 +779,90 @@ impl Row {
         } = self;
         let mut winding = *left;
         let mut inside: i32 = winding.iter().map(|w| inside_as(*w, rule)).sum();
-        for (cell, byte) in cells.iter_mut().zip(out.iter_mut()) {
-            if cell.lanes == 0 {
-                *byte = (16 * inside).min(255) as u8;
-                continue;
-            }
-            let mut total = 256 * inside;
-            let mut lanes = cell.lanes;
-            while lanes != 0 {
-                let lane = (lanes.trailing_zeros() & 15) as usize;
-                lanes &= lanes - 1;
-                if cell.multi & (1 << lane) == 0 {
-                    let before = inside_as(winding[lane], rule);
-                    winding[lane] += i32::from(cell.w[lane]);
-                    let change = inside_as(winding[lane], rule) - before;
-                    total += (256 - i32::from(cell.off[lane])) * change;
-                    inside += change;
+        // The first pixel not yet written.
+        let mut at = 0;
+        for (word, bits) in touched.iter_mut().enumerate() {
+            let mut held = core::mem::take(bits);
+            while held != 0 {
+                let index = word * 64 + held.trailing_zeros() as usize;
+                held &= held - 1;
+                solid(out, at, index, inside);
+                at = index + 1;
+                let (Some(cell), Some(byte)) = (cells.get_mut(index), out.get_mut(index)) else {
                     continue;
-                }
-
-                // A crowded lane: its windings bucketed by offset.
-                let mut put = |off: u8, w: i8| {
-                    table[usize::from(off)] += i32::from(w);
-                    map[usize::from(off >> 6)] |= 1 << (off & 63);
                 };
-                put(cell.off[lane], cell.w[lane]);
-                let mut crowd = 1u64;
-                let mut at = heads
-                    .get(cell.more as usize * 16 + lane)
-                    .copied()
-                    .unwrap_or(NONE);
-                while let Some(item) = later.get(at as usize) {
-                    put(item.off, item.w);
-                    crowd += 1;
-                    at = item.next;
-                }
-                count::shared(crowd);
-                for (word, bits) in map.iter_mut().enumerate() {
-                    let mut taken = core::mem::take(bits);
-                    while taken != 0 {
-                        let off = word * 64 + taken.trailing_zeros() as usize;
-                        taken &= taken - 1;
-                        let d = core::mem::take(&mut table[off & 255]);
+                count::converted(1);
+
+                let mut total = 256 * inside;
+                let mut lanes = cell.lanes;
+                while lanes != 0 {
+                    let lane = (lanes.trailing_zeros() & 15) as usize;
+                    lanes &= lanes - 1;
+                    if cell.multi & (1 << lane) == 0 {
                         let before = inside_as(winding[lane], rule);
-                        winding[lane] += d;
+                        winding[lane] += i32::from(cell.w[lane]);
                         let change = inside_as(winding[lane], rule) - before;
-                        total += (256 - off as i32) * change;
+                        total += (256 - i32::from(cell.off[lane])) * change;
                         inside += change;
+                        continue;
+                    }
+
+                    // A crowded lane: its windings bucketed by offset.
+                    let mut put = |off: u8, w: i8| {
+                        table[usize::from(off)] += i32::from(w);
+                        map[usize::from(off >> 6)] |= 1 << (off & 63);
+                    };
+                    put(cell.off[lane], cell.w[lane]);
+                    let mut crowd = 1u64;
+                    let mut next = heads
+                        .get(cell.more as usize * 16 + lane)
+                        .copied()
+                        .unwrap_or(NONE);
+                    while let Some(item) = later.get(next as usize) {
+                        put(item.off, item.w);
+                        crowd += 1;
+                        next = item.next;
+                    }
+                    count::shared(crowd);
+                    for (word, bits) in map.iter_mut().enumerate() {
+                        let mut taken = core::mem::take(bits);
+                        while taken != 0 {
+                            let off = word * 64 + taken.trailing_zeros() as usize;
+                            taken &= taken - 1;
+                            let d = core::mem::take(&mut table[off & 255]);
+                            let before = inside_as(winding[lane], rule);
+                            winding[lane] += d;
+                            let change = inside_as(winding[lane], rule) - before;
+                            total += (256 - off as i32) * change;
+                            inside += change;
+                        }
                     }
                 }
+                *byte = (total / 16).min(255) as u8;
+                *cell = Cell::CLEAR;
             }
-            *byte = (total / 16).min(255) as u8;
-            *cell = Cell::CLEAR;
         }
+        solid(out, at, out.len(), inside);
         *left = [0; 16];
         heads.clear();
         later.clear();
+    }
+}
+
+/// Writes the run of pixels `from..to` of a row, none of which holds a
+/// crossing, given the count of lanes the rule calls inside across it: one
+/// slice fill of `min(16 × inside, 255)` — 255 where every lane is inside — and
+/// no write at all where none is, the mask being zero already.
+fn solid(out: &mut [u8], from: usize, to: usize, inside: i32) {
+    if from >= to {
+        return;
+    }
+    count::converted(1);
+    let value = (16 * inside).min(255) as u8;
+    if value != 0 {
+        if let Some(run) = out.get_mut(from..to) {
+            run.fill(value);
+        }
     }
 }
 
@@ -918,6 +963,7 @@ pub(crate) mod count {
         static COMPARED: Cell<u64> = const { Cell::new(0) };
         static SHARED: Cell<u64> = const { Cell::new(0) };
         static ALLOCATED: Cell<u64> = const { Cell::new(0) };
+        static CONVERTED: Cell<u64> = const { Cell::new(0) };
     }
 
     /// One comparison made ordering edges or crossings.
@@ -928,6 +974,12 @@ pub(crate) mod count {
     /// `crowd` crossings sharing a lane of a cell.
     pub(crate) fn shared(crowd: u64) {
         SHARED.with(|count| count.set(count.get() + crowd));
+    }
+
+    /// One conversion: a cell holding a crossing turned into its byte, or a
+    /// run of cells holding none written at once.
+    pub(crate) fn converted(conversions: u64) {
+        CONVERTED.with(|count| count.set(count.get() + conversions));
     }
 
     /// `buffers` of a fill's scratch that grew, each by at least one
@@ -943,6 +995,7 @@ pub(crate) mod count {
             compared: COMPARED.with(|c| c.replace(0)),
             shared: SHARED.with(|c| c.replace(0)),
             allocated: ALLOCATED.with(|c| c.replace(0)),
+            converted: CONVERTED.with(|c| c.replace(0)),
         }
     }
 
@@ -954,6 +1007,9 @@ pub(crate) mod count {
         pub(crate) shared: u64,
         /// Scratch buffers that grew.
         pub(crate) allocated: u64,
+        /// Conversions: cells holding a crossing, and runs of cells holding
+        /// none.
+        pub(crate) converted: u64,
     }
 }
 
@@ -963,6 +1019,8 @@ mod count {
     pub(crate) fn compared() {}
 
     pub(crate) fn shared(_crowd: u64) {}
+
+    pub(crate) fn converted(_conversions: u64) {}
 }
 
 /// The rows of the region any edge can reach, as a half-open range of row
@@ -1770,6 +1828,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **An interior run is one slice fill** (P-07.5's guard).
+    ///
+    /// Conversions are counted: a cell holding a crossing turned into its byte
+    /// is one, and a run of cells holding none, written at once, is one. So a
+    /// row costs the cells holding a crossing plus one for each run before,
+    /// between and after them, whatever its width — and that is the count,
+    /// exactly, on every closed path the harness generates, against the cells
+    /// and the runs the reference sweep's own arithmetic finds. A rectangle
+    /// 193 pixels wide costs five a row: its two edge cells and the three runs
+    /// around them.
+    #[test]
+    fn an_interior_run_is_one_slice_fill() {
+        use crate::fill_reference::{
+            census, fill_reference, generate, region, Class, Stream, CLASSES,
+        };
+
+        let mut rect = Path::new();
+        rect.rect(3.5, 2.25, 193.0, 58.5);
+        count::take();
+        let mask = fill(&rect, FillRule::NonZero, 0, 0, 200, 64, 0.1, None);
+        assert_eq!(
+            count::take().converted,
+            5 * 59,
+            "59 rows, each two edge cells and three runs"
+        );
+        assert_eq!(
+            mask.data,
+            fill_reference(&rect, FillRule::NonZero, 0, 0, 200, 64, 0.1, None).data
+        );
+        assert_eq!(mask.at(100, 30), 255, "the interior run is whole");
+
+        let mut s = Stream::new(0x7275_6e73);
+        let mut runs = 0;
+        for class in CLASSES {
+            if class == Class::Dropped {
+                continue;
+            }
+            for index in 0..24 {
+                let path = generate(class, index, &mut s);
+                let tolerance = s.range(0.05, 0.5);
+                let (x0, y0, width, height) = region(&mut s);
+                for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+                    count::take();
+                    let _ = fill(&path, rule, x0, y0, width, height, tolerance, None);
+                    let converted = count::take().converted;
+                    let met = census(&path, rule, x0, y0, width, height, tolerance);
+                    assert_eq!(
+                        converted,
+                        met.cells + met.runs,
+                        "{class:?} path {index} under {rule:?}: the cells holding a \
+                         crossing and one a run"
+                    );
+                    runs += met.runs;
+                }
+            }
+        }
+        assert!(runs > 1000, "{runs} runs written whole");
     }
 
     // -----------------------------------------------------------------------

@@ -44,7 +44,13 @@ calls inside, which the crossings decide whatever order they come in, so no
 edge is ordered by its top and no sub-scanline's crossings by `x`. A lane
 holding several crossings in one pixel has them bucketed by their offset in
 the pixel rather than compared, so a crowded pixel costs its crossings and no
-more. An edge waits in a list of the row it begins in and leaves the active
+more. *A shape's interior is one write a run*: the row keeps a bit for each
+cell holding a crossing, and the walk visits only those, writing the run of
+pixels between two of them — where no lane's winding changes — as one slice
+fill of `min(16 × lanes inside, 255)`, and nothing at all where no lane is
+inside. A run ends at the first cell holding a crossing on any lane, so a
+pixel that reaches 255 only by the clamp still goes through its cell. An edge
+waits in a list of the row it begins in and leaves the active
 set when it ends, and a cancellation is asked before a row's deposit, so a
 stop leaves no row half converted.
 
@@ -370,6 +376,9 @@ tiny pattern over a long line cannot generate millions of pieces.
   dropped edges — through a fresh scratch and back to back through one;
   `a_fill_after_the_first_allocates_no_scratch` counts the scratch's buffers
   that grow, none after a first fill as large as any that follows;
+  `an_interior_run_is_one_slice_fill` counts conversions, exactly the cells
+  holding a crossing plus one a run on every closed generated path — five a
+  row for a rectangle 193 pixels wide;
   `stroke.rs` covers caps, joins, the miter limit and
   dash phase; `blend.rs` pins all sixteen modes in integers; `image.rs`
   measures the sampling policy against numbers — a magnified gradient's
