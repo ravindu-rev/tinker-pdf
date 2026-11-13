@@ -245,6 +245,14 @@ every refusal is an error (ruling 10).
   `a_turned_line_extracts_as_one_line` (each quarter turn),
   `a_right_to_left_line_extracts_as_imported`,
   `a_word_without_area_is_skipped_and_named` and `a_layer_is_refused_by_name`.
+- `surface_goldens.rs`'s `ocr-layer-alignment`, a reviewed-golden surface: a
+  scanned page — text in the test's own face, rendered at 144 dpi and placed
+  as a grey image — with the layer an hOCR file of its words' boxes writes
+  over it, drawn so that it shows: each word's box as text extraction reads it
+  off the layer, stroked, and its baseline, so a reviewer sees the layer sit
+  on the words. Held byte for byte in both builds and listed unreviewed until
+  a person reads it against ISO 32000-2 9.3.4, 9.3.6, 9.3.7 and 9.4.4 and
+  hOCR 1.2 4.2.
 - `src/ocr/layer.rs`'s unit tests: the program a font this engine reads,
   whose whole sums to `head`'s magic; numbers to six decimals; the nearest
   quarter turn; a fitted word filling its box at every turn; the

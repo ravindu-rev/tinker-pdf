@@ -19,12 +19,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tinker_pdf::ocr::{add_text_layer, import};
 use tinker_pdf::{
-    Bitmap, Date, DigestAlgorithm, Document, OpenOptions, Rect, RenderOptions, RenderWarning,
-    SignRefused, SignatureAppearance, SignatureImage, Signer, SigningRequest, SigningTarget,
-    SimpleFontProvider, SvgOptions, SvgWarning, WriteMode, WriteOptions,
+    Bitmap, Date, DigestAlgorithm, Document, DocumentBuilder, ImageData, OpenOptions, Rect,
+    RenderOptions, RenderWarning, SignRefused, SignatureAppearance, SignatureImage, Signer,
+    SigningRequest, SigningTarget, SimpleFontProvider, SvgOptions, SvgWarning, WordBoxOptions,
+    WriteMode, WriteOptions,
 };
-use tinker_pdf_cos::{CosDocument, DocumentEditor, ObjRef};
+use tinker_pdf_cos::{CosDocument, Dict, DocumentEditor, FormXObject, ObjRef, StampPlacement};
 
 mod cbz_support;
 mod golden_support;
@@ -153,6 +155,18 @@ const SURFACES: &[Surface] = &[
         clause: "SVG 1.1 5.2, 5.7, 8.3, 11.3, 11.4, 14.3, 14.5",
         golden: Kind::Svg { write: to_svg },
     },
+    Surface {
+        name: "ocr-layer-alignment",
+        clause: "ISO 32000-2 9.3.4, 9.3.6, 9.3.7, 9.4.4; hOCR 1.2 4.2",
+        golden: Kind::Raster {
+            draw: ocr_layer_alignment,
+            // Not measured: the floor stands under what the page's
+            // construction draws at the least, nine stroked word boxes of at
+            // least 32 points of perimeter each, their nine baselines and the
+            // scan's 32 glyphs.
+            least_ink: 400,
+        },
+    },
 ];
 
 /// The surfaces no person has read yet: exactly those whose golden's header
@@ -168,6 +182,7 @@ const UNREVIEWED: &[&str] = &[
     "svg-page",
     "xps-page",
     "to-svg",
+    "ocr-layer-alignment",
 ];
 
 fn surfaces_dir() -> PathBuf {
@@ -801,6 +816,173 @@ fn to_svg() -> String {
         "the soft mask is the one thing the writer declines"
     );
     svg.markup
+}
+
+// ---- an OCR text layer, drawn so that it shows ------------------------------
+
+/// The scanned page's size in points.
+const OCR_PAGE: (f64, f64) = (160.0, 120.0);
+
+/// The scan's resolution, twice the page's: a recogniser's boxes are in the
+/// scan's pixels, and the layer scales them onto the page.
+const SCAN_DPI: f64 = 144.0;
+
+/// What the scan shows: each line's left edge, baseline and size in points,
+/// and its text, set in the test's own face.
+const SCANNED: [(f64, f64, f64, &str); 3] = [
+    (12.0, 92.0, 14.0, "Scanned text"),
+    (12.0, 64.0, 10.0, "set in a face"),
+    (12.0, 40.0, 10.0, "and read back"),
+];
+
+/// A scanned page with the text layer OC-01's import seam writes over it,
+/// drawn so that it shows: each word's box as text extraction reads it off
+/// the layer, stroked in red, and its baseline, a fifth of the box up, in
+/// blue — so a reviewer sees the layer sit on the words of the scan.
+///
+/// The scan is a page of text in `curvy_font` rendered at [`SCAN_DPI`] and
+/// placed as a grey image; the recogniser's file is hOCR stating each word's
+/// box in the scan's pixels, rounded outward to whole ones, as FT-24's word
+/// boxes find them on the page the scan was made from; the layer is written
+/// with [`add_text_layer`] onto the whole page, and the boxes drawn are read
+/// back from the layer alone, the scan having no text.
+fn ocr_layer_alignment() -> Bitmap {
+    // The words, in the test's own face.
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_embedded_font(b"F0", b"Curvy", &curvy_font()));
+    builder.add_page(OCR_PAGE.0, OCR_PAGE.1, |page| {
+        for (x, y, size, text) in SCANNED {
+            page.text(b"F0", size, x, y, text);
+        }
+    });
+    let source = Document::open(builder.finish()).expect("the page of text opens");
+    let printed = source.page(0).expect("its page");
+
+    // The scan: that page at twice the resolution, in grey.
+    let scan = printed.render(&RenderOptions::at_dpi(SCAN_DPI));
+    let grey: Vec<u8> = scan
+        .data
+        .chunks_exact(scan.components())
+        .map(|pixel| {
+            let sum = u16::from(pixel[0]) + u16::from(pixel[1]) + u16::from(pixel[2]);
+            (sum / 3) as u8
+        })
+        .collect();
+
+    // The recogniser's file: each word's box in the scan's pixels.
+    let mut body = String::new();
+    let found = printed.word_boxes(&WordBoxOptions::at_dpi(SCAN_DPI));
+    let mut words = 0usize;
+    for line in found
+        .blocks
+        .iter()
+        .flat_map(|b| &b.paragraphs)
+        .flat_map(|p| &p.lines)
+    {
+        body.push_str("<span class=\"ocr_line\">");
+        for word in &line.words {
+            let (x0, y0, x1, y1) = word.quad.bounds();
+            body.push_str(&format!(
+                "<span class=\"ocrx_word\" title=\"bbox {} {} {} {}\">{}</span> ",
+                x0.floor(),
+                y0.floor(),
+                x1.ceil(),
+                y1.ceil(),
+                word.text
+            ));
+            words += 1;
+        }
+        body.push_str("</span>\n");
+    }
+    assert_eq!(words, 9, "the scan's nine words are found");
+    let hocr = format!(
+        "<!DOCTYPE html>\n<html><head><title>scan</title></head><body>\
+         <div class=\"ocr_page\" title=\"bbox 0 0 {} {}; scan_res 144 144\">\n{body}</div>\
+         </body></html>\n",
+        scan.width, scan.height
+    );
+    let imported = import(hocr.as_bytes())
+        .expect("the file imports")
+        .pages
+        .remove(0);
+
+    // The scanned page: the scan filling a page with no text of its own.
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_image(
+        b"Scan",
+        &ImageData::Gray8 {
+            width: scan.width,
+            height: scan.height,
+            data: &grey,
+        },
+    ));
+    builder.add_page(OCR_PAGE.0, OCR_PAGE.1, |page| {
+        page.image(b"Scan", 0.0, 0.0, OCR_PAGE.0, OCR_PAGE.1);
+    });
+    let scanned = Document::open(builder.finish()).expect("the scanned page opens");
+
+    // The layer, written over it.
+    let mut editor = scanned.editor();
+    let report = add_text_layer(&mut editor, 0, &imported, None).expect("the layer is written");
+    assert_eq!(report.drawn, words, "every word is drawn");
+    let layered = Document::open(editor.save(&WriteOptions {
+        mode: WriteMode::Incremental,
+        ..WriteOptions::default()
+    }))
+    .expect("the layered page opens");
+
+    // The layer made visible: each word's box as extraction reads it, and its
+    // baseline.
+    let read = layered
+        .page(0)
+        .expect("the page")
+        .word_boxes(&WordBoxOptions::default());
+    let mut boxes = String::from("0.85 0.1 0.1 RG 0.6 w\n");
+    let mut baselines = String::from("0.1 0.3 0.9 RG 0.6 w\n");
+    for word in read
+        .blocks
+        .iter()
+        .flat_map(|b| &b.paragraphs)
+        .flat_map(|p| &p.lines)
+        .flat_map(|l| &l.words)
+    {
+        // The frame at 72 dpi is the page in points, `y` down.
+        let (left, top, right, bottom) = word.quad.bounds();
+        let (low, high) = (OCR_PAGE.1 - bottom, OCR_PAGE.1 - top);
+        boxes.push_str(&format!(
+            "{left:.3} {low:.3} {:.3} {:.3} re S\n",
+            right - left,
+            high - low
+        ));
+        let baseline = low + (high - low) / 5.0;
+        baselines.push_str(&format!(
+            "{left:.3} {baseline:.3} m {right:.3} {baseline:.3} l S\n"
+        ));
+    }
+    let overlay = format!("{boxes}{baselines}");
+    let mut editor = layered.editor();
+    let form = editor
+        .add_form(
+            &FormXObject {
+                bbox: [0.0, 0.0, OCR_PAGE.0, OCR_PAGE.1],
+                matrix: None,
+                group: None,
+                content: overlay.as_bytes(),
+            },
+            Dict::new(),
+        )
+        .expect("the overlay's form");
+    editor
+        .stamp(0, form, StampPlacement::Over)
+        .expect("the overlay is stamped");
+    Document::open(editor.save(&WriteOptions {
+        mode: WriteMode::Incremental,
+        ..WriteOptions::default()
+    }))
+    .expect("the drawn page opens")
+    .page(0)
+    .expect("the page")
+    .render(&RenderOptions::default())
 }
 
 // ---- the checks -------------------------------------------------------------
