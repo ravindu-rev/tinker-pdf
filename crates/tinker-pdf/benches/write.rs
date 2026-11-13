@@ -103,6 +103,36 @@ fn reads_the_update(edited: &Edited, pages: u32) {
     assert_eq!(edited.page_count(), pages);
 }
 
+/// A rewrite that converts each Type 1 program it cuts to CFF
+/// (`docs/design/subsetting.md`, *When a save converts*).
+#[cfg(not(tinker_planning_baseline))]
+fn converting() -> SaveOptions {
+    SaveOptions {
+        write: rewrite(),
+        type1: write::Type1Programs::Convert,
+        ..SaveOptions::default()
+    }
+}
+
+/// The planning baseline converts nothing: its arm saves through the default
+/// door in the conversion's place, the operation the gate pairs this one
+/// with (`baseline.json`'s `paired_with`).
+#[cfg(tinker_planning_baseline)]
+fn converting() -> SaveOptions {
+    SaveOptions {
+        write: rewrite(),
+        ..SaveOptions::default()
+    }
+}
+
+/// The four Type 1 pages subset-on-save cuts and converts.
+fn type1_document() -> (Vec<u8>, Document) {
+    let bytes = inputs::store().bytes("type1-4.pdf", || inputs::type1_pages(4, 0));
+    let doc = Document::open(bytes.clone()).expect("the Type 1 pages open");
+    assert_eq!(doc.page_count(), 4);
+    (bytes, doc)
+}
+
 /// `doc` saved under `options`, reopened, and its page count held to the
 /// original's.
 fn saved_reopens(doc: &Document, options: &WriteOptions) {
@@ -219,6 +249,47 @@ fn write(c: &mut Criterion) {
         op.per(Per::Pages(4));
         op.iter(move || black_box(write::save(&mut dense.editor(), &subset)));
     });
+
+    // The same door over a Type 1 program (FT-11.11): the walk, then
+    // `subset_type1` cutting it to the glyphs drawn.
+    group.operation("subset-on-save of 4 pages over a Type 1 font", |op| {
+        let (bytes, doc) = type1_document();
+        let subset = SaveOptions {
+            write: rewrite(),
+            ..SaveOptions::default()
+        };
+        #[cfg(not(tinker_planning_baseline))]
+        {
+            let saved = write::save(&mut doc.editor(), &subset);
+            let report = saved.fonts.report().expect("the font pass ran");
+            assert_eq!(report.subsetted.len(), 1, "the program is cut: {report:?}");
+            assert!(!report.subsetted[0].converted);
+            assert!(saved.bytes.len() < bytes.len(), "the cut file is smaller");
+        }
+        op.per(Per::Pages(4));
+        op.iter(move || black_box(write::save(&mut doc.editor(), &subset)));
+    });
+    // And the same save asked to convert it to CFF first (FT-11.8):
+    // `type1_to_cff`, its every glyph outlined in both programs, every shown
+    // code read again, and the CFF subsetter's cut.
+    group.operation(
+        "subset-on-save of 4 pages over a Type 1 font converted to CFF",
+        |op| {
+            let (bytes, doc) = type1_document();
+            let options = converting();
+            #[cfg(not(tinker_planning_baseline))]
+            {
+                let saved = write::save(&mut doc.editor(), &options);
+                let report = saved.fonts.report().expect("the font pass ran");
+                assert!(report.unconverted.is_empty(), "{report:?}");
+                assert_eq!(report.subsetted.len(), 1, "{report:?}");
+                assert!(report.subsetted[0].converted, "the program is a CFF now");
+                assert!(saved.bytes.len() < bytes.len(), "the cut file is smaller");
+            }
+            op.per(Per::Pages(4));
+            op.iter(move || black_box(write::save(&mut doc.editor(), &options)));
+        },
+    );
 
     // `tpdf merge`'s shape: the first file's editor, every page of the
     // others imported after its own, saved with stream deduplication and

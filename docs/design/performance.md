@@ -943,7 +943,7 @@ column, before MS-02.6 builds the run.
 
 In this design, `cargo bench` times every operation of tier P's target
 table that the tree can run, and the row's own, in twelve groups of one file
-each, MS-09's `threads` among them: 184 operations over inputs the benches
+each, MS-09's `threads` among them: 188 operations over inputs the benches
 generate or the tree holds, each
 held by `cargo xtask bench-check --machine` to the band its machine's entry in
 `baseline.json` records, from a local `cargo bench -p tinker-pdf` on that
@@ -1145,6 +1145,7 @@ target computes the same bytes) and through the tree's own writers elsewhere.
 | `dense(n, seed)` | n A4 pages (595 × 842 pt), each about 5 600 characters of seeded words in 70 lines, drawn from about 80 distinct glyphs with a few accented letters | Liberation Serif Regular (`crates/tinker-pdf-font/data/liberation/`) embedded whole — `add_embedded_font` (`crates/tinker-pdf-cos/src/build.rs:5694`) with `set_subset_fonts(false)` (`:6795`), so subset-on-save has a program to cut | "5 dense pages", "the text page" (`dense(1, 0)`); 5 600 characters a page is P-02's ≥ 5.6 M characters/s at 1 000 pages/s |
 | `dense_part(n, seed, d)` | n pages a d-th of A4 each way (`page_part(d)`), each holding what of its dense page's text fits the same type there: its first 70 / d lines, each its words within 78 / d characters, at `dense`'s size and leading, the margins a d-th of its, so a page draws about a d²-th of the glyphs and the pixels a dense page does | as `dense` | "half-size text pages", "quarter-size pages" |
 | `producer(n)` | the dense pages' text in standard-14 Helvetica, unembedded, one `TJ` a line with kerning numbers | `add_base_font` (`build.rs:5561`) and `PageBuilder::raw` (`:4125`) | the Item's "100 producer-style standard-14 pages" |
+| `type1_pages(n, seed)` | `dense`'s seeded lines, their ASCII characters alone, on n A4 pages, in a Type 1 program written by formula and embedded whole under `/FontFile`: `.notdef` and the 95 glyphs the Standard Encoding names from 32 to 126, each `hsbw`, a stem each way and a contour through eight shared subroutines, every seventh replacing its hints and every eleventh drawing a flex, under `/Encoding StandardEncoding` | `type1_program()`, both cipher layers in `inputs.rs` | — |
 | `small(n)` | n pages of one Helvetica line each, the line `three_pages()` writes | the builder's flat page tree, one `/Kids` of every page (`build.rs:8508-8516`) | "small pages", "10 000-page document", "4 000 small pages", "rewrite 100 / 1 000 / 3 000 pages" |
 | `three_pages()` | the document `open/open a 3-page document` opens | `support/inputs.rs` | — |
 | `report(n)` | n A4 pages of two columns of body text in the embedded face, a running head and foot, a page number and one ruled table each; untagged | the builder | "5 text pages", "5 pages" of the analysis rows |
@@ -1387,6 +1388,8 @@ set.
 | `write/rewrite 100 pages into object streams` | pages · 200 × 100 | `small(100)`, `object_streams` (`crates/tinker-pdf-cos/src/write.rs:120`) | 2.6; held | ×200 | built |
 | `write/rewrite 100 pages linearized` | pages · 75 × 100 | `small(100)`, `linearize` (`:112`) | 3.7; held | ×75 | built |
 | `write/subset-on-save of 4 pages` | pages · 4 | `dense(4, 0)`, `SaveOptions::default()`: a rewrite, fonts subset (`crates/tinker-pdf/src/write.rs:144-157`) | twin (in-process 52.2, rescaled from 100 pages' 1 305); floor 1 | in | built |
+| `write/subset-on-save of 4 pages over a Type 1 font` | pages · 4 | `type1_pages(4, 0)`, `SaveOptions::default()`: a rewrite, the Type 1 program cut by `subset_type1` (FT-11.4); held before it is timed to cut the program; the planning baseline saves the same pages, writing the program whole | not in tier P's table; floor 1; a target is the owner's (H-77) | untimed | built |
+| `write/subset-on-save of 4 pages over a Type 1 font converted to CFF` | pages · 4 | `type1_pages(4, 0)` saved with `SaveOptions::type1` set to `Type1Programs::Convert`: the program converted by `type1_to_cff`, every shown code read again through the CFF's route and the cut taken by `subset_cff` (FT-11.8); held before it is timed to convert; the planning baseline, which converts nothing, saves through the default door in its place | not in tier P's table; floor 1, paired with the Type 1 subset; a target is the owner's (H-77) | untimed | built |
 | `write/merge 4 x 50 pages` | pages · 200 | `dense(50, 0..3)`: pages imported with `import_page`, saved with stream deduplication and `FontPolicy::Keep` | 1 428 → 12.5, rescaled from 4 × 100's 2 855 → 25; 114× | in | built |
 | `write/AES-256-CBC decrypt 2.5 MB` | bytes · the file | `small_image_file()`'s bytes, encrypted once, `cbc_decrypt_with_iv_prefix` (`crates/tinker-pdf-crypto/src/aes.rs:238`) | 32 → 150 MB/s (about 78 → 16.6); 4.68× | in | built |
 | `write/AES-256-CBC encrypt 2.5 MB` | bytes · the file | the same plain bytes, `cbc_encrypt_with_iv_prefix` (`:289`) | 57 → 80 MB/s (about 43.8 → 31.2); 1.4× | in | built |
@@ -1683,7 +1686,7 @@ sampling, which criterion sets only on a group and which has no command-line
 flag, is the one setting each group makes itself.
 
 Sized into the window, every operation measures for about 4.7 s under this
-sampling, so the set's 175 measure for about thirteen and three-quarter
+sampling, so the set's 188 measure for about fourteen and three-quarter
 minutes before anything is built, group after group in one local
 `cargo bench -p tinker-pdf`.
 Every
@@ -1693,14 +1696,14 @@ measures both, in one process on one host (MS-10.1's note).
 
 | Group | Operations | Measurement |
 | --- | ---: | ---: |
-| render | 42 | 3.3 min |
-| layout | 40 | 3.1 min |
+| render | 50 | 3.9 min |
+| layout | 41 | 3.2 min |
+| write | 21 | 1.6 min |
 | text | 20 | 1.6 min |
-| write | 18 | 1.4 min |
 | decode | 16 | 1.3 min |
 | analysis | 10 | 0.8 min |
 | open | 8 | 0.6 min |
-| fonts | 7 | 0.5 min |
+| fonts | 8 | 0.6 min |
 | encode | 6 | 0.5 min |
 | threads | 4 | 0.3 min |
 | sign | 3 | 0.2 min |

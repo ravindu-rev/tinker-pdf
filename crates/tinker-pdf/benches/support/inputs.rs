@@ -3395,3 +3395,394 @@ pub fn colour_face() -> Vec<u8> {
         (*b"maxp", maxp),
     ])
 }
+
+// ---------------------------------------------------------------------------
+// Fonts on save: a Type 1 program's pages, and pages of fonts no program
+// embeds.
+// ---------------------------------------------------------------------------
+
+/// A document of `objects`, numbered from one, the first its catalog, with
+/// the cross-reference table that states where each is.
+fn raw_document(objects: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec();
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(object);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// A stream object: `entries`, its `/Length`, then `data`.
+fn raw_stream(entries: &str, data: &[u8]) -> Vec<u8> {
+    let mut out = format!("<< {entries} /Length {} >>\nstream\n", data.len()).into_bytes();
+    out.extend_from_slice(data);
+    out.extend_from_slice(b"\nendstream");
+    out
+}
+
+/// One line's bytes as a hexadecimal string operand, so no byte needs an
+/// escape.
+fn hex_string(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2 + 2);
+    out.push('<');
+    for byte in bytes {
+        out.push_str(&format!("{byte:02X}"));
+    }
+    out.push('>');
+    out
+}
+
+/// A page's lines in `/F0`, 9 points on 11, from the top of an A4 page.
+fn lines_content(lines: &[Vec<u8>]) -> Vec<u8> {
+    let mut content = b"BT /F0 9 Tf 11 TL 36 806 Td\n".to_vec();
+    for (at, line) in lines.iter().enumerate() {
+        if at > 0 {
+            content.extend_from_slice(b"T* ");
+        }
+        content.extend_from_slice(hex_string(line).as_bytes());
+        content.extend_from_slice(b" Tj\n");
+    }
+    content.extend_from_slice(b"ET\n");
+    content
+}
+
+/// The page objects of `contents`, each an A4 page over `resources`, its
+/// content stream after it, numbered from `first`: the page tree's `/Kids`
+/// and the objects.
+fn raw_pages(first: usize, resources: &str, contents: &[Vec<u8>]) -> (String, Vec<Vec<u8>>) {
+    let mut kids = Vec::with_capacity(contents.len());
+    let mut objects = Vec::with_capacity(contents.len() * 2);
+    for (at, content) in contents.iter().enumerate() {
+        let page = first + 2 * at;
+        kids.push(format!("{page} 0 R"));
+        objects.push(
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] \
+                 /Resources << {resources} >> /Contents {} 0 R >>",
+                page + 1
+            )
+            .into_bytes(),
+        );
+        objects.push(raw_stream("", content));
+    }
+    (kids.join(" "), objects)
+}
+
+/// The Standard Encoding's name for an ASCII code, 32 to 126 (ISO 32000-2
+/// Annex D): the letters and digits as themselves, the rest by name.
+fn standard_name(code: u8) -> String {
+    const PUNCTUATION: [(u8, &str); 33] = [
+        (32, "space"),
+        (33, "exclam"),
+        (34, "quotedbl"),
+        (35, "numbersign"),
+        (36, "dollar"),
+        (37, "percent"),
+        (38, "ampersand"),
+        (39, "quoteright"),
+        (40, "parenleft"),
+        (41, "parenright"),
+        (42, "asterisk"),
+        (43, "plus"),
+        (44, "comma"),
+        (45, "hyphen"),
+        (46, "period"),
+        (47, "slash"),
+        (58, "colon"),
+        (59, "semicolon"),
+        (60, "less"),
+        (61, "equal"),
+        (62, "greater"),
+        (63, "question"),
+        (64, "at"),
+        (91, "bracketleft"),
+        (92, "backslash"),
+        (93, "bracketright"),
+        (94, "asciicircum"),
+        (95, "underscore"),
+        (96, "quoteleft"),
+        (123, "braceleft"),
+        (124, "bar"),
+        (125, "braceright"),
+        (126, "asciitilde"),
+    ];
+    const DIGITS: [&str; 10] = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    ];
+    if code.is_ascii_alphabetic() {
+        return char::from(code).to_string();
+    }
+    if code.is_ascii_digit() {
+        return DIGITS[usize::from(code - b'0')].to_string();
+    }
+    PUNCTUATION
+        .iter()
+        .find(|(at, _)| *at == code)
+        .map(|(_, name)| (*name).to_string())
+        .expect("an ASCII code from 32 to 126")
+}
+
+/// Adobe's cipher encrypting (Type 1 Font Format, chapter 7.1): `lead`, the
+/// bytes a reader discards, and then `plain`, under `key`.
+fn type1_cipher(plain: &[u8], key: u16, lead: &[u8]) -> Vec<u8> {
+    let mut r = key;
+    lead.iter()
+        .chain(plain)
+        .map(|&byte| {
+            let cipher = byte ^ (r >> 8) as u8;
+            r = u16::from(cipher)
+                .wrapping_add(r)
+                .wrapping_mul(52_845)
+                .wrapping_add(22_719);
+            cipher
+        })
+        .collect()
+}
+
+/// Type 1 charstring numbers in their shortest forms (chapter 6.2).
+fn charstring_numbers(values: &[i32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for &v in values {
+        if (-107..=107).contains(&v) {
+            out.push((v + 139) as u8);
+        } else if (108..=1131).contains(&v) {
+            let v = v - 108;
+            out.push((v / 256 + 247) as u8);
+            out.push((v % 256) as u8);
+        } else if (-1131..=-108).contains(&v) {
+            let v = -v - 108;
+            out.push((v / 256 + 251) as u8);
+            out.push((v % 256) as u8);
+        } else {
+            out.push(255);
+            out.extend_from_slice(&v.to_be_bytes());
+        }
+    }
+    out
+}
+
+/// A Type 1 program written here byte for byte, its three ISO 32000-2 Table
+/// 125 lengths, and the width of each code from 32 to 126.
+///
+/// `.notdef` and the 95 glyphs the Standard Encoding names from 32 to 126,
+/// each a width and a contour by formula from its code: `hsbw`, a stem each
+/// way, a move, one of eight shared subroutines of lines and a curve, and a
+/// line of its own; every seventh replaces its hints through OtherSubrs 3 and
+/// every eleventh draws a chapter 8.3 flex. Under `/Encoding
+/// StandardEncoding`, its subroutines 0 to 3 chapter 8.4's.
+pub fn type1_program() -> (Vec<u8>, [usize; 3], Vec<u32>) {
+    let n = charstring_numbers;
+    let piece = |k: i32| -> Vec<u8> {
+        [
+            n(&[200 + 10 * k]),
+            vec![6], // hlineto
+            n(&[400 + 15 * k]),
+            vec![7], // vlineto
+            n(&[-40, 30, -60, 40, -80, 0]),
+            vec![8], // rrcurveto
+            n(&[-(20 + 5 * k), -(300 + 15 * k)]),
+            vec![5, 11], // rlineto, return
+        ]
+        .concat()
+    };
+    let mut subrs: Vec<Vec<u8>> = vec![
+        [n(&[3, 0]), vec![12, 16, 12, 17, 12, 17, 12, 33, 11]].concat(),
+        [n(&[0, 1]), vec![12, 16, 11]].concat(),
+        [n(&[0, 2]), vec![12, 16, 11]].concat(),
+        vec![11],
+    ];
+    for k in 0..8 {
+        subrs.push(piece(k));
+    }
+    // Subroutine 12: the stems a hint replacement declares.
+    subrs.push([n(&[0, 30]), vec![1], n(&[120, 40]), vec![3, 11]].concat());
+
+    let mut widths = Vec::with_capacity(95);
+    let mut glyphs: Vec<(String, Vec<u8>)> =
+        vec![(".notdef".to_string(), [n(&[0, 500]), vec![13, 14]].concat())];
+    for code in 32u8..=126 {
+        let i = i32::from(code - 32);
+        if code == 32 {
+            widths.push(250);
+            glyphs.push((standard_name(code), [n(&[0, 250]), vec![13, 14]].concat()));
+            continue;
+        }
+        let width = 400 + (i * 37) % 300;
+        widths.push(width as u32);
+        let (sx, sy) = (40 + i % 30, 0);
+        let mut code_bytes = [
+            n(&[0, width]),
+            vec![13], // hsbw
+            n(&[0, 20]),
+            vec![1], // hstem
+            n(&[60 + i % 40, 50]),
+            vec![3], // vstem
+            n(&[sx, sy]),
+            vec![21], // rmoveto
+        ]
+        .concat();
+        if i % 11 == 5 {
+            // 8.3: the reference point and six more, from the pen, which
+            // ends 80 units on.
+            code_bytes.extend(n(&[1]));
+            code_bytes.push(10);
+            for (dx, dy) in [
+                (30, 0),
+                (-20, 0),
+                (10, 10),
+                (20, 0),
+                (20, 0),
+                (10, -10),
+                (10, 0),
+            ] {
+                code_bytes.extend(n(&[dx, dy]));
+                code_bytes.push(21);
+                code_bytes.extend(n(&[2]));
+                code_bytes.push(10);
+            }
+            code_bytes.extend(n(&[50, sx + 80, sy, 0]));
+            code_bytes.push(10);
+        }
+        code_bytes.extend(n(&[4 + i % 8]));
+        code_bytes.push(10); // callsubr
+        if i % 7 == 3 {
+            // 8.1: subr# 1 3 callothersubr pop callsubr.
+            code_bytes.extend(n(&[12, 1, 3]));
+            code_bytes.extend_from_slice(&[12, 16, 12, 17, 10]);
+        }
+        code_bytes.extend(n(&[i % 23 + 1, i % 17 + 1]));
+        code_bytes.extend_from_slice(&[5, 9, 14]); // rlineto, closepath, endchar
+        glyphs.push((standard_name(code), code_bytes));
+    }
+
+    let clear = b"%!PS-AdobeFont-1.0: BenchType1 001.000\n\
+        12 dict begin\n\
+        /FontInfo 5 dict dup begin\n\
+        /version (001.000) readonly def\n\
+        /FullName (Bench Type 1) readonly def\n\
+        /FamilyName (Bench) readonly def\n\
+        /Weight (Regular) readonly def\n\
+        /ItalicAngle 0 def\n\
+        end readonly def\n\
+        /FontName /BenchType1 def\n\
+        /PaintType 0 def\n\
+        /FontType 1 def\n\
+        /FontMatrix [0.001 0 0 0.001 0 0] readonly def\n\
+        /FontBBox {0 -100 1000 900} readonly def\n\
+        /Encoding StandardEncoding def\n\
+        currentdict end\n\
+        currentfile eexec\n"
+        .to_vec();
+    let lead = [0x55u8; 4];
+    let mut private = b"dup /Private 9 dict dup begin\n\
+        /RD{string currentfile exch readstring pop}executeonly def\n\
+        /ND{noaccess def}executeonly def\n\
+        /NP{noaccess put}executeonly def\n\
+        /BlueValues [-15 0 700 715] def\n\
+        /StdHW [30] def\n\
+        /StdVW [50] def\n\
+        /lenIV 4 def\n"
+        .to_vec();
+    private.extend_from_slice(format!("/Subrs {} array\n", subrs.len()).as_bytes());
+    for (index, code) in subrs.iter().enumerate() {
+        let encrypted = type1_cipher(code, 4330, &lead);
+        private.extend_from_slice(format!("dup {index} {} RD ", encrypted.len()).as_bytes());
+        private.extend_from_slice(&encrypted);
+        private.extend_from_slice(b" NP\n");
+    }
+    private.extend_from_slice(b"ND\n");
+    private.extend_from_slice(
+        format!("2 index /CharStrings {} dict dup begin\n", glyphs.len()).as_bytes(),
+    );
+    for (name, code) in &glyphs {
+        let encrypted = type1_cipher(code, 4330, &lead);
+        private.extend_from_slice(format!("/{name} {} RD ", encrypted.len()).as_bytes());
+        private.extend_from_slice(&encrypted);
+        private.extend_from_slice(b" ND\n");
+    }
+    private.extend_from_slice(
+        b"end\nend\nreadonly put\nnoaccess put\n\
+          dup /FontName get exch definefont pop\nmark currentfile closefile\n",
+    );
+    let encrypted = type1_cipher(&private, 55_665, &lead);
+    let mut trailer = b"\n".to_vec();
+    for _ in 0..8 {
+        trailer.extend_from_slice(&[b'0'; 64]);
+        trailer.push(b'\n');
+    }
+    trailer.extend_from_slice(b"cleartomark\n");
+
+    let lengths = [clear.len(), encrypted.len(), trailer.len()];
+    let mut program = clear;
+    program.extend(encrypted);
+    program.extend(trailer);
+    (program, lengths, widths)
+}
+
+/// [`dense`]'s seeded lines, each its characters from 32 to 126 alone.
+fn ascii_lines(pages: usize, seed: u64) -> Vec<Vec<Vec<u8>>> {
+    dense_text(pages, seed)
+        .into_iter()
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|line| {
+                    line.chars()
+                        .filter(|c| (' '..='~').contains(c))
+                        .map(|c| c as u8)
+                        .collect()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// `pages` A4 pages of [`dense`]'s seeded lines, their ASCII characters
+/// alone, in [`type1_program`] embedded whole under `/FontFile`, so
+/// subset-on-save has a Type 1 program to cut, and to convert.
+pub fn type1_pages(pages: usize, seed: u64) -> Vec<u8> {
+    let (program, [one, two, three], widths) = type1_program();
+    let widths: Vec<String> = widths.iter().map(u32::to_string).collect();
+    let contents: Vec<Vec<u8>> = ascii_lines(pages, seed)
+        .iter()
+        .map(|lines| lines_content(lines))
+        .collect();
+    let (kids, page_objects) = raw_pages(6, "/Font << /F0 3 0 R >>", &contents);
+    let mut objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        format!("<< /Type /Pages /Count {pages} /Kids [{kids}] >>").into_bytes(),
+        format!(
+            "<< /Type /Font /Subtype /Type1 /BaseFont /BenchType1 /FirstChar 32 \
+             /LastChar 126 /Widths [{}] /FontDescriptor 4 0 R >>",
+            widths.join(" ")
+        )
+        .into_bytes(),
+        b"<< /Type /FontDescriptor /FontName /BenchType1 /Flags 32 \
+          /FontBBox [0 -100 1000 900] /ItalicAngle 0 /Ascent 900 /Descent -100 \
+          /CapHeight 700 /StemV 50 /FontFile 5 0 R >>"
+            .to_vec(),
+        raw_stream(
+            &format!("/Length1 {one} /Length2 {two} /Length3 {three}"),
+            &program,
+        ),
+    ];
+    objects.extend(page_objects);
+    raw_document(&objects)
+}
