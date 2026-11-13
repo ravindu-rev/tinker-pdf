@@ -52,22 +52,21 @@
 //! The noncontextual subtable, type 4, is one lookup table: "a lookup table
 //! that maps a single glyph index into another glyph index", a value of 0
 //! meaning "do nothing" ("Lookup tables in a 'morx'"). Types 0, 1, 2 and 5 are
-//! state machines on the shared driver ([`super::StateTable::run`]), and the
+//! state machines on the shared driver ([`super::StateTable::run`]): the
 //! rearrangement subtable, type 0, the contextual glyph substitution
-//! subtable, type 1, and the ligature subtable, type 2, run
-//! (`super::rearrangement`, `super::contextual`, `super::ligature`); a
-//! machine runs only over a run holding a glyph its class table names
-//! (`machine`).
-//! Type 3 is reserved and a type above 5 unknown, and each such subtable, and
-//! each of a type this crate does not run yet, is skipped and named. A glyph
-//! a subtable makes `0xFFFF` is deleted: the later subtables see it as the
-//! deleted glyph, class 2, and it leaves the run when the chain ends.
+//! subtable, type 1, the ligature subtable, type 2, and the glyph insertion
+//! subtable, type 5 (`super::rearrangement`, `super::contextual`,
+//! `super::ligature`, `super::insertion`); a machine runs only over a run
+//! holding a glyph its class table names (`machine`). Type 3 is reserved and
+//! a type above 5 unknown, and each such subtable is skipped and named. A
+//! glyph a subtable makes `0xFFFF` is deleted: the later subtables see it as
+//! the deleted glyph, class 2, and it leaves the run when the chain ends.
 
 use super::feat::Feat;
 use super::lookup::{Lookup, LookupError};
 use super::state::{StateTable, DELETED};
 use super::Site;
-use super::{contextual, ligature, rearrangement};
+use super::{contextual, insertion, ligature, rearrangement};
 use crate::buffer::{Buffer, Direction};
 use crate::common::Tag;
 use crate::limits::Limits;
@@ -342,6 +341,24 @@ impl<'a> Morx<'a> {
                         &mut warnings,
                     ) {
                         Some(table) => ligature::run(
+                            &table,
+                            subtable.body,
+                            buffer,
+                            traversal,
+                            limits,
+                            site,
+                            &mut warnings,
+                        ),
+                        None => Ok(()),
+                    },
+                    INSERTION => match machine(
+                        subtable.body,
+                        insertion::ENTRY_SIZE,
+                        buffer,
+                        site,
+                        &mut warnings,
+                    ) {
+                        Some(table) => insertion::run(
                             &table,
                             subtable.body,
                             buffer,

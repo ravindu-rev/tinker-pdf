@@ -19,8 +19,9 @@
 //!
 //! - [`Morx`], the extended glyph metamorphosis table: its chains, their
 //!   feature entries and sub-feature flags, each subtable's coverage, and the
-//!   subtables the chain runs — noncontextual, rearrangement, contextual and
-//!   ligature, the last on a component stack [`COMPONENT_STACK`] deep;
+//!   subtables the chain runs — noncontextual, rearrangement, contextual,
+//!   ligature, on a component stack [`COMPONENT_STACK`] deep, and insertion,
+//!   each inserted glyph marked with how ([`crate::Insertion`]);
 //!   [`Selection`] is what a caller's OpenType features ask of it;
 //! - [`Feat`], the feature name table, which says which features' settings
 //!   exclude one another.
@@ -33,6 +34,7 @@
 
 mod contextual;
 mod feat;
+mod insertion;
 mod ligature;
 mod lookup;
 mod morx;

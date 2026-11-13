@@ -109,6 +109,24 @@ impl Direction {
     }
 }
 
+/// How an AAT insertion subtable put a glyph in the run, by the flag its
+/// action carried (`docs/design/shaping.md`, *`morx`*, *Clusters*).
+///
+/// Apple's *TrueType Reference Manual*, "Glyph Insertion Subtable", gives
+/// the two kinds. Kept on the buffer for a justifier to read
+/// ([`Buffer::insertion`]); nothing in shaping reads it, and it changes no
+/// glyph, cluster or position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Insertion {
+    /// "Appended to a particular glyph, and ... selected with that glyph":
+    /// during justification "the width of the 'baseform' will be augmented
+    /// by the width of the all the insertions", as a kashida's is.
+    KashidaLike,
+    /// Appended to a glyph and selected "with some other glyph" — a split
+    /// vowel's piece, which "do[es] not select with that glyph".
+    SplitVowelLike,
+}
+
 /// Everything a lookup needs to know about a glyph that is not part of the
 /// output.
 ///
@@ -184,6 +202,9 @@ pub(crate) struct Props {
     /// across the line. Walking the advances for a cursive child as well would
     /// subtract the join twice.
     pub(crate) attached_cursively: bool,
+    /// How an AAT insertion subtable inserted this glyph, or `None` for one
+    /// it did not. See [`Insertion`].
+    pub(crate) insertion: Option<Insertion>,
 }
 
 impl Props {
@@ -600,6 +621,34 @@ impl Buffer {
         self.props.splice(at..=at, props);
     }
 
+    /// Inserts `glyphs` at `at` — before the glyph there, or at the end of
+    /// the run — each with `cluster`, no position, and fresh props that say
+    /// it was inserted `insertion`'s way. A position past the end inserts
+    /// nothing.
+    pub(crate) fn insert(&mut self, at: usize, glyphs: &[u16], cluster: u32, insertion: Insertion) {
+        if at > self.glyphs.len() {
+            return;
+        }
+        let inserted = glyphs.iter().map(|glyph| ShapedGlyph {
+            glyph: *glyph,
+            cluster,
+            ..ShapedGlyph::default()
+        });
+        let props = Props {
+            insertion: Some(insertion),
+            ..Props::new()
+        };
+        self.glyphs.splice(at..at, inserted);
+        self.props.splice(at..at, vec![props; glyphs.len()]);
+    }
+
+    /// How an AAT insertion subtable inserted the glyph at `at`; `None` for a
+    /// glyph none inserted, and past the end. See [`Insertion`].
+    #[must_use]
+    pub fn insertion(&self, at: usize) -> Option<Insertion> {
+        self.props.get(at).and_then(|props| props.insertion)
+    }
+
     /// Removes the glyph at `at`.
     pub(crate) fn remove(&mut self, at: usize) {
         if at < self.glyphs.len() {
@@ -844,7 +893,7 @@ impl Buffer {
 
 #[cfg(test)]
 mod tests {
-    use super::{Buffer, Direction};
+    use super::{Buffer, Direction, Insertion};
 
     #[test]
     fn a_buffer_from_glyphs_numbers_its_own_clusters() {
@@ -915,6 +964,48 @@ mod tests {
         assert_eq!(buffer.props_mask(1), 9);
         assert!(buffer.props_mut(2).is_none(), "props fell out of step");
         assert_eq!(buffer.remove_every(0xFFFF), 0);
+    }
+
+    /// Inserted glyphs land before the glyph at their position, take the
+    /// cluster given and no position, keep the props in step and say how
+    /// they were inserted; the glyphs around them keep theirs, and a
+    /// position past the end inserts nothing.
+    #[test]
+    fn inserted_glyphs_land_before_their_position_and_say_how() {
+        let mut buffer = Buffer::from_glyphs(&[1, 2, 3]);
+        buffer.set_mask(1, 5);
+        buffer.insert(1, &[7, 8], 9, Insertion::SplitVowelLike);
+        buffer.insert(5, &[6], 2, Insertion::KashidaLike);
+        assert_eq!(
+            buffer
+                .glyphs()
+                .iter()
+                .map(|g| (g.glyph, g.cluster))
+                .collect::<Vec<_>>(),
+            vec![(1, 0), (7, 9), (8, 9), (2, 1), (3, 2), (6, 2)]
+        );
+        assert_eq!(
+            (0..7).map(|at| buffer.insertion(at)).collect::<Vec<_>>(),
+            vec![
+                None,
+                Some(Insertion::SplitVowelLike),
+                Some(Insertion::SplitVowelLike),
+                None,
+                None,
+                Some(Insertion::KashidaLike),
+                None,
+            ]
+        );
+        assert_eq!(buffer.props_mask(3), 5, "the 2 kept its props");
+        assert_eq!(buffer.props_mask(1), Buffer::GLOBAL, "fresh props");
+        buffer.insert(9, &[4], 0, Insertion::KashidaLike);
+        buffer.insert(0, &[], 0, Insertion::KashidaLike);
+        assert_eq!(buffer.len(), 6);
+        assert!(buffer.props_mut(5).is_some() && buffer.props_mut(6).is_none());
+        // An inserted glyph keeps its kind through a reversal.
+        buffer.reverse();
+        assert_eq!(buffer.insertion(0), Some(Insertion::KashidaLike));
+        assert_eq!(buffer.insertion(4), Some(Insertion::SplitVowelLike));
     }
 
     /// A merged range takes its smallest cluster, whichever way the run's

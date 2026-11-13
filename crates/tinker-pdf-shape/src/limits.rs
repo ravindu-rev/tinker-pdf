@@ -83,10 +83,14 @@ pub struct Limits {
 
     /// How long the buffer may **grow**.
     ///
-    /// Multiple substitution (GSUB type 2) is the only lookup that adds
+    /// Multiple substitution (GSUB type 2) is the one lookup that adds
     /// glyphs, and it can add up to 65 535 of them per input glyph. Two such
     /// lookups in sequence is 65 535 squared, which is why the ceiling is on
-    /// the *buffer* rather than on any one lookup.
+    /// the *buffer* rather than on any one lookup. An AAT insertion subtable
+    /// adds up to 62 at each transition of a machine, and a chain of them is
+    /// text-rendering-tests `MORX-34`'s billion laughs; it is held to the same
+    /// ceiling, an insertion past it refused and named
+    /// ([`crate::Warning::InsertionBudgetExceeded`]).
     ///
     /// **It is not a cap on the shaped run's length**, and the distinction is
     /// worth stating because a reader has already got it wrong. `Shaper::shape`

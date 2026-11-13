@@ -842,11 +842,21 @@ skipped and recorded.
   list of `currentInsertCount` and `markedInsertCount` glyphs (each at most
   31) in the insertion action table, inserted before the current or marked
   glyph where `currentInsertBefore` or `markedInsertBefore` is set and after it
-  otherwise; `setMark` marks the current glyph. With `dontAdvance` "the next
-  glyph processed would in fact be the first one inserted" downstream of the
-  current glyph; without it the machine moves past the current glyph and past
-  the glyphs inserted after it, so an insertion is not read again. A mark
-  keeps naming its glyph when glyphs are inserted before it. Growth past
+  otherwise, the marked glyph's list first; `setMark` marks the current
+  glyph. The machine's positions are the glyph index the chapter states it
+  over, and the test sections pin what one means once glyphs go in around
+  it. The mark is a position: glyphs inserted before the marked glyph leave
+  it naming what now stands there (`MORX-30`). `setMark` on an inserting
+  transition marks the position the current glyph held when the transition
+  began (`MORX-31`). The current glyph moves with what is inserted before it,
+  and without `dontAdvance` the machine moves past it and past the glyphs
+  inserted after it, so an insertion is not read again (`MORX-31`,
+  `MORX-33`); a walk backwards passes, likewise, the glyphs the current
+  glyph's list put on its left. With `dontAdvance` — "don't update the glyph
+  index" — the machine stays at its position, which a list inserted before it
+  at the mark moves and the current glyph's own list does not: it meets the
+  current glyph again where its list went after it (`MORX-35`), and "the
+  first one inserted" where it went before it. Growth past
   `Limits::max_glyphs` is refused, as `GSUB`'s is, and recorded.
 
 **Readings the manual leaves open, pinned by the test sections.** Where no

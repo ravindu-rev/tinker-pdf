@@ -28,7 +28,7 @@ use tinker_pdf_shape::bidi::{BaseDirection, Level};
 use tinker_pdf_shape::shape::Run;
 use tinker_pdf_shape::unicode::Script;
 use tinker_pdf_shape::{
-    Buffer, Direction, Limits, Orientation, ShapedGlyph, ShapedRun, Shaper, Tag, Warning,
+    Buffer, Direction, Insertion, Limits, Orientation, ShapedGlyph, ShapedRun, Shaper, Tag, Warning,
 };
 
 // --- bytes ---------------------------------------------------------------
@@ -2091,10 +2091,11 @@ fn a_deleted_glyph_leaves_the_run_when_the_chains_end() {
 }
 
 /// A subtable of a type this crate does not run is skipped and named, the
-/// chain going on past it: 3, reserved, a type above 5, unknown, and each
-/// type whose machine is not built yet.
+/// chain going on past it: 3, reserved, and a type above 5, unknown. Every
+/// type the chapter defines is run, so a machine's subtable that cannot be
+/// read is named as malformed instead.
 #[test]
-fn a_reserved_unknown_or_unbuilt_subtable_type_is_skipped_and_named() {
+fn a_reserved_or_unknown_subtable_type_is_skipped_and_named() {
     for kind in [3u8, 6, 200] {
         let table = morx_table(
             2,
@@ -2122,50 +2123,30 @@ fn a_reserved_unknown_or_unbuilt_subtable_type_is_skipped_and_named() {
             }]
         );
     }
-    // The one type of the chapter's not run yet, until its machine lands.
-    let kind = INSERTION;
-    let table = morx_table(
-        2,
-        &[chain(
-            1,
-            &[],
-            &[subtable(0x2000_0000 | u32::from(kind), 1, &[0; 16])],
-        )],
-    );
-    let (_, warnings) = chained(
-        &table,
-        &[10],
-        Direction::LeftToRight,
-        &Selection::defaults(),
-    );
-    assert_eq!(
-        warnings,
-        vec![Warning::SubtableTypeNotRun {
-            site: site(0),
-            kind
-        }]
-    );
-    // A ligature subtable of sixteen zero bytes is a state table of no
+    // A machine's subtable of sixteen zero bytes is a state table of no
     // classes, which is no state table: it is read, and named as malformed
     // rather than as a type not run.
-    let table = morx_table(
-        2,
-        &[chain(
-            1,
-            &[],
-            &[subtable(0x2000_0000 | u32::from(LIGATURE), 1, &[0; 16])],
-        )],
-    );
-    let (_, warnings) = chained(
-        &table,
-        &[10],
-        Direction::LeftToRight,
-        &Selection::defaults(),
-    );
-    assert_eq!(
-        warnings,
-        vec![Warning::MalformedAatSubtable { site: site(0) }]
-    );
+    for kind in [REARRANGEMENT, CONTEXTUAL, LIGATURE, INSERTION] {
+        let table = morx_table(
+            2,
+            &[chain(
+                1,
+                &[],
+                &[subtable(0x2000_0000 | u32::from(kind), 1, &[0; 16])],
+            )],
+        );
+        let (_, warnings) = chained(
+            &table,
+            &[10],
+            Direction::LeftToRight,
+            &Selection::defaults(),
+        );
+        assert_eq!(
+            warnings,
+            vec![Warning::MalformedAatSubtable { site: site(0) }],
+            "type {kind}"
+        );
+    }
 }
 
 /// A table of a version other than 2 or 3 is no `morx`; a chain the table
@@ -3800,4 +3781,665 @@ fn a_ligature_machine_meets_only_the_glyphs_it_names() {
     );
     assert!(warnings.is_empty(), "{warnings:?}");
     assert_eq!(out, [99]);
+}
+
+// --- the glyph insertion subtable (FT-07c.9) -------------------------------
+//
+// Lists from the insertion glyph table inserted beside the current glyph and
+// the marked one, the positions the machine keeps as glyphs go in around
+// them, and the ceiling growth is held to.
+
+/// An insertion entry's `setMark`.
+const SET_MARK_INSERT: u16 = 0x8000;
+/// `dontAdvance`.
+const HOLD: u16 = 0x4000;
+/// `currentIsKashidaLike`.
+const CURRENT_KASHIDA: u16 = 0x2000;
+/// `markedIsKashidaLike`.
+const MARKED_KASHIDA: u16 = 0x1000;
+/// `currentInsertBefore`.
+const CURRENT_BEFORE: u16 = 0x0800;
+/// `markedInsertBefore`.
+const MARKED_BEFORE: u16 = 0x0400;
+
+/// The flags' `currentInsertCount` field holding `n`.
+const fn current_count(n: u16) -> u16 {
+    n << 5
+}
+
+/// An insertion subtable for both orientations under flag 1: `classes`,
+/// `lines` and `entries` — new state, flags, current insert index and marked
+/// insert index — as its state table's, then its insertion glyph table after
+/// the entries, `insertionActionOffset` naming where.
+fn insertion_subtable(
+    classes: &[(u16, u16)],
+    lines: &[&[u16]],
+    entries: &[[u16; 4]],
+    glyphs: &[u16],
+) -> Vec<u8> {
+    let entries: Vec<&[u16]> = entries.iter().map(|entry| &entry[..]).collect();
+    let classes_count = lines.first().map_or(4, |line| line.len());
+    let mut body = stx(
+        count32(classes_count),
+        1,
+        &lookup_single(classes),
+        lines,
+        &entries,
+    );
+    let glyphs_at = body.len();
+    body.extend(u16s(glyphs));
+    put32(&mut body, 16, count32(glyphs_at));
+    subtable(ANY_ORIENTATION | u32::from(INSERTION), 1, &body)
+}
+
+/// The insertion subtable's worked examples: none. The chapter states the
+/// flags and shows no machine (`docs/design/shaping.md`, *The manual's worked
+/// examples*), so the machine is held by the readings below and
+/// text-rendering-tests `MORX-29` to `MORX-36`; H-142's expectations are what
+/// the count waits on.
+const INSERTION_EXAMPLES: &[Worked] = &[];
+
+/// The insertion subtable reproduces each worked example
+/// `docs/design/shaping.md` lists for type 5, and there are none.
+#[test]
+fn insertion_reproduces_the_manuals_worked_examples() {
+    assert_eq!(hold_to_worked_examples(INSERTION_EXAMPLES), 0);
+}
+
+// The glyphs of text-rendering-tests `MORX-29` to `MORX-32`'s faces: `A` to
+// `D` are 2 to 5, `I` 6, `M` 7, `N` 8, `S` 9, `P` to `R` 10 to 12 and `X` to
+// `Z` 13 to 15.
+const IA: u16 = 2;
+const IB: u16 = 3;
+const IC: u16 = 4;
+const ID: u16 = 5;
+const II: u16 = 6;
+const IM: u16 = 7;
+const IN: u16 = 8;
+const IS: u16 = 9;
+const IP: u16 = 10;
+const IQ: u16 = 11;
+const IR: u16 = 12;
+const IX: u16 = 13;
+const IY: u16 = 14;
+const IZ: u16 = 15;
+
+/// The glyphs of a string of those faces' letters.
+fn letters(text: &str) -> Vec<u16> {
+    text.chars()
+        .map(|c| match c {
+            'A' => IA,
+            'B' => IB,
+            'C' => IC,
+            'D' => ID,
+            'I' => II,
+            'M' => IM,
+            'N' => IN,
+            'S' => IS,
+            'P' => IP,
+            'Q' => IQ,
+            'R' => IR,
+            'X' => IX,
+            'Y' => IY,
+            'Z' => IZ,
+            other => panic!("no glyph for {other}"),
+        })
+        .collect()
+}
+
+/// `MORX-29`'s machine, its flags `extra` added to each inserting entry: `M`
+/// marks itself; `A` inserts `INS` before the marked glyph and `B` after it;
+/// `C` inserts it before the current glyph and `D` after it.
+fn twenty_nine(extra_marked: u16, extra_current: u16) -> Vec<u8> {
+    insertion_subtable(
+        &[(IA, 6), (IB, 7), (IC, 8), (ID, 9), (IM, 5)],
+        &[&[0, 0, 0, 0, 0, 1, 2, 3, 4, 5]],
+        &[
+            [0, 0, NO_TABLE, NO_TABLE],
+            [0, SET_MARK_INSERT, NO_TABLE, NO_TABLE],
+            [0, MARKED_BEFORE | 3 | extra_marked, NO_TABLE, 0],
+            [0, 3 | extra_marked, NO_TABLE, 0],
+            [
+                0,
+                CURRENT_BEFORE | current_count(3) | extra_current,
+                0,
+                NO_TABLE,
+            ],
+            [0, current_count(3) | extra_current, 0, NO_TABLE],
+        ],
+        &[II, IN, IS],
+    )
+}
+
+/// The glyphs, clusters and insertion kinds one subtable leaves of `glyphs`
+/// over a left-to-right run, and what it refused.
+fn inserted_through(
+    subtable: Vec<u8>,
+    glyphs: &[u16],
+) -> (Vec<(u16, u32, Option<Insertion>)>, Vec<Warning>) {
+    let table = morx_table(2, &[chain(1, &[], &[subtable])]);
+    let morx = Morx::parse(&table).expect("a readable morx");
+    let mut buffer = run_of(glyphs, Direction::LeftToRight);
+    let warnings = morx.run(&mut buffer, &Selection::defaults(), &Limits::DEFAULT);
+    let out = buffer
+        .glyphs()
+        .iter()
+        .enumerate()
+        .map(|(at, g)| (g.glyph, g.cluster, buffer.insertion(at)))
+        .collect();
+    (out, warnings)
+}
+
+/// An inserted glyph takes the cluster of the glyph it is inserted at, and
+/// says how it was inserted. A kashida-like list keeps that cluster; a
+/// split-vowel-like one is associated with the other glyph of its action —
+/// the current glyph for a list at the mark, the marked glyph for one at the
+/// current glyph — the clusters from the inserted glyphs to it merged.
+#[test]
+fn an_inserted_glyph_takes_the_cluster_it_is_inserted_at() {
+    let k = Some(Insertion::KashidaLike);
+    let v = Some(Insertion::SplitVowelLike);
+    let kashida = || twenty_nine(MARKED_KASHIDA, CURRENT_KASHIDA);
+    // `P M Q A`: `INS` before the marked `M`, each with the `M`'s cluster.
+    let (out, warnings) = inserted_through(kashida(), &letters("PMQA"));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        out,
+        vec![
+            (IP, 0, None),
+            (II, 1, k),
+            (IN, 1, k),
+            (IS, 1, k),
+            (IM, 1, None),
+            (IQ, 2, None),
+            (IA, 3, None),
+        ]
+    );
+    // `P M Q B`: after the `M`.
+    let (out, _) = inserted_through(kashida(), &letters("PMQB"));
+    assert_eq!(
+        out,
+        vec![
+            (IP, 0, None),
+            (IM, 1, None),
+            (II, 1, k),
+            (IN, 1, k),
+            (IS, 1, k),
+            (IQ, 2, None),
+            (IB, 3, None),
+        ]
+    );
+    // `P C Q` and `P D Q`: before and after the current glyph, its cluster.
+    let (out, _) = inserted_through(kashida(), &letters("PCQ"));
+    assert_eq!(
+        out,
+        vec![
+            (IP, 0, None),
+            (II, 1, k),
+            (IN, 1, k),
+            (IS, 1, k),
+            (IC, 1, None),
+            (IQ, 2, None),
+        ]
+    );
+    let (out, _) = inserted_through(kashida(), &letters("PDQ"));
+    assert_eq!(
+        out,
+        vec![
+            (IP, 0, None),
+            (ID, 1, None),
+            (II, 1, k),
+            (IN, 1, k),
+            (IS, 1, k),
+            (IQ, 2, None),
+        ]
+    );
+
+    // Split-vowel-like, the flags clear: `INS` at the `M` is associated with
+    // the `A`, so the clusters from it to the `A` are merged.
+    let split = || twenty_nine(0, 0);
+    let (out, _) = inserted_through(split(), &letters("PMQA"));
+    assert_eq!(
+        out,
+        vec![
+            (IP, 0, None),
+            (II, 1, v),
+            (IN, 1, v),
+            (IS, 1, v),
+            (IM, 1, None),
+            (IQ, 1, None),
+            (IA, 1, None),
+        ]
+    );
+    let (out, _) = inserted_through(split(), &letters("PMQB"));
+    assert_eq!(
+        out,
+        vec![
+            (IP, 0, None),
+            (IM, 1, None),
+            (II, 1, v),
+            (IN, 1, v),
+            (IS, 1, v),
+            (IQ, 1, None),
+            (IB, 1, None),
+        ]
+    );
+    // At the current glyph, associated with the mark — here the first glyph
+    // met, none having been marked — the clusters from it to the list
+    // merged.
+    let (out, _) = inserted_through(split(), &letters("PCQ"));
+    assert_eq!(
+        out,
+        vec![
+            (IP, 0, None),
+            (II, 0, v),
+            (IN, 0, v),
+            (IS, 0, v),
+            (IC, 1, None),
+            (IQ, 2, None),
+        ]
+    );
+    let (out, _) = inserted_through(split(), &letters("PDQ"));
+    assert_eq!(
+        out,
+        vec![
+            (IP, 0, None),
+            (ID, 0, None),
+            (II, 0, v),
+            (IN, 0, v),
+            (IS, 0, v),
+            (IQ, 2, None),
+        ]
+    );
+
+    // A right-to-left run, held in layout order for the chain: a list after
+    // the current glyph in layout comes before it in the text, its cluster
+    // the glyph's, so the clusters stay monotonic.
+    let after = insertion_subtable(
+        &[(10, 4)],
+        &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1]],
+        &[
+            [0, 0, NO_TABLE, NO_TABLE],
+            [0, current_count(1) | CURRENT_KASHIDA, 0, NO_TABLE],
+        ],
+        &[20],
+    );
+    let table = morx_table(2, &[chain(1, &[], &[after])]);
+    let morx = Morx::parse(&table).expect("readable");
+    let mut buffer = run_of(&[10, 11], Direction::RightToLeft);
+    assert!(morx
+        .run(&mut buffer, &Selection::defaults(), &Limits::DEFAULT)
+        .is_empty());
+    let out: Vec<(u16, u32)> = buffer
+        .glyphs()
+        .iter()
+        .map(|g| (g.glyph, g.cluster))
+        .collect();
+    assert_eq!(out, vec![(20, 0), (10, 0), (11, 1)]);
+}
+
+/// The mark is a position: glyphs inserted before the marked glyph leave it
+/// naming what now stands there. Held to text-rendering-tests `MORX-29` and
+/// `MORX-30`, whose machine this is.
+#[test]
+fn the_mark_is_a_position_that_an_insertion_before_it_leaves() {
+    for (input, output) in [
+        ("PQRMMXXMMYYAZZ", "PQRMMXXMINSMYYAZZ"),
+        ("PQRMMXXMMYYBZZ", "PQRMMXXMMINSYYBZZ"),
+        ("PQRMMXXMMYYCZZ", "PQRMMXXMMYYINSCZZ"),
+        ("PQRMMXXMMYYDZZ", "PQRMMXXMMYYDINSZZ"),
+        ("PQRMMXXXAYYAZZ", "PQRMINSINSMXXXAYYAZZ"),
+        // The second `INS` goes after the `I` the first put where the marked
+        // `M` stood, not after the `M`.
+        ("PQRMMXXXAYYBZZ", "PQRMIINSNSMXXXAYYBZZ"),
+        ("PQRMMXXXBYYAZZ", "PQRMINSMINSXXXBYYAZZ"),
+        ("PQRMMXXXBYYBZZ", "PQRMMINSINSXXXBYYBZZ"),
+    ] {
+        assert_eq!(
+            glyphs_through(twenty_nine(0, 0), &letters(input)),
+            letters(output),
+            "{input}"
+        );
+    }
+}
+
+/// `setMark` on an inserting transition marks the position the current glyph
+/// held when the transition began, before the insertion at the mark moved
+/// it. Held to text-rendering-tests `MORX-31`, whose machine this is: `M`
+/// marks itself, `A` inserts `INS` before the marked glyph and marks itself,
+/// `B` the same after it.
+#[test]
+fn set_mark_on_an_inserting_transition_marks_where_the_glyph_stood() {
+    let machine = || {
+        insertion_subtable(
+            &[(IA, 6), (IB, 7), (IM, 5)],
+            &[&[0, 0, 0, 0, 0, 1, 2, 3]],
+            &[
+                [0, 0, NO_TABLE, NO_TABLE],
+                [0, SET_MARK_INSERT, NO_TABLE, NO_TABLE],
+                [0, SET_MARK_INSERT | MARKED_BEFORE | 3, NO_TABLE, 0],
+                [0, SET_MARK_INSERT | 3, NO_TABLE, 0],
+            ],
+            &[II, IN, IS],
+        )
+    };
+    for (input, output) in [
+        ("XXAYYAZZ", "ININSSXXAYYAZZ"),
+        ("XXAYYBYY", "INSINSXXAYYBYY"),
+        ("XXBYYAZZ", "XIINSNSXBYYAZZ"),
+        ("XXBYYBZZ", "XININSSXBYYBZZ"),
+        ("MPQRAXYZA", "INSMINSPQRAXYZA"),
+        ("MPQRAXYZB", "INSMPINSQRAXYZB"),
+        ("MPQRBXYZA", "MINSINSPQRBXYZA"),
+        ("MPQRBXYZB", "MINSPINSQRBXYZB"),
+    ] {
+        assert_eq!(
+            glyphs_through(machine(), &letters(input)),
+            letters(output),
+            "{input}"
+        );
+    }
+}
+
+/// Where no glyph has been marked, the mark is the first glyph the machine
+/// met, and an insertion at the mark goes beside it (`MORX-32`).
+#[test]
+fn an_insertion_at_no_mark_goes_beside_the_first_glyph_met() {
+    let machine = || {
+        insertion_subtable(
+            &[(IA, 5), (IB, 6)],
+            &[&[0, 0, 0, 0, 0, 1, 2]],
+            &[
+                [0, 0, NO_TABLE, NO_TABLE],
+                [0, MARKED_BEFORE | 3, NO_TABLE, 0],
+                [0, 3, NO_TABLE, 0],
+            ],
+            &[II, IN, IS],
+        )
+    };
+    for (input, output) in [
+        ("A", "INSA"),
+        ("XAY", "INSXAY"),
+        ("B", "BINS"),
+        ("XBY", "XINSBY"),
+    ] {
+        assert_eq!(
+            glyphs_through(machine(), &letters(input)),
+            letters(output),
+            "{input}"
+        );
+    }
+}
+
+/// Without `dontAdvance` the machine goes on past the current glyph and the
+/// glyphs inserted after it, so an insertion is not read again (`MORX-33`);
+/// with it the machine stays at its position, meeting the current glyph
+/// again where the list went after it (`MORX-35`) and the first glyph
+/// inserted where the list went before it.
+#[test]
+fn dont_advance_meets_the_position_again_and_an_insertion_is_not_read_again() {
+    // `MORX-33`: `h` moves to state 1, where `a` inserts `ha` after itself;
+    // `a` is 2 and `h` 3.
+    let twice = || {
+        insertion_subtable(
+            &[(2, 5), (3, 4)],
+            &[&[0, 0, 0, 0, 1, 0], &[0, 0, 0, 0, 0, 2]],
+            &[
+                [0, 0, NO_TABLE, NO_TABLE],
+                [1, 0, NO_TABLE, NO_TABLE],
+                [0, current_count(2), 0, NO_TABLE],
+            ],
+            &[3, 2],
+        )
+    };
+    assert_eq!(glyphs_through(twice(), &[3, 2]), [3, 2, 3, 2]);
+    assert_eq!(
+        glyphs_through(twice(), &[3, 2, 3, 2]),
+        [3, 2, 3, 2, 3, 2, 3, 2]
+    );
+    assert_eq!(glyphs_through(twice(), &[2, 3]), [2, 3]);
+
+    // `MORX-35`: in state 0 `A` inserts `C` after itself and holds, moving to
+    // state 1, where `A` inserts `B` after itself; `B` and `C` insert `E`.
+    // `A` to `E` are 2 to 6, `X` and `Y` 7 and 8.
+    let holding = || {
+        insertion_subtable(
+            &[(2, 4), (3, 5), (4, 5)],
+            &[&[0, 0, 0, 0, 1, 2], &[0, 0, 0, 0, 3, 4]],
+            &[
+                [0, 0, NO_TABLE, NO_TABLE],
+                [1, HOLD | current_count(1), 1, NO_TABLE],
+                [0, current_count(1), 2, NO_TABLE],
+                [0, current_count(1), 0, NO_TABLE],
+                [1, current_count(1), 2, NO_TABLE],
+            ],
+            &[3, 4, 6],
+        )
+    };
+    assert_eq!(glyphs_through(holding(), &[2]), [2, 3, 4, 6]);
+    assert_eq!(glyphs_through(holding(), &[7, 2, 8]), [7, 2, 3, 4, 6, 8]);
+
+    // A list before the current glyph, held: the machine meets the first
+    // glyph inserted, 20, whose entry inserts 30 after it; had it met the 10
+    // again, its entry would have inserted 40.
+    let before = insertion_subtable(
+        &[(10, 4), (20, 5)],
+        &[
+            &[0, 0, 0, 0, 1, 0],
+            &[0, 0, 0, 0, 3, 2],
+            &[4, 4, 4, 4, 4, 4],
+        ],
+        &[
+            [0, 0, NO_TABLE, NO_TABLE],
+            [1, HOLD | CURRENT_BEFORE | current_count(1), 0, NO_TABLE],
+            [2, current_count(1), 1, NO_TABLE],
+            [2, current_count(1), 2, NO_TABLE],
+            [2, 0, NO_TABLE, NO_TABLE],
+        ],
+        &[20, 30, 40],
+    );
+    assert_eq!(glyphs_through(before, &[10]), [20, 30, 10]);
+}
+
+/// A glyph inserted on the side the walk goes on to is passed over, forward
+/// or backward: a 10 inserting a 10 beside itself inserts one, however the
+/// machine walks.
+#[test]
+fn an_insertion_is_not_read_again_whichever_way_the_walk_goes() {
+    let machine = |coverage: u32, flags: u16| {
+        let mut bytes = insertion_subtable(
+            &[(10, 4)],
+            &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1]],
+            &[
+                [0, 0, NO_TABLE, NO_TABLE],
+                [0, flags | current_count(1), 0, NO_TABLE],
+            ],
+            &[10],
+        );
+        bytes[4..8].copy_from_slice(&(coverage | u32::from(INSERTION)).to_be_bytes());
+        bytes
+    };
+    // Forward, after; backward, before: the side the walk goes on to.
+    assert_eq!(glyphs_through(machine(ANY_ORIENTATION, 0), &[10]), [10, 10]);
+    assert_eq!(
+        glyphs_through(machine(ANY_ORIENTATION | DESCENDING, CURRENT_BEFORE), &[10]),
+        [10, 10]
+    );
+    // Two glyphs, each inserting once, in both walks and on both sides.
+    for (coverage, flags) in [
+        (ANY_ORIENTATION, 0),
+        (ANY_ORIENTATION, CURRENT_BEFORE),
+        (ANY_ORIENTATION | DESCENDING, 0),
+        (ANY_ORIENTATION | DESCENDING, CURRENT_BEFORE),
+    ] {
+        assert_eq!(
+            glyphs_through(machine(coverage, flags), &[10, 7, 10]),
+            [10, 10, 7, 10, 10],
+            "coverage {coverage:#x}, flags {flags:#x}"
+        );
+    }
+}
+
+/// An insertion that would take the run past `Limits::max_glyphs` is refused
+/// and named, and the machine goes on; a chain of subtables each multiplying
+/// the run stops growing at the ceiling, each subtable that reached it named
+/// once.
+#[test]
+fn an_insertion_past_the_glyph_ceiling_is_refused_and_named() {
+    let triple = || {
+        insertion_subtable(
+            &[(10, 4)],
+            &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1]],
+            &[
+                [0, 0, NO_TABLE, NO_TABLE],
+                [0, current_count(3), 0, NO_TABLE],
+            ],
+            &[20, 21, 22],
+        )
+    };
+    let limits = Limits {
+        max_glyphs: 8,
+        ..Limits::DEFAULT
+    };
+    let (out, warnings) = through(triple(), &[10, 10, 10], &limits);
+    assert_eq!(
+        out.iter().map(|(g, _)| *g).collect::<Vec<_>>(),
+        vec![10, 20, 21, 22, 10, 10]
+    );
+    assert_eq!(
+        warnings,
+        vec![Warning::InsertionBudgetExceeded { site: site(0) }]
+    );
+    // Exactly at the ceiling is not past it.
+    let limits = Limits {
+        max_glyphs: 6,
+        ..Limits::DEFAULT
+    };
+    let (out, warnings) = through(triple(), &[10, 7, 7], &limits);
+    assert_eq!(out.len(), 6);
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // `MORX-34`'s billion laughs in four subtables: each `a` inserts nine
+    // `ha` after itself, so `ha` becomes 20 glyphs, then 200, then 992 of a
+    // ceiling of 1 000, the forty-fifth insertion of the third subtable and
+    // every one of the fourth refused.
+    let laugh = || {
+        insertion_subtable(
+            &[(2, 4)],
+            &[&[0, 0, 0, 0, 1]],
+            &[
+                [0, 0, NO_TABLE, NO_TABLE],
+                [0, current_count(18), 0, NO_TABLE],
+            ],
+            &[3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2, 3, 2],
+        )
+    };
+    let table = morx_table(2, &[chain(1, &[], &[laugh(), laugh(), laugh(), laugh()])]);
+    let limits = Limits {
+        max_glyphs: 1_000,
+        ..Limits::for_glyphs(2)
+    };
+    let (out, warnings) = chained_under(
+        &table,
+        &[3, 2],
+        Direction::LeftToRight,
+        &Selection::defaults(),
+        &limits,
+    );
+    assert_eq!(out.len(), 992);
+    assert!(
+        out.chunks(2).all(|pair| pair == [3, 2]),
+        "every glyph a laugh"
+    );
+    assert_eq!(
+        warnings,
+        vec![
+            Warning::InsertionBudgetExceeded { site: site(2) },
+            Warning::InsertionBudgetExceeded { site: site(3) },
+        ]
+    );
+
+    // `MORX-36`: inserting after itself and holding, for ever, stops at the
+    // transition ceiling, a glyph inserted at each transition.
+    let forever = insertion_subtable(
+        &[(2, 4)],
+        &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1]],
+        &[
+            [0, 0, NO_TABLE, NO_TABLE],
+            [0, HOLD | current_count(1), 0, NO_TABLE],
+        ],
+        &[3],
+    );
+    let limits = Limits {
+        max_transitions: 50,
+        ..Limits::DEFAULT
+    };
+    let (out, warnings) = through(forever, &[2], &limits);
+    assert_eq!(out.len(), 51);
+    assert_eq!(
+        warnings,
+        vec![Warning::TransitionBudgetExceeded { site: site(0) }]
+    );
+}
+
+/// A subtable with no insertion glyph table, or with one its offset puts past
+/// its end, is named and inserts nothing; a list the table does not hold is
+/// named and not inserted, the machine going on; and the end of text inserts
+/// beside the last glyph met.
+#[test]
+fn an_insertion_subtable_that_cannot_be_read_is_named() {
+    let malformed = Warning::MalformedAatSubtable { site: site(0) };
+    let headless = subtable(
+        ANY_ORIENTATION | u32::from(INSERTION),
+        1,
+        &u32s(&[4, 0, 0, 0]),
+    );
+    let (out, warnings) = through(headless, &[0], &Limits::DEFAULT);
+    assert_eq!(out, vec![(0, 0)]);
+    assert_eq!(warnings, vec![malformed]);
+
+    let mut past = twenty_nine(0, 0);
+    let body = past.len() - 12;
+    put32(&mut past, 12 + 16, count32(body + 1));
+    let (out, warnings) = through(past, &letters("PMQA"), &Limits::DEFAULT);
+    assert_eq!(
+        out.iter().map(|(g, _)| *g).collect::<Vec<_>>(),
+        letters("PMQA")
+    );
+    assert_eq!(warnings, vec![malformed]);
+
+    // A list of four from index 1 of a table of four, which ends the
+    // subtable, then a good one.
+    let short = insertion_subtable(
+        &[(10, 4), (11, 5)],
+        &[&[0, 0, 0, 0, 1, 2], &[0, 0, 0, 0, 1, 2]],
+        &[
+            [0, 0, NO_TABLE, NO_TABLE],
+            [0, current_count(4), 1, NO_TABLE],
+            [0, current_count(2), 0, NO_TABLE],
+        ],
+        &[20, 21, 22, 23],
+    );
+    let (out, warnings) = through(short, &[10, 11], &Limits::DEFAULT);
+    assert_eq!(
+        out.iter().map(|(g, _)| *g).collect::<Vec<_>>(),
+        vec![10, 11, 20, 21]
+    );
+    assert_eq!(warnings, vec![malformed]);
+
+    // `X A`: the `A` moves to state 1, whose end of text inserts 30 after
+    // the last glyph met, with its cluster.
+    let at_the_end = insertion_subtable(
+        &[(2, 4)],
+        &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1], &[2, 1, 1, 1, 1]],
+        &[
+            [0, 0, NO_TABLE, NO_TABLE],
+            [2, 0, NO_TABLE, NO_TABLE],
+            [0, current_count(1) | CURRENT_KASHIDA, 0, NO_TABLE],
+        ],
+        &[30],
+    );
+    let (out, warnings) = through(at_the_end, &[7, 2], &Limits::DEFAULT);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(out, vec![(7, 0), (2, 1), (30, 1)]);
 }

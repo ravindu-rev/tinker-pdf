@@ -1304,9 +1304,21 @@ What it does:
   component that held that cluster merged where it is stored elsewhere. An
   action that pops an empty stack ends its list, named
   (`Warning::ComponentStackEmpty`), as does one whose action, component or
-  ligature the subtable does not hold (`Warning::MalformedAatSubtable`). A
-  state machine runs only over a run holding a glyph its class table names.
-  A reserved, unknown or not yet built type is skipped and named
+  ligature the subtable does not hold (`Warning::MalformedAatSubtable`). And
+  the glyph insertion subtable runs: an entry's lists from the insertion
+  glyph table go in beside the marked glyph, then the current one, on the
+  left where its `markedInsertBefore` or `currentInsertBefore` is set and on
+  the right otherwise, each glyph taking the cluster of the glyph it is
+  inserted at and carrying how it was inserted (`Insertion::KashidaLike` or
+  `SplitVowelLike`, `Buffer::insertion`), a split-vowel-like list's clusters
+  merged with the other glyph of its action. The mark is a position, which
+  glyphs inserted before it leave; `setMark` on an inserting transition marks
+  where the current glyph stood; the machine goes on past the current glyph
+  and what was inserted after it, or, held by `dontAdvance`, stays at its
+  position. An insertion past `Limits::max_glyphs` is refused and named
+  (`Warning::InsertionBudgetExceeded`), and a list the table does not hold
+  named as malformed. A state machine runs only over a run holding a glyph
+  its class table names. A reserved or unknown type is skipped and named
   (`Warning::SubtableTypeNotRun`). `aat::Selection::from_opentype` turns a
   caller's `with_features` and `with_settings` into the settings asked for,
   by the design's table (`aat::aat_setting`): named features start from no

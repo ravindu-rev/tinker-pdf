@@ -100,7 +100,7 @@ pub mod shape;
 pub mod unicode;
 mod universal;
 
-pub use buffer::{Buffer, Direction, ShapedGlyph};
+pub use buffer::{Buffer, Direction, Insertion, ShapedGlyph};
 pub use common::{
     ClassDef, Condition, ConditionSet, Coverage, Device, Feature, FeatureList,
     FeatureSubstitutions, FeatureVariations, LangSys, Lookup, LookupList, Script, ScriptList, Tag,
@@ -278,10 +278,9 @@ pub enum Warning {
         /// The format it claimed.
         format: u16,
     },
-    /// A `morx` subtable of a type this crate does not run, so it was
-    /// skipped and the chain went on: 3 is reserved, a type above 5 is
-    /// unknown, and each type of the chapter's whose machine is not built
-    /// yet is refused by name until it is (ruling 3).
+    /// A `morx` subtable of a type the chapter does not define, so it was
+    /// skipped and the chain went on: 3 is reserved, and a type above 5 is
+    /// unknown.
     SubtableTypeNotRun {
         /// The subtable.
         site: aat::Site,
@@ -339,6 +338,14 @@ pub enum Warning {
     /// A ligature subtable's action popped an empty component stack, so its
     /// action list ended there, the glyphs it had made standing.
     ComponentStackEmpty {
+        /// The subtable.
+        site: aat::Site,
+    },
+    /// An insertion subtable's insertion would have taken the run past
+    /// [`Limits::max_glyphs`], so it was not made — refused rather than
+    /// grown, as [`Warning::GlyphBudgetExceeded`] refuses a `GSUB` multiple
+    /// substitution — and the machine went on.
+    InsertionBudgetExceeded {
         /// The subtable.
         site: aat::Site,
     },
