@@ -68,6 +68,16 @@ pub struct PlatePlan {
     process_disabled: [bool; 4],
 }
 
+/// By the colorants the plan names, in order, with their uses, and the process
+/// plates it disables: every other field is a function of those two, which
+/// [`PlatePlan::new`] derives, so two plans equal in them are equal.
+impl std::hash::Hash for PlatePlan {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.named.hash(state);
+        self.process_disabled.hash(state);
+    }
+}
+
 impl PlatePlan {
     /// The plan giving each colorant of `colorants` its use, in the order
     /// given: each spot asking for a plate ([`PlateUse::Spot`] or
@@ -101,6 +111,28 @@ impl PlatePlan {
             }
         }
         plan
+    }
+
+    /// The bytes the plan holds beside its own fields: each colorant's name
+    /// and its entries in the plan's tables, which a cache keeping a plan
+    /// counts against its budget.
+    #[must_use]
+    pub fn held_bytes(&self) -> u64 {
+        let named = self.named.iter().fold(0usize, |bytes, (name, _)| {
+            bytes
+                .saturating_add(name.len())
+                .saturating_add(std::mem::size_of::<(Arc<[u8]>, PlateUse)>())
+        });
+        let tables = self
+            .channels
+            .len()
+            .saturating_mul(std::mem::size_of::<(Arc<[u8]>, usize)>())
+            .saturating_add(
+                self.spots
+                    .len()
+                    .saturating_mul(std::mem::size_of::<usize>()),
+            );
+        u64::try_from(named.saturating_add(tables)).unwrap_or(u64::MAX)
     }
 
     /// How many spot channels the plan's canvas carries: one a spot with a

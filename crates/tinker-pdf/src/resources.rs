@@ -5332,7 +5332,13 @@ pub(crate) fn paint_cell<G: GlyphSource>(
         .with_antialias(request.antialias)
         .with_levels(request.graphics_bits, request.text_bits)
         .with_hard_edge(request.hard_edge)
-        .with_thinnest_line(request.thinnest_line);
+        .with_thinnest_line(request.thinnest_line)
+        .with_held_plates(request.plate_bytes);
+    // A coloured cell drawn on plates paints its colorants by the page's plan,
+    // so a spot inside it reaches its own plate.
+    if let Some(plan) = &request.plates {
+        renderer = renderer.with_plates(Arc::clone(plan));
+    }
 
     // 8.7.3.2: the cell is clipped to its `/BBox`. The buffer is already that
     // box rounded outward, so this only takes back the part of a pixel the
@@ -5694,6 +5700,8 @@ impl PageResources {
             usage: self.op.usage(),
             layers: self.op.layers().clone(),
             magnification: self.op.magnification_key(&self.doc),
+            plates: request.plates.clone(),
+            plate_bytes: request.plate_bytes,
         }
     }
 

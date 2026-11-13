@@ -1758,13 +1758,19 @@ impl Canvas {
     }
 
     /// `C0`, the parent's pixel `(px, py)` in this buffer's format: its bytes
-    /// straight across in the same format, and otherwise the conversion
+    /// straight across in the same format, a plates parent's process inks
+    /// straight across into `CmykA8`, as ink, and otherwise the conversion
     /// `pixel` and `encode` make, by maximum undercolour removal into ink —
     /// what a copy of the parent in this format holds, whatever black
     /// generation a paint holds on this buffer while it paints.
     fn backdrop_word(&self, parent: &Canvas, px: u32, py: u32) -> Option<[u8; 5]> {
         if parent.format == self.format {
             return self.source_from(parent, px, py).map(|(word, _)| word);
+        }
+        if self.format == PixelFormat::CmykA8 && matches!(parent.format, PixelFormat::Plates { .. })
+        {
+            let mut word = [0u8; 5];
+            return plate_pixel_into(parent, px, py, self.format, None, &mut word).then_some(word);
         }
         parent
             .pixel(px, py)
@@ -6144,6 +6150,73 @@ mod tests {
             .expect("the group holds its parent");
         isolated.remove_backdrop(&parent);
         assert_eq!(isolated.data, before, "no backdrop, no correction");
+    }
+
+    /// **An ink group over plates reads their process inks as ink** (11.4.4,
+    /// 11.4.5, 11.4.7.2): a non-isolated `CmykA8` group over a plates page of
+    /// rich black — all four inks, which light would read back as black ink
+    /// alone — and a spot adopts the four inks as they stand, at none of its
+    /// own alpha, and a knockout restores them where an element paints; a
+    /// paint at half alpha inside such a group, the backdrop taken out and
+    /// the group composited back, is the same paint drawn on the page, within
+    /// the removal's rounding — the spot under it halved, as a paint naming
+    /// no spot halves it.
+    #[test]
+    fn an_ink_group_over_plates_reads_their_process_inks_as_ink() {
+        let whole = solid(0, 0, 4, 4, 255);
+        let rich = PlateInk::named(spots(1), &[(0, 200), (1, 150), (2, 100), (3, 250), (4, 90)]);
+        let page = || {
+            let mut page = Canvas::plates(4, 4, 1, Color::WHITE).expect("under the cap");
+            page.fill_mask_plates(&whole, &rich, 1.0, BlendMode::Normal);
+            page
+        };
+        let yellow = Some([0, 0, 255, 0]);
+
+        let mut group = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
+        group.adopt_backdrop(page());
+        assert_eq!(
+            group.data[..5],
+            [200, 150, 100, 250, 0],
+            "the four inks as they stand, none of the group's own alpha"
+        );
+        group.fill_mask_inked(
+            &solid(0, 0, 2, 4, 255),
+            Color::BLACK,
+            yellow,
+            1.0,
+            BlendMode::Normal,
+        );
+        group.knock_out(&solid(0, 0, 1, 1, 255));
+        assert_eq!(
+            group.data[..5],
+            [200, 150, 100, 250, 0],
+            "a knockout restores the inks it adopted"
+        );
+
+        let mut group = Canvas::new(4, 4, PixelFormat::CmykA8, Color::TRANSPARENT);
+        group.adopt_backdrop(page());
+        group.fill_mask_inked(&whole, Color::BLACK, yellow, 0.5, BlendMode::Normal);
+        let mut through = group.release_parent().expect("the group holds its page");
+        group.remove_backdrop(&through);
+        through.composite(&group, (0, 0), 1.0, BlendMode::Normal, None, None);
+
+        let mut direct = page();
+        direct.fill_mask_inked(&whole, Color::BLACK, yellow, 0.5, BlendMode::Normal);
+        assert!(
+            through
+                .data
+                .iter()
+                .zip(&direct.data)
+                .all(|(got, want)| got.abs_diff(*want) <= 2),
+            "through the group {:?}, drawn directly {:?}",
+            &through.data[..6],
+            &direct.data[..6]
+        );
+        assert!(
+            through.data[4].abs_diff(45) <= 1,
+            "the spot halved: {}",
+            through.data[4]
+        );
     }
 
     /// **A spot under a non-isolated group comes back as it went in**

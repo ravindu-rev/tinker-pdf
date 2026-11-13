@@ -375,6 +375,27 @@ pub enum RenderWarning {
         /// has none.
         layer: String,
     },
+    /// A render on plates drew spot colorants on the process plates, through
+    /// their alternates, rather than on plates of their own, because their
+    /// plates would have passed a cap (`docs/design/overprint-separations.md`,
+    /// "The cap, and what it costs"): more spot plates than
+    /// [`MAX_SPOT_PLATES`](tinker_pdf_raster::MAX_SPOT_PLATES), or more bytes
+    /// of plates live at once than [`MAX_PLATE_BYTES`].
+    ///
+    /// Ruling 2 and ruling 10 together: every ink is drawn, and the caller is
+    /// told which spots did not come back on plates of their own. Where the
+    /// page's plates passed a cap, `named` is how many spot colorants asked
+    /// for a plate and `kept` how many kept one, the first `kept` in the
+    /// plan's order. Where a transparency group's or a coloured tiling cell's
+    /// plates buffer would have passed [`MAX_PLATE_BYTES`], that group or cell
+    /// was drawn in ink, every spot inside it through its alternate, and
+    /// `kept` is 0 of the `named` spot plates the page carries.
+    PlatesCapped {
+        /// How many spot colorants asked for a plate of their own.
+        named: usize,
+        /// How many of them kept one.
+        kept: usize,
+    },
 }
 
 /// What a pattern name paints with (8.7.3).
@@ -445,6 +466,9 @@ pub struct TileRequest {
     pub height: u32,
     /// The buffer's format, always one carrying alpha: a cell is a shape over
     /// nothing, and a format without alpha cannot say where it did not paint.
+    /// On plates it is the page's plates, which the cell is tiled onto channel
+    /// for channel, or `CmykA8` where a plates buffer would pass
+    /// [`MAX_PLATE_BYTES`].
     ///
     /// No colour rides with the request. A `PaintType 2` cell is a shape
     /// (8.7.3.3), drawn as its content stream draws it, and the renderer
@@ -473,6 +497,18 @@ pub struct TileRequest {
     /// The page's thinnest stroke, in device pixels, which a cell drawn at
     /// the page's resolution keeps ([`Renderer::with_thinnest_line`]).
     pub thinnest_line: Option<f64>,
+    /// The plate plan a coloured cell (`/PaintType 1`) drawn on plates
+    /// paints its colorants by — the page's ([`Renderer::with_plates`]), so a
+    /// spot inside the cell reaches its own plate — and `None` for every
+    /// other cell, an uncoloured one among them, whose colour is its
+    /// filler's.
+    pub plates: Option<Arc<PlatePlan>>,
+    /// The bytes of plates the render holds live where a plates cell is
+    /// drawn, outside the cell's own buffer — the page's and each open
+    /// group's — which every plates buffer opened inside the cell is charged
+    /// beside ([`Renderer::with_held_plates`], [`MAX_PLATE_BYTES`]); 0 for a
+    /// cell drawn in any other format.
+    pub plate_bytes: u64,
 }
 
 /// One rasterized tiling-pattern cell.
@@ -1115,6 +1151,10 @@ struct GroupFrame {
     /// a group compositing in RGB, which take its result into ink on an ink
     /// parent (11.7.5.3); `None` for every other group.
     removal: Option<Arc<InkTables>>,
+    /// The bytes the group's plates buffer is charged against
+    /// [`MAX_PLATE_BYTES`], at the size it has on a render of the whole page;
+    /// 0 for a buffer of any other format.
+    plate_bytes: u64,
     /// How deep the clip stack was when the group opened.
     ///
     /// A content stream may leave a `q` unbalanced; the interpreter drops the
@@ -1656,6 +1696,14 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// ([`Renderer::with_plates`]); `None` for every other render, which then
     /// asks no colorants of anybody.
     plan: Option<Arc<PlatePlan>>,
+    /// The bytes of plates the render holds live outside this renderer — for
+    /// a tiling cell's renderer, the page's and its open groups'
+    /// ([`Renderer::with_held_plates`]); 0 for a page's.
+    held_plates: u64,
+    /// The bytes this renderer's own canvas holds as plates on a render of
+    /// the whole page: its frame's pixels at a plates pixel's width, and 0
+    /// for a canvas of any other format.
+    own_plates: u64,
     /// Text objects open, each `BT` without its `ET` yet (9.4.1). A fill
     /// inside one is a Type 3 glyph's procedure painting (9.6.5), which
     /// fill-to-stroke leaves a glyph. No text object outlives the stream it
@@ -1886,6 +1934,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     pub fn new(canvas: Canvas, base: Matrix, glyphs: &'g G) -> Renderer<'g, G> {
         let frame = Bounds::of_rect(canvas.device_rect());
         let canvas_rect = canvas.device_rect();
+        let own_plates = plate_bytes_of(canvas.format, frame.area());
         Renderer {
             canvas,
             glyphs: Scope::Borrowed(glyphs),
@@ -1945,6 +1994,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             every_paint_opaque: true,
             forced: None,
             plan: None,
+            held_plates: 0,
+            own_plates,
             text_depth: 0,
         }
     }
@@ -1960,6 +2011,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     #[must_use]
     pub fn with_page_size(mut self, width: u32, height: u32) -> Self {
         self.frame = Bounds::of_rect((0, 0, width, height));
+        self.own_plates = plate_bytes_of(self.canvas.format, self.frame.area());
         self
     }
 
@@ -2271,13 +2323,86 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// its own — DeviceGray, DeviceRGB, a CIE-based or ICC space — is its
     /// light turned into ink on the process plates, as on a `CmykA8` canvas.
     ///
+    /// A transparency group whose `/CS` is a four-component, subtractive
+    /// space, or absent, composites in a plates buffer of its own carrying the
+    /// canvas's spots, so a spot painted inside it keeps its plate (11.7.3); a
+    /// group of another space composites in that space, its spots through
+    /// their alternates, and reaches the plates as light turned into ink. A
+    /// coloured tiling cell is drawn on plates by the same plan. Every plates
+    /// buffer live at once is held to [`MAX_PLATE_BYTES`].
+    ///
     /// A renderer over a canvas of any other format keeps no plan, and asks
     /// no colour its colorants.
     #[must_use]
-    pub fn with_plates(mut self, plan: PlatePlan) -> Self {
-        self.plan =
-            matches!(self.canvas.format, PixelFormat::Plates { .. }).then(|| Arc::new(plan));
+    pub fn with_plates(mut self, plan: impl Into<Arc<PlatePlan>>) -> Self {
+        self.plan = matches!(self.canvas.format, PixelFormat::Plates { .. }).then(|| plan.into());
         self
+    }
+
+    /// Says the render holds `bytes` of plates live outside this renderer's
+    /// own canvas, so every plates buffer it opens is charged beside them
+    /// against [`MAX_PLATE_BYTES`]: what a tiling cell's renderer is told of
+    /// the page it draws for ([`TileRequest::plate_bytes`]).
+    #[must_use]
+    pub fn with_held_plates(mut self, bytes: u64) -> Self {
+        self.held_plates = bytes;
+        self
+    }
+
+    /// The bytes of plates the render holds live now, each buffer at the size
+    /// it has on a render of the whole page: those held outside this
+    /// renderer, its own canvas's and each open group's plates buffer.
+    fn plate_bytes_live(&self) -> u64 {
+        self.groups.iter().fold(
+            self.held_plates.saturating_add(self.own_plates),
+            |live, frame| live.saturating_add(frame.plate_bytes),
+        )
+    }
+
+    /// Whether a plates buffer of `format` over `pixels` pixels of the page's
+    /// frame may open beside what is live ([`MAX_PLATE_BYTES`]), and its
+    /// charge where it may; `None` where it would pass the bound, which says
+    /// so once a render ([`RenderWarning::PlatesCapped`]): the buffer is then
+    /// drawn in ink, every spot inside it through its alternate.
+    fn plates_within_bound(&mut self, format: PixelFormat, pixels: u64) -> Option<u64> {
+        let PixelFormat::Plates { spots } = format else {
+            return Some(0);
+        };
+        let bytes = plate_bytes_of(format, pixels);
+        if self.plate_bytes_live().saturating_add(bytes) <= MAX_PLATE_BYTES {
+            return Some(bytes);
+        }
+        self.plates_capped(spots);
+        None
+    }
+
+    /// Says, once, that a buffer of plates carrying `spots` spot plates was
+    /// drawn in ink past [`MAX_PLATE_BYTES`], every spot inside it through
+    /// its alternate.
+    fn plates_capped(&mut self, spots: tinker_pdf_raster::Spots) {
+        let warning = RenderWarning::PlatesCapped {
+            named: spots.count(),
+            kept: 0,
+        };
+        if !self.warnings.contains(&warning) {
+            self.warnings.push(warning);
+        }
+    }
+
+    /// The format a transparency group declaring `space` composites in on
+    /// the canvas drawn on now (11.6.6): on plates with a plan, a
+    /// four-component subtractive space is the canvas's own plates, every
+    /// spot passing through the group to its plate (11.7.3); every other
+    /// space, and every space on any other canvas, its own buffer.
+    fn group_format_here(&self, space: tinker_pdf_content::GroupSpace) -> PixelFormat {
+        match (space, self.canvas.format, &self.plan) {
+            (
+                tinker_pdf_content::GroupSpace::Cmyk,
+                plates @ PixelFormat::Plates { .. },
+                Some(_),
+            ) => plates,
+            _ => Self::group_format_of(space),
+        }
     }
 
     /// What `paint` puts on the canvas drawn on now: on a plates canvas of a
@@ -2687,10 +2812,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         Some(tables)
     }
 
-    /// Puts `removal` in force on an ink canvas for one paint, handing back
-    /// what was, or does nothing on any other canvas.
+    /// Puts `removal` in force on an ink canvas — `CmykA8`, and plates, whose
+    /// process plates turn light into ink as `CmykA8` does — for one paint,
+    /// handing back what was, or does nothing on any other canvas.
     fn hold_removal(&mut self, removal: &Option<Arc<InkTables>>) -> Option<Option<Arc<InkTables>>> {
-        (removal.is_some() && self.canvas.format == PixelFormat::CmykA8)
+        (removal.is_some() && inks(self.canvas.format))
             .then(|| self.canvas.set_ink_tables(removal.clone()))
     }
 
@@ -2916,7 +3042,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 }
                 // An RGB group's result reaches an ink parent through the
                 // black generation and undercolour removal at its `Do`.
-                let held = (frame.removal.is_some() && parent.format == PixelFormat::CmykA8)
+                let held = (frame.removal.is_some() && inks(parent.format))
                     .then(|| parent.set_ink_tables(frame.removal.clone()));
                 parent.composite(
                     &buffer,
@@ -3024,8 +3150,21 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         // space it declared: a paint there is black or a lightness, and a
         // trip through ink or Lab and back would round a grey that needs none.
         let format = match group.space {
-            Some(space) if self.forced.is_none() => Self::group_format_of(space),
+            Some(space) if self.forced.is_none() => self.group_format_here(space),
             _ => Self::alpha_format(self.canvas.format),
+        };
+        // The buffer a whole-page render would have made: the clip's
+        // rectangle on the page, within the parent's.
+        let framed = self
+            .clip_bounds
+            .map_or(self.frame, |clip| clip.within(self.frame));
+        // A plates buffer is charged at that size against the plates' byte
+        // bound, so a tile charges what the page charges (ruling 5); one that
+        // would pass it composites in ink, as a group of another space does,
+        // its spots through their alternates.
+        let (format, plate_bytes) = match self.plates_within_bound(format, framed.area()) {
+            Some(bytes) => (format, bytes),
+            None => (PixelFormat::CmykA8, 0),
         };
         let buffer = Canvas::new(width, height, format, Color::TRANSPARENT).at_origin(x0, y0);
         self.count_group_buffer(&buffer);
@@ -3078,14 +3217,11 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             knockout: group.knockout && self.forced.is_none(),
             opaque,
             removal,
+            plate_bytes,
             clip_depth: self.clip_stack.len(),
             masks_open: self.mask_frames.len(),
         };
-        // The buffer a whole-page render would have made: the clip's
-        // rectangle on the page, within the parent's.
-        self.frame = self
-            .clip_bounds
-            .map_or(self.frame, |clip| clip.within(self.frame));
+        self.frame = framed;
 
         // Everything inside the group draws in the page's own frame, onto a
         // buffer that stands at `(x0, y0)` in it. The buffer used to carry a
@@ -4001,8 +4137,31 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
 
         // A cell is a shape over nothing, so its buffer must carry alpha
-        // whatever the page's format is.
+        // whatever the page's format is. On plates a cell is drawn in the
+        // page's plates and tiled channel for channel; a coloured one paints
+        // its colorants by the page's plan, so a spot inside it reaches its
+        // own plate. Its buffer is charged against the plates' byte bound at
+        // its own size, which the page frame gives (ruling 5), and one that
+        // would pass it is drawn in ink, its spots through their alternates.
         let format = Self::alpha_format(self.canvas.format);
+        let held = self.plate_bytes_live();
+        let fits = held.saturating_add(plate_bytes_of(format, area)) <= MAX_PLATE_BYTES;
+        let (format, plate_bytes) = match format {
+            PixelFormat::Plates { .. } if fits => (format, held),
+            PixelFormat::Plates { spots } => {
+                // An uncoloured cell's colours are its filler's, so in ink it
+                // is the same shape and nothing is drawn otherwise.
+                if !tiling.uncolored {
+                    self.plates_capped(spots);
+                }
+                (PixelFormat::CmykA8, 0)
+            }
+            format => (format, 0),
+        };
+        let plates = match format {
+            PixelFormat::Plates { .. } if !tiling.uncolored => self.plan.clone(),
+            _ => None,
+        };
         let request = TileRequest {
             to_pixels: to_device.then(&Matrix::translate(-tx0, -ty0)),
             bbox: tiling.bbox,
@@ -4016,6 +4175,8 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             text_bits: self.text_bits,
             hard_edge: self.hard_edge,
             thinnest_line: self.thinnest_line,
+            plates,
+            plate_bytes,
         };
         let Some(tile) = self.glyphs.tile(name, &request) else {
             return false;
@@ -6587,6 +6748,58 @@ fn region_canvas(region: PixelRegion, format: PixelFormat, background: Color) ->
 /// `u32::MAX` squared — 18 446 744 065 119 617 025 pixels, 275 billion times
 /// this cap.
 pub const MAX_PAGE_PIXELS: u64 = 1 << 26;
+
+/// The most bytes of plates one render holds at once
+/// (`docs/design/overprint-separations.md`, "The cap, and what it costs"):
+/// every [`PixelFormat::Plates`] buffer live together — the page's, each open
+/// transparency group's and a tiling cell's — each counted at the size it has
+/// on a render of the whole page, so a tile takes every decision the page
+/// under it takes (ruling 5).
+///
+/// A plates pixel is `5 + spots` bytes, sixty-nine at
+/// [`MAX_SPOT_PLATES`](tinker_pdf_raster::MAX_SPOT_PLATES), so at
+/// [`MAX_PAGE_PIXELS`] a page's plates alone would ask 69 × 2^26 bytes, 4.3
+/// GiB, which no render may. 2^30, 1 GiB: an A4 page at 300 dpi, 2 480 × 3 508
+/// pixels, keeps every one of sixty-four spot plates, and a page at
+/// `MAX_PAGE_PIXELS` sixteen bytes a pixel — the four process plates, the alpha
+/// and eleven spots ([`spots_within_bytes`]). A page whose plates would pass it
+/// keeps the spots that fit, in its plan's order, and composites the rest
+/// through their alternates; a group or a cell whose plates buffer would pass
+/// it is drawn in ink, its spots through their alternates; each says so
+/// ([`RenderWarning::PlatesCapped`]).
+pub const MAX_PLATE_BYTES: u64 = 1 << 30;
+
+/// How many spot plates a page of `pixels` pixels keeps within
+/// [`MAX_PLATE_BYTES`]: as many as leave its plates, `5 + spots` bytes a
+/// pixel, inside the bound, and at most
+/// [`MAX_SPOT_PLATES`](tinker_pdf_raster::MAX_SPOT_PLATES); none where the
+/// four process plates and the alpha leave no room for one, which no page
+/// inside [`MAX_PAGE_PIXELS`] reaches.
+#[must_use]
+pub fn spots_within_bytes(pixels: u64) -> usize {
+    let per_pixel = MAX_PLATE_BYTES / pixels.max(1);
+    let spots = per_pixel.saturating_sub(5);
+    usize::try_from(spots)
+        .unwrap_or(usize::MAX)
+        .min(tinker_pdf_raster::MAX_SPOT_PLATES)
+}
+
+/// Whether a canvas of `format` composites ink and turns light into it by
+/// the black generation and undercolour removal in force (10.4.2.4):
+/// `CmykA8`, and plates, whose process plates are `CmykA8`'s.
+fn inks(format: PixelFormat) -> bool {
+    matches!(format, PixelFormat::CmykA8 | PixelFormat::Plates { .. })
+}
+
+/// The bytes a buffer of `format` holds over `pixels` pixels where it is
+/// plates, and 0 for a buffer of any other format: what
+/// [`MAX_PLATE_BYTES`] counts.
+fn plate_bytes_of(format: PixelFormat, pixels: u64) -> u64 {
+    match format {
+        PixelFormat::Plates { .. } => pixels.saturating_mul(format.components() as u64),
+        _ => 0,
+    }
+}
 
 /// The pixel size of a page at a given scale.
 ///
@@ -11617,13 +11830,107 @@ mod plate_tests {
                 _ => None,
             }
         }
+        fn form(&self, name: &[u8]) -> Option<Form> {
+            use tinker_pdf_content::{Group, GroupSpace};
+            let group = |isolated, knockout, space| {
+                Some(Group {
+                    isolated,
+                    knockout,
+                    space,
+                })
+            };
+            let page = [0.0, 0.0, 40.0, 40.0];
+            let (content, bbox, group): (&[u8], [f64; 4], Option<Group>) = match name {
+                b"Iso" => (PROCESS_GROUP, page, group(true, false, None)),
+                b"NonIso" => (PROCESS_GROUP, page, group(false, false, None)),
+                b"Knock" => (PROCESS_GROUP, page, group(false, true, None)),
+                b"IsoKnock" => (PROCESS_GROUP, page, group(true, true, None)),
+                b"CmykIso" => (
+                    PROCESS_GROUP,
+                    page,
+                    group(true, false, Some(GroupSpace::Cmyk)),
+                ),
+                b"CmykNonIso" => (
+                    PROCESS_GROUP,
+                    page,
+                    group(false, false, Some(GroupSpace::Cmyk)),
+                ),
+                b"Nested" => (b"/Iso Do /NonIso Do", page, group(true, false, None)),
+                b"GoldIso" => (GOLD_GROUP, page, group(true, false, None)),
+                b"GoldNonIso" => (GOLD_GROUP, page, group(false, false, None)),
+                b"GoldKnock" => (GOLD_GROUP, page, group(false, true, None)),
+                b"GoldCmyk" => (GOLD_GROUP, page, group(true, false, Some(GroupSpace::Cmyk))),
+                b"GoldNested" => (b"/GoldNonIso Do", page, group(true, false, None)),
+                b"GoldRgb" => (GOLD_GROUP, page, group(true, false, Some(GroupSpace::Rgb))),
+                b"GoldGray" => (
+                    GOLD_GROUP,
+                    page,
+                    group(false, false, Some(GroupSpace::Gray)),
+                ),
+                // On the tall page `plate_bound_tests` draws: a group over 10
+                // by 10 points at its top-left, and one over 600 by 600.
+                b"SmallGold" => (
+                    b"/Gold cs 0.6 scn 4 3930 10 10 re f",
+                    [4.0, 3930.0, 14.0, 3940.0],
+                    group(true, false, None),
+                ),
+                b"BigGold" => (
+                    b"/Gold cs 0.6 scn 20 3920 20 20 re f",
+                    [0.0, 3344.0, 600.0, 3944.0],
+                    group(true, false, None),
+                ),
+                // Inside `/C4`'s cell, in its space: a group over the whole
+                // cell, painting its top.
+                b"CellGold" => (
+                    b"/Gold cs 0.6 scn 4 50 20 16 re f",
+                    [0.0, 0.0, 70.0, 70.0],
+                    group(true, false, None),
+                ),
+                _ => return None,
+            };
+            Some(Form {
+                content: content.to_vec(),
+                matrix: Matrix::IDENTITY,
+                bbox: Some(bbox),
+                group,
+                stream: 0,
+            })
+        }
     }
+
+    /// What the process groups paint: overlapping fills in DeviceCMYK, a
+    /// second under `/Half` — both alphas 0.5, `Multiply` — and fills in
+    /// DeviceRGB and DeviceGray under it.
+    const PROCESS_GROUP: &[u8] = b"0.1 0.6 0.2 0 k 4 4 24 24 re f \
+        /Half gs 0.7 0.1 0.3 0.1 k 14 14 22 22 re f \
+        0.9 0.4 0.1 rg 8 20 10 10 re f 0.5 g 2 30 30 6 re f";
+
+    /// What the spot groups paint: `Gold` at 0.6 over device pixels 4 to 24
+    /// across and 16 to 36 down.
+    const GOLD_GROUP: &[u8] = b"/Gold cs 0.6 scn 4 4 20 20 re f";
 
     /// What the paints draw: one glyph, a square over most of its em; `/Im0`,
     /// a stencil painting its whole square; `/Im1`, an image of four colours;
-    /// and `/U0`, an uncoloured tiling pattern of 4-point cells, each
-    /// painting its left half.
+    /// `/U0`, an uncoloured tiling pattern of 4-point cells, each painting its
+    /// left half; and coloured tiling patterns, whose cells are drawn as the
+    /// facade draws one, by the request's plan: `/C0`, 8-point cells of
+    /// process ink, and `/C3`, 8-point cells of process ink in their first
+    /// five columns and `Gold` in the rest; and for `plate_bound_tests`'
+    /// tall page, `/C1`, a cell of 600 points at its top-left, `/C2`, one of
+    /// 10, and `/C4`, one of 70 holding a group over the whole cell.
     struct Marks;
+
+    /// The content of the coloured cell `name`, in pattern space.
+    fn cell_content(name: &[u8]) -> Option<&'static [u8]> {
+        Some(match name {
+            b"C0" => b"0.1 0.6 0.2 0 k 0 0 5 8 re f 0.4 g 5 0 3 4 re f 0.2 0.9 0.5 rg 5 4 3 4 re f",
+            b"C3" => b"0.1 0.6 0.2 0 k 0 0 5 8 re f /Gold cs 0.6 scn 5 0 3 8 re f",
+            b"C1" => b"/Gold cs 0.6 scn 44 576 20 20 re f",
+            b"C2" => b"/Gold cs 0.6 scn 0 0 10 10 re f",
+            b"C4" => b"/CellGold Do /Gold cs 0.6 scn 4 4 20 16 re f",
+            _ => return None,
+        })
+    }
 
     impl GlyphSource for Marks {
         fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
@@ -11673,36 +11980,60 @@ mod plate_tests {
         }
 
         fn pattern(&self, name: &[u8]) -> Option<PatternPaint> {
-            (name == b"U0").then(|| {
+            let tiling = |(x, y): (f64, f64), side: f64, uncolored: bool| {
                 PatternPaint::Tiling(Box::new(TilingPattern {
-                    matrix: Matrix::IDENTITY,
-                    bbox: [0.0, 0.0, 4.0, 4.0],
-                    xstep: 4.0,
-                    ystep: 4.0,
-                    uncolored: true,
+                    matrix: Matrix::translate(x, y),
+                    bbox: [0.0, 0.0, side, side],
+                    xstep: side,
+                    ystep: side,
+                    uncolored,
                 }))
+            };
+            Some(match name {
+                b"U0" => tiling((0.0, 0.0), 4.0, true),
+                b"C0" | b"C3" => tiling((0.0, 0.0), 8.0, false),
+                b"C1" => tiling((0.0, 3344.0), 600.0, false),
+                b"C2" => tiling((4.0, 3910.0), 10.0, false),
+                b"C4" => tiling((0.0, 3874.0), 70.0, false),
+                _ => return None,
             })
         }
 
         fn tile(&self, name: &[u8], request: &TileRequest) -> Option<Tile> {
-            if name != b"U0" {
-                return None;
-            }
             let mut canvas = Canvas::new(
                 request.width,
                 request.height,
                 request.format,
                 Color::TRANSPARENT,
             );
-            for y in 0..request.height {
-                for x in 0..request.width / 2 {
-                    canvas.blend_pixel(x, y, Color::rgb(0, 255, 0), 1.0);
+            if name == b"U0" {
+                for y in 0..request.height {
+                    for x in 0..request.width / 2 {
+                        canvas.blend_pixel(x, y, Color::rgb(0, 255, 0), 1.0);
+                    }
                 }
+                return Some(Tile {
+                    canvas: Arc::new(canvas),
+                    opaque: true,
+                    warnings: Vec::new(),
+                });
             }
+            // A coloured cell, drawn as the facade's `paint_cell` draws one:
+            // on a renderer of the request's buffer, plan and held plates.
+            let content = cell_content(name)?;
+            let mut renderer = Renderer::new(canvas, request.to_pixels, self)
+                .with_pattern_depth(request.depth)
+                .with_held_plates(request.plate_bytes);
+            if let Some(plan) = &request.plates {
+                renderer = renderer.with_plates(Arc::clone(plan));
+            }
+            interpret(content, Matrix::IDENTITY, &mut renderer, &Spaces::default());
+            let opaque = renderer.painted_opaquely();
+            let (canvas, warnings) = renderer.finish();
             Some(Tile {
                 canvas: Arc::new(canvas),
-                opaque: true,
-                warnings: Vec::new(),
+                opaque,
+                warnings,
             })
         }
     }
@@ -12075,5 +12406,432 @@ mod plate_tests {
         let mut planned = Renderer::new(planned, base, &Marks).with_plates(plan());
         assert!(planned.composites_colorants(), "plates with a plan");
         assert!(asked(&mut planned) >= 2, "each colour set is asked");
+    }
+
+    /// `content` drawn on a `CmykA8` canvas and on plates by [`plan`], each
+    /// with its warnings.
+    fn ink_and_plates(
+        content: &[u8],
+    ) -> ((Canvas, Vec<RenderWarning>), (Canvas, Vec<RenderWarning>)) {
+        let base = page_transform(f64::from(SIZE), 1.0);
+        let ink = Canvas::new(SIZE, SIZE, PixelFormat::CmykA8, Color::WHITE);
+        let mut renderer = Renderer::new(ink, base, &Marks);
+        interpret(content, Matrix::IDENTITY, &mut renderer, &Spaces::default());
+        let ink = renderer.finish();
+        let plan = plan();
+        let plates =
+            Canvas::plates(SIZE, SIZE, plan.spots().count(), Color::WHITE).expect("under the cap");
+        let mut renderer = Renderer::new(plates, base, &Marks).with_plates(plan);
+        interpret(content, Matrix::IDENTITY, &mut renderer, &Spaces::default());
+        (ink, renderer.finish())
+    }
+
+    /// Asserts the plates' process channels and alpha are the `CmykA8`
+    /// canvas's byte for byte, and that no spot plate holds ink.
+    fn assert_process_plates_are_the_ink(ink: &Canvas, plates: &Canvas, what: &str) {
+        for channel in 0..4 {
+            assert_eq!(
+                plates.channel(channel),
+                ink.channel(channel),
+                "{what}: process plate {channel}"
+            );
+        }
+        assert_eq!(alphas(plates), alphas(ink), "{what}: the alpha");
+        let spots = color_spots(plates);
+        for spot in 4..4 + spots {
+            assert!(
+                plates
+                    .channel(spot)
+                    .expect("a spot's plate")
+                    .iter()
+                    .all(|tint| *tint == 0),
+                "{what}: no ink on plate {spot}"
+            );
+        }
+    }
+
+    /// How many spot plates a plates canvas carries.
+    fn color_spots(canvas: &Canvas) -> usize {
+        match canvas.format {
+            PixelFormat::Plates { spots } => spots.count(),
+            _ => 0,
+        }
+    }
+
+    /// The process page the group and cell tests paint first: two fills of
+    /// process ink, one over the other's half.
+    const PROCESS_PAGE: &str = "0.2 0.1 0 0.3 k 0 0 40 40 re f 0.5 0 0.8 0 k 0 0 20 40 re f";
+
+    /// **A group on plates composites as a CMYK group does** (RC-04.9;
+    /// 11.4.4, 11.4.5, 11.4.7.2, 11.6.6): isolated, non-isolated and knockout
+    /// groups, a knockout isolated one, groups declaring a four-component
+    /// subtractive `/CS`, and a group of groups, each holding overlapping
+    /// process ink under a constant alpha and `Multiply` and each drawn
+    /// plain and under them over a page of process ink, give on plates the
+    /// cyan, magenta, yellow, black and alpha bytes their `CmykA8` page
+    /// gives, no ink on any spot's plate and the same warnings; and so does
+    /// a coloured tiling cell of process ink, tiled from the page-frame
+    /// lattice.
+    #[test]
+    fn a_group_on_plates_composites_as_a_cmyk_group_does() {
+        for name in [
+            "Iso",
+            "NonIso",
+            "Knock",
+            "IsoKnock",
+            "CmykIso",
+            "CmykNonIso",
+            "Nested",
+        ] {
+            let content = format!("{PROCESS_PAGE} q /Half gs /{name} Do Q /{name} Do");
+            let ((ink, ink_warnings), (plates, plate_warnings)) =
+                ink_and_plates(content.as_bytes());
+            assert_process_plates_are_the_ink(&ink, &plates, name);
+            assert_eq!(plate_warnings, ink_warnings, "{name}: the warnings");
+        }
+        let content = format!(
+            "{PROCESS_PAGE} q /Pattern cs /C0 scn 3 5 30 31 re f Q \
+             q /Half gs /Pattern cs /C0 scn 10 2 25 20 re f Q"
+        );
+        let ((ink, ink_warnings), (plates, plate_warnings)) = ink_and_plates(content.as_bytes());
+        assert_process_plates_are_the_ink(&ink, &plates, "a coloured cell");
+        assert_eq!(
+            plate_warnings, ink_warnings,
+            "a coloured cell: the warnings"
+        );
+        assert!(
+            ink.channel(1)
+                .expect("magenta")
+                .iter()
+                .any(|tint| *tint == byte(0.6)),
+            "the cell's own magenta reached the page"
+        );
+    }
+
+    /// The process ink `Gold` at `tint` paints where it has no plate: its
+    /// light, which [`Spaces`] gives by its alternate, turned into ink as a
+    /// `CmykA8` canvas turns it.
+    fn gold_through_its_alternate(tint: f64) -> [u8; 4] {
+        let light = Spaces::default()
+            .resolve_color(b"Gold", &[tint], RenderingIntent::default())
+            .expect("Gold has light");
+        let (c, m, y, k) = tinker_pdf_raster::canvas::rgb_to_cmyk(light.r, light.g, light.b);
+        [c, m, y, k]
+    }
+
+    /// **A spot inside a group keeps its plate** (RC-04.9; 11.7.3: "the spot
+    /// colour passes directly through the group hierarchy"): `Gold` painted
+    /// inside an isolated, a non-isolated and a knockout group, one
+    /// declaring a four-component subtractive `/CS` and a group inside a
+    /// group, over a page of process ink, puts its tint on its own plate and
+    /// knocks out every other, the process plates among them, exactly as the
+    /// same fill outside any group does, and where the group paints nothing
+    /// the page stays. Inside a group of DeviceRGB, or DeviceGray, it is the
+    /// group's light — its alternate's, in RGB, or that light's grey — and
+    /// reaches the page as that light turned into ink, no plate of its own
+    /// and every spot knocked out under the group's shape (11.7.3's second
+    /// option).
+    #[test]
+    fn a_spot_inside_a_group_keeps_its_plate() {
+        let direct =
+            plates(format!("{PROCESS_PAGE} {}", "/Gold cs 0.6 scn 4 4 20 20 re f").as_bytes());
+        let gold = opaque([0, 0, 0, 0, byte(0.6), 0, 0, 0]);
+        assert_eq!(at(&direct, 10, 25), gold, "drawn directly");
+        for name in [
+            "GoldIso",
+            "GoldNonIso",
+            "GoldKnock",
+            "GoldCmyk",
+            "GoldNested",
+        ] {
+            let canvas = plates(format!("{PROCESS_PAGE} /{name} Do").as_bytes());
+            assert_eq!(at(&canvas, 10, 25), gold, "{name}: its tint on its plate");
+            assert!(
+                canvas.data == direct.data,
+                "{name}: the group draws the fill as it stands"
+            );
+        }
+
+        let [c, m, y, k] = gold_through_its_alternate(0.6);
+        let canvas = plates(format!("{PROCESS_PAGE} /GoldRgb Do").as_bytes());
+        assert_eq!(
+            at(&canvas, 10, 25),
+            opaque([c, m, y, k, 0, 0, 0, 0]),
+            "through an RGB group, its light in ink"
+        );
+        let page = plates(PROCESS_PAGE.as_bytes());
+        assert_eq!(
+            at(&canvas, 30, 5),
+            at(&page, 30, 5),
+            "where it paints nothing, the page"
+        );
+
+        let light = Spaces::default()
+            .resolve_color(b"Gold", &[0.6], RenderingIntent::default())
+            .expect("Gold has light");
+        let grey = Color::rgb(light.r, light.g, light.b).luma();
+        let (c, m, y, k) = tinker_pdf_raster::canvas::rgb_to_cmyk(grey, grey, grey);
+        let canvas = plates(format!("{PROCESS_PAGE} /GoldGray Do").as_bytes());
+        assert_eq!(
+            at(&canvas, 10, 25),
+            opaque([c, m, y, k, 0, 0, 0, 0]),
+            "through a grey group, its grey in ink"
+        );
+    }
+
+    /// **A coloured cell tiles its plates** (RC-04.9; 8.7.3.2): a cell of
+    /// process ink in its first five columns and `Gold` in the rest, drawn on
+    /// the page's plates by its plan, lands cell after cell from the
+    /// page-frame lattice — every eight pixels from the page's left edge —
+    /// its process ink on the process plates and `Gold` on its own plate,
+    /// each knocking the other out; and an uncoloured cell over the same
+    /// area keeps painting its filler's colorants.
+    #[test]
+    fn a_coloured_cell_tiles_its_plates() {
+        let canvas =
+            plates(format!("{PROCESS_PAGE} /Pattern cs /C3 scn 0 0 40 40 re f").as_bytes());
+        let process = opaque([byte(0.1), byte(0.6), byte(0.2), 0, 0, 0, 0, 0]);
+        let gold = opaque([0, 0, 0, 0, byte(0.6), 0, 0, 0]);
+        for cell in 0..5 {
+            for column in 0..8 {
+                let x = cell * 8 + column;
+                let want = if column < 5 { &process } else { &gold };
+                assert_eq!(&at(&canvas, x, 20), want, "column {x}");
+            }
+        }
+        let canvas =
+            plates(format!("{PROCESS_PAGE} /Under cs 0.6 /U0 scn 0 0 40 40 re f").as_bytes());
+        assert_eq!(
+            at(&canvas, 21, 20),
+            gold,
+            "an uncoloured cell, its filler's spot"
+        );
+    }
+
+    /// **Plate groups spend the group budget as any group does** (RC-04.9;
+    /// `MAX_GROUP_BUFFERS`): a page opening one group more than the budget
+    /// allows opens the same groups on plates as on `CmykA8`, declines the
+    /// same one, and says so alike.
+    #[test]
+    fn plate_groups_spend_the_group_budget_as_any_group_does() {
+        let content = "/Iso Do ".repeat(MAX_GROUP_BUFFERS as usize + 1);
+        let ((ink, ink_warnings), (plates, plate_warnings)) = ink_and_plates(content.as_bytes());
+        assert!(
+            ink_warnings.contains(&RenderWarning::GroupBudgetSpent {
+                opened: MAX_GROUP_BUFFERS
+            }),
+            "{ink_warnings:?}"
+        );
+        assert_eq!(plate_warnings, ink_warnings, "the warnings");
+        assert_process_plates_are_the_ink(&ink, &plates, "past the group budget");
+    }
+
+    /// **A snapshot inside a plates group is the group closed**: a render on
+    /// plates stopped while a non-isolated group painting a spot is open
+    /// hands back, as its snapshot, the canvas finishing it there gives.
+    #[test]
+    fn a_snapshot_inside_a_plates_group_is_the_group_closed() {
+        let plan = plan();
+        let base = page_transform(f64::from(SIZE), 1.0);
+        let canvas =
+            Canvas::plates(SIZE, SIZE, plan.spots().count(), Color::WHITE).expect("under the cap");
+        let mut renderer = Renderer::new(canvas, base, &Marks).with_plates(plan);
+        interpret(
+            PROCESS_PAGE.as_bytes(),
+            Matrix::IDENTITY,
+            &mut renderer,
+            &Spaces::default(),
+        );
+        let mut state = GraphicsState::new(Matrix::IDENTITY);
+        state.fill_alpha = 0.5;
+        let group = tinker_pdf_content::Group {
+            isolated: false,
+            knockout: false,
+            space: None,
+        };
+        assert!(renderer.begin_group(group, &state), "the group opens");
+        interpret(
+            GOLD_GROUP,
+            Matrix::IDENTITY,
+            &mut renderer,
+            &Spaces::default(),
+        );
+        let snapshot = renderer.snapshot();
+        let (finished, _) = renderer.finish();
+        assert!(
+            snapshot.data == finished.data,
+            "the snapshot is the group closed"
+        );
+        assert!(
+            at(&finished, 10, 25)[4] > 0,
+            "the spot reached its plate through the group's alpha"
+        );
+    }
+
+    // The plates' byte bound (`MAX_PLATE_BYTES`): a canvas of 70 by 70
+    // pixels at the top-left of a page 3 944 pixels square, every decision
+    // taken against the page, so the plates the page carries leave little
+    // room beside them: sixty-four spot plates keep 69 bytes a pixel,
+    // 1 073 304 384 bytes for the page, 437 440 under the bound.
+
+    /// The tall page's side in points, a pixel each.
+    const TALL: u32 = 3944;
+
+    /// The canvas's side on the tall page.
+    const CORNER: u32 = 70;
+
+    /// A plan of `count` spot plates, `Gold` the first, on plate 4.
+    fn plan_of(count: usize) -> PlatePlan {
+        let mut names = vec![b"Gold".to_vec()];
+        names.extend((1..count).map(|i| format!("Spot{i}").into_bytes()));
+        PlatePlan::new(names.iter().map(|name| (name, PlateUse::Spot)))
+    }
+
+    /// `content` drawn on the tall page's corner by `plan`: as a tile of the
+    /// whole page where `paged`, and as a page of the corner's own size where
+    /// not — every buffer then far inside the bound.
+    fn cornered(content: &[u8], plan: PlatePlan, paged: bool) -> (Canvas, Vec<RenderWarning>) {
+        let spots = plan.spots().count();
+        let canvas = Canvas::plates(CORNER, CORNER, spots, Color::WHITE).expect("under the cap");
+        let mut renderer = Renderer::new(canvas, page_transform(f64::from(TALL), 1.0), &Marks);
+        if paged {
+            renderer = renderer.with_page_size(TALL, TALL);
+        }
+        let mut renderer = renderer.with_plates(plan);
+        interpret(content, Matrix::IDENTITY, &mut renderer, &Spaces::default());
+        renderer.finish()
+    }
+
+    /// The pixel a paint of `process` ink and `gold` on plate 4 leaves on a
+    /// canvas of `spots` spot plates, opaque.
+    fn expected(spots: usize, process: [u8; 4], gold: u8) -> Vec<u8> {
+        let mut pixel = process.to_vec();
+        pixel.push(gold);
+        pixel.resize(4 + spots, 0);
+        pixel.push(255);
+        pixel
+    }
+
+    /// **A plates buffer past the byte bound draws in ink** (RC-04.9): on a
+    /// page whose sixty-four spot plates leave 437 440 bytes, a group over
+    /// 10 by 10 pixels and a coloured cell of 10 by 10 fit and keep `Gold` on
+    /// its plate, while a group and a cell over 600 by 600 would pass the
+    /// bound and are drawn in ink, `Gold` inside them through its alternate on
+    /// the process plates and no ink on its own plate; the render says so
+    /// once. The same content on a page of the canvas's size, where every
+    /// buffer fits, keeps `Gold` on its plate everywhere and says nothing.
+    #[test]
+    fn a_plates_buffer_past_the_byte_bound_draws_in_ink() {
+        let content = b"/SmallGold Do /BigGold Do \
+            /Pattern cs /C2 scn 4 3910 10 10 re f /C1 scn 40 3874 30 70 re f";
+        let gold = byte(0.6);
+        let alternate = gold_through_its_alternate(0.6);
+
+        let (canvas, warnings) = cornered(content, plan_of(64), true);
+        assert_eq!(
+            at(&canvas, 8, 8),
+            expected(64, [0; 4], gold),
+            "a small group"
+        );
+        assert_eq!(
+            at(&canvas, 8, 28),
+            expected(64, [0; 4], gold),
+            "a small cell"
+        );
+        assert_eq!(
+            at(&canvas, 30, 14),
+            expected(64, alternate, 0),
+            "a big group"
+        );
+        assert_eq!(
+            at(&canvas, 54, 14),
+            expected(64, alternate, 0),
+            "a big cell"
+        );
+        assert_eq!(
+            warnings,
+            [RenderWarning::PlatesCapped { named: 64, kept: 0 }],
+            "said once"
+        );
+
+        let (canvas, warnings) = cornered(content, plan_of(64), false);
+        for (x, y) in [(8, 8), (8, 28), (30, 14), (54, 14)] {
+            assert_eq!(
+                at(&canvas, x, y),
+                expected(64, [0; 4], gold),
+                "({x}, {y}) inside the bound"
+            );
+        }
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// **A group inside a cell is charged beside the page's plates**
+    /// (RC-04.9): a coloured cell of 70 by 70 pixels fits beside a page of
+    /// sixty-four spot plates, and its `Gold` lands on its plate; a group over
+    /// the whole cell inside it would pass the bound beside the page and the
+    /// cell together — though not beside the cell alone — and is drawn in ink,
+    /// its `Gold` through its alternate. With sixty-three spot plates the
+    /// page leaves room for both, and the group's `Gold` keeps its plate.
+    #[test]
+    fn a_group_inside_a_cell_is_charged_beside_the_page_s_plates() {
+        let content = b"/Pattern cs /C4 scn 0 3874 70 70 re f";
+        let gold = byte(0.6);
+
+        let (canvas, warnings) = cornered(content, plan_of(64), true);
+        assert_eq!(
+            at(&canvas, 10, 10),
+            expected(64, gold_through_its_alternate(0.6), 0),
+            "the group in the cell, in ink"
+        );
+        assert_eq!(
+            at(&canvas, 10, 58),
+            expected(64, [0; 4], gold),
+            "the cell's own fill"
+        );
+        assert_eq!(
+            warnings,
+            [RenderWarning::PlatesCapped { named: 64, kept: 0 }]
+        );
+
+        let (canvas, warnings) = cornered(content, plan_of(63), true);
+        assert_eq!(
+            at(&canvas, 10, 10),
+            expected(63, [0; 4], gold),
+            "room for the group"
+        );
+        assert_eq!(at(&canvas, 10, 58), expected(63, [0; 4], gold));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// **The byte bound keeps the spots that fit**: a page at
+    /// `MAX_PAGE_PIXELS` keeps eleven spot plates, sixteen bytes a pixel; an
+    /// A4 page at 300 dpi keeps the cap's sixty-four; a page of no pixels,
+    /// or of one, the cap; and one so large that the process plates alone
+    /// fill the bound, none.
+    #[test]
+    fn the_byte_bound_keeps_the_spots_that_fit() {
+        assert_eq!(spots_within_bytes(MAX_PAGE_PIXELS), 11);
+        assert_eq!(
+            plate_bytes_of(
+                PixelFormat::Plates {
+                    spots: tinker_pdf_raster::Spots::new(11).expect("under the cap")
+                },
+                MAX_PAGE_PIXELS
+            ),
+            MAX_PLATE_BYTES
+        );
+        assert_eq!(
+            spots_within_bytes(2480 * 3508),
+            tinker_pdf_raster::MAX_SPOT_PLATES
+        );
+        assert_eq!(spots_within_bytes(0), tinker_pdf_raster::MAX_SPOT_PLATES);
+        assert_eq!(spots_within_bytes(1), tinker_pdf_raster::MAX_SPOT_PLATES);
+        assert_eq!(spots_within_bytes(MAX_PLATE_BYTES / 5), 0);
+        assert_eq!(spots_within_bytes(u64::MAX), 0);
+        assert_eq!(
+            plate_bytes_of(PixelFormat::CmykA8, 100),
+            0,
+            "ink is not plates"
+        );
     }
 }

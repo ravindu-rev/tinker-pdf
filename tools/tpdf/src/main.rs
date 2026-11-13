@@ -3598,6 +3598,7 @@ fn render_warning_label(warning: &tinker_pdf::RenderWarning) -> String {
         W::Cancelled => "Cancelled".to_string(),
         W::RegionClamped { .. } => "RegionClamped".to_string(),
         W::LockedLayer { .. } => "LockedLayer".to_string(),
+        W::PlatesCapped { .. } => "PlatesCapped".to_string(),
     }
 }
 

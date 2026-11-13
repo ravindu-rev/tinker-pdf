@@ -874,17 +874,46 @@ as on `CmykA8`. A stencil tinting a spot composites on its own rather than in
 an image run, which holds light and ink; one tinting the process plates alone
 is that ink, as on `CmykA8`. A soft mask's group renders in `CmykA8` and is
 read as a mask as on an ink page, every spot in it through its alternate
-(11.7.3). A transparency group with no `/CS` composites in a plates buffer of
-its own, where colours paint by plate as on the page, and one declaring a
-space in that space's buffer, where a colour paints its light and its ink; a
-coloured tiling cell is drawn by a renderer of its own with no plan, its
-paints their light and ink on the process plates. So the process plates of a
-page in DeviceCMYK, DeviceGray and DeviceRGB are its `CmykA8` render's bytes
+(11.7.3). Light becomes ink on the process plates by the black generation and
+undercolour removal in force, as on `CmykA8`. So the process plates of a page
+in DeviceCMYK, DeviceGray and DeviceRGB are its `CmykA8` render's bytes
 (`process_plates_draw_as_the_ink_canvas_does`), and a spot's paint is exactly
 its tints on its plates and no ink on the rest
 (`a_spot_paint_lands_on_its_plate_and_knocks_out_the_rest`). A renderer over
 any other canvas keeps no plan and asks no colour its colorants, so a light
 or ink render draws as it did.
+
+**Groups and coloured patterns on plates** (the design's "Groups on plates"
+and "Patterns on plates"). A transparency group with no `/CS`, or one whose
+`/CS` is a four-component subtractive space, composites on plates in a plates
+buffer of its own carrying the canvas's spots — isolated, non-isolated over
+its parent's plates, the backdrop adopted and taken out by 11.4.4 and
+11.4.7.2, and knockout (11.4.5) — so a spot painted inside it keeps its plate
+(11.7.3's first option) and process ink inside it gives the bytes a `CmykA8`
+page gives (`a_group_on_plates_composites_as_a_cmyk_group_does`,
+`a_spot_inside_a_group_keeps_its_plate`). A group declaring DeviceGray,
+DeviceRGB or `/Lab` composites in that space, every spot in it through its
+alternate (11.7.3's second option), and its buffer reaches the plates as light
+turned into ink, by the black generation and undercolour removal at its `Do`,
+every spot plate under its shape at no ink. A coloured tiling cell
+(`/PaintType 1`) is drawn in the page's plates by the page's plan
+(`TileRequest::plates`) and tiled channel for channel from the page-frame
+lattice, so a spot inside it reaches its own plate
+(`a_coloured_cell_tiles_its_plates`); a document's kept cells are kept under
+the plan they were drawn by. A plates group is one group against
+`MAX_GROUP_BUFFERS` (`plate_groups_spend_the_group_budget_as_any_group_does`).
+Every plates buffer live at once — the page's, each open group's and a cell's,
+each at the size it has on a render of the whole page, a cell's renderer told
+what is held outside it (`Renderer::with_held_plates`) — is held to
+`MAX_PLATE_BYTES`, 1 GiB: a group or a cell whose buffer would pass it is
+drawn in ink, `CmykA8`, its spots through their alternates, and the render
+carries `RenderWarning::PlatesCapped { named, kept }`, `kept` 0 of the spot
+plates the page carries
+(`a_plates_buffer_past_the_byte_bound_draws_in_ink`,
+`a_group_inside_a_cell_is_charged_beside_the_page_s_plates`).
+`spots_within_bytes` is how many spot plates a page of a number of pixels keeps
+inside the bound: eleven at `MAX_PAGE_PIXELS`, sixteen bytes a pixel, and the
+cap's sixty-four on an A4 page at 300 dpi.
 
 **`/Lab` composites in Lab too.** Its components are not in the unit
 interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`
@@ -2408,6 +2437,7 @@ under it, so the copy holds every canvas the walk closes onto.
 | A form, a soft mask's group or a Type 3 glyph procedure that names itself while it runs, directly or through the others, drawn once | `RenderWarning::RecursiveContent`, and `SvgWarning::Render` of it from `to_svg` | A cycle has no last run; refused at its first repeat by the stream's identity, the page is what every reader can draw, where the depth cap ended a branching cycle only after two or more runs to the sixteenth | [content and text](content-and-text.md) |
 | Nested runs past the interpreter's budget for nested content — 4 MiB, and 4 096 bytes for every byte of content the page reaches — past which no stream that has already run is run again | `RenderWarning::NestedBudgetSpent`, and `SvgWarning::Render` of it from `to_svg` | A tree of distinct forms or glyph procedures, each drawing the next many times, is no cycle and no group; every stream the page holds still runs once, so what is passed over is repeats of content already drawn | [content and text](content-and-text.md) |
 | More than 2 000 transparency-group buffers on one page, or more than 2 000 groups and soft masks' groups run in one stream, past which the interpreter runs no more of either | `RenderWarning::GroupBudgetSpent`, and `SvgWarning::Render` of it from `to_svg` | A budget, not a depth: branching group and soft-mask recursion stays inside any depth cap, and every reading of the page — text, images, SVG — is bounded by the same walk | [rulings](../rulings.md) |
+| A render on plates whose plates would pass a cap: a group or a coloured tiling cell whose plates buffer would take the plates live at once past `MAX_PLATE_BYTES` (1 GiB) | `RenderWarning::PlatesCapped { named, kept }`, once a render, `kept` 0 of the `named` spot plates the page carries | Drawn in ink, its spots through their alternates on the process plates, rather than refused (ruling 2), and named, since a spot drawn on the process plates looks like process ink (ruling 10) | [design/overprint-separations.md](../design/overprint-separations.md) |
 | A text object that clips and shows no glyphs | `RenderWarning::EmptyTextClip` | Spec-correct and almost never intended | [content and text](content-and-text.md) |
 | A render stopped by its `CancelToken` | `RenderWarning::Cancelled` | Reported only when work was actually skipped | — |
 | A `RenderOptions::region` reaching past the page edge | `RenderWarning::RegionClamped` | The part on the page is rendered rather than refused (ruling 2), and a bitmap smaller than the rectangle asked for is named rather than left to arithmetic (ruling 10). A region that misses the page entirely trims to no pixels | [rulings](../rulings.md) |

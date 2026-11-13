@@ -415,7 +415,9 @@ knockout group's `knock_out` restores its initial state under each element
 (11.4.5), the backdrop's tints at no alpha or the transparent pixel it was
 made as — so process ink in isolated, non-isolated and knockout groups is a
 `CmykA8` page's bytes, and a spot under a non-isolated group comes back as it
-went in. Across
+went in. A `CmykA8` group over a plates parent adopts, restores and takes out
+the parent's process inks as ink, straight across, never through light
+(`an_ink_group_over_plates_reads_their_process_inks_as_ink`). Across
 formats a plates source composites onto `CmykA8` as its process ink and onto
 light as that ink's light, and a light or ink source onto plates as ink on the
 process channels with every spot under its shape knocked out, a group painting

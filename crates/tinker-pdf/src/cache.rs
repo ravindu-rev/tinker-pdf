@@ -890,8 +890,10 @@ pub(crate) struct KeptForm {
 /// and the sub-pixel phase are unquantised and a hit is the bytes a miss
 /// draws, the `/BBox` the cell is clipped to by its bits, the buffer's size
 /// and format, the anti-aliasing, the graphics and text levels, the rule at
-/// level 0 and the thinnest stroke the cell is drawn with, and the nesting
-/// depth, which the recursion cap reads; for a pattern that brings no
+/// level 0 and the thinnest stroke the cell is drawn with, the nesting
+/// depth, which the recursion cap reads, and on plates the plan a coloured
+/// cell paints its colorants by and the plates held live outside it; for a
+/// pattern that brings no
 /// resources of its own, the scope its names resolve in, its resource
 /// dictionary written exactly ([`Written`]); and the usage, the layer options
 /// and, where those states read a `/Zoom` entry, the magnification the render
@@ -934,18 +936,29 @@ pub(crate) struct CellKey {
     /// `/Zoom` entry (`crate::RenderOptions::magnification`); `None` where
     /// they read none, so cells kept at one magnification serve every other.
     pub(crate) magnification: Option<u64>,
+    /// The plate plan a coloured cell drawn on plates paints its colorants by
+    /// (`TileRequest::plates`), whose names and uses say which plate each
+    /// paint lands on; `None` for every other cell.
+    pub(crate) plates: Option<Arc<tinker_pdf_render::PlatePlan>>,
+    /// The bytes of plates held live outside a plates cell
+    /// (`TileRequest::plate_bytes`), which decide whether a group inside it
+    /// composites on plates or in ink.
+    pub(crate) plate_bytes: u64,
 }
 
 impl CellKey {
     /// The bytes the key holds beside its own fields: a scope's resources,
-    /// written, and what its layer options hold — the overrides, the language
-    /// and the user's names.
+    /// written, what its layer options hold — the overrides, the language
+    /// and the user's names — and a plate plan's names and tables.
     pub(crate) fn held(&self) -> u64 {
         let scope = self
             .scope
             .as_ref()
             .map_or(0, |scope| u64::try_from(scope.len()).unwrap_or(u64::MAX));
-        scope.saturating_add(layers_held(&self.layers))
+        let plates = self.plates.as_ref().map_or(0, |plan| plan.held_bytes());
+        scope
+            .saturating_add(layers_held(&self.layers))
+            .saturating_add(plates)
     }
 }
 
