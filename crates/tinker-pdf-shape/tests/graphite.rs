@@ -1872,3 +1872,1093 @@ fn the_vendored_faces_features_and_languages_read() {
     malay[7] = 1;
     assert_eq!(values_in(AWAMI, &Ask::language(b"msa ")), (malay, vec![]));
 }
+
+// --- `Silf` and its machines (FT-07d.6) ----------------------------------
+//
+// `PassSpec` states a pass as the GTF lays one out — its ranges, its states
+// and transitions, the rules each accepting state lists, and each rule's sort
+// key, pre-context and code — and `silf_table` writes a `Silf` of one
+// description around such passes at any version the design reads. The GDL's
+// rule examples are hand-compiled into these, state by state, beside the
+// rules they compile.
+
+/// A pass as a test states it.
+#[derive(Clone, Debug, Default)]
+struct PassSpec {
+    flags: u8,
+    max_rule_loop: u8,
+    max_rule_context: u8,
+    max_backup: u8,
+    /// `(first, last, column)`.
+    ranges: Vec<(u16, u16, u16)>,
+    columns: u16,
+    rows: u16,
+    transitional: u16,
+    success: u16,
+    /// Each success state's rules, from state `rows - success` on.
+    rule_lists: Vec<Vec<u16>>,
+    min_pre: u8,
+    max_pre: u8,
+    start_states: Vec<u16>,
+    /// Each rule's sort key, pre-context, constraint and action.
+    rules: Vec<(u16, u8, Vec<u8>, Vec<u8>)>,
+    /// One row a transitional state, one entry a column.
+    transitions: Vec<Vec<u16>>,
+    pass_constraint: Vec<u8>,
+    collision_threshold: u8,
+}
+
+/// The pass `spec` as a `Silf` of major version `major` stores it, its code
+/// offsets counted from `base`, the pass's offset in its description.
+fn pass_bytes(spec: &PassSpec, major: u32, base: usize) -> Vec<u8> {
+    let rule_count = u16::try_from(spec.rules.len()).expect("a few rules");
+    let mut fixed: Vec<u8> = vec![
+        spec.flags,
+        spec.max_rule_loop,
+        spec.max_rule_context,
+        spec.max_backup,
+    ];
+    fixed.extend(rule_count.to_be_bytes());
+    // The offsets of the code are patched once the fixed part's length is
+    // known; their places are remembered here.
+    let code_slot = fixed.len();
+    if major >= 2 {
+        fixed.extend([0u8; 2 + 4]);
+    }
+    fixed.extend([0u8; 4 + 4 + 4]);
+    fixed.extend(u16s(&[
+        spec.rows,
+        spec.transitional,
+        spec.success,
+        spec.columns,
+        u16::try_from(spec.ranges.len()).expect("a few"),
+        0,
+        0,
+        0,
+    ]));
+    for (first, last, column) in &spec.ranges {
+        fixed.extend(u16s(&[*first, *last, *column]));
+    }
+    let mut offset = 0u16;
+    let mut rule_map: Vec<u16> = Vec::new();
+    fixed.extend(offset.to_be_bytes());
+    for list in &spec.rule_lists {
+        offset += u16::try_from(list.len()).expect("a few");
+        fixed.extend(offset.to_be_bytes());
+        rule_map.extend(list);
+    }
+    fixed.extend(u16s(&rule_map));
+    fixed.extend([spec.min_pre, spec.max_pre]);
+    fixed.extend(u16s(&spec.start_states));
+    fixed.extend(u16s(
+        &spec
+            .rules
+            .iter()
+            .map(|(key, ..)| *key)
+            .collect::<Vec<u16>>(),
+    ));
+    fixed.extend(spec.rules.iter().map(|(_, pre, ..)| *pre));
+    if major >= 2 {
+        fixed.push(spec.collision_threshold);
+        fixed.extend(
+            u16::try_from(spec.pass_constraint.len())
+                .expect("short")
+                .to_be_bytes(),
+        );
+    }
+    let mut constraints: Vec<u8> = Vec::new();
+    let mut constraint_offsets = vec![0u16];
+    let mut actions: Vec<u8> = Vec::new();
+    let mut action_offsets = vec![0u16];
+    for (_, _, constraint, action) in &spec.rules {
+        constraints.extend(constraint);
+        constraint_offsets.push(u16::try_from(constraints.len()).expect("short"));
+        actions.extend(action);
+        action_offsets.push(u16::try_from(actions.len()).expect("short"));
+    }
+    fixed.extend(u16s(&constraint_offsets));
+    fixed.extend(u16s(&action_offsets));
+    for row in &spec.transitions {
+        assert_eq!(row.len(), usize::from(spec.columns), "a cell a column");
+        fixed.extend(u16s(row));
+    }
+    if major >= 2 {
+        fixed.push(0);
+    }
+    let pass_code = base + fixed.len();
+    let rule_code = pass_code + spec.pass_constraint.len();
+    let action_code = rule_code + constraints.len();
+    let mut at = code_slot;
+    if major >= 2 {
+        // `fsmOffset`: the offset of the state counts in the pass.
+        let fsm = u16::try_from(code_slot + 2 + 4 + 12).expect("small");
+        fixed[at..at + 2].copy_from_slice(&fsm.to_be_bytes());
+        at += 2;
+        fixed[at..at + 4].copy_from_slice(&u32::try_from(pass_code).expect("small").to_be_bytes());
+        at += 4;
+    }
+    fixed[at..at + 4].copy_from_slice(&u32::try_from(rule_code).expect("small").to_be_bytes());
+    fixed[at + 4..at + 8]
+        .copy_from_slice(&u32::try_from(action_code).expect("small").to_be_bytes());
+    let mut out = fixed;
+    out.extend(&spec.pass_constraint);
+    out.extend(constraints);
+    out.extend(actions);
+    out
+}
+
+/// A description as a test states it.
+#[derive(Clone, Debug, Default)]
+struct DescriptionSpec {
+    script_tags: Vec<[u8; 4]>,
+    /// `(code point, glyph)`, in the order stored.
+    pseudos: Vec<(u32, u16)>,
+    class_map: Vec<u8>,
+    passes: Vec<PassSpec>,
+    /// `iSubst`, `iPos`, `iJust`, `iBidi`.
+    order: [u8; 4],
+}
+
+/// A class map of `linear` classes and then `lookups`, its offsets `ULONG`s
+/// where `wide`.
+fn class_map(linear: &[Vec<u16>], lookups: &[Vec<(u16, u16)>], wide: bool) -> Vec<u8> {
+    let count = linear.len() + lookups.len();
+    let head = 4 + (count + 1) * if wide { 4 } else { 2 };
+    let mut body: Vec<u8> = Vec::new();
+    let mut offsets = vec![head];
+    for class in linear {
+        body.extend(u16s(class));
+        offsets.push(head + body.len());
+    }
+    for class in lookups {
+        let n = u16::try_from(class.len()).expect("a few");
+        let range = if n == 0 {
+            0
+        } else {
+            1u16 << (15 - n.leading_zeros())
+        };
+        let selector = if range == 0 {
+            0
+        } else {
+            15 - range.leading_zeros()
+        };
+        body.extend(u16s(&[
+            n,
+            range,
+            u16::try_from(selector).expect("small"),
+            n - range,
+        ]));
+        for (glyph, index) in class {
+            body.extend(u16s(&[*glyph, *index]));
+        }
+        offsets.push(head + body.len());
+    }
+    let mut out = u16s(&[
+        u16::try_from(count).expect("a few"),
+        u16::try_from(linear.len()).expect("a few"),
+    ]);
+    for offset in offsets {
+        if wide {
+            out.extend(u32::try_from(offset).expect("small").to_be_bytes());
+        } else {
+            out.extend(u16::try_from(offset).expect("small").to_be_bytes());
+        }
+    }
+    out.extend(body);
+    out
+}
+
+/// The description `spec` as a `Silf` of major version `major` stores it.
+fn description_bytes(spec: &DescriptionSpec, major: u32) -> Vec<u8> {
+    let mut head: Vec<u8> = Vec::new();
+    if major >= 3 {
+        head.extend(0x0004_0000u32.to_be_bytes());
+        head.extend([0u8; 4]);
+    }
+    let passes = u8::try_from(spec.passes.len()).expect("a few passes");
+    head.extend(u16s(&[500, 0, 0]));
+    head.extend([passes]);
+    head.extend(spec.order);
+    // flags, the cross-line contexts, and the pseudo, break weight and
+    // directionality attributes.
+    head.extend([0, 0, 0, 0, 1, 2]);
+    if major >= 2 {
+        // Mirroring and skip-pass attributes, and no justification levels.
+        head.extend([3, 4, 0]);
+    }
+    head.extend(u16s(&[0]));
+    // User attributes, components a ligature, direction, collisions, and
+    // two reserved bytes.
+    head.extend([0, 0, 1, 0, 0, 0]);
+    if major >= 2 {
+        // The third reserved byte, no critical features, a reserved byte.
+        head.extend([0, 0, 0]);
+    }
+    head.push(u8::try_from(spec.script_tags.len()).expect("a few"));
+    for tag in &spec.script_tags {
+        head.extend_from_slice(tag);
+    }
+    head.extend(u16s(&[499]));
+    let pass_offset = head.len();
+    head.extend(vec![0u8; (spec.passes.len() + 1) * 4]);
+    let pseudos_offset = head.len();
+    head.extend(u16s(&[
+        u16::try_from(spec.pseudos.len()).expect("a few"),
+        0,
+        0,
+        0,
+    ]));
+    for (code, glyph) in &spec.pseudos {
+        head.extend(code.to_be_bytes());
+        head.extend(glyph.to_be_bytes());
+    }
+    head.extend(&spec.class_map);
+    if major >= 3 {
+        head[4..6].copy_from_slice(&u16::try_from(pass_offset).expect("small").to_be_bytes());
+        head[6..8].copy_from_slice(&u16::try_from(pseudos_offset).expect("small").to_be_bytes());
+    }
+    let mut offsets = Vec::new();
+    let mut body: Vec<u8> = Vec::new();
+    for pass in &spec.passes {
+        let at = head.len() + body.len();
+        offsets.push(at);
+        body.extend(pass_bytes(pass, major, at));
+    }
+    offsets.push(head.len() + body.len());
+    for (n, offset) in offsets.iter().enumerate() {
+        let at = pass_offset + n * 4;
+        head[at..at + 4].copy_from_slice(&u32::try_from(*offset).expect("small").to_be_bytes());
+    }
+    head.extend(body);
+    head
+}
+
+/// A `Silf` of major version `major` holding `descriptions`.
+fn silf_table(major: u32, descriptions: &[DescriptionSpec]) -> Vec<u8> {
+    let mut out = (major << 16).to_be_bytes().to_vec();
+    if major >= 3 {
+        out.extend(0x0004_0002u32.to_be_bytes());
+    }
+    out.extend(u16s(&[
+        u16::try_from(descriptions.len()).expect("a few"),
+        0,
+    ]));
+    let mut at = out.len() + descriptions.len() * 4;
+    let mut bodies: Vec<Vec<u8>> = Vec::new();
+    for spec in descriptions {
+        out.extend(u32::try_from(at).expect("small").to_be_bytes());
+        let body = description_bytes(spec, major);
+        at += body.len();
+        bodies.push(body);
+    }
+    for body in bodies {
+        out.extend(body);
+    }
+    out
+}
+
+/// A description of the one pass `pass` and nothing else.
+fn one_pass(pass: PassSpec) -> DescriptionSpec {
+    DescriptionSpec {
+        class_map: class_map(&[], &[], true),
+        passes: vec![pass],
+        order: [0, 1, 1, 255],
+        ..DescriptionSpec::default()
+    }
+}
+
+/// Pass 0 of the description in `silf`.
+fn first_pass(silf: &[u8]) -> graphite::Pass<'_> {
+    let table = graphite::Silf::parse(silf).expect("the Silf reads");
+    let description = table.description(0).expect("its description");
+    description
+        .pass(0, &Limits::DEFAULT)
+        .expect("its first pass")
+}
+
+/// The rules and their ends the machine finds at each position of `glyphs`
+/// where it finds any.
+fn found_at(pass: &graphite::Pass<'_>, glyphs: &[u16]) -> BTreeMap<usize, Vec<(u16, usize)>> {
+    let mut out = BTreeMap::new();
+    for position in 0..=glyphs.len() {
+        let matched = pass.candidates(glyphs, position, &Limits::DEFAULT);
+        assert!(matched.refusals.is_empty(), "{:?}", matched.refusals);
+        if !matched.candidates.is_empty() {
+            out.insert(
+                position,
+                matched.candidates.iter().map(|c| (c.rule, c.end)).collect(),
+            );
+        }
+    }
+    out
+}
+
+/// The GDL's rule examples, hand-compiled into machines as the GTF lays
+/// them out, each pass's machine finding at each position the rules the GDL
+/// says it does, in its order: counted.
+#[test]
+fn a_pass_finds_the_rule_its_machine_selects() {
+    let mut held = 0usize;
+
+    // 4.1.1: `X > Y / A _ A` over `A X A X A X A`. A is glyph 1 and column
+    // 0, X glyph 2 and column 1; one pre-context slot, so the machine reads
+    // from the slot before the position. States: 0 –A→ 1 –X→ 2 –A→ 3, the
+    // last accepting rule 0.
+    let rescan = PassSpec {
+        ranges: vec![(1, 1, 0), (2, 2, 1)],
+        columns: 2,
+        rows: 4,
+        transitional: 3,
+        success: 1,
+        rule_lists: vec![vec![0]],
+        min_pre: 1,
+        max_pre: 1,
+        start_states: vec![0],
+        rules: vec![(3, 1, vec![], vec![0x31])],
+        transitions: vec![vec![1, 0], vec![0, 2], vec![3, 0]],
+        ..PassSpec::default()
+    };
+    let silf = silf_table(4, &[one_pass(rescan)]);
+    let pass = first_pass(&silf);
+    // "In order for the output we might expect (A Y A Y A Y A)": the rule
+    // matches at each X.
+    assert_eq!(
+        found_at(&pass, &[1, 2, 1, 2, 1, 2, 1]),
+        BTreeMap::from([(1, vec![(0, 3)]), (3, vec![(0, 5)]), (5, vec![(0, 7)])])
+    );
+    held += 1;
+
+    // 4.1.7: rule 0 `A B C > X Y Z / _ _ _` and rule 1 `A > D / _ B`. A, B
+    // and C are glyphs 1 to 3, columns 0 to 2. States: 0 –A→ 1 –B→ 2 –C→ 3;
+    // 2 accepts rule 1 and goes on, 3 accepts rule 0. "Longer matches have
+    // priority over shorter matches."
+    let ordering = PassSpec {
+        ranges: vec![(1, 1, 0), (2, 2, 1), (3, 3, 2)],
+        columns: 3,
+        rows: 4,
+        transitional: 3,
+        success: 2,
+        rule_lists: vec![vec![1], vec![0]],
+        start_states: vec![0],
+        rules: vec![(3, 0, vec![], vec![0x31]), (2, 0, vec![], vec![0x31])],
+        transitions: vec![vec![1, 0, 0], vec![0, 2, 0], vec![0, 0, 3]],
+        ..PassSpec::default()
+    };
+    let silf = silf_table(4, &[one_pass(ordering)]);
+    let pass = first_pass(&silf);
+    assert_eq!(
+        found_at(&pass, &[1, 2, 3]),
+        BTreeMap::from([(0, vec![(0, 3), (1, 2)])])
+    );
+    held += 1;
+
+    // 4.1.7.1: `B > Y / W A? _ C`, resolved to rule 0 `B > Y / W A _ C` and
+    // rule 1 `B > Y / W _ C`, and rule 2 `C > D / B _ E`. W, A, B, C and E
+    // are glyphs 1 to 5, columns 0 to 4. The longest pre-context is two, so
+    // rules 1 and 2 are read from one slot further back, the compiler's
+    // `ANY` in front of them. States: 0 reads the first slot (W → 1, any
+    // other → 2); 1 holds all three rules, 2 rules 1 and 2; 3 is rule 1
+    // after its W, 4 rule 0 after W A, 5 rule 2 after its B; 6, 7 and 8 one
+    // slot on; 9, 10 and 11 accept rules 1, 0 and 2.
+    let optional = PassSpec {
+        ranges: vec![(1, 1, 0), (2, 2, 1), (3, 3, 2), (4, 4, 3), (5, 5, 4)],
+        columns: 5,
+        rows: 12,
+        transitional: 9,
+        success: 3,
+        rule_lists: vec![vec![1], vec![0], vec![2]],
+        min_pre: 1,
+        max_pre: 2,
+        // Two slots before the position, from state 0; one, from the state
+        // after the `ANY` the missing slot stands for.
+        start_states: vec![0, 2],
+        rules: vec![
+            (4, 2, vec![], vec![0x31]),
+            (3, 1, vec![], vec![0x31]),
+            (3, 1, vec![], vec![0x31]),
+        ],
+        transitions: vec![
+            vec![1, 2, 2, 2, 2],
+            vec![3, 4, 5, 0, 0],
+            vec![3, 0, 5, 0, 0],
+            vec![0, 0, 6, 0, 0],
+            vec![0, 0, 7, 0, 0],
+            vec![0, 0, 0, 8, 0],
+            vec![0, 0, 0, 9, 0],
+            vec![0, 0, 0, 10, 0],
+            vec![0, 0, 0, 0, 11],
+        ],
+        ..PassSpec::default()
+    };
+    let silf = silf_table(4, &[one_pass(optional)]);
+    let pass = first_pass(&silf);
+    // "WABC" becomes "WAYC": rule 0 at the B.
+    assert_eq!(
+        found_at(&pass, &[1, 2, 3, 4]),
+        BTreeMap::from([(2, vec![(0, 4)])])
+    );
+    held += 1;
+    // "WBCE" becomes "WYCE": the shorter rule 1, at the B, is reached first;
+    // rule 2 would match at the C only on the input as it stands.
+    assert_eq!(
+        found_at(&pass, &[1, 3, 4, 5]),
+        BTreeMap::from([(1, vec![(1, 3)]), (2, vec![(2, 4)])])
+    );
+    held += 1;
+
+    // 4.1.7.2: rule 0 `A > B / W _` and rule 1 `A > C / _ X Y` over `WAXY`.
+    // W, A, X and Y are glyphs 1 to 4, columns 0 to 3; rule 1 is read from
+    // one slot back. States: 0 –W→ 1, other → 2; 1 –A→ 5, accepting rule 0
+    // and going on; 2 –A→ 3; 3 and 5 –X→ 4; 4 –Y→ 6, accepting rule 1.
+    let context = PassSpec {
+        ranges: vec![(1, 1, 0), (2, 2, 1), (3, 3, 2), (4, 4, 3)],
+        columns: 4,
+        rows: 7,
+        transitional: 6,
+        success: 2,
+        rule_lists: vec![vec![0], vec![1]],
+        min_pre: 0,
+        max_pre: 1,
+        start_states: vec![0, 2],
+        rules: vec![(2, 1, vec![], vec![0x31]), (3, 0, vec![], vec![0x31])],
+        transitions: vec![
+            vec![1, 2, 2, 2],
+            vec![0, 5, 0, 0],
+            vec![0, 3, 0, 0],
+            vec![0, 0, 4, 0],
+            vec![0, 0, 0, 6],
+            vec![0, 0, 4, 0],
+        ],
+        ..PassSpec::default()
+    };
+    let silf = silf_table(4, &[one_pass(context)]);
+    let pass = first_pass(&silf);
+    // "Neither rule is considered to match when the scan position is at the
+    // beginning of the input ... Now the scan position is before the A, and
+    // both rules match. But the second rule has precedence."
+    assert_eq!(
+        found_at(&pass, &[1, 2, 3, 4]),
+        BTreeMap::from([(1, vec![(1, 4), (0, 2)])])
+    );
+    held += 1;
+
+    assert_eq!(held, 5, "the rule-finding examples the design counts");
+}
+
+/// The compiler documentation's worked classes — linear class 6 of the
+/// upper-case vowels and indexed class 10 of the lower-case ones — read
+/// through a whole `Silf` at both offset widths: each lower vowel's index in
+/// class 10 selects its upper vowel in class 6.
+#[test]
+fn a_class_map_answers_both_kinds_of_class() {
+    let upper: Vec<u16> = vec![0x53, 0x57, 0x5B, 0x61, 0x67];
+    let lower: Vec<(u16, u16)> = vec![(0x21, 0), (0x25, 1), (0x29, 2), (0x2F, 3), (0x35, 4)];
+    let mut linear: Vec<Vec<u16>> = (0..10).map(|n| vec![200 + n]).collect();
+    linear[6] = upper.clone();
+    for (major, wide) in [(2u32, false), (3, false), (4, true), (5, true)] {
+        let spec = DescriptionSpec {
+            class_map: class_map(&linear, &[lower.clone()], wide),
+            order: [0, 0, 0, 255],
+            ..DescriptionSpec::default()
+        };
+        let silf = silf_table(major, &[spec]);
+        let table = graphite::Silf::parse(&silf).expect("the Silf reads");
+        let description = table.description(0).expect("its description");
+        let classes = description.classes();
+        assert_eq!(classes.len(), 11, "{major}");
+        assert_eq!(classes.linear_count(), 10);
+        assert_eq!(classes.kind(6), Some(graphite::ClassKind::Linear));
+        assert_eq!(classes.kind(10), Some(graphite::ClassKind::Lookup));
+        assert_eq!(classes.kind(11), None);
+        assert_eq!(classes.class_len(6), Some(5));
+        assert_eq!(classes.class_len(10), Some(5));
+        // `PutSubs 0 10 6`: "a" is index 0 of class 10, which is "A" in
+        // class 6, and so on through the vowels.
+        for (n, (glyph, _)) in lower.iter().enumerate() {
+            let index = classes.index(10, *glyph).expect("a lower vowel");
+            assert_eq!(usize::from(index), n);
+            assert_eq!(classes.glyph(6, usize::from(index)), Some(upper[n]));
+            assert_eq!(classes.glyph(10, n), Some(*glyph));
+        }
+        // A linear class gives its glyphs' indices by reading them in order.
+        assert_eq!(classes.index(6, 0x5B), Some(2));
+        // Past a class, past the map, and a glyph in neither.
+        assert_eq!(classes.glyph(6, 5), None);
+        assert_eq!(classes.glyph(11, 0), None);
+        assert_eq!(classes.index(10, 0x22), None);
+        assert_eq!(classes.index(6, 0x22), None);
+        assert_eq!(classes.index(12, 0x21), None);
+    }
+}
+
+/// The ranges, the start states and the rule order as the GTF has them,
+/// beyond the GDL's examples: a glyph in no range jams; fewer slots before
+/// the position than any rule's pre-context matches nothing; ranges out of
+/// order are read in order, the first winning.
+#[test]
+fn a_machine_reads_its_ranges_and_starts_as_the_gtf_says() {
+    // One rule, `A B` (glyphs 1 and 2), with glyphs 1 and 3 in column 0 —
+    // its ranges out of order, so read in order — and 2 in column 1.
+    let spec = PassSpec {
+        ranges: vec![(3, 3, 0), (2, 2, 1), (1, 1, 0)],
+        columns: 2,
+        rows: 3,
+        transitional: 2,
+        success: 1,
+        rule_lists: vec![vec![0]],
+        start_states: vec![0],
+        rules: vec![(2, 0, vec![], vec![0x31])],
+        transitions: vec![vec![1, 0], vec![0, 2]],
+        ..PassSpec::default()
+    };
+    let silf = silf_table(4, &[one_pass(spec)]);
+    let pass = first_pass(&silf);
+    assert_eq!(pass.column(1), Some(0));
+    assert_eq!(pass.column(3), Some(0));
+    assert_eq!(pass.column(2), Some(1));
+    assert_eq!(pass.column(4), None);
+    assert_eq!(
+        found_at(&pass, &[1, 2]),
+        BTreeMap::from([(0, vec![(0, 2)])])
+    );
+    assert_eq!(
+        found_at(&pass, &[3, 2]),
+        BTreeMap::from([(0, vec![(0, 2)])])
+    );
+    // A glyph in no range jams the machine.
+    assert_eq!(found_at(&pass, &[4, 2]), BTreeMap::new());
+    assert_eq!(found_at(&pass, &[1, 4]), BTreeMap::new());
+
+    // A pass of no machine finds nothing anywhere.
+    let none = PassSpec {
+        flags: 0x05,
+        start_states: vec![0],
+        ..PassSpec::default()
+    };
+    let silf = silf_table(5, &[one_pass(none)]);
+    let pass = first_pass(&silf);
+    assert!(!pass.has_machine());
+    assert_eq!(pass.collision_runs(), 5);
+    assert_eq!(found_at(&pass, &[1, 2, 3]), BTreeMap::new());
+
+    // Where the shortest pre-context is two, the first two positions match
+    // nothing; the start states are the GTF's, indexed by the slots missing.
+    let late = PassSpec {
+        ranges: vec![(1, 1, 0)],
+        columns: 1,
+        rows: 4,
+        transitional: 3,
+        success: 1,
+        rule_lists: vec![vec![0]],
+        min_pre: 2,
+        max_pre: 2,
+        start_states: vec![0],
+        rules: vec![(3, 2, vec![], vec![0x31])],
+        transitions: vec![vec![1], vec![2], vec![3]],
+        ..PassSpec::default()
+    };
+    let silf = silf_table(4, &[one_pass(late)]);
+    let pass = first_pass(&silf);
+    assert_eq!(pass.start(0), None);
+    assert_eq!(pass.start(1), None);
+    assert_eq!(pass.start(2), Some((0, 0)));
+    assert_eq!(pass.start(5), Some((3, 0)));
+    assert_eq!(
+        found_at(&pass, &[1, 1, 1, 1]),
+        BTreeMap::from([(2, vec![(0, 3)]), (3, vec![(0, 4)])])
+    );
+}
+
+/// A transition to a state past the table, or from a row the table does not
+/// hold, ends the walk and is named, the rules found before it standing; so
+/// is a rule past the rule count, a walk past the context ceiling, and a
+/// position past the candidate ceiling; and a pass whose counts the GTF's
+/// order cannot hold, or past the pass ceiling, does not run.
+#[test]
+fn a_transition_past_its_table_is_refused_and_named() {
+    // `A B C`: state 2 accepts rule 1 and goes on; the transition from 2
+    // names state 9, past the table's four.
+    let mut spec = PassSpec {
+        ranges: vec![(1, 1, 0), (2, 2, 1), (3, 3, 2)],
+        columns: 3,
+        rows: 4,
+        transitional: 3,
+        success: 2,
+        rule_lists: vec![vec![1], vec![0]],
+        start_states: vec![0],
+        rules: vec![(3, 0, vec![], vec![0x31]), (2, 0, vec![], vec![0x31])],
+        transitions: vec![vec![1, 0, 0], vec![0, 2, 0], vec![0, 0, 9]],
+        ..PassSpec::default()
+    };
+    let silf = silf_table(4, &[one_pass(spec.clone())]);
+    let pass = first_pass(&silf);
+    let matched = pass.candidates(&[1, 2, 3], 0, &Limits::DEFAULT);
+    assert_eq!(
+        matched.refusals,
+        vec![Refusal::TransitionPastTable { pass: 0, state: 2 }]
+    );
+    assert_eq!(
+        matched
+            .candidates
+            .iter()
+            .map(|c| (c.rule, c.end))
+            .collect::<Vec<_>>(),
+        vec![(1, 2)],
+        "the rule found before the transition stands"
+    );
+
+    // A start state past the table.
+    let mut start = spec.clone();
+    start.transitions[2][2] = 3;
+    start.start_states = vec![7];
+    let silf = silf_table(4, &[one_pass(start)]);
+    let pass = first_pass(&silf);
+    let matched = pass.candidates(&[1, 2, 3], 0, &Limits::DEFAULT);
+    assert_eq!(
+        matched.refusals,
+        vec![Refusal::TransitionPastTable { pass: 0, state: 7 }]
+    );
+    assert!(matched.candidates.is_empty());
+
+    // A rule map naming a rule past the count: named, and the rest stand.
+    spec.transitions[2][2] = 3;
+    spec.rule_lists = vec![vec![1, 5], vec![0]];
+    let silf = silf_table(4, &[one_pass(spec.clone())]);
+    let pass = first_pass(&silf);
+    let matched = pass.candidates(&[1, 2, 3], 0, &Limits::DEFAULT);
+    assert_eq!(
+        matched.refusals,
+        vec![Refusal::RuleOutOfRange { pass: 0, rule: 5 }]
+    );
+    assert_eq!(
+        matched
+            .candidates
+            .iter()
+            .map(|c| c.rule)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+
+    // Past the context ceiling: two slots read, the third refused.
+    spec.rule_lists = vec![vec![1], vec![0]];
+    let silf = silf_table(4, &[one_pass(spec.clone())]);
+    let pass = first_pass(&silf);
+    let short = Limits {
+        max_context_length: 2,
+        ..Limits::DEFAULT
+    };
+    let matched = pass.candidates(&[1, 2, 3], 0, &short);
+    assert_eq!(
+        matched.refusals,
+        vec![Refusal::RuleContextTooLong { pass: 0 }]
+    );
+    assert_eq!(
+        matched
+            .candidates
+            .iter()
+            .map(|c| c.rule)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+
+    // Past the candidate ceiling: the first gathered stands.
+    let few = Limits {
+        max_rule_candidates: 1,
+        ..Limits::DEFAULT
+    };
+    let matched = pass.candidates(&[1, 2, 3], 0, &few);
+    assert_eq!(
+        matched.refusals,
+        vec![Refusal::TooManyCandidates { pass: 0 }]
+    );
+    assert_eq!(
+        matched
+            .candidates
+            .iter()
+            .map(|c| c.rule)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+
+    // A truncated transition table: the row the walk needs is not there.
+    let mut silf = silf_table(4, &[one_pass(spec.clone())]);
+    let cut = silf.len() - 3;
+    silf.truncate(cut);
+    let table = graphite::Silf::parse(&silf).expect("the header still reads");
+    let description = table.description(0).expect("its description");
+    assert_eq!(
+        description.pass(0, &Limits::DEFAULT).map(|_| ()),
+        Err(Refusal::PassMalformed { pass: 0 })
+    );
+
+    // Counts the GTF's order cannot hold: more success states than states,
+    // and a state that does not accept with no transitions.
+    for (rows, transitional, success) in [(4u16, 3u16, 5u16), (4, 1, 2), (2, 3, 1)] {
+        let mut bad = spec.clone();
+        bad.rows = rows;
+        bad.transitional = transitional;
+        bad.success = success;
+        bad.transitions.truncate(usize::from(transitional));
+        bad.rule_lists.resize(usize::from(success), Vec::new());
+        let silf = silf_table(4, &[one_pass(bad)]);
+        let table = graphite::Silf::parse(&silf).expect("reads");
+        let description = table.description(0).expect("its description");
+        assert_eq!(
+            description.pass(0, &Limits::DEFAULT).map(|_| ()),
+            Err(Refusal::PassMalformed { pass: 0 }),
+            "{rows} {transitional} {success}"
+        );
+    }
+
+    // A range naming a column the transitions do not have.
+    let mut wide_range = spec.clone();
+    wide_range.ranges.push((4, 4, 3));
+    let silf = silf_table(4, &[one_pass(wide_range)]);
+    let table = graphite::Silf::parse(&silf).expect("reads");
+    let description = table.description(0).expect("its description");
+    assert_eq!(
+        description.pass(0, &Limits::DEFAULT).map(|_| ()),
+        Err(Refusal::PassMalformed { pass: 0 })
+    );
+
+    // Passes past the ceiling, and past the count.
+    let two = DescriptionSpec {
+        class_map: class_map(&[], &[], true),
+        passes: vec![spec.clone(), spec],
+        order: [0, 2, 2, 255],
+        ..DescriptionSpec::default()
+    };
+    let silf = silf_table(4, &[two]);
+    let table = graphite::Silf::parse(&silf).expect("reads");
+    let description = table.description(0).expect("its description");
+    let one = Limits {
+        max_passes: 1,
+        ..Limits::DEFAULT
+    };
+    assert!(description.pass(0, &one).is_ok());
+    assert_eq!(
+        description.pass(1, &one).map(|_| ()),
+        Err(Refusal::TooManyPasses { passes: 2 })
+    );
+    assert!(description.pass(1, &Limits::DEFAULT).is_ok());
+    assert_eq!(
+        description.pass(2, &Limits::DEFAULT).map(|_| ()),
+        Err(Refusal::PassMalformed { pass: 2 })
+    );
+}
+
+/// A `Silf` reads at every version the design covers — each version's
+/// fields where the notes put them, a version-5 table plain and compressed
+/// — and is refused at one it does not.
+#[test]
+fn a_silf_reads_at_every_version_it_covers() {
+    let pass = PassSpec {
+        flags: 0x20,
+        max_rule_loop: 5,
+        max_rule_context: 2,
+        max_backup: 1,
+        ranges: vec![(1, 1, 0)],
+        columns: 1,
+        rows: 2,
+        transitional: 1,
+        success: 1,
+        rule_lists: vec![vec![0]],
+        start_states: vec![0],
+        rules: vec![(1, 0, vec![0x32], vec![0x1B, 0x31])],
+        transitions: vec![vec![1]],
+        pass_constraint: vec![0x01, 0x01, 0x30],
+        collision_threshold: 7,
+        ..PassSpec::default()
+    };
+    let spec = DescriptionSpec {
+        script_tags: vec![*b"latn", *b"grek"],
+        pseudos: vec![(0x2E, 300), (0x301, 301), (0x1F600, 302)],
+        class_map: class_map(&[vec![9, 8]], &[], false),
+        passes: vec![pass],
+        order: [0, 1, 1, 255],
+    };
+    for major in 1..=5u32 {
+        let mut spec = spec.clone();
+        spec.class_map = class_map(&[vec![9, 8]], &[], major >= 4);
+        let silf = silf_table(major, &[spec]);
+        let table = graphite::Silf::parse(&silf).expect("the Silf reads");
+        assert_eq!(table.version(), major << 16);
+        assert_eq!(table.compiler_version().is_some(), major >= 3);
+        assert_eq!(table.len(), 1);
+        let description = table.description(0).expect("its description");
+        assert_eq!(description.rule_version.is_some(), major >= 3, "{major}");
+        assert_eq!(description.max_glyph, 500);
+        assert_eq!(description.passes, 1);
+        assert_eq!(
+            (
+                description.substitution,
+                description.positioning,
+                description.justification,
+                description.bidi
+            ),
+            (0, 1, 1, 255)
+        );
+        assert_eq!(
+            (
+                description.attr_pseudo,
+                description.attr_break_weight,
+                description.attr_directionality
+            ),
+            (0, 1, 2)
+        );
+        if major >= 2 {
+            assert_eq!(
+                (description.attr_mirroring, description.attr_skip_passes),
+                (3, 4)
+            );
+        } else {
+            assert_eq!(
+                (description.attr_mirroring, description.attr_skip_passes),
+                (0, 0)
+            );
+        }
+        assert_eq!(description.direction, 1);
+        assert_eq!(
+            description.script_tags,
+            vec![Tag::new(b"latn"), Tag::new(b"grek")]
+        );
+        assert_eq!(description.line_break_glyph, 499);
+        assert_eq!(description.pseudo_count(), 3);
+        assert_eq!(description.pseudo(0x301), Some(301));
+        assert_eq!(description.pseudo(0x1F600), Some(302));
+        assert_eq!(description.pseudo(0x41), None);
+        assert_eq!(description.classes().glyph(0, 1), Some(8));
+        let first = description.pass(0, &Limits::DEFAULT).expect("its pass");
+        assert!(first.is_reversed());
+        assert_eq!(
+            (
+                first.max_rule_loop,
+                first.max_rule_context,
+                first.max_backup
+            ),
+            (5, 2, 1)
+        );
+        assert_eq!(first.constraint(0), Some(&[0x32][..]));
+        assert_eq!(first.action(0), Some(&[0x1B, 0x31][..]));
+        assert_eq!(first.constraint(1), None);
+        if major >= 2 {
+            assert_eq!(first.pass_constraint(), Some(&[0x01, 0x01, 0x30][..]));
+            assert_eq!(first.collision_threshold, 7);
+        } else {
+            assert_eq!(first.pass_constraint(), None);
+            assert_eq!(first.collision_threshold, 0);
+        }
+        let matched = first.candidates(&[1], 0, &Limits::DEFAULT);
+        assert_eq!(matched.candidates.len(), 1, "{major}");
+
+        if major == 5 {
+            // Compressed, decoded, and read the same.
+            let stored = lz4_literals(&silf);
+            let decoded = graphite::decompress(graphite::SILF, &stored, &Limits::DEFAULT)
+                .expect("it decodes");
+            assert_eq!(&*decoded, &silf[..]);
+            // Still compressed when it reaches the reader: refused.
+            assert_eq!(
+                graphite::Silf::parse(&stored).map(|_| ()),
+                Err(Refusal::UnknownCompression {
+                    table: graphite::SILF,
+                    scheme: 1
+                })
+            );
+        }
+    }
+    for version in [0u32, 6, 0x0100] {
+        let silf = silf_table(version, &[]);
+        assert_eq!(
+            graphite::Silf::parse(&silf).map(|_| ()),
+            Err(Refusal::UnknownVersion {
+                table: graphite::SILF,
+                version: version << 16
+            })
+        );
+    }
+    // A run takes the first description whose script tags hold its script,
+    // and the first where none does.
+    let mut arabic = spec.clone();
+    arabic.script_tags = vec![*b"arab"];
+    arabic.class_map = class_map(&[vec![1]], &[], true);
+    let mut latin = spec;
+    latin.class_map = class_map(&[vec![2]], &[], true);
+    let silf = silf_table(4, &[arabic, latin]);
+    let table = graphite::Silf::parse(&silf).expect("reads");
+    let glyph_of = |script: &[u8; 4]| {
+        table
+            .description_for(Tag::new(script))
+            .expect("a description")
+            .expect("readable")
+            .classes()
+            .glyph(0, 0)
+    };
+    assert_eq!(glyph_of(b"latn"), Some(2));
+    assert_eq!(glyph_of(b"arab"), Some(1));
+    assert_eq!(glyph_of(b"cyrl"), Some(1));
+}
+
+/// The vendored faces' `Silf`s read as their authors compiled them, and the
+/// machine finds in them the rules their text calls for: Dai Banna SIL's
+/// composition of `e` and U+0301, through its pseudo-glyph map, to the rule
+/// whose action puts the glyph its `cmap` gives `é`.
+#[test]
+fn the_vendored_faces_silf_reads() {
+    let limits = Limits::DEFAULT;
+
+    let face = Sfnt::parse(DAI_BANNA).expect("Dai Banna SIL parses");
+    let tables = Tables::parse(&face, &limits).expect("a description");
+    let silf = graphite::Silf::parse(tables.silf()).expect("its Silf reads");
+    assert_eq!(silf.version(), 0x0004_0000);
+    assert_eq!(silf.compiler_version(), Some(0x0004_0002));
+    assert_eq!(silf.len(), 1);
+    let description = silf.description(0).expect("its description");
+    assert_eq!(description.rule_version, Some(0x0004_0000));
+    assert_eq!(
+        (
+            description.passes,
+            description.substitution,
+            description.positioning,
+            description.justification,
+            description.bidi
+        ),
+        (2, 1, 2, 2, 255)
+    );
+    assert_eq!(
+        (description.attr_break_weight, description.line_break_glyph),
+        (2, 411)
+    );
+    assert_eq!(description.pseudo_count(), 8);
+    let acute = description.pseudo(0x301).expect("U+0301 is a pseudo-glyph");
+    assert_eq!(acute, 413);
+    assert_eq!(face.glyph_for_char('\u{301}'), None);
+    let classes = description.classes();
+    assert_eq!((classes.len(), classes.linear_count()), (116, 116));
+
+    // The line-break pass: a consonant after a prevowel is given a break
+    // weight, slot attribute 14, by `PutCopy 0; PushByte -30; AttrSet 14;
+    // Next; RetZero`.
+    let breaks = description.pass(0, &limits).expect("pass 0");
+    let prevowel = face.glyph_for_char('\u{19B6}').expect("U+19B6");
+    let consonant = face.glyph_for_char('\u{1982}').expect("U+1982");
+    let glyphs = [prevowel, consonant];
+    assert!(breaks.candidates(&glyphs, 0, &limits).candidates.is_empty());
+    let found = breaks.candidates(&glyphs, 1, &limits);
+    assert_eq!(
+        found
+            .candidates
+            .iter()
+            .map(|c| (c.rule, c.end))
+            .collect::<Vec<_>>(),
+        vec![(0, 2)]
+    );
+    assert_eq!(
+        breaks.action(0),
+        Some(&[0x1E, 0x00, 0x01, 0xE2, 0x23, 0x0E, 0x19, 0x31][..])
+    );
+
+    // The substitution pass: `e` and the acute's pseudo-glyph are a rule
+    // whose action opens with `PutGlyph` of a class holding `é`.
+    let compose = description.pass(1, &limits).expect("pass 1");
+    let e = face.glyph_for_char('e').expect("e");
+    let found = compose.candidates(&[e, acute], 0, &limits);
+    assert!(found.refusals.is_empty());
+    assert_eq!(found.candidates.len(), 1);
+    let rule = found.candidates[0].rule;
+    assert_eq!(found.candidates[0].end, 2);
+    let action = compose.action(rule).expect("its action");
+    assert_eq!(action[0], 0x3B, "PutGlyph with a 16-bit class");
+    let class = usize::from(u16::from_be_bytes([action[1], action[2]]));
+    assert_eq!(classes.glyph(class, 0), face.glyph_for_char('\u{E9}'));
+
+    // Tagmukay's `Silf` 2: no compiler version, `USHORT` class offsets, and
+    // the two rules of its second pass that test its first two features —
+    // `PushFeat` of features 0 and 1, its `ss01` and `ss02`.
+    let face = Sfnt::parse(TAGMUKAY).expect("Tagmukay parses");
+    let tables = Tables::parse(&face, &limits).expect("a description");
+    let silf = graphite::Silf::parse(tables.silf()).expect("its Silf reads");
+    assert_eq!(
+        (silf.version(), silf.compiler_version()),
+        (0x0002_0000, None)
+    );
+    let description = silf.description(0).expect("its description");
+    assert_eq!(description.rule_version, None);
+    assert_eq!(
+        (
+            description.passes,
+            description.substitution,
+            description.positioning
+        ),
+        (2, 0, 2)
+    );
+    assert_eq!(
+        (
+            description.attr_mirroring,
+            description.ligature_components,
+            description.max_components
+        ),
+        (4, 6, 5)
+    );
+    let classes = description.classes();
+    assert_eq!((classes.len(), classes.linear_count()), (22, 17));
+    let second = description.pass(1, &limits).expect("pass 1");
+    assert_eq!(second.constraint(2), Some(&[0x2B, 0x00, 0x00, 0x30][..]));
+    assert_eq!(second.constraint(3), Some(&[0x2B, 0x01, 0x00, 0x30][..]));
+
+    // Awami Nastaliq's compressed `Silf` 5.1, decoded: twenty-one passes,
+    // each readable, a reversed one, collision passes with and without a
+    // machine, pass constraints; and a `maxGlyphID` below both its own
+    // pseudo-glyph and the glyphs its `Gloc` indexes.
+    let face = Sfnt::parse(AWAMI).expect("Awami Nastaliq parses");
+    let tables = Tables::parse(&face, &limits).expect("a description");
+    assert!(tables.refusals().is_empty());
+    let silf = graphite::Silf::parse(tables.silf()).expect("its Silf reads");
+    assert_eq!(silf.version(), 0x0005_0001);
+    assert_eq!(silf.compiler_version(), Some(0x0005_0000));
+    let description = silf.description(0).expect("its description");
+    assert_eq!(
+        (
+            description.passes,
+            description.substitution,
+            description.positioning,
+            description.bidi
+        ),
+        (21, 0, 7, 255)
+    );
+    assert_eq!(
+        (
+            description.direction,
+            description.attr_collisions,
+            description.user_attributes
+        ),
+        (2, 4, 6)
+    );
+    let lrm = description
+        .pseudo(0x200E)
+        .expect("U+200E is a pseudo-glyph");
+    assert_eq!(lrm, 1_673);
+    assert_eq!(description.max_glyph, 1_671);
+    let attributes = tables.attributes(&limits).expect("both").expect("readable");
+    assert!(usize::from(description.max_glyph) < attributes.glyph_count());
+    assert!(lrm > description.max_glyph);
+    for number in 0..usize::from(description.passes) {
+        description
+            .pass(number, &limits)
+            .unwrap_or_else(|refusal| panic!("pass {number}: {refusal:?}"));
+    }
+    assert!(description.pass(6, &limits).expect("pass 6").is_reversed());
+    let fix = description.pass(10, &limits).expect("pass 10");
+    assert!(!fix.has_machine());
+    assert_eq!(fix.collision_runs(), 5);
+    let kern = description.pass(18, &limits).expect("pass 18");
+    assert_eq!((kern.collision_runs(), kern.kerning()), (4, 1));
+    assert_eq!(
+        description
+            .pass(9, &limits)
+            .expect("pass 9")
+            .pass_constraint(),
+        Some(&[0x2B, 0x0A, 0x00, 0x01, 0x00, 0x16, 0x30][..])
+    );
+    assert_eq!(description.pass(3, &limits).expect("pass 3").max_backup, 50);
+}

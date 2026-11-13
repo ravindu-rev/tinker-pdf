@@ -11,7 +11,10 @@
 //! its glyph attributes ([`Attributes`]); and its features and languages
 //! ([`Features`], [`Languages`]), and the value each feature takes for a run
 //! ([`FeatureValues`], which `Shaper::graphite_features` makes from a
-//! shaper's settings, features and language). A face whose only layout
+//! shaper's settings, features and language); and its rules ([`Silf`]): each
+//! description's header, pseudo-glyph map and class map, and each pass's
+//! machine finding the rules that match at a scan position ([`Pass`]), with
+//! no rule's code run. A face whose only layout
 //! tables are these is still shaped as though it carried none, and every run
 //! over it says so (`crate::Warning::TableNotRun`).
 //!
@@ -34,9 +37,13 @@ use crate::read::Bytes;
 pub mod feat;
 pub mod glat;
 mod lz4;
+pub mod silf;
 
 pub use feat::{Feature, FeatureValues, Features, Languages, Setting};
 pub use glat::{Attributes, GlatVersion, Octabox, Subbox};
+pub use silf::{
+    Candidate, ClassKind, ClassMap, Description, JustificationLevel, Matched, Pass, Silf,
+};
 
 /// `Silf`, a Graphite description's rules.
 pub const SILF: Tag = Tag::new(b"Silf");
@@ -119,6 +126,48 @@ pub enum Refusal {
         feature: u32,
         /// The value asked for.
         value: u32,
+    },
+    /// A description states more passes than [`Limits::max_passes`]; the
+    /// passes past the ceiling do not run.
+    TooManyPasses {
+        /// The passes it states.
+        passes: u8,
+    },
+    /// A pass that cannot be read whole: its block past the description, its
+    /// arrays past its block, a range naming a column it has not, or counts
+    /// the GTF's order of states cannot hold. It does not run.
+    PassMalformed {
+        /// The pass.
+        pass: u8,
+    },
+    /// A pass's machine took, or would take, a transition its table cannot
+    /// give — to a state past its states, or from a row past its table. The
+    /// walk ended there, and the rules it had found stand.
+    TransitionPastTable {
+        /// The pass.
+        pass: u8,
+        /// The state the transition was taken from.
+        state: u16,
+    },
+    /// A pass's rule map names a rule past the pass's rule count; it was not
+    /// a candidate.
+    RuleOutOfRange {
+        /// The pass.
+        pass: u8,
+        /// The rule named.
+        rule: u16,
+    },
+    /// A pass's machine would read more slots than
+    /// [`Limits::max_context_length`] at one position; the walk ended there.
+    RuleContextTooLong {
+        /// The pass.
+        pass: u8,
+    },
+    /// A position of a pass gathered more rules than
+    /// [`Limits::max_rule_candidates`]; the rest were not tried.
+    TooManyCandidates {
+        /// The pass.
+        pass: u8,
     },
 }
 

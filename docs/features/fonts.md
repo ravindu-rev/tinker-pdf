@@ -871,8 +871,22 @@ What it does:
   `with_features` spells set to 1, and `with_settings`, the last setting of a
   tag winning. A tag naming no declared feature, and a value a feature does
   not declare, is ignored and named (`graphite::Refusal::UndeclaredFeature`,
-  `UndeclaredSetting`). No run is shaped through any of it yet: the
-  refused-by-name table below says what a run over such a face does.
+  `UndeclaredSetting`). `graphite::Silf` reads `Silf` 1 to 5, each version's
+  fields where the GTF's version notes put them: a description's header,
+  its pseudo-glyph map (bisected, a map out of order read in order), its
+  class map — linear classes read in order, lookup classes bisected — and
+  its passes, each refused by name where it cannot be read whole or its
+  counts break the GTF's order of states, and past `Limits::max_passes`. A
+  pass's machine (`Pass::candidates`) finds the rules matching at a scan
+  position as the GTF describes: a glyph's column by its ranges, the start
+  state by how many slots come before the position, a transition to 0
+  jamming, the rules of every accepting state passed, a rule whose
+  pre-context reaches before the stream dropped, the rest by sort key and
+  then rule number; a transition past the table, a rule past the count, a
+  walk past `Limits::max_context_length` and a position past
+  `Limits::max_rule_candidates` are each refused by name. No rule's code runs
+  yet, and no run is shaped through any of it: the refused-by-name table
+  below says what a run over such a face does.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so

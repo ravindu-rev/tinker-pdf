@@ -143,6 +143,29 @@ pub struct Limits {
     /// (`graphite::Refusal::TooManyAttributeRuns`) and answers nothing. A
     /// face's ceiling, which [`Limits::for_glyphs`] leaves alone.
     pub max_attribute_runs: u32,
+
+    /// How many passes of a Graphite description are run.
+    ///
+    /// **Sixty-four.** A description states its pass count in a byte, and
+    /// each pass is a walk over the whole run, so the count multiplies every
+    /// other cost. The richest shipped description this crate has read runs
+    /// twenty-one; a pass past the ceiling is refused by name
+    /// (`graphite::Refusal::TooManyPasses`) and does not run. A face's
+    /// ceiling, which [`Limits::for_glyphs`] leaves alone.
+    pub max_passes: u32,
+
+    /// How many rules one position of a Graphite pass may try.
+    ///
+    /// **One thousand and twenty-four.** The machine collects every rule of
+    /// every accepting state it passes through, and a state's rule list is a
+    /// length the face writes, so a hostile pass can hand one position tens
+    /// of thousands of candidates, each a constraint to run. A shipped
+    /// face's state lists a few; past the ceiling the rest are not tried and
+    /// the pass is named (`graphite::Refusal::TooManyCandidates`). The walk
+    /// itself reads no more than [`Limits::max_context_length`] slots, the
+    /// bound a rule shares with an OpenType lookup's input. A face's ceiling,
+    /// which [`Limits::for_glyphs`] leaves alone.
+    pub max_rule_candidates: u32,
 }
 
 impl Limits {
@@ -162,6 +185,8 @@ impl Limits {
         max_index_bytes: 8 << 20,
         max_table_bytes: 16 << 20,
         max_attribute_runs: 256,
+        max_passes: 64,
+        max_rule_candidates: 1_024,
     };
 
     /// The default ceilings, with the two work numbers scaled to a run of
@@ -254,8 +279,15 @@ mod tests {
                 limits.max_attribute_runs,
                 Limits::DEFAULT.max_attribute_runs
             );
+            assert_eq!(limits.max_passes, Limits::DEFAULT.max_passes);
+            assert_eq!(
+                limits.max_rule_candidates,
+                Limits::DEFAULT.max_rule_candidates
+            );
         }
         assert_eq!(Limits::DEFAULT.max_table_bytes, 16 << 20);
         assert_eq!(Limits::DEFAULT.max_attribute_runs, 256);
+        assert_eq!(Limits::DEFAULT.max_passes, 64);
+        assert_eq!(Limits::DEFAULT.max_rule_candidates, 1_024);
     }
 }
