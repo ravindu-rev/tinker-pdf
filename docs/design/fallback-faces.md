@@ -1,4 +1,4 @@
-# Fallback faces for composite fonts
+# Fallback faces
 
 A composite font that embeds no program names its glyphs by CID, a number in
 a character collection the font's `/CIDSystemInfo` names (9.7.3). A face the
@@ -7,7 +7,10 @@ build carries — numbers its glyphs in an order of its own, so a CID is not an
 index into it. This document describes how a substituted face is read for a
 composite font, which faces a build carries for the registry's CJK
 collections, how they are stored and switched on, and how the corpus counts
-the files they are for (ROADMAP FT-01).
+the files they are for (ROADMAP FT-01); and, in its last section, the faces a
+build carries for every other script, emoji, mathematics, music and symbols,
+and the lookup by script and language that chooses among them (ROADMAP
+FT-02).
 
 ## Scope
 
@@ -381,3 +384,443 @@ FT-01's exit falls from.
 | The WOFF2 encoder changes the font data beyond the compression, and the face loses the name its licence reserves | `cjk_faces.rs` holds every table each file unpacks to against the published face's, and names the three changes WOFF2 §5 makes |
 | The `bundled-fonts` wasm profile grows by the faces | Its figure is re-recorded at FT-01.10 at the price ruling 19 leaves with the owner; the default profile carries no face |
 | A region's best face lacks CIDs of a later supplement | FT-01.4 counts the CIDs each candidate reaches per supplement, and a CID no route reaches draws `.notdef` and reports |
+
+## Every script, emoji, mathematics, music and symbols (FT-02)
+
+FT-01's faces answer a composite font of the registry's CJK collections.
+This section extends the build's faces to every character an admitted face
+can draw: a face for each script one covers, and faces for emoji,
+mathematics, music and other symbols, chosen a character at a time by a
+lookup the producing path and the reading path both ask (ROADMAP FT-02).
+
+### Scope
+
+- The lookup: a character, the script of the run it is in, and a language
+  tag or a character collection where the caller has one, in; the face the
+  build carries to draw it with, or none, out.
+- The faces: one candidate a script, by the Unicode Character Database's
+  `Script` property, and the candidates for the emoji, mathematics, music and
+  symbol classes; the groups that carry them, each a feature and a wasm
+  profile; their storage, their homes and their licences.
+- The two paths that ask the lookup: the producing path, which lays out a
+  book's, a Markdown document's or an HTML document's text and embeds the
+  faces it draws with (`epub/paint.rs`), and the reading path, which draws a
+  glyph of an unembedded font that no font-level substitute covers
+  (`resources.rs`).
+- Which scripts the reading path draws without shaping, and which it reports
+  by name.
+- The census that prices the faces, the page-per-script proof, and what "no
+  `.notdef`" is measured by.
+
+### Non-goals
+
+- **Shaping in the reading path.** A PDF's producer placed every glyph, and
+  the reading path draws a glyph a character where the producer put it,
+  unshaped, as `features/fonts.md`'s refusal table keeps permanent. A script
+  whose text that would draw wrongly is reported by name instead.
+- **A second style.** One style, Regular, in a sans-serif design where the
+  family has one, as FT-01's faces.
+- **Colour emoji.** The emoji group carries a monochrome outline face, drawn
+  on both paths as every outline is. Whether a book draws its emoji in colour
+  is H-141's (a), and a colour face joins the group only on its ruling.
+- **A face under a licence `deny.toml` does not admit** (ruling 18).
+- **A script no admitted face covers.** Each is named below, and its
+  characters are counted as uncovered, never drawn from a face that lacks
+  them.
+- **Han, Hiragana, Katakana, Hangul and Bopomofo.** FT-01's four CJK faces
+  draw them, and the lookup reaches those faces rather than adding others.
+
+### Design
+
+**The classes, from data the tree vendors** (Unicode 17.0.0). A character's
+script is `Scripts.txt`'s, through `tinker_pdf_shape::unicode::script`
+(`crates/tinker-pdf-shape/data/ucd`). Its classes are read from
+`crates/tinker-pdf-layout/data/ucd`: **emoji** is `emoji-data.txt`'s
+`Emoji_Presentation`, and `Extended_Pictographic` where U+FE0F follows; a
+character followed by U+FE0E asks text presentation and is no emoji;
+**mathematics** is `DerivedCoreProperties.txt`'s `Math`; **symbols** are
+`DerivedGeneralCategory.txt`'s `So` and `Sm`, and `No` of the `Common`
+script — Mayan numerals and the Siyaq numbers among them. No property names
+music: a musical symbol is a symbol, reached through the symbol faces' fixed
+order below, and the census counts the four musical blocks — Musical
+Symbols, Byzantine Musical Symbols, Ancient Greek Musical Notation and
+Znamenny Musical Notation — by the names `UnicodeData.txt` gives their
+characters (`MUSICAL SYMBOL`, `BYZANTINE MUSICAL SYMBOL`, `GREEK VOCAL
+NOTATION SYMBOL`, `GREEK INSTRUMENTAL NOTATION SYMBOL`, `ZNAMENNY`).
+
+**The lookup.** For a character `c`, its run's script, and the caller's
+language tag or character collection where it has one, the first of these
+that names a face whose `cmap` covers `c`:
+
+1. **Emoji presentation**: `c` is an emoji, as above — the emoji face.
+2. **The CJK scripts**: `c` is Han, Hiragana, Katakana, Hangul or Bopomofo —
+   FT-01's faces, narrowed below.
+3. **Its script**: `Scripts.txt`'s, or, where that is `Common` or
+   `Inherited`, its run's: the script of the nearest character before it in
+   the run that is neither, else of the nearest after it, else Latin — the
+   script's face.
+4. **Mathematics**: `c` is `Math` — the mathematics face.
+5. **Symbols**: `c` is a symbol, as above — the first, in this fixed order,
+   of Noto Sans Symbols, Noto Sans Symbols 2, Noto Music, Noto Znamenny
+   Musical Notation, Noto Sans Mayan Numerals, Noto Sans Indic Siyaq Numbers,
+   Noto Serif Ottoman Siyaq, the mathematics face and the emoji face, which
+   draws a pictograph asked in text presentation.
+6. **The Latin face**, Noto Sans, for a `Common` character no face before it
+   covers: punctuation and spaces, whose shapes no script's face owns.
+7. **None.** The character is counted as uncovered, by the path that asked.
+
+A run is what the asking path shapes or shows as one: a shaping run of the
+producing path, and the string of one text-showing operator in one font on
+the reading path. The result is a function of the character, the run's
+script, the language or collection and the features the build carries, so a
+build draws a page the same way every time (ruling 4).
+
+**Han, and the scripts whose forms vary by language.** Han's forms differ by
+region, so step 2 chooses among FT-01's faces by the caller's BCP 47 tag:
+`ja` the Japanese face; `ko` the Korean face; `zh` with the `Hant` script
+subtag, or with the region `TW`, `HK` or `MO`, the Traditional Chinese face;
+any other `zh` the Simplified Chinese face. Without a tag, the font's
+character collection chooses, as `Region::of` reads it for FT-01; with
+neither, the four faces are asked in the order of how many of the script's
+characters each covers, most first, by FT-02.2's census, and the first that
+covers `c` draws it. Hiragana and Katakana prefer the Japanese face, Hangul
+the Korean and Bopomofo the Traditional Chinese, before the rest, whatever
+the tag. Every other script has one face here, so a language changes its
+form only through the face's own `locl` lookups, which the producing path's
+shaper runs under the OpenType language system the tag names (FT-15); the
+reading path, which does not shape, draws the default forms.
+
+**Where the producing path takes the language.** From the element's computed
+style: the `lang` and `xml:lang` FT-15 resolves and carries into layout's
+computed style (FT-15.7), read where `paint.rs` shapes a run rather than
+carried a second time. A Markdown document has no element language and asks
+with none; neither does the builder's own text.
+
+**The reading path, drawn and reported.** The reading path draws a glyph a
+character at the producer's position, so it admits a script only where that
+draws it right: where no character of it joins its neighbours, forms a
+conjunct or is drawn before the character it follows. By the shape crate's
+vendored data, a script is **reported** where any character of its own has a
+`Joining_Type` of `D`, `L`, `R` or `C` (`DerivedJoiningType.txt`), an
+`Indic_Syllabic_Category` of `Virama` or `Invisible_Stacker`
+(`IndicSyllabicCategory.txt`), or an `Indic_Positional_Category` of `Left`
+(`IndicPositionalCategory.txt`), and three more are reported by name because
+a face combines their characters by its own layout tables, which no
+property states: Duployan's joining, SignWriting's fills and rotations, and
+Egyptian Hieroglyphs' quadrat controls. Every other script is **drawn**.
+A reported script's character is not drawn from any face: the page reports
+`RenderWarning::ScriptNotDrawn` naming the script, once a font a page, which
+`features/fonts.md`'s refusal table lists, and the character's glyph is the
+font's own `.notdef`, as an unreached glyph is. The tables below give each
+script's side.
+
+**The candidates.** Each is fetched once to be measured and never committed
+until FT-02.4 vendors it, and each carries `OFL-1.1`, which `deny.toml`
+admits (H-91 ratifies the entry; ruling 18). Every face of the three script
+tables is its family's Regular as the Noto project publishes it,
+[notofonts/notofonts.github.io](https://github.com/notofonts/notofonts.github.io)
+at `3460ae9`, `fonts/<Family>/unhinted/ttf/<Family>-Regular.ttf`, its
+family's sans-serif face, or its serif face where the family has no sans.
+The groups are UAX #31's three tables of scripts for Unicode 17.0.0
+(revision 43): its Recommended Scripts, Limited Use Scripts and Excluded
+Scripts, each a feature of its own.
+
+`fallback-scripts`, the Recommended Scripts but `Common`, `Inherited` and the
+CJK scripts:
+
+| Face | Scripts | Reading path |
+| --- | --- | --- |
+| Noto Sans Arabic | Arabic `Arab` | reported |
+| Noto Sans Armenian | Armenian `Armn` | drawn |
+| Noto Sans Bengali | Bengali `Beng` | reported |
+| Noto Sans | Cyrillic `Cyrl`, Greek `Grek`, Latin `Latn` | drawn |
+| Noto Sans Devanagari | Devanagari `Deva` | reported |
+| Noto Sans Ethiopic | Ethiopic `Ethi` | drawn |
+| Noto Sans Georgian | Georgian `Geor` | drawn |
+| Noto Sans Gujarati | Gujarati `Gujr` | reported |
+| Noto Sans Gurmukhi | Gurmukhi `Guru` | reported |
+| Noto Sans Hebrew | Hebrew `Hebr` | drawn |
+| Noto Sans Kannada | Kannada `Knda` | reported |
+| Noto Sans Khmer | Khmer `Khmr` | reported |
+| Noto Sans Lao | Lao `Laoo` | drawn |
+| Noto Sans Malayalam | Malayalam `Mlym` | reported |
+| Noto Sans Myanmar | Myanmar `Mymr` | reported |
+| Noto Sans Oriya | Oriya `Orya` | reported |
+| Noto Sans Sinhala | Sinhala `Sinh` | reported |
+| Noto Sans Tamil | Tamil `Taml` | reported |
+| Noto Sans Telugu | Telugu `Telu` | reported |
+| Noto Sans Thaana | Thaana `Thaa` | drawn |
+| Noto Sans Thai | Thai `Thai` | drawn |
+| Noto Serif Tibetan | Tibetan `Tibt` | reported |
+
+`fallback-scripts-limited`, the Limited Use Scripts but Bopomofo:
+
+| Face | Scripts | Reading path |
+| --- | --- | --- |
+| Noto Sans Adlam | Adlam `Adlm` | reported |
+| Noto Sans Balinese | Balinese `Bali` | reported |
+| Noto Sans Bamum | Bamum `Bamu` | drawn |
+| Noto Sans Batak | Batak `Batk` | drawn |
+| Noto Sans Chakma | Chakma `Cakm` | reported |
+| Noto Sans Canadian Aboriginal | Canadian Aboriginal Syllabics `Cans` | drawn |
+| Noto Sans Cham | Cham `Cham` | reported |
+| Noto Sans Cherokee | Cherokee `Cher` | drawn |
+| Noto Serif NP Hmong | Nyiakeng Puachue Hmong `Hmnp` | drawn |
+| Noto Sans Javanese | Javanese `Java` | reported |
+| Noto Sans Kayah Li | Kayah Li `Kali` | drawn |
+| Noto Sans Tai Tham | Tai Tham `Lana` | reported |
+| Noto Sans Lepcha | Lepcha `Lepc` | reported |
+| Noto Sans Limbu | Limbu `Limb` | drawn |
+| Noto Sans Lisu | Lisu `Lisu` | drawn |
+| Noto Sans Mandaic | Mandaic `Mand` | reported |
+| Noto Sans Meetei Mayek | Meetei Mayek `Mtei` | reported |
+| Noto Sans Newa | Newa `Newa` | reported |
+| Noto Sans NKo | Nko `Nkoo` | reported |
+| Noto Sans Ol Chiki | Ol Chiki `Olck` | drawn |
+| Noto Sans Osage | Osage `Osge` | drawn |
+| Noto Sans Miao | Miao `Plrd` | drawn |
+| Noto Sans Hanifi Rohingya | Hanifi Rohingya `Rohg` | reported |
+| Noto Sans Saurashtra | Saurashtra `Saur` | reported |
+| Noto Sans Sundanese | Sundanese `Sund` | reported |
+| Noto Sans Syloti Nagri | Syloti Nagri `Sylo` | reported |
+| Noto Sans Syriac | Syriac `Syrc` | reported |
+| Noto Sans Tai Le | Tai Le `Tale` | drawn |
+| Noto Sans New Tai Lue | New Tai Lue `Talu` | drawn |
+| Noto Sans Tai Viet | Tai Viet `Tavt` | drawn |
+| Noto Sans Tifinagh | Tifinagh `Tfng` | drawn |
+| Noto Sans Vai | Vai `Vaii` | drawn |
+| Noto Sans Wancho | Wancho `Wcho` | drawn |
+| Noto Sans Yi | Yi `Yiii` | drawn |
+
+`fallback-scripts-historic`, the Excluded Scripts that have a face:
+
+| Face | Scripts | Reading path |
+| --- | --- | --- |
+| Noto Sans Caucasian Albanian | Caucasian Albanian `Aghb` | drawn |
+| Noto Serif Ahom | Ahom `Ahom` | reported |
+| Noto Sans Imperial Aramaic | Imperial Aramaic `Armi` | drawn |
+| Noto Sans Avestan | Avestan `Avst` | drawn |
+| Noto Sans Bassa Vah | Bassa Vah `Bass` | drawn |
+| Noto Sans Bhaiksuki | Bhaiksuki `Bhks` | reported |
+| Noto Sans Brahmi | Brahmi `Brah` | reported |
+| Noto Sans Buginese | Buginese `Bugi` | reported |
+| Noto Sans Buhid | Buhid `Buhd` | drawn |
+| Noto Sans Carian | Carian `Cari` | drawn |
+| Noto Sans Chorasmian | Chorasmian `Chrs` | reported |
+| Noto Sans Coptic | Coptic `Copt` | drawn |
+| Noto Sans Cypro Minoan | Cypro-Minoan `Cpmn` | drawn |
+| Noto Sans Cypriot | Cypriot `Cprt` | drawn |
+| Noto Serif Dives Akuru | Dives Akuru `Diak` | reported |
+| Noto Serif Dogra | Dogra `Dogr` | reported |
+| Noto Sans Deseret | Deseret `Dsrt` | drawn |
+| Noto Sans Duployan | Duployan `Dupl` | reported |
+| Noto Sans Egyptian Hieroglyphs | Egyptian Hieroglyphs `Egyp` | reported |
+| Noto Sans Elbasan | Elbasan `Elba` | drawn |
+| Noto Sans Elymaic | Elymaic `Elym` | drawn |
+| Noto Sans Glagolitic | Glagolitic `Glag` | drawn |
+| Noto Sans Gunjala Gondi | Gunjala Gondi `Gong` | reported |
+| Noto Sans Masaram Gondi | Masaram Gondi `Gonm` | reported |
+| Noto Sans Gothic | Gothic `Goth` | drawn |
+| Noto Sans Grantha | Grantha `Gran` | reported |
+| Noto Sans Hanunoo | Hanunoo `Hano` | drawn |
+| Noto Sans Hatran | Hatran `Hatr` | drawn |
+| Noto Sans Anatolian Hieroglyphs | Anatolian Hieroglyphs `Hluw` | drawn |
+| Noto Sans Pahawh Hmong | Pahawh Hmong `Hmng` | drawn |
+| Noto Sans Old Hungarian | Old Hungarian `Hung` | drawn |
+| Noto Sans Old Italic | Old Italic `Ital` | drawn |
+| Noto Sans Kawi | Kawi `Kawi` | reported |
+| Noto Sans Kharoshthi | Kharoshthi `Khar` | reported |
+| Noto Sans Khojki | Khojki `Khoj` | reported |
+| Noto Serif Khitan Small Script | Khitan Small Script `Kits` | drawn |
+| Noto Sans Kaithi | Kaithi `Kthi` | reported |
+| Noto Sans Linear A | Linear A `Lina` | drawn |
+| Noto Sans Linear B | Linear B `Linb` | drawn |
+| Noto Sans Lycian | Lycian `Lyci` | drawn |
+| Noto Sans Lydian | Lydian `Lydi` | drawn |
+| Noto Serif Makasar | Makasar `Maka` | reported |
+| Noto Sans Mahajani | Mahajani `Mahj` | drawn |
+| Noto Sans Manichaean | Manichaean `Mani` | reported |
+| Noto Sans Marchen | Marchen `Marc` | reported |
+| Noto Sans Medefaidrin | Medefaidrin `Medf` | drawn |
+| Noto Sans Mende Kikakui | Mende Kikakui `Mend` | drawn |
+| Noto Sans Meroitic | Meroitic Cursive `Merc`, Meroitic Hieroglyphs `Mero` | drawn |
+| Noto Sans Modi | Modi `Modi` | reported |
+| Noto Sans Mongolian | Mongolian `Mong` | reported |
+| Noto Sans Mro | Mro `Mroo` | drawn |
+| Noto Sans Multani | Multani `Mult` | drawn |
+| Noto Sans Nag Mundari | Nag Mundari `Nagm` | drawn |
+| Noto Sans Old North Arabian | Old North Arabian `Narb` | drawn |
+| Noto Sans Nandinagari | Nandinagari `Nand` | reported |
+| Noto Sans Nabataean | Nabataean `Nbat` | drawn |
+| Noto Sans Nushu | Nushu `Nshu` | drawn |
+| Noto Sans Ogham | Ogham `Ogam` | drawn |
+| Noto Sans Old Turkic | Old Turkic `Orkh` | drawn |
+| Noto Sans Osmanya | Osmanya `Osma` | drawn |
+| Noto Serif Old Uyghur | Old Uyghur `Ougr` | reported |
+| Noto Sans Palmyrene | Palmyrene `Palm` | drawn |
+| Noto Sans Pau Cin Hau | Pau Cin Hau `Pauc` | drawn |
+| Noto Sans Old Permic | Old Permic `Perm` | drawn |
+| Noto Sans Phags Pa | Phags-pa `Phag` | reported |
+| Noto Sans Inscriptional Pahlavi | Inscriptional Pahlavi `Phli` | drawn |
+| Noto Sans Psalter Pahlavi | Psalter Pahlavi `Phlp` | reported |
+| Noto Sans Phoenician | Phoenician `Phnx` | drawn |
+| Noto Sans Inscriptional Parthian | Inscriptional Parthian `Prti` | drawn |
+| Noto Sans Rejang | Rejang `Rjng` | drawn |
+| Noto Sans Runic | Runic `Runr` | drawn |
+| Noto Sans Samaritan | Samaritan `Samr` | drawn |
+| Noto Sans Old South Arabian | Old South Arabian `Sarb` | drawn |
+| Noto Sans Sign Writing | SignWriting `Sgnw` | reported |
+| Noto Sans Shavian | Shavian `Shaw` | drawn |
+| Noto Sans Sharada | Sharada `Shrd` | reported |
+| Noto Sans Siddham | Siddham `Sidd` | reported |
+| Noto Sans Khudawadi | Khudawadi `Sind` | reported |
+| Noto Sans Sora Sompeng | Sora Sompeng `Sora` | drawn |
+| Noto Sans Sogdian | Sogdian `Sogd` | reported |
+| Noto Sans Old Sogdian | Old Sogdian `Sogo` | drawn |
+| Noto Sans Soyombo | Soyombo `Soyo` | reported |
+| Noto Sans Sunuwar | Sunuwar `Sunu` | drawn |
+| Noto Sans Tagbanwa | Tagbanwa `Tagb` | drawn |
+| Noto Sans Takri | Takri `Takr` | reported |
+| Noto Serif Tangut | Tangut `Tang` | drawn |
+| Noto Sans Tagalog | Tagalog `Tglg` | drawn |
+| Noto Sans Tirhuta | Tirhuta `Tirh` | reported |
+| Noto Sans Tangsa | Tangsa `Tnsa` | drawn |
+| Noto Serif Todhri | Todhri `Todr` | drawn |
+| Noto Serif Toto | Toto `Toto` | drawn |
+| Noto Sans Ugaritic | Ugaritic `Ugar` | drawn |
+| Noto Sans Vithkuqi | Vithkuqi `Vith` | drawn |
+| Noto Sans Warang Citi | Warang Citi `Wara` | drawn |
+| Noto Sans Old Persian | Old Persian `Xpeo` | drawn |
+| Noto Sans Cuneiform | Cuneiform `Xsux` | drawn |
+| Noto Serif Yezidi | Yezidi `Yezi` | drawn |
+| Noto Sans Zanabazar Square | Zanabazar Square `Zanb` | reported |
+
+No admitted face covers nine scripts of the Excluded Scripts, each new in
+Unicode 16.0 or 17.0: Beria Erfe `Berf`, Garay `Gara`, Gurung Khema `Gukh`,
+Kirat Rai `Krai`, Ol Onal `Onao`, Sidetic `Sidt`, Tai Yo `Tayo`, Tolong Siki
+`Tols` and Tulu-Tigalari `Tutg`. Their characters stay counted, as the
+non-goals say. Braille is in none of UAX #31's tables; Noto Sans Symbols 2
+draws it, in the symbols group.
+
+The class groups, each a feature of its own:
+
+| Feature | Candidates | What it serves | Upstream |
+| --- | --- | --- | --- |
+| `fallback-emoji` | Noto Emoji, Regular, its variable face's default instance | emoji presentation, and a pictograph asked in text presentation after the symbol faces | [google/fonts](https://github.com/google/fonts) at `29b4ec6`, `ofl/notoemoji/NotoEmoji[wght].ttf` |
+| `fallback-math` | Noto Sans Math; STIX Two Math | `Math` | notofonts.github.io as above, `fonts/NotoSansMath/`; google/fonts as above, `ofl/stixtwomath/STIXTwoMath-Regular.ttf` |
+| `fallback-music` | Noto Music; Noto Znamenny Musical Notation | the four musical blocks, in the symbol order | notofonts.github.io as above, `fonts/NotoMusic/`, `fonts/NotoZnamennyMusicalNotation/` |
+| `fallback-symbols` | Noto Sans Symbols; Noto Sans Symbols 2; Noto Sans Mayan Numerals; Noto Sans Indic Siyaq Numbers; Noto Serif Ottoman Siyaq | `So`, `Sm` and `Common`'s `No`, in the symbol order; Braille | notofonts.github.io as above, each family's `fonts/<Family>/` |
+
+All of them are `OFL-1.1`. Of the two mathematics candidates the group
+carries one: the one whose `cmap` covers the most `Math` characters by
+FT-02.2's census, and of two that cover as many the smaller stored. Every
+other group carries all its candidates, which serve different characters.
+`fallback-fonts` turns all seven groups on; `bundled-fonts` turns none of
+them on, so the bundled profile grows by FT-01's faces alone.
+
+**The storage form, and where the faces live.** As FT-01's: WOFF2, the
+reference encoder's, named with its version in each face's provenance, made
+ready once a process behind a `OnceLock` on its first request. The test that
+holds each file to its published face (`crates/tinker-pdf/tests/cjk_faces.rs`
+is FT-01's) holds every table but `glyf` and `loca` byte for byte, and those
+two by the outlines they give each glyph: WOFF2 §5.1 transforms `glyf`, and
+its reconstruction need not be the published bytes. No Noto face names a
+reserved font name, so the transform changes no name. Each group is a data
+crate of its own, `tinker-pdf-font-fallback-<group>`, split into numbered
+crates where its faces pass `CRATES_IO_CEILING`, each holding whole faces and
+their licences, an edge for `cargo xtask dag` and a manifest for `cargo xtask
+versions`, depended on by `tinker-pdf-font` through the group's feature.
+
+**The features and the profiles.** Each group's feature is declared in
+`tinker-pdf-font`, forwarded by the facade and by `bindings/js`, and is a wasm
+profile `cargo xtask footprint` holds at its own figure and tolerance (ruling
+19), the default profile carrying none of them.
+
+**The two paths.** The producing path asks for a character no book face and
+no Liberation stand-in covers, with its run's script and its element's
+language; it shapes the run in the face the lookup gives, embeds that face as
+a composite font as it embeds the stand-in, and measures the run in it,
+because layout's `metrics::FontRequest` carries the language. The reading
+path asks for a character of an unembedded font whose font-level substitute
+lacks its glyph, with its run's script and the font's collection; it draws
+the glyph from the face the lookup gives where the script is drawn, and
+reports it by name where the script is reported. An embedded font's missing
+glyph is the font's own: neither path asks the lookup for it.
+
+**The census** (FT-02.2) prices the faces and chooses none of them but the
+mathematics face, by the rule above. `crates/tinker-pdf/tests/fallback_coverage.rs`,
+`#[ignore]`d, `fallback_face_coverage_census`, reads each candidate of the
+tables above from the directory `TINKER_FALLBACK_FACES` names — and FT-01's
+four region faces, which step 2 orders by it — and each one's WOFF2 form from
+the same directory under its stem with `.woff2`. It prints `RAN` and two
+tables, each row led by its table's name, or `SKIPPED`: `coverage`, a row for
+each face and each `Script` value and class its `cmap` covers any character
+of, with the count it covers and the count the value or class holds; and
+`storage`, a row for each face, its bytes as published and as WOFF2, and a
+row for each group, its faces' WOFF2 bytes together, the bytes it adds to a
+native build. Its rows are `crates/tinker-pdf/tests/fallback_coverage.tsv`
+(ruling 16), held whole by `the_committed_census_is_whole`, and each group's
+gzipped wasm, built as `release.yml` builds the default profile with a
+scratch feature that carries the group's WOFF2 files, is `fallback_sizes.tsv`
+beside it. Each run's revision, machine and day go in its commit's message.
+
+**The page-per-script proof, and what "no `.notdef`" is measured by.** For
+every script the tables give a face, and for each class group, FT-02.5
+generates a Markdown page and opens it with `Document::open_markdown`, the
+features on: the first 64 of the script's letters — `General_Category` `L`,
+in code point order — that its face covers, or the first 64 of the class's
+characters its group's faces cover. "No `.notdef`" is three facts of that document: no font it embeds is
+shown glyph 0 anywhere on the page, read from the page's own text-showing
+operators through the font's encoding; the producing path's `Fonts::uncovered`
+counts no character; and the page renders reporting nothing. The reading
+path's twin is FT-02.6's page of an unembedded font whose `/Differences`
+name characters of drawn scripts and of reported ones.
+
+### Milestones
+
+1. **FT-02.1: this section.**
+2. **FT-02.2: the price.** Exit: `fallback_coverage.rs`
+   `fallback_face_coverage_census` (ignored) reads the candidates from
+   `TINKER_FALLBACK_FACES` and prints `RAN` with a row per face and script,
+   or `SKIPPED`; its rows, with each group's bytes and wasm figures, are
+   `fallback_coverage.tsv` and `fallback_sizes.tsv`, held by
+   `the_committed_census_is_whole`.
+3. **FT-02.3: the lookup.** Exit: `crates/tinker-pdf/src/fallback.rs`'s
+   `every_script_resolves_to_its_groups_face`,
+   `common_and_inherited_take_their_runs_script`,
+   `emoji_mathematics_music_and_symbols_resolve_by_class`,
+   `han_resolves_by_language_and_collection` and
+   `a_character_no_face_covers_resolves_to_none`, over a face table given in
+   the test; `tinker-pdf-layout`'s property tests hold each table it compiles
+   to the vendored file it reads.
+4. **FT-02.4: the faces vendored.** Exit: `bundled.rs`
+   `every_fallback_face_is_compiled_in_once_and_reads` and
+   `each_fallback_face_is_made_ready_once`; `cargo xtask vendor`, `cargo deny
+   check licenses bans sources` and `release.rs`'s package tests.
+5. **FT-02.5: the producing path asks.** Exit: `fallback_faces.rs`
+   `a_page_per_script_draws_no_notdef_and_reports_nothing` and
+   `han_is_drawn_in_the_face_its_language_selects`, with the features on.
+6. **FT-02.6: the reading path asks.** Exit: `substitute_fonts.rs`
+   `a_glyph_the_substitute_lacks_is_drawn_from_its_scripts_face`,
+   `a_script_the_reading_path_refuses_is_reported_by_name`, and an embedded
+   font's missing glyph still drawn `.notdef` and reported.
+7. **FT-02.7: the fingerprints.** Exit: `determinism.rs`'s
+   `rendering_is_stable_across_targets` holds a page set in several fallback
+   faces through the producing path and one drawn through the reading path,
+   with the features, on Linux, Windows and `wasm32-wasip1`.
+8. **FT-02.8: the profiles.** Exit: a local MS-06 footprint check with a row
+   per feature at its committed figure, the default profile's unchanged.
+9. **FT-02.9: the speed row.** Exit: `xtask/src/bench.rs`
+   `the_committed_baseline_agrees_with_the_tree` with the layout group's
+   operation over every covered script's sample, and its time reported.
+
+### Risks
+
+| Risk | Mitigation |
+| --- | --- |
+| A script the reading path draws unshaped draws wrongly after all | The rule is read from the vendored properties and errs toward reporting; a script found wrong moves to the reported side by name, with a test |
+| A `Common` character takes the wrong script's face | It takes its run's script, the face drawing its neighbours, and the Latin face only where no face before covers it |
+| A group passes crates.io's ceiling | Numbered crates of whole faces, never a split file |
+| A face of the census is not the face vendored | FT-02.4 holds each vendored file to its published face, table by table, and to the SHA-256 `THIRDPARTY.md` records |
+| The historic group's faces make its profile large | It is a profile of its own, off by default, held at its own figure (ruling 19) |
+| Han drawn in another region's forms where a document names no language | The collection chooses where the font names one; otherwise the faces are asked by the census's coverage, a stated order rather than a guess |
