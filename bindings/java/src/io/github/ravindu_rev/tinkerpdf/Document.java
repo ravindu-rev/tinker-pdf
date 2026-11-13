@@ -155,6 +155,14 @@ public final class Document implements AutoCloseable {
         }
     }
 
+    /**
+     * A page's drawing as a command stream's versioned bytes
+     * (docs/design/command-stream.md), which {@link CommandStream#parse} reads.
+     */
+    public byte[] commandStream(int index) {
+        return Native.takeBuffer(handle(Native.tpdf_page_command_stream, pointer, index));
+    }
+
     /** The strict structural validator (ruling 13); an empty list is a clean document. */
     public List<Defect> validate() {
         MemorySegment defects = handle(Native.tpdf_document_validate, pointer);

@@ -2,6 +2,8 @@ package io.github.ravindu_rev.tinkerpdf;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -141,6 +143,211 @@ public final class TinkerPdf {
 
     /** One form-data warning: the key or element (null unless NOT_READ) and the field. */
     public record FormDataWarning(FormDataWarningKind kind, String what, String field) {}
+
+    /**
+     * {@code TpdfCommandKind}: every kind of record a command stream holds, as
+     * the facade's {@code CommandKind} lists them. A kind's number on the wire
+     * is another number, which {@link Command#number()} carries.
+     */
+    public enum CommandKind {
+        END, FUNCTION, HALFTONE, STORED, COLORANTS, SOURCE, STATE, BEGIN_TEXT, GLYPH_RUN, END_TEXT, FILL_PATH,
+        STROKE_PATH, CLIP_PATH, SAVE_STATE, RESTORE_STATE, DRAW_IMAGE, DRAW_SHADING, BEGIN_MARKED_CONTENT,
+        END_MARKED_CONTENT, BEGIN_FORM, END_FORM, BEGIN_GROUP, END_GROUP, BEGIN_SOFT_MASK, END_SOFT_MASK,
+        CLEAR_SOFT_MASK, GROUP_BUDGET_SPENT, RECURSION_REFUSED, NESTED_BUDGET_SPENT, PAGE, ANNOTATION,
+        MISSING_FONT, REPAIRED_SPACE, SCOPE, OUTLINE, FONT_IDENTITY, PROFILE, COLOR_SPACE, IMAGE, INLINE_IMAGE,
+        IMAGE_DECODE, SHADING_DEFINITION, SHADING, PATTERN, CELL
+    }
+
+    /** {@code TpdfCommandFieldTag}: what a command-stream field holds. */
+    public enum CommandFieldTag { NOTHING, UNSIGNED, SIGNED, REAL, BYTES, REALS, NATURALS, STRINGS }
+
+    /** {@code TpdfImageAnswer}: what a page's resources answered for an image. */
+    public enum ImageAnswer { ABSENT, IMAGE, REFUSED }
+
+    /**
+     * {@code TpdfCommand}: one record as the cursor reads it. {@code kind} is
+     * null for a kind this build does not know, which a stream of a newer
+     * minor version holds, and {@code number} is the kind's number on the
+     * wire, known or not; {@code index} is the record's place, from 0, which
+     * the stream's accessors name it by. The end stands at the number of
+     * records, with no fields.
+     */
+    public record Command(CommandKind kind, int number, int index, int fieldCount) {}
+
+    /**
+     * A record and its fields, in their places: a command's state is its
+     * field 0, a reference to the {@code STATE} records before it in their
+     * order (docs/design/command-stream.md, "The records").
+     */
+    public record CommandRecord(CommandKind kind, int number, int index, List<CommandField> fields) {}
+
+    /**
+     * {@code TpdfCommandOutline}: a glyph's outline record. {@code operators}
+     * is a byte a segment (0 a move, 1 a line, 2 a quadratic, 3 a cubic, 4 a
+     * close), and {@code numbers} their numbers in order, in a space where a
+     * unit is an em; both are empty where {@code found} is false.
+     */
+    public record CommandOutline(long scope, long fontId, int code, boolean found, byte[] operators,
+            double[] numbers) {}
+
+    /**
+     * {@code TpdfCommandImage}: an image's decode at one reduction.
+     * {@code window} is {x, y, width, height} where the samples are a window
+     * of the decode, and null where they are all of it; {@code codec} names a
+     * refused decode's codec, and is empty otherwise. {@code rgb} holds three
+     * bytes a sample, row-major from the top, and is empty where
+     * {@code twoColour} holds a byte a sample choosing between
+     * {@code colours}' two: red, green, blue and alpha of a zero, then of any
+     * other.
+     */
+    public record CommandImage(long image, int reduction, ImageAnswer answer, int width, int height, int[] window,
+            boolean stencil, boolean interpolate, String codec, byte[] rgb, byte[] alpha, byte[] twoColour,
+            byte[] colours) {}
+
+    /**
+     * {@code TpdfCommandField}: one field, its tag beside the value the tag
+     * says it holds. {@link #value()} is null for {@code NOTHING}, a
+     * {@link Long} for {@code UNSIGNED} (its 64 bits, read with
+     * {@link Long#toUnsignedString(long)}) and {@code SIGNED}, a {@link Double}
+     * for {@code REAL}, and a {@code byte[]}, {@code double[]}, {@code long[]}
+     * or {@code List<byte[]>} for {@code BYTES}, {@code REALS},
+     * {@code NATURALS} and {@code STRINGS}, each a copy. Two fields are equal
+     * when their tags and values are, a real by its bits.
+     */
+    public static final class CommandField {
+        private final CommandFieldTag tag;
+        private final Object value;
+
+        private CommandField(CommandFieldTag tag, Object value) {
+            this.tag = tag;
+            this.value = value;
+        }
+
+        public static CommandField nothing() {
+            return new CommandField(CommandFieldTag.NOTHING, null);
+        }
+
+        /** An unsigned integer, its 64 bits in a long. A reference to a record is one. */
+        public static CommandField unsigned(long value) {
+            return new CommandField(CommandFieldTag.UNSIGNED, value);
+        }
+
+        public static CommandField signed(long value) {
+            return new CommandField(CommandFieldTag.SIGNED, value);
+        }
+
+        public static CommandField real(double value) {
+            return new CommandField(CommandFieldTag.REAL, value);
+        }
+
+        public static CommandField bytes(byte[] value) {
+            return new CommandField(CommandFieldTag.BYTES, value.clone());
+        }
+
+        public static CommandField reals(double[] value) {
+            return new CommandField(CommandFieldTag.REALS, value.clone());
+        }
+
+        public static CommandField naturals(long[] value) {
+            return new CommandField(CommandFieldTag.NATURALS, value.clone());
+        }
+
+        public static CommandField strings(List<byte[]> value) {
+            return new CommandField(CommandFieldTag.STRINGS, copies(value));
+        }
+
+        public CommandFieldTag tag() {
+            return tag;
+        }
+
+        public Object value() {
+            return switch (tag) {
+                case BYTES -> ((byte[]) value).clone();
+                case REALS -> ((double[]) value).clone();
+                case NATURALS -> ((long[]) value).clone();
+                case STRINGS -> copies(strings());
+                default -> value;
+            };
+        }
+
+        @SuppressWarnings("unchecked")
+        private List<byte[]> strings() {
+            return (List<byte[]>) value;
+        }
+
+        private static List<byte[]> copies(List<byte[]> strings) {
+            List<byte[]> out = new ArrayList<>(strings.size());
+            for (byte[] string : strings) {
+                out.add(string.clone());
+            }
+            return out;
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (!(other instanceof CommandField that) || that.tag != tag) {
+                return false;
+            }
+            return switch (tag) {
+                case NOTHING -> true;
+                case UNSIGNED, SIGNED -> value.equals(that.value);
+                case REAL -> Double.doubleToRawLongBits((Double) value) == Double.doubleToRawLongBits((Double) that.value);
+                case BYTES -> Arrays.equals((byte[]) value, (byte[]) that.value);
+                case REALS -> Arrays.equals(bits((double[]) value), bits((double[]) that.value));
+                case NATURALS -> Arrays.equals((long[]) value, (long[]) that.value);
+                case STRINGS -> {
+                    List<byte[]> ours = strings();
+                    List<byte[]> theirs = that.strings();
+                    boolean same = ours.size() == theirs.size();
+                    for (int at = 0; same && at < ours.size(); at++) {
+                        same = Arrays.equals(ours.get(at), theirs.get(at));
+                    }
+                    yield same;
+                }
+            };
+        }
+
+        @Override
+        public int hashCode() {
+            int hash = switch (tag) {
+                case NOTHING -> 0;
+                case UNSIGNED, SIGNED -> value.hashCode();
+                case REAL -> Long.hashCode(Double.doubleToRawLongBits((Double) value));
+                case BYTES -> Arrays.hashCode((byte[]) value);
+                case REALS -> Arrays.hashCode(bits((double[]) value));
+                case NATURALS -> Arrays.hashCode((long[]) value);
+                case STRINGS -> {
+                    int combined = 1;
+                    for (byte[] string : strings()) {
+                        combined = 31 * combined + Arrays.hashCode(string);
+                    }
+                    yield combined;
+                }
+            };
+            return hash * 31 + tag.ordinal();
+        }
+
+        @Override
+        public String toString() {
+            return switch (tag) {
+                case NOTHING -> "NOTHING";
+                case UNSIGNED -> "UNSIGNED " + Long.toUnsignedString((Long) value);
+                case SIGNED, REAL -> tag + " " + value;
+                case BYTES -> "BYTES " + Arrays.toString((byte[]) value);
+                case REALS -> "REALS " + Arrays.toString((double[]) value);
+                case NATURALS -> "NATURALS " + Arrays.toString((long[]) value);
+                case STRINGS -> "STRINGS " + strings().size();
+            };
+        }
+
+        private static long[] bits(double[] reals) {
+            long[] out = new long[reals.length];
+            for (int at = 0; at < reals.length; at++) {
+                out[at] = Double.doubleToRawLongBits(reals[at]);
+            }
+            return out;
+        }
+    }
 
     /** The {@code TPDF_SCRIPT_*} policy bits. */
     public static final int SCRIPT_CALCULATE = 1;

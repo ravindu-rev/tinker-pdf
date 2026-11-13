@@ -333,6 +333,195 @@ public enum ImageKind
     Gray8 = 2,
 }
 
+/// <summary>
+/// Every kind of record a command stream holds (<c>TpdfCommandKind</c>), as the
+/// facade's <c>CommandKind</c> lists them, numbered from zero.
+/// </summary>
+/// <remarks>
+/// A kind's number on the wire is another number, which
+/// <see cref="Command.Number"/> carries. These numbers are transcribed by hand,
+/// so <c>crates/tinker-pdf-ffi</c> pins every one, and
+/// <c>tests/binding_enums.rs</c> holds every arm here to the header's.
+/// </remarks>
+public enum CommandKind
+{
+    /// <summary>The stream's end, which the cursor reads after its last record and the encoder writes itself.</summary>
+    End = 0,
+
+    /// <summary>A function a state or a definition refers to.</summary>
+    Function = 1,
+
+    /// <summary>A halftone.</summary>
+    Halftone = 2,
+
+    /// <summary>A state's stored parameters.</summary>
+    Stored = 3,
+
+    /// <summary>What a colour paints by colorant.</summary>
+    Colorants = 4,
+
+    /// <summary>What a colour was resolved from.</summary>
+    Source = 5,
+
+    /// <summary>A graphics state a command refers to.</summary>
+    State = 6,
+
+    /// <summary><c>BT</c>.</summary>
+    BeginText = 7,
+
+    /// <summary>Consecutive glyphs of one font, size, writing mode and state.</summary>
+    GlyphRun = 8,
+
+    /// <summary><c>ET</c>.</summary>
+    EndText = 9,
+
+    /// <summary>A path filled.</summary>
+    FillPath = 10,
+
+    /// <summary>A path stroked.</summary>
+    StrokePath = 11,
+
+    /// <summary>A path clipped to.</summary>
+    ClipPath = 12,
+
+    /// <summary><c>q</c>.</summary>
+    SaveState = 13,
+
+    /// <summary><c>Q</c>.</summary>
+    RestoreState = 14,
+
+    /// <summary>An image XObject or an inline image drawn.</summary>
+    DrawImage = 15,
+
+    /// <summary><c>sh</c>.</summary>
+    DrawShading = 16,
+
+    /// <summary>Marked content begun.</summary>
+    BeginMarkedContent = 17,
+
+    /// <summary>Marked content ended.</summary>
+    EndMarkedContent = 18,
+
+    /// <summary>A form XObject entered.</summary>
+    BeginForm = 19,
+
+    /// <summary>A form XObject left.</summary>
+    EndForm = 20,
+
+    /// <summary>A transparency group begun.</summary>
+    BeginGroup = 21,
+
+    /// <summary>A transparency group ended.</summary>
+    EndGroup = 22,
+
+    /// <summary>A soft mask begun.</summary>
+    BeginSoftMask = 23,
+
+    /// <summary>A soft mask ended.</summary>
+    EndSoftMask = 24,
+
+    /// <summary>The soft mask cleared.</summary>
+    ClearSoftMask = 25,
+
+    /// <summary>The interpretation offered no further group.</summary>
+    GroupBudgetSpent = 26,
+
+    /// <summary>A stream not run again inside itself.</summary>
+    RecursionRefused = 27,
+
+    /// <summary>The interpretation ran no further nested content.</summary>
+    NestedBudgetSpent = 28,
+
+    /// <summary>The page's crop box, rotation, group space, usage and index: a page stream's first record.</summary>
+    Page = 29,
+
+    /// <summary>An annotation's appearance: its calls follow, in its scope.</summary>
+    Annotation = 30,
+
+    /// <summary>A font no name resolved, where the interpretation met it.</summary>
+    MissingFont = 31,
+
+    /// <summary>A colour space read with a repair.</summary>
+    RepairedSpace = 32,
+
+    /// <summary>A form's or an appearance's resource scope.</summary>
+    Scope = 33,
+
+    /// <summary>A glyph's outline in a scope (<see cref="CommandStream.OutlineAt"/>).</summary>
+    Outline = 34,
+
+    /// <summary>Which font a scope's font id is.</summary>
+    FontIdentity = 35,
+
+    /// <summary>An ICC profile's bytes.</summary>
+    Profile = 36,
+
+    /// <summary>A colour space.</summary>
+    ColorSpace = 37,
+
+    /// <summary>An image XObject a scope names.</summary>
+    Image = 38,
+
+    /// <summary>An inline image of the stream's calls.</summary>
+    InlineImage = 39,
+
+    /// <summary>An image's decode at one reduction (<see cref="CommandStream.ImageAt"/>).</summary>
+    ImageDecode = 40,
+
+    /// <summary>A shading's definition.</summary>
+    ShadingDefinition = 41,
+
+    /// <summary>What a shading name answers in a scope.</summary>
+    Shading = 42,
+
+    /// <summary>What a pattern name answers in a scope.</summary>
+    Pattern = 43,
+
+    /// <summary>A tiling cell, its own stream.</summary>
+    Cell = 44,
+}
+
+/// <summary>What a command-stream field holds (<c>TpdfCommandFieldTag</c>).</summary>
+public enum CommandFieldTag
+{
+    /// <summary>An absent value.</summary>
+    Nothing = 0,
+
+    /// <summary>An unsigned integer; a reference to a record is one.</summary>
+    Unsigned = 1,
+
+    /// <summary>A signed integer.</summary>
+    Signed = 2,
+
+    /// <summary>A real, its bits as written.</summary>
+    Real = 3,
+
+    /// <summary>Bytes.</summary>
+    Bytes = 4,
+
+    /// <summary>Reals.</summary>
+    Reals = 5,
+
+    /// <summary>Unsigned integers.</summary>
+    Naturals = 6,
+
+    /// <summary>Byte strings.</summary>
+    Strings = 7,
+}
+
+/// <summary>What a page's resources answered for an image at one reduction (<c>TpdfImageAnswer</c>).</summary>
+public enum ImageAnswer
+{
+    /// <summary>No image: the name named none.</summary>
+    Absent = 0,
+
+    /// <summary>The image, decoded.</summary>
+    Image = 1,
+
+    /// <summary>A decode this build refused, its codec named.</summary>
+    Refused = 2,
+}
+
 /// <summary>Thrown when the engine reports a failure.</summary>
 public sealed class PdfException : Exception
 {

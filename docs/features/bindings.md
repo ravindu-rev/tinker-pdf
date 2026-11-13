@@ -26,9 +26,9 @@ a C caller compares them against literals and the .NET binding against an
 a new status is appended rather than inserted. Unit tests pin them: one names
 every status's number, and one holds the list and its length, so a variant
 added without a line is caught by the count rather than by somebody
-remembering. Another pins every discriminant of the signature enums and the
-write ones, because those are transcribed by hand into
-`bindings/dotnet/TinkerPdf.cs`.
+remembering. Others pin every discriminant of the signature enums, the
+write ones and the command stream's, because those are transcribed by hand
+into `bindings/dotnet/TinkerPdf.cs`.
 
 **Every enum a caller hands over is an `int`, and is checked.** The enums a
 caller supplies — `TpdfPixelFormat`, `TpdfWriteMode`,
@@ -353,8 +353,8 @@ refusal; it keeps its commands, so it finishes again. A kind or a tag its
 enum does not declare, the end pushed, and null data with a count are
 refused at the push, naming them. A command is read through a pointer the
 caller passes, so Ruby's Fiddle could call every function, and no callback
-crosses the boundary. The four wrappers carry no stream yet (the refusal
-table's row).
+crosses the boundary. The .NET and Java wrappers project these calls (below);
+Go and Ruby carry no stream yet (the refusal table's row).
 
 **The command stream in Python and JavaScript** crosses directly from the
 facade, as the rest of their surfaces do, through no C ABI between
@@ -398,6 +398,49 @@ page holding every kind of record, beside a stream of the three a page reaches
 only past a budget or through a recording that composites colorants, to the
 facade's bytes, and drive a recording device that hears every kind in the
 order the facade's decoder gives them; each prints `COMMAND-STREAM: RAN`.
+
+**The command stream in .NET and Java** projects the C ABI's calls one for
+one (`bindings/dotnet/TinkerPdf.Read.cs`,
+`bindings/java/src/io/github/ravindu_rev/tinkerpdf/CommandStream.java`).
+`Document.CommandStream(index)` and `Document.commandStream(index)` hand back
+the page's bytes, and `CommandStream.Parse`/`parse` reads them into a handle
+whose refusal is the reader's sentence on a `PdfException` or
+`TinkerPdfException` of `BadArgument`. The cursor, `Next`/`next`, reads one
+`Command` a call — its `CommandKind`, null for a kind the build does not
+know, its number on the wire, its place and its field count — and the end
+after the last until `Rewind`/`rewind`; `CommandAt`/`command`,
+`FieldAt`/`field` and `RecordAt`/`record` read one by its place. A
+`CommandField` is its `CommandFieldTag` and a value
+copied out of the stream — an unsigned a `ulong` (in Java a `long` holding its
+64 bits), a signed a `long`, a real a `double`, and an array a `byte[]`, a
+`double[]`, a `ulong[]` (in Java a `long[]`) or a list of `byte[]` — equal to
+another of the same tag and value, a real by its bits, and made again by its
+tag's constructor. `Records()`/`records()` is every record in order,
+`OutlineAt`/`outline` and `ImageAt`/`image` the two tables a host draws from
+as `CommandOutline` and `CommandImage` (an `ImageAnswer`, the size, the
+window, the samples and the colours), and `ToBytes`, `Version`,
+`PageIndex`, `Size` and `Render` project the facade's own. `CommandEncoder`
+and `CommandStream.Encoder` push records by kind and fields and finish them
+into bytes. `Replay`/`replay` hands each record, in the stream's order, to
+the method of an `ICommandDevice` or a `CommandStream.Device` named for its
+kind, a kind the build does not know to `Unknown`/`unknown`; every method
+does nothing until a device implements it, and an exception a method throws
+ends the replay. The three enums are transcribed by hand — .NET writes each
+arm's number, Java declares the arms in the C order and passes `ordinal()` —
+the C crate's
+`the_command_stream_enums_have_the_numbers_the_bindings_transcribe` pins
+every number, and `tests/binding_enums.rs` holds both bindings' arms to the
+header's. A replay to a canvas is a device over the projection: the
+.NET README replays a stream to `System.Drawing.Graphics`, which runs on
+Windows only, and Java's smoke program replays the every-kind page to a
+`Graphics2D` over an image and counts its ink. Each smoke program decodes the
+stream of that page through its own types and writes it back to the
+facade's bytes, beside the stream of the three kinds pushed by hand; drives
+a recording device that hears every kind in the stream's order, a device
+naming one method and one that throws; holds each outline and decode
+accessor to its record's fields, the cursor's end and rewind, the replay's
+render to the page's render, and the encoder's and the reader's refusals;
+and exits non-zero on any difference.
 
 **The write surface, and its shape.** What separates it from the read
 surface is shape, not capability: `DocumentEditor::transaction(|tx| ..)` and
@@ -632,8 +675,9 @@ Swift's statuses each to its own constant. The two enums no binding
 keeps as a table, `TpdfTargetKind` and `TpdfSanitiseList`, are a literal 0
 or 1 at the one place each crosses, and both arms of each cross in a parity
 script; the command stream's three, `TpdfCommandKind`,
-`TpdfCommandFieldTag` and `TpdfImageAnswer`, are carried by no wrapper,
-since none projects the stream yet. Python and JavaScript name arms by string over the facade, so no
+`TpdfCommandFieldTag` and `TpdfImageAnswer`, are carried by .NET and Java,
+held to the header as every other enum is, and by neither Go nor Ruby, which
+project no stream yet. Python and JavaScript name arms by string over the facade, so no
 number crosses there; the same file holds each of their string-to-arm
 lines, both directions, to the rule that the string is the arm's own name
 (the page boundaries' `"trim"` for `TrimBox` the one stated exception).
@@ -1176,7 +1220,7 @@ cargo xtask bindings-coverage
 | The payloads inside a signature enum — which revision, which defect, whose certificate, how many bits | the enum arm crosses, the payload does not | a C enum has no payload, and a struct invented here to carry one would be this crate spelling something the facade already spells (ruling 11) | [signatures](../design/signatures.md) |
 | Counted work: `RenderOptions::stats`, `Bitmap::stats` and `Stats`; `Document::page_counted`, `Page::text_counted`, `Page::images_counted`, `SaveOptions::stats`, `Saved::stats`, `DocumentEditor::count_work`, `Document::inferred_orders_counted`, `Bitmap::to_png_counted`, and `Document::validate_pdfa_counted`, `Document::validate_pdfua_counted` and `Document::validate_pdfx_counted` | not projected; `tpdf_page_render`, every binding's render, text, save and validation count nothing and hand back no stats | a debt rather than a limit: the C ABI's render takes a scale and a format rather than the options, so asking needs an entry point of its own, as each counted sibling does, and `Stats` is `#[non_exhaustive]` and gains a counter with each row that counts one, so a struct carrying it across needs a layout that can grow. Ruling 11 makes it a debt, and no step of SU-12 owes it yet, so it stands here until one does | [performance](../design/performance.md) |
 | Render parts, placement, usage and layers: `RenderOptions::content`, `RenderOptions::widgets`, `RenderOptions::other_annotations`, `RenderOptions::magnification`, `RenderOptions::usage`, `RenderOptions::layers`, `LayerOptions::*` and `LayerUser::*` | not projected; `tpdf_page_render` and every binding's render draw the page's content and every annotation, as a render naming no usage draws them, at magnification 1, in `/D`'s states | a debt rather than a limit: the C ABI's render takes a scale and a format rather than the options, so each needs an entry point of its own or a struct of options that can grow, as `RenderOptions::stats` does. Ruling 11 makes it a debt, and no step of SU-12 owes it yet, so it stands here until one does | [design/render-usage.md](../design/render-usage.md) |
-| The command stream: `Page::command_stream` and `DisplayList::command_stream`, which write a page's drawing as versioned bytes, and `CommandStream::*`, `CommandRecord::*`, `CommandField::*`, `CommandKind::*`, `CommandBudgets::*`, `CommandStreamError::*`, `COMMAND_STREAM_MAJOR` and `COMMAND_STREAM_MINOR`, which read, draw and write it back | on the C ABI as `src/commands.rs`'s bytes, cursor, fields, accessors, encoder and render, with no display list and no budgets of a caller's; in Python and JavaScript as their `CommandStream` classes, records, fields, kinds, budgets and device protocol, with no display list and no record built field by field (`CommandRecord::with`) or read by the facade's typed reader (`CommandRecord::read`); the wrappers hand back no stream and read none | RC-18.7 and RC-18.8 project it in the wrappers over the C ABI; until each lands, its surface carries no stream | [design](../design/command-stream.md) |
+| The command stream: `Page::command_stream` and `DisplayList::command_stream`, which write a page's drawing as versioned bytes, and `CommandStream::*`, `CommandRecord::*`, `CommandField::*`, `CommandKind::*`, `CommandBudgets::*`, `CommandStreamError::*`, `COMMAND_STREAM_MAJOR` and `COMMAND_STREAM_MINOR`, which read, draw and write it back | on the C ABI as `src/commands.rs`'s bytes, cursor, fields, accessors, encoder and render, with no display list and no budgets of a caller's; in Python and JavaScript as their `CommandStream` classes, records, fields, kinds, budgets and device protocol, with no display list and no record built field by field (`CommandRecord::with`) or read by the facade's typed reader (`CommandRecord::read`); in .NET and Java as their `CommandStream`, commands, records, fields, tables, encoder and device interface over the C ABI's calls; Go and Ruby hand back no stream and read none | RC-18.8 projects it in Go and Ruby; until it lands, their surfaces carry no stream | [design](../design/command-stream.md) |
 | CommonJS build | none; ESM only | two builds of the engine can diverge; a CommonJS entry that re-exports the one ESM build cannot | [ROADMAP](../ROADMAP.md) SU-14 |
 | Holding a wasm `view()` across an engine call | the view becomes zero-length | wasm memory growth detaches the buffer; use `data()` | — |
 | A security handler the engine lacks | `TpdfStatus::UnsupportedHandler` | public-key encryption is absent | [encryption](encryption.md) |
@@ -1245,8 +1289,9 @@ cargo xtask bindings-coverage
   it against the wheel it builds, and `release.yml` runs it against each
   platform's wheel and greps `WHEEL-SMOKE: RAN`. The .NET Smoke program
   holds `OpenFile` to `Open(bytes)` over three files made the same way,
-  comparing each file's `ReadWarnings()` by kind, place and sentence,
-  before it prints `DOTNET-SMOKE: RAN`; it runs locally against the packed
+  comparing each file's `ReadWarnings()` by kind, place and sentence, and
+  runs the command stream's leg, before it prints `DOTNET-SMOKE: RAN`; it
+  runs locally against the packed
   package, and `release.yml` runs it against the package it builds.
 - The **write** legs run beside them, from the same installed artefacts:
   `write_parity.py`, `write_parity.mjs` and the Smoke program's third

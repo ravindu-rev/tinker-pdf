@@ -20,6 +20,11 @@
 // four-megabyte file it is streamed and reads the same, and over a damaged
 // file and a linearized one updated since it reads the file whole and warns
 // what the bytes warn.
+//
+// Then the command stream: the stream of a page holding every kind of record,
+// decoded through the binding's own types and written back to the facade's
+// bytes, and replayed to a recording device that hears every kind in the
+// stream's order.
 
 using System;
 using System.Collections.Generic;
@@ -267,7 +272,471 @@ static void OnDemand()
 
 OnDemand();
 
-Console.WriteLine("DOTNET-SMOKE: RAN, rendered, inked and opened on demand");
+// ---- the command stream -------------------------------------------------------
+//
+// The stream of a page holding every kind of record -- the C ABI's test page
+// (crates/tinker-pdf-ffi/src/commands/tests.rs, every_kind_page), built again
+// from the face and the profile the checkout holds -- decoded through the
+// binding's own types and written back to the facade's bytes, beside a stream
+// of the three kinds a page reaches only past a budget or through a recording
+// that composites colorants, pushed by hand. Between the two, every kind but
+// the end. A recording device hears every kind in the stream's order, the
+// tables' accessors are their records' fields, the replay through the engine
+// draws what the page's render draws, and bytes that are no stream are
+// refused with the reader's sentence.
+
+static void Check(bool ok, string what)
+{
+    if (!ok)
+    {
+        throw new Exception($"command stream: {what}");
+    }
+}
+
+static void Expect(Action call, Status status, string what)
+{
+    try
+    {
+        call();
+    }
+    catch (PdfException e) when (e.Status == status)
+    {
+        return;
+    }
+    catch (PdfException e)
+    {
+        throw new Exception($"command stream: {what}: {e.Status} ({e.Message}), not {status}");
+    }
+    throw new Exception($"command stream: {what} must be refused with {status}");
+}
+
+// A stream object of `dictionary` holding `data`.
+static byte[] StreamObject(string dictionary, byte[] data)
+{
+    var output = new MemoryStream();
+    output.Write(Ascii($"<< {dictionary} /Length {data.Length} >>\nstream\n"));
+    output.Write(data);
+    output.Write(Ascii("\nendstream"));
+    return output.ToArray();
+}
+
+// The 200 x 160 page whose stream holds every kind a page's stream is written
+// with: a state with stored parameters, a black generation, a transfer
+// function and a halftone; a clip and an axial shading in an ICC space; a fill
+// in a /Separation space and one in a Lab space whose range is written
+// backwards; text in an embedded face and in a font no name resolves; an image
+// XObject and an inline image; marked content, a group under a luminosity soft
+// mask then cleared; a tiling pattern, a form with resources of its own, a
+// form that draws itself, and a square annotation with an appearance.
+static byte[] EveryKindPage(byte[] serif, byte[] iccProfile)
+{
+    var widthList = new string[95];
+    Array.Fill(widthList, "500");
+    var widths = string.Join(" ", widthList);
+    var content = new MemoryStream();
+    content.Write(Ascii(
+        "q /Fancy gs 0 0 1 RG 2 w 10 10 m 100 10 l S 1 0 0 rg 10 20 30 20 re f Q\n" +
+        "q 10 40 40 30 re W n /Sh0 sh Q\n" +
+        "q /CS0 cs 0.7 scn 60 20 20 20 re f Q\n" +
+        "q /Lab0 cs 50 10 10 sc 90 20 10 10 re f Q\n" +
+        "BT /F0 12 Tf 10 120 Td (Glyphs) Tj ET\n" +
+        "BT /Nope 12 Tf 10 140 Td (x) Tj ET\n" +
+        "q 20 0 0 20 120 20 cm /Im0 Do Q\n" +
+        "q 10 0 0 10 150 20 cm BI /W 2 /H 2 /CS /G /BPC 8 ID "));
+    content.Write(new byte[] { 0x00, 0x55, 0xAA, 0xFF });
+    content.Write(Ascii(
+        " EI Q\n" +
+        "/Span << /MCID 0 >> BDC 0 g 120 60 5 5 re f EMC\n" +
+        "q /Masked gs 1 0 0 1 120 80 cm /G Do /NoMask gs 0 1 0 rg 0 0 5 5 re f Q\n" +
+        "q /Pattern cs /P0 scn 150 60 30 30 re f Q\n" +
+        "q 1 0 0 1 150 100 cm /Fm0 Do Q\n" +
+        "/Rec Do\n"));
+    var rgb = new byte[] { 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0 };
+    return Pdf(new List<byte[]>
+    {
+        Ascii("<< /Type /Catalog /Pages 2 0 R >>"),
+        Ascii("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+        Ascii("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 160] /Resources 4 0 R " +
+              "/Contents 5 0 R /Annots [17 0 R] >>"),
+        Ascii("<< /Font << /F0 6 0 R >> " +
+              "/XObject << /Im0 9 0 R /G 10 0 R /Fm0 11 0 R /Rec 12 0 R >> " +
+              "/Shading << /Sh0 13 0 R >> /Pattern << /P0 15 0 R >> " +
+              "/ColorSpace << " +
+              "/CS0 [/Separation /Spot /DeviceRGB " +
+              "<< /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [1 0 0] /N 1 >>] " +
+              "/Lab0 [/Lab << /WhitePoint [0.9505 1 1.089] /Range [100 -100 -100 100] >>] >> " +
+              "/ExtGState << " +
+              "/Fancy << /RI /Saturation " +
+              "/BG << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >> " +
+              "/TR << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 2 >> " +
+              "/HT << /Type /Halftone /HalftoneType 1 /Frequency 60 /Angle 45 " +
+              "/SpotFunction /Round >> >> " +
+              "/Masked << /SMask << /Type /Mask /S /Luminosity /G 16 0 R >> >> " +
+              "/NoMask << /SMask /None >> >> >>"),
+        StreamObject("", content.ToArray()),
+        Ascii("<< /Type /Font /Subtype /TrueType /BaseFont /LiberationSerif /FirstChar 32 " +
+              $"/LastChar 126 /Widths [{widths}] /FontDescriptor 7 0 R " +
+              "/Encoding /WinAnsiEncoding >>"),
+        Ascii("<< /Type /FontDescriptor /FontName /LiberationSerif /Flags 32 " +
+              "/FontBBox [-200 -300 1200 1000] /ItalicAngle 0 /Ascent 900 /Descent -200 " +
+              "/CapHeight 700 /StemV 80 /FontFile2 8 0 R >>"),
+        StreamObject($"/Length1 {serif.Length}", serif),
+        StreamObject(
+            "/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB " +
+            "/BitsPerComponent 8",
+            rgb),
+        StreamObject(
+            "/Type /XObject /Subtype /Form /BBox [0 0 20 20] /Group << /S /Transparency >>",
+            Ascii("0 0.8 0 rg 0 0 20 20 re f")),
+        StreamObject(
+            "/Type /XObject /Subtype /Form /BBox [0 0 40 40] " +
+            "/Resources << /XObject << /ImF 9 0 R >> >>",
+            Ascii("q 10 0 0 10 0 0 cm /ImF Do Q")),
+        StreamObject(
+            "/Type /XObject /Subtype /Form /BBox [0 0 10 10] " +
+            "/Resources << /XObject << /Rec 12 0 R >> >>",
+            Ascii("0 0 1 rg 0 0 2 2 re f /Rec Do")),
+        Ascii("<< /ShadingType 2 /ColorSpace [/ICCBased 14 0 R] /Coords [10 0 50 0] " +
+              "/Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> " +
+              "/Extend [true true] >>"),
+        StreamObject("/N 3", iccProfile),
+        StreamObject(
+            "/PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 10 10] /XStep 10 " +
+            "/YStep 10 /Resources << >>",
+            Ascii("1 0 0 rg 0 0 5 5 re f")),
+        StreamObject(
+            "/Type /XObject /Subtype /Form /BBox [0 0 200 160] " +
+            "/Group << /S /Transparency /CS /DeviceGray >>",
+            Ascii("0.5 g 0 0 200 160 re f")),
+        Ascii("<< /Type /Annot /Subtype /Square /Rect [150 120 190 150] /AP << /N 18 0 R >> >>"),
+        StreamObject("/Type /XObject /Subtype /Form /BBox [0 0 40 30]", Ascii("0 0 1 RG 2 w 1 1 38 28 re S")),
+    });
+}
+
+// `fields`, each made again from its tag and value through the binding's
+// constructors.
+static CommandField[] Rebuilt(IReadOnlyList<CommandField> fields)
+{
+    var rebuilt = new CommandField[fields.Count];
+    for (var at = 0; at < fields.Count; at++)
+    {
+        var field = fields[at];
+        var again = field.Tag switch
+        {
+            CommandFieldTag.Nothing => CommandField.Nothing(),
+            CommandFieldTag.Unsigned => CommandField.Unsigned((ulong)field.Value!),
+            CommandFieldTag.Signed => CommandField.Signed((long)field.Value!),
+            CommandFieldTag.Real => CommandField.Real((double)field.Value!),
+            CommandFieldTag.Bytes => CommandField.Bytes((byte[])field.Value!),
+            CommandFieldTag.Reals => CommandField.Reals((double[])field.Value!),
+            CommandFieldTag.Naturals => CommandField.Naturals((ulong[])field.Value!),
+            CommandFieldTag.Strings => CommandField.Strings((IReadOnlyList<byte[]>)field.Value!),
+            _ => throw new Exception($"command stream: a field of tag {field.Tag}"),
+        };
+        Check(again.Equals(field) && again.GetHashCode() == field.GetHashCode(), $"a field rebuilds: {field}");
+        rebuilt[at] = again;
+    }
+    return rebuilt;
+}
+
+// Field `at`'s unsigned value.
+static ulong Natural(CommandRecord record, int at)
+{
+    var field = record.Fields[at];
+    Check(field.Tag == CommandFieldTag.Unsigned, $"{record.Kind}'s field {at} is {field}");
+    return (ulong)field.Value!;
+}
+
+// Field `at`'s bytes.
+static byte[] BytesOf(CommandRecord record, int at)
+{
+    var field = record.Fields[at];
+    Check(field.Tag == CommandFieldTag.Bytes, $"{record.Kind}'s field {at} is {field}");
+    return (byte[])field.Value!;
+}
+
+static long[] Bits(double[] reals) => Array.ConvertAll(reals, BitConverter.DoubleToInt64Bits);
+
+static void CommandStreams(string root)
+{
+    var serif = File.ReadAllBytes(
+        Path.Combine(root, "crates", "tinker-pdf-font", "data", "liberation", "LiberationSerif-Regular.ttf"));
+    var iccProfile = File.ReadAllBytes(Path.Combine(root, "fuzz", "corpus", "icc_profile", "rgb-gamma-curve.icc"));
+    byte[] written;
+    (double Width, double Height) pageSize;
+    byte[] direct;
+    (uint Width, uint Height) directSize;
+    using (var everyKind = Document.Open(EveryKindPage(serif, iccProfile)))
+    {
+        written = everyKind.CommandStream(0);
+        pageSize = everyKind.PageSize(0);
+        using (var bitmap = everyKind.Render(0, 1.0, PixelFormat.Rgb8))
+        {
+            direct = bitmap.Pixels.ToArray();
+            directSize = (bitmap.Width, bitmap.Height);
+        }
+        Expect(() => everyKind.CommandStream(1), Status.NoSuchPage, "a stream of a page past the end");
+    }
+
+    using var stream = CommandStream.Parse(written);
+    Check(stream.ToBytes().AsSpan().SequenceEqual(written), "the stream writes back its own bytes");
+    Check(stream.PageIndex == 0, $"the stream is page 0's, not {stream.PageIndex}");
+    Check(stream.Size == pageSize, "the stream's page is the page's size");
+
+    var records = stream.Records();
+    Check(records.Count == stream.Count, "every record, counted");
+    Check(records[0].Kind == CommandKind.Page, $"the page record leads: {records[0].Kind}");
+    foreach (var record in records)
+    {
+        var command = stream.Next();
+        Check(command.Kind is not null, $"kind {record.Number} is one this build knows");
+        Check(command == stream.CommandAt(record.Index), $"the cursor reads record {record.Index} as its place does");
+        Check(
+            command.Kind == record.Kind && command.Number == record.Number && command.FieldCount == record.Fields.Count,
+            $"record {record.Index}'s command");
+    }
+    for (var twice = 0; twice < 2; twice++)
+    {
+        var end = stream.Next();
+        Check(
+            end.Kind == CommandKind.End && end.Number == 0 && end.Index == records.Count && end.FieldCount == 0,
+            $"the end, after the last record: {end}");
+    }
+    stream.Rewind();
+    Check(stream.Next() == stream.CommandAt(0), "a rewind puts the cursor back on the page record");
+    Expect(() => stream.CommandAt((uint)records.Count), Status.BadArgument, "a record past the end");
+    Expect(() => stream.FieldAt(0, (uint)records[0].Fields.Count), Status.BadArgument, "a field past the page record's last");
+
+    using (var encoder = new CommandEncoder())
+    {
+        foreach (var record in records)
+        {
+            encoder.Push(record.Kind!.Value, Rebuilt(record.Fields));
+        }
+        Check(
+            encoder.Finish().AsSpan().SequenceEqual(written),
+            "the stream decoded and written back through the binding's types is the facade's bytes");
+    }
+
+    var onThePage = new HashSet<CommandKind>();
+    foreach (var record in records)
+    {
+        onThePage.Add(record.Kind!.Value);
+    }
+    var byHand = new[] { CommandKind.Colorants, CommandKind.GroupBudgetSpent, CommandKind.NestedBudgetSpent };
+    foreach (var kind in Enum.GetValues<CommandKind>())
+    {
+        if (kind != CommandKind.End && Array.IndexOf(byHand, kind) < 0)
+        {
+            Check(onThePage.Contains(kind), $"the page's stream holds a {kind} record");
+        }
+    }
+
+    var colorants = new[]
+    {
+        CommandField.Unsigned(1),
+        CommandField.Strings(new[] { Ascii("Spot"), Ascii("Other") }),
+        CommandField.Bytes(new byte[] { 128, 64 }),
+        CommandField.Naturals(new ulong[] { 1 }),
+        CommandField.Bytes(new byte[] { 0, 0, 0, 255 }),
+        CommandField.Nothing(),
+        CommandField.Bytes(new byte[] { 10, 20, 30, 40 }),
+    };
+    byte[] hand;
+    using (var encoder = new CommandEncoder())
+    {
+        encoder.Push(records[0]);
+        encoder.Push(CommandKind.Colorants, colorants);
+        encoder.Push(CommandKind.GroupBudgetSpent, Array.Empty<CommandField>());
+        encoder.Push(CommandKind.NestedBudgetSpent, Array.Empty<CommandField>());
+        hand = encoder.Finish();
+        Expect(() => encoder.Push(CommandKind.End, Array.Empty<CommandField>()), Status.BadArgument, "the end pushed");
+        Expect(
+            () => encoder.Push((CommandKind)99, Array.Empty<CommandField>()),
+            Status.BadArgument,
+            "a kind the C ABI does not declare");
+        Check(encoder.Finish().AsSpan().SequenceEqual(hand), "an encoder keeps its records, and a refused push adds none");
+    }
+    using (var lonely = new CommandEncoder())
+    {
+        lonely.Push(CommandKind.GroupBudgetSpent, Array.Empty<CommandField>());
+        Expect(() => lonely.Finish(), Status.BadArgument, "records with no page record");
+    }
+
+    var heard = new HashSet<CommandKind>();
+    using (var reread = CommandStream.Parse(hand))
+    {
+        var back = reread.Records();
+        var kinds = new List<CommandKind?>();
+        foreach (var record in back)
+        {
+            kinds.Add(record.Kind);
+        }
+        Check(
+            System.Linq.Enumerable.SequenceEqual(kinds, new CommandKind?[]
+            {
+                CommandKind.Page, CommandKind.Colorants, CommandKind.GroupBudgetSpent, CommandKind.NestedBudgetSpent,
+            }),
+            $"the records pushed by hand read back in order: {string.Join(", ", kinds)}");
+        Check(
+            System.Linq.Enumerable.SequenceEqual(back[0].Fields, records[0].Fields)
+                && System.Linq.Enumerable.SequenceEqual(back[1].Fields, colorants)
+                && back[2].Fields.Count == 0
+                && back[3].Fields.Count == 0,
+            "the records pushed by hand read back as pushed");
+        Check(reread.Version == stream.Version, "the page's stream is at the version the encoder writes, this build's");
+        using (var encoder = new CommandEncoder())
+        {
+            foreach (var record in back)
+            {
+                encoder.Push(record.Kind!.Value, Rebuilt(record.Fields));
+            }
+            Check(encoder.Finish().AsSpan().SequenceEqual(hand), "and write back through the binding's types");
+        }
+        foreach (var each in new[] { stream, reread })
+        {
+            var recorder = new Recorder();
+            each.Replay(recorder);
+            var order = new List<CommandKind?>();
+            foreach (var record in each.Records())
+            {
+                order.Add(record.Kind);
+            }
+            Check(
+                System.Linq.Enumerable.SequenceEqual(recorder.Seen, order),
+                "the device receives every record in the decoder's order");
+            foreach (var kind in recorder.Seen)
+            {
+                heard.Add(kind!.Value);
+            }
+        }
+    }
+    foreach (var kind in Enum.GetValues<CommandKind>())
+    {
+        if (kind != CommandKind.End)
+        {
+            Check(heard.Contains(kind), $"the device heard a {kind} record");
+        }
+    }
+
+    var glyphs = new GlyphRuns();
+    stream.Replay(glyphs);
+    var runs = 0;
+    foreach (var record in records)
+    {
+        if (record.Kind == CommandKind.GlyphRun)
+        {
+            runs += 1;
+        }
+    }
+    Check(glyphs.Runs == runs, "a device naming one method hears only that kind");
+    try
+    {
+        stream.Replay(new Refusing());
+        throw new Exception("command stream: a device's exception ends the replay");
+    }
+    catch (InvalidOperationException e)
+    {
+        Check(e.Message == "the device refuses", $"the device's exception is thrown: {e.Message}");
+    }
+
+    var outlines = 0;
+    var decodes = 0;
+    foreach (var record in records)
+    {
+        if (record.Kind == CommandKind.Outline)
+        {
+            var outline = stream.OutlineAt(record.Index);
+            Check(
+                outline.Scope == Natural(record, 0)
+                    && outline.FontId == Natural(record, 1)
+                    && outline.Code == Natural(record, 2)
+                    && outline.Found == (Natural(record, 3) == 1)
+                    && outline.Operators.AsSpan().SequenceEqual(BytesOf(record, 4))
+                    && Bits(outline.Numbers).AsSpan().SequenceEqual(Bits((double[])record.Fields[5].Value!)),
+                $"outline record {record.Index} is its fields");
+            outlines += 1;
+        }
+        else if (record.Kind == CommandKind.ImageDecode)
+        {
+            var image = stream.ImageAt(record.Index);
+            Check(
+                image.Image == Natural(record, 0)
+                    && image.Reduction == Natural(record, 1)
+                    && (ulong)image.Answer == Natural(record, 2),
+                $"image decode record {record.Index} is its image, reduction and answer");
+            if (image.Answer == ImageAnswer.Image)
+            {
+                var held = record.Fields[8].Tag == CommandFieldTag.Bytes;
+                Check(
+                    image.Width == Natural(record, 4)
+                        && image.Height == Natural(record, 5)
+                        && image.Rgb.AsSpan().SequenceEqual(BytesOf(record, 6))
+                        && image.Alpha.AsSpan().SequenceEqual(BytesOf(record, 7))
+                        && image.TwoColour.AsSpan().SequenceEqual(held ? BytesOf(record, 8) : Array.Empty<byte>())
+                        && image.Colours.AsSpan().SequenceEqual(held ? BytesOf(record, 9) : new byte[8])
+                        && image.Stencil == (Natural(record, 10) == 1)
+                        && image.Interpolate == (Natural(record, 11) == 1),
+                    $"image decode record {record.Index} is its samples and colours");
+                var window = record.Fields[15];
+                if (window.Tag == CommandFieldTag.Naturals)
+                {
+                    var edges = (ulong[])window.Value!;
+                    Check(
+                        image.Window is { } at
+                            && at.X == edges[0]
+                            && at.Y == edges[1]
+                            && at.Width == edges[2]
+                            && at.Height == edges[3],
+                        $"image decode record {record.Index}'s window");
+                }
+                else
+                {
+                    Check(image.Window is null, $"image decode record {record.Index} is all of its decode");
+                }
+            }
+            else if (image.Answer == ImageAnswer.Refused)
+            {
+                Check(
+                    image.Codec == System.Text.Encoding.UTF8.GetString(BytesOf(record, 3)),
+                    "a refused decode names its codec");
+            }
+            decodes += 1;
+        }
+    }
+    Check(outlines > 0 && decodes > 0, $"{outlines} outlines and {decodes} decodes");
+    Expect(() => stream.OutlineAt(0), Status.BadArgument, "an outline asked of the page record");
+    Expect(() => stream.ImageAt(0), Status.BadArgument, "a decode asked of the page record");
+
+    using (var replayed = stream.Render(1.0, PixelFormat.Rgb8))
+    {
+        Check(
+            replayed.Width == directSize.Width
+                && replayed.Height == directSize.Height
+                && replayed.Pixels.SequenceEqual(direct),
+            "the replay draws what a render of the page draws");
+    }
+
+    foreach (var refused in new[] { Array.Empty<byte>(), Ascii("not a command stream"), written[..^1] })
+    {
+        Expect(() => CommandStream.Parse(refused).Dispose(), Status.BadArgument, "bytes that are no stream");
+    }
+    try
+    {
+        CommandStream.Parse(Ascii("plainly not one")).Dispose();
+        throw new Exception("command stream: plainly not a stream, and read");
+    }
+    catch (PdfException e)
+    {
+        Check(e.Message.Contains("not a command stream", StringComparison.Ordinal), $"the reader's sentence: {e.Message}");
+    }
+    Console.WriteLine(
+        $"command stream: {records.Count} records, every kind, written back to the facade's bytes");
+}
+
+CommandStreams(Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(args[0])))!);
+
+Console.WriteLine("DOTNET-SMOKE: RAN, rendered, inked, opened on demand and the command stream written back");
 
 // ---- the write leg (gap 32 milestone 5) ------------------------------------
 //
@@ -1264,3 +1733,88 @@ Console.WriteLine("DOTNET-PARITY: finalizer-only teardown released its handles w
 
 Console.WriteLine("DOTNET-PARITY: RAN");
 return 0;
+
+// A device that notes every record it is handed, each by the method its kind
+// names: the command stream leg's recording device.
+sealed class Recorder : ICommandDevice
+{
+    internal readonly List<CommandKind?> Seen = new();
+
+    private void Note(CommandKind kind, CommandRecord record)
+    {
+        if (record.Kind != kind)
+        {
+            throw new Exception($"command stream: the method for {kind} was handed a {record.Kind}");
+        }
+        Seen.Add(kind);
+    }
+
+    public void Function(CommandRecord record) => Note(CommandKind.Function, record);
+    public void Halftone(CommandRecord record) => Note(CommandKind.Halftone, record);
+    public void Stored(CommandRecord record) => Note(CommandKind.Stored, record);
+    public void Colorants(CommandRecord record) => Note(CommandKind.Colorants, record);
+    public void Source(CommandRecord record) => Note(CommandKind.Source, record);
+    public void State(CommandRecord record) => Note(CommandKind.State, record);
+    public void BeginText(CommandRecord record) => Note(CommandKind.BeginText, record);
+    public void GlyphRun(CommandRecord record) => Note(CommandKind.GlyphRun, record);
+    public void EndText(CommandRecord record) => Note(CommandKind.EndText, record);
+    public void FillPath(CommandRecord record) => Note(CommandKind.FillPath, record);
+    public void StrokePath(CommandRecord record) => Note(CommandKind.StrokePath, record);
+    public void ClipPath(CommandRecord record) => Note(CommandKind.ClipPath, record);
+    public void SaveState(CommandRecord record) => Note(CommandKind.SaveState, record);
+    public void RestoreState(CommandRecord record) => Note(CommandKind.RestoreState, record);
+    public void DrawImage(CommandRecord record) => Note(CommandKind.DrawImage, record);
+    public void DrawShading(CommandRecord record) => Note(CommandKind.DrawShading, record);
+    public void BeginMarkedContent(CommandRecord record) => Note(CommandKind.BeginMarkedContent, record);
+    public void EndMarkedContent(CommandRecord record) => Note(CommandKind.EndMarkedContent, record);
+    public void BeginForm(CommandRecord record) => Note(CommandKind.BeginForm, record);
+    public void EndForm(CommandRecord record) => Note(CommandKind.EndForm, record);
+    public void BeginGroup(CommandRecord record) => Note(CommandKind.BeginGroup, record);
+    public void EndGroup(CommandRecord record) => Note(CommandKind.EndGroup, record);
+    public void BeginSoftMask(CommandRecord record) => Note(CommandKind.BeginSoftMask, record);
+    public void EndSoftMask(CommandRecord record) => Note(CommandKind.EndSoftMask, record);
+    public void ClearSoftMask(CommandRecord record) => Note(CommandKind.ClearSoftMask, record);
+    public void GroupBudgetSpent(CommandRecord record) => Note(CommandKind.GroupBudgetSpent, record);
+    public void RecursionRefused(CommandRecord record) => Note(CommandKind.RecursionRefused, record);
+    public void NestedBudgetSpent(CommandRecord record) => Note(CommandKind.NestedBudgetSpent, record);
+    public void Page(CommandRecord record) => Note(CommandKind.Page, record);
+    public void Annotation(CommandRecord record) => Note(CommandKind.Annotation, record);
+    public void MissingFont(CommandRecord record) => Note(CommandKind.MissingFont, record);
+    public void RepairedSpace(CommandRecord record) => Note(CommandKind.RepairedSpace, record);
+    public void Scope(CommandRecord record) => Note(CommandKind.Scope, record);
+    public void Outline(CommandRecord record) => Note(CommandKind.Outline, record);
+    public void FontIdentity(CommandRecord record) => Note(CommandKind.FontIdentity, record);
+    public void Profile(CommandRecord record) => Note(CommandKind.Profile, record);
+    public void ColorSpace(CommandRecord record) => Note(CommandKind.ColorSpace, record);
+    public void Image(CommandRecord record) => Note(CommandKind.Image, record);
+    public void InlineImage(CommandRecord record) => Note(CommandKind.InlineImage, record);
+    public void ImageDecode(CommandRecord record) => Note(CommandKind.ImageDecode, record);
+    public void ShadingDefinition(CommandRecord record) => Note(CommandKind.ShadingDefinition, record);
+    public void Shading(CommandRecord record) => Note(CommandKind.Shading, record);
+    public void Pattern(CommandRecord record) => Note(CommandKind.Pattern, record);
+    public void Cell(CommandRecord record) => Note(CommandKind.Cell, record);
+
+    public void Unknown(CommandRecord record) =>
+        throw new Exception($"command stream: a record of kind {record.Number}, which this build does not know");
+}
+
+// A device naming one method, which hears only that kind.
+sealed class GlyphRuns : ICommandDevice
+{
+    internal int Runs;
+
+    public void GlyphRun(CommandRecord record)
+    {
+        if (record.Kind != CommandKind.GlyphRun)
+        {
+            throw new Exception($"command stream: GlyphRun was handed a {record.Kind}");
+        }
+        Runs += 1;
+    }
+}
+
+// A device whose exception ends the replay.
+sealed class Refusing : ICommandDevice
+{
+    public void BeginText(CommandRecord record) => throw new InvalidOperationException("the device refuses");
+}

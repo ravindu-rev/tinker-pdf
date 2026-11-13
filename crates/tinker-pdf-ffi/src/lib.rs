@@ -5184,6 +5184,86 @@ endobj
         assert_eq!(TpdfWidgetDefect::RectMissing as i32, 0);
     }
 
+    /// The command stream's three enums, pinned for the same reason:
+    /// `bindings/dotnet/TinkerPdf.cs` writes every arm's number out by hand
+    /// and Java passes `ordinal()`, so an arm moved here would compile on
+    /// both sides and name another kind, tag or answer on each. The kinds'
+    /// and the tags' lists are counted against every arm their enums declare,
+    /// so an arm added without a line here fails.
+    #[test]
+    fn the_command_stream_enums_have_the_numbers_the_bindings_transcribe() {
+        const KINDS: &[(TpdfCommandKind, i32)] = &[
+            (TpdfCommandKind::End, 0),
+            (TpdfCommandKind::Function, 1),
+            (TpdfCommandKind::Halftone, 2),
+            (TpdfCommandKind::Stored, 3),
+            (TpdfCommandKind::Colorants, 4),
+            (TpdfCommandKind::Source, 5),
+            (TpdfCommandKind::State, 6),
+            (TpdfCommandKind::BeginText, 7),
+            (TpdfCommandKind::GlyphRun, 8),
+            (TpdfCommandKind::EndText, 9),
+            (TpdfCommandKind::FillPath, 10),
+            (TpdfCommandKind::StrokePath, 11),
+            (TpdfCommandKind::ClipPath, 12),
+            (TpdfCommandKind::SaveState, 13),
+            (TpdfCommandKind::RestoreState, 14),
+            (TpdfCommandKind::DrawImage, 15),
+            (TpdfCommandKind::DrawShading, 16),
+            (TpdfCommandKind::BeginMarkedContent, 17),
+            (TpdfCommandKind::EndMarkedContent, 18),
+            (TpdfCommandKind::BeginForm, 19),
+            (TpdfCommandKind::EndForm, 20),
+            (TpdfCommandKind::BeginGroup, 21),
+            (TpdfCommandKind::EndGroup, 22),
+            (TpdfCommandKind::BeginSoftMask, 23),
+            (TpdfCommandKind::EndSoftMask, 24),
+            (TpdfCommandKind::ClearSoftMask, 25),
+            (TpdfCommandKind::GroupBudgetSpent, 26),
+            (TpdfCommandKind::RecursionRefused, 27),
+            (TpdfCommandKind::NestedBudgetSpent, 28),
+            (TpdfCommandKind::Page, 29),
+            (TpdfCommandKind::Annotation, 30),
+            (TpdfCommandKind::MissingFont, 31),
+            (TpdfCommandKind::RepairedSpace, 32),
+            (TpdfCommandKind::Scope, 33),
+            (TpdfCommandKind::Outline, 34),
+            (TpdfCommandKind::FontIdentity, 35),
+            (TpdfCommandKind::Profile, 36),
+            (TpdfCommandKind::ColorSpace, 37),
+            (TpdfCommandKind::Image, 38),
+            (TpdfCommandKind::InlineImage, 39),
+            (TpdfCommandKind::ImageDecode, 40),
+            (TpdfCommandKind::ShadingDefinition, 41),
+            (TpdfCommandKind::Shading, 42),
+            (TpdfCommandKind::Pattern, 43),
+            (TpdfCommandKind::Cell, 44),
+        ];
+        for (kind, number) in KINDS {
+            assert_eq!(*kind as i32, *number, "{kind:?}");
+        }
+        assert_eq!(KINDS.len(), TpdfCommandKind::ALL.len(), "every kind");
+
+        const TAGS: &[(TpdfCommandFieldTag, i32)] = &[
+            (TpdfCommandFieldTag::Nothing, 0),
+            (TpdfCommandFieldTag::Unsigned, 1),
+            (TpdfCommandFieldTag::Signed, 2),
+            (TpdfCommandFieldTag::Real, 3),
+            (TpdfCommandFieldTag::Bytes, 4),
+            (TpdfCommandFieldTag::Reals, 5),
+            (TpdfCommandFieldTag::Naturals, 6),
+            (TpdfCommandFieldTag::Strings, 7),
+        ];
+        for (tag, number) in TAGS {
+            assert_eq!(*tag as i32, *number, "{tag:?}");
+        }
+        assert_eq!(TAGS.len(), TpdfCommandFieldTag::ALL.len(), "every tag");
+
+        assert_eq!(TpdfImageAnswer::Absent as i32, 0);
+        assert_eq!(TpdfImageAnswer::Image as i32, 1);
+        assert_eq!(TpdfImageAnswer::Refused as i32, 2);
+    }
+
     /// The signature enums' numbers are transcribed by hand into
     /// `bindings/dotnet/TinkerPdf.cs`, so they are pinned on this side too:
     /// a reordered variant would compile everywhere and mean something else

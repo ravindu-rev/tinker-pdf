@@ -344,14 +344,15 @@ Ruling 11 keeps a binding a projection: each projects the facade's decoder —
 the records, their kinds and fields, the encoder and the render — and a
 device interface fed from it, one method a command kind, which the binding
 calls in the stream's order. A replay to a platform's 2D canvas is an example
-over that projection, written in the binding's README, and never binding API.
+over that projection, written in the binding's README — or, for Java, which
+has none, in its smoke program, where it runs — and never binding API.
 
 | Binding | Route | Its platform's 2D canvas | The example |
 | --- | --- | --- | --- |
 | JavaScript | the facade, through wasm-bindgen | `CanvasRenderingContext2D` | a replay to a canvas in the README |
 | Python | the facade, through PyO3 | none in the standard library that clips, blends or draws cubic Béziers (`tkinter.Canvas` does neither of the first two) | the device protocol alone |
 | .NET | the C ABI | `System.Drawing.Graphics` (GDI+), supported on Windows only | a replay to `Graphics` on Windows |
-| Java | the C ABI | `java.awt.Graphics2D` | a replay to `Graphics2D` |
+| Java | the C ABI | `java.awt.Graphics2D` | a replay to `Graphics2D` in `test/Smoke.java` |
 | Go | the C ABI | none: `image/draw` composites rasters and draws no paths | the device interface alone |
 | Ruby | the C ABI | none | the device interface alone |
 | Swift | source only (SU-13) | Core Graphics on Apple platforms | none until SU-13 widens its coverage |
@@ -395,10 +396,14 @@ over that projection, written in the binding's README, and never binding API.
    of a page holding every command kind to the facade's bytes, and drive a
    recording device that receives every kind in the order the facade's
    decoder gives them.
-7. **RC-18.7, .NET and Java**, and **RC-18.8, Go and Ruby**: each wrapper's
-   smoke program decodes and re-encodes the same page's stream through its
-   own types to the facade's bytes, dispatches every kind to a recording
-   device, and exits non-zero on any difference.
+7. **RC-18.7, landed: .NET and Java**, and **RC-18.8, Go and Ruby**: each
+   wrapper's smoke program decodes and re-encodes the same page's stream
+   through its own types to the facade's bytes, dispatches every kind to a
+   recording device, and exits non-zero on any difference;
+   `bindings/dotnet/tests/Smoke/Program.cs` and `bindings/java/test/Smoke.java`
+   do, and the FFI's
+   `the_command_stream_enums_have_the_numbers_the_bindings_transcribe` pins
+   the three enums both transcribe.
 8. **RC-18.9, parity.** `cargo xtask bindings-parity --require-all` prints
    the recorded `command-stream` hash from every surface, and
    `cargo xtask bindings-coverage` passes with no refusal line left for the
