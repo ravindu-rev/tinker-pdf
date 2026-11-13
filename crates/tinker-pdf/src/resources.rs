@@ -4,6 +4,7 @@
 //! renderer — exist so those crates never see a PDF dictionary. This is where
 //! the dictionaries actually get read.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
@@ -13,7 +14,7 @@ use tinker_pdf_content::{
 };
 use tinker_pdf_cos::{
     decode_text_string, font as cos_font, limits, pages as cos_pages, Cached, CosDocument,
-    CosError, Counting, DecodedStreams, Dict, Name, ObjRef, Object,
+    CosError, Counting, DecodedStreams, Dict, Filled, Flights, Name, ObjRef, Object,
 };
 use tinker_pdf_filters::{
     ccitt_decode, jbig2_decode, jpeg_decode, jpeg_decode_strips_sized, CcittParams, Jbig2Params,
@@ -38,7 +39,16 @@ use crate::stats::{self, Counter, Work};
 /// Beside it, the font the extraction reported as resolving no glyph for the
 /// code, if it did — so a later render that meets the code from the cache
 /// says what the first one said ([`PageResources::for_one_render`]).
-type OutlineCache = HashMap<(u64, u32), (Option<Arc<Outline>>, Option<String>)>;
+type OutlineCache = Flights<(u64, u32), (Option<Arc<Outline>>, Option<String>)>;
+
+/// The most image names [`Caches::images`] keeps. A page names what it names,
+/// so an honest one never reaches it; past it each draw of a new name decodes
+/// it again, as before the cache.
+const MAX_CACHED_IMAGES: usize = 256;
+
+/// The most glyph outlines [`Caches::outlines`] keeps: a hostile document
+/// could ask for millions of codes.
+const MAX_CACHED_OUTLINES: usize = 1 << 16;
 
 /// A decoded image, or the codec that could not decode it, and the damage the
 /// decode tolerated as `(resource name, what was tolerated)`.
@@ -66,12 +76,13 @@ struct CachedImage {
 /// for every other image, which is decoded at full size whatever a draw asks.
 /// Each size's decode is kept under the reduction it was made at
 /// ([`reduction`]): 1 for full size, 2, 4 and 8 for a half, a quarter and an
-/// eighth.
+/// eighth. The name's first decode is its first size's, so the render that
+/// makes it decodes the image once; each other size fills once too.
 struct ImageEntry {
     /// The frame a request can reduce, or `None` where none can.
     frame: Option<(u32, u32)>,
     /// The decodes made, by reduction.
-    decoded: HashMap<u32, CachedImage>,
+    decoded: Flights<u32, CachedImage>,
 }
 
 /// An image XObject decoded for one draw ([`PageResources::decode_image`]),
@@ -120,6 +131,16 @@ fn reduction(scale: JpegScale) -> u32 {
 /// Behind one `Arc` so a retained page can give each render resources of its
 /// own — fresh lists of what that render had to tolerate — over the same
 /// caches ([`PageResources::for_one_render`]).
+///
+/// **The five dear ones fill once however many renders ask at once**: font
+/// programs, images, ICC transforms, outlines and form scopes are
+/// [`Flights`] (`docs/design/parallelism.md`, "Single-flight fills"), so the
+/// first render of a display list to miss a key computes it while the renders
+/// beside it on other threads wait for that value, and a render with a fill of
+/// its own open computes for itself rather than waiting, so no fill waits on
+/// another and none can deadlock. A render that met a key another filled
+/// counts a hit and says again what the fill reported, so a hit is exactly
+/// what a miss computes, warnings included.
 #[derive(Default)]
 struct Caches {
     /// The embedded font program of each font, by the id the interpreter uses.
@@ -141,21 +162,21 @@ struct Caches {
     /// so a program the scopes of one operation draw — a page's and its
     /// forms', or every page's of a save — is decoded once between them, and
     /// the entry here is the operation's bytes, not a copy of them.
-    programs: Mutex<HashMap<u64, Option<Arc<Vec<u8>>>>>,
+    programs: Flights<u64, Option<Arc<Vec<u8>>>>,
     /// Decoded images, kept because a page may draw one many times: by the
     /// resource name, each name's decodes by the reduction they were made at
     /// (`ImageEntry`), so a hit hands back exactly what that size's miss
     /// computes (`docs/design/jpeg-speed.md`, "The scale rule").
-    images: Mutex<HashMap<Vec<u8>, ImageEntry>>,
+    images: Flights<Vec<u8>, Arc<ImageEntry>>,
     /// Compiled ICC transforms, by the profile stream's object number.
     ///
     /// A transform is three 4 096-entry tables, and a page may name the same
     /// `ICCBased` space at every one of a thousand `cs` operators. The `None`
     /// is cached too: a profile that would not parse must be refused once
     /// rather than re-read and re-refused a thousand times.
-    icc: Mutex<IccCache>,
+    icc: IccCache,
     /// Outlines already extracted, keyed by font and code.
-    outlines: RwLock<OutlineCache>,
+    outlines: OutlineCache,
     /// Nested scopes already built, by the form's own object number.
     ///
     /// A page may invoke one form a thousand times — a stamp, a rule, a
@@ -168,7 +189,7 @@ struct Caches {
     /// because two names can reach one form and a name means nothing outside
     /// the dictionary it was looked up in. `None` is cached too: "this form
     /// brought no resources" is an answer worth not recomputing.
-    form_scopes: Mutex<HashMap<u64, Option<Arc<PageResources>>>>,
+    form_scopes: Flights<u64, Option<Arc<PageResources>>>,
     /// The scope's default colour spaces (8.6.5.6), read on the first
     /// question it is asked about a device space.
     ///
@@ -459,7 +480,7 @@ type FunctionCache = HashMap<(ObjRef, Option<u32>), Option<Arc<Function>>>;
 ///
 /// The `None` is cached as deliberately as the `Some`: a profile that will
 /// not parse must be refused once rather than re-read at every `cs`.
-type IccCache = HashMap<(u32, u16), Option<Arc<tinker_pdf_color::icc::Transforms>>>;
+type IccCache = Flights<(u32, u16), Option<Arc<tinker_pdf_color::icc::Transforms>>>;
 
 /// Which glyph of an embedded program a code selects, and on whose authority.
 ///
@@ -1783,21 +1804,20 @@ impl PageResources {
         reference: tinker_pdf_cos::ObjRef,
     ) -> Option<Arc<tinker_pdf_color::icc::Transforms>> {
         let key = (reference.num, reference.gen);
-        if let Ok(cache) = self.caches.icc.lock() {
-            if let Some(found) = cache.get(&key) {
-                self.count(Counter::IccTransformHits);
-                return found.clone();
-            }
-        }
-        self.count(Counter::IccTransformMisses);
-        let compiled = self
-            .decoded(reference)
-            .ok()
-            .and_then(|bytes| tinker_pdf_color::icc::Profile::parse(&bytes).ok())
-            .and_then(tinker_pdf_color::icc::Transforms::compile)
-            .map(Arc::new);
-        if let Ok(mut cache) = self.caches.icc.lock() {
-            cache.insert(key, compiled.clone());
+        let made = Cell::new(false);
+        let compiled = self.caches.icc.read(key, || {
+            made.set(true);
+            self.count(Counter::IccTransformMisses);
+            Filled::Keep(
+                self.decoded(reference)
+                    .ok()
+                    .and_then(|bytes| tinker_pdf_color::icc::Profile::parse(&bytes).ok())
+                    .and_then(tinker_pdf_color::icc::Transforms::compile)
+                    .map(Arc::new),
+            )
+        });
+        if !made.get() {
+            self.count(Counter::IccTransformHits);
         }
         compiled
     }
@@ -1996,16 +2016,14 @@ impl PageResources {
     fn form_resources(&self, name: &[u8]) -> Option<Arc<PageResources>> {
         let (dict, reference) = self.xobject(name)?;
         let key = (u64::from(reference.num) << 16) | u64::from(reference.gen);
-        if let Ok(cache) = self.caches.form_scopes.lock() {
-            if let Some(hit) = cache.get(&key) {
-                self.count(Counter::FormScopeHits);
-                return hit.as_ref().map(|kept| self.bind(kept));
-            }
-        }
-        self.count(Counter::FormScopeMisses);
-        let built = self.build_form_resources(&dict);
-        if let Ok(mut cache) = self.caches.form_scopes.lock() {
-            cache.insert(key, built.clone());
+        let made = Cell::new(false);
+        let built = self.caches.form_scopes.read(key, || {
+            made.set(true);
+            self.count(Counter::FormScopeMisses);
+            Filled::Keep(self.build_form_resources(&dict))
+        });
+        if !made.get() {
+            self.count(Counter::FormScopeHits);
         }
         built.as_ref().map(|kept| self.bind(kept))
     }
@@ -3458,32 +3476,32 @@ impl GlyphSource for PageResources {
     }
 
     fn outline(&self, font_id: u64, code: u32) -> Option<Outline> {
-        if let Ok(cache) = self.caches.outlines.read() {
-            if let Some((hit, unresolved)) = cache.get(&(font_id, code)) {
-                self.count(Counter::GlyphOutlineHits);
-                // What the extraction reported, reported again: this render
-                // met the glyph too, and a render of its own would have.
-                if let Some(name) = unresolved {
-                    self.note_missing_font(name.clone());
-                }
-                return hit.as_ref().map(|o| (**o).clone());
+        let made = Cell::new(false);
+        let (outline, unresolved) = self.caches.outlines.read((font_id, code), || {
+            made.set(true);
+            self.count(Counter::GlyphOutlineMisses);
+            if let Ok(mut marker) = self.unresolved.lock() {
+                *marker = None;
             }
-        }
-        self.count(Counter::GlyphOutlineMisses);
-
-        if let Ok(mut marker) = self.unresolved.lock() {
-            *marker = None;
-        }
-        let outline = self.extract_outline(font_id, code).map(Arc::new);
-        let unresolved = self
-            .unresolved
-            .lock()
-            .ok()
-            .and_then(|mut marker| marker.take());
-        if let Ok(mut cache) = self.caches.outlines.write() {
-            // Bounded: a hostile document could ask for millions of codes.
-            if cache.len() < 1 << 16 {
-                cache.insert((font_id, code), (outline.clone(), unresolved));
+            let outline = self.extract_outline(font_id, code).map(Arc::new);
+            let unresolved = self
+                .unresolved
+                .lock()
+                .ok()
+                .and_then(|mut marker| marker.take());
+            let found = (outline, unresolved);
+            if self.caches.outlines.len() <= MAX_CACHED_OUTLINES {
+                Filled::Keep(found)
+            } else {
+                Filled::Once(found)
+            }
+        });
+        if !made.get() {
+            self.count(Counter::GlyphOutlineHits);
+            // What the extraction reported, reported again: this render met
+            // the glyph too, and a render of its own would have.
+            if let Some(name) = unresolved {
+                self.note_missing_font(name);
             }
         }
         outline.map(|o| (*o).clone())
@@ -3667,39 +3685,70 @@ impl GlyphSource for PageResources {
     }
 
     fn image(&self, name: &[u8], request: &ImageRequest) -> Result<Option<DecodedImage>, String> {
-        if let Ok(cache) = self.caches.images.lock() {
-            // The size this draw is decoded at, read off what the name's first
-            // decode found its frame to be.
-            let hit = cache.get(name).and_then(|entry| {
-                let at = entry
-                    .frame
-                    .map_or(1, |frame| reduction(jpeg_scale(frame, request)));
-                entry.decoded.get(&at)
+        // Whether this read decoded the image itself, rather than meeting a
+        // decode another render made or is making.
+        let made = Cell::new(false);
+        // The name's first decode is made at this draw's size, by the first
+        // render to ask; its frame says at which size every later draw of the
+        // name is decoded.
+        let entry = self.caches.images.read(name.to_vec(), || {
+            made.set(true);
+            let (decoded, frame) = self.decode_cached(name, request);
+            let entry = Arc::new(ImageEntry {
+                frame,
+                decoded: Flights::new(),
             });
-            if let Some(hit) = hit {
-                self.count(Counter::ImageHits);
-                // What the decode said, said again: a render that meets the
-                // image here met it as surely as the one that decoded it.
-                for entry in &hit.damage {
-                    self.note_damaged_image(entry.clone());
-                }
-                for entry in &hit.repairs {
-                    self.note_repaired_space(entry.clone());
-                }
-                return match &hit.image {
-                    Ok(image) => Ok(Some((**image).clone())),
-                    Err(codec) => Err(codec.clone()),
-                };
+            let at = decoded.at;
+            entry.decoded.read(at, || Filled::Keep(decoded.cached));
+            // Bounded by names, as a hostile page could name thousands; a
+            // name has at most four sizes.
+            if self.caches.images.len() <= MAX_CACHED_IMAGES {
+                Filled::Keep(entry)
+            } else {
+                Filled::Once(entry)
+            }
+        });
+        let at = entry
+            .frame
+            .map_or(1, |frame| reduction(jpeg_scale(frame, request)));
+        let cached = entry.decoded.read(at, || {
+            made.set(true);
+            Filled::Keep(self.decode_cached(name, request).0.cached)
+        });
+        if !made.get() {
+            self.count(Counter::ImageHits);
+            // What the decode said, said again: a render that meets the image
+            // here met it as surely as the one that decoded it.
+            for entry in &cached.damage {
+                self.note_damaged_image(entry.clone());
+            }
+            for entry in &cached.repairs {
+                self.note_repaired_space(entry.clone());
             }
         }
+        match &cached.image {
+            Ok(image) => Ok(Some((**image).clone())),
+            Err(codec) => Err(codec.clone()),
+        }
+    }
+}
 
+/// One decode [`Caches::images`] keeps: the image or the codec's refusal, with
+/// what the decode tolerated, and the reduction it was made at.
+struct Kept {
+    at: u32,
+    cached: CachedImage,
+}
+
+impl PageResources {
+    /// Decodes image XObject `name` for a draw that asks as `request` does —
+    /// the decoder run of a miss, counted as one — and hands it back as the
+    /// cache keeps it, with the frame later draws read their size against.
+    fn decode_cached(&self, name: &[u8], request: &ImageRequest) -> (Kept, Option<(u32, u32)>) {
         self.count(Counter::ImageMisses);
         self.count(Counter::ImagesDecoded);
         let label = String::from_utf8_lossy(name).into_owned();
-        let Decoded {
-            image: decoded,
-            frame,
-        } = self.decode_image(name, request);
+        let Decoded { image, frame } = self.decode_image(name, request);
         // The damage this decode reported: every entry under this name, which
         // only this image's decode (and its soft mask's, part of it) writes.
         let damage: Vec<(String, String)> = self
@@ -3720,36 +3769,16 @@ impl GlyphSource for PageResources {
             .into_iter()
             .filter(|(named, _)| *named == label)
             .collect();
-        let at = match &decoded {
+        let at = match &image {
             Ok(image) => image.reduced.map_or(1, |grid| grid.factor),
             Err(_) => 1,
         };
-        let image = match &decoded {
-            Ok(image) => Ok(Arc::new(image.clone())),
-            Err(codec) => Err(codec.clone()),
+        let cached = CachedImage {
+            image: image.map(Arc::new),
+            damage,
+            repairs,
         };
-        if let Ok(mut cache) = self.caches.images.lock() {
-            // Bounded by names, as a hostile page could name thousands; a
-            // name has at most four sizes.
-            if cache.len() < 256 || cache.contains_key(name) {
-                cache
-                    .entry(name.to_vec())
-                    .or_insert_with(|| ImageEntry {
-                        frame,
-                        decoded: HashMap::new(),
-                    })
-                    .decoded
-                    .insert(
-                        at,
-                        CachedImage {
-                            image,
-                            damage,
-                            repairs,
-                        },
-                    );
-            }
-        }
-        decoded.map(Some)
+        (Kept { at, cached }, frame)
     }
 }
 
@@ -4136,20 +4165,18 @@ impl PageResources {
     /// The font program behind a font id, read once a scope and decoded once
     /// an operation.
     fn program(&self, font_id: u64) -> Option<Arc<Vec<u8>>> {
-        if let Ok(cache) = self.caches.programs.lock() {
-            if let Some(hit) = cache.get(&font_id) {
-                self.count(Counter::FontProgramHits);
-                return hit.clone();
-            }
+        let made = Cell::new(false);
+        let program = self.caches.programs.read(font_id, || {
+            made.set(true);
+            self.count(Counter::FontProgramMisses);
+            Filled::Keep(self.font_by_id(font_id).and_then(|found| {
+                program_for(&self.doc, &found, self.provider.as_deref(), &self.op)
+            }))
+        });
+        if !made.get() {
+            self.count(Counter::FontProgramHits);
         }
-        self.count(Counter::FontProgramMisses);
-        let built = self
-            .font_by_id(font_id)
-            .and_then(|found| program_for(&self.doc, &found, self.provider.as_deref(), &self.op));
-        if let Ok(mut cache) = self.caches.programs.lock() {
-            cache.insert(font_id, built.clone());
-        }
-        built
+        program
     }
 
     /// The font a text-font name stands for in this scope.

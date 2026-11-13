@@ -141,6 +141,20 @@ impl<K: Eq + Hash + Clone, V: Clone> Flights<K, V> {
     pub fn is_ready(&self, key: &K) -> bool {
         matches!(lock(&self.slots).get(key), Some(Slot::Ready(_)))
     }
+
+    /// How many keys hold a slot, published or being filled: what a cache
+    /// bounded by its entries compares with its bound before it keeps one
+    /// more.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        lock(&self.slots).len()
+    }
+
+    /// Whether no key holds a slot.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        lock(&self.slots).is_empty()
+    }
 }
 
 /// One open fill on this thread, for as long as it lives.
@@ -386,6 +400,22 @@ mod tests {
         assert_eq!((first, second), (1, 2));
         assert_eq!(fills.load(Ordering::SeqCst), 2);
         assert_eq!(flights.read(9, || Filled::Keep(3)), 2, "the second's kept");
+    }
+
+    /// A map's length counts every key that holds a slot: a published one,
+    /// and one being filled, which a fill reading the length sees as its own;
+    /// a value kept for one read alone leaves no slot behind.
+    #[test]
+    fn the_length_counts_published_and_filling_slots() {
+        let flights: Flights<u32, usize> = Flights::new();
+        assert!(flights.is_empty());
+        assert_eq!(flights.read(1, || Filled::Keep(0)), 0);
+        assert_eq!(flights.len(), 1);
+        let seen = flights.read(2, || Filled::Keep(flights.len()));
+        assert_eq!(seen, 2, "the slot being filled is counted");
+        assert_eq!(flights.read(3, || Filled::Once(flights.len())), 3);
+        assert_eq!(flights.len(), 2, "a passing value leaves no slot");
+        assert!(!flights.is_empty());
     }
 
     #[test]

@@ -613,6 +613,23 @@ cancellation might, never more (`display_list.rs`'s
 `every_replay_names_the_images_the_page_draws` and
 `every_replay_names_the_glyph_its_font_could_not_resolve`).
 
+**Renders of one list at once fill each cache once.** The five dear caches a
+list's renders share — images, font programs, glyph outlines, ICC transforms
+and form scopes — are single-flight (`tinker_pdf_cos::Flights`): the first
+render on any thread to miss a key computes it while renders of that key on
+other threads wait for its value, and a render that is itself in the middle
+of a fill computes rather than waits, so no wait can form a cycle and none
+deadlocks; a same-thread re-entry for a key computes, as an uncached read
+does. A render that meets a value another computed counts a hit and says
+again what the fill reported — an image's damage and repairs, an outline's
+unresolved font — so a hit is exactly what a miss computes, warnings
+included. A fill never reads a render's cancel token. So four renders of one
+list decode a shared image once between them (`parallelism.rs`'s
+`four_renders_of_one_display_list_decode_a_shared_image_once`) and extract
+each glyph once (`four_renders_of_one_display_list_extract_a_shared_glyph_once`);
+a font program, read inside an outline's fill, can be read once for each
+concurrent extraction that meets another's read, and is bounded by them.
+
 **A page too large to retain is drawn the direct way.** A recording keeps
 every call with its own copy of the state and the path, so what it holds is
 the interpreter's *work*, and work multiplies through forms: a page that

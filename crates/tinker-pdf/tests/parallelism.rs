@@ -667,3 +667,253 @@ fn a_subset_walk_on_four_threads_walks_no_page_on_the_caller() {
         "one page is the caller's, the pool starting no thread for it"
     );
 }
+
+// ---- Single-flight fills (P-15.6) -------------------------------------------
+//
+// The caches a display list's renders share fill once however many renders
+// miss a key at once (`docs/design/parallelism.md`, "Single-flight fills").
+// Counted through each render's own stats and summed: the decodes, extractions
+// and builds a set of concurrent renders made are what one render made.
+
+/// A page whose caches its renders share: a 320 by 240 4:2:0 JPEG drawn at
+/// half its size, a Flate RGB image whose data is cut short, which decodes
+/// what it has and warns, and a form with resources of its own showing a line
+/// of text in the embedded face. 1 the catalog, 2 the page tree, 3 the page,
+/// 4 its content, 5 the JPEG, 6 the cut image, 7 the form, 8 to 10 the face.
+fn shared_caches_document() -> Vec<u8> {
+    use guard_support::{deflated, face, object, pdf, stream};
+
+    let jpeg = render_support::minified_baseline_jpeg(320, 240);
+    let noise: Vec<u8> = (0..24u32 * 18 * 3)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    let mut cut = tinker_pdf_filters::zlib_compress(&noise);
+    cut.truncate(cut.len() * 2 / 3);
+    let content = "q 160 0 0 120 4 4 cm /Jp Do Q q 60 0 0 45 170 100 cm /Fl Do Q \
+                   q 1 0 0 1 170 20 cm /Fm Do Q";
+    let mut objects = vec![
+        object("<< /Type /Catalog /Pages 2 0 R >>"),
+        object("<< /Type /Pages /Count 1 /Kids [3 0 R] >>"),
+        object(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 240 160] \
+             /Resources << /XObject << /Jp 5 0 R /Fl 6 0 R /Fm 7 0 R >> >> /Contents 4 0 R >>",
+        ),
+        deflated("", content.as_bytes()),
+        stream(
+            "/Type /XObject /Subtype /Image /Width 320 /Height 240 /ColorSpace /DeviceRGB \
+             /BitsPerComponent 8 /Filter /DCTDecode",
+            &jpeg,
+        ),
+        stream(
+            "/Type /XObject /Subtype /Image /Width 24 /Height 18 /ColorSpace /DeviceRGB \
+             /BitsPerComponent 8 /Filter /FlateDecode",
+            &cut,
+        ),
+        stream(
+            "/Type /XObject /Subtype /Form /BBox [0 0 70 40] \
+             /Resources << /Font << /F1 8 0 R >> >>",
+            b"BT /F1 12 Tf 2 12 Td (Shared) Tj ET",
+        ),
+    ];
+    objects.extend(face(8));
+    pdf(&objects)
+}
+
+/// `render` four times at once — on four threads that start it together at a
+/// barrier, where threads start — the results in thread order. On
+/// `wasm32-wasip1`, where none starts, four times in turn on the caller.
+fn four_at_once<T: Send>(render: impl Fn() -> T + Sync) -> Vec<T> {
+    if !THREADS_START {
+        return (0..4).map(|_| render()).collect();
+    }
+    let start = Barrier::new(4);
+    thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    start.wait();
+                    render()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("no render panicked"))
+            .collect()
+    })
+}
+
+/// The sum of four renders' stats.
+fn summed(bitmaps: &[Bitmap]) -> Stats {
+    bitmaps
+        .iter()
+        .map(|bitmap| bitmap.stats.expect("each render counted"))
+        .fold(Stats::default(), |sum, stats| sum + stats)
+}
+
+/// **Four renders of one display list decode a shared image once.** Four
+/// threads replay one list at once, meeting at a barrier before each asks for
+/// the page's JPEG and its cut Flate image: between them they decode each
+/// once — two misses and two decodes, the other six lookups hits — and the
+/// JPEG's samples are transformed once. Each render is the page drawn
+/// directly, pixels and warnings: the cut image's damage, said by the render
+/// that decoded it, is said again by each that met its decode, waiting on it
+/// or finding it published. The form's scope, built when the list was
+/// recorded, is found by all four.
+#[test]
+fn four_renders_of_one_display_list_decode_a_shared_image_once() {
+    let doc = Document::open(shared_caches_document()).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let direct = page.render(&RenderOptions::default());
+    assert!(
+        direct
+            .warnings
+            .iter()
+            .any(|warning| matches!(warning, RenderWarning::DamagedImage { .. })),
+        "the cut image is named as damaged: {:?}",
+        direct.warnings
+    );
+    let counted = RenderOptions {
+        stats: true,
+        ..RenderOptions::default()
+    };
+
+    // One replay alone, of a list of its own: what one render decodes.
+    let alone = page.display_list().render(&counted);
+    let alone = alone.stats.expect("counted");
+    assert_eq!(
+        (alone.image_misses, alone.images_decoded, alone.image_hits),
+        (2, 2, 0)
+    );
+    assert!(alone.jpeg_samples_transformed > 0);
+
+    let list = page.display_list();
+    let renders = four_at_once(|| list.render(&counted));
+    for (index, bitmap) in renders.iter().enumerate() {
+        assert!(
+            drawn(bitmap) == drawn(&direct),
+            "render {index} is not the page drawn directly: {:?} against {:?}",
+            bitmap.warnings,
+            direct.warnings
+        );
+    }
+    let sum = summed(&renders);
+    assert_eq!(
+        (sum.image_misses, sum.images_decoded, sum.image_hits),
+        (2, 2, 6),
+        "each image decoded once between the four"
+    );
+    assert_eq!(
+        sum.jpeg_samples_transformed, alone.jpeg_samples_transformed,
+        "the JPEG transformed once"
+    );
+    assert_eq!(
+        (sum.form_scope_misses, sum.form_scope_hits),
+        (0, 4),
+        "the form's scope, built at the recording, found by each"
+    );
+}
+
+/// **Four renders extract a shared glyph once**: the form's line of text
+/// replayed by four renders at once is extracted, code by code, once between
+/// them — the misses one replay alone makes, the rest hits — and its font's
+/// program, which only an extraction looks up, is looked up as often as one
+/// replay looks it up and read at least once. The program's misses are the
+/// one figure a schedule can move: an extraction, its fill open, that meets a
+/// program another thread is reading reads it for itself rather than wait
+/// (the design's rule 3), so they are bounded by the extractions, not one.
+#[test]
+fn four_renders_of_one_display_list_extract_a_shared_glyph_once() {
+    let doc = Document::open(shared_caches_document()).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let counted = RenderOptions {
+        stats: true,
+        ..RenderOptions::default()
+    };
+    let alone = page.display_list().render(&counted);
+    let alone = alone.stats.expect("counted");
+    let lookups = alone.glyph_outline_misses + alone.glyph_outline_hits;
+    assert_eq!(
+        alone.glyph_outline_misses, 6,
+        "six letters, each a code of its own: {alone:?}"
+    );
+
+    let list = page.display_list();
+    let sum = summed(&four_at_once(|| list.render(&counted)));
+    assert_eq!(
+        sum.glyph_outline_misses, alone.glyph_outline_misses,
+        "each glyph extracted once between the four"
+    );
+    assert_eq!(
+        sum.glyph_outline_hits,
+        4 * lookups - alone.glyph_outline_misses
+    );
+    assert_eq!(
+        sum.font_program_misses + sum.font_program_hits,
+        alone.font_program_misses + alone.font_program_hits,
+        "the program is looked up by the extractions alone, one replay's worth"
+    );
+    assert!(
+        (1..=alone.glyph_outline_misses).contains(&sum.font_program_misses),
+        "the program read at least once and at most once an extraction: {}",
+        sum.font_program_misses
+    );
+}
+
+/// **A same-thread re-entry never waits on itself**, driven through the fill
+/// itself (`tinker_pdf_cos::Flights`, which the facade's caches are): a fill
+/// that reads its own key again computes the inner value and publishes
+/// nothing, the outer value the one kept; and across two maps, as the
+/// facade's nest — a form scope's fill reading an image whose fill reads the
+/// form scope again — the innermost read computes rather than waits, and
+/// each outer value is kept. Run on a thread of its own with a deadline,
+/// where threads start, so a wait on itself fails rather than hangs.
+#[test]
+fn a_same_thread_reentry_never_waits_on_itself() {
+    use std::time::Duration;
+    use tinker_pdf_cos::{Filled, Flights};
+
+    fn reenter() -> (u32, u32, u32, u32, u32) {
+        let images: Flights<Vec<u8>, u32> = Flights::new();
+        let outer = images.read(b"Im0".to_vec(), || {
+            let inner = images.read(b"Im0".to_vec(), || Filled::Keep(7));
+            assert!(
+                !images.is_ready(&b"Im0".to_vec()),
+                "the re-entry published nothing"
+            );
+            Filled::Keep(inner + 1)
+        });
+        let scopes: Flights<u64, u32> = Flights::new();
+        let nested = scopes.read(1, || {
+            let image = images.read(b"Im1".to_vec(), || {
+                let again = scopes.read(1, || Filled::Keep(100));
+                Filled::Keep(again + 10)
+            });
+            Filled::Keep(image + 1)
+        });
+        (
+            outer,
+            images.read(b"Im0".to_vec(), || Filled::Keep(0)),
+            nested,
+            scopes.read(1, || Filled::Keep(0)),
+            images.read(b"Im1".to_vec(), || Filled::Keep(0)),
+        )
+    }
+
+    let got = if THREADS_START {
+        let (send, receive) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = send.send(reenter());
+        });
+        receive
+            .recv_timeout(Duration::from_secs(60))
+            .expect("a re-entry waited on itself and never finished")
+    } else {
+        reenter()
+    };
+    assert_eq!(
+        got,
+        (8, 8, 111, 111, 110),
+        "each re-entry computed its own, and each outer value was kept"
+    );
+}
