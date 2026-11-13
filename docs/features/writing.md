@@ -50,6 +50,18 @@ set's own maximum never clobbers the file's. An incremental update to a
 linearized file de-linearizes it by nature — the parameter dictionary goes
 stale — which is documented, not errored.
 
+*The section alone.* `write::update_section` writes what an incremental
+update appends without the original: it is handed the original's length and
+whether its last byte is a newline (`write::Prefix`, which
+`CosDocument::prefix` reads from the last byte, so a streamed document asks
+its source for one byte), and every offset it writes is that length plus its
+own place. `incremental_update` is the original followed by that section,
+joined once; `DocumentEditor::save_update` hands back the section of the save
+`DocumentEditor::save` writes incrementally, so the document's bytes followed
+by it are that save, byte for byte. A signature's placeholder is reserved in
+the section with its offsets in the whole file, which is joined once because
+the digest covers it.
+
 An update to an **encrypted** document is sealed with that document's own key
 (7.6.2). It has to be: the appended objects sit under a trailer whose
 `/Encrypt` still stands, so they must speak whatever the original file speaks —
@@ -441,6 +453,9 @@ an uncounted one.
 In-module tests in `crates/tinker-pdf-cos/src/write.rs` pin the load-bearing
 invariants by name: `an_incremental_update_preserves_the_original_bytes_exactly`,
 `an_update_over_an_unchainable_document_writes_no_prev`,
+`edit/tests.rs`'s `an_update_section_is_written_without_copying_the_original`
+(the section copies none of the original, the whole save copies it once, and
+the two are one file whose update reopens at `Trust`),
 `the_cross_reference_table_always_has_its_free_head` (every entry exactly
 twenty bytes), `a_stream_that_already_declares_a_filter_is_handed_through_untouched`
 (both directions, so it cannot pass on a writer that stopped compressing),

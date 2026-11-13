@@ -179,6 +179,16 @@ pub const WRITERS: &[Writer] = &[
         beside: &[],
     },
     Writer {
+        entry: "write::update_section",
+        needle: "update_section(",
+        beside: &[],
+    },
+    Writer {
+        entry: "DocumentEditor::save_update",
+        needle: ".save_update(",
+        beside: &[],
+    },
+    Writer {
         entry: "linearize::linearize",
         needle: "linearize::linearize",
         beside: &[],

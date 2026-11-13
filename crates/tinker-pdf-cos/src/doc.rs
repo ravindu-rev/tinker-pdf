@@ -1118,6 +1118,33 @@ impl CosDocument {
         self.buffer.whole()
     }
 
+    /// What an update written after this document needs of it
+    /// (`crate::write::update_section`): its length, and whether its last
+    /// byte is a newline.
+    ///
+    /// Read from the last byte alone, so a streamed document asks its source
+    /// for one byte where [`CosDocument::bytes`] would fetch every one; only a
+    /// source that cannot supply that byte is fetched whole, and then the
+    /// prefix is the one those bytes make — the bytes a whole save writes
+    /// after, so the two cannot part.
+    #[must_use]
+    pub fn prefix(&self) -> crate::write::Prefix {
+        let len = self.buffer.len();
+        let Some(last) = len.checked_sub(1) else {
+            return crate::write::Prefix {
+                len,
+                ends_in_newline: false,
+            };
+        };
+        match self.buffer.window(last..len) {
+            Ok(byte) => crate::write::Prefix {
+                len,
+                ends_in_newline: byte.first() == Some(&b'\n'),
+            },
+            Err(_) => crate::write::Prefix::of(self.bytes()),
+        }
+    }
+
     /// The highest object number the cross-reference table knows.
     ///
     /// New objects start above it, so an edit cannot collide with something

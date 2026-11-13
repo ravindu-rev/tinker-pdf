@@ -314,6 +314,78 @@ fn an_incremental_save_keeps_the_original_bytes() {
     );
 }
 
+/// **An update section is written without copying the original.** The
+/// section [`DocumentEditor::save_update`] writes copies no byte of the
+/// document, and the whole save copies the document once, to put the section
+/// after it; the two are one file — the document's bytes, then the section —
+/// whose update reopens to the edit, so every offset the section states is
+/// counted from the document's start. A document that does not end in a
+/// newline gets one at the head of its section, and one that does gets none.
+/// An editor that changed nothing writes a section too: the free head, the
+/// trailer and its chain.
+#[test]
+fn an_update_section_is_written_without_copying_the_original() {
+    let options = WriteOptions {
+        mode: WriteMode::Incremental,
+        ..WriteOptions::default()
+    };
+    let mut bare = document(3).bytes().to_vec();
+    while matches!(bare.last(), Some(b'\n' | b'\r')) {
+        bare.pop();
+    }
+    let ended = [&bare[..], b"\n"].concat();
+    for bytes in [ended, bare] {
+        let doc = Arc::new(CosDocument::open(bytes.clone()).expect("it opens"));
+        let mut editor = DocumentEditor::new(Arc::clone(&doc));
+        assert!(editor.rotate_page(1, 90));
+        let note = editor.allocate();
+        editor.put(note, Object::Int(7));
+
+        let _ = crate::write::count::take();
+        let section = editor.save_update(&options);
+        assert_eq!(
+            crate::write::count::take(),
+            0,
+            "the section copies nothing of the document"
+        );
+        assert_eq!(
+            section.first() == Some(&b'\n'),
+            !bytes.ends_with(b"\n"),
+            "a newline first exactly when the document does not end in one"
+        );
+
+        let whole = editor.save(&options);
+        assert_eq!(
+            crate::write::count::take(),
+            bytes.len() as u64,
+            "the whole save copies the document once"
+        );
+        assert!(
+            whole == [&bytes[..], &section[..]].concat(),
+            "the save is the document's bytes and then the section"
+        );
+
+        let saved = CosDocument::open(whole).expect("the update reopens");
+        assert_eq!(
+            saved.ladder_level(),
+            crate::LadderLevel::Trust,
+            "every offset the section states is where its object is: {:?}",
+            saved.warnings()
+        );
+        assert!(saved.warnings().is_empty(), "{:?}", saved.warnings());
+        assert_eq!(saved.revisions().len(), 2, "chained to the document");
+        assert_eq!(saved.get(note).ok().as_deref(), Some(&Object::Int(7)));
+        assert_eq!(pages::collect(&saved)[1].rotation, 90);
+    }
+
+    let doc = document(1);
+    let editor = DocumentEditor::new(Arc::clone(&doc));
+    let _ = crate::write::count::take();
+    let section = editor.save_update(&options);
+    assert_eq!(crate::write::count::take(), 0);
+    assert!(editor.save(&options) == [doc.bytes(), &section[..]].concat());
+}
+
 #[test]
 fn appended_content_does_not_disturb_what_was_there() {
     let mut editor = DocumentEditor::new(document(1));

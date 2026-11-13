@@ -275,6 +275,42 @@ impl DocumentEditor {
         self.save_with(options, write::Sealing::from_options(options), work)
     }
 
+    /// The update an incremental save of these edits appends, **alone**: the
+    /// bytes [`DocumentEditor::save`] writes after the document's own under
+    /// [`WriteMode::Incremental`], whatever `options.mode` says — the same
+    /// objects, the same trailer and the same inherited encryption, with
+    /// [`WriteOptions::compress`] and [`WriteOptions::parallelism`] read as
+    /// that save reads them.
+    ///
+    /// Every offset in it counts from the document's start, so the document's
+    /// bytes followed by these are that save, byte for byte; and nothing of
+    /// the document's own bytes is read or copied to write it — its length
+    /// and its last byte are all an update needs ([`CosDocument::prefix`]),
+    /// so a streamed document is not fetched for it.
+    ///
+    /// [`CosDocument::prefix`]: crate::CosDocument::prefix
+    #[must_use]
+    pub fn save_update(&self, options: &WriteOptions) -> Vec<u8> {
+        let set = self.changed_set();
+        let trailer = self.update_trailer();
+        let key = self.doc.file_key();
+        let cipher = key.as_ref().map(|key| write::InheritedCipher { key });
+        write::update_section_reserving(
+            self.doc.prefix(),
+            &set,
+            &trailer,
+            self.doc.last_startxref(),
+            &write::UpdatePlan {
+                names: self.doc.names_table(),
+                compress: options.compress,
+                crypt: cipher.as_ref().map(|c| c as &dyn write::ObjectCipher),
+                reserved: None,
+                parallelism: options.parallelism,
+            },
+        )
+        .0
+    }
+
     /// Saves the edits as a document **sealed to recipients** rather than to
     /// a password (ISO 32000-2 7.6.5): a rewrite whose `/Encrypt` is the
     /// public-key handler's, `/Recipients` the envelopes `sealed` carries, and

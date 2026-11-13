@@ -983,6 +983,31 @@ endobj
     );
 }
 
+/// What an update written after a document needs to know of it: its length,
+/// and whether its last byte is a newline — never its bytes.
+///
+/// An update's offsets are the document's length plus their place in the
+/// update, and 7.5.6's update begins on a new line, so these two are all
+/// [`update_section`] reads of what it is written after.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Prefix {
+    /// How many bytes the document has.
+    pub len: u64,
+    /// Whether its last byte is `\n`. False for a document with no bytes.
+    pub ends_in_newline: bool,
+}
+
+impl Prefix {
+    /// The prefix `bytes` make.
+    #[must_use]
+    pub fn of(bytes: &[u8]) -> Prefix {
+        Prefix {
+            len: bytes.len() as u64,
+            ends_in_newline: bytes.last() == Some(&b'\n'),
+        }
+    }
+}
+
 /// Appends an incremental update to `original`.
 ///
 /// The result **starts with `original`, byte for byte**. That invariant is
@@ -991,6 +1016,9 @@ endobj
 ///
 /// `trailer` supplies `/Root`, `/Info` and `/ID`; `/Prev` and `/Size` are
 /// written for it.
+///
+/// The original followed by the section [`update_section`] writes after it,
+/// joined once: the one copy of the original a whole-file save makes.
 #[must_use]
 pub fn incremental_update(
     original: &[u8],
@@ -1015,6 +1043,79 @@ pub fn incremental_update(
         },
     )
     .0
+}
+
+/// The incremental update [`incremental_update`] appends to a document,
+/// alone: the bytes that follow `prefix`'s document in the file it writes.
+///
+/// A newline first when the document does not end in one (7.5.6), then each
+/// changed object, the cross-reference section of their rows and object
+/// zero's free head, and the trailer with its `/Size`, `/Prev` and `/ID` —
+/// every offset in it the document's length plus its place here, so the
+/// document's bytes followed by these are [`incremental_update`]'s file, byte
+/// for byte. Nothing of the document's own bytes is read or copied.
+#[must_use]
+pub fn update_section(
+    prefix: Prefix,
+    changed: &ObjectSet,
+    trailer: &Dict,
+    previous_startxref: u64,
+    names: &NameTable,
+    compress: bool,
+    crypt: Option<&dyn ObjectCipher>,
+) -> Vec<u8> {
+    update_section_reserving(
+        prefix,
+        changed,
+        trailer,
+        previous_startxref,
+        &UpdatePlan {
+            names,
+            compress,
+            crypt,
+            reserved: None,
+            parallelism: Parallelism::Serial,
+        },
+    )
+    .0
+}
+
+/// `original` followed by `section`, in one buffer of their sum's length.
+fn joined(original: &[u8], section: &[u8]) -> Vec<u8> {
+    count::copied(original.len());
+    let mut out = Vec::with_capacity(original.len().saturating_add(section.len()));
+    out.extend_from_slice(original);
+    out.extend_from_slice(section);
+    out
+}
+
+/// What the writer copies out of a document it writes after, counted for
+/// the update section's guard: compiled only under `cfg(test)` and kept per
+/// thread.
+#[cfg(test)]
+pub(crate) mod count {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static COPIED: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// `bytes` of an original copied into the output.
+    pub(crate) fn copied(bytes: usize) {
+        COPIED.with(|count| count.set(count.get().saturating_add(bytes as u64)));
+    }
+
+    /// The bytes copied on this thread since the last call, which starts the
+    /// count again from zero.
+    pub(crate) fn take() -> u64 {
+        COPIED.with(|count| count.replace(0))
+    }
+}
+
+/// The counter outside tests: nothing.
+#[cfg(not(test))]
+mod count {
+    pub(crate) fn copied(_bytes: usize) {}
 }
 
 /// How an incremental update is to be written, beyond what it is written over.
@@ -1052,14 +1153,45 @@ pub(crate) fn incremental_update_reserving(
     previous_startxref: u64,
     plan: &UpdatePlan<'_>,
 ) -> (Vec<u8>, Option<SignaturePlaceholder>) {
+    let (section, placeholder) = update_section_reserving(
+        Prefix::of(original),
+        changed,
+        trailer,
+        previous_startxref,
+        plan,
+    );
+    (joined(original, &section), placeholder)
+}
+
+/// [`update_section`], optionally appending one object whose bytes the caller
+/// has already serialised, as [`incremental_update_reserving`] does — the
+/// placeholder's fields at their offsets in the **whole file**, the document's
+/// length plus their place in the section, since that is the file a signature
+/// is patched and digested in.
+pub(crate) fn update_section_reserving(
+    prefix: Prefix,
+    changed: &ObjectSet,
+    trailer: &Dict,
+    previous_startxref: u64,
+    plan: &UpdatePlan<'_>,
+) -> (Vec<u8>, Option<SignaturePlaceholder>) {
     let (names, compress, crypt, reserved) = (plan.names, plan.compress, plan.crypt, plan.reserved);
-    let mut out = original.to_vec();
+    let mut out = Vec::new();
 
     // 7.5.6: an update begins on a new line so the appended section cannot be
     // mistaken for a continuation of whatever the original ended with.
-    if !out.ends_with(b"\n") {
+    if !prefix.ends_in_newline {
         out.push(b'\n');
     }
+
+    // Where a byte of the section stands in the whole file.
+    let base = prefix.len;
+    let at = |out: &[u8]| base.saturating_add(out.len() as u64);
+    let in_file = |local: usize| {
+        usize::try_from(base)
+            .unwrap_or(usize::MAX)
+            .saturating_add(local)
+    };
 
     let mut offsets: Vec<(u32, u64)> = Vec::with_capacity(changed.entries.len());
     // 7.6.2: an update inherits the original file's encryption, so the
@@ -1081,25 +1213,30 @@ pub(crate) fn incremental_update_reserving(
         crypt,
         plan.parallelism,
     );
+    // `write_entries` places each object in the section; the table states
+    // where it stands in the whole file.
+    for (_, offset) in &mut offsets {
+        *offset = base.saturating_add(*offset);
+    }
 
     // The signature object, if there is one: written verbatim, uncompressed
     // and unencrypted, with its reserved fields' offsets carried out.
     let mut placeholder = None;
     if let Some((num, reserved)) = reserved {
-        offsets.push((num, out.len() as u64));
+        offsets.push((num, at(&out)));
         out.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
-        let body_at = out.len();
+        let body_at = in_file(out.len());
         out.extend_from_slice(&reserved.bytes);
         out.extend_from_slice(b"\nendobj\n");
         placeholder = Some(SignaturePlaceholder {
-            contents_at: body_at + reserved.contents_at,
+            contents_at: body_at.saturating_add(reserved.contents_at),
             contents_len: reserved.contents_len,
-            byte_range_at: body_at + reserved.byte_range_at,
+            byte_range_at: body_at.saturating_add(reserved.byte_range_at),
             byte_range_len: reserved.byte_range_len,
         });
     }
 
-    let xref_at = out.len() as u64;
+    let xref_at = at(&out);
     write_classic_xref(&mut out, &offsets);
 
     // 14.4: an update keeps the document's permanent identifier and moves the
