@@ -32,7 +32,9 @@
 
 use std::mem::size_of;
 
-use super::{IccError, Reader, CURVE_ENTRIES, MAX_CLUT_ENTRIES, MAX_LUT_INPUTS};
+use super::{
+    IccError, Reader, CURVE_ENTRIES, MAX_CLUT_ENTRIES, MAX_DEVICE_CHANNELS, MAX_LUT_INPUTS,
+};
 
 /// The most processing elements one `multiProcessElementsType` tag may chain.
 ///
@@ -55,12 +57,28 @@ const ONE: i64 = 1 << 16;
 pub struct Pipeline {
     /// How many channels go in.
     inputs: usize,
+    /// How many channels come out: the connection space's three, or a
+    /// device link's output device's.
+    outputs: usize,
     /// The stages, in the order the tag lists its elements; the placeholders
     /// are left out, since they change nothing.
     stages: Vec<Stage>,
     /// Whether the connection space the last stage gives is `Lab` rather
     /// than `XYZ`, as the profile's header says.
     lab: bool,
+}
+
+/// What a tag's two ends are, which fixes the channel counts it is held to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ends {
+    /// A `D2B*` tag: the device's channels in, each held to `0..=1`, the
+    /// connection space's three out.
+    Forward,
+    /// A device link's `D2B0` (ICC.1 8.6, 8.10.3): `inputs` device channels
+    /// in, each held to `0..=1`, and the `outputs` of the device the link's
+    /// connection-space field names out, with no connection space at
+    /// either end.
+    Link { inputs: usize, outputs: usize },
 }
 
 /// One compiled processing element.
@@ -125,6 +143,27 @@ enum Segment {
 /// that decreases, a number that is not finite, a curve that is not finite
 /// over the inputs it is given.
 pub fn read(data: &[u8], lab: bool) -> Result<Pipeline, IccError> {
+    read_tag(data, lab, Ends::Forward)
+}
+
+/// A device link's `D2B0` (ICC.1 8.6, 8.10.3 a)), read from `data`: the
+/// `inputs` channels of the link's data space in, the `outputs` of the
+/// device its connection-space field names out, each a device value with no
+/// connection space at either end.
+///
+/// # Errors
+///
+/// [`read`]'s, and [`IccError::TooLarge`] for a tag giving more than
+/// [`MAX_DEVICE_CHANNELS`] channels, before any element is read, and
+/// [`IccError::UnsupportedSpace`] for one whose counts are not the two
+/// spaces'.
+pub fn read_link(data: &[u8], inputs: usize, outputs: usize) -> Result<Pipeline, IccError> {
+    read_tag(data, false, Ends::Link { inputs, outputs })
+}
+
+/// A `multiProcessElementsType` tag's pipeline, read from `data` between the
+/// two ends `ends` names.
+fn read_tag(data: &[u8], lab: bool, ends: Ends) -> Result<Pipeline, IccError> {
     let reader = Reader { bytes: data };
     if reader.sig(0) != Some(*b"mpet") {
         return Err(IccError::MalformedTag);
@@ -138,9 +177,16 @@ pub fn read(data: &[u8], lab: bool) -> Result<Pipeline, IccError> {
     if inputs > MAX_LUT_INPUTS || count > MAX_MPE_ELEMENTS {
         return Err(IccError::TooLarge);
     }
-    // Three is what the connection space is, and what a `D2B*` tag gives.
-    if outputs != 3 {
-        return Err(IccError::UnsupportedSpace);
+    match ends {
+        // Three is what the connection space is, and what a `D2B*` tag gives.
+        Ends::Forward if outputs != 3 => return Err(IccError::UnsupportedSpace),
+        Ends::Forward => {}
+        Ends::Link { .. } if outputs > MAX_DEVICE_CHANNELS => return Err(IccError::TooLarge),
+        Ends::Link {
+            inputs: data_space,
+            outputs: device,
+        } if inputs != data_space || outputs != device => return Err(IccError::UnsupportedSpace),
+        Ends::Link { .. } => {}
     }
 
     // The elements, located, and every one's type known before any is
@@ -203,6 +249,7 @@ pub fn read(data: &[u8], lab: bool) -> Result<Pipeline, IccError> {
     }
     Ok(Pipeline {
         inputs,
+        outputs,
         stages,
         lab,
     })
@@ -288,6 +335,11 @@ impl Pipeline {
         self.lab
     }
 
+    /// How many channels the pipeline gives.
+    pub fn outputs(&self) -> usize {
+        self.outputs
+    }
+
     /// The connection-space value for `components`, each clamped to `0..=1`,
     /// in its own units: XYZ with the PCS white's `Y` at one, or `L*` from
     /// nought to a hundred and `a*` and `b*` as they are (6.3.4.2).
@@ -295,16 +347,34 @@ impl Pipeline {
     /// Integer throughout: the floats are the caller's components on the way
     /// in and the answer on the way out.
     pub fn evaluate(&self, components: &[f64]) -> [f64; 3] {
+        let values = self.run(components);
+        [0, 1, 2].map(|channel| values.get(channel).copied().unwrap_or(0) as f64 / ONE as f64)
+    }
+
+    /// Every channel the pipeline gives `components`, each clamped to
+    /// `0..=1` on the way in — a device link's output device values — in
+    /// the order the tag's last element gives them.
+    pub fn evaluate_all(&self, components: &[f64]) -> Vec<f64> {
+        self.run(components)
+            .into_iter()
+            .map(|value| value as f64 / ONE as f64)
+            .collect()
+    }
+
+    /// The stages over `components`, in s15.16: a component that is not a
+    /// number is zero, and each is held to `0..=1`.
+    fn run(&self, components: &[f64]) -> Vec<i64> {
         let mut values: Vec<i64> = (0..self.inputs)
             .map(|channel| {
                 let value = components.get(channel).copied().unwrap_or(0.0);
+                let value = if value.is_nan() { 0.0 } else { value };
                 fixed(value.clamp(0.0, 1.0))
             })
             .collect();
         for stage in &self.stages {
             values = stage.apply(&values);
         }
-        [0, 1, 2].map(|channel| values.get(channel).copied().unwrap_or(0) as f64 / ONE as f64)
+        values
     }
 }
 

@@ -1876,7 +1876,7 @@ fn ledger() -> Vec<Bound> {
             name: "MAX_ICC_TAGS",
             cap: MAX_ICC_TAGS as u128,
             published: "1 024",
-            // `srgb-first-party.icc`, the busiest of the thirteen `.icc` seeds
+            // `srgb-first-party.icc`, the busiest of the fourteen `.icc` seeds
             // `fuzz/corpus/icc_profile/` commits, which the `icc_profile`
             // target hands straight to `Profile::parse`. No `.pdf` or `.xps`
             // fixture in this repository embeds a profile at all — measured,
@@ -1914,7 +1914,7 @@ fn ledger() -> Vec<Bound> {
             name: "MAX_ICC_BYTES",
             cap: MAX_ICC_BYTES as u128,
             published: "2 MiB",
-            // `srgb-first-party.icc`, the largest of the thirteen committed
+            // `srgb-first-party.icc`, the largest of the fourteen committed
             // seeds: the engine's own sRGB profile, which `tinker-pdf-color`'s
             // `build.rs` computes.
             fixtures: 2_624,

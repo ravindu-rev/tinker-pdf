@@ -34,7 +34,8 @@
 //! The other direction, from the connection space to a profile's device
 //! components, is [`Output`]: through a `B2A*` table — `mft1`, `mft2` or
 //! v4's `mBA ` — or a matrix/TRC or grey model inverted when it is built and
-//! integer per colour (`docs/design/icc.md`, "The output transform").
+//! integer per colour (`docs/design/icc.md`, "The output transform"). A
+//! device link, which takes one device's values to another's, is [`Link`].
 //!
 //! The same census found the versions: v2 2 739, v4 9, v5 2. So v2 is not a
 //! legacy case to tolerate on the way to v4 — it is the case, and the two
@@ -80,7 +81,7 @@ mod mpe;
 mod output;
 
 pub use mpe::MAX_MPE_ELEMENTS;
-pub use output::{lab_to_xyz, xyz_to_lab, DeviceColour, Output, MAX_DEVICE_CHANNELS};
+pub use output::{lab_to_xyz, xyz_to_lab, DeviceColour, Link, Output, MAX_DEVICE_CHANNELS};
 
 /// A rendering intent: ICC.1's four (6.1), the ones a transform is compiled
 /// for.
@@ -642,8 +643,125 @@ pub struct Tables {
     output_slots: [Option<usize>; 3],
     /// One a distinct `B2A*` element, in the order the tags first name them.
     outputs: Vec<Element<Lut>>,
+    /// A device link's `A2B0` and `D2B0`, from one device to another
+    /// (ICC.1 8.6): located only for a profile of class `link`, and never
+    /// an intent's table.
+    link: Option<LinkTags>,
     /// Whether the connection space is `Lab` rather than `XYZ`.
     lab: bool,
+}
+
+/// What a device link (ICC.1 8.6) converts through: its `D2B0`, which
+/// 8.10.3 a) puts first where it reads, and its `A2B0`, each kept unread
+/// until [`Profile::parse`] reads it.
+#[derive(Clone, Debug, PartialEq)]
+struct LinkTags {
+    /// The data space's channels, which the link takes.
+    inputs: usize,
+    /// The channels of the space the connection-space field names, which
+    /// the link gives (7.2.7).
+    outputs: usize,
+    /// The `A2B0` tag's element: `mft1`, `mft2` or `mAB `.
+    table: Option<Element<Lut>>,
+    /// The `D2B0` tag's element, a `multiProcessElementsType`.
+    pipeline: Option<Element<mpe::Pipeline>>,
+}
+
+/// What a device link's transform runs through.
+#[derive(Clone, Debug, PartialEq)]
+enum LinkSource {
+    /// Its `A2B0`: `mft1`, `mft2` or `mAB `.
+    Table(Arc<Lut>),
+    /// Its `D2B0`'s elements.
+    Elements(Arc<mpe::Pipeline>),
+}
+
+impl LinkTags {
+    /// The link's tags at `table` and `pipeline` — `A2B0`'s and `D2B0`'s
+    /// offset and size in `bytes`, where the profile carries them — unread,
+    /// between a data space of `inputs` channels and an output space of
+    /// `outputs`.
+    fn locate(
+        inputs: usize,
+        outputs: usize,
+        table: Option<(usize, usize)>,
+        pipeline: Option<(usize, usize)>,
+        bytes: &[u8],
+    ) -> Result<LinkTags, IccError> {
+        let (_, mut tables) = Element::locate([table], bytes)?;
+        let (_, mut pipelines) = Element::locate([pipeline], bytes)?;
+        Ok(LinkTags {
+            inputs,
+            outputs,
+            table: tables.pop(),
+            pipeline: pipelines.pop(),
+        })
+    }
+
+    /// What the link converts through, read now if nothing has read it yet:
+    /// its `D2B0` where that reads, as ICC.1 8.10.3 a) has it, and otherwise
+    /// its `A2B0`. A `D2B0` that does not read is passed over; where neither
+    /// reads, the `A2B0`'s refusal, else the `D2B0`'s, else
+    /// [`IccError::MissingTags`] for a link carrying neither.
+    fn source(&self) -> Result<LinkSource, IccError> {
+        let pipeline = self
+            .pipeline
+            .as_ref()
+            .map(|element| element.read(|bytes| mpe::read_link(bytes, self.inputs, self.outputs)));
+        if let Some(Ok(pipeline)) = &pipeline {
+            return Ok(LinkSource::Elements(Arc::clone(pipeline)));
+        }
+        let table = self.table.as_ref().map(|element| {
+            element.read(|bytes| {
+                read_lut(
+                    bytes,
+                    false,
+                    Direction::Link {
+                        inputs: self.inputs,
+                        outputs: self.outputs,
+                    },
+                )
+            })
+        });
+        match (table, pipeline) {
+            (Some(Ok(table)), _) => Ok(LinkSource::Table(table)),
+            (Some(Err(error)), _) | (None, Some(Err(error))) => Err(error),
+            (None, _) => Err(IccError::MissingTags),
+        }
+    }
+
+    /// Lets go of the bytes of each tag that has been read.
+    fn release_read(&mut self) {
+        if let Some(table) = &mut self.table {
+            table.release_read();
+        }
+        if let Some(pipeline) = &mut self.pipeline {
+            pipeline.release_read();
+        }
+    }
+
+    /// The most bytes the link's tags can come to hold, read or not.
+    fn held_bound(&self) -> usize {
+        let table = self.table.as_ref().map_or(0, |table| {
+            table.held_bound(Lut::held_bytes, |raw| lut_bound(raw.len()))
+        });
+        let pipeline = self.pipeline.as_ref().map_or(0, |pipeline| {
+            pipeline.held_bound(mpe::Pipeline::held_bytes, mpe::bound)
+        });
+        table.saturating_add(pipeline)
+    }
+
+    /// The bytes the link's tags hold now.
+    #[cfg(test)]
+    fn held(&self) -> usize {
+        self.table
+            .as_ref()
+            .map_or(0, |table| table.held(Lut::held_bytes))
+            + self
+                .pipeline
+                .as_ref()
+                .map_or(0, |pipeline| pipeline.held(mpe::Pipeline::held_bytes))
+    }
 }
 
 impl Tables {
@@ -669,6 +787,7 @@ impl Tables {
             pipelines,
             output_slots,
             outputs,
+            link: None,
             lab,
         })
     }
@@ -683,6 +802,7 @@ impl Tables {
             pipelines: Vec::new(),
             output_slots: [None; 3],
             outputs: Vec::new(),
+            link: None,
             lab,
         }
     }
@@ -733,6 +853,9 @@ impl Tables {
         }
         for pipeline in &mut self.pipelines {
             pipeline.release_read();
+        }
+        if let Some(link) = &mut self.link {
+            link.release_read();
         }
     }
 }
@@ -1019,6 +1142,15 @@ enum Direction {
     Output {
         /// How many channels the profile's data space has.
         channels: usize,
+    },
+    /// A device link's `A2B0` (ICC.1 8.6): one device's channels in and
+    /// another's out, with no connection space at either end.
+    Link {
+        /// How many channels the link's data space has.
+        inputs: usize,
+        /// How many channels the space its connection-space field names
+        /// has: the device it converts to.
+        outputs: usize,
     },
 }
 
@@ -1965,6 +2097,47 @@ impl Profile {
                 .find(|(s, _, _)| s == want)
                 .map(|(_, offset, size)| &bytes[*offset..*offset + *size])
         };
+        let place = |want: &[u8; 4]| {
+            tags.iter()
+                .find(|(s, _, _)| s == want)
+                .map(|&(_, offset, size)| (offset, size))
+        };
+        // The media white, which only ICC-absolute colorimetry reads
+        // (6.2.3): one that is absent or does not read leaves the profile
+        // with the PCS white for it (`Profile::media_scale`), and refuses
+        // nothing a relative transform could be built from.
+        let white = find(b"wtpt").and_then(|data| read_xyz(data).ok());
+
+        // A device link (8.6) converts one device's values to another's: its
+        // connection-space field names the space its transform gives, a
+        // device's (7.2.7), and it carries one `AToB0`, or a `DToB0` that
+        // 8.10.3 a) reads first. It is read now, so a link nothing in it
+        // converts through is refused here, and it is never an intent's
+        // source: no transform to sRGB is built from it.
+        if &class == b"link" {
+            let inputs = channels(space).ok_or(IccError::UnsupportedSpace)?;
+            let outputs = channels(pcs).ok_or(IccError::UnsupportedSpace)?;
+            let mut link = LinkTags::locate(
+                usize::from(inputs),
+                usize::from(outputs),
+                place(b"A2B0"),
+                place(b"D2B0"),
+                bytes,
+            )?;
+            link.source()?;
+            link.release_read();
+            let mut tables = Tables::none(false);
+            tables.link = Some(link);
+            return Ok(Profile {
+                space,
+                pcs,
+                class,
+                version,
+                model: None,
+                tables,
+                white,
+            });
+        }
 
         let has_matrix =
             find(b"rXYZ").is_some() && find(b"gXYZ").is_some() && find(b"bXYZ").is_some();
@@ -1985,11 +2158,6 @@ impl Profile {
         if model.is_none() && !tables_convert {
             return Err(IccError::UnsupportedPcs);
         }
-        let place = |want: &[u8; 4]| {
-            tags.iter()
-                .find(|(s, _, _)| s == want)
-                .map(|&(_, offset, size)| (offset, size))
-        };
         let mut tables = if tables_convert {
             Tables::locate(
                 [place(b"A2B0"), place(b"A2B1"), place(b"A2B2")],
@@ -2059,12 +2227,6 @@ impl Profile {
             });
         }
         tables.release_read();
-
-        // The media white, which only ICC-absolute colorimetry reads
-        // (6.2.3): one that is absent or does not read leaves the profile
-        // with the PCS white for it (`Profile::media_scale`), and refuses
-        // nothing a relative transform could be built from.
-        let white = find(b"wtpt").and_then(|data| read_xyz(data).ok());
 
         Ok(Profile {
             space,
@@ -2142,8 +2304,12 @@ fn read_lut(data: &[u8], lab: bool, direction: Direction) -> Result<Lut, IccErro
         (s, _) if &s == b"mft1" => false,
         // `mAB ` and `mBA ` are v4's, and a different structure: five
         // optional stages where v2 has three fixed ones, each carrying its
-        // own offset, one type a direction.
-        (s, Direction::Forward) if &s == b"mAB " => return read_mab(data, lab),
+        // own offset, one type a direction. A device link's `AToB0` is an
+        // `mAB ` too (8.6), from one device to another.
+        (s, Direction::Forward) if &s == b"mAB " => return read_mab(data, lab, None),
+        (s, Direction::Link { inputs, outputs }) if &s == b"mAB " => {
+            return read_mab(data, false, Some((inputs, outputs)))
+        }
         (s, Direction::Output { channels }) if &s == b"mBA " => {
             return read_mba(data, lab, channels)
         }
@@ -2180,6 +2346,16 @@ fn read_lut(data: &[u8], lab: bool, direction: Direction) -> Result<Lut, IccErro
         }
         Direction::Output { .. } if inputs != 3 => return Err(IccError::MalformedTag),
         Direction::Output { .. } => {}
+        // A link's two sides are two devices: the output count held to the
+        // most channels a data space has before a curve is read, then each
+        // count to its space's, the data space's and the one the
+        // connection-space field names (7.2.7).
+        Direction::Link { .. } if outputs > MAX_DEVICE_CHANNELS => return Err(IccError::TooLarge),
+        Direction::Link {
+            inputs: data,
+            outputs: device,
+        } if inputs != data || outputs != device => return Err(IccError::UnsupportedSpace),
+        Direction::Link { .. } => {}
     }
     // `grid.pow(inputs)` is the branch this format hides in two bytes.
     let points = grid
@@ -2193,7 +2369,8 @@ fn read_lut(data: &[u8], lab: bool, direction: Direction) -> Result<Lut, IccErro
     // The 3x3 matrix at offset 12 applies only when the input is the connection
     // space in XYZ (10.8, 10.9): at an `A2B*` tag it is not, and the matrix is
     // read past; at a `B2A*` tag over XYZ it is, and a matrix other than the
-    // identity is kept. Over Lab the clause has it the identity.
+    // identity is kept. Over Lab the clause has it the identity, and a link's
+    // input is a device's, so it is read past there too.
     let input_matrix = match direction {
         Direction::Output { .. } if !lab => {
             let mut e = [0.0f64; 9];
@@ -2365,7 +2542,13 @@ fn sample_curve(curve: &Curve, entries: usize) -> Vec<u16> {
 ///
 /// Its Lab connection space, like `mBA `'s, is each component's range over
 /// the whole currency (10.10.1): `L*` 100 at `FFFFh`, not `mft2`'s `FF00h`.
-fn read_mab(data: &[u8], lab: bool) -> Result<Lut, IccError> {
+///
+/// At a device link's `A2B0` (8.6), `link` gives the data space's channels
+/// and the output device's, which the tag's two counts are held to — the
+/// output count to [`MAX_DEVICE_CHANNELS`] first, before any stage is read.
+/// The matrix is three by three and the M curves one an output channel
+/// (10.10.4, 10.10.5), so a tag carrying either has three outputs.
+fn read_mab(data: &[u8], lab: bool, link: Option<(usize, usize)>) -> Result<Lut, IccError> {
     let reader = Reader { bytes: data };
     let byte = |at: usize| data.get(at).copied().ok_or(IccError::MalformedTag);
     let inputs = byte(8)? as usize;
@@ -2373,12 +2556,22 @@ fn read_mab(data: &[u8], lab: bool) -> Result<Lut, IccError> {
     if inputs == 0 || inputs > MAX_LUT_INPUTS {
         return Err(IccError::MalformedTag);
     }
-    // Three is what the connection space is, and what `to_rgb` reads.
-    if outputs != 3 {
-        return Err(IccError::UnsupportedSpace);
+    match link {
+        // Three is what the connection space is, and what `to_rgb` reads.
+        None if outputs != 3 => return Err(IccError::UnsupportedSpace),
+        None => {}
+        Some(_) if outputs == 0 => return Err(IccError::MalformedTag),
+        Some(_) if outputs > MAX_DEVICE_CHANNELS => return Err(IccError::TooLarge),
+        Some((data_space, device)) if inputs != data_space || outputs != device => {
+            return Err(IccError::UnsupportedSpace)
+        }
+        Some(_) => {}
     }
 
     let [b_at, matrix_at, m_at, clut_at, a_at] = v4_offsets(&reader)?;
+    if (matrix_at != 0 || m_at != 0) && outputs != 3 {
+        return Err(IccError::MalformedTag);
+    }
 
     // The A curves are per *input* and the M and B curves per output.
     let input_tables = if a_at == 0 {
@@ -3536,7 +3729,11 @@ impl Tables {
             .pipelines
             .iter()
             .map(|pipeline| pipeline.held_bound(mpe::Pipeline::held_bytes, mpe::bound));
-        tables.chain(pipelines).fold(lists, usize::saturating_add)
+        let link = self.link.as_ref().map_or(0, LinkTags::held_bound);
+        tables
+            .chain(pipelines)
+            .fold(lists, usize::saturating_add)
+            .saturating_add(link)
     }
 
     /// The most bytes a transform's grid over one of the tables or pipelines
@@ -3577,7 +3774,8 @@ impl Tables {
             .iter()
             .map(|pipeline| pipeline.held(mpe::Pipeline::held_bytes))
             .sum();
-        lists + tables + pipelines
+        let link = self.link.as_ref().map_or(0, LinkTags::held);
+        lists + tables + pipelines + link
     }
 }
 
@@ -3808,11 +4006,19 @@ pub(crate) mod tests {
             /// Parses, and every intent's transform out of the connection
             /// space compiles too, so the target drives `Output` as well.
             Output,
+            /// Parses as a device link, whose transform the target drives,
+            /// and builds no transform to sRGB.
+            Link,
             /// Refused by name, after the tag table was walked.
             Refusal(IccError),
         }
 
-        let seeds: [(&str, Vec<u8>, Reaches); 13] = [
+        let seeds: [(&str, Vec<u8>, Reaches); 14] = [
+            // A CMYK-to-CMYK device link carrying a `D2B0`, a matrix that
+            // swaps two inks and halves a third, and an `mft2` `A2B0` beside
+            // it: the seed that reaches the link readers, the elements first
+            // as ICC.1 8.10.3 has them and the table where they break.
+            ("link-cmyk", link_seed(), Reaches::Link),
             // A CMYK printer profile carrying both directions over Lab: an
             // `A2B0` of four inks to the connection space and a `B2A0` back,
             // each an `mft2`, the seed that reaches the output tables.
@@ -3925,6 +4131,16 @@ pub(crate) mod tests {
         for (name, bytes, reaches) in &seeds {
             let got = Profile::parse(bytes);
             match reaches {
+                Reaches::Link => {
+                    let profile = got.unwrap_or_else(|e| panic!("{name}: {e:?}"));
+                    assert!(Link::compile(&profile).is_ok(), "{name}: no link");
+                    for intent in Intent::ALL {
+                        assert!(
+                            Transform::compile(&profile, intent).is_none(),
+                            "{name}: a link built a transform to sRGB"
+                        );
+                    }
+                }
                 Reaches::Transform | Reaches::Output => {
                     let profile = got.unwrap_or_else(|e| panic!("{name}: {e:?}"));
                     for intent in Intent::ALL {
@@ -4008,6 +4224,42 @@ pub(crate) mod tests {
                     *b"B2A0",
                     graded_mft2(3, 4, |node, channel| {
                         (((node * 5 + channel * 3) % 17) * 3855) as u16
+                    }),
+                ),
+            ],
+        )
+    }
+
+    /// The `link-cmyk` seed: a CMYK-to-CMYK device link (ICC.1 8.6) whose
+    /// `D2B0` is one matrix element taking `(c, m, y, k)` to `(m, c, y, k/2
+    /// + 1/4)`, and whose `A2B0`, an `mft2` over a two-point grid, gives node
+    /// `n`'s channel `c` `((3n + 7c) mod 13) × 5 041`.
+    fn link_seed() -> Vec<u8> {
+        build_as(
+            b"link",
+            b"CMYK",
+            b"CMYK",
+            &[
+                (
+                    *b"D2B0",
+                    mpet(
+                        4,
+                        4,
+                        &[matf(
+                            &[
+                                vec![0.0, 1.0, 0.0, 0.0],
+                                vec![1.0, 0.0, 0.0, 0.0],
+                                vec![0.0, 0.0, 1.0, 0.0],
+                                vec![0.0, 0.0, 0.0, 0.5],
+                            ],
+                            &[0.0, 0.0, 0.0, 0.25],
+                        )],
+                    ),
+                ),
+                (
+                    *b"A2B0",
+                    graded_mft2(4, 4, |node, channel| {
+                        (((node * 3 + channel * 7) % 13) * 5041) as u16
                     }),
                 ),
             ],
@@ -4309,6 +4561,143 @@ pub(crate) mod tests {
         assert_eq!(
             Output::compile(&falling, Intent::Perceptual),
             Err(IccError::NoInverse)
+        );
+
+        // A device link with no `A2B0` (8.6 requires one), and nothing else
+        // to convert through.
+        let empty_link = build_as(
+            b"link",
+            b"CMYK",
+            b"CMYK",
+            &[(*b"wtpt", xyz(0.9642, 1.0, 0.8249))],
+        );
+        assert_eq!(Profile::parse(&empty_link), Err(IccError::MissingTags));
+        // One whose connection-space field names no space a registry
+        // defines, so nothing says how many channels it gives.
+        let unnamed = build_as(
+            b"link",
+            b"CMYK",
+            b"YYY ",
+            &[(*b"A2B0", graded_mft2(4, 3, |_, _| 0))],
+        );
+        assert_eq!(Profile::parse(&unnamed), Err(IccError::UnsupportedSpace));
+        // One whose table gives another count than that space has.
+        let miscounted = build_as(
+            b"link",
+            b"CMYK",
+            b"RGB ",
+            &[(*b"A2B0", graded_mft2(4, 4, |_, _| 0))],
+        );
+        assert_eq!(Profile::parse(&miscounted), Err(IccError::UnsupportedSpace));
+    }
+
+    /// **A device link reads its `D2B0` before its `A2B0`** (ICC.1 8.10.3):
+    /// the link seed's matrix element answers where it reads, its `mft2`
+    /// where the element is one this build does not read, and a link whose
+    /// only tag does not read is refused for it, by name. Its counts are
+    /// held before anything is read — sixteen outputs is too many, a table
+    /// of four inputs for a space of three another space — and an `mAB `
+    /// with a matrix or M curves gives the matrix's three channels or is
+    /// malformed. A link builds no transform to sRGB, nor one out of the
+    /// connection space, and its tags are counted in the profile's bound.
+    #[test]
+    fn a_link_reads_its_d2b0_before_its_a2b0() {
+        let profile = Profile::parse(&link_seed()).expect("the link seed parses");
+        let link = Link::compile(&profile).expect("a link");
+        assert_eq!((link.inputs(), link.channels()), (4, 4));
+        assert_eq!(link.output_space(), *b"CMYK");
+        let got = link.apply(&[0.2, 0.6, 0.4, 0.8]);
+        let want = [0.6, 0.2, 0.4, 0.8 * 0.5 + 0.25].map(|v: f64| (v * 65535.0).round());
+        for (got, want) in got.channels().iter().zip(want) {
+            assert!(
+                (f64::from(*got) - want).abs() <= 2.0,
+                "the D2B0's matrix: {:?} against {want:?}",
+                got
+            );
+        }
+        for intent in Intent::ALL {
+            assert!(Transform::compile(&profile, intent).is_none(), "{intent:?}");
+            assert_eq!(
+                Output::compile(&profile, intent),
+                Err(IccError::MissingTags)
+            );
+            assert_eq!(profile.connection_value(intent, &[0.5; 4]), None);
+        }
+        assert!(Transforms::compile(profile.clone()).is_none());
+        assert!(profile.tables.held_bound() >= profile.tables.held());
+
+        // The D2B0 broken: the A2B0, node by node at the grid's corners.
+        let table = graded_mft2(4, 4, |node, channel| {
+            (((node * 3 + channel * 7) % 13) * 5041) as u16
+        });
+        let broken = mpet(4, 4, &[element_of(b"JtoX", 4, 4, &[0; 16])]);
+        let fallen = build_as(
+            b"link",
+            b"CMYK",
+            b"CMYK",
+            &[(*b"D2B0", broken.clone()), (*b"A2B0", table.clone())],
+        );
+        let link =
+            Link::compile(&Profile::parse(&fallen).expect("the A2B0 serves")).expect("a link");
+        for node in 0..16usize {
+            let corner: Vec<f64> = (0..4)
+                .map(|axis| ((node >> (3 - axis)) & 1) as f64)
+                .collect();
+            let got = link.apply(&corner);
+            for (channel, value) in got.channels().iter().enumerate() {
+                let want = (((node * 3 + channel * 7) % 13) * 5041) as u16;
+                assert!(
+                    value.abs_diff(want) <= 1,
+                    "node {node}, channel {channel}: {value} against {want}"
+                );
+            }
+        }
+        // Alone, the broken D2B0 refuses the link by the element's name.
+        let alone = build_as(b"link", b"CMYK", b"CMYK", &[(*b"D2B0", broken)]);
+        assert_eq!(
+            Profile::parse(&alone),
+            Err(IccError::UnsupportedElement(*b"JtoX"))
+        );
+
+        // Counts held before anything is read.
+        let link_of = |inputs, outputs| Direction::Link { inputs, outputs };
+        assert_eq!(
+            read_lut(&graded_mft2(4, 16, |_, _| 0), false, link_of(4, 15)),
+            Err(IccError::TooLarge),
+            "sixteen outputs"
+        );
+        assert_eq!(
+            read_lut(&graded_mft2(4, 4, |_, _| 0), false, link_of(3, 4)),
+            Err(IccError::UnsupportedSpace),
+            "four inputs for a space of three"
+        );
+        assert_eq!(
+            mpe::read_link(&mpet(4, 16, &[element_of(b"matf", 4, 16, &[])]), 4, 15),
+            Err(IccError::TooLarge),
+            "sixteen outputs in elements"
+        );
+        let with_matrix = V4Stages {
+            b: identities(4),
+            matrix: Some([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+            m: identities(4),
+            clut: Some((vec![2, 2, 2], vec![0; 8 * 4])),
+            a: identities(3),
+        };
+        assert_eq!(
+            read_lut(&with_matrix.tag(b"mAB ", 3, 4), false, link_of(3, 4)),
+            Err(IccError::MalformedTag),
+            "a matrix with four outputs"
+        );
+        let plain = V4Stages {
+            matrix: None,
+            m: Vec::new(),
+            ..with_matrix
+        };
+        assert!(read_lut(&plain.tag(b"mAB ", 3, 4), false, link_of(3, 4)).is_ok());
+        assert_eq!(
+            read_lut(&plain.tag(b"mBA ", 3, 4), false, link_of(3, 4)),
+            Err(IccError::NeedsLut),
+            "an mBA at a link's A2B0"
         );
     }
 

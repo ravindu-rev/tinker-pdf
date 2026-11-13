@@ -21,7 +21,11 @@
 //! falling curve is a typed refusal (`docs/design/icc.md`, "The output
 //! transform"); and the connection-space value each intent's source gives,
 //! which that transform takes from another profile, is read for components
-//! of every count.
+//! of every count. A device link — class `link`, its connection-space field
+//! naming the device it converts to — reads its `D2B0` or `A2B0` (`mft1`,
+//! `mft2` or `mAB `) when it is parsed, and its transform is applied to
+//! components of every count, where a table whose counts are not the two
+//! spaces' is a typed refusal (`docs/design/icc.md`, "Device links").
 //!
 //! # What this target checks, and what it does not
 //!
@@ -42,12 +46,16 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use tinker_pdf_color::icc::{Intent, Output, Profile, Transform, Transforms};
+use tinker_pdf_color::icc::{Intent, Link, Output, Profile, Transform, Transforms};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(profile) = Profile::parse(data) else {
         return;
     };
+    // A device link's transform, device to device, where the profile is one.
+    if let Ok(link) = Link::compile(&profile) {
+        link_all(&link);
+    }
     // Every intent's transform, each compiled on its own and through the set
     // a colour space carries: an intent reads a table relative colorimetric's
     // parse did not, so a hostile `A2B0` or `A2B2` is reached only here.
@@ -86,6 +94,23 @@ fn connection_all(profile: &Profile, intent: Intent) {
     ];
     for components in sets {
         let _ = profile.connection_value(intent, components);
+    }
+}
+
+/// A device link must answer for any components: in range, past either end,
+/// not numbers, and too few or too many of them.
+fn link_all(link: &Link) {
+    let sets: [&[f64]; 7] = [
+        &[0.0; 15],
+        &[1.0; 15],
+        &[0.5, 0.25, 0.75, 0.125],
+        &[-1.0, 2.0, f64::NAN, 0.5],
+        &[f64::INFINITY, f64::NEG_INFINITY, 0.0],
+        &[0.5],
+        &[],
+    ];
+    for components in sets {
+        let _ = link.apply(components);
     }
 }
 

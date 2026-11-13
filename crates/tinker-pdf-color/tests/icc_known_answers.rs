@@ -18,7 +18,9 @@
 //! them — and one device unit for the rounding of the entries
 //! (`docs/design/icc.md`, "The output transform").
 
-use tinker_pdf_color::icc::{Intent, Model, Output, Profile, PCS_WHITE};
+use tinker_pdf_color::icc::{
+    IccError, Intent, Link, Model, Output, Profile, Transform, Transforms, PCS_WHITE,
+};
 
 /// Entries in an inverted curve: the engine's compiled-curve resolution.
 const ENTRIES: f64 = 4096.0;
@@ -89,9 +91,20 @@ fn para_tag(function: u16, params: &[f64]) -> Vec<u8> {
 
 /// A version 4 display profile in `space` and `pcs` carrying `tags`.
 fn profile(space: &[u8; 4], pcs: &[u8; 4], tags: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    profile_of(b"mntr", space, pcs, tags)
+}
+
+/// A version 4 profile of device class `class` in `space` and `pcs`
+/// carrying `tags`.
+fn profile_of(
+    class: &[u8; 4],
+    space: &[u8; 4],
+    pcs: &[u8; 4],
+    tags: &[([u8; 4], Vec<u8>)],
+) -> Vec<u8> {
     let mut out = vec![0u8; 128];
     out[8..12].copy_from_slice(&0x0430_0000u32.to_be_bytes());
-    out[12..16].copy_from_slice(b"mntr");
+    out[12..16].copy_from_slice(class);
     out[16..20].copy_from_slice(space);
     out[20..24].copy_from_slice(pcs);
     out[36..40].copy_from_slice(b"acsp");
@@ -1073,7 +1086,6 @@ enum Slot {
 /// only sources do not read is, for the first reason.
 #[test]
 fn the_relative_colorimetric_b2a_is_chosen_first() {
-    use tinker_pdf_color::icc::IccError;
     let broken = {
         let mut bytes = b"mft2".to_vec();
         bytes.extend_from_slice(&[0; 8]);
@@ -1611,7 +1623,6 @@ fn mba_profile(table: &V4Table) -> Profile {
 /// curves. At an `A2B*` tag an `mBA ` stays refused by name.
 #[test]
 fn an_mba_tag_runs_its_stages_in_icc_1s_order() {
-    use tinker_pdf_color::icc::IccError;
     let full = every_stage();
     let forms = [
         ("every stage", full.clone()),
@@ -1782,4 +1793,463 @@ fn a_v4_table_reads_and_writes_lab_in_its_own_encoding() {
             "a*, b* 0 lie at 80h over FFh: {channels:?}"
         );
     }
+}
+
+// ---- device links ------------------------------------------------------------
+//
+// A device link (ICC.1 8.6) takes one device's values to another's through its
+// one `AToB0` — `lut8Type`, `lut16Type` or `lutAToBType` — with no connection
+// space at either end: its data space is the space it takes, and its
+// connection-space field names the space it gives (7.2.7). Each structure's
+// stages run as they do at any `A2B*` tag: input or A curves, the grid, output
+// or B curves (10.8, 10.9, 10.10).
+
+/// Which of the three structures a link's `A2B0` is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Form {
+    /// `lut8Type`, `mft1`.
+    Lut8,
+    /// `lut16Type`, `mft2`.
+    Lut16,
+    /// `lutAToBType`, `mAB `: A curves, a grid, B curves.
+    AToB,
+}
+
+/// A link's `A2B0` over `inputs` channels to `outputs`, laid out and
+/// recomputed here.
+#[derive(Clone, Debug)]
+struct LinkTable {
+    form: Form,
+    inputs: usize,
+    outputs: usize,
+    /// Grid points along each input axis; `mft1` and `mft2` write one count
+    /// for every axis.
+    grids: Vec<usize>,
+    /// `mft1`'s and `mft2`'s input curves, in the type's own width.
+    input_curves: Vec<Vec<u16>>,
+    /// `mAB `'s A curves, one a gamma an input, as `para` tags of type 0.
+    a_gammas: Vec<f64>,
+    /// The grid's entries, `outputs` a node, the last input's axis fastest,
+    /// in the type's own width: an `mft1`'s bytes, an `mft2`'s and an
+    /// `mAB `'s 16-bit values.
+    clut: Vec<u16>,
+    /// `mft1`'s and `mft2`'s output curves, in the type's own width.
+    output_curves: Vec<Vec<u16>>,
+    /// `mAB `'s B curves, one a gamma an output.
+    b_gammas: Vec<f64>,
+}
+
+impl LinkTable {
+    /// The `A2B0` tag's bytes.
+    fn tag(&self) -> Vec<u8> {
+        match self.form {
+            Form::Lut8 | Form::Lut16 => self.v2_tag(),
+            Form::AToB => self.mab_tag(),
+        }
+    }
+
+    /// An `mft1` or `mft2`: the header, the identity matrix 10.8 has a
+    /// device input ignore, then the curves and the grid in the type's width.
+    fn v2_tag(&self) -> Vec<u8> {
+        let wide = self.form == Form::Lut16;
+        let mut out = if wide {
+            b"mft2".to_vec()
+        } else {
+            b"mft1".to_vec()
+        };
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&[
+            self.inputs as u8,
+            self.outputs as u8,
+            self.grids[0] as u8,
+            0,
+        ]);
+        for value in IDENTITY {
+            out.extend_from_slice(&s15(value));
+        }
+        if wide {
+            out.extend_from_slice(&(self.input_curves[0].len() as u16).to_be_bytes());
+            out.extend_from_slice(&(self.output_curves[0].len() as u16).to_be_bytes());
+        }
+        let value = |out: &mut Vec<u8>, v: u16| {
+            if wide {
+                out.extend_from_slice(&v.to_be_bytes());
+            } else {
+                out.push(v as u8);
+            }
+        };
+        for curve in &self.input_curves {
+            for &v in curve {
+                value(&mut out, v);
+            }
+        }
+        for &v in &self.clut {
+            value(&mut out, v);
+        }
+        for curve in &self.output_curves {
+            for &v in curve {
+                value(&mut out, v);
+            }
+        }
+        out
+    }
+
+    /// An `mAB ` of B curves, a 16-bit grid and A curves, the header listing
+    /// their offsets B, matrix, M, CLUT, A (10.10.1), each on a four-byte
+    /// boundary.
+    fn mab_tag(&self) -> Vec<u8> {
+        fn pad(out: &mut Vec<u8>) {
+            while out.len() % 4 != 0 {
+                out.push(0);
+            }
+        }
+        let mut out = b"mAB ".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&[self.inputs as u8, self.outputs as u8, 0, 0]);
+        out.extend_from_slice(&[0; 20]);
+        let b_at = out.len() as u32;
+        for gamma in &self.b_gammas {
+            out.extend_from_slice(&para_tag(0, &[*gamma]));
+            pad(&mut out);
+        }
+        let clut_at = out.len() as u32;
+        let mut counts = [0u8; 16];
+        for (slot, points) in counts.iter_mut().zip(&self.grids) {
+            *slot = *points as u8;
+        }
+        out.extend_from_slice(&counts);
+        out.extend_from_slice(&[2, 0, 0, 0]);
+        for value in &self.clut {
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        pad(&mut out);
+        let a_at = out.len() as u32;
+        for gamma in &self.a_gammas {
+            out.extend_from_slice(&para_tag(0, &[*gamma]));
+            pad(&mut out);
+        }
+        for (slot, offset) in [(0, b_at), (3, clut_at), (4, a_at)] {
+            out[12 + 4 * slot..16 + 4 * slot].copy_from_slice(&offset.to_be_bytes());
+        }
+        out
+    }
+
+    /// A value of the type's width as the 16-bit currency over 0..=1: an
+    /// `mft1`'s byte over 255.
+    fn unit(&self, v: u16) -> f64 {
+        if self.form == Form::Lut8 {
+            f64::from(v) / 255.0
+        } else {
+            f64::from(v) / 65535.0
+        }
+    }
+
+    /// A sampled curve at `x`, read linearly between its entries.
+    fn curve(&self, curve: &[u16], x: f64) -> f64 {
+        let last = (curve.len() - 1) as f64;
+        let position = x.clamp(0.0, 1.0) * last;
+        let index = (position.floor() as usize).min(curve.len() - 2);
+        let fraction = position - index as f64;
+        let (low, high) = (self.unit(curve[index]), self.unit(curve[index + 1]));
+        low + (high - low) * fraction
+    }
+
+    /// Grid node `at`'s channel `c`, over 0..=1.
+    fn node(&self, at: &[usize], c: usize) -> f64 {
+        let offset = at
+            .iter()
+            .zip(&self.grids)
+            .fold(0usize, |offset, (&index, &points)| offset * points + index);
+        self.unit(self.clut[offset * self.outputs + c])
+    }
+
+    /// The link's channels for device values `x`, each over 0..=1,
+    /// recomputed stage by stage: each input through its curve — a table's
+    /// read linearly, an A curve's gamma as stored — the grid interpolated
+    /// multilinearly over every input's axis, each output through its curve.
+    fn evaluate(&self, x: &[f64]) -> Vec<f64> {
+        let mut base = vec![0usize; self.inputs];
+        let mut fraction = vec![0.0f64; self.inputs];
+        for axis in 0..self.inputs {
+            let v = x[axis].clamp(0.0, 1.0);
+            let coordinate = match self.form {
+                Form::AToB => v.powf(stored(self.a_gammas[axis])),
+                _ => self.curve(&self.input_curves[axis], v),
+            };
+            let last = (self.grids[axis] - 1) as f64;
+            let p = coordinate * last;
+            let index = (p.floor() as usize).min(self.grids[axis] - 2);
+            base[axis] = index;
+            fraction[axis] = p - index as f64;
+        }
+        (0..self.outputs)
+            .map(|c| {
+                let mut value = 0.0;
+                for corner in 0..1usize << self.inputs {
+                    let mut weight = 1.0;
+                    let mut at = base.clone();
+                    for axis in 0..self.inputs {
+                        if (corner >> (self.inputs - 1 - axis)) & 1 == 1 {
+                            weight *= fraction[axis];
+                            at[axis] += 1;
+                        } else {
+                            weight *= 1.0 - fraction[axis];
+                        }
+                    }
+                    value += weight * self.node(&at, c);
+                }
+                match self.form {
+                    Form::AToB => value.clamp(0.0, 1.0).powf(stored(self.b_gammas[c])),
+                    _ => self.curve(&self.output_curves[c], value),
+                }
+            })
+            .collect()
+    }
+
+    /// One table step for channel `c`, in 16-bit units: along each axis, the
+    /// most two neighbouring nodes differ by anywhere on the grid, over the
+    /// 256ths of a cell the grid is interpolated in and the units a
+    /// coordinate can be off by — one for a table curve's rounding, eight for
+    /// an A curve sampled into 1 024 entries — carried through the output
+    /// curve's steepest stretch, and four units for the roundings after the
+    /// grid.
+    fn step(&self, c: usize) -> f64 {
+        let coordinate = if self.form == Form::AToB { 8.0 } else { 1.0 } / 65535.0;
+        let nodes: usize = self.grids.iter().product();
+        let mut span = 0.0;
+        for axis in 0..self.inputs {
+            let mut widest = 0.0f64;
+            for index in 0..nodes {
+                let mut at = vec![0usize; self.inputs];
+                let mut rest = index;
+                for a in (0..self.inputs).rev() {
+                    at[a] = rest % self.grids[a];
+                    rest /= self.grids[a];
+                }
+                if at[axis] + 1 < self.grids[axis] {
+                    let mut high = at.clone();
+                    high[axis] += 1;
+                    widest = widest.max((self.node(&high, c) - self.node(&at, c)).abs());
+                }
+            }
+            span += widest * (1.0 / 256.0 + coordinate * (self.grids[axis] - 1) as f64);
+        }
+        let slope = match self.form {
+            Form::AToB => stored(self.b_gammas[c]).max(1.0),
+            _ => {
+                let curve = &self.output_curves[c];
+                curve
+                    .windows(2)
+                    .map(|pair| (self.unit(pair[1]) - self.unit(pair[0])).abs())
+                    .fold(0.0f64, f64::max)
+                    * (curve.len() - 1) as f64
+            }
+        };
+        span * slope * 65535.0 + 4.0
+    }
+}
+
+/// A link's `A2B0` of `form` over `inputs` channels to `outputs`: a grid of
+/// three points an axis — an `mAB `'s of two to four, its own on each axis —
+/// whose channel `c` rises along each axis by a curve of its own, between
+/// input curves bent their own way and output curves of their own.
+fn link_table(form: Form, inputs: usize, outputs: usize) -> LinkTable {
+    let grids: Vec<usize> = match form {
+        Form::AToB => (0..inputs).map(|axis| [3, 2, 4, 3][axis % 4]).collect(),
+        _ => vec![3; inputs],
+    };
+    let top = if form == Form::Lut8 { 255.0 } else { 65535.0 };
+    let nodes: usize = grids.iter().product();
+    let mut clut = Vec::with_capacity(nodes * outputs);
+    for index in 0..nodes {
+        let mut at = vec![0usize; inputs];
+        let mut rest = index;
+        for axis in (0..inputs).rev() {
+            at[axis] = rest % grids[axis];
+            rest /= grids[axis];
+        }
+        for c in 0..outputs {
+            let mut mixed = 0.03 * c as f64;
+            for axis in 0..inputs {
+                let u = at[axis] as f64 / (grids[axis] - 1) as f64;
+                let shaped = match (axis + c) % 3 {
+                    0 => u,
+                    1 => u * u,
+                    _ => 1.0 - u,
+                };
+                mixed += shaped / inputs as f64 * (0.6 + 0.1 * ((axis + 2 * c) % 4) as f64);
+            }
+            clut.push((mixed.clamp(0.0, 1.0) * top).round() as u16);
+        }
+    }
+    let (input_curves, output_curves) = match form {
+        Form::Lut16 => (
+            (0..inputs)
+                .map(|axis| vec![0, 20_000 + 5_000 * axis as u16, 65_535])
+                .collect(),
+            (0..outputs)
+                .map(|c| vec![1_000 * c as u16, 22_000, 47_000, 64_000 + 300 * c as u16])
+                .collect(),
+        ),
+        Form::Lut8 => (
+            (0..inputs)
+                .map(|axis| byte_curve(0.8 + 0.2 * axis as f64))
+                .collect(),
+            (0..outputs)
+                .map(|c| byte_curve(1.0 + 0.1 * c as f64))
+                .collect(),
+        ),
+        Form::AToB => (Vec::new(), Vec::new()),
+    };
+    LinkTable {
+        form,
+        inputs,
+        outputs,
+        grids,
+        input_curves,
+        a_gammas: (0..inputs)
+            .map(|axis| [1.0, 1.4, 1.8, 1.2][axis % 4])
+            .collect(),
+        clut,
+        output_curves,
+        b_gammas: (0..outputs).map(|c| [1.0, 1.3, 2.0, 1.6][c % 4]).collect(),
+    }
+}
+
+/// Device values over `inputs` channels: each at both ends of its axis, on
+/// grid nodes and between them.
+fn device_lattice(inputs: usize) -> Vec<Vec<f64>> {
+    let levels: &[f64] = if inputs > 3 {
+        &[0.0, 0.2, 0.5, 0.65, 1.0]
+    } else {
+        &[0.0, 0.1, 0.35, 0.5, 0.72, 0.9, 1.0]
+    };
+    let mut out = vec![Vec::new()];
+    for _ in 0..inputs {
+        out = out
+            .into_iter()
+            .flat_map(|prefix: Vec<f64>| {
+                levels.iter().map(move |&level| {
+                    let mut next = prefix.clone();
+                    next.push(level);
+                    next
+                })
+            })
+            .collect();
+    }
+    out
+}
+
+/// **A device link maps device values through its table.** A CMYK-to-CMYK
+/// and an RGB-to-CMYK link, each with its `A2B0` in all three structures a
+/// link's `AToB0` takes — `mft1`, `mft2` and `mAB ` (ICC.1 8.6) — takes each
+/// device value of a lattice over its inputs to the four ink values each
+/// stage recomputed here gives: input or A curves, the grid interpolated
+/// multilinearly over every input's axis, output or B curves, with no
+/// connection-space encoding at either end; within one table step. Values
+/// past either end of the input device's axis are held there.
+#[test]
+fn a_device_link_maps_device_values_through_its_table() {
+    for form in [Form::Lut8, Form::Lut16, Form::AToB] {
+        for (space, inputs) in [(b"CMYK", 4usize), (b"RGB ", 3)] {
+            let table = link_table(form, inputs, 4);
+            let bytes = profile_of(b"link", space, b"CMYK", &[(*b"A2B0", table.tag())]);
+            let what = format!("{form:?}, {inputs} inputs");
+            let parsed = Profile::parse(&bytes).unwrap_or_else(|error| panic!("{what}: {error:?}"));
+            let link = Link::compile(&parsed).unwrap_or_else(|error| panic!("{what}: {error:?}"));
+            assert_eq!((link.inputs(), link.channels()), (inputs, 4), "{what}");
+            for x in device_lattice(inputs) {
+                let got = link.apply(&x);
+                assert_eq!(got.channels().len(), 4, "{what}");
+                for (c, want) in table.evaluate(&x).into_iter().enumerate() {
+                    let (got, want, slack) =
+                        (f64::from(got.channels()[c]), want * 65535.0, table.step(c));
+                    assert!(
+                        (got - want).abs() <= slack,
+                        "{what}, {x:?}, channel {c}: {got}, not {want:.1} within {slack:.1}"
+                    );
+                }
+            }
+            assert_eq!(
+                link.apply(&vec![-0.5; inputs]),
+                link.apply(&vec![0.0; inputs]),
+                "{what}: below the axis is held at its foot"
+            );
+            assert_eq!(
+                link.apply(&vec![1.5; inputs]),
+                link.apply(&vec![1.0; inputs]),
+                "{what}: past it, at its top"
+            );
+        }
+    }
+}
+
+/// **A link names its output space in the connection-space field** (ICC.1
+/// 7.2.7, 8.6): a profile of class `link` whose field names `CMYK`, a
+/// six-colour `6CLR` or `GRAY` parses, and its link gives that space's
+/// channels — four, six, one — from its data space's; the same bytes in any
+/// other class are refused, a device space being no connection space. A link
+/// builds no transform to sRGB, under any intent, nor one out of the
+/// connection space, and a profile of another class carries no link. A
+/// table whose output count is not the field's space's is refused, as one
+/// whose input count is not the data space's is.
+#[test]
+fn a_link_names_its_output_space_in_the_connection_space_field() {
+    for (field, outputs) in [(b"CMYK", 4usize), (b"6CLR", 6), (b"GRAY", 1)] {
+        let table = link_table(Form::Lut16, 3, outputs);
+        let tags = [(*b"A2B0", table.tag())];
+        let parsed = Profile::parse(&profile_of(b"link", b"RGB ", field, &tags))
+            .unwrap_or_else(|error| panic!("{field:?}: {error:?}"));
+        assert_eq!(parsed.pcs, *field);
+        assert_eq!(
+            parsed.channels(),
+            Some(3),
+            "the data space is the link's input"
+        );
+        let link = Link::compile(&parsed).expect("a link");
+        assert_eq!(link.output_space(), *field);
+        assert_eq!((link.inputs(), link.channels()), (3, outputs));
+        assert_eq!(link.apply(&[0.3, 0.6, 0.9]).channels().len(), outputs);
+        for intent in Intent::ALL {
+            assert!(
+                Transform::compile(&parsed, intent).is_none(),
+                "{field:?}, {intent:?}: a link builds no transform to sRGB"
+            );
+            assert_eq!(
+                Output::compile(&parsed, intent),
+                Err(IccError::MissingTags),
+                "{field:?}, {intent:?}: nor one out of the connection space"
+            );
+        }
+        assert!(Transforms::compile(parsed).is_none());
+
+        for class in [b"prtr", b"mntr", b"scnr", b"spac"] {
+            assert_eq!(
+                Profile::parse(&profile_of(class, b"RGB ", field, &tags)),
+                Err(IccError::UnsupportedPcs),
+                "{class:?} naming {field:?} in its connection-space field"
+            );
+        }
+    }
+
+    let (bytes, _) = matrix_profile();
+    let display = Profile::parse(&bytes).expect("a display profile");
+    assert_eq!(Link::compile(&display), Err(IccError::MissingTags));
+
+    let four = link_table(Form::Lut16, 3, 4).tag();
+    assert_eq!(
+        Profile::parse(&profile_of(
+            b"link",
+            b"RGB ",
+            b"6CLR",
+            &[(*b"A2B0", four.clone())]
+        )),
+        Err(IccError::UnsupportedSpace),
+        "four outputs for a six-colour space"
+    );
+    assert_eq!(
+        Profile::parse(&profile_of(b"link", b"CMYK", b"CMYK", &[(*b"A2B0", four)])),
+        Err(IccError::UnsupportedSpace),
+        "three inputs for a four-channel data space"
+    );
 }

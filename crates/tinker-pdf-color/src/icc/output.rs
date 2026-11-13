@@ -34,8 +34,8 @@
 use std::sync::Arc;
 
 use super::{
-    compile_curve, fixed, round_shift, Curve, IccError, Intent, Lut, Model, Profile, Step,
-    CURVE_ENTRIES, ONE,
+    compile_curve, fixed, round_shift, Curve, IccError, Intent, LinkSource, Lut, Model, Profile,
+    Step, CURVE_ENTRIES, ONE,
 };
 
 /// The most device channels a transform out of the connection space gives:
@@ -271,6 +271,106 @@ impl Output {
             }
         }
     }
+}
+
+/// A device link's transform (ICC.1 8.6): one device's values to another's,
+/// through the link's `D2B0` where that reads and its `A2B0` otherwise
+/// (8.10.3), with no connection space at either end.
+///
+/// A link's data space is the space it takes, and its connection-space
+/// field names the space it gives (7.2.7) — a device's, which is why no
+/// transform to sRGB is built from it ([`super::Transform::compile`] answers
+/// `None`) and why an `ICCBased` space may not name one (ISO 32000-2 Table
+/// 67). The header's rendering intent says which intent the link was built
+/// for and selects nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Link {
+    source: LinkSource,
+    inputs: usize,
+    output_space: [u8; 4],
+}
+
+impl Link {
+    /// The link `profile` carries, read by [`Profile::parse`] when it parsed
+    /// a profile of class `link`.
+    ///
+    /// # Errors
+    ///
+    /// [`IccError::MissingTags`] for a profile of another class, which
+    /// carries no link; a link profile that parsed always answers.
+    pub fn compile(profile: &Profile) -> Result<Link, IccError> {
+        let tags = profile.tables.link.as_ref().ok_or(IccError::MissingTags)?;
+        Ok(Link {
+            source: tags.source()?,
+            inputs: tags.inputs,
+            output_space: profile.pcs,
+        })
+    }
+
+    /// How many components the link takes: its data space's.
+    #[must_use]
+    pub fn inputs(&self) -> usize {
+        self.inputs
+    }
+
+    /// How many channels the link gives: those of the space its
+    /// connection-space field names.
+    #[must_use]
+    pub fn channels(&self) -> usize {
+        match &self.source {
+            LinkSource::Table(lut) => lut.outputs(),
+            LinkSource::Elements(pipeline) => pipeline.outputs(),
+        }
+    }
+
+    /// The space the link gives, as its four-byte signature: its profile's
+    /// connection-space field (7.2.7).
+    #[must_use]
+    pub fn output_space(&self) -> [u8; 4] {
+        self.output_space
+    }
+
+    /// The output device's values for `components`, the input device's,
+    /// each in `0..=1` and held there — one that is not a number is zero, a
+    /// missing one zero — through the link's table or elements, each channel
+    /// from 0 to 65 535.
+    #[must_use]
+    pub fn apply(&self, components: &[f64]) -> DeviceColour {
+        let held: Vec<f64> = (0..self.inputs)
+            .map(|channel| {
+                let value = components.get(channel).copied().unwrap_or(0.0);
+                if value.is_nan() {
+                    0.0
+                } else {
+                    value.clamp(0.0, 1.0)
+                }
+            })
+            .collect();
+        let mut out = [0u16; MAX_DEVICE_CHANNELS];
+        let count = self.channels().min(MAX_DEVICE_CHANNELS);
+        match &self.source {
+            LinkSource::Table(lut) => {
+                for (slot, value) in out.iter_mut().zip(lut.evaluate(&held)).take(count) {
+                    *slot = device_value(value);
+                }
+            }
+            LinkSource::Elements(pipeline) => {
+                for (slot, value) in out.iter_mut().zip(pipeline.evaluate_all(&held)).take(count) {
+                    *slot = device_value(value);
+                }
+            }
+        }
+        DeviceColour::of(out.get(..count).unwrap_or(&[]))
+    }
+}
+
+/// A device value over `0..=1` as 16 bits, held to the axis; one that is not
+/// a number is zero.
+fn device_value(value: f64) -> u16 {
+    if value.is_nan() {
+        return 0;
+    }
+    (value.clamp(0.0, 1.0) * 65535.0).round() as u16
 }
 
 /// A matrix/TRC or grey model inverted, its connection-space value divided

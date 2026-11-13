@@ -159,6 +159,24 @@ intent's source gives, in the profile's own connection space. No render
 converts through either; they are the colour crate's transforms toward a
 device.
 
+**A device link**, a profile of class `link` (ICC.1 8.6), takes one device's
+values to another's: its data space is the space it takes, and its
+connection-space field names the space it gives (7.2.7), a device's.
+`Profile::parse` reads it when it parses the profile — its `D2B0` first where
+that reads, as 8.10.3 has it, and otherwise its `A2B0`, an `mft1`, `mft2` or
+`mAB ` — and `tinker_pdf_color::icc::Link::compile(profile)` is its transform:
+`Link::apply` takes the input device's components, each held to `0..1`,
+through the table's stages, or the elements', with no connection-space
+encoding at either end, to the output device's channels, each from 0 to
+65 535. The table's input count is held to the data space's and its output
+count to fifteen before any of its curves is read, then to the output
+space's; an `mAB ` carrying a matrix or M curves has the matrix's three
+outputs. A link with neither tag is refused as `MissingTags`, and one whose
+only `D2B0` holds an element this build does not read, by the element's
+name. No transform to sRGB is built from a link, nor one out of the
+connection space: an `ICCBased` space's profile may not be one (ISO 32000-2
+Table 67), so a page naming one keeps 8.6.5.5's alternate-space reading.
+
 **`CalGray` and `CalRGB` convert through their own parameters** (8.6.5.2,
 8.6.5.3): the components go through `/Gamma`, `/Matrix` takes them into XYZ
 relative to `/WhitePoint`, and the white point is adapted to D50 before the
