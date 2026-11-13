@@ -18,8 +18,10 @@
 //!
 //! - [`fixed`]: the 26.6 arithmetic, shared with the other hinters.
 //! - [`vm`]: the machine — its stack, its decoding and dispatch, its bounds.
+//! - `flow`: `IF` and the jumps, function and instruction definitions.
 
 pub mod fixed;
+mod flow;
 pub mod vm;
 
 pub use vm::{Error, Limits, MaxProfile, Program, Vm};

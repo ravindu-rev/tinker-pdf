@@ -5,6 +5,7 @@
 //! the specification states them, transcribed into the test, and never read
 //! back from the interpreter.
 
+mod flow;
 mod stack;
 
 use super::vm::{Error, Limits, MaxProfile, Program, Vm};

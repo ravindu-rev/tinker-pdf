@@ -7,18 +7,26 @@
 //! functions*, *Arithmetic and math instructions* and *Debugging* — and
 //! dispatches every other opcode to the family that executes it.
 
+use std::sync::Arc;
+
 use super::fixed;
+use super::flow::Definitions;
 
 /// The steps one run may take: a run of `fpgm`, of `prep`, or of a glyph's or
 /// a component's program, the functions it calls included
 /// (`docs/design/hinting.md`, "Bounds that keep hostile bytecode finite").
 ///
 /// A step is an instruction dispatched, or one of the units of work an
-/// instruction does beyond its own: each stack element `MINDEX` moves.
+/// instruction does beyond its own: each stack element `MINDEX` moves, each
+/// instruction `IF`, `ELSE`, `FDEF` and `IDEF` pass over, and each call
+/// `LOOPCALL` makes.
 pub const BUDGET: u32 = 1 << 20;
 
 /// A run asks its stop predicate once in this many steps.
 pub const STOP_EVERY: u32 = 4096;
+
+/// How deep `CALL`, `LOOPCALL` and an instruction `IDEF` defines may nest.
+pub const CALL_DEPTH: u32 = 64;
 
 /// The fewest stack entries a face is given, whatever its `maxp` declares.
 const STACK_FLOOR: usize = 256;
@@ -166,6 +174,30 @@ pub enum Error {
     Budget,
     /// The caller's stop predicate answered yes.
     Stopped,
+    /// An `IF` skipped to, or an `ELSE` skipped to, an `EIF` the program does
+    /// not have.
+    UnterminatedIf,
+    /// A jump to before its program's start or past its end.
+    JumpOutOfRange,
+    /// An `FDEF` or `IDEF` with no `ENDF` after it.
+    UnterminatedDefinition,
+    /// An `ENDF` outside a function or instruction definition.
+    EndfOutsideDefinition,
+    /// An `FDEF` or `IDEF` in a glyph's program: "attempts to invoke the FDEF
+    /// instruction within a glyph program will result in an error".
+    DefinitionInGlyphProgram,
+    /// An `FDEF` or `IDEF` executed inside a definition.
+    NestedDefinition,
+    /// A function number outside `0` to `maxFunctionDefs - 1`.
+    FunctionIndex(i32),
+    /// A `CALL` or `LOOPCALL` of a function no `FDEF` defined.
+    UndefinedFunction(i32),
+    /// An `IDEF` of a value that is not an opcode.
+    OpcodeOutOfRange(i32),
+    /// An `IDEF` of one opcode more than `maxInstructionDefs` allows.
+    InstructionDefinitions,
+    /// Calls nested past [`CALL_DEPTH`].
+    CallDepth,
 }
 
 impl core::fmt::Display for Error {
@@ -179,35 +211,59 @@ impl core::fmt::Display for Error {
             Error::DivideByZero => write!(f, "DIV by zero"),
             Error::Budget => write!(f, "the program ran past its {BUDGET} steps"),
             Error::Stopped => write!(f, "the run was stopped"),
+            Error::UnterminatedIf => write!(f, "an IF or ELSE with no EIF"),
+            Error::JumpOutOfRange => write!(f, "a jump left its program"),
+            Error::UnterminatedDefinition => write!(f, "a definition with no ENDF"),
+            Error::EndfOutsideDefinition => write!(f, "an ENDF outside a definition"),
+            Error::DefinitionInGlyphProgram => write!(f, "a definition in a glyph program"),
+            Error::NestedDefinition => write!(f, "a definition inside a definition"),
+            Error::FunctionIndex(n) => write!(f, "function {n} is past maxFunctionDefs"),
+            Error::UndefinedFunction(n) => write!(f, "function {n} is not defined"),
+            Error::OpcodeOutOfRange(n) => write!(f, "{n} is not an opcode"),
+            Error::InstructionDefinitions => {
+                write!(f, "more instruction definitions than maxInstructionDefs")
+            }
+            Error::CallDepth => write!(f, "calls nested past {CALL_DEPTH}"),
         }
     }
 }
 
 /// The interpreter: a face's bounds and the state its programs read and
 /// write.
+///
+/// A clone shares the function and instruction definitions with the machine
+/// it was cloned from until one of them defines another, so a machine made
+/// for each glyph from its size's does not copy what `fpgm` defined.
 #[derive(Clone, Debug)]
 pub struct Vm {
-    limits: Limits,
+    pub(super) limits: Limits,
     /// The interpreter stack, bottom first.
     stack: Vec<i32>,
+    /// The functions and instructions `fpgm` and `prep` defined.
+    pub(super) definitions: Arc<Definitions>,
     /// The program the current run, or the last, executes.
     program: Program,
     /// The steps the current run, or the last, took.
     steps: u32,
     /// The step count at which the stop predicate is next asked.
     stop_due: u32,
+    /// How many calls the current run is inside.
+    pub(super) depth: u32,
 }
 
 impl Vm {
-    /// A machine for a face with these limits, its stack empty.
+    /// A machine for a face with these limits, its stack empty and nothing
+    /// defined.
     #[must_use]
     pub fn new(limits: Limits) -> Vm {
         Vm {
             limits,
             stack: Vec::new(),
+            definitions: Arc::default(),
             program: Program::Font,
             steps: 0,
             stop_due: STOP_EVERY,
+            depth: 0,
         }
     }
 
@@ -220,7 +276,8 @@ impl Vm {
     /// Runs `code` as `program` from an empty stack, asking `stop` once in
     /// [`STOP_EVERY`] steps whether to give up. What the program left on the
     /// stack, and the steps it took, are there to read afterwards, whether it
-    /// ended or stopped with an error.
+    /// ended or stopped with an error; the functions and instructions it
+    /// defined stay defined for every later run.
     pub fn run(
         &mut self,
         code: &[u8],
@@ -255,6 +312,7 @@ impl Vm {
         self.program = program;
         self.steps = 0;
         self.stop_due = STOP_EVERY;
+        self.depth = 0;
     }
 
     /// Spends `n` steps of the run's budget.
@@ -302,13 +360,14 @@ impl Vm {
     }
 
     /// Executes the instruction `op` found at `at` in `code`, and answers
-    /// where the next one begins.
+    /// where the next one begins: past its end, where a jump lands, or the
+    /// end of `code` where `ENDF` ends a definition.
     fn instruction(
         &mut self,
         op: u8,
         code: &[u8],
         at: usize,
-        _stop: Option<&dyn Fn() -> bool>,
+        stop: Option<&dyn Fn() -> bool>,
     ) -> Result<usize, Error> {
         match op {
             // NPUSHB[ ], NPUSHW[ ]: a count byte, then that many bytes or words.
@@ -326,9 +385,20 @@ impl Vm {
             0x4F => {
                 self.pop()?;
             }
-            _ => return Err(Error::NoInstruction(op)),
+            // IF, ELSE, EIF, the jumps, and the definitions and calls.
+            0x58 | 0x1B | 0x59 | 0x1C | 0x78 | 0x79 | 0x2C | 0x2D | 0x2B | 0x2A | 0x89 => {
+                return self.flow(op, code, at, stop);
+            }
+            _ => self.undefined(op, stop)?,
         }
         Ok(at + 1)
+    }
+
+    /// Spends a step for the instruction at `at` in `code`, which a skip or a
+    /// definition passes over, and answers where the next one begins.
+    pub(super) fn pass_over(&mut self, code: &[u8], at: usize) -> Result<usize, Error> {
+        self.spend(1)?;
+        Ok(at + instruction_length(code, at)?)
     }
 
     /// Pushes `count` bytes, each padded to 32 bits unsigned, or `count`
@@ -476,6 +546,30 @@ impl Vm {
         };
         self.push(result)
     }
+}
+
+/// The length in bytes of the instruction at `at` in `code`: a push with its
+/// count and its data, every other instruction its opcode alone. An error
+/// where the data runs past the end.
+pub(super) fn instruction_length(code: &[u8], at: usize) -> Result<usize, Error> {
+    let op = *code.get(at).ok_or(Error::TruncatedPush)?;
+    let count = || {
+        code.get(at + 1)
+            .copied()
+            .map(usize::from)
+            .ok_or(Error::TruncatedPush)
+    };
+    let length = match op {
+        0x40 => 2 + count()?,
+        0x41 => 2 + 2 * count()?,
+        0xB0..=0xB7 => 1 + usize::from(op - 0xAF),
+        0xB8..=0xBF => 1 + 2 * usize::from(op - 0xB7),
+        _ => 1,
+    };
+    if at + length > code.len() {
+        return Err(Error::TruncatedPush);
+    }
+    Ok(length)
 }
 
 #[cfg(test)]

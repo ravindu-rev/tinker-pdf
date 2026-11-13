@@ -350,14 +350,22 @@ a panic and never a wait:
 | --- | --- |
 | The stack | `maxStackElements` plus 32 entries, at least 256 and at most 65 536: a producer that under-declares still runs, and a hostile `maxp` holds 256 KiB |
 | The storage area, the CVT, the function and instruction definitions, the twilight zone | `maxStorage`, the `cvt ` table's entries, `maxFunctionDefs`, `maxInstructionDefs` (an opcode is a byte, so at most 256), `maxTwilightPoints` capped at 16 384; an index past any of them |
-| Instructions a run executes | 1 048 576 (2^20) for each run of `fpgm`, `prep`, a glyph's or a component's program, counting each instruction dispatched, each stack element `MINDEX` moves, each point a loop-counted instruction moves, and each call `LOOPCALL` makes |
+| Instructions a run executes | 1 048 576 (2^20) for each run of `fpgm`, `prep`, a glyph's or a component's program, counting each instruction dispatched, each instruction `IF`, `ELSE`, `FDEF` and `IDEF` pass over, each stack element `MINDEX` moves, each point a loop-counted instruction moves, and each call `LOOPCALL` makes |
 | Call depth | 64: `CALL`, `LOOPCALL` and a dispatch to an `IDEF` nest no deeper |
 | The instruction stream | a push that runs past its program's end, a jump outside it, an `IF` with no `EIF` or a definition with no `ENDF` |
-| Where definitions may stand | `FDEF` and `IDEF` in a glyph program, and `ENDF` outside a definition |
-| What instructions name | an undefined function, an opcode with no instruction and no `IDEF`, a zero `DIV`, an orthogonal freedom vector at a move, `IUP` in zone 0 |
+| Where definitions may stand | `FDEF` and `IDEF` in a glyph program or inside a definition, and `ENDF` outside one |
+| What instructions name | an undefined function, an `IDEF` of a value that is no opcode, an opcode with no instruction and no `IDEF`, a zero `DIV`, an orthogonal freedom vector at a move, `IUP` in zone 0 |
 
 `IDEF` affects only undefined opcodes and is ignored for a defined one, as
-the specification says. A run also stops when the renderer's stop predicate
+the specification says: the 37 opcodes the instruction set summary assigns
+to no instruction. `GETVARIATION`'s 0x91 is one of them here, since this
+engine does not execute it (*Non-goals*), so the `IDEF` the OpenType text
+requires a font that uses it to carry stands in for it. A definition's body
+is the bytes from the instruction after its `FDEF` or `IDEF` to the first
+`ENDF` after it, push data passed over; a jump inside a definition is
+relative to it and may not leave it, and its end returns. A later
+definition of the same number or opcode replaces an earlier one, and the
+definitions `fpgm` and `prep` make last from run to run. A run also stops when the renderer's stop predicate
 answers yes, asked every 4 096 instructions, and leaves its glyph unhinted.
 The instructions a run executes are its steps (`docs/design/resource-exhaustion.md`,
 "The counters"): the hinter returns them as a value, and the facade adds them
