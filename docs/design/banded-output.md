@@ -173,8 +173,9 @@ close at the same writes: a file written in bands of any height is the
 whole-page file byte for byte, and no PNG's bytes move.
 
 **The open chunk is the writer's.** A chunk's length precedes its data, so the
-chunk being filled is held by the writer and appended to the output whole when
-it closes. Before a write its data is under 64 KiB, and one write appends at
+chunk being filled is held by the writer, reserved once at its bound, and
+appended to the output whole when it closes. Before a write its data is under
+64 KiB, and one write appends at
 most 137 516 bytes: a block written in whichever form is fewest bits is never
 longer than its fixed-code form — three bits of header, a literal 8 or 9 bits,
 a match at most 31 (an 8-bit length code with 5 extra bits, a 5-bit distance

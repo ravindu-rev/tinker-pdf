@@ -115,7 +115,8 @@ pub use netpbm::{
 pub use png::{
     colour_type_depth_is_legal, png_decode, png_decode_counted, png_encode, png_encode_counted,
     png_scan, ChunkType, PngColour, PngEncodeError, PngError, PngHeader, PngHeld, PngImage,
-    PngScan, PngSource, PngTransparency, MAX_PNG_SAMPLES, PNG_SIGNATURE,
+    PngLayout, PngRows, PngScan, PngSource, PngTransparency, PngWriter, MAX_PNG_SAMPLES,
+    PNG_SIGNATURE,
 };
 pub use predictors::PredictorParams;
 pub use raster::ImagePixels;

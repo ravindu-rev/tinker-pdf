@@ -458,6 +458,7 @@ fn every_refusal_is_reachable() {
             row_bytes: 2,
         },
         PngEncodeError::ShortData { have: 1, need: 2 },
+        PngEncodeError::RowCount { height: 2, rows: 3 },
     ] {
         assert!(!e.to_string().is_empty());
     }
@@ -668,4 +669,382 @@ fn the_writer_holds_rows_its_deflater_and_its_file() {
         png_encode(&packed(width, height, PngColour::Rgba, &data)),
         Ok(file)
     );
+}
+
+// --- rows in bands --------------------------------------------------------
+
+/// A raster of `width` by `height` in `colour`, `pad` bytes of junk after
+/// each row: its left half noise, then a ramp and a flat quarter, so every
+/// filter and both stored and coded blocks have rows to choose and the noise
+/// fills several IDAT chunks, and the junk differs from the pixels so that
+/// reading it would show.
+fn banded_raster(width: u32, height: u32, colour: PngColour, pad: usize, seed: u64) -> Vec<u8> {
+    let mut next = seeded(seed);
+    let n = colour.components() as usize;
+    let row = width as usize * n;
+    let mut data = Vec::with_capacity((row + pad) * height as usize);
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            for c in 0..n {
+                let value = if x < width as usize / 2 {
+                    next() as u8
+                } else if x < 3 * width as usize / 4 {
+                    (x + 3 * y + 17 * c) as u8
+                } else {
+                    0xC8
+                };
+                data.push(value);
+            }
+        }
+        data.extend(core::iter::repeat_n(0x5A, pad));
+    }
+    data
+}
+
+/// `data` written through a [`PngWriter`] in bands of `band` rows, the output
+/// drained after every call as a sink would drain it, each call's bytes
+/// required to be whole chunks.
+fn written_in_bands(layout: &PngLayout, stride: usize, data: &[u8], band: u32) -> Vec<u8> {
+    let mut file = Vec::new();
+    let mut out = Vec::new();
+    let mut writer = PngWriter::new(layout, &mut out).expect("a picture");
+    file.append(&mut out);
+    let mut top = 0u32;
+    while top < layout.height {
+        let rows = band.min(layout.height - top);
+        let from = top as usize * stride;
+        writer
+            .rows(
+                &PngRows {
+                    rows,
+                    stride,
+                    data: &data[from..],
+                },
+                &mut out,
+            )
+            .expect("a band of the picture");
+        whole_chunks(&out);
+        file.append(&mut out);
+        top += rows;
+        assert_eq!(writer.rows_left(), layout.height - top);
+    }
+    writer.finish(&mut out).expect("every row was handed over");
+    whole_chunks(&out);
+    file.append(&mut out);
+    file
+}
+
+/// `bytes`, appended by one call of the writer, as whole chunks: each a
+/// length, a type, that many bytes and a CRC over the type and the data, and
+/// nothing left over, so a caller may drain its output after any call.
+fn whole_chunks(bytes: &[u8]) {
+    let mut at = 0usize;
+    while at < bytes.len() {
+        assert!(at + 12 <= bytes.len(), "a chunk's head cut off");
+        let len =
+            u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]) as usize;
+        assert!(at + 12 + len <= bytes.len(), "a chunk cut off");
+        let declared = u32::from_be_bytes([
+            bytes[at + 8 + len],
+            bytes[at + 9 + len],
+            bytes[at + 10 + len],
+            bytes[at + 11 + len],
+        ]);
+        assert_eq!(
+            declared,
+            crc32(&bytes[at + 4..at + 8 + len]),
+            "a chunk's CRC"
+        );
+        at += 12 + len;
+    }
+}
+
+/// **A PNG written in bands is the PNG written whole** (RC-16.2,
+/// `docs/design/banded-output.md`): rasters of the four colour types, tight
+/// and padded, several IDAT chunks long, written in bands of one row, of
+/// every prime height up to 61 and of all rows at once, are `png_encode`'s
+/// bytes for the raster whole: the same writes reach the deflater whatever
+/// band a row arrives in, so the same chunks close at the same places. A
+/// raster whose rows pass `FEED`, so that each row is fed in pieces, does too.
+#[test]
+fn a_png_written_in_bands_is_the_png_written_whole() {
+    let primes = [
+        2u32, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61,
+    ];
+    let (width, height) = (307u32, 251u32);
+    let mut chunked = 0;
+    for colour in [
+        PngColour::Grey,
+        PngColour::GreyAlpha,
+        PngColour::Rgb,
+        PngColour::Rgba,
+    ] {
+        for pad in [0usize, 5] {
+            let n = colour.components() as usize;
+            let stride = width as usize * n + pad;
+            let data = banded_raster(width, height, colour, pad, 0x51 + pad as u64);
+            let whole = png_encode(&PngSource {
+                width,
+                height,
+                colour,
+                stride,
+                data: &data,
+            })
+            .expect("the raster encodes whole");
+            let idats = walk(&whole)
+                .iter()
+                .filter(|(kind, _)| kind == b"IDAT")
+                .count();
+            if idats > 1 {
+                chunked += 1;
+            }
+            let layout = PngLayout {
+                width,
+                height,
+                colour,
+            };
+            for band in core::iter::once(1).chain(primes).chain([height]) {
+                assert_eq!(
+                    written_in_bands(&layout, stride, &data, band),
+                    whole,
+                    "{colour:?}, {pad} bytes of padding, bands of {band}"
+                );
+            }
+        }
+    }
+    assert!(
+        chunked >= 4,
+        "too few rasters span several IDAT chunks to test the framing: {chunked}"
+    );
+
+    // Rows longer than a feed: each is handed to the deflater in pieces.
+    let (wide, rows) = (17_000u32, 5u32);
+    let data = banded_raster(wide, rows, PngColour::Rgba, 3, 9);
+    let stride = wide as usize * 4 + 3;
+    assert!(wide as usize * 4 > FEED, "a row of several feeds");
+    let whole = png_encode(&PngSource {
+        width: wide,
+        height: rows,
+        colour: PngColour::Rgba,
+        stride,
+        data: &data,
+    })
+    .expect("the wide raster encodes");
+    let layout = PngLayout {
+        width: wide,
+        height: rows,
+        colour: PngColour::Rgba,
+    };
+    for band in [1u32, 2, 3, 5] {
+        assert_eq!(
+            written_in_bands(&layout, stride, &data, band),
+            whole,
+            "wide rows in bands of {band}"
+        );
+    }
+}
+
+/// **A writer refuses rows its picture does not have, and takes nothing of a
+/// refused band**: more rows than are left, at once or after the bands so
+/// far, and a finish short of the height are each
+/// [`PngEncodeError::RowCount`], counting the rows handed over; a band whose
+/// stride overlaps its rows or whose buffer is short is refused as
+/// `png_encode` refuses a raster; no refusal appends a byte, and the writer
+/// goes on to write the file the picture whole writes. A band of no rows is
+/// nothing, whatever it carries, and a writer for no picture writes nothing.
+#[test]
+fn a_writer_refuses_rows_its_picture_does_not_have() {
+    let (width, height) = (9u32, 6u32);
+    let colour = PngColour::Rgb;
+    let stride = 27usize;
+    let data = banded_raster(width, height, colour, 0, 3);
+    let layout = PngLayout {
+        width,
+        height,
+        colour,
+    };
+    let whole = png_encode(&packed(width, height, colour, &data)).expect("whole");
+    let band = |rows: u32, top: u32| PngRows {
+        rows,
+        stride,
+        data: &data[top as usize * stride..],
+    };
+
+    let mut file = Vec::new();
+    let mut writer = PngWriter::new(&layout, &mut file).expect("a picture");
+    assert_eq!(
+        writer.rows(&band(7, 0), &mut file),
+        Err(PngEncodeError::RowCount { height: 6, rows: 7 }),
+        "seven rows at once"
+    );
+    writer.rows(&band(4, 0), &mut file).expect("four rows");
+    let after_four = file.len();
+    assert_eq!(
+        writer.rows(&band(3, 3), &mut file),
+        Err(PngEncodeError::RowCount { height: 6, rows: 7 }),
+        "three more after four"
+    );
+    assert_eq!(
+        writer.rows(
+            &PngRows {
+                rows: 2,
+                stride: 26,
+                data: &data[4 * stride..],
+            },
+            &mut file
+        ),
+        Err(PngEncodeError::ShortStride {
+            stride: 26,
+            row_bytes: 27
+        })
+    );
+    assert_eq!(
+        writer.rows(
+            &PngRows {
+                rows: 2,
+                stride,
+                data: &data[4 * stride..4 * stride + 53],
+            },
+            &mut file
+        ),
+        Err(PngEncodeError::ShortData { have: 53, need: 54 })
+    );
+    assert_eq!(
+        writer.rows(
+            &PngRows {
+                rows: 0,
+                stride: 0,
+                data: &[],
+            },
+            &mut file
+        ),
+        Ok(()),
+        "no rows are nothing"
+    );
+    assert_eq!(file.len(), after_four, "a refusal appended bytes");
+    assert_eq!(writer.rows_left(), 2);
+    writer.rows(&band(2, 4), &mut file).expect("the last two");
+    writer.finish(&mut file).expect("every row");
+    assert_eq!(file, whole, "the refusals left their mark on the file");
+
+    // Finished short.
+    let mut out = Vec::new();
+    let mut short = PngWriter::new(&layout, &mut out).expect("a picture");
+    short.rows(&band(5, 0), &mut out).expect("five rows");
+    let before = out.len();
+    assert_eq!(
+        short.finish(&mut out),
+        Err(PngEncodeError::RowCount { height: 6, rows: 5 })
+    );
+    assert_eq!(out.len(), before, "a refused finish appended bytes");
+
+    // A writer for no picture writes nothing.
+    let mut nothing = Vec::new();
+    assert!(matches!(
+        PngWriter::new(
+            &PngLayout {
+                width: 0,
+                height: 4,
+                colour
+            },
+            &mut nothing
+        ),
+        Err(PngEncodeError::BadDimensions {
+            width: 0,
+            height: 4
+        })
+    ));
+    assert!(nothing.is_empty());
+    assert!(!PngEncodeError::RowCount { height: 6, rows: 7 }
+        .to_string()
+        .is_empty());
+}
+
+/// **The chunk's bound is the design's**: one write appends at most 137 516
+/// bytes and the open chunk holds at most 203 059
+/// (`docs/design/banded-output.md`), and a picture whose whole stream is
+/// shorter reserves its chunk at that instead.
+#[test]
+fn the_open_chunk_is_reserved_at_its_bound() {
+    assert_eq!(WRITE_BOUND, 137_516);
+    assert_eq!(CHUNK_BOUND, 203_059);
+    let small = PngLayout {
+        width: 3,
+        height: 2,
+        colour: PngColour::Rgb,
+    };
+    // Two rows of nine bytes and their type bytes, 20 bytes at 9 bits, one
+    // block's 10 bits, the stream's six bytes and the chunk's eight.
+    assert_eq!(
+        small.chunk_capacity(),
+        8 + 6 + (20 * 9 + 10_usize).div_ceil(8)
+    );
+    let large = PngLayout {
+        width: 2_480,
+        height: 3_509,
+        colour: PngColour::Rgb,
+    };
+    assert_eq!(large.chunk_capacity(), CHUNK_BOUND);
+    let mut out = Vec::new();
+    let writer = PngWriter::new(&small, &mut out).expect("a picture");
+    assert!(
+        writer.held().peak < 400_000 + 64,
+        "a small picture holds the deflater and a small chunk: {}",
+        writer.held().peak
+    );
+}
+
+/// **A writer holds three rows, its deflater and one chunk**, whatever the
+/// picture's height: on a noisy raster written in bands and drained as it
+/// goes, what it reports holding at most is at least its three rows and at
+/// most those, the deflater's fixed state and the chunk
+/// `docs/design/banded-output.md` bounds (65 535 bytes of data before a
+/// write, 137 516 one write appends, and the chunk's eight bytes of length
+/// and type), with no buffer sized from the image, at ten times the height as
+/// at once.
+#[test]
+fn a_writer_holds_three_rows_its_deflater_and_one_chunk() {
+    let width = 600u32;
+    let row = width as usize * 4;
+    // The deflater's 393 216 bytes of tables, window and symbols, and its
+    // fields, under 400 000.
+    let bound = 3 * row + 400_000 + 8 + 65_535 + 137_516;
+    for height in [60u32, 600] {
+        let data = banded_raster(width, height, PngColour::Rgba, 0, 77);
+        let layout = PngLayout {
+            width,
+            height,
+            colour: PngColour::Rgba,
+        };
+        let mut out = Vec::new();
+        let mut writer = PngWriter::new(&layout, &mut out).expect("a picture");
+        let mut top = 0;
+        while top < height {
+            let rows = 37.min(height - top);
+            writer
+                .rows(
+                    &PngRows {
+                        rows,
+                        stride: row,
+                        data: &data[top as usize * row..],
+                    },
+                    &mut out,
+                )
+                .expect("a band");
+            // Drained, as a sink drains it.
+            out.clear();
+            top += rows;
+        }
+        let during = writer.held();
+        let held = writer.finish(&mut out).expect("every row");
+        assert_eq!(held.image_scratch, 0, "no buffer sized from the image");
+        assert_eq!(during.image_scratch, 0);
+        assert!(held.peak >= during.peak, "the peak went down");
+        assert!(held.peak >= 3 * row, "{} under three rows", held.peak);
+        assert!(
+            held.peak <= bound,
+            "{height} rows high: {} held, past {bound}",
+            held.peak
+        );
+    }
 }

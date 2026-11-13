@@ -512,6 +512,28 @@ sized from the image rather than from a row or a constant, none, and `peak`,
 the most held at once with the file — plain numbers handed back, since this
 crate keeps no tally (ruling 8).
 
+**The rows can come in bands** ([design/banded-output.md](../design/banded-output.md)).
+`PngWriter::new` takes a `PngLayout` — the width, the height and the colour
+type — and appends the signature and IHDR to the caller's output;
+`PngWriter::rows` takes the next `PngRows`, any number of rows `stride` bytes
+apart, filtering the first against the last row of the band before, and
+appends every IDAT chunk they close; `PngWriter::finish` appends the last
+chunk and IEND and hands back the `PngHeld` of the writer itself. Each call
+appends whole chunks, so a caller drains its output whenever it likes and
+holds the file nowhere. `png_encode` is this writer handed every row at once,
+and a raster handed over in bands of any height writes the same bytes: the
+deflater is handed each row's type byte and then the row in pieces of at most
+64 KiB whatever band the row arrives in, its output depends on its input alone,
+and a chunk closes after the write that brings its data to 64 KiB or more and
+at the end — so the chunks close at the same writes. A chunk's length precedes
+its data, so the chunk being filled is the writer's until it closes, reserved
+once at its bound: its data under 64 KiB before a write and what one write can
+append, 203 059 bytes, or the whole stream's bound for a picture whose stream
+is shorter. The writer refuses, appending nothing, a band of more rows than the
+picture has left and a finish short of its height (`PngEncodeError::RowCount`),
+and a band whose stride overlaps its rows or whose buffer is short, as
+`png_encode` refuses a raster.
+
 All five of 9.2's filter types are emitted, chosen per row by **the minimum
 sum of absolute differences** the specification itself recommends in 12.8,
 with the filtered bytes read as *signed* (a byte of `0xFF` is a difference of
@@ -949,7 +971,8 @@ to agree with the decode it stands in for. The encoder half is `deflate`,
 `zlib_compress`, the streaming `Deflater` and `ZlibDeflater` and their
 whole-input `deflate_at` and `zlib_compress_at`, each at a `DeflateLevel`,
 `png_encode` and `png_encode_counted` (the file and a `PngHeld`)
-(takes a `PngSource`, returns the file or a `PngEncodeError`), `ccitt_g4_encode`
+(takes a `PngSource`, returns the file or a `PngEncodeError`), `PngWriter`
+(takes a `PngLayout`, then `PngRows` a band at a time), `ccitt_g4_encode`
 (takes a `CcittSource`, returns the coded bits or a `CcittEncodeError`),
 `jbig2_generic_encode` / `jbig2_generic_region_segment` (take a
 `Jbig2GenericSource`, return the MQ bytes or the whole segment data, or a
@@ -1212,7 +1235,15 @@ wants the reason to survive it.
   reader: the signature, IHDR first with 11.2.2's thirteen bytes, IEND last and
   empty, every chunk's CRC recomputed over its type and its data, and the IDAT
   payload, cut into chunks as the deflater emits, equal to the fast level's
-  zlib stream of the filtered stream.
+  zlib stream of the filtered stream. The writer in bands is held to the
+  writer whole in `png/encode/tests.rs`
+  (`a_png_written_in_bands_is_the_png_written_whole`: the four colour types,
+  tight and padded, several chunks long, in bands of one row, of every prime
+  height up to 61 and of all rows, and rows longer than a feed; each call's
+  bytes whole chunks), with its refusals
+  (`a_writer_refuses_rows_its_picture_does_not_have`), its chunk's bound
+  (`the_open_chunk_is_reserved_at_its_bound`) and what it holds
+  (`a_writer_holds_three_rows_its_deflater_and_one_chunk`).
 - `crates/tinker-pdf/tests/png_input.rs` — `Bitmap::from_png`, the other
   direction of the same mapping: the round trip through `to_png` exact for
   every page format, and every expectation named from the bytes the test wrote

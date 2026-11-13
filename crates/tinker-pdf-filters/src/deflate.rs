@@ -47,12 +47,12 @@ const EMPTY: u32 = u32::MAX;
 const OFFSET_LIMIT: usize = 1 << 31;
 /// The bytes a position is searched with ahead of it, short of the input's
 /// end: a match's reach forward, a hash's three, and the next position's.
-const LOOKAHEAD: usize = MAX_MATCH + MIN_MATCH + 1;
+pub(crate) const LOOKAHEAD: usize = MAX_MATCH + MIN_MATCH + 1;
 /// The streaming deflater's window buffer: two windows, so a match may always
 /// reach a whole window back from anywhere a position is searched.
 const BUFFER: usize = 2 * WINDOW;
 /// The symbols, literals and matches, a block holds before it is written.
-const BLOCK_SYMBOLS: usize = 16_384;
+pub(crate) const BLOCK_SYMBOLS: usize = 16_384;
 /// How far back a three-byte match may be at the ratio level: further, its
 /// distance's extra bits cost more than its three literals do.
 const TOO_FAR: usize = 4_096;
