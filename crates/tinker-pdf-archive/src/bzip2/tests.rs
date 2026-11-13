@@ -53,7 +53,7 @@ fn small_streams_from_libbzip2_decode_to_what_went_in() {
 fn the_block_crc_is_the_msb_first_crc_32_and_not_zip_s() {
     let mut crc = u32::MAX;
     for &byte in b"123456789" {
-        crc = crc_update(crc, byte);
+        crc = crc_update(&CRC_TABLE, crc, byte);
     }
     assert_eq!(!crc, 0xFC89_1918);
 }

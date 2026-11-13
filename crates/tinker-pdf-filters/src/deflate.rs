@@ -317,10 +317,48 @@ struct Match {
     dist: usize,
 }
 
-/// Each match length's index into [`LENGTH_TABLE`], from 3 to 258.
-const LENGTH_INDEX: [u8; MAX_MATCH + 1] = length_index();
+/// The tables the writer derives from RFC 1951's lists and formulas, built
+/// once at first use rather than evaluated into the binary, as every table
+/// the codec crates derive is (P-19.1). A block takes them when it is made,
+/// so no symbol pays for the `LazyLock`'s check.
+struct Tables {
+    /// Each match length's index into [`LENGTH_TABLE`], from 3 to 258.
+    length_index: [u8; MAX_MATCH + 1],
+    /// Each distance from 1 to 256's index into [`DISTANCE_TABLE`], by
+    /// `distance - 1`.
+    distance_low: [u8; 256],
+    /// Each distance past 256's index into [`DISTANCE_TABLE`], by
+    /// `(distance - 1) >> 7`: every code past 256 spans a multiple of 128.
+    distance_high: [u8; 256],
+    /// The fixed literal/length code of RFC 1951 §3.2.6, reversed for
+    /// writing.
+    fixed_literals: [Code; 288],
+    /// The fixed distance code: five bits, reversed for writing.
+    fixed_distances: [Code; 30],
+}
 
-const fn length_index() -> [u8; MAX_MATCH + 1] {
+static TABLES: std::sync::LazyLock<Tables> = std::sync::LazyLock::new(|| Tables {
+    length_index: length_index(),
+    distance_low: distance_low(),
+    distance_high: distance_high(),
+    fixed_literals: fixed_literals(),
+    fixed_distances: fixed_distances(),
+});
+
+impl Tables {
+    /// `distance`'s index into [`DISTANCE_TABLE`], for a distance from 1 to
+    /// the window.
+    fn distance_index(&self, distance: usize) -> usize {
+        let index = if distance <= 256 {
+            self.distance_low[distance - 1]
+        } else {
+            self.distance_high[(distance - 1) >> 7]
+        };
+        usize::from(index)
+    }
+}
+
+fn length_index() -> [u8; MAX_MATCH + 1] {
     let mut index = [0u8; MAX_MATCH + 1];
     let mut i = 0;
     while i < LENGTH_TABLE.len() {
@@ -337,14 +375,7 @@ const fn length_index() -> [u8; MAX_MATCH + 1] {
     index
 }
 
-/// Each distance from 1 to 256's index into [`DISTANCE_TABLE`], by
-/// `distance - 1`.
-const DISTANCE_LOW: [u8; 256] = distance_low();
-/// Each distance past 256's index into [`DISTANCE_TABLE`], by
-/// `(distance - 1) >> 7`: every code past 256 spans a multiple of 128.
-const DISTANCE_HIGH: [u8; 256] = distance_high();
-
-const fn distance_low() -> [u8; 256] {
+fn distance_low() -> [u8; 256] {
     let mut index = [0u8; 256];
     let mut i = 0;
     while i < DISTANCE_TABLE.len() {
@@ -359,7 +390,7 @@ const fn distance_low() -> [u8; 256] {
     index
 }
 
-const fn distance_high() -> [u8; 256] {
+fn distance_high() -> [u8; 256] {
     let mut index = [0u8; 256];
     let mut i = 0;
     while i < DISTANCE_TABLE.len() {
@@ -374,17 +405,6 @@ const fn distance_high() -> [u8; 256] {
         i += 1;
     }
     index
-}
-
-/// `distance`'s index into [`DISTANCE_TABLE`], for a distance from 1 to the
-/// window.
-fn distance_index(distance: usize) -> usize {
-    let index = if distance <= 256 {
-        DISTANCE_LOW[distance - 1]
-    } else {
-        DISTANCE_HIGH[(distance - 1) >> 7]
-    };
-    usize::from(index)
 }
 
 /// `code`'s low `length` bits in the other order: a Huffman code is packed
@@ -403,12 +423,7 @@ const fn reversed(code: u16, length: u8) -> u16 {
 /// A code as the writer writes it: reversed, and its length.
 type Code = (u16, u8);
 
-/// The fixed literal/length code of RFC 1951 §3.2.6, reversed for writing.
-const FIXED_LITERALS: [Code; 288] = fixed_literals();
-/// The fixed distance code: five bits, reversed for writing.
-const FIXED_DISTANCES: [Code; 30] = fixed_distances();
-
-const fn fixed_literals() -> [Code; 288] {
+fn fixed_literals() -> [Code; 288] {
     let mut codes = [(0u16, 0u8); 288];
     let mut symbol = 0u16;
     while symbol < 288 {
@@ -424,7 +439,7 @@ const fn fixed_literals() -> [Code; 288] {
     codes
 }
 
-const fn fixed_distances() -> [Code; 30] {
+fn fixed_distances() -> [Code; 30] {
     let mut codes = [(0u16, 0u8); 30];
     let mut symbol = 0;
     while symbol < 30 {
@@ -495,6 +510,8 @@ struct Block {
     start: usize,
     /// The input bytes the block's symbols cover.
     len: usize,
+    /// The writer's derived tables, taken once.
+    tables: &'static Tables,
 }
 
 impl Block {
@@ -505,6 +522,7 @@ impl Block {
             distances: [0; 30],
             start: 0,
             len: 0,
+            tables: &TABLES,
         }
     }
 
@@ -519,8 +537,8 @@ impl Block {
         // their sixteen bits.
         self.symbols
             .push(((found.len as u32) << 16) | found.dist as u32);
-        self.literals[257 + usize::from(LENGTH_INDEX[found.len])] += 1;
-        self.distances[distance_index(found.dist)] += 1;
+        self.literals[257 + usize::from(self.tables.length_index[found.len])] += 1;
+        self.distances[self.tables.distance_index(found.dist)] += 1;
         self.len += found.len;
     }
 
@@ -599,13 +617,13 @@ fn write_symbols(
             bits.code(out, literals[value]);
             continue;
         }
-        let index = usize::from(LENGTH_INDEX[value]);
+        let index = usize::from(block.tables.length_index[value]);
         let (_, extra, base) = LENGTH_TABLE[index];
         bits.code(out, literals[257 + index]);
         if extra > 0 {
             bits.put(out, (value - base) as u32, extra);
         }
-        let index = distance_index(dist);
+        let index = block.tables.distance_index(dist);
         let (_, extra, base) = DISTANCE_TABLE[index];
         bits.code(out, distances[index]);
         if extra > 0 {
@@ -1194,7 +1212,8 @@ impl Deflater {
             .start
             .checked_sub(self.start)
             .and_then(|from| self.buffer.get(from..from + block.len));
-        let fixed = 3 + symbol_bits(block, &FIXED_LITERALS, &FIXED_DISTANCES);
+        let tables = block.tables;
+        let fixed = 3 + symbol_bits(block, &tables.fixed_literals, &tables.fixed_distances);
         let dynamic = Dynamic::new(block);
         let dynamic_bits = dynamic.bits(block);
         match stored {
@@ -1208,8 +1227,8 @@ impl Deflater {
                     &mut self.bits,
                     out,
                     block,
-                    &FIXED_LITERALS,
-                    &FIXED_DISTANCES,
+                    &tables.fixed_literals,
+                    &tables.fixed_distances,
                 );
             }
             _ => dynamic.write(&mut self.bits, out, block, last),
@@ -1858,7 +1877,7 @@ mod tests {
         for length in MIN_MATCH..=MAX_MATCH {
             let symbol = symbol_of(&LENGTH_TABLE, length);
             assert_eq!(
-                LENGTH_TABLE[usize::from(LENGTH_INDEX[length])].0,
+                LENGTH_TABLE[usize::from(TABLES.length_index[length])].0,
                 symbol,
                 "length {length}"
             );
@@ -1866,7 +1885,7 @@ mod tests {
         for distance in 1..=WINDOW {
             let symbol = symbol_of(&DISTANCE_TABLE, distance);
             assert_eq!(
-                DISTANCE_TABLE[distance_index(distance)].0,
+                DISTANCE_TABLE[TABLES.distance_index(distance)].0,
                 symbol,
                 "distance {distance}"
             );
@@ -1874,13 +1893,13 @@ mod tests {
         for symbol in 0..288u16 {
             let (code, length) = fixed_literal_code(symbol);
             assert_eq!(
-                FIXED_LITERALS[usize::from(symbol)],
+                TABLES.fixed_literals[usize::from(symbol)],
                 (reversed(code, length as u8), length as u8),
                 "literal/length {symbol}"
             );
         }
         assert_eq!(reversed(0b0011_0000, 8), 0b0000_1100);
-        assert_eq!(FIXED_DISTANCES[1], (0b10000, 5));
+        assert_eq!(TABLES.fixed_distances[1], (0b10000, 5));
     }
 
     // ---- Dynamic blocks -------------------------------------------------------
@@ -2093,7 +2112,7 @@ mod tests {
                 block.literal(byte);
             }
         }
-        let fixed = 3 + symbol_bits(&block, &FIXED_LITERALS, &FIXED_DISTANCES);
+        let fixed = 3 + symbol_bits(&block, &TABLES.fixed_literals, &TABLES.fixed_distances);
         let dynamic = Dynamic::new(&block).bits(&block);
         assert!(dynamic < fixed, "{dynamic} bits dynamic, {fixed} fixed");
 
@@ -2136,7 +2155,7 @@ mod tests {
                 let block = &deflater.block;
                 let counted = [
                     stored_bits(block.len, 0),
-                    3 + symbol_bits(block, &FIXED_LITERALS, &FIXED_DISTANCES),
+                    3 + symbol_bits(block, &TABLES.fixed_literals, &TABLES.fixed_distances),
                     Dynamic::new(block).bits(block),
                 ];
                 let fewest = counted.iter().copied().min().expect("three counts");

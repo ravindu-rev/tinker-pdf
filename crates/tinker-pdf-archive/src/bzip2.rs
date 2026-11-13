@@ -123,28 +123,29 @@ const MAX_RUN_WEIGHT: u32 = 1 << 21;
 /// CRC-32 as bzip2 computes it: polynomial `04C11DB7` shifted in most
 /// significant bit first, which is **not** the reflected CRC-32 ZIP, PNG and
 /// `tinker_pdf_filters::crc32` share. Same polynomial, other bit order.
-const CRC_TABLE: [u32; 256] = {
+///
+/// Built at first use rather than evaluated at compile time, so the kilobyte
+/// is not in every binary that links this crate (P-19.1); a block takes it
+/// once, never a byte at a time.
+static CRC_TABLE: std::sync::LazyLock<[u32; 256]> = std::sync::LazyLock::new(|| {
     let mut table = [0u32; 256];
-    let mut i = 0;
-    while i < 256 {
+    for (i, slot) in table.iter_mut().enumerate() {
+        // `i` is below 256.
         let mut c = (i as u32) << 24;
-        let mut bit = 0;
-        while bit < 8 {
+        for _ in 0..8 {
             c = if c & 0x8000_0000 != 0 {
                 (c << 1) ^ 0x04C1_1DB7
             } else {
                 c << 1
             };
-            bit += 1;
         }
-        table[i] = c;
-        i += 1;
+        *slot = c;
     }
     table
-};
+});
 
-fn crc_update(crc: u32, byte: u8) -> u32 {
-    (crc << 8) ^ CRC_TABLE[((crc >> 24) as u8 ^ byte) as usize]
+fn crc_update(table: &[u32; 256], crc: u32, byte: u8) -> u32 {
+    (crc << 8) ^ table[((crc >> 24) as u8 ^ byte) as usize]
 }
 
 /// The bit reader: most significant bit of each byte first.
@@ -470,6 +471,7 @@ fn block(
 
     // Walk it, undoing the run-length pass as the bytes come out: four equal
     // bytes are followed by a count of how many more.
+    let table = &*CRC_TABLE;
     let mut crc = u32::MAX;
     let mut position = (tt.get(origin).copied().unwrap_or(0) >> 8) as usize;
     let mut last: Option<u8> = None;
@@ -486,7 +488,7 @@ fn block(
             }
             for _ in 0..repeat {
                 out.push(value);
-                crc = crc_update(crc, value);
+                crc = crc_update(table, crc, value);
             }
             same = 0;
             continue;
@@ -501,7 +503,7 @@ fn block(
             return Err(Error::TooLarge);
         }
         out.push(byte);
-        crc = crc_update(crc, byte);
+        crc = crc_update(table, crc, byte);
     }
     Ok(!crc)
 }

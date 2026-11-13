@@ -47,7 +47,10 @@ usage:
   cargo xtask written   check that every test that writes a document holds
                         it to the validate-on-save helper, but the files on
                         its pending list, which only shrinks
-  cargo xtask check     all twelve of the above
+  cargo xtask tables    check that the codec and raster crates build every
+                        table they derive at first use, in a `LazyLock`, and
+                        evaluate none into a `static` or a `const`
+  cargo xtask check     all thirteen of the above
 
   cargo xtask release [options]  publish to crates.io, PyPI, npm and NuGet
 
@@ -266,6 +269,7 @@ fn main() -> ExitCode {
         "determinism" => report("determinism", determinism::check(&repo_root())),
         "names" => report("names", names::check(&repo_root())),
         "written" => report("written", written::check(&repo_root())),
+        "tables" => report("tables", check_tables()),
         "footprint" if rest.is_empty() => report("footprint", footprint::check(&repo_root())),
         "footprint" => one("footprint", footprint::run(&repo_root(), rest)),
         "check" => {
@@ -281,6 +285,7 @@ fn main() -> ExitCode {
             let roster = determinism::check(&repo_root());
             let named = names::check(&repo_root());
             let writers = written::check(&repo_root());
+            let tables = check_tables();
             let mut problems = dag.err().unwrap_or_default();
             problems.extend(libm.err().unwrap_or_default());
             problems.extend(oracles.err().unwrap_or_default());
@@ -293,6 +298,7 @@ fn main() -> ExitCode {
             problems.extend(roster.err().unwrap_or_default());
             problems.extend(named.err().unwrap_or_default());
             problems.extend(writers.err().unwrap_or_default());
+            problems.extend(tables.err().unwrap_or_default());
             report(
                 "check",
                 if problems.is_empty() {
@@ -1645,6 +1651,358 @@ fn collect_text_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// The codec and raster crates, whose derived tables are built at first use
+/// (P-19.1): the stream filters and image codecs, the containers' own
+/// decompressors, the ZIP reader and the rasteriser.
+const TABLE_CRATES: [&str; 4] = [
+    "tinker-pdf-filters",
+    "tinker-pdf-archive",
+    "tinker-pdf-zip",
+    "tinker-pdf-raster",
+];
+
+/// **Every table a codec or raster crate derives is built at first use**, in
+/// a `LazyLock`, and none is evaluated at compile time into a `static` or a
+/// `const` (P-19.1; `docs/verification.md`, "Tools").
+///
+/// A table evaluated at compile time is bytes in every binary that links its
+/// crate, the wasm module a browser downloads among them; built at first use
+/// it costs its loop once a process and nothing in the binary. So the check
+/// refuses, in every source of [`TABLE_CRATES`], a `static` or `const` whose
+/// type is an array — `[T; N]`, a reference to one or a slice, or a `type`
+/// alias in its file of one — and whose initialiser is a call, which in a
+/// constant is a `const fn`'s, or a block, `const` or not. A table written out
+/// as its defining list, a byte string or an included file passes, and so
+/// does every constant that is not an array; there is no size under which a
+/// derived table is let through and no list of exemptions.
+fn check_tables() -> Result<(), Vec<String>> {
+    let root = repo_root();
+    let mut problems = Vec::new();
+    for crate_name in TABLE_CRATES {
+        let mut files = Vec::new();
+        collect_rust_files(
+            &root.join("crates").join(crate_name).join("src"),
+            &mut files,
+        );
+        files.sort();
+        for file in files {
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                problems.push(format!("cannot read {}", file.display()));
+                continue;
+            };
+            let shown = file
+                .strip_prefix(&root)
+                .unwrap_or(&file)
+                .display()
+                .to_string();
+            for (line, name) in derived_tables(&text) {
+                problems.push(format!(
+                    "{shown}:{line}: `{name}` is a table evaluated at compile time; build it \
+                     in a `LazyLock` at first use and take it once a call, never a byte at a \
+                     time (P-19.1)"
+                ));
+            }
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
+/// The tables `source` evaluates at compile time, each with its line and its
+/// name: [`check_tables`]'s rule, read over the code with its comments taken
+/// out.
+fn derived_tables(source: &str) -> Vec<(usize, String)> {
+    let code = without_comments(source);
+    let aliases = array_aliases(&code);
+    let mut found = Vec::new();
+    let mut offset = 0usize;
+    for (number, line) in code.split('\n').enumerate() {
+        if let Some((name, after)) = constant_item(line) {
+            let rest = code.get(offset + after..).unwrap_or_default();
+            let typed = top_level(rest, '=', true).and_then(|equals| {
+                let kind = rest.get(..equals)?.trim();
+                let value = rest.get(equals + 1..)?;
+                let end = top_level(value, ';', false)?;
+                Some((kind, value.get(..end)?.trim()))
+            });
+            if let Some((kind, value)) = typed {
+                if is_table(kind, &aliases) && is_derived(value) {
+                    found.push((number + 1, name.to_string()));
+                }
+            }
+        }
+        offset += line.len() + 1;
+    }
+    found
+}
+
+/// `source` with every `//` and `/* */` comment taken out, its strings, its
+/// characters and its line breaks kept, so that a line number means what it
+/// did.
+fn without_comments(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut at = 0usize;
+    let mut depth = 0usize;
+    while let Some(&byte) = bytes.get(at) {
+        let next = bytes.get(at + 1).copied();
+        if depth > 0 {
+            if byte == b'*' && next == Some(b'/') {
+                depth -= 1;
+                at += 2;
+            } else if byte == b'/' && next == Some(b'*') {
+                depth += 1;
+                at += 2;
+            } else {
+                if byte == b'\n' {
+                    out.push('\n');
+                }
+                at += 1;
+            }
+            continue;
+        }
+        if byte == b'/' && next == Some(b'/') {
+            at = source[at..].find('\n').map_or(source.len(), |n| at + n);
+            continue;
+        }
+        if byte == b'/' && next == Some(b'*') {
+            depth = 1;
+            at += 2;
+            continue;
+        }
+        let end = literal_end(source, at).unwrap_or_else(|| {
+            // One character, whole: a byte that starts a multi-byte one
+            // carries its continuation bytes with it.
+            source[at..]
+                .chars()
+                .next()
+                .map_or(at + 1, |c| at + c.len_utf8())
+        });
+        out.push_str(source.get(at..end).unwrap_or_default());
+        at = end;
+    }
+    out
+}
+
+/// Where a string, byte string, raw string or character literal starting at
+/// `at` ends, or `None` when none starts there. A lifetime is no literal.
+fn literal_end(source: &str, at: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut start = at;
+    if bytes.get(start) == Some(&b'b') && matches!(bytes.get(start + 1), Some(b'"' | b'\'' | b'r'))
+    {
+        start += 1;
+    }
+    // A literal starts a token: `r` or `b` inside a word is part of it.
+    let inside_word = at > 0
+        && bytes
+            .get(at - 1)
+            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
+    match bytes.get(start) {
+        Some(b'"') => {
+            let mut i = start + 1;
+            while let Some(&byte) = bytes.get(i) {
+                match byte {
+                    b'\\' => i += 2,
+                    b'"' => return Some(i + 1),
+                    _ => i += 1,
+                }
+            }
+            Some(bytes.len())
+        }
+        Some(b'r') if !inside_word => {
+            let hashes = bytes
+                .get(start + 1..)?
+                .iter()
+                .take_while(|&&b| b == b'#')
+                .count();
+            if bytes.get(start + 1 + hashes) != Some(&b'"') {
+                return None;
+            }
+            let close = format!("\"{}", "#".repeat(hashes));
+            let body = start + 2 + hashes;
+            Some(
+                source
+                    .get(body..)?
+                    .find(&close)
+                    .map_or(bytes.len(), |n| body + n + close.len()),
+            )
+        }
+        Some(b'\'') if !inside_word || start > at => {
+            // `'x'`, or an escape such as `'\n'` or `'\u{7F}'`; anything
+            // else is a lifetime or a label.
+            if bytes.get(start + 1) == Some(&b'\\') {
+                let close = source.get(start + 2..)?.find('\'')?;
+                Some(start + 2 + close + 1)
+            } else {
+                let c = source.get(start + 1..)?.chars().next()?;
+                let after = start + 1 + c.len_utf8();
+                (bytes.get(after) == Some(&b'\'')).then_some(after + 1)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The names `code` declares as `type NAME = [...]`: arrays under another
+/// name.
+fn array_aliases(code: &str) -> Vec<String> {
+    code.lines()
+        .filter_map(|line| {
+            let rest = without_visibility(line.trim_start()).strip_prefix("type ")?;
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            let value = rest.split_once('=')?.1.trim_start();
+            (!name.is_empty() && value.starts_with('[')).then_some(name)
+        })
+        .collect()
+}
+
+/// `text` past a leading `pub`, `pub(crate)` or other visibility.
+fn without_visibility(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("pub") else {
+        return text;
+    };
+    let rest = match rest.strip_prefix('(') {
+        Some(inner) => match inner.find(')') {
+            Some(close) => &inner[close + 1..],
+            None => return text,
+        },
+        None => rest,
+    };
+    if rest.starts_with(char::is_whitespace) {
+        rest.trim_start()
+    } else {
+        text
+    }
+}
+
+/// The name a line's `static` or `const` item declares, and the offset in the
+/// line just past the colon before its type; `None` for any other line.
+fn constant_item(line: &str) -> Option<(&str, usize)> {
+    let trimmed = without_visibility(line.trim_start());
+    let rest = trimmed
+        .strip_prefix("static")
+        .or_else(|| trimmed.strip_prefix("const"))?;
+    if !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let length = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    let name = &rest[..length];
+    if name.is_empty() || name == "fn" || name == "mut" || name == "unsafe" {
+        return None;
+    }
+    let after = rest[length..].trim_start();
+    after.strip_prefix(':')?;
+    Some((name, line.len() - after.len() + 1))
+}
+
+/// The offset in `text` of the first `stop` outside every bracket, strings
+/// and characters skipped, or `None` when a `;` outside them comes first.
+///
+/// With `angles`, as in a type, `<` and `>` are brackets too, but only where
+/// a generic's can stand — outside every `[]`, `()` and `{}` or inside
+/// another `<>` — since inside an array's length or a call they are
+/// comparisons and shifts, and `1 << 9` there opens nothing; and a `>` after
+/// a `-` is an arrow, which closes nothing.
+fn top_level(text: &str, stop: char, angles: bool) -> Option<usize> {
+    let mut open: Vec<char> = Vec::new();
+    let mut previous = ' ';
+    let mut at = 0usize;
+    while at < text.len() {
+        if let Some(end) = literal_end(text, at) {
+            at = end;
+            previous = ' ';
+            continue;
+        }
+        let c = text[at..].chars().next()?;
+        let generic = angles && matches!(open.last(), None | Some('<'));
+        match c {
+            _ if c == stop && open.is_empty() => return Some(at),
+            '(' | '[' | '{' => open.push(c),
+            '<' if generic => open.push(c),
+            '>' if generic && previous != '-' && open.last() == Some(&'<') => {
+                open.pop();
+            }
+            ')' | ']' | '}' => {
+                open.pop();
+            }
+            ';' if open.is_empty() => return None,
+            _ => {}
+        }
+        previous = c;
+        at += c.len_utf8();
+    }
+    None
+}
+
+/// Whether a constant's type is a table: an array, a reference to one or a
+/// slice, or one of `aliases`.
+fn is_table(kind: &str, aliases: &[String]) -> bool {
+    let mut kind = kind.trim();
+    if let Some(rest) = kind.strip_prefix('&') {
+        kind = rest.trim_start();
+        if let Some(lifetime) = kind.strip_prefix('\'') {
+            let length = lifetime
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(lifetime.len());
+            kind = lifetime[length..].trim_start();
+        }
+    }
+    kind.starts_with('[') || aliases.iter().any(|alias| alias == kind)
+}
+
+/// Whether a constant's initialiser derives it: a block, `const` or not, or
+/// a call — a path, its turbofish included, then `(` — which in a constant
+/// is a `const fn`'s. A macro, a list, a byte string or a dereference is
+/// none.
+fn is_derived(value: &str) -> bool {
+    let value = value.trim_start();
+    let mut block = value;
+    for keyword in ["const", "unsafe"] {
+        if let Some(after) = block.strip_prefix(keyword) {
+            if after.trim_start().starts_with('{') {
+                block = after.trim_start();
+            }
+        }
+    }
+    if block.starts_with('{') {
+        return true;
+    }
+    let mut rest = value.strip_prefix('&').map_or(value, str::trim_start);
+    loop {
+        let starts = rest
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        if !starts {
+            return false;
+        }
+        let length = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        rest = rest[length..].trim_start();
+        if let Some(generics) = rest.strip_prefix("::<") {
+            let Some(close) = top_level(generics, '>', true) else {
+                return false;
+            };
+            rest = generics[close + 1..].trim_start();
+        }
+        match rest.strip_prefix("::") {
+            Some(more) => rest = more.trim_start(),
+            None => return rest.starts_with('('),
+        }
+    }
+}
+
 fn check_dag() -> Result<(), Vec<String>> {
     let root = repo_root();
     let crates_dir = root.join("crates");
@@ -1955,6 +2313,116 @@ allow = [
     fn this_repository_declares_the_data_it_vendors() {
         if let Err(problems) = check_vendor() {
             panic!("vendored data and THIRDPARTY.md disagree:\n{problems:#?}");
+        }
+    }
+
+    /// **A table a codec derives at compile time is refused**, by its line
+    /// and its name: a `static` or `const` array, a reference to one, a
+    /// slice or an alias of one, its length a shift or not, initialised by a
+    /// `const fn` call — a path, a method or a turbofish, on the item's line
+    /// or the next — or by a block, `const` or not.
+    #[test]
+    fn a_derived_static_table_is_refused() {
+        let source = r#"//! A codec.
+
+/// One entry a byte.
+static TABLE: [u32; 256] = table();
+
+const fn table() -> [u32; 256] {
+    [0; 256]
+}
+
+pub(crate) const SQUARE: [[i64; 4]; 4] = cosines::<4>();
+const DOFFSET: [u32; 25] = {
+    let mut out = [0u32; 25];
+    out[1] = 1;
+    out
+};
+pub static BYTES: &'static [u8] = &build();
+type Codes = [(u16, u8); 30];
+const FIXED: Codes = fixed();
+const SPLIT: [u8; 4] =
+    u32::to_be_bytes(7);
+pub(super) const INLINE: [u8; 2] = const { [1, 2] };
+const CHAINED: [u8; 8] = Table::<Vec<u8>>::build();
+static SLICE: &[u16] = &crate::tables::make(3);
+static MODES: [Option<(Mode, u8)>; 1 << MODE_BITS] = mode_table();
+"#;
+        let expected: Vec<(usize, String)> = [
+            (4, "TABLE"),
+            (10, "SQUARE"),
+            (11, "DOFFSET"),
+            (16, "BYTES"),
+            (18, "FIXED"),
+            (19, "SPLIT"),
+            (21, "INLINE"),
+            (22, "CHAINED"),
+            (23, "SLICE"),
+            (24, "MODES"),
+        ]
+        .into_iter()
+        .map(|(line, name)| (line, name.to_string()))
+        .collect();
+        assert_eq!(derived_tables(source), expected);
+    }
+
+    /// **A table built at first use is admitted**, and so is every constant
+    /// the rule does not name: a `LazyLock`, its table's length a shift or
+    /// not, a table written out as its list, a byte string, an included
+    /// file, a scalar or a struct from a `const fn`, a function pointer, a
+    /// compile-time assertion, a thread-local's `const` initialiser, a
+    /// `const fn` itself, and anything in a comment or a string.
+    #[test]
+    fn a_lazily_built_table_is_admitted() {
+        let source = r##"//! A codec.
+
+/// `static DOC: [u8; 2] = make();`, in a doc comment.
+static TABLE: std::sync::LazyLock<[u32; 256]> = std::sync::LazyLock::new(table);
+static KERNEL: LazyLock<Kernel> = LazyLock::new(|| Kernel { k0: 5_793 });
+static RUNS: LazyLock<[Run; 1 << RUN_BITS]> = LazyLock::new(|| run_table(&TERM, &MAKEUP));
+static BUILD: fn() -> [u8; 4] = make;
+const ZIGZAG: [usize; 4] = [0, 1, 8, 16];
+const BITS: [u8; 1 << 3] = [0; 1 << 3];
+const ZEROS: [u8; 64] = [0; 64];
+const ORDER: [usize; 3] =
+    [16, 17, 18];
+pub(crate) const SIGNATURE: [u8; 4] = *b"PK\x03\x04";
+const DICTIONARY: &[u8] = include_bytes!("dictionary.bin");
+static NAMES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/names.bin"));
+const CAP: Limits = Limits::new(1 << 20);
+const EMPTY: u32 = u32::MAX;
+const GDEF: u32 = u32::from_be_bytes(*b"GDEF");
+const _: () = {
+    assert!(1 < 2);
+};
+thread_local! {
+    static CALLS: Cell<u64> = const { Cell::new(0) };
+}
+const fn table() -> [u32; 256] {
+    [0; 256]
+}
+pub const fn bits() -> u32 {
+    3
+}
+// static OLD: [u32; 256] = table();
+/* const GONE: [u8; 4] = { [0; 4] }; */
+const TEXT: &str = "static FAKE: [u8; 2] = make();";
+const RAW: &str = r#"const FAKE: [u8; 2] = { [0; 2] };"#;
+const QUOTE: char = '{';
+fn helper<'a>(bytes: &'a [u8]) -> &'a [u8] {
+    static_assert(bytes);
+    bytes
+}
+"##;
+        assert_eq!(derived_tables(source), Vec::new());
+    }
+
+    /// The rule runs against this repository, as the graph check does: every
+    /// table the codec and raster crates derive is built at first use.
+    #[test]
+    fn this_repository_builds_its_derived_tables_at_first_use() {
+        if let Err(problems) = check_tables() {
+            panic!("a derived table is evaluated at compile time:\n{problems:#?}");
         }
     }
 }

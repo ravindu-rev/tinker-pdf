@@ -1130,8 +1130,29 @@ so the caps are properties of inputs, not of machines.
   (a test that writes a document calls the validate-on-save helper, but the
   files its pending list names), `vendor` (data-file provenance gate),
   `versions`, `names` (the roadmap names no engine, viewer, validator or
-  document tool), `check`, `corpus-fetch` / `corpus-run` /
+  document tool), `tables` (the codec and raster crates build every table
+  they derive at first use), `check`, `corpus-fetch` / `corpus-run` /
   `corpus-licences`, `release`, `nuget-stage`.
+
+`cargo xtask tables` holds the codec and raster crates — `tinker-pdf-filters`,
+`tinker-pdf-archive`, `tinker-pdf-zip` and `tinker-pdf-raster` — to building
+every lookup table they derive from a defining list or a formula at first
+use, in a `LazyLock`, rather than evaluating it at compile time: a table
+evaluated at compile time is bytes in every binary that links its crate, the
+wasm module a browser downloads among them, and one built at first use costs
+its loop once a process and nothing in the binary. It reads every source of
+those crates, comments taken out, and refuses a `static` or `const` whose type
+is an array, a reference to one or a slice, or a `type` alias of one, and
+whose initialiser is a call — in a constant, a `const fn`'s — or a block,
+`const` or not, by its file, its line and its name. A table written out as its
+defining list, a byte string or an included file passes, and so does every
+constant that is not an array; no size lets a derived table through and no
+list exempts one. A codec takes such a table once a call — the CRC-32's update
+and the bzip2 block's output loop before their loops, the deflate writer when
+it makes its block, the CCITT decode before its rows and its row reader when it
+is made — so the `LazyLock`'s check never runs once a byte. A shift in an
+array's length, `[Run; 1 << 9]`, is read as the length it is and not as the
+start of a generic.
 
 `cargo xtask names` holds the roadmap to the owner's answer on how far the
 never-name rule reaches (ruling 23, H-07): `docs/ROADMAP.md` and every file

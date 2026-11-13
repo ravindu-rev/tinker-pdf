@@ -58,21 +58,21 @@ const NDBITS: [u8; 25] = [
     0, 0, 0, 0, 10, 10, 11, 11, 10, 10, 10, 10, 10, 9, 9, 8, 7, 7, 8, 7, 7, 6, 6, 5, 5,
 ];
 
-/// §8's `DOFFSET` recursion, evaluated once at compile time.
-const DOFFSET: [u32; 25] = {
+/// §8's `DOFFSET` recursion, evaluated once at first use rather than at
+/// compile time, as every table the codec crates derive is (P-19.1).
+static DOFFSET: std::sync::LazyLock<[u32; 25]> = std::sync::LazyLock::new(|| {
     let mut out = [0u32; 25];
-    let mut length = 0usize;
-    while length < 24 {
+    for length in 0..24usize {
         let words = if length < 4 {
             0
         } else {
             1u32 << NDBITS[length]
         };
+        // `length` is below 24.
         out[length + 1] = out[length] + (length as u32) * words;
-        length += 1;
     }
     out
-};
+});
 
 /// The longest code any prefix code in this format may have (§3.5's
 /// `32768 >> code length` bookkeeping bottoms out at 15).

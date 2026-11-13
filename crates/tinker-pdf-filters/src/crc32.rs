@@ -27,47 +27,47 @@
 //! # Why a table, and why 1 KiB of it
 //!
 //! Bitwise costs eight tests and eight shifts per byte and needs no table.
-//! Table-driven costs one lookup, one xor and one shift, and 1 KiB of
-//! `.rodata`. The kilobyte is spent because of where this sits in the design
-//! above: with the image bytes passed through rather than decoded, **the CRC is
-//! the only pass anything makes over an archive's bytes**, and a plausible
-//! comic is a few hundred megabytes of them. A per-byte cost eight times what
-//! it needs to be would be most of the cost of opening the document, which is
-//! not a trade worth a kilobyte.
+//! Table-driven costs one lookup, one xor and one shift, and 1 KiB of memory.
+//! The kilobyte is spent because of where this sits in the design above: with
+//! the image bytes passed through rather than decoded, **the CRC is the only
+//! pass anything makes over an archive's bytes**, and a plausible comic is a
+//! few hundred megabytes of them. A per-byte cost eight times what it needs to
+//! be would be most of the cost of opening the document, which is not a trade
+//! worth a kilobyte.
 //!
-//! The table is *derived* from the polynomial in a `const fn`, evaluated at
-//! compile time, rather than transcribed from a published listing. That is the
-//! same discipline the JPEG 2000 fixed point took with Table F.4 — recompute
-//! rather than copy twice — and it costs nothing here: there is no runtime
-//! initialisation, no `OnceLock`, no `unsafe` (the crate forbids it), and no
-//! 256 lines of hex for a reader to audit. What pins the result is the three
-//! published values in the tests and a bitwise reference written the *other*
-//! way round, most-significant-bit-first over the unreflected polynomial, so
-//! agreement between them is agreement between two formulations rather than an
-//! expression agreeing with itself.
+//! The table is *derived* from the polynomial rather than transcribed from a
+//! published listing — the same discipline the JPEG 2000 fixed point took with
+//! Table F.4, recompute rather than copy twice, and no 256 lines of hex for a
+//! reader to audit — and **it is built at first use, in a `LazyLock`, rather
+//! than evaluated at compile time**. A table evaluated at compile time is a
+//! kilobyte of `.rodata` in every binary that links this crate, the wasm
+//! module a browser downloads among them, where building it is 2 048 steps of
+//! the bit loop once a process; the codec and raster crates hold every table
+//! they derive to that rule, and `cargo xtask check` refuses one evaluated
+//! into a `static` or a `const` (P-19.1). [`Crc32::update`] takes the table
+//! once a call, so the `LazyLock`'s check stays out of the per-byte loop. What
+//! pins the result is the three published values in the tests and a bitwise
+//! reference written the *other* way round, most-significant-bit-first over
+//! the unreflected polynomial, so agreement between them is agreement between
+//! two formulations rather than an expression agreeing with itself.
 
 /// `0x04C1_1DB7` with its bits reversed, which is what feeding a byte
 /// least-significant-bit-first amounts to.
 const POLY: u32 = 0xEDB8_8320;
 
-/// One entry per leading byte: eight steps of the bit loop, memoised.
-///
-/// `static` rather than `const` on purpose — a `const` is substituted at each
-/// use site, and a kilobyte is worth naming a single copy for.
-static TABLE: [u32; 256] = table();
+/// One entry per leading byte: eight steps of the bit loop, memoised, built
+/// once at first use and held in one place.
+static TABLE: std::sync::LazyLock<[u32; 256]> = std::sync::LazyLock::new(table);
 
-const fn table() -> [u32; 256] {
+fn table() -> [u32; 256] {
     let mut t = [0u32; 256];
-    let mut n = 0usize;
-    while n < 256 {
+    for (n, slot) in t.iter_mut().enumerate() {
+        // `n` is below 256.
         let mut c = n as u32;
-        let mut bit = 0;
-        while bit < 8 {
+        for _ in 0..8 {
             c = if c & 1 == 0 { c >> 1 } else { POLY ^ (c >> 1) };
-            bit += 1;
         }
-        t[n] = c;
-        n += 1;
+        *slot = c;
     }
     t
 }
@@ -96,12 +96,15 @@ impl Crc32 {
 
     /// Folds `data` in. Any number of calls; only the concatenation matters.
     pub fn update(&mut self, data: &[u8]) {
+        // Once a call: the table's first use builds it, and no byte pays for
+        // the check.
+        let table = &*TABLE;
         let mut c = self.state;
         for &b in data {
             // The mask is what makes this total: the index is 0..=255 and the
             // table has 256 entries, so there is no input that can reach past
             // it (ruling 1).
-            c = TABLE[((c ^ u32::from(b)) & 0xff) as usize] ^ (c >> 8);
+            c = table[((c ^ u32::from(b)) & 0xff) as usize] ^ (c >> 8);
         }
         self.state = c;
     }
