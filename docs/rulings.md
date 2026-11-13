@@ -818,6 +818,8 @@ instead of living in one feature's head.
     | ED-36e.2–ED-36e.4 | Redaction residue outside the content | scrubbed by default — links and annotations in the area, field values and annotation `/Contents`, `/ActualText`, `/Alt` and `/E`, outline titles, named destinations and attachments — with a typed opt-out naming each place kept; `tpdf redact` inherits it |
     | K-03.9 | A passed-through PNG | verified by one streamed inflate at open; a PNG whose data does not match its header takes the decode route; the owner took the open-time cost |
     | RC-01.9 | An ICC profile carrying both a matrix or curve and A2B tables | converted by its tables first, as ICC.1:2010 8.10.2 orders them; pages using such profiles render differently, and the owner took that |
+    | FT-01.8 | Where the CJK fallback face lives, when the collection the census chooses passes `CRATES_IO_CEILING` in every form | a data crate per region, each holding one Source Han Sans region face (JP for Japan1, CN for GB1, TW for CNS1, KR for Korea1 and KR) in WOFF2 under the ceiling; the CIDs only the collection reaches are the price the owner took |
+    | FT-01.8 | Who makes a vendored face's WOFF2 bytes | an established WOFF2 encoder, named with its version in the face's provenance; a test decodes each file with `woff.rs` and holds every table to the published face's, so no outside program vouches for the bytes |
 
 ## How to add a ruling
 
