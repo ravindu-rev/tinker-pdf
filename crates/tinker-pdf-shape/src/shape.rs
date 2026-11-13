@@ -678,12 +678,18 @@ pub struct Shaper<'a> {
     /// layout tables are of a kind this crate does not run: `Silf`, for a
     /// Graphite description. See [`Warning::TableNotRun`].
     not_run: Option<Tag>,
+    /// The AAT table the face's runs are shaped without, where the face
+    /// carries no OpenType Layout table to shape them through: its `morx`,
+    /// or its `mort` where it has no `morx`. See [`aat_not_run`].
+    aat_not_run: Option<Tag>,
 }
 
 /// `Silf`, the table a Graphite description's rules live in.
 const SILF: u32 = u32::from_be_bytes(*b"Silf");
 /// `morx`, the AAT table a face's substitutions live in.
 const MORX: u32 = u32::from_be_bytes(*b"morx");
+/// `mort`, the table `morx` extends, which a face may still carry alone.
+const MORT: u32 = u32::from_be_bytes(*b"mort");
 
 /// The table a face's runs go without, where its only layout tables are a
 /// Graphite description's: a `Silf`, and no readable `GSUB` or `GPOS` and no
@@ -696,6 +702,29 @@ fn table_not_run(face: &Sfnt<'_>, layout: &Layout<'_>) -> Option<Tag> {
         && layout.gpos().is_none()
         && face.table(MORX).is_none();
     graphite_only.then(|| Tag::new(b"Silf"))
+}
+
+/// The AAT table a face's runs go without (`docs/design/shaping.md`, *AAT
+/// shaping*, *Precedence*): where the face carries no readable `GSUB` or
+/// `GPOS`, its `morx`, which this crate does not run yet (ROADMAP row
+/// FT-07c, ruling 3), or, where it carries no `morx` and no Graphite
+/// description, its `mort`, the predecessor table no row reads. A face
+/// carrying either OpenType Layout table shapes through it as it always has,
+/// whatever AAT tables it carries beside it, and is named for none of them.
+///
+/// The manual has a face carrying both tables ignore its `mort` (*The 'mort'
+/// table*, *Platform-specific Information*: "If a font has both a 'mort'
+/// table and a 'morx' (extended metamorphosis) table, the 'mort' table is
+/// ignored"), so such a face is named by its `morx` alone; and a `Silf` beside
+/// a `mort` is the Graphite description [`table_not_run`] names.
+fn aat_not_run(face: &Sfnt<'_>, layout: &Layout<'_>) -> Option<Tag> {
+    if layout.gsub().is_some() || layout.gpos().is_some() {
+        return None;
+    }
+    if face.table(MORX).is_some() {
+        return Some(Tag::new(b"morx"));
+    }
+    (face.table(MORT).is_some() && face.table(SILF).is_none()).then(|| Tag::new(b"mort"))
 }
 
 impl<'a> Shaper<'a> {
@@ -713,6 +742,7 @@ impl<'a> Shaper<'a> {
             settings: &[],
             plans: None,
             not_run: table_not_run(face, &layout),
+            aat_not_run: aat_not_run(face, &layout),
         }
     }
 
@@ -1133,7 +1163,9 @@ impl<'a> Shaper<'a> {
     ///
     /// A face whose only layout tables are a Graphite description is shaped
     /// as though it carried none, and every run over it says so, once:
-    /// [`Warning::TableNotRun`], naming `Silf`.
+    /// [`Warning::TableNotRun`], naming `Silf`. So is a face whose only
+    /// layout table is AAT's, named by its `morx`, or by its `mort` where it
+    /// carries no `morx`.
     #[must_use]
     pub fn shape(&self, text: &str, run: &Run) -> ShapedRun {
         let slice = text.get(run.text.clone()).unwrap_or("");
@@ -1164,6 +1196,9 @@ impl<'a> Shaper<'a> {
         // name, once a run, and the run is shaped as the face's `cmap` and
         // `hmtx` alone shape it.
         if let Some(table) = self.not_run {
+            warnings.push(Warning::TableNotRun { table });
+        }
+        if let Some(table) = self.aat_not_run {
             warnings.push(Warning::TableNotRun { table });
         }
         if let Some(gsub) = self.layout.gsub() {
@@ -2569,6 +2604,80 @@ mod tests {
             let layout = crate::Layout::parse(&face);
             let names: Vec<&[u8; 4]> = tables.iter().map(|(tag, _)| *tag).collect();
             assert_eq!(super::table_not_run(&face, &layout), expected, "{names:?}");
+        }
+    }
+
+    /// A face goes without its AAT tables only where it has no OpenType
+    /// Layout table to take instead: its `morx` is named, or its `mort` where
+    /// it carries no `morx` and no Graphite description; a readable `GSUB` or
+    /// `GPOS` beside either takes the path it always took and names neither.
+    #[test]
+    fn only_a_face_whose_layout_is_aat_alone_goes_without_it() {
+        let morx: &[u8] = &[0, 2, 0, 0, 0, 0, 0, 0];
+        let mort: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0];
+        let silf: &[u8] = &[0, 4, 0, 0, 0, 4, 0, 2, 0, 0, 0, 0];
+        let layout: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+        let unreadable: &[u8] = &[0, 2, 0, 0, 0, 0, 0, 0, 0, 0];
+        let gdef: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let kerx: &[u8] = &[0, 2, 0, 0, 0, 0, 0, 0];
+        let named_morx = Some(Tag::new(b"morx"));
+        let named_mort = Some(Tag::new(b"mort"));
+        let cases: Vec<(Vec<(&[u8; 4], &[u8])>, Option<Tag>)> = vec![
+            (vec![(b"morx", morx)], named_morx),
+            (vec![(b"GDEF", gdef), (b"morx", morx)], named_morx),
+            (vec![(b"GSUB", unreadable), (b"morx", morx)], named_morx),
+            (vec![(b"GPOS", unreadable), (b"morx", morx)], named_morx),
+            (vec![(b"morx", morx), (b"mort", mort)], named_morx),
+            (vec![(b"Silf", silf), (b"morx", morx)], named_morx),
+            (vec![(b"kerx", kerx), (b"morx", morx)], named_morx),
+            (vec![(b"mort", mort)], named_mort),
+            (vec![(b"GSUB", layout), (b"morx", morx)], None),
+            (vec![(b"GPOS", layout), (b"morx", morx)], None),
+            (vec![(b"GSUB", layout), (b"mort", mort)], None),
+            (vec![(b"GPOS", layout), (b"mort", mort)], None),
+            (vec![(b"Silf", silf), (b"mort", mort)], None),
+            (vec![(b"kerx", kerx)], None),
+            (vec![(b"Silf", silf)], None),
+            (vec![], None),
+        ];
+        for (tables, expected) in cases {
+            let bytes = directory(&tables);
+            let face = Sfnt::parse(&bytes).expect("a directory parses");
+            let layout = crate::Layout::parse(&face);
+            let names: Vec<&[u8; 4]> = tables.iter().map(|(tag, _)| *tag).collect();
+            assert_eq!(super::aat_not_run(&face, &layout), expected, "{names:?}");
+        }
+    }
+
+    /// The two refusals never name one face twice: a face is a Graphite
+    /// description, or AAT's, or neither, so a run carries at most one
+    /// [`Warning::TableNotRun`].
+    #[test]
+    fn a_face_is_named_for_one_table_at_most() {
+        let silf: &[u8] = &[0, 4, 0, 0, 0, 4, 0, 2, 0, 0, 0, 0];
+        let morx: &[u8] = &[0, 2, 0, 0, 0, 0, 0, 0];
+        let mort: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0];
+        let gdef: &[u8] = &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let tables: [(&[u8; 4], &[u8]); 4] = [
+            (b"Silf", silf),
+            (b"morx", morx),
+            (b"mort", mort),
+            (b"GDEF", gdef),
+        ];
+        // Every subset of the four tables, by bitmask.
+        for mask in 0u8..16 {
+            let chosen: Vec<(&[u8; 4], &[u8])> = tables
+                .iter()
+                .enumerate()
+                .filter(|(at, _)| mask & (1 << at) != 0)
+                .map(|(_, table)| *table)
+                .collect();
+            let bytes = directory(&chosen);
+            let face = Sfnt::parse(&bytes).expect("a directory parses");
+            let layout = crate::Layout::parse(&face);
+            let named = usize::from(super::table_not_run(&face, &layout).is_some())
+                + usize::from(super::aat_not_run(&face, &layout).is_some());
+            assert!(named <= 1, "mask {mask:04b} named {named} tables");
         }
     }
 }

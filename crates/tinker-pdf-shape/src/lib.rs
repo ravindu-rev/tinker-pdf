@@ -238,9 +238,12 @@ pub enum Warning {
     /// `table` names the table that was not run. A face whose layout is a
     /// Graphite description — a `Silf`, with no `GSUB`, `GPOS` or `morx`
     /// beside it — is named by `Silf` (`docs/design/shaping.md`, *Graphite
-    /// shaping*; ROADMAP row FT-07d, ruling 3). Recorded once per run,
-    /// whatever the run holds, because the fact is the face's and the run is
-    /// what it touched.
+    /// shaping*; ROADMAP row FT-07d, ruling 3). A face whose layout is AAT's —
+    /// a `morx`, with no readable `GSUB` or `GPOS` beside it — is named by
+    /// `morx` (*AAT shaping*; ROADMAP row FT-07c), and one carrying `mort`
+    /// and no `morx`, `Silf`, `GSUB` or `GPOS` by `mort`, the predecessor
+    /// table no row reads. Recorded once per run, whatever the run holds,
+    /// because the fact is the face's and the run is what it touched.
     TableNotRun {
         /// The table, as the face's table directory spells it.
         table: Tag,
