@@ -132,7 +132,7 @@ piece in the list, which lands its code (a bench operation unmeasured), and a
 P-02.1, P-02.2, P-02.3, P-02.4, P-02.5, P-02.6, P-02.7, P-03.2,
 P-04.3, P-04.4, P-04.5, P-04.7, P-05.5, P-05.8, P-28.1, MS-09.2a, MS-09.3a,
 MS-10.1a, MS-10.2, MS-12.3, K-03.2, K-03.3, K-03.4, K-03.5, K-03.6, K-03.7,
-K-03.8, K-03.8b, K-03.8c, K-04.1, K-04.2, K-04.3, K-04.4, K-04.5, K-04.6, K-04.7, K-04.8,
+K-03.8, K-03.8b, K-04.1, K-04.2, K-04.3, K-04.4, K-04.5, K-04.6, K-04.7, K-04.8,
 K-04.9, K-04.10, K-04.11a, K-05.1, K-05.2, K-05.3, K-05.4, K-05.5, K-05.6b,
 K-05.7, K-05.8, K-07.2, K-07.3, FT-24.1, FT-24.3, K-08.1, K-08.2, K-08.3,
 K-08.4, OC-01.1, OC-01.2, OC-01.3, K-08.6, K-09.1, K-09.2, K-10.1, K-10.2,
@@ -269,7 +269,10 @@ AN-06.3, AN-06.4, AN-06.5, AN-07.1, AN-07.2, AN-07.3, AN-07.4, AN-09.1,
 AN-09.2, AN-09.3, AN-10a.1, AN-10a.2, AN-10b.1, AN-10b.2, AN-10b.3,
 AN-10b.4.
 
-**The end phase.** First the long proofs, several lanes at once:
+**The end phase.** First the full test and gate run on every target, each
+failure traced to the step that wrote it and each moved pin reviewed by the
+owner; K-03.8c lands from that run, its exact defect lists read off it. Then
+the long proofs, several lanes at once:
 
 MS-18.2, K-06.2, K-02.5, MS-13.2, MS-13.3, MS-13.4, MS-13.5, K-04.12,
 RC-16.6a, RC-20.16, FT-01.7, FT-01.12, FT-11.10, FT-14.9, FT-30.7, FT-30.9,
