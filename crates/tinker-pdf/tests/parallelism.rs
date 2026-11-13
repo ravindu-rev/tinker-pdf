@@ -917,3 +917,49 @@ fn a_same_thread_reentry_never_waits_on_itself() {
         "each re-entry computed its own, and each outer value was kept"
     );
 }
+
+// ---- Bands of one page (P-15.7) ----------------------------------------------
+
+/// **A four-band render runs no band on the caller.** A page of text drawn
+/// from its display list, and through `Page::render`, on four threads is cut
+/// into four bands — no run of images stands on it to move a cut — and its
+/// stats say all four ran on the pool's workers and none on the caller, on
+/// `wasm32-wasip1`, where no thread starts, all four on the caller; whatever
+/// the schedule, since a band counts where it ran. The page is the page drawn
+/// whole, and a render asked for no threads counts no band.
+#[test]
+fn a_four_band_render_runs_no_band_on_the_caller() {
+    let doc = walked(1);
+    let page = doc.page(0).expect("a page");
+    let list = page.display_list();
+    let whole = page.render(&RenderOptions::default());
+    let expected = if THREADS_START { (4, 0) } else { (0, 4) };
+    for (door, banded) in [
+        (
+            "DisplayList::render",
+            list.render(&counting(Parallelism::Threads(4))),
+        ),
+        (
+            "Page::render",
+            page.render(&counting(Parallelism::Threads(4))),
+        ),
+    ] {
+        assert!(
+            drawn(&banded) == drawn(&whole),
+            "{door}: the bands are the page"
+        );
+        assert_eq!(
+            placed(&banded.stats.expect("asked")),
+            expected,
+            "{door}: four bands, (on workers, on the caller)"
+        );
+    }
+    let serial = list.render(&counting(Parallelism::Serial));
+    assert_eq!(placed(&serial.stats.expect("asked")), (0, 0), "no band");
+    let one = list.render(&counting(Parallelism::Threads(1)));
+    assert_eq!(
+        placed(&one.stats.expect("asked")),
+        (0, 0),
+        "one thread, one band"
+    );
+}

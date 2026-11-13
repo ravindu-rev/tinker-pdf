@@ -17,6 +17,7 @@
 
 mod epub_support;
 mod guard_support;
+mod region_support;
 mod render_support;
 mod written_support;
 
@@ -333,13 +334,16 @@ const ROSTER: &[Guard] = &[
             "P-15.3",
         )
     },
-    owed(
-        "A9",
-        "band-parallel renders byte-identical to serial at 2, 3, 4 and 7 threads",
-        "a9_band_renders_are_the_serial_page_at_2_3_4_and_7_threads",
-        "P-15",
-        "P-15.7",
-    ),
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A9",
+            "band-parallel renders byte-identical to serial at 2, 3, 4 and 7 threads",
+            "a9_band_renders_are_the_serial_page_at_2_3_4_and_7_threads",
+            "P-15",
+            "P-15.7",
+        )
+    },
     Guard {
         file: "guard_allocations.rs",
         state: State::Landed,
@@ -408,6 +412,10 @@ const SUPPORT: &[(&str, &str)] = &[
     (
         "epub_support/typeface.rs",
         include_str!("epub_support/typeface.rs"),
+    ),
+    (
+        "region_support/mod.rs",
+        include_str!("region_support/mod.rs"),
     ),
 ];
 
@@ -2386,4 +2394,227 @@ fn held_save(
     let saved = tinker_pdf::write::save(editor, options);
     written_support::rewritten("a save", editor.document().bytes(), &saved.bytes);
     saved
+}
+
+// ---- A9: a page drawn in bands is the serial page ---------------------------
+
+/// A9's paths page: 200 by 150 points of curves, strokes and fills, every cap,
+/// join and dash, at fractional coordinates, so long anti-aliased edges cross
+/// every row a band could be cut at.
+fn a9_paths_page() -> Vec<u8> {
+    let mut content = String::new();
+    for at in 0..40u32 {
+        let (x, y) = (
+            f64::from(at * 37 % 190) + 0.3,
+            f64::from(at * 53 % 140) + 0.7,
+        );
+        content.push_str(&format!(
+            "{:.2} {:.2} {:.2} RG {:.1} w {} J {} j [{} {}] 0 d \
+             {x:.2} {y:.2} m {:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c S\n",
+            f64::from(at % 7) / 7.0,
+            f64::from(at % 5) / 5.0,
+            f64::from(at % 3) / 3.0,
+            0.4 + f64::from(at % 6) * 0.9,
+            at % 3,
+            (at + 1) % 3,
+            1 + at % 4,
+            at % 3,
+            x + 30.5,
+            y + 60.25,
+            x - 20.75,
+            y + 10.5,
+            (x + 45.0) % 200.0,
+            (y + 25.0) % 150.0,
+        ));
+        if at % 4 == 0 {
+            content.push_str(&format!(
+                "[] 0 d {:.2} 0.4 0.6 rg {x:.2} {y:.2} {:.2} {:.2} re f\n",
+                f64::from(at % 9) / 9.0,
+                8.5 + f64::from(at % 5),
+                6.25 + f64::from(at % 3)
+            ));
+        }
+    }
+    pdf(&[
+        object("<< /Type /Catalog /Pages 2 0 R >>"),
+        object("<< /Type /Pages /Count 1 /Kids [3 0 R] >>"),
+        object("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 150] /Contents 4 0 R >>"),
+        deflated("", content.as_bytes()),
+    ])
+}
+
+/// A9's JPEG page: a 400 by 300 4:2:0 JPEG over the whole of a 200 by 150
+/// page, a single image, which is a run of one and constrains no cut.
+fn a9_jpeg_page() -> Vec<u8> {
+    let jpeg = render_support::minified_baseline_jpeg(400, 300);
+    pdf(&[
+        object("<< /Type /Catalog /Pages 2 0 R >>"),
+        object("<< /Type /Pages /Count 1 /Kids [3 0 R] >>"),
+        object(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 150] \
+             /Resources << /XObject << /Im0 5 0 R >> >> /Contents 4 0 R >>",
+        ),
+        deflated("", b"q 200 0 0 150 0 0 cm /Im0 Do Q"),
+        stream(
+            "/Type /XObject /Subtype /Image /Width 400 /Height 300 /ColorSpace /DeviceRGB \
+             /BitsPerComponent 8 /Filter /DCTDecode",
+            &jpeg,
+        ),
+    ])
+}
+
+/// A9's page of warnings met in other bands' order: a 120 by 160 page whose
+/// content fills a strip near its foot with one tiling pattern and then a
+/// strip near its head with another, each cell drawing an image no decoder
+/// here reads and a Flate image cut short. Drawn in bands, the head's band
+/// meets the second pattern's warnings and the foot's the first's, so the
+/// bands, taken in order, meet them the other way round from the page — which
+/// met the first fill's first. 1 the catalog, 2 the page tree, 3 the page, 4
+/// its content, 5 and 6 the patterns, 7 to 10 their images.
+fn a9_warnings_page() -> Vec<u8> {
+    let mut cut = tinker_pdf_filters::zlib_compress(&a9_noise(6 * 6 * 3, 21));
+    cut.truncate(cut.len() / 2);
+    let cell = |unreadable: u32, damaged: u32, name: &str| {
+        stream(
+            &format!(
+                "/PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 12 12] /XStep 12 \
+                 /YStep 12 /Resources << /XObject << /U {unreadable} 0 R /{name} {damaged} 0 R \
+                 >> >>"
+            ),
+            format!("q 6 0 0 6 0 0 cm /U Do Q q 6 0 0 6 6 6 cm /{name} Do Q").as_bytes(),
+        )
+    };
+    let damaged = |filter: &str| {
+        stream(
+            &format!(
+                "/Type /XObject /Subtype /Image /Width 6 /Height 6 /ColorSpace /DeviceRGB \
+                 /BitsPerComponent 8 /Filter {filter}"
+            ),
+            &cut,
+        )
+    };
+    pdf(&[
+        object("<< /Type /Catalog /Pages 2 0 R >>"),
+        object("<< /Type /Pages /Count 1 /Kids [3 0 R] >>"),
+        object(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 160] \
+             /Resources << /Pattern << /Foot 5 0 R /Head 6 0 R >> >> /Contents 4 0 R >>",
+        ),
+        deflated(
+            "",
+            b"/Pattern cs /Foot scn 10 8 100 24 re f /Head scn 10 128 100 24 re f",
+        ),
+        cell(7, 8, "FootCut"),
+        cell(9, 10, "HeadCut"),
+        stream(
+            "/Type /XObject /Subtype /Image /Width 8 /Height 8 /ColorSpace /DeviceGray \
+             /BitsPerComponent 1 /Filter /JBIG2Decode",
+            b"no JBIG2 segment here",
+        ),
+        damaged("/FlateDecode"),
+        stream(
+            "/Type /XObject /Subtype /Image /Width 8 /Height 8 /ColorSpace /DeviceGray \
+             /BitsPerComponent 8 /Filter /DCTDecode",
+            b"not a JPEG either",
+        ),
+        damaged("[/FlateDecode]"),
+    ])
+}
+
+/// **A9, the band half: every page drawn in bands is the serial page.**
+///
+/// Every page `render_regions.rs` tiles (`region_support`): text, a shading,
+/// an image and strokes, turned and cropped; a group's, a mask's, a tiling
+/// cell's and a mesh's canvases; the pen, one-bit images and JPEGs decoded at
+/// the size they are drawn; the stroked frame, the page whose ink is all
+/// annotation, and the three-image page of ruling 5's named exception, whose
+/// run of images covers every row and so leaves no row to cut at. Beside them
+/// every page of A9's text, image and annotated documents — a font they lack,
+/// a codec this build has not and a damaged image among them — a paths page,
+/// a full-page JPEG, and a page whose bands meet its warnings in the other
+/// order from the page's. Each drawn through `DisplayList::render` on 2, 3, 4
+/// and 7 threads, and through `Page::render` on 3, at 0.5x, 1x, 1.5x and 4x,
+/// is the page drawn serially: size, format, pixels and warnings. In both
+/// builds, and on `wasm32-wasip1`, where the bands are cut and stitched on
+/// the caller.
+#[test]
+fn a9_band_renders_are_the_serial_page_at_2_3_4_and_7_threads() {
+    use tinker_pdf::Parallelism;
+
+    let mut documents: Vec<(String, Vec<u8>)> = region_support::fixtures()
+        .into_iter()
+        .map(|fixture| (fixture.name.to_string(), fixture.bytes))
+        .collect();
+    documents.extend([
+        (
+            "the stroked frame".to_string(),
+            region_support::framed_page(),
+        ),
+        ("annotations".to_string(), region_support::annotated_page()),
+        (
+            "the named exception's three images".to_string(),
+            region_support::image_run_page(),
+        ),
+        ("A9's text".to_string(), a9_text_document()),
+        ("A9's images".to_string(), a9_image_document()),
+        ("A9's annotations".to_string(), a9_annotated_document()),
+        ("paths".to_string(), a9_paths_page()),
+        ("a JPEG page".to_string(), a9_jpeg_page()),
+        ("warnings in other bands".to_string(), a9_warnings_page()),
+    ]);
+    let (mut compared, mut warned) = (0usize, 0usize);
+    for (name, bytes) in &documents {
+        let document = Document::open(bytes.clone()).expect("the A9 document opens");
+        for index in 0..document.page_count() {
+            let page = document.page(index).expect("a page");
+            let list = page.display_list();
+            for scale in [0.5, 1.0, 1.5, 4.0] {
+                let serial = RenderOptions {
+                    scale,
+                    ..RenderOptions::default()
+                };
+                let whole = page.render(&serial);
+                warned += usize::from(!whole.warnings.is_empty());
+                let drawn = |bitmap: &tinker_pdf::Bitmap| {
+                    (
+                        bitmap.width,
+                        bitmap.height,
+                        bitmap.format,
+                        bitmap.data.clone(),
+                        bitmap.warnings.clone(),
+                    )
+                };
+                let expected = drawn(&whole);
+                let banded = |threads: usize| RenderOptions {
+                    parallelism: Parallelism::Threads(threads),
+                    ..serial.clone()
+                };
+                for threads in [2usize, 3, 4, 7] {
+                    let bitmap = list.render(&banded(threads));
+                    assert!(
+                        drawn(&bitmap) == expected,
+                        "{name}, page {index} at {scale}x in {threads} bands: not the page \
+                         drawn whole ({:?} banded, {:?} whole)",
+                        bitmap.warnings,
+                        whole.warnings
+                    );
+                    compared += 1;
+                }
+                let through_page = page.render(&banded(3));
+                assert!(
+                    drawn(&through_page) == expected,
+                    "{name}, page {index} at {scale}x: Page::render in bands is not the page"
+                );
+                compared += 1;
+            }
+        }
+    }
+    assert!(
+        warned >= 12,
+        "the warnings compared include real ones: {warned}"
+    );
+    println!(
+        "guard-a9-bands: RAN {compared} banded renders, each byte-identical to its page \
+         drawn whole with the same warnings, {warned} of the serial renders warning"
+    );
 }

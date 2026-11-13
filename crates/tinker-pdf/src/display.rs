@@ -56,6 +56,17 @@
 //! one a render cancelled before the first such font would give — less, and
 //! never more.
 //!
+//! # A page in bands
+//!
+//! With threads asked for, [`DisplayList::render`] draws the page in
+//! horizontal bands, each a region of the page in its one frame (ruling 5) on
+//! a thread of the engine's pool, into one bitmap
+//! (`docs/design/parallelism.md`, "Bands of one page"). The cuts keep each
+//! run of image draws — the one decision ruling 5 leaves to a canvas — inside
+//! one band ([`DisplayList::image_runs`], [`cuts`]), and the bands' warnings,
+//! each stamped with the ordinal of the call it was met at, merge into the
+//! page's list ([`merged`]).
+//!
 //! # A page too large to retain
 //!
 //! A recording holds every call with its own state and path, so what it costs
@@ -72,13 +83,23 @@
 
 use std::sync::Arc;
 
-use tinker_pdf_content::{interpret, replay, Event, Matrix};
+use std::sync::{Mutex, PoisonError};
+
+use tinker_pdf_content::{
+    interpret, replay, Device, Event, Glyph, GraphicsState, Group, ImageRef, MarkedProps,
+    MaskGroup, Matrix, PathSegment,
+};
 use tinker_pdf_cos::pages as cos_pages;
-use tinker_pdf_render::DisplayRecorder;
+use tinker_pdf_pool::{on_worker, Executor, MAX_THREADS};
+use tinker_pdf_raster::image::{image_bounds_in, Transform};
+use tinker_pdf_render::{DisplayRecorder, Renderer};
 
 use crate::annots::{self, Recorded};
 use crate::resources::PageResources;
-use crate::{Bitmap, Page, RenderOptions};
+use crate::stats::Counter;
+use crate::{
+    handed_back, Bitmap, Met, Page, Parallelism, PixelRegion, RenderOptions, RenderWarning, View,
+};
 
 /// A page interpreted once, to be drawn as often and at as many scales as a
 /// caller likes. See [`Page::display_list`].
@@ -184,34 +205,247 @@ impl DisplayList {
     /// because this is the same pipeline with the interpretation replaced by
     /// a replay of what the interpretation produced.
     ///
+    /// With [`RenderOptions::parallelism`] asking for two threads or more,
+    /// the page is drawn in horizontal bands on that many threads of the
+    /// engine's pool (the module documentation): the same bitmap and, for a
+    /// render that runs to its end, the same warnings.
+    ///
     /// A list that is not retained ([`DisplayList::is_retained`]) draws by
-    /// calling [`Page::render`].
+    /// calling [`Page::render`], on the caller.
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
         if !self.retained {
-            return self.page.render(options);
+            // On the caller: a page asked for in bands asks its list for
+            // them, and a list that keeps nothing draws it the direct way.
+            return self.page.render(&RenderOptions {
+                parallelism: Parallelism::Serial,
+                ..options.clone()
+            });
+        }
+        if let Some(bitmap) = self.render_in_bands(options) {
+            return bitmap;
         }
         let resources = self
             .resources
             .for_one_render_counted(crate::stats::tally(options.stats));
         self.page
             .render_layer_with(options, None, &resources, |renderer, resources| {
-                let replayed = replay(&self.content, renderer);
-                // What the interpretation could not resolve, reported by a
-                // replay that ran to the end. See the module documentation for
-                // why a cancelled one reports none of it.
-                if !replayed.cancelled {
-                    resources.note_missing_fonts(&self.interpreted_missing);
-                    resources.note_repaired_spaces(&self.interpreted_repairs);
-                }
-                if options.annotations {
-                    for annotation in &self.annotations {
-                        renderer.push_resources(resources.bind(&annotation.scope));
-                        replay(&annotation.events, renderer);
-                        renderer.pop_resources();
-                    }
-                }
+                self.replay_onto(options, renderer, resources);
             })
+    }
+
+    /// The list's calls onto `target`: the content, what its interpretation
+    /// could not resolve noted by a replay that ran to the end, and the
+    /// annotations after them where `options` draws them, each in the scope
+    /// its appearance resolves in. See the module documentation for why a
+    /// cancelled replay notes none of what the interpretation met.
+    fn replay_onto(
+        &self,
+        options: &RenderOptions,
+        target: &mut impl Target,
+        resources: &PageResources,
+    ) {
+        let replayed = replay(&self.content, target);
+        if !replayed.cancelled {
+            resources.note_missing_fonts(&self.interpreted_missing);
+            resources.note_repaired_spaces(&self.interpreted_repairs);
+        }
+        target.settle();
+        if options.annotations {
+            for annotation in &self.annotations {
+                target.push(resources.bind(&annotation.scope));
+                replay(&annotation.events, target);
+                target.pop();
+            }
+        }
+    }
+
+    /// The list drawn in horizontal bands on the threads
+    /// `options.parallelism` names (`docs/design/parallelism.md`, "Bands of
+    /// one page"), or `None` where it is drawn whole: asked for no threads, or
+    /// for one, a view of fewer than two rows, or a page whose runs of images
+    /// leave no row to cut at.
+    ///
+    /// Each band is the view's own rows drawn as a region of the page in its
+    /// one frame (ruling 5), so it is byte-equal to those rows of the page
+    /// drawn whole; the cuts keep each run of images inside one band
+    /// ([`DisplayList::image_runs`], [`cuts`]), which is the decision ruling 5
+    /// leaves to the canvas. Every band replays the whole list over the list's
+    /// caches, which fill once however many bands miss a key at once, and
+    /// writes its rows into one bitmap sized to the view. What the bands met
+    /// is merged into the list the page drawn whole reports ([`merged`]). On
+    /// the pool's workers where they start, and on the caller where none does
+    /// — wasm32, a host at its thread limit — with the same output; each band
+    /// counts where it ran into the render's one tally.
+    fn render_in_bands(&self, options: &RenderOptions) -> Option<Bitmap> {
+        let threads = match options.parallelism {
+            Parallelism::Threads(threads) if threads >= 2 => threads.min(MAX_THREADS),
+            _ => return None,
+        };
+        let page = &self.page;
+        let View {
+            scale,
+            applied,
+            full_width,
+            full_height,
+            view,
+            asked,
+        } = page.view(options, None);
+        if view.width == 0 || view.height < 2 {
+            return None;
+        }
+        let base = page.base_at(applied);
+        let runs = self.image_runs(options, &base, (full_width, full_height));
+        let count = threads.min(usize::try_from(view.height).unwrap_or(usize::MAX));
+        let bands = bands_of(view, &cuts(&runs, view, count));
+        if bands.len() < 2 {
+            return None;
+        }
+
+        let work = crate::stats::tally(options.stats);
+        let format = handed_back(options);
+        let stride = (view.width as usize).saturating_mul(format.components());
+        let mut data = vec![0u8; stride.saturating_mul(view.height as usize)];
+        // Each band's rows of the one bitmap, its own to write.
+        let mut slots: Vec<Mutex<&mut [u8]>> = Vec::with_capacity(bands.len());
+        let mut rest = data.as_mut_slice();
+        for band in &bands {
+            let (rows, after) = rest.split_at_mut(stride.saturating_mul(band.height as usize));
+            slots.push(Mutex::new(rows));
+            rest = after;
+        }
+        let parts: Vec<Mutex<Option<BandMet>>> = bands.iter().map(|_| Mutex::new(None)).collect();
+        let premultiplied = Mutex::new(false);
+        options.parallelism.run(bands.len(), &|index| {
+            let (Some(band), Some(slot), Some(part)) =
+                (bands.get(index), slots.get(index), parts.get(index))
+            else {
+                return;
+            };
+            if let Some(work) = &work {
+                let place = if on_worker() {
+                    Counter::PoolItemsOnWorkers
+                } else {
+                    Counter::PoolItemsOnCaller
+                };
+                work.add(place, 1);
+            }
+            let resources = self.resources.for_one_render_counted(work.clone());
+            let band_options = RenderOptions {
+                region: Some(*band),
+                parallelism: Parallelism::Serial,
+                ..options.clone()
+            };
+            let mut stamps = Stamps::default();
+            let layer = page.draw_layer(&band_options, None, &resources, |renderer, resources| {
+                let mut stamping = Stamping {
+                    renderer,
+                    resources,
+                    ordinal: 0,
+                    stamps: Stamps::default(),
+                };
+                self.replay_onto(options, &mut stamping, resources);
+                stamps = stamping.stamps;
+            });
+            let mut rows = slot.lock().unwrap_or_else(PoisonError::into_inner);
+            let rows: &mut [u8] = &mut rows;
+            let length = rows.len().min(layer.pixels.data.len());
+            if let (Some(to), Some(from)) =
+                (rows.get_mut(..length), layer.pixels.data.get(..length))
+            {
+                to.copy_from_slice(from);
+            }
+            *premultiplied.lock().unwrap_or_else(PoisonError::into_inner) =
+                layer.pixels.premultiplied;
+            *part.lock().unwrap_or_else(PoisonError::into_inner) = Some(BandMet {
+                met: layer.met,
+                stamps,
+            });
+        });
+
+        let parts: Vec<BandMet> = parts
+            .into_iter()
+            .filter_map(|part| part.into_inner().unwrap_or_else(PoisonError::into_inner))
+            .collect();
+        let warnings = merged(
+            &parts,
+            (applied < scale).then_some((scale, applied)),
+            asked
+                .filter(|requested| *requested != view)
+                .map(|requested| (requested, view)),
+        );
+        drop(slots);
+        Some(Bitmap {
+            width: view.width,
+            height: view.height,
+            format,
+            stride,
+            data,
+            warnings,
+            premultiplied: premultiplied
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner),
+            stats: work.as_ref().map(|work| work.stats()),
+        })
+    }
+
+    /// The rows of the page each run of image draws covers, at the render's
+    /// scale: each maximal sequence of two image draws or more with no call
+    /// between them the renderer ends a run on
+    /// ([`tinker_pdf_render::ends_image_run`]) — in the content, its forms,
+    /// groups and soft masks, and the annotations after it where `options`
+    /// draws them, in the order a replay delivers them — as the rows of the
+    /// page its draws' unit squares reach (`image_bounds_in`'s rectangle,
+    /// under each draw's transform and the page's `base`).
+    ///
+    /// A superset of the runs the renderer holds: a draw a hidden layer hides,
+    /// or that a change of state or an overlap makes the renderer start a run
+    /// of its own at, is counted into the sequence it stands in, and only
+    /// costs a cut a row it could have had. A single draw is a run of one and
+    /// constrains nothing. A tiling cell is drawn on a canvas of its own,
+    /// the same in a band as on the page, so its runs are not here.
+    fn image_runs(
+        &self,
+        options: &RenderOptions,
+        base: &Matrix,
+        page: (u32, u32),
+    ) -> Vec<(u32, u32)> {
+        let annotations = self
+            .annotations
+            .iter()
+            .filter(|_| options.annotations)
+            .flat_map(|annotation| annotation.events.iter());
+        let mut runs = Vec::new();
+        // The open sequence's first row, its row past the last, and its draws.
+        let mut open: Option<(u32, u32, usize)> = None;
+        let close = |open: &mut Option<(u32, u32, usize)>, runs: &mut Vec<(u32, u32)>| {
+            if let Some((top, bottom, draws)) = open.take() {
+                if draws >= 2 && top < bottom {
+                    runs.push((top, bottom));
+                }
+            }
+        };
+        for event in self.content.iter().chain(annotations) {
+            match event {
+                Event::DrawImage { state, .. } => {
+                    // A call recorded with no state is replayed in the
+                    // initial one, and its square is placed by that.
+                    let ctm = state.as_deref().map_or(Matrix::IDENTITY, |state| state.ctm);
+                    let sequence = open.get_or_insert((u32::MAX, 0, 0));
+                    if let Some((top, bottom)) = rows_of(&ctm.then(base), page) {
+                        sequence.0 = sequence.0.min(top);
+                        sequence.1 = sequence.1.max(bottom);
+                    }
+                    sequence.2 += 1;
+                }
+                other if tinker_pdf_render::ends_image_run(other.kind()) => {
+                    close(&mut open, &mut runs);
+                }
+                _ => {}
+            }
+        }
+        close(&mut open, &mut runs);
+        runs
     }
 
     /// The page the list was recorded from.
@@ -282,6 +516,408 @@ impl DisplayList {
     #[must_use]
     pub fn is_retained(&self) -> bool {
         self.retained
+    }
+}
+
+/// The rows of a page `page` pixels in size an image's unit square reaches
+/// under `to_device`, as its first row and the row past its last; `None` for
+/// a square that reaches none.
+fn rows_of(to_device: &Matrix, page: (u32, u32)) -> Option<(u32, u32)> {
+    let t = Transform {
+        a: to_device.a,
+        b: to_device.b,
+        c: to_device.c,
+        d: to_device.d,
+        e: to_device.e,
+        f: to_device.f,
+    };
+    let (_, y, _, height) = image_bounds_in(&t, (0, 0, page.0, page.1))?;
+    // Clamped into the page, so inside `0..page.1`.
+    let top = u32::try_from(y).ok()?;
+    Some((top, top.saturating_add(height)))
+}
+
+/// Where `count` bands of `view` are cut: the page rows
+/// `view.y + round(k × height ÷ count)` for `k` from 1, each moved to the
+/// nearest row no run of `runs` has rows on both sides of — the lower of two
+/// as near — and kept between the cut before it and the next cut's own row;
+/// a cut with no such row is dropped, and the view is drawn in fewer bands
+/// (`docs/design/parallelism.md`, "Bands of one page"). A cut is the first
+/// row of the band below it.
+fn cuts(runs: &[(u32, u32)], view: PixelRegion, count: usize) -> Vec<u32> {
+    // The rows no cut may be, as inclusive ranges, merged where they meet:
+    // every row strictly inside a run.
+    let mut blocked: Vec<(u32, u32)> = runs
+        .iter()
+        .filter(|(top, bottom)| bottom.saturating_sub(*top) >= 2)
+        .map(|&(top, bottom)| (top + 1, bottom - 1))
+        .collect();
+    blocked.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(blocked.len());
+    for (from, to) in blocked {
+        match merged.last_mut() {
+            Some(last) if from <= last.1.saturating_add(1) => last.1 = last.1.max(to),
+            _ => merged.push((from, to)),
+        }
+    }
+    let inside = |row: u32| {
+        let at = merged.partition_point(|&(from, _)| from <= row);
+        at.checked_sub(1)
+            .and_then(|at| merged.get(at))
+            .filter(|&&(_, to)| row <= to)
+            .copied()
+    };
+    let (top, height) = (u64::from(view.y), u64::from(view.height));
+    let n = u64::try_from(count).unwrap_or(u64::MAX).max(1);
+    // round(k × height ÷ n), half up, in integers.
+    let ideal = |k: u64| {
+        let offset = (2 * k * height + n) / (2 * n);
+        u32::try_from(top + offset).unwrap_or(u32::MAX)
+    };
+    let end = u32::try_from(top + height).unwrap_or(u32::MAX);
+    let mut placed: Vec<u32> = Vec::new();
+    for k in 1..n {
+        let lower = placed.last().copied().unwrap_or(view.y);
+        let upper = if k + 1 < n { ideal(k + 1) } else { end };
+        let want = ideal(k);
+        let candidates = match inside(want) {
+            None => [Some(want), None],
+            Some((from, to)) => {
+                let (below, above) = (from.checked_sub(1), to.checked_add(1));
+                let near = |row: Option<u32>| row.map_or(u32::MAX, |row| row.abs_diff(want));
+                if near(above) < near(below) {
+                    [above, below]
+                } else {
+                    [below, above]
+                }
+            }
+        };
+        if let Some(cut) = candidates
+            .into_iter()
+            .flatten()
+            .find(|&row| lower < row && row < upper)
+        {
+            placed.push(cut);
+        }
+    }
+    placed
+}
+
+/// The bands of `view` its `cuts` make, top to bottom, the whole width each.
+fn bands_of(view: PixelRegion, cuts: &[u32]) -> Vec<PixelRegion> {
+    let end = view.y.saturating_add(view.height);
+    let mut edges = Vec::with_capacity(cuts.len() + 2);
+    edges.push(view.y);
+    edges.extend_from_slice(cuts);
+    edges.push(end);
+    edges
+        .windows(2)
+        .filter_map(|pair| match pair {
+            [from, to] if from < to => Some(PixelRegion::new(view.x, *from, view.width, to - from)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The ordinal of the call a warning was first met at among the calls a
+/// replay delivers, and the warning's place among those that call met.
+type Stamp = (u64, u32);
+
+/// The stamps of what one band's render met: one for each warning of the
+/// renderer's list met during the calls, each damaged image and each
+/// repaired space of the resources', in their orders.
+#[derive(Default)]
+struct Stamps {
+    met: Vec<Stamp>,
+    damaged: Vec<Stamp>,
+    repaired: Vec<Stamp>,
+}
+
+/// Stamps the entries a list has gained since `stamps` last saw it, `now` long
+/// after the call `ordinal`.
+fn stamp(stamps: &mut Vec<Stamp>, now: usize, ordinal: u64) {
+    for place in 0..now.saturating_sub(stamps.len()) {
+        stamps.push((ordinal, u32::try_from(place).unwrap_or(u32::MAX)));
+    }
+}
+
+/// One band's render: what it met and the calls it met each at.
+struct BandMet {
+    met: Met,
+    stamps: Stamps,
+}
+
+/// The warnings of a page drawn in bands, as the page drawn whole reports
+/// them (`docs/design/parallelism.md`, "Warnings equal the serial render's").
+///
+/// Every band replays the same calls, so a call's ordinal is the same in
+/// each, and the page met a warning first at the first call that produced it
+/// on its canvas — a call some band's canvas holds. So each warning the
+/// renderer met during the calls is kept once, at the least stamp any band
+/// met it at, and ordered by that; then what the renderers added at the end,
+/// in the fixed order a render adds it; then the facade's, each damaged image
+/// and repaired space at its least stamp likewise; the page scaled down and
+/// the caller's region clamped, which belong to the whole. A band lies inside
+/// the page, so none is clamped itself.
+fn merged(
+    parts: &[BandMet],
+    scaled_down: Option<(f64, f64)>,
+    clamped: Option<(PixelRegion, PixelRegion)>,
+) -> Vec<RenderWarning> {
+    let mut calls: Vec<(Stamp, RenderWarning)> = Vec::new();
+    let mut ending: Vec<RenderWarning> = Vec::new();
+    for part in parts {
+        for (index, warning) in part.met.renderer.iter().enumerate() {
+            match part.stamps.met.get(index) {
+                Some(&stamp) => keep_least(&mut calls, stamp, warning.clone()),
+                None => {
+                    if !ending.contains(warning) {
+                        ending.push(warning.clone());
+                    }
+                }
+            }
+        }
+    }
+    calls.sort_by(|a, b| a.0.cmp(&b.0));
+    // `Renderer::finish`'s order; a sort that keeps the order of the rest.
+    ending.sort_by_key(|warning| match warning {
+        RenderWarning::UnreadableFont => 0,
+        RenderWarning::GroupBudgetSpent { .. } => 1,
+        RenderWarning::RecursiveContent => 2,
+        RenderWarning::NestedBudgetSpent => 3,
+        RenderWarning::Cancelled => 4,
+        _ => 5,
+    });
+    let mut renderer: Vec<RenderWarning> = calls.into_iter().map(|(_, warning)| warning).collect();
+    renderer.extend(ending);
+    let listed = |pick: &dyn Fn(&BandMet) -> (&[(String, String)], &[Stamp])| {
+        let mut least: Vec<(Stamp, (String, String))> = Vec::new();
+        for part in parts {
+            let (entries, stamps) = pick(part);
+            for (index, entry) in entries.iter().enumerate() {
+                let stamp = stamps
+                    .get(index)
+                    .copied()
+                    .unwrap_or((u64::MAX, u32::try_from(index).unwrap_or(u32::MAX)));
+                keep_least(&mut least, stamp, entry.clone());
+            }
+        }
+        least.sort_by(|a, b| a.0.cmp(&b.0));
+        // The cap a render's own list keeps (`PageResources`).
+        least.truncate(64);
+        least
+            .into_iter()
+            .map(|(_, entry)| entry)
+            .collect::<Vec<_>>()
+    };
+    let damaged = listed(&|part| (&part.met.damaged, &part.stamps.damaged));
+    let repaired = listed(&|part| (&part.met.repaired, &part.stamps.repaired));
+    Met {
+        renderer,
+        missing_fonts: parts.iter().any(|part| part.met.missing_fonts),
+        damaged,
+        repaired,
+        scaled_down,
+        clamped,
+    }
+    .warnings()
+}
+
+/// Keeps `value` in `kept` once, at the least `stamp` it has been met at.
+fn keep_least<T: PartialEq>(kept: &mut Vec<(Stamp, T)>, stamp: Stamp, value: T) {
+    match kept.iter_mut().find(|(_, held)| *held == value) {
+        Some(held) => held.0 = held.0.min(stamp),
+        None => kept.push((stamp, value)),
+    }
+}
+
+/// Where a list's calls are replayed: the renderer, or the renderer behind a
+/// [`Stamping`].
+trait Target: Device {
+    /// [`Renderer::push_resources`].
+    fn push(&mut self, scope: Arc<PageResources>);
+    /// [`Renderer::pop_resources`].
+    fn pop(&mut self);
+    /// Marks the end of the content's calls, after what the recording's
+    /// interpretation met is noted.
+    fn settle(&mut self) {}
+}
+
+impl Target for Renderer<'_, PageResources> {
+    fn push(&mut self, scope: Arc<PageResources>) {
+        self.push_resources(scope);
+    }
+
+    fn pop(&mut self) {
+        self.pop_resources();
+    }
+}
+
+/// A renderer handed each recorded call in turn, stamping what each call made
+/// the render meet — the renderer's warnings and the resources' damaged
+/// images and repaired spaces — with the call's ordinal, for [`merged`].
+struct Stamping<'a, 'g> {
+    renderer: &'a mut Renderer<'g, PageResources>,
+    resources: &'a PageResources,
+    ordinal: u64,
+    stamps: Stamps,
+}
+
+impl Stamping<'_, '_> {
+    /// Stamps what the call just delivered made the render meet, and counts
+    /// the call.
+    fn after(&mut self) {
+        let ordinal = self.ordinal;
+        stamp(&mut self.stamps.met, self.renderer.met().len(), ordinal);
+        let (damaged, repaired) = self.resources.tolerated();
+        stamp(&mut self.stamps.damaged, damaged, ordinal);
+        stamp(&mut self.stamps.repaired, repaired, ordinal);
+        self.ordinal = self.ordinal.saturating_add(1);
+    }
+}
+
+impl Target for Stamping<'_, '_> {
+    fn push(&mut self, scope: Arc<PageResources>) {
+        self.renderer.push_resources(scope);
+    }
+
+    fn pop(&mut self) {
+        self.renderer.pop_resources();
+    }
+
+    fn settle(&mut self) {
+        self.after();
+    }
+}
+
+impl Device for Stamping<'_, '_> {
+    fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
+        self.renderer.show_glyph(glyph, state);
+        self.after();
+    }
+
+    fn begin_text(&mut self) {
+        self.renderer.begin_text();
+        self.after();
+    }
+
+    fn end_text(&mut self) {
+        self.renderer.end_text();
+        self.after();
+    }
+
+    fn fill_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
+        self.renderer.fill_path(path, state, even_odd);
+        self.after();
+    }
+
+    fn stroke_path(&mut self, path: &[PathSegment], state: &GraphicsState) {
+        self.renderer.stroke_path(path, state);
+        self.after();
+    }
+
+    fn clip_path(&mut self, path: &[PathSegment], state: &GraphicsState, even_odd: bool) {
+        self.renderer.clip_path(path, state, even_odd);
+        self.after();
+    }
+
+    fn save_state(&mut self) {
+        self.renderer.save_state();
+        self.after();
+    }
+
+    fn restore_state(&mut self) {
+        self.renderer.restore_state();
+        self.after();
+    }
+
+    fn draw_image(&mut self, image: &ImageRef, state: &GraphicsState) {
+        self.renderer.draw_image(image, state);
+        self.after();
+    }
+
+    fn draw_shading(&mut self, name: &[u8], state: &GraphicsState) {
+        self.renderer.draw_shading(name, state);
+        self.after();
+    }
+
+    fn begin_marked_content(
+        &mut self,
+        tag: &[u8],
+        visible: bool,
+        hidden_layer: Option<&str>,
+        props: Option<&MarkedProps>,
+    ) {
+        self.renderer
+            .begin_marked_content(tag, visible, hidden_layer, props);
+        self.after();
+    }
+
+    fn end_marked_content(&mut self) {
+        self.renderer.end_marked_content();
+        self.after();
+    }
+
+    fn begin_form(&mut self, id: u64, name: &[u8]) -> bool {
+        let entered = self.renderer.begin_form(id, name);
+        self.after();
+        entered
+    }
+
+    fn end_form(&mut self, id: u64) {
+        self.renderer.end_form(id);
+        self.after();
+    }
+
+    fn begin_group(&mut self, group: Group, state: &GraphicsState) -> bool {
+        let entered = self.renderer.begin_group(group, state);
+        self.after();
+        entered
+    }
+
+    fn end_group(&mut self) {
+        self.renderer.end_group();
+        self.after();
+    }
+
+    fn begin_soft_mask(
+        &mut self,
+        mask: &MaskGroup,
+        bbox: &[PathSegment],
+        state: &GraphicsState,
+    ) -> bool {
+        let entered = self.renderer.begin_soft_mask(mask, bbox, state);
+        self.after();
+        entered
+    }
+
+    fn end_soft_mask(&mut self) {
+        self.renderer.end_soft_mask();
+        self.after();
+    }
+
+    fn clear_soft_mask(&mut self) {
+        self.renderer.clear_soft_mask();
+        self.after();
+    }
+
+    fn group_budget_spent(&mut self) {
+        self.renderer.group_budget_spent();
+        self.after();
+    }
+
+    fn recursion_refused(&mut self) {
+        self.renderer.recursion_refused();
+        self.after();
+    }
+
+    fn nested_budget_spent(&mut self) {
+        self.renderer.nested_budget_spent();
+        self.after();
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.renderer.is_cancelled()
     }
 }
 
@@ -860,6 +1496,262 @@ mod tests {
             fills[12].stored_parameters(),
             &StoredParameters::INITIAL,
             "`/HT /Default` restores the initial value"
+        );
+    }
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+    use crate::Document;
+
+    /// A view of `height` rows at row `y`, 50 wide.
+    fn view(y: u32, height: u32) -> PixelRegion {
+        PixelRegion::new(0, y, 50, height)
+    }
+
+    /// With no run anywhere, the cuts are the even rows `round(k × height ÷ n)`
+    /// from the view's top, half up, and a run of one row, which no cut can
+    /// fall strictly inside, moves none of them.
+    #[test]
+    fn cuts_fall_evenly_where_no_run_stands() {
+        assert_eq!(cuts(&[], view(0, 100), 4), vec![25, 50, 75]);
+        // round(10 / 3) and round(20 / 3), from row 7.
+        assert_eq!(cuts(&[], view(7, 10), 3), vec![10, 14]);
+        // round(5 / 2) is 3, half up.
+        assert_eq!(cuts(&[], view(0, 5), 2), vec![3]);
+        assert_eq!(cuts(&[], view(0, 4), 4), vec![1, 2, 3], "a band a row");
+        assert!(cuts(&[], view(0, 9), 1).is_empty(), "one band, no cut");
+        // Row 24 alone holds no cut inside it; rows 50 and 51 hold only 51.
+        assert_eq!(
+            cuts(&[(24, 25), (50, 52)], view(0, 100), 4),
+            vec![25, 50, 75]
+        );
+    }
+
+    /// A cut that would fall strictly inside a run moves to the nearer of the
+    /// rows just outside it — the run's first row, or the row past its last —
+    /// the lower of two as near; the others stay where they were.
+    #[test]
+    fn a_cut_moves_to_the_nearest_row_no_run_spans() {
+        // Rows 20 to 29: 25 is inside, 20 and 30 are five away each.
+        assert_eq!(cuts(&[(20, 30)], view(0, 100), 4), vec![20, 50, 75]);
+        // Rows 22 to 29: 22 is three away, 30 five.
+        assert_eq!(cuts(&[(22, 30)], view(0, 100), 4), vec![22, 50, 75]);
+        // Rows 18 to 27: 28 is three away, 18 seven.
+        assert_eq!(cuts(&[(18, 28)], view(0, 100), 4), vec![28, 50, 75]);
+        // A view starting below the page's top: its rows are the page's.
+        assert_eq!(cuts(&[(60, 70)], view(40, 40), 2), vec![60]);
+    }
+
+    /// Runs that overlap or abut block their rows as one; a cut keeps between
+    /// the cut before it and the next cut's own row, taking the farther free
+    /// row where the nearer is outside them, and is dropped where both are;
+    /// and a run over every row leaves no cut at all — the view drawn whole.
+    #[test]
+    fn a_cut_keeps_between_its_neighbours_or_is_dropped() {
+        // Rows 10 to 39 and 39 to 69 block 11 to 68 as one: 25 moves to 10,
+        // 50 to 70, and 75 is free.
+        assert_eq!(
+            cuts(&[(10, 40), (39, 70)], view(0, 100), 4),
+            vec![10, 70, 75]
+        );
+        // 50 inside rows 45 to 79 moves to 45, the nearer; 75 inside them
+        // moves to 80, the nearer, which is past 45.
+        assert_eq!(cuts(&[(45, 80)], view(0, 100), 4), vec![25, 45, 80]);
+        // 25 inside rows 20 to 79 moves to 20; 50 has 20, not past the cut
+        // before it, and 80, past 75, its neighbour: dropped; 75 moves to 80.
+        assert_eq!(cuts(&[(20, 80)], view(0, 100), 4), vec![20, 80]);
+        assert_eq!(
+            bands_of(view(0, 100), &[20, 80]),
+            vec![view(0, 20), view(20, 60), view(80, 20)],
+            "the run in a band of its own"
+        );
+        // A run over every row: each cut's free rows are the view's own
+        // edges, which no cut may be.
+        assert!(cuts(&[(0, 100)], view(0, 100), 4).is_empty());
+        assert_eq!(bands_of(view(0, 100), &[]), vec![view(0, 100)]);
+    }
+
+    /// The bands of a view tile it, top to bottom, the whole width each.
+    #[test]
+    fn the_bands_tile_the_view() {
+        let region = PixelRegion::new(13, 40, 21, 60);
+        let bands = bands_of(region, &[55, 61, 99]);
+        assert_eq!(
+            bands,
+            vec![
+                PixelRegion::new(13, 40, 21, 15),
+                PixelRegion::new(13, 55, 21, 6),
+                PixelRegion::new(13, 61, 21, 38),
+                PixelRegion::new(13, 99, 21, 1),
+            ]
+        );
+        let rows: u32 = bands.iter().map(|band| band.height).sum();
+        assert_eq!(rows, region.height);
+    }
+
+    /// A document of one 100 by 100 page drawing `content`, whose `/Im` is a
+    /// one-sample grey image.
+    fn page_drawing(content: &str) -> Vec<u8> {
+        format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100]\n\
+   /Resources << /XObject << /Im 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray \
+   /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length 3 >>\nstream\n40>\nendstream\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+            content.len()
+        )
+        .into_bytes()
+    }
+
+    /// The runs a list's planner reads: image draws one after another, a `q`
+    /// and a `Q` between them, are one sequence over their rows; a fill ends
+    /// one; a single draw is no run; and the rows are the page's at the
+    /// render's scale.
+    #[test]
+    fn the_runs_are_what_the_renderer_holds() {
+        let content = "q 20 0 0 10 0 80 cm /Im Do Q q 20 0 0 10 30 60 cm /Im Do Q \
+                       0 0 1 1 re f \
+                       q 20 0 0 10 0 30 cm /Im Do Q \
+                       0 0 1 1 re f \
+                       q 20 0 0 5 0 10 cm /Im Do Q q 20 0 0 5 30 0 cm /Im Do Q \
+                       q 20 0 0 5 60 20 cm /Im Do Q";
+        let document = Document::open(page_drawing(content)).expect("it opens");
+        let page = document.page(0).expect("a page");
+        let list = page.display_list();
+        let runs = |scale: f64| {
+            let options = RenderOptions {
+                scale,
+                ..RenderOptions::default()
+            };
+            let View {
+                applied,
+                full_width,
+                full_height,
+                ..
+            } = page.view(&options, None);
+            list.image_runs(&options, &page.base_at(applied), (full_width, full_height))
+        };
+        // Rows from the top: the first two images over rows 10 to 39, the
+        // lone one none, the last three over rows 75 to 99.
+        assert_eq!(runs(1.0), vec![(10, 40), (75, 100)]);
+        assert_eq!(runs(2.0), vec![(20, 80), (150, 200)]);
+    }
+
+    /// A band's render met with its stamps, for the merge.
+    fn band(
+        renderer: Vec<RenderWarning>,
+        met: Vec<Stamp>,
+        damaged: Vec<((&str, &str), Stamp)>,
+    ) -> BandMet {
+        BandMet {
+            met: Met {
+                renderer,
+                missing_fonts: false,
+                damaged: damaged
+                    .iter()
+                    .map(|((name, reason), _)| (name.to_string(), reason.to_string()))
+                    .collect(),
+                repaired: Vec::new(),
+                scaled_down: None,
+                clamped: None,
+            },
+            stamps: Stamps {
+                met,
+                damaged: damaged.iter().map(|(_, stamp)| *stamp).collect(),
+                repaired: Vec::new(),
+            },
+        }
+    }
+
+    fn unsupported(codec: &str) -> RenderWarning {
+        RenderWarning::UnsupportedImage {
+            codec: codec.to_string(),
+        }
+    }
+
+    /// **The bands' warnings are the page's.** A warning two bands met is
+    /// kept once, at the earlier call, and the warnings are ordered by the
+    /// call each was first met at — so a band below that met the page's first
+    /// warning, and a band above that met only its second, merge into the
+    /// page's order; what the renderers added at the end follows, in the
+    /// order a render adds it, each once; then the facade's, by the same
+    /// rule, and the page's own scale and region.
+    #[test]
+    fn warnings_merge_in_the_order_the_page_met_them() {
+        let top = band(
+            vec![unsupported("NotJpeg"), RenderWarning::RecursiveContent],
+            vec![(9, 0)],
+            vec![(("HeadCut", "truncated"), (9, 0))],
+        );
+        let bottom = band(
+            vec![
+                unsupported("JBIG2Decode"),
+                unsupported("NotJpeg"),
+                RenderWarning::UnreadableFont,
+                RenderWarning::RecursiveContent,
+            ],
+            vec![(4, 0), (9, 0)],
+            vec![
+                (("FootCut", "truncated"), (4, 0)),
+                (("HeadCut", "truncated"), (9, 0)),
+            ],
+        );
+        let region = PixelRegion::new(0, 0, 500, 500);
+        let applied = PixelRegion::new(0, 0, 100, 120);
+        let warnings = merged(&[top, bottom], Some((8.0, 4.0)), Some((region, applied)));
+        assert_eq!(
+            warnings,
+            vec![
+                unsupported("JBIG2Decode"),
+                unsupported("NotJpeg"),
+                RenderWarning::UnreadableFont,
+                RenderWarning::RecursiveContent,
+                RenderWarning::DamagedImage {
+                    name: "FootCut".to_string(),
+                    reason: "truncated".to_string(),
+                },
+                RenderWarning::DamagedImage {
+                    name: "HeadCut".to_string(),
+                    reason: "truncated".to_string(),
+                },
+                RenderWarning::PageScaledDown {
+                    requested: 8.0,
+                    applied: 4.0,
+                },
+                RenderWarning::RegionClamped {
+                    requested: region,
+                    applied,
+                },
+            ]
+        );
+
+        // Two warnings one call met keep that call's order; one a band met at
+        // an earlier call keeps the earlier; and a font the resources missed,
+        // said by one band, is said once where no renderer said it.
+        let one = band(
+            vec![unsupported("a"), unsupported("b")],
+            vec![(3, 0), (3, 1)],
+            vec![],
+        );
+        let mut other = band(
+            vec![unsupported("a"), unsupported("b")],
+            vec![(1, 0), (3, 0)],
+            vec![],
+        );
+        other.met.missing_fonts = true;
+        assert_eq!(
+            merged(&[one, other], None, None),
+            vec![
+                unsupported("a"),
+                unsupported("b"),
+                RenderWarning::UnreadableFont
+            ]
         );
     }
 }

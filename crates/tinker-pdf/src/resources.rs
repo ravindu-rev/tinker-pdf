@@ -1734,6 +1734,16 @@ impl PageResources {
             .stream_image_input_counted(r, self.op.work.as_deref())
     }
 
+    /// How many damaged images and repaired spaces these resources have
+    /// met so far: what a caller delivering calls one at a time reads after
+    /// each, to say which call each was first met at (`display.rs`, a page's
+    /// bands).
+    pub(crate) fn tolerated(&self) -> (usize, usize) {
+        let damaged = self.damaged_images.lock().map_or(0, |list| list.len());
+        let repaired = self.repaired_spaces.lock().map_or(0, |list| list.len());
+        (damaged, repaired)
+    }
+
     /// Adds fonts some other pass over the same content could not resolve —
     /// the interpretation a retained page recorded — to what this render
     /// reports, as though its own interpretation had met them.

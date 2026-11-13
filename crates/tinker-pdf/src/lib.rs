@@ -737,11 +737,15 @@ pub struct RenderOptions {
     /// Spent on the pages of [`Document::render_pages`], each page rendered
     /// on a thread of the engine's own pool that the call starts and joins,
     /// the bitmaps handed back in page order: each is the one
-    /// [`Page::render`] returns serially, byte for byte, warnings included.
-    /// A page rendered by [`Page::render`] or [`DisplayList::render`] draws
-    /// on the calling thread whatever this says. No caller's behaviour
-    /// changes unless it asks; on wasm32 no thread starts and the same work
-    /// runs on the caller.
+    /// [`Page::render`] returns serially, byte for byte, warnings included —
+    /// a page of a walk draws serially on its thread whatever this says.
+    /// And spent on the bands of one page by [`DisplayList::render`] and
+    /// [`Page::render`], which records the page to draw it so: the page's
+    /// rows cut into as many horizontal bands, each drawn as a region of the
+    /// page on a thread of its own and written into one bitmap, the same
+    /// bitmap the page drawn whole is and, for a render that runs to its end,
+    /// the same warnings. No caller's behaviour changes unless it asks; on
+    /// wasm32 no thread starts and the same work runs on the caller.
     pub parallelism: Parallelism,
 }
 
@@ -2371,6 +2375,125 @@ impl core::fmt::Debug for Document {
     }
 }
 
+/// The rectangle of the page's pixels a render draws, and its scale
+/// ([`Page::view`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct View {
+    /// The scale asked for.
+    pub(crate) scale: f64,
+    /// The scale used, the page's size clamped (`PageScaledDown`).
+    pub(crate) applied: f64,
+    /// The whole page's pixels across, at `applied`.
+    pub(crate) full_width: u32,
+    /// And down.
+    pub(crate) full_height: u32,
+    /// The pixels drawn: the region asked for, or the part's own rectangle,
+    /// or the page, trimmed to the page.
+    pub(crate) view: PixelRegion,
+    /// The region the caller asked for, if any.
+    pub(crate) asked: Option<PixelRegion>,
+}
+
+/// What one render met, in the parts its warnings are assembled from
+/// ([`Met::warnings`]): kept apart so the bands of one page can merge theirs
+/// into the list the page drawn whole reports
+/// (`docs/design/parallelism.md`, "Warnings equal the serial render's").
+pub(crate) struct Met {
+    /// The renderer's list: what it met, in the order it first met each, then
+    /// what it adds at the end of the render.
+    pub(crate) renderer: Vec<RenderWarning>,
+    /// Whether the resources met a font they could not resolve.
+    pub(crate) missing_fonts: bool,
+    /// The images the resources decoded with something tolerated, as
+    /// `(resource name, what was tolerated)`, in the order they were met.
+    pub(crate) damaged: Vec<(String, String)>,
+    /// The colour spaces the resources read with a repair, likewise.
+    pub(crate) repaired: Vec<(String, String)>,
+    /// The scale asked for and the scale used, where the page was too large.
+    pub(crate) scaled_down: Option<(f64, f64)>,
+    /// The region asked for and the part of it that is on the page, where the
+    /// two differ.
+    pub(crate) clamped: Option<(PixelRegion, PixelRegion)>,
+}
+
+impl Met {
+    /// The render's warnings, in the order a bitmap carries them: the
+    /// renderer's, then `UnreadableFont` for a font the resources could not
+    /// resolve, each damaged image and each repaired space once, the page
+    /// scaled down and the region clamped.
+    pub(crate) fn warnings(&self) -> Vec<RenderWarning> {
+        let mut warnings = self.renderer.clone();
+        // A glyph a font could not name is reported here rather than by the
+        // renderer, which counts only the glyphs it was handed nothing for.
+        // `.notdef` *is* an outline, so drawing it — which is what the spec
+        // asks for — never reaches that counter, and the page would come out
+        // blank in that spot with nothing said about why.
+        if self.missing_fonts && !warnings.contains(&RenderWarning::UnreadableFont) {
+            warnings.push(RenderWarning::UnreadableFont);
+        }
+        // Ruling 10: an image that decoded with a damaged row replicated, or
+        // short, is drawn *and* named. The decoders have always returned these
+        // and the image path has always thrown them away, so a scan missing
+        // half its rows rendered identically to a scan of blank paper.
+        for (name, reason) in &self.damaged {
+            let warning = RenderWarning::DamagedImage {
+                name: name.clone(),
+                reason: reason.clone(),
+            };
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+        // And a colour space read with a repair, for the same reason: the
+        // colours are drawn, and "read as written" stays distinguishable.
+        for (name, reason) in &self.repaired {
+            let warning = RenderWarning::RepairedColorSpace {
+                name: name.clone(),
+                reason: reason.clone(),
+            };
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+        if let Some((requested, applied)) = self.scaled_down {
+            warnings.push(RenderWarning::PageScaledDown { requested, applied });
+        }
+        if let Some((requested, applied)) = self.clamped {
+            warnings.push(RenderWarning::RegionClamped { requested, applied });
+        }
+        warnings
+    }
+}
+
+/// One render's pixels, in the format handed back and premultiplied where
+/// asked, and what it met ([`Page::draw_layer`]).
+pub(crate) struct Layer {
+    /// The bitmap, its warnings not yet assembled.
+    pub(crate) pixels: Bitmap,
+    /// What the render met.
+    pub(crate) met: Met,
+}
+
+impl Layer {
+    /// The bitmap, with its warnings.
+    pub(crate) fn into_bitmap(self) -> Bitmap {
+        let mut bitmap = self.pixels;
+        bitmap.warnings = self.met.warnings();
+        bitmap
+    }
+}
+
+/// The format a render of `options` hands its bitmap back in: `CmykA8` where
+/// the caller asked for ink by name and said they know it is ink, and
+/// otherwise a format that stores light (`tinker_pdf_render::page_format`).
+pub(crate) fn handed_back(options: &RenderOptions) -> PixelFormat {
+    if options.allow_cmyk && options.format == PixelFormat::CmykA8 {
+        PixelFormat::CmykA8
+    } else {
+        tinker_pdf_render::page_format(options.format)
+    }
+}
+
 /// One page.
 #[derive(Clone)]
 pub struct Page {
@@ -2489,8 +2612,17 @@ impl Page {
     /// outward** so a page never loses its last row or column: A4 at 150 dpi
     /// is 1240×1755. [`RenderOptions::region`] narrows it to a rectangle of
     /// those pixels, and then the bitmap is that rectangle's size.
+    ///
+    /// With [`RenderOptions::parallelism`] asking for two threads or more, the
+    /// page is recorded once ([`Page::display_list`]) and drawn from the
+    /// recording in horizontal bands on that many threads
+    /// ([`DisplayList::render`]): the same bitmap, and for a render that runs
+    /// to its end the same warnings.
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
+        if matches!(options.parallelism, Parallelism::Threads(threads) if threads >= 2) {
+            return self.display_list().render(options);
+        }
         // The operation is made before the content is decoded, so the decode
         // counts too.
         let op = resources::Operation::new(stats::tally(options.stats));
@@ -2559,12 +2691,20 @@ impl Page {
             &resources::PageResources,
         ),
     ) -> Bitmap {
+        self.draw_layer(options, frame, resources, paint)
+            .into_bitmap()
+    }
+
+    /// The rectangle of the page's pixels a render of `options` draws, and the
+    /// scale it draws them at: [`Page::render_layer_with`]'s view, which a
+    /// render in bands cuts.
+    pub(crate) fn view(
+        &self,
+        options: &RenderOptions,
+        frame: Option<(f64, f64, f64, f64)>,
+    ) -> View {
         let (w, h) = self.size();
         let (scale, applied) = self.scales(options);
-
-        // Ruling 2: the caller gets a whole page rather than a fragment, and
-        // is told the resolution is not the one they asked for.
-        let scaled_down = applied < scale;
 
         // Ruling 5. The whole page's pixel rectangle is computed first,
         // because it is what a region is a rectangle *of*: the region's
@@ -2589,6 +2729,47 @@ impl Page {
             .or(frame)
             .unwrap_or(full)
             .clamped_to(full_width, full_height);
+        View {
+            scale,
+            applied,
+            full_width,
+            full_height,
+            view,
+            asked,
+        }
+    }
+
+    /// The transform from the page's default space to its pixels at `applied`
+    /// — rotation and the crop box's origin in it, never a region (ruling 5).
+    pub(crate) fn base_at(&self, applied: f64) -> Matrix {
+        tinker_pdf_render::page_view_transform(self.crop_box(), self.rotation(), applied)
+    }
+
+    /// [`Page::render_layer_with`]'s render, its pixels in the format handed
+    /// back and what it met kept in the parts its warnings are assembled from
+    /// ([`Met`]), which the bands of one page merge.
+    pub(crate) fn draw_layer(
+        &self,
+        options: &RenderOptions,
+        frame: Option<(f64, f64, f64, f64)>,
+        resources: &resources::PageResources,
+        paint: impl FnOnce(
+            &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
+            &resources::PageResources,
+        ),
+    ) -> Layer {
+        let View {
+            scale,
+            applied,
+            full_width,
+            full_height,
+            view,
+            asked,
+        } = self.view(options, frame);
+
+        // Ruling 2: the caller gets a whole page rather than a fragment, and
+        // is told the resolution is not the one they asked for.
+        let scaled_down = applied < scale;
 
         // The rotation and the crop-box origin belong in the transform, not
         // only in the canvas size: sizing for a rotated page and then drawing
@@ -2596,8 +2777,7 @@ impl Page {
         // The region is *not* in the transform: the page is drawn through the
         // one transform whatever part of it is asked for, and the canvas
         // stands at the region's corner of the displayed picture (ruling 5).
-        let crop = self.crop_box();
-        let base = tinker_pdf_render::page_view_transform(crop, self.rotation(), applied);
+        let base = self.base_at(applied);
 
         // 11.4.7: the page itself may declare a transparency group, and its
         // `/CS` is the space the *whole page* composites in. Nothing invokes
@@ -2615,11 +2795,7 @@ impl Page {
         // may start with nothing on it only if the format it comes back in can
         // say so. A transparent canvas converted to `Rgb8` at the end would
         // drop an alpha of zero and keep the black stored under it.
-        let wanted = if options.allow_cmyk && options.format == PixelFormat::CmykA8 {
-            PixelFormat::CmykA8
-        } else {
-            tinker_pdf_render::page_format(options.format)
-        };
+        let wanted = handed_back(options);
         let canvas = if options.transparent && wanted.has_alpha() && canvas_format.has_alpha() {
             tinker_pdf_render::region_canvas_clear(view, canvas_format)
         } else {
@@ -2633,52 +2809,22 @@ impl Page {
             renderer = renderer.with_cancel(cancel.clone());
         }
         paint(&mut renderer, resources);
-        let (canvas, mut warnings, counts) = renderer.finish_counted();
+        let (canvas, warnings, counts) = renderer.finish_counted();
         stats::add_render(resources.work().map(|work| &**work), counts);
-        // A glyph a font could not name is reported here rather than by the
-        // renderer, which counts only the glyphs it was handed nothing for.
-        // `.notdef` *is* an outline, so drawing it — which is what the spec
-        // asks for — never reaches that counter, and the page would come out
-        // blank in that spot with nothing said about why.
-        if !resources.missing_fonts().is_empty()
-            && !warnings.contains(&RenderWarning::UnreadableFont)
-        {
-            warnings.push(RenderWarning::UnreadableFont);
-        }
-        // Ruling 10: an image that decoded with a damaged row replicated, or
-        // short, is drawn *and* named. The decoders have always returned these
-        // and the image path has always thrown them away, so a scan missing
-        // half its rows rendered identically to a scan of blank paper.
-        for (name, reason) in resources.damaged_images() {
-            let warning = RenderWarning::DamagedImage { name, reason };
-            if !warnings.contains(&warning) {
-                warnings.push(warning);
-            }
-        }
-        // And a colour space read with a repair, for the same reason: the
-        // colours are drawn, and "read as written" stays distinguishable.
-        for (name, reason) in resources.repaired_spaces() {
-            let warning = RenderWarning::RepairedColorSpace { name, reason };
-            if !warnings.contains(&warning) {
-                warnings.push(warning);
-            }
-        }
-        if scaled_down {
-            warnings.push(RenderWarning::PageScaledDown {
-                requested: scale,
-                applied,
-            });
-        }
-        // Ruling 10: a bitmap smaller than the rectangle asked for is a
-        // leniency, and a leniency is named. Only when the trim actually
-        // changed the ask — a region inside the page reports nothing, which is
-        // every tile of a well-formed lattice.
-        if let Some(requested) = asked.filter(|requested| *requested != view) {
-            warnings.push(RenderWarning::RegionClamped {
-                requested,
-                applied: view,
-            });
-        }
+        let met = Met {
+            renderer: warnings,
+            missing_fonts: !resources.missing_fonts().is_empty(),
+            damaged: resources.damaged_images(),
+            repaired: resources.repaired_spaces(),
+            scaled_down: scaled_down.then_some((scale, applied)),
+            // Ruling 10: a bitmap smaller than the rectangle asked for is a
+            // leniency, and a leniency is named. Only when the trim actually
+            // changed the ask — a region inside the page reports nothing,
+            // which is every tile of a well-formed lattice.
+            clamped: asked
+                .filter(|requested| *requested != view)
+                .map(|requested| (requested, view)),
+        };
 
         // Back to something a caller can read. A page group composited over
         // ink comes back as light, which is 11.4.7's own last step — unless
@@ -2689,20 +2835,20 @@ impl Page {
             canvas.extract(canvas.origin(), canvas.width, canvas.height, wanted)
         };
 
-        let mut bitmap = Bitmap {
+        let mut pixels = Bitmap {
             width: canvas.width,
             height: canvas.height,
             format: canvas.format,
             stride: canvas.stride,
             data: canvas.data,
-            warnings,
+            warnings: Vec::new(),
             premultiplied: false,
             stats: resources.work().map(|work| work.stats()),
         };
         if options.premultiplied {
-            bitmap.premultiply();
+            pixels.premultiply();
         }
-        bitmap
+        Layer { pixels, met }
     }
 
     /// The page's link annotations, in `/Annots` order (12.5.6.5).

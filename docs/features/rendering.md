@@ -910,7 +910,8 @@ save that encrypts counts ([writing](writing.md)); and
 `pool_items_on_workers` and `pool_items_on_caller`, where a page of a page walk
 ran — on one of the pool's workers or on the caller — counted into the first
 counted operation the page makes, its render or its counted text, and never
-into a page rendered outside a walk. `Stats::work()` totals the step counts,
+into a page rendered outside a walk; and where each band of a page drawn in
+bands ran, counted into that render's one tally. `Stats::work()` totals the step counts,
 which leaves out those maxima, those quantities and the two pool counts — where
 a part ran is no step, so a walked page totals what the page rendered alone
 does — and two `Stats` add with `+`, a maximum keeping the larger. Every
@@ -948,9 +949,39 @@ with the same output. `Document::walk_pages(pages, parallelism, work, each)`
 is the walk both page walks are, for a caller whose page is more than one
 door: `work` runs for each page on its thread and `each` takes what it
 returned, in page order; called on one of the pool's workers, a walk runs on
-that worker. `Page::render` and `DisplayList::render` draw on the calling
-thread whatever `parallelism` says. The design is
-[parallelism](../design/parallelism.md).
+that worker. The design is [parallelism](../design/parallelism.md).
+
+**A page in bands.** `DisplayList::render` with `RenderOptions::parallelism`
+at `Threads(n)`, `n` two or more, cuts the rows it draws — the page, or the
+region asked for — into at most `n` horizontal bands at rows of the page
+frame, draws each as a region of the page (`RenderOptions::region`) on the
+engine's pool over the list's shared caches, and writes each band's rows into
+one bitmap sized to the view; `Page::render` with such options records the
+page's list for the call and draws it so. Each band is the page's own region
+in its one frame (ruling 5), so each is byte-equal to its rows of the page
+drawn whole. The one decision ruling 5 leaves to the canvas — whether an
+image draw joins the run of images held back — is kept out of the cuts: the
+planner reads the list for each sequence of two image draws or more with
+nothing the renderer ends a run on between them
+(`tinker_pdf_render::ends_image_run`, which
+`the_planners_rule_is_the_renderers_flush` holds to the renderer one kind of
+call at a time), in the content, its forms, groups and soft masks and the
+annotations drawn after it, takes the rows of the page its draws cover, and
+moves each cut from `round(k × height ÷ n)` to the nearest row no such
+sequence has rows on both sides of, between the cut before it and the next
+cut's own row, dropping a cut that has none — a page whose run of images
+covers every row, a scan of strips, draws as one band. The warnings are the
+page's: every band replays the same calls, so each band stamps what it met
+with the ordinal of the call it met it at, and the merge keeps each warning
+once at the least ordinal any band met it at, in that order, then what the
+renderers add at the end in their fixed order, then each damaged image and
+repaired space likewise, then the page's own scale and region. A list that is
+not retained, a view of fewer than two rows, or one thread draws the page
+whole. Where no thread starts — wasm32, a host at its thread limit — the bands
+are cut and stitched on the caller, with the same output. Each band counts
+into the render's one tally, where it ran included
+(`parallelism.rs`'s `a_four_band_render_runs_no_band_on_the_caller`); a
+render through `Page::render` counts the bands' replay, not the recording.
 
 `Page::display_list()` returns a `DisplayList` — the page interpreted once —
 whose `render(&RenderOptions)` returns what `Page::render` returns for the
@@ -1154,6 +1185,15 @@ defect to hide in.
   four workers are four threads at a barrier, and holds a walk to the order
   its pages were named in, one wave alive at once, a walk inside a walk on its
   worker and a cancelled walk to the pages' own renders.
+- A page in bands: `guards.rs`'s
+  `a9_band_renders_are_the_serial_page_at_2_3_4_and_7_threads` holds every page
+  `render_regions.rs` tiles (`tests/region_support/`) — the three-image page of
+  ruling 5's named exception among them, whose run covers every row — every
+  page of A9's documents, a paths page, a full-page JPEG and a page whose
+  bands meet its warnings in the other order from the page's, drawn through
+  `DisplayList::render` on 2, 3, 4 and 7 threads and through `Page::render`,
+  at 0.5x to 4x, to the page drawn whole: pixels and warnings; `display.rs`'s
+  band tests hold the planner's cuts, its runs and the merge.
 - Counted work: `crates/tinker-pdf/tests/stats.rs`.
   `render_stats_are_none_unless_asked` over the page, a tile, a display list,
   a form and an annotation; `render_stats_count_what_a_generated_page_draws`,

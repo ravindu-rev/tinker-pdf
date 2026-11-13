@@ -26,8 +26,8 @@ pub use display::{Admission, DisplayRecorder, MAX_DISPLAY_LIST_BYTES};
 pub use mesh::{Mesh, MeshParams};
 pub use shading::{ColorTable, Shading, ShadingScratch, TABLE_ENTRIES};
 use tinker_pdf_content::{
-    Device, Glyph, GraphicsState, ImageRef, LineCap as ContentCap, LineJoin as ContentJoin, Matrix,
-    PathSegment,
+    Device, EventKind, Glyph, GraphicsState, ImageRef, LineCap as ContentCap,
+    LineJoin as ContentJoin, Matrix, PathSegment,
 };
 
 use tinker_pdf_font::Outline;
@@ -1440,6 +1440,19 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let counts = self.counts;
         let (canvas, warnings) = self.finish();
         (canvas, warnings, counts)
+    }
+
+    /// What the render has met so far, in the order it first met each: the
+    /// list [`Renderer::finish`] hands back, before the warnings it adds at
+    /// the end of the render.
+    ///
+    /// What a caller that delivers the calls one at a time reads after each,
+    /// to say which call a warning was first met at: the bands of one page
+    /// merge their lists by that into the page's own
+    /// (`docs/design/parallelism.md`, "Warnings equal the serial render's").
+    #[must_use]
+    pub fn met(&self) -> &[RenderWarning] {
+        &self.warnings
     }
 
     /// The canvas and everything the render had to tolerate.
@@ -3936,6 +3949,47 @@ pub fn page_transform(page_height: f64, scale: f64) -> Matrix {
     }
 }
 
+/// Whether the renderer composites the run of images it is holding back when
+/// it is handed a call of `kind` (`Renderer::flush_run`): every call that
+/// draws anything but an image, a clip, `ET`, and either end of a group or a
+/// soft mask, and `/SMask /None`; never `BT`, a `q`, a `Q`, a form's bracket,
+/// a marked-content scope, or what the interpreter reports of its budgets. An
+/// image draw decides for itself whether it joins the run, and is no end of
+/// one here.
+///
+/// The rule the bands of one page are planned by: a run of image draws is
+/// decided by what its canvas holds (ruling 5's named exception), so no band
+/// is cut through the rows of one (`docs/design/parallelism.md`, "Bands of one
+/// page"). `the_planners_rule_is_the_renderers_flush` holds it to the renderer
+/// one kind at a time.
+#[must_use]
+pub fn ends_image_run(kind: EventKind) -> bool {
+    match kind {
+        EventKind::ShowGlyph
+        | EventKind::EndText
+        | EventKind::FillPath
+        | EventKind::StrokePath
+        | EventKind::ClipPath
+        | EventKind::DrawShading
+        | EventKind::BeginGroup
+        | EventKind::EndGroup
+        | EventKind::BeginSoftMask
+        | EventKind::EndSoftMask
+        | EventKind::ClearSoftMask => true,
+        EventKind::BeginText
+        | EventKind::SaveState
+        | EventKind::RestoreState
+        | EventKind::DrawImage
+        | EventKind::BeginMarkedContent
+        | EventKind::EndMarkedContent
+        | EventKind::BeginForm
+        | EventKind::EndForm
+        | EventKind::GroupBudgetSpent
+        | EventKind::RecursionRefused
+        | EventKind::NestedBudgetSpent => false,
+    }
+}
+
 /// The transform that maps a page's visible area onto its canvas.
 ///
 /// Three things the raw flip does not do, each of which silently misplaces
@@ -5521,6 +5575,216 @@ mod tests {
             Reduced { factor: 0, ..grid },
         ] {
             assert_eq!(reduced_square(&unit, 3, 2, broken), None, "{broken:?}");
+        }
+    }
+
+    /// Every kind of recorded call, so a test of each holds them all.
+    const EVERY_KIND: [EventKind; 22] = [
+        EventKind::BeginText,
+        EventKind::ShowGlyph,
+        EventKind::EndText,
+        EventKind::FillPath,
+        EventKind::StrokePath,
+        EventKind::ClipPath,
+        EventKind::SaveState,
+        EventKind::RestoreState,
+        EventKind::DrawImage,
+        EventKind::DrawShading,
+        EventKind::BeginMarkedContent,
+        EventKind::EndMarkedContent,
+        EventKind::BeginForm,
+        EventKind::EndForm,
+        EventKind::BeginGroup,
+        EventKind::EndGroup,
+        EventKind::BeginSoftMask,
+        EventKind::EndSoftMask,
+        EventKind::ClearSoftMask,
+        EventKind::GroupBudgetSpent,
+        EventKind::RecursionRefused,
+        EventKind::NestedBudgetSpent,
+    ];
+
+    /// `OneImage`'s image drawn ten pixels square at `(x, 10)`: a draw that
+    /// joins a run, the page being far below the size a run is refused at.
+    fn image_draw(x: f64) -> tinker_pdf_content::Event {
+        tinker_pdf_content::Event::DrawImage {
+            image: ImageRef {
+                name: b"Im0".to_vec(),
+                inline: false,
+                inline_dict: Vec::new(),
+                inline_data: Vec::new(),
+            },
+            state: Some(Box::new(GraphicsState::new(Matrix {
+                a: 10.0,
+                b: 0.0,
+                c: 0.0,
+                d: 10.0,
+                e: x,
+                f: 10.0,
+            }))),
+        }
+    }
+
+    /// The calls that hand the renderer one call of `kind` while it holds a
+    /// run of images: an image draw, then the call — inside the bracket it
+    /// ends, for a kind that ends one.
+    fn holding_a_run_then(kind: EventKind) -> Vec<tinker_pdf_content::Event> {
+        use tinker_pdf_content::{Event, Form, Group, MarkedScope, MaskGroup};
+
+        let state = || Some(Box::new(GraphicsState::new(Matrix::IDENTITY)));
+        let square = || {
+            vec![
+                PathSegment::MoveTo { x: 2.0, y: 2.0 },
+                PathSegment::LineTo { x: 8.0, y: 2.0 },
+                PathSegment::LineTo { x: 8.0, y: 8.0 },
+                PathSegment::Close,
+            ]
+        };
+        let group = || Event::BeginGroup {
+            group: Group {
+                isolated: true,
+                knockout: false,
+                space: None,
+            },
+            entered: true,
+            state: state(),
+        };
+        let mask = || Event::BeginSoftMask {
+            mask: Box::new(MaskGroup {
+                form: Form {
+                    content: Vec::new(),
+                    matrix: Matrix::IDENTITY,
+                    bbox: None,
+                    group: None,
+                    stream: 0,
+                },
+                luminosity: true,
+                backdrop: None,
+                transfer: None,
+            }),
+            bbox: Vec::new(),
+            entered: true,
+            state: state(),
+        };
+        let marked = || {
+            Event::BeginMarkedContent(MarkedScope {
+                tag: b"P".to_vec(),
+                visible: true,
+                hidden_layer: None,
+                props: None,
+            })
+        };
+        let form = || Event::BeginForm {
+            id: 1,
+            name: b"Fm0".to_vec(),
+            entered: true,
+        };
+        let call = match kind {
+            EventKind::BeginText => Event::BeginText,
+            EventKind::ShowGlyph => Event::ShowGlyph {
+                glyph: Glyph {
+                    code: 65,
+                    text: "A".to_string(),
+                    transform: Matrix {
+                        a: 12.0,
+                        b: 0.0,
+                        c: 0.0,
+                        d: 12.0,
+                        e: 30.0,
+                        f: 30.0,
+                    },
+                    baseline: None,
+                    advance: 0.6,
+                    size: 12.0,
+                    vertical: false,
+                    font_id: 1,
+                    font_name: None,
+                },
+                state: state(),
+            },
+            EventKind::FillPath => Event::FillPath {
+                path: square(),
+                even_odd: false,
+                state: state(),
+            },
+            EventKind::StrokePath => Event::StrokePath {
+                path: square(),
+                state: state(),
+            },
+            EventKind::ClipPath => Event::ClipPath {
+                path: square(),
+                even_odd: false,
+                state: state(),
+            },
+            EventKind::SaveState => Event::SaveState,
+            EventKind::RestoreState => Event::RestoreState,
+            EventKind::DrawImage => image_draw(30.0),
+            EventKind::DrawShading => Event::DrawShading {
+                name: b"Sh0".to_vec(),
+                state: state(),
+            },
+            EventKind::BeginMarkedContent => marked(),
+            EventKind::BeginForm => form(),
+            EventKind::BeginGroup => group(),
+            EventKind::BeginSoftMask => mask(),
+            EventKind::ClearSoftMask => Event::ClearSoftMask,
+            EventKind::GroupBudgetSpent => Event::GroupBudgetSpent,
+            EventKind::RecursionRefused => Event::RecursionRefused,
+            EventKind::NestedBudgetSpent => Event::NestedBudgetSpent,
+            // The end of a bracket, the run opened inside it.
+            EventKind::EndText => return vec![Event::BeginText, image_draw(10.0), Event::EndText],
+            EventKind::EndMarkedContent => {
+                return vec![marked(), image_draw(10.0), Event::EndMarkedContent]
+            }
+            EventKind::EndForm => return vec![form(), image_draw(10.0), Event::EndForm { id: 1 }],
+            EventKind::EndGroup => return vec![group(), image_draw(10.0), Event::EndGroup],
+            EventKind::EndSoftMask => return vec![mask(), image_draw(10.0), Event::EndSoftMask],
+        };
+        vec![image_draw(10.0), call]
+    }
+
+    /// **The band planner's rule is the renderer's flush** (`ends_image_run`):
+    /// for every kind of call, a renderer holding a run of images — one drawn
+    /// just before, inside the bracket a closing kind ends — has composited it
+    /// after the call exactly when the rule says the kind ends a run. So the
+    /// planner, which reads runs off a display list by the rule, cannot drift
+    /// from the renderer, which decides them.
+    #[test]
+    fn the_planners_rule_is_the_renderers_flush() {
+        let source = OneImage {
+            color: (40, 90, 160),
+            alpha: Vec::new(),
+        };
+        for kind in EVERY_KIND {
+            let events = holding_a_run_then(kind);
+            assert_eq!(
+                events.last().map(tinker_pdf_content::Event::kind),
+                Some(kind),
+                "the case ends on its kind"
+            );
+            let canvas = Canvas::new(60, 60, PixelFormat::Rgb8, Color::WHITE);
+            let mut renderer = Renderer::new(canvas, page_transform(60.0, 1.0), &source);
+            let replayed = tinker_pdf_content::replay(&events, &mut renderer);
+            assert_eq!(
+                replayed.delivered,
+                events.len(),
+                "{kind:?}: every call delivered"
+            );
+            assert_eq!(
+                renderer.run.is_none(),
+                ends_image_run(kind),
+                "{kind:?}: the renderer {} the run, and the rule says it {}",
+                if renderer.run.is_none() {
+                    "composited"
+                } else {
+                    "still holds"
+                },
+                if ends_image_run(kind) {
+                    "ends it"
+                } else {
+                    "does not"
+                }
+            );
         }
     }
 
