@@ -81,7 +81,7 @@
 
 use super::codestream::{Codestream, Quant, QuantStyle, Roi};
 use super::colour;
-use super::tier2::{CodeBlock, Orientation, Subband, Tile};
+use super::tier2::{CodeBlock, Orientation, Subband, Tile, TileComponent};
 use super::Refusal;
 
 // --- the fixed-point format ---------------------------------------------
@@ -842,30 +842,261 @@ fn dequantise<A: Arith>(
 
 // --- the ladder (F.3.3 and F.3.4) -----------------------------------------
 
-/// F.3.4's 2D synthesis for one resolution step.
-fn synthesise_2d<A: Arith>(plane: &mut Plane<A>, x0: u32, y0: u32) {
-    // Rows, then columns -- F.3.4's HOR_SR followed by VER_SR.
-    let mut row = vec![A::default(); plane.width as usize];
-    for y in 0..plane.height {
-        for x in 0..plane.width {
-            row[x as usize] = plane.get(x, y);
+/// F.3.4's 2D synthesis for one resolution step, over what the decode needs
+/// of it: `read`, the samples it reads, and `out`, the samples that must come
+/// out right, both on the resolution's grid, whose origin is `(x0, y0)`.
+///
+/// Rows first, then columns — F.3.4's HOR_SR followed by VER_SR. Every row
+/// the column pass reads is lifted, along the columns `read` spans; then each
+/// of `out`'s columns is lifted along the rows `read` spans. A sub-line is
+/// lifted with its first sample's own absolute index as `i0`, so its
+/// parities are the whole line's. A value within the filter's reach of a
+/// sub-line's end that is not the resolution's own end comes out wrong —
+/// the symmetric extension reflects at the wrong place — and is never read:
+/// `read` is `out` widened by that reach, and a sample of `out` depends on
+/// nothing outside it (`Needs::of`). With nothing windowed, `read` and `out`
+/// are the whole grid and this is the whole-plane synthesis.
+fn synthesise_2d<A: Arith>(plane: &mut Plane<A>, x0: u32, y0: u32, read: Rect, out: Rect) {
+    if read.is_empty() || out.is_empty() {
+        return;
+    }
+    let (rx0, rx1) = (read.x0 - x0, read.x1 - x0);
+    let (ry0, ry1) = (read.y0 - y0, read.y1 - y0);
+    let mut row = vec![A::default(); (rx1 - rx0) as usize];
+    for y in ry0..ry1 {
+        for x in rx0..rx1 {
+            row[(x - rx0) as usize] = plane.get(x, y);
         }
-        A::synthesise(&mut row, x0);
-        for x in 0..plane.width {
-            plane.set(x, y, row[x as usize]);
+        A::synthesise(&mut row, read.x0);
+        for x in rx0..rx1 {
+            plane.set(x, y, row[(x - rx0) as usize]);
         }
     }
 
-    let mut column = vec![A::default(); plane.height as usize];
-    for x in 0..plane.width {
-        for y in 0..plane.height {
-            column[y as usize] = plane.get(x, y);
+    let mut column = vec![A::default(); (ry1 - ry0) as usize];
+    for x in (out.x0 - x0)..(out.x1 - x0) {
+        for y in ry0..ry1 {
+            column[(y - ry0) as usize] = plane.get(x, y);
         }
-        A::synthesise(&mut column, y0);
-        for y in 0..plane.height {
-            plane.set(x, y, column[y as usize]);
+        A::synthesise(&mut column, read.y0);
+        for y in ry0..ry1 {
+            plane.set(x, y, column[(y - ry0) as usize]);
         }
     }
+}
+
+// --- what a window needs (P-10.3) -----------------------------------------
+
+/// A rectangle `[x0, x1) x [y0, y1)` of one grid, in that grid's absolute
+/// coordinates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Rect {
+    pub(crate) x0: u32,
+    pub(crate) y0: u32,
+    pub(crate) x1: u32,
+    pub(crate) y1: u32,
+}
+
+impl Rect {
+    /// Whether it holds no sample.
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.x0 >= self.x1 || self.y0 >= self.y1
+    }
+
+    /// The samples both hold; empty where they share none.
+    pub(crate) fn and(&self, other: &Rect) -> Rect {
+        let r = Rect {
+            x0: self.x0.max(other.x0),
+            y0: self.y0.max(other.y0),
+            x1: self.x1.min(other.x1),
+            y1: self.y1.min(other.y1),
+        };
+        if r.is_empty() {
+            Rect::default()
+        } else {
+            r
+        }
+    }
+
+    /// Whether the two share a sample.
+    pub(crate) fn meets(&self, other: &Rect) -> bool {
+        !self.and(other).is_empty()
+    }
+
+    /// Widened by `reach` on every side.
+    fn widened(&self, reach: u32) -> Rect {
+        Rect {
+            x0: self.x0.saturating_sub(reach),
+            y0: self.y0.saturating_sub(reach),
+            x1: self.x1.saturating_add(reach),
+            y1: self.y1.saturating_add(reach),
+        }
+    }
+}
+
+/// A resolution's own grid as a [`Rect`].
+fn grid_of(resolution: &super::tier2::Resolution) -> Rect {
+    Rect {
+        x0: resolution.x0,
+        y0: resolution.y0,
+        x1: resolution.x1,
+        y1: resolution.y1,
+    }
+}
+
+/// How far F.3.8's synthesis of one level reaches: an output sample depends
+/// on the interleaved inputs within this many samples of it. The 5/3's two
+/// lifting steps reach one sample each and the 9/7's four do, and its
+/// scaling none.
+pub(crate) const fn reach(reversible: bool) -> u32 {
+    if reversible {
+        2
+    } else {
+        4
+    }
+}
+
+/// What a decode needs of one tile-component, resolution by resolution from
+/// 0 up to the top one it keeps (`docs/design/jpx-speed.md`, "A window").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Needs {
+    /// Each resolution's samples that must come out right: at the top, what
+    /// the blit reads; below it, what the resolution above reads as its low
+    /// band.
+    out: Vec<Rect>,
+    /// What each resolution's synthesis reads: `out` widened by the filter's
+    /// reach and clamped to the resolution. Resolution 0 is not synthesised
+    /// and reads its own `out`.
+    read: Vec<Rect>,
+    /// The coefficients each subband must supply, in the band's own
+    /// coordinates (B-15), by `[resolution][band]` in tier-2's band order.
+    bands: Vec<Vec<Rect>>,
+}
+
+impl Needs {
+    /// Everything of the resolutions a decode dropping `discard` keeps:
+    /// every grid and every band whole, which is the decode as it runs with
+    /// no window.
+    pub(crate) fn whole(tc: &TileComponent, discard: u8) -> Needs {
+        let kept = kept(tc, discard);
+        let out: Vec<Rect> = tc.resolutions.iter().take(kept).map(grid_of).collect();
+        let bands = tc
+            .resolutions
+            .iter()
+            .take(kept)
+            .map(|resolution| {
+                resolution
+                    .bands
+                    .iter()
+                    .map(|band| Rect {
+                        x0: band.x0,
+                        y0: band.y0,
+                        x1: band.x1,
+                        y1: band.y1,
+                    })
+                    .collect()
+            })
+            .collect();
+        Needs {
+            read: out.clone(),
+            out,
+            bands,
+        }
+    }
+
+    /// What `top`, a rectangle of the top kept resolution's grid, needs of
+    /// every resolution and band below it.
+    ///
+    /// From the top down: a level's synthesis of `out` reads `out` widened by
+    /// `reach` (the filter's, [`reach`]) and clamped to the resolution — a
+    /// symmetric extension at the resolution's edge reflects within `reach`
+    /// of that edge, inside the widened rectangle, so it needs nothing more.
+    /// Of what it reads, F.3.3 puts low-pass sample `u` at `2u` and
+    /// high-pass sample `u` at `2u + 1`, so the even positions of `[a, b)`
+    /// are `[ceil(a / 2), ceil(b / 2))` of the resolution below, which is its
+    /// `out`, and the odd ones are `[floor(a / 2), floor(b / 2))` of a high
+    /// band. An empty `top` needs nothing at all.
+    pub(crate) fn of(tc: &TileComponent, discard: u8, top: Rect, reach: u32) -> Needs {
+        let kept = kept(tc, discard);
+        let mut out = vec![Rect::default(); kept];
+        let mut read = vec![Rect::default(); kept];
+        let mut bands: Vec<Vec<Rect>> = vec![Vec::new(); kept];
+        out[kept - 1] = top.and(&grid_of(&tc.resolutions[kept - 1]));
+        for r in (1..kept).rev() {
+            let resolution = &tc.resolutions[r];
+            let wide = if out[r].is_empty() {
+                Rect::default()
+            } else {
+                out[r].widened(reach).and(&grid_of(resolution))
+            };
+            read[r] = wide;
+            let half = |high: bool, a: u32, b: u32| {
+                if high {
+                    (a / 2, b / 2)
+                } else {
+                    (a.div_ceil(2), b.div_ceil(2))
+                }
+            };
+            bands[r] = resolution
+                .bands
+                .iter()
+                .map(|band| {
+                    if wide.is_empty() {
+                        return Rect::default();
+                    }
+                    let (hx, hy) = match band.orientation {
+                        Orientation::Ll => (false, false),
+                        Orientation::Hl => (true, false),
+                        Orientation::Lh => (false, true),
+                        Orientation::Hh => (true, true),
+                    };
+                    let (x0, x1) = half(hx, wide.x0, wide.x1);
+                    let (y0, y1) = half(hy, wide.y0, wide.y1);
+                    Rect { x0, y0, x1, y1 }
+                })
+                .collect();
+            out[r - 1] = if wide.is_empty() {
+                Rect::default()
+            } else {
+                let (x0, x1) = half(false, wide.x0, wide.x1);
+                let (y0, y1) = half(false, wide.y0, wide.y1);
+                Rect { x0, y0, x1, y1 }.and(&grid_of(&tc.resolutions[r - 1]))
+            };
+        }
+        read[0] = out[0];
+        bands[0] = tc.resolutions[0].bands.iter().map(|_| out[0]).collect();
+        Needs { out, read, bands }
+    }
+
+    /// The top kept resolution's samples that must come out right.
+    pub(crate) fn top(&self) -> Rect {
+        self.out.last().copied().unwrap_or_default()
+    }
+
+    /// Whether tier-1 must decode `block`, of band `band` at resolution
+    /// `resolution`: whether it holds a coefficient the decode reads.
+    pub(crate) fn wants(&self, resolution: usize, band: usize, block: &CodeBlock) -> bool {
+        self.bands
+            .get(resolution)
+            .and_then(|bands| bands.get(band))
+            .is_some_and(|rect| {
+                rect.meets(&Rect {
+                    x0: block.x0,
+                    y0: block.y0,
+                    x1: block.x1,
+                    y1: block.y1,
+                })
+            })
+    }
+}
+
+/// The resolutions a decode dropping `discard` keeps of `tc`: at least its
+/// resolution 0.
+fn kept(tc: &TileComponent, discard: u8) -> usize {
+    tc.resolutions
+        .len()
+        .saturating_sub(usize::from(discard))
+        .max(1)
 }
 
 /// Reconstruct one tile-component in `A`'s arithmetic: dequantise every
@@ -879,6 +1110,12 @@ fn synthesise_2d<A: Arith>(plane: &mut Plane<A>, x0: u32, y0: u32) {
 /// already clamped to the fewest levels any tile-component has, and is
 /// clamped here again to this one's, so it can never leave no resolution.
 ///
+/// `needs` says which of each plane's samples must come out right
+/// ([`Needs`]): only those are interleaved up from the resolution below and
+/// synthesised, and of the plane that comes back only `needs.top()` is the
+/// decode — the rest is whatever the window left there. `None` is
+/// [`Needs::whole`], every sample.
+///
 /// `pub(crate)` because the test module instantiates it a third time, with an
 /// `f64` arithmetic that performs F.3.8.2's steps in floating point. That is
 /// the plan's gate 2, and it is only a gate on the *arithmetic* if both sides
@@ -888,12 +1125,21 @@ pub(crate) fn ladder<A: Arith>(
     tile: &Tile,
     component: usize,
     discard: u8,
+    needs: Option<&Needs>,
     clamped: &mut bool,
 ) -> Result<Plane<A>, Refusal> {
     let tc = tile
         .components
         .get(component)
         .ok_or(Refusal::Structure("a tile with no such component"))?;
+    let whole;
+    let needs = match needs {
+        Some(needs) => needs,
+        None => {
+            whole = Needs::whole(tc, discard);
+            &whole
+        }
+    };
     let precision = stream
         .siz
         .components
@@ -956,8 +1202,12 @@ pub(crate) fn ladder<A: Arith>(
             // subsampled component starting at an odd sample, or the
             // rounding up of B-14 at a lower resolution.
             let (px, py) = (resolution.x0 % 2, resolution.y0 % 2);
-            for y in 0..plane.height {
-                for x in 0..plane.width {
+            // Of the resolution below, the samples this one's synthesis
+            // reads: `needs.out[r - 1]`, which is all of it unwindowed.
+            let low = needs.out.get(r - 1).copied().unwrap_or_default();
+            for v in low.y0..low.y1 {
+                for u in low.x0..low.x1 {
+                    let (x, y) = (u - plane.x0, v - plane.y0);
                     next.set(2 * x + px, 2 * y + py, plane.get(x, y));
                 }
             }
@@ -978,7 +1228,13 @@ pub(crate) fn ladder<A: Arith>(
                 };
                 write_band(&ctx, band, &mut next, offsets, true, clamped)?;
             }
-            synthesise_2d(&mut next, resolution.x0, resolution.y0);
+            synthesise_2d(
+                &mut next,
+                resolution.x0,
+                resolution.y0,
+                needs.read.get(r).copied().unwrap_or_default(),
+                needs.out.get(r).copied().unwrap_or_default(),
+            );
         }
         plane = next;
     }
@@ -1056,17 +1312,29 @@ pub(crate) fn reconstruct(
     tile: &Tile,
     component: usize,
     discard: u8,
+    needs: Option<&Needs>,
     clamped: &mut bool,
 ) -> Result<Plane, Refusal> {
     if arithmetic(stream, tile.index, component)? {
         Ok(into_samples(ladder::<Exact>(
-            stream, tile, component, discard, clamped,
+            stream, tile, component, discard, needs, clamped,
         )?))
     } else {
         Ok(into_samples(ladder::<Fixed>(
-            stream, tile, component, discard, clamped,
+            stream, tile, component, discard, needs, clamped,
         )?))
     }
+}
+
+/// Whether tile `tile`'s component `component` is coded with the reversible
+/// 5/3, refused as [`arithmetic`] refuses a transform Table A.28 does not
+/// pair with its quantisation.
+pub(crate) fn reversible(
+    stream: &Codestream<'_>,
+    tile: u16,
+    component: usize,
+) -> Result<bool, Refusal> {
+    arithmetic(stream, tile, component)
 }
 
 /// The inverse-wavelet levels a decode dropping `discard` resolutions
@@ -1098,13 +1366,27 @@ fn transformed<A: Arith>(
     stream: &Codestream<'_>,
     tile: &Tile,
     discard: u8,
+    needs: Option<&[Needs]>,
     clamped: &mut bool,
 ) -> Result<Vec<Plane>, Refusal> {
     let mut planes = Vec::with_capacity(3);
     for c in 0..3 {
-        planes.push(ladder::<A>(stream, tile, c, discard, clamped)?);
+        let need = needs.and_then(|needs| needs.get(c));
+        planes.push(ladder::<A>(stream, tile, c, discard, need, clamped)?);
     }
-    colour::inverse_mct(&mut planes)?;
+    // G.2 over the samples the decode reads: one rectangle, since the three
+    // planes share their grid, or all of them where the components' needs
+    // part, which only a window over components of different grids could
+    // make them do.
+    let region = needs.and_then(|needs| {
+        let top = needs.first()?.top();
+        needs
+            .iter()
+            .take(3)
+            .all(|need| need.top() == top)
+            .then_some(top)
+    });
+    colour::inverse_mct(&mut planes, region)?;
     Ok(planes.into_iter().map(into_samples).collect())
 }
 
@@ -1120,12 +1402,14 @@ pub(crate) fn reconstruct_tile(
     stream: &Codestream<'_>,
     tile: &Tile,
     discard: u8,
+    needs: Option<&[Needs]>,
     clamped: &mut bool,
 ) -> Result<Vec<Plane>, Refusal> {
     let count = stream.siz.components.len();
+    let need = |c: usize| needs.and_then(|needs| needs.get(c));
     if !stream.cod_for(tile.index).mct {
         return (0..count)
-            .map(|c| reconstruct(stream, tile, c, discard, clamped))
+            .map(|c| reconstruct(stream, tile, c, discard, need(c), clamped))
             .collect();
     }
     if count < 3 {
@@ -1146,12 +1430,12 @@ pub(crate) fn reconstruct_tile(
         }
     }
     let mut planes = if reversible {
-        transformed::<Exact>(stream, tile, discard, clamped)?
+        transformed::<Exact>(stream, tile, discard, needs, clamped)?
     } else {
-        transformed::<Fixed>(stream, tile, discard, clamped)?
+        transformed::<Fixed>(stream, tile, discard, needs, clamped)?
     };
     for c in 3..count {
-        planes.push(reconstruct(stream, tile, c, discard, clamped)?);
+        planes.push(reconstruct(stream, tile, c, discard, need(c), clamped)?);
     }
     Ok(planes)
 }
@@ -1164,6 +1448,41 @@ pub(crate) fn into_samples<A: Arith>(plane: Plane<A>) -> Plane<i32> {
         width: plane.width,
         height: plane.height,
         samples: plane.samples.into_iter().map(A::sample).collect(),
+    }
+}
+
+/// G.1's DC level shift, and the clamp to the component's precision, over
+/// `region` of the plane's grid where a window names one, or the whole
+/// plane.
+pub(crate) fn level_shift_in(plane: &mut Plane, precision: u8, signed: bool, region: Option<Rect>) {
+    let Some(region) = region else {
+        level_shift(plane, precision, signed);
+        return;
+    };
+    let shift = if signed {
+        0
+    } else {
+        1i32 << (i32::from(precision) - 1)
+    };
+    let (lo, hi) = if signed {
+        (
+            -(1i32 << (i32::from(precision) - 1)),
+            (1i32 << (i32::from(precision) - 1)) - 1,
+        )
+    } else {
+        (0, (1i32 << i32::from(precision)) - 1)
+    };
+    let within = region.and(&Rect {
+        x0: plane.x0,
+        y0: plane.y0,
+        x1: plane.x0.saturating_add(plane.width),
+        y1: plane.y0.saturating_add(plane.height),
+    });
+    for y in within.y0..within.y1 {
+        for x in within.x0..within.x1 {
+            let at = ((y - plane.y0) as usize) * (plane.width as usize) + (x - plane.x0) as usize;
+            plane.samples[at] = (plane.samples[at] + shift).clamp(lo, hi);
+        }
     }
 }
 

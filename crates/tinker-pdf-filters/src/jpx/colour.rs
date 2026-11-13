@@ -110,7 +110,10 @@ pub(crate) fn inverse_ict(y0: i64, y1: i64, y2: i64) -> (i64, i64, i64) {
 /// the same and a second copy of it is a second thing to get wrong. The
 /// pairing is not a choice either — A.6.1 ties the RCT to the reversible 5/3
 /// and the ICT to the irreversible 9/7, so the arithmetic already decided.
-pub(crate) fn inverse_mct<A: Arith>(planes: &mut [Plane<A>]) -> Result<(), Refusal> {
+pub(crate) fn inverse_mct<A: Arith>(
+    planes: &mut [Plane<A>],
+    region: Option<super::wavelet::Rect>,
+) -> Result<(), Refusal> {
     // A.6.1's SGcod names one transform for the tile, and G.2 defines it over
     // three components. Fewer than three is a codestream asking for a
     // transform of something it has not got.
@@ -129,15 +132,31 @@ pub(crate) fn inverse_mct<A: Arith>(planes: &mut [Plane<A>]) -> Result<(), Refus
             "a multiple component transform over components of different sizes",
         ));
     }
-    for i in 0..planes[0].samples.len() {
-        let (a, b, c) = A::inverse_mct(
-            planes[0].samples[i],
-            planes[1].samples[i],
-            planes[2].samples[i],
-        );
-        planes[0].samples[i] = a;
-        planes[1].samples[i] = b;
-        planes[2].samples[i] = c;
+    // Every pixel, or a window's: the region is on the planes' own grid,
+    // which the three share.
+    let (x0, y0) = (planes[0].x0, planes[0].y0);
+    let (w, h) = shape;
+    let (cx0, cy0, cx1, cy1) = match region {
+        None => (0, 0, w, h),
+        Some(region) => (
+            region.x0.saturating_sub(x0).min(w),
+            region.y0.saturating_sub(y0).min(h),
+            region.x1.saturating_sub(x0).min(w),
+            region.y1.saturating_sub(y0).min(h),
+        ),
+    };
+    for y in cy0..cy1 {
+        for x in cx0..cx1 {
+            let i = (y as usize) * (w as usize) + x as usize;
+            let (a, b, c) = A::inverse_mct(
+                planes[0].samples[i],
+                planes[1].samples[i],
+                planes[2].samples[i],
+            );
+            planes[0].samples[i] = a;
+            planes[1].samples[i] = b;
+            planes[2].samples[i] = c;
+        }
     }
     Ok(())
 }

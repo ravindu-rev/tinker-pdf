@@ -333,6 +333,22 @@ request at its default, the full image, and every committed codestream's
 decode there is pinned in `tests/jpx_decodes.rs` by its CRC-32
 ([design](../design/jpx-speed.md)).
 
+**And a window.** The request's `window`, a `JpxWindow` of the image a
+decode at that discard returns, in its own pixels, asks for that rectangle
+alone: the decode returns its samples, clamped to the image, and they are
+the same rectangle of the whole decode sample for sample; a window holding
+no pixel of the image is an empty image. What the window reads is worked
+out from the top down, per tile-component: each level's synthesis of the
+samples it must produce reads them widened by the filter's reach, two
+samples for the 5/3 and four for the 9/7 (F.3.8), its even positions are
+the level below's and its odd ones the high bands' (F.3.3), so tier-1
+decodes only the code-blocks holding a coefficient read, the synthesis
+lifts only the rows and columns read, and G.2's transform, G.1's level
+shift and the copy into the image run over the window alone. A tile the
+window misses is neither decoded nor synthesised; tier-2 still reads every
+packet header, since a packet's place is known only from the headers before
+it. Without a window every sample is decoded as before.
+
 **`BYPASS` and `TERMALL` are two capabilities over one mechanism.** What
 they share is B.10.7.2's *multiple codeword segments*: with either set, a
 code-block's contribution to a packet is signalled as `K` lengths rather than

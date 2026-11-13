@@ -33,7 +33,7 @@
 use std::path::{Path, PathBuf};
 
 use tinker_pdf_filters::{
-    jpx_decode_request, jpx_header, Capability, FilterError, JpxRequest, Limits,
+    jpx_decode_request, jpx_header, Capability, FilterError, JpxRequest, JpxWindow, Limits,
 };
 
 /// The seed directory, from this crate rather than from the working directory.
@@ -52,6 +52,31 @@ fn boxed(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The window bits 5 to 7 of the knob byte ask for, on the image a decode at
+/// the knob's discard returns: none, or one of seven rectangles chosen for
+/// their edges — a corner pixel, small rectangles inside a small image, a
+/// row and a column to the image's far edge through a size that overflows
+/// `u32` when added to its corner, a rectangle wholly off the image, and an
+/// empty one.
+fn window_of(knobs: u8) -> Option<JpxWindow> {
+    let (x, y, width, height) = match knobs >> 5 {
+        0 => return None,
+        1 => (0, 0, 1, 1),
+        2 => (1, 1, 2, 3),
+        3 => (3, 2, 5, 4),
+        4 => (0, 2, u32::MAX, 1),
+        5 => (2, 0, 1, u32::MAX),
+        6 => (u32::MAX, u32::MAX, 4, 4),
+        _ => (0, 0, 0, 5),
+    };
+    Some(JpxWindow {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
 /// The target's own reading of its first byte, restated so a seed means here
 /// exactly what it means there: its output ceiling, the levels it drops, and
 /// the inputs it decodes.
@@ -66,6 +91,7 @@ fn inputs_of(data: &[u8]) -> (usize, JpxRequest, Vec<Vec<u8>>) {
     };
     let request = JpxRequest {
         discard: (knobs >> 3) & 3,
+        window: window_of(knobs),
     };
     let mut inputs: Vec<Vec<u8>> = vec![body.to_vec()];
     if knobs & 4 != 0 {
@@ -129,16 +155,42 @@ fn every_committed_seed_decodes_or_refuses_by_name() {
                     );
                     // The target's reduced-size assertion, restated.
                     assert!(image.discard <= request.discard, "{}", path.display());
-                    for (full, got) in [(header.width, image.width), (header.height, image.height)]
-                    {
+                    for (full, got, at, size) in [
+                        (
+                            header.width,
+                            image.width,
+                            request.window.map(|w| w.x),
+                            request.window.map(|w| w.width),
+                        ),
+                        (
+                            header.height,
+                            image.height,
+                            request.window.map(|w| w.y),
+                            request.window.map(|w| w.height),
+                        ),
+                    ] {
                         let (full, got) = (u64::from(full), u64::from(got));
                         let d = u32::from(image.discard);
-                        assert!(
-                            (full >> d..=full.div_ceil(1 << d)).contains(&got),
-                            "{}: a reduced side {got} is no side of {full} halved {d} times",
-                            path.display()
-                        );
+                        let (lo, hi) = (full >> d, full.div_ceil(1 << d));
+                        match (at, size) {
+                            (Some(at), Some(size)) => {
+                                let (at, size) = (u64::from(at), u64::from(size));
+                                let most = (at + size).min(hi).saturating_sub(at.min(hi));
+                                let least = (at + size).min(lo).saturating_sub(at.min(lo));
+                                assert!(
+                                    got <= most && (got >= least || got == 0),
+                                    "{}: a window's side {got} outside {least}..={most}",
+                                    path.display()
+                                );
+                            }
+                            _ => assert!(
+                                (lo..=hi).contains(&got),
+                                "{}: a reduced side {got} is no side of {full} halved {d} times",
+                                path.display()
+                            ),
+                        }
                     }
+                    assert_eq!(image.width == 0, image.height == 0, "{}", path.display());
                     assert_eq!(
                         header.opacity,
                         image.opacity.is_some(),

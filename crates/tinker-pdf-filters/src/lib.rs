@@ -95,7 +95,7 @@ pub use jpeg::{
 };
 pub use jpx::{
     jpx_decode, jpx_decode_attributed, jpx_decode_request, jpx_header, JpxColour, JpxCounts,
-    JpxHeader, JpxImage, JpxRequest, Refusal as JpxRefusal,
+    JpxHeader, JpxImage, JpxRequest, JpxWindow, Refusal as JpxRefusal,
 };
 pub use jxr::{
     jxr_decode, JxrChannels, JxrError, JxrImage, JxrPixelFormat, JxrRefusal, JxrWarning,

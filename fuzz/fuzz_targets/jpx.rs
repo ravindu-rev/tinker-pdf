@@ -57,7 +57,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use tinker_pdf_filters::{
-    jpx_decode_request, jpx_header, Capability, FilterError, JpxRequest, Limits,
+    jpx_decode_request, jpx_header, Capability, FilterError, JpxRequest, JpxWindow, Limits,
 };
 
 /// The twelve bytes a JP2 file opens with (T.800 I.5.1), and the empty
@@ -65,6 +65,31 @@ use tinker_pdf_filters::{
 const SIGNATURE: [u8; 12] = [
     0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50, 0x20, 0x20, 0x0D, 0x0A, 0x87, 0x0A,
 ];
+
+/// The window bits 5 to 7 of the knob byte ask for, on the image a decode at
+/// the knob's discard returns: none, or one of seven rectangles chosen for
+/// their edges — a corner pixel, small rectangles inside a small image, a
+/// row and a column to the image's far edge through a size that overflows
+/// `u32` when added to its corner, a rectangle wholly off the image, and an
+/// empty one.
+fn window_of(knobs: u8) -> Option<JpxWindow> {
+    let (x, y, width, height) = match knobs >> 5 {
+        0 => return None,
+        1 => (0, 0, 1, 1),
+        2 => (1, 1, 2, 3),
+        3 => (3, 2, 5, 4),
+        4 => (0, 2, u32::MAX, 1),
+        5 => (2, 0, 1, u32::MAX),
+        6 => (u32::MAX, u32::MAX, 4, 4),
+        _ => (0, 0, 0, 5),
+    };
+    Some(JpxWindow {
+        x,
+        y,
+        width,
+        height,
+    })
+}
 
 fn boxed(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
     let mut out = ((body.len() + 8) as u32).to_be_bytes().to_vec();
@@ -91,8 +116,10 @@ fuzz_target!(|data: &[u8]| {
     // Bits 3 and 4 drop that many resolution levels from the top (T.800
     // B.5), so the reduced geometry is fuzzed as the full one is: a discard
     // past a codestream's levels is clamped, never a panic.
+    // And bits 5 to 7 ask for a window of that image (`window_of`).
     let request = JpxRequest {
         discard: (knobs >> 3) & 3,
+        window: window_of(knobs),
     };
 
     // Bit 2 wraps the body in JP2 boxes. PDF permits both a whole JP2 file
@@ -130,14 +157,47 @@ fuzz_target!(|data: &[u8]| {
                     image.discard <= request.discard,
                     "a decode dropped more levels than it was asked to"
                 );
-                for (full, got) in [(header.width, image.width), (header.height, image.height)] {
+                for (full, got, at, size) in [
+                    (
+                        header.width,
+                        image.width,
+                        request.window.map(|w| w.x),
+                        request.window.map(|w| w.width),
+                    ),
+                    (
+                        header.height,
+                        image.height,
+                        request.window.map(|w| w.y),
+                        request.window.map(|w| w.height),
+                    ),
+                ] {
                     let (full, got) = (u64::from(full), u64::from(got));
                     let d = u32::from(image.discard);
-                    assert!(
-                        (full >> d..=full.div_ceil(1 << d)).contains(&got),
-                        "a reduced side {got} is no side of the full {full} halved {d} times"
-                    );
+                    let (lo, hi) = (full >> d, full.div_ceil(1 << d));
+                    match (at, size) {
+                        (Some(at), Some(size)) => {
+                            // A window's side is its own clamped to the
+                            // reduced image, whose side is between `lo` and
+                            // `hi`; one off the image is empty.
+                            let (at, size) = (u64::from(at), u64::from(size));
+                            let most = (at + size).min(hi).saturating_sub(at.min(hi));
+                            let least = (at + size).min(lo).saturating_sub(at.min(lo));
+                            assert!(
+                                got <= most && (got >= least || got == 0),
+                                "a window's side {got} outside {least}..={most}"
+                            );
+                        }
+                        _ => assert!(
+                            (lo..=hi).contains(&got),
+                            "a reduced side {got} is no side of the full {full} halved {d} times"
+                        ),
+                    }
                 }
+                assert_eq!(
+                    image.width == 0,
+                    image.height == 0,
+                    "an empty window is an empty image both ways"
+                );
                 let bytes = if image.precision > 8 { 2usize } else { 1 };
                 let want = (image.width as usize)
                     .checked_mul(image.height as usize)

@@ -116,8 +116,16 @@ fn limits() -> Limits {
 /// `bytes` decoded with `discard` levels dropped.
 fn decode_dropping(bytes: &[u8], discard: u8) -> JpxImage {
     let mut warnings = Vec::new();
-    let (image, _) = jpx_decode_request(bytes, &limits(), &JpxRequest { discard }, &mut warnings)
-        .unwrap_or_else(|e| panic!("a reduced decode: {e:?} {warnings:?}"));
+    let (image, _) = jpx_decode_request(
+        bytes,
+        &limits(),
+        &JpxRequest {
+            discard,
+            window: None,
+        },
+        &mut warnings,
+    )
+    .unwrap_or_else(|e| panic!("a reduced decode: {e:?} {warnings:?}"));
     image
 }
 
@@ -266,7 +274,15 @@ fn a_damaged_codestream_decodes_or_refuses_by_name_at_every_discard() {
     for input in &damaged {
         for discard in 0..=4u8 {
             let mut warnings = Vec::new();
-            match jpx_decode_request(input, &limits(), &JpxRequest { discard }, &mut warnings) {
+            match jpx_decode_request(
+                input,
+                &limits(),
+                &JpxRequest {
+                    discard,
+                    window: None,
+                },
+                &mut warnings,
+            ) {
                 Ok((image, _)) => {
                     assert!(image.discard <= discard);
                     let per = usize::from(image.precision > 8) + 1;
@@ -364,9 +380,16 @@ fn guard_a7_levels_decoded_are_the_levels_needed() {
     let mut previous = u64::MAX;
     for d in 0..=levels {
         let mut warnings = Vec::new();
-        let (image, counts) =
-            jpx_decode_request(&bytes, &limits(), &JpxRequest { discard: d }, &mut warnings)
-                .expect("it decodes");
+        let (image, counts) = jpx_decode_request(
+            &bytes,
+            &limits(),
+            &JpxRequest {
+                discard: d,
+                window: None,
+            },
+            &mut warnings,
+        )
+        .expect("it decodes");
         assert_eq!(image.discard, d);
         assert_eq!(
             counts.levels_synthesised,

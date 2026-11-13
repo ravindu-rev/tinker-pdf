@@ -485,6 +485,22 @@ pub struct JpxRequest {
     /// resolutions alone. A figure past the fewest levels a tile-component
     /// has is clamped to it, and [`JpxImage::discard`] says what was applied.
     pub discard: u8,
+    /// The part of the image wanted, or `None` for all of it: a rectangle of
+    /// the image a decode at [`JpxRequest::discard`] returns, in its own
+    /// pixels from its top-left corner. The decode returns that rectangle's
+    /// samples alone, clamped to the image — exactly the same rectangle of
+    /// the whole decode — and a rectangle off the image is an empty image.
+    pub window: Option<JpxWindow>,
+}
+
+/// A rectangle of a decoded image, in its own pixels from its top-left
+/// corner: [`JpxRequest::window`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct JpxWindow {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// What one decode did, counted: the leaf's half of guard A7, handed back
@@ -732,7 +748,26 @@ fn decode_inner(
     // a code-block that has drifted is named here rather than handed on as
     // plausible coefficients. A dropped resolution's code-blocks are not
     // decoded at all.
-    counts.code_blocks_decoded += tier1::decode_tiles(&stream, &mut tiles, discard)?;
+    // T.800 B.5: the image a decode dropping `discard` levels returns lies
+    // on the reference grid reduced by `2^discard`, every coordinate
+    // `ceil(x / 2^discard)` — the image area's and each tile's alike. The
+    // window is a rectangle of it, and each tile the window reaches needs of
+    // each of its components what the window reads (`wavelet::Needs`):
+    // a tile it misses is neither decoded nor synthesised. Tier-2 has read
+    // every packet header, as it must to find the packets after them.
+    let grid = Grid::reduced(&stream.siz, discard);
+    let window = grid.window(request.window);
+    let needs: Option<Vec<Option<Vec<wavelet::Needs>>>> = match request.window {
+        None => None,
+        Some(_) => Some(
+            tiles
+                .iter()
+                .map(|tile| tile_needs(&stream, tile, &grid, window, discard))
+                .collect::<Result<_, _>>()?,
+        ),
+    };
+    counts.code_blocks_decoded +=
+        tier1::decode_tiles(&stream, &mut tiles, discard, needs.as_deref())?;
 
     // Annex I's boxes and Annex A's components together decide what a channel
     // *is*, and that has to be settled before a single sample is written: a
@@ -764,11 +799,7 @@ fn decode_inner(
         return Err(Refusal::Budget("output colour channels"));
     }
 
-    // T.800 B.5: the image a decode dropping `discard` levels returns lies
-    // on the reference grid reduced by `2^discard`, every coordinate
-    // `ceil(x / 2^discard)` — the image area's and each tile's alike.
-    let grid = Grid::reduced(&stream.siz, discard);
-    let (width, height) = (grid.width, grid.height);
+    let (width, height) = (window.x1 - window.x0, window.y1 - window.y0);
     let stride = plan.colour.len();
     let wide = usize::from(precision > 8) + 1;
     // Re-spent here rather than trusted from `check_budget`, because a
@@ -790,24 +821,38 @@ fn decode_inner(
     let mut samples = vec![0u8; pixels * stride * wide];
     let mut opacity = plan.opacity.map(|_| vec![0u8; pixels * wide]);
 
-    for tile in &tiles {
+    for (t, tile) in tiles.iter().enumerate() {
+        // A tile the window misses is neither synthesised nor written.
+        let need: Option<&Vec<wavelet::Needs>> = match &needs {
+            None => None,
+            Some(needs) => match needs.get(t) {
+                Some(Some(need)) => Some(need),
+                _ => continue,
+            },
+        };
         // Every component of the tile at once, because G.2's transform reads
         // three planes and applying it one plane at a time is not a thing
         // that can be done.
-        let mut planes = wavelet::reconstruct_tile(&stream, tile, discard, clamped)?;
+        let mut planes =
+            wavelet::reconstruct_tile(&stream, tile, discard, need.map(Vec::as_slice), clamped)?;
         counts.levels_synthesised += wavelet::levels_synthesised(tile, discard);
         for (c, plane) in planes.iter_mut().enumerate() {
             let component = &stream.siz.components[c];
             // G.1, and *after* G.2 rather than before it — which is what
-            // `reconstruct_tile` having already run makes true here.
-            wavelet::level_shift(plane, component.precision, component.signed);
+            // `reconstruct_tile` having already run makes true here. Over
+            // the samples the window reads, or every sample.
+            let region = need.and_then(|need| need.get(c)).map(wavelet::Needs::top);
+            wavelet::level_shift_in(plane, component.precision, component.signed, region);
         }
-        let bounds = grid.tile(stream.siz.tile_bounds(u32::from(tile.index)));
+        let bounds = window.and(&grid.tile(stream.siz.tile_bounds(u32::from(tile.index))));
+        if bounds.is_empty() {
+            continue;
+        }
         for (k, channel) in plan.colour.iter().enumerate() {
             blit(
                 &planes,
                 &stream.siz,
-                &grid,
+                &window,
                 bounds,
                 *channel,
                 palette,
@@ -823,7 +868,7 @@ fn decode_inner(
             blit(
                 &planes,
                 &stream.siz,
-                &grid,
+                &window,
                 bounds,
                 channel,
                 palette,
@@ -880,10 +925,100 @@ impl Grid {
 
     /// A tile's bounds on the full reference grid, reduced as the image's
     /// are.
-    fn tile(&self, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> (u32, u32, u32, u32) {
+    fn tile(&self, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> wavelet::Rect {
         let d = self.discard;
-        (reduce(x0, d), reduce(y0, d), reduce(x1, d), reduce(y1, d))
+        wavelet::Rect {
+            x0: reduce(x0, d),
+            y0: reduce(y0, d),
+            x1: reduce(x1, d),
+            y1: reduce(y1, d),
+        }
     }
+
+    /// `asked` on this grid, clamped to the image: the whole image for no
+    /// window, and an empty rectangle for one that holds no pixel of it.
+    fn window(&self, asked: Option<JpxWindow>) -> wavelet::Rect {
+        let Some(asked) = asked else {
+            return wavelet::Rect {
+                x0: self.x0,
+                y0: self.y0,
+                x1: self.x0 + self.width,
+                y1: self.y0 + self.height,
+            };
+        };
+        // In `u64`, since a caller's corner plus its size may pass `u32`.
+        let side = |at: u32, size: u32, extent: u32| {
+            let start = u64::from(at).min(u64::from(extent));
+            let end = (u64::from(at) + u64::from(size)).min(u64::from(extent));
+            (start as u32, end as u32)
+        };
+        let (x0, x1) = side(asked.x, asked.width, self.width);
+        let (y0, y1) = side(asked.y, asked.height, self.height);
+        if x0 >= x1 || y0 >= y1 {
+            return wavelet::Rect::default();
+        }
+        wavelet::Rect {
+            x0: self.x0 + x0,
+            y0: self.y0 + y0,
+            x1: self.x0 + x1,
+            y1: self.y0 + y1,
+        }
+    }
+}
+
+/// What a window needs of each component of `tile`, or `None` for a tile it
+/// misses.
+///
+/// A component's need at its top kept resolution is what the blit reads:
+/// reduced reference sample `x` of the tile's part of the window reads
+/// component sample `floor(x / XRsiz)`, clamped into the plane, so the
+/// samples are the clamped images of the part's first and last columns and
+/// everything between. Each component takes its own filter's reach.
+fn tile_needs(
+    stream: &codestream::Codestream<'_>,
+    tile: &tier2::Tile,
+    grid: &Grid,
+    window: wavelet::Rect,
+    discard: u8,
+) -> Result<Option<Vec<wavelet::Needs>>, Refusal> {
+    let part = window.and(&grid.tile(stream.siz.tile_bounds(u32::from(tile.index))));
+    if part.is_empty() {
+        return Ok(None);
+    }
+    let mut out = Vec::with_capacity(tile.components.len());
+    for (c, tc) in tile.components.iter().enumerate() {
+        let component = stream.siz.components.get(c).ok_or(Refusal::Structure(
+            "a component the SIZ marker does not declare",
+        ))?;
+        let (dx, dy) = (
+            u32::from(component.dx).max(1),
+            u32::from(component.dy).max(1),
+        );
+        let kept = tc
+            .resolutions
+            .len()
+            .saturating_sub(usize::from(discard))
+            .max(1);
+        let reach = wavelet::reach(wavelet::reversible(stream, tile.index, c)?);
+        let top = tc
+            .resolutions
+            .get(kept - 1)
+            .map_or(wavelet::Rect::default(), |res| {
+                if res.x0 >= res.x1 || res.y0 >= res.y1 {
+                    return wavelet::Rect::default();
+                }
+                let across = |v: u32| v.clamp(res.x0, res.x1 - 1);
+                let down = |v: u32| v.clamp(res.y0, res.y1 - 1);
+                wavelet::Rect {
+                    x0: across(part.x0 / dx),
+                    y0: down(part.y0 / dy),
+                    x1: across((part.x1 - 1) / dx) + 1,
+                    y1: down((part.y1 - 1) / dy) + 1,
+                }
+            });
+        out.push(wavelet::Needs::of(tc, discard, top, reach));
+    }
+    Ok(Some(out))
 }
 
 /// `ceil(v / 2^d)`, B.5's reduction of one reference-grid coordinate. `d` is
@@ -975,16 +1110,17 @@ fn normalise(value: i32, from: u8, to: u8, signed: bool) -> u32 {
 /// sample is what replication means at an edge; reading zero would put a
 /// black line down the left of every such tile.
 ///
-/// On a reduced grid (`grid`'s discard of `d`) the same rule runs at the
-/// lower scale: `(x0, y0, x1, y1)` is the tile reduced as B.5 reduces it, the
-/// plane is resolution `N_L - d`'s, and a reduced reference sample `x`
-/// reads component sample `floor(x / XRsiz)` of it, as the full grid's `x`
-/// reads `floor(x / XRsiz)` of the full plane.
+/// On a reduced grid (a discard of `d`) the same rule runs at the lower
+/// scale: the plane is resolution `N_L - d`'s, and a reduced reference
+/// sample `x` reads component sample `floor(x / XRsiz)` of it, as the full
+/// grid's `x` reads `floor(x / XRsiz)` of the full plane. `bounds` is the part
+/// of the tile, reduced as B.5 reduces it, that `window` holds, and the
+/// samples are written from the window's own top-left corner.
 fn blit(
     planes: &[wavelet::Plane],
     siz: &codestream::Siz,
-    grid: &Grid,
-    (x0, y0, x1, y1): (u32, u32, u32, u32),
+    window: &wavelet::Rect,
+    bounds: wavelet::Rect,
     channel: colour::Channel,
     palette: Option<&boxes::Palette>,
     to: Blit<'_>,
@@ -1002,17 +1138,17 @@ fn blit(
         u32::from(component.dx).max(1),
         u32::from(component.dy).max(1),
     );
-    let (width, height) = (grid.width, grid.height);
-    for y in y0..y1 {
-        let Some(py) = y.checked_sub(grid.y0) else {
+    let (width, height) = (window.x1 - window.x0, window.y1 - window.y0);
+    for y in bounds.y0..bounds.y1 {
+        let Some(py) = y.checked_sub(window.y0) else {
             continue;
         };
         if py >= height {
             continue;
         }
         let cy = (y / dy).saturating_sub(plane.y0).min(plane.height - 1);
-        for x in x0..x1 {
-            let Some(px) = x.checked_sub(grid.x0) else {
+        for x in bounds.x0..bounds.x1 {
+            let Some(px) = x.checked_sub(window.x0) else {
                 continue;
             };
             if px >= width {

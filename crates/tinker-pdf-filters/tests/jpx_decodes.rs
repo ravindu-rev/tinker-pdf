@@ -131,8 +131,16 @@ fn every_committed_codestream_decodes_at_every_discard() {
         let bytes = std::fs::read(dir.join(&name)).unwrap_or_else(|e| panic!("{name}: {e}"));
         let decode = |discard: u8| {
             let mut warnings = Vec::new();
-            jpx_decode_request(&bytes, &limits, &JpxRequest { discard }, &mut warnings)
-                .unwrap_or_else(|e| panic!("{name} dropping {discard}: {e:?} {warnings:?}"))
+            jpx_decode_request(
+                &bytes,
+                &limits,
+                &JpxRequest {
+                    discard,
+                    window: None,
+                },
+                &mut warnings,
+            )
+            .unwrap_or_else(|e| panic!("{name} dropping {discard}: {e:?} {warnings:?}"))
         };
         let (whole, _) = decode(0);
         let levels = decode(u8::MAX).0.discard;

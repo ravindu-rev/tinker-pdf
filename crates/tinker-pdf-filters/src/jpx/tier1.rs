@@ -48,6 +48,7 @@
 use super::codestream::Codestream;
 use super::passes::Schedule;
 use super::tier2::{CodeBlock, Orientation, Segment, Tile};
+use super::wavelet::Needs;
 use super::{Refusal, MAX_JPX_WORK};
 use crate::mq::{MqContexts, MqDecoder};
 
@@ -915,11 +916,16 @@ fn charge(work: &mut u64, n: u64) -> Result<(), Refusal> {
 }
 
 /// Runs tier-1 over every code-block of every tile that a decode dropping
-/// the top `discard` resolutions keeps, and returns how many code-blocks it
+/// the top `discard` resolutions keeps and, where a window says what it
+/// reads, that the window reaches, and returns how many code-blocks it
 /// decoded.
 ///
-/// A dropped resolution's blocks are never decoded, so they spend nothing:
-/// the budget is charged for the work the decode does. `discard` is already
+/// `needs` is a window's, one entry a tile: `None` for a tile it misses,
+/// whose blocks are all skipped, and each component's [`Needs`] for the rest,
+/// whose blocks are decoded where they hold a coefficient the window's
+/// synthesis reads. `None` for `needs` is no window: every block of a kept
+/// resolution. A block skipped is never decoded, so it spends nothing: the
+/// budget is charged for the work the decode does. `discard` is already
 /// clamped to the fewest levels any tile-component has, so every
 /// tile-component keeps at least its resolution 0.
 ///
@@ -934,6 +940,7 @@ pub(crate) fn decode_tiles(
     stream: &Codestream<'_>,
     tiles: &mut [Tile],
     discard: u8,
+    needs: Option<&[Option<Vec<Needs>>]>,
 ) -> Result<u64, Refusal> {
     let mut work = MAX_JPX_WORK;
     // One context array for the whole codestream, reset per code-block. That
@@ -943,9 +950,17 @@ pub(crate) fn decode_tiles(
     let mut contexts = initial_contexts();
     let mut decoded = 0u64;
 
-    for tile in tiles.iter_mut() {
+    for (t, tile) in tiles.iter_mut().enumerate() {
         let index = tile.index;
+        let wanted: Option<&Vec<Needs>> = match needs {
+            None => None,
+            Some(needs) => match needs.get(t) {
+                Some(Some(wanted)) => Some(wanted),
+                _ => continue,
+            },
+        };
         for (c, component) in tile.components.iter_mut().enumerate() {
+            let need = wanted.map(|wanted| wanted.get(c));
             let coding = stream.style_for(index, c);
             let style = CodingStyle {
                 segmentation_symbols: coding.segmentation_symbols(),
@@ -958,11 +973,18 @@ pub(crate) fn decode_tiles(
                 .resolutions
                 .len()
                 .saturating_sub(usize::from(discard));
-            for resolution in component.resolutions.iter_mut().take(kept) {
-                for band in &mut resolution.bands {
+            for (r, resolution) in component.resolutions.iter_mut().enumerate().take(kept) {
+                for (b, band) in resolution.bands.iter_mut().enumerate() {
                     let orientation = band.orientation;
                     for precinct in &mut band.precincts {
                         for block in &mut precinct.blocks {
+                            let read = match need {
+                                None => true,
+                                Some(need) => need.is_some_and(|need| need.wants(r, b, block)),
+                            };
+                            if !read {
+                                continue;
+                            }
                             decode_one(block, orientation, style, &mut contexts, &mut work)?;
                             decoded += 1;
                         }
