@@ -848,6 +848,22 @@ What it does:
   run's length along its own axis, `Shaper::shape_text_vertical` shapes a
   paragraph as a column at once, and `Shaper::vertical_metrics` reports what
   a glyph stands on.
+- **Graphite tables, read and not yet run.** `tinker_pdf_shape::graphite`
+  reads a Graphite description's tables (*Graphite shaping* in the design).
+  `graphite::Tables` is a face's view of them, made where it carries a
+  `Silf`, with a compressed `Silf` or `Glat` — the GTF's scheme 1, one LZ4
+  block — decoded once, its stated size held to `Limits::max_table_bytes`
+  before a byte is decoded and the decoded table held to being the table
+  again. `graphite::Attributes` answers each glyph's attributes from `Gloc`
+  and `Glat` 1, 2 and 3, per glyph and attribute number in integers: the
+  first run holding a number answers, an attribute no run holds is 0, the
+  glyph count is `Gloc`'s own, and a block that cannot be read, or of more
+  runs than `Limits::max_attribute_runs`, is refused by name for every
+  attribute alike. A `Glat` 3 block's octabox is read too, its four diagonal
+  bytes the least and greatest x + y and x − y over the outline, as the
+  vendored Awami Nastaliq's outlines bear out. No run is shaped through any
+  of it yet: the refused-by-name table below says what a run over such a
+  face does.
 
 - **A layout seam, and one path owning a run.** `Shaper` sits beside `Metrics`
   in `crates/tinker-pdf-layout/src/metrics.rs` as plain structs and `f64`, so

@@ -370,6 +370,8 @@ fuzz_target!(|data: &[u8]| {
             _ => 65_536,
         },
         max_index_bytes: Limits::DEFAULT.max_index_bytes,
+        max_table_bytes: Limits::DEFAULT.max_table_bytes,
+        max_attribute_runs: Limits::DEFAULT.max_attribute_runs,
     };
     let marks = if more & 4 == 0 {
         MarkWidths::ZeroByGdef

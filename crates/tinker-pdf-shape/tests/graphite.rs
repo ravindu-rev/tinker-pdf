@@ -13,11 +13,14 @@
 //! their authors' compiler wrote; and the fixtures that can say a shaped run
 //! is right are H-64's.
 
+use std::collections::BTreeMap;
+
 use tinker_pdf_font::Sfnt;
 use tinker_pdf_shape::bidi::{BaseDirection, Level};
+use tinker_pdf_shape::graphite::{self, Attributes, GlatVersion, Octabox, Refusal, Subbox, Tables};
 use tinker_pdf_shape::shape::Run;
 use tinker_pdf_shape::unicode::Script;
-use tinker_pdf_shape::{Orientation, ShapedGlyph, ShapedRun, Shaper, Tag, Warning};
+use tinker_pdf_shape::{Limits, Orientation, ShapedGlyph, ShapedRun, Shaper, Tag, Warning};
 
 // --- a face assembler ----------------------------------------------------
 //
@@ -677,4 +680,631 @@ fn the_vendored_faces_take_the_path_the_precedence_gives() {
             "{family} is not named"
         );
     }
+}
+
+// --- glyph attributes (FT-07d.4) ----------------------------------------
+//
+// A glyph's attributes are a map from number to value; `glat_and_gloc`
+// writes such maps as each `Glat` version stores them — runs of consecutive
+// numbers, an octabox first where the version carries them — and a `Gloc`
+// in either offset size, so the answers the reader gives are compared with
+// the maps the test began from.
+
+/// How a test writes its `Gloc`.
+#[derive(Clone, Copy, Debug)]
+struct Index {
+    /// Offsets of four bytes rather than two.
+    long: bool,
+    /// The name array at the end, each attribute given `1000 + n`.
+    names: bool,
+}
+
+/// The `Glat` and `Gloc` storing `glyphs`' maps in `version`, each block
+/// opening with `octaboxes[glyph]` where the version carries octaboxes.
+fn glat_and_gloc(
+    version: GlatVersion,
+    glyphs: &[BTreeMap<u16, i16>],
+    octaboxes: &[Option<Octabox>],
+    index: Index,
+    count: u16,
+) -> (Vec<u8>, Vec<u8>) {
+    let mut glat: Vec<u8> = match version {
+        GlatVersion::One => 0x0001_0000u32.to_be_bytes().to_vec(),
+        GlatVersion::Two => 0x0002_0000u32.to_be_bytes().to_vec(),
+        GlatVersion::Three { octaboxes } => {
+            let mut out = 0x0003_0000u32.to_be_bytes().to_vec();
+            out.extend(u32::from(octaboxes).to_be_bytes());
+            out
+        }
+    };
+    let mut offsets = vec![glat.len()];
+    for (glyph, map) in glyphs.iter().enumerate() {
+        if let (GlatVersion::Three { octaboxes: true }, Some(Some(octabox))) =
+            (version, octaboxes.get(glyph))
+        {
+            glat.extend(octabox.cells.to_be_bytes());
+            glat.extend(octabox.diagonals);
+            for sub in &octabox.subboxes {
+                glat.extend([sub.left, sub.right, sub.bottom, sub.top]);
+                glat.extend(sub.diagonals);
+            }
+        }
+        // Runs of consecutive numbers, in order.
+        let mut runs: Vec<(u16, Vec<i16>)> = Vec::new();
+        for (number, value) in map {
+            match runs.last_mut() {
+                Some((first, values))
+                    if usize::from(*first) + values.len() == usize::from(*number) =>
+                {
+                    values.push(*value);
+                }
+                _ => runs.push((*number, vec![*value])),
+            }
+        }
+        for (first, values) in runs {
+            if version == GlatVersion::One {
+                glat.push(u8::try_from(first).expect("a byte attribute number"));
+                glat.push(u8::try_from(values.len()).expect("a byte count"));
+            } else {
+                glat.extend(first.to_be_bytes());
+                glat.extend(u16::try_from(values.len()).expect("a count").to_be_bytes());
+            }
+            for value in values {
+                glat.extend(value.to_be_bytes());
+            }
+        }
+        offsets.push(glat.len());
+    }
+    let flags = u16::from(index.long) | (u16::from(index.names) << 1);
+    let mut gloc = 0x0001_0000u32.to_be_bytes().to_vec();
+    gloc.extend(u16s(&[flags, count]));
+    for offset in offsets {
+        if index.long {
+            gloc.extend(u32::try_from(offset).expect("small").to_be_bytes());
+        } else {
+            gloc.extend(u16::try_from(offset).expect("small").to_be_bytes());
+        }
+    }
+    if index.names {
+        gloc.extend(u16s(&(0..count).map(|n| 1000 + n).collect::<Vec<u16>>()));
+    }
+    (glat, gloc)
+}
+
+/// The glyphs every version's test stores: an empty glyph, a single run, a
+/// glyph of three runs with the extremes of an `i16`, a glyph of two runs
+/// with a number past the first run's, and, where the version numbers
+/// attributes in 16 bits, attributes past 255.
+fn attribute_maps(version: GlatVersion) -> Vec<BTreeMap<u16, i16>> {
+    let mut maps = vec![
+        BTreeMap::new(),
+        BTreeMap::from([(0, 5)]),
+        BTreeMap::from([(1, -2), (2, 300), (3, 4), (9, i16::MIN), (10, i16::MAX)]),
+        BTreeMap::from([(7, 1), (8, -1), (200, 9)]),
+    ];
+    if version != GlatVersion::One {
+        maps.push(BTreeMap::from([
+            (255, 3),
+            (256, 4),
+            (300, 42),
+            (65_535, -7),
+        ]));
+    }
+    maps
+}
+
+/// An octabox for glyph `glyph`, with a sub-box in each cell its bits name.
+fn octabox_for(glyph: u8, cells: u16) -> Octabox {
+    Octabox {
+        cells,
+        diagonals: [glyph, glyph + 1, glyph + 2, glyph + 3],
+        subboxes: (0..16u8)
+            .filter(|cell| cells & (1 << cell) != 0)
+            .map(|cell| Subbox {
+                cell,
+                left: cell,
+                right: cell + 16,
+                bottom: cell + 32,
+                top: cell + 48,
+                diagonals: [cell + 64, cell + 80, cell + 96, cell + 112],
+            })
+            .collect(),
+    }
+}
+
+/// Every version answers every glyph's every attribute as stored, 0 where it
+/// stores nothing, through either offset size, with or without the name
+/// array, octaboxes and all; and the same tables through `Tables`, a `Glat`
+/// 3 compressed and decoded on the way.
+#[test]
+fn every_glat_version_answers_the_attributes_it_stores() {
+    let versions = [
+        GlatVersion::One,
+        GlatVersion::Two,
+        GlatVersion::Three { octaboxes: false },
+        GlatVersion::Three { octaboxes: true },
+    ];
+    let indexes = [
+        Index {
+            long: false,
+            names: false,
+        },
+        Index {
+            long: true,
+            names: false,
+        },
+        Index {
+            long: false,
+            names: true,
+        },
+        Index {
+            long: true,
+            names: true,
+        },
+    ];
+    let mut checked = 0usize;
+    for version in versions {
+        let maps = attribute_maps(version);
+        // Glyph 0 is empty and so has no octabox; the others each have one:
+        // one with no sub-boxes, one with every cell, one with two, one with
+        // the lower left alone.
+        let cells = [0u16, 0x0000, 0xFFFF, 0x1008, 0x0001];
+        let octaboxes: Vec<Option<Octabox>> = (0..maps.len())
+            .map(|glyph| {
+                (glyph > 0).then(|| octabox_for(u8::try_from(glyph).expect("small"), cells[glyph]))
+            })
+            .collect();
+        let highest = maps
+            .iter()
+            .flat_map(|map| map.keys().copied())
+            .max()
+            .unwrap_or(0);
+        for index in indexes {
+            let count = 12;
+            let (glat, gloc) = glat_and_gloc(version, &maps, &octaboxes, index, count);
+            let attributes =
+                Attributes::parse(&gloc, &glat, &Limits::DEFAULT).expect("the tables read");
+            assert_eq!(attributes.version(), version);
+            assert_eq!(attributes.glyph_count(), maps.len());
+            assert_eq!(attributes.attribute_count(), count);
+            for number in 0..count + 2 {
+                let name = attributes.attribute_name(number);
+                if index.names && number < count {
+                    assert_eq!(name, Some(1000 + number));
+                } else {
+                    assert_eq!(name, None, "{number}");
+                }
+            }
+            for (glyph, map) in maps.iter().enumerate() {
+                let glyph = u16::try_from(glyph).expect("small");
+                let mut numbers: Vec<u16> = (0..=highest.min(400)).collect();
+                numbers.extend([highest, 65_534, 65_535]);
+                for number in numbers {
+                    let expected = map.get(&number).copied().unwrap_or(0);
+                    assert_eq!(
+                        attributes.attribute(glyph, number),
+                        Some(expected),
+                        "{version:?} {index:?} glyph {glyph} attribute {number}"
+                    );
+                    checked += 1;
+                }
+                let octabox = attributes.octabox(glyph).expect("readable");
+                if version == (GlatVersion::Three { octaboxes: true }) {
+                    assert_eq!(octabox, octaboxes[usize::from(glyph)].clone());
+                } else {
+                    assert_eq!(octabox, None);
+                }
+            }
+            let beyond = u16::try_from(maps.len()).expect("small");
+            assert_eq!(attributes.attribute(beyond, 0), None);
+        }
+
+        // The same `Glat`, compressed where its version can be, read through
+        // a face's `Tables`.
+        let (glat, gloc) = glat_and_gloc(version, &maps, &octaboxes, indexes[0], 12);
+        let stored = match version {
+            GlatVersion::Three { .. } => lz4_literals(&glat),
+            _ => glat.clone(),
+        };
+        let silf = empty_silf();
+        let tables = Tables::from_tables(
+            Some(&silf[..]),
+            Some(&stored[..]),
+            Some(&gloc[..]),
+            None,
+            None,
+            &Limits::DEFAULT,
+        )
+        .expect("a description");
+        assert_eq!(tables.glat(), Some(&glat[..]), "{version:?} decoded");
+        let attributes = tables
+            .attributes(&Limits::DEFAULT)
+            .expect("both tables")
+            .expect("readable");
+        for (glyph, map) in maps.iter().enumerate() {
+            for (number, value) in map {
+                let glyph = u16::try_from(glyph).expect("small");
+                assert_eq!(attributes.attribute(glyph, *number), Some(*value));
+            }
+        }
+    }
+    assert!(checked > 10_000, "{checked} answers compared");
+}
+
+/// `table` as GTF compression scheme 1 stores it: its version, the scheme
+/// and size word, and an LZ4 block of literals alone holding the table.
+fn lz4_literals(table: &[u8]) -> Vec<u8> {
+    let size = u32::try_from(table.len()).expect("small");
+    let mut out = table[0..4].to_vec();
+    out.extend(((1u32 << 27) | size).to_be_bytes());
+    out.extend(lz4_literal_token(table.len()));
+    out.extend_from_slice(table);
+    out
+}
+
+/// An LZ4 token for `literals` literals and no match, with the literal
+/// count's continuation bytes after it.
+fn lz4_literal_token(literals: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    if literals < 15 {
+        out.push(u8::try_from(literals).expect("short") << 4);
+    } else {
+        out.push(0xF0);
+        let mut left = literals - 15;
+        while left >= 255 {
+            out.push(255);
+            left -= 255;
+        }
+        out.push(u8::try_from(left).expect("under 255"));
+    }
+    out
+}
+
+/// A glyph whose block cannot be read answers `None` for every attribute and
+/// names itself, and its neighbours still answer.
+#[test]
+fn an_offset_past_the_glat_answers_none() {
+    let version = GlatVersion::Two;
+    let maps = attribute_maps(version);
+    let index = Index {
+        long: false,
+        names: false,
+    };
+    let (glat, gloc) = glat_and_gloc(version, &maps, &[], index, 0);
+    // `Gloc`'s offsets: eight bytes of version, flags and count, then one
+    // `USHORT` a glyph and one more.
+    let offset_at = |glyph: usize| 8 + glyph * 2;
+    let read = |gloc: &[u8], glyph: usize| be16(gloc, offset_at(glyph));
+    let set = |gloc: &mut Vec<u8>, glyph: usize, value: u16| {
+        gloc[offset_at(glyph)..offset_at(glyph) + 2].copy_from_slice(&value.to_be_bytes());
+    };
+    let glat_len = u16::try_from(glat.len()).expect("small");
+
+    // The last glyph's end past `Glat`'s end.
+    let mut past = gloc.clone();
+    set(&mut past, maps.len(), glat_len + 2);
+    // Glyph 2's end set before its start: glyph 2 ends before it starts, and
+    // glyph 3, whose start it is, starts before glyph 2's own.
+    let mut backwards = gloc.clone();
+    set(&mut backwards, 3, read(&gloc, 2) - 2);
+    // Glyph 1 starting inside the header: glyph 0's end is glyph 1's start.
+    let mut header = gloc.clone();
+    set(&mut header, 1, 2);
+    // Glyph 3 cut short inside its last run.
+    let mut cut = gloc.clone();
+    set(&mut cut, 4, read(&gloc, 4) - 1);
+
+    // (what, the index, the glyphs it breaks, the glyphs whose data it moves
+    // and so whose answers say nothing)
+    let last = u16::try_from(maps.len() - 1).expect("small");
+    let cases: [(&str, Vec<u8>, Vec<u16>, Vec<u16>); 4] = [
+        ("an end past the Glat", past, vec![last], vec![]),
+        ("an end before the start", backwards, vec![2], vec![3]),
+        ("a start inside the header", header, vec![0, 1], vec![]),
+        ("a run past its block", cut, vec![3], vec![4]),
+    ];
+    for (what, gloc, broken, moved) in cases {
+        let attributes = Attributes::parse(&gloc, &glat, &Limits::DEFAULT).expect(what);
+        for (glyph, map) in maps.iter().enumerate() {
+            let glyph = u16::try_from(glyph).expect("small");
+            if broken.contains(&glyph) {
+                for number in [0u16, 1, 2, 7, 300] {
+                    assert_eq!(attributes.attribute(glyph, number), None, "{what}: {glyph}");
+                    assert_eq!(
+                        attributes.lookup(glyph, number),
+                        Err(Refusal::GlyphUnreadable { glyph }),
+                        "{what}: {glyph}"
+                    );
+                }
+                assert_eq!(
+                    attributes.runs(glyph),
+                    Err(Refusal::GlyphUnreadable { glyph })
+                );
+            } else if moved.contains(&glyph) {
+                // The glyph's block now starts inside another's: readable or
+                // not, it is not this glyph's data, so nothing is asserted.
+            } else {
+                for (number, value) in map {
+                    assert_eq!(
+                        attributes.attribute(glyph, *number),
+                        Some(*value),
+                        "{what}: glyph {glyph} still reads"
+                    );
+                }
+            }
+        }
+    }
+    // A glyph past the offsets.
+    let attributes = Attributes::parse(&gloc, &glat, &Limits::DEFAULT).expect("readable");
+    let beyond = u16::try_from(maps.len()).expect("small");
+    assert_eq!(attributes.attribute(beyond, 0), None);
+    assert_eq!(
+        attributes.lookup(beyond, 0),
+        Err(Refusal::GlyphUnreadable { glyph: beyond })
+    );
+}
+
+/// The LZ4 Block Format's worked examples, each transcribed as the block
+/// of a compressed `Glat` 3 and decoded through `graphite::decompress`:
+/// three literal lengths and the offset of 1 that repeats a byte.
+#[test]
+fn the_lz4_block_formats_examples_decode() {
+    // A table of `n` bytes: `Glat` 3's header, then `n - 8` bytes counting
+    // from 1.
+    let table = |n: usize| -> Vec<u8> {
+        let mut out = 0x0003_0000u32.to_be_bytes().to_vec();
+        out.extend(0u32.to_be_bytes());
+        out.extend((1..=n - 8).map(|b| u8::try_from(b % 251).expect("a byte")));
+        out
+    };
+    let mut examples: Vec<(&str, Vec<u8>, Vec<u8>)> = Vec::new();
+    // "A literal length of 48 will be represented as: 15 ... 33".
+    let plain = table(48);
+    let mut block = vec![0xF0, 33];
+    block.extend_from_slice(&plain);
+    examples.push(("48 as 15 and 33", block, plain));
+    // "A literal length of 280 will be represented as: 15, 255, 10".
+    let plain = table(280);
+    let mut block = vec![0xF0, 255, 10];
+    block.extend_from_slice(&plain);
+    examples.push(("280 as 15, 255 and 10", block, plain));
+    // "A literal length of 15 will be represented as: 15, 0 ... yes, the
+    // zero must be output".
+    let plain = table(15);
+    let mut block = vec![0xF0, 0];
+    block.extend_from_slice(&plain);
+    examples.push(("15 as 15 and 0", block, plain));
+    // "A common case is an offset of 1, meaning the last byte is repeated
+    // matchlength times": nine literals ending in 7, eleven more 7s from an
+    // offset of 1, and a last sequence of one literal.
+    let mut plain = 0x0003_0000u32.to_be_bytes().to_vec();
+    plain.extend(0u32.to_be_bytes());
+    plain.push(7);
+    plain.extend([7u8; 11]);
+    plain.push(7);
+    let mut block = vec![0x97];
+    block.extend_from_slice(&plain[..9]);
+    block.extend([0x01, 0x00, 0x10, 7]);
+    examples.push(("an offset of 1", block, plain));
+
+    assert_eq!(examples.len(), 4, "the LZ4 examples the design counts");
+    for (what, block, plain) in examples {
+        let mut stored = plain[0..4].to_vec();
+        let size = u32::try_from(plain.len()).expect("small");
+        stored.extend(((1u32 << 27) | size).to_be_bytes());
+        stored.extend(block);
+        let decoded = graphite::decompress(graphite::GLAT, &stored, &Limits::DEFAULT)
+            .unwrap_or_else(|refusal| panic!("{what}: {refusal:?}"));
+        assert_eq!(&*decoded, &plain[..], "{what}");
+    }
+}
+
+/// The GTF's sub-box bitmap: bit index (y × 4) + x, "bit 3 indicates the
+/// presence of the lower right cell, and bit 12 the upper left cell".
+#[test]
+fn the_gtfs_subbox_bitmap_names_its_cells() {
+    let version = GlatVersion::Three { octaboxes: true };
+    let maps = vec![BTreeMap::from([(0u16, 1i16)])];
+    let octabox = octabox_for(1, (1 << 3) | (1 << 12));
+    let index = Index {
+        long: false,
+        names: false,
+    };
+    let (glat, gloc) = glat_and_gloc(version, &maps, &[Some(octabox)], index, 1);
+    let attributes = Attributes::parse(&gloc, &glat, &Limits::DEFAULT).expect("readable");
+    let read = attributes
+        .octabox(0)
+        .expect("readable")
+        .expect("an octabox");
+    let cells: Vec<(u8, u8, u8)> = read
+        .subboxes
+        .iter()
+        .map(|sub| (sub.cell, sub.column(), sub.row()))
+        .collect();
+    // (bit, column, row): the lower right cell, then the upper left — the
+    // one example the design counts for these two tables.
+    let named = vec![(3u8, 3u8, 0u8), (12, 0, 3)];
+    assert_eq!(cells, named, "bit 3 lower right, bit 12 upper left");
+}
+
+/// The table of `name`, carried by `face`, as bytes.
+fn raw(face: &Sfnt<'_>, name: &[u8; 4]) -> Vec<u8> {
+    face.table(tag(name))
+        .unwrap_or_else(|| panic!("{} is carried", String::from_utf8_lossy(name)))
+        .to_vec()
+}
+
+/// A `USHORT` of `table` at `at`.
+fn be16(table: &[u8], at: usize) -> u16 {
+    u16::from_be_bytes([table[at], table[at + 1]])
+}
+
+/// Every vendored face's glyph attributes read whole: each glyph `Gloc`
+/// counts, and each attribute number `Gloc` declares, answers without a
+/// refusal; the count is `Gloc`'s own, which in Awami Nastaliq passes the
+/// face's `maxp`, its pseudo-glyphs among the glyphs `Gloc` indexes.
+#[test]
+fn the_vendored_faces_attributes_read_whole() {
+    let limits = Limits::DEFAULT;
+    // (bytes, family, glyphs Gloc counts, the Glat version)
+    let faces: [(&[u8], &str, usize, GlatVersion); 3] = [
+        (DAI_BANNA, "Dai Banna SIL", 421, GlatVersion::One),
+        (TAGMUKAY, "Tagmukay", 347, GlatVersion::One),
+        (
+            AWAMI,
+            "Awami Nastaliq",
+            1_727,
+            GlatVersion::Three { octaboxes: true },
+        ),
+    ];
+    for (bytes, family, glyphs, version) in faces {
+        let face = Sfnt::parse(bytes).unwrap_or_else(|| panic!("{family} parses"));
+        let tables = Tables::parse(&face, &limits).unwrap_or_else(|| panic!("{family}'s Silf"));
+        assert_eq!(tables.refusals(), &[], "{family} decodes");
+        let attributes = tables
+            .attributes(&limits)
+            .expect("Gloc and Glat")
+            .unwrap_or_else(|refusal| panic!("{family}: {refusal:?}"));
+        assert_eq!(attributes.version(), version, "{family}");
+        assert_eq!(attributes.glyph_count(), glyphs, "{family}");
+        for glyph in 0..glyphs {
+            let glyph = u16::try_from(glyph).expect("glyph ids are 16 bits");
+            for number in 0..attributes.attribute_count() {
+                if let Err(refusal) = attributes.lookup(glyph, number) {
+                    panic!("{family} glyph {glyph} attribute {number}: {refusal:?}");
+                }
+            }
+        }
+    }
+
+    // Awami Nastaliq's `Gloc` indexes past its `maxp`: the pseudo-glyph its
+    // `Silf` maps U+200E to, 1 673, has a block, whose break weight —
+    // attribute 3, as its `Silf` names it — is the GDL's default of 30.
+    let face = Sfnt::parse(AWAMI).expect("Awami Nastaliq parses");
+    let real = usize::from(be16(&raw(&face, b"maxp"), 4));
+    assert_eq!(real, 1_672);
+    let tables = Tables::parse(&face, &limits).expect("a description");
+    let attributes = tables.attributes(&limits).expect("both").expect("readable");
+    assert!(attributes.glyph_count() > real);
+    assert_eq!(attributes.attribute(1_673, 3), Some(30));
+    assert_eq!(attributes.attribute(1_673, 0), Some(0));
+}
+
+/// An octabox's four diagonals are, in the order stored, the least and
+/// greatest x + y and the least and greatest x − y over the glyph's points,
+/// each `255 × distance / (width + height)` rounded down: held to every
+/// simple glyph of the vendored Awami Nastaliq that has an octabox, its
+/// points read from `glyf` by this test's own lines.
+#[test]
+fn an_octabox_bounds_its_glyphs_outline() {
+    let limits = Limits::DEFAULT;
+    let face = Sfnt::parse(AWAMI).expect("Awami Nastaliq parses");
+    let tables = Tables::parse(&face, &limits).expect("a description");
+    let attributes = tables.attributes(&limits).expect("both").expect("readable");
+    let head = raw(&face, b"head");
+    let loca = raw(&face, b"loca");
+    let glyf = raw(&face, b"glyf");
+    let glyphs = usize::from(be16(&raw(&face, b"maxp"), 4));
+    let long_loca = be16(&head, 50) == 1;
+    let location = |glyph: usize| -> usize {
+        if long_loca {
+            let at = glyph * 4;
+            usize::try_from(u32::from_be_bytes([
+                loca[at],
+                loca[at + 1],
+                loca[at + 2],
+                loca[at + 3],
+            ]))
+            .expect("an offset")
+        } else {
+            usize::from(be16(&loca, glyph * 2)) * 2
+        }
+    };
+    let mut checked = 0usize;
+    for glyph in 0..glyphs {
+        let (start, end) = (location(glyph), location(glyph + 1));
+        if end <= start {
+            continue;
+        }
+        let data = &glyf[start..end];
+        let Some(points) = simple_glyph_points(data) else {
+            continue;
+        };
+        let edge = |at: usize| i64::from(i16::from_be_bytes([data[at], data[at + 1]]));
+        let (x_min, y_min, x_max, y_max) = (edge(2), edge(4), edge(6), edge(8));
+        let span = (x_max - x_min) + (y_max - y_min);
+        let glyph_id = u16::try_from(glyph).expect("16 bits");
+        let Some(octabox) = attributes.octabox(glyph_id).expect("readable") else {
+            continue;
+        };
+        if span <= 0 || points.is_empty() {
+            continue;
+        }
+        let sums: Vec<i64> = points.iter().map(|(x, y)| x + y).collect();
+        let differences: Vec<i64> = points.iter().map(|(x, y)| x - y).collect();
+        let scaled = |value: i64, from: i64| (value - from) * 255 / span;
+        let least = |values: &[i64]| values.iter().copied().min().expect("points");
+        let greatest = |values: &[i64]| values.iter().copied().max().expect("points");
+        let expected = [
+            scaled(least(&sums), x_min + y_min),
+            scaled(greatest(&sums), x_min + y_min),
+            scaled(least(&differences), x_min - y_max),
+            scaled(greatest(&differences), x_min - y_max),
+        ];
+        let stored = [
+            i64::from(octabox.sum_min()),
+            i64::from(octabox.sum_max()),
+            i64::from(octabox.difference_min()),
+            i64::from(octabox.difference_max()),
+        ];
+        assert_eq!(stored, expected, "glyph {glyph}");
+        checked += 1;
+    }
+    assert_eq!(checked, 1_194, "every simple glyph with an octabox");
+}
+
+/// A simple `glyf` glyph's points, on and off the curve, in font units;
+/// `None` for a composite.
+fn simple_glyph_points(data: &[u8]) -> Option<Vec<(i64, i64)>> {
+    let contours = usize::try_from(i16::from_be_bytes([data[0], data[1]])).ok()?;
+    if contours == 0 {
+        return Some(Vec::new());
+    }
+    let ends_at = 10;
+    let count = usize::from(be16(data, ends_at + (contours - 1) * 2)) + 1;
+    let instructions = usize::from(be16(data, ends_at + contours * 2));
+    let mut at = ends_at + contours * 2 + 2 + instructions;
+    let mut flags = Vec::with_capacity(count);
+    while flags.len() < count {
+        let flag = data[at];
+        at += 1;
+        flags.push(flag);
+        if flag & 8 != 0 {
+            let repeats = data[at];
+            at += 1;
+            for _ in 0..repeats {
+                flags.push(flag);
+            }
+        }
+    }
+    flags.truncate(count);
+    let mut axis = |short: u8, same: u8| -> Vec<i64> {
+        let mut out = Vec::with_capacity(count);
+        let mut value = 0i64;
+        for flag in &flags {
+            if flag & short != 0 {
+                let delta = i64::from(data[at]);
+                at += 1;
+                value += if flag & same != 0 { delta } else { -delta };
+            } else if flag & same == 0 {
+                value += i64::from(i16::from_be_bytes([data[at], data[at + 1]]));
+                at += 2;
+            }
+            out.push(value);
+        }
+        out
+    };
+    let xs = axis(2, 16);
+    let ys = axis(4, 32);
+    Some(xs.into_iter().zip(ys).collect())
 }

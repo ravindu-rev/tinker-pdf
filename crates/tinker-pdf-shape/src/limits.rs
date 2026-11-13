@@ -117,6 +117,32 @@ pub struct Limits {
     /// the moment it builds, and a `Plans` holds no more than the largest
     /// ceiling any shaper over it carried.
     pub max_index_bytes: usize,
+
+    /// How large a compressed Graphite table may say it decodes to.
+    ///
+    /// **Sixteen mebibytes.** A compressed `Silf` or `Glat` states its
+    /// decoded size in twenty-seven bits, which is 128 MiB, and the size is
+    /// the face's word: a hostile one names the most it can and decodes a
+    /// few bytes into it. The largest shipped description this crate has
+    /// read decodes to under three, so the ceiling is generous five times
+    /// over, and it is checked before a byte is decoded — a table that
+    /// states more is refused by name (`graphite::Refusal::TableTooLarge`)
+    /// and its face read as though it did not carry it.
+    ///
+    /// A ceiling on a face, like [`Limits::max_index_bytes`], so
+    /// [`Limits::for_glyphs`] leaves it alone.
+    pub max_table_bytes: usize,
+
+    /// How many attribute runs one glyph's `Glat` block may be read through.
+    ///
+    /// **Two hundred and fifty-six.** A glyph's attributes are stored as runs
+    /// of consecutive numbers, and asking for one walks the runs in order, so
+    /// a face whose every block is the whole of a large `Glat` would make
+    /// every question cost the table. Shipped faces store a handful of runs a
+    /// glyph; past the ceiling the block is refused by name
+    /// (`graphite::Refusal::TooManyAttributeRuns`) and answers nothing. A
+    /// face's ceiling, which [`Limits::for_glyphs`] leaves alone.
+    pub max_attribute_runs: u32,
 }
 
 impl Limits {
@@ -134,6 +160,8 @@ impl Limits {
         max_operations: 500_000,
         max_glyphs: 65_536,
         max_index_bytes: 8 << 20,
+        max_table_bytes: 16 << 20,
+        max_attribute_runs: 256,
     };
 
     /// The default ceilings, with the two work numbers scaled to a run of
@@ -212,5 +240,22 @@ mod tests {
                 Limits::DEFAULT.max_index_bytes
             );
         }
+    }
+
+    /// The Graphite tables' ceilings are a face's too: no run length moves
+    /// the size a table may decode to or the runs a glyph's block is read
+    /// through.
+    #[test]
+    fn scaling_leaves_the_graphite_table_ceilings_alone() {
+        for count in [0usize, 1, 1_000, 1 << 20, usize::MAX] {
+            let limits = Limits::for_glyphs(count);
+            assert_eq!(limits.max_table_bytes, Limits::DEFAULT.max_table_bytes);
+            assert_eq!(
+                limits.max_attribute_runs,
+                Limits::DEFAULT.max_attribute_runs
+            );
+        }
+        assert_eq!(Limits::DEFAULT.max_table_bytes, 16 << 20);
+        assert_eq!(Limits::DEFAULT.max_attribute_runs, 256);
     }
 }

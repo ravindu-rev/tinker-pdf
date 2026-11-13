@@ -353,6 +353,8 @@ fuzz_target!(|data: &[u8]| {
             _ => 65_536,
         },
         max_index_bytes: Limits::DEFAULT.max_index_bytes,
+        max_table_bytes: Limits::DEFAULT.max_table_bytes,
+        max_attribute_runs: Limits::DEFAULT.max_attribute_runs,
     };
     // The same ceilings with an index ceiling too small to keep anything, so
     // every stage falls back to resolving per run.

@@ -6,7 +6,8 @@
 //! machinery that executes a lookup list against a [`Buffer`]. Its second to
 //! fifth are built on it: the default, Arabic and USE shapers ([`Shaper`]),
 //! which map text to glyphs and decide which features run, and UAX #9
-//! ([`bidi`]).
+//! ([`bidi`]). [`graphite`] reads a Graphite description's tables, which no
+//! run is shaped through yet (`docs/design/shaping.md`, *Graphite shaping*).
 //!
 //! **The eleventh leaf.** Ruling 8's August 2026 amendment makes the test of
 //! a leaf the definition rather than the list: *a leaf is any crate that takes
@@ -85,6 +86,7 @@ pub mod buffer;
 pub mod common;
 pub mod gdef;
 mod gpos;
+pub mod graphite;
 mod gsub;
 pub mod limits;
 pub mod read;
