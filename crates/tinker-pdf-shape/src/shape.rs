@@ -1545,10 +1545,7 @@ impl<'a> Shaper<'a> {
         if orientation != Orientation::Upright && arabic::joins(text) {
             return Plan::Joining;
         }
-        if text
-            .chars()
-            .any(|c| universal::category(c) != universal::Category::Other)
-        {
+        if text.chars().any(universal::is_brahmic) {
             return Plan::Universal;
         }
         Plan::Default
@@ -1688,12 +1685,12 @@ impl<'a> Shaper<'a> {
     ///
     /// `U+1B40 BALINESE VOWEL SIGN TALING TEDUNG` is
     /// `Indic_Positional_Category` `Left_And_Right`: it is drawn on **both**
-    /// sides of its consonant. As one character it is neither `Left` nor
-    /// `Right`, so `crate::universal::category` can only call it a mark that
-    /// stays where it is, and its left half stays where it was typed. Its
-    /// canonical decomposition — `U+1B3E` (`Left`) and `U+1B35` (`Right`) — is
-    /// two characters with two positions, and the reordering pause can then
-    /// move the first and leave the second.
+    /// sides of its consonant. As one character it has one position and one
+    /// class, and `crate::universal::category` can only call the whole of it
+    /// a pre-base vowel, its right half included. Its canonical decomposition
+    /// — `U+1B3E` (`Left`) and `U+1B35` (`Right`) — is two characters with two
+    /// positions, and the reordering pause can then move the first and leave
+    /// the second: USE's *Split vowel handling*.
     ///
     /// Every part keeps the **whole** character's cluster, so a decomposition
     /// invents no offsets the caller's text does not have and `/ToUnicode`
@@ -1701,11 +1698,11 @@ impl<'a> Shaper<'a> {
     ///
     /// # Three limits, each deliberate
     ///
-    /// - It is applied only where the cluster model has an opinion — a
-    ///   character `crate::universal::category` calls anything but `Other`.
-    ///   Latin's precomposed accents are left alone: nothing here needs their
-    ///   halves, and decomposing them would change every Latin run's glyphs
-    ///   for no fixture's benefit.
+    /// - It is applied only in a run the cluster model shapes — one holding a
+    ///   character Unicode gives an `Indic_Syllabic_Category`
+    ///   (`crate::universal::is_brahmic`). A Latin run's precomposed accents
+    ///   are left alone: nothing here needs their halves, and decomposing them
+    ///   would change every Latin run's glyphs for no fixture's benefit.
     /// - It is applied only when the face has a glyph for **every** part.
     ///   Decomposing into a `.notdef` would replace a drawable character with
     ///   an undrawable one, which is worse than not decomposing.
@@ -1955,12 +1952,14 @@ fn repha_positions(syllables: &[u16], categories: &[universal::Category]) -> Vec
             end = end.saturating_add(1);
         }
         let after = at.saturating_add(2);
+        let role = |at: usize| categories.get(at).map(|category| category.role());
         if syllable != 0
-            && categories.get(at) == Some(&universal::Category::Base)
-            && categories.get(at.saturating_add(1)) == Some(&universal::Category::Halant)
-            && categories
-                .get(after..end)
-                .is_some_and(|rest| rest.contains(&universal::Category::Base))
+            && role(at) == Some(universal::Role::Base)
+            && role(at.saturating_add(1)) == Some(universal::Role::Halant)
+            && categories.get(after..end).is_some_and(|rest| {
+                rest.iter()
+                    .any(|category| category.role() == universal::Role::Base)
+            })
         {
             for flag in out.get_mut(at..after).unwrap_or_default() {
                 *flag = true;

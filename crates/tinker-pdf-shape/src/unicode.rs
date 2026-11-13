@@ -338,6 +338,28 @@ pub enum MarkCategory {
     Mn,
 }
 
+/// The five `General_Category` values the Universal Shaping Engine's
+/// character classification reads besides the marks ([`MarkCategory`]).
+///
+/// Every other value is the absence of a row, as with [`MarkCategory`]:
+/// [`general_class`] answers `None` for a character that is none of the five.
+/// The names are the UCD's abbreviations, as [`BidiClass`]'s are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum GeneralClass {
+    /// `Other_Letter`: a letter with no case. What tells a dependent sign
+    /// that is a letter in its own right — Thai's spacing vowels — from one
+    /// that is a mark.
+    Lo,
+    /// `Other_Punctuation`, which the classification makes a standalone base.
+    Po,
+    /// `Currency_Symbol`, a symbol to the classification.
+    Sc,
+    /// `Other_Symbol`, likewise.
+    So,
+    /// `Space_Separator`, an other.
+    Zs,
+}
+
 /// UAX #24's `Script`, at Unicode 17.0's 175 values.
 ///
 /// `Katakana_Or_Hiragana` is deliberately absent: it is a union value that
@@ -981,6 +1003,14 @@ pub fn mark_category(c: char) -> Option<MarkCategory> {
     find(MARKS, c as u32)
 }
 
+/// A character's `General_Category` where it is one of the five
+/// [`GeneralClass`] names, from field 2 of the vendored `UnicodeData.txt`;
+/// `None` for every other character.
+#[must_use]
+pub fn general_class(c: char) -> Option<GeneralClass> {
+    find(GENERAL_CLASSES, c as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{bidi_class, bracket, mirrored, script, BidiClass, BracketKind, Script};
@@ -1137,6 +1167,32 @@ mod tests {
         assert_eq!(mark_category('\u{20E3}'), Some(MarkCategory::Me));
         for c in ['a', '\u{200D}', '\u{200C}', '\u{6F22}', '\u{309B}', ' '] {
             assert_eq!(mark_category(c), None, "{c:?}");
+        }
+    }
+
+    /// The five `General_Category` values the USE classification reads, a
+    /// range row's interior among them, and nothing else.
+    #[test]
+    fn the_general_classes_are_the_five_the_classification_reads() {
+        use super::{general_class, GeneralClass};
+        for (c, expected) in [
+            ('\u{0E01}', GeneralClass::Lo), // THAI CHARACTER KO KAI
+            ('\u{0E32}', GeneralClass::Lo), // THAI CHARACTER SARA AA
+            ('\u{4E2D}', GeneralClass::Lo), // inside the CJK range row
+            ('\u{AC01}', GeneralClass::Lo), // inside the Hangul range row
+            ('!', GeneralClass::Po),
+            ('\u{1AAD}', GeneralClass::Po), // TAI THAM SIGN CAANG
+            ('\u{00A9}', GeneralClass::So),
+            ('\u{1B66}', GeneralClass::So), // BALINESE MUSICAL SYMBOL DING
+            ('$', GeneralClass::Sc),
+            ('\u{09F2}', GeneralClass::Sc), // BENGALI RUPEE MARK
+            (' ', GeneralClass::Zs),
+            ('\u{00A0}', GeneralClass::Zs),
+        ] {
+            assert_eq!(general_class(c), Some(expected), "{c:?}");
+        }
+        for c in ['a', 'A', '1', '\u{0301}', '\u{0903}', '(', '\u{0378}'] {
+            assert_eq!(general_class(c), None, "{c:?}");
         }
     }
 

@@ -1208,8 +1208,11 @@ What it does:
   Unicode Standard's own rule, and a feature mask per glyph so `init` reaches
   the first letter of a word and no other. Seven `GSUB` stages instead of one,
   because a face's `medi` lookup is written expecting `init` not to have run.
-- **The Universal Shaping Engine, in part.** `Indic_Syllabic_Category` and
-  `Indic_Positional_Category`, a syllable per Brahmic cluster, every `GSUB`
+- **The Universal Shaping Engine, in part.** USE's own character classes and
+  subclasses, from `Indic_Syllabic_Category`, `Indic_Positional_Category`,
+  `General_Category`, `Joining_Type` and `Script` with the specification's
+  override tables ([design/shaping.md](../design/shaping.md), *Character
+  categories*), a syllable per Brahmic cluster, every `GSUB`
   feature applied inside one syllable and never across two, USE's feature
   stages, the canonical decomposition of a Brahmic character that has one, and
   one reordering pause that moves a pre-base glyph to the front of its

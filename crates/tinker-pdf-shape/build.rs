@@ -32,8 +32,10 @@
 //!   splits a paragraph on.
 //! - `UnicodeData.txt` is `Canonical_Decomposition_Mapping` (field 5) and
 //!   `General_Category` (field 2), of which `Ps` and `Pi` are kept — which
-//!   marks open something — and `Mn`, `Mc` and `Me`: which characters are
-//!   marks, so a grapheme cluster's orientation can be read.
+//!   marks open something — `Mn`, `Mc` and `Me`: which characters are
+//!   marks, so a grapheme cluster's orientation can be read — and `Lo`, `Po`,
+//!   `So`, `Sc` and `Zs`, the five the Universal Shaping Engine's character
+//!   classification reads besides the marks.
 //! - `PropertyValueAliases.txt` supplies each script's ISO 15924 code, which
 //!   is where an OpenType script tag comes from. See
 //!   [`crate::unicode::Script::opentype_tag`] for what that derivation does
@@ -101,6 +103,7 @@ fn main() {
     decomposition(&data, &mut out);
     opening_punctuation(&data, &mut out);
     marks(&data, &mut out);
+    general_classes(&data, &mut out);
     vertical_orientation(&data, &mut out);
 
     let target = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets this")).join("ucd.rs");
@@ -448,10 +451,11 @@ fn joining(data: &Path, out: &mut String) {
 /// Southeast Asian blocks has neither and the tables stop there.
 ///
 /// The USE categories themselves are **not** generated here. They are derived
-/// from these two in `crate::use_shaper`, because a category is this crate's
-/// reading of the two properties rather than a property Unicode publishes —
-/// the same split `unicode.rs` draws everywhere else between somebody else's
-/// facts and this repository's algorithm.
+/// from these two, `General_Category`, `Joining_Type` and `Script` in
+/// `crate::universal`, with the specification's overrides, because a category
+/// is the Universal Shaping Engine's reading of the properties rather than a
+/// property Unicode publishes — the same split `unicode.rs` draws everywhere
+/// else between somebody else's facts and the algorithm that reads them.
 fn indic(data: &Path, out: &mut String) {
     for (file, name, kind) in [
         (
@@ -669,6 +673,62 @@ fn marks(data: &Path, out: &mut String) {
         "UnicodeData.txt yielded no enclosing mark"
     );
     emit(out, "MARKS", "MarkCategory", &ranges(&map));
+}
+
+/// The five `General_Category` values the Universal Shaping Engine's
+/// *Character classification* reads — `Lo`, `Po`, `So`, `Sc` and `Zs` — from
+/// field 2 of `UnicodeData.txt`, as merged ranges.
+///
+/// Only those five, because they are the only ones the classification table
+/// names besides the marks, which [`marks`] already compiles: `Lo` splits a
+/// dependent sign that is a letter of its own from one that is a mark, `Po`
+/// makes a standalone base, `So` and `Sc` a symbol and `Zs` an other. A range
+/// row of the file (`<CJK Ideograph, First>` and its `Last>`) is a run of `Lo`
+/// and is expanded, which is why this reads the rows in pairs rather than
+/// refusing them as [`marks`] does.
+fn general_classes(data: &Path, out: &mut String) {
+    let text = read(&data.join("UnicodeData.txt"));
+    let mut map: BTreeMap<u32, String> = BTreeMap::new();
+    let mut opened: Option<(u32, String)> = None;
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        let fields: Vec<&str> = line.split(';').collect();
+        let (Some(code), Some(name), Some(category)) =
+            (fields.first(), fields.get(1), fields.get(2))
+        else {
+            continue;
+        };
+        let code = hex(code);
+        if name.ends_with(", First>") {
+            opened = Some((code, (*category).to_string()));
+            continue;
+        }
+        let first = if name.ends_with(", Last>") {
+            let (first, opening) = opened.take().unwrap_or_else(|| {
+                panic!("UnicodeData.txt closes a range it never opened at {code:#x}")
+            });
+            assert_eq!(
+                &opening, category,
+                "UnicodeData.txt's range ending at {code:#x} changes category"
+            );
+            first
+        } else {
+            code
+        };
+        if !matches!(*category, "Lo" | "Po" | "So" | "Sc" | "Zs") {
+            continue;
+        }
+        for code in first..=code {
+            map.insert(code, (*category).to_string());
+        }
+    }
+    for wanted in ["Lo", "Po", "So", "Sc", "Zs"] {
+        assert!(
+            map.values().any(|category| category == wanted),
+            "UnicodeData.txt yielded no {wanted}"
+        );
+    }
+    emit(out, "GENERAL_CLASSES", "GeneralClass", &ranges(&map));
 }
 
 /// UAX #50's `Vertical_Orientation`, with the file's `@missing` default

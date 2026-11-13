@@ -796,10 +796,10 @@ const MAX_DELTA: i32 = 1;
 ///   need it, which is why it is a gap rather than a cause.
 /// - **Dotted circles.** USE inserts one into a cluster its grammar calls
 ///   broken; this crate never inserts a glyph the text did not ask for.
-/// - The `Category` collapse — five values where USE has around twenty — and
-///   the syllable rule, both stated as simplifications in `crate::universal`.
-///   `docs/design/shaping.md` calls opening that grammar properly effectively
-///   unbounded, and the `set` column above is where its cost is visible.
+/// - The syllable rule, stated as a simplification in `crate::universal`. Its
+///   categories are USE's own classes; the grammar that reads them is
+///   `docs/design/shaping.md`'s *The cluster grammar*, and the `set` column
+///   above is where the simplification's cost is visible.
 const PASSING: &[(&str, usize)] = &[
     ("CMAP-1", 4),
     ("CMAP-2", 2),
