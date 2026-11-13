@@ -1187,7 +1187,14 @@ draws, a blend mode other than Normal or a constant alpha below one, less
 `pdfa/colour.rs`'s tolerance, at a paint of that kind — with nothing hidden,
 masked or never painted under counted. The two readings part at a `/BM` this
 engine does not recognise, which draws as Normal (11.3.5) and which PDF/A-1
-refuses as written. `page_analysis.rs` holds each answer to a fixture whose
+refuses as written. **`overprint`** (`Overprint`) says which paints are made
+with overprint on, from the keys K-01 stores in every state: `fills`, a fill,
+a filled glyph, an image or an `sh` made with `/op` in force — `/OP`'s value
+where a state writes no `/op` (Table 58) — and `strokes`, a stroke or a
+stroked glyph made with `/OP`; `nonzero_mode`, whether one of those was made
+under `/OPM 1` (8.6.7.4); and `used()`, either of the first two. It reads the
+state at the paints, under the same rules, and simulates nothing.
+`page_analysis.rs` holds each answer to a fixture whose
 answer is known, `analysis.rs` holds the box to its own walk of the recorded
 events, and `determinism.rs` pins every fingerprinted page's box.
 

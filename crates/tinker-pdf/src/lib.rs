@@ -223,7 +223,7 @@ pub use word_boxes::WordBoxOptions;
 const CONTAINER_SNIFF: u64 = 1024;
 /// What a page draws, read from its drawing rather than its pixels:
 /// [`Page::analysis`] and [`DisplayList::analysis`].
-pub use analysis::{Marks, PageAnalysis};
+pub use analysis::{Marks, Overprint, PageAnalysis};
 /// The per-family annotation payloads (12.5.6) behind [`Annotation::payload`],
 /// the types they are built from, and [`Page::annotation_list`]'s answer —
 /// every one of them a field type or a return type of the read surface, so a

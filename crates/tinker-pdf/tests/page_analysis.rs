@@ -9,7 +9,7 @@
 
 mod render_support;
 
-use tinker_pdf::{Document, PageAnalysis, PixelRegion, RenderOptions};
+use tinker_pdf::{Document, Overprint, PageAnalysis, PixelRegion, RenderOptions};
 
 // ---- building pages -------------------------------------------------------------
 
@@ -494,4 +494,191 @@ fn transparency_in_each_of_its_five_ways() {
         ..Page::default()
     };
     assert!(!uses(&hidden), "transparency in hidden content");
+}
+
+// ---- overprint ---------------------------------------------------------------------
+
+/// The overprint a page's paints are made with.
+fn overprint(page: &Page<'_>) -> Overprint {
+    page.analysis(&RenderOptions::default()).overprint
+}
+
+/// What `fills`, `strokes` and `nonzero_mode` should read, as one triple.
+fn read(page: &Page<'_>) -> (bool, bool, bool) {
+    let o = overprint(page);
+    (o.fills, o.strokes, o.nonzero_mode)
+}
+
+/// The graphics states the overprint fixtures set by `gs`: `/OP` alone (which
+/// `/op` then takes, Table 58), `/OP` for strokes only, `/op` alone, `/op`
+/// under each mode, and nothing.
+const STATES: &str = "/ExtGState << \
+    /Both << /OP true >> \
+    /StrokeOnly << /OP true /op false >> \
+    /FillOnly << /op true >> \
+    /Mode1 << /op true /OPM 1 >> \
+    /Mode0 << /op true /OPM 0 >> \
+    /ModeAlone << /OPM 1 >> \
+    /Off << /OP false /op false >> >>";
+
+/// **A paint is made with overprint when the key for its kind is in force at
+/// it** (8.6.7): `/op` for a fill, a filled glyph, an image and `sh`, `/OP`
+/// for a stroke and a stroked glyph; a state set and never painted under says
+/// nothing, nor does hidden content or a mask's group; a form's paints are the
+/// page's; and the mode is the one the overprinting paint was made under.
+#[test]
+fn overprint_is_reported_where_a_paint_uses_it() {
+    let page = |content: &'static str| Page {
+        resources: STATES,
+        content,
+        ..Page::default()
+    };
+
+    // `/OP` on a stroke, and the fill beside it that `/op false` keeps off.
+    assert_eq!(
+        read(&page(
+            "/StrokeOnly gs 4 w 10 10 m 100 10 l S 10 20 30 30 re f"
+        )),
+        (false, true, false),
+        "/OP on a stroke"
+    );
+    // `/op` on a fill, and the stroke beside it that has no `/OP`.
+    assert_eq!(
+        read(&page(
+            "/FillOnly gs 10 20 30 30 re f 4 w 10 10 m 100 10 l S"
+        )),
+        (true, false, false),
+        "/op on a fill"
+    );
+    // `/OP` alone sets both, since `/op` takes its value.
+    assert_eq!(
+        read(&page("/Both gs 10 20 30 30 re f 4 w 10 10 m 100 10 l S")),
+        (true, true, false),
+        "/OP alone"
+    );
+    // Set by `gs` and never painted under: before the `gs`, or nothing after.
+    assert_eq!(
+        read(&page("10 20 30 30 re f 4 w 10 10 m 100 10 l S /Both gs")),
+        (false, false, false),
+        "set and never painted under"
+    );
+    assert!(!overprint(&page("/Both gs")).used(), "a gs alone");
+    // `Q` puts the state back.
+    assert_eq!(
+        read(&page("q /Both gs Q 10 20 30 30 re f")),
+        (false, false, false),
+        "restored by Q"
+    );
+    // Turned off again.
+    assert_eq!(
+        read(&page("/Both gs /Off gs 10 20 30 30 re f")),
+        (false, false, false),
+        "turned off"
+    );
+
+    // The mode, as the overprinting paint settled it: 1, 0, and a mode set
+    // with no overprint on.
+    assert_eq!(
+        read(&page("/Mode1 gs 10 20 30 30 re f")),
+        (true, false, true),
+        "/OPM 1"
+    );
+    assert_eq!(
+        read(&page("/Mode0 gs 10 20 30 30 re f")),
+        (true, false, false),
+        "/OPM 0"
+    );
+    assert_eq!(
+        read(&page("/ModeAlone gs 10 20 30 30 re f")),
+        (false, false, false),
+        "/OPM 1 with nothing overprinting"
+    );
+
+    // An image and `sh` are non-stroking paints.
+    let image_page = Page {
+        resources: &format!("{STATES} /XObject << /Im 5 0 R >>"),
+        content: "/FillOnly gs q 20 0 0 20 10 10 cm /Im Do Q",
+        extra: vec![image("")],
+        ..Page::default()
+    };
+    assert_eq!(read(&image_page), (true, false, false), "an image");
+    let shading_page = Page {
+        resources: &format!("{STATES} /Shading << /Sh {AXIAL} >>"),
+        content: "/FillOnly gs q 0 0 50 50 re W n /Sh sh Q",
+        ..Page::default()
+    };
+    assert_eq!(read(&shading_page), (true, false, false), "sh");
+
+    // A glyph overprints by its mode: filled under `/op`, stroked under
+    // `/OP`.
+    for (mode, state, want) in [
+        (0, "/FillOnly", (true, false, false)),
+        (1, "/StrokeOnly", (false, true, false)),
+        (1, "/FillOnly", (false, false, false)),
+        (2, "/Both", (true, true, false)),
+    ] {
+        let content = format!("{state} gs BT {mode} Tr /F1 50 Tf 20 20 Td (!) Tj ET");
+        let glyph = Page {
+            resources: &format!("{STATES} /Font << /F1 5 0 R >>"),
+            content: &content,
+            extra: face(5),
+            ..Page::default()
+        };
+        assert_eq!(read(&glyph), want, "a glyph in mode {mode} under {state}");
+    }
+
+    // Set inside a form: the form's paint is the page's.
+    let form = stream(
+        &format!("/Type /XObject /Subtype /Form /BBox [0 0 100 100] /Resources << {STATES} >>"),
+        b"/FillOnly gs 10 10 20 20 re f",
+    );
+    let in_form = Page {
+        resources: "/XObject << /Fm 5 0 R >>",
+        content: "/Fm Do",
+        extra: vec![form],
+        ..Page::default()
+    };
+    assert_eq!(read(&in_form), (true, false, false), "set inside a form");
+
+    // Set inside hidden content, and painted there: nothing is painted.
+    let hidden = Page {
+        catalog: LAYERS_CATALOG,
+        resources: &format!("{LAYERS_RESOURCES} {STATES}"),
+        content: "/OC /Off BDC /Both gs 10 10 20 20 re f 2 w 0 0 m 50 50 l S EMC",
+        extra: layers(),
+        ..Page::default()
+    };
+    assert!(!overprint(&hidden).used(), "inside hidden content");
+    // Set inside hidden content and painted after it: the state outlives the
+    // scope (8.11.3.2 hides paints, not operators), so the paint after it
+    // overprints.
+    let after = Page {
+        catalog: LAYERS_CATALOG,
+        resources: &format!("{LAYERS_RESOURCES} {STATES}"),
+        content: "/OC /Off BDC /FillOnly gs EMC 10 10 20 20 re f",
+        extra: layers(),
+        ..Page::default()
+    };
+    assert_eq!(
+        read(&after),
+        (true, false, false),
+        "painted after hidden content"
+    );
+
+    // A soft mask's group is a picture of a mask, and its paints are none of
+    // the page's.
+    let mask_group = stream(
+        &format!(
+            "/Type /XObject /Subtype /Form /BBox [0 0 200 100] \
+             /Group << /S /Transparency /CS /DeviceGray >> /Resources << {STATES} >>"
+        ),
+        b"/Both gs 1 g 0 0 100 100 re f",
+    );
+    let masked = Page {
+        resources: "/ExtGState << /M << /SMask << /S /Luminosity /G 5 0 R >> >> >>",
+        content: "/M gs 0 0 200 100 re f",
+        extra: vec![mask_group],
+        ..Page::default()
+    };
+    assert!(!overprint(&masked).used(), "inside a mask's group");
 }

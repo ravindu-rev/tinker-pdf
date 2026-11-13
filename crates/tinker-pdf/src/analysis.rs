@@ -27,9 +27,10 @@
 //!
 //! # What it reads
 //!
-//! The union of every mark's box, met with those rectangles and the crop box,
-//! and whether the page uses transparency in `pdfa/colour.rs`'s five ways,
-//! read at the paints. The design doc says what a mark is and why each box is
+//! The union of every mark's box, met with those rectangles and the crop box;
+//! whether the page uses transparency in `pdfa/colour.rs`'s five ways; and
+//! which paints are made with overprint on, from the keys K-01 stores in the
+//! state — each read at the paints. The design doc says what a mark is and why each box is
 //! taken as it is; the comments here cite where each rule comes from.
 
 use std::sync::Arc;
@@ -73,6 +74,36 @@ pub struct PageAnalysis {
     /// XObject the page draws, a blend mode other than Normal at a paint, or
     /// a constant alpha below one at a paint.
     pub transparency: bool,
+    /// Which paints are made with overprint on, read from the overprint keys
+    /// in force at each (8.6.7).
+    pub overprint: Overprint,
+}
+
+/// Which of a page's paints are made with overprint on (8.6.7), and under
+/// which mode: what the graphics state says at each paint, never what a
+/// device would do with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Overprint {
+    /// A non-stroking paint — a fill, a filled glyph, an image or `sh` — was
+    /// made with `/op` in force, which is `/OP`'s value where a state writes
+    /// no `/op` (Table 58).
+    pub fills: bool,
+    /// A stroke or a stroked glyph was made with `/OP` in force.
+    pub strokes: bool,
+    /// One of those paints was made under the non-zero overprint mode,
+    /// `/OPM 1` (8.6.7.4), under which a DeviceCMYK component of zero leaves
+    /// the ink beneath it: the mode as the paints settled it, not as a
+    /// dictionary wrote it.
+    pub nonzero_mode: bool,
+}
+
+impl Overprint {
+    /// Whether any paint was made with overprint on.
+    #[must_use]
+    pub fn used(self) -> bool {
+        self.fills || self.strokes
+    }
 }
 
 /// The box a page's marks fill, in points and in pixels.
@@ -91,8 +122,8 @@ pub struct Marks {
 
 impl Page {
     /// What this page draws, read from its drawing without rendering it
-    /// (`docs/design/page-analysis.md`): the bounding box of its marks and
-    /// whether it uses transparency.
+    /// (`docs/design/page-analysis.md`): the bounding box of its marks,
+    /// whether it uses transparency and which of its paints overprint.
     ///
     /// The analysis of the page's display list ([`DisplayList::analysis`]),
     /// which this records and drops: a caller who also renders the page asks
@@ -667,6 +698,7 @@ pub(crate) struct Analyser<'r> {
     scratch: FillScratch,
     marks: Option<Rect>,
     transparency: bool,
+    overprint: Overprint,
 }
 
 impl<'r> Analyser<'r> {
@@ -693,6 +725,7 @@ impl<'r> Analyser<'r> {
             scratch: FillScratch::new(),
             marks: None,
             transparency: false,
+            overprint: Overprint::default(),
         }
     }
 
@@ -726,8 +759,27 @@ impl<'r> Analyser<'r> {
 
     /// What one paint says about the page: its alpha, its blend mode and the
     /// mask over it, read against `pdfa/colour.rs`'s reading of ISO 19005-1
-    /// 6.4.
+    /// 6.4; and the overprint key for its kind, with the mode, from the
+    /// parameters K-01 stores in its state.
     fn read_paint(&mut self, ink: Ink, state: &GraphicsState) {
+        // 8.6.7: `/OP` for stroking, `/op` for every other painting operation,
+        // `/op` taking `/OP`'s value where a dictionary writes none (Table 58),
+        // which is how the stored parameters already hold it.
+        let stored = state.stored_parameters();
+        let overprints = match ink {
+            Ink::Fill => stored.fill_overprint,
+            Ink::Stroke => stored.stroke_overprint,
+        };
+        if overprints {
+            match ink {
+                Ink::Fill => self.overprint.fills = true,
+                Ink::Stroke => self.overprint.strokes = true,
+            }
+            // 8.6.7.4 defines 0 and 1; a mode written otherwise is not 0.
+            if stored.overprint_mode != 0 {
+                self.overprint.nonzero_mode = true;
+            }
+        }
         let alpha = match ink {
             Ink::Fill => state.fill_alpha,
             Ink::Stroke => state.stroke_alpha,
@@ -784,6 +836,7 @@ impl<'r> Analyser<'r> {
                 pixels: pixel_box(page, options, rect),
             }),
             transparency: self.transparency,
+            overprint: self.overprint,
         }
     }
 }
