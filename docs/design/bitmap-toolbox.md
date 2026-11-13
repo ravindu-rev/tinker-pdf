@@ -244,10 +244,19 @@ source has none, and dropped, the straight colour kept, where the target has
 none. A premultiplied source is straightened first; the result is
 premultiplied when `premultiplied` asks and the target has alpha. `Bgr8` and
 `Bgra8` are `Rgb8` and `Rgba8` with the colour bytes in the other order. A
-format converted to itself, premultiplied as it already is, is the same bytes:
-same-format copies never go through a `Color`, which is
-`Canvas::source_from`'s rule, because an ink buffer's split does not survive
-the trip.
+format converted to itself, premultiplied as it already is, is the same bytes,
+its stride and padding included: same-format copies never go through a
+`Color`, which is `Canvas::source_from`'s rule, because an ink buffer's split
+does not survive the trip — so a same-format conversion that changes only the
+premultiplied state straightens or premultiplies each colour byte where it
+stands, and an ink bitmap's rich blacks stay rich. Every other result is
+packed, in the format and premultiplied state asked for, carrying the
+source's warnings and no `stats`. Plates are no picture: a plates bitmap
+converts to nothing, nothing converts into plates, and a result whose bytes
+cannot be allocated is `None`. The arithmetic is `toolbox::convert`, and it is
+the facade's one copy of the relation: `Bitmap::to_png`'s straightened copy of
+a premultiplied bitmap, its red-first copy of a blue-first one and its RGBA
+copy of an ink or Lab one are each this conversion.
 
 ### Forced colours, and how they reach the renderer (RC-09.5)
 

@@ -4,11 +4,11 @@
 //! is read through `golden_support`'s PPM reader — the goldens are never
 //! rewritten here (H-133) — and laid out in each of the eight pixel formats,
 //! and, where the format has an alpha, with an alpha plane this file lays on,
-//! straight and premultiplied. Each map, each reduction, the scale and the
-//! subsample run over every one of those, and every byte and every answer is
-//! held to the closed form the design states, computed here from the formula
-//! and the canvas's own colour relations (`tinker_pdf_raster::canvas`), never
-//! from the toolbox.
+//! straight and premultiplied. Each map, each reduction, the scale, the
+//! subsample and every conversion between two formats run over every one of
+//! those, and every byte and every answer is held to the closed form the
+//! design states, computed here from the formula and the canvas's own colour
+//! relations (`tinker_pdf_raster::canvas`), never from the toolbox.
 //!
 //! Gamma is taken at exponents of one half, one and two, whose powers this
 //! file computes exactly in integers: `floor(255 * pow(v / 255, g) + 0.5)` is
@@ -735,9 +735,9 @@ fn a_bitmap_that_is_not_a_picture_is_refused_whole() {
 /// **A plates bitmap is not a picture, and is refused whole**: its spot
 /// channels are tints of colorants whose colours the bitmap does not carry,
 /// so no map writes a byte of one — with no spot, with some, at the cap,
-/// straight and premultiplied — and every reduction, scale and subsample
-/// answers `None`, its own size and a factor of one among them, as `to_png`
-/// writes none.
+/// straight and premultiplied — and every reduction, scale, subsample and
+/// conversion answers `None`, its own size, a factor of one and its own format
+/// among them, as `to_png` writes none; and no bitmap converts into plates.
 #[test]
 fn a_plates_bitmap_is_refused_whole() {
     let maps = maps();
@@ -760,7 +760,16 @@ fn a_plates_bitmap_is_refused_whole() {
             assert!(bitmap.scaled(bitmap.width, bitmap.height).is_none());
             assert!(bitmap.subsampled(2, 2).is_none());
             assert!(bitmap.subsampled(1, 1).is_none());
+            for format in FORMATS {
+                assert!(bitmap.converted(format, false).is_none());
+                assert!(bitmap.converted(format, true).is_none());
+            }
+            assert!(bitmap.converted(format, premultiplied).is_none());
             assert!(bitmap.to_png().is_none());
+        }
+        // Nor is anything converted into plates.
+        for bitmap in variants(&golden) {
+            assert!(bitmap.converted(format, false).is_none(), "{count} spots");
         }
     }
 }
@@ -1087,9 +1096,9 @@ fn a_padded_stride_scales_and_subsamples_as_its_packed_twin() {
     }
 }
 
-/// Scale and subsample refuse a bitmap that is not a picture, a size or a
-/// factor of zero, and a result too large to hold, rather than handing back
-/// part of one.
+/// Scale, subsample and conversion refuse a bitmap that is not a picture,
+/// scale and subsample a size or a factor of zero, and scale a result too
+/// large to hold, rather than handing back part of one.
 #[test]
 fn scale_and_subsample_refuse_what_is_no_picture() {
     let (_, golden) = goldens().remove(0);
@@ -1113,6 +1122,10 @@ fn scale_and_subsample_refuse_what_is_no_picture() {
     ] {
         assert!(bitmap.scaled(10, 10).is_none());
         assert!(bitmap.subsampled(2, 2).is_none());
+        for format in FORMATS {
+            assert!(bitmap.converted(format, false).is_none(), "{format:?}");
+        }
+        assert!(bitmap.converted(PixelFormat::Rgba8, true).is_none());
     }
     assert!(base.scaled(0, 10).is_none());
     assert!(base.scaled(10, 0).is_none());
@@ -1120,4 +1133,237 @@ fn scale_and_subsample_refuse_what_is_no_picture() {
     assert!(base.subsampled(1, 0).is_none());
     // More bytes than an address space holds: refused, not attempted.
     assert!(base.scaled(u32::MAX, u32::MAX).is_none());
+}
+
+// ---- conversion -----------------------------------------------------------------
+
+/// What a conversion should make of a packed `bitmap`, from the relation the
+/// design names: each pixel straightened where the bitmap is premultiplied;
+/// then, into the bitmap's own format, those bytes as they are, and into any
+/// other, its sRGB as the canvas reads its format written as the canvas
+/// encodes a fill of `format`, the alpha carried, 255 where the bitmap has
+/// none and dropped where `format` has none; premultiplied after where asked
+/// and `format` has an alpha.
+fn converted_expected(bitmap: &Bitmap, format: PixelFormat, premultiplied: bool) -> Vec<u8> {
+    let source = bitmap.format;
+    let colours_in = colours(source);
+    let colours_out = colours(format);
+    let mut out = Vec::new();
+    for px in bitmap.data.chunks_exact(source.components()) {
+        let a = if source.has_alpha() {
+            px[colours_in]
+        } else {
+            255
+        };
+        let mut straight = px.to_vec();
+        if bitmap.premultiplied {
+            for c in &mut straight[..colours_in] {
+                *c = straighten(*c, a);
+            }
+        }
+        let mut pixel = if format == source {
+            straight
+        } else {
+            let mut pixel = vec![0u8; format.components()];
+            write(format, &mut pixel, srgb(source, &straight));
+            if format.has_alpha() {
+                pixel[colours_out] = a;
+            }
+            pixel
+        };
+        if premultiplied && format.has_alpha() {
+            for c in &mut pixel[..colours_out] {
+                *c = premultiply(*c, a);
+            }
+        }
+        out.extend_from_slice(&pixel);
+    }
+    out
+}
+
+/// **Every conversion is the relation the test computes**: every golden, in
+/// every format, straight and premultiplied, converted to each of the eight
+/// formats straight and premultiplied — all 56 ordered pairs of formats and
+/// each format to itself — every byte computed here from the canvas's
+/// relations; the result packed, in the format and premultiplied state asked
+/// for, carrying the source's warnings and no stats; and a format converted
+/// to itself, premultiplied as it already is, the same bytes.
+#[test]
+fn every_conversion_is_the_relation_the_test_computes() {
+    let mut held = 0usize;
+    let mut pairs = BTreeSet::new();
+    for (name, golden) in goldens() {
+        for bitmap in variants(&golden).into_iter().map(warned) {
+            for format in FORMATS {
+                for premultiplied in [false, true] {
+                    let what = format!(
+                        "{name}, {:?}{} to {format:?}{}",
+                        bitmap.format,
+                        if bitmap.premultiplied {
+                            " premultiplied"
+                        } else {
+                            ""
+                        },
+                        if premultiplied { " premultiplied" } else { "" }
+                    );
+                    let got = bitmap
+                        .converted(format, premultiplied)
+                        .unwrap_or_else(|| panic!("{what}: a picture converts"));
+                    let to = premultiplied && format.has_alpha();
+                    let itself = format == bitmap.format && to == bitmap.premultiplied;
+                    assert_eq!(
+                        (
+                            got.width,
+                            got.height,
+                            got.format,
+                            got.stride,
+                            got.premultiplied
+                        ),
+                        (
+                            bitmap.width,
+                            bitmap.height,
+                            format,
+                            bitmap.width as usize * format.components(),
+                            to
+                        ),
+                        "{what}: the result's fields"
+                    );
+                    assert_eq!(got.warnings, bitmap.warnings, "{what}: the warnings travel");
+                    assert!(got.stats.is_none(), "{what}: a conversion counted nothing");
+                    let want = if itself {
+                        bitmap.data.clone()
+                    } else {
+                        converted_expected(&bitmap, format, premultiplied)
+                    };
+                    if got.data != want {
+                        let at = got
+                            .data
+                            .iter()
+                            .zip(&want)
+                            .position(|(a, b)| a != b)
+                            .unwrap_or(0);
+                        panic!(
+                            "{what}: byte {at} is {} where the relation gives {}",
+                            got.data[at], want[at]
+                        );
+                    }
+                    if format != bitmap.format {
+                        pairs.insert((format!("{:?}", bitmap.format), format!("{format:?}")));
+                    }
+                    held += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(pairs.len(), 56, "every ordered pair of the eight formats");
+    println!("bitmap-toolbox conversion: RAN, {held} conversions held to the relation");
+}
+
+/// **A format converted to itself is the same bytes**: every variant, packed
+/// and padded, converted to its own format premultiplied as it already is
+/// comes back as it went in, stride and padding included — and an ink bitmap
+/// converted to itself premultiplied, or straight again, keeps every ink it
+/// has, its rich blacks among them, which a trip through light would turn to
+/// black ink alone.
+#[test]
+fn a_format_converted_to_itself_is_the_same_bytes() {
+    let (_, golden) = goldens().remove(0);
+    for bitmap in variants(&golden) {
+        for source in [bitmap.clone(), padded(&bitmap, 5)] {
+            let same = source
+                .converted(source.format, source.premultiplied)
+                .expect("a picture");
+            assert_eq!(
+                (same.stride, same.premultiplied, same.format),
+                (source.stride, source.premultiplied, source.format),
+                "{:?}",
+                source.format
+            );
+            assert_eq!(same.data, source.data, "{:?}", source.format);
+        }
+    }
+    let ink = variant(&golden, PixelFormat::CmykA8, false);
+    assert!(
+        ink.data
+            .chunks_exact(5)
+            .any(|px| px[3] > 0 && px[..3].iter().any(|&v| v > 0)),
+        "the ink variant holds inks beside black"
+    );
+    let multiplied = ink.converted(PixelFormat::CmykA8, true).expect("a picture");
+    for (got, px) in multiplied
+        .data
+        .chunks_exact(5)
+        .zip(ink.data.chunks_exact(5))
+    {
+        let want: Vec<u8> = px[..4]
+            .iter()
+            .map(|&c| premultiply(c, px[4]))
+            .chain([px[4]])
+            .collect();
+        assert_eq!(got, &want[..], "each ink premultiplied in place");
+    }
+    let back = multiplied
+        .converted(PixelFormat::CmykA8, false)
+        .expect("a picture");
+    for (got, px) in back
+        .data
+        .chunks_exact(5)
+        .zip(multiplied.data.chunks_exact(5))
+    {
+        let want: Vec<u8> = px[..4]
+            .iter()
+            .map(|&c| straighten(c, px[4]))
+            .chain([px[4]])
+            .collect();
+        assert_eq!(got, &want[..], "each ink straightened in place");
+    }
+}
+
+/// Light through ink and back is exact: 8.6.4.4's relation inverted with
+/// maximum undercolour removal returns every colour it was given, so each
+/// golden's light converted to ink and back is the light it was, alpha and
+/// all.
+#[test]
+fn light_through_ink_and_back_is_exact() {
+    for (name, golden) in goldens() {
+        for format in [PixelFormat::Rgb8, PixelFormat::Rgba8] {
+            let light = variant(&golden, format, false);
+            let back = light
+                .converted(PixelFormat::CmykA8, false)
+                .and_then(|ink| ink.converted(format, false))
+                .expect("a picture");
+            assert_eq!(back.data, light.data, "{name}, {format:?}");
+        }
+    }
+}
+
+/// **`to_png` writes what conversion gives**: the PNG of every variant of a
+/// golden is the PNG of the variant converted, straight, to the layout PNG
+/// stores it in — itself for the four PNG has, red first for the blue-first
+/// two, RGBA for ink and Lab — because the writer's conversions are the
+/// toolbox's.
+#[test]
+fn to_png_writes_what_conversion_gives() {
+    let (_, golden) = goldens().remove(0);
+    for bitmap in variants(&golden) {
+        let layout = match bitmap.format {
+            PixelFormat::Gray8 | PixelFormat::GrayA8 | PixelFormat::Rgb8 | PixelFormat::Rgba8 => {
+                bitmap.format
+            }
+            PixelFormat::Bgr8 => PixelFormat::Rgb8,
+            _ => PixelFormat::Rgba8,
+        };
+        let converted = bitmap.converted(layout, false).expect("a picture");
+        assert_eq!(
+            bitmap.to_png(),
+            converted.to_png(),
+            "{:?}{}",
+            bitmap.format,
+            if bitmap.premultiplied {
+                " premultiplied"
+            } else {
+                ""
+            }
+        );
+    }
 }

@@ -1150,6 +1150,34 @@ impl Bitmap {
         Some(self.with_pixels(layout, data))
     }
 
+    /// This bitmap re-expressed in `format`, premultiplied when
+    /// `premultiplied` asks and `format` has an alpha: each pixel decoded to
+    /// straight sRGB and alpha as a canvas of this bitmap's format reads it —
+    /// a premultiplied pixel straightened first, ink through 8.6.4.4's
+    /// relation, Lab back out of `L*a*b*` — and written as a canvas of
+    /// `format` is filled: grey by [`Color::luma`], ink by the
+    /// maximum-undercolour-removal inverse, Lab through `L*a*b*`, `Bgr8` and
+    /// `Bgra8` blue first. The alpha is carried where both formats have one,
+    /// is 255 where this bitmap has none, and is dropped, the straight colour
+    /// kept, where `format` has none.
+    ///
+    /// A same-format conversion never goes through a colour, so an ink
+    /// bitmap's split survives it: its colour is only straightened or
+    /// premultiplied, byte by byte, and a format converted to itself,
+    /// premultiplied as it already is, is a copy of this bitmap, stride and
+    /// all. Otherwise the result's rows are packed; it carries this bitmap's
+    /// warnings, and its `stats` is `None`.
+    ///
+    /// `None` on a bitmap that is not a picture, `to_png`'s condition, for a
+    /// `format` of [`PixelFormat::Plates`] — tints of colorants a colour does
+    /// not name — and for a result whose bytes cannot be allocated.
+    #[must_use]
+    pub fn converted(&self, format: PixelFormat, premultiplied: bool) -> Option<Bitmap> {
+        let (layout, data) =
+            tinker_pdf_raster::toolbox::convert(&self.layout(), &self.data, format, premultiplied)?;
+        Some(self.with_pixels(layout, data))
+    }
+
     /// A bitmap of the toolbox's `layout` and `data`, carrying this one's
     /// warnings: the picture is still the render they describe.
     fn with_pixels(&self, layout: tinker_pdf_raster::toolbox::Layout, data: Vec<u8>) -> Bitmap {
@@ -1364,112 +1392,56 @@ impl Bitmap {
         self.premultiplied = true;
     }
 
-    /// A straight-alpha copy of a premultiplied bitmap, or `None` when a row
-    /// the fields promise is not in the buffer.
+    /// A straight-alpha copy of a premultiplied bitmap: [`Bitmap::converted`]
+    /// to its own format, straight — `round(c·255/a)`, clamped to 255 for a
+    /// component the premultiplied convention does not allow (`c > a`), and
+    /// zero where the alpha is: nothing is painted there and there is no
+    /// colour to recover.
     ///
-    /// `round(c·255/a)`, clamped to 255 for a component the premultiplied
-    /// convention does not allow (`c > a`), and zero where the alpha is:
-    /// nothing is painted there and there is no colour to recover.
+    /// `None` when the bitmap is not a picture, the same condition
+    /// [`Bitmap::to_png`] answers `None` for.
     fn straightened(&self) -> Option<Bitmap> {
-        let components = self.format.components();
-        let colours = components.checked_sub(1)?;
-        let row_bytes = (self.width as usize).checked_mul(components)?;
-        let mut data = Vec::with_capacity(row_bytes.checked_mul(self.height as usize)?);
-        for y in 0..self.height as usize {
-            let at = y.checked_mul(self.stride)?;
-            let row = self.data.get(at..at.checked_add(row_bytes)?)?;
-            for pixel in row.chunks_exact(components) {
-                let (colour, alpha) = pixel.split_at(colours);
-                let a = u32::from(*alpha.first()?);
-                for c in colour {
-                    let straight = (u32::from(*c) * 255 + a / 2)
-                        .checked_div(a)
-                        .map_or(0, |v| v.min(255));
-                    data.push(straight as u8);
-                }
-                data.push(a as u8);
-            }
-        }
+        let (layout, data) =
+            tinker_pdf_raster::toolbox::convert(&self.layout(), &self.data, self.format, false)?;
         Some(Bitmap {
-            width: self.width,
-            height: self.height,
-            format: self.format,
-            stride: row_bytes,
-            data,
             warnings: Vec::new(),
-            premultiplied: false,
             stats: None,
+            ..self.with_pixels(layout, data)
         })
     }
 
     /// A blue-first bitmap's rows packed red first, its alpha kept where it
-    /// was: what PNG's colour types 2 and 6 store.
+    /// was: what PNG's colour types 2 and 6 store — [`Bitmap::converted`] to
+    /// `Rgb8` or `Rgba8`, straight.
     ///
-    /// `None` when the buffer is shorter than the rows it promises, the same
-    /// condition [`Bitmap::to_png`] answers `None` for.
+    /// `None` when the bitmap is not a picture, the same condition
+    /// [`Bitmap::to_png`] answers `None` for.
     fn red_first(&self) -> Option<Vec<u8>> {
-        let components = self.format.components();
-        let row_bytes = (self.width as usize).checked_mul(components)?;
-        let mut out = Vec::with_capacity(row_bytes.checked_mul(self.height as usize)?);
-        for y in 0..self.height as usize {
-            let at = y.checked_mul(self.stride)?;
-            let row = self.data.get(at..at.checked_add(row_bytes)?)?;
-            for pixel in row.chunks_exact(components) {
-                let (Some(b), Some(g), Some(r)) = (pixel.first(), pixel.get(1), pixel.get(2))
-                else {
-                    return None;
-                };
-                out.extend_from_slice(&[*r, *g, *b]);
-                out.extend_from_slice(pixel.get(3..).unwrap_or_default());
-            }
-        }
-        Some(out)
+        let format = if self.format.has_alpha() {
+            PixelFormat::Rgba8
+        } else {
+            PixelFormat::Rgb8
+        };
+        tinker_pdf_raster::toolbox::convert(&self.layout(), &self.data, format, false)
+            .map(|(_, data)| data)
     }
 
-    /// The two formats PNG cannot carry, as straight RGBA.
+    /// The two formats PNG cannot carry, as straight RGBA: [`Bitmap::converted`]
+    /// to `Rgba8`, ink through 8.6.4.4's relation and Lab back out of the
+    /// `L/100`, `(a + 128)/255`, `(b + 128)/255` encoding `PixelFormat::LabA8`
+    /// documents, each the canvas's own reading of its format.
     ///
     /// Both keep their alpha, which is what makes truecolour-with-alpha the
     /// right target for each: a `CmykA8` pixel is five bytes and a `LabA8` one
     /// is four, and both carry an alpha that a three-component target would
     /// have to drop or composite against a background nobody asked for.
     ///
-    /// `None` when the buffer is shorter than the rows it promises — the same
-    /// condition [`Bitmap::to_png`] answers `None` for, found here first
-    /// because this is where the bytes are read.
+    /// `None` when the bitmap is not a picture — the same condition
+    /// [`Bitmap::to_png`] answers `None` for, found here first because this
+    /// is where the bytes are read.
     fn to_rgba(&self) -> Option<Vec<u8>> {
-        let components = self.format.components();
-        let width = self.width as usize;
-        let mut out = Vec::with_capacity(width.checked_mul(self.height as usize)?.checked_mul(4)?);
-        for y in 0..self.height as usize {
-            let row = self.data.get(y.checked_mul(self.stride)?..)?;
-            for x in 0..width {
-                // Both ends checked: `width x components` is arithmetic on a
-                // caller's own numbers, and an end that wrapped would be a
-                // slice inside the buffer rather than a `None` (ruling 1).
-                let at = x.checked_mul(components)?;
-                let px = row.get(at..at.checked_add(components)?)?;
-                let (r, g, b, a) = match self.format {
-                    // 8.6.4.4, through the rasterizer's own byte-level copy of
-                    // the relation — held to `tinker_pdf_color`'s by a test in
-                    // `tinker-pdf-render` over every combination that matters,
-                    // so the two cannot drift apart behind this call.
-                    PixelFormat::CmykA8 => {
-                        let (r, g, b) =
-                            tinker_pdf_raster::canvas::cmyk_to_rgb(px[0], px[1], px[2], px[3]);
-                        (r, g, b, px[4])
-                    }
-                    // The inverse of the `L/100`, `(a + 128)/255`,
-                    // `(b + 128)/255` encoding `PixelFormat::LabA8` documents,
-                    // taken from the crate that owns it rather than rewritten.
-                    _ => {
-                        let (r, g, b) = tinker_pdf_raster::canvas::lab_to_rgb(px[0], px[1], px[2]);
-                        (r, g, b, px[3])
-                    }
-                };
-                out.extend_from_slice(&[r, g, b, a]);
-            }
-        }
-        Some(out)
+        tinker_pdf_raster::toolbox::convert(&self.layout(), &self.data, PixelFormat::Rgba8, false)
+            .map(|(_, data)| data)
     }
 }
 

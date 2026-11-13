@@ -1,6 +1,6 @@
 //! The bitmap toolbox's arithmetic (`docs/design/bitmap-toolbox.md`): the
-//! per-pixel maps, the reductions, and scale and subsample, over a buffer of
-//! pixels in any [`PixelFormat`] and stride.
+//! per-pixel maps, the reductions, scale and subsample, and conversion between
+//! formats, over a buffer of pixels in any [`PixelFormat`] and stride.
 //!
 //! On `PIXEL_PATHS`, so gamma's table is built through `tinker_pdf_math::pow`
 //! and no transcendental of the platform's reaches a pixel (ruling 4); every
@@ -731,6 +731,116 @@ pub fn subsample(layout: &Layout, data: &[u8], x: u32, y: u32) -> Option<(Layout
     ))
 }
 
+// ---- conversion ---------------------------------------------------------------
+
+/// The bitmap re-expressed in `format`, premultiplied where `premultiplied`
+/// asks and `format` has an alpha to multiply by: [`crate::Canvas::extract`]'s
+/// per-pixel relation. Each pixel is straightened where the source is
+/// premultiplied, decoded to sRGB and alpha as [`decode`] reads it and
+/// encoded as [`encode`] writes a fill — grey by [`Color::luma`], ink by
+/// 8.6.4.4's maximum-undercolour-removal inverse, Lab by [`lab_bytes`], a
+/// blue-first format blue first — its alpha carried where both formats have
+/// one, 255 where the source has none, and dropped, the straight colour kept,
+/// where `format` has none; then premultiplied, `round(s · a / 255)`, where
+/// asked.
+///
+/// **A same-format copy never goes through a colour**, which is
+/// [`crate::Canvas`]'s own rule for one: an ink pixel's split does not survive
+/// the trip through light, so a format converted to itself only has its
+/// colour straightened or premultiplied, byte by byte, and one converted to
+/// itself premultiplied as it already is is its bytes, stride and padding
+/// included.
+///
+/// `None` for a buffer that is not a picture ([`Layout::is_picture`]), for a
+/// `format` of plates — not a picture either: their spots are tints of
+/// colorants a colour does not name — and for a result whose bytes cannot be
+/// had; otherwise the result's layout, its rows packed, and its bytes.
+#[must_use]
+pub fn convert(
+    layout: &Layout,
+    data: &[u8],
+    format: PixelFormat,
+    premultiplied: bool,
+) -> Option<(Layout, Vec<u8>)> {
+    if !layout.is_picture(data.len()) || matches!(format, PixelFormat::Plates { .. }) {
+        return None;
+    }
+    let source = layout.format;
+    let from = layout.premultiplied();
+    let to = premultiplied && format.has_alpha();
+    if format == source && from == to {
+        return Some((
+            Layout {
+                premultiplied: to,
+                ..*layout
+            },
+            data.to_vec(),
+        ));
+    }
+    let colours_in = colours(source);
+    let colours_out = colours(format);
+    let components = format.components();
+    let stride = (layout.width as usize).checked_mul(components)?;
+    let mut out = zeroed(stride.checked_mul(layout.height as usize)?)?;
+    let mut at = 0usize;
+    each_pixel(layout, data, |pixel| {
+        let alpha = if source.has_alpha() {
+            pixel.get(colours_in).copied().unwrap_or(255)
+        } else {
+            255
+        };
+        // The pixel straight; a picture's pixel is at most five bytes, since
+        // plates are no picture.
+        let mut straight = [0u8; 5];
+        for (slot, &byte) in straight.iter_mut().zip(pixel) {
+            *slot = byte;
+        }
+        if from {
+            for c in straight.iter_mut().take(colours_in) {
+                *c = straighten(*c, alpha);
+            }
+        }
+        let mut word = [0u8; 5];
+        if format == source {
+            word = straight;
+        } else if let Some(colour) = straight
+            .get(..pixel.len())
+            .and_then(|straight| decode(source, straight))
+        {
+            let (bytes, count) = encode(format, colour);
+            for (slot, byte) in word.iter_mut().zip(bytes.iter().take(count)) {
+                *slot = *byte;
+            }
+            if format.has_alpha() {
+                if let Some(slot) = word.get_mut(count) {
+                    *slot = colour.a;
+                }
+            }
+        }
+        if to {
+            for c in word.iter_mut().take(colours_out) {
+                *c = premultiply(*c, alpha);
+            }
+        }
+        if let (Some(slot), Some(word)) = (out.get_mut(at..at + components), word.get(..components))
+        {
+            slot.copy_from_slice(word);
+        }
+        at += components;
+        true
+    });
+    Some((
+        Layout {
+            format,
+            width: layout.width,
+            height: layout.height,
+            stride,
+            premultiplied: to,
+        },
+        out,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1195,5 +1305,136 @@ mod tests {
         let (out, kept) = subsample(&rgba, &[9, 8, 7, 10, 1, 2, 3, 4], 2, 1).expect("a picture");
         assert!(out.premultiplied);
         assert_eq!(kept, [9, 8, 7, 10]);
+    }
+
+    /// **A conversion is the canvas's own extract**: over a row of pixels of
+    /// every byte pattern in each format, straight, every pair of formats
+    /// converts to the bytes [`Canvas::extract`] copies the same canvas into,
+    /// a same-format copy among them.
+    #[test]
+    fn a_conversion_is_the_canvas_s_extract() {
+        let width = 97u32;
+        for from in FORMATS {
+            let mut canvas = Canvas::new(width, 1, from, Color::TRANSPARENT);
+            for (i, byte) in canvas.data.iter_mut().enumerate() {
+                *byte = ((i * 151 + i / 7 * 29 + 13) % 256) as u8;
+            }
+            let layout = packed_layout(from, width, 1);
+            for to in FORMATS {
+                let (out, data) = convert(&layout, &canvas.data, to, false).expect("a picture");
+                assert_eq!(
+                    (out.format, out.width, out.height, out.premultiplied),
+                    (to, width, 1, false),
+                    "{from:?} to {to:?}"
+                );
+                let extracted = canvas.extract((0, 0), width, 1, to);
+                assert_eq!(data, extracted.data, "{from:?} to {to:?}");
+            }
+        }
+    }
+
+    /// Conversion worked by hand: a grey is luma, a premultiplied pixel is
+    /// straightened and its alpha dropped where the target has none, a format
+    /// without alpha gains an opaque one, light black is black ink alone, a
+    /// rich black reads as black light, and a blue-first pixel is reordered.
+    #[test]
+    fn a_conversion_worked_by_hand() {
+        let rgb = packed_layout(PixelFormat::Rgb8, 2, 1);
+        let (_, grey) =
+            convert(&rgb, &[255, 0, 0, 10, 20, 30], PixelFormat::Gray8, false).expect("a picture");
+        // (299 · 255 + 500) / 1000 is 76; (2990 + 11740 + 3420 + 500) / 1000 is 18.
+        assert_eq!(grey, [76, 18]);
+        let (_, rgba) =
+            convert(&rgb, &[255, 0, 0, 10, 20, 30], PixelFormat::Rgba8, false).expect("a picture");
+        assert_eq!(rgba, [255, 0, 0, 255, 10, 20, 30, 255]);
+        let (_, ink) = convert(&rgb, &[0, 0, 0, 255, 255, 255], PixelFormat::CmykA8, false)
+            .expect("a picture");
+        assert_eq!(ink, [0, 0, 0, 255, 255, 0, 0, 0, 0, 255]);
+        let (_, bgr) =
+            convert(&rgb, &[1, 2, 3, 4, 5, 6], PixelFormat::Bgr8, false).expect("a picture");
+        assert_eq!(bgr, [3, 2, 1, 6, 5, 4]);
+
+        let premultiplied = Layout {
+            premultiplied: true,
+            ..packed_layout(PixelFormat::Rgba8, 2, 1)
+        };
+        // Half-alpha red stored as (128, 0, 0, 128) is straight red; nothing
+        // painted stays nothing.
+        let (out, light) = convert(
+            &premultiplied,
+            &[128, 0, 0, 128, 0, 0, 0, 0],
+            PixelFormat::Rgb8,
+            false,
+        )
+        .expect("a picture");
+        assert!(!out.premultiplied);
+        assert_eq!(light, [255, 0, 0, 0, 0, 0]);
+        // Straight again, premultiplied into grey and alpha: luma of red is
+        // 76, times 128 / 255 is 38.
+        let (out, grey) = convert(
+            &premultiplied,
+            &[128, 0, 0, 128, 0, 0, 0, 0],
+            PixelFormat::GrayA8,
+            true,
+        )
+        .expect("a picture");
+        assert!(out.premultiplied);
+        assert_eq!(grey, [38, 128, 0, 0]);
+
+        let rich = packed_layout(PixelFormat::CmykA8, 1, 1);
+        let (_, black) = convert(&rich, &[255, 255, 255, 255, 200], PixelFormat::Rgba8, false)
+            .expect("a picture");
+        assert_eq!(black, [0, 0, 0, 200]);
+        // Ink to itself premultiplied keeps all four inks: no trip through
+        // light, which would leave black ink alone.
+        let (out, kept) = convert(&rich, &[255, 255, 255, 255, 128], PixelFormat::CmykA8, true)
+            .expect("a picture");
+        assert!(out.premultiplied);
+        assert_eq!(kept, [128, 128, 128, 128, 128]);
+    }
+
+    /// A format converted to itself, premultiplied as it already is, is its
+    /// bytes, stride and padding included; a format without alpha is never
+    /// premultiplied, whatever its flag says; plates and a buffer that is not
+    /// a picture are refused.
+    #[test]
+    fn a_format_to_itself_is_its_bytes_and_plates_are_refused() {
+        let padded = Layout {
+            stride: 5,
+            ..packed_layout(PixelFormat::Gray8, 3, 2)
+        };
+        let data = [1, 2, 3, 99, 98, 4, 5, 6, 97, 96];
+        assert_eq!(
+            convert(&padded, &data, PixelFormat::Gray8, false),
+            Some((padded, data.to_vec()))
+        );
+        assert_eq!(
+            convert(&padded, &data, PixelFormat::Gray8, true),
+            Some((padded, data.to_vec())),
+            "grey has no alpha to be premultiplied by"
+        );
+        let flagged = Layout {
+            premultiplied: true,
+            ..packed_layout(PixelFormat::Rgb8, 1, 1)
+        };
+        let (out, same) =
+            convert(&flagged, &[10, 20, 30], PixelFormat::Rgb8, false).expect("a picture");
+        assert!(!out.premultiplied, "a flag without alpha means nothing");
+        assert_eq!(same, [10, 20, 30]);
+        assert_eq!(
+            convert(&padded, &data, PixelFormat::Rgb8, false).map(|(layout, _)| layout.stride),
+            Some(9),
+            "a conversion's rows are packed"
+        );
+        assert_eq!(convert(&padded, &data[..7], PixelFormat::Rgb8, false), None);
+        let plates = PixelFormat::Plates {
+            spots: crate::canvas::Spots::new(2).expect("under the cap"),
+        };
+        assert_eq!(convert(&padded, &data, plates, false), None);
+        let from_plates = packed_layout(plates, 1, 1);
+        assert_eq!(
+            convert(&from_plates, &[0; 7], PixelFormat::Rgb8, false),
+            None
+        );
     }
 }

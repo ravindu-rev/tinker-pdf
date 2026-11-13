@@ -1867,6 +1867,22 @@ warnings and no `stats`; a scale to the bitmap's own size and a subsample by
 one are copies of it, stride and all, and each answers `None` for a bitmap
 that is not a picture, a size or factor of zero, or a result whose bytes
 cannot be allocated.
+`converted(format, premultiplied)` re-expresses a bitmap in any of the eight
+formats by the canvas's own per-pixel relation (`Canvas::extract`): each
+pixel straightened where the bitmap is premultiplied, read as sRGB and alpha
+as a canvas of its format reads it, and written as a canvas of `format` is
+filled — grey by `Color::luma`, ink by 8.6.4.4's maximum-undercolour-removal
+inverse, Lab through `L*a*b*`, the blue-first formats blue first — its alpha
+carried, 255 where the source has none and dropped where `format` has none,
+and premultiplied after where asked and `format` has an alpha. A same-format
+conversion never goes through a colour, so an ink bitmap keeps its split: one
+premultiplied as it already is is a copy, stride and all, and one that only
+changes the premultiplied state straightens or premultiplies each byte where
+it stands. Every other result has packed rows and the source's warnings and
+no `stats`, and it is `None` for a bitmap that is not a picture, for plates,
+which nothing converts into either, and for a result whose bytes cannot be
+allocated. `to_png`'s straightened, red-first and RGBA copies are this
+conversion.
 
 **Forced colours** draw a page in two colours for high contrast:
 `RenderOptions::forced_colours` takes a `ForcedColours` — a `background`, a
@@ -2155,9 +2171,19 @@ under it, so the copy holds every canvas the walk closes onto.
   factors that divide each golden and factors that do not, past its extent
   included; a scale to the same size returns the same bytes, a padded stride
   scales and subsamples as its packed twin, and the refusals refuse.
+  `every_conversion_is_the_relation_the_test_computes` converts every variant
+  of every golden to each of the eight formats, straight and premultiplied —
+  all 56 ordered pairs and each format to itself — every byte computed from
+  the canvas's relations; `a_format_converted_to_itself_is_the_same_bytes`
+  holds the copies, packed and padded, and an ink bitmap premultiplied and
+  straightened in place; `light_through_ink_and_back_is_exact` and
+  `to_png_writes_what_conversion_gives` hold the round trip through ink and
+  the PNG writer's conversions to the toolbox's.
   `tinker-pdf-raster`'s `toolbox` tests hold gamma's table to its formula at
   other exponents, the toolbox's decoding and encoding of each format to the
-  canvas's own, and scale and subsample on cases worked by hand; its `image`
+  canvas's own, every conversion of a row of every byte pattern to
+  `Canvas::extract`'s copy of it, and scale, subsample and conversion on
+  cases worked by hand; its `image`
   tests hold `resample`'s planned lines to the rationals and every resampled
   pixel to an area average written from the definition.
 - Forced colours: `render_options.rs`'s

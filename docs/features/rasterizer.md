@@ -693,7 +693,10 @@ image covers exactly — column `x` of `width` covering
 `[x W / width, (x + 1) W / width)` of the image, each tap that span's overlap
 with a sample measured in `1 / width` of one, so the weights are the
 rationals themselves rather than a centre a floating-point inverse found;
-`subsample` keeps the first sample of each block. `tint_grey` writes a `Gray8`
+`subsample` keeps the first sample of each block; `convert` re-expresses a
+buffer in another format by `Canvas::extract`'s per-pixel relation,
+straightened first where it is premultiplied and premultiplied after where
+asked, a same-format copy never through a colour. `tint_grey` writes a `Gray8`
 picture into any format but plates, opaque, each grey on `tint`'s ramp between two
 colours — what a forced-colour render's black-on-white coverage becomes in the
 facade. `gamma_table` is gamma's 256 bytes,
