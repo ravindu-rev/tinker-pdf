@@ -4021,6 +4021,11 @@ impl Transform {
 #[derive(Debug)]
 pub struct Transforms {
     profile: Profile,
+    /// The bytes the profile was read from, where the transforms were
+    /// compiled from them ([`Transforms::compile_shared`]): what a command
+    /// stream writes an ICC space by, so its reader compiles the same
+    /// transforms. Shared with whoever handed them over, and counted there.
+    source: Option<Arc<Vec<u8>>>,
     relative: Arc<Transform>,
     /// Which source relative colorimetric's transform came from.
     relative_source: SourceId,
@@ -4040,10 +4045,37 @@ impl Transforms {
         let relative = Arc::new(Transform::of_source(source, media, then));
         Some(Transforms {
             profile,
+            source: None,
             relative,
             relative_source,
             others: [OnceLock::new(), OnceLock::new(), OnceLock::new()],
         })
+    }
+
+    /// The transforms of the profile `bytes` hold, keeping the bytes
+    /// ([`Transforms::source`]) without a copy; `None` where they are no
+    /// profile [`Profile::parse`] reads, or one with no relative
+    /// colorimetric transform.
+    #[must_use]
+    pub fn compile_shared(bytes: Arc<Vec<u8>>) -> Option<Transforms> {
+        let profile = Profile::parse(&bytes).ok()?;
+        let mut transforms = Transforms::compile(profile)?;
+        transforms.source = Some(bytes);
+        Some(transforms)
+    }
+
+    /// [`Transforms::compile_shared`] of a copy of `bytes`.
+    #[must_use]
+    pub fn compile_bytes(bytes: &[u8]) -> Option<Transforms> {
+        Transforms::compile_shared(Arc::new(bytes.to_vec()))
+    }
+
+    /// The bytes the profile was read from, where the transforms were
+    /// compiled from them ([`Transforms::compile_shared`]); `None` for
+    /// transforms compiled from a profile handed over parsed.
+    #[must_use]
+    pub fn source(&self) -> Option<&[u8]> {
+        self.source.as_deref().map(Vec::as_slice)
     }
 
     /// The transform `intent` converts through, compiled now if no colour has

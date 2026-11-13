@@ -36,6 +36,12 @@ pub(crate) trait AppearanceDevice: Device {
     ///
     /// [`push_scope`]: AppearanceDevice::push_scope
     fn pop_scope(&mut self);
+
+    /// Told before each annotation [`draw`] hands on, drawn or hidden,
+    /// whether it is a widget: what a command stream's writer records each
+    /// appearance with, so a replay draws the kinds a render asks for. Every
+    /// other device draws what it is handed, and is told nothing.
+    fn annotation(&mut self, _widget: bool) {}
 }
 
 impl AppearanceDevice for Renderer<'_, PageResources> {
@@ -104,11 +110,14 @@ pub(crate) fn draw(
     placement: Placement,
     kinds: Kinds,
 ) {
-    each_appearance(doc, page, op, kinds, |_, entry| match entry {
-        Entry::Draws(appearance) => {
-            draw_prepared(doc, &appearance, provider, device, op, placement);
+    each_appearance(doc, page, op, kinds, |widget, entry| {
+        device.annotation(widget);
+        match entry {
+            Entry::Draws(appearance) => {
+                draw_prepared(doc, &appearance, provider, device, op, placement);
+            }
+            Entry::Hidden(layer) => note_hidden(device, layer),
         }
-        Entry::Hidden(layer) => note_hidden(device, layer),
     });
 }
 

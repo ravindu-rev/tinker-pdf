@@ -1267,6 +1267,39 @@ cancellation might, never more (`display_list.rs`'s
 `every_replay_names_the_images_the_page_draws` and
 `every_replay_names_the_glyph_its_font_could_not_resolve`).
 
+**The command stream** ([design](../design/command-stream.md)).
+`DisplayList::command_stream` writes a list's page as versioned bytes a host
+keeps and draws without the document, and `Page::command_stream` writes the
+page's list's: every call the list holds, in `tinker-pdf-content`'s codec,
+and the answer to every question a render of them asks the renderer's
+`GlyphSource`, asked of the page's resources in the scope the renderer asks
+it in — through resources of their own for each answer, so what each noted
+(an outline's unresolved font, an image's damage, a space's repair) rides
+with it. Every glyph shown in a mode that paints or clips has its outline
+and its font's identity; every image drawn has its frame and a decode at
+every reduction a draw can ask for (`Frame::reductions`: a JPEG's four
+scales, a codestream's levels), under the intent in force at the draw; every
+`sh` and every pattern a paint names has its definition, an ICC space by the
+bytes of its profile, which `icc::Transforms` keeps, shared with whoever
+handed them over, where it compiled from them; an image XObject's entry holds
+beside its frame the bytes the writing document's budget leaves its decode
+(`PageResources::image_room`), which a draw's reduction is read against; each tiling cell is interpreted once, as `PageResources::tile`
+interprets it, into a stream of its own in the cell's resources or the
+asking scope's, to the depth the renderer reaches; and each form that brings
+resources and each appearance is a scope of its own, its record saying
+whether it is a widget's, an appearance `/NoZoom` or `/NoRotate` places at
+render time written placed as a render at magnification 1 places it. The
+page's crop box,
+rotation, group space, usage and index lead the stream. What the
+interpretation met is written where a replay reaches it: a retained list's
+after its content, as its renders note it, and an interpretation's — a list
+that is not retained is interpreted into the writer, as `to_svg` writes it —
+before the call it was met ahead of. The tables a stream holds answer every
+question a render of its page asks, with the value the page's resources give
+(`command_stream.rs`'s `the_stream_answers_every_question_a_render_asks`),
+and a page written either way is one stream
+(`a_page_interpreted_into_the_writer_writes_its_lists_stream`).
+
 **Renders of one list at once fill each cache once.** The five dear caches a
 list's renders share — images, font programs, glyph outlines, ICC transforms
 and form scopes — are single-flight (`tinker_pdf_cos::Flights`): the first

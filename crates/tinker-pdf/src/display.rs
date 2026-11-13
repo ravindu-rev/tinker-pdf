@@ -284,7 +284,60 @@ impl Page {
     }
 }
 
+impl Page {
+    /// The page's drawing as a command stream (`docs/design/command-stream.md`):
+    /// its display list's ([`DisplayList::command_stream`]), for no usage.
+    #[must_use]
+    pub fn command_stream(&self) -> Vec<u8> {
+        self.display_list().command_stream()
+    }
+}
+
+/// A list of `page` that keeps none of its calls, as a page past
+/// `MAX_DISPLAY_LIST_BYTES` is kept: what the command stream's writer
+/// interprets the page into.
+#[cfg(test)]
+pub(crate) fn not_retained(page: &Page) -> DisplayList {
+    let layers = LayerOptions::default();
+    let resources = PageResources::new_in(
+        &page.doc,
+        &page.inner,
+        page.fonts.as_ref(),
+        page.operation(None, None, &layers),
+    );
+    let states = resources.operation().states(&page.doc);
+    DisplayList {
+        page: page.clone(),
+        resources: resources.kept(),
+        content: Vec::new(),
+        annotations: Vec::new(),
+        interpreted_missing: Vec::new(),
+        interpreted_repairs: Vec::new(),
+        retained: false,
+        usage: None,
+        budget_spent: false,
+        layers,
+        states,
+    }
+}
+
 impl DisplayList {
+    /// The page's drawing as a command stream (`docs/design/command-stream.md`):
+    /// versioned bytes holding every call this list holds, with its graphics
+    /// state, and the answer to every question a render of them asks —
+    /// glyph outlines, images decoded at every size a draw can ask for,
+    /// shadings, patterns and their cells, form and appearance scopes —
+    /// so a host can keep, send and draw the page without the document.
+    ///
+    /// The stream is of the usage the list was recorded for
+    /// ([`DisplayList::usage`]), its annotations' appearances included. A
+    /// list that is not retained ([`DisplayList::is_retained`]) interprets the
+    /// page into the writer, and writes the same stream.
+    #[must_use]
+    pub fn command_stream(&self) -> Vec<u8> {
+        crate::command_stream::write_list(self).0
+    }
+
     /// Draws the page as [`Page::render`] would with the same `options`.
     ///
     /// Every option applies exactly as it does there — the scale and its

@@ -819,9 +819,11 @@ impl IccKey {
         }
     }
 
-    /// The profile's bytes.
-    pub(crate) fn profile(&self) -> &[u8] {
-        &self.profile
+    /// The profile's bytes, shared: what the transforms compiled from them
+    /// read and keep as their source (`Transforms::compile_shared`), with no
+    /// copy.
+    pub(crate) fn shared(&self) -> Arc<Vec<u8>> {
+        Arc::clone(&self.profile)
     }
 
     /// The bytes the key holds beside its own fields: the profile's.

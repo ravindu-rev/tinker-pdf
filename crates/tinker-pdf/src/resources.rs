@@ -231,6 +231,54 @@ pub(crate) enum Frame {
 }
 
 impl Frame {
+    /// How many of the image's own samples each way one decoded sample
+    /// stands for in the decode a draw that asks as `request` does is handed,
+    /// its decode's samples to take at most `room` bytes where a budget is
+    /// stated: [`Frame::asked`]'s reduction, which a command stream's replay
+    /// picks its decode by (`docs/design/command-stream.md`).
+    pub(crate) fn reduction(self, request: &ImageRequest, room: Option<Room>) -> u32 {
+        self.asked(request, room).reduction
+    }
+
+    /// Every reduction a draw of an image of this frame can be handed a
+    /// decode at, each with a request that asks for it and holds the whole
+    /// image: what a command stream holds a decode at. A JPEG's four scales,
+    /// each asked by a drawn size of exactly its samples (`jpeg_scale`), and
+    /// a codestream's `d` levels dropped for every `d` its header allows that
+    /// leaves a sample a side (`jpx_discard`), each asked by `W >> d` by
+    /// `H >> d`; the full size is the infinite request's. A budget only ever
+    /// takes a draw to one of these.
+    pub(crate) fn reductions(self) -> Vec<(u32, ImageRequest)> {
+        let asking = |across: f64, down: f64| ImageRequest {
+            drawn: (across, down),
+            reach: None,
+            visible: None,
+        };
+        let candidates: Vec<ImageRequest> = match self {
+            Frame::Jpeg { width, height } => {
+                [JpegScale::Half, JpegScale::Quarter, JpegScale::Eighth]
+                    .into_iter()
+                    .map(|scale| {
+                        let samples =
+                            |side: u32| f64::from(side) * f64::from(scale.block_samples()) / 8.0;
+                        asking(samples(width), samples(height))
+                    })
+                    .collect()
+            }
+            Frame::Jpx(frame) => (1..=frame.levels.min(31))
+                .map(|d| asking(f64::from(frame.width >> d), f64::from(frame.height >> d)))
+                .collect(),
+        };
+        let mut out = vec![(1, ImageRequest::FULL)];
+        for request in candidates {
+            let reduction = self.reduction(&request, None);
+            if !out.iter().any(|(held, _)| *held == reduction) {
+                out.push((reduction, request));
+            }
+        }
+        out
+    }
+
     /// What a draw that asks as `request` does asks the decode for, its
     /// decode's samples to take at most `room` bytes where a budget is stated
     /// ([`Room`]): the draw's own ask where they fit or no budget is stated,
@@ -261,7 +309,7 @@ impl Frame {
 /// never of what the cache holds, so the reduction a draw takes is the same
 /// whatever was drawn before it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Room(u64);
+pub(crate) struct Room(pub(crate) u64);
 
 impl Room {
     /// The room under `budget` for an image whose key's defaults are
@@ -295,23 +343,23 @@ struct DecodeAsk<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct JpxFrame {
     /// Its image's own width and height, `Xsiz − XOsiz` by `Ysiz − YOsiz`.
-    width: u32,
-    height: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
     /// `XOsiz` and `YOsiz`, which the reduced grids are cut from (T.800
     /// B.5).
-    origin: (u32, u32),
+    pub(crate) origin: (u32, u32),
     /// The most levels a decode of it can drop
     /// ([`tinker_pdf_filters::JpxHeader::levels`]), and none under an
     /// `/Indexed` space, whose samples are indices (8.6.6.3) a lower
     /// resolution would average.
-    levels: u8,
+    pub(crate) levels: u8,
     /// Whether every sample is opaque — no opacity channel that
     /// `/SMaskInData` puts to use — so that a window may hold the part a draw
     /// shows rather than all it reaches ([`ImageRequest::visible`]).
-    opaque: bool,
+    pub(crate) opaque: bool,
     /// The dictionary's `/Interpolate`, which the sampling policy reads and
     /// the window's margin with it.
-    interpolate: bool,
+    pub(crate) interpolate: bool,
 }
 
 impl JpxFrame {
@@ -2959,9 +3007,10 @@ impl PageResources {
                 return None;
             };
             let (compiled, hit) = cache.icc(profile.clone(), work, || {
-                let compiled = tinker_pdf_color::icc::Profile::parse(profile.profile())
-                    .ok()
-                    .and_then(tinker_pdf_color::icc::Transforms::compile)
+                // Compiled keeping the key's bytes as the transforms' source,
+                // shared rather than copied, so a command stream writes the
+                // space by them (`Transforms::source`).
+                let compiled = tinker_pdf_color::icc::Transforms::compile_shared(profile.shared())
                     .map(Arc::new);
                 let bytes = compiled
                     .as_ref()
@@ -2999,8 +3048,7 @@ impl PageResources {
     ) -> Option<Arc<tinker_pdf_color::icc::Transforms>> {
         self.decoded(reference)
             .ok()
-            .and_then(|bytes| tinker_pdf_color::icc::Profile::parse(&bytes).ok())
-            .and_then(tinker_pdf_color::icc::Transforms::compile)
+            .and_then(tinker_pdf_color::icc::Transforms::compile_shared)
             .map(Arc::new)
     }
 
@@ -5122,7 +5170,7 @@ impl GlyphSource for PageResources {
         let conversion = self.own_intent(dict).unwrap_or(intent).conversion();
         self.count(Counter::ImagesDecoded);
         self.decode_inline(dict, data, request, conversion)
-            .map(Some)
+            .map(|(image, _)| Some(image))
     }
 
     fn image(
@@ -5189,6 +5237,68 @@ impl GlyphSource for PageResources {
     }
 }
 
+/// Draws a tiling cell for `request` (8.7.3.2) on a renderer over `glyphs`,
+/// `paint` making its calls in pattern space: the buffer the request
+/// describes, transparent, clipped to the cell's `/BBox`, at the request's
+/// depth, levels, rule and thinnest line. Hands back the cell's pixels, what
+/// it met, what it drew and whether every paint of it was fully opaque
+/// (11.7.5.2). One function for a cell interpreted from its content stream
+/// and one replayed from a command stream (`docs/design/command-stream.md`),
+/// so the two draw one cell.
+pub(crate) fn paint_cell<G: GlyphSource>(
+    request: &tinker_pdf_render::TileRequest,
+    glyphs: &G,
+    paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_, G>),
+) -> (
+    Canvas,
+    Vec<tinker_pdf_render::RenderWarning>,
+    tinker_pdf_render::RenderCounts,
+    bool,
+) {
+    let canvas = Canvas::new(
+        request.width,
+        request.height,
+        request.format,
+        Color::TRANSPARENT,
+    );
+    let mut renderer = tinker_pdf_render::Renderer::new(canvas, request.to_pixels, glyphs)
+        .with_cancel(request.cancel.clone())
+        .with_pattern_depth(request.depth)
+        .with_antialias(request.antialias)
+        .with_levels(request.graphics_bits, request.text_bits)
+        .with_hard_edge(request.hard_edge)
+        .with_thinnest_line(request.thinnest_line);
+
+    // 8.7.3.2: the cell is clipped to its `/BBox`. The buffer is already that
+    // box rounded outward, so this only takes back the part of a pixel the
+    // rounding gave away -- but a hatch is normally drawn with a line width
+    // that deliberately runs past the box so neighbouring cells join, and
+    // without the clip that overshoot lands in the next cell's gap.
+    let [x0, y0, x1, y1] = request.bbox;
+    let box_path = [
+        PathSegment::MoveTo { x: x0, y: y0 },
+        PathSegment::LineTo { x: x1, y: y0 },
+        PathSegment::LineTo { x: x1, y: y1 },
+        PathSegment::LineTo { x: x0, y: y1 },
+        PathSegment::Close,
+    ];
+    // Pattern space, because `to_pixels` is the renderer's `base` and the
+    // cell's CTM starts at the identity.
+    let state = tinker_pdf_content::GraphicsState::new(Matrix::IDENTITY);
+    renderer.clip_path(&box_path, &state, false);
+
+    paint(&mut renderer);
+    // 8.7.3.3: a `PaintType 2` cell is drawn as its content stream draws it
+    // and is only a shape: the renderer composites its coverage in the `SCN`
+    // colour (`Canvas::composite_tinted`), so nothing about colour is decided
+    // here and the cell is the same whatever it is filled in.
+    //
+    // 11.7.5.2 asks whether every object of the cell was fully opaque.
+    let opaque = renderer.painted_opaquely();
+    let (canvas, warnings, counts) = renderer.finish_counted();
+    (canvas, warnings, counts, opaque)
+}
+
 /// One decode [`Caches::images`] keeps: the image or the codec's refusal, with
 /// what the decode tolerated, and what it was asked for.
 struct Kept {
@@ -5250,6 +5360,68 @@ impl PageResources {
             frame,
             colour,
         )
+    }
+
+    /// The frame image XObject `name` is decoded against
+    /// ([`ImageEntry::frame`]), in `intent`: the scope's cache entry's, which
+    /// a decode of the name has already filled, or a decode's own where none
+    /// has, kept no longer than the call. `None` for an image no draw
+    /// reduces. What a command stream reads its reductions from
+    /// ([`Frame::reductions`]).
+    pub(crate) fn image_frame(&self, name: &[u8], intent: RenderingIntent) -> Option<Frame> {
+        let entry = self.caches.images.read(name.to_vec(), || {
+            let (decoded, frame, colour) = self.decode_cached(name, &ImageRequest::FULL, intent);
+            let entry = Arc::new(ImageEntry {
+                frame,
+                colour,
+                decoded: Flights::new(),
+            });
+            let key = (decoded.at, colour.key(intent));
+            entry.decoded.read(key, || Filled::Keep(decoded.cached));
+            Filled::Once(entry)
+        });
+        entry.frame
+    }
+
+    /// The bytes the document's budget leaves image XObject `name`'s decode
+    /// in this scope ([`Room`]): what every draw of it reads the reduction it
+    /// takes against beside its size ([`Frame::asked`]), and so what a command
+    /// stream holds beside the image's frame. `None` for a render with no
+    /// budget, and for a name selecting no image whose decode a draw's size
+    /// reduces ([`PageResources::reducible`]), which no budget reduces either.
+    pub(crate) fn image_room(&self, name: &[u8]) -> Option<Room> {
+        let cache = self.op.cache()?;
+        let (dict, _) = self.xobject(name)?;
+        let subtype = self
+            .doc
+            .resolve_key(&dict, Name::SUBTYPE)
+            .as_name()
+            .and_then(|n| self.doc.name_bytes(n))?;
+        if subtype.as_ref() != b"Image" || !self.reducible(&dict) {
+            return None;
+        }
+        let key_bytes = u64::try_from(self.defaults().written.len()).unwrap_or(u64::MAX);
+        Some(Room::under(cache.limits().bytes, key_bytes))
+    }
+
+    /// The frame an inline image's decode is read against, as
+    /// [`GlyphSource::inline_image`] decodes it in `intent`: a JPEG's or a
+    /// codestream's own, `None` for any other. An inline image carries no
+    /// mask, so every frame its codec reports reduces.
+    pub(crate) fn inline_frame(
+        &self,
+        dict: &[u8],
+        data: &[u8],
+        intent: RenderingIntent,
+    ) -> Option<Frame> {
+        let text = expand_inline_abbreviations(dict);
+        let mut sink = tinker_pdf_cos::WarningSink::new();
+        let parsed = tinker_pdf_cos::parse_object_at(&text, 0, self.doc.names_table(), &mut sink);
+        let dict = parsed.object.as_dict()?;
+        let conversion = self.own_intent(dict).unwrap_or(intent).conversion();
+        self.decode_inline(dict, data, &ImageRequest::FULL, conversion)
+            .ok()
+            .and_then(|(_, frame)| frame)
     }
 
     /// How image XObject `dict`'s colours take a rendering intent
@@ -5501,48 +5673,9 @@ impl PageResources {
             None => scope.unwrap_or(self),
         };
 
-        let canvas = Canvas::new(
-            request.width,
-            request.height,
-            request.format,
-            Color::TRANSPARENT,
-        );
-        let mut renderer = tinker_pdf_render::Renderer::new(canvas, request.to_pixels, resources)
-            .with_cancel(request.cancel.clone())
-            .with_pattern_depth(request.depth)
-            .with_antialias(request.antialias)
-            .with_levels(request.graphics_bits, request.text_bits)
-            .with_hard_edge(request.hard_edge)
-            .with_thinnest_line(request.thinnest_line);
-
-        // 8.7.3.2: the cell is clipped to its `/BBox`. The buffer is already
-        // that box rounded outward, so this only takes back the part of a
-        // pixel the rounding gave away -- but a hatch is normally drawn with a
-        // line width that deliberately runs past the box so neighbouring cells
-        // join, and without the clip that overshoot lands in the next cell's
-        // gap.
-        let [x0, y0, x1, y1] = request.bbox;
-        let box_path = [
-            PathSegment::MoveTo { x: x0, y: y0 },
-            PathSegment::LineTo { x: x1, y: y0 },
-            PathSegment::LineTo { x: x1, y: y1 },
-            PathSegment::LineTo { x: x0, y: y1 },
-            PathSegment::Close,
-        ];
-        // Pattern space, because `to_pixels` is the renderer's `base` and the
-        // interpreter's CTM starts at the identity below.
-        let state = tinker_pdf_content::GraphicsState::new(Matrix::IDENTITY);
-        renderer.clip_path(&box_path, &state, false);
-
-        tinker_pdf_content::interpret(&content, Matrix::IDENTITY, &mut renderer, resources);
-        // 8.7.3.3: a `PaintType 2` cell is drawn as its content stream draws
-        // it and is only a shape: the renderer composites its coverage in the
-        // `SCN` colour (`Canvas::composite_tinted`), so nothing about colour
-        // is decided here and the cell is the same whatever it is filled in.
-        //
-        // 11.7.5.2 asks whether every object of the cell was fully opaque.
-        let opaque = renderer.painted_opaquely();
-        let (canvas, warnings, counts) = renderer.finish_counted();
+        let (canvas, warnings, counts, opaque) = paint_cell(request, resources, |renderer| {
+            tinker_pdf_content::interpret(&content, Matrix::IDENTITY, renderer, resources);
+        });
         // The cell's renderer is one of this render's own, so the work it did
         // is; the calls it drew are a paint of the fill that names the
         // pattern, not the page's.
@@ -6028,6 +6161,45 @@ impl PageResources {
             *marker = Some(name.clone());
         }
         self.note_missing_font(name);
+    }
+
+    /// How many fonts these resources have met that they could not resolve:
+    /// what a caller delivering calls one at a time reads after each, as
+    /// [`PageResources::tolerated`] is read, to say which call each was met
+    /// at (`command_stream.rs`).
+    pub(crate) fn missing_count(&self) -> usize {
+        self.missing_fonts.lock().map_or(0, |list| list.len())
+    }
+
+    /// The tiling cell pattern `name` selects here (8.7.3.2): its content
+    /// stream, decoded, and the resources its `/Resources` names, serving
+    /// this scope's operation, or `None` where it names none and draws in
+    /// this scope. `None` for a name that selects no pattern stream: a direct
+    /// dictionary carrying the keys but no stream has no cell to draw, and
+    /// declining is what turns it back into the reported gap it was.
+    ///
+    /// 8.7.3.2: the cell's own `/Resources`. Gap 11 recorded that a *form*
+    /// XObject's `/Resources` are consulted nowhere in this engine; a
+    /// pattern's are, because a cell that names `/F0` almost always means a
+    /// font the page never heard of — a pattern is a self-contained drawing,
+    /// where a form is usually written beside the page that invokes it.
+    pub(crate) fn cell(&self, name: &[u8]) -> Option<(Arc<Vec<u8>>, Option<PageResources>)> {
+        let (dict, reference) = self.pattern_entry(name)?;
+        let content = self.decoded(reference?).ok()?;
+        let own = self
+            .doc
+            .resolve_key(&dict, Name::RESOURCES)
+            .as_dict()
+            .cloned()
+            .map(|dict| {
+                PageResources::from_dict_in(
+                    &self.doc,
+                    dict,
+                    self.provider.as_ref(),
+                    self.op.clone(),
+                )
+            });
+        Some((content, own))
     }
 
     /// Adds a font to what this render could not resolve, once, and to what
@@ -7816,7 +7988,7 @@ impl PageResources {
     }
 
     /// Decodes an inline image's samples (8.9.7), its colours converted as
-    /// `conversion` says.
+    /// `conversion` says, with the frame a JPEG or a codestream reports.
     ///
     /// Separate from [`Self::decode_image_at`] because an inline image has no
     /// object number: its bytes are in hand rather than behind a stream tier,
@@ -7827,7 +7999,7 @@ impl PageResources {
         data: &[u8],
         request: &ImageRequest,
         conversion: icc::Conversion,
-    ) -> Result<DecodedImage, String> {
+    ) -> Result<(DecodedImage, Option<Frame>), String> {
         let int = |key: &[u8]| {
             self.doc
                 .resolve_key(dict, self.name(key))
@@ -7885,20 +8057,18 @@ impl PageResources {
                 // decoded at the size the draw asks. It has no object to be
                 // kept under, so no budget reaches it.
                 let named = self.inline_space(dict);
-                return self
-                    .jpeg_image(
-                        &data,
-                        &decode,
-                        interpolate,
-                        named,
-                        INLINE_NAME.as_bytes(),
-                        DecodeAsk {
-                            request,
-                            conversion,
-                            room: None,
-                        },
-                    )
-                    .map(|(image, _)| image);
+                return self.jpeg_image(
+                    &data,
+                    &decode,
+                    interpolate,
+                    named,
+                    INLINE_NAME.as_bytes(),
+                    DecodeAsk {
+                        request,
+                        conversion,
+                        room: None,
+                    },
+                );
             }
             InlineSamples::Jpx(data) => {
                 // The same entry point the XObject path takes, for the same
@@ -7910,20 +8080,18 @@ impl PageResources {
                 // so it too is decoded at the size the draw asks; an inline
                 // image is never cached, so its frame is read by no later draw.
                 let named = self.inline_space(dict);
-                return self
-                    .jpx_image(
-                        &data,
-                        dict,
-                        interpolate,
-                        named,
-                        INLINE_NAME.as_bytes(),
-                        DecodeAsk {
-                            request,
-                            conversion,
-                            room: None,
-                        },
-                    )
-                    .map(|(image, _)| image);
+                return self.jpx_image(
+                    &data,
+                    dict,
+                    interpolate,
+                    named,
+                    INLINE_NAME.as_bytes(),
+                    DecodeAsk {
+                        request,
+                        conversion,
+                        room: None,
+                    },
+                );
             }
         };
         // 7.4.6: fax output is one bit per pixel whatever the dictionary
@@ -7953,25 +8121,28 @@ impl PageResources {
             SampleForm::TwoColour,
         );
 
-        Ok(DecodedImage {
-            width,
-            height,
-            rgb,
-            alpha,
-            stencil: is_mask,
-            interpolate,
-            two_colour,
-            reduced: None,
-            // A stencil is painted in the fill colour, whose family the
-            // state carries.
-            family: if is_mask {
-                tinker_pdf_content::ColorFamily::Other
-            } else {
-                tinker_pdf_render::color_family(&space)
+        Ok((
+            DecodedImage {
+                width,
+                height,
+                rgb,
+                alpha,
+                stencil: is_mask,
+                interpolate,
+                two_colour,
+                reduced: None,
+                // A stencil is painted in the fill colour, whose family the
+                // state carries.
+                family: if is_mask {
+                    tinker_pdf_content::ColorFamily::Other
+                } else {
+                    tinker_pdf_render::color_family(&space)
+                },
+                soft_masked: false,
+                window: None,
             },
-            soft_masked: false,
-            window: None,
-        })
+            None,
+        ))
     }
 
     /// The `/ColorSpace` an image XObject's dictionary names, read as a space

@@ -999,7 +999,7 @@ const MAX_GROUP_BUFFERS: u32 = 2000;
 /// the lattice counts, because every cell of every level draws the whole of
 /// the level below it. Sixteen levels of a four-cell lattice is four billion
 /// cells inside a budget that only ever looks at one level at a time.
-const MAX_PATTERN_DEPTH: u32 = 4;
+pub const MAX_PATTERN_DEPTH: u32 = 4;
 
 /// The most lattice positions one tiling-pattern fill will composite
 /// (8.7.3.2).
