@@ -60,7 +60,13 @@ the encoding the font dictionary specifies or the program's built-in one.
 can fill, stroke, draw images. The content interpreter fetches the procedure
 named by `/Encoding /Differences` out of `/CharProcs` and runs it recursively
 under the font's `/FontMatrix` — which is required, because a Type 3 font
-chooses its own glyph-space units rather than the 1/1000 convention.
+chooses its own glyph-space units rather than the 1/1000 convention. A
+resource scope reads the font's `/Differences` once, on its first glyph, into
+a table of each code's glyph name — the first name an array gives a code is
+the one it keeps, every item resolved, an integer or a real setting the code
+as the interpreter always read it — and keeps it beside `/CharProcs` and the
+matrix, so a glyph is one probe of the table and one lookup of its
+procedure.
 
 **Composite fonts** (9.7.4). The CID the encoding CMap produces — not the
 code — selects both the glyph and the advance. The advance is `/W`'s, read in

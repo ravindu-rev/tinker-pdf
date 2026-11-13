@@ -2229,7 +2229,7 @@ step that brings it within bound.
 
 | Question | Asked | What it reads each time | Step |
 | --- | --- | --- | --- |
-| `type3_glyph` | every glyph | the font's dictionary out of `/Font`, copied, with `/Font`, `/Subtype` and the font's name looked up by their bytes; for a Type 3 font, `/Encoding`, `/Differences` walked from its first item, `/CharProcs` and `/FontMatrix` | P-02.4 the record; P-02.2 the keys and P-02.3 the kind, landed |
+| `type3_glyph` | every glyph | the font's dictionary out of `/Font`, copied, with `/Font`, `/Subtype` and the font's name looked up by their bytes; for a Type 3 font, `/Encoding`, `/Differences` walked from its first item, `/CharProcs` and `/FontMatrix` | P-02.2 the keys, P-02.3 the kind and P-02.4 the record, landed |
 | `font_object`, `resource_name`, `selection` | every glyph a save's subset walk records (`subset::show`), and each outline the renderer extracts | `font_ids` scanned for the id and the name copied; `font_object` the `/Font` subdictionary copied too (`font_table`) | P-02.3, landed |
 | a scope's construction | every scope: a page's, a form's, a pattern cell's, an appearance's, the font rule's | every font its `/Font` names, read with its CMaps (`stats::fonts`), used or not; and `for_one_render` and `bind` copy the two maps it filled for every render and every counting asker | P-02.3, landed |
 | `color_space`, `selected_space` | each `cs` and `CS` that names a resource, three readings; each `sc` and `scn` in one, two | `/ColorSpace`, the entry and its parse | P-02.5 |

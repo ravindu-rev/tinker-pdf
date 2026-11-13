@@ -165,6 +165,59 @@ pub(crate) struct ScopeFont {
     /// Whether [`FontSource::type3_glyph`] reads it as a Type 3 font: its own
     /// `/Subtype` the name `/Type3`, as written.
     type3: bool,
+    /// A Type 3 font's procedures, read on its first glyph and kept for every
+    /// render over the scope.
+    procedures: OnceLock<Type3Procedures>,
+}
+
+/// What a Type 3 font's glyphs are drawn from (9.6.5), read once a scope on
+/// its first glyph (`docs/design/performance.md`, P-02, "The Type 3 record").
+struct Type3Procedures {
+    /// Each code's glyph name, as [`type3_codes`] reads `/Differences`.
+    names: HashMap<u32, Name>,
+    /// `/CharProcs`, resolved; a glyph's procedure is the stream its name
+    /// names there.
+    procs: Arc<Object>,
+    /// `/FontMatrix`'s six numbers, each a number where it lies; `None` when
+    /// they are not six, which draws no glyph.
+    matrix: Option<Matrix>,
+}
+
+/// A Type 3 font's `/Differences`, read as the interpreter reads it — item by
+/// item from the first, a counter starting at 0: an integer sets it, a
+/// negative one or one past `u32` to 0; a real sets it as `as u32` converts
+/// it; a name is given to the counter's code, **the first name a code is
+/// given the one it keeps**, and the counter steps on, held at `u32::MAX`;
+/// every item is resolved before it is read, and an item of any other type is
+/// passed over. Names are kept as the array holds them, never as text.
+///
+/// Not the cos `Font`'s table, which lets a later entry win, passes over an
+/// indirect item and keeps lossy strings; `subset.rs`'s `names_of` and
+/// `redact.rs`'s `carrying_procedures` read the array this way too.
+fn type3_codes(doc: &CosDocument, differences: &[Object]) -> HashMap<u32, Name> {
+    let mut names = HashMap::new();
+    let mut code = 0u32;
+    for item in differences {
+        #[cfg(test)]
+        DIFFERENCES_READ.with(|read| read.set(read.get().saturating_add(1)));
+        match doc.resolve(item).as_ref() {
+            Object::Int(v) => code = u32::try_from(*v).unwrap_or(0),
+            Object::Real(v) => code = *v as u32,
+            Object::Name(name) => {
+                names.entry(code).or_insert(*name);
+                code = code.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The `/Differences` items [`type3_codes`] has read on this thread, so a
+    /// test holds a scope to reading its array once.
+    static DIFFERENCES_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A scope's fonts, by the name its content selects each by and by the id
@@ -1947,51 +2000,14 @@ impl FontSource for PageResources {
 
         // A Type 3 font addresses its procedures by name, and the only way to
         // get one is the /Encoding /Differences array — there is no built-in
-        // encoding for a font whose glyphs the document invented.
-        let encoding = self.doc.resolve_key(dict, Name::ENCODING);
-        let differences = self.doc.resolve_key(encoding.as_dict()?, Name::DIFFERENCES);
-        let differences = differences.as_array()?;
-
-        let mut current = 0u32;
-        let mut name: Option<Name> = None;
-        for item in differences {
-            match self.doc.resolve(item).as_ref() {
-                Object::Int(v) => current = u32::try_from(*v).unwrap_or(0),
-                Object::Real(v) => current = *v as u32,
-                Object::Name(n) => {
-                    if current == code {
-                        name = Some(*n);
-                        break;
-                    }
-                    current = current.saturating_add(1);
-                }
-                _ => {}
-            }
-        }
-        let name = name?;
-
-        let procs = self.doc.resolve_key(dict, Name::CHAR_PROCS);
-        let reference = procs.as_dict()?.get_ref(name)?;
+        // encoding for a font whose glyphs the document invented. Read once
+        // a scope, on the font's first glyph; a glyph is then one probe of
+        // the codes and one lookup in /CharProcs.
+        let procedures = found.procedures.get_or_init(|| self.read_type3(dict));
+        let name = *procedures.names.get(&code)?;
+        let reference = procedures.procs.as_dict()?.get_ref(name)?;
         let content = self.decoded(reference).ok()?;
-
-        // 9.6.5: /FontMatrix maps glyph space to text space. Unlike every
-        // other font it is not 1/1000 by convention — a Type 3 font chooses
-        // its own units, and the matrix is required for that reason.
-        let matrix = self
-            .doc
-            .resolve_key(dict, Name::FONT_MATRIX)
-            .as_array()
-            .and_then(|values| {
-                let n = |i: usize| values.get(i).and_then(Object::as_number);
-                Some(Matrix {
-                    a: n(0)?,
-                    b: n(1)?,
-                    c: n(2)?,
-                    d: n(3)?,
-                    e: n(4)?,
-                    f: n(5)?,
-                })
-            })?;
+        let matrix = procedures.matrix?;
 
         Some(tinker_pdf_content::Type3Glyph {
             content,
@@ -3334,7 +3350,50 @@ impl PageResources {
             dict,
             font: Arc::new(font),
             type3,
+            procedures: OnceLock::new(),
         })
+    }
+
+    /// A Type 3 font's procedures, as its dictionary `font` gives them: the
+    /// codes `/Encoding`'s `/Differences` names, `/CharProcs` and
+    /// `/FontMatrix`. An `/Encoding` that is no dictionary, a `/Differences`
+    /// that is no array and a `/CharProcs` that is no dictionary give a record
+    /// that answers every code with nothing, as the walk this replaced did.
+    fn read_type3(&self, font: &Dict) -> Type3Procedures {
+        let encoding = self.doc.resolve_key(font, Name::ENCODING);
+        let names = encoding
+            .as_dict()
+            .map(|encoding| {
+                let differences = self.doc.resolve_key(encoding, Name::DIFFERENCES);
+                differences
+                    .as_array()
+                    .map(|items| type3_codes(&self.doc, items))
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        // 9.6.5: /FontMatrix maps glyph space to text space. Unlike every
+        // other font it is not 1/1000 by convention — a Type 3 font chooses
+        // its own units, and the matrix is required for that reason.
+        let matrix = self
+            .doc
+            .resolve_key(font, Name::FONT_MATRIX)
+            .as_array()
+            .and_then(|values| {
+                let n = |i: usize| values.get(i).and_then(Object::as_number);
+                Some(Matrix {
+                    a: n(0)?,
+                    b: n(1)?,
+                    c: n(2)?,
+                    d: n(3)?,
+                    e: n(4)?,
+                    f: n(5)?,
+                })
+            });
+        Type3Procedures {
+            names,
+            procs: self.doc.resolve_key(font, Name::CHAR_PROCS),
+            matrix,
+        }
     }
 
     /// The font a font id stands for in this scope.
@@ -5990,5 +6049,197 @@ trailer\n<< /Size 5 /Root 1 0 R >>\n%%EOF\n",
         // with names the form and cannot reach it.
         let over_original = PageResources::new(&editor.shared_document(), viewed, None);
         assert!(over_original.xobject(b"Fm9").is_none());
+    }
+
+    /// P-02.4's record of a Type 3 font's procedures, held to the walk it
+    /// replaced and to one reading a scope.
+    mod type3_record {
+        use std::cell::Cell;
+
+        use super::super::{type3_codes, PageResources, DIFFERENCES_READ};
+        use crate::{Document, RenderOptions};
+        use tinker_pdf_content::FontSource;
+        use tinker_pdf_cos::{CosDocument, Name, ObjRef, Object};
+
+        /// The walk [`type3_codes`] replaced, kept to hold the record to: for
+        /// one code, the array read from its first item to the first name at
+        /// that code, every item resolved before it is read.
+        fn walk_differences(doc: &CosDocument, differences: &[Object], code: u32) -> Option<Name> {
+            let mut current = 0u32;
+            for item in differences {
+                match doc.resolve(item).as_ref() {
+                    Object::Int(v) => current = u32::try_from(*v).unwrap_or(0),
+                    Object::Real(v) => current = *v as u32,
+                    Object::Name(n) => {
+                        if current == code {
+                            return Some(*n);
+                        }
+                        current = current.saturating_add(1);
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+
+        /// A document whose objects 3 to 7 are what a `/Differences` array's
+        /// indirect items point at: an integer, a negative integer, a real, a
+        /// name, and a reference to the integer, which resolves through two.
+        fn differences_document() -> CosDocument {
+            let bytes = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+3 0 obj\n40\nendobj\n\
+4 0 obj\n-3\nendobj\n\
+5 0 obj\n7.9\nendobj\n\
+6 0 obj\n/Indirect\nendobj\n\
+7 0 obj\n3 0 R\nendobj\n\
+trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n";
+            CosDocument::open(bytes.to_vec()).expect("it opens")
+        }
+
+        /// One `/Differences` array from a seeded generator, of what the
+        /// reading has to tell apart: integers small, negative and past
+        /// `u32`, at and below `u32::MAX`; reals that truncate, are negative,
+        /// NaN or past the range; names that repeat; every indirect item
+        /// above; and items of a type the reading passes over.
+        fn differences(doc: &CosDocument, seed: &mut u64) -> Vec<Object> {
+            let mut next = || {
+                *seed ^= *seed << 13;
+                *seed ^= *seed >> 7;
+                *seed ^= *seed << 17;
+                *seed
+            };
+            let names = [b"a".as_slice(), b"b", b"space", b"x", b"Indirect"];
+            let length = (next() % 40) as usize;
+            (0..length)
+                .map(|_| match next() % 12 {
+                    0 => Object::Int((next() % 300) as i64),
+                    1 => Object::Int(-((next() % 5) as i64) - 1),
+                    2 => Object::Int(i64::from(u32::MAX) + 1 + (next() % 3) as i64),
+                    3 => Object::Real((next() % 3000) as f64 / 10.0),
+                    4 => Object::Real(-((next() % 50) as f64) / 7.0),
+                    5 => Object::Real(if next() % 2 == 0 { f64::NAN } else { 5.0e9 }),
+                    6 => Object::Ref(ObjRef::new(3 + (next() % 5) as u32, 0)),
+                    7 => Object::Int(i64::from(u32::MAX) - (next() % 2) as i64),
+                    8 => Object::Bool(true),
+                    _ => Object::Name(doc.intern(names[(next() % 5) as usize])),
+                })
+                .collect()
+        }
+
+        /// **P-02.4**: the record gives every code the name the walk it
+        /// replaced gives — over generated arrays with repeated codes,
+        /// negative and real counters, counters at and past `u32::MAX` and
+        /// indirect items — and no name to a code the walk gives none.
+        #[test]
+        fn the_type3_table_answers_what_the_walk_answered() {
+            let doc = differences_document();
+            let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+            let mut named = 0usize;
+            for _ in 0..2_000 {
+                let items = differences(&doc, &mut seed);
+                let table = type3_codes(&doc, &items);
+                let mut codes: Vec<u32> = (0..=300).collect();
+                codes.extend([u32::MAX - 2, u32::MAX - 1, u32::MAX]);
+                codes.extend(table.keys().copied());
+                for code in codes {
+                    let walked = walk_differences(&doc, &items, code);
+                    assert_eq!(
+                        table.get(&code).copied(),
+                        walked,
+                        "code {code} of {items:?}"
+                    );
+                    named += usize::from(walked.is_some());
+                }
+            }
+            assert!(named > 2_000, "the arrays name codes: {named}");
+        }
+
+        /// A page of a Type 3 font whose `/Differences` holds `items` items —
+        /// a counter and a name for each of its codes — showing every code
+        /// twenty times.
+        fn type3_page(items: usize) -> Document {
+            let glyphs = items - 1;
+            let mut differences = String::from("0");
+            let mut procs = String::new();
+            for at in 0..glyphs {
+                differences.push_str(&format!(" /g{at}"));
+                procs.push_str(&format!(" /g{at} 6 0 R"));
+            }
+            let mut shown = String::new();
+            for _ in 0..20 {
+                shown.push('<');
+                for code in 0..glyphs {
+                    shown.push_str(&format!("{code:02X}"));
+                }
+                shown.push_str("> Tj ");
+            }
+            let content = format!("BT /T3 10 Tf 10 10 Td {shown}ET");
+            let font = format!(
+                "<< /Type /Font /Subtype /Type3 /FontBBox [0 0 1000 1000]\n\
+                 /FontMatrix [0.001 0 0 0.001 0 0] /CharProcs <<{procs} >>\n\
+                 /Encoding << /Type /Encoding /Differences [{differences}] >>\n\
+                 /FirstChar 0 /LastChar {last} /Widths [{widths}] >>",
+                last = glyphs - 1,
+                widths = " 500".repeat(glyphs)
+            );
+            let procedure = "500 0 d0 0 0 400 400 re f";
+            let bytes = format!(
+                "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
+   /Resources << /Font << /T3 5 0 R >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n{font}\nendobj\n\
+6 0 obj\n<< /Length {} >>\nstream\n{procedure}\nendstream\nendobj\n\
+trailer\n<< /Size 7 /Root 1 0 R >>\n%%EOF\n",
+                content.len(),
+                procedure.len()
+            );
+            Document::open(bytes.into_bytes()).expect("it opens")
+        }
+
+        /// **P-02.4**: a scope reads its Type 3 font's `/Differences` once, on
+        /// the font's first glyph, however many glyphs it is asked about — the
+        /// array's length a scope, and never more — and a render over its
+        /// caches reads none of it again; another scope over the same
+        /// dictionary reads it once for itself, and so do the page's text and
+        /// its render, one scope each.
+        #[test]
+        fn differences_are_read_once_per_scope() {
+            const ITEMS: usize = 60;
+            let read = || DIFFERENCES_READ.with(Cell::get);
+            let reset = || DIFFERENCES_READ.with(|read| read.set(0));
+            let document = type3_page(ITEMS);
+            let page = document.page(0).expect("its page");
+
+            reset();
+            let scope = PageResources::new(&page.doc, &page.inner, None);
+            let mut drawn = 0;
+            for _ in 0..20 {
+                for code in 0..ITEMS as u32 + 2 {
+                    drawn += usize::from(scope.type3_glyph(b"T3", code).is_some());
+                }
+            }
+            assert_eq!(drawn, 20 * (ITEMS - 1), "every code the array names draws");
+            assert_eq!(read(), ITEMS, "the array read once, item by item");
+            let again = scope.for_one_render();
+            assert!(again.type3_glyph(b"T3", 0).is_some());
+            assert_eq!(read(), ITEMS, "a render over the same caches reads nothing");
+
+            reset();
+            let other = PageResources::new(&page.doc, &page.inner, None);
+            assert!(other.type3_glyph(b"T3", 3).is_some());
+            assert_eq!(read(), ITEMS, "another scope reads it once for itself");
+
+            reset();
+            let _ = page.text();
+            assert_eq!(read(), ITEMS, "a text extraction, one scope");
+            reset();
+            let _ = page.render(&RenderOptions::default());
+            assert_eq!(read(), ITEMS, "a render, one scope");
+        }
     }
 }
