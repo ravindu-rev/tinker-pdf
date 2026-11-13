@@ -1293,10 +1293,12 @@ kept, the glyphs of each of those under a half and a quarter turn read into
 the lines they make upright, and every threshold met exactly on an upright
 line, under the identity, a shift and `scaleX(2)`, decided as the page's `x`
 and `y` decide, search hit geometry,
-wmode/rtl separation, non-finite glyphs dropped, and a Type 3 glyph read
-where it is placed, once whether its procedure shows text of its own or is
-passed over at the depth cap, adding nothing for a code that maps nothing and
-recorded by no drawing device),
+wmode/rtl separation, non-finite glyphs dropped, a code nothing maps said
+once in the order first met with the text unchanged, its sixty-four kept
+apart from the unknown fonts' and not said inside a dropped artifact, and a
+Type 3 glyph read where it is placed, once whether its procedure shows text of
+its own or is passed over at the depth cap, adding nothing for a code that
+maps nothing but its report and recorded by no drawing device),
 `crates/tinker-pdf/src/text_order.rs` (ruling 14 on hand-built lines: a
 visual Hebrew line, one already in reading order, a mark on either side of
 its base, digits in a right-to-left line, an out-of-order left-to-right line
@@ -1318,7 +1320,14 @@ limit, a leading dash read last — the bracket tie-break, a right-to-left
 line opening with a bracketed Latin run drawn as three pieces, a list marker
 and a wrapped parenthesis in left-to-right text read as typed, and
 every committed `testdata` document and EPUB book unchanged against the
-opt-out),
+opt-out), `crates/tinker-pdf/tests/text_defaults.rs` (today's default
+extraction of every committed PDF, book and XPS document that opens without a
+key — each page's blocks, lines and characters, text, quad, origin, font and
+size, its warnings and `plain_text()`, written as a record of named fields and
+digested — held to `text_defaults.tsv` per build, a moved or unrecorded
+digest failing with its document and page; the table is written only by the
+command in its header, and a digest that moves is a finding for the owner,
+[design](../design/extraction-options.md)),
 `words.rs` (the table compiled from the file, segments of contractions,
 decimals and abbreviations, combining marks, flag pairs, word boxes from a
 real content stream, a raised character widening its word's box, a turned

@@ -1,0 +1,9 @@
+# The default extraction of every committed document of text_defaults.rs's
+# set, a SHA-256 of each page's record of named fields, by build
+# (docs/design/extraction-options.md, "The pin of the default").
+# Written only by these commands, each writing its build's rows and keeping
+# the others':
+# cargo test -p tinker-pdf --test text_defaults -- --ignored write_text_defaults --exact
+# cargo test -p tinker-pdf --features bundled-fonts --test text_defaults -- --ignored write_text_defaults --exact
+# A digest that moves is a finding put to the owner, never re-pinned to match.
+build	document	page	digest
