@@ -339,50 +339,106 @@ also bounds what flattening holds by its input (ruling 1).
 ### Type 1 to Type 2
 
 `tinker_pdf_font::type1_to_cff(program)` (FT-11.7) answers a bare CFF — one
-font, Type 2 charstrings, `CharstringType` unstated — or a refusal naming the
-construct it cannot map:
+font, Type 2 charstrings, no subroutines, `CharstringType` unstated — with its
+glyph names in glyph order and the CFF glyph each Type 1 glyph became, or a
+`Type1CffRefusal` naming the construct it would not map. Each charstring runs
+on a machine that is the Type 1 reader step for step — its number forms, its
+48-operand stack, its calls and bounds, its `callothersubr`/`pop` protocol —
+recording what it draws, and that is written as Type 2:
 
 - **Width and side bearing.** `hsbw sbx wx` gives the glyph's width `wx`,
   written as the first operand of its first stack-clearing operator over a
-  `nominalWidthX` and `defaultWidthX` of 0 (5177 §3.1); Type 2 has no side
-  bearing (5177 appendix C), so the current point starts at `(sbx, 0)` and
-  the first move carries it. `sbw` with a vertical width or a vertical side
+  `nominalWidthX` and `defaultWidthX` of 0 (5177 §3.1), and nothing for a
+  width of 0; the width a second `hsbw` sets is the one the reader advances
+  by. Type 2 has no side bearing (5177 appendix C), so the pen starts at
+  `(sbx, 0)` in the reader and at the origin in Type 2, and the first move
+  carries the difference. `sbw` with a vertical width or a vertical side
   bearing other than 0 is refused: Type 2 has no vertical width.
-- **Paths.** `rmoveto`, `hmoveto`, `vmoveto`, `rlineto`, `hlineto`,
-  `vlineto`, `rrcurveto`, `hvcurveto` and `vhcurveto` keep their operator
-  codes, Type 2's forms of one operand set; `closepath` is dropped, since a
-  Type 2 path closes at its next move and at `endchar`.
-- **Hints.** Every stem the glyph declares — its own and every hint
-  replacement's — is gathered, moved by the side bearing (`vstem`'s `x` is
-  relative to `sbx`), sorted and deduplicated, and declared at the start as
-  `hstemhm`/`vstemhm` with a `hintmask` for each set where the glyph replaces
-  hints (chapter 8.1), or as `hstem`/`vstem` where it does not; `hstem3` and
-  `vstem3` are three stems; `dotsection` is dropped; past appendix B's 96
-  stems is refused.
-- **Flex.** The seven points between OtherSubrs 1 and 0 (chapter 8.3) are
-  Type 2's `flex` (12 35), its depth the first operand subroutine 0 is
-  handed.
-- **Accents.** `seac` is written as the base's path and the accent's moved by
-  `(adx, ady)` in one charstring, which every Type 2 reader draws, rather than
-  as `endchar`'s deprecated four operands (5177 appendix C), which this
-  engine's CFF reader does not compose.
+- **Every operand lands where the reader's did.** A coordinate is written as
+  the program's own operand where adding it to Type 2's pen gives the
+  reader's coordinate, which is wherever the two pens stand together; as the
+  exact difference where one Type 2 operand holds it — an integer within
+  ±32 767 or a 16.16 fraction — which is what a side bearing, a second
+  `hsbw` and an accent's displacement need; and, from a pen at 0, as the side
+  bearing and the operand summed by Type 2's `add` (12 10), the reader's own
+  addition. A coordinate none of the three reaches exactly refuses the
+  program (`Number`); nothing is rounded.
+- **Paths.** Moves, lines and the three curve operators keep their Type 2
+  forms, `hmoveto`, `vmoveto`, `hlineto`, `vlineto`, `hvcurveto` and
+  `vhcurveto` wherever the delta they leave out is 0, and runs of lines, of
+  curves and of alternating axes join into one operator within the stack.
+  `closepath` is written as nothing, since a Type 2 path closes at its next
+  move and at `endchar`; so a path drawn before the glyph's first move, or
+  after a `closepath` with no move between, which Type 2 cannot draw, is
+  refused (`Path`).
 - **Subroutines** are inlined, so the CFF carries none and the CFF subsetter
-  cuts it.
-- **`div`** is Type 2's `div` (12 12) where both operands are numbers Type 2
-  writes — an integer within ±32 767 or a 16.16 value; a dividend past that
-  (chapter 6.2 lets a Type 1 integer reach 2³¹ before a `div`) is written as
-  its quotient where a 16.16 value holds it exactly, and refused otherwise.
-- **Refused**: an OtherSubrs entry past 3, a `pop` or `setcurrentpoint`
-  outside the flex protocol, and a glyph whose conversion does not outline
-  and advance as the program does.
+  cuts it. An `endchar` inside a subroutine ends that subroutine and the
+  glyph draws on, as the reader runs it. A call to an index the program does
+  not define — past the array, into a hole of it, or negative — is refused.
+- **Hints.** Every stem the glyph declares — its own, `hstem3`'s and
+  `vstem3`'s three, and each hint replacement's — is moved by the side
+  bearing (a stem is relative to the left side bearing point, chapter 6),
+  ordered and declared once at the start, at 16.16, which is what a Type 2
+  operand holds; a stem guides a rasteriser and is no part of the outline.
+  Without hint replacement they are `hstem`/`vstem`; with it
+  `hstemhm`/`vstemhm`, and a `hintmask` selects each set before the first
+  segment it holds for. A hint replacement's set is the stems of the `subr#`
+  handed to OtherSubrs entry 3 (chapter 8.1), read as an interpreter that
+  replaces hints reads them; one that names no subroutine the program
+  defines, or whose subroutine does anything but declare stems, is refused
+  (`HintReplacement`). `dotsection` is dropped; past appendix B's 96 stems is
+  refused.
+- **Flex.** The seven points between OtherSubrs 1 and 0 (chapter 8.3) are
+  Type 2's `flex` (12 35), the reference point dropped and the flex height
+  the first operand subroutine 0 is handed. A flex of other than seven
+  points, one inside another, one never ended, one interrupted by anything
+  but its moves, calls and `div`, or one drawn where no path is open is
+  refused (`Flex`).
+- **Accents.** `seac` is written as the base's path and the accent's moved by
+  `(adx, ady)` in one charstring, each component drawn as its own charstring
+  as the reader draws it, rather than as `endchar`'s deprecated four operands
+  (5177 appendix C), which this engine's CFF reader does not compose; the
+  accent's stems are moved with it and selected by a mask of their own where
+  they differ from the base's. A `seac` whose base or accent the program lacks
+  is refused (`Accent`).
+- **`div`** is Type 2's `div` (12 12) where both operands are written; a
+  dividend Type 2 does not write (chapter 6.2 lets a Type 1 integer reach
+  2³¹ before a `div`) is written as its quotient where one operand holds that
+  exactly, and refused otherwise.
+- **Refused besides**: a multiple-master program, whose glyphs are its
+  masters blended at an instance; an OtherSubrs entry past 3; a `pop` with
+  nothing the flex or hint-replacement protocol left for it, a
+  `setcurrentpoint` anywhere but after a flex, and a value either protocol
+  hands `pop` used as an operand (`Protocol`); a glyph that meets one of the
+  reader's bounds; two charstrings under one name, and a name that is empty
+  or not UTF-8; a `/FontName` that is not 1 to 127 bytes of printable ASCII
+  outside 5176's reserved characters; a converted charstring past 65 535
+  bytes, or charstrings that together pass sixteen times the program's
+  length (ruling 1); and a conversion whose read-back disagrees
+  (`Mismatch`).
 
-The charset names every charstring, `.notdef` first as 5176 requires, each
-name a standard string or one in the String INDEX; the encoding is the
-predefined Standard one where the program says `StandardEncoding`, and
-otherwise a format 0 or 1 table with a supplement for a glyph two codes name;
-the Top DICT carries the program's `FontMatrix` and `FontBBox`. The INDEX and
-DICT writers are `cff_subset.rs`'s. Every glyph is outlined and advanced in
-both programs before the converter answers.
+The charset names every charstring, `.notdef` first as 5176 requires — an
+empty one, drawing nothing and advancing nothing, where the program has
+none, which is what a name the program lacks draws — then the glyphs the
+built-in encoding reaches in the order of the lowest code each answers to,
+then every other glyph in program order; each name is a standard string or
+one in the String INDEX, and the charset is the predefined ISOAdobe one where
+it is that, otherwise the smallest of 5176's three formats. The encoding is the
+predefined Standard one where it gives every code the glyph the program's
+does, and otherwise the smaller of formats 0 and 1 with a supplement for each
+further code a glyph answers to; a code the program maps to `.notdef` is
+mapped to nothing, 5176's glyph 0. The Name INDEX holds `/FontName`, the Top
+DICT the program's `FontMatrix` where it is not the default, its `FontBBox`
+and its `FontInfo` strings and numbers, and the Private DICT its
+`BlueValues`, `OtherBlues`, `FamilyBlues`, `FamilyOtherBlues`, `StdHW`,
+`StdVW`, `StemSnapH`, `StemSnapV`, `BlueScale`, `BlueShift`, `BlueFuzz`,
+`ForceBold`, `LanguageGroup` and `ExpansionFactor` as 5176 Table 23 spells
+them, zones and snaps as delta arrays, each where the program states it
+within the table's limits. `UniqueID` is not carried: the charstrings are not
+the program's. The INDEX and DICT writers are `cff_subset.rs`'s. Before it
+answers, every Type 1 glyph is found at its CFF glyph by its name and
+outlined and advanced in both programs, the font matrix compared, and every
+built-in code read back.
 
 ### When a save converts
 

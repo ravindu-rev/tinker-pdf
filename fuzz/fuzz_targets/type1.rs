@@ -9,8 +9,8 @@
 //!
 //! # What this target checks, and what it does not
 //!
-//! **Only that the code did not panic, hang, or exhaust memory.** Every call
-//! is discarded. Both layers of the stream cipher make this worse than
+//! **For the reader, only that the code did not panic, hang, or exhaust
+//! memory.** Every call is discarded. Both layers of the stream cipher make this worse than
 //! usual, as this target's own header says: every byte of a damaged program
 //! decrypts to *something*, so a wrong key yields a plausible charstring
 //! rather than a failure. So a run that returned the *wrong* answer passes
@@ -24,10 +24,18 @@
 //! Recorded because the same shape has already cost this repository once: the
 //! `brotli` target asserts only self-consistency and could not have found the
 //! ring-buffer defect that a decoded-bytes comparison found immediately.
+//!
+//! **The converter to CFF** (`tinker_pdf_font::type1_to_cff`) is a writer
+//! over the same machine, and what it answers is asserted on: it parses as a
+//! CFF, holds the glyphs it names with `.notdef` first, and draws and
+//! advances each Type 1 glyph it maps exactly as the reader does. That last
+//! check is the converter's own, run again from outside; the reader both
+//! sides are held to is this repository's, so it is evidence that the
+//! conversion agrees with the reader and not that either is right.
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
-use tinker_pdf_font::Type1;
+use tinker_pdf_font::{type1_to_cff, Cff, Type1};
 
 fuzz_target!(|data: &[u8]| {
     let Some(mut font) = Type1::parse(data) else {
@@ -64,6 +72,37 @@ fuzz_target!(|data: &[u8]| {
         // `advance` is `hsbw`/`sbw` and the width-only path.
         let _ = font.outline(glyph);
         let _ = font.advance(glyph);
+    }
+
+    // The conversion: refused, or a CFF of the glyphs it names drawing each
+    // Type 1 glyph as the reader draws it.
+    if let Ok(converted) = type1_to_cff(data) {
+        let Some(cff) = Cff::parse(&converted.program) else {
+            panic!(
+                "the converter wrote {} bytes the CFF reader refuses",
+                converted.program.len()
+            );
+        };
+        assert_eq!(
+            cff.glyph_count(),
+            converted.names.len(),
+            "the names it reports are the glyphs it holds"
+        );
+        assert_eq!(cff.glyph_name(0), Some(".notdef"), "5176's glyph 0");
+        assert_eq!(converted.glyphs.len(), font.glyph_count());
+        for (index, &gid) in converted.glyphs.iter().enumerate().take(64) {
+            let glyph = u16::try_from(index).expect("at most 64");
+            assert_eq!(
+                cff.outline(gid).map(|outline| outline.segments),
+                font.outline(glyph).map(|outline| outline.segments),
+                "glyph {index} draws otherwise"
+            );
+            assert_eq!(cff.advance(gid), font.advance(glyph));
+        }
+        assert!(
+            type1_to_cff(data) == Ok(converted),
+            "the same program converted twice to different bytes"
+        );
     }
 
     // A multiple-master program instanced at three design vectors — every

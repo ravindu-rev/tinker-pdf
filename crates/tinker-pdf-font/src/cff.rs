@@ -1593,7 +1593,7 @@ pub(crate) const STANDARD_STRINGS: &[&str; 391] = &[
 /// Codes 32 to 126 are the printable ASCII names in order, which is why that
 /// half is arithmetic; the high range is contiguous in SIDs and full of holes
 /// in codes, so it is written out.
-const STANDARD_ENCODING: &[(u8, u16)] = &[
+pub(crate) const STANDARD_ENCODING: &[(u8, u16)] = &[
     (32, 1),
     (33, 2),
     (34, 3),

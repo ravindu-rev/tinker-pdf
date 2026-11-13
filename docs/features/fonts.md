@@ -277,6 +277,40 @@ program does not define or meets one of the reader's bounds (ten levels of
 calls, 100 000 operators, 48 operands), and a subset that draws a kept glyph
 otherwise.
 
+**Converting a Type 1 program to CFF** ([design](../design/subsetting.md),
+*Type 1 to Type 2*). `tinker_pdf_font::type1_to_cff(program)` rewrites a Type
+1 program as a bare CFF: one font of Type 2 charstrings, no subroutines. Each
+charstring runs on a machine that is the reader above step for step and is
+written as Type 2 — the side bearing folded into the first move, `closepath`
+left to the next move and to `endchar`, every subroutine inlined (an
+`endchar` inside one ends only it, as the reader runs it), a flex as Type 2's
+`flex`, a `seac` as the base's path and the accent's in one charstring, and
+every stem the glyph and its hint replacements declare, moved by the side
+bearing, at the start: `hstem`/`vstem`, or `hstemhm`/`vstemhm` with a
+`hintmask` wherever the set changes. Each operand lands where the reader's
+did: the program's own where the two pens stand together, `div` kept as Type
+2's `div`; the exact difference where one Type 2 operand holds it; or, from a
+pen at 0, the side bearing and the operand added by Type 2's `add`. The
+charset names every glyph, `.notdef` first — an empty one where the program
+has none — then the glyphs the built-in encoding reaches in the order of
+their lowest codes; the encoding is the predefined Standard one where it is
+that, otherwise 5176's smaller table with a supplement for each further code;
+the Top DICT carries the program's `FontMatrix`, `FontBBox` and `FontInfo`,
+the Private DICT its zones, stems and hinting values. It answers the CFF, its
+names in glyph order and the CFF glyph of each Type 1 glyph, after outlining
+and advancing every glyph in both programs and reading back every name and
+every built-in code; or a `Type1CffRefusal` naming what it would not guess: an
+unreadable or multiple-master program, more glyphs than a CFF holds, a name
+given twice or not UTF-8, a `/FontName` a CFF cannot carry, a call to a
+subroutine the program does not define or a run past one of the reader's
+bounds, an `sbw` with vertical metrics, an OtherSubrs entry past 3, a `pop` or
+`setcurrentpoint` outside its protocol, a flex outside chapter 8.3's form, a
+hint replacement that declares no stems, more than 96 stems, a path drawn
+without a move, a `seac` whose component is missing, a number no Type 2
+operand holds exactly, a charstring past 65 535 bytes or charstrings past
+sixteen times the program's length, and a conversion that draws, names or
+encodes a glyph otherwise.
+
 **A multiple-master program** (the Type 1 Font Format Supplement's section 3;
 [design](../design/type42-and-multiple-master.md)) is read with its
 `/WeightVector` — two to sixteen numbers, its default instance — and its blend

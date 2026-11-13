@@ -34,6 +34,7 @@ pub mod svg_table;
 pub mod symbolic;
 pub mod type1;
 pub mod type1_subset;
+pub mod type1_to_cff;
 pub mod type42;
 pub mod variation;
 pub mod woff;
@@ -60,5 +61,6 @@ pub use svg_table::{SvgDocument, SvgRecord, SvgRefusal, SvgTable, SvgWarning, MA
 pub use symbolic::{substitute_glyph, SymbolRoute};
 pub use type1::{Blend, Instance, InstanceRefusal, Type1};
 pub use type1_subset::{subset_type1, Type1Refusal, Type1Subset};
+pub use type1_to_cff::{type1_to_cff, Type1Cff, Type1CffRefusal};
 pub use type42::{Type42, Type42Refusal};
 pub use woff::{packaging, Packaging, WoffError};

@@ -625,6 +625,18 @@ impl Type1<'_> {
         Some(run.width)
     }
 
+    /// The charstring of the glyph at `index`, decrypted, as this reader runs
+    /// it: what [`crate::type1_to_cff`] converts.
+    pub(crate) fn charstring(&self, index: usize) -> Option<&[u8]> {
+        self.glyphs.get(index).map(|(_, code)| code.as_slice())
+    }
+
+    /// The subroutine the reader stores at `index`, decrypted: empty at an
+    /// index below the highest that the program does not define.
+    pub(crate) fn subr(&self, index: usize) -> Option<&[u8]> {
+        self.subrs.get(index).map(Vec::as_slice)
+    }
+
     /// A glyph's run as [`crate::type1_subset`] reads it: the subroutines it
     /// called, the hint replacements it asked for, its `seac` components and
     /// the first bound it met, and the steps it took. `None` for a glyph the
@@ -1493,7 +1505,7 @@ fn regular_end(data: &[u8], start: usize) -> usize {
 }
 
 /// A PostScript integer or real, `0.53`, `.53`, `-12` or `1e-3`, finite.
-fn ps_number(token: &[u8]) -> Option<f64> {
+pub(crate) fn ps_number(token: &[u8]) -> Option<f64> {
     let body = token
         .strip_prefix(b"-")
         .or_else(|| token.strip_prefix(b"+"))
