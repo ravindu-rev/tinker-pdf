@@ -407,7 +407,11 @@
         { "name": "PDF-X validation of 5 pages", "unit": "pages",
           "per_iteration": 110, "calls": 22,
           "gate": { "floor": 1, "relations": [
-            { "to": "text of the 5 claiming pages", "at_most": 3 } ] } }
+            { "to": "text of the 5 claiming pages", "at_most": 3 } ] } },
+        { "name": "the text page's box, transparency and overprint at 150 dpi",
+          "unit": "pages", "per_iteration": 5, "calls": 5, "gate": { "floor": 1 } },
+        { "name": "the text page's grey test at 72 dpi", "unit": "pixels",
+          "per_iteration": 1001980, "calls": 2, "gate": { "floor": 1 } }
       ]
     },
     {
@@ -670,6 +674,8 @@
         "analysis/PDF-A validation of 5 pages",
         "analysis/PDF-UA validation of 5 pages",
         "analysis/PDF-X validation of 5 pages",
+        "analysis/the text page's box, transparency and overprint at 150 dpi",
+        "analysis/the text page's grey test at 72 dpi",
         "encode/PNG of the 1240x1755 text page",
         "encode/PNG of the near-blank page",
         "encode/deflate page-like data",

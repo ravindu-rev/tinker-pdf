@@ -941,7 +941,7 @@ column, before MS-02.6 builds the run.
 
 In this design, `cargo bench` times every operation of tier P's target
 table that the tree can run, and the row's own, in twelve groups of one file
-each, MS-09's `threads` among them: 173 operations over inputs the benches
+each, MS-09's `threads` among them: 175 operations over inputs the benches
 generate or the tree holds, each
 held by `cargo xtask bench-check --machine` to the band its machine's entry in
 `baseline.json` records, from a local `cargo bench -p tinker-pdf` on that
@@ -1233,6 +1233,9 @@ set, and the split divides each by its own `calls`.
 
 **analysis** — every relation's "text of the same pages" is the group's own
 text of the document the operation reads, so all six stay inside the group.
+The two page-analysis rows (RC-17) read the render group's text page,
+`dense(1, 0)`, under the same stored name; neither is in tier P's table, and
+no run has timed them, so their window is *untimed*.
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
@@ -1244,6 +1247,8 @@ text of the document the operation reads, so all six stay inside the group.
 | `analysis/PDF-A validation of 5 pages` | pages · 10 × 5 | `claiming(5)`, `validate_pdfa` (`lib.rs:1990`) | not measured; ≤ 3 × text | ×10 | built |
 | `analysis/PDF-UA validation of 5 pages` | pages · 11 × 5 | `validate_pdfua` (`:2020`) | not measured; ≤ 3 × text | ×11 | built |
 | `analysis/PDF-X validation of 5 pages` | pages · 22 × 5 | `validate_pdfx` (`:2043`) | not measured; ≤ 3 × text | ×22 | built |
+| `analysis/the text page's box, transparency and overprint at 150 dpi` | pages · 5 | `dense(1, 0)`'s display list, recorded once untimed: `DisplayList::analysis` at 150 dpi (`crates/tinker-pdf/src/analysis.rs`), one walk of its events answering the box, transparency and overprint together; held before it is timed to a box over the page's lines inside the page, no transparency and no overprint; the planning baseline, which has no analysis, renders the page from the same list at 150 dpi in its place | not in tier P's table; floor 1, against the planning baseline's render of the same page; a target is the owner's (H-77) | untimed | built |
+| `analysis/the text page's grey test at 72 dpi` | pixels · 2 × 595×842 | `dense(1, 0)`, `Page::greyness` at 72 dpi with the default thresholds: the page drawn and every pixel read; held before it is timed to grey with no pixel coloured; the planning baseline, which has no grey test, draws the same render in its place | the same | untimed | built |
 
 **render** — a page render is `Page::render` (`lib.rs:2247`) at
 `RenderOptions::at_dpi` (`:724`); "the text page" is `dense(1, 0)`'s page; a
@@ -1647,8 +1652,9 @@ sampling, which criterion sets only on a group and which has no command-line
 flag, is the one setting each group makes itself.
 
 Sized into the window, every operation measures for about 4.7 s under this
-sampling, so the set's 147 measure for about eleven and a half minutes before
-anything is built, group after group in one local `cargo bench -p tinker-pdf`.
+sampling, so the set's 175 measure for about thirteen and three-quarter
+minutes before anything is built, group after group in one local
+`cargo bench -p tinker-pdf`.
 Every
 relation tier P draws between two operations has both in one group — the
 analysis group carries its own text for that reason — so one bench binary
@@ -1656,15 +1662,15 @@ measures both, in one process on one host (MS-10.1's note).
 
 | Group | Operations | Measurement |
 | --- | ---: | ---: |
+| render | 42 | 3.3 min |
 | layout | 40 | 3.1 min |
-| render | 34 | 2.7 min |
-| write | 17 | 1.3 min |
-| text | 13 | 1.0 min |
-| decode | 9 | 0.7 min |
-| analysis | 8 | 0.6 min |
-| open | 7 | 0.5 min |
+| text | 20 | 1.6 min |
+| write | 18 | 1.4 min |
+| decode | 16 | 1.3 min |
+| analysis | 10 | 0.8 min |
+| open | 8 | 0.6 min |
 | fonts | 7 | 0.5 min |
-| encode | 4 | 0.3 min |
+| encode | 6 | 0.5 min |
 | threads | 4 | 0.3 min |
 | sign | 3 | 0.2 min |
 | calibration | 1 | 0.1 min |

@@ -266,7 +266,6 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| RC-17.6a | measure | The analysis's speed rows in MS-04's analysis group: the bounding box, transparency and overprint answers for the 150-dpi text page from its display list, and the grey test at 72 dpi, each paired with the planning baseline's render of the same page. *Note:* The row gives no target, so the figures are recorded and a target is the owner's (H-77). | `crates/tinker-pdf/benches`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md` | `cargo xtask baseline` holds the bench file and `baseline.json` to one list with the two operations in it (`xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree`), and their first paired ratios against the planning baseline, taken by a local MS-02 paired run, are recorded in `docs/verification.md`. | RC-17.2, RC-17.3, RC-17.4, MS-02, MS-04 |
 | RC-17.6b | measure | The wall-clock figure RC-17.6a's exit names, taken in the timing phase on the named machine with nothing else running (ruling 15): by MS-04.10's fifteen runs, or by the paired run where RC-17.6a's exit names one, and committed as ruling 16 says. *Note:* Split from RC-17.6 by the owner's timing choice; RC-17.6a lands the operation unmeasured. | `crates/tinker-pdf/benches/baseline.json` | The figure RC-17.6a's exit names is committed and `cargo xtask baseline` holds it. | RC-17.6a, MS-04.10 |
 
 ## RC-18 — A serialisable drawing-command stream for hosts
