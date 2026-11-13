@@ -4162,6 +4162,66 @@ impl Bitmap {
         u32::from(byte) & (0xFF << past)
     }
 
+    /// `count` pixels of row `y` from column `x`, the first in bit
+    /// `count - 1`, read as one word: 0 for every pixel outside the bitmap,
+    /// as [`Bitmap::get_wide`] answers, padding included. In 64 bits for
+    /// `get_wide`'s reason. `count` is at most 57, so the bytes it spans fit.
+    fn row_bits(&self, y: i64, x: i64, count: u32) -> u64 {
+        let Ok(row) = usize::try_from(y) else {
+            return 0;
+        };
+        let end = x + i64::from(count);
+        let from = x.max(0);
+        let to = end.min(i64::from(self.width));
+        if row >= self.height as usize || from >= to {
+            return 0;
+        }
+        #[cfg(test)]
+        tests::WORDS.with(|words| words.set(words.get() + 1));
+        // Both are inside the row: `0 <= from < to <= width`.
+        let (first, last) = ((from >> 3) as usize, ((to - 1) >> 3) as usize);
+        let base = row * self.stride;
+        let mut bits = 0u64;
+        for index in first..=last {
+            let byte = self.bits.get(base + index).copied().unwrap_or(0);
+            let past = (8 * (index + 1)).saturating_sub(self.width as usize);
+            bits = (bits << 8) | u64::from(byte & (0xFFu8 << past));
+        }
+        // Column `c` is bit `low - c` of `bits`; it belongs at `end - 1 - c`.
+        let low = (last as i64 + 1) * 8 - 1;
+        let placed = if low >= end - 1 {
+            bits >> (low - (end - 1))
+        } else {
+            bits << (end - 1 - low)
+        };
+        placed & ((1u64 << count) - 1)
+    }
+
+    /// Writes the pixels `mask` names, from `values`, into the 32 pixels of
+    /// row `y` from column `x`, a multiple of eight: the pixel at `x` in bit
+    /// 31, the others keeping what they held. One write for a run of
+    /// [`Bitmap::set`]s.
+    fn store_bits(&mut self, x: u32, y: u32, values: u32, mask: u32) {
+        #[cfg(test)]
+        tests::STORES.with(|stores| stores.set(stores.get() + 1));
+        let base = (y as usize) * self.stride;
+        let first = (x as usize) >> 3;
+        for (offset, (value, keep)) in values
+            .to_be_bytes()
+            .into_iter()
+            .zip(mask.to_be_bytes())
+            .enumerate()
+        {
+            let index = first + offset;
+            if keep == 0 || index >= self.stride {
+                continue;
+            }
+            if let Some(byte) = self.bits.get_mut(base + index) {
+                *byte = (*byte & !keep) | (value & keep);
+            }
+        }
+    }
+
     /// Writes the pixels row `y` has decided since its last store — the low
     /// bits of `gathered`, the pixel at `x` in bit 0 — into the byte holding
     /// `x`, from that byte's first pixel to `x`: one write for eight
@@ -4443,10 +4503,12 @@ impl Tap {
 /// pixel — so each of those is a window, one new pixel enters each of the four
 /// rows per pixel, and the context is read out of the windows bit by bit. That
 /// is four bounds-checked reads a pixel where there were thirteen at template
-/// 0 and ten at 1, and 6.3.5.6's typical-row test, which read the whole
-/// neighbourhood again, becomes a comparison of three windows. A refinement
-/// region as large as the ceiling was the dearest thing the `jbig2` fuzz
-/// target could spend its work budget on.
+/// 0 and ten at 1. A refinement region as large as the ceiling was the
+/// dearest thing the `jbig2` fuzz target could spend its work budget on.
+///
+/// 6.3.5.6's typical row does not move the windows a pixel at a time at all:
+/// [`decode_typical_row`] reads the rows a word at a time and sets the windows
+/// from those words at each pixel it codes.
 ///
 /// The layout stays data, a [`RefineTemplate`]. The two the standard draws are
 /// recognised once a call and read out of the windows with fixed shifts —
@@ -4468,9 +4530,9 @@ impl Tap {
 ///
 /// The one place that freedom stops is 6.3.5.6's TPGRON pseudo-context, which
 /// is a bare number in the standard's own ordering and does not survive a
-/// relabelling. [`decode_refinement_into`] therefore has no TPGRON, and the
-/// one caller that could set it refuses instead of guessing which slot it
-/// names.
+/// relabelling. [`TPGRON_0`] and [`TPGRON_1`] are its slots in this file's
+/// order, determined against the corpus's TPGRON fixtures rather than
+/// transcribed (`docs/design/jbig2-symbol-text.md`).
 struct RolledRefinement {
     /// Which of the readings below the template is.
     layout: Layout,
@@ -4615,12 +4677,28 @@ impl RolledRefinement {
     }
 
     /// 6.3.5.6's test of a pixel in a typical row: the value its reference's
-    /// whole three-by-three neighbourhood agrees on, if it does.
+    /// whole three-by-three neighbourhood agrees on, if it does. The test a
+    /// pixel at a time, which [`decode_typical_row`]'s, 32 pixels at once, is
+    /// held to.
+    #[cfg(test)]
     fn uniform(&self) -> Option<u32> {
         match self.reference {
             [0, 0, 0] => Some(0),
             [7, 7, 7] => Some(1),
             _ => None,
+        }
+    }
+
+    /// The windows for pixel `i` of a word whose rows [`decode_typical_row`]
+    /// read: `above` is the target's row above and `rows` the reference's
+    /// three, each holding the columns from the one before pixel 0's, that
+    /// one in bit 33; `left` is the target pixel just decided.
+    fn place(&mut self, above: u64, rows: &[u64; 3], i: u32, left: u32) {
+        let window = |word: u64| ((word >> (31 - i)) & 7) as u32;
+        self.above = window(above);
+        self.left = left;
+        for (slot, &row) in self.reference.iter_mut().zip(rows) {
+            *slot = window(row);
         }
     }
 
@@ -4692,7 +4770,9 @@ fn refinement_context(
 /// symbol dictionary, where the adaptive state has to survive from one symbol
 /// to the next.
 ///
-/// TPGRON (6.3.5.6) is deliberately absent — see [`RolledRefinement`].
+/// With TPGRON (6.3.5.6) on, each row first decides whether it is typical,
+/// against [`RefineTemplate::typical`]'s slot; a typical row is
+/// [`decode_typical_row`]'s.
 fn decode_refinement_into(
     coder: &mut MqDecoder<'_>,
     contexts: &mut MqContexts,
@@ -4713,23 +4793,87 @@ fn decode_refinement_into(
             // picture that barely changed costs almost nothing.
             ltp ^= coder.decode_at(contexts, template.typical);
         }
+        if ltp == 1 {
+            decode_typical_row(coder, contexts, &mut rolled, reference, (dx, dy), y, into);
+            continue;
+        }
         let sy = y as i32;
         rolled.start(into, reference, (dx, dy), sy);
         for x in 0..into.width {
             let sx = x as i32;
-            // In a typical row a pixel whose whole reference neighbourhood
-            // agrees is not coded at all: it is that value. Only the pixels on
-            // a boundary cost a decision.
-            let typical = if ltp == 1 { rolled.uniform() } else { None };
-            let pixel = match typical {
-                Some(value) => value,
-                None => {
-                    let cx = rolled.context(into, reference, (dx, dy), sx, sy);
-                    u32::from(coder.decode_at(contexts, cx))
-                }
-            };
+            let cx = rolled.context(into, reference, (dx, dy), sx, sy);
+            let pixel = u32::from(coder.decode_at(contexts, cx));
             into.set(x, y, pixel);
             rolled.advance(into, reference, (dx, dy), sx, sy, pixel);
+        }
+    }
+}
+
+/// **6.3.5.6's typical row, 32 pixels at a time.**
+///
+/// In a typical row a pixel whose reference's whole three-by-three
+/// neighbourhood agrees is not coded: it is that value, which is the
+/// reference's own pixel at its centre. So the test runs over a word of 32
+/// pixels at once — the reference's three rows about the word are each read
+/// as one word, ANDed and ORed together and with their one-pixel shifts, and
+/// a bit stands where all nine pixels are 1 or all nine are 0 — and a run of
+/// such pixels is written from the reference's centre row in one masked
+/// store, three loads for the word however long the run. Only the others
+/// reach a decision, in raster order, the run before each stored before its
+/// context is formed, so the row being decoded reads as it does a pixel at a
+/// time.
+///
+/// Each pixel that is coded has its windows set from the words
+/// ([`RolledRefinement::place`]) rather than carried from the pixel before,
+/// so they are back in step at the end of every skipped run; the target's row
+/// above is read as a word only once a word has such a pixel.
+fn decode_typical_row(
+    coder: &mut MqDecoder<'_>,
+    contexts: &mut MqContexts,
+    rolled: &mut RolledRefinement,
+    reference: &Bitmap,
+    (dx, dy): (i32, i32),
+    y: u32,
+    into: &mut Bitmap,
+) {
+    let sy = y as i32;
+    let centre = i64::from(sy) - i64::from(dy);
+    let mut left = 0u32;
+    for word in 0..into.width.div_ceil(32) {
+        let start = word * 32;
+        let limit = (into.width - start).min(32);
+        // Each word holds the reference's columns from one left of pixel 0's
+        // neighbourhood centre to one right of pixel 31's: 34 bits, the
+        // first in bit 33, so pixel `i`'s three are bits `33 - i` to `31 - i`.
+        let first = i64::from(start) - i64::from(dx) - 1;
+        let rows = [centre - 1, centre, centre + 1].map(|r| reference.row_bits(r, first, 34));
+        let all = rows[0] & rows[1] & rows[2];
+        let any = rows[0] | rows[1] | rows[2];
+        let black = all & (all >> 1) & (all >> 2);
+        let white = !(any | (any >> 1) | (any >> 2));
+        // Pixel `i` in bit `31 - i`, as the bitmap packs them.
+        let uniform = ((black | white) & 0xFFFF_FFFF) as u32;
+        let values = ((rows[1] >> 1) & 0xFFFF_FFFF) as u32;
+        let mut above = None;
+        let mut i = 0u32;
+        while i < limit {
+            let run = (uniform << i).leading_ones().min(limit - i);
+            if run > 0 {
+                let mask = (u32::MAX >> i) & !u32::MAX.checked_shr(i + run).unwrap_or(0);
+                into.store_bits(start, y, values, mask);
+                left = (values >> (32 - i - run)) & 1;
+                i += run;
+                continue;
+            }
+            let row_above = *above
+                .get_or_insert_with(|| into.row_bits(i64::from(sy) - 1, i64::from(start) - 1, 34));
+            rolled.place(row_above, &rows, i, left);
+            let x = start + i;
+            let cx = rolled.context(into, reference, (dx, dy), x as i32, sy);
+            let pixel = u32::from(coder.decode_at(contexts, cx));
+            into.set(x, y, pixel);
+            left = pixel;
+            i += 1;
         }
     }
 }
@@ -6047,8 +6191,10 @@ mod tests {
         pub(super) static READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         /// Every byte [`Bitmap::row_byte`] has read, likewise.
         pub(super) static LOADS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-        /// Every [`Bitmap::store_byte`], likewise.
+        /// Every [`Bitmap::store_byte`] and [`Bitmap::store_bits`], likewise.
         pub(super) static STORES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// Every word [`Bitmap::row_bits`] has read, likewise.
+        pub(super) static WORDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
 
     /// A deterministic picture with no structure to lean on: a linear
@@ -8260,6 +8406,296 @@ mod tests {
                         rolled.advance(&target, &reference, (dx, dy), x, y, target.get(x, y));
                     }
                 }
+            }
+        }
+    }
+
+    /// **A row read as a word is its pixels read one at a time**: every
+    /// column from far left of the bitmap to far right of it, every row from
+    /// the one above the first to the one below the last, at word widths of
+    /// one pixel, a byte, the 34 a typical row reads and the most the call
+    /// takes, over widths that end on a partial byte and padding that holds
+    /// noise.
+    #[test]
+    fn a_row_read_as_bits_is_its_pixels_read_one_at_a_time() {
+        for width in (1..=20).chain([31, 33, 64]) {
+            let height = 3;
+            let mut bitmap = Bitmap::new(width, height, 1 << 20).expect("bitmap");
+            for (index, byte) in bitmap.bits.iter_mut().enumerate() {
+                *byte = ((index as u32 + 3).wrapping_mul(0x9E37_79B9) >> 24) as u8;
+            }
+            for y in -1..=i64::from(height) {
+                for x in -70..i64::from(width) + 70 {
+                    for count in [1u32, 8, 34, 57] {
+                        let expected = (0..i64::from(count)).fold(0u64, |bits, at| {
+                            (bits << 1) | u64::from(bitmap.get_wide(x + at, y))
+                        });
+                        assert_eq!(
+                            bitmap.row_bits(y, x, count),
+                            expected,
+                            "width {width}, row {y}, column {x}, {count} pixels"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// [`decode_refinement_into`] with every row decoded a pixel at a time:
+    /// the windows carried from pixel to pixel, 6.3.5.6's test asked of each
+    /// pixel of a typical row through [`RolledRefinement::uniform`], and each
+    /// pixel written alone. Returns the typical rows it met, and the pixels
+    /// of those rows the test decided and the ones it coded, so a test can say
+    /// that it reached them.
+    fn decode_refinement_a_pixel_at_a_time(
+        coder: &mut MqDecoder<'_>,
+        contexts: &mut MqContexts,
+        template: &RefineTemplate<'_>,
+        tpgron: bool,
+        reference: &Bitmap,
+        (dx, dy): (i32, i32),
+        into: &mut Bitmap,
+    ) -> (u32, u64, u64) {
+        let mut rolled = RolledRefinement::new(template);
+        let mut ltp = 0u8;
+        let (mut rows, mut decided, mut asked) = (0u32, 0u64, 0u64);
+        for y in 0..into.height {
+            if tpgron {
+                ltp ^= coder.decode_at(contexts, template.typical);
+            }
+            rows += u32::from(ltp);
+            let sy = y as i32;
+            rolled.start(into, reference, (dx, dy), sy);
+            for x in 0..into.width {
+                let sx = x as i32;
+                let typical = if ltp == 1 { rolled.uniform() } else { None };
+                let pixel = if let Some(value) = typical {
+                    decided += 1;
+                    value
+                } else {
+                    asked += u64::from(ltp);
+                    let cx = rolled.context(into, reference, (dx, dy), sx, sy);
+                    u32::from(coder.decode_at(contexts, cx))
+                };
+                into.set(x, y, pixel);
+                rolled.advance(into, reference, (dx, dy), sx, sy, pixel);
+            }
+        }
+        (rows, decided, asked)
+    }
+
+    /// A reference with runs to skip and edges to code: white, black and
+    /// [`noise`] in patches nine pixels wide and four tall, staggered by row
+    /// band, so a typical row meets uniform neighbourhoods and the pixels on
+    /// their boundaries both.
+    fn patches(width: u32, height: u32, seed: u64) -> Bitmap {
+        let speckled = noise(width, height, seed);
+        let mut bitmap = Bitmap::new(width, height, 1 << 20).expect("a test bitmap");
+        for y in 0..height {
+            for x in 0..width {
+                let value = match (u64::from(x / 9 + y / 4) + seed) % 3 {
+                    0 => 0,
+                    1 => 1,
+                    _ => speckled.get(x as i32, y as i32),
+                };
+                bitmap.set(x, y, value);
+            }
+        }
+        bitmap
+    }
+
+    /// **A typical row decoded a word at a time is the one decoded a pixel
+    /// at a time.**
+    ///
+    /// With TPGRON on, the same coded bytes through [`decode_refinement_into`]
+    /// and [`decode_refinement_a_pixel_at_a_time`]: both templates, the
+    /// relabelled order, and adaptive pixels at their nominal places, on the
+    /// row being decoded to either side of the pixel and far outside every
+    /// window; reference offsets putting the reference's columns at either
+    /// end of a 32-bit word, and offsets at either end of 32 bits; references
+    /// of noise and of patches, wider and narrower than the target; targets
+    /// either side of a word wide, fresh and already holding noise, so a run
+    /// stored before its pixels were reached shows in the context of the
+    /// pixel that reads past it. Both must give the same bytes and leave the
+    /// coder where the other left it, every adaptive state included — and
+    /// across the cases the typical rows must have pixels both decided by the
+    /// test and coded, or the comparison proved nothing.
+    #[test]
+    fn typical_rows_decode_identically_a_word_at_a_time() {
+        let reversed_here: Vec<(i8, i8)> = REFINE_0_HERE.iter().rev().copied().collect();
+        let reversed_there: Vec<(i8, i8)> = REFINE_0_THERE.iter().rev().copied().collect();
+        let mut templates = vec![
+            refine_template(0, NOMINAL_REFINE_AT),
+            refine_template(0, [(-3, 0), (2, 2)]),
+            refine_template(0, [(2, 0), (-128, 127)]),
+            refine_template(1, NOMINAL_REFINE_AT),
+        ];
+        templates.push(RefineTemplate {
+            here: &reversed_here,
+            there: &reversed_there,
+            at: Some(NOMINAL_REFINE_AT),
+            typical: TPGRON_0,
+        });
+        let offsets = [
+            (0, 0),
+            (1, -1),
+            (-1, 2),
+            (31, 0),
+            (-31, 1),
+            (32, -2),
+            (-32, 0),
+            (33, 1),
+            (-33, -1),
+            (i32::MIN, i32::MAX),
+            (i32::MAX, i32::MIN),
+        ];
+        let coded: Vec<u8> = (0..400u32)
+            .map(|i| ((i + 7).wrapping_mul(0x2545_F491) >> 24) as u8)
+            .collect();
+        let height = 12;
+        let (mut typical_rows, mut decided, mut asked) = (0u32, 0u64, 0u64);
+        for (index, template) in templates.iter().enumerate() {
+            let states = refine_states(template.bits());
+            for (seed, &offset) in offsets.iter().enumerate() {
+                for width in [1u32, 31, 32, 33, 64, 70] {
+                    let references = [
+                        ("noise", noise(width + 5, height + 2, 11 + seed as u64)),
+                        ("patches", patches(width + 3, height + 3, seed as u64)),
+                        (
+                            "narrow patches",
+                            patches(width.div_ceil(2), 9, 3 + seed as u64),
+                        ),
+                    ];
+                    for (kind, reference) in &references {
+                        for filled in [false, true] {
+                            let mut start = Bitmap::new(width, height, 1 << 20).expect("bitmap");
+                            if filled {
+                                for (at, byte) in start.bits.iter_mut().enumerate() {
+                                    *byte = ((at as u32 + 1).wrapping_mul(0x85EB_CA6B) >> 24) as u8;
+                                }
+                            }
+                            let (mut ours, mut theirs) = (start.clone(), start);
+                            let (mut our_coder, mut their_coder) =
+                                (MqDecoder::new(&coded), MqDecoder::new(&coded));
+                            let (mut our_contexts, mut their_contexts) =
+                                (MqContexts::new(states), MqContexts::new(states));
+                            decode_refinement_into(
+                                &mut our_coder,
+                                &mut our_contexts,
+                                template,
+                                true,
+                                reference,
+                                offset,
+                                &mut ours,
+                            );
+                            let (rows, by_test, by_coder) = decode_refinement_a_pixel_at_a_time(
+                                &mut their_coder,
+                                &mut their_contexts,
+                                template,
+                                true,
+                                reference,
+                                offset,
+                                &mut theirs,
+                            );
+                            let case = format!(
+                                "template {index}, offset {offset:?}, width {width}, \
+                                 {kind} reference, filled {filled}"
+                            );
+                            assert_eq!(ours.bits, theirs.bits, "{case}: the pixels differ");
+                            assert_eq!(
+                                our_coder.take_decisions(),
+                                their_coder.take_decisions(),
+                                "{case}: the decision counts differ"
+                            );
+                            assert_eq!(
+                                our_coder.position(),
+                                their_coder.position(),
+                                "{case}: the coders stopped apart"
+                            );
+                            assert!(
+                                (0..states)
+                                    .all(|cx| our_contexts.state(cx) == their_contexts.state(cx)),
+                                "{case}: an adaptive state differs"
+                            );
+                            typical_rows += rows;
+                            decided += by_test;
+                            asked += by_coder;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            typical_rows > 0 && decided > 0 && asked > 0,
+            "the cases met {typical_rows} typical rows, {decided} pixels in them \
+             decided by the test and {asked} coded"
+        );
+    }
+
+    /// **A typical row reads its reference a word at a time.**
+    ///
+    /// A target whose every row is typical, over a reference that is uniform
+    /// under every pixel — white, and black under offsets that move its
+    /// columns off the words' — decides every pixel by 6.3.5.6's test, so
+    /// the coder makes the rows' TPGRON decisions and no other, and reads the
+    /// reference as three words for each 32 pixels and nothing a pixel at a
+    /// time: counted through [`READS`] and [`WORDS`].
+    #[test]
+    fn a_typical_row_reads_its_reference_a_word_at_a_time() {
+        let (width, height) = (200u32, 6u32);
+        let words_a_row = u64::from(width.div_ceil(32));
+        for template in [
+            refine_template(0, NOMINAL_REFINE_AT),
+            refine_template(1, NOMINAL_REFINE_AT),
+        ] {
+            let states = refine_states(template.bits());
+            for (black, offset) in [(false, (0, 0)), (true, (-37, -3)), (true, (-5, -2))] {
+                // Every neighbourhood the offsets reach lies inside.
+                let mut reference = Bitmap::new(width + 80, height + 8, 1 << 20).expect("bitmap");
+                if black {
+                    reference.fill_black();
+                }
+                // The first row turns typical prediction on and the rest
+                // leave it on.
+                let mut encoder = MqEncoder::new(states);
+                encoder.encode_at(template.typical, 1);
+                for _ in 1..height {
+                    encoder.encode_at(template.typical, 0);
+                }
+                let coded = encoder.flush();
+                let mut into = Bitmap::new(width, height, 1 << 20).expect("bitmap");
+                let mut coder = MqDecoder::new(&coded);
+                let mut contexts = MqContexts::new(states);
+                READS.with(|reads| reads.set(0));
+                WORDS.with(|words| words.set(0));
+                decode_refinement_into(
+                    &mut coder,
+                    &mut contexts,
+                    &template,
+                    true,
+                    &reference,
+                    offset,
+                    &mut into,
+                );
+                let reads = READS.with(std::cell::Cell::get);
+                let words = WORDS.with(std::cell::Cell::get);
+                let case = format!("template with {} bits, offset {offset:?}", template.bits());
+                assert_eq!(
+                    coder.take_decisions(),
+                    u64::from(height),
+                    "{case}: a pixel was coded"
+                );
+                let value = if black { 0xFF } else { 0 };
+                assert!(
+                    into.bits.iter().all(|&byte| byte == value),
+                    "{case}: the target is not its reference"
+                );
+                assert_eq!(reads, 0, "{case}: {reads} pixels were read one at a time");
+                assert!(
+                    words <= 3 * words_a_row * u64::from(height),
+                    "{case}: {words} words read for {height} rows of {words_a_row} words, \
+                     more than three a word"
+                );
             }
         }
     }

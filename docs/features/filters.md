@@ -205,6 +205,11 @@ dictionary — where an aggregate symbol is itself a text region — 6.4.11's
 per-instance refinement inside a text region, and the generic refinement region
 segments of 7.4.7 (types 40, 42 and 43). Both of 6.3.5.3's context templates
 are implemented, with 7.4.7.3's adaptive pair and 6.3.5.6's typical prediction.
+A typical row is tested 32 pixels at a time: the reference's three rows about
+the word are read as one word each and ANDed and ORed with their one-pixel
+shifts, which marks every pixel whose nine reference pixels agree; a run of
+those is written from the reference in one store, and only the pixels between
+runs are coded, in raster order.
 With them come 7.4.6.1's intermediate regions, which are decoded and kept
 rather than drawn: a refinement region's reference is either one of those or,
 failing that, whatever the page already holds under the region's own box
