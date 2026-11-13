@@ -70,8 +70,20 @@ pub struct Stats {
     /// stroked or both, once a glyph. A glyph with no outline, an empty one
     /// (a space) and one only clipped with are not.
     ///
-    /// Counted by the renderer, as `glyphs_shown` is.
+    /// Counted by the renderer, as `glyphs_shown` is. A filled glyph drawn
+    /// from a mask the render's glyph-mask cache held builds no path and is
+    /// not one; its mask's miss was.
     pub outlines_filled: u64,
+    /// Glyph masks the renderer rasterised: each filled glyph drawn from a
+    /// mask its render's cache did not hold, or whose font the scope gave no
+    /// identity for (`docs/design/performance.md`, P-06).
+    ///
+    /// Counted by the renderer, as `glyphs_shown` is.
+    pub glyph_masks_rasterised: u64,
+    /// Filled glyphs the renderer drew from a mask its render's cache held.
+    ///
+    /// Counted by the renderer, as `glyphs_shown` is.
+    pub glyph_mask_hits: u64,
     /// Font dictionaries read: one for each name a resource scope's content
     /// selects a font by — its `/Font` entry, or the object a graphics
     /// state's `/Font` names — read the first time the scope is asked about
@@ -300,6 +312,10 @@ pub enum Counter {
     GlyphsShown,
     /// [`Stats::outlines_filled`].
     OutlinesFilled,
+    /// [`Stats::glyph_masks_rasterised`].
+    GlyphMasksRasterised,
+    /// [`Stats::glyph_mask_hits`].
+    GlyphMaskHits,
     /// [`Stats::font_dictionaries_resolved`].
     FontDictionariesResolved,
     /// [`Stats::images_decoded`].
@@ -370,6 +386,8 @@ impl Stats {
         [
             self.glyphs_shown,
             self.outlines_filled,
+            self.glyph_masks_rasterised,
+            self.glyph_mask_hits,
             self.font_dictionaries_resolved,
             self.images_decoded,
             self.font_program_hits,
@@ -408,6 +426,8 @@ impl Stats {
         match counter {
             Counter::GlyphsShown => &mut self.glyphs_shown,
             Counter::OutlinesFilled => &mut self.outlines_filled,
+            Counter::GlyphMasksRasterised => &mut self.glyph_masks_rasterised,
+            Counter::GlyphMaskHits => &mut self.glyph_mask_hits,
             Counter::FontDictionariesResolved => &mut self.font_dictionaries_resolved,
             Counter::ImagesDecoded => &mut self.images_decoded,
             Counter::FontProgramHits => &mut self.font_program_hits,
@@ -448,6 +468,10 @@ impl Add for Stats {
         Stats {
             glyphs_shown: self.glyphs_shown.saturating_add(other.glyphs_shown),
             outlines_filled: self.outlines_filled.saturating_add(other.outlines_filled),
+            glyph_masks_rasterised: self
+                .glyph_masks_rasterised
+                .saturating_add(other.glyph_masks_rasterised),
+            glyph_mask_hits: self.glyph_mask_hits.saturating_add(other.glyph_mask_hits),
             font_dictionaries_resolved: self
                 .font_dictionaries_resolved
                 .saturating_add(other.font_dictionaries_resolved),
@@ -636,9 +660,11 @@ mod tests {
     use super::*;
 
     /// Every counter, so a test of one property covers them all.
-    const ALL: [Counter; 29] = [
+    const ALL: [Counter; 31] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
+        Counter::GlyphMasksRasterised,
+        Counter::GlyphMaskHits,
         Counter::FontDictionariesResolved,
         Counter::ImagesDecoded,
         Counter::FontProgramHits,

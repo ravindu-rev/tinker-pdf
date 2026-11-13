@@ -15,6 +15,7 @@ use tinker_pdf_raster::blend::BlendMode as RasterBlend;
 
 pub mod display;
 mod glyph;
+mod glyph_cache;
 pub mod mesh;
 pub mod shading;
 
@@ -506,6 +507,31 @@ pub trait GlyphSource {
         let _ = name;
         None
     }
+
+    /// What font `font_id` selects in this scope, for the render's glyph-mask
+    /// cache (`docs/design/performance.md`, P-06). The id is the name the
+    /// scope's content selects the font by, and a form's scope may bind the
+    /// same name to another font, so the id alone cannot key a mask.
+    ///
+    /// `None` keeps the glyph's masks out of the cache: each is rasterised at
+    /// every request, to the same pixels.
+    fn font_identity(&self, font_id: u64) -> Option<FontIdentity> {
+        let _ = font_id;
+        None
+    }
+}
+
+/// What a glyph-mask cache keys a font by: one font wherever a scope names
+/// it, or one only within the scope's turn the renderer holds it in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FontIdentity {
+    /// The font's object, `num << 16 | gen`: one font wherever a scope names
+    /// it, so its masks serve every scope.
+    Object(u64),
+    /// A font written into the scope's own resource dictionary, which has no
+    /// object: one font only within the scope the renderer holds it in, so
+    /// its masks serve that scope's turn alone.
+    Scoped,
 }
 
 /// A `GlyphSource` that has nothing, for callers that only want geometry.
@@ -791,14 +817,22 @@ pub struct RenderCounts {
     /// [`Device::show_glyph`] call, whether or not anything was drawn for it.
     pub glyphs_shown: u64,
     /// Glyph outlines this renderer built into a path and painted — filled,
-    /// stroked or both, once a glyph. A glyph with no outline, an empty one
-    /// and one a clipping-only mode adds to the clip are not.
+    /// stroked or both, once a glyph: on the path route, and for a filled
+    /// glyph's mask its cache did not hold. A glyph drawn from a mask the
+    /// cache held builds none, and a glyph with no outline, an empty one and
+    /// one a clipping-only mode adds to the clip are not counted either.
     pub outlines_filled: u64,
     /// A shading's function evaluated for a colour: once a table entry where
     /// a sweep reads it through a [`ColorTable`](shading::ColorTable), and
     /// once a colour asked of it otherwise — each pixel of a sweep no table
     /// stands in for, and each input a table does not vouch for.
     pub shading_functions_evaluated: u64,
+    /// Glyph masks this renderer rasterised (`docs/design/performance.md`,
+    /// P-06): each filled glyph drawn from a mask its cache did not hold, or
+    /// whose font the glyph source gave no identity for.
+    pub glyph_masks_rasterised: u64,
+    /// Filled glyphs drawn from a mask this renderer's cache held.
+    pub glyph_mask_hits: u64,
 }
 
 /// The rasterizing device.
@@ -896,12 +930,22 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// caller says so instead. Until this existed the appearance's resources
     /// reached the interpreter and not the device, so a name that resolved for
     /// text did not resolve for an image.
-    pushed_scopes: Vec<Scope<'g, G>>,
-    /// The resource scope each open form displaced, innermost last.
+    pushed_scopes: Vec<(Scope<'g, G>, u64)>,
+    /// The resource scope each open form displaced, innermost last, with the
+    /// serial it held.
     ///
     /// `None` for a form that brought no `/Resources` of its own, which is the
     /// common case and costs one `Option` rather than a clone of the page's.
-    form_scopes: Vec<Option<Scope<'g, G>>>,
+    form_scopes: Vec<Option<(Scope<'g, G>, u64)>>,
+    /// The serial of the scope `glyphs` is: 0 for the one the renderer was
+    /// made with, and the next number at each scope a form brings or a caller
+    /// pushes. A font written into a scope's dictionary keys its glyph masks
+    /// by it, so two scopes that name two fonts alike never share one.
+    scope: u64,
+    /// The serials handed out so far.
+    scopes: u64,
+    /// This render's glyph masks (`glyph_cache`).
+    glyph_cache: glyph_cache::GlyphCache,
     /// Consecutive image draws held back so that abutting ones do not
     /// conflate (`tinker_pdf_raster::fragments`).
     ///
@@ -976,6 +1020,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             run: None,
             pushed_scopes: Vec::new(),
             form_scopes: Vec::new(),
+            scope: 0,
+            scopes: 0,
+            glyph_cache: glyph_cache::GlyphCache::new(),
             admission: Admission::new(),
             groups: Vec::new(),
             soft: None,
@@ -1191,14 +1238,41 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
     /// appearance — where there is no name for the interpreter to announce.
     pub fn push_resources(&mut self, resources: Arc<G>) {
         let outer = mem::replace(&mut self.glyphs, Scope::Owned(resources));
-        self.pushed_scopes.push(outer);
+        let serial = self.next_scope();
+        self.pushed_scopes.push((outer, serial));
     }
 
     /// Restores the scope [`Renderer::push_resources`] displaced.
     pub fn pop_resources(&mut self) {
-        if let Some(outer) = self.pushed_scopes.pop() {
+        if let Some((outer, serial)) = self.pushed_scopes.pop() {
             self.glyphs = outer;
+            self.scope = serial;
         }
+    }
+
+    /// Gives the scope just made current the next serial, and hands back the
+    /// one it displaced.
+    fn next_scope(&mut self) -> u64 {
+        self.scopes = self.scopes.saturating_add(1);
+        mem::replace(&mut self.scope, self.scopes)
+    }
+
+    /// The key a glyph's mask is kept under, or `None` when its font has no
+    /// identity in the current scope and its masks are not kept.
+    fn glyph_key(&self, glyph: &Glyph, placement: &glyph::Placement) -> Option<glyph_cache::Key> {
+        let font = match self.glyphs.font_identity(glyph.font_id)? {
+            FontIdentity::Object(object) => glyph_cache::KeyFont::Object(object),
+            FontIdentity::Scoped => glyph_cache::KeyFont::Scoped {
+                font_id: glyph.font_id,
+                scope: self.scope,
+            },
+        };
+        Some(glyph_cache::Key {
+            font,
+            code: glyph.code,
+            matrix: placement.matrix,
+            phase: placement.phase,
+        })
     }
 
     /// Composites the run of images held back so far, if any.
@@ -3226,30 +3300,61 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
 
         // 9.3.6 mode 0 in a solid colour: drawn from a mask rasterised in the
         // glyph's own frame and placed at the whole pixel its origin falls in
-        // (`glyph`). Strokes, pattern fills and the clipping modes keep the
-        // path route below, and so does a glyph whose mask would be too large
-        // to be worth one or will not place.
+        // (`glyph`), kept for the rest of the render under the key it is a
+        // function of (`glyph_cache`). Strokes, pattern fills and the clipping
+        // modes keep the path route below, and so does a glyph whose mask
+        // would be too large to be worth one or will not place.
         if matches!(mode, tinker_pdf_content::TextRenderMode::Fill) && state.fill_pattern.is_none()
         {
             if let Some(placement) = glyph::Placement::of(&combined) {
                 if self.stopping() {
                     return;
                 }
-                let stop = self.stop_predicate();
-                if let Some(local) = glyph::rasterise(
-                    &outline,
-                    &placement,
-                    self.tolerance,
-                    self.antialias,
-                    Some(&stop),
-                ) {
-                    #[cfg(test)]
-                    {
-                        self.mask_pixels = self
-                            .mask_pixels
-                            .saturating_add(u64::from(local.width) * u64::from(local.height));
+                let key = self.glyph_key(glyph, &placement);
+                let asked = match key.as_ref().map(|key| self.glyph_cache.get(key)) {
+                    Some(Ok(kept)) => Ok(kept),
+                    Some(Err(request)) => Err(key.map(|key| (key, request))),
+                    None => Err(None),
+                };
+                let local = match asked {
+                    Ok(kept) => {
+                        self.counts.glyph_mask_hits = self.counts.glyph_mask_hits.saturating_add(1);
+                        Some(kept)
                     }
-                    self.counts.outlines_filled = self.counts.outlines_filled.saturating_add(1);
+                    Err(miss) => {
+                        let stop = self.stop_predicate();
+                        let made = glyph::rasterise(
+                            &outline,
+                            &placement,
+                            self.tolerance,
+                            self.antialias,
+                            Some(&stop),
+                        )
+                        .map(Arc::new);
+                        if let Some(made) = &made {
+                            #[cfg(test)]
+                            {
+                                self.mask_pixels = self
+                                    .mask_pixels
+                                    .saturating_add(u64::from(made.width) * u64::from(made.height));
+                            }
+                            self.counts.outlines_filled =
+                                self.counts.outlines_filled.saturating_add(1);
+                            self.counts.glyph_masks_rasterised =
+                                self.counts.glyph_masks_rasterised.saturating_add(1);
+                            // A mask a cancelled render stopped short is drawn
+                            // and never kept, so a hit is always the mask a
+                            // miss would rasterise.
+                            if let Some((key, request)) = miss {
+                                if !self.stopping() {
+                                    self.glyph_cache.insert(key, Arc::clone(made), request);
+                                }
+                            }
+                        }
+                        made
+                    }
+                };
+                if let Some(local) = local {
                     self.paint_glyph_mask(
                         &local,
                         placement.origin,
@@ -3542,14 +3647,18 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
         // interpreter asks its own seam the same question about the same name,
         // so the two scopes open and close together.
         let nested = self.glyphs.form_scope(name);
-        self.form_scopes
-            .push(nested.map(|scope| mem::replace(&mut self.glyphs, Scope::Owned(scope))));
+        let displaced = nested.map(|scope| {
+            let outer = mem::replace(&mut self.glyphs, Scope::Owned(scope));
+            (outer, self.next_scope())
+        });
+        self.form_scopes.push(displaced);
         !self.stopping()
     }
 
     fn end_form(&mut self, _id: u64) {
-        if let Some(Some(outer)) = self.form_scopes.pop() {
+        if let Some(Some((outer, serial))) = self.form_scopes.pop() {
             self.glyphs = outer;
+            self.scope = serial;
         }
         if let Some(held) = self.clip_stack.pop() {
             self.restore_held(held);

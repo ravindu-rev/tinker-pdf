@@ -89,6 +89,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/guards.rs",
         test: "the_tally_counts_the_same_on_every_target",
     },
+    // MS-01's A4 glyph-mask guard: the masks a 5 600-glyph page rasterises,
+    // held on every target to its distinct keys, and its hits to 98 %.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/guards.rs",
+        test: "a4_glyph_masks_rasterised_are_at_most_their_distinct_keys",
+    },
     // MS-01's A1 lookup guard: the nodes one page lookup reads, held on every
     // target to its root and depth x fan-out under it.
     Fingerprint {

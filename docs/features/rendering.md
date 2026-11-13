@@ -427,6 +427,26 @@ clipping modes and a glyph whose mask would hold more than 65 536 pixels
 are drawn as paths in the page's frame, so a glyph far larger than its
 canvas is rasterised only where it can show.
 
+**A render keeps its glyph masks** (`glyph_cache.rs`). A mask is a function
+of the font, the code, the quantised 2x2 and the phase, one of 256, and is
+kept for the rest of the render under those four; a later glyph with the same
+four is drawn from it, building no path, and a hit is the mask a miss would
+rasterise, because a mask a cancelled render stopped short is drawn and never
+kept. The font is the glyph source's answer, `GlyphSource::font_identity`, so
+the render crate holds no dictionary: the facade gives a font with an object —
+its `/Font` entry's reference, or the object a reserved name spells — as
+`FontIdentity::Object`, one font in every scope; a font written into a
+resource dictionary as `FontIdentity::Scoped`, keyed beside the renderer's
+serial for the scope's turn — the page's, and a new one at each form that
+brings a scope and each scope a caller pushes — so two scopes naming two
+fonts alike never share a mask; and an id that selects no font as none, whose
+masks are not kept. The cache is bounded by bytes, each mask charged its
+pixels and 64 bytes beside them, against 16 MiB a render, and evicts the masks
+least recently asked for, by a counter every request takes a number of, so
+which it evicts is the same on every run and every target. A tiling cell is
+drawn by a renderer of its own, with a cache of its own. Path-route glyphs and
+Type 3 procedures bypass it.
+
 **Optional content** (8.11). The catalog's `/OCProperties` `/D`
 configuration is resolved once at bind: `/BaseState` sets every group in
 `/OCGs` and `/ON`/`/OFF` name the exceptions (8.11.4.3 Table 101), OCMDs
@@ -754,10 +774,13 @@ takes and hands them back as `Bitmap::stats`, an `Option<Stats>` that is
 or a caller builds. `Stats` (`Copy`, `Default`, `Eq`, `#[non_exhaustive]`,
 every field a public `u64`) names them: `glyphs_shown`, every glyph the
 interpreter showed the renderer, `outlines_filled`, every glyph outline it
-painted, and `shading_functions_evaluated`, every evaluation of a shading's
-function for a colour — once a table entry where a sweep reads the function
-through a `ColorTable`, once a colour asked of it otherwise — all counted by
-the renderer, a tiling pattern's cell included;
+built into a path and painted — on the path route, and for a mask its cache
+did not hold — `glyph_masks_rasterised` and `glyph_mask_hits`, each filled
+glyph drawn from a mask rasterised for it and each drawn from a mask the
+render's cache held, and `shading_functions_evaluated`, every evaluation of a
+shading's function for a colour — once a table entry where a sweep reads the
+function through a `ColorTable`, once a colour asked of it otherwise — all
+counted by the renderer, a tiling pattern's cell included;
 `font_dictionaries_resolved`, each font a resource scope reads — once for
 each name its content selects a font by, the first time the scope is asked
 about the name, and kept for every render over the scope: a font a scope

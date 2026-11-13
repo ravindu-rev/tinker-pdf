@@ -206,14 +206,17 @@ const ROSTER: &[Guard] = &[
             "P-02.3",
         )
     },
-    owed(
-        "A4",
-        "glyph masks rasterised at most the distinct (font, glyph, scale, phase) keys, \
-         hit ratio at least 98 % on a 5 600-glyph page",
-        "a4_glyph_masks_rasterised_are_at_most_their_distinct_keys",
-        "P-06",
-        "P-06.3",
-    ),
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A4",
+            "glyph masks rasterised at most the distinct (font, glyph, scale, phase) keys, \
+             hit ratio at least 98 % on a 5 600-glyph page",
+            "a4_glyph_masks_rasterised_are_at_most_their_distinct_keys",
+            "P-06",
+            "P-06.3",
+        )
+    },
     Guard {
         state: State::Landed,
         ..owed(
@@ -833,6 +836,54 @@ fn the_a4_page_shows_5600_glyphs_of_80_distinct() {
     assert!(
         distinct.iter().all(|c| c.is_ascii_graphic()),
         "every code a printable one, so every glyph has an outline"
+    );
+}
+
+/// **A4**: a render of [`glyph_page`] at 72 dpi rasterises at most one glyph
+/// mask for each of its distinct (font, glyph, 2x2, phase) keys — its eighty
+/// codes, every origin on a whole pixel and every glyph at one size — and
+/// draws at least 98 % of its glyphs from a mask its cache held. Eighty masks
+/// are far inside the cache's bound, so none is evicted.
+#[test]
+fn a4_glyph_masks_rasterised_are_at_most_their_distinct_keys() {
+    let document = Document::open(glyph_page()).expect("the A4 page opens");
+    let page = document.page(0).expect("its page");
+    let stats = page
+        .render(&RenderOptions {
+            stats: true,
+            ..RenderOptions::default()
+        })
+        .stats
+        .expect("asked");
+    let keys = u64::from(A4_DISTINCT);
+    let glyphs = (A4_LINES as u64) * keys;
+    assert_eq!(
+        stats.glyphs_shown, glyphs,
+        "every glyph is shown: {stats:?}"
+    );
+    assert_eq!(
+        stats.glyph_masks_rasterised + stats.glyph_mask_hits,
+        glyphs,
+        "every glyph is drawn from a mask: {stats:?}"
+    );
+    assert!(
+        stats.glyph_masks_rasterised <= keys,
+        "{} masks rasterised over {keys} distinct keys: {stats:?}",
+        stats.glyph_masks_rasterised
+    );
+    // At least 98 %, in integers: hits x 100 >= 98 x requests.
+    assert!(
+        stats.glyph_mask_hits * 100 >= 98 * glyphs,
+        "{} hits of {glyphs}: {stats:?}",
+        stats.glyph_mask_hits
+    );
+    assert_eq!(
+        stats.outlines_filled, stats.glyph_masks_rasterised,
+        "a hit builds no path, and only a miss is an outline filled"
+    );
+    println!(
+        "guard-a4: RAN {} masks rasterised over {keys} keys, {} hits of {glyphs}",
+        stats.glyph_masks_rasterised, stats.glyph_mask_hits
     );
 }
 

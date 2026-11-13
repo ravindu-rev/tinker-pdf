@@ -202,7 +202,9 @@ already carries it.
 | Counter | One unit is | Counted in | Step |
 | --- | --- | --- | --- |
 | `glyphs_shown` | a glyph the interpreter showed the renderer (`Device::show_glyph`, `crates/tinker-pdf-render/src/lib.rs:2847`) | the renderer | built |
-| `outlines_filled` | a glyph outline the renderer built into a path and painted | the renderer | built |
+| `outlines_filled` | a glyph outline the renderer built into a path and painted: on the path route, and for a glyph mask the render's cache did not hold | the renderer | built |
+| `glyph_masks_rasterised` | a filled glyph's mask rasterised: a key the render's cache did not hold, or a font with no identity (P-06) | the renderer | built |
+| `glyph_mask_hits` | a filled glyph drawn from a mask the render's cache held (P-06) | the renderer | built |
 | `font_dictionaries_resolved` | a font dictionary a scope reads: once for each name its content selects a font by — the `/Font` entry, or a reserved name's object, when it is a dictionary — at the first question about the name or about the id another scope over the same dictionary handed out (P-02, "The font table") | the facade's scopes (`PageResources::scope_font`) | built |
 | `images_decoded` | an image decoder run: an image XObject's cache miss, and every inline image, which is never cached (`resources.rs:222-224`); in an image extraction, each entry it lists and every inline image | the facade's scopes | built |
 | a `_hits` and a `_misses` for each of the five caches `Caches` holds — font programs, images, ICC transforms, glyph outlines, form scopes (`resources.rs:63-101`) | a lookup that found an entry, a cached `None` included, or one that did not | the facade's scopes | built |

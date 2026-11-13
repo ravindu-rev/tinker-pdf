@@ -23,7 +23,7 @@ use tinker_pdf_filters::{
 use tinker_pdf_font::{base_glyph_name, cff::Cff, glyf, BaseEncoding, Outline, Sfnt, Type1};
 use tinker_pdf_raster::canvas::{Canvas, Color};
 use tinker_pdf_render::{
-    DecodedImage, GlyphSource, Mesh, MeshParams, PatternPaint, Shading, TilingPattern,
+    DecodedImage, FontIdentity, GlyphSource, Mesh, MeshParams, PatternPaint, Shading, TilingPattern,
 };
 
 use crate::fonts::{self, FontProvider, FontRequest};
@@ -3269,6 +3269,25 @@ impl PageResources {
 impl GlyphSource for PageResources {
     fn form_scope(&self, name: &[u8]) -> Option<Arc<PageResources>> {
         self.form_resources(name)
+    }
+
+    /// The font `font_id` selects here, from the scope's font table: the
+    /// object its `/Font` entry refers to, or the one a reserved name spells,
+    /// is one font in every scope; a font written into the dictionary is one
+    /// only within this scope; an id that selects no font has no identity,
+    /// and its glyphs' masks are not kept.
+    fn font_identity(&self, font_id: u64) -> Option<FontIdentity> {
+        let object = |reference: ObjRef| {
+            FontIdentity::Object((u64::from(reference.num) << 16) | u64::from(reference.gen))
+        };
+        if let Some(reference) = fonts::reserved_id_reference(font_id) {
+            return Some(object(reference));
+        }
+        let found = self.font_by_id(font_id)?;
+        Some(match found.object {
+            Some(reference) => object(reference),
+            None => FontIdentity::Scoped,
+        })
     }
 
     fn outline(&self, font_id: u64, code: u32) -> Option<Outline> {

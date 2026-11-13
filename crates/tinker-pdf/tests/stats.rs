@@ -294,6 +294,12 @@ fn glyphs_and_an_image_stats() -> Stats {
     } else {
         SHOWN[0].1.len() as u64
     };
+    // Every glyph drawn is filled in a colour, so drawn from a mask, and at
+    // 72 dpi no two of one font and code stand at one phase: `Curvy!` is six
+    // codes, Helvetica's two `l`s stand at sixteenths 5 and 0 across, and
+    // Courier's three `a`s at 0, 3 and 6. So every mask is a miss, and each
+    // builds the outline it fills.
+    expected.glyph_masks_rasterised = expected.outlines_filled;
     // The page's scope reads each of its three fonts at its first glyph; no
     // glyph reads one again, and a substitute is asked for from the
     // dictionary read.
@@ -417,6 +423,8 @@ fn render_stats_count_what_a_generated_page_draws() {
         stats.work(),
         stats.glyphs_shown
             + stats.outlines_filled
+            + stats.glyph_masks_rasterised
+            + stats.glyph_mask_hits
             + stats.font_dictionaries_resolved
             + stats.images_decoded
             + stats.font_program_hits
@@ -432,15 +440,25 @@ fn render_stats_count_what_a_generated_page_draws() {
     // The page again is the same work again: nothing is kept between two
     // direct renders, and a count depends on nothing but the page.
     assert_eq!(counted(&page), expected, "a second render");
-    // At another scale and in a region the work is the page's, not the
-    // canvas's: every glyph and image here is drawn wherever it lands.
+    // At another scale the work is the page's, not the canvas's: every glyph
+    // and image here is drawn wherever it lands. Only how the masks divide
+    // between rasterised and kept follows the phases the scale puts the
+    // glyphs at: at three times the scale Helvetica's two `l`s both stand at
+    // a whole pixel, so the second is drawn from the first's mask and builds
+    // no path.
     let scaled = page
         .render(&RenderOptions {
             scale: 3.0,
             ..asking()
         })
         .stats;
-    assert_eq!(scaled, Some(expected), "at three times the scale");
+    let mut at_three = expected;
+    if BUNDLED {
+        at_three.glyph_masks_rasterised -= 1;
+        at_three.glyph_mask_hits += 1;
+        at_three.outlines_filled -= 1;
+    }
+    assert_eq!(scaled, Some(at_three), "at three times the scale");
 }
 
 /// A form invoked three times builds its scope once, and what runs inside it
@@ -461,7 +479,14 @@ fn a_form_shown_three_times_builds_its_scope_once() {
         ],
     );
     expected.glyphs_shown = shown;
-    expected.outlines_filled = shown;
+    // The form's `abca` stands at sixteenths 0, 6, 13 and 3 across and on a
+    // whole pixel down at every invocation, and its font is one object in
+    // the form's scope: the first invocation rasterises a mask for each of
+    // its four glyphs, the two `a`s at two phases, and the other two draw
+    // every glyph from those, building no path.
+    expected.glyph_masks_rasterised = 4;
+    expected.glyph_mask_hits = shown - 4;
+    expected.outlines_filled = 4;
     // The form's scope reads its one font at its first glyph and keeps it
     // across the three invocations; the page's names one nothing selects,
     // which is not read.
@@ -532,6 +557,9 @@ fn render_form_counts_the_scope_it_reads_the_name_in() {
     );
     expected.glyphs_shown = shown;
     expected.outlines_filled = shown;
+    // Its two `a`s stand a fifth of a pixel apart across, at two phases, so
+    // every glyph's mask is rasterised.
+    expected.glyph_masks_rasterised = shown;
     // The form's scope reads its own font once; the scope the name is read
     // in and the render's own name one nothing selects, which neither reads.
     expected.font_dictionaries_resolved = 1;
@@ -746,6 +774,8 @@ fn a_pattern_cell_counts_what_it_draws() {
     );
     expected.glyphs_shown = 2;
     expected.outlines_filled = 2;
+    // The cell's renderer keeps masks of its own: two codes, two masks.
+    expected.glyph_masks_rasterised = 2;
     // The cell's scope reads its one font, at its first glyph.
     expected.font_dictionaries_resolved = 1;
     expected.glyph_outline_misses = 2;
@@ -769,6 +799,8 @@ fn an_annotation_counts_both_scopes_its_appearance_builds() {
     );
     drawn.glyphs_shown = shown;
     drawn.outlines_filled = shown;
+    // Every glyph a distinct code: a mask each.
+    drawn.glyph_masks_rasterised = shown;
     // Both of the appearance's scopes read its one font: the interpreter's
     // at its first glyph, the renderer's at its first outline, by the id the
     // interpreter's handed out.
@@ -852,6 +884,9 @@ fn a_display_list_counts_through_the_resources_it_keeps() {
     let mut expected = Stats::default();
     expected.glyphs_shown = direct.glyphs_shown;
     expected.outlines_filled = direct.outlines_filled;
+    // Each replay is a render of its own, whose masks are its own.
+    expected.glyph_masks_rasterised = direct.glyph_masks_rasterised;
+    expected.glyph_mask_hits = direct.glyph_mask_hits;
     // Every outline and the image are the list's now.
     expected.glyph_outline_hits = direct.glyphs_shown;
     expected.image_hits = 2;
@@ -883,6 +918,7 @@ fn a_display_list_counts_the_annotations_it_keeps() {
     expected.font_dictionaries_resolved = 1;
     expected.glyphs_shown = shown;
     expected.outlines_filled = shown;
+    expected.glyph_masks_rasterised = shown;
     expected.glyph_outline_misses = shown;
     expected.font_program_misses = 1;
     expected.font_program_hits = shown - 1;
@@ -895,6 +931,7 @@ fn a_display_list_counts_the_annotations_it_keeps() {
     let mut expected = Stats::default();
     expected.glyphs_shown = shown;
     expected.outlines_filled = shown;
+    expected.glyph_masks_rasterised = shown;
     expected.glyph_outline_hits = shown;
     assert_eq!(
         list.render(&asking()).stats,
