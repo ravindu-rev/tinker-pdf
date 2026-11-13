@@ -1171,7 +1171,25 @@ Every lookup takes the next number of one counter and the entry it reaches
 records it, and a fill that would pass the budget evicts the entries least
 recently requested first, through one ordered index, until it fits; an entry
 larger than the whole budget is used by the render that made it and not kept,
-so a budget of zero keeps nothing and every draw decodes. The maps are looked
+so a budget of zero keeps nothing and every draw decodes. **An image the
+budget cannot hold at the size it is drawn is drawn smaller** rather than
+refused: a JPEG or a JPEG 2000 codestream with no mask, whose decode at that
+size — three bytes a sample, four for a codestream whose own opacity
+`/SMaskInData` puts to use — would not fit the budget beside the rest of its
+entry's charge, its 64 bytes and its key's defaults, is decoded at the least
+reduction past that size whose decode fits: the largest of a JPEG's half,
+quarter and eighth, or the fewest levels a codestream can drop, read off its
+whole reduced image and never the window a canvas holds, so every tile and
+band of a page draws from the page's one decode (ruling 5). It is kept under
+that reduction, so a draw whose own size asks for it finds it and a hit is
+that request's miss's bytes, and every render that draws the image so names
+it, `RenderWarning::ReducedImage { name, factor }`, the reduction its decode
+was made at. Which reduction is taken is a function of the image, the size
+it is drawn at and the budget, never of what the cache holds. An image no
+reduction fits is decoded at the size it is drawn at, as with no budget, and
+not kept; one with a mask, one whose samples are palette indices and an
+inline image are decoded as with no budget whatever it is; and with no budget
+nothing is reduced. The maps are looked
 up and never iterated, so on one thread which entries leave is a function of
 the requests, the same on every run and every target. **A budget stated at
 open holds the document's parsed objects beside the entries**
@@ -2056,6 +2074,7 @@ under it, so the copy holds every canvas the walk closes onto.
 |---|---|---|---|
 | An image codec not built in | `RenderWarning::UnsupportedImage` | A neutral placeholder is drawn and the codec named | [filters](filters.md) |
 | An image decoded with damage tolerated | `RenderWarning::DamagedImage` | Drawn *and* named, so a damaged scan is distinguishable from a blank one (ruling 10) | [rulings](../rulings.md) |
+| A JPEG or JPEG 2000 image whose decode at the size it is drawn would not fit the document's cache budget | `RenderWarning::ReducedImage { name, factor }` | Drawn from the least reduction past that size the budget holds — a JPEG at a half, a quarter or an eighth, a codestream with levels dropped — rather than refused, and named so a coarser picture is never taken for the image (ruling 10). Only under a stated budget; an image no reduction fits is drawn as with none | [opening](opening.md) |
 | A page above 67.1 Mpx at the requested scale | `RenderWarning::PageScaledDown` | A whole page smaller beats a fragment at full size (ruling 2) | [rulings](../rulings.md) |
 | A font program that could not be read | `RenderWarning::UnreadableFont` | Its glyphs are not drawn; the rest of the page is | [content and text](content-and-text.md) |
 | A shading that cannot be read into types 1–7 | `RenderWarning::UnsupportedShading` | Reported by type number rather than guessed at | [rulings](../rulings.md) |

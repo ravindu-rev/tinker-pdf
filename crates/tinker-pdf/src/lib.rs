@@ -2884,6 +2884,9 @@ pub(crate) struct Met {
     pub(crate) damaged: Vec<(String, String)>,
     /// The colour spaces the resources read with a repair, likewise.
     pub(crate) repaired: Vec<(String, String)>,
+    /// The images drawn from a decode the document's budget reduced, as
+    /// `(resource name, reduction)`, likewise.
+    pub(crate) reduced: Vec<(String, u32)>,
     /// The scale asked for and the scale used, where the page was too large.
     pub(crate) scaled_down: Option<(f64, f64)>,
     /// The region asked for and the part of it that is on the page, where the
@@ -2897,8 +2900,9 @@ pub(crate) struct Met {
 impl Met {
     /// The render's warnings, in the order a bitmap carries them: the
     /// renderer's, then `UnreadableFont` for a font the resources could not
-    /// resolve, each damaged image and each repaired space once, the page
-    /// scaled down and the region clamped.
+    /// resolve, each damaged image, each repaired space and each image drawn
+    /// reduced once, an optional-content configuration that could not be
+    /// read, the page scaled down and the region clamped.
     pub(crate) fn warnings(&self) -> Vec<RenderWarning> {
         let mut warnings = self.renderer.clone();
         // A glyph a font could not name is reported here rather than by the
@@ -2928,6 +2932,18 @@ impl Met {
             let warning = RenderWarning::RepairedColorSpace {
                 name: name.clone(),
                 reason: reason.clone(),
+            };
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+        // And an image drawn coarser than its drawn size asks, because the
+        // document's budget would not hold the decode that size asks for: the
+        // page is drawn, and the picture is not mistaken for the image.
+        for (name, factor) in &self.reduced {
+            let warning = RenderWarning::ReducedImage {
+                name: name.clone(),
+                factor: *factor,
             };
             if !warnings.contains(&warning) {
                 warnings.push(warning);
@@ -3400,6 +3416,7 @@ impl Page {
             missing_fonts: !resources.missing_fonts().is_empty(),
             damaged: resources.damaged_images(),
             repaired: resources.repaired_spaces(),
+            reduced: resources.reduced_images(),
             scaled_down: scaled_down.then_some((scale, applied)),
             // Ruling 10: a bitmap smaller than the rectangle asked for is a
             // leniency, and a leniency is named. Only when the trim actually

@@ -187,6 +187,30 @@ pub enum RenderWarning {
         /// The decoder's own stable identifier for what it tolerated.
         reason: String,
     },
+    /// An image whose decode at the size it is drawn would not fit the
+    /// document's cache budget was drawn from a decode at a lower resolution
+    /// that fits (`docs/design/performance.md`, P-16, "Reduced-resolution
+    /// decode").
+    ///
+    /// Only a render of a document whose caller stated a budget
+    /// (`CacheLimits`) reports it, and only for a JPEG or a JPEG 2000 image
+    /// with no mask: a JPEG decoded at a half, a quarter or an eighth, a
+    /// codestream with resolution levels dropped. Ruling 10 — the page is
+    /// drawn *and* named, so a picture coarser than the page asks for is never
+    /// mistaken for the image as it is. Which reduction is taken is a function
+    /// of the image, the size it is drawn at and the budget, never of what
+    /// else the document keeps, so every render that draws the image so
+    /// reports it, a render served by the document's cache as one that
+    /// decoded.
+    ReducedImage {
+        /// The resource name the image was drawn under.
+        name: String,
+        /// How many of the image's own samples, each way, one sample of the
+        /// decode it was drawn from stands for: 2, 4 or 8 for a JPEG, `2^d`
+        /// for a codestream with `d` levels dropped — always more than the
+        /// size it is drawn at asks for.
+        factor: u32,
+    },
     /// A colour space's parameters said something no space can mean, and
     /// were read the nearest way that means something.
     ///

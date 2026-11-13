@@ -93,6 +93,16 @@ use crate::stats;
 /// The budget bounds what the document keeps, not what a render needs to run —
 /// its canvas, the page's content, a decoder's working set — and an entry or
 /// an object a render is drawing from is its own copy until it lets it go.
+///
+/// **An image the budget cannot hold at the size it is drawn is drawn
+/// smaller**: a JPEG or a JPEG 2000 image with no mask, whose decode at that
+/// size would not fit the budget beside what its entry is charged, is decoded
+/// at the least reduction past that size whose decode fits — a JPEG at a
+/// half, a quarter or an eighth, a codestream with resolution levels dropped
+/// — and the render names it, [`crate::RenderWarning::ReducedImage`]. Which
+/// reduction is taken is a function of the image, its drawn size and the
+/// budget, never of what the document holds. An image no reduction fits is
+/// decoded as with no budget, and not kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CacheLimits {
     /// The most bytes the document keeps at once, each entry and each parsed
@@ -669,7 +679,11 @@ pub(crate) struct ImageKey {
     /// eighth, and `2^d` for a JPEG 2000 codestream decoded with `d` levels
     /// dropped (`tinker_pdf_render::Reduced::factor`) — and the rectangle of
     /// the decoded image it holds, where a codestream's decode holds part of
-    /// it (`tinker_pdf_render::DecodedImage::window`).
+    /// it (`tinker_pdf_render::DecodedImage::window`). A reduction the
+    /// budget took a draw to past what its size asks is keyed as the same
+    /// reduction asked by a draw's size, since it is the same decode: a hit
+    /// is the bytes that request's miss computes, and a request for one
+    /// reduction is never served another.
     pub(crate) asked: Asked,
     /// The conversion the image's colours take, its own `/Intent`'s or the
     /// one in force at the draw (8.6.5.8, Table 89), where an intent changes

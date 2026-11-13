@@ -877,13 +877,14 @@ fn bands_of(view: PixelRegion, cuts: &[u32]) -> Vec<PixelRegion> {
 type Stamp = (u64, u32);
 
 /// The stamps of what one band's render met: one for each warning of the
-/// renderer's list met during the calls, each damaged image and each
-/// repaired space of the resources', in their orders.
+/// renderer's list met during the calls, each damaged image, each repaired
+/// space and each image drawn reduced of the resources', in their orders.
 #[derive(Default)]
 struct Stamps {
     met: Vec<Stamp>,
     damaged: Vec<Stamp>,
     repaired: Vec<Stamp>,
+    reduced: Vec<Stamp>,
 }
 
 /// Stamps the entries a list has gained since `stamps` last saw it, `now` long
@@ -943,33 +944,24 @@ fn merged(
     });
     let mut renderer: Vec<RenderWarning> = calls.into_iter().map(|(_, warning)| warning).collect();
     renderer.extend(ending);
-    let listed = |pick: &dyn Fn(&BandMet) -> (&[(String, String)], &[Stamp])| {
-        let mut least: Vec<(Stamp, (String, String))> = Vec::new();
-        for part in parts {
-            let (entries, stamps) = pick(part);
-            for (index, entry) in entries.iter().enumerate() {
-                let stamp = stamps
-                    .get(index)
-                    .copied()
-                    .unwrap_or((u64::MAX, u32::try_from(index).unwrap_or(u32::MAX)));
-                keep_least(&mut least, stamp, entry.clone());
-            }
-        }
-        least.sort_by(|a, b| a.0.cmp(&b.0));
-        // The cap a render's own list keeps (`PageResources`).
-        least.truncate(64);
-        least
-            .into_iter()
-            .map(|(_, entry)| entry)
-            .collect::<Vec<_>>()
-    };
-    let damaged = listed(&|part| (&part.met.damaged, &part.stamps.damaged));
-    let repaired = listed(&|part| (&part.met.repaired, &part.stamps.repaired));
+    let damaged = listed(parts, |part| {
+        (part.met.damaged.as_slice(), part.stamps.damaged.as_slice())
+    });
+    let repaired = listed(parts, |part| {
+        (
+            part.met.repaired.as_slice(),
+            part.stamps.repaired.as_slice(),
+        )
+    });
+    let reduced = listed(parts, |part| {
+        (part.met.reduced.as_slice(), part.stamps.reduced.as_slice())
+    });
     Met {
         renderer,
         missing_fonts: parts.iter().any(|part| part.met.missing_fonts),
         damaged,
         repaired,
+        reduced,
         scaled_down,
         clamped,
         // Every band names the one configuration.
@@ -978,6 +970,29 @@ fn merged(
             .find_map(|part| part.met.unreadable_configuration),
     }
     .warnings()
+}
+
+/// One of the facade's lists of what the bands met, as the page drawn whole
+/// lists it: each entry once, at the least stamp any band met it at, ordered
+/// by that, and held to the cap a render's own list keeps (`PageResources`).
+fn listed<T: Clone + PartialEq>(
+    parts: &[BandMet],
+    pick: impl Fn(&BandMet) -> (&[T], &[Stamp]),
+) -> Vec<T> {
+    let mut least: Vec<(Stamp, T)> = Vec::new();
+    for part in parts {
+        let (entries, stamps) = pick(part);
+        for (index, entry) in entries.iter().enumerate() {
+            let stamp = stamps
+                .get(index)
+                .copied()
+                .unwrap_or((u64::MAX, u32::try_from(index).unwrap_or(u32::MAX)));
+            keep_least(&mut least, stamp, entry.clone());
+        }
+    }
+    least.sort_by(|a, b| a.0.cmp(&b.0));
+    least.truncate(64);
+    least.into_iter().map(|(_, entry)| entry).collect()
 }
 
 /// Keeps `value` in `kept` once, at the least `stamp` it has been met at.
@@ -1012,7 +1027,8 @@ impl Target for Renderer<'_, PageResources> {
 
 /// A renderer handed each recorded call in turn, stamping what each call made
 /// the render meet — the renderer's warnings and the resources' damaged
-/// images and repaired spaces — with the call's ordinal, for [`merged`].
+/// images, repaired spaces and images drawn reduced — with the call's
+/// ordinal, for [`merged`].
 struct Stamping<'a, 'g> {
     renderer: &'a mut Renderer<'g, PageResources>,
     resources: &'a PageResources,
@@ -1026,9 +1042,10 @@ impl Stamping<'_, '_> {
     fn after(&mut self) {
         let ordinal = self.ordinal;
         stamp(&mut self.stamps.met, self.renderer.met().len(), ordinal);
-        let (damaged, repaired) = self.resources.tolerated();
-        stamp(&mut self.stamps.damaged, damaged, ordinal);
-        stamp(&mut self.stamps.repaired, repaired, ordinal);
+        let tolerated = self.resources.tolerated();
+        stamp(&mut self.stamps.damaged, tolerated.damaged, ordinal);
+        stamp(&mut self.stamps.repaired, tolerated.repaired, ordinal);
+        stamp(&mut self.stamps.reduced, tolerated.reduced, ordinal);
         self.ordinal = self.ordinal.saturating_add(1);
     }
 }
@@ -1928,6 +1945,7 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
                     .map(|((name, reason), _)| (name.to_string(), reason.to_string()))
                     .collect(),
                 repaired: Vec::new(),
+                reduced: Vec::new(),
                 scaled_down: None,
                 clamped: None,
                 unreadable_configuration: None,
@@ -1936,6 +1954,7 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
                 met,
                 damaged: damaged.iter().map(|(_, stamp)| *stamp).collect(),
                 repaired: Vec::new(),
+                reduced: Vec::new(),
             },
         }
     }
@@ -2022,6 +2041,43 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
                 unsupported("a"),
                 unsupported("b"),
                 RenderWarning::UnreadableFont
+            ]
+        );
+    }
+
+    /// **The images the bands drew reduced are the page's, each once**: an
+    /// image two bands drew from a decode the budget reduced is said once,
+    /// at the earlier call either met it at, and the reduced images follow
+    /// the damaged ones, in the order the page met them.
+    #[test]
+    fn reduced_images_merge_in_the_order_the_page_met_them() {
+        let reduced = |entries: Vec<((&str, u32), Stamp)>, damaged| {
+            let mut part = band(Vec::new(), Vec::new(), damaged);
+            part.met.reduced = entries
+                .iter()
+                .map(|((name, factor), _)| (name.to_string(), *factor))
+                .collect();
+            part.stamps.reduced = entries.iter().map(|(_, stamp)| *stamp).collect();
+            part
+        };
+        let top = reduced(
+            vec![(("Photo", 2), (7, 0))],
+            vec![(("Scan", "truncated"), (9, 0))],
+        );
+        let bottom = reduced(vec![(("Map", 8), (2, 0)), (("Photo", 2), (5, 0))], vec![]);
+        let said = |name: &str, factor| RenderWarning::ReducedImage {
+            name: name.to_string(),
+            factor,
+        };
+        assert_eq!(
+            merged(&[top, bottom], None, None),
+            vec![
+                RenderWarning::DamagedImage {
+                    name: "Scan".to_string(),
+                    reason: "truncated".to_string(),
+                },
+                said("Map", 8),
+                said("Photo", 2),
             ]
         );
     }

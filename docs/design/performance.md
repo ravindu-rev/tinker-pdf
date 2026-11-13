@@ -3597,20 +3597,28 @@ a codec this build refuses draws ruling 2's placeholder, named by
 nothing yet that "aborts": the refusal a budget-bound engine would otherwise
 reach for is the placeholder, and this replaces it with a smaller picture.
 
-With a budget stated, **an image whose full decode is larger than the budget
-itself** is decoded at the largest reduction whose bytes fit it — a DCT
-image's scaled decode (P-09), a JPEG 2000 image's discarded levels (P-10) —
-and drawn from that, named by a new typed `RenderWarning`,
-`ReducedImage { name, factor }`, which joins rendering's refusal table
-(ruling 10). The reduction is a function of the image's size and the stated
-budget, never of what else the cache holds, so a page draws the same pixels
-whatever was rendered before it; an image the budget can hold whole is
-decoded whole, and room is made for it by eviction. An image no reduction
-fits — a codec with no reduced decode of its own, or a factor past what its
-codec can give — is decoded whole and drawn as today, and not kept: it is
-used once by the request that made it, as every entry larger than the budget
-is. With no budget stated nothing changes, and every fingerprint and
-`render_regions.rs` pass as they are.
+With a budget stated, **an image whose decode at the size it is drawn is
+larger than the budget itself** — beside the rest of its entry's charge, its
+64 bytes and its key's defaults, so that "fits" is "can be kept" — is decoded
+at the least reduction past what that size asks whose bytes fit it — a DCT
+image's scaled decode (P-09), the largest of a half, a quarter and an eighth;
+a JPEG 2000 image's discarded levels (P-10), the fewest — and drawn from
+that, named by a typed `RenderWarning`, `ReducedImage { name, factor }`,
+which joins rendering's refusal table (ruling 10). A decode is three bytes a
+sample, four for a codestream whose own opacity `/SMaskInData` puts to use,
+and a codestream's is read off its whole reduced image, never the window a
+canvas holds: the window is a tile's or a band's, and a page is drawn from
+one decode in every part of it (ruling 5). The reduction is a function of the
+image's size, the size it is drawn at and the stated budget, never of what
+else the cache holds, so a page draws the same pixels whatever was rendered
+before it; an image the budget can hold at its drawn size is decoded at it,
+and room is made for it by eviction. An image no reduction fits — a codec with
+no reduced decode of its own, an image with a mask or of palette indices, or
+a factor past what its codec can give — is decoded as the draw asks and drawn
+as today, and not kept: it is used once by the request that made it, as
+every entry larger than the budget is. An inline image has no object to be
+kept under and is never reduced. With no budget stated nothing changes, and
+every fingerprint and `render_regions.rs` pass as they are.
 
 #### Parsed objects under pressure
 

@@ -231,15 +231,19 @@ pub(crate) enum Frame {
 }
 
 impl Frame {
-    /// What a draw that asks as `request` does asks the decode for.
-    fn asked(self, request: &ImageRequest) -> Asked {
+    /// What a draw that asks as `request` does asks the decode for, its
+    /// decode's samples to take at most `room` bytes where a budget is stated
+    /// ([`Room`]): the draw's own ask where they fit or no budget is stated,
+    /// and otherwise the least reduction past it whose decode fits
+    /// ([`jpeg_scale_within`], [`JpxFrame::ask_within`]).
+    fn asked(self, request: &ImageRequest, room: Option<Room>) -> Asked {
         match self {
             Frame::Jpeg { width, height } => Asked {
-                reduction: reduction(jpeg_scale((width, height), request)),
+                reduction: reduction(jpeg_scale_within((width, height), request, room)),
                 window: None,
             },
             Frame::Jpx(frame) => {
-                let (discard, window) = frame.ask(request);
+                let (discard, window) = frame.ask_within(request, room);
                 Asked {
                     reduction: 1 << discard.min(31),
                     window,
@@ -247,6 +251,42 @@ impl Frame {
             }
         }
     }
+}
+
+/// The bytes a decoded image's samples may take and the decode still be kept
+/// under the document's budget (`docs/design/performance.md`, P-16,
+/// "Reduced-resolution decode"): the budget less what its entry is charged
+/// beside them — the cache's 64 bytes and its key's defaults
+/// (`cache::ImageKey::painted`). A function of the budget and the key alone,
+/// never of what the cache holds, so the reduction a draw takes is the same
+/// whatever was drawn before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Room(u64);
+
+impl Room {
+    /// The room under `budget` for an image whose key's defaults are
+    /// `key_bytes` long.
+    fn under(budget: u64, key_bytes: u64) -> Room {
+        Room(budget.saturating_sub(key_bytes.saturating_add(cache::ENTRY_BYTES)))
+    }
+
+    /// Whether `pixels` samples of `per` bytes each fit.
+    fn holds(self, pixels: u64, per: u64) -> bool {
+        pixels.saturating_mul(per) <= self.0
+    }
+}
+
+/// What a draw asks an image's decode for beside the image itself: the size
+/// it is drawn at and the parts of it the draw reaches and shows, the
+/// conversion its colours take (8.6.5.8, Table 89), and the bytes the
+/// document's budget leaves its samples where the document keeps the decode
+/// ([`Room`]) — `None` for a decode its draw alone holds: an inline image, a
+/// soft mask, a render with no budget.
+#[derive(Clone, Copy)]
+struct DecodeAsk<'a> {
+    request: &'a ImageRequest,
+    conversion: icc::Conversion,
+    room: Option<Room>,
 }
 
 /// A JPEG 2000 codestream as its header and its dictionary give it, which
@@ -281,6 +321,47 @@ impl JpxFrame {
     fn ask(&self, request: &ImageRequest) -> (u8, Option<SourceWindow>) {
         let discard = jpx_discard((self.width, self.height), self.levels, request);
         (discard, self.window(discard, request))
+    }
+
+    /// [`JpxFrame::ask`], its decode's samples to take at most `room` bytes
+    /// where a budget is stated (`docs/design/performance.md`, P-16,
+    /// "Reduced-resolution decode"): the draw's own levels where the image
+    /// reduced by them fits or no budget is stated; otherwise the fewest
+    /// levels dropped past them, up to all the codestream can drop, whose
+    /// reduced image fits; and the draw's own where none does, which is
+    /// decoded as it always was and not kept. Each with the window that many
+    /// levels down the draw holds ([`JpxFrame::window`]).
+    ///
+    /// What fits is read off the whole reduced image, never the window: the
+    /// window is the canvas's — a tile's, a band's — and the levels a page
+    /// draws an image at are one for every part of it (ruling 5), so a tile
+    /// is drawn from the samples the page is. An image whose samples are
+    /// indices drops none (`levels` is 0), so it is always the draw's own.
+    fn ask_within(&self, request: &ImageRequest, room: Option<Room>) -> (u8, Option<SourceWindow>) {
+        let own = self.ask(request);
+        let Some(room) = room else {
+            return own;
+        };
+        let fits = |d: u8| {
+            let (columns, rows) = self.reduced(d);
+            room.holds(u64::from(columns) * u64::from(rows), self.sample_bytes())
+        };
+        if fits(own.0) {
+            return own;
+        }
+        (own.0.saturating_add(1)..=self.levels.min(31))
+            .find(|d| fits(*d))
+            .map_or(own, |d| (d, self.window(d, request)))
+    }
+
+    /// The bytes a decoded sample takes: three of RGB, and a fourth of
+    /// opacity where `/SMaskInData` puts the codestream's own to use.
+    fn sample_bytes(&self) -> u64 {
+        if self.opaque {
+            3
+        } else {
+            4
+        }
     }
 
     /// The reduced image's own width and height once `d` levels are dropped:
@@ -494,6 +575,32 @@ fn jpeg_scale(frame: (u32, u32), request: &ImageRequest) -> JpegScale {
         .into_iter()
         .find(|&scale| holds(frame.0, scale, across) && holds(frame.1, scale, down))
         .unwrap_or(JpegScale::Full)
+}
+
+/// [`jpeg_scale`], the decode's samples to take at most `room` bytes where a
+/// budget is stated (`docs/design/performance.md`, P-16, "Reduced-resolution
+/// decode"): the draw's own scale where its decode fits or no budget is
+/// stated; otherwise the largest of the smaller scales whose decode — three
+/// bytes a sample of `⌈W·N/8⌉ × ⌈H·N/8⌉` ([`JpegScale::length`]) — fits;
+/// and the draw's own where none does, which is decoded as it always was and
+/// not kept.
+fn jpeg_scale_within(frame: (u32, u32), request: &ImageRequest, room: Option<Room>) -> JpegScale {
+    let own = jpeg_scale(frame, request);
+    let Some(room) = room else {
+        return own;
+    };
+    let fits = |scale: JpegScale| {
+        let pixels = u64::from(scale.length(frame.0)) * u64::from(scale.length(frame.1));
+        room.holds(pixels, 3)
+    };
+    if fits(own) {
+        return own;
+    }
+    JpegScale::ALL
+        .into_iter()
+        .filter(|scale| scale.block_samples() < own.block_samples())
+        .find(|scale| fits(*scale))
+        .unwrap_or(own)
 }
 
 /// How many of an image's own samples each way one decoded sample stands for
@@ -1167,6 +1274,18 @@ impl Operation {
     }
 }
 
+/// How long each list of what a scope's resources tolerated is
+/// ([`PageResources::tolerated`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Tolerated {
+    /// Images decoded with damage tolerated.
+    pub(crate) damaged: usize,
+    /// Colour spaces read with a repair.
+    pub(crate) repaired: usize,
+    /// Images drawn from a decode the budget reduced.
+    pub(crate) reduced: usize,
+}
+
 /// Everything one page's rendering needs from its resources.
 pub struct PageResources {
     doc: Arc<CosDocument>,
@@ -1189,6 +1308,10 @@ pub struct PageResources {
     /// what the decoder tolerated)`. Ruling 10: the leaf crate says what it
     /// forgave, and this is where the object it happened in gets attached.
     damaged_images: Mutex<Vec<(String, String)>>,
+    /// Images drawn from a decode the document's budget took below what
+    /// their drawn size asks, as `(resource name, reduction)` — reported as
+    /// [`tinker_pdf_render::RenderWarning::ReducedImage`] (ruling 10).
+    reduced_images: Mutex<Vec<(String, u32)>>,
     /// Colour spaces whose parameters were read the nearest way that means
     /// something, as `(resource name, what was repaired)` — reported as
     /// [`tinker_pdf_render::RenderWarning::RepairedColorSpace`] (ruling 10).
@@ -2165,6 +2288,27 @@ impl PageResources {
             .unwrap_or_default()
     }
 
+    /// Images drawn from a decode the document's budget reduced past what
+    /// their drawn size asks, and the reduction each was drawn at (ruling 10,
+    /// `docs/design/performance.md`, P-16, "Reduced-resolution decode").
+    #[must_use]
+    pub(crate) fn reduced_images(&self) -> Vec<(String, u32)> {
+        self.reduced_images
+            .lock()
+            .map(|images| images.clone())
+            .unwrap_or_default()
+    }
+
+    /// Adds an image drawn from a decode the budget reduced, and its
+    /// reduction, to what this render met, once.
+    fn note_reduced_image(&self, entry: (String, u32)) {
+        if let Ok(mut reduced) = self.reduced_images.lock() {
+            if reduced.len() < 64 && !reduced.contains(&entry) {
+                reduced.push(entry);
+            }
+        }
+    }
+
     /// Adds repairs some other pass over the same content met — the
     /// interpretation a retained page recorded — to what this render reports,
     /// as [`PageResources::note_missing_fonts`] does for fonts.
@@ -2225,6 +2369,7 @@ impl PageResources {
             caches: Arc::clone(&self.caches),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
+            reduced_images: Mutex::new(Vec::new()),
             repaired_spaces: Mutex::new(Vec::new()),
             image_capture: Mutex::new(None),
             unresolved: Mutex::new(None),
@@ -2322,14 +2467,16 @@ impl PageResources {
             .stream_image_input_counted(r, self.op.work.as_deref())
     }
 
-    /// How many damaged images and repaired spaces these resources have
-    /// met so far: what a caller delivering calls one at a time reads after
-    /// each, to say which call each was first met at (`display.rs`, a page's
-    /// bands).
-    pub(crate) fn tolerated(&self) -> (usize, usize) {
-        let damaged = self.damaged_images.lock().map_or(0, |list| list.len());
-        let repaired = self.repaired_spaces.lock().map_or(0, |list| list.len());
-        (damaged, repaired)
+    /// How many damaged images, repaired spaces and reduced images these
+    /// resources have met so far: what a caller delivering calls one at a
+    /// time reads after each, to say which call each was first met at
+    /// (`display.rs`, a page's bands).
+    pub(crate) fn tolerated(&self) -> Tolerated {
+        Tolerated {
+            damaged: self.damaged_images.lock().map_or(0, |list| list.len()),
+            repaired: self.repaired_spaces.lock().map_or(0, |list| list.len()),
+            reduced: self.reduced_images.lock().map_or(0, |list| list.len()),
+        }
     }
 
     /// Adds fonts some other pass over the same content could not resolve —
@@ -2377,6 +2524,7 @@ impl PageResources {
             caches: Arc::default(),
             missing_fonts: Mutex::new(Vec::new()),
             damaged_images: Mutex::new(Vec::new()),
+            reduced_images: Mutex::new(Vec::new()),
             repaired_spaces: Mutex::new(Vec::new()),
             image_capture: Mutex::new(None),
             unresolved: Mutex::new(None),
@@ -4604,6 +4752,9 @@ impl GlyphSource for PageResources {
             for entry in resources.repaired_spaces() {
                 self.note_repaired_space(entry);
             }
+            for entry in resources.reduced_images() {
+                self.note_reduced_image(entry);
+            }
         }
 
         Some(tinker_pdf_render::Tile {
@@ -4677,9 +4828,11 @@ impl GlyphSource for PageResources {
                 Filled::Once(entry)
             }
         });
+        // A render's own cache keeps nothing past it, so no budget reaches
+        // what it decodes.
         let at = entry
             .frame
-            .map_or(Asked::WHOLE, |frame| frame.asked(request));
+            .map_or(Asked::WHOLE, |frame| frame.asked(request, None));
         let key = (at, entry.colour.key(intent));
         let cached = entry.decoded.read(key, || {
             made.set(true);
@@ -4726,7 +4879,7 @@ impl PageResources {
             image,
             frame,
             colour,
-        } = self.decode_image(name, request, intent);
+        } = self.decode_image(name, request, intent, None);
         // The damage this decode reported: every entry under this name, which
         // only this image's decode writes.
         let damage: Vec<(Option<String>, String)> = self
@@ -4847,6 +5000,11 @@ impl PageResources {
         let colour = self.serving(self.op.clone()).image_colour(&dict, name);
         let label = String::from_utf8_lossy(name).into_owned();
         let work = self.op.work.as_deref();
+        // The bytes the decode's samples may take and its entry still be kept
+        // under the budget, which what a draw asks is read against beside its
+        // size: a function of the budget and the key, so the reduction a draw
+        // takes is the same whatever the cache holds.
+        let room = Room::under(cache.limits().bytes, key_bytes);
         // Whether this draw decoded the image, and the decode it made to
         // learn the frame, for the lookup of what it asks to keep.
         let decoded = Cell::new(false);
@@ -4855,10 +5013,13 @@ impl PageResources {
             decoded.set(true);
             self.count(Counter::ImagesDecoded);
             let decoding = self.serving(self.op.clone());
-            let Decoded { image, frame, .. } = decoding.decode_image(name, request, intent);
+            let Decoded { image, frame, .. } =
+                decoding.decode_image(name, request, intent, Some(room));
             (Arc::new(CachedImage::of(&image, &decoding, &label)), frame)
         };
-        let at = if self.reducible(&dict) {
+        // What the draw asks, and the reduction the budget took it to past
+        // what its size asks, where it took one.
+        let (at, reduced) = if self.reducible(&dict) {
             let key = FrameKey {
                 object: reference,
                 painted: painted.clone(),
@@ -4868,9 +5029,16 @@ impl PageResources {
                 learnt.set(Some(entry));
                 Fill::Keep(frame, key_bytes)
             });
-            frame.map_or(Asked::WHOLE, |frame| frame.asked(request))
+            match frame {
+                Some(frame) => {
+                    let at = frame.asked(request, Some(room));
+                    let own = frame.asked(request, None);
+                    (at, (at.reduction > own.reduction).then_some(at.reduction))
+                }
+                None => (Asked::WHOLE, None),
+            }
         } else {
-            Asked::WHOLE
+            (Asked::WHOLE, None)
         };
         let key = ImageKey {
             object: reference,
@@ -4892,6 +5060,12 @@ impl PageResources {
             Counter::ImageHits
         });
         kept.say_again(self, &label);
+        // Ruling 10: an image the budget took below what its drawn size asks
+        // is drawn *and* named, by every render that draws it so, whether the
+        // cache served it or it decoded. A refusal draws no picture to name.
+        if let (Some(factor), Ok(_)) = (reduced, &kept.image) {
+            self.note_reduced_image((label, factor));
+        }
         Some(kept.handed())
     }
 
@@ -6004,11 +6178,19 @@ impl PageResources {
     /// asks. Each codec's own path decodes an image of palette indices whole
     /// too ([`Frame`]). Its colours convert in its own `/Intent` where it
     /// names one, and in `intent` otherwise (8.6.5.8, Table 89).
+    ///
+    /// `room` is what the document's budget leaves its samples where the
+    /// document keeps the decode ([`Room`]): an image a draw's size can
+    /// reduce is decoded at the least reduction past what the size asks whose
+    /// samples fit it, where what the size asks does not fit and one does
+    /// (`docs/design/performance.md`, P-16, "Reduced-resolution decode"). An
+    /// image no draw reduces is decoded whole whatever it leaves.
     fn decode_image(
         &self,
         name: &[u8],
         request: &ImageRequest,
         intent: RenderingIntent,
+        room: Option<Room>,
     ) -> Decoded {
         let Some((dict, reference)) = self.xobject(name) else {
             return Decoded {
@@ -6030,13 +6212,21 @@ impl PageResources {
             SampleForm::TwoColour
         };
         let reducible = self.reducible(&dict);
-        let request = if reducible {
-            request
+        let ask = if reducible {
+            DecodeAsk {
+                request,
+                conversion,
+                room,
+            }
         } else {
-            &ImageRequest::FULL
+            DecodeAsk {
+                request: &ImageRequest::FULL,
+                conversion,
+                room: None,
+            }
         };
         let decoded = self
-            .decode_image_at(&dict, reference, &label, form, request, conversion)
+            .decode_image_at(&dict, reference, &label, form, ask)
             .map(|(mut image, frame)| {
                 // 11.6.5.3: /SMask is a greyscale image whose samples are this
                 // one's opacity. Without it every soft-masked image — a drop
@@ -6312,7 +6502,8 @@ impl PageResources {
     /// The frame it hands back beside the image is the JPEG's own size, which
     /// a later draw's scale is read against; none under an `/Indexed` space,
     /// whose samples are indices (8.6.6.3) — a smaller scale averages them
-    /// into indices no sample chose — so such a JPEG is decoded whole.
+    /// into indices no sample chose — so such a JPEG is decoded whole, under a
+    /// budget too.
     fn jpeg_image(
         &self,
         raw: &[u8],
@@ -6320,14 +6511,18 @@ impl PageResources {
         interpolate: bool,
         named: Option<ColorSpace>,
         name: &[u8],
-        request: &ImageRequest,
-        conversion: icc::Conversion,
+        ask: DecodeAsk<'_>,
     ) -> Result<(DecodedImage, Option<Frame>), String> {
+        let DecodeAsk {
+            request,
+            conversion,
+            room,
+        } = ask;
         let indexed = matches!(named, Some(ColorSpace::Indexed { .. }));
-        let request = if indexed {
-            &ImageRequest::FULL
+        let (request, room) = if indexed {
+            (&ImageRequest::FULL, None)
         } else {
-            request
+            (request, room)
         };
         let mut into = JpegInto {
             resources: self,
@@ -6340,10 +6535,11 @@ impl PageResources {
             width: 0,
             rgb: Vec::new(),
         };
-        // The scale is the frame's own size against the drawn size, asked
-        // when the decode reads the frame, so it is sized by the bytes rather
-        // than by what the dictionary says they hold.
-        let choose = |width: u32, height: u32| jpeg_scale((width, height), request);
+        // The scale is the frame's own size against the drawn size and what
+        // the budget leaves its samples, asked when the decode reads the
+        // frame, so it is sized by the bytes rather than by what the
+        // dictionary says they hold.
+        let choose = |width: u32, height: u32| jpeg_scale_within((width, height), request, room);
         let frame = jpeg_decode_strips_sized(raw, JPEG_CEILING, &choose, &mut into)
             .map_err(|e| format!("{e:?}"))?;
         let work = self.op.work.as_deref();
@@ -6436,7 +6632,10 @@ impl PageResources {
     /// a lower resolution would average — as the decoder drops none of a
     /// codestream a `pclr` palette reads
     /// ([`tinker_pdf_filters::JpxHeader::levels`]) — though a window of it is
-    /// still a window. What the decode did is counted into
+    /// still a window. Where the document keeps the decode under a budget, a
+    /// decode the drawn size asks for whose samples would not fit what the
+    /// budget leaves drops more levels, the fewest whose do
+    /// ([`JpxFrame::ask_within`]). What the decode did is counted into
     /// [`crate::Stats::jpx_levels_synthesised`],
     /// [`crate::Stats::jpx_code_blocks_decoded`] and
     /// [`crate::Stats::jpx_levels_discarded`].
@@ -6447,9 +6646,13 @@ impl PageResources {
         interpolate: bool,
         named: Option<ColorSpace>,
         name: &[u8],
-        request: &ImageRequest,
-        conversion: icc::Conversion,
+        ask: DecodeAsk<'_>,
     ) -> Result<(DecodedImage, Option<Frame>), String> {
+        let DecodeAsk {
+            request,
+            conversion,
+            room,
+        } = ask;
         let smask_in_data = dict.get_int(self.name(b"SMaskInData")).unwrap_or(0);
         let image_mask = dict.get_bool(self.name(b"ImageMask")).unwrap_or(false);
         if image_mask {
@@ -6477,7 +6680,7 @@ impl PageResources {
                 opaque: smask_in_data == 0 || !header.opacity,
                 interpolate,
             });
-        let (discard, window) = frame.map_or((0, None), |frame| frame.ask(request));
+        let (discard, window) = frame.map_or((0, None), |frame| frame.ask_within(request, room));
         let mut warnings = Vec::new();
         // The decode's parts — code-blocks, tiles, components, wavelet
         // levels — on the threads the operation may spend, serially unless
@@ -6751,18 +6954,20 @@ impl PageResources {
 
     /// Decodes an image from its dictionary, wherever that came from, a
     /// one-bit image of one component held as `form` asks, for a draw that
-    /// asks as `request` does, its colours converted as `conversion` says;
-    /// and, beside it, the frame a codec that can answer a drawn size found
-    /// the image to be ([`Frame`]).
+    /// asks as `ask` does ([`DecodeAsk`]): at the size it is drawn at, its
+    /// colours converted as its conversion says, and within what the budget
+    /// leaves its samples where the document keeps it; and, beside it, the
+    /// frame a codec that can answer a drawn size found the image to be
+    /// ([`Frame`]).
     fn decode_image_at(
         &self,
         dict: &Dict,
         reference: tinker_pdf_cos::ObjRef,
         name: &str,
         form: SampleForm,
-        request: &ImageRequest,
-        conversion: icc::Conversion,
+        ask: DecodeAsk<'_>,
     ) -> Result<(DecodedImage, Option<Frame>), String> {
+        let conversion = ask.conversion;
         let dict = dict.clone();
         let name = name.as_bytes();
 
@@ -6830,7 +7035,7 @@ impl PageResources {
                 .image_input(reference)
                 .map_err(|_| "DCTDecode".to_string())?;
             let named = self.image_space(&dict, name);
-            return self.jpeg_image(&raw, &decode, interpolate, named, name, request, conversion);
+            return self.jpeg_image(&raw, &decode, interpolate, named, name, ask);
         }
         if matches!(last_filter.as_deref(), Some(b"JPXDecode")) {
             // Like a JPEG and unlike a fax, a JPX codestream carries its own
@@ -6841,7 +7046,7 @@ impl PageResources {
                 .image_input(reference)
                 .map_err(|_| "JPXDecode".to_string())?;
             let named = self.image_space(&dict, name);
-            return self.jpx_image(&raw, &dict, interpolate, named, name, request, conversion);
+            return self.jpx_image(&raw, &dict, interpolate, named, name, ask);
         }
 
         let (data, bpc) = self.stream_samples(
@@ -7145,7 +7350,8 @@ impl PageResources {
             // not join the sample loop below.
             InlineSamples::Jpeg(data) => {
                 // An inline image carries no mask (Table 93), so its JPEG is
-                // decoded at the size the draw asks.
+                // decoded at the size the draw asks. It has no object to be
+                // kept under, so no budget reaches it.
                 let named = self.inline_space(dict);
                 return self
                     .jpeg_image(
@@ -7154,8 +7360,11 @@ impl PageResources {
                         interpolate,
                         named,
                         INLINE_NAME.as_bytes(),
-                        request,
-                        conversion,
+                        DecodeAsk {
+                            request,
+                            conversion,
+                            room: None,
+                        },
                     )
                     .map(|(image, _)| image);
             }
@@ -7176,8 +7385,11 @@ impl PageResources {
                         interpolate,
                         named,
                         INLINE_NAME.as_bytes(),
-                        request,
-                        conversion,
+                        DecodeAsk {
+                            request,
+                            conversion,
+                            room: None,
+                        },
                     )
                     .map(|(image, _)| image);
             }
@@ -7263,8 +7475,11 @@ impl PageResources {
             reference,
             "SMask",
             SampleForm::Rgb,
-            &ImageRequest::FULL,
-            icc::Conversion::default(),
+            DecodeAsk {
+                request: &ImageRequest::FULL,
+                conversion: icc::Conversion::default(),
+                room: None,
+            },
         )
         .ok()
         .map(|(image, _)| image)
@@ -8610,12 +8825,13 @@ fn scale(outline: &Outline, factor: f64) -> Outline {
 #[cfg(test)]
 mod tests {
     use super::{
-        expand_inline_abbreviations, jpx_discard, jpx_skip, Answer, Asked, Contents, Frame,
-        JpxFrame, PageResources, Remembered, SourceWindow,
+        expand_inline_abbreviations, jpeg_scale, jpeg_scale_within, jpx_discard, jpx_skip, Answer,
+        Asked, Contents, Frame, JpxFrame, PageResources, Remembered, Room, SourceWindow,
     };
     use tinker_pdf_color::{ColorSpace, Colorant};
     use tinker_pdf_content::{ColorantKind, FontSource};
     use tinker_pdf_cos::{Name, ObjRef, Object};
+    use tinker_pdf_filters::JpegScale;
     use tinker_pdf_render::{ImageRequest, UnitArea};
 
     /// A draw of `across` by `down` pixels.
@@ -8728,7 +8944,7 @@ mod tests {
             (jpx, ImageRequest::FULL, 1),
         ] {
             assert_eq!(
-                frame.asked(&request),
+                frame.asked(&request, None),
                 Asked {
                     reduction: want,
                     window: None
@@ -8746,8 +8962,218 @@ mod tests {
             }),
             ..drawn(155.0, 219.0)
         };
-        assert!(jpx.asked(&corner).window.is_some(), "a codestream's part");
-        assert_eq!(jpeg.asked(&corner).window, None, "a JPEG is decoded whole");
+        assert!(
+            jpx.asked(&corner, None).window.is_some(),
+            "a codestream's part"
+        );
+        assert_eq!(
+            jpeg.asked(&corner, None).window,
+            None,
+            "a JPEG is decoded whole"
+        );
+    }
+
+    /// **The room is the budget less what an entry is charged beside its
+    /// samples**: the cache's 64 bytes and the key's defaults, never below
+    /// nothing; and a decode fits it when its samples' bytes are at most it.
+    #[test]
+    fn the_room_is_the_budget_less_an_entrys_own_charge() {
+        assert_eq!(Room::under(10_000, 0), Room(10_000 - 64));
+        assert_eq!(Room::under(10_000, 36), Room(10_000 - 100));
+        assert_eq!(Room::under(100, 36), Room(0), "a budget its key fills");
+        assert_eq!(Room::under(0, 0), Room(0), "a budget of zero");
+        assert_eq!(Room::under(5, u64::MAX), Room(0), "no overflow");
+        assert_eq!(Room::under(u64::MAX, 0), Room(u64::MAX - 64));
+        assert!(Room(12).holds(4, 3), "exactly the room");
+        assert!(!Room(11).holds(4, 3), "a byte past it");
+        assert!(
+            !Room(u64::MAX - 1).holds(u64::MAX, 2),
+            "saturating, never wrapping"
+        );
+        assert!(Room(u64::MAX).holds(u64::MAX, 4));
+    }
+
+    /// **A budget takes a JPEG to the largest of the smaller scales whose
+    /// decode fits** (`docs/design/performance.md`, P-16, "Reduced-resolution
+    /// decode"). A 512 by 384 frame holds 589 824 bytes at full size, 147 456
+    /// at a half, 36 864 at a quarter and 9 216 at an eighth, three a sample:
+    /// each fits a room of exactly its bytes and not one byte less, where the
+    /// next scale down is taken. A room no scale fits leaves the draw's own,
+    /// and so does no budget. A draw that already asks for a quarter never
+    /// goes back up to a half however roomy the budget, and is taken down to
+    /// an eighth only where a quarter does not fit. Odd sides round up,
+    /// `⌈601·4/8⌉ = 301` by `⌈401·4/8⌉ = 201`.
+    #[test]
+    fn a_budget_takes_a_jpeg_to_the_largest_smaller_scale_that_fits() {
+        let frame = (512, 384);
+        let whole = drawn(512.0, 384.0);
+        assert_eq!(jpeg_scale(frame, &whole), JpegScale::Full);
+        let within = |request: &ImageRequest, room: Option<u64>| {
+            jpeg_scale_within(frame, request, room.map(Room))
+        };
+        for (room, want) in [
+            (None, JpegScale::Full),
+            (Some(u64::MAX), JpegScale::Full),
+            (Some(589_824), JpegScale::Full),
+            (Some(589_823), JpegScale::Half),
+            (Some(147_456), JpegScale::Half),
+            (Some(147_455), JpegScale::Quarter),
+            (Some(36_864), JpegScale::Quarter),
+            (Some(36_863), JpegScale::Eighth),
+            (Some(9_216), JpegScale::Eighth),
+            (Some(9_215), JpegScale::Full),
+            (Some(0), JpegScale::Full),
+        ] {
+            assert_eq!(within(&whole, room), want, "a room of {room:?}");
+        }
+
+        let quarter = drawn(128.0, 96.0);
+        assert_eq!(jpeg_scale(frame, &quarter), JpegScale::Quarter);
+        for (room, want) in [
+            (None, JpegScale::Quarter),
+            (Some(u64::MAX), JpegScale::Quarter),
+            (Some(36_864), JpegScale::Quarter),
+            (Some(36_863), JpegScale::Eighth),
+            (Some(9_216), JpegScale::Eighth),
+            (Some(9_215), JpegScale::Quarter),
+        ] {
+            assert_eq!(within(&quarter, room), want, "a quarter's draw, {room:?}");
+        }
+
+        // A size that is no number asks for the whole image, and a budget
+        // reduces it as it reduces a draw at full size.
+        assert_eq!(within(&ImageRequest::FULL, Some(147_456)), JpegScale::Half);
+
+        let odd = (601, 401);
+        let at = |room: u64| jpeg_scale_within(odd, &drawn(601.0, 401.0), Some(Room(room)));
+        assert_eq!(at(301 * 201 * 3), JpegScale::Half);
+        assert_eq!(
+            at(301 * 201 * 3 - 1),
+            JpegScale::Quarter,
+            "151 by 101 a quarter"
+        );
+        assert_eq!(
+            at(151 * 101 * 3 - 1),
+            JpegScale::Eighth,
+            "76 by 51 an eighth"
+        );
+
+        // What a frame asks under the room is the scale's reduction.
+        let jpeg = Frame::Jpeg {
+            width: 512,
+            height: 384,
+        };
+        for (room, want) in [
+            (589_824, 1),
+            (589_823, 2),
+            (147_455, 4),
+            (36_863, 8),
+            (9_215, 1),
+        ] {
+            assert_eq!(
+                jpeg.asked(&whole, Some(Room(room))),
+                Asked {
+                    reduction: want,
+                    window: None
+                },
+                "a room of {room}"
+            );
+        }
+    }
+
+    /// **A budget takes a codestream to the fewest levels dropped past the
+    /// draw's own whose reduced image fits**, read off the whole reduced
+    /// image and never the window, so a tile of a page is decoded at the
+    /// page's levels (ruling 5). The 620 by 877 codestream of five levels
+    /// reduces to 310 by 439, 155 by 220, 78 by 110, 39 by 55 and 20 by 28
+    /// (T.800 B.5), 408 270, 102 300, 25 740, 6 435 and 1 680 bytes at three a
+    /// sample and 1 631 220 whole; with opacity put to use, four a sample. A
+    /// room none fits leaves the draw's own levels; so does no budget, and so
+    /// does a frame that can drop none, as one whose samples are indices.
+    #[test]
+    fn a_budget_takes_a_codestream_to_the_fewest_levels_that_fit() {
+        let frame = JpxFrame {
+            width: 620,
+            height: 877,
+            origin: (0, 0),
+            levels: 5,
+            opaque: true,
+            interpolate: false,
+        };
+        let whole = drawn(620.0, 877.0);
+        let discard = |frame: &JpxFrame, request: &ImageRequest, room: Option<u64>| {
+            frame.ask_within(request, room.map(Room)).0
+        };
+        for (room, want) in [
+            (None, 0),
+            (Some(u64::MAX), 0),
+            (Some(1_631_220), 0),
+            (Some(1_631_219), 1),
+            (Some(408_270), 1),
+            (Some(408_269), 2),
+            (Some(102_299), 3),
+            (Some(25_739), 4),
+            (Some(6_434), 5),
+            (Some(1_680), 5),
+            (Some(1_679), 0),
+            (Some(0), 0),
+        ] {
+            assert_eq!(discard(&frame, &whole, room), want, "a room of {room:?}");
+        }
+
+        let translucent = JpxFrame {
+            opaque: false,
+            ..frame
+        };
+        assert_eq!(discard(&translucent, &whole, Some(310 * 439 * 4)), 1);
+        assert_eq!(
+            discard(&translucent, &whole, Some(408_270)),
+            2,
+            "four bytes a sample: 310 by 439 is 544 360 of them"
+        );
+
+        let quarter = drawn(155.0, 219.0);
+        assert_eq!(frame.ask(&quarter).0, 2);
+        assert_eq!(
+            discard(&frame, &quarter, Some(u64::MAX)),
+            2,
+            "never back up"
+        );
+        assert_eq!(discard(&frame, &quarter, Some(102_300)), 2);
+        assert_eq!(discard(&frame, &quarter, Some(25_740)), 3);
+        assert_eq!(discard(&frame, &quarter, Some(1_679)), 2, "none fits");
+
+        let indices = JpxFrame { levels: 0, ..frame };
+        assert_eq!(discard(&indices, &whole, Some(1)), 0, "nothing to drop");
+
+        // The window is the one the draw holds that many levels down, and the
+        // levels are the page's whatever part of it a canvas shows: a draw
+        // showing a corner whose window would fit at the draw's own levels
+        // drops what the whole image needs, as the page does.
+        let corner = showing(620.0, 877.0, (0.0, 0.75, 0.25, 1.0));
+        let (own, held) = frame.ask(&corner);
+        assert_eq!(own, 0);
+        let held = held.expect("a corner is a window");
+        let room = u64::from(held.width) * u64::from(held.height) * 3;
+        assert!(
+            room < 1_631_220,
+            "the corner's window fits where the image does not"
+        );
+        assert_eq!(
+            frame.ask_within(&corner, Some(Room(room))),
+            (
+                discard(&frame, &whole, Some(room)),
+                frame.window(discard(&frame, &whole, Some(room)), &corner)
+            ),
+            "the page's levels and their window"
+        );
+        assert_eq!(
+            Frame::Jpx(frame).asked(&whole, Some(Room(408_269))),
+            Asked {
+                reduction: 4,
+                window: None
+            }
+        );
     }
 
     /// A draw of `across` by `down` pixels that reaches all of its image and

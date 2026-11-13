@@ -15,7 +15,9 @@
 //!   mask, which is decoded at the smallest of an eighth, a quarter and a
 //!   half that its drawn size allows, and whose draw first looks up its
 //!   frame — a second lookup a draw, the frame charged 64 bytes — to read
-//!   that reduction against;
+//!   that reduction against; under a budget whose room, beside an entry's
+//!   own charge, cannot hold that decode, a JPEG or a codestream with no mask
+//!   is decoded at the least reduction past it that fits, and says so;
 //! - a decoded image is charged its samples, its alpha and its two-colour
 //!   bytes at the decoded size, the words of what its decode reported, and
 //!   the cache's 64 bytes beside them; a raw `/DeviceRGB` image of `w` by `h`
@@ -203,12 +205,23 @@ fn refused_jpx() -> Vec<u8> {
 /// A 4:2:0 baseline JPEG of `width` by `height` from the engine's own
 /// encoder, as a `/DeviceRGB` image XObject with no mask.
 fn jpeg_image(width: u32, height: u32) -> Vec<u8> {
+    stream(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width {width} /Height {height} \
+             /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode"
+        ),
+        &jpeg_bytes(width, height),
+    )
+}
+
+/// The bytes of [`jpeg_image`]'s JPEG.
+fn jpeg_bytes(width: u32, height: u32) -> Vec<u8> {
     use tinker_pdf_filters::{JpegOptions, JpegSampling, JpegSource, JpegSourceColour};
 
     let samples: Vec<u8> = (0..width * height * 3)
         .map(|i| (i * 53 % 251) as u8)
         .collect();
-    let data = tinker_pdf_filters::jpeg_encode(
+    tinker_pdf_filters::jpeg_encode(
         &JpegSource {
             width,
             height,
@@ -221,14 +234,7 @@ fn jpeg_image(width: u32, height: u32) -> Vec<u8> {
             ..JpegOptions::default()
         },
     )
-    .expect("the raster encodes");
-    stream(
-        &format!(
-            "/Type /XObject /Subtype /Image /Width {width} /Height {height} \
-             /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode"
-        ),
-        &data,
-    )
+    .expect("the raster encodes")
 }
 
 /// `name` drawn into the square at `(x, y)` of side `side`.
@@ -1656,4 +1662,473 @@ fn parsed_objects_and_entries_leave_one_budget_in_one_order() {
         1,
         "an object least recently read left"
     );
+}
+
+// ---- An image past the budget, decoded at a reduced resolution -------------
+//
+// `docs/design/performance.md`, P-16, "Reduced-resolution decode". Under a
+// budget, a JPEG or a JPEG 2000 image with no mask whose decode at the size
+// it is drawn would not fit the budget beside the 64 bytes an entry is
+// charged — every image here sits in a scope with no defaults, so its key
+// holds nothing more — is decoded at the least reduction past that size's
+// whose samples fit, three bytes a sample; and where none fits, at the size
+// it is drawn, as with no budget, and not kept.
+
+/// The samples a decode of the JPEG `data` at `scale` holds, as the decoder
+/// hands them a strip at a time — RGB, three bytes a sample — with their
+/// width and height and the samples its inverse transforms output
+/// (`Stats::jpeg_samples_transformed`).
+fn jpeg_at(data: &[u8], scale: tinker_pdf_filters::JpegScale) -> (u32, u32, Vec<u8>, u64) {
+    use tinker_pdf_filters::{JpegLayout, JpegSink};
+
+    #[derive(Default)]
+    struct Rows {
+        width: u32,
+        height: u32,
+        samples: Vec<u8>,
+    }
+    impl JpegSink for Rows {
+        fn begin(&mut self, layout: JpegLayout) {
+            self.width = layout.width;
+            self.height = layout.height;
+        }
+
+        fn strip(&mut self, _y: u32, _rows: u32, data: &[u8]) {
+            self.samples.extend_from_slice(data);
+        }
+    }
+    let mut rows = Rows::default();
+    let frame = tinker_pdf_filters::jpeg_decode_strips(data, 1 << 28, scale, &mut rows)
+        .expect("the JPEG decodes");
+    (rows.width, rows.height, rows.samples, frame.transformed)
+}
+
+/// One of the decoder's own codestreams (`tinker-pdf-filters/tests/jpx`).
+fn codestream(name: &str) -> Vec<u8> {
+    std::fs::read(
+        std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tinker-pdf-filters/tests/jpx"
+        ))
+        .join(name),
+    )
+    .unwrap_or_else(|e| panic!("{name}: {e}"))
+}
+
+/// The samples of the codestream `data` decoded with `discard` levels
+/// dropped, whole, with their width and height: three 8-bit components a
+/// sample, which is RGB.
+fn jpx_at(data: &[u8], discard: u8) -> (u32, u32, Vec<u8>) {
+    let (image, _) = tinker_pdf_filters::jpx_decode_request(
+        data,
+        &tinker_pdf_filters::Limits::new(1 << 28),
+        &tinker_pdf_filters::JpxRequest {
+            discard,
+            window: None,
+        },
+        &mut Vec::new(),
+    )
+    .expect("the codestream decodes");
+    assert_eq!(
+        (image.components, image.precision),
+        (3, 8),
+        "three 8-bit components"
+    );
+    (image.width, image.height, image.samples)
+}
+
+/// The decoder's 32 by 24 colour codestream of two levels, at the grid's
+/// origin, so that each level down halves both sides exactly.
+fn two_level_codestream() -> Vec<u8> {
+    let jpx = codestream("c1-3.jp2");
+    let header = tinker_pdf_filters::jpx_header(&jpx, &tinker_pdf_filters::Limits::new(1 << 28))
+        .expect("its header reads");
+    assert_eq!(
+        (header.width, header.height, header.origin, header.levels),
+        (32, 24, (0, 0), 2),
+        "the fixture these figures are worked from"
+    );
+    jpx
+}
+
+/// A JPEG 2000 image XObject of `width` by `height` holding the codestream
+/// `data`, in the codestream's own colour (8.9.5.4), with no mask.
+fn jpx_image(width: u32, height: u32, data: &[u8]) -> Vec<u8> {
+    stream(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width {width} /Height {height} /Filter /JPXDecode"
+        ),
+        data,
+    )
+}
+
+/// A raw `/DeviceRGB` image of `width` by `height` holding `samples`.
+fn rgb_samples_image(width: u32, height: u32, samples: &[u8]) -> Vec<u8> {
+    stream(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width {width} /Height {height} \
+             /ColorSpace /DeviceRGB /BitsPerComponent 8"
+        ),
+        samples,
+    )
+}
+
+/// A page drawing `image`, object 3 under the name `/J`, over the whole of
+/// its 100-point square.
+fn covered(image: Vec<u8>) -> Vec<u8> {
+    document(
+        &[image],
+        &[(
+            "<< /XObject << /J 3 0 R >> >>",
+            "q 100 0 0 100 0 0 cm /J Do Q\n",
+        )],
+    )
+}
+
+/// The rendering of a raw image of `samples`, `width` by `height`, over the
+/// whole of [`covered`]'s page at `scale`: what a page drawing a decode that
+/// holds those samples draws, where the decode's samples span the image's
+/// square exactly.
+fn drawn_raw(width: u32, height: u32, samples: &[u8], scale: f64) -> Bitmap {
+    Document::open(covered(rgb_samples_image(width, height, samples)))
+        .expect("it opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions {
+            scale,
+            ..RenderOptions::default()
+        })
+}
+
+/// The pixels of `bitmap` inside `region`, its rows one after another.
+fn cut(bitmap: &Bitmap, region: PixelRegion) -> Vec<u8> {
+    let per = bitmap.format.components();
+    let mut out = Vec::new();
+    for y in region.y..region.y + region.height {
+        let start = y as usize * bitmap.stride + region.x as usize * per;
+        out.extend_from_slice(&bitmap.data[start..start + region.width as usize * per]);
+    }
+    out
+}
+
+/// Whether `bitmap` says an image was drawn reduced.
+fn says_reduced(bitmap: &Bitmap) -> bool {
+    bitmap
+        .warnings
+        .iter()
+        .any(|warning| matches!(warning, RenderWarning::ReducedImage { .. }))
+}
+
+/// **An image past the budget draws at a reduced resolution and says so.**
+///
+/// A 64 by 48 JPEG drawn over the 100-pixel page at 72 dpi asks for every
+/// sample, 9 216 bytes, which a budget of 4 096 cannot hold; a half holds 32
+/// by 24 samples, 2 304 bytes, which it can. So the render decodes the JPEG
+/// at a half — its inverse transforms output a half's samples — draws exactly
+/// what those samples draw as a raw image over the same square, says
+/// `ReducedImage { name: "J", factor: 2 }` beside what a render with no
+/// budget says, and keeps the decode and the frame, 2 304 + 64 and 64 bytes,
+/// under the budget. A second render finds both and says it again. A render
+/// at a fifth of the scale, 20 pixels a side, asks for a half of its own,
+/// finds that decode, and draws and says what a document with no budget
+/// draws and says there: a hit is the bytes its request's miss computes. A
+/// budget stated at open, charging the parsed objects beside, draws and says
+/// the same.
+///
+/// The 32 by 24 codestream of two levels likewise: 2 304 bytes whole, 576 one
+/// level down, which a budget of 1 024 holds — one level dropped, counted,
+/// `factor: 2` — and a budget of 639, which leaves 575 beside the entry's 64,
+/// two, 8 by 6 samples, `factor: 4`. With no budget each image is decoded at
+/// the size it is drawn at and nothing is said.
+#[test]
+fn an_image_past_the_budget_draws_at_a_reduced_resolution_and_says_so() {
+    use tinker_pdf_filters::JpegScale;
+
+    let jpeg = jpeg_bytes(64, 48);
+    let bytes = covered(jpeg_image(64, 48));
+    let plain = Document::open(bytes.clone()).expect("it opens");
+    let (unbudgeted, stats) = counted(&plain.page(0).expect("a page"), 72.0);
+    let (_, _, _, every) = jpeg_at(&jpeg, JpegScale::Full);
+    assert_eq!(stats.jpeg_samples_transformed, every, "no budget: whole");
+    assert!(!says_reduced(&unbudgeted), "{:?}", unbudgeted.warnings);
+
+    let (width, height, samples, half) = jpeg_at(&jpeg, JpegScale::Half);
+    assert_eq!((width, height), (32, 24));
+    let mut says = unbudgeted.warnings.clone();
+    says.push(RenderWarning::ReducedImage {
+        name: "J".to_string(),
+        factor: 2,
+    });
+    let budget = 4_096;
+    let document = cache_only(bytes.clone(), budget);
+    let page = document.page(0).expect("a page");
+    let (first, stats) = counted(&page, 72.0);
+    assert_eq!(stats.images_decoded, 1, "{stats:?}");
+    assert_eq!(stats.jpeg_samples_transformed, half, "decoded at a half");
+    assert_eq!(first.warnings, says);
+    assert_eq!(stats.cache_bytes_held, (2_304 + ENTRY_BYTES) + ENTRY_BYTES);
+    assert!(stats.cache_bytes_held <= budget);
+    let raw = drawn_raw(32, 24, &samples, 1.0);
+    assert_eq!((first.width, first.height), (raw.width, raw.height));
+    assert!(first.data == raw.data, "the page draws the half's samples");
+    assert!(first.data != unbudgeted.data, "and not every sample's");
+
+    let (again, stats) = counted(&page, 72.0);
+    assert_eq!(stats.images_decoded, 0, "{stats:?}");
+    assert_eq!((stats.cache_misses, stats.cache_hits), (0, 2));
+    same_render(&again, &first, "the second render");
+
+    let fifth = RenderOptions {
+        scale: 0.2,
+        stats: true,
+        ..RenderOptions::default()
+    };
+    let small = page.render(&fifth);
+    assert_eq!(small.stats.expect("asked").images_decoded, 0, "the half's");
+    let alone = plain.page(0).expect("a page").render(&fifth);
+    assert!(small.data == alone.data, "a fifth of the scale");
+    assert_eq!(
+        small.warnings, alone.warnings,
+        "a draw that asks for a half itself"
+    );
+
+    let at_open = budgeted(bytes, budget);
+    let (opened, stats) = counted(&at_open.page(0).expect("a page"), 72.0);
+    assert_eq!(stats.jpeg_samples_transformed, half, "at open too");
+    same_render(&opened, &first, "a budget stated at open");
+
+    let jpx = two_level_codestream();
+    let bytes = covered(jpx_image(32, 24, &jpx));
+    let plain = Document::open(bytes.clone()).expect("it opens");
+    let (unbudgeted, stats) = counted(&plain.page(0).expect("a page"), 72.0);
+    assert_eq!(stats.jpx_levels_discarded, 0, "no budget: whole");
+    assert!(!says_reduced(&unbudgeted), "{:?}", unbudgeted.warnings);
+    for (budget, discard, factor, side) in [(1_024, 1, 2, (16, 12)), (639, 2, 4, (8, 6))] {
+        let (width, height, samples) = jpx_at(&jpx, discard);
+        assert_eq!((width, height), side);
+        let document = cache_only(bytes.clone(), budget);
+        let page = document.page(0).expect("a page");
+        let mut says = unbudgeted.warnings.clone();
+        says.push(RenderWarning::ReducedImage {
+            name: "J".to_string(),
+            factor,
+        });
+        let (first, stats) = counted(&page, 72.0);
+        assert_eq!(stats.images_decoded, 1, "under {budget}: {stats:?}");
+        assert_eq!(
+            stats.jpx_levels_discarded,
+            u64::from(discard),
+            "under {budget}"
+        );
+        assert_eq!(first.warnings, says, "under {budget}");
+        let held = 3 * u64::from(width * height) + ENTRY_BYTES + ENTRY_BYTES;
+        assert_eq!(stats.cache_bytes_held, held, "under {budget}");
+        assert!(held <= budget);
+        let raw = drawn_raw(width, height, &samples, 1.0);
+        assert!(
+            first.data == raw.data,
+            "under {budget}: the reduced samples"
+        );
+        assert!(
+            first.data != unbudgeted.data,
+            "under {budget}: not every sample's"
+        );
+        let (again, stats) = counted(&page, 72.0);
+        assert_eq!(stats.images_decoded, 0, "under {budget}: {stats:?}");
+        same_render(&again, &first, &format!("again under {budget}"));
+    }
+    // A tenth of the scale, 10 pixels a side, asks for one level dropped of
+    // its own: the decode the budget of 1 024 took the page to.
+    let document = cache_only(bytes, 1_024);
+    let page = document.page(0).expect("a page");
+    let _ = counted(&page, 72.0);
+    let tenth = RenderOptions {
+        scale: 0.1,
+        stats: true,
+        ..RenderOptions::default()
+    };
+    let small = page.render(&tenth);
+    assert_eq!(
+        small.stats.expect("asked").images_decoded,
+        0,
+        "one level down's"
+    );
+    let alone = plain.page(0).expect("a page").render(&tenth);
+    assert!(small.data == alone.data, "a tenth of the scale");
+    assert_eq!(small.warnings, alone.warnings);
+}
+
+/// **An image no reduction fits is drawn as it always was, and not kept.**
+/// Under a budget of 200 bytes, 136 beside an entry's 64, the 64 by 48 JPEG's
+/// eighth is 8 by 6 samples, 144 bytes, and the two-level codestream's two
+/// levels down are 8 by 6 too: no decode fits. Each image is decoded at the
+/// size it is drawn at, at every render, draws what a document with no
+/// budget draws and says what it says, and only its frame, 64 bytes, is
+/// kept.
+#[test]
+fn an_image_no_reduction_fits_is_drawn_as_it_always_was() {
+    for (label, bytes) in [
+        ("the JPEG", covered(jpeg_image(64, 48))),
+        (
+            "the codestream",
+            covered(jpx_image(32, 24, &two_level_codestream())),
+        ),
+    ] {
+        let plain = Document::open(bytes.clone())
+            .expect("it opens")
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        let document = cache_only(bytes, 200);
+        let page = document.page(0).expect("a page");
+        for pass in ["first", "second"] {
+            let (bitmap, stats) = counted(&page, 72.0);
+            assert_eq!(stats.images_decoded, 1, "{label}, {pass}: {stats:?}");
+            assert_eq!(stats.jpx_levels_discarded, 0, "{label}, {pass}");
+            assert_eq!(
+                stats.cache_bytes_held, ENTRY_BYTES,
+                "{label}, {pass}: its frame alone"
+            );
+            same_render(&bitmap, &plain, &format!("{label}, {pass} render"));
+        }
+    }
+}
+
+/// A grey JPEG of `width` by `height` from the engine's own encoder.
+fn grey_jpeg(width: u32, height: u32) -> Vec<u8> {
+    use tinker_pdf_filters::{JpegOptions, JpegSource, JpegSourceColour};
+
+    let samples: Vec<u8> = (0..width * height).map(|i| (i * 29 % 256) as u8).collect();
+    tinker_pdf_filters::jpeg_encode(
+        &JpegSource {
+            width,
+            height,
+            colour: JpegSourceColour::Gray,
+            stride: width as usize,
+            data: &samples,
+        },
+        &JpegOptions::default(),
+    )
+    .expect("the raster encodes")
+}
+
+/// **An image no draw reduces is decoded whole under any budget.** Under the
+/// budget of 4 096 that takes the 64 by 48 JPEG to a half, a raw image of its
+/// size, the JPEG with a soft mask (11.6.5.3), a grey JPEG whose samples are
+/// indices into a palette (8.6.6.3) and the JPEG drawn inline — none of
+/// which a draw's size reduces, and the last of which has no object to be
+/// kept under — each draw what a document with no budget draws and say what
+/// it says, and none says it was reduced.
+#[test]
+fn an_image_no_draw_reduces_is_decoded_whole_under_any_budget() {
+    let jpeg = jpeg_bytes(64, 48);
+    let rgb = "/Type /XObject /Subtype /Image /Width 64 /Height 48 /ColorSpace /DeviceRGB \
+               /BitsPerComponent 8";
+    let mask: Vec<u8> = (0..64 * 48).map(|i| (i % 256) as u8).collect();
+    let masked = document(
+        &[
+            stream(&format!("{rgb} /Filter /DCTDecode /SMask 4 0 R"), &jpeg),
+            stream(
+                "/Type /XObject /Subtype /Image /Width 64 /Height 48 \
+                 /ColorSpace /DeviceGray /BitsPerComponent 8",
+                &mask,
+            ),
+        ],
+        &[(
+            "<< /XObject << /J 3 0 R >> >>",
+            "q 100 0 0 100 0 0 cm /J Do Q\n",
+        )],
+    );
+    let palette: String = (0..256u32)
+        .map(|i| format!("{:02X}{:02X}{:02X}", i, 255 - i, i / 2))
+        .collect();
+    let indexed = covered(stream(
+        &format!(
+            "/Type /XObject /Subtype /Image /Width 64 /Height 48 \
+             /ColorSpace [/Indexed /DeviceRGB 255 <{palette}>] /BitsPerComponent 8 \
+             /Filter /DCTDecode"
+        ),
+        &grey_jpeg(64, 48),
+    ));
+    let hex: String = jpeg.iter().map(|byte| format!("{byte:02X}")).collect();
+    let inline_content = format!(
+        "q 100 0 0 100 0 0 cm BI /W 64 /H 48 /CS /RGB /BPC 8 /F [/AHx /DCT] ID {hex}> EI Q\n"
+    );
+    let inline = document(&[], &[("<< >>", inline_content.as_str())]);
+    for (label, bytes) in [
+        ("a raw image", covered(rgb_image(64, 48, 3))),
+        ("a soft-masked JPEG", masked),
+        ("a JPEG of indices", indexed),
+        ("an inline JPEG", inline),
+    ] {
+        let plain = Document::open(bytes.clone())
+            .expect("it opens")
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        let document = cache_only(bytes, 4_096);
+        for pass in ["first", "second"] {
+            let bitmap = document
+                .page(0)
+                .expect("a page")
+                .render(&RenderOptions::default());
+            assert!(
+                !says_reduced(&bitmap),
+                "{label}, {pass}: {:?}",
+                bitmap.warnings
+            );
+            same_render(&bitmap, &plain, &format!("{label}, {pass} render"));
+        }
+    }
+}
+
+/// **Every part of a page under a budget is drawn from the page's reduced
+/// decode** (ruling 5): which reduction a budget takes an image to is read
+/// off its whole decode at that reduction, never the part a canvas shows, so
+/// each tile of the 100-pixel page — 37 by 23, the last row and column
+/// partial — is byte-equal to its rectangle of the page and says what the
+/// page says, the codestream's windows included; and the page drawn in bands
+/// from its display list on three threads is the page, said once.
+#[test]
+fn every_part_of_a_page_under_a_budget_draws_the_pages_reduced_decode() {
+    for (label, bytes, budget) in [
+        ("the JPEG", covered(jpeg_image(64, 48)), 4_096),
+        (
+            "the codestream",
+            covered(jpx_image(32, 24, &two_level_codestream())),
+            1_024,
+        ),
+    ] {
+        let whole = cache_only(bytes.clone(), budget)
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        assert!(says_reduced(&whole), "{label}: {:?}", whole.warnings);
+        let document = cache_only(bytes.clone(), budget);
+        let page = document.page(0).expect("a page");
+        for y in (0..whole.height).step_by(23) {
+            for x in (0..whole.width).step_by(37) {
+                let region =
+                    PixelRegion::new(x, y, 37.min(whole.width - x), 23.min(whole.height - y));
+                let tile = page.render(&RenderOptions {
+                    region: Some(region),
+                    ..RenderOptions::default()
+                });
+                assert!(
+                    tile.data == cut(&whole, region),
+                    "{label}: the tile at ({x}, {y}) is not the page under it"
+                );
+                assert_eq!(tile.warnings, whole.warnings, "{label}: ({x}, {y})");
+            }
+        }
+        let banded = cache_only(bytes, budget)
+            .page(0)
+            .expect("a page")
+            .display_list()
+            .render(&RenderOptions {
+                parallelism: Parallelism::Threads(3),
+                ..RenderOptions::default()
+            });
+        same_render(&banded, &whole, &format!("{label} in bands"));
+    }
 }

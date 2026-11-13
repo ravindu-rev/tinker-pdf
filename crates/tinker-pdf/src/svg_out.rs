@@ -676,6 +676,15 @@ impl<'a> Writer<'a> {
                 reason,
             }));
         }
+        // Every list the resources keep of what they tolerated is said, as a
+        // render says it. A write keeps what it computes for itself, so no
+        // budget takes an image it embeds below its full size.
+        for (name, factor) in resources.reduced_images() {
+            self.warn(SvgWarning::Render(RenderWarning::ReducedImage {
+                name,
+                factor,
+            }));
+        }
         self.finish(width, height)
     }
 
