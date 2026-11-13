@@ -66,7 +66,6 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
-| RC-04.17a | measure | The separations speed rows in MS-04's render group: the separations fixture's plates at 150 dpi and the 64-spot page's 68 plates at 72 dpi, each operation sized to MS-04's 20 to 300 ms window, with their baseline entries. *Note:* These join the render group's file. The tier sets no target for them and none is invented here: a target is the owner's (H-77). | `crates/tinker-pdf/benches/render.rs`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md` | `xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree` holds the bench file and `baseline.json` to one list with both operations in it, and `cargo bench -p tinker-pdf` reports their times, recorded in `docs/verification.md`. | RC-04.12, RC-04.13, RC-04.14, RC-04.15, MS-04 |
 | RC-04.17b | measure | The wall-clock figure RC-04.17a's exit names, taken in the timing phase on the named machine with nothing else running (ruling 15): by MS-04.10's fifteen runs, or by the paired run where RC-04.17a's exit names one, and committed as ruling 16 says. *Note:* Split from RC-04.17 by the owner's timing choice; RC-04.17a lands the operation unmeasured. | `crates/tinker-pdf/benches/baseline.json` | The figure RC-04.17a's exit names is committed and `cargo xtask baseline` holds it. | RC-04.17a, MS-04.10 |
 
 ## RC-05 — Soft proofing

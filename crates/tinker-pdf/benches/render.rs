@@ -18,7 +18,9 @@
 //! The coverage rows — the 250 paths under the centre and any-part rules and
 //! at a 4-bit graphics level, and the text page at a 4-bit text level — stand
 //! beside the default renders of the same pages, which the planning
-//! baseline's arm draws in their place, and are untimed too.
+//! baseline's arm draws in their place, and are untimed too. So are the two
+//! separations rows, a page's plates, whose pages the planning baseline's arm
+//! draws as their process inks in their place.
 
 mod support;
 
@@ -38,9 +40,9 @@ use tinker_pdf::{
 };
 use tinker_pdf::{Bitmap, Document, Page, RenderOptions, RenderWarning, SampleCodec};
 #[cfg(not(tinker_planning_baseline))]
-use tinker_pdf::{ForcedColours, HardEdge};
+use tinker_pdf::{ForcedColours, HardEdge, SeparationOptions, Separations};
 #[cfg(tinker_planning_baseline)]
-use tinker_pdf::{PixelRegion, WriteMode, WriteOptions};
+use tinker_pdf::{PixelFormat, PixelRegion, WriteMode, WriteOptions};
 use tinker_pdf_cos::ObjRef;
 
 /// `bitmap`, the text page's 150-dpi render, resized to `width` by `height`
@@ -354,6 +356,51 @@ fn v5_image_page() -> Page {
         stored("cmyk-quarter.pdf", || inputs::cmyk_page(4)),
         SampleCodec::Stream,
     )
+}
+
+/// `page`'s plates at `dpi`, every colorant a plate of its own
+/// (`Page::separations` under the default plan): what the separations rows
+/// time.
+#[cfg(not(tinker_planning_baseline))]
+fn plates_at(page: &Page, dpi: f64) -> Separations {
+    page.separations(&SeparationOptions {
+        render: RenderOptions::at_dpi(dpi),
+        ..SeparationOptions::default()
+    })
+}
+
+/// The planning baseline has no separations: its arm draws the page as its
+/// process inks, `CmykA8`, in their place — the plates of the four process
+/// colorants that revision can draw.
+#[cfg(tinker_planning_baseline)]
+fn plates_at(page: &Page, dpi: f64) -> Bitmap {
+    page.render(&RenderOptions {
+        format: PixelFormat::CmykA8,
+        allow_cmyk: true,
+        ..RenderOptions::at_dpi(dpi)
+    })
+}
+
+/// Before its runs, a separations row's page is held to the plates it
+/// times: `plates` of them, every one holding ink, and no warning — so a
+/// page whose spots fell back to their alternates, or whose plates were
+/// capped, is not what gets timed.
+#[cfg(not(tinker_planning_baseline))]
+fn holds_its_plates(page: &Page, dpi: f64, plates: usize, what: &str) {
+    let drawn = plates_at(page, dpi);
+    assert!(
+        drawn.warnings.is_empty(),
+        "{what} draws its plates cleanly: {:?}",
+        drawn.warnings
+    );
+    assert_eq!(drawn.plates.len(), plates, "{what}: its plates");
+    assert!(
+        drawn
+            .plates
+            .iter()
+            .all(|plate| plate.tints.iter().any(|tint| *tint != 0)),
+        "{what}: every plate holds ink"
+    );
 }
 
 /// What the four-band operation draws from: the page's display list, kept,
@@ -1004,6 +1051,39 @@ fn render(c: &mut Criterion) {
             op.iter(move || black_box(intents.render(&RenderOptions::at_dpi(150.0))));
         },
     );
+
+    // ---- separations ------------------------------------------------------
+
+    // RC-04.16's fixture (`inputs::separations_page`): four spots on their
+    // plates through fills, text, two groups, an image and a stencil, a
+    // shading and a mesh, the page `separations.rs` fingerprints; its eight
+    // plates a call. The unit is the page's pixels at 150 dpi. The planning
+    // baseline has no separations, so its arm draws the page as its process
+    // inks in their place.
+    group.operation("the separations fixture's plates at 150 dpi", |op| {
+        let fixture = Document::open(stored("separations.pdf", inputs::separations_page))
+            .expect("the separations fixture opens")
+            .page(0)
+            .expect("a page");
+        #[cfg(not(tinker_planning_baseline))]
+        holds_its_plates(&fixture, 150.0, 8, "the separations fixture");
+        op.per(renders(&fixture, 150.0, 1));
+        op.iter(move || black_box(plates_at(&fixture, 150.0)));
+    });
+    // RC-04.15's page (`inputs::spots_page(64)`): A4 whose sixteen `/DeviceN`
+    // spaces name sixty-four spots, each filling a square of its own, so its
+    // sixty-eight plates, the cap's, a call at 72 dpi; the planning
+    // baseline's arm draws its process inks in their place.
+    group.operation("the 64-spot page's 68 plates at 72 dpi", |op| {
+        let spots = Document::open(stored("spots-64.pdf", || inputs::spots_page(64)))
+            .expect("the 64-spot page opens")
+            .page(0)
+            .expect("a page");
+        #[cfg(not(tinker_planning_baseline))]
+        holds_its_plates(&spots, 72.0, 68, "the 64-spot page");
+        op.per(renders(&spots, 72.0, 1));
+        op.iter(move || black_box(plates_at(&spots, 72.0)));
+    });
     group.operation("the half-size JPEG page at 72 dpi", |op| {
         let jpeg_half = image_page(
             stored("jpeg-half.pdf", || inputs::jpeg_page_part(2)),

@@ -78,6 +78,15 @@ pub use samples::{
     PHOTO_LIKE_LEVEL_SIX,
 };
 
+/// The separations inputs, pages written byte by byte that `separations.rs`
+/// takes alone to hold their plates: the render group's separations rows
+/// draw them.
+#[path = "plates.rs"]
+mod plates;
+
+#[allow(unused_imports, reason = "the render group reads them and no other")]
+pub use plates::{separations_page, spots_page};
+
 /// The tests' EPUB support, for its OCF writer: the generated books go
 /// through the same writer as the tests' own.
 #[path = "../../tests/epub_support/mod.rs"]
