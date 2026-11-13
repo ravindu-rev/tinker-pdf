@@ -1894,9 +1894,11 @@ impl Charstring<'_, '_> {
                 }
                 // return
                 11 => return,
-                // endchar
+                // endchar: no operands, or `seac`'s four (5177, appendix
+                // C), so a width makes one or five, and four are not one.
                 14 => {
-                    self.take_width_for(0);
+                    let expected = if self.stack.len() >= 4 { 4 } else { 0 };
+                    self.take_width_for(expected);
                     if self.open {
                         self.outline.push(Segment::Close);
                         self.open = false;
@@ -2356,11 +2358,17 @@ mod tests {
     fn three_glyph_program() -> Vec<u8> {
         // Glyph 0 is .notdef; glyph 1 carries a width prefix and two lines;
         // glyph 2 declares a stem, masks it, and calls the local subroutine.
-        let charstrings = index(&[
+        program_with(&[
             &[14][..],
             &[250, 100, 189, 189, 21, 239, 139, 5, 139, 239, 5, 14][..],
             &[189, 217, 1, 189, 189, 21, 19, 0x80, 32, 10, 14][..],
-        ]);
+        ])
+    }
+
+    /// A program of these charstrings, under a Private DICT whose
+    /// defaultWidthX is 500 and nominalWidthX 400, with one local subroutine.
+    fn program_with(glyphs: &[&[u8]]) -> Vec<u8> {
+        let charstrings = index(glyphs);
         let subrs = index(&[&[239, 139, 5, 11][..]]);
         // defaultWidthX, nominalWidthX, then Subrs at the byte after this
         // DICT — fourteen bytes on, so the operand is 14 + 139.
@@ -2438,6 +2446,31 @@ mod tests {
         assert_eq!(cff.advance(1), Some(1376.0));
         // Glyph 2 clears its stack without one, so it takes defaultWidthX.
         assert_eq!(cff.advance(2), Some(500.0));
+    }
+
+    /// 5177, appendix C: `endchar` may carry `seac`'s four operands, so a
+    /// width before them makes five, and four carry none. Reading the first
+    /// of four as a width gave an accented letter its accent's horizontal
+    /// offset over nominalWidthX for an advance.
+    #[test]
+    fn endchar_with_seacs_four_operands_carries_no_width() {
+        // `50 0 65 193 endchar`: adx ady bchar achar, the codes of A and grave.
+        let seac: &[u8] = &[189, 139, 204, 247, 85, 14];
+        let program = program_with(&[
+            &[14][..],
+            seac,
+            &[&[215][..], seac].concat(),
+            &[215, 14][..],
+        ]);
+        let cff = Cff::parse(&program).expect("a CFF font");
+        assert_eq!(cff.advance(1), Some(500.0), "four operands: defaultWidthX");
+        assert_eq!(
+            cff.advance(2),
+            Some(476.0),
+            "five: nominalWidthX and the first"
+        );
+        assert_eq!(cff.advance(3), Some(476.0), "one: nominalWidthX and it");
+        assert!(cff.outline(1).expect("glyph 1").is_empty());
     }
 
     #[test]

@@ -158,6 +158,10 @@ const UNSIGNED: &[(&str, &str)] = &[
         "a bare CFF has a four-byte header but no distinguishing magic",
     ),
     (
+        "cff_charstrings",
+        "a structured generator: the body chooses a CFF's INDEXes, DICTs and charstrings",
+    ),
+    (
         "cff_subset",
         "fuzzes a writer: the body is a glyph set, not a file",
     ),

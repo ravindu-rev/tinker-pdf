@@ -88,13 +88,16 @@ Three properties make it a reader every generator can share:
   depth it asks for, so an iteration's work is bounded whatever the input
   says; the caps are the generator's, and its target's header names them.
 
-`fuzz/src/lib.rs` is the fuzz crate's library: `Choices`, and the generators
-more than one target builds on — the COS model and its file writer in
+`fuzz/src/lib.rs` is the fuzz crate's library: `Choices`, and every
+generator, a module each — the COS model and its file writer in
 `fuzz/src/cos.rs`, which `content_stream`, `render_rewrite` and `render_tile`
-write their documents with, and the page generator in `fuzz/src/content.rs`. A
-generator only one target uses lives in that target's file. The library's unit
-tests run with `cargo test --manifest-path fuzz/Cargo.toml --lib` on stable,
-and `cargo xtask fuzz` compiles them with the targets
+write their documents with, the page generator in `fuzz/src/content.rs`, and
+one module for each format's generator, `fuzz/src/cff.rs` the first. A
+generator lives there even when one target uses it, because its seed writer
+is a unit test beside it and a target is a binary with no test harness of
+its own; the target holds the assertions. The library's unit tests run with
+`cargo test --manifest-path fuzz/Cargo.toml --lib` on stable, and
+`cargo xtask fuzz` compiles them with the targets
 (`cargo check --all-targets`).
 
 ### Seeds, and the audit
@@ -221,10 +224,12 @@ interpreter's caps — ten levels of subroutine, its operation budget, and the
 outline's segment cap — so an outline is the whole program's.
 
 It asserts that every glyph's outline extracts inside those caps, with every
-coordinate finite, and that a subset keeping the glyph
-(`tinker_pdf_font::subset`, read back by `Cff::parse`) draws the same outline,
-segment for segment, and the same advance. A subset may decline (ruling 2);
-one that is written must hold.
+coordinate finite; that its advance is the width it was written with — the
+Private DICT's nominal width and the glyph's width operand, or the default
+width where it has none, a glyph that is `endchar` alone included; and that a
+subset keeping the glyph (`tinker_pdf_font::subset`, read back by
+`Cff::parse`) draws the same outline, segment for segment, and the same
+advance. A subset may decline (ruling 2); one that is written must hold.
 
 ### TrueType outlines: `glyf_outlines`
 

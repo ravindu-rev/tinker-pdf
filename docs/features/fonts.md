@@ -33,6 +33,8 @@ anti-aliasing.
 
 **CFF / Type 2** (9.6.6). `Cff` parses the INDEX and DICT structures and runs
 Type 2 charstrings — implicit width on the first stack-clearing operator,
+`endchar` among them, where `seac`'s four operands are not a width and a
+fifth before them is (Type 2 charstring specification, appendix C),
 `hintmask` operand counting (hints are parsed exactly far enough to skip),
 local and global subroutines with the count-dependent bias. Glyph selection is
 the charset's job, never the character code's: all three written charset

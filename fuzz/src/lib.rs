@@ -8,6 +8,7 @@
 
 use std::path::PathBuf;
 
+pub mod cff;
 pub mod content;
 pub mod cos;
 
