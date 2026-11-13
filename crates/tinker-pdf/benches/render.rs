@@ -315,6 +315,47 @@ fn four_intents(page: &Page) {
 #[cfg(tinker_planning_baseline)]
 fn four_intents(_page: &Page) {}
 
+/// The version 5 image page (`inputs::v5_page`), its one image decoded whole,
+/// held before it is timed to draw its picture through its profile: unlike
+/// the same samples as `/DeviceRGB`, which is how a picture whose profile the
+/// parser refused draws, so the operation times a version 5 conversion and
+/// not a copy.
+#[cfg(not(tinker_planning_baseline))]
+fn v5_image_page() -> Page {
+    let page = image_page(
+        stored("v5-quarter.pdf", || inputs::v5_page(4, true)),
+        SampleCodec::Stream,
+    );
+    let drawn = page.render(&RenderOptions::at_dpi(72.0));
+    let device = Document::open(inputs::v5_page(4, false))
+        .expect("the device twin opens")
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::at_dpi(72.0));
+    assert_eq!(
+        (drawn.width, drawn.height),
+        (device.width, device.height),
+        "the page and its device twin are one size"
+    );
+    assert!(
+        drawn.data != device.data,
+        "the version 5 page draws its picture through its profile, not as /DeviceRGB \
+         draws the samples"
+    );
+    page
+}
+
+/// The planning baseline reads no version 5 profile: its arm draws the CMYK
+/// page, its own ICC image of the same samples' size, in the v5 page's
+/// place, the operation the pair is held against.
+#[cfg(tinker_planning_baseline)]
+fn v5_image_page() -> Page {
+    image_page(
+        stored("cmyk-quarter.pdf", || inputs::cmyk_page(4)),
+        SampleCodec::Stream,
+    )
+}
+
 /// What the four-band operation draws from: the page's display list, kept,
 /// which the facade draws in bands on the engine's pool — the retained list
 /// tier P times bands over (`docs/design/parallelism.md`).
@@ -929,6 +970,21 @@ fn render(c: &mut Criterion) {
             let (width, height) = inputs::scan_part(4);
             op.per(Per::Pixels(u64::from(width) * u64::from(height)));
             op.iter(move || black_box(cmyk_page.render(&RenderOptions::at_dpi(300.0))));
+        },
+    );
+    // The CMYK page's samples as RGB under `/ICCBased` over a version 5
+    // profile of multi-process elements (`inputs::v5_page`), drawn at the
+    // image's own resolution so each sample is converted once through the
+    // pipeline's grid: the unit is the image's samples. The planning
+    // baseline reads no version 5 profile, so its arm draws the CMYK page,
+    // its own ICC image of as many samples, in this one's place.
+    group.operation(
+        "an ICC-based image to sRGB through a v5 multi-process profile",
+        |op| {
+            let v5_page = v5_image_page();
+            let (width, height) = inputs::scan_part(4);
+            op.per(Per::Pixels(u64::from(width) * u64::from(height)));
+            op.iter(move || black_box(v5_page.render(&RenderOptions::at_dpi(300.0))));
         },
     );
     // RC-01's page at A4 (`inputs::intents_page`): under each of Table 69's

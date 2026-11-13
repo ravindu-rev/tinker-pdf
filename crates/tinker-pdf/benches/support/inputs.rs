@@ -1690,6 +1690,57 @@ pub fn cmyk_page(divisor: u32) -> Vec<u8> {
     builder.finish()
 }
 
+/// The ICC profiles the tests write byte by byte, `tests/icc_support/`'s:
+/// [`v5_page`] converts through its version 5 profile of multi-process
+/// elements, the bytes `determinism.rs`'s version 5 page draws a picture
+/// through. The planning baseline reads no version 5 profile and builds no
+/// such page, so its build leaves the file out.
+#[cfg(not(tinker_planning_baseline))]
+#[path = "../../tests/icc_support/transforms.rs"]
+mod icc_transforms;
+
+/// A page a `divisor`th of A4 each way covered by [`photo`] at
+/// [`scan_part`]'s size, seed 0 — [`cmyk_page`]'s samples before they are
+/// turned into ink — Flate-coded under `/ICCBased` over a version 5 display
+/// profile whose `A2B0` is multi-process elements: ICC.2's formula segments
+/// and a single sampled curve, a matrix and an extended grid
+/// (`icc_transforms::v5_elements_profile`, RC-20.10). With `profiled` false
+/// the same samples are `/DeviceRGB`, as a picture whose profile the parser
+/// refused would draw them.
+#[cfg(not(tinker_planning_baseline))]
+pub fn v5_page(divisor: u32, profiled: bool) -> Vec<u8> {
+    let (width, height) = scan_part(divisor);
+    let (page_width, page_height) = page_part(divisor);
+    let coded = tinker_pdf_filters::zlib_compress(&photo(width, height, 0));
+    let mut builder = DocumentBuilder::new();
+    let color_space = if profiled {
+        assert!(builder.add_icc_color_space(b"CS0", &icc_transforms::v5_elements_profile(), 3));
+        ImageColorSpace::Icc {
+            resource: b"CS0",
+            components: 3,
+        }
+    } else {
+        ImageColorSpace::DeviceRgb
+    };
+    assert!(builder.add_image(
+        b"Im0",
+        &ImageData::Compressed(CompressedImage {
+            width,
+            height,
+            bits_per_component: 8,
+            color_space,
+            filter: Some(ImageFilter::Flate),
+            data: &coded,
+            color_key_mask: None,
+            soft_mask: None,
+        })
+    ));
+    builder.add_page(page_width, page_height, |page| {
+        page.image(b"Im0", 0.0, 0.0, page_width, page_height)
+    });
+    builder.finish()
+}
+
 /// The rendering intents Table 69 names, in [`intents_page`]'s column order.
 pub const INTENTS: [&str; 4] = [
     "Perceptual",

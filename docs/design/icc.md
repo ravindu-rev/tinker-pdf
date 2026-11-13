@@ -1424,8 +1424,9 @@ reads them in a local run over the fetched corpora and raises the floor.
 12. RC-20.14, landed: fingerprints. `determinism.rs`'s
     `icc_transforms_are_stable_across_targets` and
     `a_v5_profiled_page_renders_the_same_on_every_target`.
-13. RC-20.15a: the speed row `an ICC-based image to sRGB through a v5
-    multi-process profile`; RC-20.15b: its wall-clock figure.
+13. RC-20.15a, landed unmeasured: the speed row `an ICC-based image to sRGB
+    through a v5 multi-process profile`, in MS-04's render group beside the
+    CMYK image's; RC-20.15b: its wall-clock figure.
 14. RC-20.16: the corpus figure, ratcheted.
 
 #### Risks
