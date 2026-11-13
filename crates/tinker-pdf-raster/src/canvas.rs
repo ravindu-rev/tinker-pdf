@@ -695,6 +695,58 @@ impl Canvas {
         mask: Option<&Mask>,
         stop: Option<&dyn Fn() -> bool>,
     ) {
+        self.composite_through(src, None, at, alpha, mode, mask, stop);
+    }
+
+    /// As [`Canvas::composite`], every pixel of `src` painted in `color`
+    /// rather than its own: `src` gives the coverage, its alpha, and the
+    /// caller the colour.
+    ///
+    /// What an uncoloured tiling pattern's cell is (8.7.3.3): a shape whose
+    /// colour comes from whoever fills with it, so one cell rasterised once
+    /// serves every colour it is filled in. It writes exactly what
+    /// [`Canvas::recolor`] of `src` and then `composite` wrote, without
+    /// touching `src`: the colour is taken in `src`'s own bytes and read
+    /// across into this canvas's as `composite` reads any pixel, and neither
+    /// step depends on a pixel's alpha, so one source word serves the whole
+    /// cell. A `src` with no alpha channel, which `recolor` leaves as it is,
+    /// composites its own colours.
+    #[allow(clippy::too_many_arguments)]
+    pub fn composite_tinted(
+        &mut self,
+        src: &Canvas,
+        color: Color,
+        at: (i32, i32),
+        alpha: f64,
+        mode: BlendMode,
+        mask: Option<&Mask>,
+        stop: Option<&dyn Fn() -> bool>,
+    ) {
+        if !src.format.has_alpha() {
+            self.composite_through(src, None, at, alpha, mode, mask, stop);
+            return;
+        }
+        let swatch = Canvas::new(1, 1, src.format, color);
+        let Some((tint, _)) = self.source_from(&swatch, 0, 0) else {
+            return;
+        };
+        self.composite_through(src, Some(tint), at, alpha, mode, mask, stop);
+    }
+
+    /// The walk [`Canvas::composite`] and [`Canvas::composite_tinted`]
+    /// share: each pixel's source is `src`'s own, read across, or `tint`
+    /// beside `src`'s alpha.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_through(
+        &mut self,
+        src: &Canvas,
+        tint: Option<[u8; 5]>,
+        at: (i32, i32),
+        alpha: f64,
+        mode: BlendMode,
+        mask: Option<&Mask>,
+        stop: Option<&dyn Fn() -> bool>,
+    ) {
         let alpha = if alpha.is_finite() {
             operation_level(alpha)
         } else {
@@ -725,7 +777,11 @@ impl Canvas {
                     (i64::from(col) - at_local.0) as u32,
                     (i64::from(row) - at_local.1) as u32,
                 );
-                let Some((source, own)) = self.source_from(src, sx, sy) else {
+                let read = match tint {
+                    Some(tint) => Some((tint, src.alpha_at(sx, sy))),
+                    None => self.source_from(src, sx, sy),
+                };
+                let Some((source, own)) = read else {
                     continue;
                 };
                 let coverage = mask.map_or(255, |mask| {
@@ -1718,6 +1774,159 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every blend mode 11.3.5 names.
+    const MODES: [BlendMode; 16] = [
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::ColorDodge,
+        BlendMode::ColorBurn,
+        BlendMode::HardLight,
+        BlendMode::SoftLight,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+        BlendMode::Hue,
+        BlendMode::Saturation,
+        BlendMode::Color,
+        BlendMode::Luminosity,
+    ];
+
+    /// A 5×4 cell in `format`: colours of its own, which a tint must hide,
+    /// under alphas that run from none through partial to full.
+    fn tinted_cell(format: PixelFormat) -> Canvas {
+        let mut cell = Canvas::new(5, 4, format, Color::TRANSPARENT);
+        let components = format.components();
+        let channels = color_channels(format);
+        let alphas = [0u8, 1, 37, 128, 200, 254, 255];
+        for pixel in 0..20usize {
+            let base = pixel * components;
+            for channel in 0..channels {
+                cell.data[base + channel] = (pixel * 53 + channel * 91 + 17) as u8;
+            }
+            if format.has_alpha() {
+                cell.data[base + channels] = alphas[pixel % alphas.len()];
+            }
+        }
+        cell
+    }
+
+    /// **A tinted composite is a recoloured composite.**
+    ///
+    /// For a cell in every format that carries alpha, onto a canvas of every
+    /// format — an opaque page, a half-transparent buffer, and a non-isolated
+    /// group's buffer over its backdrop — under every blend mode, at full,
+    /// partial, zero and non-finite alpha, with no mask and with one that
+    /// covers in part, and in three colours, compositing the cell through a
+    /// colour writes exactly the bytes `recolor` of the cell and then
+    /// `composite` wrote, and counts the same approximated blends. A cell with
+    /// no alpha channel, which `recolor` leaves alone, composites its own
+    /// colours either way.
+    #[test]
+    fn a_tinted_composite_is_a_recoloured_composite() {
+        let all = [
+            PixelFormat::Gray8,
+            PixelFormat::GrayA8,
+            PixelFormat::Rgb8,
+            PixelFormat::Rgba8,
+            PixelFormat::CmykA8,
+            PixelFormat::LabA8,
+        ];
+        let colours = [
+            Color::rgb(200, 60, 20),
+            Color::rgb(0, 0, 0),
+            Color::rgb(30, 160, 255),
+        ];
+        let mut partial = Mask::empty(0, 0, 7, 6);
+        for (index, value) in partial.data.iter_mut().enumerate() {
+            *value = (index * 37 % 256) as u8;
+        }
+        let mut compared = 0usize;
+        for cell_format in all {
+            let cell = tinted_cell(cell_format);
+            for format in all {
+                let page = Canvas::new(7, 6, format, Color::rgb(90, 140, 210));
+                let mut targets = vec![("an opaque page", page.clone())];
+                if format.has_alpha() {
+                    let half = Color {
+                        r: 90,
+                        g: 140,
+                        b: 210,
+                        a: 128,
+                    };
+                    targets.push(("a half-transparent buffer", Canvas::new(7, 6, format, half)));
+                    let mut group = Canvas::new(7, 6, format, Color::TRANSPARENT);
+                    group.adopt_backdrop(page.clone());
+                    targets.push(("a non-isolated group", group));
+                }
+                for (what, target) in &targets {
+                    for mode in MODES {
+                        for alpha in [1.0, 0.6, 0.0, f64::NAN] {
+                            for mask in [None, Some(&partial)] {
+                                for colour in colours {
+                                    let mut tinted = target.clone();
+                                    tinted.composite_tinted(
+                                        &cell,
+                                        colour,
+                                        (1, 1),
+                                        alpha,
+                                        mode,
+                                        mask,
+                                        None,
+                                    );
+                                    let mut recoloured = cell.clone();
+                                    recoloured.recolor(colour);
+                                    let mut expected = target.clone();
+                                    expected.composite(
+                                        &recoloured,
+                                        (1, 1),
+                                        alpha,
+                                        mode,
+                                        mask,
+                                        None,
+                                    );
+                                    let case = format!(
+                                        "a {cell_format:?} cell onto {what} in {format:?}, \
+                                         {mode:?}, alpha {alpha}, mask {}, {colour:?}",
+                                        mask.is_some()
+                                    );
+                                    assert_eq!(tinted.data, expected.data, "{case}");
+                                    assert_eq!(
+                                        tinted.approximated_blends, expected.approximated_blends,
+                                        "{case}"
+                                    );
+                                    compared += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(compared > 0);
+
+        // A cell carrying no alpha: `recolor` leaves it, so both composite
+        // its own colours, and the tint shows nowhere.
+        let opaque = tinted_cell(PixelFormat::Rgb8);
+        let page = Canvas::new(7, 6, PixelFormat::Rgb8, Color::WHITE);
+        let mut tinted = page.clone();
+        tinted.composite_tinted(
+            &opaque,
+            Color::rgb(255, 0, 0),
+            (1, 1),
+            1.0,
+            BlendMode::Normal,
+            None,
+            None,
+        );
+        let mut plain = page;
+        plain.composite(&opaque, (1, 1), 1.0, BlendMode::Normal, None, None);
+        assert_eq!(tinted.data, plain.data);
+        assert_eq!(tinted.pixel(1, 1), opaque.pixel(0, 0));
     }
 
     /// And the copy itself, end to end: `extract` of a whole canvas in its own

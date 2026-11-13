@@ -3426,18 +3426,13 @@ impl GlyphSource for PageResources {
         renderer.clip_path(&box_path, &state, false);
 
         tinker_pdf_content::interpret(&content, Matrix::IDENTITY, &mut renderer, resources);
-        let (mut canvas, warnings, counts) = renderer.finish_counted();
+        // 8.7.3.3: a `PaintType 2` cell is drawn as its content stream draws
+        // it and is only a shape: the renderer composites its coverage in the
+        // `SCN` colour (`Canvas::composite_tinted`), so nothing about colour
+        // is decided here and the cell is the same whatever it is filled in.
+        let (canvas, warnings, counts) = renderer.finish_counted();
         // The cell's renderer is one of this render's own, so what it drew is.
         stats::add_render(self.op.work.as_deref(), counts);
-
-        // 8.7.3.3: `PaintType 2`. The cell is a shape and the colour comes
-        // from the `SCN` operands, so whatever the content stream said about
-        // colour is discarded here rather than intercepted at every paint --
-        // which is what makes "colour operators inside it are ignored" true of
-        // operators this engine has not implemented yet as well.
-        if let Some((r, g, b)) = request.color {
-            canvas.recolor(Color::rgb(r, g, b));
-        }
 
         // Ruling 10, and only reachable when the cell had resources of its
         // own: a font the cell could not resolve, or an image it had to

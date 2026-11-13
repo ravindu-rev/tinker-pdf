@@ -213,10 +213,14 @@ once a row and each pixel maps to the bits `Matrix::apply` gives it
 the *parent content stream's default space* as 8.7.3.1 requires — not the
 CTM in force at paint time, which is the whole correctness question in a
 tiling pattern. The cell is rasterised once into a `/BBox`-sized offscreen
-canvas, with the pattern's own `/Resources`, and blitted across the lattice;
-`PaintType 2` recolours the finished cell with the underlying-space colour
-(8.7.3.3). The lattice is bounded before a pixel exists: 65 536 positions,
-16.7 Mpx per cell buffer, and 33.5 million square points of compositing per
+canvas, with the pattern's own `/Resources`, and blitted across the lattice.
+A `PaintType 2` cell is a shape (8.7.3.3): it is asked for with no colour
+and drawn as its content stream draws it, and the blit composites its
+coverage in the underlying-space colour (`Canvas::composite_tinted`, which
+writes exactly what recolouring the cell and compositing it wrote), so what
+a cell holds is the same whatever colour it is filled in and the colour
+operators inside it reach nothing. The lattice is bounded before a pixel
+exists: 65 536 positions, 16.7 Mpx per cell buffer, and 33.5 million square points of compositing per
 fill — pixels at 72 dpi, counted in the default space and not in device
 pixels, so a lattice is drawn or refused alike at every scale and a page
 does not lose its pattern at a higher resolution — and past any bound the

@@ -375,10 +375,14 @@ pub struct TileRequest {
     pub height: u32,
     /// The buffer's format, always one carrying alpha: a cell is a shape over
     /// nothing, and a format without alpha cannot say where it did not paint.
+    ///
+    /// No colour rides with the request. A `PaintType 2` cell is a shape
+    /// (8.7.3.3), drawn as its content stream draws it, and the renderer
+    /// composites its coverage in the `SCN` colour
+    /// ([`Canvas::composite_tinted`]), so what a cell's pixels hold never
+    /// depends on the colour it is filled in and one cell serves every
+    /// colour.
     pub format: PixelFormat,
-    /// `PaintType 2`'s colour, already resolved to RGB, or `None` for a
-    /// coloured pattern (8.7.3.3).
-    pub color: Option<(u8, u8, u8)>,
     /// The render's cancellation token, so a cell stops with the page.
     pub cancel: CancelToken,
     /// How many tiling patterns are already open above this one, for the
@@ -2139,7 +2143,6 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             width,
             height,
             format,
-            color: tiling.uncolored.then_some((color.r, color.g, color.b)),
             cancel: self.cancel.clone(),
             depth: self.pattern_depth + 1,
             antialias: self.antialias,
@@ -2160,6 +2163,16 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             self.knockout_restore(&coverage);
         }
         let mode = blend_mode(state.blend);
+        // 8.7.3.3: a `PaintType 2` cell is a shape and the `SCN` operands its
+        // colour, so whatever the cell's content stream said about colour is
+        // discarded here, at the blit, rather than intercepted at every paint
+        // inside it -- which is what makes "colour operators inside it are
+        // ignored" true of operators this engine has not implemented yet as
+        // well. Opaque, as the colour slot's light is: the fill's `ca` is
+        // `alpha`.
+        let tint = tiling
+            .uncolored
+            .then(|| Color::rgb(color.r, color.g, color.b));
 
         // The lattice step as a device *vector*: a translation in pattern
         // space, so the matrix's translation cancels and only its linear part
@@ -2182,8 +2195,21 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     x.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
                     y.round().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32,
                 );
-                self.canvas
-                    .composite(&tile, at, alpha, mode, Some(&coverage), Some(&stop));
+                match tint {
+                    Some(tint) => self.canvas.composite_tinted(
+                        &tile,
+                        tint,
+                        at,
+                        alpha,
+                        mode,
+                        Some(&coverage),
+                        Some(&stop),
+                    ),
+                    None => {
+                        self.canvas
+                            .composite(&tile, at, alpha, mode, Some(&coverage), Some(&stop));
+                    }
+                }
             }
         }
         true
@@ -5156,6 +5182,115 @@ mod tests {
         let mut renderer = Renderer::new(canvas, page_transform(40.0, 1.0), tiles);
         interpret(content, Matrix::IDENTITY, &mut renderer, &OneChar);
         renderer.finish()
+    }
+
+    /// A `PaintType 2` pattern whose cells a test watches being asked for:
+    /// each request kept, and each cell drawn in a green of its own on its
+    /// left half and left empty on its right.
+    struct Uncoloured {
+        requests: std::cell::RefCell<Vec<TileRequest>>,
+    }
+
+    impl GlyphSource for Uncoloured {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            None
+        }
+
+        fn pattern(&self, name: &[u8]) -> Option<PatternPaint> {
+            (name == b"U0").then(|| {
+                PatternPaint::Tiling(Box::new(TilingPattern {
+                    matrix: Matrix::IDENTITY,
+                    bbox: [0.0, 0.0, 4.0, 4.0],
+                    xstep: 4.0,
+                    ystep: 4.0,
+                    uncolored: true,
+                }))
+            })
+        }
+
+        fn tile(&self, name: &[u8], request: &TileRequest) -> Option<Tile> {
+            if name != b"U0" {
+                return None;
+            }
+            self.requests.borrow_mut().push(request.clone());
+            let mut canvas = Canvas::new(
+                request.width,
+                request.height,
+                request.format,
+                Color::TRANSPARENT,
+            );
+            for y in 0..request.height {
+                for x in 0..request.width / 2 {
+                    canvas.blend_pixel(x, y, Color::rgb(0, 255, 0), 1.0);
+                }
+            }
+            Some(Tile {
+                canvas,
+                warnings: Vec::new(),
+            })
+        }
+    }
+
+    /// **An uncoloured cell is asked for without its colour.** One
+    /// `PaintType 2` pattern filled in red over the page's lower half and in
+    /// blue over its upper half asks for two cells whose requests differ in
+    /// no field, since a cell is a shape and its colour is the blit's; and the
+    /// page still takes each fill's colour where the cells painted, white
+    /// where they did not, and the cells' own green nowhere.
+    #[test]
+    fn an_uncoloured_cell_is_asked_for_without_its_colour() {
+        let source = Uncoloured {
+            requests: std::cell::RefCell::new(Vec::new()),
+        };
+        let canvas = Canvas::new(40, 40, PixelFormat::Rgb8, Color::WHITE);
+        let mut renderer = Renderer::new(canvas, page_transform(40.0, 1.0), &source);
+        interpret(
+            b"1 0 0 rg /U0 scn 0 0 40 20 re f 0 0 1 rg /U0 scn 0 20 40 20 re f",
+            Matrix::IDENTITY,
+            &mut renderer,
+            &OneChar,
+        );
+        let (canvas, warnings) = renderer.finish();
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let requests = source.requests.borrow();
+        assert_eq!(requests.len(), 2, "a cell for each fill");
+        let fields = |r: &TileRequest| {
+            (
+                r.to_pixels,
+                r.bbox,
+                r.width,
+                r.height,
+                r.format,
+                r.depth,
+                r.antialias,
+            )
+        };
+        assert_eq!(
+            fields(&requests[0]),
+            fields(&requests[1]),
+            "the red fill's cell and the blue fill's"
+        );
+
+        // Each cell paints the left half of its four pixels across.
+        let red = Color::rgb(255, 0, 0);
+        let blue = Color::rgb(0, 0, 255);
+        for x in (0..40).step_by(4) {
+            assert_eq!(canvas.pixel(x, 30), Some(red), "the lower fill at x {x}");
+            assert_eq!(canvas.pixel(x + 1, 30), Some(red), "x {}", x + 1);
+            assert_eq!(canvas.pixel(x + 2, 30), Some(Color::WHITE), "x {}", x + 2);
+            assert_eq!(canvas.pixel(x, 10), Some(blue), "the upper fill at x {x}");
+            assert_eq!(canvas.pixel(x + 3, 10), Some(Color::WHITE), "x {}", x + 3);
+        }
+        for y in 0..40 {
+            for x in 0..40 {
+                assert_ne!(
+                    canvas.pixel(x, y).map(|c| (c.r, c.g, c.b)),
+                    Some((0, 255, 0)),
+                    "the cell's own colour shows at ({x}, {y})"
+                );
+            }
+        }
     }
 
     /// The point of the whole design: one rasterization, however many lattice
