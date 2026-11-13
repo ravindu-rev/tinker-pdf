@@ -114,6 +114,62 @@ pub struct CMap {
     /// True when this stands in for a predefined CMap whose data is not built
     /// in, so the code-to-CID mapping is assumed rather than known.
     approximate: bool,
+    /// Whether `ranges`, in the order they were written, ascend by low code
+    /// and are disjoint, each low at most its high. Then the one range that
+    /// can hold a code is the last starting at or below it, which a bisection
+    /// finds, and it is the range a scan from the start matches first; ranges
+    /// written any other way are scanned, so the first written still wins.
+    ranges_ordered: bool,
+    /// The same, of `cid_ranges`.
+    cid_ranges_ordered: bool,
+}
+
+/// Whether `ranges` ascend by low code, disjoint, each low at most its high,
+/// counting each range read.
+fn ranges_in_order<T>(ranges: &[(u32, u32, T)], steps: &mut u64) -> bool {
+    let mut previous_high: Option<u32> = None;
+    for (low, high, _) in ranges {
+        *steps = steps.saturating_add(1);
+        if low > high || previous_high.is_some_and(|previous| *low <= previous) {
+            return false;
+        }
+        previous_high = Some(*high);
+    }
+    true
+}
+
+/// The first of `ranges` a scan from the start finds holding `code`: by
+/// bisection when they are in order ([`ranges_in_order`]), by the scan
+/// otherwise. Each range read is a step.
+fn first_range<T>(
+    ranges: &[(u32, u32, T)],
+    ordered: bool,
+    code: u32,
+    steps: &mut u64,
+) -> Option<usize> {
+    if !ordered {
+        for (index, (low, high, _)) in ranges.iter().enumerate() {
+            *steps = steps.saturating_add(1);
+            if (*low..=*high).contains(&code) {
+                return Some(index);
+            }
+        }
+        return None;
+    }
+    // The ranges starting at or below `code` are a prefix, the lows
+    // ascending; the last of them is the only one that can hold it.
+    let (mut below, mut past) = (0usize, ranges.len());
+    while below < past {
+        let middle = below + (past - below) / 2;
+        *steps = steps.saturating_add(1);
+        if ranges[middle].0 <= code {
+            below = middle + 1;
+        } else {
+            past = middle;
+        }
+    }
+    let index = below.checked_sub(1)?;
+    (code <= ranges[index].1).then_some(index)
 }
 
 impl CMap {
@@ -232,10 +288,24 @@ impl CMap {
     /// that is mis-split does not.
     #[must_use]
     pub fn decode_codes(&self, bytes: &[u8]) -> Vec<(u32, u8)> {
+        self.decode_codes_with(bytes, &mut 0)
+    }
+
+    /// [`CMap::decode_codes`], and the steps it took
+    /// (`docs/design/resource-exhaustion.md`, "The counters"): a codespace
+    /// range examined for each one a code is tried against.
+    #[must_use]
+    pub fn decode_codes_counted(&self, bytes: &[u8]) -> (Vec<(u32, u8)>, u64) {
+        let mut steps = 0u64;
+        let codes = self.decode_codes_with(bytes, &mut steps);
+        (codes, steps)
+    }
+
+    fn decode_codes_with(&self, bytes: &[u8], steps: &mut u64) -> Vec<(u32, u8)> {
         let mut out = Vec::new();
         let mut at = 0usize;
         while let Some(rest) = bytes.get(at..).filter(|r| !r.is_empty()) {
-            let (value, len) = self.next_code(rest);
+            let (value, len) = self.next_code(rest, steps);
             out.push((value, len));
             // `next_code` never answers zero, so this terminates whatever the
             // codespace ranges say (ruling 1).
@@ -245,7 +315,8 @@ impl CMap {
     }
 
     /// The first code in `rest`, which is never empty, and its byte length.
-    fn next_code(&self, rest: &[u8]) -> (u32, u8) {
+    fn next_code(&self, rest: &[u8], steps: &mut u64) -> (u32, u8) {
+        *steps = steps.saturating_add(1);
         // No codespace at all: a simple font's `/Encoding` is one byte per
         // code, and an identity CMap that lost its ranges is still two.
         if self.codespaces.is_empty() {
@@ -258,7 +329,13 @@ impl CMap {
             let Some(slice) = rest.get(..len) else {
                 break;
             };
-            if self.codespaces.iter().any(|r| r.contains(slice)) {
+            let mut tried = 0u64;
+            let claimed = self.codespaces.iter().any(|r| {
+                tried += 1;
+                r.contains(slice)
+            });
+            *steps = steps.saturating_add(tried);
+            if claimed {
                 return (be(slice), len as u8);
             }
         }
@@ -291,15 +368,25 @@ impl CMap {
     /// The text a code maps to, if this CMap is a `/ToUnicode`.
     #[must_use]
     pub fn to_unicode(&self, code: u32) -> Option<&[char]> {
+        self.to_unicode_with(code, &mut 0)
+    }
+
+    /// [`CMap::to_unicode`], and the steps it took: the single asked, and a
+    /// range read for each one the lookup examined.
+    #[must_use]
+    pub fn to_unicode_counted(&self, code: u32) -> (Option<&[char]>, u64) {
+        let mut steps = 0u64;
+        let chars = self.to_unicode_with(code, &mut steps);
+        (chars, steps)
+    }
+
+    fn to_unicode_with(&self, code: u32, steps: &mut u64) -> Option<&[char]> {
+        *steps = steps.saturating_add(1);
         if let Some(chars) = self.single.get(&code) {
             return Some(chars);
         }
-        for (low, high, base) in &self.ranges {
-            if (*low..=*high).contains(&code) {
-                return Some(base);
-            }
-        }
-        None
+        let index = first_range(&self.ranges, self.ranges_ordered, code, steps)?;
+        Some(&self.ranges[index].2)
     }
 
     /// The text a code maps to, with a range's offset applied.
@@ -312,20 +399,17 @@ impl CMap {
         if let Some(chars) = self.single.get(&code) {
             return Some(chars.iter().collect());
         }
-        for (low, high, base) in &self.ranges {
-            if (*low..=*high).contains(&code) {
-                let offset = code - low;
-                let mut chars = base.clone();
-                // Only the final character advances; the rest is a prefix.
-                if let Some(last) = chars.last_mut() {
-                    if let Some(shifted) = char::from_u32(u32::from(*last) + offset) {
-                        *last = shifted;
-                    }
-                }
-                return Some(chars.into_iter().collect());
+        let index = first_range(&self.ranges, self.ranges_ordered, code, &mut 0)?;
+        let (low, _, base) = &self.ranges[index];
+        let offset = code - low;
+        let mut chars = base.clone();
+        // Only the final character advances; the rest is a prefix.
+        if let Some(last) = chars.last_mut() {
+            if let Some(shifted) = char::from_u32(u32::from(*last) + offset) {
+                *last = shifted;
             }
         }
-        None
+        Some(chars.into_iter().collect())
     }
 
     /// The lowest code this `/ToUnicode` maps to exactly `c`, read backwards
@@ -391,7 +475,21 @@ impl CMap {
     /// would have thrown the child's own mappings away.
     #[must_use]
     pub fn cid(&self, code: u32) -> Option<u32> {
-        self.cid_mapped(code)
+        self.cid_with(code, &mut 0)
+    }
+
+    /// [`CMap::cid`], and the steps it took: the single asked, a range read
+    /// for each declared range the lookup examined, and a step for each
+    /// compiled block it bisected and each probe of the bisection.
+    #[must_use]
+    pub fn cid_counted(&self, code: u32) -> (Option<u32>, u64) {
+        let mut steps = 0u64;
+        let cid = self.cid_with(code, &mut steps);
+        (cid, steps)
+    }
+
+    fn cid_with(&self, code: u32, steps: &mut u64) -> Option<u32> {
+        self.cid_mapped_with(code, steps)
             .or_else(|| self.identity.then_some(code))
     }
 
@@ -402,15 +500,21 @@ impl CMap {
     /// inherited, and within the compiled tables a child block beats its
     /// parent's.
     fn cid_mapped(&self, code: u32) -> Option<u32> {
+        self.cid_mapped_with(code, &mut 0)
+    }
+
+    fn cid_mapped_with(&self, code: u32, steps: &mut u64) -> Option<u32> {
+        *steps = steps.saturating_add(1);
         if let Some(cid) = self.cid_single.get(&code) {
             return Some(*cid);
         }
-        for (low, high, base) in &self.cid_ranges {
-            if (*low..=*high).contains(&code) {
-                return Some(base + (code - low));
-            }
+        if let Some(index) = first_range(&self.cid_ranges, self.cid_ranges_ordered, code, steps) {
+            let (low, _, base) = self.cid_ranges[index];
+            return Some(base + (code - low));
         }
         for block in &self.cid_sorted {
+            // A bisection of the block, its probes counted as a scan's reads.
+            *steps = steps.saturating_add(u64::from(usize::BITS - block.len().leading_zeros()));
             // `partition_point` finds the first range starting past `code`,
             // so the one before it is the only candidate — sorted and
             // disjoint is what makes that true, and `build.rs` asserts both
@@ -580,6 +684,15 @@ impl CMap {
         if !self.wmode_declared {
             self.vertical = parent.vertical;
         }
+        self.order_ranges(&mut 0);
+    }
+
+    /// Records whether the ranges are in the order a bisection needs, after
+    /// whatever built or extended them: a parse, or an inheritance that put a
+    /// parent's ranges behind the child's.
+    fn order_ranges(&mut self, steps: &mut u64) {
+        self.ranges_ordered = ranges_in_order(&self.ranges, steps);
+        self.cid_ranges_ordered = ranges_in_order(&self.cid_ranges, steps);
     }
 }
 
@@ -726,6 +839,15 @@ pub fn parse(bytes: &[u8]) -> CMap {
     parse_embedded(bytes, &mut |_| None).cmap
 }
 
+/// [`parse`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): a token read for each one the body's tokenizer produced,
+/// and a range read for each one the ranges' order is checked over.
+#[must_use]
+pub fn parse_counted(bytes: &[u8]) -> (CMap, u64) {
+    let (parsed, steps) = parse_embedded_counted(bytes, &mut |_| None);
+    (parsed.cmap, steps)
+}
+
 /// Parses an embedded CMap and its `usecmap` chain (9.7.5.3).
 ///
 /// `resolve` is how the chain leaves this crate: it is asked for a parent by
@@ -741,17 +863,31 @@ pub fn parse_embedded(
     bytes: &[u8],
     resolve: &mut dyn FnMut(ParentRef<'_>) -> Option<ParentSource>,
 ) -> Parsed {
+    parse_embedded_counted(bytes, resolve).0
+}
+
+/// [`parse_embedded`], and the steps it took, every CMap of the chain's
+/// included: what [`parse_counted`] counts, for each one.
+#[must_use]
+pub fn parse_embedded_counted(
+    bytes: &[u8],
+    resolve: &mut dyn FnMut(ParentRef<'_>) -> Option<ParentSource>,
+) -> (Parsed, u64) {
     let mut chain = Chain {
         resolve,
         visited: vec![bytes.to_vec()],
         depth: 0,
         warnings: Vec::new(),
+        steps: 0,
     };
     let cmap = chain.parse(bytes);
-    Parsed {
-        cmap,
-        warnings: chain.warnings,
-    }
+    (
+        Parsed {
+            cmap,
+            warnings: chain.warnings,
+        },
+        chain.steps,
+    )
 }
 
 /// One `usecmap` chain being walked: how far down it is, and what is on it.
@@ -764,12 +900,14 @@ struct Chain<'r> {
     visited: Vec<Vec<u8>>,
     depth: usize,
     warnings: Vec<Warning>,
+    /// The steps every parse of the chain took.
+    steps: u64,
 }
 
 impl Chain<'_> {
     /// Parses one CMap and merges whatever it inherits.
     fn parse(&mut self, bytes: &[u8]) -> CMap {
-        let (mut cmap, named) = parse_body(bytes, &mut self.warnings);
+        let (mut cmap, named) = parse_body(bytes, &mut self.warnings, &mut self.steps);
 
         // 9.7.5.3: the `usecmap` operator and the stream dictionary's
         // `/UseCMap` say the same thing and are required to agree, so either
@@ -838,7 +976,11 @@ impl Chain<'_> {
 
 /// Scans one CMap's own source, returning it and the name its `usecmap`
 /// operator gave, if any.
-fn parse_body(bytes: &[u8], warnings: &mut Vec<Warning>) -> (CMap, Option<Vec<u8>>) {
+fn parse_body(
+    bytes: &[u8],
+    warnings: &mut Vec<Warning>,
+    steps: &mut u64,
+) -> (CMap, Option<Vec<u8>>) {
     let mut cmap = CMap::default();
     let mut parent: Option<Vec<u8>> = None;
     let mut tokens = Tokenizer::new(bytes);
@@ -898,6 +1040,8 @@ fn parse_body(bytes: &[u8], warnings: &mut Vec<Warning>) -> (CMap, Option<Vec<u8
         }
     }
 
+    *steps = steps.saturating_add(tokens.read);
+    cmap.order_ranges(steps);
     (cmap, parent)
 }
 
@@ -1106,14 +1250,21 @@ enum Token {
 struct Tokenizer<'a> {
     bytes: &'a [u8],
     pos: usize,
+    /// Tokens asked for, the end of the input included.
+    read: u64,
 }
 
 impl<'a> Tokenizer<'a> {
     fn new(bytes: &'a [u8]) -> Tokenizer<'a> {
-        Tokenizer { bytes, pos: 0 }
+        Tokenizer {
+            bytes,
+            pos: 0,
+            read: 0,
+        }
     }
 
     fn next_token(&mut self) -> Option<Token> {
+        self.read = self.read.saturating_add(1);
         loop {
             let b = *self.bytes.get(self.pos)?;
             if b.is_ascii_whitespace() {

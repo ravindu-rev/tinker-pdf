@@ -291,6 +291,27 @@ font a page names and never uses raises none of them there. Writing:
 `add_cid_font`, `set_subset_fonts`, and `PageBuilder::text` or
 `PageBuilder::glyphs` (glyphs addressed by index, for a composite font).
 
+`tinker-pdf-font`'s parsers each have a counted sibling that returns its
+uncounted sibling's answer and the steps it took
+([resource exhaustion](../design/resource-exhaustion.md), "The counters"), a
+count in the crate's own vocabulary that a caller can add to an operation's
+tally: `Sfnt::parse_counted` (a table record read, a record compared) and
+`Sfnt::glyph_for_char_counted` (an encoding record weighed and the subtable's
+order checked, at a face's first lookup; an entry examined, at each);
+`glyf::outline_counted` (a glyph appended, a component read, each contour end,
+flag, coordinate and emitted point); `Cff::parse_counted` (each INDEX offset,
+charset, encoding and FDSelect entry and Font DICT) and `Cff::outline_counted`
+(each operand and operator the Type 2 machine read, its subroutines' included);
+`Type1::parse_counted` (each byte of the `eexec` section and of each
+charstring decrypted, each byte of the private section walked) and
+`Type1::outline_counted` (each operand and operator run, both glyphs of a
+`seac` included); `woff::decode_counted` (each directory entry, each byte the
+tables decompress to and each byte of the font assembled); and for a CMap,
+`cmap::parse_counted` and `parse_embedded_counted` (each token, every CMap of
+the chain's), `CMap::decode_codes_counted` (each codespace range a code is
+tried against), `CMap::to_unicode_counted` and `CMap::cid_counted` (each
+range a lookup examined).
+
 ```rust
 use std::sync::Arc;
 use tinker_pdf::{Document, SimpleFontProvider};
@@ -783,6 +804,23 @@ What it does **not** do, each named so it is a backlog and not a mystery:
   narrow. The variation selectors are the exception and are already handled:
   `Shaper::map` *consumes* one, because a selector chooses a glyph.
 
+**A `cmap` subtable in its format's order is bisected, and one out of order
+is read as written.** `glyph_for_char` chooses its subtable at a face's first
+lookup and keeps the choice, with whether the subtable's entries are in the
+order the format requires: format 4's end codes ascending, format 12's and 13's
+groups ascending, disjoint and each well formed, and every entry readable. In
+that order the entry a scan from the start stops at is the one a bisection
+finds, so a lookup bisects and gives the same glyph for every code; a subtable
+a broken producer wrote out of order is scanned, so its first matching entry
+still wins. An embedded CMap's `bfrange` and `cidrange` ranges are read the
+same way, checked after the CMap is parsed and again after it inherits a
+parent's: in ascending, disjoint order a lookup bisects, and otherwise the
+first range written that holds the code wins, as the precedence of a single
+over a range and of the child's ranges over the parent's requires. So mapping
+every character of a long text through a subtable of many segments costs work
+in proportion to the text and the logarithm of the subtable, where a scan of
+every segment for every character was their product.
+
 **A `cmap` of format 13 is read**, the many-to-one range format: the same
 groups as format 12 and the same glyph for every code in the range rather than
 an offset into a run. `CMAP-4` is what adjudicates it: it is a capability built
@@ -865,6 +903,20 @@ corpora already vendored here. So every name stays on the list.
 
 ## Verified
 
+- `crates/tinker-pdf-font/tests/complexity.rs` — the parsers held to
+  [resource exhaustion](../design/resource-exhaustion.md)'s size-scaling law
+  through their counted siblings, in both feature builds: the work of a font
+  at four times a size is at most 4.4 times the work at that size — for a
+  directory of more tables, a simple glyph of more points and a composite of
+  more components, a CFF of more glyphs, a longer charstring and more
+  subroutine calls, a longer `eexec` section and a Type 1 font of more
+  charstrings, WOFF and WOFF 2.0 files of more tables, and an embedded CMap of
+  more `bfchar` mappings — and, where a lookup bisects, at most 4.4 times the
+  logarithm's growth more, for format 4 and format 12 subtables of more
+  segments and an embedded CMap of more `cidrange` ranges, every code of each
+  mapped. Each read gives back what was written, alike through the uncounted
+  doors, and a subtable and a CMap written out of order still match the entry
+  written first.
 - `crates/tinker-pdf/src/fontlist.rs` — unit tests beside the listing:
   9.6.4's subset-tag shape in both directions (seven strings that are not a
   tag, each for its own reason), a descriptor deciding embedding, a

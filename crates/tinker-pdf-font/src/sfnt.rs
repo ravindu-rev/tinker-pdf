@@ -7,9 +7,14 @@
 //! Every read is bounds-checked against the buffer the caller supplied,
 //! because a font program is document-controlled data like any other.
 
+use std::sync::OnceLock;
+
 /// A parsed table directory over borrowed bytes.
 #[derive(Clone, Debug)]
 pub struct Sfnt<'a> {
+    /// The `cmap` subtable characters are looked up in, chosen at the first
+    /// lookup and kept, so a run of lookups chooses once.
+    cmap: OnceLock<Option<CmapChoice>>,
     data: &'a [u8],
     tables: Vec<(u32, u32, u32)>,
     /// The `sfntVersion` of the directory these tables came from.
@@ -36,6 +41,24 @@ fn be32(data: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
+const TAG_CMAP: u32 = 0x636D_6170;
+const TAG_HEAD: u32 = 0x6865_6164;
+const TAG_HHEA: u32 = 0x6868_6561;
+
+/// The `cmap` subtable a face's characters are looked up in (9.6.6.4).
+#[derive(Clone, Copy, Debug)]
+struct CmapChoice {
+    score: u32,
+    platform: u16,
+    offset: usize,
+    /// Whether the subtable's entries are in the order its format requires —
+    /// format 4's end codes ascending, format 12's and 13's groups ascending,
+    /// disjoint and each well formed — and every one of them readable. Then
+    /// the entry a scan from the start stops at is the one a bisection finds,
+    /// so a lookup bisects; a subtable out of order is scanned as written.
+    ordered: bool,
+}
+
 impl<'a> Sfnt<'a> {
     /// Parses the table directory.
     ///
@@ -44,6 +67,21 @@ impl<'a> Sfnt<'a> {
     /// face, since it has no way to say otherwise.
     #[must_use]
     pub fn parse(data: &'a [u8]) -> Option<Sfnt<'a>> {
+        Sfnt::parse_with(data, &mut 0)
+    }
+
+    /// [`Sfnt::parse`], and the steps it took
+    /// (`docs/design/resource-exhaustion.md`, "The counters"): a table record
+    /// read for each table the directory lists, and a record compared for
+    /// each comparison the lookups of `head` and `hhea` made.
+    #[must_use]
+    pub fn parse_counted(data: &'a [u8]) -> (Option<Sfnt<'a>>, u64) {
+        let mut steps = 0u64;
+        let font = Sfnt::parse_with(data, &mut steps);
+        (font, steps)
+    }
+
+    fn parse_with(data: &'a [u8], steps: &mut u64) -> Option<Sfnt<'a>> {
         let mut base = 0usize;
         if data.get(..4) == Some(b"ttcf") {
             base = be32(data, 12)? as usize;
@@ -58,6 +96,7 @@ impl<'a> Sfnt<'a> {
         let count = be16(data, base + 4)? as usize;
         let mut tables = Vec::with_capacity(count.min(64));
         for i in 0..count.min(512) {
+            *steps = steps.saturating_add(1);
             let at = base + 12 + i * 16;
             let (Some(tag), Some(off), Some(len)) =
                 (be32(data, at), be32(data, at + 8), be32(data, at + 12))
@@ -68,6 +107,7 @@ impl<'a> Sfnt<'a> {
         }
 
         let mut sfnt = Sfnt {
+            cmap: OnceLock::new(),
             data,
             tables,
             version: tag,
@@ -75,13 +115,13 @@ impl<'a> Sfnt<'a> {
             num_h_metrics: 0,
         };
 
-        if let Some(head) = sfnt.table(0x6865_6164) {
+        if let Some(head) = sfnt.table_with(TAG_HEAD, steps) {
             // A units-per-em of zero would divide by zero downstream.
             if let Some(upem) = be16(head, 18).filter(|v| *v >= 16) {
                 sfnt.units_per_em = upem;
             }
         }
-        if let Some(hhea) = sfnt.table(0x6868_6561) {
+        if let Some(hhea) = sfnt.table_with(TAG_HHEA, steps) {
             sfnt.num_h_metrics = be16(hhea, 34).unwrap_or(0);
         }
 
@@ -101,7 +141,18 @@ impl<'a> Sfnt<'a> {
     /// One table's bytes, by tag.
     #[must_use]
     pub fn table(&self, tag: u32) -> Option<&'a [u8]> {
-        let (_, off, len) = self.tables.iter().find(|(t, _, _)| *t == tag)?;
+        self.table_with(tag, &mut 0)
+    }
+
+    /// [`Sfnt::table`], counting each record compared.
+    fn table_with(&self, tag: u32, steps: &mut u64) -> Option<&'a [u8]> {
+        let mut compared = 0u64;
+        let found = self.tables.iter().find(|(t, _, _)| {
+            compared += 1;
+            *t == tag
+        });
+        *steps = steps.saturating_add(compared);
+        let (_, off, len) = found?;
         self.data
             .get(*off as usize..(*off as usize).checked_add(*len as usize)?)
     }
@@ -124,34 +175,32 @@ impl<'a> Sfnt<'a> {
     /// A character's glyph index, through the best `cmap` subtable available.
     #[must_use]
     pub fn glyph_for_char(&self, c: char) -> Option<u16> {
-        let cmap = self.table(0x636D_6170)?;
-        let count = be16(cmap, 2)? as usize;
+        self.glyph_for_char_with(c, &mut 0)
+    }
 
-        // 9.6.6.4 prefers (3,1) Windows Unicode BMP, then (3,0) symbol, then
-        // (1,0) Macintosh Roman. (3,10) covers characters beyond the BMP.
-        let mut best: Option<(u32, u16, usize)> = None;
-        for i in 0..count.min(64) {
-            let at = 4 + i * 8;
-            let (Some(platform), Some(encoding), Some(offset)) =
-                (be16(cmap, at), be16(cmap, at + 2), be32(cmap, at + 4))
-            else {
-                break;
-            };
-            let score = match (platform, encoding) {
-                (3, 10) => 5,
-                (3, 1) => 4,
-                (0, _) => 3,
-                (3, 0) => 2,
-                (1, 0) => 1,
-                _ => 0,
-            };
-            if score > 0 && best.is_none_or(|(b, _, _)| score > b) {
-                best = Some((score, platform, offset as usize));
-            }
-        }
+    /// [`Sfnt::glyph_for_char`], and the steps it took: an encoding record
+    /// read for each one the first lookup weighs, an entry for each one it
+    /// checks the subtable's order with, and an entry for each one this
+    /// lookup examined — one for each step of a bisection, or of a scan
+    /// through a subtable out of order.
+    #[must_use]
+    pub fn glyph_for_char_counted(&self, c: char) -> (Option<u16>, u64) {
+        let mut steps = 0u64;
+        let glyph = self.glyph_for_char_with(c, &mut steps);
+        (glyph, steps)
+    }
 
-        let (score, platform, offset) = best?;
-        let sub = cmap.get(offset..)?;
+    fn glyph_for_char_with(&self, c: char, steps: &mut u64) -> Option<u16> {
+        let mut chosen = 0u64;
+        let choice = *self.cmap.get_or_init(|| self.choose_cmap(&mut chosen));
+        *steps = steps.saturating_add(chosen);
+        let CmapChoice {
+            score,
+            platform,
+            offset,
+            ordered,
+        } = choice?;
+        let sub = self.table_with(TAG_CMAP, steps)?.get(offset..)?;
         let mut code = u32::from(c);
         // A (3,0) symbol subtable maps the F0xx private-use block, and
         // documents address it with the low byte (9.6.6.4).
@@ -175,7 +224,47 @@ impl<'a> Sfnt<'a> {
         if platform == 1 && code >= 0x80 {
             return None;
         }
-        lookup_cmap(sub, code)
+        lookup_cmap(sub, code, ordered, steps)
+    }
+
+    /// Which subtable a character is looked up in, and whether it is in its
+    /// format's order: what [`Sfnt::glyph_for_char`] asks once and keeps.
+    fn choose_cmap(&self, steps: &mut u64) -> Option<CmapChoice> {
+        let cmap = self.table_with(TAG_CMAP, steps)?;
+        let count = be16(cmap, 2)? as usize;
+
+        // 9.6.6.4 prefers (3,1) Windows Unicode BMP, then (3,0) symbol, then
+        // (1,0) Macintosh Roman. (3,10) covers characters beyond the BMP.
+        let mut best: Option<(u32, u16, usize)> = None;
+        for i in 0..count.min(64) {
+            *steps = steps.saturating_add(1);
+            let at = 4 + i * 8;
+            let (Some(platform), Some(encoding), Some(offset)) =
+                (be16(cmap, at), be16(cmap, at + 2), be32(cmap, at + 4))
+            else {
+                break;
+            };
+            let score = match (platform, encoding) {
+                (3, 10) => 5,
+                (3, 1) => 4,
+                (0, _) => 3,
+                (3, 0) => 2,
+                (1, 0) => 1,
+                _ => 0,
+            };
+            if score > 0 && best.is_none_or(|(b, _, _)| score > b) {
+                best = Some((score, platform, offset as usize));
+            }
+        }
+
+        let (score, platform, offset) = best?;
+        let ordered = cmap.get(offset..).is_some_and(|sub| in_order(sub, steps));
+        Some(CmapChoice {
+            score,
+            platform,
+            offset,
+            ordered,
+        })
     }
 
     /// The glyph named `name`, through the `post` table's version 2 names.
@@ -213,8 +302,81 @@ impl<'a> Sfnt<'a> {
     }
 }
 
+/// Whether a format 4, 12 or 13 subtable's entries are in the order its
+/// format requires, every one readable, counting each entry read.
+///
+/// Read once a face and kept ([`CmapChoice::ordered`]): a subtable in order is
+/// bisected and gives the answer a scan from the start gives, and one out of
+/// order — which a broken producer writes and the format does not allow — is
+/// scanned as written, so the first entry that matches still wins.
+fn in_order(sub: &[u8], steps: &mut u64) -> bool {
+    match be16(sub, 0) {
+        Some(4) => {
+            let Some(seg2) = be16(sub, 6) else {
+                return false;
+            };
+            let mut previous = 0u16;
+            for i in 0..usize::from(seg2) / 2 {
+                *steps = steps.saturating_add(1);
+                let Some(end) = be16(sub, 14 + i * 2) else {
+                    return false;
+                };
+                if end < previous {
+                    return false;
+                }
+                previous = end;
+            }
+            true
+        }
+        Some(12 | 13) => {
+            let Some(groups) = be32(sub, 12) else {
+                return false;
+            };
+            let mut previous_end: Option<u32> = None;
+            for i in 0..(groups as usize).min(1 << 20) {
+                *steps = steps.saturating_add(1);
+                let at = 16 + i * 12;
+                let (Some(start), Some(end), Some(_)) =
+                    (be32(sub, at), be32(sub, at + 4), be32(sub, at + 8))
+                else {
+                    return false;
+                };
+                if start > end || previous_end.is_some_and(|previous| start <= previous) {
+                    return false;
+                }
+                previous_end = Some(end);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The first of `count` entries whose key, read by `key`, is at least `code`,
+/// by bisection over keys that do not descend: the entry a scan from the start
+/// stops at. `count` when none is. Each key read is a step.
+fn lower_bound(
+    count: usize,
+    code: u32,
+    steps: &mut u64,
+    key: impl Fn(usize) -> Option<u32>,
+) -> Option<usize> {
+    let (mut low, mut high) = (0usize, count);
+    while low < high {
+        let middle = low + (high - low) / 2;
+        *steps = steps.saturating_add(1);
+        if key(middle)? < code {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    Some(low)
+}
+
 /// Looks a code up in one `cmap` subtable, in the formats that occur.
-fn lookup_cmap(sub: &[u8], code: u32) -> Option<u16> {
+fn lookup_cmap(sub: &[u8], code: u32, ordered: bool, steps: &mut u64) -> Option<u16> {
+    *steps = steps.saturating_add(1);
     match be16(sub, 0)? {
         // Format 0: a 256-byte table.
         0 => {
@@ -289,7 +451,18 @@ fn lookup_cmap(sub: &[u8], code: u32) -> Option<u16> {
             let deltas = starts + seg2;
             let ranges = deltas + seg2;
 
-            for i in 0..segs {
+            // In order, the first segment whose end is at least the code is
+            // the one bisection finds, and the segments before it are the
+            // ones a scan passes over.
+            let from = if ordered {
+                lower_bound(segs, u32::from(code), steps, |i| {
+                    be16(sub, ends + i * 2).map(u32::from)
+                })?
+            } else {
+                0
+            };
+            for i in from..segs {
+                *steps = steps.saturating_add(1);
                 let end = be16(sub, ends + i * 2)?;
                 if code > end {
                     continue;
@@ -327,7 +500,8 @@ fn lookup_cmap(sub: &[u8], code: u32) -> Option<u16> {
         // Format 12: grouped ranges, for characters beyond the BMP.
         12 => {
             let groups = be32(sub, 12)? as usize;
-            for i in 0..groups.min(1 << 20) {
+            for i in group_candidates(sub, groups, code, ordered, steps)? {
+                *steps = steps.saturating_add(1);
                 let at = 16 + i * 12;
                 let (Some(start), Some(end), Some(glyph)) =
                     (be32(sub, at), be32(sub, at + 4), be32(sub, at + 8))
@@ -357,7 +531,8 @@ fn lookup_cmap(sub: &[u8], code: u32) -> Option<u16> {
         // character in the range, all but the first of them wrong.
         13 => {
             let groups = be32(sub, 12)? as usize;
-            for i in 0..groups.min(1 << 20) {
+            for i in group_candidates(sub, groups, code, ordered, steps)? {
+                *steps = steps.saturating_add(1);
                 let at = 16 + i * 12;
                 let (Some(start), Some(end), Some(glyph)) =
                     (be32(sub, at), be32(sub, at + 4), be32(sub, at + 8))
@@ -374,9 +549,43 @@ fn lookup_cmap(sub: &[u8], code: u32) -> Option<u16> {
     }
 }
 
+/// The format 12 or 13 groups a lookup of `code` reads, in the order it
+/// reads them: every group, when the subtable is out of order, and when it is
+/// in order only the one group that can hold the code — the last that starts
+/// at or below it, found by bisection — or none.
+fn group_candidates(
+    sub: &[u8],
+    groups: usize,
+    code: u32,
+    ordered: bool,
+    steps: &mut u64,
+) -> Option<core::ops::Range<usize>> {
+    let groups = groups.min(1 << 20);
+    if !ordered {
+        return Some(0..groups);
+    }
+    // The groups starting at or below `code` are a prefix, since the starts
+    // ascend; the last of them is the only one that can hold it, the groups
+    // being disjoint.
+    let past = lower_bound(groups, code.saturating_add(1), steps, |i| {
+        be32(sub, 16 + i * 12)
+    })?;
+    if code == u32::MAX {
+        // `code + 1` saturated, so the bound found the first start that is
+        // `u32::MAX` rather than the first past it.
+        return Some(groups.saturating_sub(1)..groups);
+    }
+    Some(past.saturating_sub(1)..past)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lookup that scans, as one through a subtable out of order does.
+    fn lookup_cmap_scanned(sub: &[u8], code: u32) -> Option<u16> {
+        lookup_cmap(sub, code, false, &mut 0)
+    }
 
     /// Builds a minimal sfnt with one table, to exercise the directory.
     fn sfnt_with(tag: &[u8; 4], table: &[u8]) -> Vec<u8> {
@@ -435,26 +644,30 @@ mod tests {
         patch(&mut sub, headers, glyphs);
         patch(&mut sub, headers + 8, glyphs + 4);
 
-        assert_eq!(lookup_cmap(&sub, 0x41), Some(7), "a single-byte code");
-        assert_eq!(lookup_cmap(&sub, 0x42), Some(8), "the next one");
-        assert_eq!(lookup_cmap(&sub, 0x43), Some(0), "past the run");
         assert_eq!(
-            lookup_cmap(&sub, 0x8140),
+            lookup_cmap_scanned(&sub, 0x41),
+            Some(7),
+            "a single-byte code"
+        );
+        assert_eq!(lookup_cmap_scanned(&sub, 0x42), Some(8), "the next one");
+        assert_eq!(lookup_cmap_scanned(&sub, 0x43), Some(0), "past the run");
+        assert_eq!(
+            lookup_cmap_scanned(&sub, 0x8140),
             Some(1001),
             "a pair, and `idDelta` is added to the glyph the array holds"
         );
         assert_eq!(
-            lookup_cmap(&sub, 0x8141),
+            lookup_cmap_scanned(&sub, 0x8141),
             Some(0),
             "a zero in the array stays zero rather than taking the delta"
         );
         assert_eq!(
-            lookup_cmap(&sub, 0x81),
+            lookup_cmap_scanned(&sub, 0x81),
             Some(0),
             "a lead byte on its own is half a code"
         );
         assert_eq!(
-            lookup_cmap(&sub, 0x4141),
+            lookup_cmap_scanned(&sub, 0x4141),
             Some(0),
             "a pair whose first byte does not lead is not a code either"
         );

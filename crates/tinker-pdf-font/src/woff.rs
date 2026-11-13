@@ -175,11 +175,26 @@ fn tag_name(tag: u32) -> String {
 /// will not unpack, a transform is unknown, or the result would exceed
 /// `max_output`.
 pub fn decode(bytes: &[u8], max_output: usize) -> Result<Vec<u8>, WoffError> {
-    match packaging(bytes) {
-        Some(Packaging::Woff) => decode_woff1(bytes, max_output),
-        Some(Packaging::Woff2) => decode_woff2(bytes, max_output),
+    decode_counted(bytes, max_output).0
+}
+
+/// [`decode`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): a table directory entry read for each table, a byte for
+/// each one the tables decompress to — WOFF 2.0's whole data block — and a
+/// byte for each one of the font assembled from them.
+pub fn decode_counted(bytes: &[u8], max_output: usize) -> (Result<Vec<u8>, WoffError>, u64) {
+    let mut steps = 0u64;
+    let decoded = match packaging(bytes) {
+        Some(Packaging::Woff) => decode_woff1(bytes, max_output, &mut steps),
+        Some(Packaging::Woff2) => decode_woff2(bytes, max_output, &mut steps),
         None => Err(WoffError::NotAWoff),
-    }
+    };
+    (decoded, steps)
+}
+
+/// `n` steps more, saturating.
+fn step(steps: &mut u64, n: usize) {
+    *steps = steps.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
 }
 
 // ---- shared sfnt assembly ---------------------------------------------------
@@ -341,7 +356,7 @@ const WOFF1_HEADER: usize = 44;
 /// One WOFF 1.0 table directory entry (§5).
 const WOFF1_ENTRY: usize = 20;
 
-fn decode_woff1(bytes: &[u8], max_output: usize) -> Result<Vec<u8>, WoffError> {
+fn decode_woff1(bytes: &[u8], max_output: usize, steps: &mut u64) -> Result<Vec<u8>, WoffError> {
     let flavor = be32(bytes, 4).ok_or(WoffError::Truncated)?;
     let count = usize::from(be16(bytes, 12).ok_or(WoffError::Truncated)?);
     // §3: "The header includes a reserved field; this MUST be set to zero. If
@@ -364,6 +379,7 @@ fn decode_woff1(bytes: &[u8], max_output: usize) -> Result<Vec<u8>, WoffError> {
     let mut tables = Vec::with_capacity(count);
     let mut expected_size = 12usize + count * 16;
     for i in 0..count {
+        step(steps, 1);
         let at = WOFF1_HEADER + i * WOFF1_ENTRY;
         let tag = be32(bytes, at).ok_or(WoffError::Truncated)?;
         let offset = be32(bytes, at + 4).ok_or(WoffError::Truncated)? as usize;
@@ -416,6 +432,7 @@ fn decode_woff1(bytes: &[u8], max_output: usize) -> Result<Vec<u8>, WoffError> {
         // end-to-end integrity check either container carries, the cost is one
         // pass over bytes already in cache, and a face that fails it is one
         // this engine would rather decline by name than embed.
+        step(steps, data.len());
         if directory_checksum(tag, &data) != orig_checksum {
             return Err(WoffError::TableChecksum { tag });
         }
@@ -448,7 +465,9 @@ fn decode_woff1(bytes: &[u8], max_output: usize) -> Result<Vec<u8>, WoffError> {
     // advisory, neither is part of the sfnt, and the metadata block is
     // XML — reading it would give this crate an opinion about markup that
     // ruling 8 says it may not have.
-    assemble(flavor, tables, max_output)
+    let font = assemble(flavor, tables, max_output)?;
+    step(steps, font.len());
+    Ok(font)
 }
 
 // ---- WOFF 2.0 ---------------------------------------------------------------
@@ -598,7 +617,7 @@ fn transform_kind(tag: u32, version: u8) -> Result<bool, WoffError> {
     Ok(transformed)
 }
 
-fn decode_woff2(bytes: &[u8], max_output: usize) -> Result<Vec<u8>, WoffError> {
+fn decode_woff2(bytes: &[u8], max_output: usize, steps: &mut u64) -> Result<Vec<u8>, WoffError> {
     let flavor = be32(bytes, 4).ok_or(WoffError::Truncated)?;
     let count = usize::from(be16(bytes, 12).ok_or(WoffError::Truncated)?);
     // §3.2 is explicit that the reserved field is *not* grounds for refusal
@@ -620,6 +639,7 @@ fn decode_woff2(bytes: &[u8], max_output: usize) -> Result<Vec<u8>, WoffError> {
     let mut entries = Vec::with_capacity(count);
     let mut block_size = 0usize;
     for _ in 0..count {
+        step(steps, 1);
         let flags = directory.u8()?;
         let known = usize::from(flags & 0x3f);
         let tag = if known == 63 {
@@ -690,8 +710,11 @@ fn decode_woff2(bytes: &[u8], max_output: usize) -> Result<Vec<u8>, WoffError> {
             "the decompressed block is not the size the directory declared",
         ));
     }
+    step(steps, block.len());
 
-    reconstruct(flavor, &entries, &block, collection.as_ref(), max_output)
+    let font = reconstruct(flavor, &entries, &block, collection.as_ref(), max_output)?;
+    step(steps, font.len());
+    Ok(font)
 }
 
 /// §4.2's collection directory: which table directory entries each nested font

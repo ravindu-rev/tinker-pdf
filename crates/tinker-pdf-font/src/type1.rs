@@ -73,6 +73,22 @@ impl Type1<'_> {
     /// Reads a Type 1 program: PFB, PFA, or the bare bytes a PDF embeds.
     #[must_use]
     pub fn parse(data: &[u8]) -> Option<Type1<'static>> {
+        Type1::parse_with(data, &mut 0)
+    }
+
+    /// [`Type1::parse`], and the steps it took
+    /// (`docs/design/resource-exhaustion.md`, "The counters"): a byte for each
+    /// one of the `eexec` section decrypted, each byte of the private section
+    /// the reading of `/CharStrings` and `/Subrs` walked, and each byte of a
+    /// charstring or a subroutine decrypted.
+    #[must_use]
+    pub fn parse_counted(data: &[u8]) -> (Option<Type1<'static>>, u64) {
+        let mut steps = 0u64;
+        let font = Type1::parse_with(data, &mut steps);
+        (font, steps)
+    }
+
+    fn parse_with(data: &[u8], steps: &mut u64) -> Option<Type1<'static>> {
         let data = strip_pfb(data);
 
         // The cleartext half ends at `eexec`; everything after it is
@@ -99,13 +115,14 @@ impl Type1<'_> {
         };
 
         let private = decrypt(encrypted, EEXEC_KEY, 4);
+        step(steps, encrypted.len());
 
         let len_iv = read_int_after(&private, b"/lenIV").unwrap_or(LEN_IV as i64);
         let len_iv = len_iv.clamp(0, 16) as usize;
 
         Some(Type1 {
-            glyphs: read_charstrings(&private, len_iv),
-            subrs: read_subrs(&private, len_iv),
+            glyphs: read_charstrings(&private, len_iv, steps),
+            subrs: read_subrs(&private, len_iv, steps),
             encoding: read_encoding(clear),
             font_matrix: read_font_matrix(clear).unwrap_or([0.001, 0.0, 0.0, 0.001, 0.0, 0.0]),
             _marker: core::marker::PhantomData,
@@ -148,7 +165,17 @@ impl Type1<'_> {
     /// The outline of one glyph, in font units.
     #[must_use]
     pub fn outline(&self, glyph: u16) -> Option<Outline> {
-        let (_, charstring) = self.glyphs.get(usize::from(glyph))?;
+        self.outline_counted(glyph).0
+    }
+
+    /// [`Type1::outline`], and the steps it took: each operand and operator
+    /// the charstring machine ran, in the glyph's charstring, the subroutines
+    /// it called and, for a `seac`, both glyphs it is built from.
+    #[must_use]
+    pub fn outline_counted(&self, glyph: u16) -> (Option<Outline>, u64) {
+        let Some((_, charstring)) = self.glyphs.get(usize::from(glyph)) else {
+            return (None, 0);
+        };
         let mut run = Run {
             font: self,
             outline: Outline::default(),
@@ -166,13 +193,15 @@ impl Type1<'_> {
         };
         run.execute(charstring, 0);
         run.close();
+        let steps = u64::from(run.ops);
 
         // `seac` builds a glyph from two others, and can only be resolved once
         // the base charstring has finished telling us which two.
         if let Some((base, accent, adx, ady)) = run.seac {
-            return self.compose(base, accent, adx, ady);
+            let (outline, composed) = self.compose(base, accent, adx, ady);
+            return (outline, steps.saturating_add(composed));
         }
-        Some(run.outline)
+        (Some(run.outline), steps)
     }
 
     /// The advance width of a glyph, from its `hsbw`.
@@ -199,14 +228,33 @@ impl Type1<'_> {
     }
 
     /// Builds an accented glyph from its two components (`seac`).
-    fn compose(&self, base: u8, accent: u8, adx: f64, ady: f64) -> Option<Outline> {
+    /// A `seac` glyph from its two components, and the steps their outlines
+    /// took.
+    fn compose(&self, base: u8, accent: u8, adx: f64, ady: f64) -> (Option<Outline>, u64) {
+        let mut steps = 0u64;
+        let composed = self.compose_with(base, accent, adx, ady, &mut steps);
+        (composed, steps)
+    }
+
+    fn compose_with(
+        &self,
+        base: u8,
+        accent: u8,
+        adx: f64,
+        ady: f64,
+        steps: &mut u64,
+    ) -> Option<Outline> {
         // The two components are named by their StandardEncoding codes, which
         // is the one place this format assumes a specific encoding.
         let base_name = crate::encoding::base_glyph_name(crate::BaseEncoding::Standard, base)?;
         let accent_name = crate::encoding::base_glyph_name(crate::BaseEncoding::Standard, accent)?;
 
-        let mut outline = self.outline(self.glyph_for_name(base_name.as_bytes())?)?;
-        let accent = self.outline(self.glyph_for_name(accent_name.as_bytes())?)?;
+        let (outline, taken) = self.outline_counted(self.glyph_for_name(base_name.as_bytes())?);
+        *steps = steps.saturating_add(taken);
+        let mut outline = outline?;
+        let (accent, taken) = self.outline_counted(self.glyph_for_name(accent_name.as_bytes())?);
+        *steps = steps.saturating_add(taken);
+        let accent = accent?;
 
         for segment in accent.segments {
             outline.segments.push(shift(segment, adx, ady));
@@ -697,7 +745,7 @@ fn read_encoding(clear: &[u8]) -> Vec<(u8, Vec<u8>)> {
 }
 
 /// `/Subrs <n> array` followed by `dup <i> <len> RD <bytes> NP`.
-fn read_subrs(private: &[u8], len_iv: usize) -> Vec<Vec<u8>> {
+fn read_subrs(private: &[u8], len_iv: usize, steps: &mut u64) -> Vec<Vec<u8>> {
     let Some(at) = find(private, b"/Subrs") else {
         return Vec::new();
     };
@@ -735,14 +783,16 @@ fn read_subrs(private: &[u8], len_iv: usize) -> Vec<Vec<u8>> {
                 subrs.resize(index + 1, Vec::new());
             }
             subrs[index] = decrypt(bytes, CHARSTRING_KEY, len_iv);
+            step(steps, bytes.len());
         }
         i = start + to;
     }
+    step(steps, i.min(region.len()));
     subrs
 }
 
 /// `/CharStrings <n> dict dup begin` then `/<name> <len> RD <bytes> ND`.
-fn read_charstrings(private: &[u8], len_iv: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
+fn read_charstrings(private: &[u8], len_iv: usize, steps: &mut u64) -> Vec<(Vec<u8>, Vec<u8>)> {
     let Some(at) = find(private, b"/CharStrings") else {
         return Vec::new();
     };
@@ -781,12 +831,19 @@ fn read_charstrings(private: &[u8], len_iv: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
         };
 
         out.push((name, decrypt(bytes, CHARSTRING_KEY, len_iv)));
+        step(steps, bytes.len());
         if out.len() > 20_000 {
             break;
         }
         i = name_start + to;
     }
+    step(steps, i.min(region.len()));
     out
+}
+
+/// `n` steps more, saturating.
+fn step(steps: &mut u64, n: usize) {
+    *steps = steps.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
 }
 
 /// An integer and how many bytes it and its leading whitespace took.

@@ -65,43 +65,57 @@ fn glyph_range(sfnt: &Sfnt, glyph: u16) -> Option<(usize, usize)> {
 /// Reads one glyph's outline in font units.
 #[must_use]
 pub fn outline(sfnt: &Sfnt, glyph: u16) -> Option<Outline> {
+    outline_with(sfnt, glyph, &mut 0)
+}
+
+/// [`outline`], and the steps it took (`docs/design/resource-exhaustion.md`,
+/// "The counters"): a glyph appended for the glyph and each component, a
+/// component record read, and for a simple glyph each contour end, each flag,
+/// each coordinate on either axis and each point a contour is emitted from.
+#[must_use]
+pub fn outline_counted(sfnt: &Sfnt, glyph: u16) -> (Option<Outline>, u64) {
+    let mut steps = 0u64;
+    let outline = outline_with(sfnt, glyph, &mut steps);
+    (outline, steps)
+}
+
+fn outline_with(sfnt: &Sfnt, glyph: u16, steps: &mut u64) -> Option<Outline> {
     let mut out = Outline::default();
     let mut budget = MAX_COMPONENTS;
     append(
         sfnt,
         glyph,
-        0.0,
-        0.0,
-        1.0,
-        0.0,
-        0.0,
-        1.0,
+        [0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
         0,
         &mut budget,
         &mut out,
+        steps,
     );
     Some(out)
 }
 
-/// Appends a glyph's contours, transformed by the given 2×3 matrix.
-#[allow(clippy::too_many_arguments)]
+/// One step more, saturating.
+fn step(steps: &mut u64, n: usize) {
+    *steps = steps.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+}
+
+/// Appends a glyph's contours, transformed by the given 2×3 matrix, written
+/// `[dx, dy, a, b, c, d]`.
 fn append(
     sfnt: &Sfnt,
     glyph: u16,
-    dx: f64,
-    dy: f64,
-    a: f64,
-    b: f64,
-    c: f64,
-    d: f64,
+    matrix: [f64; 6],
     depth: u32,
     budget: &mut u32,
     out: &mut Outline,
+    steps: &mut u64,
 ) {
+    let [dx, dy, a, b, c, d] = matrix;
     if depth > MAX_COMPONENT_DEPTH || *budget == 0 {
         return;
     }
     *budget -= 1;
+    step(steps, 1);
     let Some(glyf) = sfnt.table(0x676C_7966) else {
         return;
     };
@@ -119,9 +133,9 @@ fn append(
     let transform = |x: f64, y: f64| (a * x + c * y + dx, b * x + d * y + dy);
 
     if contours >= 0 {
-        simple(data, contours as usize, &transform, out);
+        simple(data, contours as usize, &transform, out, steps);
     } else {
-        composite(sfnt, data, dx, dy, a, b, c, d, depth, budget, out);
+        composite(sfnt, data, matrix, depth, budget, out, steps);
     }
 }
 
@@ -131,10 +145,12 @@ fn simple(
     contours: usize,
     transform: &dyn Fn(f64, f64) -> (f64, f64),
     out: &mut Outline,
+    steps: &mut u64,
 ) {
     // The header is 10 bytes, then one end-point index per contour.
     let mut ends = Vec::with_capacity(contours.min(256));
     for i in 0..contours {
+        step(steps, 1);
         let Some(end) = be16(data, 10 + i * 2) else {
             return;
         };
@@ -152,7 +168,8 @@ fn simple(
     };
     let mut at = 10 + contours * 2 + 2 + usize::from(instruction_len);
 
-    // Flags, run-length encoded by the REPEAT bit.
+    // Flags, run-length encoded by the REPEAT bit: a step a flag, however
+    // it was spelled.
     let mut flags = Vec::with_capacity(count);
     while flags.len() < count {
         let Some(&flag) = data.get(at) else { return };
@@ -171,6 +188,8 @@ fn simple(
             }
         }
     }
+
+    step(steps, flags.len());
 
     // Coordinates are deltas, one or two bytes by the flag bits.
     let mut xs = Vec::with_capacity(count);
@@ -194,6 +213,8 @@ fn simple(
         xs.push(x);
     }
 
+    step(steps, xs.len());
+
     let mut ys = Vec::with_capacity(count);
     let mut y = 0i32;
     for &flag in &flags {
@@ -215,12 +236,15 @@ fn simple(
         ys.push(y);
     }
 
+    step(steps, ys.len());
+
     let mut first = 0usize;
     for &end in &ends {
         if end < first || end >= count {
             break;
         }
         emit_contour(&flags, &xs, &ys, first, end, transform, out);
+        step(steps, end + 1 - first);
         first = end + 1;
     }
 }
@@ -328,21 +352,18 @@ fn emit_contour(
     out.push(Segment::Close);
 }
 
-/// A composite glyph: other glyphs, each with a placement.
-#[allow(clippy::too_many_arguments)]
+/// A composite glyph: other glyphs, each with a placement, under the matrix
+/// `[dx, dy, a, b, c, d]` the glyph is drawn with.
 fn composite(
     sfnt: &Sfnt,
     data: &[u8],
-    dx: f64,
-    dy: f64,
-    a: f64,
-    b: f64,
-    c: f64,
-    d: f64,
+    matrix: [f64; 6],
     depth: u32,
     budget: &mut u32,
     out: &mut Outline,
+    steps: &mut u64,
 ) {
+    let [dx, dy, a, b, c, d] = matrix;
     let mut at = 10usize;
     let mut guard = 0u32;
 
@@ -351,6 +372,7 @@ fn composite(
         if guard > 64 {
             return;
         }
+        step(steps, 1);
         let (Some(flags), Some(index)) = (be16(data, at), be16(data, at + 2)) else {
             return;
         };
@@ -417,15 +439,11 @@ fn composite(
         append(
             sfnt,
             index,
-            ndx,
-            ndy,
-            na,
-            nb,
-            nc,
-            nd,
+            [ndx, ndy, na, nb, nc, nd],
             depth + 1,
             budget,
             out,
+            steps,
         );
         if *budget == 0 {
             return;

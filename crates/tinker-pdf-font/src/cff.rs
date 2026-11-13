@@ -216,24 +216,48 @@ impl<'a> Cff<'a> {
     /// Parses a bare CFF font program.
     #[must_use]
     pub fn parse(data: &'a [u8]) -> Option<Cff<'a>> {
+        Cff::parse_with(data, &mut 0)
+    }
+
+    /// [`Cff::parse`], and the steps it took
+    /// (`docs/design/resource-exhaustion.md`, "The counters"): an entry for
+    /// each offset of each INDEX it reads, and for each glyph's charset,
+    /// encoding and FDSelect entry and each Font DICT.
+    #[must_use]
+    pub fn parse_counted(data: &'a [u8]) -> (Option<Cff<'a>>, u64) {
+        let mut steps = 0u64;
+        let font = Cff::parse_with(data, &mut steps);
+        (font, steps)
+    }
+
+    fn parse_with(data: &'a [u8], steps: &mut u64) -> Option<Cff<'a>> {
+        let read = |steps: &mut u64, entries: usize| {
+            *steps = steps.saturating_add(u64::try_from(entries).unwrap_or(u64::MAX));
+        };
         // The header's fourth byte is its own size, so the name INDEX follows.
         let header_size = usize::from(*data.get(2)?);
-        let (_names, at) = Index::parse(data, header_size)?;
+        let (names, at) = Index::parse(data, header_size)?;
+        read(steps, names.len() + 1);
         let (top_dicts, at) = Index::parse(data, at)?;
+        read(steps, top_dicts.len() + 1);
         let (strings, at) = Index::parse(data, at)?;
+        read(steps, strings.len() + 1);
         let (global_subrs, _) = Index::parse(data, at)?;
+        read(steps, global_subrs.len() + 1);
 
         let top = parse_dict(top_dicts.get(0)?);
 
         let charstrings_at = dict_get(&top, 17).and_then(<[f64]>::first).copied()? as usize;
         let (charstrings, _) = Index::parse(data, charstrings_at)?;
         let glyphs = charstrings.len();
+        read(steps, glyphs + 1);
 
         // The Private DICT gives the local subroutines and the widths.
         let private = match dict_get(&top, 18) {
             Some(operands) => read_private(data, operands)?,
             None => Private::default(),
         };
+        read(steps, private.local_subrs.len() + 1);
 
         // 12 30 is ROS: its presence, and nothing else, is what makes a font
         // CID-keyed, which changes what the charset means.
@@ -246,6 +270,7 @@ impl<'a> Cff<'a> {
             .copied()
             .unwrap_or(0.0);
         let charset = read_charset(data, charset_at, glyphs, is_cid);
+        read(steps, charset.len());
         let by_sid = invert_charset(&charset);
 
         // 16 is Encoding, which a CID-keyed font does not have: its glyphs are
@@ -259,6 +284,7 @@ impl<'a> Cff<'a> {
                 .unwrap_or(0.0);
             read_encoding(data, at, &by_sid)
         };
+        read(steps, encoding.len());
 
         // 12 36 FDArray and 12 37 FDSelect: a CID-keyed font's glyphs are
         // partitioned between Font DICTs, each with its own Private DICT and
@@ -271,6 +297,7 @@ impl<'a> Cff<'a> {
             Some(&at) if !fds.is_empty() => read_fd_select(data, at, glyphs),
             _ => Vec::new(),
         };
+        read(steps, fds.len() + fd_select.len());
 
         // 12 7 is FontMatrix; the default is 1/1000 in both axes.
         let (font_matrix, top_has_matrix) = match dict_get(&top, 0x0C07) {
@@ -412,13 +439,24 @@ impl<'a> Cff<'a> {
     /// One glyph's outline, in the font's own units.
     #[must_use]
     pub fn outline(&self, glyph: u16) -> Option<Outline> {
-        let charstring = self.charstrings.get(usize::from(glyph))?;
+        self.outline_counted(glyph).0
+    }
+
+    /// [`Cff::outline`], and the steps it took: each operand and operator the
+    /// Type 2 machine read, in the glyph's charstring and in every subroutine
+    /// it called — what the machine spends of its budget.
+    #[must_use]
+    pub fn outline_counted(&self, glyph: u16) -> (Option<Outline>, u64) {
+        let Some(charstring) = self.charstrings.get(usize::from(glyph)) else {
+            return (None, 0);
+        };
         let mut ctx = self.charstring_context(glyph);
         ctx.run(charstring);
         if ctx.open {
             ctx.outline.push(Segment::Close);
         }
-        Some(ctx.outline)
+        let steps = u64::from(CHARSTRING_BUDGET - ctx.budget);
+        (Some(ctx.outline), steps)
     }
 
     /// A glyph's advance, when the charstring declares one.
@@ -445,7 +483,7 @@ impl<'a> Cff<'a> {
             width: None,
             open: false,
             depth: 0,
-            budget: 64_000,
+            budget: CHARSTRING_BUDGET,
             transient: [0.0; 32],
         }
     }
@@ -1586,6 +1624,10 @@ pub(crate) fn bias(count: usize) -> i32 {
         32768
     }
 }
+
+/// The operands and operators one glyph's Type 2 machine may read, its
+/// subroutines' included, before it stops.
+const CHARSTRING_BUDGET: u32 = 64_000;
 
 struct Charstring<'a, 'b> {
     cff: &'b Cff<'a>,
