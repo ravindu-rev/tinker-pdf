@@ -86,6 +86,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "svg_output_is_stable_across_targets",
     },
+    // The engine's own sRGB profile, computed on the build host by
+    // `tinker-pdf-color/build.rs`: its bytes on every target (RC-19).
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "the_first_party_srgb_profile_is_one_byte_string_on_every_target",
+    },
     // The archival packet's hash.
     Fingerprint {
         file: "crates/tinker-pdf/tests/pdfa_writer.rs",

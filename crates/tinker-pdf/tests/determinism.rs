@@ -3197,6 +3197,56 @@ fn svg_output_is_stable_across_targets() {
     );
 }
 
+/// The engine's own sRGB ICC profile, `tinker_pdf::SRGB_PROFILE`, hashed
+/// (`docs/design/icc.md`, RC-19).
+///
+/// The profile is computed when the engine is built, by
+/// `crates/tinker-pdf-color/build.rs` from IEC 61966-2-1's published
+/// numbers, and a build script runs on the build host whatever the target:
+/// so this is ruling 4 held over the build host's arithmetic as well as the
+/// target's. The script's four IEEE operations and `tinker_pdf_math::pow`
+/// make one answer on every host, and this pin is what says so on each
+/// target the suite runs on. **A hash that differs between build hosts is a
+/// determinism bug in `build.rs`, never a table edit.**
+///
+/// The hash covers every byte — the colorants and the curve, and as much the
+/// header's date and the `desc` and `cprt` texts — so a one-byte change to
+/// the description is another profile, and the second half of the test
+/// shows the pin sees one.
+#[test]
+fn the_first_party_srgb_profile_is_one_byte_string_on_every_target() {
+    let profile = tinker_pdf::SRGB_PROFILE;
+    // The profile this hash is about, asserted rather than assumed: an ICC
+    // profile of a display, RGB into XYZ, of the size RC-19.1's layout gives.
+    assert_eq!(&profile[36..40], b"acsp", "an ICC profile");
+    assert_eq!(&profile[12..24], b"mntrRGB XYZ ", "a display, RGB into XYZ");
+    assert_eq!(profile.len(), 2624, "RC-19.1's layout");
+    assert_eq!(
+        sha(profile),
+        "25219b24748844890523c69184ba4f4f010edba7c692be2166b57e8aa3e863cd",
+        "the first-party sRGB profile is not the bytes it was. If two targets \
+         or two build hosts disagree, this is a determinism bug in \
+         `crates/tinker-pdf-color/build.rs` -- find the arithmetic that is not \
+         host-stable, do not update the pin. If the profile changed \
+         deliberately, `crates/tinker-pdf-color/tests/srgb_profile.rs` says \
+         what it holds now. The profile is {} bytes.",
+        profile.len()
+    );
+
+    let description = b"sRGB IEC 61966-2-1 (tinker-pdf)";
+    let at = profile
+        .windows(description.len())
+        .position(|window| window == description)
+        .expect("the description is in the profile");
+    let mut changed = profile.to_vec();
+    changed[at] ^= 0x01;
+    assert_ne!(
+        sha(&changed),
+        sha(profile),
+        "one byte of `desc` is another profile"
+    );
+}
+
 /// The bytes the CBZ synthesiser hands `CosDocument::open`, hashed.
 ///
 /// *Added August 2026, with gap 29 milestone 6.* The `cbz` fingerprint above

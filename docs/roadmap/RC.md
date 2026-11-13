@@ -320,18 +320,6 @@ complete enough to convert documents (ED-06b) and to write PDF/X (SD-11).
 | RC-18.10a | measure | The stream's speed rows in MS-04's render group: writing the 150-dpi text page's command stream, and rendering that page at 150 dpi from its parsed stream, each paired with the planning baseline's direct render of the same page. *Note:* The row gives no target, so the figures are recorded and a target is the owner's (H-77). | `crates/tinker-pdf/benches`, `crates/tinker-pdf/benches/baseline.json`, `docs/verification.md` | `cargo xtask baseline` holds the bench file and `baseline.json` to one list with the two operations in it (`xtask/src/bench.rs` `the_committed_baseline_agrees_with_the_tree`), and their first paired ratios against the planning baseline, taken by a local MS-02 paired run, are recorded in `docs/verification.md`. | RC-18.4, MS-02, MS-04 |
 | RC-18.10b | measure | The wall-clock figure RC-18.10a's exit names, taken in the timing phase on the named machine with nothing else running (ruling 15): by MS-04.10's fifteen runs, or by the paired run where RC-18.10a's exit names one, and committed as ruling 16 says. *Note:* Split from RC-18.10 by the owner's timing choice; RC-18.10a lands the operation unmeasured. | `crates/tinker-pdf/benches/baseline.json` | The figure RC-18.10a's exit names is committed and `cargo xtask baseline` holds it. | RC-18.10a, MS-04.10 |
 
-## RC-19 — A first-party sRGB profile
-
-**A first-party sRGB profile**: the engine's own ICC profile built by `build.rs` from IEC 61966-2-1's published primaries, white point and transfer function, used as the default RGB space and as PDF/A conversion's default output intent
-
-**Exit criterion.** the generated profile's colorant matrix and TRC recomputed from the standard's numbers in the test; the profile parses and validates through `tinker-pdf-color`
-
-**Doc:** [design/icc.md](../design/icc.md), RC-19 · **Depends on:** —
-
-| Step | Kind | What | Where | Exit | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| RC-19.5 | test | Fingerprint the profile's bytes on every target: `determinism.rs` pins the SHA-256 of `tinker_pdf::SRGB_PROFILE`, entered in K-07's roster, which holds `build.rs`'s arithmetic to one answer on every build host. *Note:* No speed row: the profile is a constant and nothing runs per page. A hash that differs between build hosts is a determinism bug in `build.rs`, never a table edit. | `crates/tinker-pdf/tests/determinism.rs`, `xtask/src/determinism.rs` (new), `docs/features/determinism.md` | `determinism.rs` `the_first_party_srgb_profile_is_one_byte_string_on_every_target` (new) passes under `cargo test` on Linux and Windows (CI runs it on every pull request) and under `--target wasm32-wasip1` locally, recorded here; a one-byte change to the profile's `desc` text fails it; `docs/features/determinism.md` lists it. | RC-19.2, K-07 |
-
 ## RC-20 — ICC engine completion
 
 **ICC engine completion**: v4 in both directions (`B2A*`, `mBA `) for output, named-colour tags, device links, gamut tags, and reading v5 (iccMAX) profiles

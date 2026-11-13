@@ -27,8 +27,9 @@ names what would move it.
 - **NG-03 — The ICC's own published profile files, bundled.** They carry
   no SPDX identifier, so `cargo xtask vendor` cannot admit them; which
   device an archival document's colours are for stays the caller's
-  statement ([design/pdfa.md](../design/pdfa.md)). A first-party sRGB
-  profile built from IEC 61966-2-1's published numbers is RC-19's.
+  statement ([design/pdfa.md](../design/pdfa.md)). The engine computes an
+  sRGB profile of its own from IEC 61966-2-1's published numbers instead,
+  `tinker_pdf::SRGB_PROFILE` ([design/icc.md](../design/icc.md), RC-19).
 - **NG-04 — The four properties ruling 13 retires**: a reader
   nobody here wrote accepting this engine's output, a second reading of an
   XPS package, a reference CSS implementation, an arbiter for an EPUB

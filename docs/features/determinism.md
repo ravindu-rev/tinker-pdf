@@ -188,6 +188,17 @@ order and stream framing are pinned — none of which a rendered hash can see.
 two-box claim above: the book is stable at 432 x 648 and at 600 x 800, and
 the two differ in bytes and in page count.
 
+**The engine's own sRGB profile** is pinned as bytes too:
+`the_first_party_srgb_profile_is_one_byte_string_on_every_target` holds the
+SHA-256 of `tinker_pdf::SRGB_PROFILE` to a committed value. The profile is
+computed by `crates/tinker-pdf-color/build.rs` when the engine is built
+([rendering](rendering.md)), and a build script runs on the build host
+whatever the target, so the pin holds the host's arithmetic to one answer as
+the render fingerprints hold the target's: four IEEE operations and
+`tinker_pdf_math::pow`, the same bytes wherever they are computed. A hash that
+differs between build hosts is a determinism bug in `build.rs`, never a table
+edit, and a one-byte change to the profile's description fails it.
+
 Three fixtures carry guarantees of different kinds: one is synthesised
 rather than parsed, so it pins the writer and parser to each other; one is
 a package a third-party serialiser wrote, so it can disagree with this
@@ -223,9 +234,9 @@ not green".
 **The determinism roster** (`xtask/src/determinism.rs`) names them:
 `determinism.rs`'s render fingerprints and the same pages drawn in bands, the
 patched page's, its SVG output's hashes, its three synthesised documents' byte
-hashes, its display list's replay of every fingerprinted page and the same
-pages drawn through a warm and a starved document cache, and under a warm
-and a starved budget stated at open;
+hashes, the first-party sRGB profile's bytes, its display list's replay of
+every fingerprinted page and the same pages drawn through a warm and a
+starved document cache, and under a warm and a starved budget stated at open;
 `pdfa_writer.rs`'s archival hash; `epub_shaped.rs`'s shaped page;
 `render_options.rs`'s pinned ink, transparent and premultiplied, hard-edged
 output and levels, rules and widths; the shaper's two fingerprints; and the guard suite's
