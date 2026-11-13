@@ -56,8 +56,8 @@
 //!   ceiling here would have to be kept in step with two that already fire.
 //! - **Nothing on the split or the re-deflate.** Both are bounded by the raster
 //!   the two caps above already allowed: the split writes exactly as many bytes
-//!   as it reads, and `zlib_compress` of *n* bytes is *n* plus a fixed header
-//!   in the worst case.
+//!   as it reads, and `zlib_compress` of *n* bytes is at worst *n* and a few
+//!   bytes a block, each block stored where nothing codes it smaller.
 //! - **Nothing on the palette.** 11.2.3 caps it at `2^bit_depth` entries and
 //!   the scan enforces that, so 768 bytes is the format's own ceiling.
 

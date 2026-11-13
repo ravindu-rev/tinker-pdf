@@ -19,11 +19,11 @@ fixed-Huffman and dynamic-Huffman blocks (RFC 1951), the zlib wrapper
 is absent. The encoder exists too: `deflate.rs` is a hash-chain LZ77 match
 finder whose chains live in two tables of one window's entries, a bucket's
 newest position and a ring of each position's predecessor, so what it holds
-is the same 256 KiB whatever the input's length. `deflate` and
-`zlib_compress` feed it fixed Huffman codes over the whole input, with stored
-blocks whenever those are smaller — they compress every stream the writer
-emits, object streams included. `Deflater` is the streaming encoder: input is
-fed in pieces into a window buffer of two windows, 64 KiB, and each block, of
+is the same 256 KiB whatever the input's length. `Deflater` is the encoder,
+streaming, and `deflate` and `zlib_compress`, which compress every stream the
+writer emits, object streams included, are it at the ratio level over a whole
+input. Input is fed in pieces into a window buffer of two windows, 64 KiB,
+and each block, of
 16 384 symbols or what the input's end leaves, is appended to the caller's
 output as it completes, stored, fixed-coded or in a dynamic code of its own,
 whichever is fewest bits, a tie going to the simpler, and stored only while

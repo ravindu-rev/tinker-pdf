@@ -1132,7 +1132,7 @@ target computes the same bytes) and through the tree's own writers elsewhere.
 | `image_file()` | as many A4 pages as reach 23 000 000 bytes, each covered by its own image, `photo(2480, 3508, page)` DCT-coded, so no two pages share an image a writer could deduplicate | `jpeg_encode`, `add_image` (`build.rs:7206`) | "a 23 MB file", "a 23 MB image file" |
 | `small_image_file()` | the first page of `image_file()`'s pages alone, 2 496 733 bytes | the same | "a 2.5 MB image file", and the CBC pair's bytes |
 | `aes_file()` | `image_file()` saved at R6 with both passwords empty and fixed entropy, the file `tpdf encrypt` writes with neither password | `WriteOptions::encryption` (`crates/tinker-pdf-cos/src/write.rs:30-55`, `:124`) | the Item's "an AES-256 file" |
-| `jpeg_page()`, `jpeg_page_part(d)`, `flate_page(d)`, `cmyk_page(d)` | a page a d-th of A4 each way (`jpeg_page()` A4 itself) covered by one image at `scan_part(d)`'s size: `baseline_jpeg()` or `baseline_jpeg_part(d)`; `photo` at that size, seed 1, through `zlib_compress` (`deflate.rs:319`); `photo` converted to CMYK by formula and Flate-coded under `/ICCBased` with `cmyk-lut.icc` (`add_icc_color_space`, `build.rs:6356`) | `add_image` | "half-size JPEG page", "quarter-size JPEG page", "Flate RGB image page", "an ICC-based CMYK image"; the CMYK image is not DCT-coded, so its operation times the conversion and no JPEG decode; `jpeg_page()` is the peak test's |
+| `jpeg_page()`, `jpeg_page_part(d)`, `flate_page(d)`, `cmyk_page(d)` | a page a d-th of A4 each way (`jpeg_page()` A4 itself) covered by one image at `scan_part(d)`'s size: `baseline_jpeg()` or `baseline_jpeg_part(d)`; `photo` at that size, seed 1, through `zlib_compress` (`deflate.rs:223`); `photo` converted to CMYK by formula and Flate-coded under `/ICCBased` with `cmyk-lut.icc` (`add_icc_color_space`, `build.rs:6356`) | `add_image` | "half-size JPEG page", "quarter-size JPEG page", "Flate RGB image page", "an ICC-based CMYK image"; the CMYK image is not DCT-coded, so its operation times the conversion and no JPEG decode; `jpeg_page()` is the peak test's |
 | `jpx_page()`, `jpx_page_part()` | an A4 page covered by `data/`'s 2480×3508 irreversible codestream, the peak test's; and a page a quarter of A4 each way covered by its 620×877 one | `ImageFilter::Jpx` (`build.rs:438`) | "full-page JPEG 2000" |
 | `g4_page(d)`, `jbig2_page(d)` | a page a d-th of A4 each way covered by `scan_at(300 / d)`: G4-coded (`ccitt_g4_encode`, `ccitt/encode.rs:386`, as `ImageFilter::CcittFax`); and the same page saved through the image pass's `BilevelCodec::Jbig2Generic` (`crates/tinker-pdf/src/recode.rs:188-197`), the builder having no JBIG2 filter | the builder, then `write::save` | "G4 / JBIG2 scan page" |
 | `paths(n)`, `curves(n)` | three in five of n filled polygons and closed curves at fractional coordinates, as `triangles()` draws them, and two in five stroked cubic curves, 0.5 to 4 pt wide, each of the nine cap-and-join pairs in turn, every fifth dashed; `curves(n)` is n such curves alone | `raw` | "250 paths", "100 paths", "the 250-path page's 100 stroked curves alone" |
@@ -1253,9 +1253,9 @@ text of the document the operation reads, so all six stay inside the group.
 | --- | --- | --- | --- | --- | --- |
 | `encode/PNG of the 1240x1755 text page` | pixels · 1240×1755 | the text page's 150-dpi bitmap, rendered once, `Bitmap::to_png` (`lib.rs:861`) | 269 → 40; 6.72× | in | built |
 | `encode/PNG of the near-blank page` | pixels · 2 × 1240×1755 | a 150-dpi bitmap of a page holding one line | 145 → 15; 9.66× | ×2 | built |
-| `encode/deflate page-like data` | bytes · 6 528 600 | `page_like()`, `deflate_at` at `DeflateLevel::Ratio` (`deflate.rs:1475`); the planning baseline runs `deflate` | 40 → 120 MB/s (163 → 54); 3×; size ≤ 1.02 × level 6's, exact | in | built |
+| `encode/deflate page-like data` | bytes · 6 528 600 | `page_like()`, `deflate_at` at `DeflateLevel::Ratio` (`deflate.rs:1297`); the planning baseline runs `deflate` | 40 → 120 MB/s (163 → 54); 3×; size ≤ 1.02 × level 6's, exact | in | built |
 | `encode/deflate photo-like data` | bytes · 6 528 600 | `photo_like()`, the same | 28 → 40 MB/s (233 → 163); 1.4×; size likewise | in | built |
-| `encode/deflate page-like data, fast level` | bytes · 6 528 600 | `page_like()`, `deflate_at` at `DeflateLevel::Fast` (`deflate.rs:1475`); the planning baseline runs `deflate` in its place | ≥ 300 MB/s; 7.5×, paired with the baseline's deflate, at floor 1 until P-04.6 | untimed | built |
+| `encode/deflate page-like data, fast level` | bytes · 6 528 600 | `page_like()`, `deflate_at` at `DeflateLevel::Fast` (`deflate.rs:1297`); the planning baseline runs `deflate` in its place | ≥ 300 MB/s; 7.5×, paired with the baseline's deflate, at floor 1 until P-04.6 | untimed | built |
 | `encode/deflate photo-like data, fast level` | bytes · 6 528 600 | `photo_like()`, the same | ≥ 150 MB/s; 5.27×, paired likewise, at floor 1 until P-04.6 | untimed | built |
 
 The fast level's two operations take one call on the ratio level's inputs.
@@ -2850,12 +2850,12 @@ compares decoded.
 
 ## P-04 — PNG and deflate
 
-*For [ROADMAP](../ROADMAP.md) row P-04.* The encoder is one fixed-Huffman
-block over the whole input, its match finder holds one `usize` per input byte
-(`prev`, `crates/tinker-pdf-filters/src/deflate.rs`), and `deflate` writes a
-stored copy of the whole input beside it to keep the smaller; the PNG writer
-filters the whole image into one buffer, compresses that, and copies the
-compressed stream into its chunks (`png/encode.rs`). This section fixes the
+*For [ROADMAP](../ROADMAP.md) row P-04.* At the planning baseline the
+encoder is one fixed-Huffman block over the whole input, its match finder
+holds one `usize` per input byte, and `deflate` writes a stored copy of the
+whole input beside it to keep the smaller; the PNG writer filters the whole
+image into one buffer, compresses that, and copies the compressed stream into
+its chunks. This section fixes the
 encoder's two levels, the match finder's ring and how its positions are held,
 dynamic-Huffman blocks and each block's choice, the streaming interface and
 the window it keeps, the PNG writer's one pass and its chunks as the deflater

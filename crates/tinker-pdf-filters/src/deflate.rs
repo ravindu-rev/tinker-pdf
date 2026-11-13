@@ -1,20 +1,17 @@
 //! Own deflate encoder (RFC 1951), with the zlib wrapper of RFC 1950.
 //!
-//! Two encoders live here, both hash-chain LZ77 over one window.
-//!
-//! [`deflate`] and [`zlib_compress`] compress every stream the writer emits:
-//! one fixed-Huffman block over the whole input, or stored blocks wherever
-//! those are smaller.
-//!
-//! [`Deflater`] is the streaming one (`docs/design/performance.md`, P-04):
-//! input is fed in pieces into a window buffer of two windows, and whole
-//! blocks are appended to the caller's output as they complete, each written
-//! stored, fixed-coded or in a dynamic code of its own (RFC 1951 §3.2.7),
-//! whichever is fewest bits. It runs at one of two
-//! levels ([`DeflateLevel`]): fast, greedy over a short chain, or ratio, over
-//! a long chain with a lazy step. [`ZlibDeflater`] wraps it in RFC 1950's
-//! header and a running Adler-32, and [`deflate_at`] and [`zlib_compress_at`]
-//! feed it a whole input at once.
+//! [`Deflater`] is a hash-chain LZ77 over one window, streaming
+//! (`docs/design/performance.md`, P-04): input is fed in pieces into a window
+//! buffer of two windows, and whole blocks are appended to the caller's output
+//! as they complete, each written stored, fixed-coded or in a dynamic code of
+//! its own (RFC 1951 §3.2.7), whichever is fewest bits. It runs at one of two
+//! levels ([`DeflateLevel`]): fast, greedy over a short chain, for output
+//! written once and read once, a rendered page among them; or ratio, over a
+//! long chain with a lazy step, for documents. [`ZlibDeflater`] wraps it in
+//! RFC 1950's header and a running Adler-32, and [`deflate_at`] and
+//! [`zlib_compress_at`] feed it a whole input at once. [`deflate`] and
+//! [`zlib_compress`], which compress every stream the writer emits, are those
+//! two at the ratio level.
 //!
 //! **Arrival is not an input** (ruling 4). A block ends at
 //! [`BLOCK_SYMBOLS`] symbols or at the end of the input, a position is
@@ -136,67 +133,6 @@ impl Finder {
     }
 }
 
-/// Writes bits least-significant-first, as deflate requires.
-struct BitWriter {
-    out: Vec<u8>,
-    bit_buffer: u32,
-    bit_count: u32,
-}
-
-impl BitWriter {
-    fn new() -> BitWriter {
-        BitWriter {
-            out: Vec::new(),
-            bit_buffer: 0,
-            bit_count: 0,
-        }
-    }
-
-    /// Writes `count` bits of `value`, low bit first.
-    fn write(&mut self, value: u32, count: u32) {
-        self.bit_buffer |= (value & ((1u32 << count) - 1)) << self.bit_count;
-        self.bit_count += count;
-        while self.bit_count >= 8 {
-            self.out.push((self.bit_buffer & 0xFF) as u8);
-            self.bit_buffer >>= 8;
-            self.bit_count -= 8;
-        }
-    }
-
-    /// Writes a Huffman code, which is stored most-significant-bit-first and
-    /// so must be reversed on the way out (RFC 1951 §3.1.1).
-    fn write_code(&mut self, code: u16, length: u32) {
-        let mut reversed = 0u32;
-        for i in 0..length {
-            reversed |= ((u32::from(code) >> i) & 1) << (length - 1 - i);
-        }
-        self.write(reversed, length);
-    }
-
-    fn align(&mut self) {
-        if self.bit_count > 0 {
-            self.out.push((self.bit_buffer & 0xFF) as u8);
-            self.bit_buffer = 0;
-            self.bit_count = 0;
-        }
-    }
-
-    fn finish(mut self) -> Vec<u8> {
-        self.align();
-        self.out
-    }
-}
-
-/// The fixed literal/length code of RFC 1951 §3.2.6.
-fn fixed_literal_code(symbol: u16) -> (u16, u32) {
-    match symbol {
-        0..=143 => (0b0011_0000 + symbol, 8),
-        144..=255 => (0b1_1001_0000 + (symbol - 144), 9),
-        256..=279 => (symbol - 256, 7),
-        _ => (0b1100_0000 + (symbol - 280), 8),
-    }
-}
-
 /// `(code, extra bits, base length)` for each length symbol, 257..=285.
 const LENGTH_TABLE: [(u16, u32, usize); 29] = [
     (257, 0, 3),
@@ -264,74 +200,28 @@ const DISTANCE_TABLE: [(u16, u32, usize); 30] = [
     (29, 13, 24_577),
 ];
 
-fn length_symbol(length: usize) -> (u16, u32, usize) {
-    // Walk from the top so the largest base that fits is chosen.
-    for entry in LENGTH_TABLE.iter().rev() {
-        if length >= entry.2 {
-            return *entry;
-        }
-    }
-    LENGTH_TABLE[0]
-}
-
-fn distance_symbol(distance: usize) -> (u16, u32, usize) {
-    for entry in DISTANCE_TABLE.iter().rev() {
-        if distance >= entry.2 {
-            return *entry;
-        }
-    }
-    DISTANCE_TABLE[0]
-}
-
-/// Three bytes hashed into a bucket. Collisions are fine: a candidate is
-/// always verified before it is used.
-fn hash3(data: &[u8], at: usize) -> usize {
-    let byte = |i: usize| data.get(at + i).copied().unwrap_or(0);
-    hash(byte(0), byte(1), byte(2))
-}
-
 /// The bucket of the three bytes `a`, `b` and `c`.
 fn hash(a: u8, b: u8, c: u8) -> usize {
     let (a, b, c) = (u32::from(a), u32::from(b), u32::from(c));
     (((a << 10) ^ (b << 5) ^ c).wrapping_mul(2_654_435_761) >> 17) as usize % HASH_SIZE
 }
 
-/// Compresses to a raw deflate stream (RFC 1951).
+/// Compresses to a raw deflate stream (RFC 1951) at the ratio level: what
+/// [`deflate_at`] writes at [`DeflateLevel::Ratio`].
 #[must_use]
 pub fn deflate(input: &[u8]) -> Vec<u8> {
-    // Incompressible input is common — an already-compressed image, a JPEG
-    // passed through — and a stored block is the honest answer for it.
-    let compressed = deflate_fixed(input);
-    let stored = stored_blocks(input);
-    if stored.len() <= compressed.len() {
-        stored
-    } else {
-        compressed
-    }
+    deflate_at(input, DeflateLevel::Ratio)
 }
 
-/// Wraps a deflate stream in the zlib header and Adler-32 of RFC 1950.
+/// Wraps a deflate stream at the ratio level in the zlib header and Adler-32
+/// of RFC 1950: what [`zlib_compress_at`] writes at [`DeflateLevel::Ratio`].
 ///
 /// This is what a PDF `/FlateDecode` stream contains: the decoder accepts a
 /// raw stream too, because real files contain both, but what we *write* is
 /// the one the specification asks for.
 #[must_use]
 pub fn zlib_compress(input: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    // CMF: deflate, 32K window. FLG: no dictionary, default level, with the
-    // check bits chosen so the pair is a multiple of 31.
-    out.push(0x78);
-    out.push(0x9C);
-    out.extend_from_slice(&deflate(input));
-    out.extend_from_slice(&adler32(input).to_be_bytes());
-    out
-}
-
-/// RFC 1950 §9.
-fn adler32(data: &[u8]) -> u32 {
-    let mut adler = Adler32::new();
-    adler.update(data);
-    adler.value()
+    zlib_compress_at(input, DeflateLevel::Ratio)
 }
 
 /// RFC 1950 §9's checksum, kept as it runs: the two sums are reduced at least
@@ -364,108 +254,6 @@ impl Adler32 {
     fn value(self) -> u32 {
         (self.b << 16) | self.a
     }
-}
-
-/// Stored (uncompressed) blocks, which cost five bytes per 65535.
-fn stored_blocks(input: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    if input.is_empty() {
-        // An empty final stored block, so the stream is still well formed.
-        out.extend_from_slice(&[0x01, 0x00, 0x00, 0xFF, 0xFF]);
-        return out;
-    }
-
-    let mut chunks = input.chunks(65_535).peekable();
-    while let Some(chunk) = chunks.next() {
-        let last = u8::from(chunks.peek().is_none());
-        out.push(last);
-        let len = chunk.len() as u16;
-        out.extend_from_slice(&len.to_le_bytes());
-        out.extend_from_slice(&(!len).to_le_bytes());
-        out.extend_from_slice(chunk);
-    }
-    out
-}
-
-/// One fixed-Huffman block over the whole input.
-fn deflate_fixed(input: &[u8]) -> Vec<u8> {
-    let mut w = BitWriter::new();
-    // Final block, fixed Huffman codes.
-    w.write(1, 1);
-    w.write(0b01, 2);
-
-    // Each bucket's positions, a chain ordered nearest-first.
-    let mut finder = Finder::new();
-    #[cfg(test)]
-    tests::note_scratch(&finder);
-
-    let mut at = 0usize;
-    while at < input.len() {
-        let (mut best_len, mut best_dist) = (0usize, 0usize);
-
-        if at + MIN_MATCH <= input.len() {
-            let bucket = hash3(input, at);
-            let mut next = finder.first(bucket);
-            let limit = at.saturating_sub(WINDOW);
-            let mut tries = 0usize;
-
-            while let Some(candidate) = next.filter(|&c| c >= limit && tries < MAX_CHAIN) {
-                tries += 1;
-                let max_len = MAX_MATCH.min(input.len() - at);
-                let mut len = 0usize;
-                while len < max_len && input[candidate + len] == input[at + len] {
-                    len += 1;
-                }
-                if len > best_len {
-                    best_len = len;
-                    best_dist = at - candidate;
-                    // A longest-possible match cannot be improved on.
-                    if len == max_len {
-                        break;
-                    }
-                }
-                next = finder.next(candidate);
-            }
-        }
-
-        if best_len >= MIN_MATCH {
-            let (sym, extra_bits, base) = length_symbol(best_len);
-            let (code, bits) = fixed_literal_code(sym);
-            w.write_code(code, bits);
-            if extra_bits > 0 {
-                w.write((best_len - base) as u32, extra_bits);
-            }
-
-            let (dsym, dextra, dbase) = distance_symbol(best_dist);
-            // Distance codes are five-bit fixed, not the literal code.
-            w.write_code(dsym, 5);
-            if dextra > 0 {
-                w.write((best_dist - dbase) as u32, dextra);
-            }
-
-            // Every position the match covers still has to enter the chain, or
-            // later matches cannot reach back through it.
-            for i in 0..best_len {
-                let pos = at + i;
-                if pos + MIN_MATCH <= input.len() {
-                    finder.insert(hash3(input, pos), pos);
-                }
-            }
-            at += best_len;
-        } else {
-            let (code, bits) = fixed_literal_code(u16::from(input[at]));
-            w.write_code(code, bits);
-            if at + MIN_MATCH <= input.len() {
-                finder.insert(hash3(input, at), at);
-            }
-            at += 1;
-        }
-    }
-
-    // End of block.
-    let (code, bits) = fixed_literal_code(256);
-    w.write_code(code, bits);
-    w.finish()
 }
 
 // ---- The streaming deflater -------------------------------------------------
@@ -1163,10 +951,13 @@ impl Deflater {
     /// A deflater at `level`.
     #[must_use]
     pub fn new(level: DeflateLevel) -> Deflater {
+        let finder = Finder::new();
+        #[cfg(test)]
+        tests::note_scratch(&finder);
         Deflater {
             level,
             params: level.params(),
-            finder: Finder::new(),
+            finder,
             buffer: Vec::new(),
             start: 0,
             scan: 0,
@@ -1636,84 +1427,21 @@ mod tests {
     /// The Adler-32 trailer is what tells a decoder the data survived.
     #[test]
     fn the_adler_trailer_matches() {
-        // RFC 1950's own worked value for "Mark Adler".
-        assert_eq!(adler32(b"Mark Adler"), 0x13070394);
+        // RFC 1950's own worked value for "Mark Adler", whole and in pieces.
+        let mut adler = Adler32::new();
+        adler.update(b"Mark Adler");
+        assert_eq!(adler.value(), 0x13070394);
+        let mut pieces = Adler32::new();
+        for piece in [&b"Mark"[..], b"", b" Ad", b"ler"] {
+            pieces.update(piece);
+        }
+        assert_eq!(pieces.value(), 0x13070394);
     }
 
     #[test]
     fn long_input_round_trips() {
         let input: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
         round_trip(&input);
-    }
-
-    /// The encoder as it was before the ring, its chain one entry an input
-    /// byte, kept to hold the ring to the bytes it gave.
-    fn deflate_fixed_by_vector(input: &[u8]) -> Vec<u8> {
-        let mut w = BitWriter::new();
-        w.write(1, 1);
-        w.write(0b01, 2);
-        let mut head = vec![usize::MAX; HASH_SIZE];
-        let mut prev = vec![usize::MAX; input.len()];
-        let mut at = 0usize;
-        while at < input.len() {
-            let (mut best_len, mut best_dist) = (0usize, 0usize);
-            if at + MIN_MATCH <= input.len() {
-                let bucket = hash3(input, at);
-                let mut candidate = head[bucket];
-                let limit = at.saturating_sub(WINDOW);
-                let mut tries = 0usize;
-                while candidate != usize::MAX && candidate >= limit && tries < MAX_CHAIN {
-                    tries += 1;
-                    let max_len = MAX_MATCH.min(input.len() - at);
-                    let mut len = 0usize;
-                    while len < max_len && input[candidate + len] == input[at + len] {
-                        len += 1;
-                    }
-                    if len > best_len {
-                        best_len = len;
-                        best_dist = at - candidate;
-                        if len == max_len {
-                            break;
-                        }
-                    }
-                    candidate = prev[candidate];
-                }
-            }
-            if best_len >= MIN_MATCH {
-                let (sym, extra_bits, base) = length_symbol(best_len);
-                let (code, bits) = fixed_literal_code(sym);
-                w.write_code(code, bits);
-                if extra_bits > 0 {
-                    w.write((best_len - base) as u32, extra_bits);
-                }
-                let (dsym, dextra, dbase) = distance_symbol(best_dist);
-                w.write_code(dsym, 5);
-                if dextra > 0 {
-                    w.write((best_dist - dbase) as u32, dextra);
-                }
-                for i in 0..best_len {
-                    let pos = at + i;
-                    if pos + MIN_MATCH <= input.len() {
-                        let bucket = hash3(input, pos);
-                        prev[pos] = head[bucket];
-                        head[bucket] = pos;
-                    }
-                }
-                at += best_len;
-            } else {
-                let (code, bits) = fixed_literal_code(u16::from(input[at]));
-                w.write_code(code, bits);
-                if at + MIN_MATCH <= input.len() {
-                    let bucket = hash3(input, at);
-                    prev[at] = head[bucket];
-                    head[bucket] = at;
-                }
-                at += 1;
-            }
-        }
-        let (code, bits) = fixed_literal_code(256);
-        w.write_code(code, bits);
-        w.finish()
     }
 
     /// `len` deterministic pseudo-random bytes.
@@ -1726,31 +1454,6 @@ mod tests {
                 state as u8
             })
             .collect()
-    }
-
-    /// The ring visits the candidates the vector visited, in its order, so the
-    /// compressed bytes are the same: on noise, on repetition, and on blocks a
-    /// window long, one less and one more, repeated to four windows, whose
-    /// matches sit at the window's edge and just past it.
-    #[test]
-    fn the_ring_finds_what_the_vector_found() {
-        let mut inputs = vec![
-            noise(3 * WINDOW, 0x2545_F491_4F6C_DD1D),
-            b"the quick brown fox ".repeat(10_000),
-        ];
-        for block in [WINDOW - 1, WINDOW, WINDOW + 1] {
-            inputs.push(noise(block, block as u64).repeat(4 * WINDOW / block + 1));
-        }
-        for input in &inputs {
-            let ring = deflate_fixed(input);
-            assert_eq!(
-                ring,
-                deflate_fixed_by_vector(input),
-                "{} bytes compressed differently",
-                input.len()
-            );
-            round_trip(input);
-        }
     }
 
     /// The finder's tables are the same size for 64 KiB of input and for
@@ -2127,13 +1830,33 @@ mod tests {
         }
     }
 
+    /// The symbol whose range holds `value` in `table`: the largest base not
+    /// past it, walked from the top.
+    fn symbol_of(table: &[(u16, u32, usize)], value: usize) -> u16 {
+        table
+            .iter()
+            .rev()
+            .find(|entry| value >= entry.2)
+            .map_or(table[0].0, |entry| entry.0)
+    }
+
+    /// RFC 1951 §3.2.6's fixed literal/length code, as its table states it.
+    fn fixed_literal_code(symbol: u16) -> (u16, u32) {
+        match symbol {
+            0..=143 => (0b0011_0000 + symbol, 8),
+            144..=255 => (0b1_1001_0000 + (symbol - 144), 9),
+            256..=279 => (symbol - 256, 7),
+            _ => (0b1100_0000 + (symbol - 280), 8),
+        }
+    }
+
     /// The tables a writer codes from: every length and distance reaches the
     /// symbol whose range holds it, and each fixed code is RFC 1951 3.2.6's
     /// reversed.
     #[test]
     fn the_symbol_tables_are_the_rfcs() {
         for length in MIN_MATCH..=MAX_MATCH {
-            let (symbol, _, _) = length_symbol(length);
+            let symbol = symbol_of(&LENGTH_TABLE, length);
             assert_eq!(
                 LENGTH_TABLE[usize::from(LENGTH_INDEX[length])].0,
                 symbol,
@@ -2141,7 +1864,7 @@ mod tests {
             );
         }
         for distance in 1..=WINDOW {
-            let (symbol, _, _) = distance_symbol(distance);
+            let symbol = symbol_of(&DISTANCE_TABLE, distance);
             assert_eq!(
                 DISTANCE_TABLE[distance_index(distance)].0,
                 symbol,

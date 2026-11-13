@@ -2910,7 +2910,7 @@ fn the_synthesised_document_is_the_same_bytes_on_every_target() {
         .collect();
     assert_eq!(
         hash,
-        "c72d64d37f0f087f5cd5b51404304c82a1493e539018ce67bd8723917a74008e",
+        "995ed489d626a4388fd117f7b4c61bfa7d46a22e5839b17bf16f602af69bfc88",
         "the synthesised document is not the bytes it was; see this test's doc \
          comment for what that means and how to tell it apart from a rendering \
          change. The document is {} bytes.",
@@ -3046,7 +3046,7 @@ fn the_synthesised_fixed_document_is_the_same_bytes_on_every_target() {
         .collect();
     assert_eq!(
         hash,
-        "cd716c28d0d004a710d974050e7e22e11e3c3c351d76c543fef1e313cfc9f019",
+        "5aa40f7b728dac39497eed83de5552c0aebde34d546370f56c02b3d348c6a02d",
         "the synthesised fixed document is not the bytes it was; see this \
          test's doc comment for what that means and how to tell it apart from \
          a rendering change. The document is {} bytes.",
