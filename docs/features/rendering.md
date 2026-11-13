@@ -1461,7 +1461,10 @@ defect to hide in.
   refused codestream reported under each page's own name from one entry; one
   image in two scopes' defaults kept twice and in a third with the first's
   defaults found; clones, pages, display lists and the four-thread page walk
-  sharing one cache, a new budget or new fonts starting another. The
+  sharing one cache, a new budget or new fonts starting another.
+  `determinism.rs`'s `warm_and_starved_caches_render_the_fingerprints` holds
+  every fingerprinted page to its fingerprint and its warnings through a warm
+  cache and a starved one ([determinism](determinism.md)). The
   machinery's own tests are `cache.rs`'s: the eviction order whatever the hash
   order, an entry past the budget used once, single-flight fills on four
   threads, a re-entry and crossed fills — across a `Flights` too — that

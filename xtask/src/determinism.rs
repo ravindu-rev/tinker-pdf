@@ -46,6 +46,12 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "a_display_list_replays_every_fingerprinted_page_byte_for_byte",
     },
+    // Every fingerprinted page drawn twice through a warm document cache and
+    // twice through a starved one, held to its fingerprint (P-16).
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "warm_and_starved_caches_render_the_fingerprints",
+    },
     // Every fingerprinted page drawn in four bands, held to its fingerprint.
     Fingerprint {
         file: "crates/tinker-pdf/tests/determinism.rs",

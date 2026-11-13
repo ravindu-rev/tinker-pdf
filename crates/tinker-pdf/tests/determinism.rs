@@ -61,8 +61,8 @@ mod written_support;
 use std::sync::Arc;
 
 use tinker_pdf::{
-    Bitmap, Document, DocumentBuilder, OpenOptions, PixelRegion, RenderOptions, RenderWarning,
-    SimpleFontProvider, SvgOptions, SvgWarning,
+    Bitmap, CacheLimits, Document, DocumentBuilder, OpenOptions, PixelRegion, RenderOptions,
+    RenderWarning, SimpleFontProvider, SvgOptions, SvgWarning,
 };
 
 mod render_support;
@@ -3540,6 +3540,86 @@ fn a_display_list_replays_every_fingerprinted_page_byte_for_byte() {
             }
         }
     }
+}
+
+/// **What a document keeps across its renders draws what computing it again
+/// draws** (`docs/design/performance.md`, P-16): every fingerprinted page,
+/// rendered twice through a document whose budget keeps everything its
+/// renders compute — so the second render is served by the document's cache
+/// — and twice through one whose budget of zero keeps nothing, so that every
+/// request computes again, hashes to its committed fingerprint each time and
+/// reports what a render with no budget reports.
+///
+/// **Not a new fingerprint**: the table above is untouched, and a page that
+/// disagrees with it here is a finding about the cache — a value that is not
+/// a function of its key — or, where only one target disagrees, a
+/// determinism bug, never a reason to edit the table. Each kind the cache
+/// keeps is under this test as it lands, since the page renders through every
+/// kind the document keeps. So that it cannot stop exercising the cache
+/// unnoticed, the warm second renders must find something kept between them,
+/// and the starved ones nothing.
+#[test]
+fn warm_and_starved_caches_render_the_fingerprints() {
+    let budgets = [
+        ("warm", CacheLimits::new(256 << 20)),
+        ("starved", CacheLimits::new(0)),
+    ];
+    let counting = RenderOptions {
+        stats: true,
+        ..RenderOptions::default()
+    };
+    let mut wrong = Vec::new();
+    let mut hits = [0u64; 2];
+    for fixture in GOLDEN {
+        let want = FINGERPRINTS
+            .iter()
+            .find(|(n, _)| *n == fixture.name)
+            .map(|(_, h)| *h)
+            .expect("every page has a fingerprint");
+        let (document, at) = opened(fixture);
+        let plain = document
+            .page(at)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        for (which, (label, limits)) in budgets.iter().enumerate() {
+            let budgeted = document.clone().with_cache_limits(*limits);
+            let page = budgeted.page(at).expect("a page");
+            for pass in ["first", "second"] {
+                let bitmap = page.render(&counting);
+                let stats = bitmap.stats.expect("a counted render hands its stats back");
+                if pass == "second" {
+                    hits[which] += stats.cache_hits;
+                }
+                let actual = hashed(fixture, &bitmap);
+                if actual != want {
+                    wrong.push(format!(
+                        "{} {label}, {pass} render: {actual}, committed {want}",
+                        fixture.name
+                    ));
+                }
+                if bitmap.warnings != plain.warnings {
+                    wrong.push(format!(
+                        "{} {label}, {pass} render: reported {:?} where a render with no \
+                         budget reports {:?}",
+                        fixture.name, bitmap.warnings, plain.warnings
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "a render through the document's cache is not the page its fingerprint \
+         pins. A kept entry is what computing it again computes, so this is a \
+         finding about the cache, or, where only one target disagrees, a \
+         determinism bug -- never a reason to edit the table:\n{}",
+        wrong.join("\n")
+    );
+    assert!(
+        hits[0] > 0,
+        "the warm second renders found nothing kept, so this test measured no hit"
+    );
+    assert_eq!(hits[1], 0, "a budget of zero keeps nothing to find");
 }
 
 /// The bytes the EPUB reader hands `CosDocument::open`, hashed.

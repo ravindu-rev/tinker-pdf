@@ -127,6 +127,18 @@ each to the page's committed fingerprint, so it adds no hash either. On
 `wasm32-wasip1` no thread starts, and the walk and the bands are drawn and
 stitched on the caller, which must come to the same bytes.
 
+**What a document keeps across its renders is what it computes.**
+`warm_and_starved_caches_render_the_fingerprints` renders every page of the
+table twice through a document whose cache budget keeps everything its
+renders compute ([rendering](rendering.md)'s "The document's cache"), so the
+second render is served by the cache, and twice through one whose budget of
+zero keeps nothing, so every request computes again; each render is held to
+the page's committed fingerprint and to the warnings a render with no budget
+reports, so it adds no hash. Every kind the cache keeps is under it, since a
+page renders through every kind its document keeps, and so that it cannot
+stop exercising the cache unnoticed the warm second renders must find
+something kept between them and the starved ones nothing.
+
 **The SVG writer's output** is pinned beside the render fingerprints:
 `svg_output_is_stable_across_targets` writes every page of the table with the
 default `SvgOptions` and holds the SHA-256 of its markup to a committed value.
@@ -180,8 +192,9 @@ not green".
 
 **The determinism roster** (`xtask/src/determinism.rs`) names them:
 `determinism.rs`'s render fingerprints and the same pages drawn in bands, its
-SVG output's hashes, its three synthesised documents' byte hashes and its
-display list's replay of every fingerprinted page;
+SVG output's hashes, its three synthesised documents' byte hashes, its
+display list's replay of every fingerprinted page and the same pages drawn
+through a warm and a starved document cache;
 `pdfa_writer.rs`'s archival hash; `epub_shaped.rs`'s shaped page;
 `render_options.rs`'s pinned ink, transparent and premultiplied, and
 hard-edged output; the shaper's two fingerprints; and the guard suite's
