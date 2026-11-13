@@ -256,6 +256,18 @@ widens or narrows a gap against it: the EPUB writer, which reads each line it
 draws back through this device, reads it under the matrix the page draws it
 under ([epub](epub.md)).
 
+A glyph whose code no `/ToUnicode` entry and no encoding names stands for no
+text, and is dropped; the device says so first, as
+`TextWarning::UnmappedCode { code }`, once for each such code a page shows,
+in the order first met, so a page with text this build could not decode does
+not read as a page with less text (ruling 2). The report is the page's
+whether the glyph is shown or a Type 3 glyph reported after its procedure;
+a glyph inside an `/Artifact` scope the device drops is not the page's text
+and is not said. At most 64 codes are kept, bounded apart from the 64
+`UnknownFont` warnings, so a page of many unmapped codes still names every
+font it could not resolve. The text, the lines and the quads are what they
+are without the report.
+
 A horizontal line is measured along its own baseline (`text.rs`'s `Frame`):
 along its first glyph's direction, and across it at a quarter turn from it.
 Where the pen stands after a glyph is the furthest of its box's corners along
@@ -1198,7 +1210,7 @@ crate has an API of its own; see [architecture](../architecture.md).
 | What | Typed name | Why (one line) | See |
 | --- | --- | --- | --- |
 | A font resource the page names but the build cannot resolve | `TextWarning::UnknownFont { name }` | emitted by `Page::text()`, deduplicated, naming which resource — absence stays distinguishable from emptiness | ruling 2, [rulings](../rulings.md) |
-| A code with no `/ToUnicode` entry and no encoding that names it | `TextWarning::UnmappedCode { code }` | the typed vocabulary for a per-code guess; a glyph that decodes to no text at all is dropped from the page rather than invented | 9.10.3 |
+| A code with no `/ToUnicode` entry and no encoding that names it | `TextWarning::UnmappedCode { code }` | emitted by `Page::text()` once for each such code a page shows, at most 64, before its glyph is dropped: a glyph that decodes to no text is reported rather than invented, so a page with text this build could not decode is told from a page with less text | 9.10.2, ruling 2 |
 | Form XObject / Type 3 / soft-mask nesting past 16 levels | `MAX_FORM_DEPTH` | recursion is refused rather than allowed to overflow the stack | 8.10 |
 | A form, a soft mask's group or a Type 3 glyph procedure run again inside itself, directly or through the others | `Device::recursion_refused` | a cycle has no last run: refused at its first repeat, by the stream's identity, it draws once, where the depth cap ended it only after two or more runs to the sixteenth | 8.10 |
 | Nested runs past 4 MiB and 4 096 bytes for every byte of content reached, each run its stream's length and 256 bytes | `NESTED_WORK_FLOOR`, `NESTED_WORK_RATE`, `NESTED_RUN_COST`, said to the device as `Device::nested_budget_spent` | a tree of distinct forms or glyph procedures, each drawing the next many times, is no cycle and no group, and only a budget bounds it; scaled to what the file holds, it lets a page run its content four thousand times over, and a stream's first run always fits, so only further runs of content already drawn are passed over | 8.10, 9.6.5 |

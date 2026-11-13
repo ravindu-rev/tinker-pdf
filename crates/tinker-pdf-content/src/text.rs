@@ -11,7 +11,7 @@
 //! are not the same property, and conflating them makes both wrong. The
 //! engine reports them apart and lets the caller map as it needs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::device::{Device, Glyph, MarkedProps};
 use crate::plain::{PlainText, PlainTextOptions};
@@ -234,10 +234,15 @@ pub enum TextWarning {
         /// The resource name.
         name: String,
     },
-    /// A code had no `/ToUnicode` entry and no encoding that named it, so the
-    /// character it stands for is a guess.
+    /// A glyph's code had no `/ToUnicode` entry and no encoding that named it,
+    /// so the glyph stands for no text this build could read (9.10.2).
+    ///
+    /// Said once for each such code a page shows, before the glyph is
+    /// dropped, so a page whose text could not all be decoded does not read
+    /// as a page with less text (ruling 2).
     UnmappedCode {
-        /// The code.
+        /// The code, as the font's encoding reads it: a simple font's byte, a
+        /// composite font's CMap code.
         code: u32,
     },
 }
@@ -407,7 +412,19 @@ pub struct TextDevice {
     stated: Vec<u32>,
     /// Each span's text, in the order the spans opened.
     stated_texts: Vec<String>,
+    /// The codes reported as [`TextWarning::UnmappedCode`], so that a glyph
+    /// whose code was reported costs one lookup and not a walk of the
+    /// warnings: a page of a font with no `/ToUnicode` shows such a code at
+    /// every glyph.
+    unmapped: BTreeSet<u32>,
 }
+
+/// How many warnings of one kind a page keeps: a page whose font is unknown
+/// says so once rather than once a glyph, and a page of thousands of codes
+/// nothing maps names the first of them and not every one. Each kind is
+/// bounded apart, so a page that shows many unmapped codes still names every
+/// font it could not resolve.
+const MAX_WARNINGS_OF_A_KIND: usize = 64;
 
 /// One open marked-content scope.
 struct Scope {
@@ -519,9 +536,23 @@ impl TextDevice {
     /// Records something extraction had to tolerate.
     ///
     /// Deduplicated: a page whose font is unknown says so once rather than
-    /// once per glyph, which would bury the report under its own noise.
+    /// once per glyph, which would bury the report under its own noise. At
+    /// most [`MAX_WARNINGS_OF_A_KIND`] of each kind are kept, each kind
+    /// bounded apart from the other, in the order first met.
     pub fn warn(&mut self, warning: TextWarning) {
-        if !self.warnings.contains(&warning) && self.warnings.len() < 64 {
+        if let TextWarning::UnmappedCode { code } = warning {
+            if self.unmapped.len() < MAX_WARNINGS_OF_A_KIND && self.unmapped.insert(code) {
+                self.warnings.push(warning);
+            }
+            return;
+        }
+        let kind = core::mem::discriminant(&warning);
+        let of_its_kind = self
+            .warnings
+            .iter()
+            .filter(|kept| core::mem::discriminant(*kept) == kind)
+            .count();
+        if of_its_kind < MAX_WARNINGS_OF_A_KIND && !self.warnings.contains(&warning) {
             self.warnings.push(warning);
         }
     }
@@ -1077,7 +1108,8 @@ impl Device for TextDevice {
 
     /// 9.6.4: a Type 3 glyph stands for its text as any glyph does, though
     /// what it draws is its procedure's; it is read where it is placed, as a
-    /// shown glyph is, and a code that maps to nothing adds nothing.
+    /// shown glyph is, and a code that maps to nothing adds nothing and is
+    /// reported, as a shown glyph's is.
     fn show_type3_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
         self.show_glyph(glyph, state);
     }
@@ -1086,7 +1118,15 @@ impl Device for TextDevice {
         if self.artifacts > 0 && !self.keep_artifacts {
             return;
         }
-        if !glyph.transform.is_finite() || glyph.text.is_empty() {
+        // 9.10.2: a code no `/ToUnicode` entry and no encoding names stands
+        // for no text this build can read. It is said, once a code, before
+        // the glyph is dropped: a page with text that could not be decoded
+        // must not read as a page with less text (ruling 2).
+        if glyph.text.is_empty() {
+            self.warn(TextWarning::UnmappedCode { code: glyph.code });
+            return;
+        }
+        if !glyph.transform.is_finite() {
             return;
         }
 
@@ -2462,6 +2502,149 @@ mod tests {
         assert_eq!(p.plain_text(), "A\n");
     }
 
+    /// A glyph of `code` that maps to no text, drawn at `x`.
+    fn unmapped(code: u32, x: f64) -> Glyph {
+        Glyph {
+            code,
+            text: String::new(),
+            ..glyph("x", x, 700.0, 10.0)
+        }
+    }
+
+    /// The text and the quad of every character of `page`, in order.
+    fn drawn_chars(page: &TextPage) -> Vec<(String, Quad)> {
+        page.lines()
+            .iter()
+            .flat_map(|line| line.chars.iter())
+            .map(|c| (c.text.clone(), c.quad))
+            .collect()
+    }
+
+    /// **A code nothing maps is said, once**: two glyphs of one unmapped
+    /// code and one of another give two warnings, in the order first met,
+    /// and the text, the lines and the quads are the page's without them.
+    #[test]
+    fn a_code_nothing_maps_is_reported_once() {
+        let reported = page(&[
+            glyph("a", 0.0, 700.0, 10.0),
+            unmapped(1, 5.0),
+            unmapped(1, 10.0),
+            unmapped(2, 15.0),
+            glyph("b", 20.0, 700.0, 10.0),
+        ]);
+        assert_eq!(
+            reported.warnings,
+            vec![
+                TextWarning::UnmappedCode { code: 1 },
+                TextWarning::UnmappedCode { code: 2 },
+            ]
+        );
+        let drawn = page(&[glyph("a", 0.0, 700.0, 10.0), glyph("b", 20.0, 700.0, 10.0)]);
+        assert!(drawn.warnings.is_empty(), "{:?}", drawn.warnings);
+        assert_eq!(reported.plain_text(), "ab\n");
+        assert_eq!(reported.plain_text(), drawn.plain_text());
+        assert_eq!(reported.lines().len(), drawn.lines().len());
+        assert_eq!(drawn_chars(&reported), drawn_chars(&drawn));
+    }
+
+    /// A non-finite glyph whose code maps to nothing is said as any other
+    /// is: what it stands for is the question, not where it was drawn.
+    #[test]
+    fn a_non_finite_glyph_of_an_unmapped_code_is_reported() {
+        let mut bad = unmapped(7, 0.0);
+        bad.transform.f = f64::INFINITY;
+        let p = page(&[bad, glyph("A", 0.0, 700.0, 10.0)]);
+        assert_eq!(p.plain_text(), "A\n");
+        assert_eq!(p.warnings, vec![TextWarning::UnmappedCode { code: 7 }]);
+    }
+
+    /// **Each kind is bounded apart**: a page of a hundred unmapped codes
+    /// keeps the first sixty-four, and still names every font it could not
+    /// resolve after them; and a page of seventy unknown fonts keeps
+    /// sixty-four of those.
+    #[test]
+    fn unmapped_codes_are_bounded_apart_from_unknown_fonts() {
+        let mut d = TextDevice::new();
+        let state = GraphicsState::new(Matrix::IDENTITY);
+        for code in 0..100u32 {
+            d.show_glyph(&unmapped(code, f64::from(code)), &state);
+        }
+        for name in ["F1", "F2", "F1", "F3"] {
+            d.warn(TextWarning::UnknownFont { name: name.into() });
+        }
+        let p = d.finish();
+        let codes: Vec<u32> = p
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                TextWarning::UnmappedCode { code } => Some(*code),
+                TextWarning::UnknownFont { .. } => None,
+            })
+            .collect();
+        assert_eq!(codes, (0..64).collect::<Vec<u32>>());
+        let fonts: Vec<&str> = p
+            .warnings
+            .iter()
+            .filter_map(|w| match w {
+                TextWarning::UnknownFont { name } => Some(name.as_str()),
+                TextWarning::UnmappedCode { .. } => None,
+            })
+            .collect();
+        assert_eq!(fonts, vec!["F1", "F2", "F3"]);
+        assert!(p.plain_text().is_empty());
+
+        let mut d = TextDevice::new();
+        for at in 0..70 {
+            d.warn(TextWarning::UnknownFont {
+                name: format!("F{at}"),
+            });
+        }
+        d.warn(TextWarning::UnmappedCode { code: 9 });
+        let p = d.finish();
+        assert_eq!(p.warnings.len(), 65);
+        assert_eq!(
+            p.warnings.last(),
+            Some(&TextWarning::UnmappedCode { code: 9 })
+        );
+    }
+
+    /// What an artifact scope draws is not the page's text (14.8.2.2), so a
+    /// code nothing maps inside a dropped one is not said; a device that
+    /// keeps artifacts reads it, and says it.
+    #[test]
+    fn an_unmapped_code_only_counts_where_its_glyph_would_be_read() {
+        let state = GraphicsState::new(Matrix::IDENTITY);
+        for keep in [false, true] {
+            let mut d = if keep {
+                TextDevice::keeping_artifacts()
+            } else {
+                TextDevice::new()
+            };
+            d.show_glyph(&glyph("a", 0.0, 700.0, 10.0), &state);
+            d.begin_marked_content(b"Artifact", true, None, None);
+            d.show_glyph(&unmapped(3, 10.0), &state);
+            d.end_marked_content();
+            let p = d.finish();
+            let expected = if keep {
+                vec![TextWarning::UnmappedCode { code: 3 }]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(p.warnings, expected, "keeping artifacts: {keep}");
+        }
+    }
+
+    /// Through the interpreter: a byte the font maps to nothing, between two
+    /// it maps, is said once however often it is shown, and the text reads
+    /// the two that map, as one line.
+    #[test]
+    fn an_unmapped_byte_of_a_shown_string_is_reported() {
+        let page = extract_threes(b"BT /F 10 Tf 100 700 Td (a\\001\\001b) Tj (\\001) Tj ET");
+        assert_eq!(page.plain_text(), "ab\n");
+        assert_eq!(page.lines().len(), 1);
+        assert_eq!(page.warnings, vec![TextWarning::UnmappedCode { code: 1 }]);
+    }
+
     /// Every byte is one code, half an em wide, standing for itself.
     struct Simple;
 
@@ -2643,6 +2826,27 @@ mod tests {
         assert_eq!(page.plain_text(), "Hi\n");
         assert!(extract_threes(b"BT /T3 10 Tf 100 700 Td (zz) Tj ET")
             .plain_text()
+            .is_empty());
+    }
+
+    /// And a Type 3 code that maps to nothing is said, as a shown glyph's is;
+    /// a procedure that shows a code its own font maps to nothing says that
+    /// code, and its glyph still reads as its own `U`.
+    #[test]
+    fn a_type3_code_that_maps_nothing_is_reported() {
+        let page = extract_threes(b"BT /T3 10 Tf 100 700 Td (azbz) Tj ET");
+        assert_eq!(page.plain_text(), "Hi\n");
+        assert_eq!(
+            page.warnings,
+            vec![TextWarning::UnmappedCode {
+                code: u32::from(b'z')
+            }]
+        );
+        let page = extract_threes(b"BT /T3 10 Tf 100 700 Td (u) Tj ET");
+        assert_eq!(page.plain_text(), "U\n");
+        assert_eq!(page.warnings, vec![TextWarning::UnmappedCode { code: 1 }]);
+        assert!(extract_threes(b"BT /T3 10 Tf 100 700 Td (ab) Tj ET")
+            .warnings
             .is_empty());
     }
 

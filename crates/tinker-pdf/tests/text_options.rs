@@ -10,7 +10,7 @@
 
 mod written_support;
 
-use tinker_pdf::{Document, PlainTextOptions, SearchOptions};
+use tinker_pdf::{Document, PlainTextOptions, SearchOptions, TextFormat, TextOptions, TextWarning};
 use tinker_pdf_cos::DocumentBuilder;
 
 /// A one-page document whose content stream is `content`, with Helvetica
@@ -102,6 +102,57 @@ fn each_search_option_finds_what_it_says_and_the_default_is_search() {
         "sum is inside three words and is none of them"
     );
     assert_eq!(with("resume", whole), 2);
+}
+
+/// One line in Helvetica under `WinAnsiEncoding` with three codes the
+/// encoding leaves undefined (Annex D.2): `\201` twice, and `\215`, between
+/// letters it names.
+const UNMAPPED: &str = "BT /F0 10 Tf 10 150 Td (A\\201\\201B\\215C) Tj ET";
+
+/// **A code nothing maps is reported** (FT-17.2): a page whose font names
+/// no character for two of the codes it draws says so, once for each code,
+/// in the order the page draws them, and reads the letters it can.
+#[test]
+fn an_unmapped_code_is_reported() {
+    let doc = document(UNMAPPED);
+    let text = doc.page(0).expect("a page").text();
+    assert_eq!(text.plain_text(), "ABC\n");
+    assert_eq!(
+        text.warnings,
+        vec![
+            TextWarning::UnmappedCode { code: 0x81 },
+            TextWarning::UnmappedCode { code: 0x8D },
+        ]
+    );
+
+    // The letters are one line of three characters: the undefined codes'
+    // glyphs add nothing to it, as before the report.
+    let lines = text.lines();
+    assert_eq!(lines.len(), 1, "{:?}", text.plain_text());
+    let spelled: String = lines[0].chars.iter().map(|c| c.text.as_str()).collect();
+    assert_eq!(spelled, "ABC");
+
+    // The same report in content order, and in what the structured writers
+    // write for the page.
+    let stream = doc.page(0).expect("a page").text_with(&TextOptions {
+        content_order: true,
+        ..TextOptions::default()
+    });
+    assert_eq!(stream.warnings, text.warnings);
+    let page = doc.page(0).expect("a page");
+    let json = text.serialize(TextFormat::Json, &page.text_frame());
+    assert!(
+        json.contains(
+            "{\"kind\":\"unmapped-code\",\"code\":129},{\"kind\":\"unmapped-code\",\"code\":141}"
+        ),
+        "{json}"
+    );
+
+    // A page whose every code maps reports nothing.
+    let sound = document("BT /F0 10 Tf 10 150 Td (ABC) Tj ET");
+    let sound = sound.page(0).expect("a page").text();
+    assert_eq!(sound.plain_text(), "ABC\n");
+    assert!(sound.warnings.is_empty(), "{:?}", sound.warnings);
 }
 
 /// What `builder` writes, held to the validate-on-save helper as a document
