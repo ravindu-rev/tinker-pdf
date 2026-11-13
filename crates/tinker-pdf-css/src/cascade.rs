@@ -46,6 +46,8 @@
 //! implementation, written so `a_lazy_resolution_and_the_single_pass_agree` can
 //! compare the two; it is not the shipped route and its doc comment says so.
 
+use std::collections::HashMap;
+
 use crate::longhand::Longhand;
 use crate::parser::{Declared, LayerPart, Report, StyleRule, Stylesheet};
 use crate::property::*;
@@ -952,6 +954,8 @@ impl StyleTree {
 /// size `rem` needs.
 struct Generating<'a> {
     origin_style: &'a ComputedStyle,
+    /// The originating element's computed style's number in the memo.
+    origin_number: u32,
     initial: &'a ComputedStyle,
     root_font_size: f64,
 }
@@ -1013,6 +1017,17 @@ pub type Sheet<'a> = (Origin, &'a Stylesheet);
 /// already done. [`Element::parent`] returns an index into this same slice,
 /// and an index that is not less than the child's is a caller error this
 /// refuses by name rather than silently reading an uninitialised style.
+///
+/// **A style is computed once for each thing it is a function of.** An
+/// element's computed style is its parent's inherited and its winning
+/// declarations applied, so two elements whose parents' styles came out of
+/// one computation and whose winners are the same declarations of the same
+/// sheets have one computed style, and the second takes the first's rather
+/// than cloning its parent's twice and applying its winners again; a
+/// generated box shares the same way over its originating element's style.
+/// Matching, the report, counters and languages still run for every element,
+/// and an element carrying declarations of its own — a `style=""`, a
+/// presentational hint — is never shared.
 pub fn cascade<E: Element>(
     sheets: &[Sheet<'_>],
     elements: &[E],
@@ -1049,6 +1064,83 @@ pub fn cascade_from<E: Element>(
     budget: &mut Budget,
     initial: &ComputedStyle,
 ) -> Result<StyleTree, Refusal> {
+    cascade_with(sheets, elements, limits, budget, initial, true)
+}
+
+/// [`cascade_from`] with every style computed afresh, none taken from the
+/// memo: the cascade the memo is held to (`memoised_and_fresh_cascades_agree`).
+#[cfg(test)]
+pub(crate) fn cascade_fresh<E: Element>(
+    sheets: &[Sheet<'_>],
+    elements: &[E],
+    limits: &Limits,
+    budget: &mut Budget,
+    initial: &ComputedStyle,
+) -> Result<StyleTree, Refusal> {
+    cascade_with(sheets, elements, limits, budget, initial, false)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Styles [`cascade_with`] computed — an element's or a generated box's
+    /// inherited from its parent and its winners applied — on this thread.
+    pub(crate) static STYLES_COMPUTED: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// One style computed, for the `cfg(test)` count.
+fn computed() {
+    #[cfg(test)]
+    STYLES_COMPUTED.with(|n| n.set(n.get() + 1));
+}
+
+/// What an element's computed style is a function of, and so what the
+/// memo keys it by (`css-cascade-5` §7.2): its parent's computed style, by
+/// the number the memo gave it, or `None` for the initial one; the winning
+/// declarations, each by what decided it ([`WinnerKey`]); and the root's
+/// font size, which `rem` reads.
+type StyleKey = (Option<u32>, Vec<WinnerKey>, u64);
+
+/// What a generated box's computed style is a function of: which box, its
+/// originating element's computed style by number, its winners, and the
+/// root's font size.
+type PseudoKey = (u8, u32, Vec<WinnerKey>, u64);
+
+/// The computed styles a cascade has made, by what they are a function of.
+///
+/// **The key is exact.** Two elements whose parents' computed styles came
+/// out of one computation, and whose winning declarations are the same
+/// declarations of the same sheets, have the same computed style; every
+/// value an element carries itself — a `style=""`, a presentational hint —
+/// makes its declarations its own, and such an element is never shared. A
+/// style shared is a style its element would have computed, which
+/// `memoised_and_fresh_cascades_agree` holds over every fixture.
+#[derive(Default)]
+struct Memo {
+    /// An element's computed style: the number it was given and an element
+    /// holding it.
+    styles: HashMap<StyleKey, (u32, usize)>,
+    /// A generated box's computed style.
+    pseudos: HashMap<PseudoKey, ComputedStyle>,
+    /// The numbers given out so far.
+    numbers: u32,
+}
+
+impl Memo {
+    /// A number no computed style has yet.
+    fn next(&mut self) -> u32 {
+        self.numbers = self.numbers.saturating_add(1);
+        self.numbers
+    }
+}
+
+fn cascade_with<E: Element>(
+    sheets: &[Sheet<'_>],
+    elements: &[E],
+    limits: &Limits,
+    budget: &mut Budget,
+    initial: &ComputedStyle,
+    memoise: bool,
+) -> Result<StyleTree, Refusal> {
     if elements.len() > limits.max_elements {
         return Err(Refusal::TooManyElements {
             elements: elements.len(),
@@ -1068,22 +1160,50 @@ pub fn cascade_from<E: Element>(
     let mut generated: Vec<Generated> = Vec::with_capacity(elements.len());
     let mut root_font_size = initial.font_size;
     let mut language_of: Vec<Option<usize>> = Vec::with_capacity(elements.len());
+    // Each element's computed style's number in the memo, so that a child
+    // can say which style it inherits from without comparing styles.
+    let mut numbers: Vec<u32> = Vec::with_capacity(elements.len());
+    let mut memo = Memo::default();
 
     for index in 0..elements.len() {
-        let mut style = match elements[index].parent() {
-            Some(parent) => ComputedStyle::inherit_from(&styles[parent]),
-            None => initial.clone(),
+        // Matched and reported for every element: the winners are the key,
+        // and what they reach on this element is this element's to report.
+        let (winners, keys) = matcher.winners(elements, index, &mut report, budget)?;
+        let parent_number = elements[index]
+            .parent()
+            .map(|parent| numbers.get(parent).copied().unwrap_or(0));
+        let key = keys
+            .filter(|_| memoise)
+            .map(|keys| (parent_number, keys, root_font_size.to_bits()));
+        let shared = key
+            .as_ref()
+            .and_then(|key| memo.styles.get(key))
+            .and_then(|&(number, at)| styles.get(at).map(|style| (number, style.clone())));
+        let (number, style) = match shared {
+            Some(found) => found,
+            None => {
+                computed();
+                let mut style = match elements[index].parent() {
+                    Some(parent) => ComputedStyle::inherit_from(&styles[parent]),
+                    None => initial.clone(),
+                };
+                // The parent for §7.1's `inherit`. The root has none, and
+                // §7.2 gives it the initial values -- which is the same style
+                // `initial` reads, so an `inherit` on the root element and an
+                // `initial` on it agree, as they must.
+                let parent = match elements[index].parent() {
+                    Some(parent) => styles[parent].clone(),
+                    None => initial.clone(),
+                };
+                apply_winners(&winners, &mut style, &parent, initial, root_font_size);
+                let number = memo.next();
+                if let Some(key) = key {
+                    memo.styles.insert(key, (number, index));
+                }
+                (number, style)
+            }
         };
-        let winners = matcher.winners(elements, index, &mut report, budget)?;
-        // The parent for §7.1's `inherit`. The root has none, and §7.2 gives
-        // it the initial values -- which is the same style `initial` reads, so
-        // an `inherit` on the root element and an `initial` on it agree, as
-        // they must.
-        let parent = match elements[index].parent() {
-            Some(parent) => styles[parent].clone(),
-            None => initial.clone(),
-        };
-        apply_winners(&winners, &mut style, &parent, initial, root_font_size);
+        numbers.push(number);
         if elements[index].parent().is_none() {
             root_font_size = style.font_size;
         }
@@ -1092,35 +1212,29 @@ pub fn cascade_from<E: Element>(
         // there is nothing to inherit from until this line has run.
         let generating = Generating {
             origin_style: &style,
+            origin_number: number,
             initial,
             root_font_size,
         };
+        let mut pseudo = |which| {
+            matcher.pseudo_winners(
+                elements,
+                index,
+                which,
+                &generating,
+                &mut report,
+                budget,
+                memoise.then_some(&mut memo.pseudos),
+            )
+        };
+        let before = pseudo(PseudoElement::Before)?;
+        let after = pseudo(PseudoElement::After)?;
+        let first_letter = pseudo(PseudoElement::FirstLetter)?;
         generated.push(Generated {
             marker: None,
-            before: matcher.pseudo_winners(
-                elements,
-                index,
-                PseudoElement::Before,
-                &generating,
-                &mut report,
-                budget,
-            )?,
-            after: matcher.pseudo_winners(
-                elements,
-                index,
-                PseudoElement::After,
-                &generating,
-                &mut report,
-                budget,
-            )?,
-            first_letter: matcher.pseudo_winners(
-                elements,
-                index,
-                PseudoElement::FirstLetter,
-                &generating,
-                &mut report,
-                budget,
-            )?,
+            before,
+            after,
+            first_letter,
         });
         // `selectors-4` §6.5.1's inheritance of a language, kept as the index
         // of the nearest element that declares one so that it is one word per
@@ -1829,6 +1943,7 @@ impl<'a> Matcher<'a> {
     /// Returns `None` unless `content` cascaded to something. §12.2 makes that
     /// the condition for the box existing, and the style of a box that does not
     /// exist is not a thing worth computing.
+    #[allow(clippy::too_many_arguments)]
     fn pseudo_winners<E: Element>(
         &self,
         elements: &[E],
@@ -1837,6 +1952,7 @@ impl<'a> Matcher<'a> {
         from: &Generating<'_>,
         report: &mut Report,
         budget: &mut Budget,
+        memo: Option<&mut HashMap<PseudoKey, ComputedStyle>>,
     ) -> Result<Option<PseudoBox>, Refusal> {
         let mut matched: Vec<(CascadeKey, Origin, &Declared)> = Vec::new();
         for handle in self.index.candidates(&elements[at]) {
@@ -1927,23 +2043,47 @@ impl<'a> Matcher<'a> {
                 _ => {}
             }
         }
-        let resolved: Vec<Winner> = winners
+        let (resolved, keys): (Vec<Winner>, Vec<WinnerKey>) = winners
             .into_iter()
             .map(|(longhand, index)| resolve_rollbacks(longhand, index, &matched))
-            .collect();
+            .unzip();
 
         // §12.1: a generated box inherits from its **originating element**, not
         // from that element's parent. So the parent for both inheritance and
         // `inherit` is `origin_style`, and `em` resolves against the originating
-        // element's font size, which is what `inherit_from` carries over.
-        let mut style = ComputedStyle::inherit_from(from.origin_style);
-        apply_winners(
-            &resolved,
-            &mut style,
-            from.origin_style,
-            from.initial,
-            from.root_font_size,
-        );
+        // element's font size, which is what `inherit_from` carries over. A
+        // box of one kind whose originating style and winners another already
+        // had is that box's style: a generated box carries nothing of its own
+        // but its content, which is not in its style.
+        let fresh = || {
+            computed();
+            let mut style = ComputedStyle::inherit_from(from.origin_style);
+            apply_winners(
+                &resolved,
+                &mut style,
+                from.origin_style,
+                from.initial,
+                from.root_font_size,
+            );
+            style
+        };
+        let style = match memo {
+            Some(memo) => {
+                let kind = match which {
+                    PseudoElement::Before => 0,
+                    PseudoElement::After => 1,
+                    _ => 2,
+                };
+                let key = (
+                    kind,
+                    from.origin_number,
+                    keys,
+                    from.root_font_size.to_bits(),
+                );
+                memo.entry(key).or_insert_with(fresh).clone()
+            }
+            None => fresh(),
+        };
         Ok(Some(PseudoBox {
             style,
             text: String::new(),
@@ -1951,13 +2091,16 @@ impl<'a> Matcher<'a> {
         }))
     }
 
+    /// The winners, and what decided each of them — `None` when the element
+    /// carries declarations of its own, a presentational hint or a
+    /// `style=""`, whose style is its own and never shared.
     fn winners<E: Element>(
         &self,
         elements: &[E],
         at: usize,
         report: &mut Report,
         budget: &mut Budget,
-    ) -> Result<Vec<Winner>, Refusal> {
+    ) -> Result<(Vec<Winner>, Option<Vec<WinnerKey>>), Refusal> {
         // The document language's presentational hints — HTML §15.1: author
         // level, specificity zero, *"at the start of the author style sheet"*.
         // Pushed first and keyed at the weakest layer and the first position,
@@ -2067,10 +2210,12 @@ impl<'a> Matcher<'a> {
             }
         }
 
-        Ok(winners
+        let own = !hint_owned.is_empty() || !inline_owned.is_empty();
+        let (resolved, keys): (Vec<Winner>, Vec<WinnerKey>) = winners
             .into_iter()
             .map(|(longhand, index)| resolve_rollbacks(longhand, index, &matched))
-            .collect())
+            .unzip();
+        Ok((resolved, (!own).then_some(keys)))
     }
 }
 
@@ -2135,28 +2280,38 @@ fn resolve_rollbacks(
     longhand: Longhand,
     from: usize,
     matched: &[(CascadeKey, Origin, &Declared)],
-) -> Winner {
+) -> (Winner, WinnerKey) {
+    let default = |keyword: Defaulting| {
+        (
+            Winner::Default(longhand, keyword),
+            WinnerKey::Default(longhand, defaulting_number(keyword)),
+        )
+    };
     let mut at = from;
     for _ in 0..=matched.len() {
         let (key, origin, declared) = &matched[at];
         let keyword = match &declared.declaration {
             crate::property::Declaration::Known(property) => {
-                return Winner::Value(property.clone())
+                let address = core::ptr::from_ref::<Declared>(declared) as usize;
+                return (
+                    Winner::Value(property.clone()),
+                    WinnerKey::Declared(address),
+                );
             }
             crate::property::Declaration::Defaulted { keyword, .. } => *keyword,
             // Nothing else can be a winner: `note_winner` is only reached from
             // the two arms above.
-            _ => return Winner::Default(longhand, Defaulting::Unset),
+            _ => return default(Defaulting::Unset),
         };
         let (rank, layer, origin) = (key.rank, key.layer, *origin);
         match keyword {
             Defaulting::Inherit | Defaulting::Initial | Defaulting::Unset => {
-                return Winner::Default(longhand, keyword)
+                return default(keyword)
             }
             Defaulting::Revert => {
                 match strongest_below(longhand, &matched[..at], |_, other, _| other < origin) {
                     Some(next) => at = next,
-                    None => return Winner::Default(longhand, Defaulting::Unset),
+                    None => return default(Defaulting::Unset),
                 }
             }
             Defaulting::RevertLayer => {
@@ -2168,12 +2323,35 @@ fn resolve_rollbacks(
                 };
                 match strongest_below(longhand, &matched[..at], keep) {
                     Some(next) => at = next,
-                    None => return Winner::Default(longhand, Defaulting::Unset),
+                    None => return default(Defaulting::Unset),
                 }
             }
         }
     }
-    Winner::Default(longhand, Defaulting::Unset)
+    default(Defaulting::Unset)
+}
+
+/// What decided one winner, for the cascade's memo: the declaration whose
+/// value won, by its address in its sheet — the sheets are borrowed for the
+/// whole cascade, so one address is one declaration — or a defaulting keyword
+/// on a longhand, which a declaration anywhere would apply alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum WinnerKey {
+    /// The declaration's address.
+    Declared(usize),
+    /// A keyword's number ([`defaulting_number`]), on a longhand.
+    Default(Longhand, u8),
+}
+
+/// §7.1's keywords, numbered for a [`WinnerKey`].
+fn defaulting_number(keyword: Defaulting) -> u8 {
+    match keyword {
+        Defaulting::Inherit => 0,
+        Defaulting::Initial => 1,
+        Defaulting::Unset => 2,
+        Defaulting::Revert => 3,
+        Defaulting::RevertLayer => 4,
+    }
 }
 
 /// The strongest declaration for `longhand` among `earlier` that `keep` admits.
@@ -2267,7 +2445,7 @@ fn lazily<E: Element>(
             lazily(matcher, elements, root, report, budget)?.font_size
         }
     };
-    let winners = matcher.winners(elements, at, report, budget)?;
+    let (winners, _) = matcher.winners(elements, at, report, budget)?;
     let initial = ComputedStyle::initial();
     apply_winners(
         &winners,

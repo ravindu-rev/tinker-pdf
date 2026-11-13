@@ -58,7 +58,12 @@ HTML §15), author sheets and `style=""` attributes; §7.1's five explicit
 defaulting keywords on every property and every shorthand — `inherit`,
 `initial`, `unset`, and the two that roll the cascade back rather than
 replacing a value, `revert` to the previous **origin** and `revert-layer` to
-the previous **layer**; `@media` evaluated against a `MediaContext`;
+the previous **layer**, each computed style made once for each thing it is a
+function of — its parent's computed style and the same winning declarations
+of the same sheets — so a thousand sibling paragraphs alike compute one style
+and take it, a generated box shares over its originating element's style the
+same way, and an element with a `style=""` or a presentational hint computes
+its own; `@media` evaluated against a `MediaContext`;
 `@supports` (`css-conditional-3` §6) evaluated against **this build** — a
 declaration test is true where the property and its value would be accepted
 in a style rule, so `@supports (display: flex)` applies its rules and
@@ -1171,6 +1176,17 @@ rather than zero.
   characters one face of a family covers and another does not, the kana face
   alone, the standard 14 alone, nothing, and the coverage-blind question a
   line height asks.
+- `crates/tinker-pdf-css/src/tests/cascade.rs`'s memo:
+  `elements_with_one_parent_style_and_one_set_of_winners_compute_once` counts,
+  under `cfg(test)`, the styles a cascade over a thousand sibling paragraphs
+  and lists nested five deep computes — one for each distinct key, where
+  computing afresh makes one an element and one a generated box — and
+  `memoised_and_fresh_cascades_agree` holds every computed style, generated
+  box and report of the memoised cascade to a fresh one's, over those and a
+  document reaching two origins and two layers, `!important`, `revert`,
+  `inherit` and `initial`, `em` and `rem`, structural and sibling selectors,
+  `style=""`, presentational hints, languages, counters, all three generated
+  boxes, two roots and a caller's own initial values.
 - **Committed books from real producers** (pandoc 3.10.2 and 3.11, calibre
   9.13.0 and 9.14.0, KCC 11.0.1) over text authored here, in
   `crates/tinker-pdf/tests/epub/`, with epubcheck 5.3.0 verdicts recorded in

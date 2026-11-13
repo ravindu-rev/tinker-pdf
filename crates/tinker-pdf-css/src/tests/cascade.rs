@@ -1349,3 +1349,256 @@ fn transform_is_not_inherited_and_a_fixed_box_under_one_is_counted() {
         Some(1)
     );
 }
+
+// ---- The memo: one computation for each style an element is a function of --
+
+/// A body of a thousand sibling paragraphs, every other one `.lead`, and
+/// lists nested five deep — three items to a list, the first holding the
+/// next — with the indices of the first paragraph and of the first list.
+fn paragraphs_and_lists() -> Vec<Node> {
+    let mut spec: Vec<(&str, Option<usize>)> = vec![("body", None)];
+    for _ in 0..1000 {
+        spec.push(("p", Some(0)));
+    }
+    let mut parent = 0;
+    for _ in 0..5 {
+        let list = spec.len();
+        spec.push(("ul", Some(parent)));
+        let first = spec.len();
+        for _ in 0..3 {
+            spec.push(("li", Some(list)));
+        }
+        parent = first;
+    }
+    let mut nodes = tree(&spec);
+    for (index, node) in nodes.iter_mut().enumerate().take(1001).skip(1) {
+        if index % 2 == 0 {
+            node.classes = vec!["lead".to_owned()];
+        }
+    }
+    nodes
+}
+
+/// The sheet the memo tests cascade: a rule for the paragraphs, one more for
+/// the lead ones, a generated box before each, and a rule each for the lists
+/// and their items.
+const PARAGRAPHS_AND_LISTS: &str = "p { color: red; margin: 0 }\n\
+     .lead { font-weight: bold }\n\
+     p::before { content: \"\\00A7\" }\n\
+     ul { margin-left: 20px }\n\
+     li { list-style-type: square }";
+
+/// **Elements with one parent style and one set of winners compute once**
+/// (P-18.2): over a thousand sibling paragraphs and lists nested five deep,
+/// the styles computed are the distinct keys and no more — the body; the
+/// paragraphs' two, plain and lead, each with its one parent and its own
+/// winners; their generated boxes' two, one for each originating style; and
+/// each list level's list and its items, ten in all, since every level's
+/// parent is a style of its own.
+#[test]
+fn elements_with_one_parent_style_and_one_set_of_winners_compute_once() {
+    use crate::cascade::STYLES_COMPUTED;
+
+    let nodes = paragraphs_and_lists();
+    let parsed = sheet(PARAGRAPHS_AND_LISTS);
+    let limits = Limits::DEFAULT;
+    STYLES_COMPUTED.with(|n| n.set(0));
+    let styled = cascade(
+        &[(Origin::Author, &parsed)],
+        &nodes,
+        &limits,
+        &mut Budget::new(&limits),
+    )
+    .expect("under every cap");
+    let computed = STYLES_COMPUTED.with(std::cell::Cell::get);
+    assert_eq!(computed, 1 + 2 + 2 + 5 * 2, "one for each distinct key");
+    assert_eq!(styled.styles.len(), nodes.len());
+    assert_eq!(styled.styles[1].color, styled.styles[3].color);
+    assert_eq!(styled.styles[2].font_weight, 700, "a lead paragraph");
+    assert_eq!(styled.styles[1].font_weight, 400, "a plain one");
+    assert!(
+        styled.generated[1].before.is_some() && styled.generated[2].before.is_some(),
+        "every paragraph's box"
+    );
+
+    // Afresh, every element computes its own.
+    STYLES_COMPUTED.with(|n| n.set(0));
+    let fresh = crate::cascade::cascade_fresh(
+        &[(Origin::Author, &parsed)],
+        &nodes,
+        &limits,
+        &mut Budget::new(&limits),
+        &ComputedStyle::initial(),
+    )
+    .expect("under every cap");
+    assert_eq!(
+        STYLES_COMPUTED.with(std::cell::Cell::get),
+        nodes.len() as u64 + 1000,
+        "each element and each paragraph's box"
+    );
+    assert_eq!(styled, fresh, "and the same styles");
+}
+
+/// A node named `name` under `parent`, with its classes, attributes and
+/// `style=""`; [`tree`] fills its sibling links in.
+fn node(
+    name: &str,
+    parent: Option<usize>,
+    classes: &[&str],
+    attributes: &[(&str, &str)],
+    style: Option<&str>,
+) -> Node {
+    Node {
+        name: name.to_owned(),
+        classes: classes.iter().map(|c| (*c).to_owned()).collect(),
+        attributes: attributes
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect(),
+        style: style.map(str::to_owned),
+        parent,
+        ..Node::default()
+    }
+}
+
+/// `nodes` with their sibling links filled in, as [`tree`] fills them.
+fn linked(mut nodes: Vec<Node>) -> Vec<Node> {
+    let spec: Vec<(String, Option<usize>)> =
+        nodes.iter().map(|n| (n.name.clone(), n.parent)).collect();
+    let spec: Vec<(&str, Option<usize>)> = spec.iter().map(|(n, p)| (n.as_str(), *p)).collect();
+    let links = tree(&spec);
+    for (node, link) in nodes.iter_mut().zip(links) {
+        node.previous = link.previous;
+        node.next = link.next;
+    }
+    nodes
+}
+
+/// A document reaching every way a style is made: two origins and two
+/// layers, `!important`, `revert` and `inherit`, `em` and `rem`, sibling and
+/// structural selectors, a `style=""` and a presentational hint on some of
+/// many alike elements, languages, counters and generated boxes of all three
+/// kinds — with the user-agent sheet beside its author one.
+fn every_way_a_style_is_made() -> (Vec<Node>, Stylesheet, Stylesheet) {
+    let user_agent = sheet(
+        "p { margin: 1em 0 } em { color: green } h1 { font-size: 2em; font-weight: bold }\n\
+         li { display: list-item } ol { counter-reset: list-item }",
+    );
+    let author = sheet(
+        "@layer base, theme;\n\
+         @layer base { p { color: blue; font-size: 1.2em } li::before { content: counter(list-item) \". \" } }\n\
+         @layer theme { .warn { color: red !important } }\n\
+         html { font-size: 20px }\n\
+         body { margin: 1rem; line-height: 1.5 }\n\
+         p { text-indent: 2em; font-weight: inherit }\n\
+         p:nth-child(odd) { background-color: yellow }\n\
+         p + p { margin-top: 0 }\n\
+         .lead { font-size: 2rem; font-weight: bold }\n\
+         em { font-style: italic; color: revert }\n\
+         p:lang(fr) { quotes: none }\n\
+         h1::first-letter { font-size: 3em }\n\
+         h1::after { content: \" \\00B6\" }\n\
+         .quiet { color: inherit; font-size: initial }",
+    );
+    let mut nodes = vec![
+        node("html", None, &[], &[("lang", "en")], None),
+        node("body", Some(0), &[], &[], None),
+        node("h1", Some(1), &[], &[], None),
+    ];
+    for i in 0..24 {
+        let classes: &[&str] = match i % 6 {
+            0 => &["lead"],
+            1 => &["warn"],
+            2 => &["quiet"],
+            _ => &[],
+        };
+        let attributes: &[(&str, &str)] = match i % 7 {
+            3 => &[("lang", "fr")],
+            5 => &[("hint", "color: purple")],
+            _ => &[],
+        };
+        let style = (i % 9 == 4).then_some("font-size: 7px");
+        let at = nodes.len();
+        nodes.push(node("p", Some(1), classes, attributes, style));
+        if i % 4 == 1 {
+            nodes.push(node("em", Some(at), &[], &[], None));
+        }
+    }
+    let list = nodes.len();
+    nodes.push(node("ol", Some(1), &[], &[], None));
+    for _ in 0..5 {
+        nodes.push(node("li", Some(list), &[], &[], None));
+    }
+    // A second root, which the root's font size is reset for.
+    nodes.push(node("aside", None, &["lead"], &[], None));
+    nodes.push(node("p", Some(nodes.len() - 1), &[], &[], None));
+    (linked(nodes), user_agent, author)
+}
+
+/// **Memoised and fresh cascades agree** (P-18.2): over the fixtures here —
+/// the thousand paragraphs and the nested lists, a document reaching every
+/// way a style is made, and every fixture tree under every sheet of this
+/// file's tests that the memo could share a style in — the memoised
+/// cascade's styles, generated boxes and report are a fresh cascade's,
+/// exactly.
+#[test]
+fn memoised_and_fresh_cascades_agree() {
+    use crate::cascade::cascade_fresh;
+
+    let limits = Limits::DEFAULT;
+    let compare = |what: &str, nodes: &[Node], sheets: &[(Origin, &Stylesheet)]| {
+        let memoised = cascade(sheets, nodes, &limits, &mut Budget::new(&limits));
+        let fresh = cascade_fresh(
+            sheets,
+            nodes,
+            &limits,
+            &mut Budget::new(&limits),
+            &ComputedStyle::initial(),
+        );
+        assert_eq!(memoised, fresh, "{what}");
+    };
+
+    let nodes = paragraphs_and_lists();
+    let parsed = sheet(PARAGRAPHS_AND_LISTS);
+    compare("paragraphs and lists", &nodes, &[(Origin::Author, &parsed)]);
+
+    let (nodes, user_agent, author) = every_way_a_style_is_made();
+    compare(
+        "every way a style is made",
+        &nodes,
+        &[(Origin::UserAgent, &user_agent), (Origin::Author, &author)],
+    );
+    // And each sheet alone, and the author's twice over, which doubles its
+    // declarations without changing which wins.
+    compare("the author's alone", &nodes, &[(Origin::Author, &author)]);
+    compare(
+        "the user agent's alone",
+        &nodes,
+        &[(Origin::UserAgent, &user_agent)],
+    );
+    compare(
+        "the author's twice",
+        &nodes,
+        &[(Origin::Author, &author), (Origin::Author, &author)],
+    );
+
+    // From a caller's own initial values, as a host's base font size gives
+    // them.
+    let mut initial = ComputedStyle::initial();
+    initial.font_size = 21.0;
+    let memoised = cascade_from(
+        &[(Origin::Author, &author)],
+        &nodes,
+        &limits,
+        &mut Budget::new(&limits),
+        &initial,
+    );
+    let fresh = cascade_fresh(
+        &[(Origin::Author, &author)],
+        &nodes,
+        &limits,
+        &mut Budget::new(&limits),
+        &initial,
+    );
+    assert_eq!(memoised, fresh, "from the caller's initial values");
+}
