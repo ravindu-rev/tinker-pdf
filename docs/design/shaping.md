@@ -826,11 +826,16 @@ skipped and recorded.
   the ligature list. As the `mort` chapter reads the machine morx inherits, a
   popped component whose action has neither `last` nor `store` set becomes a
   deleted glyph, and one whose action has either set is replaced by the
-  ligature at the sum so far; the stack holds 16 components, a push past them
-  refused and recorded; after the actions the ligature's position is pushed
-  again, "so that the ligatures can be used as components of other
-  ligatures". An action popping an empty stack ends its list there, what it
-  formed standing, and is recorded.
+  ligature at the sum so far, the sum starting again after each ligature a
+  list stores — the chapters say only that "multiple ligatures may be formed
+  by setting the store flag on intermediate entries", and this engine indexes
+  each by its own components; the stack holds 16 components, a push past them
+  refused and recorded; after the actions each ligature's position is pushed
+  again, the one stored deepest first so the stack keeps the walk's order,
+  "so that the ligatures can be used as components of other ligatures". An
+  action popping an empty stack ends its list there, what it formed standing,
+  and is recorded; so does an action, a component or a ligature the subtable
+  does not hold, the glyph it would have replaced standing.
 - **Noncontextual (4).** One lookup table: each glyph it covers with a value
   other than 0 becomes that value.
 - **Insertion (5).** `currentInsertIndex` and `markedInsertIndex` start a
@@ -868,13 +873,17 @@ the glyph ceiling (`MORX-34`).
 after `GSUB`.
 
 **Clusters.** A ligature takes the first cluster of its components, the one
-`shaping::cluster_texts` rebuilds `/ToUnicode` from. An inserted glyph takes
-the cluster of the glyph it is inserted at; the manual makes a split-vowel-like
-insertion (its `currentIsKashidaLike` or `markedIsKashidaLike` flag clear)
-"associated with the same character offset" as the other glyph of its action,
-so for one the clusters from the inserted glyph to that glyph are merged, as a
-rearranged span's are. Whether each inserted glyph was inserted kashida-like
-is kept on the buffer for FT-07e, and changes no output here.
+`shaping::cluster_texts` rebuilds `/ToUnicode` from; stored away from the
+component that holds it — a later component of a backward walk, or of a
+right-to-left run in layout order — the clusters from the one to the other
+are merged, as a rearranged span's are, so they stay monotonic. An inserted
+glyph takes the cluster of the glyph it is inserted at; the manual makes a
+split-vowel-like insertion (its `currentIsKashidaLike` or
+`markedIsKashidaLike` flag clear) "associated with the same character
+offset" as the other glyph of its action, so for one the clusters from the
+inserted glyph to that glyph are merged, as a rearranged span's are. Whether
+each inserted glyph was inserted kashida-like is kept on the buffer for
+FT-07e, and changes no output here.
 
 #### `kerx`
 

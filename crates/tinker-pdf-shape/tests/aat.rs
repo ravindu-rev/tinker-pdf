@@ -20,9 +20,9 @@ use tinker_pdf_font::Sfnt;
 
 use tinker_pdf_shape::aat::{
     aat_setting, AatSetting, Cursor, Entry, Feat, FeatureEntry, Lookup, LookupError, LookupFormat,
-    Morx, Selection, Site, StateError, StateTable, Traversal, ANY_ORIENTATION, CONTEXTUAL, DELETED,
-    DELETED_GLYPH, DESCENDING, END_OF_TEXT, INSERTION, LIGATURE, LOGICAL, NONCONTEXTUAL,
-    OUT_OF_BOUNDS, REARRANGEMENT, VERTICAL,
+    Morx, Selection, Site, StateError, StateTable, Traversal, ANY_ORIENTATION, COMPONENT_STACK,
+    CONTEXTUAL, DELETED, DELETED_GLYPH, DESCENDING, END_OF_TEXT, INSERTION, LIGATURE, LOGICAL,
+    NONCONTEXTUAL, OUT_OF_BOUNDS, REARRANGEMENT, VERTICAL,
 };
 use tinker_pdf_shape::bidi::{BaseDirection, Level};
 use tinker_pdf_shape::shape::Run;
@@ -2122,31 +2122,50 @@ fn a_reserved_unknown_or_unbuilt_subtable_type_is_skipped_and_named() {
             }]
         );
     }
-    // Each type of the chapter's not run yet leaves this list when its
-    // machine lands.
-    for kind in [LIGATURE, INSERTION] {
-        let table = morx_table(
-            2,
-            &[chain(
-                1,
-                &[],
-                &[subtable(0x2000_0000 | u32::from(kind), 1, &[0; 16])],
-            )],
-        );
-        let (_, warnings) = chained(
-            &table,
-            &[10],
-            Direction::LeftToRight,
-            &Selection::defaults(),
-        );
-        assert_eq!(
-            warnings,
-            vec![Warning::SubtableTypeNotRun {
-                site: site(0),
-                kind
-            }]
-        );
-    }
+    // The one type of the chapter's not run yet, until its machine lands.
+    let kind = INSERTION;
+    let table = morx_table(
+        2,
+        &[chain(
+            1,
+            &[],
+            &[subtable(0x2000_0000 | u32::from(kind), 1, &[0; 16])],
+        )],
+    );
+    let (_, warnings) = chained(
+        &table,
+        &[10],
+        Direction::LeftToRight,
+        &Selection::defaults(),
+    );
+    assert_eq!(
+        warnings,
+        vec![Warning::SubtableTypeNotRun {
+            site: site(0),
+            kind
+        }]
+    );
+    // A ligature subtable of sixteen zero bytes is a state table of no
+    // classes, which is no state table: it is read, and named as malformed
+    // rather than as a type not run.
+    let table = morx_table(
+        2,
+        &[chain(
+            1,
+            &[],
+            &[subtable(0x2000_0000 | u32::from(LIGATURE), 1, &[0; 16])],
+        )],
+    );
+    let (_, warnings) = chained(
+        &table,
+        &[10],
+        Direction::LeftToRight,
+        &Selection::defaults(),
+    );
+    assert_eq!(
+        warnings,
+        vec![Warning::MalformedAatSubtable { site: site(0) }]
+    );
 }
 
 /// A table of a version other than 2 or 3 is no `morx`; a chain the table
@@ -3337,4 +3356,448 @@ fn each_processing_order_meets_the_glyphs_its_coverage_says() {
             assert!(warnings.is_empty());
         }
     }
+}
+
+// --- the ligature subtable (FT-07c.8) --------------------------------------
+//
+// A component stack the machine pushes glyphs on, and the action lists that
+// pop them through the component table into the ligature list.
+
+/// A ligature action's `last` flag, which also stores.
+const LAST_ACTION: u32 = 0x8000_0000;
+/// A ligature action's `store` flag.
+const STORE_ACTION: u32 = 0x4000_0000;
+
+/// A ligature subtable for both orientations under flag 1: `classes`,
+/// `lines` and `entries` — new state, flags and action index — as its state
+/// table's, then its action table, component table and ligature list, in
+/// that order after the entries, each offset stated from the start of the
+/// state table as the chapter's three `UInt32`s state it.
+fn ligature_subtable(
+    classes: &[(u16, u16)],
+    lines: &[&[u16]],
+    entries: &[[u16; 3]],
+    actions: &[u32],
+    components: &[u16],
+    ligatures: &[u16],
+) -> Vec<u8> {
+    let entries: Vec<&[u16]> = entries.iter().map(|entry| &entry[..]).collect();
+    let classes_count = lines.first().map_or(4, |line| line.len());
+    let mut body = stx(
+        count32(classes_count),
+        3,
+        &lookup_single(classes),
+        lines,
+        &entries,
+    );
+    let actions_at = body.len();
+    body.extend(u32s(actions));
+    let components_at = body.len();
+    body.extend(u16s(components));
+    let ligatures_at = body.len();
+    body.extend(u16s(ligatures));
+    put32(&mut body, 16, count32(actions_at));
+    put32(&mut body, 20, count32(components_at));
+    put32(&mut body, 24, count32(ligatures_at));
+    subtable(ANY_ORIENTATION | u32::from(LIGATURE), 1, &body)
+}
+
+/// The `morx` chapter's *Examples*, "2. A ligature table": the 24 ligatures
+/// of `a`, `b` or `c`, `d` or `e`, and `f` to `i` — glyphs 20 to 28 — to
+/// glyphs 1000 to 1015, 1500 to 1506 and 1511, every byte at offsets 0 to 221
+/// as the example prints it, but for one correction: the class lookup's third
+/// segment, printed at offset 52 with the second's values `24, 23, 5`, is the
+/// glyphs 25 to 28 in class 6 its own comment states, the class the state
+/// array's last line acts on and nothing else maps.
+fn ligature_example() -> Vec<u8> {
+    let mut body = u32s(&[7, 28, 64, 120, 144, 156, 174]);
+    // The class lookup: format 2, six-byte segments, three of them, search
+    // range 12, entry selector 1, range shift 6; then the segments, each its
+    // last glyph, first glyph and class, and the guard.
+    body.extend(u16s(&[2, 6, 3, 12, 1, 6]));
+    body.extend(u16s(&[22, 20, 4, 24, 23, 5, 28, 25, 6]));
+    body.extend(u16s(&[0xFFFF, 0xFFFF, 1]));
+    // The state array: start of text, start of line, "saw a, b, or c", and
+    // "saw a, b, or c followed by d or e".
+    body.extend(u16s(&[0, 0, 0, 0, 1, 0, 0]));
+    body.extend(u16s(&[0, 0, 0, 0, 1, 0, 0]));
+    body.extend(u16s(&[0, 0, 0, 0, 1, 2, 0]));
+    body.extend(u16s(&[0, 0, 0, 0, 1, 2, 3]));
+    // The entries: back to state 0; set a component and go to state 2; set
+    // a component and go to state 3; set a component and act from action 0.
+    body.extend(u16s(&[0, 0, 0, 2, 0x8000, 0, 3, 0x8000, 0, 0, 0xA000, 0]));
+    // The actions: -25 for the component popped first, -19 for the second,
+    // and -14 for the last.
+    body.extend(u32s(&[0x3FFF_FFE7, 0x3FFF_FFED, 0xBFFF_FFF2]));
+    // The component table.
+    body.extend(u16s(&[0, 1, 2, 3, 0, 4, 0, 8, 16]));
+    // The ligature list.
+    let ligatures: Vec<u16> = (1000..=1015).chain(1500..=1506).chain([1511]).collect();
+    body.extend(u16s(&ligatures));
+    assert_eq!(body.len(), 222, "the example's bytes, 0 to 221");
+    subtable(ANY_ORIENTATION | u32::from(LIGATURE), 1, &body)
+}
+
+/// The ligature subtable's worked examples, as `docs/design/shaping.md`
+/// lists them for type 2: one.
+const LIGATURE_EXAMPLES: &[Worked] = &[Worked {
+    source: "the morx chapter, Examples, 2. A ligature table",
+    subtable: ligature_example,
+    cases: &[
+        // The example's 24 ligatures, `a` to `c` at 20 to 22, `d` and `e`
+        // at 23 and 24, `f` to `i` at 25 to 28.
+        (&[20, 23, 25], &[1000]),
+        (&[20, 23, 26], &[1001]),
+        (&[20, 23, 27], &[1002]),
+        (&[20, 23, 28], &[1003]),
+        (&[20, 24, 25], &[1004]),
+        (&[20, 24, 26], &[1005]),
+        (&[20, 24, 27], &[1006]),
+        (&[20, 24, 28], &[1007]),
+        (&[21, 23, 25], &[1008]),
+        (&[21, 23, 26], &[1009]),
+        (&[21, 23, 27], &[1010]),
+        (&[21, 23, 28], &[1011]),
+        (&[21, 24, 25], &[1012]),
+        (&[21, 24, 26], &[1013]),
+        (&[21, 24, 27], &[1014]),
+        (&[21, 24, 28], &[1015]),
+        (&[22, 23, 25], &[1500]),
+        (&[22, 23, 26], &[1501]),
+        (&[22, 23, 27], &[1502]),
+        (&[22, 23, 28], &[1503]),
+        (&[22, 24, 25], &[1504]),
+        (&[22, 24, 26], &[1505]),
+        (&[22, 24, 27], &[1506]),
+        (&[22, 24, 28], &[1511]),
+        // Two components form nothing, and a first and third with no second
+        // form nothing either.
+        (&[20, 23], &[20, 23]),
+        (&[20, 25], &[20, 25]),
+        // A first component the machine starts again at stays pushed, and
+        // the ligature forms from the components after it.
+        (&[20, 20, 23, 25], &[20, 1000]),
+        // Two ligatures in a row, and glyphs the class table does not name
+        // around one.
+        (&[20, 23, 25, 21, 24, 28], &[1000, 1015]),
+        (&[7, 22, 24, 26, 7], &[7, 1505, 7]),
+    ],
+}];
+
+/// The ligature subtable reproduces each worked example
+/// `docs/design/shaping.md` lists for type 2, and there is one.
+#[test]
+fn ligature_reproduces_the_manuals_worked_examples() {
+    assert_eq!(hold_to_worked_examples(LIGATURE_EXAMPLES), 1);
+}
+
+/// A machine over glyphs 10 and 11, both class 4: the first pushes and moves
+/// to state 2, where any glyph the class table does not name keeps the
+/// state, and the second pushes and acts, its own glyph deleted and the
+/// first's replaced by ligature 99. `coverage` is the orientation and walk
+/// bits of the subtable.
+fn pairing_machine(coverage: u32) -> Vec<u8> {
+    let mut bytes = ligature_subtable(
+        &[(10, 4), (11, 4)],
+        &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1], &[2, 2, 2, 2, 3]],
+        &[[0, 0, 0], [2, 0x8000, 0], [2, 0, 0], [0, 0xA000, 0]],
+        &[0, LAST_ACTION],
+        &[0; 12],
+        &[99],
+    );
+    // The coverage, at bytes 4 to 8 of the subtable.
+    bytes[4..8].copy_from_slice(&(coverage | u32::from(LIGATURE)).to_be_bytes());
+    bytes
+}
+
+/// A ligature takes the first cluster of its components whichever of them
+/// it is stored at: stored at the first, the glyphs after it keep their
+/// clusters; stored at a later one — walking a run backwards, or a
+/// right-to-left run in layout order — the clusters from the ligature to its
+/// first component are merged, so they stay monotonic.
+#[test]
+fn a_ligature_keeps_its_first_components_cluster() {
+    // Forward: `10 5 11`, the ligature stored at the 10.
+    let (out, warnings) = through(
+        pairing_machine(ANY_ORIENTATION),
+        &[10, 5, 11],
+        &Limits::DEFAULT,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(out, vec![(99, 0), (5, 1)]);
+    // The manual's example: each ligature the cluster of its `a`, `b` or
+    // `c`, and a glyph after it its own.
+    let (out, _) = through(ligature_example(), &[22, 24, 26, 7], &Limits::DEFAULT);
+    assert_eq!(out, vec![(1505, 0), (7, 3)]);
+    let (out, _) = through(
+        ligature_example(),
+        &[7, 20, 23, 25, 21, 24, 28],
+        &Limits::DEFAULT,
+    );
+    assert_eq!(out, vec![(7, 0), (1000, 1), (1015, 4)]);
+
+    // Backward: the 11 is pushed first and the ligature stored there, so it
+    // takes the 10's cluster, and the 5 between them is merged into it.
+    let (out, warnings) = through(
+        pairing_machine(ANY_ORIENTATION | DESCENDING),
+        &[10, 5, 11],
+        &Limits::DEFAULT,
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(out, vec![(5, 0), (99, 0)]);
+
+    // A right-to-left run, walked in layout order: the ligature is stored at
+    // the 11, its layout's first glyph, and takes the 10's cluster, the
+    // first in the text; in logical order the 5 comes first, merged.
+    let table = morx_table(2, &[chain(1, &[], &[pairing_machine(ANY_ORIENTATION)])]);
+    let morx = Morx::parse(&table).expect("readable");
+    let mut buffer = run_of(&[10, 5, 11], Direction::RightToLeft);
+    assert!(morx
+        .run(&mut buffer, &Selection::defaults(), &Limits::DEFAULT)
+        .is_empty());
+    let out: Vec<(u16, u32)> = buffer
+        .glyphs()
+        .iter()
+        .map(|g| (g.glyph, g.cluster))
+        .collect();
+    assert_eq!(out, vec![(5, 0), (99, 0)]);
+}
+
+/// A machine pushing every glyph 10 and acting at glyph 11, its one action
+/// replacing the top of the stack by ligature 99.
+fn stacking_machine() -> Vec<u8> {
+    ligature_subtable(
+        &[(10, 4), (11, 5)],
+        &[&[0, 0, 0, 0, 1, 2], &[0, 0, 0, 0, 1, 2]],
+        &[[0, 0, 0], [0, 0x8000, 0], [0, 0xA000, 0]],
+        &[LAST_ACTION],
+        &[0; 12],
+        &[99],
+    )
+}
+
+/// The component stack holds sixteen glyphs: a push past them is refused
+/// and named, once however often, and the machine goes on, its action
+/// popping the sixteenth.
+#[test]
+fn a_component_stack_past_its_ceiling_is_refused_and_named() {
+    assert_eq!(COMPONENT_STACK, 16, "the mort chapter's sixteen");
+    let full = Warning::ComponentStackFull { site: site(0) };
+    // Fifteen glyphs and the actor fill the stack exactly.
+    let mut run = vec![10u16; 15];
+    run.push(11);
+    let (out, warnings) = through(stacking_machine(), &run, &Limits::DEFAULT);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let mut expected: Vec<u16> = vec![10; 15];
+    expected.push(99);
+    assert_eq!(out.iter().map(|(g, _)| *g).collect::<Vec<_>>(), expected);
+
+    // Sixteen and the actor: the actor's own push is refused, and its action
+    // pops the sixteenth 10.
+    let mut run = vec![10u16; 16];
+    run.push(11);
+    let (out, warnings) = through(stacking_machine(), &run, &Limits::DEFAULT);
+    assert_eq!(warnings, vec![full]);
+    let mut expected: Vec<u16> = vec![10; 15];
+    expected.extend([99, 11]);
+    assert_eq!(out.iter().map(|(g, _)| *g).collect::<Vec<_>>(), expected);
+
+    // Twenty and the actor: five pushes refused, named once.
+    let mut run = vec![10u16; 20];
+    run.push(11);
+    let (out, warnings) = through(stacking_machine(), &run, &Limits::DEFAULT);
+    assert_eq!(warnings, vec![full]);
+    let mut expected: Vec<u16> = vec![10; 15];
+    expected.push(99);
+    expected.extend([10, 10, 10, 10, 11]);
+    assert_eq!(out.iter().map(|(g, _)| *g).collect::<Vec<_>>(), expected);
+
+    // A machine that pushes without advancing fills the stack, is refused,
+    // and stops at its transition ceiling, both named.
+    let holding = ligature_subtable(
+        &[(10, 4)],
+        &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1]],
+        &[[0, 0, 0], [0, 0xC000, 0]],
+        &[LAST_ACTION],
+        &[0; 12],
+        &[99],
+    );
+    let limits = Limits {
+        max_transitions: 40,
+        ..Limits::DEFAULT
+    };
+    let (out, warnings) = through(holding, &[10, 7], &limits);
+    assert_eq!(out, vec![(10, 0), (7, 1)]);
+    assert_eq!(
+        warnings,
+        vec![full, Warning::TransitionBudgetExceeded { site: site(0) }]
+    );
+}
+
+/// The machine of text-rendering-tests `MORX-41`'s face: `a` and `b` push,
+/// `c` pushes and acts, two actions of offset −2, the second last; glyphs `a`
+/// to `c` are 2 to 4 and the ligatures `a_c` and `b_c` 5 and 6.
+fn under_and_overflow_machine() -> Vec<u8> {
+    ligature_subtable(
+        &[(2, 4), (3, 5), (4, 6)],
+        &[&[0, 0, 0, 0, 1, 1, 2]],
+        &[[0, 0, 0], [0, 0x8000, 0], [0, 0xA000, 0]],
+        &[0x3FFF_FFFE, 0xBFFF_FFFE],
+        &[0, 1, 0, 0],
+        &[5, 6],
+    )
+}
+
+/// An action popping an empty stack ends its list there, what it formed
+/// standing, and is named; an action, a component or a ligature the
+/// subtable does not hold ends it the same way, named as malformed, the
+/// glyph it would have replaced standing.
+#[test]
+fn an_action_list_the_stack_or_the_tables_cannot_serve_ends_and_is_named() {
+    let empty = Warning::ComponentStackEmpty { site: site(0) };
+    let malformed = Warning::MalformedAatSubtable { site: site(0) };
+    let machine = under_and_overflow_machine;
+    assert_eq!(glyphs_through(machine(), &[2, 4]), [5]);
+    assert_eq!(glyphs_through(machine(), &[3, 4]), [6]);
+    // `cc`: each `c` is deleted by the first action, and the second finds
+    // the stack empty.
+    let (out, warnings) = through(machine(), &[4, 4], &Limits::DEFAULT);
+    assert_eq!(out, vec![]);
+    assert_eq!(warnings, vec![empty]);
+    // `abcc`: the first `c` forms `b_c`, which is pushed again over the `a`;
+    // the second pops it, and its component index, 6 − 2, is past the
+    // component table, where the ligature list's 5 stands: ligature 5 is
+    // past the list, so `b_c` stands.
+    let (out, warnings) = through(machine(), &[2, 3, 4, 4], &Limits::DEFAULT);
+    assert_eq!(out, vec![(2, 0), (6, 1)]);
+    assert_eq!(warnings, vec![malformed]);
+
+    // An action index past the action table.
+    let past_actions = ligature_subtable(
+        &[(10, 4)],
+        &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1]],
+        &[[0, 0, 0], [0, 0xA000, 9]],
+        &[LAST_ACTION],
+        &[0; 12],
+        &[99],
+    );
+    let (out, warnings) = through(past_actions, &[10], &Limits::DEFAULT);
+    assert_eq!(out, vec![(10, 0)]);
+    assert_eq!(warnings, vec![malformed]);
+    // A component index past the component table, the ligature list empty
+    // behind it.
+    let past_components = ligature_subtable(
+        &[(10, 4)],
+        &[&[0, 0, 0, 0, 1], &[0, 0, 0, 0, 1]],
+        &[[0, 0, 0], [0, 0xA000, 0]],
+        &[LAST_ACTION],
+        &[0; 4],
+        &[],
+    );
+    let (out, warnings) = through(past_components, &[10], &Limits::DEFAULT);
+    assert_eq!(out, vec![(10, 0)]);
+    assert_eq!(warnings, vec![malformed]);
+}
+
+/// A subtable whose state table holds no offsets to its three tables, or an
+/// offset past its end, is named, and changes nothing.
+#[test]
+fn a_ligature_subtable_that_cannot_be_read_is_named() {
+    let malformed = Warning::MalformedAatSubtable { site: site(0) };
+    // An `STXHeader` whose three parts all sit at its own start, sixteen
+    // bytes long: its class table reads as format 0 and gives glyph 0 class
+    // 4, but there is no word at 16 for the action table's offset.
+    let headless = subtable(
+        ANY_ORIENTATION | u32::from(LIGATURE),
+        1,
+        &u32s(&[4, 0, 0, 0]),
+    );
+    let (out, warnings) = through(headless, &[0], &Limits::DEFAULT);
+    assert_eq!(out, vec![(0, 0)]);
+    assert_eq!(warnings, vec![malformed]);
+
+    // Each of the three offsets pointed one byte past the subtable: the body
+    // starts twelve bytes into the subtable, and the offsets at 16, 20 and
+    // 24 of the body.
+    for slot in [16usize, 20, 24] {
+        let mut bytes = pairing_machine(ANY_ORIENTATION);
+        let body = bytes.len() - 12;
+        put32(&mut bytes, 12 + slot, count32(body + 1));
+        let (out, warnings) = through(bytes, &[10, 11], &Limits::DEFAULT);
+        assert_eq!(out, vec![(10, 0), (11, 1)], "slot {slot}");
+        assert_eq!(warnings, vec![malformed], "slot {slot}");
+    }
+}
+
+/// An action with `store` forms a ligature in place of the glyph it pops and
+/// the list goes on, the sum starting again for the next; each ligature is
+/// pushed again, so a later action can make it a component of another.
+#[test]
+fn a_list_stores_each_ligature_and_a_ligature_is_a_component_of_the_next() {
+    // Glyph 10 pushes, 11 pushes and acts: the 11's component value is 2,
+    // stored as ligature 2, and the 10's is 1, stored as ligature 1 — the sum
+    // started again.
+    let mut components = vec![0u16; 10];
+    components.extend([1, 2]);
+    let storing = ligature_subtable(
+        &[(10, 4), (11, 5)],
+        &[&[0, 0, 0, 0, 1, 2], &[0, 0, 0, 0, 1, 2]],
+        &[[0, 0, 0], [0, 0x8000, 0], [0, 0xA000, 0]],
+        &[STORE_ACTION, LAST_ACTION],
+        &components,
+        &[50, 51, 52, 53],
+    );
+    let (out, warnings) = through(storing, &[10, 11], &Limits::DEFAULT);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(out, vec![(51, 0), (52, 1)], "each ligature its own sum");
+
+    // Glyph 10 pushes, 11 pushes and forms ligature 60 of the two, and 12
+    // pushes and forms ligature 61 of the 60 and itself.
+    let mut components = vec![0u16; 64];
+    components[60] = 1;
+    let nesting = ligature_subtable(
+        &[(10, 4), (11, 5), (12, 6)],
+        &[&[0, 0, 0, 0, 1, 2, 3], &[0, 0, 0, 0, 1, 2, 3]],
+        &[[0, 0, 0], [0, 0x8000, 0], [0, 0xA000, 0], [0, 0xA000, 2]],
+        &[0, LAST_ACTION, 0, LAST_ACTION],
+        &components,
+        &[60, 61],
+    );
+    let (out, warnings) = through(nesting.clone(), &[10, 11, 12], &Limits::DEFAULT);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(out, vec![(61, 0)]);
+    assert_eq!(glyphs_through(nesting, &[10, 11, 7]), [60, 7]);
+}
+
+/// A run holding no glyph the machine's class table names is not walked,
+/// and a glyph a subtable before it deleted is class 2 to it, whatever the
+/// class table says.
+#[test]
+fn a_ligature_machine_meets_only_the_glyphs_it_names() {
+    assert_eq!(
+        glyphs_through(pairing_machine(ANY_ORIENTATION), &[7, 8]),
+        [7, 8]
+    );
+    // A noncontextual subtable deletes the 12 first: the ligature machine,
+    // whose state 2 keeps its state on a deleted glyph, pairs the 10 with
+    // the 11, and the deleted glyph leaves the run.
+    let table = morx_table(
+        2,
+        &[chain(
+            1,
+            &[],
+            &[
+                noncontextual(1, &[(12, DELETED)]),
+                pairing_machine(ANY_ORIENTATION),
+            ],
+        )],
+    );
+    let (out, warnings) = chained(
+        &table,
+        &[10, 12, 11],
+        Direction::LeftToRight,
+        &Selection::defaults(),
+    );
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(out, [99]);
 }

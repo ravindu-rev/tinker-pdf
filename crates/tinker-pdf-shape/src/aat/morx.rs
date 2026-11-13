@@ -53,8 +53,9 @@
 //! that maps a single glyph index into another glyph index", a value of 0
 //! meaning "do nothing" ("Lookup tables in a 'morx'"). Types 0, 1, 2 and 5 are
 //! state machines on the shared driver ([`super::StateTable::run`]), and the
-//! rearrangement subtable, type 0, and the contextual glyph substitution
-//! subtable, type 1, run (`super::rearrangement`, `super::contextual`); a
+//! rearrangement subtable, type 0, the contextual glyph substitution
+//! subtable, type 1, and the ligature subtable, type 2, run
+//! (`super::rearrangement`, `super::contextual`, `super::ligature`); a
 //! machine runs only over a run holding a glyph its class table names
 //! (`machine`).
 //! Type 3 is reserved and a type above 5 unknown, and each such subtable, and
@@ -66,7 +67,7 @@ use super::feat::Feat;
 use super::lookup::{Lookup, LookupError};
 use super::state::{StateTable, DELETED};
 use super::Site;
-use super::{contextual, rearrangement};
+use super::{contextual, ligature, rearrangement};
 use crate::buffer::{Buffer, Direction};
 use crate::common::Tag;
 use crate::limits::Limits;
@@ -323,6 +324,24 @@ impl<'a> Morx<'a> {
                         &mut warnings,
                     ) {
                         Some(table) => contextual::run(
+                            &table,
+                            subtable.body,
+                            buffer,
+                            traversal,
+                            limits,
+                            site,
+                            &mut warnings,
+                        ),
+                        None => Ok(()),
+                    },
+                    LIGATURE => match machine(
+                        subtable.body,
+                        ligature::ENTRY_SIZE,
+                        buffer,
+                        site,
+                        &mut warnings,
+                    ) {
+                        Some(table) => ligature::run(
                             &table,
                             subtable.body,
                             buffer,

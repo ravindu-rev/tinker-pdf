@@ -19,8 +19,9 @@
 //!
 //! - [`Morx`], the extended glyph metamorphosis table: its chains, their
 //!   feature entries and sub-feature flags, each subtable's coverage, and the
-//!   subtables the chain runs; [`Selection`] is what a caller's OpenType
-//!   features ask of it;
+//!   subtables the chain runs — noncontextual, rearrangement, contextual and
+//!   ligature, the last on a component stack [`COMPONENT_STACK`] deep;
+//!   [`Selection`] is what a caller's OpenType features ask of it;
 //! - [`Feat`], the feature name table, which says which features' settings
 //!   exclude one another.
 //!
@@ -32,12 +33,14 @@
 
 mod contextual;
 mod feat;
+mod ligature;
 mod lookup;
 mod morx;
 mod rearrangement;
 mod state;
 
 pub use feat::{Feat, FeatureName, FEAT};
+pub use ligature::COMPONENT_STACK;
 pub use lookup::{Lookup, LookupError, LookupFormat};
 pub use morx::{
     aat_setting, AatSetting, Chain, FeatureEntry, Morx, Selection, Subtable, ANY_ORIENTATION,

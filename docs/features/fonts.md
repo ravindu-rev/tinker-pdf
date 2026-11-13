@@ -1290,9 +1290,23 @@ What it does:
   indices name, `setMark` marks the current glyph after the substitutions,
   the mark is the first glyph met where none was set and keeps its glyph
   wherever the machine moves, and an index past the subtable's tables is
-  named (`Warning::SubstitutionTableMissing`). A state machine runs only over
-  a run holding a glyph its class table names. A
-  reserved, unknown or not yet built type is skipped and named
+  named (`Warning::SubstitutionTableMissing`). The ligature subtable runs
+  too: `setComponent` pushes the current glyph on a component stack sixteen
+  deep (`aat::COMPONENT_STACK`), a push past it refused and named
+  (`Warning::ComponentStackFull`), and `performAction` runs an action list,
+  each action popping a component, adding its glyph to the action's 30-bit
+  sign-extended offset to index the component table, and summing the values
+  it finds into an index into the ligature list — a component whose action
+  is neither `last` nor `store` deleted, one whose action is either replaced
+  by the ligature at the sum, the sum starting again after each ligature, and
+  each ligature pushed again to be a component of another. A ligature takes
+  the first cluster of its components, the clusters between it and the
+  component that held that cluster merged where it is stored elsewhere. An
+  action that pops an empty stack ends its list, named
+  (`Warning::ComponentStackEmpty`), as does one whose action, component or
+  ligature the subtable does not hold (`Warning::MalformedAatSubtable`). A
+  state machine runs only over a run holding a glyph its class table names.
+  A reserved, unknown or not yet built type is skipped and named
   (`Warning::SubtableTypeNotRun`). `aat::Selection::from_opentype` turns a
   caller's `with_features` and `with_settings` into the settings asked for,
   by the design's table (`aat::aat_setting`): named features start from no

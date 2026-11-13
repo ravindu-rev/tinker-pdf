@@ -497,6 +497,26 @@ impl Buffer {
         }
     }
 
+    /// Gives every glyph of `range` the smallest cluster in it, as
+    /// [`Buffer::reorder`] does for the glyphs it moves.
+    ///
+    /// What keeps clusters monotonic where an AAT subtable associates a
+    /// glyph with one it does not stand beside: a ligature stored away from
+    /// the component whose cluster it takes, and an insertion the chapter
+    /// associates with the other glyph of its action. A range the buffer does
+    /// not hold whole merges nothing.
+    pub(crate) fn merge_clusters(&mut self, range: core::ops::Range<usize>) {
+        let Some(glyphs) = self.glyphs.get_mut(range) else {
+            return;
+        };
+        let Some(cluster) = glyphs.iter().map(|glyph| glyph.cluster).min() else {
+            return;
+        };
+        for glyph in glyphs {
+            glyph.cluster = cluster;
+        }
+    }
+
     /// The half-open ranges of glyphs sharing one non-zero syllable number.
     ///
     /// Read after substitution has changed the buffer's length, so it is
@@ -895,6 +915,30 @@ mod tests {
         assert_eq!(buffer.props_mask(1), 9);
         assert!(buffer.props_mut(2).is_none(), "props fell out of step");
         assert_eq!(buffer.remove_every(0xFFFF), 0);
+    }
+
+    /// A merged range takes its smallest cluster, whichever way the run's
+    /// clusters run, and the glyphs outside it keep theirs; a range the
+    /// buffer does not hold merges nothing.
+    #[test]
+    fn a_merged_range_takes_its_smallest_cluster() {
+        let mut buffer = Buffer::from_glyphs(&[1, 2, 3, 4, 5]);
+        buffer.merge_clusters(1..4);
+        let clusters =
+            |buffer: &Buffer| -> Vec<u32> { buffer.glyphs().iter().map(|g| g.cluster).collect() };
+        assert_eq!(clusters(&buffer), vec![0, 1, 1, 1, 4]);
+        // A run held backwards, as a right-to-left run is in layout order.
+        buffer.reverse();
+        buffer.merge_clusters(0..3);
+        assert_eq!(clusters(&buffer), vec![1, 1, 1, 1, 0]);
+        let backwards = core::ops::Range { start: 4, end: 2 };
+        for range in [3..9, 7..9, backwards] {
+            let before = clusters(&buffer);
+            buffer.merge_clusters(range.clone());
+            assert_eq!(clusters(&buffer), before, "{range:?}");
+        }
+        buffer.merge_clusters(2..2);
+        assert_eq!(clusters(&buffer), vec![1, 1, 1, 1, 0]);
     }
 
     /// Reversing turns glyphs and props round together, and twice is the

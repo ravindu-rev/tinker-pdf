@@ -329,6 +329,19 @@ pub enum Warning {
         /// The tag.
         tag: Tag,
     },
+    /// A ligature subtable's entry pushed a glyph on a full component
+    /// stack — the `mort` chapter's sixteen, [`aat::COMPONENT_STACK`] — so
+    /// the glyph was not pushed and the machine went on.
+    ComponentStackFull {
+        /// The subtable.
+        site: aat::Site,
+    },
+    /// A ligature subtable's action popped an empty component stack, so its
+    /// action list ended there, the glyphs it had made standing.
+    ComponentStackEmpty {
+        /// The subtable.
+        site: aat::Site,
+    },
 }
 
 /// What positioning does with the advance a mark glyph arrived with.
