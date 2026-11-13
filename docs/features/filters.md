@@ -503,6 +503,21 @@ the hash stream deduplication buckets by, kept here because the archive
 crate and `tinker-pdf-cos` both reach this crate and neither reaches the
 other.
 
+**And gzip, over those two.** `gzip_member` reads one RFC 1952 member: the
+ten-byte header, whose ID1, ID2 and CM it checks and whose reserved flag bits
+it refuses, as 2.3.1.2 asks; the optional fields its flags declare, in 2.3's
+order — the extra field skipped by its XLEN and handed back as written, the
+file name and the comment read to their terminating zeros, the CRC16 checked
+against the CRC-32 of the header before it; the deflate data inflated through
+`inflate_raw` under the caller's `Limits`; and the trailer's CRC32 and ISIZE
+checked against what inflated. `GzipMember::end` says where the member
+stopped, and `gzip_decode` reads a file's members one after another (2.2),
+their data concatenated under one ceiling, refusing bytes after a member that
+begin no member. Every failure is a `GzipError` naming it, and nothing is
+repaired or cut: the first caller is the `SVG ` table's compressed documents,
+which are drawn whole or not at all
+([colour fonts](../design/colour-fonts.md)).
+
 **And a PNG *encoder*.**
 `png_encode` takes an interleaved 8-bit raster and returns a whole file:
 signature, IHDR, IDAT, IEND, each chunk's CRC over its type and its data. It
@@ -1005,7 +1020,9 @@ whole-input `deflate_at` and `zlib_compress_at`, each at a `DeflateLevel`,
 `jpeg_encode` (takes a `JpegSource` and a `JpegOptions`, returns the whole
 interchange datastream or a `JpegEncodeError`); the container
 half is `png_decode`, `png_scan`, `tiff_decode`, `tiff_scan`, `packbits_decode`,
-`inflate_raw`, `crc32`, `xxh64`, `jxr_decode` (returns `JxrImage`), `bmp_decode`
+`inflate_raw`, `crc32`, `gzip_member` and `gzip_decode` (return a
+`GzipMember` or the file's data, or a `GzipError`), `xxh64`, `jxr_decode`
+(returns `JxrImage`), `bmp_decode`
 (returns `BmpImage`, whose pixels are an `ImagePixels`), `gif_decode`
 (returns `GifImage`, the same pixels), `webp_decode` (returns `WebpImage`,
 the same pixels, never indexed) and `netpbm_decode` (returns `NetpbmImage`, an
@@ -1123,6 +1140,9 @@ applied, so it keeps the empty dependency row it has.
 | A Netpbm width or height of zero or past 32 bits, a maxval of zero or past 65 535, a PAM depth below its tuple type's, a PFM scale factor of zero | `NetpbmError::BadDimensions`, `BadMaxval`, `BadDepth`, `BadScale` | The descriptions bound each, and a sample read past one is another number | — |
 | A PAM tuple type other than `BLACKANDWHITE`, `GRAYSCALE` and `RGB`, each with or without `_ALPHA`, and `CMYK` and `CMYK_ALPHA` — the null one, of a header with no `TUPLTYPE`, among them | `NetpbmError::UnknownTupleType`, the type as written | The PAM description: a process "must further define the format to specify the meanings of the data", and a depth is not a meaning | — |
 | Netpbm past `MAX_NETPBM_SAMPLES` or the caller's ceiling | `NetpbmError::TooManySamples`, `ExceedsOutputLimit` | A width and a height are decimal fields of any length; refused before allocation (ruling 1) | [rulings](../rulings.md) |
+| A gzip member whose ID1 and ID2 are not 31 and 139, whose CM is not 8, or whose FLG sets a reserved bit | `GzipError::NotGzip`, `Method`, `ReservedFlags` | RFC 1952 2.3.1.2: a decompressor checks ID1, ID2 and CM, and a reserved bit may announce a field it would otherwise read as data | — |
+| A gzip member whose CRC16, CRC32 or ISIZE disagrees with what it holds, whose deflate data is corrupt, or which is cut off in its header, its data or its trailer | `GzipError::HeaderCrc`, `Crc`, `Size`, `CorruptData`, `TruncatedHeader`, `TruncatedData`, `TruncatedTrailer` | A member its own checks disagree with is a damaged member, and the document it carries is drawn whole or not at all | — |
+| A gzip member that inflates past the caller's ceiling, or bytes after a member that begin no member | `GzipError::ExceedsOutputLimit`, `TrailingBytes` | Refused, not cut (ruling 1): a document cut short is a different document, and RFC 1952 2.2 puts nothing between or after a file's members | [rulings](../rulings.md) |
 | JPEG XR fixed-point, half-float and 32-bit float pixel formats (Table A.6's SINT and Float rows) | `JxrRefusal::FloatOrFixedPointFormat` | 9.10.7's postscaling makes those numbers mean something `JxrImage`'s 8- and 16-bit unsigned samples cannot say; reinterpreting them returns a picture whose values are a different quantity | [design](../design/jpeg-xr.md) |
 | JPEG XR CMYK, CMYKDIRECT, NCOMPONENT and RGBE output formats | `JxrRefusal::UnsupportedColourFormat` | A colour pipeline with no consumer in this engine; a CMYK image read as RGB is a different picture, not a degraded one | [design](../design/jpeg-xr.md) |
 | A Table A.6 GUID this build has no row for | `JxrRefusal::UnknownPixelFormat` | The GUID is what names the channel order, so an unknown one cannot be guessed at | [design](../design/jpeg-xr.md) |

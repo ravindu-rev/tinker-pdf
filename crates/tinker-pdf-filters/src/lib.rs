@@ -26,6 +26,10 @@
 //! of them changes anything a `/Filter` name reaches. [`xxh64`] is a hash
 //! two crates above this one share, the Zstandard frame checksum and the
 //! bucket deduplication sorts streams into, and no filter reads it.
+//! [`gzip_member`] and [`gzip_decode`] read RFC 1952's gzip format over
+//! [`inflate_raw`] and [`crc32`] — a member's header and trailer around its
+//! deflate data — for the `SVG ` table's compressed documents, which no
+//! `/Filter` names either.
 //!
 //! [`png_encode`] is the fourth and the only one that *writes*. It is here for
 //! the same reason and more sharply: a PNG file is a zlib stream inside chunks
@@ -53,6 +57,7 @@ mod ccitt;
 mod crc32;
 pub mod deflate;
 mod gif;
+mod gzip;
 mod inflate;
 mod jbig2;
 mod jpeg;
@@ -84,6 +89,7 @@ pub use deflate::{
     deflate, deflate_at, zlib_compress, zlib_compress_at, DeflateLevel, Deflater, ZlibDeflater,
 };
 pub use gif::{gif_decode, gif_decode_counted, GifError, GifImage, MAX_GIF_SAMPLES};
+pub use gzip::{gzip_decode, gzip_member, GzipError, GzipHeader, GzipMember};
 pub use inflate::{inflate_raw, RawInflated};
 pub use jbig2::{
     decode as jbig2_decode, decode_attributed as jbig2_decode_attributed,
