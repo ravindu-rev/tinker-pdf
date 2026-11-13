@@ -1585,3 +1585,161 @@ fn the_suite_covers_the_sections_it_claims_to() {
 /// CMAP-2 are variation-selector sections and do reach the lookups, so they
 /// stay under the ordinary rule.
 const NOT_ABOUT_LOOKUPS: [&str; 1] = ["CMAP-4"];
+
+/// Each code point's `Canonical_Combining_Class` where it is not 0: field 3
+/// of the vendored `UnicodeData.txt`. A range's first and last lines carry
+/// class 0, so no range is expanded.
+fn combining_classes() -> BTreeMap<u32, u8> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/ucd/UnicodeData.txt");
+    let data = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{} could not be read: {error}", path.display()));
+    let mut out = BTreeMap::new();
+    for line in data.lines() {
+        let fields: Vec<&str> = line.split(';').collect();
+        let (Some(code), Some(class)) = (fields.first(), fields.get(3)) else {
+            continue;
+        };
+        let (Ok(code), Ok(class)) = (u32::from_str_radix(code, 16), class.parse::<u8>()) else {
+            continue;
+        };
+        if class != 0 {
+            out.insert(code, class);
+        }
+    }
+    out
+}
+
+/// `text` in canonical order: every adjacent pair whose first class is
+/// greater than the second, and the second not 0, exchanged until no such
+/// pair is left — the Unicode Standard's canonical ordering, over the text
+/// as typed. This crate decomposes nothing before `cmap`, so the text as
+/// typed stands in for the text decomposed.
+fn canonical_order(text: &str, classes: &BTreeMap<u32, u8>) -> String {
+    let class = |c: char| classes.get(&u32::from(c)).copied().unwrap_or(0);
+    let mut chars: Vec<char> = text.chars().collect();
+    let mut exchanged = true;
+    while exchanged {
+        exchanged = false;
+        for at in 1..chars.len() {
+            let (first, second) = (class(chars[at - 1]), class(chars[at]));
+            if first > second && second != 0 {
+                chars.swap(at - 1, at);
+                exchanged = true;
+            }
+        }
+    }
+    chars.into_iter().collect()
+}
+
+/// Whether `ours` is what `expected` says, as
+/// `every_runnable_case_produces_what_the_fixture_says` judges it: as many
+/// glyphs, each within `MAX_DELTA` and the same glyph where its name
+/// resolves.
+fn reproduces(ours: &[(u16, i32, i32)], expected: &[(Option<u16>, i32, i32)]) -> bool {
+    ours.len() == expected.len()
+        && ours.iter().zip(expected).all(|(ours, want)| {
+            (ours.1 - want.1).abs() <= MAX_DELTA
+                && (ours.2 - want.2).abs() <= MAX_DELTA
+                && want.0.is_none_or(|glyph| glyph == ours.0)
+        })
+}
+
+/// FT-08.2's price of canonical ordering, which H-145 reads: each runnable
+/// case's text put in canonical order and shaped through [`shaped`], each
+/// section's cases gained and lost against the text as typed — the cases
+/// [`PASSING`] counts — printed by id. No engine code changes: the probe
+/// orders the text it hands the suite's own shaping.
+#[test]
+#[ignore = "a measurement H-145 reads, run by name"]
+fn canonical_ordering_price() {
+    let classes = combining_classes();
+    println!("RAN canonical_ordering_price");
+    let mut totals = (0usize, 0usize, 0usize);
+    for (section, cases) in runnable() {
+        let mut gained: Vec<String> = Vec::new();
+        let mut lost: Vec<String> = Vec::new();
+        let mut moved = 0usize;
+        for case in &cases {
+            if case.no_crash {
+                continue;
+            }
+            let ordered = canonical_order(&case.render, &classes);
+            if ordered == case.render {
+                continue;
+            }
+            moved += 1;
+            let bytes = font_bytes(&case.font);
+            let face = Sfnt::parse(&bytes).expect("a fixture font is a valid sfnt");
+            let cff = face
+                .table(u32::from_be_bytes(*b"CFF "))
+                .and_then(Cff::parse);
+            let expected: Vec<(Option<u16>, i32, i32)> = case
+                .expected
+                .iter()
+                .map(|(name, x, y)| (glyph_named(&face, cff.as_ref(), name), *x, *y))
+                .collect();
+            let before = reproduces(&shaped(&face, cff.as_ref(), &case.render), &expected);
+            let after = reproduces(&shaped(&face, cff.as_ref(), &ordered), &expected);
+            match (before, after) {
+                (false, true) => gained.push(case.id.clone()),
+                (true, false) => lost.push(case.id.clone()),
+                _ => {}
+            }
+        }
+        println!(
+            "{section}: {moved} reordered, {} gained {gained:?}, {} lost {lost:?}",
+            gained.len(),
+            lost.len()
+        );
+        totals = (
+            totals.0 + moved,
+            totals.1 + gained.len(),
+            totals.2 + lost.len(),
+        );
+    }
+    println!(
+        "canonical_ordering_price: {} reordered, {} gained, {} lost",
+        totals.0, totals.1, totals.2
+    );
+}
+
+/// The ordering the probe applies is the canonical one: a pair out of
+/// class order is exchanged, a starter (class 0) is never crossed, and text
+/// already in order is left alone. `SAKOT` (U+1A60, class 9) after a
+/// class-230 mark is the pair the note under FT-08.2 names.
+#[test]
+fn the_probe_orders_text_canonically() {
+    let classes = combining_classes();
+    assert_eq!(classes.get(&0x0301), Some(&230));
+    assert_eq!(classes.get(&0x1A60), Some(&9));
+    assert_eq!(classes.get(&0x0041), None);
+    // U+0301 (230) before U+0323 (220): exchanged.
+    assert_eq!(
+        canonical_order("a\u{301}\u{323}", &classes),
+        "a\u{323}\u{301}"
+    );
+    // A class-230 mark before SAKOT: exchanged.
+    assert_eq!(
+        canonical_order("\u{1A75}\u{1A60}", &classes),
+        "\u{1A60}\u{1A75}"
+    );
+    // A starter between them is never crossed.
+    assert_eq!(
+        canonical_order("\u{301}a\u{323}", &classes),
+        "\u{301}a\u{323}"
+    );
+    // Already in order, and equal classes, are left alone.
+    assert_eq!(
+        canonical_order("a\u{323}\u{301}", &classes),
+        "a\u{323}\u{301}"
+    );
+    assert_eq!(
+        canonical_order("a\u{301}\u{300}", &classes),
+        "a\u{301}\u{300}"
+    );
+    // Three out of order sort fully.
+    assert_eq!(
+        canonical_order("a\u{301}\u{328}\u{323}", &classes),
+        "a\u{328}\u{323}\u{301}"
+    );
+}

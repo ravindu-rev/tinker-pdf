@@ -482,7 +482,19 @@ column whose face has no `GPOS` writes no number.
 5. The USE shaper for Indic and Southeast Asian scripts. Exit: every
    text-rendering-tests USE section, counted; scripts with no fixture listed
    by name in the feature doc as shaped-but-unverified rather than counted as
-   done.
+   done. The price of canonical ordering, which H-145 reads, is measured
+   before anything applies it (FT-08.2): `text_rendering.rs`'s `#[ignore]`d
+   `canonical_ordering_price` puts each runnable case's text in
+   `Canonical_Combining_Class` order — field 3 of the vendored
+   `UnicodeData.txt`, every adjacent pair whose first class is greater than
+   the second and the second not 0 exchanged — shapes it through the suite's
+   own `shaped`, and prints `RAN canonical_ordering_price` and each section's
+   cases gained and lost against the text as typed, by id. Ordering the text
+   before `cmap` stands in for ordering it after decomposition, because this
+   crate decomposes nothing. Its figures, with its time from `cargo test`'s
+   own `finished in` line in release and debug, are what H-145 reads; the
+   eight passing cases that type a class-230 mark just before `SAKOT`
+   (U+1A60, class 9) type the pair the ordering exchanges.
 6. The layout consumer: `Shaper` trait, itemize→shape→break→reorder wiring,
    `BookMetrics` implements it. Exit: an Arabic EPUB fixture paginates with
    joined forms and RTL line order, pinned by a render fingerprint; the
