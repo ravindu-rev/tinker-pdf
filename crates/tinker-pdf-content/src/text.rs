@@ -117,6 +117,15 @@ pub struct TextChar {
     /// page read by [`TextDevice::keeping_artifacts`], since every other
     /// reading drops what such a scope draws.
     pub artifact: bool,
+    /// Which glyph drew it: the glyph's place among every glyph the content
+    /// showed [`TextDevice`] on the page, in the content stream's order,
+    /// counted from 0 — the ones it dropped among them, so a place says
+    /// where in the stream the glyph was — or `None` for a character no
+    /// glyph draws, an `/ActualText`'s character placed on its span's box.
+    ///
+    /// The key a box option's boxes are put in by ([`HeldBoxes`]), once
+    /// ruling 14 has read the page with the em box.
+    pub glyph: Option<u32>,
 }
 
 /// Which way a line runs.
@@ -419,6 +428,67 @@ impl Unmapped {
     }
 }
 
+/// Which box a character is reported with
+/// (`docs/design/extraction-options.md`, options 6 and 7), in the glyph's own
+/// space, where an em is one unit along each axis and the glyph's transform
+/// takes it to the page.
+///
+/// Every decision extraction makes from geometry reads the em box whatever
+/// this says — which glyphs are a line, which lines a block, and ruling 14's
+/// reading — so a box option changes the quads a caller reads and nothing
+/// else ([`HeldBoxes`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CharBoxes {
+    /// The em box: the advance wide (at least a thousandth of an em), 0.2 of
+    /// an em below the baseline to 0.8 above; a vertical glyph one em wide and
+    /// its advance high.
+    #[default]
+    EmBox,
+    /// Ascenders and side bearings: a horizontal glyph from where its
+    /// outline's bounds start to where they end, or across its advance where
+    /// it draws nothing, and from the font's descent to its ascent, or as the
+    /// em box where the font states neither. A vertical glyph keeps the em
+    /// box: ascent and descent are horizontal metrics.
+    FontMetrics,
+    /// The outline's bounds, where the glyph draws something; the
+    /// [`CharBoxes::FontMetrics`] box, or a vertical glyph's em box, where it
+    /// draws nothing.
+    Outline,
+}
+
+impl CharBoxes {
+    /// The quad `glyph` is reported with under this option, other than its
+    /// em box: `w` and `h` the em box's width and height in glyph space, as
+    /// [`TextDevice`] measures them. `None` under [`CharBoxes::EmBox`], and
+    /// wherever the glyph's extent was not read — a Type 3 glyph — so the
+    /// em box stands.
+    fn quad(self, glyph: &Glyph, w: f64, h: f64) -> Option<Quad> {
+        if self == CharBoxes::EmBox {
+            return None;
+        }
+        let extent = glyph.extent.as_deref()?;
+        let em = (0.0, -0.2 * h, w, 0.8 * h);
+        let (x0, y0, x1, y1) = match (self, glyph.vertical, extent.ink) {
+            (CharBoxes::Outline, _, Some(ink)) => ink,
+            (_, true, _) => em,
+            (_, false, ink) => {
+                let (x0, x1) = ink.map_or((0.0, w), |(x0, _, x1, _)| (x0, x1));
+                let (y0, y1) = extent
+                    .ascent_descent
+                    .map_or((-0.2, 0.8), |(ascent, descent)| (descent, ascent));
+                (x0, y0, x1, y1)
+            }
+        };
+        let t = &glyph.transform;
+        Some(Quad {
+            ll: t.apply(x0, y0),
+            lr: t.apply(x1, y0),
+            ul: t.apply(x0, y1),
+            ur: t.apply(x1, y1),
+        })
+    }
+}
+
 /// How [`TextDevice`] reads a page (`docs/design/extraction-options.md`):
 /// the extraction options the facade's `TextOptions` carries for this crate.
 ///
@@ -427,6 +497,75 @@ impl Unmapped {
 pub struct ExtractionOptions {
     /// What a glyph whose code maps to no text becomes.
     pub unmapped: Unmapped,
+    /// Which box a character is reported with.
+    pub boxes: CharBoxes,
+}
+
+/// The boxes a box option asked for ([`CharBoxes`]), held apart from a page
+/// read with the em box until ruling 14 has read it
+/// ([`TextDevice::finish_held`]): each glyph's, by its place
+/// ([`TextChar::glyph`]), and the union of each `/ActualText` span's, by the
+/// span ([`TextChar::stated`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HeldBoxes {
+    glyphs: BTreeMap<u32, Quad>,
+    spans: BTreeMap<u32, Quad>,
+}
+
+impl HeldBoxes {
+    /// Whether nothing is held: what [`CharBoxes::EmBox`] holds.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.glyphs.is_empty()
+    }
+
+    /// Holds `quad`, the box asked for of the glyph at `place`, under the
+    /// outermost `/ActualText` span `stated` names where one is open.
+    fn hold(&mut self, place: u32, stated: Option<u32>, quad: Quad) {
+        self.glyphs.insert(place, quad);
+        if let Some(span) = stated {
+            self.spans
+                .entry(span)
+                .and_modify(|union| {
+                    if let Some(both) = enclosing([*union, quad].into_iter()) {
+                        *union = both;
+                    }
+                })
+                .or_insert(quad);
+        }
+    }
+
+    /// Puts the held boxes into `page`: each character a glyph drew takes its
+    /// glyph's box, a character an `/ActualText` placed on its span's box
+    /// rather than on a glyph takes the union of its span's boxes, and every
+    /// line's and block's quad is made again from its characters', as
+    /// [`TextDevice::finish`] makes them. Nothing is done where nothing is
+    /// held, so a page read with the em box is left as it is, to the bit.
+    pub fn apply(self, page: &mut TextPage) {
+        if self.is_empty() {
+            return;
+        }
+        for block in page.blocks_mut() {
+            for line in &mut block.lines {
+                for c in &mut line.chars {
+                    let held = match (c.glyph, c.stated) {
+                        (Some(place), _) => self.glyphs.get(&place),
+                        (None, Some(span)) => self.spans.get(&span),
+                        (None, None) => None,
+                    };
+                    if let Some(quad) = held {
+                        c.quad = *quad;
+                    }
+                }
+                if let Some(quad) = enclosing(line.chars.iter().map(|c| c.quad)) {
+                    line.quad = quad;
+                }
+            }
+            if let Some(quad) = enclosing(block.lines.iter().map(|l| l.quad)) {
+                block.quad = quad;
+            }
+        }
+    }
 }
 
 /// Collects glyphs into a [`TextPage`].
@@ -437,6 +576,12 @@ pub struct TextDevice {
     warnings: Vec<TextWarning>,
     /// How the page is read.
     options: ExtractionOptions,
+    /// How many glyphs the device has been handed: the next one's place
+    /// ([`TextChar::glyph`]).
+    shown: u32,
+    /// The boxes a box option asked for, by glyph, held until the page is
+    /// read ([`TextDevice::finish_held`]).
+    held: HeldBoxes,
     /// How many `/Artifact` scopes are open (14.8.2.2).
     ///
     /// A **counter and not a flag**, because marked content nests and an
@@ -632,9 +777,22 @@ impl TextDevice {
         }
     }
 
-    /// The page assembled from everything shown so far.
+    /// The page assembled from everything shown so far, its characters in
+    /// the boxes [`ExtractionOptions::boxes`] asks for.
     #[must_use]
-    pub fn finish(mut self) -> TextPage {
+    pub fn finish(self) -> TextPage {
+        let (mut page, held) = self.finish_held();
+        held.apply(&mut page);
+        page
+    }
+
+    /// The page assembled from everything shown so far, its characters in
+    /// their em boxes, and the boxes a box option asked for held beside it
+    /// ([`HeldBoxes::apply`] puts them in): for a caller that reads the page
+    /// with the em box first — ruling 14's ordering — so that the boxes
+    /// change no decision it makes.
+    #[must_use]
+    pub fn finish_held(mut self) -> (TextPage, HeldBoxes) {
         self.flush();
 
         let lines: Vec<TextLine> = self
@@ -693,12 +851,13 @@ impl TextDevice {
             }
         }
 
-        TextPage::new(
+        let page = TextPage::new(
             blocks,
             std::mem::take(&mut self.mcid_props),
             std::mem::take(&mut self.stated_texts),
             std::mem::take(&mut self.warnings),
-        )
+        );
+        (page, std::mem::take(&mut self.held))
     }
 
     /// Ends the line being collected: as the next starts, at an artifact's
@@ -1190,6 +1349,10 @@ impl Device for TextDevice {
     }
 
     fn show_glyph(&mut self, glyph: &Glyph, state: &GraphicsState) {
+        // Every glyph handed counts toward the next one's place, the ones
+        // dropped among them ([`TextChar::glyph`]).
+        let ordinal = self.shown;
+        self.shown = self.shown.saturating_add(1);
         if self.artifacts > 0 && !self.keep_artifacts {
             return;
         }
@@ -1214,9 +1377,11 @@ impl Device for TextDevice {
             return;
         }
 
-        // The glyph box in text space is the unit square scaled by the font's
-        // ascent and descent; 0.0 to 1.0 vertically is close enough for a
-        // selection rectangle and needs no font program to compute.
+        // The glyph's em box: the advance wide, 0.8 of an em above the
+        // baseline and 0.2 below, which is close enough for a selection
+        // rectangle and needs no font program to compute. Every decision the
+        // device makes reads it, under every box option
+        // (`docs/design/extraction-options.md`, "The em box").
         let t = &glyph.transform;
         let advance = if glyph.advance.is_finite() {
             glyph.advance / glyph.size.max(f64::MIN_POSITIVE)
@@ -1239,6 +1404,9 @@ impl Device for TextDevice {
         if !quad.is_finite() {
             return;
         }
+        // The box the caller asked for, held apart until ruling 14 has read
+        // the page with the em box ([`HeldBoxes`]).
+        let asked = self.options.boxes.quad(glyph, w, h).filter(Quad::is_finite);
 
         let origin = (t.e, t.f);
         // Which line this glyph belongs to is asked at the **baseline**: 9.4.3's
@@ -1431,6 +1599,10 @@ impl Device for TextDevice {
                 }
                 _ => None,
             };
+            let stated = self.stated.first().copied();
+            if let Some(asked) = asked {
+                self.held.hold(ordinal, stated, asked);
+            }
             line.chars.push(TextChar {
                 text: text.to_owned(),
                 quad,
@@ -1439,18 +1611,21 @@ impl Device for TextDevice {
                 mcid: self.mcids.last().map(|(_, mcid)| *mcid),
                 stream: self.mcids.last().map_or(0, |(stream, _)| *stream),
                 font: glyph.font_name.clone(),
-                stated: self.stated.first().copied(),
+                stated,
                 artifact: self.artifacts > 0,
+                glyph: Some(ordinal),
             });
         }
     }
 
     /// The glyph a code with no text selects, where a fallback stands for
-    /// it ([`Unmapped::Glyph`]); nothing otherwise, so the default reading
-    /// parses no font program.
+    /// it ([`Unmapped::Glyph`]), and each glyph's extent, where a box option
+    /// builds a box from it ([`CharBoxes`]); nothing otherwise, so the
+    /// default reading parses no font program.
     fn glyph_queries(&self) -> GlyphQueries {
         GlyphQueries {
             unmapped_glyph_ids: self.options.unmapped == Unmapped::Glyph,
+            extents: self.options.boxes != CharBoxes::EmBox,
         }
     }
 
@@ -1479,6 +1654,7 @@ impl Device for TextDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::GlyphExtent;
     use crate::state::Matrix;
 
     fn glyph(text: &str, x: f64, y: f64, size: f64) -> Glyph {
@@ -1500,6 +1676,7 @@ mod tests {
             font_id: 1,
             font_name: None,
             glyph_id: None,
+            extent: None,
         }
     }
 
@@ -2704,7 +2881,10 @@ mod tests {
 
     /// A device reading as `unmapped` asks of its glyphs.
     fn falling_back(unmapped: Unmapped) -> TextDevice {
-        TextDevice::with_options(&ExtractionOptions { unmapped })
+        TextDevice::with_options(&ExtractionOptions {
+            unmapped,
+            ..ExtractionOptions::default()
+        })
     }
 
     /// **An unmapped glyph falls back as its options ask**
@@ -2895,6 +3075,368 @@ mod tests {
         assert_eq!(read(Unmapped::Drop), "Hi\n");
         assert_eq!(read(Unmapped::Glyph), "H\u{FFFD}i\n");
         assert_eq!(read(Unmapped::Code), "H\u{F007A}i\n");
+    }
+
+    /// A device reporting characters in `boxes`.
+    fn boxed(boxes: CharBoxes) -> TextDevice {
+        TextDevice::with_options(&ExtractionOptions {
+            boxes,
+            ..ExtractionOptions::default()
+        })
+    }
+
+    /// `glyph` with `extent` read for it.
+    fn with_extent(glyph: Glyph, extent: Option<GlyphExtent>) -> Glyph {
+        Glyph {
+            extent: extent.map(Box::new),
+            ..glyph
+        }
+    }
+
+    /// The quad a glyph of size 10 at `(x, 700)`, upright, has for the glyph
+    /// space box `(x0, y0, x1, y1)`.
+    fn upright(x: f64, (x0, y0, x1, y1): (f64, f64, f64, f64)) -> Quad {
+        let at = |gx: f64, gy: f64| (x + 10.0 * gx, 700.0 + 10.0 * gy);
+        Quad {
+            ll: at(x0, y0),
+            lr: at(x1, y0),
+            ul: at(x0, y1),
+            ur: at(x1, y1),
+        }
+    }
+
+    /// Whether two quads are one, corner by corner.
+    fn same_quad(a: &Quad, b: &Quad) -> bool {
+        near(a.ll, b.ll) && near(a.lr, b.lr) && near(a.ul, b.ul) && near(a.ur, b.ur)
+    }
+
+    /// The one character a device in `boxes` reads from `glyph`.
+    fn one_char(boxes: CharBoxes, glyph: &Glyph) -> TextChar {
+        let mut d = boxed(boxes);
+        d.show_glyph(glyph, &GraphicsState::new(Matrix::IDENTITY));
+        let page = d.finish();
+        let lines = page.lines();
+        assert_eq!(lines.len(), 1, "{boxes:?}");
+        lines[0].chars[0].clone()
+    }
+
+    /// **Each box option builds its quad from the glyph's extent**
+    /// (`docs/design/extraction-options.md`, options 6 and 7): the em box by
+    /// default; the outline's sides and the font's ascent and descent for
+    /// the metrics; the outline's bounds for the outline. A glyph that draws
+    /// nothing takes its advance, a font that states no ascent the em box's
+    /// heights, and a glyph whose extent was not read the em box.
+    #[test]
+    fn each_box_option_builds_its_quad_from_the_glyphs_extent() {
+        let extent = GlyphExtent {
+            ascent_descent: Some((0.9, -0.25)),
+            ink: Some((0.05, -0.1, 0.45, 0.7)),
+        };
+        // Half an em wide: an advance of 5 at a size of 10.
+        let g = with_extent(glyph("g", 10.0, 700.0, 10.0), Some(extent));
+        for (boxes, expected) in [
+            (CharBoxes::EmBox, (0.0, -0.2, 0.5, 0.8)),
+            (CharBoxes::FontMetrics, (0.05, -0.25, 0.45, 0.9)),
+            (CharBoxes::Outline, (0.05, -0.1, 0.45, 0.7)),
+        ] {
+            let c = one_char(boxes, &g);
+            assert!(
+                same_quad(&c.quad, &upright(10.0, expected)),
+                "{boxes:?}: {:?}",
+                c.quad
+            );
+            assert!(near(c.origin, (10.0, 700.0)), "{boxes:?}: the origin stays");
+        }
+
+        // A space: no ink, so its advance; and a font with no ascent.
+        let space = with_extent(
+            glyph(" ", 10.0, 700.0, 10.0),
+            Some(GlyphExtent {
+                ascent_descent: None,
+                ink: None,
+            }),
+        );
+        let mut d = boxed(CharBoxes::Outline);
+        let state = GraphicsState::new(Matrix::IDENTITY);
+        d.show_glyph(
+            &with_extent(glyph("a", 0.0, 700.0, 10.0), Some(extent)),
+            &state,
+        );
+        d.show_glyph(&space, &state);
+        let page = d.finish();
+        let held = &page.lines()[0].chars[1];
+        assert!(
+            same_quad(&held.quad, &upright(10.0, (0.0, -0.2, 0.5, 0.8))),
+            "a space in no font's metrics: {:?}",
+            held.quad
+        );
+        let spaced = with_extent(
+            glyph(" ", 10.0, 700.0, 10.0),
+            Some(GlyphExtent {
+                ascent_descent: Some((0.9, -0.25)),
+                ink: None,
+            }),
+        );
+        for boxes in [CharBoxes::FontMetrics, CharBoxes::Outline] {
+            let mut d = boxed(boxes);
+            d.show_glyph(
+                &with_extent(glyph("a", 0.0, 700.0, 10.0), Some(extent)),
+                &state,
+            );
+            d.show_glyph(&spaced, &state);
+            let page = d.finish();
+            let held = &page.lines()[0].chars[1];
+            assert!(
+                same_quad(&held.quad, &upright(10.0, (0.0, -0.25, 0.5, 0.9))),
+                "{boxes:?}: a space across its advance: {:?}",
+                held.quad
+            );
+        }
+
+        // No extent read — a Type 3 glyph's — keeps the em box.
+        for boxes in [CharBoxes::FontMetrics, CharBoxes::Outline] {
+            let c = one_char(boxes, &glyph("g", 10.0, 700.0, 10.0));
+            assert!(same_quad(&c.quad, &upright(10.0, (0.0, -0.2, 0.5, 0.8))));
+        }
+    }
+
+    /// A vertical glyph keeps its em box for the metrics, since ascent and
+    /// descent are horizontal metrics, and takes its outline for the outline.
+    #[test]
+    fn a_vertical_glyph_takes_its_outline_and_keeps_its_em_box_otherwise() {
+        let mut v = glyph("v", 10.0, 700.0, 10.0);
+        v.vertical = true;
+        v.advance = -10.0;
+        let ink = (0.1, -0.9, 0.8, -0.1);
+        let v = with_extent(
+            v,
+            Some(GlyphExtent {
+                ascent_descent: Some((0.9, -0.25)),
+                ink: Some(ink),
+            }),
+        );
+        let em = upright(10.0, (0.0, -0.2, 1.0, 0.8));
+        assert!(same_quad(&one_char(CharBoxes::EmBox, &v).quad, &em));
+        assert!(same_quad(&one_char(CharBoxes::FontMetrics, &v).quad, &em));
+        assert!(same_quad(
+            &one_char(CharBoxes::Outline, &v).quad,
+            &upright(10.0, ink)
+        ));
+    }
+
+    /// **The boxes are held until the page is read**: `finish_held` hands the
+    /// page back in its em boxes with the boxes asked for beside it, and
+    /// `apply` puts them in, each line's and block's quad made again from
+    /// its characters'; under the em box nothing is held, and `apply` leaves
+    /// the page to the bit; `finish` is the two at once.
+    #[test]
+    fn a_box_option_is_held_and_put_in_after() {
+        let extent = GlyphExtent {
+            ascent_descent: Some((0.9, -0.25)),
+            ink: Some((0.1, 0.0, 0.4, 0.6)),
+        };
+        let glyphs = [
+            with_extent(glyph("a", 0.0, 700.0, 10.0), Some(extent)),
+            with_extent(glyph("b", 5.0, 700.0, 10.0), Some(extent)),
+        ];
+        let read = |boxes: CharBoxes| {
+            let mut d = boxed(boxes);
+            let state = GraphicsState::new(Matrix::IDENTITY);
+            for g in &glyphs {
+                d.show_glyph(g, &state);
+            }
+            d.finish_held()
+        };
+        let (em_page, em_held) = read(CharBoxes::EmBox);
+        assert!(em_held.is_empty());
+        let mut applied = em_page.clone();
+        em_held.apply(&mut applied);
+        assert_eq!(format!("{applied:?}"), format!("{em_page:?}"));
+
+        let (page, held) = read(CharBoxes::Outline);
+        assert!(!held.is_empty());
+        assert_eq!(drawn_chars(&page), drawn_chars(&em_page), "held, not in");
+        let mut outlined = page.clone();
+        held.apply(&mut outlined);
+        let chars: Vec<&TextChar> = outlined
+            .lines()
+            .into_iter()
+            .flat_map(|l| l.chars.iter())
+            .collect();
+        assert!(same_quad(
+            &chars[0].quad,
+            &upright(0.0, (0.1, 0.0, 0.4, 0.6))
+        ));
+        assert!(same_quad(
+            &chars[1].quad,
+            &upright(5.0, (0.1, 0.0, 0.4, 0.6))
+        ));
+        let line = outlined.lines()[0];
+        let (x0, y0, x1, y1) = line.quad.bounds();
+        assert!(
+            near((x0, y0), (1.0, 700.0)) && near((x1, y1), (9.0, 706.0)),
+            "{:?}",
+            line.quad
+        );
+        assert_eq!(outlined.blocks()[0].quad, line.quad);
+        assert_eq!(chars[0].glyph, Some(0));
+        assert_eq!(chars[1].glyph, Some(1));
+
+        let mut d = boxed(CharBoxes::Outline);
+        let state = GraphicsState::new(Matrix::IDENTITY);
+        for g in &glyphs {
+            d.show_glyph(g, &state);
+        }
+        assert_eq!(
+            format!("{:?}", d.finish()),
+            format!("{outlined:?}"),
+            "finish is finish_held and apply"
+        );
+    }
+
+    /// **Every decision reads the em box**: two lines whose em boxes are
+    /// within a block's gap of each other and whose glyphs' ink is not are
+    /// one block under every box option, and read the same text.
+    #[test]
+    fn a_box_option_changes_no_line_and_no_block() {
+        // Ink a tenth of an em high, six tenths up: twenty-three points
+        // between the two lines' ink, fourteen between their em boxes.
+        let extent = GlyphExtent {
+            ascent_descent: Some((0.7, -0.1)),
+            ink: Some((0.1, 0.6, 0.4, 0.7)),
+        };
+        let glyphs = [
+            with_extent(glyph("a", 0.0, 700.0, 10.0), Some(extent)),
+            with_extent(glyph("b", 5.0, 700.0, 10.0), Some(extent)),
+            with_extent(glyph("c", 0.0, 676.0, 10.0), Some(extent)),
+            with_extent(glyph("d", 5.0, 676.0, 10.0), Some(extent)),
+        ];
+        let mut texts = Vec::new();
+        for boxes in [CharBoxes::EmBox, CharBoxes::FontMetrics, CharBoxes::Outline] {
+            let mut d = boxed(boxes);
+            let state = GraphicsState::new(Matrix::IDENTITY);
+            for g in &glyphs {
+                d.show_glyph(g, &state);
+            }
+            let page = d.finish();
+            assert_eq!(page.blocks().len(), 1, "{boxes:?}: one block");
+            assert_eq!(page.lines().len(), 2, "{boxes:?}: two lines");
+            texts.push(page.plain_text());
+        }
+        assert!(texts.iter().all(|text| text == "ab\ncd\n"), "{texts:?}");
+    }
+
+    /// An `/ActualText` character placed on its span's box rather than on a
+    /// glyph takes the union of its span's held boxes; a character of no
+    /// glyph and no span keeps its quad.
+    #[test]
+    fn a_stated_character_on_its_span_takes_its_spans_boxes() {
+        let extent = GlyphExtent {
+            ascent_descent: None,
+            ink: Some((0.1, 0.0, 0.4, 0.6)),
+        };
+        let mut d = boxed(CharBoxes::Outline);
+        let state = GraphicsState::new(Matrix::IDENTITY);
+        let props = MarkedProps {
+            actual_text: Some("xy".into()),
+            ..MarkedProps::default()
+        };
+        d.begin_marked_content(b"Span", true, None, Some(&props));
+        d.show_glyph(
+            &with_extent(glyph("a", 0.0, 700.0, 10.0), Some(extent)),
+            &state,
+        );
+        d.show_glyph(
+            &with_extent(glyph("b", 5.0, 700.0, 10.0), Some(extent)),
+            &state,
+        );
+        d.end_marked_content();
+        let (mut page, held) = d.finish_held();
+        let lone = Quad {
+            ll: (50.0, 50.0),
+            lr: (51.0, 50.0),
+            ul: (50.0, 51.0),
+            ur: (51.0, 51.0),
+        };
+        if let Some(line) = page
+            .blocks_mut()
+            .first_mut()
+            .and_then(|b| b.lines.first_mut())
+        {
+            let mut stated = line.chars[0].clone();
+            stated.glyph = None;
+            stated.text = "x".into();
+            let mut neither = stated.clone();
+            neither.stated = None;
+            neither.quad = lone;
+            line.chars.push(stated);
+            line.chars.push(neither);
+        }
+        held.apply(&mut page);
+        let chars: Vec<&TextChar> = page
+            .lines()
+            .into_iter()
+            .flat_map(|l| l.chars.iter())
+            .collect();
+        let (x0, y0, x1, y1) = chars[2].quad.bounds();
+        assert!(
+            near((x0, y0), (1.0, 700.0)) && near((x1, y1), (9.0, 706.0)),
+            "{:?}",
+            chars[2].quad
+        );
+        assert_eq!(chars[3].quad, lone);
+    }
+
+    /// A source that answers every glyph's extent and counts the questions.
+    struct Measuring {
+        fonts: std::cell::Cell<usize>,
+        inks: std::cell::Cell<usize>,
+    }
+
+    impl crate::interpret::FontSource for Measuring {
+        fn decode(&self, font: &[u8], bytes: &[u8]) -> Vec<(u32, String, f64)> {
+            crate::interpret::FontSource::decode(&Simple, font, bytes)
+        }
+        fn vertical_metrics(&self, font: &[u8], code: u32) -> (f64, f64, f64) {
+            crate::interpret::FontSource::vertical_metrics(&Simple, font, code)
+        }
+        fn font_extent(&self, _font: &[u8]) -> Option<(f64, f64)> {
+            self.fonts.set(self.fonts.get() + 1);
+            Some((0.75, -0.25))
+        }
+        fn glyph_ink(&self, _font: &[u8], code: u32) -> Option<(f64, f64, f64, f64)> {
+            self.inks.set(self.inks.get() + 1);
+            (code != u32::from(b' ')).then_some((0.0, 0.0, 0.5, 0.5))
+        }
+    }
+
+    /// **The interpreter asks for extents only where the device wants
+    /// them**: the font's once a showing operator and the ink once a glyph,
+    /// under a box option, and nothing by default.
+    #[test]
+    fn the_interpreter_asks_for_extents_only_where_the_device_wants_them() {
+        let content = b"BT /F 10 Tf 100 700 Td (ab) Tj [(c) -100 ( d)] TJ ET";
+        let source = Measuring {
+            fonts: std::cell::Cell::new(0),
+            inks: std::cell::Cell::new(0),
+        };
+        let mut plain = TextDevice::new();
+        crate::interpret::interpret(content, Matrix::IDENTITY, &mut plain, &source);
+        assert_eq!((source.fonts.get(), source.inks.get()), (0, 0));
+        let em = plain.finish();
+
+        let mut outlined = boxed(CharBoxes::Outline);
+        crate::interpret::interpret(content, Matrix::IDENTITY, &mut outlined, &source);
+        // `(ab)`, `(c)` and `( d)`: three strings shown, five glyphs.
+        assert_eq!((source.fonts.get(), source.inks.get()), (3, 5));
+        let outlined = outlined.finish();
+        assert_eq!(outlined.plain_text(), em.plain_text());
+        let quads: Vec<Quad> = drawn_chars(&outlined).into_iter().map(|(_, q)| q).collect();
+        let at_a = &quads[0];
+        assert!(
+            near(at_a.ll, (100.0, 700.0)) && near(at_a.ur, (105.0, 705.0)),
+            "{at_a:?}"
+        );
     }
 
     /// What an artifact scope draws is not the page's text (14.8.2.2), so a

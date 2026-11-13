@@ -406,6 +406,7 @@ mod tests {
                         font: None,
                         stated: None,
                         artifact: false,
+                        glyph: None,
                     }
                 })
                 .collect(),

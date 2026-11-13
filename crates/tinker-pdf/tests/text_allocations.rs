@@ -54,6 +54,7 @@ fn line_page(chars: usize) -> TextPage {
                 font: Some(Arc::clone(&font)),
                 stated: None,
                 artifact: false,
+                glyph: None,
             }
         })
         .collect();

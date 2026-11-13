@@ -11,7 +11,8 @@
 mod written_support;
 
 use tinker_pdf::{
-    Document, PlainTextOptions, SearchOptions, TextFormat, TextOptions, TextWarning, Unmapped,
+    CharBoxes, Document, PlainTextOptions, SearchOptions, TextFormat, TextOptions, TextWarning,
+    Unmapped,
 };
 use tinker_pdf_cos::DocumentBuilder;
 
@@ -354,6 +355,142 @@ fn an_unmapped_code_falls_back_to_its_code_or_its_glyph_when_asked() {
             "{mode:?}: a fallback is found where it stands"
         );
     }
+}
+
+/// The face's own numbers for one glyph, in its units: its `hmtx` advance
+/// and left side bearing and its `glyf` header's box.
+struct FaceGlyph {
+    advance: f64,
+    lsb: f64,
+    x_min: f64,
+    y_min: f64,
+    x_max: f64,
+    y_max: f64,
+}
+
+/// `face`'s `hhea` ascender and descender and its `head` units an em, read
+/// from the tables' own bytes.
+fn face_vertical(face: &[u8]) -> (f64, f64, f64) {
+    let sfnt = tinker_pdf_font::Sfnt::parse(face).expect("the face parses");
+    let hhea = sfnt.table(u32::from_be_bytes(*b"hhea")).expect("an hhea");
+    let at = |offset: usize| f64::from(i16::from_be_bytes([hhea[offset], hhea[offset + 1]]));
+    (at(4), at(6), f64::from(sfnt.units_per_em))
+}
+
+/// The face's numbers for the glyph its `cmap` gives `c`.
+fn face_glyph(face: &[u8], c: char) -> FaceGlyph {
+    let sfnt = tinker_pdf_font::Sfnt::parse(face).expect("the face parses");
+    let glyph = sfnt.glyph_for_char(c).expect("the face draws it");
+    let bounds = tinker_pdf_font::glyf::bounds(&sfnt, glyph).expect("a glyf header");
+    FaceGlyph {
+        advance: f64::from(sfnt.advance(glyph).expect("an advance")),
+        lsb: f64::from(sfnt.left_side_bearing(glyph).expect("a side bearing")),
+        x_min: f64::from(bounds.x_min),
+        y_min: f64::from(bounds.y_min),
+        x_max: f64::from(bounds.x_max),
+        y_max: f64::from(bounds.y_max),
+    }
+}
+
+/// **Each box option is the face's own metrics** (FT-17.5,
+/// `docs/design/extraction-options.md`'s options 6 and 7): on a page that
+/// embeds Liberation Sans as a simple TrueType font and draws `Hog` upright
+/// and `Hy` under a quarter turn, at 20 points, each character's quad in
+/// each mode is the one the test computes from the face's tables and the
+/// character's origin — the em box from the advance `/Widths` writes; the
+/// metrics from `hhea`'s ascender and descender and the `hmtx` left side
+/// bearing, the right one taken off the advance; the outline from the
+/// `glyf` header — and no mode changes the text, a line, a block or an
+/// origin.
+#[test]
+fn each_box_option_is_the_faces_own_metrics() {
+    const SIZE: f64 = 20.0;
+    let face = liberation_sans();
+    let mut builder = DocumentBuilder::new();
+    assert!(builder.add_embedded_font(b"F0", b"LiberationSans", &face));
+    builder.add_page(300.0, 200.0, |page| {
+        page.raw(
+            b"BT /F0 20 Tf 40 150 Td (Hog) Tj ET \
+              q 0 1 -1 0 250 40 cm BT /F0 20 Tf 0 0 Td (Hy) Tj ET Q",
+        );
+    });
+    let doc = Document::open(built("boxes", builder)).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    let read = |boxes: CharBoxes| {
+        page.text_with(&TextOptions {
+            boxes,
+            ..TextOptions::default()
+        })
+    };
+    let (ascender, descender, units) = face_vertical(&face);
+
+    let em = read(CharBoxes::EmBox);
+    assert_eq!(
+        format!("{em:?}"),
+        format!("{:?}", page.text()),
+        "the em box is Page::text"
+    );
+    let mut checked = 0usize;
+    for boxes in [CharBoxes::EmBox, CharBoxes::FontMetrics, CharBoxes::Outline] {
+        let text = read(boxes);
+        assert_eq!(text.plain_text(), em.plain_text(), "{boxes:?}");
+        assert_eq!(text.blocks().len(), em.blocks().len(), "{boxes:?}");
+        let (lines, em_lines) = (text.lines(), em.lines());
+        assert_eq!(lines.len(), 2, "{boxes:?}: {:?}", text.plain_text());
+        for (line, em_line) in lines.iter().zip(&em_lines) {
+            assert_eq!(line.text, em_line.text);
+            // The baseline's direction and its normal on the page: upright,
+            // or the quarter turn `0 1 -1 0` gives the text's axes.
+            let turned = line.text == "Hy";
+            let (u, v) = if turned {
+                ((0.0, 1.0), (-1.0, 0.0))
+            } else {
+                ((1.0, 0.0), (0.0, 1.0))
+            };
+            for (c, em_c) in line.chars.iter().zip(&em_line.chars) {
+                assert_eq!(c.origin, em_c.origin, "{boxes:?}: the origin stays");
+                let letter = c.text.chars().next().expect("a letter");
+                let g = face_glyph(&face, letter);
+                // `/Widths` holds the advance in whole thousandths.
+                let advance = (g.advance * 1000.0 / units).round() / 1000.0;
+                let (x0, y0, x1, y1) = match boxes {
+                    CharBoxes::EmBox => (0.0, -0.2, advance, 0.8),
+                    CharBoxes::FontMetrics => (
+                        g.lsb / units,
+                        descender / units,
+                        (g.lsb + g.x_max - g.x_min) / units,
+                        ascender / units,
+                    ),
+                    CharBoxes::Outline => (
+                        g.x_min / units,
+                        g.y_min / units,
+                        g.x_max / units,
+                        g.y_max / units,
+                    ),
+                };
+                let at = |gx: f64, gy: f64| {
+                    (
+                        c.origin.0 + SIZE * (gx * u.0 + gy * v.0),
+                        c.origin.1 + SIZE * (gx * u.1 + gy * v.1),
+                    )
+                };
+                for (corner, expected) in [
+                    (c.quad.ll, at(x0, y0)),
+                    (c.quad.lr, at(x1, y0)),
+                    (c.quad.ul, at(x0, y1)),
+                    (c.quad.ur, at(x1, y1)),
+                ] {
+                    assert!(
+                        near(corner, expected),
+                        "{boxes:?} {letter}: {corner:?} against {expected:?} in {:?}",
+                        c.quad
+                    );
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, 15, "five letters in three modes");
 }
 
 /// What `builder` writes, held to the validate-on-save helper as a document

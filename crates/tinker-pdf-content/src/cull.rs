@@ -1058,8 +1058,10 @@ mod tests {
         // And what the device asks of its glyphs: nothing for a recorder, and
         // a glyph index for a text device standing glyphs for theirs.
         for unmapped in [crate::text::Unmapped::Drop, crate::text::Unmapped::Glyph] {
-            let mut text =
-                crate::text::TextDevice::with_options(&crate::text::ExtractionOptions { unmapped });
+            let mut text = crate::text::TextDevice::with_options(&crate::text::ExtractionOptions {
+                unmapped,
+                ..crate::text::ExtractionOptions::default()
+            });
             let asks = text.glyph_queries();
             for (what, cull) in culls() {
                 let culled = Culled::new(&mut text, cull, Black::NONE);

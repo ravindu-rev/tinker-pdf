@@ -118,7 +118,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use tinker_pdf_content::{
-    ExtractionOptions, Quad, TextBlock, TextChar, TextLine, TextPage, Unmapped, WritingMode,
+    CharBoxes, ExtractionOptions, Quad, TextBlock, TextChar, TextLine, TextPage, Unmapped,
+    WritingMode,
 };
 use tinker_pdf_shape::bidi::{
     drawn_reading, faces_outward, logical_order, BaseDirection, DrawnReading,
@@ -159,6 +160,12 @@ pub struct TextOptions {
     /// its code or for the glyph its font program selects. Every such code
     /// is reported as a `TextWarning::UnmappedCode` whatever this says.
     pub unmapped: Unmapped,
+    /// Which box each character is reported with: its em box
+    /// ([`CharBoxes::EmBox`], the default), the font's ascent and descent
+    /// and the glyph's side bearings, or the glyph's outline. Every decision
+    /// from geometry — lines, blocks, ruling 14's order — reads the em box
+    /// whatever this says, so it changes the quads and nothing else.
+    pub boxes: CharBoxes,
 }
 
 impl TextOptions {
@@ -166,6 +173,7 @@ impl TextOptions {
     pub(crate) fn extraction(&self) -> ExtractionOptions {
         ExtractionOptions {
             unmapped: self.unmapped,
+            boxes: self.boxes,
         }
     }
 }
@@ -576,6 +584,9 @@ pub(crate) fn stated_chars(text: &str, glyphs: &[&TextChar], span: Option<u32>) 
                     font: first.font.clone(),
                     stated: span.or(first.stated),
                     artifact: first.artifact,
+                    // No glyph draws it: a box option's box for it is its
+                    // span's (`HeldBoxes::apply`).
+                    glyph: None,
                 });
                 rest = rest.get(next.len_utf8()..).unwrap_or_default();
             }
@@ -1418,6 +1429,7 @@ mod tests {
             font: None,
             stated: None,
             artifact: false,
+            glyph: None,
         }
     }
 
@@ -1903,6 +1915,7 @@ mod tests {
                         font: None,
                         stated: None,
                         artifact: false,
+                        glyph: None,
                     });
                     along += width;
                 }

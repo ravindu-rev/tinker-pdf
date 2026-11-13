@@ -160,6 +160,30 @@ pub struct Glyph {
     /// because answering reads the font program, which nothing else the text
     /// device does needs.
     pub glyph_id: Option<u16>,
+    /// The font's ascent and descent and the glyph's outline bounds, where
+    /// the device asked for them ([`GlyphQueries::extents`]); `None`
+    /// everywhere else, and for a Type 3 glyph, whose shape is a procedure.
+    ///
+    /// Boxed, so that a glyph no device asks this of — every glyph a
+    /// recording of a drawing keeps — carries a word for it and no more.
+    pub extent: Option<Box<GlyphExtent>>,
+}
+
+/// What [`crate::FontSource`] says of a glyph's extent, in the glyph's own
+/// space — where an em is one unit along each axis, before
+/// [`Glyph::transform`] takes it to the page — for a device building a box
+/// other than the em box (`docs/design/extraction-options.md`, options 6 and
+/// 7).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GlyphExtent {
+    /// The font's ascent and its descent, the second below the baseline and
+    /// so normally negative ([`crate::FontSource::font_extent`]); `None`
+    /// where the font states neither.
+    pub ascent_descent: Option<(f64, f64)>,
+    /// The bounds of the glyph's outline, `(x0, y0, x1, y1)`
+    /// ([`crate::FontSource::glyph_ink`]); `None` for a glyph that draws
+    /// nothing — a space — and where no outline is read.
+    pub ink: Option<(f64, f64, f64, f64)>,
 }
 
 /// What a device asks the interpreter to find out about each glyph beyond
@@ -171,6 +195,9 @@ pub struct GlyphQueries {
     /// The glyph index the font program selects for each glyph whose code
     /// maps to no text ([`Glyph::glyph_id`]).
     pub unmapped_glyph_ids: bool,
+    /// The font's ascent and descent and each glyph's outline bounds
+    /// ([`Glyph::extent`]).
+    pub extents: bool,
 }
 
 /// What a content stream asks to be drawn.

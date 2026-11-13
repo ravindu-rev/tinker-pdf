@@ -5,7 +5,7 @@
 //! which is what keeps one malformed instruction from desynchronizing the rest
 //! of the page.
 
-use crate::device::{Device, Glyph, GlyphQueries, ImageRef, MarkedProps, PathSegment};
+use crate::device::{Device, Glyph, GlyphExtent, GlyphQueries, ImageRef, MarkedProps, PathSegment};
 use crate::record::{Answers, Event, RecordingDevice};
 use crate::replay::replay;
 use crate::state::{
@@ -417,6 +417,31 @@ pub trait FontSource {
     /// ([`crate::GlyphQueries::unmapped_glyph_ids`]), and then only for a
     /// glyph whose code maps to no text, in the scope the glyph is shown in.
     fn glyph_id(&self, font: &[u8], code: u32) -> Option<u16> {
+        let _ = (font, code);
+        None
+    }
+
+    /// The named font's ascent and descent, in its glyph space, where an em
+    /// is one unit: the second below the baseline and so normally negative.
+    /// `None` — the default — where the font states neither.
+    ///
+    /// Asked only where the device wants it
+    /// ([`crate::GlyphQueries::extents`]), once for each text-showing
+    /// operator, for [`crate::GlyphExtent::ascent_descent`].
+    fn font_extent(&self, font: &[u8]) -> Option<(f64, f64)> {
+        let _ = font;
+        None
+    }
+
+    /// The bounds of the outline the glyph `code` selects in the named font
+    /// draws, `(x0, y0, x1, y1)` in its glyph space, where an em is one unit:
+    /// `None` — the default — for a glyph that draws nothing and where no
+    /// outline is read.
+    ///
+    /// Asked only where the device wants it
+    /// ([`crate::GlyphQueries::extents`]), once for each glyph shown, for
+    /// [`crate::GlyphExtent::ink`].
+    fn glyph_ink(&self, font: &[u8], code: u32) -> Option<(f64, f64, f64, f64)> {
         let _ = (font, code);
         None
     }
@@ -3869,6 +3894,13 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
         let vertical = self.fonts.is_vertical(&font_name);
         let font_id = self.fonts.font_id(&font_name);
         let font_label = self.fonts.font_name(&font_name);
+        // Asked once an operator, and only of a device that wants it: the
+        // font's ascent and descent are the font's, whichever glyph shows.
+        let ascent_descent = if self.queries.extents {
+            self.fonts.font_extent(&font_name)
+        } else {
+            None
+        };
 
         for (code, text, width) in self.fonts.decode(&font_name, bytes) {
             let ts = self.gs.text.clone();
@@ -4010,6 +4042,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                         font_id,
                         font_name: font_label.clone(),
                         glyph_id: None,
+                        extent: None,
                     };
                     if !reported.text.is_empty() {
                         self.texts_handed = self.texts_handed.saturating_add(1);
@@ -4034,6 +4067,12 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
             } else {
                 None
             };
+            let extent = self.queries.extents.then(|| {
+                Box::new(GlyphExtent {
+                    ascent_descent,
+                    ink: self.fonts.glyph_ink(&font_name, code),
+                })
+            });
             let glyph = Glyph {
                 code,
                 text: text.clone(),
@@ -4045,6 +4084,7 @@ impl<'d, D: Device, F: FontSource> Interpreter<'d, D, F> {
                 font_id,
                 font_name: font_label.clone(),
                 glyph_id,
+                extent,
             };
             if !glyph.text.is_empty() {
                 self.texts_handed = self.texts_handed.saturating_add(1);
@@ -7311,6 +7351,7 @@ mod tests {
             fn glyph_queries(&self) -> GlyphQueries {
                 GlyphQueries {
                     unmapped_glyph_ids: true,
+                    extents: true,
                 }
             }
         }

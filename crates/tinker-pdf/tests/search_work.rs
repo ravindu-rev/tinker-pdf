@@ -291,6 +291,7 @@ fn line_page(text: &str) -> TextPage {
             font: None,
             stated: None,
             artifact: false,
+            glyph: None,
         })
         .collect();
     let bounds = quad(0.0, chars.len() as f64 * 5.0);

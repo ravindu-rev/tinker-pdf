@@ -431,6 +431,7 @@ mod tests {
             vertical: false,
             font_name: None,
             glyph_id: None,
+            extent: None,
         }
     }
 

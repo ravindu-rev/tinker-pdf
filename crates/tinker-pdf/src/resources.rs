@@ -905,6 +905,9 @@ pub(crate) struct ScopeFont {
     /// selection the usage walk asks for, which no instance moves and which
     /// sets none.
     type1_read: OnceLock<Option<Type1<'static>>>,
+    /// The font's ascent and descent, read on the first question a box
+    /// option asks of it ([`FontSource::font_extent`]) and kept.
+    extent: OnceLock<Option<(f64, f64)>>,
 }
 
 /// What a Type 3 font's glyphs are drawn from (9.6.5), read once a scope on
@@ -4388,6 +4391,37 @@ impl FontSource for PageResources {
         self.selection(id, code).map(|selected| selected.glyph)
     }
 
+    /// The font's ascent and descent in an em's units
+    /// (`docs/design/extraction-options.md`, options 6 and 7), the first of:
+    /// an embedded sfnt program's `hhea` ascender and descender over its
+    /// `unitsPerEm`, where they are not both zero; the font descriptor's
+    /// `/Ascent` and `/Descent` over 1000 (Table 120), where they are not
+    /// both zero; its `/FontBBox`'s lower and upper `y` over 1000, where the
+    /// lower is below the upper. A composite font's descriptor is its
+    /// descendant's; a Type 3 font, whose glyph space is its own, has none.
+    /// Read once a scope and kept.
+    fn font_extent(&self, font: &[u8]) -> Option<(f64, f64)> {
+        let found = self.scope_font(font)?;
+        if found.type3 {
+            return None;
+        }
+        *found.extent.get_or_init(|| self.read_extent(&found))
+    }
+
+    /// The bounds of the outline `code` selects in the font `font` names
+    /// here, in an em's units: [`Outline::bounds`] — its points' box,
+    /// control points included, which for a `glyf` glyph is its header's —
+    /// of the outline a render draws ([`GlyphSource::outline`], at the
+    /// instance a render reads). `None` for a glyph that draws nothing, a
+    /// font with no program and a Type 3 font.
+    fn glyph_ink(&self, font: &[u8], code: u32) -> Option<(f64, f64, f64, f64)> {
+        if self.scope_font(font)?.type3 {
+            return None;
+        }
+        let id = FontSource::font_id(self, font);
+        GlyphSource::outline(self, id, code)?.bounds()
+    }
+
     fn type3_glyph(&self, font: &[u8], code: u32) -> Option<tinker_pdf_content::Type3Glyph> {
         // 9.6.5: only a Type 3 font has glyph procedures. Every other kind
         // returns None here, which leaves the ordinary outline path untouched,
@@ -6622,7 +6656,65 @@ impl PageResources {
             procedures: OnceLock::new(),
             type1: OnceLock::new(),
             type1_read: OnceLock::new(),
+            extent: OnceLock::new(),
         })
+    }
+
+    /// What [`FontSource::font_extent`] answers for `found`, read from its
+    /// program and its descriptor.
+    fn read_extent(&self, found: &ScopeFont) -> Option<(f64, f64)> {
+        /// `hhea`.
+        const HHEA: u32 = u32::from_be_bytes(*b"hhea");
+        let from_program = self.program(found.id).and_then(|program| {
+            let sfnt = Sfnt::parse(&program.bytes)?;
+            let hhea = sfnt.table(HHEA)?;
+            let read = |at: usize| {
+                let bytes = hhea.get(at..at + 2)?;
+                Some(f64::from(i16::from_be_bytes([bytes[0], bytes[1]])))
+            };
+            let (ascender, descender) = (read(4)?, read(6)?);
+            let units = f64::from(sfnt.units_per_em.max(1));
+            (ascender != 0.0 || descender != 0.0).then(|| (ascender / units, descender / units))
+        });
+        if from_program.is_some() {
+            return from_program;
+        }
+
+        let dict = found.dict.as_dict()?;
+        // A composite font keeps its descriptor on the descendant.
+        let descendants = self.doc.resolve_key(dict, Name::DESCENDANT_FONTS);
+        let descendant = descendants
+            .as_array()
+            .and_then(<[Object]>::first)
+            .map(|first| self.doc.resolve(first));
+        let holder = descendant
+            .as_deref()
+            .and_then(Object::as_dict)
+            .unwrap_or(dict);
+        let descriptor = self.doc.resolve_key(holder, Name::FONT_DESCRIPTOR);
+        let descriptor = descriptor.as_dict()?;
+        let number = |key: &[u8]| {
+            self.doc
+                .resolve_key(descriptor, self.name(key))
+                .as_number()
+                .filter(|value| value.is_finite())
+        };
+        if let (Some(ascent), Some(descent)) = (number(b"Ascent"), number(b"Descent")) {
+            if ascent != 0.0 || descent != 0.0 {
+                return Some((ascent / 1000.0, descent / 1000.0));
+            }
+        }
+        let bbox = self.doc.resolve_key(descriptor, self.name(b"FontBBox"));
+        let corners: Vec<f64> = bbox
+            .as_array()?
+            .iter()
+            .map(|corner| self.doc.resolve(corner).as_number())
+            .collect::<Option<Vec<f64>>>()?;
+        let [_, lower, _, upper] = corners[..] else {
+            return None;
+        };
+        (lower.is_finite() && upper.is_finite() && lower < upper)
+            .then(|| (upper / 1000.0, lower / 1000.0))
     }
 
     /// A Type 3 font's procedures, as its dictionary `font` gives them: the

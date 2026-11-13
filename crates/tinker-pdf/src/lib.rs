@@ -167,6 +167,9 @@ pub use tables::{
 /// or the content stream's own order (ruling 14), and the extraction options
 /// (`docs/design/extraction-options.md`).
 pub use text_order::TextOptions;
+/// Which box a character of [`Page::text_with`] is reported with
+/// ([`TextOptions::boxes`]).
+pub use tinker_pdf_content::CharBoxes;
 pub use tinker_pdf_content::{
     HyphenCounts, MarkedProps, PlainText, PlainTextOptions, Quad, SearchOptions, TextBlock,
     TextChar, TextLine, TextPage, TextWarning, TextWord, Unmapped, WritingMode,
@@ -3627,12 +3630,15 @@ impl Page {
     /// The page's text, ordered as `options` asks, counting into `work` when
     /// the operation is counting.
     fn text_ordered(&self, options: &TextOptions, work: Option<&Arc<stats::Work>>) -> TextPage {
-        let mut page = self.text_in_content_order(options, work);
+        let (mut page, held) = self.text_in_content_order(options, work);
         if options.content_order {
             text_order::state_in_content_order(&mut page);
         } else {
             self.put_in_logical_order(&mut page);
         }
+        // The boxes a box option asked for go in once the page is read with
+        // the em box, so they change no decision ruling 14 makes.
+        held.apply(&mut page);
         page
     }
 
@@ -3647,19 +3653,21 @@ impl Page {
     }
 
     /// What the content stream showed, in the order it showed it, read as
-    /// `options` asks.
+    /// `options` asks, its characters in their em boxes, and the boxes a box
+    /// option asked for held beside it.
     fn text_in_content_order(
         &self,
         options: &TextOptions,
         work: Option<&Arc<stats::Work>>,
-    ) -> TextPage {
+    ) -> (TextPage, tinker_pdf_content::HeldBoxes) {
         let content = stats::content(&self.doc, &self.inner, work);
         // Text extraction needs no glyph outlines — the widths come from the
         // font dictionary — so no provider is consulted here, and by default
         // no font program is parsed. The glyph-id fallback asks the embedded
-        // program which glyph a code selects (`Device::glyph_queries`), and
-        // its lookups report no unresolved glyph: they read what a code
-        // stands for and draw nothing. One operation, so a form drawn three
+        // program which glyph a code selects, and a box option its ascent and
+        // its glyphs' outlines (`Device::glyph_queries`); those lookups report
+        // no unresolved glyph: they read what a glyph stands for and where its
+        // ink is, and draw nothing. One operation, so a form drawn three
         // times, a Type 3 glyph shown fifty and a font the page and its forms
         // both read are each decoded once.
         let resources = resources::PageResources::new_in(
@@ -3680,7 +3688,7 @@ impl Page {
         for name in resources.missing_fonts() {
             device.warn(TextWarning::UnknownFont { name });
         }
-        device.finish()
+        device.finish_held()
     }
 
     /// What a serialisation of [`Page::text`] needs to know about the page:

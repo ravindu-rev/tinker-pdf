@@ -292,6 +292,30 @@ the lookup adds no `UnknownFont` warning a render would add; and a device that
 asks anything of its glyphs is never handed a kept recording of a form's
 drawing in place of interpreting it.
 
+**The box options** (`TextOptions::boxes`, the design's options 6 and 7). A
+character's quad is its **em box** by default (`CharBoxes::EmBox`): the advance
+wide, 0.8 of an em above the baseline and 0.2 below. `CharBoxes::FontMetrics`
+— ascenders and side bearings — spans a horizontal glyph from where its
+outline's bounds start to where they end, or its advance where it draws
+nothing, and from the font's descent to its ascent; `CharBoxes::Outline` is
+the outline's bounds, the metrics' box for a glyph that draws nothing. The
+ascent and descent are an embedded sfnt program's `hhea` ascender and
+descender over its `unitsPerEm`, else the descriptor's `/Ascent` and
+`/Descent`, else its `/FontBBox`'s heights, else the em box's; a vertical
+glyph keeps the em box for the metrics, and a Type 3 glyph under every
+option. The outline is the one a render draws, `Outline::bounds` of it, in an
+em's units (`FontSource::font_extent`, asked once a showing operator, and
+`FontSource::glyph_ink`, once a glyph, only where a box option asks). Every
+decision from geometry reads the em box whatever the option: the device
+groups lines and blocks by it, and holds the boxes asked for apart
+(`TextDevice::finish_held`, `HeldBoxes`) by each character's glyph — its place
+among the glyphs the page showed, `TextChar::glyph` — until ruling 14 has read
+the page, when the facade puts them in (`HeldBoxes::apply`): each character
+takes its glyph's box, a character an `/ActualText` placed on its span's box
+the union of its span's, and the lines' and blocks' quads are made again from
+the characters'. So a box option changes the quads, and the words', search's
+and the serialisations' boxes built from them, and nothing else.
+
 A horizontal line is measured along its own baseline (`text.rs`'s `Frame`):
 along its first glyph's direction, and across it at a quarter turn from it.
 Where the pen stands after a glyph is the furthest of its box's corners along
@@ -728,7 +752,8 @@ extraction options ([design](../design/extraction-options.md)), each a field
 whose default is `Page::text()`'s reading, so `TextOptions` stays `Copy` and
 `Eq` and a caller names a base for the fields it leaves: `unmapped` keeps a
 glyph whose code maps to no text as a character standing for its code or its
-glyph (above). A page's blocks
+glyph, and `boxes` reports each character in its em box, the font's metrics or
+its outline (above). A page's blocks
 are read through `TextPage::blocks()` and changed only through
 `blocks_mut()`, because a search keeps what it folded them into (below):
 `blocks_mut` drops every kept form before it hands the blocks out, so a
@@ -778,8 +803,10 @@ procedure however often it is shown, a font's CMaps whichever scope reads the
 font first, since every scope of one extraction reads through the decoded
 streams the extraction keeps until it returns (as a render's do,
 [rendering](rendering.md)) — over a scope with no font provider, so a build's
-bundled faces change nothing; under the glyph-id fallback the embedded
-programs its glyph lookups decode are counted as a render's are.
+bundled faces change nothing; under the glyph-id fallback and a box option
+the embedded programs and outlines their lookups read are counted as a
+render's are, and reading a multiple-master program's outlines reports the
+instance it reads, as a render does.
 `Page::images_counted()` returns `Page::images()`'s list with the same:
 `images_decoded` is one decoder run for each entry listed, an image's masks
 part of its decode, and one for each inline image, whose data is the

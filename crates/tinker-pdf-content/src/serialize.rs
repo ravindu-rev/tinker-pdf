@@ -1037,6 +1037,7 @@ mod tests {
             font: font.cloned(),
             stated: None,
             artifact: false,
+            glyph: None,
         }
     }
 

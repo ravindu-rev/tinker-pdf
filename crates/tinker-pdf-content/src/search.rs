@@ -538,6 +538,7 @@ mod tests {
                         font_id: 1,
                         font_name: None,
                         glyph_id: None,
+                        extent: None,
                     },
                     &state,
                 );

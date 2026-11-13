@@ -163,6 +163,7 @@ fn hostile_text_round_trips_through_json_exactly() {
                     font: Some(font.clone()),
                     stated: None,
                     artifact: false,
+                    glyph: None,
                 }],
                 text: hostile.to_string(),
                 quad,
