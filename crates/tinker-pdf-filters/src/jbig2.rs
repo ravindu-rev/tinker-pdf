@@ -334,9 +334,12 @@ pub enum Jbig2Refusal {
     /// 7.4.3.1.1: the `SDHUFFDH` selector chose its reserved value, 2.
     HuffmanDhSelector,
     /// 7.4.3.1.1: the `SDHUFFDW` selector chose its reserved value, 2.
+    ///
+    /// Bits 6 and 7, `SDHUFFBMSIZE` and `SDHUFFAGGINST`, have no refusal of
+    /// their own: each is one bit, B.1 or the next custom table, so neither
+    /// has a value this build does not read, and a custom table the segment
+    /// does not refer to is [`Jbig2Refusal::CustomTableMissing`].
     HuffmanDwSelector,
-    /// 7.4.3.1.1 bits 6 and 7: `SDHUFFBMSIZE` or `SDHUFFAGGINST` chose one.
-    HuffmanBmSizeOrAggInstSelector,
     /// 7.4.2: a dictionary consuming a retained bitmap-coding context that
     /// no segment it refers to left behind.
     ///
@@ -499,7 +502,6 @@ impl Jbig2Refusal {
 
             Self::HuffmanDhSelector
             | Self::HuffmanDwSelector
-            | Self::HuffmanBmSizeOrAggInstSelector
             | Self::RetainedContextMissing
             | Self::RetainedContextMismatch
             | Self::TextTableSelector
@@ -7277,6 +7279,50 @@ mod tests {
                 expected.warning(),
                 Warning::Jbig2VariantSkipped,
                 "flags {flags:#06x} reports the wrong warning outwardly"
+            );
+        }
+    }
+
+    /// **`SDHUFFBMSIZE` and `SDHUFFAGGINST` have no value this build does not
+    /// read.** 7.4.3.1.1 gives each one bit: 0 is Table B.1 and 1 the next
+    /// custom table the dictionary refers to. So a set bit takes the custom
+    /// road, and a dictionary that refers to no Tables segment is refused for
+    /// the missing table, by that name, and for nothing about the selector.
+    #[test]
+    fn the_size_and_instance_selectors_take_a_custom_table_and_refuse_only_its_absence() {
+        // SDHUFF with SDHUFFBMSIZE (bit 6), then with SDHUFFAGGINST (bit 7);
+        // the height and width selectors stay on B.4 and B.2.
+        for flags in [0x0041u16, 0x0081] {
+            let mut data = Vec::new();
+            data.extend_from_slice(&flags.to_be_bytes());
+            data.extend_from_slice(&1u32.to_be_bytes());
+            data.extend_from_slice(&1u32.to_be_bytes());
+            let segment = Segment {
+                number: 1,
+                referred: Vec::new(),
+                kind: kind::SYMBOL_DICTIONARY,
+                page: 1,
+                data: &data,
+                unknown_length: false,
+            };
+            let mut warnings = Vec::new();
+            assert!(
+                symbol_dictionary(
+                    &segment,
+                    &[],
+                    &[],
+                    None,
+                    &mut None,
+                    &mut test_page(1 << 20),
+                    &mut warnings
+                )
+                .is_none(),
+                "flags {flags:#06x} decoded without the table it asks for"
+            );
+            assert_eq!(
+                warnings,
+                vec![Jbig2Refusal::CustomTableMissing],
+                "flags {flags:#06x} refused under the wrong name"
             );
         }
     }

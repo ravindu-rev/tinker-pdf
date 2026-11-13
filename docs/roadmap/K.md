@@ -109,18 +109,6 @@ K-08 extends the mechanism to every new rendered surface.
 | K-08.5 | test | A golden family for fields under formatting scripts: a page of text fields whose appearances show the values `AFNumber_Format`, `AFPercent_Format`, `AFDate_Format` and `AFSpecial_Format` produce, its header naming its clause, entering `UNREVIEWED`, once a formatted value reaches a field's appearance. *Note:* No appearance draws a formatted value today: `formatted_value` returns a `DisplayString` no writer takes (`docs/features/forms.md`). FJ-07's formatting after a committed change is taken as the row that adds the surface. | `crates/tinker-pdf/tests/surface_goldens.rs` (new), `crates/tinker-pdf/tests/goldens/surfaces/formatted-fields.ppm` (new) | `every_surface_golden_is_what_this_build_draws` holds `formatted-fields` byte for byte above its ink floor, `unreviewed` and listed in `UNREVIEWED`, in the default and `bundled-fonts` builds. | K-08.1, FJ-07 |
 | K-08.6 | test | A golden family for OCR text-layer alignment: a scanned-page fixture with its imported invisible text layer drawn visibly over it (each word's box and baseline), so a reviewer sees the layer sit on the words; its header naming its clause, entering `UNREVIEWED`. *Note:* The layer is OC-01's import seam's; the recogniser's own layer (OC-02) joins the family in that row. | `crates/tinker-pdf/tests/surface_goldens.rs` (new), `crates/tinker-pdf/tests/goldens/surfaces/ocr-layer-alignment.ppm` (new) | `every_surface_golden_is_what_this_build_draws` holds `ocr-layer-alignment` byte for byte above its ink floor, `unreviewed` and listed in `UNREVIEWED`, in the default and `bundled-fonts` builds. | K-08.1, OC-01.3 |
 
-## K-18 — A JBIG2 refusal nothing raises
-
-**A JBIG2 refusal nothing raises**: `Jbig2Refusal::HuffmanBmSizeOrAggInstSelector` is matched but never constructed
-
-**Exit criterion.** the variant is raised where its case is decoded, with a test, or it is removed
-
-**Doc:** [features/filters.md](../features/filters.md) · **Depends on:** —
-
-| Step | Kind | What | Where | Exit | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| K-18.1 | fix | Raise the refusal where a symbol dictionary or text region selects its bitmap-size or aggregation-instance table in a way the decoder does not read, or remove the variant if no such case remains. | `crates/tinker-pdf-filters/src/jbig2.rs` | A test in `jbig2.rs`'s tests module meets the refusal, or `git grep` finds no variant. | — |
-
 ## K-19 — PngSuite run locally
 
 **PngSuite run locally**: `png_suite.rs` reads the suite when it is fetched, and CI, which fetches nothing, prints `SKIPPED` for it
