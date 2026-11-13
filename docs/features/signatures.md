@@ -368,6 +368,14 @@ covered span, and flipping one bit of what it draws turns the digest to
 evidence is the vectors that gate `bignum` and the OpenSSL-made key and
 certificate, not a second verifier.
 
+**The seal's picture** is a reviewed-golden surface:
+`crates/tinker-pdf/tests/surface_goldens.rs`'s `visible-signature` is a new
+visible field's seal — a picture and the request's name, date, reason and
+location — rendered with its widget and held byte for byte in both builds,
+its text drawn from the test's own face through the document's font
+provider, and listed unreviewed until a person reads it against 12.7.4.5 and
+12.5.5.
+
 **A signature with no signed attributes** is held to one OpenSSL 3.0.13
 fixture (`tests/signature_support/no-signed-attributes.pdf`, `cms -sign
 -noattr`) and to `tests/signature_shapes.rs`: it verifies and anchors; a

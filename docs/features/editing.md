@@ -890,6 +890,12 @@ encrypted input decrypted; whether the save doors refuse is
   face, embedded — wrapped onto three lines where the layout puts them, and
   set against the right side by `/Q 2`; and a callout from the box to the
   point it calls out, drawn only under `/IT /FreeTextCallout`.
+- `crates/tinker-pdf/tests/surface_goldens.rs`'s `annotation-appearances`
+  golden — one page of every subtype synthesis draws from a design this
+  repository states: a line and a polyline with their endings, a square, a
+  circle and a polygon, an ink path, the four text markups and a free text
+  box in the `/DR`'s embedded face — held byte for byte in both builds and
+  listed unreviewed until a person reads it against 12.5.5 and 12.5.6.
   `appearance.rs`'s own tests pin `Highlight`, `Underline`, `StrikeOut`,
   `Square`, `Circle`, `Text` and `Link` byte for byte and
   each ending's path, decline every subtype whose appearance no dictionary

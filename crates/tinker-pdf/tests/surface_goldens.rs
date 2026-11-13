@@ -17,14 +17,23 @@
 //! XML declaration, compared past that comment byte for byte.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use tinker_pdf::Bitmap;
+use tinker_pdf::{
+    Bitmap, Date, DigestAlgorithm, Document, Rect, RenderOptions, RenderWarning, SignRefused,
+    SignatureAppearance, SignatureImage, Signer, SigningRequest, SigningTarget, SimpleFontProvider,
+    WriteMode, WriteOptions,
+};
+use tinker_pdf_cos::{CosDocument, DocumentEditor, ObjRef};
 
 mod golden_support;
+mod render_support;
 use golden_support::{
-    assert_small_enough, goldens_in, ppm_mismatch, read_header, read_svg_header, reviewer_and_date,
-    svg_body, svg_mismatch, to_ppm, to_svg_golden, Golden, Header, HeaderError, UNREVIEWED_MARK,
+    assert_small_enough, disagreement, goldens_in, ppm_mismatch, ppm_samples, read_header,
+    read_svg_header, reviewer_and_date, svg_body, svg_mismatch, to_ppm, to_svg_golden, Golden,
+    Header, HeaderError, UNREVIEWED_MARK,
 };
+use render_support::curvy_font;
 
 /// The most bytes one surface golden may be: a page of about 145 points
 /// square at 72 dpi. A reviewer reads the whole picture against its clause.
@@ -50,12 +59,27 @@ struct Surface {
 ///
 /// Order-sensitive on purpose, as `render_goldens.rs`'s families are: a
 /// surface dropped from the list is the failure this exists to make visible.
-const SURFACES: &[Surface] = &[];
+const SURFACES: &[Surface] = &[
+    Surface {
+        name: "annotation-appearances",
+        clause: "ISO 32000-1 12.5.5, 12.5.6",
+        draw: annotation_appearances,
+        // About half of what the page paints, 6 895 pixels.
+        least_ink: 3400,
+    },
+    Surface {
+        name: "visible-signature",
+        clause: "ISO 32000-1 12.7.4.5, 12.5.5",
+        draw: visible_signature,
+        // About half of what the page paints, 2 867 pixels.
+        least_ink: 1400,
+    },
+];
 
 /// The surfaces no person has read yet: exactly those whose golden's header
 /// reads `reviewer: unreviewed`. A surface leaves this list when a person has
 /// read its golden against its clause and put their name in it (H-73).
-const UNREVIEWED: &[&str] = &[];
+const UNREVIEWED: &[&str] = &["annotation-appearances", "visible-signature"];
 
 fn surfaces_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -77,7 +101,288 @@ fn ink(bitmap: &Bitmap) -> usize {
         .count()
 }
 
+// ---- the surfaces -----------------------------------------------------------
+
+/// The annotation page's size in points, and so in pixels at 72 dpi.
+const ANNOTATION_PAGE: (f64, f64) = (140.0, 120.0);
+
+/// The subtypes appearance synthesis draws from a design this repository
+/// states, each as `DocumentEditor::add_annotation` is handed it with no
+/// `/AP`: a line with an ending at each point, a polyline with its own two,
+/// the three shapes, an ink path, the four text markups and a free text box,
+/// laid out apart so that each is read on its own.
+const ANNOTATIONS: [&str; 11] = [
+    "<< /Type /Annot /Subtype /Line /Rect [0 0 140 120] /L [10 105 60 105] \
+     /BS << /W 2 >> /C [0.8 0.1 0.1] /IC [0.1 0.3 0.9] /LE [/ClosedArrow /Square] >>",
+    "<< /Type /Annot /Subtype /PolyLine /Rect [0 0 140 120] \
+     /Vertices [75 95 95 112 115 95 132 110] /BS << /W 1.5 >> /C [0.1 0.5 0.2] \
+     /IC [0.95 0.8 0.3] /LE [/Circle /OpenArrow] >>",
+    "<< /Type /Annot /Subtype /Square /Rect [8 58 38 84] /BS << /W 2 >> \
+     /C [0.8 0.1 0.1] /IC [0.95 0.8 0.3] >>",
+    "<< /Type /Annot /Subtype /Circle /Rect [44 58 74 84] /BS << /W 2 >> \
+     /C [0.1 0.3 0.9] /IC [0.7 0.9 0.7] >>",
+    "<< /Type /Annot /Subtype /Polygon /Rect [0 0 140 120] \
+     /Vertices [80 58 108 58 94 84] /BS << /W 1.5 >> /C [0.5 0.1 0.6] /IC [0.9 0.8 0.95] >>",
+    "<< /Type /Annot /Subtype /Ink /Rect [0 0 140 120] /BS << /W 2 >> /C [0.2 0.2 0.2] \
+     /InkList [[114 60 120 82 126 62 132 84]] >>",
+    "<< /Type /Annot /Subtype /Highlight /Rect [0 0 140 120] /C [1 0.85 0.2] \
+     /QuadPoints [8 50 38 50 8 38 38 38] >>",
+    "<< /Type /Annot /Subtype /Underline /Rect [0 0 140 120] /C [0.1 0.3 0.9] \
+     /QuadPoints [42 50 72 50 42 38 72 38] >>",
+    "<< /Type /Annot /Subtype /StrikeOut /Rect [0 0 140 120] /C [0.8 0.1 0.1] \
+     /QuadPoints [76 50 106 50 76 38 106 38] >>",
+    "<< /Type /Annot /Subtype /Squiggly /Rect [0 0 140 120] /C [0.1 0.5 0.2] \
+     /QuadPoints [110 50 134 50 110 38 134 38] >>",
+    "<< /Type /Annot /Subtype /FreeText /Rect [8 4 132 32] /C [0.9 0.95 1] \
+     /BS << /W 1 >> /DA (/Cv 9 Tf 0.1 0.1 0.4 rg) /Contents (Free text in the curvy face) >>",
+];
+
+/// `curvy_font` as a simple TrueType font, its descriptor and its program,
+/// objects 4, 5 and 6: the face the form's `/DR` names `/Cv`, which the free
+/// text annotation's `/DA` selects, so its text is drawn from an embedded
+/// program in every build.
+fn curvy_objects() -> Vec<Vec<u8>> {
+    let program = curvy_font();
+    let widths: Vec<&str> = (32..=126)
+        .map(|code| if code == 32 { "320" } else { "640" })
+        .collect();
+    let font = format!(
+        "<< /Type /Font /Subtype /TrueType /BaseFont /Curvy /Encoding /WinAnsiEncoding \
+         /FirstChar 32 /LastChar 126 /Widths [{}] /FontDescriptor 5 0 R >>",
+        widths.join(" ")
+    );
+    let descriptor = "<< /Type /FontDescriptor /FontName /Curvy /Flags 32 \
+                      /FontBBox [-500 -300 1500 1000] /ItalicAngle 0 /Ascent 750 \
+                      /Descent -250 /CapHeight 700 /StemV 80 /FontFile2 6 0 R >>";
+    let mut file = format!("<< /Length {0} /Length1 {0} >>\nstream\n", program.len()).into_bytes();
+    file.extend_from_slice(&program);
+    file.extend_from_slice(b"\nendstream");
+    vec![font.into_bytes(), descriptor.as_bytes().to_vec(), file]
+}
+
+/// A one-page file: the catalog, whose form's `/DR` holds the face, the
+/// page, the face's three objects, and each of [`ANNOTATIONS`] as an object
+/// of its own from object 7, on no page's `/Annots`.
+fn annotation_fixture() -> Vec<u8> {
+    let (width, height) = ANNOTATION_PAGE;
+    let mut bodies: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R \
+          /AcroForm << /Fields [] /DR << /Font << /Cv 4 0 R >> >> >> >>"
+            .to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Resources << >> >>"
+        )
+        .into_bytes(),
+    ];
+    bodies.extend(curvy_objects());
+    bodies.extend(ANNOTATIONS.iter().map(|a| a.as_bytes().to_vec()));
+
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (index, body) in bodies.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", bodies.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    let size = bodies.len() + 1;
+    out.extend_from_slice(
+        format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    out
+}
+
+/// 12.5.5 and 12.5.6: every annotation of [`ANNOTATIONS`] added through the
+/// editor, which synthesises its appearance, the file saved and opened again
+/// and its page rendered with its annotations.
+fn annotation_appearances() -> Bitmap {
+    let doc = Arc::new(CosDocument::open(annotation_fixture()).expect("the fixture opens"));
+    let mut editor = DocumentEditor::new(Arc::clone(&doc));
+    let ap = doc.intern(b"AP");
+    for num in (7u32..).take(ANNOTATIONS.len()) {
+        let dict = doc
+            .get(ObjRef { num, gen: 0 })
+            .ok()
+            .and_then(|object| object.as_dict().cloned())
+            .expect("each annotation is a dictionary");
+        assert!(!dict.contains_key(ap), "the fixture carries no /AP");
+        editor
+            .add_annotation(0, dict)
+            .expect("the annotation is added");
+    }
+    let saved = editor.save(&WriteOptions {
+        mode: WriteMode::Rewrite,
+        ..WriteOptions::default()
+    });
+    let document = Document::open(saved).expect("the saved file opens");
+    let page = document.page(0).expect("the page");
+    let annotations = page.annotations();
+    assert_eq!(
+        annotations.len(),
+        ANNOTATIONS.len(),
+        "every annotation is on the page"
+    );
+    assert!(
+        annotations.iter().all(|a| a.has_appearance),
+        "and each was given an appearance"
+    );
+    page.render(&RenderOptions::default())
+}
+
+/// The signature page's size in points.
+const SIGNATURE_PAGE: (f64, f64) = (160.0, 70.0);
+
+/// Where the seal goes on it.
+const SEAL: Rect = Rect {
+    x0: 8.0,
+    y0: 8.0,
+    x1: 152.0,
+    y1: 62.0,
+};
+
+/// A signer whose signature is no signature: the seal is what this golden
+/// draws, and it is the same whatever `/Contents` holds.
+struct Unsigned;
+
+impl Signer for Unsigned {
+    fn digest_algorithm(&self) -> DigestAlgorithm {
+        DigestAlgorithm::Sha256
+    }
+
+    fn sign(&self, _digest: &[u8]) -> Result<Vec<u8>, SignRefused> {
+        Ok(Vec::new())
+    }
+}
+
+/// A 24 by 16 greyscale picture: a dark disc on a mid-grey ground.
+fn seal_picture() -> SignatureImage {
+    let (width, height) = (24u32, 16u32);
+    let mut data = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let (dx, dy) = (f64::from(x) - 11.5, f64::from(y) - 7.5);
+            data.push(if dx * dx + dy * dy < 36.0 { 20 } else { 140 });
+        }
+    }
+    SignatureImage::Gray8 {
+        width,
+        height,
+        data,
+    }
+}
+
+/// 12.7.4.5 with 12.5.5: a new visible signature field's seal — a picture,
+/// and the request's who, when, why and where — on a blank page, rendered
+/// with its widget.
+///
+/// The seal names its text's font Helvetica, a standard 14 name a build with
+/// no faces cannot draw and a `bundled-fonts` build draws in a face of its
+/// own; the document is opened with the test's own face as its provider,
+/// which every build asks before any face it bundles, so both builds draw the
+/// seal's text from one program.
+fn visible_signature() -> Bitmap {
+    let mut builder = tinker_pdf::DocumentBuilder::new();
+    builder.add_page(SIGNATURE_PAGE.0, SIGNATURE_PAGE.1, |_| {});
+    let blank = Document::open(builder.finish()).expect("the blank page opens");
+
+    let signer = Unsigned;
+    let mut request = SigningRequest::new(
+        SigningTarget::NewVisibleField {
+            name: "Seal".to_owned(),
+            page: 0,
+            rect: SEAL,
+            appearance: SignatureAppearance::with_image(seal_picture()),
+        },
+        &signer,
+    );
+    request.reserve = 16;
+    request.name = Some("Ada Lovelace".to_owned());
+    request.reason = Some("I approve this page".to_owned());
+    request.location = Some("London".to_owned());
+    request.signed_at = Some(Date {
+        year: 2026,
+        month: 9,
+        day: 26,
+        hour: 10,
+        minute: 30,
+        second: 0,
+        utc_offset_minutes: Some(60),
+    });
+    let signed = blank
+        .editor()
+        .save_signed(
+            &WriteOptions {
+                mode: WriteMode::Incremental,
+                ..WriteOptions::default()
+            },
+            &request,
+        )
+        .expect("the seal is drawn and the file signed");
+
+    let face = Arc::new(SimpleFontProvider::new(curvy_font()));
+    Document::open(signed)
+        .expect("the signed file opens")
+        .with_fonts(face)
+        .page(0)
+        .expect("the page")
+        .render(&RenderOptions::default())
+}
+
 // ---- the checks -------------------------------------------------------------
+
+/// Every surface golden is what this build draws, byte for byte, above the
+/// surface's ink floor and with every glyph it names drawn.
+#[test]
+fn every_surface_golden_is_what_this_build_draws() {
+    let mut wrong = Vec::new();
+    for surface in SURFACES {
+        let bitmap = (surface.draw)();
+        let drawn = ink(&bitmap);
+        assert!(
+            drawn >= surface.least_ink,
+            "{}: the page painted {drawn} pixels, fewer than the {} it is \
+             supposed to -- a blank golden matches a blank render forever",
+            surface.name,
+            surface.least_ink
+        );
+        assert!(
+            !bitmap.warnings.contains(&RenderWarning::UnreadableFont),
+            "{}: a font this build cannot draw, so its glyphs are missing",
+            surface.name
+        );
+        let committed = std::fs::read(golden_path(surface)).expect("the golden reads");
+        wrong.extend(ppm_mismatch(surface.name, &committed, &bitmap));
+    }
+    assert!(wrong.is_empty(), "{}", disagreement(&wrong));
+}
+
+/// One pixel changed in a surface golden is a golden this build does not
+/// draw: every byte is compared, and no tolerance stands between a golden
+/// and the picture.
+#[test]
+fn one_pixel_changed_in_a_surface_golden_fails_it() {
+    for surface in SURFACES {
+        let bitmap = (surface.draw)();
+        let mut committed = std::fs::read(golden_path(surface)).expect("the golden reads");
+        // The middle pixel's first component, one level away.
+        let samples = ppm_samples(&committed).len();
+        let at = committed.len() - samples + samples / 6 * 3;
+        committed[at] ^= 1;
+        assert!(
+            ppm_mismatch(surface.name, &committed, &bitmap).is_some(),
+            "{}: a golden one pixel off still matched",
+            surface.name
+        );
+    }
+}
 
 /// Every surface has a golden whose header names it and its clause, the
 /// surfaces left unreviewed are exactly those `UNREVIEWED` lists, and the
