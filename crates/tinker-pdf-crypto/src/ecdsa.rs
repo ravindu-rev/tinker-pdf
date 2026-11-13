@@ -918,7 +918,10 @@ mod tests {
     }
 
     /// NIST CAVP `SigVer.rsp` from `186-3ecdsatestvectors.zip`, P-256 and
-    /// P-384. Every vector for a digest this crate implements.
+    /// P-384, every vector. A SHA-224 group is verified over the digest
+    /// [`crate::sha2::sha224`] computes, [`DigestAlgorithm`] having no SHA-224
+    /// member, which [`EcPublicKey::verify`] takes as it takes any other
+    /// (FIPS 186-4 §6.4 reads a digest shorter than the order as it stands).
     ///
     /// The failure classes are the file's own: a changed message, a changed
     /// `r`, a changed `s`, and a changed `Q`. The last is the one worth
@@ -932,7 +935,7 @@ mod tests {
         const VECTORS: &str = include_str!("../tests/data/cavp/ecdsa_sigver_p256_p384.rsp");
 
         let mut curve = None;
-        let mut algorithm = None;
+        let mut digest = None;
         let mut message = Vec::new();
         let mut qx = Vec::new();
         let mut qy = Vec::new();
@@ -940,7 +943,6 @@ mod tests {
         let mut s = Vec::new();
 
         let mut ran = 0usize;
-        let mut skipped = 0usize;
         let mut accepted = 0usize;
         let mut rejected = 0usize;
         let mut off_curve = 0usize;
@@ -957,7 +959,7 @@ mod tests {
                     Some("P-384") => Some(Curve::P384),
                     _ => None,
                 };
-                algorithm = parts.next().and_then(algorithm_named);
+                digest = parts.next();
                 continue;
             }
             let Some((name, value)) = line.split_once(" = ") else {
@@ -970,13 +972,17 @@ mod tests {
                 "R" => r = unhex(value),
                 "S" => s = unhex(value),
                 "Result" => {
-                    let (Some(curve), Some(algorithm)) = (curve, algorithm) else {
-                        skipped += 1;
-                        continue;
-                    };
+                    let curve = curve.expect("every group is P-256 or P-384");
                     let expected_valid = value.starts_with('P');
-                    let outcome = EcPublicKey::new(curve, &qx, &qy)
-                        .and_then(|key| key.verify_message(algorithm, &message, &r, &s));
+                    let outcome = EcPublicKey::new(curve, &qx, &qy).and_then(|key| match digest {
+                        Some("SHA-224") => key.verify(&crate::sha2::sha224(&message), &r, &s),
+                        name => {
+                            let algorithm = name
+                                .and_then(algorithm_named)
+                                .expect("every other group names a member");
+                            key.verify_message(algorithm, &message, &r, &s)
+                        }
+                    });
                     if matches!(
                         outcome,
                         Err(EcdsaRefusal::PointNotOnCurve | EcdsaRefusal::PointAtInfinity)
@@ -999,10 +1005,12 @@ mod tests {
             }
         }
 
-        assert_eq!(ran, 120, "vectors run");
-        assert_eq!(skipped, 30, "SHA-224 vectors, which this crate cannot hash");
-        assert_eq!(accepted, 24, "Result = P");
-        assert_eq!(rejected, 96, "Result = F");
+        assert_eq!(
+            ran, 150,
+            "vectors run, the 30 of the SHA-224 groups among them"
+        );
+        assert_eq!(accepted, 30, "Result = P");
+        assert_eq!(rejected, 120, "Result = F");
         // Measured, and worth writing down rather than assuming: none of this
         // file's thirty "Q changed" vectors substitutes a point that is off
         // the curve. They swap in another valid public key, so they exercise

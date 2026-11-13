@@ -1,8 +1,13 @@
-//! SHA-256, SHA-384 and SHA-512 (FIPS 180-4).
+//! The SHA-2 family of FIPS 180-4: SHA-224, SHA-256, SHA-384, SHA-512,
+//! SHA-512/224 and SHA-512/256.
 //!
-//! Revision 6 needs all three: Algorithm 2.B selects among them by a modulo of
-//! the running hash (7.6.4.3.4), so a partial implementation would decrypt some
-//! documents and not others.
+//! Revision 6 needs SHA-256, SHA-384 and SHA-512: Algorithm 2.B selects among
+//! them by a modulo of the running hash (7.6.4.3.4), so a partial
+//! implementation would decrypt some documents and not others. The other three
+//! are the same two computations under their own initial hash values (5.3.2,
+//! 5.3.6.1, 5.3.6.2), each digest the left-most bytes of the final hash value
+//! (6.3, 6.6, 6.7). Every member is held to NIST CAVP's byte-oriented SHAVS
+//! files or FIPS 180-4's examples in the tests below.
 
 const K256: [u32; 64] = [
     0x428a_2f98,
@@ -154,7 +159,8 @@ const K512: [u64; 80] = [
     0x6c44_198c_4a47_5817,
 ];
 
-/// SHA-256 streaming state.
+/// SHA-256 streaming state. SHA-224 is the same computation with different
+/// initial values and a truncated digest (FIPS 180-4 section 6.3).
 #[derive(Clone, Debug)]
 pub struct Sha256 {
     state: [u32; 8],
@@ -172,17 +178,37 @@ impl Default for Sha256 {
 impl Sha256 {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_state([
+            0x6a09_e667,
+            0xbb67_ae85,
+            0x3c6e_f372,
+            0xa54f_f53a,
+            0x510e_527f,
+            0x9b05_688c,
+            0x1f83_d9ab,
+            0x5be0_cd19,
+        ])
+    }
+
+    /// SHA-224, from its initial hash value (5.3.2); its digest is the first
+    /// 28 bytes [`Sha256::finish`] returns.
+    #[must_use]
+    pub fn new_224() -> Self {
+        Self::with_state([
+            0xc105_9ed8,
+            0x367c_d507,
+            0x3070_dd17,
+            0xf70e_5939,
+            0xffc0_0b31,
+            0x6858_1511,
+            0x64f9_8fa7,
+            0xbefa_4fa4,
+        ])
+    }
+
+    fn with_state(state: [u32; 8]) -> Self {
         Self {
-            state: [
-                0x6a09_e667,
-                0xbb67_ae85,
-                0x3c6e_f372,
-                0xa54f_f53a,
-                0x510e_527f,
-                0x9b05_688c,
-                0x1f83_d9ab,
-                0x5be0_cd19,
-            ],
+            state,
             buffer: [0u8; 64],
             buffered: 0,
             length_bits: 0,
@@ -226,6 +252,7 @@ impl Sha256 {
         self.buffered = rest.len();
     }
 
+    /// The full 32-byte final hash value; SHA-224 takes the first 28.
     #[must_use]
     pub fn finish(mut self) -> [u8; 32] {
         let bits = self.length_bits;
@@ -301,8 +328,9 @@ impl Sha256 {
     }
 }
 
-/// SHA-512 streaming state. SHA-384 is the same computation with different
-/// initial values and a truncated digest (FIPS 180-4 section 5.3.4).
+/// SHA-512 streaming state. SHA-384, SHA-512/224 and SHA-512/256 are the same
+/// computation with different initial values and a truncated digest (FIPS
+/// 180-4 sections 6.5 to 6.7).
 #[derive(Clone, Debug)]
 pub struct Sha512 {
     state: [u64; 8],
@@ -343,6 +371,39 @@ impl Sha512 {
             0x8eb4_4a87_6858_1511,
             0xdb0c_2e0d_64f9_8fa7,
             0x47b5_481d_befa_4fa4,
+        ])
+    }
+
+    /// SHA-512/224, from the initial hash value 5.3.6's IV generation
+    /// function gives for t = 224 (5.3.6.1); its digest is the first 28 bytes
+    /// [`Sha512::finish`] returns.
+    #[must_use]
+    pub fn new_512_224() -> Self {
+        Self::with_state([
+            0x8c3d_37c8_1954_4da2,
+            0x73e1_9966_89dc_d4d6,
+            0x1dfa_b7ae_32ff_9c82,
+            0x679d_d514_582f_9fcf,
+            0x0f6d_2b69_7bd4_4da8,
+            0x77e3_6f73_04c4_8942,
+            0x3f9d_85a8_6a1d_36c8,
+            0x1112_e6ad_91d6_92a1,
+        ])
+    }
+
+    /// SHA-512/256, from the initial hash value for t = 256 (5.3.6.2); its
+    /// digest is the first 32 bytes [`Sha512::finish`] returns.
+    #[must_use]
+    pub fn new_512_256() -> Self {
+        Self::with_state([
+            0x2231_2194_fc2b_f72c,
+            0x9f55_5fa3_c84c_64c2,
+            0x2393_b86b_6f53_b151,
+            0x9638_7719_5940_eabd,
+            0x9628_3ee2_a88e_ffe3,
+            0xbe5e_1e25_5386_3992,
+            0x2b01_99fc_2c85_b8aa,
+            0x0eb7_2ddc_81c5_2ca2,
         ])
     }
 
@@ -392,7 +453,8 @@ impl Sha512 {
         self.buffered = rest.len();
     }
 
-    /// The full 64-byte digest; SHA-384 callers take the first 48.
+    /// The full 64-byte final hash value; SHA-384 takes the first 48 bytes,
+    /// SHA-512/256 the first 32 and SHA-512/224 the first 28.
     #[must_use]
     pub fn finish(mut self) -> [u8; 64] {
         let bits = self.length_bits;
@@ -468,6 +530,24 @@ impl Sha512 {
     }
 }
 
+/// The left-most `N` bytes of a final hash value: how FIPS 180-4 truncates a
+/// digest (6.3, 6.5 to 6.7), the hash value's words being big-endian.
+fn leftmost<const N: usize>(full: &[u8]) -> [u8; N] {
+    let mut out = [0u8; N];
+    if let Some(src) = full.get(..N) {
+        out.copy_from_slice(src);
+    }
+    out
+}
+
+/// One-shot SHA-224.
+#[must_use]
+pub fn sha224(data: &[u8]) -> [u8; 28] {
+    let mut h = Sha256::new_224();
+    h.update(data);
+    leftmost(&h.finish())
+}
+
 /// One-shot SHA-256.
 #[must_use]
 pub fn sha256(data: &[u8]) -> [u8; 32] {
@@ -481,12 +561,7 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 pub fn sha384(data: &[u8]) -> [u8; 48] {
     let mut h = Sha512::new_384();
     h.update(data);
-    let full = h.finish();
-    let mut out = [0u8; 48];
-    if let Some(src) = full.get(..48) {
-        out.copy_from_slice(src);
-    }
-    out
+    leftmost(&h.finish())
 }
 
 /// One-shot SHA-512.
@@ -495,6 +570,22 @@ pub fn sha512(data: &[u8]) -> [u8; 64] {
     let mut h = Sha512::new();
     h.update(data);
     h.finish()
+}
+
+/// One-shot SHA-512/224.
+#[must_use]
+pub fn sha512_224(data: &[u8]) -> [u8; 28] {
+    let mut h = Sha512::new_512_224();
+    h.update(data);
+    leftmost(&h.finish())
+}
+
+/// One-shot SHA-512/256.
+#[must_use]
+pub fn sha512_256(data: &[u8]) -> [u8; 32] {
+    let mut h = Sha512::new_512_256();
+    h.update(data);
+    leftmost(&h.finish())
 }
 
 #[cfg(test)]
@@ -548,6 +639,152 @@ mod tests {
         );
     }
 
+    fn unhex(text: &str) -> Vec<u8> {
+        text.trim()
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let digits = std::str::from_utf8(pair).expect("ASCII hex");
+                u8::from_str_radix(digits, 16).expect("a hex byte")
+            })
+            .collect()
+    }
+
+    /// A SHAVS message file's vectors: each `Len`, `Msg` and `MD`, the
+    /// message cut to `Len` bits, because a byte-oriented file prints the
+    /// empty message as `Msg = 00`.
+    fn messages(source: &str) -> Vec<(Vec<u8>, String)> {
+        let mut out = Vec::new();
+        let mut bits = None;
+        let mut message = Vec::new();
+        for line in source.lines() {
+            let Some((name, value)) = line.split_once(" = ") else {
+                continue;
+            };
+            match name.trim() {
+                "Len" => bits = Some(value.trim().parse::<usize>().expect("a bit length")),
+                "Msg" => message = unhex(value),
+                "MD" => {
+                    let bits = bits.take().expect("every MD follows its Len");
+                    assert_eq!(bits % 8, 0, "a byte-oriented file");
+                    message.truncate(bits / 8);
+                    assert_eq!(message.len(), bits / 8, "Msg spells Len bits out");
+                    out.push((core::mem::take(&mut message), value.trim().to_string()));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Hashes every vector of a short- or long-message file and returns how
+    /// many there were, so that a parser matching nothing cannot pass.
+    fn run_messages(source: &str, hash: fn(&[u8]) -> Vec<u8>) -> usize {
+        let vectors = messages(source);
+        for (index, (message, digest)) in vectors.iter().enumerate() {
+            assert_eq!(
+                hex(&hash(message)),
+                *digest,
+                "vector {index}, {} bytes",
+                message.len()
+            );
+        }
+        vectors.len()
+    }
+
+    /// SHAVS 6.4's Monte Carlo test. From the file's seed, each of a hundred
+    /// checkpoints is the last of a thousand digests, every message the three
+    /// digests before it, and seeds the next; returns how many it checked.
+    fn run_monte_carlo(source: &str, hash: fn(&[u8]) -> Vec<u8>) -> usize {
+        let mut seed = Vec::new();
+        let mut checked = 0usize;
+        for line in source.lines() {
+            let Some((name, value)) = line.split_once(" = ") else {
+                continue;
+            };
+            match name.trim() {
+                "Seed" => seed = unhex(value),
+                "COUNT" => assert_eq!(value.trim(), checked.to_string(), "checkpoints in order"),
+                "MD" => {
+                    let [mut a, mut b, mut c] = [seed.clone(), seed.clone(), seed.clone()];
+                    for _ in 3..1003 {
+                        let next = hash(&[a.as_slice(), &b, &c].concat());
+                        a = b;
+                        b = c;
+                        c = next;
+                    }
+                    assert_eq!(hex(&c), value.trim(), "checkpoint {checked}");
+                    seed = c;
+                    checked += 1;
+                }
+                _ => {}
+            }
+        }
+        checked
+    }
+
+    /// NIST CAVP's byte-oriented SHA-224 files: every message length from 0
+    /// to 64 bytes, 64 long messages of many blocks each, and the Monte Carlo
+    /// chain of a hundred thousand digests.
+    #[test]
+    fn cavp_sha224() {
+        let hash = |data: &[u8]| sha224(data).to_vec();
+        let short = include_str!("../tests/data/cavp/sha224_short_msg.rsp");
+        let long = include_str!("../tests/data/cavp/sha224_long_msg.rsp");
+        let monte = include_str!("../tests/data/cavp/sha224_monte.rsp");
+        assert_eq!(run_messages(short, hash), 65, "short messages");
+        assert_eq!(run_messages(long, hash), 64, "long messages");
+        assert_eq!(run_monte_carlo(monte, hash), 100, "Monte Carlo checkpoints");
+    }
+
+    /// The same three files for SHA-512/224: messages of 0 to 128 bytes, 128
+    /// long ones, and the chain.
+    #[test]
+    fn cavp_sha512_224() {
+        let hash = |data: &[u8]| sha512_224(data).to_vec();
+        let short = include_str!("../tests/data/cavp/sha512_224_short_msg.rsp");
+        let long = include_str!("../tests/data/cavp/sha512_224_long_msg.rsp");
+        let monte = include_str!("../tests/data/cavp/sha512_224_monte.rsp");
+        assert_eq!(run_messages(short, hash), 129, "short messages");
+        assert_eq!(run_messages(long, hash), 128, "long messages");
+        assert_eq!(run_monte_carlo(monte, hash), 100, "Monte Carlo checkpoints");
+    }
+
+    /// And for SHA-512/256, the member ISO/TS 32001 adds to PDF's hashes.
+    #[test]
+    fn cavp_sha512_256() {
+        let hash = |data: &[u8]| sha512_256(data).to_vec();
+        let short = include_str!("../tests/data/cavp/sha512_256_short_msg.rsp");
+        let long = include_str!("../tests/data/cavp/sha512_256_long_msg.rsp");
+        let monte = include_str!("../tests/data/cavp/sha512_256_monte.rsp");
+        assert_eq!(run_messages(short, hash), 129, "short messages");
+        assert_eq!(run_messages(long, hash), 128, "long messages");
+        assert_eq!(run_monte_carlo(monte, hash), 100, "Monte Carlo checkpoints");
+    }
+
+    /// 5.3.6's SHA-512/t IV generation function, run for t = 224 and 256:
+    /// SHA-512 over the ASCII name, from SHA-512's initial hash value with
+    /// every word XORed with `a5a5a5a5a5a5a5a5`. It gives the words 5.3.6.1
+    /// and 5.3.6.2 print, which are where `new_512_224` and `new_512_256`
+    /// start.
+    #[test]
+    fn the_sha512_t_initial_values_are_the_iv_generation_function_s() {
+        for (name, start) in [
+            ("SHA-512/224", Sha512::new_512_224()),
+            ("SHA-512/256", Sha512::new_512_256()),
+        ] {
+            let mut iv = Sha512::new().state;
+            for word in &mut iv {
+                *word ^= 0xa5a5_a5a5_a5a5_a5a5;
+            }
+            let mut generator = Sha512::with_state(iv);
+            generator.update(name.as_bytes());
+            let generated = generator.finish();
+            let words: Vec<u8> = start.state.iter().flat_map(|w| w.to_be_bytes()).collect();
+            assert_eq!(generated.to_vec(), words, "{name}");
+        }
+    }
+
     #[test]
     fn streaming_matches_one_shot() {
         let data: Vec<u8> = (0u8..=255).cycle().take(1000).collect();
@@ -563,6 +800,18 @@ mod tests {
             b.update(chunk);
         }
         assert_eq!(b.finish(), sha512(&data));
+
+        let mut c = Sha256::new_224();
+        for chunk in data.chunks(29) {
+            c.update(chunk);
+        }
+        assert_eq!(c.finish().get(..28), Some(&sha224(&data)[..]));
+
+        let mut d = Sha512::new_512_256();
+        for chunk in data.chunks(53) {
+            d.update(chunk);
+        }
+        assert_eq!(d.finish().get(..32), Some(&sha512_256(&data)[..]));
     }
 
     #[test]

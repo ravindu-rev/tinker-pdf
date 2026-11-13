@@ -57,7 +57,9 @@ scrutiny, so here is the honest framing:
   with a private key in the engine is [ROADMAP](docs/ROADMAP.md) rows SG-01
   to SG-09.
 - **Correctness is checked against published vectors** — RFC 1321 for MD5,
-  RFC 6229 for RC4, worked examples for SHA-2, and known-answer tests for AES.
+  RFC 6229 for RC4, worked examples for SHA-256, SHA-384 and SHA-512, NIST
+  CAVP's SHAVS files for SHA-224, SHA-512/224 and SHA-512/256, and
+  known-answer tests for AES.
 
   Stated precisely: for *most* of the cipher and hash primitives the full
   NIST CAVP suites are **not** wired in, and there is no CBC-AES-256 vector

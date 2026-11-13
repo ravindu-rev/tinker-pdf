@@ -1054,15 +1054,17 @@ cover the file the namespace names. The XLink schema states none.
 not redistributed in any built artefact.
 
 `crates/tinker-pdf-crypto/tests/data/cavp/` holds NIST CAVP known-answer
-vectors for RSA and ECDSA signature verification and for Triple DES, from the
-DSS and block-cipher test-vector archives at csrc.nist.gov. NIST publications
+vectors for RSA and ECDSA signature verification, for Triple DES, and for
+SHA-224, SHA-512/224 and SHA-512/256, from the DSS, block-cipher and
+secure-hashing test-vector archives at csrc.nist.gov (the last is
+`shs/shabytetestvectors.zip`, its byte-oriented SHAVS files). NIST publications
 are works of the United States Government and carry no copyright, so there is
 no licence to reproduce. Each file's own header comment records the archive it
 came from, the date it was fetched, the SHA-256 of that archive, the SHA-256 of
 the file inside it, and what was taken — for the two ECDSA files, which curve
-groups were dropped and why; for the seven Triple DES files, that nothing was
-dropped at all. They are `cargo test` inputs, compiled in only under
-`#[cfg(test)]`, and are not in any built artefact.
+groups were dropped and why; for the seven Triple DES files and the nine
+SHA-2 files, that nothing was dropped at all. They are `cargo test` inputs,
+compiled in only under `#[cfg(test)]`, and are not in any built artefact.
 
 `crates/tinker-pdf-crypto/tests/data/pkcs1/pss-vect.txt` is RSA Laboratories'
 PKCS #1 v2.1 RSASSA-PSS test vectors (`pkcs-1v2-1d2-vec.zip`), which RSA no

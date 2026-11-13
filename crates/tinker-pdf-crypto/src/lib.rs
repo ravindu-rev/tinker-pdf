@@ -15,9 +15,9 @@
 //! encryption-on-save (to a password or to a recipient's public key) and
 //! signature *verification*, not a protocol;
 //! correctness is gated on published vectors (FIPS 197, FIPS 180-4, FIPS 46-3,
-//! RFC 6229, RFC 1321, and NIST CAVP for Triple DES and the two signature
-//! schemes) as merge requirements rather than aspirations; password comparison
-//! is constant-time.
+//! RFC 6229, RFC 1321, and NIST CAVP for Triple DES, for SHA-224, SHA-512/224
+//! and SHA-512/256, and for the two signature schemes) as merge requirements
+//! rather than aspirations; password comparison is constant-time.
 //! PDF's own older revisions are weak by design — RC4 at 40 bits protects
 //! nothing — and its permission flags are advisory: a document saying
 //! "printing denied" is asking, not enforcing. Nothing here changes that, and

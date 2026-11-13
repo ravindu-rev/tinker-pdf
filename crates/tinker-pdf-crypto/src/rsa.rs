@@ -35,13 +35,15 @@
 //!
 //! # What it costs
 //!
-//! A digest algorithm this crate does not implement cannot be verified: the
-//! `DigestInfo` prefix is a constant per algorithm and a guessed one would
-//! accept the wrong thing. SHA-1, SHA-256, SHA-384 and SHA-512 are the four
-//! offered; MD2 and MD5 are not, even though RFC 8017 lists them, because no
-//! signature worth checking uses them and a verifier that accepts MD5 is a
-//! verifier that accepts a chosen-prefix collision. SHA-224 is absent for the
-//! simpler reason that the crate has no SHA-224.
+//! A digest algorithm [`DigestAlgorithm`] has no member for cannot be
+//! verified: the `DigestInfo` prefix is a constant per algorithm and a guessed
+//! one would accept the wrong thing. SHA-1, SHA-256, SHA-384 and SHA-512 are
+//! the four offered; MD2 and MD5 are not, even though RFC 8017 lists them,
+//! because no signature worth checking uses them and a verifier that accepts
+//! MD5 is a verifier that accepts a chosen-prefix collision. SHA-224,
+//! SHA-512/224 and SHA-512/256, which [`crate::sha2`] computes, are not
+//! offered either: [`DigestAlgorithm`] is also the selector `tinker-pdf-pki`
+//! resolves a CMS digest OID to, and that reader names none of the three.
 //!
 //! A modulus wider than 4096 bits is refused rather than truncated, and so is
 //! a signature whose length is not exactly the modulus's.
@@ -736,9 +738,10 @@ mod tests {
             "SHA256" => Some(DigestAlgorithm::Sha256),
             "SHA384" => Some(DigestAlgorithm::Sha384),
             "SHA512" => Some(DigestAlgorithm::Sha512),
-            // SHA-224 groups exist in the file; this crate has no SHA-224 and
-            // guessing its DigestInfo prefix would be exactly the kind of
-            // constant this module refuses to invent.
+            // SHA-224 groups exist in the file; `DigestAlgorithm` has no
+            // SHA-224 member to carry its DigestInfo prefix, and a prefix
+            // written here alone would be exactly the kind of constant this
+            // module refuses to invent.
             _ => None,
         }
     }
@@ -1150,7 +1153,10 @@ mod tests {
         }
 
         assert_eq!(ran, 360, "vectors run");
-        assert_eq!(skipped, 90, "SHA-224 vectors, which this crate cannot hash");
+        assert_eq!(
+            skipped, 90,
+            "SHA-224 vectors, which DigestAlgorithm has no member for"
+        );
         assert_eq!(accepted, 60, "Result = P");
         assert_eq!(rejected, 300, "Result = F");
     }
@@ -1239,7 +1245,10 @@ mod tests {
         }
 
         assert_eq!(ran, 360, "vectors run");
-        assert_eq!(skipped, 90, "SHA-224 vectors, which this crate cannot hash");
+        assert_eq!(
+            skipped, 90,
+            "SHA-224 vectors, which DigestAlgorithm has no member for"
+        );
         assert_eq!(accepted, 60, "Result = P");
         assert_eq!(rejected, 300, "Result = F");
         // Sixty of each of NIST's five reasons, so a parser that matched only

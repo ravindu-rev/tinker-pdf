@@ -74,7 +74,6 @@ deterministic by default.
 | Step | Kind | What | Where | Exit | Depends on |
 | --- | --- | --- | --- | --- | --- |
 | SG-04.1 | build | SHA-3-256, -384 and -512 and SHAKE256 on Keccak-f[1600]. *Note:* SHA-3 and the Brainpool curves are on the list H-32 approves, whose default is the list in this tier; SG-04 adds no private-key operation, so H-09's ruling covers none of it. | `crates/tinker-pdf-crypto/src/sha3.rs` (new), `crates/tinker-pdf-crypto/src/lib.rs`, `crates/tinker-pdf-crypto/tests/sha3.rs` (new) | `sha3.rs` (new): NIST SHA3VS vectors pass. | H-92 |
-| SG-04.2 | build | SHA-512/256. | `crates/tinker-pdf-crypto/src/sha2.rs` | CAVP's SHA-512/256 vectors pass. | H-92 |
 | SG-04.3 | build | Brainpool P256r1, P384r1 and P512r1 for verification, retiring `Unchecked::UnsupportedKey` for them. | `crates/tinker-pdf-crypto/src/ecdsa.rs`, `docs/features/signatures.md` | The parameters equal RFC 5639's; Wycheproof's Brainpool verification vectors pass. | H-92 |
 | SG-04.4 | build | DSA verification for legacy signatures. | `crates/tinker-pdf-crypto/src/dsa.rs` (new), `crates/tinker-pdf-pki/src/cms.rs` | CAVP's DSA verification vectors pass. | H-92 |
 | SG-04.5 | build | RSA moduli up to 16 384 bits, the limit a ledger row. | `crates/tinker-pdf-crypto/src/rsa.rs`, `crates/tinker-pdf/tests/bounds_ledger.rs` | 8 192- and 16 384-bit signatures verify; a larger modulus is a typed refusal; the limit is a ledger row. | — |

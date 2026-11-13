@@ -11,7 +11,8 @@
 # would commit 640 KB of vectors no test can run. What remains: 150
 # vectors, 75 per curve, five SHA groups each, 30 Result = P and 120
 # Result = F with the failure reason in the parenthesis. The SHA-224
-# groups are skipped at run time, this crate implementing no SHA-224.
+# groups are verified over the digest sha2::sha224 computes, the
+# DigestAlgorithm selector having no SHA-224 member.
 # SHA-256 of the kept region: 333e470cf0d193f1e880e2e55325cc71942f88c1b0395a08eda3fff4cb98fe5f
 # NIST publications are US Government works and carry no copyright.
 
