@@ -13,9 +13,10 @@
 //! XObject at one reduction, in the default colour spaces its scope paints
 //! device spaces in (8.6.5.6), which are the one thing outside the object a
 //! decode reads; a JPEG's or a JPEG 2000 codestream's frame, which a draw's
-//! size is read against for the reduction it is decoded at; the compiled
-//! transforms of one ICC profile
-//! stream; the recorded drawing of one form under everything its drawing
+//! size is read against for the reduction it is decoded at; the profile one
+//! ICC stream holds, and the compiled transforms of one profile's bytes,
+//! wherever they are embedded; the recorded drawing of one form under
+//! everything its drawing
 //! reads; a glyph's mask under P-06's key and the anti-aliasing a render
 //! rasterises it with. So **a hit is the bytes a miss computes**, and a page
 //! draws the same pixels whatever was drawn before it.
@@ -152,7 +153,11 @@ pub(crate) struct Table {
     images: HashMap<ImageKey, Slot<Arc<CachedImage>>>,
     /// The frames of the images a draw's size reduces.
     frames: HashMap<FrameKey, Slot<Option<Frame>>>,
-    /// Compiled ICC transforms, and the profiles that would not compile.
+    /// The profile each ICC stream holds, and the streams that would not
+    /// decode.
+    profiles: HashMap<ProfileKey, Slot<Option<IccKey>>>,
+    /// Compiled ICC transforms, by the profile's bytes, and the profiles that
+    /// would not compile.
     icc: HashMap<IccKey, Slot<Option<Arc<Transforms>>>>,
     /// Forms' drawings, recorded.
     forms: HashMap<FormKey, Slot<Arc<KeptForm>>>,
@@ -172,6 +177,7 @@ impl Entries for Table {
         match key {
             Key::Image(key) => remove_ready(&mut self.images, key),
             Key::Frame(key) => remove_ready(&mut self.frames, key),
+            Key::Profile(key) => remove_ready(&mut self.profiles, key),
             Key::Icc(key) => remove_ready(&mut self.icc, key),
             Key::Form(key) => remove_ready(&mut self.forms, &**key),
             Key::Mask(key) => remove_ready(&mut self.masks, key),
@@ -212,6 +218,7 @@ enum Slot<V> {
 pub(crate) enum Key {
     Image(ImageKey),
     Frame(FrameKey),
+    Profile(ProfileKey),
     Icc(IccKey),
     Form(Box<FormKey>),
     Mask(MaskKey),
@@ -252,6 +259,18 @@ impl Kind for FrameKey {
     }
 }
 
+impl Kind for ProfileKey {
+    type Value = Option<IccKey>;
+
+    fn slots(table: &mut Table) -> &mut HashMap<Self, Slot<Self::Value>> {
+        &mut table.profiles
+    }
+
+    fn key(&self) -> Key {
+        Key::Profile(*self)
+    }
+}
+
 impl Kind for IccKey {
     type Value = Option<Arc<Transforms>>;
 
@@ -260,7 +279,7 @@ impl Kind for IccKey {
     }
 
     fn key(&self) -> Key {
-        Key::Icc(*self)
+        Key::Icc(self.clone())
     }
 }
 
@@ -362,6 +381,21 @@ impl DocumentCache {
         work: Option<&Work>,
         fill: impl FnOnce() -> Fill<Option<Frame>>,
     ) -> (Option<Frame>, bool) {
+        self.read(key, work, fill)
+    }
+
+    /// The profile the ICC stream under `key` holds, as the transforms of it
+    /// are kept under ([`IccKey`]), or `None` where the stream would not
+    /// decode, and whether the request found it kept, filled as
+    /// [`DocumentCache::image`] fills an image: so a stream is decoded and
+    /// its bytes digested once a document while it is kept, and a stream that
+    /// will not decode is refused once.
+    pub(crate) fn profile(
+        &self,
+        key: ProfileKey,
+        work: Option<&Work>,
+        fill: impl FnOnce() -> Fill<Option<IccKey>>,
+    ) -> (Option<IccKey>, bool) {
         self.read(key, work, fill)
     }
 
@@ -709,12 +743,77 @@ pub(crate) struct FrameKey {
     pub(crate) painted: Written,
 }
 
-/// What a compiled ICC transform is kept under: the profile stream's object,
-/// as a scope's own cache of transforms keys it, so a profile one object
-/// holds compiles once a document however many pages, forms and renders name
-/// it, and one that will not compile is refused once.
+/// What the profile one ICC stream holds is kept under: the stream's object,
+/// which a scope's question about an `ICCBased` space names. Its value is the
+/// profile's key among the transforms ([`IccKey`]), which holds the bytes,
+/// so a stream named on many pages, forms and renders is decoded and its bytes
+/// digested once while it is kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct IccKey(pub(crate) ObjRef);
+pub(crate) struct ProfileKey(pub(crate) ObjRef);
+
+/// What a compiled ICC transform is kept under (`docs/design/icc.md`, P-22,
+/// "The document cache: its key and its charge"): the profile's bytes, their
+/// SHA-256 standing for them in the map and the bytes themselves compared in
+/// full on a hit — so one profile embedded as many objects is one entry, and
+/// two profiles are two whatever their digests — and the destination the
+/// transforms convert toward. The conversion a transform was compiled for —
+/// its rendering intent, and black-point compensation where RC-02 adds it —
+/// is the kept `Transforms`' own key within the entry, so a transform's whole
+/// key is the profile's bytes, the destination and the conversion. A profile
+/// that will not compile is refused under its bytes, once a document.
+#[derive(Clone, Debug)]
+pub(crate) struct IccKey {
+    digest: [u8; 32],
+    profile: Arc<Vec<u8>>,
+    destination: Destination,
+}
+
+/// The colour space a profile's transforms convert toward: sRGB, the only
+/// one this engine converts to; a destination profile (RC-06) is a value of
+/// its own, keyed by its bytes as a source is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Destination {
+    /// IEC 61966-2-1's sRGB.
+    Srgb,
+}
+
+impl IccKey {
+    /// The key of the transforms of `profile`'s bytes toward sRGB.
+    pub(crate) fn srgb(profile: Arc<Vec<u8>>) -> IccKey {
+        IccKey {
+            digest: tinker_pdf_crypto::sha2::sha256(&profile),
+            profile,
+            destination: Destination::Srgb,
+        }
+    }
+
+    /// The profile's bytes.
+    pub(crate) fn profile(&self) -> &[u8] {
+        &self.profile
+    }
+
+    /// The bytes the key holds beside its own fields: the profile's.
+    pub(crate) fn held(&self) -> u64 {
+        u64::try_from(self.profile.len()).unwrap_or(u64::MAX)
+    }
+}
+
+impl PartialEq for IccKey {
+    fn eq(&self, other: &IccKey) -> bool {
+        self.destination == other.destination
+            && self.digest == other.digest
+            && (Arc::ptr_eq(&self.profile, &other.profile) || self.profile == other.profile)
+    }
+}
+
+impl Eq for IccKey {}
+
+impl Hash for IccKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.digest.hash(state);
+        self.destination.hash(state);
+    }
+}
 
 /// What a form's recorded drawing is kept under: the interpreter's
 /// [`FormInvocation`] — the form and everything of the interpretation its

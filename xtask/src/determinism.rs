@@ -284,6 +284,17 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/image_conversion.rs",
         test: "an_image_converts_in_allocations_flat_in_its_colours",
     },
+    // P-22's transform guard: the transforms built over a document are at
+    // most its distinct profile keys, and the icc page rendered twice through
+    // one document is its fingerprint both times, on every target.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/icc_cache.rs",
+        test: "transforms_built_are_at_most_the_distinct_keys",
+    },
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "the_icc_page_rendered_twice_through_one_document_is_its_fingerprint",
+    },
     // MS-01's A8 guard: the PNG path's whole-image scratch, none, and its
     // peak with the file at most 1.2 x the image.
     Fingerprint {

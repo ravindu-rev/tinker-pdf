@@ -3846,6 +3846,60 @@ fn warm_and_starved_caches_render_the_fingerprints() {
     assert_eq!(hits[1], 0, "a budget of zero keeps nothing to find");
 }
 
+/// **The `icc` page rendered twice through one document is its fingerprint
+/// both times** (`docs/design/icc.md`, P-22, "The document cache: its key
+/// and its charge"): under a budget with room for everything it computes,
+/// its first render compiles its profiles' transforms and keeps them under
+/// each profile's bytes, the second compiles none and finds every one kept,
+/// and both hash to the page's committed fingerprint.
+///
+/// **Not a new fingerprint**: the table above is untouched, and a page that
+/// disagrees with it here is a finding about the kept transforms, never a
+/// reason to edit the table.
+#[test]
+fn the_icc_page_rendered_twice_through_one_document_is_its_fingerprint() {
+    let fixture = GOLDEN
+        .iter()
+        .find(|fixture| fixture.name == "icc")
+        .expect("the icc page is fingerprinted");
+    let want = FINGERPRINTS
+        .iter()
+        .find(|(name, _)| *name == "icc")
+        .map(|(_, hash)| *hash)
+        .expect("the icc page has a fingerprint");
+    let (document, at) = opened_under(fixture, CacheLimits::new(256 << 20));
+    let page = document.page(at).expect("a page");
+    let counting = RenderOptions {
+        stats: true,
+        ..RenderOptions::default()
+    };
+    let first = page.render(&counting);
+    let second = page.render(&counting);
+    let (compiled, kept) = (
+        first.stats.expect("a counted render hands its stats back"),
+        second.stats.expect("a counted render hands its stats back"),
+    );
+    assert!(
+        compiled.icc_transform_misses > 0,
+        "the first render compiled the page's profiles: {compiled:?}"
+    );
+    assert_eq!(
+        kept.icc_transform_misses, 0,
+        "the second render compiled none: {kept:?}"
+    );
+    assert!(
+        kept.icc_transform_hits >= compiled.icc_transform_misses,
+        "and found every one kept: {kept:?}"
+    );
+    for (which, bitmap) in [("first", &first), ("second", &second)] {
+        assert_eq!(
+            hashed(fixture, bitmap),
+            want,
+            "the {which} render of the icc page through one document is not its              fingerprint: a kept transform is what compiling it again compiles, so this              is a finding about the cache, never a reason to edit the table"
+        );
+    }
+}
+
 /// `fixture` opened as [`opened`] opens it, with `limits` stated at open, so
 /// that the document's parsed objects are charged to the budget beside its
 /// cache.

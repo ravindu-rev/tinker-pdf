@@ -1654,8 +1654,15 @@ P-16.1's compiled-ICC kind, re-keyed by P-22.7:
   values already, and RC-06's destination profiles are values of the
   destination, keyed by their bytes as the source is: each adds keys and none
   reshapes the kind.
+- **The bytes each stream holds** are kept beside the entries, under the
+  stream's object (`cache::ProfileKey`) and charged their length: a scope's
+  question about an `ICCBased` space names an object, and reading what its
+  bytes are once a document, rather than decoding and digesting the stream at
+  every question, keeps a kept profile's every later question free of both. A
+  stream that will not decode has no bytes, and is refused under its object.
 - **A refusal is kept** under the profile's bytes, so a profile that does not
-  parse is refused once a document.
+  parse is refused once a document, and a stream that will not decode under
+  its object, likewise once.
 - **The charge**, taken when the entry is inserted: the parsed profile's
   tables — its `A2B*` and `D2B*` elements as `Profile::parse` holds them,
   or a matrix/TRC transform's three 4 096-entry curves — and, for each

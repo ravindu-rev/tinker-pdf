@@ -1227,10 +1227,21 @@ room for is used by its render and not kept. `Stats::cache_bytes_held` and
 `Stats::cache_evictions` count the cache's own entries. A budget stated on an
 open document holds the entries alone. An inline image has no
 object and stays the render's. **Compiled ICC transforms** are kept beside the
-images under the profile stream's object, the key a scope's own cache keeps
-them under: a profile named on every page, in a form and by every render
-compiles once while it fits, and one that will not compile is refused once, its
-refusal kept. A set of transforms is charged the most it can come to hold
+images under the profile's bytes (`docs/design/icc.md`, P-22, "The document
+cache: its key and its charge"): their SHA-256 stands for them in the map and
+the bytes themselves are compared in full on a hit, beside the destination,
+sRGB, so a profile named on every page, in a form, in an appearance and by
+every render, or embedded as many objects, compiles once while it fits, and
+the transforms built are at most the distinct keys of a profile's bytes, its
+destination and the conversion each transform is compiled for, the intent
+among it, which the kept transforms key within themselves
+(`icc_cache.rs`'s `transforms_built_are_at_most_the_distinct_keys`). The
+bytes an ICC stream holds are kept beside them under the stream's object,
+charged their length, so a stream is decoded and its bytes digested once a
+document while that is kept. A profile that will not compile is refused under
+its bytes and a stream that will not decode under its object, each once a
+document, its refusal kept. A set of transforms is charged the profile's bytes
+its key holds and the most it can come to hold
 whichever intents are compiled after it is kept and whatever they convert
 (`tinker_pdf_color::icc::Transforms::bytes_bound`): the profile's model, and
 its tables and `D2B*` pipelines as read — one not read yet at the most reading
@@ -1239,7 +1250,9 @@ grid's every node filled and its largest row tables built: relative
 colorimetric's, and one for each other intent at the most any of the
 profile's sources compiles, a model's curves or the largest grid a table or a
 pipeline is read through. So an intent compiled, a grid node filled or a row
-converted later never takes the cache past its budget. **A form's drawing**
+converted later never takes the cache past its budget; past the budget each
+use compiles its own, as with none, and draws the same page
+(`under_a_budget_below_one_grid_every_page_is_the_same`). **A form's drawing**
 is kept too: the interpreter asks for a recording of each form it enters and
 offers each it makes ([content and text](content-and-text.md)), and the
 document keeps it under the interpreter's `FormInvocation`, the usage the

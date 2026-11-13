@@ -34,7 +34,7 @@ use tinker_pdf_render::{
 };
 
 use crate::cache::{
-    self, DocumentCache, Fill, FormKey, FrameKey, IccKey, ImageKey, KeptForm, Written,
+    self, DocumentCache, Fill, FormKey, FrameKey, IccKey, ImageKey, KeptForm, ProfileKey, Written,
 };
 use crate::fonts::{self, FontProvider, FontRequest};
 use crate::optional::OptionalContent;
@@ -2918,23 +2918,58 @@ impl PageResources {
     /// rest (`docs/design/icc.md`, "What compiling per intent costs").
     ///
     /// A document with a budget keeps the transforms in its cache under the
-    /// same key, charged the most bytes they can come to hold whichever
-    /// intents are compiled later (`Transforms::bytes_bound`), so a profile
-    /// named on many pages, forms and renders compiles once while it fits; a
-    /// refusal is kept as firmly, so a profile that will not parse is refused
-    /// once a document. Without one, each scope keeps its own, as it always
+    /// profile's bytes (`cache::IccKey`, `docs/design/icc.md`, P-22, "The
+    /// document cache: its key and its charge"), so a profile named on many
+    /// pages, forms and renders, or embedded as many objects, compiles once
+    /// while it fits, charged the most bytes the transforms can come to hold
+    /// whichever intents are compiled later (`Transforms::bytes_bound`) and
+    /// the profile's bytes its key holds. The bytes each stream holds are
+    /// kept beside them under the stream's object (`cache::ProfileKey`), so a
+    /// stream is decoded and its bytes digested once a document while that is
+    /// kept. A refusal is kept as firmly — a profile that will not parse
+    /// under its bytes, a stream that will not decode under its object — so
+    /// each is refused once a document. Past the budget each use compiles,
+    /// as without one; and without one each scope keeps its own, as it always
     /// did.
     fn icc_transform(
         &self,
         reference: tinker_pdf_cos::ObjRef,
     ) -> Option<Arc<tinker_pdf_color::icc::Transforms>> {
         if let Some(cache) = self.op.cache() {
-            let (compiled, hit) = cache.icc(IccKey(reference), self.op.work.as_deref(), || {
-                let compiled = self.compile_icc(reference);
+            let work = self.op.work.as_deref();
+            let (profile, read) = cache.profile(ProfileKey(reference), work, || {
+                match self.decoded(reference) {
+                    Ok(bytes) => {
+                        let key = IccKey::srgb(bytes);
+                        let held = key.held();
+                        Fill::Keep(Some(key), held)
+                    }
+                    Err(_) => Fill::Keep(None, 0),
+                }
+            });
+            let Some(profile) = profile else {
+                // A stream that will not decode has no profile to compile: it
+                // is refused where it was read, as a profile that will not
+                // parse is refused where its bytes were.
+                self.count(if read {
+                    Counter::IccTransformHits
+                } else {
+                    Counter::IccTransformMisses
+                });
+                return None;
+            };
+            let (compiled, hit) = cache.icc(profile.clone(), work, || {
+                let compiled = tinker_pdf_color::icc::Profile::parse(profile.profile())
+                    .ok()
+                    .and_then(tinker_pdf_color::icc::Transforms::compile)
+                    .map(Arc::new);
                 let bytes = compiled
                     .as_ref()
                     .map_or(0, |transforms| transforms.bytes_bound());
-                Fill::Keep(compiled, u64::try_from(bytes).unwrap_or(u64::MAX))
+                let bytes = u64::try_from(bytes)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(profile.held());
+                Fill::Keep(compiled, bytes)
             });
             self.count(if hit {
                 Counter::IccTransformHits
