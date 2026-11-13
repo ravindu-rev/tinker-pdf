@@ -157,10 +157,11 @@ fn the_crc_covers_the_type_and_the_data_and_not_the_length() {
     assert!(png_scan(&file).is_ok());
 }
 
-/// The IDAT payload is exactly what [`zlib_compress`] makes of the filtered
-/// stream — no second wrapper, no re-framing, nothing between.
+/// The IDAT payload is exactly the fast level's zlib stream of the filtered
+/// stream — no second wrapper, no re-framing, nothing between — though the
+/// writer fed it a row at a time, and a byte for each row's type.
 #[test]
-fn the_idat_is_zlib_compress_of_the_filtered_stream() {
+fn the_idat_is_the_fast_levels_zlib_stream_of_the_filtered_stream() {
     let data: Vec<u8> = (0..64u8).collect();
     let file = png_encode(&packed(8, 8, PngColour::Grey, &data)).expect("an 8 x 8 grey");
     let mut idat = Vec::new();
@@ -169,7 +170,10 @@ fn the_idat_is_zlib_compress_of_the_filtered_stream() {
             idat.extend_from_slice(&body);
         }
     }
-    assert_eq!(idat, zlib_compress(&filtered_stream(&file)));
+    assert_eq!(
+        idat,
+        crate::zlib_compress_at(&filtered_stream(&file), DeflateLevel::Fast)
+    );
 }
 
 // --- Table 11.1 ---------------------------------------------------------
@@ -530,4 +534,138 @@ fn a_varying_alpha_channel_survives_the_write() {
     let rgba: Vec<u8> = vec![1, 2, 3, 0, 4, 5, 6, 77, 7, 8, 9, 255];
     let file = png_encode(&packed(3, 1, PngColour::Rgba, &rgba)).expect("RGBA");
     assert_eq!(png_decode(&file, &CAP).expect("valid").data, rgba);
+}
+
+// --- one pass, and the stream as it is written ------------------------------
+
+/// The choice the encoder made before the one pass: each of the five filters
+/// applied to the row and costed, the first of the cheapest kept.
+fn five_passes(row: &[u8], prior: &[u8], bpp: usize) -> u8 {
+    let mut candidate = vec![0u8; row.len()];
+    let (mut best_kind, mut best_cost) = (0u8, u64::MAX);
+    for kind in FILTERS {
+        filter_row(kind, row, prior, bpp, &mut candidate);
+        let cost = cost_of(&candidate);
+        if cost < best_cost {
+            best_cost = cost;
+            best_kind = kind;
+        }
+    }
+    best_kind
+}
+
+/// A seeded stream of numbers.
+fn seeded(mut state: u64) -> impl FnMut() -> u64 {
+    move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    }
+}
+
+/// The one pass's five sums are the five costs the five passes took, filter
+/// by filter, and it picks the filter they picked, ties included: on random
+/// rows and natural ones — flat, a ramp, a falling ramp, ink dotted on white,
+/// a row repeating the one above — under a random row above and under the
+/// zero row above the first, where None ties Up and Sub ties Paeth, at one to
+/// four bytes a pixel and widths from one pixel up.
+#[test]
+fn the_one_pass_cost_chooses_what_five_passes_chose() {
+    let mut next = seeded(0x9E37_79B9_7F4A_7C15);
+    let mut chosen = [0usize; 5];
+    for bpp in 1..=4 {
+        for width in [1usize, 2, 3, 7, 64, 333] {
+            let len = width * bpp;
+            let random = |next: &mut dyn FnMut() -> u64| -> Vec<u8> {
+                (0..len).map(|_| next() as u8).collect()
+            };
+            let above = random(&mut next);
+            let rows = [
+                random(&mut next),
+                vec![200u8; len],
+                (0..len).map(|i| i as u8).collect(),
+                (0..len).map(|i| 250u8.wrapping_sub(i as u8)).collect(),
+                (0..len)
+                    .map(|i| if i % 7 == 3 { 24 } else { 255 })
+                    .collect(),
+                above.clone(),
+                vec![0u8; len],
+            ];
+            for prior in [above.clone(), vec![0u8; len]] {
+                for row in &rows {
+                    let sums = costs(row, &prior, bpp);
+                    let mut filtered = vec![0u8; len];
+                    for kind in FILTERS {
+                        filter_row(kind, row, &prior, bpp, &mut filtered);
+                        assert_eq!(
+                            sums[usize::from(kind)],
+                            cost_of(&filtered),
+                            "filter {kind}, {bpp} bytes a pixel, {width} wide"
+                        );
+                    }
+                    let kind = cheapest(&sums);
+                    assert_eq!(
+                        kind,
+                        five_passes(row, &prior, bpp),
+                        "{row:?} under {prior:?}"
+                    );
+                    chosen[usize::from(kind)] += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        chosen.iter().all(|&n| n > 0),
+        "every filter is chosen somewhere: {chosen:?}"
+    );
+}
+
+/// The IDAT chunks of a large image are cut as the deflater emits: every
+/// chunk but the last holds 64 KiB or more, none is empty, and together they
+/// are the fast level's zlib stream of the filtered rows.
+#[test]
+fn the_idat_is_cut_into_chunks_as_the_deflater_emits() {
+    let mut next = seeded(17);
+    let (width, height) = (300u32, 300u32);
+    let data: Vec<u8> = (0..width * height * 3).map(|_| next() as u8).collect();
+    let file = png_encode(&packed(width, height, PngColour::Rgb, &data)).expect("a noisy page");
+    let idats: Vec<Vec<u8>> = walk(&file)
+        .into_iter()
+        .filter(|(kind, _)| kind == b"IDAT")
+        .map(|(_, data)| data)
+        .collect();
+    assert!(idats.len() > 2, "{} chunks", idats.len());
+    let (last, full) = idats.split_last().expect("chunks");
+    assert!(full.iter().all(|chunk| chunk.len() >= IDAT_SIZE));
+    assert!(!last.is_empty());
+    assert_eq!(
+        idats.concat(),
+        crate::zlib_compress_at(&filtered_stream(&file), DeflateLevel::Fast)
+    );
+    assert_eq!(png_decode(&file, &CAP).expect("valid").data, data);
+}
+
+/// The writer holds no buffer sized from the image: three rows, the
+/// deflater's fixed state and the file. On a flat page of 2 000 by 2 000
+/// RGBA, sixteen million bytes whose file is small, that is a few per cent
+/// of the image, and it includes the file.
+#[test]
+fn the_writer_holds_rows_its_deflater_and_its_file() {
+    let (width, height) = (2_000u32, 2_000u32);
+    let data = vec![0x7Fu8; (width * height * 4) as usize];
+    let (file, held) =
+        png_encode_counted(&packed(width, height, PngColour::Rgba, &data)).expect("a flat page");
+    assert_eq!(held.image_scratch, 0, "no whole-image buffer");
+    assert!(held.peak >= file.len() + 3 * (width as usize * 4));
+    assert!(
+        held.peak < data.len() / 20,
+        "{} bytes held for an image of {}",
+        held.peak,
+        data.len()
+    );
+    assert_eq!(
+        png_encode(&packed(width, height, PngColour::Rgba, &data)),
+        Ok(file)
+    );
 }

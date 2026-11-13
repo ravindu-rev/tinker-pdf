@@ -354,17 +354,34 @@ other.
 signature, IHDR, IDAT, IEND, each chunk's CRC over its type and its data. It
 is here rather than in the tool that wanted it because a PNG file *is* the
 three things that already lived here and nowhere else — a zlib stream (10.3 is
-`zlib_compress`, RFC 1950), 9.2's row filters (`predictors.rs`, which PDF's
-`/Predictor 15` adopted wholesale) and a chunk CRC-32 — so any other home
-would have had to reach for all three or copy them.
+RFC 1950, which `ZlibDeflater` writes), 9.2's row filters (`predictors.rs`,
+which PDF's `/Predictor 15` adopted wholesale) and a chunk CRC-32 — so any
+other home would have had to reach for all three or copy them.
+
+The file is written as it is made. Each row is costed under the five filters
+in one integer pass, filtered once with the cheapest, and its type byte and
+bytes go to a zlib stream at `DeflateLevel::Fast` — the fast level for
+rendered output is H-42's answer (ruling 23) — which appends each block to
+the open IDAT chunk as it completes; a chunk is closed, its length written
+and its CRC taken over its type and its data, once it reaches 64 KiB and at
+the end, and one zlib stream spans them all (10.3). So the writer holds three
+rows, the deflater's fixed state and the file, and no whole filtered image,
+whole compressed stream or stored copy. `png_encode_counted` returns the file
+with a `PngHeld`: `image_scratch`, the most bytes held at once in buffers
+sized from the image rather than from a row or a constant, none, and `peak`,
+the most held at once with the file — plain numbers handed back, since this
+crate keeps no tally (ruling 8).
 
 All five of 9.2's filter types are emitted, chosen per row by **the minimum
 sum of absolute differences** the specification itself recommends in 12.8,
 with the filtered bytes read as *signed* (a byte of `0xFF` is a difference of
 minus one, and the unsigned reading rejects exactly the rows a filter helped
-most). Integer arithmetic throughout, ties to the lowest-numbered filter, so
-the chosen filter and therefore every compressed byte is identical on every
-target (ruling 4). Across PngSuite each of the five is asserted to be chosen
+most). The five sums are taken in one pass over the row, each byte's five
+filtered values formed from its neighbours and each added to its own sum, so
+they are the five costs the filters would give one at a time. Integer
+arithmetic throughout, ties to the lowest-numbered filter, so the chosen
+filter and therefore every compressed byte is identical on every target
+(ruling 4). Across PngSuite each of the five is asserted to be chosen
 for some row, because an encoder emitting type 0 everywhere would round-trip
 perfectly and exercise 9.2's other four formulas on neither side.
 
@@ -718,7 +735,8 @@ path places a `.jp2` page's own bytes as `/JPXDecode` on the strength of it,
 and `jpx_reference.rs`, the seed replay and the `jpx` fuzz target each hold it
 to agree with the decode it stands in for. The encoder half is `deflate`,
 `zlib_compress`, the streaming `Deflater` and `ZlibDeflater` and their
-whole-input `deflate_at` and `zlib_compress_at`, each at a `DeflateLevel`, `png_encode`
+whole-input `deflate_at` and `zlib_compress_at`, each at a `DeflateLevel`,
+`png_encode` and `png_encode_counted` (the file and a `PngHeld`)
 (takes a `PngSource`, returns the file or a `PngEncodeError`), `ccitt_g4_encode`
 (takes a `CcittSource`, returns the coded bits or a `CcittEncodeError`),
 `jbig2_generic_encode` / `jbig2_generic_region_segment` (take a
@@ -956,7 +974,8 @@ wants the reason to survive it.
   asserted against clause 5 rather than against the
   reader: the signature, IHDR first with 11.2.2's thirteen bytes, IEND last and
   empty, every chunk's CRC recomputed over its type and its data, and the IDAT
-  payload equal to `zlib_compress` of the filtered stream.
+  payload, cut into chunks as the deflater emits, equal to the fast level's
+  zlib stream of the filtered stream.
 - `crates/tinker-pdf/tests/png_input.rs` — `Bitmap::from_png`, the other
   direction of the same mapping: the round trip through `to_png` exact for
   every page format, and every expectation named from the bytes the test wrote

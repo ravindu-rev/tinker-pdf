@@ -859,12 +859,35 @@ impl Bitmap {
     /// ```
     #[must_use]
     pub fn to_png(&self) -> Option<Vec<u8>> {
-        use tinker_pdf_filters::{png_encode, PngColour, PngSource};
+        self.png(None, 0)
+    }
+
+    /// [`Bitmap::to_png`], counting: the file, and what writing it held
+    /// ([`Stats`]) — `png_image_scratch`, the most bytes held at once in
+    /// buffers sized from the image, and `png_peak`, the most held at once
+    /// with the file. A bitmap in one of the four layouts PNG has is written
+    /// with none of the first, its rows streamed into the file; a
+    /// premultiplied one holds its straightened copy, and a `CmykA8` or
+    /// `LabA8` one its RGBA copy. Beside `None`, nothing was written and the
+    /// counts are zero.
+    #[must_use]
+    pub fn to_png_counted(&self) -> (Option<Vec<u8>>, Stats) {
+        let work = stats::Work::new();
+        let png = self.png(Some(&work), 0);
+        (png, work.stats())
+    }
+
+    /// The PNG file, `copies` bytes of copies of the image held beside it,
+    /// what it held counted into `work` when it is counting.
+    fn png(&self, work: Option<&stats::Work>, copies: usize) -> Option<Vec<u8>> {
+        use tinker_pdf_filters::{png_encode_counted, PngColour, PngSource};
 
         // PNG's alpha is straight, so premultiplied colour is divided back
-        // out first; see `RenderOptions::premultiplied` for what that keeps.
+        // out first, into a copy; see `RenderOptions::premultiplied` for what
+        // that keeps.
         if self.premultiplied {
-            return self.straightened()?.to_png();
+            let straight = self.straightened()?;
+            return straight.png(work, copies + straight.data.capacity());
         }
 
         // The four formats PNG already has a colour type for: no copy, and the
@@ -878,23 +901,26 @@ impl Bitmap {
             data: &self.data,
         };
         let converted: Vec<u8>;
-        let source = match self.format {
-            PixelFormat::Gray8 => direct(PngColour::Grey),
-            PixelFormat::GrayA8 => direct(PngColour::GreyAlpha),
-            PixelFormat::Rgb8 => direct(PngColour::Rgb),
-            PixelFormat::Rgba8 => direct(PngColour::Rgba),
+        let (source, copies) = match self.format {
+            PixelFormat::Gray8 => (direct(PngColour::Grey), copies),
+            PixelFormat::GrayA8 => (direct(PngColour::GreyAlpha), copies),
+            PixelFormat::Rgb8 => (direct(PngColour::Rgb), copies),
+            PixelFormat::Rgba8 => (direct(PngColour::Rgba), copies),
             PixelFormat::CmykA8 | PixelFormat::LabA8 => {
                 converted = self.to_rgba()?;
-                PngSource {
+                let source = PngSource {
                     width: self.width,
                     height: self.height,
                     colour: PngColour::Rgba,
                     stride: self.width as usize * 4,
                     data: &converted,
-                }
+                };
+                (source, copies + converted.capacity())
             }
         };
-        png_encode(&source).ok()
+        let (file, held) = png_encode_counted(&source).ok()?;
+        stats::png_held(work, copies + held.image_scratch, copies + held.peak);
+        Some(file)
     }
 
     /// Multiplies every colour component by its pixel's alpha, in place, and

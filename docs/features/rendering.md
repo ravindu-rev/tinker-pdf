@@ -670,7 +670,8 @@ samples and its soft mask's, a font's program and its CMaps, an ICC profile —
 with `most_decodes_of_one_stream`, the most runs any one stream had,
 `most_decoded_stream`, the reference of the stream that had them (the lowest
 of several that tie), and `bytes_decoded`, the bytes the runs returned
-([filters](filters.md)).
+([filters](filters.md)); and, from `Bitmap::to_png_counted`,
+`png_image_scratch` and `png_peak`, maxima of the bytes a PNG write held.
 `Stats::work()` totals the step counts, which leaves out that maximum and that
 quantity, and two `Stats` add with `+`, a maximum keeping the larger. Every
 render door counts the same way: `Page::render`, `Page::render_form` (the
@@ -748,7 +749,14 @@ white rectangle.
 
 `Bitmap::to_png` writes the page out as a PNG file (ISO/IEC 15948), eight bits
 a component, through `tinker_pdf_filters::png_encode` — where the zlib
-stream, the chunk CRC-32 and 9.2's row filters a PNG is made of live. It is
+stream, the chunk CRC-32 and 9.2's row filters a PNG is made of live — its
+rows streamed through a zlib stream at the fast level into the file, so
+writing holds no buffer the size of the image. `Bitmap::to_png_counted` is
+the counted door: the file, and a `Stats` whose `png_image_scratch` is the
+most bytes the write held at once in buffers sized from the image — none for
+the four formats PNG has, the straightened copy of a premultiplied bitmap, the
+RGBA copy of a `CmykA8` or `LabA8` one — and whose `png_peak` is the most held
+at once with the file (guard A8, [performance](../design/performance.md)). It is
 **total over all six `PixelFormat`s**, which matters because a
 page comes back in two of them and the fields are public: `Gray8`, `Rgb8`,
 `GrayA8` and `Rgba8` are colour types 0, 2, 4 and 6 byte for byte, and the two

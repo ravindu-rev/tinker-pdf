@@ -1432,6 +1432,16 @@ impl Deflater {
     fn retained(&self) -> usize {
         self.buffer.capacity()
     }
+
+    /// The bytes the deflater holds: itself, the finder's two tables, the
+    /// window buffer and the block's symbols. Each is bounded by a constant,
+    /// none sized from the input's length.
+    pub(crate) fn held(&self) -> usize {
+        core::mem::size_of::<Deflater>()
+            + (self.finder.head.capacity() + self.finder.ring.capacity()) * 4
+            + self.buffer.capacity()
+            + self.block.symbols.capacity() * 4
+    }
 }
 
 /// A zlib stream (RFC 1950): the two-byte header, a [`Deflater`]'s stream and
@@ -1461,6 +1471,12 @@ impl ZlibDeflater {
         self.header(out);
         self.adler.update(input);
         self.deflater.write(input, out);
+    }
+
+    /// The bytes the stream holds, its deflater's included.
+    pub(crate) fn held(&self) -> usize {
+        core::mem::size_of::<ZlibDeflater>() - core::mem::size_of::<Deflater>()
+            + self.deflater.held()
     }
 
     /// Writes the deflater's rest and the checksum.

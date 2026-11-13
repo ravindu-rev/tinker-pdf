@@ -46,8 +46,8 @@ fn lowest(one: Option<ObjRef>, other: Option<ObjRef>) -> Option<ObjRef> {
 /// What one operation counted: the value a door hands back when asked.
 ///
 /// Every field is public, and each but [`Stats::most_decoded_stream`] a `u64`:
-/// a count of steps of one kind, but for one maximum, the stream it was reached
-/// on, and one quantity, which say so. **It is `#[non_exhaustive]`** so
+/// a count of steps of one kind, but for three maxima, the stream one was
+/// reached on, and one quantity, which say so. **It is `#[non_exhaustive]`** so
 /// that a counter a later row adds — masks rasterised, threads run — is an
 /// addition rather than a break: read a field by name, total the steps with
 /// [`Stats::work`], and sum two with `+`.
@@ -214,6 +214,21 @@ pub struct Stats {
     ///
     /// Counted with `streams_decoded`.
     pub bytes_decoded: u64,
+    /// The most bytes a PNG write held at once in buffers sized from the
+    /// image rather than from a row or a constant: a whole filtered image, a
+    /// whole compressed stream, a stored copy of either, or the copy of a
+    /// bitmap converted to a layout PNG has. A maximum: [`Stats::work`] leaves
+    /// it out, and `+` keeps the larger of two.
+    ///
+    /// Counted by `tinker-pdf-filters`' PNG writer, which hands it back as a
+    /// value, and by the facade's PNG door, which adds the copy it converts.
+    pub png_image_scratch: u64,
+    /// The most bytes a PNG write held at once, its file included: its rows,
+    /// its deflater's state, its file as that grew, and any converted copy.
+    /// A maximum, as `png_image_scratch` is.
+    ///
+    /// Counted with `png_image_scratch`.
+    pub png_peak: u64,
 }
 
 /// One kind of step a [`Work`] counts: a [`Stats`] field, by name.
@@ -272,9 +287,10 @@ impl Stats {
     /// The total of every counter that counts a step taken — the figure a
     /// guard compares at two sizes of one input.
     ///
-    /// A maximum and a quantity are left out — `most_decodes_of_one_stream`
-    /// and `bytes_decoded` — because a byte total grows with the page and
-    /// would hide a step count that grows with the document.
+    /// The maxima and the quantity are left out — `most_decodes_of_one_stream`,
+    /// `bytes_decoded`, `png_image_scratch` and `png_peak` — because a byte
+    /// total grows with the page and would hide a step count that grows with
+    /// the document.
     #[must_use]
     pub fn work(&self) -> u64 {
         [
@@ -403,6 +419,8 @@ impl Add for Stats {
                 Ordering::Equal => lowest(self.most_decoded_stream, other.most_decoded_stream),
             },
             bytes_decoded: self.bytes_decoded.saturating_add(other.bytes_decoded),
+            png_image_scratch: self.png_image_scratch.max(other.png_image_scratch),
+            png_peak: self.png_peak.max(other.png_peak),
         }
     }
 }
@@ -478,6 +496,17 @@ impl Work {
             }
             let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
             stats.bytes_decoded = stats.bytes_decoded.saturating_add(bytes);
+        }
+    }
+
+    /// Records what a PNG write held: `image_scratch` bytes of buffers sized
+    /// from the image and `peak` bytes in all, each kept where it is the
+    /// larger ([`Stats::png_image_scratch`], [`Stats::png_peak`]).
+    pub fn png_held(&self, image_scratch: u64, peak: u64) {
+        if let Ok(mut tally) = self.counts.lock() {
+            let stats = &mut tally.stats;
+            stats.png_image_scratch = stats.png_image_scratch.max(image_scratch);
+            stats.png_peak = stats.png_peak.max(peak);
         }
     }
 
@@ -631,6 +660,23 @@ mod tests {
         assert_eq!(sum.most_decodes_of_one_stream, 3, "a maximum, not a sum");
         assert_eq!(sum.most_decoded_stream, Some(ObjRef::new(1, 0)));
         assert_eq!(thrice.stats() + once.stats(), sum, "in either order");
+    }
+
+    /// A PNG write's two figures are maxima: each keeps the larger, in a
+    /// tally and across `+`, and neither is a step `work()` totals.
+    #[test]
+    fn a_png_writes_held_bytes_keep_the_larger_and_count_no_work() {
+        let work = Work::new();
+        work.png_held(10, 300);
+        work.png_held(4, 900);
+        let stats = work.stats();
+        assert_eq!((stats.png_image_scratch, stats.png_peak), (10, 900));
+        assert_eq!(stats.work(), 0, "bytes held are no step");
+        let other = Work::new();
+        other.png_held(70, 20);
+        let sum = stats + other.stats();
+        assert_eq!((sum.png_image_scratch, sum.png_peak), (70, 900));
+        assert_eq!(other.stats() + stats, sum, "in either order");
     }
 
     #[test]

@@ -1433,8 +1433,9 @@ live, and it holds what they stand on.
 - **The generators**, each held to its shape by a test of its own: a balanced
   tree of ten thousand pages, ten kids a node over four levels; documents of
   a thousand and four thousand pages, a line of text each, for comparing one
-  operation at two sizes; a page of 5 600 glyphs of 80 distinct codes; and
-  four documents of a hundred pages to merge. Each is written object by
+  operation at two sizes; a page of 5 600 glyphs of 80 distinct codes;
+  four documents of a hundred pages to merge; and two A4 pages for the PNG
+  path, seventy lines of text and one. Each is written object by
   object in memory, and every glyph is drawn in an embedded face, so both
   builds count alike and nothing is read from disk.
 - **The pins**: `the_tally_counts_the_same_on_every_target` holds a render's,

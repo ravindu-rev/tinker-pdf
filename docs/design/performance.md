@@ -217,6 +217,8 @@ already carries it.
 | `most_decodes_of_one_stream` | the most runs any one stream had in the operation — a maximum, the quantity A5 holds to one | the same | built |
 | `most_decoded_stream` | the reference of the stream that had those runs, the lowest of a tie — what names a stream a page keeps decoding | the same | built |
 | `bytes_decoded` | a byte a filter chain returned — a quantity | the same | built |
+| `png_image_scratch` | a byte of a buffer a PNG write sized from the image rather than from a row or a constant, the most held at once — a maximum, the quantity A8 holds to none | `tinker-pdf-filters`' PNG writer, handed back as a value (`PngHeld`), and the facade's PNG door for a copy it converts | built |
+| `png_peak` | a byte a PNG write held, its file included, the most at once — a maximum, A8's peak | the same | built |
 
 `work()` sums every counter that counts a step taken, and leaves out maxima and
 quantities — `most_decodes_of_one_stream`, `bytes_decoded`, and every byte or
@@ -292,6 +294,7 @@ tree — or a list, or a verdict whose fields other code compares.
 | validation | `Document::validate_pdfa_counted(&self, PdfACoverage)`, and `validate_pdfua_counted` and `validate_pdfx_counted` alike | `(verdict, Stats)` | built |
 | page lookup, the document door | `Document::page_counted(&self, index: u32)` | `(Option<Page>, Stats)` | built |
 | reading-order inference | `Document::inferred_orders_counted(&self, Range<u32>, &InferenceOptions)` | `(Vec<InferredOrder>, Stats)` | built |
+| PNG, the bitmap door | `Bitmap::to_png_counted(&self)` | `(Option<Vec<u8>>, Stats)` | built |
 
 `Bitmap::stats` is a public field rather than a method: a method needs a field
 the caller cannot see, and one private field would stop every hand-built
@@ -483,7 +486,7 @@ lands in the step named, in
 | A6 | merge deduplication decodes no byte-identical copy, and each differing encoding under one dictionary once a save (ruling 23) | `a6_merge_deduplication_decodes_no_copy_and_each_differing_encoding_once` | P-03, P-03.6, landed |
 | A7 | IDCT output ≤ 4 × drawn pixels for a quarter-scale draw | `a_jpeg_drawn_at_a_quarter_transforms_four_samples_a_pixel`, in `crates/tinker-pdf/tests/images.rs` | P-09, P-09.8 |
 | A7 | JPX levels decoded ≤ levels needed | `a_jpx_image_drawn_at_a_quarter_decodes_two_levels_fewer`, in `crates/tinker-pdf/tests/jpx_images.rs` | P-10, P-10.8 |
-| A8 | whole-image scratch on the PNG path ≤ 1 × the image | `a8_the_png_path_holds_at_most_one_image_of_scratch` | P-04, P-04.5 |
+| A8 | whole-image scratch on the PNG path ≤ 1 × the image | `a8_the_png_path_holds_at_most_one_image_of_scratch` | P-04, P-04.5, landed |
 | A9 | page-parallel renders byte-identical to serial at 2, 3, 4 and 7 threads | `a9_page_walks_are_the_serial_walk_at_2_3_4_and_7_threads` | P-15, P-15.3 |
 | A9 | band-parallel renders byte-identical to serial at 2, 3, 4 and 7 threads | `a9_band_renders_are_the_serial_page_at_2_3_4_and_7_threads` | P-15, P-15.7 |
 | A10 | allocations O(1) per page: page lookup | `a10_page_lookup_allocates_a_flat_amount_per_page`, in `crates/tinker-pdf/tests/guard_allocations.rs` | P-01, P-01.3, landed |
@@ -1211,7 +1214,7 @@ text of the document the operation reads, so all six stay inside the group.
 
 | Id | Unit · an iteration | Input | Tier P | Window | Step |
 | --- | --- | --- | --- | --- | --- |
-| `encode/PNG of the 1240x1755 text page` | pixels · 1240×1755 | the text page's 150-dpi bitmap, rendered once, `Bitmap::to_png` (`lib.rs:832`) | 269 → 40; 6.72× | in | built |
+| `encode/PNG of the 1240x1755 text page` | pixels · 1240×1755 | the text page's 150-dpi bitmap, rendered once, `Bitmap::to_png` (`lib.rs:861`) | 269 → 40; 6.72× | in | built |
 | `encode/PNG of the near-blank page` | pixels · 2 × 1240×1755 | a 150-dpi bitmap of a page holding one line | 145 → 15; 9.66× | ×2 | built |
 | `encode/deflate page-like data` | bytes · 6 528 600 | `page_like()`, `deflate_at` at `DeflateLevel::Ratio` (`deflate.rs:1475`); the planning baseline runs `deflate` | 40 → 120 MB/s (163 → 54); 3×; size ≤ 1.02 × level 6's, exact | in | built |
 | `encode/deflate photo-like data` | bytes · 6 528 600 | `photo_like()`, the same | 28 → 40 MB/s (233 → 163); 1.4×; size likewise | in | built |
@@ -2914,15 +2917,19 @@ compressed stream and no stored copy.
 #### A8, and the scratch bound
 
 `tinker-pdf-filters` counts, on the PNG path, the bytes of every buffer it
-sizes from the image rather than from a row or a constant — the filtered
-image, the finder's per-byte chain, the stored copy, the compressed stream
-and its copy into chunks — and the facade's PNG door (`Bitmap::to_png`, as
-MS-01's `Stats`) reports the most of them live at once. **A8** holds that to
-one image (`a8_the_png_path_holds_at_most_one_image_of_scratch`, P-04.5),
-which P-04.5 meets with none; and the row's scratch bound, the path's peak
-with its output at most 1.2 × the image's bytes, holds on MS-04's two PNG
-inputs, the 1240 × 1755 text page and the near-blank page, where three rows
-and the deflater's 384 KiB are a few per cent of the image. MS-05's band for
+sizes from the image rather than from a row or a constant — a filtered image,
+a per-byte chain, a stored copy, a compressed stream or its copy into chunks,
+of which the streaming writer holds none — and hands them back as a value,
+`PngHeld`, beside its peak with the file; the facade's counted PNG door
+(`Bitmap::to_png_counted`) adds the copy it converts, where it converts one,
+and reports both in MS-01's `Stats`, as `png_image_scratch` and `png_peak`.
+**A8** holds the first to one image
+(`a8_the_png_path_holds_at_most_one_image_of_scratch`), which the writer meets
+with none, and the row's scratch bound, the path's peak with its output at
+most 1.2 × the image's bytes, on two A4 pages at 150 dpi, 1240 × 1755, written
+in the guard suite: a text page and a near-blank page, the shapes of MS-04's
+two PNG inputs, where three rows and the deflater's 384 KiB are a few per
+cent of the image. MS-05's band for
 rendering at 300 dpi to PNG holds the process's peak (P-04.8).
 
 #### The level-6 size bound

@@ -7,8 +7,8 @@
 //! it existed: "a PNG writer would mean a deflate encoder in a test tool, and
 //! the engine already has one it should not depend on from here." The premise
 //! was right and the conclusion was backwards. Everything a PNG writer needs is
-//! *already in this crate and nowhere else*: [`crate::zlib_compress`] is RFC
-//! 1950, which is byte for byte what 10.3 puts inside IDAT; [`Crc32`] is 5.3's
+//! *already in this crate and nowhere else*: [`crate::ZlibDeflater`] writes
+//! RFC 1950, which is byte for byte what 10.3 puts inside IDAT; [`Crc32`] is 5.3's
 //! per-chunk checksum with the resumable shape 5.3 needs, because the checksum
 //! covers a chunk's type and its data and those are never adjacent in one
 //! buffer; and `predictors.rs` already owns 9.2's predictor because PDF's
@@ -54,7 +54,7 @@
 
 use super::{ChunkType, PngColour, MAX_CHUNK_LEN, MAX_DIMENSION};
 use crate::crc32::Crc32;
-use crate::deflate::zlib_compress;
+use crate::deflate::{DeflateLevel, ZlibDeflater};
 use crate::predictors::paeth;
 
 /// Why a raster could not be written as a PNG.
@@ -125,7 +125,32 @@ pub struct PngSource<'a> {
 
 /// 9.2's five filter types, in the specification's own numbering — which is
 /// also the byte that precedes every scanline.
+#[cfg(test)]
 const FILTERS: [u8; 5] = [0, 1, 2, 3, 4];
+
+/// An IDAT chunk is closed once its data reaches this many bytes, and at the
+/// end of the stream.
+const IDAT_SIZE: usize = 1 << 16;
+
+/// The most of a row the deflater is handed in one write, so that what one
+/// write appends to a chunk is bounded however wide the row is, and a chunk
+/// stays far under 5.3's `MAX_CHUNK_LEN`. Arrival is no input of the
+/// deflater's, so how a row is cut changes no byte.
+const FEED: usize = 1 << 16;
+
+/// What [`png_encode_counted`] held as it wrote, in bytes: plain numbers,
+/// handed back as a value, since this crate keeps no tally (ruling 8).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PngHeld {
+    /// The most held at once in buffers sized from the image rather than
+    /// from a row or a constant — a whole filtered image, a whole compressed
+    /// stream, a stored copy of either. The writer sizes none: it holds three
+    /// rows, the deflater's state, which is fixed, and the file.
+    pub image_scratch: usize,
+    /// The most held at once, the file included: the three rows, the
+    /// deflater's state and the file as it grew.
+    pub peak: usize,
+}
 
 /// Writes a complete PNG file: signature, IHDR, IDAT, IEND.
 ///
@@ -133,6 +158,22 @@ const FILTERS: [u8; 5] = [0, 1, 2, 3, 4];
 /// Any [`PngEncodeError`] — all three are a raster that does not describe a
 /// picture.
 pub fn png_encode(source: &PngSource<'_>) -> Result<Vec<u8>, PngEncodeError> {
+    png_encode_counted(source).map(|(file, _)| file)
+}
+
+/// [`png_encode`], and what writing the file held ([`PngHeld`]).
+///
+/// Each row is costed under the five filters in one pass and filtered once,
+/// with the cheapest; its type byte and bytes go to a zlib stream at the fast
+/// level ([`DeflateLevel::Fast`]), which appends to the open IDAT chunk as it
+/// completes each block, and the chunk is closed — its length written and
+/// its CRC taken over its type and its data — once it reaches 64 KiB and at
+/// the end. So no whole filtered image, whole compressed stream or stored
+/// copy is ever held (`docs/design/performance.md`, P-04).
+///
+/// # Errors
+/// Any [`PngEncodeError`], as [`png_encode`].
+pub fn png_encode_counted(source: &PngSource<'_>) -> Result<(Vec<u8>, PngHeld), PngEncodeError> {
     let (width, height) = (source.width, source.height);
     if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
         return Err(PngEncodeError::BadDimensions { width, height });
@@ -167,22 +208,84 @@ pub fn png_encode(source: &PngSource<'_>) -> Result<Vec<u8>, PngEncodeError> {
     let row_bytes = row_bytes as usize;
     let bpp = source.colour.components() as usize;
 
-    let filtered = filter_rasters(source, row_bytes, bpp);
-
     let mut out = Vec::from(super::PNG_SIGNATURE);
     chunk(&mut out, super::IHDR, &ihdr(source));
-    // 5.3 caps a chunk at `2^31 - 1` bytes and 10.3 lets one zlib stream span
-    // any number of IDATs, so the compressed bytes are cut at that ceiling
-    // rather than refused. For every raster this engine can render the loop
-    // runs exactly once — a page is capped at 67.1 Mpx, which is 268 MB of
-    // RGBA before compression — and it is written as a loop anyway because
-    // `Vec::chunks` costs nothing when there is one chunk, where a refusal
-    // would be a branch that can only ever fire on a caller's own buffer.
-    for part in zlib_compress(&filtered).chunks(MAX_CHUNK_LEN as usize) {
-        chunk(&mut out, super::IDAT, part);
+
+    // 10.3 lets one zlib stream span any number of IDATs, so the stream is
+    // cut wherever the deflater has appended past a chunk's size: one chunk
+    // for a small image, and never one near 5.3's ceiling.
+    let mut zlib = ZlibDeflater::new(DeflateLevel::Fast);
+    let mut idat = Idat::open(&mut out);
+    let mut prior = vec![0u8; row_bytes];
+    let mut current = vec![0u8; row_bytes];
+    let mut filtered = vec![0u8; row_bytes];
+    for y in 0..source.height as usize {
+        let at = y * source.stride;
+        // Bounded by the `ShortData` check above, and read through `get`
+        // regardless (ruling 1): a `Vec` index is a panic and this one is
+        // arithmetic on a caller's number.
+        match source.data.get(at..at + row_bytes) {
+            Some(row) => current.copy_from_slice(row),
+            None => current.fill(0),
+        }
+        let kind = cheapest(&costs(&current, &prior, bpp));
+        filter_row(kind, &current, &prior, bpp, &mut filtered);
+        zlib.write(&[kind], &mut out);
+        idat.cut(&mut out);
+        for piece in filtered.chunks(FEED) {
+            zlib.write(piece, &mut out);
+            idat.cut(&mut out);
+        }
+        core::mem::swap(&mut prior, &mut current);
     }
+    let rows = prior.capacity() + current.capacity() + filtered.capacity();
+    let state = zlib.held();
+    zlib.finish(&mut out);
+    idat.close(&mut out);
     chunk(&mut out, super::IEND, b"");
-    Ok(out)
+    let held = PngHeld {
+        image_scratch: 0,
+        peak: rows + state + out.capacity(),
+    };
+    Ok((out, held))
+}
+
+/// The IDAT chunk being written: where it starts in the file.
+struct Idat {
+    start: usize,
+}
+
+impl Idat {
+    /// Opens a chunk at the end of `out`: its length, written when it
+    /// closes, and its type.
+    fn open(out: &mut Vec<u8>) -> Idat {
+        let start = out.len();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&super::IDAT.0);
+        Idat { start }
+    }
+
+    /// Closes the chunk and opens the next once it has reached
+    /// [`IDAT_SIZE`].
+    fn cut(&mut self, out: &mut Vec<u8>) {
+        if out.len() - self.start - 8 >= IDAT_SIZE {
+            self.close(out);
+            *self = Idat::open(out);
+        }
+    }
+
+    /// 5.3: the chunk's length, over its data, and its CRC-32, over its type
+    /// and its data and not its length.
+    fn close(&self, out: &mut Vec<u8>) {
+        let data = out.len() - self.start - 8;
+        // A chunk is cut a bounded write past `IDAT_SIZE`, so the length fits;
+        // `unwrap_or` the ceiling all the same (ruling 1).
+        let len = u32::try_from(data).unwrap_or(MAX_CHUNK_LEN);
+        out[self.start..self.start + 4].copy_from_slice(&len.to_be_bytes());
+        let mut crc = Crc32::new();
+        crc.update(&out[self.start + 4..]);
+        out.extend_from_slice(&crc.finish().to_be_bytes());
+    }
 }
 
 /// 11.2.2's thirteen bytes.
@@ -214,57 +317,6 @@ const fn colour_type(colour: PngColour) -> u8 {
         PngColour::GreyAlpha => 4,
         PngColour::Rgba => 6,
     }
-}
-
-/// Every scanline filtered by whichever of the five costs least, each one
-/// prefixed with its type byte (9.1), concatenated into the stream that goes
-/// inside IDAT.
-fn filter_rasters(source: &PngSource<'_>, row_bytes: usize, bpp: usize) -> Vec<u8> {
-    // One tag plus one row per scanline, exactly. Saturating rather than plain
-    // arithmetic: `png_encode` has already shown that `row_bytes x height` fits
-    // the caller's buffer, but the extra tag byte a row is not in that buffer,
-    // and a reservation that wraps is an allocation smaller than what is about
-    // to be pushed into it (ruling 1).
-    let mut filtered = Vec::with_capacity(
-        row_bytes
-            .saturating_add(1)
-            .saturating_mul(source.height as usize),
-    );
-    let mut prior = vec![0u8; row_bytes];
-    let mut current = vec![0u8; row_bytes];
-    let mut candidate = vec![0u8; row_bytes];
-    let mut best = vec![0u8; row_bytes];
-
-    for y in 0..source.height as usize {
-        let at = y * source.stride;
-        // Bounded by the `ShortData` check in `png_encode`, and read through
-        // `get` regardless (ruling 1): a `Vec` index is a panic and this one
-        // is arithmetic on a caller's number.
-        match source.data.get(at..at + row_bytes) {
-            Some(row) => current.copy_from_slice(row),
-            None => current.fill(0),
-        }
-
-        let (mut best_kind, mut best_cost) = (0u8, u64::MAX);
-        for kind in FILTERS {
-            filter_row(kind, &current, &prior, bpp, &mut candidate);
-            let cost = cost_of(&candidate);
-            // Strictly less, so the first of a tie wins and the choice does
-            // not depend on iteration order being stable (ruling 4). 9.2's own
-            // ordering puts None first, which is the one a decoder unfilters
-            // fastest, so a tie resolving to it is the right tie to take.
-            if cost < best_cost {
-                best_cost = cost;
-                best_kind = kind;
-                best.copy_from_slice(&candidate);
-            }
-        }
-
-        filtered.push(best_kind);
-        filtered.extend_from_slice(&best);
-        core::mem::swap(&mut prior, &mut current);
-    }
-    filtered
 }
 
 /// ISO/IEC 15948 9.2, Table 9.1 — the **filtering** direction, which is the
@@ -300,7 +352,7 @@ fn filter_row(kind: u8, row: &[u8], prior: &[u8], bpp: usize, out: &mut [u8]) {
             // 3, Average. 9.2 is explicit that the sum is formed without
             // overflow and the floor is taken before the subtraction, which is
             // why the addition happens in `u16` and not in `u8`.
-            3 => x.wrapping_sub(((u16::from(a) + u16::from(b)) / 2) as u8),
+            3 => x.wrapping_sub(average(a, b)),
             // 4, Paeth. The predictor itself is `predictors.rs`'s, which is
             // the one this crate's decoder unfilters with and the one PDF's
             // `/Predictor 15` reaches. **Deliberately shared rather than
@@ -322,24 +374,86 @@ fn filter_row(kind: u8, row: &[u8], prior: &[u8], bpp: usize, out: &mut [u8]) {
 
 /// The heuristic ISO/IEC 15948 12.8 recommends for choosing a filter: **the
 /// minimum sum of absolute differences**, over the filtered bytes read as
-/// signed values.
+/// signed values — each of the five filters' sums for `row` under `prior`,
+/// in one pass over the row: at each byte the five filtered values are
+/// formed from `a`, `b` and `c`, as [`filter_row`] forms them, and each
+/// added to its own sum.
 ///
 /// Signed is the whole content of the rule and the easy half to lose. A
 /// filtered byte of `0xFF` is a difference of **-1**, which is a very good
 /// prediction; read unsigned it is 255, the worst score there is, and a
 /// heuristic reading it that way rejects exactly the rows the filter helped
-/// most. So `128..=255` counts as `256 - b`, which is `|b - 256|`.
+/// most. So `128..=255` counts as `256 - b`, which is `|b - 256|`
+/// ([`magnitude`]).
 ///
-/// Integer arithmetic only, and a `u64` accumulator that cannot overflow: the
-/// largest term is 128 and the longest row this crate will encode is bounded
-/// by a `usize`, so the sum is under `2^63` on any target (ruling 4). A float
-/// score would make the chosen filter — and therefore every compressed byte —
+/// Integer arithmetic only, and `u64` sums that cannot overflow: the largest
+/// term is 128 and the longest row this crate will encode is bounded by a
+/// `usize`, so a sum is under `2^63` on any target (ruling 4). A float score
+/// would make the chosen filter — and therefore every compressed byte —
 /// depend on the target's rounding.
+fn costs(row: &[u8], prior: &[u8], bpp: usize) -> [u64; 5] {
+    let mut sums = [0u64; 5];
+    let lead = bpp.min(row.len()).min(prior.len());
+    // The first pixel's bytes: `a` and `c` fall outside the image, which 9.2
+    // makes zero.
+    for (&x, &b) in row[..lead].iter().zip(&prior[..lead]) {
+        add_costs(&mut sums, x, 0, b, 0);
+    }
+    // Every later byte, its `a` and `c` a pixel back.
+    let left = row.iter().zip(prior);
+    for ((&x, &b), (&a, &c)) in row[lead..].iter().zip(&prior[lead..]).zip(left) {
+        add_costs(&mut sums, x, a, b, c);
+    }
+    sums
+}
+
+/// Adds one byte's five filtered values to their sums, in 9.2's order: None,
+/// Sub, Up, Average and Paeth.
+#[inline]
+fn add_costs(sums: &mut [u64; 5], x: u8, a: u8, b: u8, c: u8) {
+    sums[0] += magnitude(x);
+    sums[1] += magnitude(x.wrapping_sub(a));
+    sums[2] += magnitude(x.wrapping_sub(b));
+    sums[3] += magnitude(x.wrapping_sub(average(a, b)));
+    sums[4] += magnitude(x.wrapping_sub(paeth(a, b, c)));
+}
+
+/// A filtered byte as 12.8 scores it: its distance from zero, read signed.
+#[inline]
+fn magnitude(byte: u8) -> u64 {
+    u64::from(if byte < 128 {
+        byte
+    } else {
+        0u8.wrapping_sub(byte)
+    })
+}
+
+/// 9.2's Average predictor: the sum formed without overflow and the floor
+/// taken before it is used, which is why the addition is in `u16`.
+#[inline]
+fn average(a: u8, b: u8) -> u8 {
+    ((u16::from(a) + u16::from(b)) / 2) as u8
+}
+
+/// The filter of the five sums that is cheapest. Strictly less, so the first
+/// of a tie wins and the choice does not depend on an order of visiting
+/// (ruling 4); 9.2's own ordering puts None first, which is the one a decoder
+/// unfilters fastest, so a tie resolving to it is the right tie to take.
+fn cheapest(costs: &[u64; 5]) -> u8 {
+    let mut best = 0;
+    for (kind, &cost) in costs.iter().enumerate() {
+        if cost < costs[best] {
+            best = kind;
+        }
+    }
+    best as u8
+}
+
+/// 12.8's sum over `filtered`, one filter's bytes: what [`costs`] adds up
+/// for each filter at once, kept to hold it to the five passes it replaced.
+#[cfg(test)]
 fn cost_of(filtered: &[u8]) -> u64 {
-    filtered
-        .iter()
-        .map(|&b| u64::from(if b < 128 { b } else { 0u8.wrapping_sub(b) }))
-        .sum()
+    filtered.iter().map(|&byte| magnitude(byte)).sum()
 }
 
 /// 5.3's chunk layout: a four-byte length, a four-byte type, the data, and a
@@ -357,8 +471,8 @@ fn cost_of(filtered: &[u8]) -> u64 {
 /// module's injection matrix: it makes every file this engine writes
 /// unreadable, including by this engine.
 fn chunk(out: &mut Vec<u8>, kind: ChunkType, data: &[u8]) {
-    // Every caller is either a fixed 13 bytes, an empty IEND, or a slice cut
-    // at `MAX_CHUNK_LEN`, so the conversion cannot fail; `unwrap_or` rather
+    // Every caller is a fixed 13 bytes or an empty IEND, so the conversion
+    // cannot fail; `unwrap_or` rather
     // than an `unwrap` all the same (ruling 1), and the fallback is the
     // ceiling 5.3 names so a hypothetical over-long chunk is refused by a
     // reader rather than mis-parsed by one.

@@ -283,13 +283,16 @@ const ROSTER: &[Guard] = &[
             "P-10.8",
         )
     },
-    owed(
-        "A8",
-        "whole-image scratch on the PNG path at most 1 x the image",
-        "a8_the_png_path_holds_at_most_one_image_of_scratch",
-        "P-04",
-        "P-04.5",
-    ),
+    Guard {
+        state: State::Landed,
+        ..owed(
+            "A8",
+            "whole-image scratch on the PNG path at most 1 x the image",
+            "a8_the_png_path_holds_at_most_one_image_of_scratch",
+            "P-04",
+            "P-04.5",
+        )
+    },
     owed(
         "A9",
         "page-parallel renders byte-identical to serial at 2, 3, 4 and 7 threads",
@@ -1369,4 +1372,115 @@ fn a6_merge_deduplication_decodes_no_copy_and_each_differing_encoding_once() {
          one program for the face",
         stats.streams_decoded, stats.bytes_decoded
     );
+}
+
+// ---- A8: the PNG path's scratch ------------------------------------------------
+
+/// The text page's lines: A4 at 9 pt on 11, from the top margin to the
+/// bottom.
+const A8_LINES: usize = 70;
+
+/// Line `line` of A8's pages: words of three to nine letters from a seeded
+/// sequence, so that no two lines are alike.
+fn a8_line(line: usize) -> String {
+    let mut state = 0x2545_F491_4F6C_DD1Du64 ^ (line as u64 + 1);
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut text = String::new();
+    while text.len() < 80 {
+        for _ in 0..3 + next() % 7 {
+            text.push(char::from(b'a' + (next() % 26) as u8));
+        }
+        text.push(' ');
+    }
+    text
+}
+
+/// An A4 page of `lines` lines in the embedded face, the shape of the encode
+/// group's two PNG inputs: the text page, and the near-blank page of one
+/// line. 1 the catalog, 2 the page tree, 3 to 5 the face, 6 the page, 7 its
+/// content.
+fn a8_page(lines: usize) -> Vec<u8> {
+    let mut content = String::from("BT /F1 9 Tf 11 TL 36 806 Td\n");
+    for line in 0..lines {
+        content.push_str(&format!("({}) Tj T*\n", a8_line(line)));
+    }
+    content.push_str("ET");
+    let mut objects = vec![
+        object("<< /Type /Catalog /Pages 2 0 R >>"),
+        object("<< /Type /Pages /Count 1 /Kids [6 0 R] >>"),
+    ];
+    objects.extend(face(3));
+    objects.push(object(
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]\n\
+         /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>",
+    ));
+    objects.push(deflated("", content.as_bytes()));
+    pdf(&objects)
+}
+
+/// A8's pages read back as the lines they were written with: seventy on the
+/// text page, none alike, and one on the near-blank page.
+#[test]
+fn a8s_pages_hold_their_lines() {
+    for lines in [A8_LINES, 1] {
+        let document = Document::open(a8_page(lines)).expect("the A8 page opens");
+        let read = document.page(0).expect("its page").text().plain_text();
+        let read: Vec<&str> = read
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        let written: Vec<String> = (0..lines).map(a8_line).collect();
+        assert_eq!(read.len(), lines, "{read:?}");
+        for (read, written) in read.iter().zip(&written) {
+            assert_eq!(read.trim(), written.trim());
+        }
+        let distinct: BTreeSet<&String> = written.iter().collect();
+        assert_eq!(distinct.len(), lines, "no two lines alike");
+    }
+}
+
+/// **A8**: writing a page to PNG holds no buffer sized from the image — the
+/// rows stream through the deflater into the file — and holds at most 1.2
+/// times the image's bytes with the file, on a page of text and a near-blank
+/// page at 150 dpi, each read back as the bitmap it was.
+#[test]
+fn a8_the_png_path_holds_at_most_one_image_of_scratch() {
+    for (name, lines) in [("text", A8_LINES), ("near-blank", 1)] {
+        let document = Document::open(a8_page(lines)).expect("the A8 page opens");
+        let page = document.page(0).expect("its page");
+        let bitmap = page.render(&RenderOptions::at_dpi(150.0));
+        assert_eq!((bitmap.width, bitmap.height), (1240, 1755), "{name}: A4");
+        assert!(
+            bitmap.data.iter().any(|&byte| byte < 128),
+            "{name}: the page draws its text"
+        );
+        let image = bitmap.data.len() as u64;
+        let (png, stats) = bitmap.to_png_counted();
+        let png = png.expect("the bitmap is a picture");
+        assert_eq!(stats.png_image_scratch, 0, "{name}: no whole-image scratch");
+        assert!(
+            10 * stats.png_peak <= 12 * image,
+            "{name}: {} bytes held for an image of {image}",
+            stats.png_peak
+        );
+        assert!(
+            stats.png_peak >= png.len() as u64,
+            "{name}: the file is held"
+        );
+        assert_eq!(stats.work(), 0, "a write takes no counted step");
+        let back = tinker_pdf::Bitmap::from_png(&png).expect("the file reads back");
+        assert_eq!(back.data, bitmap.data, "{name}: the file is the bitmap");
+        println!(
+            "guard-a8-{name}: RAN {} bytes of image scratch, {} held with a file of {}, \
+             for an image of {image}",
+            stats.png_image_scratch,
+            stats.png_peak,
+            png.len()
+        );
+    }
 }

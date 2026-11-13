@@ -73,6 +73,16 @@ pub(crate) fn content(
     cos_pages::content_bytes_counted(doc, page, work.map(|work| &**work))
 }
 
+/// Records what a PNG write held, when the operation is counting:
+/// `image_scratch` bytes of buffers sized from the image, and `peak` bytes in
+/// all, the file included.
+pub(crate) fn png_held(work: Option<&Work>, image_scratch: usize, peak: usize) {
+    if let Some(work) = work {
+        let bytes = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        work.png_held(bytes(image_scratch), bytes(peak));
+    }
+}
+
 /// Adds what a renderer counted — its glyphs shown and outlines painted — to
 /// the operation's tally, when it is counting. The renderer has no edge to the
 /// tally's crate and hands its counts back as a value instead.

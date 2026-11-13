@@ -106,7 +106,7 @@ use crate::{inflate, predictor_decode, Limits, PredictorParams, Tail, Warning, W
 
 mod encode;
 
-pub use encode::{png_encode, PngEncodeError, PngSource};
+pub use encode::{png_encode, png_encode_counted, PngEncodeError, PngHeld, PngSource};
 
 // --- the budget ---------------------------------------------------------
 

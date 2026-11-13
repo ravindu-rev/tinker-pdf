@@ -101,9 +101,9 @@ pub use jxr::{
 };
 pub use mq::{encoder::MqEncoder, MqContext, MqContexts, MqDecoder};
 pub use png::{
-    colour_type_depth_is_legal, png_decode, png_encode, png_scan, ChunkType, PngColour,
-    PngEncodeError, PngError, PngHeader, PngImage, PngScan, PngSource, PngTransparency,
-    MAX_PNG_SAMPLES, PNG_SIGNATURE,
+    colour_type_depth_is_legal, png_decode, png_encode, png_encode_counted, png_scan, ChunkType,
+    PngColour, PngEncodeError, PngError, PngHeader, PngHeld, PngImage, PngScan, PngSource,
+    PngTransparency, MAX_PNG_SAMPLES, PNG_SIGNATURE,
 };
 pub use predictors::PredictorParams;
 pub use raster::ImagePixels;
