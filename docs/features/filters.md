@@ -25,8 +25,18 @@ blocks whenever those are smaller — they compress every stream the writer
 emits, object streams included. `Deflater` is the streaming encoder: input is
 fed in pieces into a window buffer of two windows, 64 KiB, and each block, of
 16 384 symbols or what the input's end leaves, is appended to the caller's
-output as it completes, stored or fixed-coded, whichever is fewer bits, and
-stored only while its input is still in the buffer. Its bytes are a function
+output as it completes, stored, fixed-coded or in a dynamic code of its own,
+whichever is fewest bits, a tie going to the simpler, and stored only while
+its input is still in the buffer. A dynamic block's code (RFC 1951 3.2.7) is
+built from the block's own counts by package-merge: the lengths that cost
+the fewest bits within 15, ties settled by symbol order, and complete, the
+lowest spare symbols standing in where fewer than two are counted. Its header
+sends both alphabets' lengths as one sequence run-length coded with 16, 17
+and 18, under a code-length code limited to 7 bits, each count trimmed of
+trailing zeros. `crates/tinker-pdf/tests/deflate_size.rs` holds the ratio
+level to at most 1.02 times the bytes level 6 gives the benchmark set's
+page-like and photo-like inputs, counts committed beside their generators
+(ruling 17). Its bytes are a function
 of the input alone, never of how the input was cut into writes (ruling 4):
 block boundaries follow symbol counts, a position is searched only with 262
 bytes ahead of it or at the input's end, and the buffer slides only when it

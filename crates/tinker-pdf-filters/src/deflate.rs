@@ -9,7 +9,8 @@
 //! [`Deflater`] is the streaming one (`docs/design/performance.md`, P-04):
 //! input is fed in pieces into a window buffer of two windows, and whole
 //! blocks are appended to the caller's output as they complete, each written
-//! stored or fixed-coded, whichever is fewer bits. It runs at one of two
+//! stored, fixed-coded or in a dynamic code of its own (RFC 1951 §3.2.7),
+//! whichever is fewest bits. It runs at one of two
 //! levels ([`DeflateLevel`]): fast, greedy over a short chain, or ratio, over
 //! a long chain with a lazy step. [`ZlibDeflater`] wraps it in RFC 1950's
 //! header and a running Adler-32, and [`deflate_at`] and [`zlib_compress_at`]
@@ -749,18 +750,20 @@ impl Block {
     }
 }
 
-/// The bits a block costs fixed-coded, header and end included.
-fn fixed_bits(block: &Block) -> u64 {
-    let mut bits = 3 + u64::from(FIXED_LITERALS[256].1);
+/// The bits `block`'s symbols and its end cost in `literals` and
+/// `distances`, extra bits included.
+fn symbol_bits(block: &Block, literals: &[Code], distances: &[Code]) -> u64 {
+    let mut bits = u64::from(literals[256].1);
     for (symbol, &count) in block.literals.iter().enumerate() {
         let extra = match symbol.checked_sub(257) {
             Some(index) => LENGTH_TABLE[index].1,
             None => 0,
         };
-        bits += u64::from(count) * u64::from(u32::from(FIXED_LITERALS[symbol].1) + extra);
+        bits += u64::from(count) * u64::from(u32::from(literals[symbol].1) + extra);
     }
     for (index, &count) in block.distances.iter().enumerate() {
-        bits += u64::from(count) * u64::from(5 + DISTANCE_TABLE[index].1);
+        bits +=
+            u64::from(count) * u64::from(u32::from(distances[index].1) + DISTANCE_TABLE[index].1);
     }
     bits
 }
@@ -822,6 +825,290 @@ fn write_symbols(
         }
     }
     bits.code(out, literals[256]);
+}
+
+/// The longest literal/length or distance code (RFC 1951 §3.2.7).
+const MAX_BITS: usize = 15;
+/// The longest code of the code-length code: its lengths are sent in three
+/// bits.
+const MAX_LENGTH_BITS: usize = 7;
+/// The order the code-length code's lengths are sent in (RFC 1951 §3.2.7).
+const LENGTH_ORDER: [usize; 19] = [
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+];
+
+/// Code lengths for symbols counted `counts`, none longer than `limit`
+/// bits, by package-merge: the lengths that cost the fewest bits under the
+/// limit, a tie between equal weights settled by symbol order, so that they
+/// depend on the counts alone.
+///
+/// A code needs two symbols, so where fewer are counted the lowest symbols
+/// the counts leave out stand in, counted once; every code is then complete,
+/// its lengths satisfying Kraft's equality. `counts` holds at least two
+/// symbols and at most `2^limit`.
+fn code_lengths(counts: &[u32], limit: usize) -> Vec<u8> {
+    let mut lengths = vec![0u8; counts.len()];
+    let mut leaves: Vec<(u64, usize)> = counts
+        .iter()
+        .enumerate()
+        .filter(|&(_, &count)| count > 0)
+        .map(|(symbol, &count)| (u64::from(count), symbol))
+        .collect();
+    let mut spare = counts
+        .iter()
+        .enumerate()
+        .filter(|&(_, &count)| count == 0)
+        .map(|(symbol, _)| symbol);
+    while leaves.len() < 2 {
+        match spare.next() {
+            Some(symbol) => leaves.push((1, symbol)),
+            None => break,
+        }
+    }
+    // By weight, then by symbol: every key differs, so the order is total.
+    leaves.sort_unstable();
+    let n = leaves.len();
+    if n < 2 {
+        return lengths;
+    }
+
+    // Each list is one denomination's items, lightest first: the leaves, and
+    // the packages of the pairs of the list below, a leaf before a package
+    // of its weight. An item is its weight and the leaf it is, or `None` for
+    // a package.
+    let mut lists: Vec<Vec<(u64, Option<usize>)>> = Vec::with_capacity(limit);
+    lists.push(
+        leaves
+            .iter()
+            .enumerate()
+            .map(|(index, &(weight, _))| (weight, Some(index)))
+            .collect(),
+    );
+    for _ in 1..limit {
+        let Some(below) = lists.last() else { break };
+        let mut packages = below
+            .chunks_exact(2)
+            .map(|pair| pair[0].0 + pair[1].0)
+            .peekable();
+        let mut leaf = leaves
+            .iter()
+            .map(|&(weight, _)| weight)
+            .enumerate()
+            .peekable();
+        let mut list = Vec::with_capacity(n + below.len() / 2);
+        loop {
+            match (leaf.peek().copied(), packages.peek().copied()) {
+                (Some((index, weight)), Some(package)) if weight <= package => {
+                    list.push((weight, Some(index)));
+                    leaf.next();
+                }
+                (_, Some(package)) => {
+                    list.push((package, None));
+                    packages.next();
+                }
+                (Some((index, weight)), None) => {
+                    list.push((weight, Some(index)));
+                    leaf.next();
+                }
+                (None, None) => break,
+            }
+        }
+        lists.push(list);
+    }
+
+    // The 2n - 2 lightest items of the top list are the code: a leaf among
+    // them adds one to its symbol's length, and the packages among them are
+    // the lightest of theirs, so they are made of the lightest items below.
+    let mut take = 2 * n - 2;
+    for list in lists.iter().rev() {
+        let mut packages = 0;
+        for &(_, item) in list.iter().take(take) {
+            match item {
+                Some(index) => lengths[leaves[index].1] += 1,
+                None => packages += 1,
+            }
+        }
+        take = 2 * packages;
+    }
+    lengths
+}
+
+/// RFC 1951 §3.2.2's canonical code for `lengths`, each code reversed for
+/// writing, into `codes`.
+fn canonical(lengths: &[u8], codes: &mut [Code]) {
+    let mut count = [0u32; MAX_BITS + 1];
+    for &length in lengths {
+        count[usize::from(length)] += 1;
+    }
+    count[0] = 0;
+    let mut next = [0u32; MAX_BITS + 1];
+    let mut code = 0u32;
+    for bits in 1..=MAX_BITS {
+        code = (code + count[bits - 1]) << 1;
+        next[bits] = code;
+    }
+    for (slot, &length) in codes.iter_mut().zip(lengths) {
+        *slot = match length {
+            0 => (0, 0),
+            length => {
+                let code = &mut next[usize::from(length)];
+                // A complete code of at most 15 bits: every code fits.
+                let reversed = reversed(*code as u16, length);
+                *code += 1;
+                (reversed, length)
+            }
+        };
+    }
+}
+
+/// The extra bits each code-length symbol carries: 16 repeats the previous
+/// length 3 to 6 times, 17 a zero 3 to 10 times, 18 a zero 11 to 138 times.
+fn length_extra(symbol: u8) -> u32 {
+    match symbol {
+        16 => 2,
+        17 => 3,
+        18 => 7,
+        _ => 0,
+    }
+}
+
+/// `lengths` as RFC 1951 §3.2.7 sends them, one sequence over both
+/// alphabets: each run of a length a literal and as many 16s as it fills,
+/// and each run of zeros 18s, then a 17, then literal zeros. Each entry is a
+/// code-length symbol and its extra bits' value.
+fn runs(lengths: &[u8]) -> Vec<(u8, u8)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < lengths.len() {
+        let length = lengths[at];
+        let run = lengths[at..]
+            .iter()
+            .take_while(|&&next| next == length)
+            .count();
+        at += run;
+        let mut left = run;
+        if length == 0 {
+            while left >= 11 {
+                let n = left.min(138);
+                out.push((18, (n - 11) as u8));
+                left -= n;
+            }
+            if left >= 3 {
+                out.push((17, (left - 3) as u8));
+                left = 0;
+            }
+        } else {
+            out.push((length, 0));
+            left -= 1;
+            while left >= 3 {
+                let n = left.min(6);
+                out.push((16, (n - 3) as u8));
+                left -= n;
+            }
+        }
+        out.extend(std::iter::repeat_n((length, 0), left));
+    }
+    out
+}
+
+/// A block's dynamic Huffman code (RFC 1951 §3.2.7): the two alphabets'
+/// codes from the block's counts, limited to 15 bits, and the header that
+/// sends them — their lengths run-length coded under a code-length code
+/// limited to 7 bits, every count of the header trimmed of trailing zeros.
+struct Dynamic {
+    literals: [Code; 286],
+    distances: [Code; 30],
+    /// `HLIT` and `HDIST`: the literal/length and distance lengths sent.
+    hlit: usize,
+    hdist: usize,
+    /// The code-length code, and `HCLEN`, its lengths sent.
+    lengths: [Code; 19],
+    hclen: usize,
+    /// Both alphabets' lengths as sent.
+    runs: Vec<(u8, u8)>,
+}
+
+impl Dynamic {
+    fn new(block: &Block) -> Dynamic {
+        let mut counts = block.literals;
+        // The end of the block, written once.
+        counts[256] = 1;
+        let literal_lengths = code_lengths(&counts, MAX_BITS);
+        let distance_lengths = code_lengths(&block.distances, MAX_BITS);
+        let used = |lengths: &[u8]| {
+            lengths
+                .iter()
+                .rposition(|&length| length > 0)
+                .map_or(0, |at| at + 1)
+        };
+        let hlit = used(&literal_lengths).max(257);
+        let hdist = used(&distance_lengths).max(1);
+
+        let mut sent = literal_lengths[..hlit].to_vec();
+        sent.extend_from_slice(&distance_lengths[..hdist]);
+        let runs = runs(&sent);
+        let mut length_counts = [0u32; 19];
+        for &(symbol, _) in &runs {
+            length_counts[usize::from(symbol)] += 1;
+        }
+        let length_lengths = code_lengths(&length_counts, MAX_LENGTH_BITS);
+        let hclen = LENGTH_ORDER
+            .iter()
+            .rposition(|&symbol| length_lengths[symbol] > 0)
+            .map_or(0, |at| at + 1)
+            .max(4);
+
+        let mut dynamic = Dynamic {
+            literals: [(0, 0); 286],
+            distances: [(0, 0); 30],
+            hlit,
+            hdist,
+            lengths: [(0, 0); 19],
+            hclen,
+            runs,
+        };
+        canonical(&literal_lengths, &mut dynamic.literals);
+        canonical(&distance_lengths, &mut dynamic.distances);
+        canonical(&length_lengths, &mut dynamic.lengths);
+        dynamic
+    }
+
+    /// The bits the header costs after `BFINAL` and `BTYPE`.
+    fn header_bits(&self) -> u64 {
+        let lengths: u64 = self
+            .runs
+            .iter()
+            .map(|&(symbol, _)| {
+                u64::from(self.lengths[usize::from(symbol)].1) + u64::from(length_extra(symbol))
+            })
+            .sum();
+        5 + 5 + 4 + 3 * self.hclen as u64 + lengths
+    }
+
+    /// The bits the block costs in this code, its header and end included.
+    fn bits(&self, block: &Block) -> u64 {
+        3 + self.header_bits() + symbol_bits(block, &self.literals, &self.distances)
+    }
+
+    /// Writes `block` in this code, final if `last` is.
+    fn write(&self, bits: &mut Bits, out: &mut Vec<u8>, block: &Block, last: bool) {
+        bits.put(out, u32::from(last), 1);
+        bits.put(out, 0b10, 2);
+        bits.put(out, (self.hlit - 257) as u32, 5);
+        bits.put(out, (self.hdist - 1) as u32, 5);
+        bits.put(out, (self.hclen - 4) as u32, 4);
+        for &symbol in &LENGTH_ORDER[..self.hclen] {
+            bits.put(out, u32::from(self.lengths[symbol].1), 3);
+        }
+        for &(symbol, extra) in &self.runs {
+            bits.code(out, self.lengths[usize::from(symbol)]);
+            let count = length_extra(symbol);
+            if count > 0 {
+                bits.put(out, u32::from(extra), count);
+            }
+        }
+        write_symbols(bits, out, block, &self.literals, &self.distances);
+    }
 }
 
 /// The length of the run `here` and `there` share, both the same length.
@@ -1107,21 +1394,23 @@ impl Deflater {
         }
     }
 
-    /// Writes the block stored or fixed-coded, whichever is fewer bits, stored
-    /// on a tie and only while its input is still in the buffer; then the
-    /// whole bytes of it.
+    /// Writes the block stored, fixed-coded or in its own dynamic code,
+    /// whichever is fewest bits, a tie going to the simpler and stored only
+    /// while its input is still in the buffer; then the whole bytes of it.
     fn flush(&mut self, out: &mut Vec<u8>, last: bool) {
         let block = &self.block;
         let stored = block
             .start
             .checked_sub(self.start)
             .and_then(|from| self.buffer.get(from..from + block.len));
-        let fixed = fixed_bits(block);
+        let fixed = 3 + symbol_bits(block, &FIXED_LITERALS, &FIXED_DISTANCES);
+        let dynamic = Dynamic::new(block);
+        let dynamic_bits = dynamic.bits(block);
         match stored {
-            Some(data) if stored_bits(data.len(), self.bits.count) <= fixed => {
+            Some(data) if stored_bits(data.len(), self.bits.count) <= fixed.min(dynamic_bits) => {
                 write_stored(&mut self.bits, out, data, last);
             }
-            _ => {
+            _ if fixed <= dynamic_bits => {
                 self.bits.put(out, u32::from(last), 1);
                 self.bits.put(out, 0b01, 2);
                 write_symbols(
@@ -1132,6 +1421,7 @@ impl Deflater {
                     &FIXED_DISTANCES,
                 );
             }
+            _ => dynamic.write(&mut self.bits, out, block, last),
         }
         self.bits.bytes(out);
         self.block.reset();
@@ -1852,5 +2142,275 @@ mod tests {
         }
         assert_eq!(reversed(0b0011_0000, 8), 0b0000_1100);
         assert_eq!(FIXED_DISTANCES[1], (0b10000, 5));
+    }
+
+    // ---- Dynamic blocks -------------------------------------------------------
+
+    /// Kraft's sum of `lengths` in units of `2^-limit`: a complete code's is
+    /// `2^limit`.
+    fn kraft(lengths: &[u8], limit: usize) -> u64 {
+        lengths
+            .iter()
+            .filter(|&&length| length > 0)
+            .map(|&length| 1u64 << (limit - usize::from(length)))
+            .sum()
+    }
+
+    /// The bits `lengths` cost over `counts`.
+    fn cost(counts: &[u32], lengths: &[u8]) -> u64 {
+        counts
+            .iter()
+            .zip(lengths)
+            .map(|(&count, &length)| u64::from(count) * u64::from(length))
+            .sum()
+    }
+
+    /// The bits an unlimited Huffman code costs over `counts`, merging the two
+    /// lightest weights until one is left: what a limited code costs too
+    /// wherever its limit does not bind.
+    fn huffman_cost(counts: &[u32]) -> u64 {
+        let mut weights: Vec<u64> = counts
+            .iter()
+            .filter(|&&count| count > 0)
+            .map(|&count| u64::from(count))
+            .collect();
+        let mut cost = 0;
+        while weights.len() > 1 {
+            weights.sort_unstable_by(|a, b| b.cmp(a));
+            let a = weights.pop().expect("two weights");
+            let b = weights.pop().expect("two weights");
+            cost += a + b;
+            weights.push(a + b);
+        }
+        cost
+    }
+
+    /// Package-merge's lengths are a complete code within the limit, Kraft's
+    /// sum exactly one, and give every symbol counted a code: for skewed
+    /// counts an unlimited code would take past fifteen bits, and past seven
+    /// for the code-length code; for flat counts; for one symbol counted and
+    /// for none, where the lowest spare symbols stand in. Where the limit
+    /// does not bind they cost what an unlimited Huffman code costs.
+    #[test]
+    fn code_lengths_are_complete_and_at_most_fifteen() {
+        // Fibonacci counts: an unlimited code is as deep as the symbols are
+        // many.
+        let mut fibonacci = vec![1u32, 1];
+        while fibonacci.len() < 30 {
+            let n = fibonacci.len();
+            fibonacci.push(fibonacci[n - 1] + fibonacci[n - 2]);
+        }
+        let mut one = vec![0u32; 30];
+        one[17] = 5;
+        let cases = [
+            ("skewed", fibonacci.clone(), MAX_BITS),
+            (
+                "skewed, code lengths",
+                fibonacci[..19].to_vec(),
+                MAX_LENGTH_BITS,
+            ),
+            ("flat", vec![1u32; 286], MAX_BITS),
+            ("one symbol", one, MAX_BITS),
+            ("none", vec![0u32; 30], MAX_BITS),
+        ];
+        for (name, counts, limit) in &cases {
+            let lengths = code_lengths(counts, *limit);
+            assert_eq!(kraft(&lengths, *limit), 1 << limit, "{name}: complete");
+            assert!(
+                lengths.iter().all(|&length| usize::from(length) <= *limit),
+                "{name}: within {limit} bits"
+            );
+            assert!(
+                counts
+                    .iter()
+                    .zip(&lengths)
+                    .all(|(&count, &length)| count == 0 || length > 0),
+                "{name}: every symbol counted has a code"
+            );
+        }
+        let longest = |counts: &[u32], limit| code_lengths(counts, limit).into_iter().max();
+        assert_eq!(longest(&fibonacci, MAX_BITS), Some(15), "the limit binds");
+        assert_eq!(longest(&fibonacci[..19], MAX_LENGTH_BITS), Some(7));
+        let flat = code_lengths(&[1u32; 286], MAX_BITS);
+        assert_eq!(flat.iter().filter(|&&length| length == 8).count(), 226);
+        assert_eq!(flat.iter().filter(|&&length| length == 9).count(), 60);
+        let mut want = vec![0u8; 30];
+        want[0] = 1;
+        want[17] = 1;
+        assert_eq!(
+            code_lengths(&cases[3].1, MAX_BITS),
+            want,
+            "the lowest spare stands in"
+        );
+        want[17] = 0;
+        want[1] = 1;
+        assert_eq!(
+            code_lengths(&[0u32; 30], MAX_BITS),
+            want,
+            "two spares stand in"
+        );
+
+        // Counts within a factor of ten of each other, and a text's letters:
+        // the limit does not bind, and the code is optimal.
+        let mut next = seeded(31);
+        let near: Vec<u32> = (0..286).map(|_| 100 + (next() % 900) as u32).collect();
+        let mut letters = [0u32; 256];
+        for &byte in b"the quick brown fox jumps over the lazy dog, and then sleeps" {
+            letters[usize::from(byte)] += 1;
+        }
+        for counts in [&near[..], &letters[..], &[1u32; 286][..]] {
+            assert_eq!(
+                cost(counts, &code_lengths(counts, MAX_BITS)),
+                huffman_cost(counts),
+                "an optimal code"
+            );
+        }
+    }
+
+    /// RFC 1951 §3.2.2's own example: lengths (3, 3, 3, 3, 3, 2, 4, 4) for A
+    /// to H are the codes 010, 011, 100, 101, 110, 00, 1110 and 1111.
+    #[test]
+    fn the_canonical_code_is_the_rfcs_example() {
+        let lengths = [3u8, 3, 3, 3, 3, 2, 4, 4];
+        let mut codes = [(0u16, 0u8); 8];
+        canonical(&lengths, &mut codes);
+        let want = [0b010, 0b011, 0b100, 0b101, 0b110, 0b00, 0b1110, 0b1111];
+        for (&(code, length), want) in codes.iter().zip(want) {
+            assert_eq!(code, reversed(want, length), "written reversed");
+        }
+    }
+
+    /// Lengths `runs` sent, expanded back.
+    fn expand(runs: &[(u8, u8)]) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        for &(symbol, extra) in runs {
+            let (value, count) = match symbol {
+                16 => (
+                    *out.last().expect("a length to repeat"),
+                    3 + usize::from(extra),
+                ),
+                17 => (0, 3 + usize::from(extra)),
+                18 => (0, 11 + usize::from(extra)),
+                length => (length, 1),
+            };
+            out.extend(std::iter::repeat_n(value, count));
+        }
+        out
+    }
+
+    /// The lengths are sent in runs: a length then 16s repeating it three to
+    /// six times, zeros as 18s of up to 138 and a 17 of three to ten, and
+    /// shorter runs as they are. Expanded, the runs are the lengths, on
+    /// random sequences as well.
+    #[test]
+    fn code_lengths_are_sent_in_runs() {
+        let mut lengths = vec![3u8; 8];
+        lengths.extend([0, 0, 5]);
+        lengths.extend([0; 20]);
+        lengths.extend([7, 7, 7]);
+        lengths.extend([0; 150]);
+        lengths.extend([2; 4]);
+        let want = [
+            (3, 0),
+            (16, 3),
+            (3, 0),
+            (0, 0),
+            (0, 0),
+            (5, 0),
+            (18, 9),
+            (7, 0),
+            (7, 0),
+            (7, 0),
+            (18, 127),
+            (18, 1),
+            (2, 0),
+            (16, 0),
+        ];
+        assert_eq!(runs(&lengths), want);
+        assert_eq!(expand(&want), lengths);
+
+        let mut next = seeded(41);
+        for _ in 0..200 {
+            let mut lengths = Vec::new();
+            while lengths.len() < 316 {
+                let value = [0, 0, 0, 8, 9, 15][(next() % 6) as usize];
+                lengths.extend(std::iter::repeat_n(value, 1 + (next() % 160) as usize));
+            }
+            let sent = runs(&lengths);
+            assert!(sent.iter().all(|&(symbol, _)| symbol < 19));
+            assert_eq!(expand(&sent), lengths);
+        }
+    }
+
+    /// The letters `e`, `t`, `a` and `z` six hundred, two hundred, a hundred
+    /// and ten times: a block of them costs fewer bits in its own code than in
+    /// the fixed one, and a deflater fed seeded text weighted alike writes its
+    /// block dynamic, `BTYPE` 10.
+    #[test]
+    fn a_skewed_block_is_smaller_dynamic_than_fixed() {
+        let mut block = Block::new();
+        for (byte, count) in [(b'e', 600), (b't', 200), (b'a', 100), (b'z', 10)] {
+            for _ in 0..count {
+                block.literal(byte);
+            }
+        }
+        let fixed = 3 + symbol_bits(&block, &FIXED_LITERALS, &FIXED_DISTANCES);
+        let dynamic = Dynamic::new(&block).bits(&block);
+        assert!(dynamic < fixed, "{dynamic} bits dynamic, {fixed} fixed");
+
+        let mut next = seeded(51);
+        let text: Vec<u8> = (0..6_000)
+            .map(|_| match next() % 91 {
+                0..=59 => b'e',
+                60..=79 => b't',
+                80..=89 => b'a',
+                _ => b'z',
+            })
+            .collect();
+        for level in LEVELS {
+            let out = deflate_at(&text, level);
+            assert_eq!((out[0] >> 1) & 0b11, 0b10, "{level:?}: BTYPE 10, dynamic");
+            let back = inflate_raw(&out, &Limits::new(2 * text.len()));
+            assert_eq!(back.data, text, "{level:?}");
+        }
+    }
+
+    /// A block is written in the bits its choice counted: for an input that
+    /// is one block, the stream is the fewest of the three counts, rounded up
+    /// to a byte, under the `BTYPE` of the one chosen: stored for literals
+    /// that do not repeat, fixed for a word, dynamic for weighted text.
+    #[test]
+    fn a_block_costs_the_bits_it_was_counted_at() {
+        let mut next = seeded(61);
+        let weighted: Vec<u8> = (0..3_000)
+            .map(|_| b"eeeeettan"[(next() % 9) as usize])
+            .collect();
+        let unrepeated = unrepeated(2_000, 71);
+        let inputs: [(&[u8], u8); 3] = [(&unrepeated, 0b00), (b"hello", 0b01), (&weighted, 0b10)];
+        for (input, btype) in inputs {
+            for level in LEVELS {
+                let mut deflater = Deflater::new(level);
+                let mut out = Vec::new();
+                deflater.write(input, &mut out);
+                deflater.drain(&mut out);
+                assert!(out.is_empty(), "one block");
+                let block = &deflater.block;
+                let counted = [
+                    stored_bits(block.len, 0),
+                    3 + symbol_bits(block, &FIXED_LITERALS, &FIXED_DISTANCES),
+                    Dynamic::new(block).bits(block),
+                ];
+                let fewest = counted.iter().copied().min().expect("three counts");
+                deflater.flush(&mut out, true);
+                deflater.bits.align(&mut out);
+                assert_eq!(
+                    out.len() as u64,
+                    fewest.div_ceil(8),
+                    "{level:?}, {counted:?}"
+                );
+                assert_eq!((out[0] >> 1) & 0b11, btype, "{level:?}, {counted:?}");
+                assert_eq!(inflate_raw(&out, &Limits::new(8_000)).data, input);
+            }
+        }
     }
 }
