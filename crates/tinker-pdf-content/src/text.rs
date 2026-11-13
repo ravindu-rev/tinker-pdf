@@ -175,10 +175,16 @@ pub struct TextBlock {
 }
 
 /// A page's text.
+///
+/// Its blocks are read through [`TextPage::blocks`] and changed through
+/// [`TextPage::blocks_mut`] alone, because a search keeps what it folded
+/// them into ([`crate::search`]): `blocks_mut` drops every kept form before
+/// it hands the blocks out, so a search after any change reads the blocks as
+/// they are.
 #[derive(Clone, Debug, Default)]
 pub struct TextPage {
     /// The blocks, in reading order.
-    pub blocks: Vec<TextBlock>,
+    blocks: Vec<TextBlock>,
     /// The 14.9 values each marked sequence's property list carried, keyed by
     /// the pair 14.7.4.2 identifies a sequence with: the content stream the
     /// `BDC` was written in — a form XObject's packed indirect reference, or
@@ -213,6 +219,10 @@ pub struct TextPage {
     /// difference between "this page has no text" and "this page has text this
     /// build could not decode" is invisible.
     pub warnings: Vec<TextWarning>,
+    /// The page's text in each of the four folds a search reads it in, each
+    /// built at the first search that asks for it and kept for every search
+    /// after (`docs/design/performance.md`, P-24).
+    pub(crate) forms: crate::search::Forms,
 }
 
 /// Something extraction could not do exactly.
@@ -233,6 +243,44 @@ pub enum TextWarning {
 }
 
 impl TextPage {
+    /// A page of `blocks`, in reading order, with the property lists, the
+    /// stated texts and the warnings [`TextDevice::finish`] would give it, and
+    /// no form folded yet.
+    #[must_use]
+    pub fn new(
+        blocks: Vec<TextBlock>,
+        mcid_props: BTreeMap<(u64, u32), MarkedProps>,
+        stated: Vec<String>,
+        warnings: Vec<TextWarning>,
+    ) -> TextPage {
+        TextPage {
+            blocks,
+            mcid_props,
+            stated,
+            warnings,
+            forms: crate::search::Forms::default(),
+        }
+    }
+
+    /// The blocks, in reading order.
+    #[must_use]
+    pub fn blocks(&self) -> &[TextBlock] {
+        &self.blocks
+    }
+
+    /// The blocks, to change: every form a search kept of them is dropped
+    /// first, so the next search folds the blocks as they then are.
+    pub fn blocks_mut(&mut self) -> &mut Vec<TextBlock> {
+        self.forms.clear();
+        &mut self.blocks
+    }
+
+    /// The blocks, taken out of the page.
+    #[must_use]
+    pub fn into_blocks(self) -> Vec<TextBlock> {
+        self.blocks
+    }
+
     /// Every line, flattened.
     #[must_use]
     pub fn lines(&self) -> Vec<&TextLine> {
@@ -276,54 +324,14 @@ impl TextPage {
     ///
     /// Matches within a line, returning one quad per match. Case folding is
     /// the simple ASCII-plus-Unicode-lowercase kind, which is what the engine
-    /// being replaced did and what callers have calibrated against.
+    /// being replaced did and what callers have calibrated against: both
+    /// sides through `str::to_lowercase`, the page's a glyph at a time. The
+    /// page's lower-cased text is folded at the first search that reads it
+    /// and kept ([`crate::search`]), so a search after it folds its needle
+    /// alone.
     #[must_use]
     pub fn search(&self, needle: &str) -> Vec<Quad> {
-        if needle.is_empty() {
-            return Vec::new();
-        }
-        let needle_lower = needle.to_lowercase();
-        let mut hits = Vec::new();
-
-        for line in self.lines() {
-            // Index by character so a match maps back to the glyphs it covers.
-            let chars: Vec<String> = line.chars.iter().map(|c| c.text.to_lowercase()).collect();
-            let joined: String = chars.concat();
-
-            let mut from = 0usize;
-            while let Some(found) = joined.get(from..).and_then(|s| s.find(&needle_lower)) {
-                let start_byte = from + found;
-                let end_byte = start_byte + needle_lower.len();
-
-                // Map byte offsets back to glyph indices.
-                let mut at = 0usize;
-                let mut first = None;
-                let mut last = None;
-                for (i, piece) in chars.iter().enumerate() {
-                    let next = at + piece.len();
-                    if first.is_none() && next > start_byte {
-                        first = Some(i);
-                    }
-                    if at < end_byte {
-                        last = Some(i);
-                    }
-                    at = next;
-                }
-
-                if let (Some(a), Some(b)) = (first, last) {
-                    if let Some(quad) = span_quad(line, a, b) {
-                        hits.push(quad);
-                    }
-                }
-
-                from = start_byte + needle_lower.len().max(1);
-                if from >= joined.len() {
-                    break;
-                }
-            }
-        }
-
-        hits
+        self.find(needle, &crate::search::SearchOptions::default(), None)
     }
 }
 
@@ -579,12 +587,12 @@ impl TextDevice {
             }
         }
 
-        TextPage {
+        TextPage::new(
             blocks,
-            mcid_props: std::mem::take(&mut self.mcid_props),
-            stated: std::mem::take(&mut self.stated_texts),
-            warnings: std::mem::take(&mut self.warnings),
-        }
+            std::mem::take(&mut self.mcid_props),
+            std::mem::take(&mut self.stated_texts),
+            std::mem::take(&mut self.warnings),
+        )
     }
 
     /// Ends the line being collected: as the next starts, at an artifact's

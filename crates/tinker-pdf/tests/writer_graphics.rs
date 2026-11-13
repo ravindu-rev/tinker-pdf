@@ -941,7 +941,7 @@ fn a_composite_run_positions_its_glyphs_from_the_widths_the_font_states() {
     let page = document.page(0).expect("a page");
     let extracted = page.text();
     let quads: Vec<(f64, f64)> = extracted
-        .blocks
+        .blocks()
         .iter()
         .flat_map(|block| block.lines.iter())
         .flat_map(|line| line.chars.iter())

@@ -270,7 +270,7 @@ fn exercise(bytes: Vec<u8>) {
         let _ = text.plain_text();
         let _ = text.search("e");
         let _ = text.lines();
-        let _ = text.blocks.len();
+        let _ = text.blocks().len();
         // UAX #29 over whatever a mutated font decoded to, and the search
         // options, which fold and segment the same text.
         for line in text.lines() {

@@ -809,7 +809,7 @@ pub fn logical_text(doc: &Document) -> Vec<String> {
     for at in 0..doc.page_count() {
         let mut by_id: BTreeMap<(u64, u32), String> = BTreeMap::new();
         let page = doc.page(at).expect("a page in range");
-        for block in &page.text().blocks {
+        for block in page.text().blocks() {
             for line in &block.lines {
                 for character in &line.chars {
                     if let Some(mcid) = character.mcid {

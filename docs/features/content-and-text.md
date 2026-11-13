@@ -538,9 +538,15 @@ mask's content rather than paint it.
 ## API
 
 Everything is on the facade (ruling 11): `Page::text()` returns a
-`TextPage` of `blocks` → `lines` → `chars`, plus `warnings`, every line in
+`TextPage` of blocks → `lines` → `chars`, plus `warnings`, every line in
 logical order (ruling 14); `Page::text_with(&TextOptions)` is the same with
-`content_order` as the opt-out to the content stream's order.
+`content_order` as the opt-out to the content stream's order. A page's blocks
+are read through `TextPage::blocks()` and changed only through
+`blocks_mut()`, because a search keeps what it folded them into (below):
+`blocks_mut` drops every kept form before it hands the blocks out, so a
+search after any change reads them as they are. `into_blocks()` takes them,
+and `TextPage::new(blocks, mcid_props, stated, warnings)` builds a page by
+hand with nothing kept; `mcid_props`, `stated` and `warnings` are fields.
 `Document::text_pages(pages, &options, each)` reads each of `pages` as
 `Page::text_with` reads it and hands `each` the page's index and its text,
 `None` for a page the tree will not hand back, in the order `pages` names
@@ -637,6 +643,20 @@ switches, each off by default and each composable with the others:
   from `ا`. Compatibility mappings (`ﬁ`, `①`) are not applied, Hangul
   syllables stay composed, and canonical reordering is not performed.
   `tinker_pdf_content::fold_diacritics` is the folding on its own.
+
+**A page is folded once a fold.** For each of the four ways a search folds
+— none, lower-cased, diacritics removed, both — the page keeps a form: every
+line's text folded a glyph at a time and joined, with the byte offset where
+each glyph's folded piece starts, which is how a match maps back to its
+glyphs. A form is built at the first search that asks for its fold, and
+never at extraction, so a caller that never searches pays nothing; every
+search after it in that fold folds its needle alone. `whole_word` reads the
+form of its case and accents. A clone keeps the forms built, and two threads
+searching one page in one fold build its form once
+([performance](../design/performance.md), P-24).
+`search_counted(needle, &SearchOptions)` returns `search_with`'s quads, to the
+bit, with a `Stats` whose `text_forms_built` says how many forms the search
+built: one for a page's first search in a fold, none after.
 
 Regular expressions are not an option: the tree has no regex engine and
 links none, and a hand-rolled linear-time one is [roadmap](../ROADMAP.md) row

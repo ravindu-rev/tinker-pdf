@@ -501,7 +501,7 @@ fn json_page(out: &mut String, frame: &PageFrame, page: &TextPage) {
     let (x0, y0, x1, y1) = frame.bounds;
     json_numbers(out, &[x0, y0, x1, y1]);
     let _ = write!(out, ",\"rotation\":{},\"blocks\":[", frame.rotation);
-    for (b, block) in page.blocks.iter().enumerate() {
+    for (b, block) in page.blocks().iter().enumerate() {
         if b > 0 {
             out.push(',');
         }
@@ -632,7 +632,7 @@ fn xml_page(out: &mut String, frame: &PageFrame, page: &TextPage) {
     let _ = write!(out, "<page index=\"{}\"", frame.index);
     xml_numbers(out, "box", &[x0, y0, x1, y1]);
     let _ = writeln!(out, " rotation=\"{}\">", frame.rotation);
-    for block in &page.blocks {
+    for block in page.blocks() {
         out.push_str("<block");
         if block.quad.is_finite() {
             let (a, b, c, d) = block.quad.bounds();
@@ -749,7 +749,7 @@ fn html_page(out: &mut String, frame: &PageFrame, page: &TextPage) {
     out.push_str(";height:");
     css_points(out, y1 - y0);
     out.push_str("\">\n");
-    for block in &page.blocks {
+    for block in page.blocks() {
         out.push_str("<div class=\"block\">\n");
         for line in &block.lines {
             let (lx0, _, _, ly1) = if line.quad.is_finite() {
@@ -1085,23 +1085,23 @@ mod tests {
 
     fn hostile_page() -> TextPage {
         let font: Arc<str> = Arc::from("Evil\"<Font>&\u{1}");
-        TextPage {
-            blocks: vec![crate::text::TextBlock {
+        TextPage::new(
+            vec![crate::text::TextBlock {
                 quad: quad(0.0, 10.0),
                 lines: vec![line(vec![
                     ch(HOSTILE, 0.0, 12.0, Some(&font)),
                     ch("x", 5.0, 12.0, None),
                 ])],
             }],
-            mcid_props: Default::default(),
-            stated: Vec::new(),
-            warnings: vec![
+            Default::default(),
+            Vec::new(),
+            vec![
                 TextWarning::UnknownFont {
                     name: "F<1>\"".to_string(),
                 },
                 TextWarning::UnmappedCode { code: 7 },
             ],
-        }
+        )
     }
 
     const FRAME: PageFrame = PageFrame {

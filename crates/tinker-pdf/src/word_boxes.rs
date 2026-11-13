@@ -88,7 +88,7 @@ impl Page {
 
         let text = self.text();
         let mut blocks = Vec::new();
-        for block in &text.blocks {
+        for block in text.blocks() {
             let mut lines = Vec::new();
             for line in &block.lines {
                 let words: Vec<WordBox> = box_words(line)

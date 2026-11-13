@@ -1964,7 +1964,7 @@ impl<'a> Fonts<'a> {
             declared,
         );
         Some((
-            page.blocks
+            page.blocks()
                 .iter()
                 .flat_map(|block| &block.lines)
                 .map(|line| line.text.as_str())
@@ -4820,7 +4820,7 @@ impl Overprint {
     /// The glyphs of `page`, a reading in the order drawn.
     fn of(page: &tinker_pdf_content::TextPage) -> Overprint {
         Overprint(
-            page.blocks
+            page.blocks()
                 .iter()
                 .flat_map(|block| &block.lines)
                 .flat_map(|line| &line.chars)

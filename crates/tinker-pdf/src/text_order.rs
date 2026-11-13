@@ -209,7 +209,7 @@ pub(crate) fn into_logical_order_knowing(
 /// ([`rejoin_split_lines`]), a piece with no right-to-left character among
 /// them.
 pub(crate) fn sequences_read(page: &TextPage) -> BTreeSet<(u64, u32)> {
-    page.blocks
+    page.blocks()
         .iter()
         .filter(|block| block.lines.iter().any(|line| holds_rtl(&line.chars)))
         .flat_map(|block| block.lines.iter())
@@ -226,8 +226,12 @@ fn in_logical_order(
     declared: Option<Declared<'_>>,
 ) -> usize {
     let mut changed = 0usize;
-    let TextPage { blocks, stated, .. } = page;
-    let stated: &[String] = stated;
+    // The stated texts are read beside the blocks as they change, so they
+    // are taken out of the page for the walk and put back after it: a page
+    // changes its blocks only through `blocks_mut`, which drops what a
+    // search kept of them.
+    let stated = std::mem::take(&mut page.stated);
+    let blocks = page.blocks_mut();
     let mut reads: Vec<Vec<Option<Read>>> = Vec::with_capacity(blocks.len());
     for block in blocks.iter_mut() {
         let (joined, read) = rejoin_split_lines(&mut block.lines);
@@ -239,8 +243,8 @@ fn in_logical_order(
     } else {
         keep_stated_on_first_line(blocks, Some(&mut reads))
     };
-    let stated = Stated {
-        texts: stated,
+    let texts = Stated {
+        texts: &stated,
         elsewhere: Some(&elsewhere),
     };
     for (block, mut read) in blocks.iter_mut().zip(reads) {
@@ -248,16 +252,17 @@ fn in_logical_order(
             let read = read.get_mut(at).and_then(Option::take);
             let direction = declared.and_then(|declared| declared.of(&line.chars));
             let moved = match known.as_deref_mut() {
-                Some(known) => logical_line_reading(line, read, stated, direction, |visual| {
+                Some(known) => logical_line_reading(line, read, texts, direction, |visual| {
                     known.reading(visual, direction)
                 }),
-                None => logical_line(line, read, stated, direction),
+                None => logical_line(line, read, texts, direction),
             };
             if moved {
                 changed += 1;
             }
         }
     }
+    page.stated = stated;
     changed
 }
 
@@ -266,18 +271,21 @@ fn in_logical_order(
 /// the span's first glyph, on the first line the page reads its glyphs on
 /// (14.9.4, `TextChar::stated`).
 pub(crate) fn state_in_content_order(page: &mut TextPage) {
-    let TextPage { blocks, stated, .. } = page;
-    if stated.is_empty() {
+    if page.stated.is_empty() {
         return;
     }
+    // Taken out for the walk and put back, as `in_logical_order` does.
+    let stated = std::mem::take(&mut page.stated);
+    let blocks = page.blocks_mut();
     let elsewhere = keep_stated_on_first_line(blocks, None);
-    let stated = Stated {
-        texts: stated,
+    let texts = Stated {
+        texts: &stated,
         elsewhere: Some(&elsewhere),
     };
     for line in blocks.iter_mut().flat_map(|block| block.lines.iter_mut()) {
-        state_in_place(line, stated);
+        state_in_place(line, texts);
     }
+    page.stated = stated;
 }
 
 /// Drops each `/ActualText` span's glyphs from every line after the first the
@@ -1596,12 +1604,12 @@ mod tests {
     #[test]
     fn a_line_the_stream_split_on_one_baseline_is_read_as_one() {
         let mut page = TextPage::default();
-        page.blocks.push(tinker_pdf_content::TextBlock {
+        page.blocks_mut().push(tinker_pdf_content::TextBlock {
             lines: split_in_three(),
             quad: ch("a", 0.0, 35.0).quad,
         });
         into_logical_order(&mut page, None);
-        let lines = &page.blocks[0].lines;
+        let lines = &page.blocks()[0].lines;
         assert_eq!(lines.len(), 1, "the three pieces are one line");
         assert_eq!(lines[0].text, format!("a {ALEF}{BET}{GIMEL} b"));
         let (x0, _, x1, _) = lines[0].quad.bounds();
@@ -1647,12 +1655,12 @@ mod tests {
             )
         };
         let mut page = TextPage::default();
-        page.blocks.push(tinker_pdf_content::TextBlock {
+        page.blocks_mut().push(tinker_pdf_content::TextBlock {
             lines: vec![copy(0.0), copy(0.5)],
             quad: ch(ALEF, 10.0, 15.5).quad,
         });
         into_logical_order(&mut page, None);
-        let texts: Vec<&str> = page.blocks[0]
+        let texts: Vec<&str> = page.blocks()[0]
             .lines
             .iter()
             .map(|line| line.text.as_str())
@@ -1708,7 +1716,7 @@ mod tests {
         }));
         let characters = RUN + 2 * PIECES;
         let mut page = TextPage::default();
-        page.blocks.push(tinker_pdf_content::TextBlock {
+        page.blocks_mut().push(tinker_pdf_content::TextBlock {
             lines,
             quad: ch("a", start, 5.0 * characters as f64).quad,
         });
@@ -1723,7 +1731,7 @@ mod tests {
             "{looks} characters looked at to rejoin and read a page of {characters}; \
              a join that costs its piece looks at no more than {bound}"
         );
-        let lines = &page.blocks[0].lines;
+        let lines = &page.blocks()[0].lines;
         assert_eq!(lines.len(), 1, "every piece is the one line");
         assert_eq!(lines[0].chars.len(), characters, "no character lost");
         let word = format!("{ALEF}{BET}").repeat(PIECES);
@@ -1909,7 +1917,7 @@ mod tests {
     #[test]
     fn a_chain_the_bracket_tie_break_turns_is_joined_whole() {
         let mut page = TextPage::default();
-        page.blocks.push(tinker_pdf_content::TextBlock {
+        page.blocks_mut().push(tinker_pdf_content::TextBlock {
             lines: vec![
                 line(vec![ch("(", 25.0, 5.0)], false),
                 line(vec![ch("a", 15.0, 5.0), ch("b", 20.0, 5.0)], false),
@@ -1921,7 +1929,7 @@ mod tests {
             quad: ch("a", 0.0, 30.0).quad,
         });
         into_logical_order(&mut page, None);
-        let lines = &page.blocks[0].lines;
+        let lines = &page.blocks()[0].lines;
         assert_eq!(lines.len(), 1, "the three pieces are one line");
         assert_eq!(lines[0].text, format!("(ab){ALEF}{BET}"));
         assert!(lines[0].rtl, "and it reads right to left");
@@ -1961,12 +1969,12 @@ mod tests {
             read_whole.text
         );
         let mut page = TextPage::default();
-        page.blocks.push(tinker_pdf_content::TextBlock {
+        page.blocks_mut().push(tinker_pdf_content::TextBlock {
             lines: pieces,
             quad: whole.quad,
         });
         into_logical_order(&mut page, None);
-        let lines = &page.blocks[0].lines;
+        let lines = &page.blocks()[0].lines;
         let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(texts, ["de".to_string(), format!("). {ALEF}{BET}.")]);
         assert!(lines[1].rtl, "the Hebrew group reads right to left");
@@ -2086,7 +2094,7 @@ mod tests {
                         ur: shift(c.quad.ur),
                     };
                 }
-                page.blocks.push(tinker_pdf_content::TextBlock {
+                page.blocks_mut().push(tinker_pdf_content::TextBlock {
                     lines: vec![line],
                     quad,
                 });
@@ -2129,8 +2137,8 @@ mod tests {
                 into_logical_order(&mut afresh, None)
             );
             assert_eq!(
-                format!("{:?}", knowing.blocks),
-                format!("{:?}", afresh.blocks)
+                format!("{:?}", knowing.blocks()),
+                format!("{:?}", afresh.blocks())
             );
         }
     }

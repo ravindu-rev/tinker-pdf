@@ -59,8 +59,8 @@ fn line_page(chars: usize) -> TextPage {
         .collect();
     let text: String = characters.iter().map(|c| c.text.as_str()).collect();
     let bounds = quad(36.25, chars as f64 * advance);
-    TextPage {
-        blocks: vec![TextBlock {
+    TextPage::new(
+        vec![TextBlock {
             quad: bounds,
             lines: vec![TextLine {
                 chars: characters,
@@ -71,10 +71,10 @@ fn line_page(chars: usize) -> TextPage {
                 size: 11.3,
             }],
         }],
-        mcid_props: Default::default(),
-        stated: Vec::new(),
-        warnings: Vec::new(),
-    }
+        Default::default(),
+        Vec::new(),
+        Vec::new(),
+    )
 }
 
 /// **P-02.6**: a character writes its numbers without allocating. Each

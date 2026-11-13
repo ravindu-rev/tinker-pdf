@@ -292,6 +292,15 @@ pub struct Stats {
     /// Counted by `tinker-pdf-render`'s renderer, a tiling pattern's cell
     /// included, and added to the operation's tally by the facade.
     pub shading_functions_evaluated: u64,
+    /// A page's text folded and joined in one of the four folds a search
+    /// reads it in, its table of offsets back to the glyphs with it: once a
+    /// page and fold, at the first search that asks for the fold, which every
+    /// later search of the page in it reads (`docs/design/performance.md`,
+    /// P-24).
+    ///
+    /// Counted by `tinker-pdf-content`'s search, through
+    /// `TextPage::search_counted`.
+    pub text_forms_built: u64,
     /// The most bytes a JPEG decode held at once beside the image it decoded
     /// into: its coefficients, its component planes and the strip it handed
     /// on, every buffer sized from the image. A maximum, as
@@ -394,6 +403,8 @@ pub enum Counter {
     PoolItemsOnWorkers,
     /// [`Stats::pool_items_on_caller`].
     PoolItemsOnCaller,
+    /// [`Stats::text_forms_built`].
+    TextFormsBuilt,
 }
 
 impl Stats {
@@ -443,6 +454,7 @@ impl Stats {
             self.content_tokens_read,
             self.operators_run,
             self.shading_functions_evaluated,
+            self.text_forms_built,
         ]
         .into_iter()
         .fold(0u64, u64::saturating_add)
@@ -484,6 +496,7 @@ impl Stats {
             Counter::ShadingFunctionsEvaluated => &mut self.shading_functions_evaluated,
             Counter::PoolItemsOnWorkers => &mut self.pool_items_on_workers,
             Counter::PoolItemsOnCaller => &mut self.pool_items_on_caller,
+            Counter::TextFormsBuilt => &mut self.text_forms_built,
         }
     }
 }
@@ -582,6 +595,7 @@ impl Add for Stats {
             pool_items_on_caller: self
                 .pool_items_on_caller
                 .saturating_add(other.pool_items_on_caller),
+            text_forms_built: self.text_forms_built.saturating_add(other.text_forms_built),
         }
     }
 }
@@ -696,7 +710,7 @@ mod tests {
 
     /// Every counter of a step, so a test of one property covers them all;
     /// [`PLACES`] holds the two that count where a part ran.
-    const ALL: [Counter; 31] = [
+    const ALL: [Counter; 32] = [
         Counter::GlyphsShown,
         Counter::OutlinesFilled,
         Counter::GlyphMasksRasterised,
@@ -728,6 +742,7 @@ mod tests {
         Counter::ContentTokensRead,
         Counter::OperatorsRun,
         Counter::ShadingFunctionsEvaluated,
+        Counter::TextFormsBuilt,
     ];
 
     /// The counters of where a pooled operation's parts ran.

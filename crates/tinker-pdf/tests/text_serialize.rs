@@ -149,8 +149,8 @@ fn hostile_text_round_trips_through_json_exactly() {
         ll: (0.0, -2.0),
         lr: (5.0, -2.0),
     };
-    let page = TextPage {
-        blocks: vec![TextBlock {
+    let page = TextPage::new(
+        vec![TextBlock {
             quad,
             lines: vec![TextLine {
                 chars: vec![TextChar {
@@ -171,12 +171,12 @@ fn hostile_text_round_trips_through_json_exactly() {
                 size: 12.0,
             }],
         }],
-        mcid_props: Default::default(),
-        stated: Vec::new(),
-        warnings: vec![TextWarning::UnknownFont {
+        Default::default(),
+        Vec::new(),
+        vec![TextWarning::UnknownFont {
             name: hostile.to_string(),
         }],
-    };
+    );
     let frame = PageFrame {
         index: 0,
         bounds: (0.0, 0.0, 10.0, 10.0),

@@ -31,8 +31,24 @@
 //! Regular expressions are **not** an option: the tree has no regex engine
 //! and links none, and whether it should grow one is a decision the roadmap
 //! keeps open rather than one this module makes.
+//!
+//! # What a page keeps
+//!
+//! A page is built once and searched many times, so a search does not fold
+//! the page's text again: for each of the four ways a search folds — none,
+//! lower-cased, diacritics removed, both — the page keeps a **form**, every
+//! line's text folded a glyph at a time and joined, with the byte offset
+//! where each glyph's folded piece starts. A form is built at the first
+//! search that asks for its fold, never at extraction, and kept until the
+//! blocks change ([`TextPage::blocks_mut`] drops it); every later search in
+//! that fold folds its needle alone (`docs/design/performance.md`, P-24).
+//! [`TextPage::search_counted`] says how many forms a search built.
 
-use crate::text::{span_quad, Quad, TextPage};
+use std::sync::OnceLock;
+
+use tinker_pdf_cos::{Counter, Stats, Work};
+
+use crate::text::{span_quad, Quad, TextLine, TextPage};
 use crate::words::{member, word_boundaries};
 
 /// How [`TextPage::search_with`] matches.
@@ -79,17 +95,146 @@ pub fn fold_diacritics(text: &str) -> String {
     out
 }
 
-/// One side of a comparison, folded as `options` asks.
-fn fold(text: &str, options: &SearchOptions) -> String {
-    let cased = if options.case_sensitive {
-        text.to_string()
-    } else {
-        text.to_lowercase()
-    };
-    if options.diacritic_insensitive {
-        fold_diacritics(&cased)
-    } else {
-        cased
+/// One of the four ways a search folds text (`docs/design/performance.md`,
+/// P-24, "What a form is, and where a `TextPage` keeps it").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fold {
+    /// Case and accents significant.
+    Exact,
+    /// Lower-cased, accents significant: [`TextPage::search`]'s, and the
+    /// default options'.
+    Lower,
+    /// Case significant, diacritics removed.
+    Unaccented,
+    /// Lower-cased, then diacritics removed.
+    LowerUnaccented,
+}
+
+impl Fold {
+    /// The fold `options` search in.
+    const fn of(options: &SearchOptions) -> Fold {
+        match (options.case_sensitive, options.diacritic_insensitive) {
+            (true, false) => Fold::Exact,
+            (false, false) => Fold::Lower,
+            (true, true) => Fold::Unaccented,
+            (false, true) => Fold::LowerUnaccented,
+        }
+    }
+
+    /// Where a page keeps its form in this fold.
+    const fn index(self) -> usize {
+        match self {
+            Fold::Exact => 0,
+            Fold::Lower => 1,
+            Fold::Unaccented => 2,
+            Fold::LowerUnaccented => 3,
+        }
+    }
+
+    /// `text` folded: lower-cased by `str::to_lowercase` unless case is
+    /// significant, then its diacritics removed where they are not.
+    fn text(self, text: &str) -> String {
+        let cased = match self {
+            Fold::Exact | Fold::Unaccented => text.to_string(),
+            Fold::Lower | Fold::LowerUnaccented => text.to_lowercase(),
+        };
+        match self {
+            Fold::Unaccented | Fold::LowerUnaccented => fold_diacritics(&cased),
+            Fold::Exact | Fold::Lower => cased,
+        }
+    }
+}
+
+/// A page's text in one fold: for each line, in the order
+/// [`TextPage::lines`] gives them, its folded text and where each glyph's
+/// piece of it starts.
+#[derive(Clone, Debug)]
+pub(crate) struct Form {
+    lines: Vec<FormLine>,
+}
+
+/// One line of a [`Form`].
+#[derive(Clone, Debug)]
+struct FormLine {
+    /// Every glyph's text, folded a glyph at a time and joined, so a match
+    /// maps back to the glyphs it covers even where folding changed a
+    /// character's length.
+    text: String,
+    /// The byte offset in `text` where each glyph's folded piece starts, and
+    /// `text`'s length after the last: one more entry than the line has
+    /// glyphs. A glyph whose piece folding empties — a combining mark searched
+    /// without diacritics — starts where the next one does.
+    offsets: Vec<u32>,
+}
+
+impl Form {
+    /// `page`'s text in `fold`.
+    fn folded(page: &TextPage, fold: Fold) -> Form {
+        Form {
+            lines: page
+                .blocks()
+                .iter()
+                .flat_map(|block| &block.lines)
+                .map(|line| FormLine::folded(line, fold))
+                .collect(),
+        }
+    }
+}
+
+impl FormLine {
+    /// `line`'s text in `fold`, a glyph at a time.
+    fn folded(line: &TextLine, fold: Fold) -> FormLine {
+        let mut text = String::new();
+        let mut offsets = Vec::with_capacity(line.chars.len() + 1);
+        for c in &line.chars {
+            offsets.push(offset(text.len()));
+            text.push_str(&fold.text(&c.text));
+        }
+        offsets.push(offset(text.len()));
+        FormLine { text, offsets }
+    }
+
+    /// The glyphs the bytes `start..end` of the line's text cover: the first
+    /// whose piece ends past `start` and the last whose piece starts before
+    /// `end`.
+    fn glyphs(&self, start: usize, end: usize) -> Option<(usize, usize)> {
+        let mut first = None;
+        let mut last = None;
+        for (index, pair) in self.offsets.windows(2).enumerate() {
+            let (at, next) = (pair[0] as usize, pair[1] as usize);
+            if first.is_none() && next > start {
+                first = Some(index);
+            }
+            if at < end {
+                last = Some(index);
+            }
+        }
+        Some((first?, last?))
+    }
+}
+
+/// A byte offset as a [`FormLine`] holds it: a line's text is far shorter
+/// than four gigabytes, and one past it is held at the end.
+fn offset(at: usize) -> u32 {
+    u32::try_from(at).unwrap_or(u32::MAX)
+}
+
+/// The forms a [`TextPage`] keeps, one a [`Fold`], each built at the first
+/// search that asks for its fold.
+///
+/// `OnceLock`s, because a search takes `&TextPage` and a page is `Send` and
+/// `Sync`: two threads searching one page in one fold at once build its form
+/// once, the second waiting for the first. A clone keeps the forms built,
+/// which describe its blocks as they describe the original's.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Forms([OnceLock<Form>; 4]);
+
+impl Forms {
+    /// Drops every form, for blocks about to change.
+    pub(crate) fn clear(&mut self) {
+        for form in &mut self.0 {
+            form.take();
+        }
     }
 }
 
@@ -106,22 +251,62 @@ impl TextPage {
     /// (a needle of nothing but accents, searched without them).
     #[must_use]
     pub fn search_with(&self, needle: &str, options: &SearchOptions) -> Vec<Quad> {
+        self.find(needle, options, None)
+    }
+
+    /// [`TextPage::search_with`], with a count of what the search did: its
+    /// quads are `search_with`'s for the same arguments, to the bit, and its
+    /// [`Stats`] counts `text_forms_built`, the forms this search folded the
+    /// page into, which is one for the first search of a page in a fold and
+    /// none for every search after it.
+    ///
+    /// A counted sibling, as `Page::text_counted` is, because `search` takes
+    /// no options to carry a switch and the answer is a list
+    /// (`docs/design/performance.md`, P-24, "The counted door").
+    #[must_use]
+    pub fn search_counted(&self, needle: &str, options: &SearchOptions) -> (Vec<Quad>, Stats) {
+        let work = Work::new();
+        let quads = self.find(needle, options, Some(&work));
+        (quads, work.stats())
+    }
+
+    /// The page's text in `fold`, folded now if no search has read it in
+    /// that fold, the build counted into `work` where there is one.
+    fn form(&self, fold: Fold, work: Option<&Work>) -> &Form {
+        // `index` is below four, the array's length, for every fold.
+        self.forms.0[fold.index()].get_or_init(|| {
+            if let Some(work) = work {
+                work.add(Counter::TextFormsBuilt, 1);
+            }
+            Form::folded(self, fold)
+        })
+    }
+
+    /// What [`TextPage::search`], [`TextPage::search_with`] and
+    /// [`TextPage::search_counted`] share: `needle` found as `options` asks
+    /// in the page's kept form, counting into `work` where there is one.
+    pub(crate) fn find(
+        &self,
+        needle: &str,
+        options: &SearchOptions,
+        work: Option<&Work>,
+    ) -> Vec<Quad> {
         if needle.is_empty() {
             return Vec::new();
         }
-        let needle = fold(needle, options);
+        let fold = Fold::of(options);
+        let needle = fold.text(needle);
         if needle.is_empty() {
             return Vec::new();
         }
+        let form = self.form(fold, work);
         let mut hits = Vec::new();
 
-        for line in self.lines() {
-            // Folded per character, so a match maps back to the glyphs it
-            // covers even where folding changed a character's length.
-            let pieces: Vec<String> = line.chars.iter().map(|c| fold(&c.text, options)).collect();
-            let joined: String = pieces.concat();
+        let lines = self.blocks().iter().flat_map(|block| &block.lines);
+        for (line, kept) in lines.zip(&form.lines) {
+            let joined = kept.text.as_str();
             let boundaries = if options.whole_word {
-                word_boundaries(&joined)
+                word_boundaries(joined)
             } else {
                 Vec::new()
             };
@@ -135,21 +320,7 @@ impl TextPage {
                         && boundaries.binary_search(&end).is_ok());
 
                 if whole {
-                    // Byte offsets back to glyph indices.
-                    let mut at = 0usize;
-                    let mut first = None;
-                    let mut last = None;
-                    for (i, piece) in pieces.iter().enumerate() {
-                        let next = at + piece.len();
-                        if first.is_none() && next > start {
-                            first = Some(i);
-                        }
-                        if at < end {
-                            last = Some(i);
-                        }
-                        at = next;
-                    }
-                    if let (Some(a), Some(b)) = (first, last) {
+                    if let Some((a, b)) = kept.glyphs(start, end) {
                         if let Some(quad) = span_quad(line, a, b) {
                             hits.push(quad);
                         }
@@ -389,6 +560,160 @@ mod tests {
         let p = page(&["e\u{301}"]);
         assert!(p.search_with("\u{301}", &ACCENTS).is_empty());
         assert!(p.search_with("", &WORD).is_empty());
+    }
+
+    /// The four option sets that each fold the text their own way, and one
+    /// whole-word set, which folds as its case and accents say.
+    const FOLDS: [SearchOptions; 5] = [
+        SearchOptions {
+            case_sensitive: false,
+            whole_word: false,
+            diacritic_insensitive: false,
+        },
+        CASE,
+        ACCENTS,
+        SearchOptions {
+            case_sensitive: true,
+            whole_word: false,
+            diacritic_insensitive: true,
+        },
+        WORD,
+    ];
+
+    /// Every quad's corners as bits, so two answers compare to the bit.
+    fn bits(quads: &[Quad]) -> Vec<[u64; 8]> {
+        quads
+            .iter()
+            .map(|q| {
+                [
+                    q.ul.0, q.ul.1, q.ur.0, q.ur.1, q.ll.0, q.ll.1, q.lr.0, q.lr.1,
+                ]
+                .map(f64::to_bits)
+            })
+            .collect()
+    }
+
+    /// A page of accents, capitals and repeats for the folds to part on.
+    fn folding_page() -> TextPage {
+        page(&[
+            "R\u{e9}sum\u{e9} resume RESUME",
+            "o|ffi|ce caf|e|\u{301} M\u{fc}ller",
+            "aaaa aa \u{130}stanbul",
+        ])
+    }
+
+    /// **A page is folded once a fold, whatever the searches.** Ten searches
+    /// in each fold build its form at the first and read it after, each
+    /// returning, to the bit, what the same search of a page that has kept
+    /// nothing returns; a whole-word search reads the form of its case and
+    /// accents, and `search` the default's.
+    #[test]
+    fn a_page_is_folded_once_a_fold_whatever_the_searches() {
+        let needles = [
+            "resume",
+            "R\u{e9}sum\u{e9}",
+            "aa",
+            "a",
+            "ffi",
+            "e\u{301}",
+            "m\u{fc}ller",
+            "office",
+            "zzz",
+            "\u{130}",
+        ];
+        let kept = folding_page();
+        let mut built = 0u64;
+        for options in FOLDS {
+            for (round, needle) in needles.iter().enumerate() {
+                let (quads, stats) = kept.search_counted(needle, &options);
+                built += stats.text_forms_built;
+                if round > 0 {
+                    assert_eq!(stats.text_forms_built, 0, "{needle:?}, {options:?}");
+                }
+                assert_eq!(
+                    bits(&quads),
+                    bits(&folding_page().search_with(needle, &options)),
+                    "{needle:?}, {options:?}: a kept form finds what a fresh page finds"
+                );
+                assert_eq!(bits(&quads), bits(&kept.search_with(needle, &options)));
+            }
+        }
+        assert_eq!(built, 4, "one form a fold, the whole-word set's among them");
+        let (_, stats) = kept.search_counted("aa", &SearchOptions::default());
+        assert_eq!(stats.text_forms_built, 0);
+
+        let fresh = folding_page();
+        let _ = fresh.search("resume");
+        let (_, stats) = fresh.search_counted("aa", &SearchOptions::default());
+        assert_eq!(stats.text_forms_built, 0, "search keeps the default's form");
+        let (_, stats) = fresh.search_counted("", &CASE);
+        assert_eq!(stats.text_forms_built, 0, "an empty needle folds nothing");
+        let (_, stats) = fresh.search_counted("\u{301}", &ACCENTS);
+        assert_eq!(stats.text_forms_built, 0, "nor one folding empties");
+        let copy = kept.clone();
+        let (_, stats) = copy.search_counted("resume", &CASE);
+        assert_eq!(stats.text_forms_built, 0, "a clone keeps the forms built");
+        let (_, stats) = TextPage::default().search_counted("a", &CASE);
+        assert_eq!(stats.text_forms_built, 1, "an empty page has a form too");
+    }
+
+    /// **A form does not outlive a change to its blocks.** A search after
+    /// `blocks_mut` has reordered the lines, dropped a glyph or edited one
+    /// finds what a page made of those blocks afresh finds, and folds again.
+    #[test]
+    fn a_form_does_not_outlive_a_change_to_its_blocks() {
+        type Change = fn(&mut Vec<crate::text::TextBlock>);
+        let changes: [(&str, Change); 4] = [
+            ("lines reversed", |blocks| {
+                for block in blocks.iter_mut() {
+                    block.lines.reverse();
+                }
+                blocks.reverse();
+            }),
+            ("a glyph dropped", |blocks| {
+                if let Some(line) = blocks.first_mut().and_then(|b| b.lines.first_mut()) {
+                    line.chars.remove(1);
+                }
+            }),
+            ("a glyph edited", |blocks| {
+                if let Some(c) = blocks
+                    .first_mut()
+                    .and_then(|b| b.lines.first_mut())
+                    .and_then(|l| l.chars.get_mut(0))
+                {
+                    c.text = "Z".to_string();
+                }
+            }),
+            ("everything dropped", |blocks| blocks.clear()),
+        ];
+        for (what, change) in changes {
+            for options in FOLDS {
+                let mut kept = folding_page();
+                for needle in ["resume", "Zsum", "aa", "ffi"] {
+                    let _ = kept.search_with(needle, &options);
+                }
+                change(kept.blocks_mut());
+                let afresh = TextPage::new(
+                    kept.blocks().to_vec(),
+                    kept.mcid_props.clone(),
+                    kept.stated.clone(),
+                    kept.warnings.clone(),
+                );
+                for (index, needle) in ["resume", "Zsum", "aa", "ffi", "R"].iter().enumerate() {
+                    let (quads, stats) = kept.search_counted(needle, &options);
+                    assert_eq!(
+                        bits(&quads),
+                        bits(&afresh.search_with(needle, &options)),
+                        "{what}, {needle:?}, {options:?}"
+                    );
+                    assert_eq!(
+                        stats.text_forms_built,
+                        u64::from(index == 0),
+                        "{what}, {needle:?}, {options:?}: folded again once"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

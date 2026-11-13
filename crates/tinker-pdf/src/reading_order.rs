@@ -814,7 +814,7 @@ fn declined(
     let flat = flatten(page);
     let mut next = 0usize;
     let mut drafts = Vec::new();
-    for (index, block) in page.blocks.iter().enumerate() {
+    for (index, block) in page.blocks().iter().enumerate() {
         let pieces = block
             .lines
             .iter()
@@ -838,7 +838,7 @@ fn declined(
 
 /// Every character of `page`, in stream order.
 fn flatten(page: &TextPage) -> Vec<&TextChar> {
-    page.blocks
+    page.blocks()
         .iter()
         .flat_map(|b| b.lines.iter())
         .flat_map(|l| l.chars.iter())
@@ -988,7 +988,7 @@ fn infer(
     let mut line_at: Vec<usize> = Vec::with_capacity(flat.len());
     let mut in_place: Vec<(Role, Piece)> = Vec::new();
     let mut next = 0usize;
-    for (block, b) in page.blocks.iter().enumerate() {
+    for (block, b) in page.blocks().iter().enumerate() {
         for source in &b.lines {
             let all = next..next + source.chars.len();
             next += source.chars.len();

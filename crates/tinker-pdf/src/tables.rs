@@ -784,7 +784,7 @@ fn tables_of(observed: &Observed, frame: (f64, f64, f64, f64), aligned: bool) ->
     let mut warnings = read.warnings.clone();
     let page = &observed.text;
     let flat: Vec<&TextChar> = page
-        .blocks
+        .blocks()
         .iter()
         .flat_map(|b| b.lines.iter())
         .flat_map(|l| l.chars.iter())
@@ -794,7 +794,7 @@ fn tables_of(observed: &Observed, frame: (f64, f64, f64, f64), aligned: bool) ->
     // among the page's lines, with that line's top and whether it reads
     // right to left.
     let line_of: Vec<LineOf> = page
-        .blocks
+        .blocks()
         .iter()
         .flat_map(|b| b.lines.iter())
         .enumerate()
@@ -1556,7 +1556,7 @@ fn fragments(page: &TextPage, flat: &[&TextChar], em: f64, ruled: &[bool]) -> Ve
     let gap = ALIGNED_GAP_EMS * em;
     let mut out = Vec::new();
     let mut next = 0usize;
-    for line in page.blocks.iter().flat_map(|b| b.lines.iter()) {
+    for line in page.blocks().iter().flat_map(|b| b.lines.iter()) {
         let first = next;
         next += line.chars.len();
         if line.wmode != tinker_pdf_content::WritingMode::Horizontal {

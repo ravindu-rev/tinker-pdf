@@ -371,7 +371,7 @@ fn a_real_book_has_block_structure_a_heading_and_no_head_text() {
 fn font_sizes(doc: &Document) -> BTreeSet<u32> {
     let mut out = BTreeSet::new();
     for at in 0..doc.page_count() {
-        for block in doc.page(at).expect("a page").text().blocks {
+        for block in doc.page(at).expect("a page").text().into_blocks() {
             for line in block.lines {
                 for character in line.chars {
                     out.insert((character.size * 10.0).round() as u32);
@@ -669,7 +669,7 @@ fn a_links_rectangle_is_over_the_words_that_are_the_link() {
             // this is what closes it.
             let baselines: Vec<(f64, f64)> = page
                 .text()
-                .blocks
+                .blocks()
                 .iter()
                 .flat_map(|block| block.lines.iter())
                 .flat_map(|line| line.chars.iter())

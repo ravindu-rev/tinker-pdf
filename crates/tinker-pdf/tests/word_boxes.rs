@@ -288,7 +288,7 @@ fn expected_records(document: &Document, scale: f64) -> Vec<Vec<String>> {
         let carry = |point: (f64, f64)| to_frame(crop, rotation, scale, point);
         let p = u64::from(page.index()) + 1;
         records.push(record(1, [p, 0, 0, 0, 0], [0, 0, size.0, size.1], ""));
-        for (b, block) in (1u64..).zip(&page.text().blocks) {
+        for (b, block) in (1u64..).zip(page.text().blocks()) {
             let edges = tsv_box(&block.quad, &carry, size);
             records.push(record(2, [p, b, 0, 0, 0], edges, ""));
             // A born-digital block is one paragraph, its box the block's.
