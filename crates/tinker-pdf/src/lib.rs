@@ -243,6 +243,9 @@ pub use render_part::{NotDrawn, RenderPartError};
 pub use stats::Stats;
 /// A page written as SVG 1.1: [`Page::to_svg`], and what it could not say.
 pub use svg_out::{Rasterised, Svg, SvgOptions, SvgWarning, MAX_SVG_BYTES};
+/// Why [`write::append`]'s reopen read the whole document again rather than
+/// its update alone ([`Appended::full_open`]).
+pub use tinker_pdf_cos::FullOpen;
 /// Writing: creation, editing and saving.
 ///
 /// Without these on the facade a caller depending only on this crate could
@@ -508,11 +511,12 @@ pub use verdict::{
 /// The function stays behind [`write::save`], as [`subset::apply`] does: a
 /// bare `save` at the crate root next to [`tinker_pdf_cos::DocumentEditor`]'s
 /// own `save` would be two doors with one name, and which door you used is
-/// the thing this module exists to make visible.
+/// the thing this module exists to make visible. [`write::append`], the
+/// edit-and-reopen door, stays behind it too.
 pub use write::{
-    BilevelCodec, ContinuousCodec, FontPolicy, ImageCoding, ImageOutcome, ImagePolicy,
-    ImageRecoding, ImageReport, JpegTables, Recoded, SaveOptions, Saved, SubsetOutcome,
-    UntouchedImage, UntouchedImageReason,
+    AppendError, AppendOptions, Appended, BilevelCodec, ContinuousCodec, FontPolicy, ImageCoding,
+    ImageOutcome, ImagePolicy, ImageRecoding, ImageReport, JpegTables, Recoded, SaveOptions, Saved,
+    SubsetOutcome, UntouchedImage, UntouchedImageReason,
 };
 /// Fixed documents: the other thing a `PK\x03\x04` can be (gap 30).
 pub use xps::{Dialect, XpsElementDefect, XpsPageDefect};

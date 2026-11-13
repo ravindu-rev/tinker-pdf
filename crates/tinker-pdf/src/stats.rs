@@ -3,8 +3,9 @@
 //!
 //! Feature documentation: `docs/features/rendering.md` ("Counted work") for
 //! the render door and the counters; `content-and-text.md` for text and image
-//! extraction, `writing.md` for a save and a merge, and `pdfa.md`, `pdfua.md`
-//! and `pdfx.md` for the validators. Design: `docs/design/performance.md`.
+//! extraction, `writing.md` for a save, a merge and an append and its reopen,
+//! and `pdfa.md`, `pdfua.md` and `pdfx.md` for the validators. Design:
+//! `docs/design/performance.md`.
 //!
 //! The tally itself is `tinker-pdf-cos`'s, because the page walk, the filter
 //! chain and the editor it rides are there; this crate re-exports the value it
@@ -15,7 +16,7 @@
 use std::sync::Arc;
 
 pub use tinker_pdf_cos::Stats;
-use tinker_pdf_cos::{pages as cos_pages, CosDocument, CosError, ObjRef};
+use tinker_pdf_cos::{pages as cos_pages, CosDocument, CosError, ObjRef, OpenError, Reopened};
 pub(crate) use tinker_pdf_cos::{Counter, Work};
 use tinker_pdf_render::RenderCounts;
 
@@ -65,6 +66,22 @@ pub(crate) fn decoded(
     work: Option<&Arc<Work>>,
 ) -> Result<Vec<u8>, CosError> {
     doc.stream_decoded_counted(r, work.map(|work| &**work))
+}
+
+/// `base` reopened over `update`, an incremental section written after its
+/// bytes ([`CosDocument::reopen`]), what the reopen read counted into `work`
+/// when the operation is counting: the section's tokens, its rows and the
+/// objects it parsed, and everything a full open reads when the reopen opens
+/// whole.
+pub(crate) fn reopen(
+    base: &Arc<CosDocument>,
+    update: Arc<[u8]>,
+    work: Option<&Arc<Work>>,
+) -> Result<Reopened, OpenError> {
+    match work {
+        Some(work) => CosDocument::reopen_counted(base, update, work),
+        None => CosDocument::reopen(base, update),
+    }
 }
 
 /// The document's XMP packet, its decode counted into `work` when the

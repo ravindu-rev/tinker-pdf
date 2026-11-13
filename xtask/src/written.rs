@@ -174,6 +174,16 @@ pub const WRITERS: &[Writer] = &[
         beside: &[],
     },
     Writer {
+        entry: "tinker_pdf::write::append",
+        needle: "write::append",
+        beside: &[],
+    },
+    Writer {
+        entry: "tinker_pdf::write::AppendOptions",
+        needle: "AppendOptions",
+        beside: &[],
+    },
+    Writer {
         entry: "write::incremental_update",
         needle: "incremental_update(",
         beside: &[],

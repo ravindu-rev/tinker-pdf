@@ -435,6 +435,33 @@ first sets its page order, and a rolled-back transaction keeps what was
 counted. A counted save writes the same bytes and reports the same passes as
 an uncounted one.
 
+**Appended and read back, on a third door.**
+`tinker_pdf::write::append(&document, &editor, &AppendOptions) ->
+Result<Appended, AppendError>` writes an editor's edits as the update section
+an incremental save appends (`DocumentEditor::save_update`) and reopens
+`document`'s object layer over it (`CosDocument::reopen`,
+[opening](opening.md)), so a caller holds the bytes to append to its file and
+the document they make without opening the file again. `Appended` carries the
+section (`update`, an `Arc<[u8]>` the reopened document reads where it is:
+`document`'s bytes followed by it are `DocumentEditor::save` under
+`WriteMode::Incremental`, byte for byte), the reopened `Document`, which keeps
+the font provider, the archive report and the security `document` had, and
+its cache budget (`Document::cache_limits`) in a cache of its own, since an
+entry `document` kept may be of an object the update replaces, the
+`FullOpen` reason when the reopen read the whole file again, the numbers of
+the objects the update writes (`DocumentEditor::changed_numbers`), and the
+reopen's `Stats` when `AppendOptions::stats` asked — on an editor
+`count_work` made count, the editor's whole tally, as a save hands it back.
+`AppendOptions` holds `compress` and `parallelism`, the two `WriteOptions`
+fields an update reads, and `stats`. An editor whose object layer is not
+`document`'s own — the same bytes opened again included — is
+`AppendError::NotThisDocument`, and a reopen that must read the whole file and
+cannot fetch it is `AppendError::Reopen`, naming the range. The door runs
+neither pass `save` runs, since an update leaves every original program and
+image in the file (7.5.6). A reopen that reads the section alone reads its
+rows — one for each changed object and one for object zero's free head — and
+parses no object, where a full open reads every row the file has.
+
 ## Refused by name
 
 | What | Typed variant | Why (one line) | See |
@@ -469,6 +496,19 @@ the two are one file whose update reopens at `Trust`),
 twenty bytes), `a_stream_that_already_declares_a_filter_is_handed_through_untouched`
 (both directions, so it cannot pass on a writer that stopped compressing),
 and object-stream round-trips through the engine's own reader.
+
+`crates/tinker-pdf/tests/incremental_reopen.rs` holds `write::append` on the
+public surface: `an_annotation_edit_saved_and_reopened_parses_only_what_changed`
+counts a one-annotation edit of a generated 1 000-page file — its rows the
+changed object's and the free head's, no object parsed, every count the one
+the same edit of a 10-page file gives — and renders and extracts every page of
+the reopened document as a fresh open of the joined bytes does; the rest hold
+the update to the incremental save's section, compressed and on threads, the
+font provider, archive report and security carried, the cache budget kept in
+a cache of the reopened document's own, an update to an update, an
+untouched editor, an editor of another document refused, every `FullOpen`
+reason the facade can meet, and a source that cannot supply the file refused
+with the range it missed.
 
 The encrypted incremental update has two tests of its own in
 `crates/tinker-pdf-cos/tests/strict_validator.rs`, and they are a pair on

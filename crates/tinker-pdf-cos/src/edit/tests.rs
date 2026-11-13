@@ -386,6 +386,71 @@ fn an_update_section_is_written_without_copying_the_original() {
     assert!(editor.save(&options) == [doc.bytes(), &section[..]].concat());
 }
 
+/// `changed_numbers` names exactly the objects the update section writes:
+/// what was put, written as a stream and deleted, and the page-tree nodes a
+/// page move rewrites, ascending — each one a row of the section's table,
+/// which states nothing else but object zero's free head. An untouched
+/// editor's section writes no object and names none.
+#[test]
+fn the_changed_numbers_are_the_sections_objects() {
+    let options = WriteOptions {
+        mode: WriteMode::Incremental,
+        ..WriteOptions::default()
+    };
+    let doc = document(3);
+    assert!(DocumentEditor::new(Arc::clone(&doc))
+        .changed_numbers()
+        .is_empty());
+
+    let mut editor = DocumentEditor::new(Arc::clone(&doc));
+    let note = editor.allocate();
+    editor.put(note, Object::Int(7));
+    let image = editor.allocate();
+    editor.put_stream(
+        image,
+        StreamData {
+            dict: Dict::new(),
+            data: b"bytes".to_vec(),
+        },
+    );
+    let pages = pages::collect(&doc);
+    let gone = pages::contents(&doc, &pages[2])
+        .first()
+        .copied()
+        .expect("page 3 draws");
+    editor.delete(gone);
+    assert!(editor.move_page(0, 2));
+    let changed = editor.changed_numbers();
+    assert!(
+        changed.windows(2).all(|pair| pair[0] < pair[1]),
+        "ascending, each once: {changed:?}"
+    );
+    for num in [note.num, image.num, gone.num] {
+        assert!(changed.contains(&num), "{num} is written: {changed:?}");
+    }
+    for page in &pages {
+        assert!(
+            changed.contains(&page.reference.num),
+            "a moved tree rewrites every page's /Parent: {changed:?}"
+        );
+    }
+
+    // The reopen reads the section's rows and nothing else
+    // (`a_reopen_parses_only_what_changed`), so the numbers it touches are
+    // the rows the section states.
+    let section = editor.save_update(&options);
+    let _ = crate::doc::count::take();
+    let reopened = CosDocument::reopen(&doc, section).expect("it reopens");
+    let mut rows = crate::doc::count::take();
+    assert_eq!(reopened.full_open, None);
+    assert!(rows.remove(&0), "the free head's row is read");
+    assert_eq!(
+        rows.into_iter().collect::<Vec<_>>(),
+        changed,
+        "the section's rows are the changed numbers"
+    );
+}
+
 #[test]
 fn appended_content_does_not_disturb_what_was_there() {
     let mut editor = DocumentEditor::new(document(1));

@@ -315,6 +315,17 @@ impl DocumentEditor {
         .0
     }
 
+    /// The numbers of the objects [`DocumentEditor::save_update`]'s section
+    /// writes, ascending: every object this editor has put or written, every
+    /// one it has deleted, and each page-tree node a page operation rewrites.
+    /// They are the numbers a reopen over that section parses afresh
+    /// ([`crate::CosDocument::reopen`]); object zero's free head, which its
+    /// table also states, is not one.
+    #[must_use]
+    pub fn changed_numbers(&self) -> Vec<u32> {
+        self.changed_set().numbers()
+    }
+
     /// Saves the edits as a document **sealed to recipients** rather than to
     /// a password (ISO 32000-2 7.6.5): a rewrite whose `/Encrypt` is the
     /// public-key handler's, `/Recipients` the envelopes `sealed` carries, and

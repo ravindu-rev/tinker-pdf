@@ -4125,8 +4125,10 @@ a view is still a snapshot.
 writes `save_update`'s section, reopens `document`'s object layer over it, and
 hands back `Appended`: the section (`update`), the reopened `Document`
 carrying `document`'s font provider and archive report, the `FullOpen` when
-there was one, the numbers the update changed (the editor's changed set), and
-the reopen's counts when `AppendOptions::stats` asked. `Appended::patch`
+there was one, the numbers the update changed (the editor's changed set,
+`DocumentEditor::changed_numbers`), and the reopen's counts when
+`AppendOptions::stats` asked — on an editor that counts, its whole tally, as a
+save hands it back. `Appended::patch`
 re-renders one of its pages over a bitmap of the page before the edit.
 
 #### The counted quantities

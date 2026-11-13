@@ -89,6 +89,17 @@ that names it, at the same number, plain and encrypted, and the facade's
 `resources_over_an_editors_view_resolve_what_it_allocated` does the same
 through `PageResources`.
 
+**An edit appended and read on.** `tinker_pdf::write::append(&document,
+&editor, &options)` is `view` for a host that keeps what it saves: it writes
+the section `save_update` writes, reopens the document over it the same way,
+and hands back the section to append to the file, the reopened `Document` —
+with the font provider and archive report the document had — and the numbers
+of the objects the edits wrote, `changed_numbers()` (every object put,
+written or deleted and each page-tree node a page operation rewrites,
+ascending). The editor must be the document's own, `Document::editor()` or one
+over the handle it shares; it is left as it was, and an editor over the
+reopened document makes the next update ([writing](writing.md)).
+
 **Page surgery** (7.7.3). `delete_page`, `move_page`, `rotate_page` (any
 multiple of 90, stored as `/Rotate`; any other turn is refused and changes
 nothing — `a_turn_that_is_not_a_quarter_is_refused_and_changes_nothing`),
@@ -689,7 +700,8 @@ let bytes = editor.save(&tinker_pdf::WriteOptions::default());
 ```
 
 `DocumentEditor` (facade re-export of `tinker_pdf_cos::DocumentEditor`):
-`document()`, `is_dirty()`, `has_changed()`, `allocate()`, `get()`, `put()`,
+`document()`, `is_dirty()`, `has_changed()`, `changed_numbers()`,
+`allocate()`, `get()`, `put()`,
 `put_stream()`, `delete()`, `intern()`, `stream_bytes()`, `catalog()`,
 `update_catalog()`,
 `add_name_tree()`, `add_number_tree()`, `add_named_destination()`,
@@ -846,6 +858,11 @@ encrypted input decrypted; whether the save doors refuse is
 
 ## Verified
 
+- `crates/tinker-pdf/tests/incremental_reopen.rs` — an edit appended through
+  `write::append` reads, page for page, as a fresh open of the file and its
+  update ([writing](writing.md) gives the cases); `edit/tests.rs`'s
+  `the_changed_numbers_are_the_sections_objects` holds `changed_numbers` to
+  the rows of the section `save_update` writes.
 - `crates/tinker-pdf/tests/editor_stamp.rs` — a stamp over paints on top and
   one under beneath; the page's own content streams are the same objects,
   unredefined by the update, with the same bytes; two pages sharing one

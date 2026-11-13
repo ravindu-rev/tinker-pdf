@@ -118,16 +118,36 @@
 //! the prefix, so a smaller file is not what it produces, and
 //! [`ImageOutcome::RecodedButTheOriginalsRemain`] says so.
 //!
+//! # Appending, and reading what was appended
+//!
+//! [`append`] is the edit-and-reopen door (`docs/design/performance.md`,
+//! P-17): it writes an editor's edits as the update section an incremental
+//! save appends ([`DocumentEditor::save_update`]), and reopens the document the
+//! editor was made from over that section
+//! ([`CosDocument::reopen`](crate::CosDocument::reopen)), so the caller holds
+//! the bytes to append and the document they make, read as a fresh open of
+//! the whole file reads it. Neither costs the document: nothing
+//! of its bytes is copied, its cross-reference chain is not walked again and
+//! its entries are not probed again, and every object the edits leave alone is
+//! its own parse, kept. It runs neither pass [`save`] runs. Both would cut
+//! programs and images whose originals an update leaves in the file (7.5.6),
+//! as [`SubsetOutcome::CutButTheOriginalsRemain`] says of [`save`] under
+//! [`WriteMode::Incremental`]; a caller who wants the smaller programs drawn
+//! saves through [`save`] and opens what it wrote.
+//!
 //! # What this module is not
 //!
 //! It is not a second serializer. Every byte still comes from
-//! [`DocumentEditor::save`]; this runs its passes over the editor first and
-//! then calls it. Signing ([`DocumentEditor::save_signed`]) has no door here on
-//! purpose: it is incremental by definition, so the paragraph above applies to
-//! all of it, and a caller who wants a signed document with subset fonts
-//! subsets, rewrites, reopens and signs that.
+//! [`DocumentEditor::save`] or [`DocumentEditor::save_update`]; this runs its
+//! passes over the editor first and then calls one. Signing
+//! ([`DocumentEditor::save_signed`]) has no door here on purpose: it is
+//! incremental by definition, so what the incremental save's section says
+//! applies to all of it, and a caller who wants a signed document with subset
+//! fonts subsets, rewrites, reopens and signs that.
 
-use tinker_pdf_cos::{DocumentEditor, WriteMode, WriteOptions};
+use std::sync::Arc;
+
+use tinker_pdf_cos::{DocumentEditor, FullOpen, WriteMode, WriteOptions};
 
 pub use crate::recode::{
     BilevelCodec, ContinuousCodec, ImageCoding, ImagePolicy, ImageRecoding, ImageReport,
@@ -413,6 +433,223 @@ pub fn save(editor: &mut DocumentEditor, options: &SaveOptions) -> Saved {
         fonts,
         images,
         stats: work.filter(|_| options.stats).map(|work| work.stats()),
+    }
+}
+
+/// Options for [`append`].
+///
+/// The two [`WriteOptions`] fields an update section reads, and whether to
+/// count the reopen. Nothing else `WriteOptions` holds applies to an update:
+/// its layout, version, containers and encryption are the document's, and it
+/// collects and merges nothing, so a field here the call did not read would
+/// be a flag that lies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AppendOptions {
+    /// Compress the streams the update carries that the caller has not
+    /// already encoded, as [`WriteOptions::compress`] does. Off by default.
+    pub compress: bool,
+    /// The threads the writer may spend compressing them, as
+    /// [`WriteOptions::parallelism`] spends them: every byte is the serial
+    /// writer's. [`Parallelism::Serial`] by default.
+    pub parallelism: Parallelism,
+    /// Count what the reopen reads and hand it back as [`Appended::stats`]:
+    /// the section's tokens, its cross-reference rows and the objects it
+    /// parses, and all a full open reads when the reopen opens whole. On an
+    /// editor [`DocumentEditor::count_work`] asked to count, the count is
+    /// everything counted over the editor since, this reopen included.
+    ///
+    /// Off by default. A counted append writes the same bytes and reopens the
+    /// same document as an uncounted one.
+    pub stats: bool,
+}
+
+/// An editor's edits written as an incremental update, and the document
+/// reopened over it, by [`append`].
+///
+/// `#[must_use]`: the update is bytes a caller has to append to the file it
+/// holds, and the document is what those two make.
+#[derive(Clone)]
+#[must_use]
+pub struct Appended {
+    /// The update section: the bytes an incremental save appends to the
+    /// document's own, its offsets counted from the document's start, so the
+    /// document's bytes followed by these are the save
+    /// [`DocumentEditor::save`] writes under [`WriteMode::Incremental`], byte
+    /// for byte. Shared with [`Appended::document`], which reads them where
+    /// they are.
+    pub update: Arc<[u8]>,
+    /// The document's bytes followed by [`Appended::update`], as
+    /// [`Document::open`] reads the two joined: the same objects, pages,
+    /// pixels and text, and the warnings the document had and then the
+    /// update's own. It carries the font provider and the archive report the
+    /// document had, and the security it was authenticated with; and, where
+    /// the document keeps a cache ([`Document::cache_limits`]), a cache of its
+    /// own under the same budget, since what the document's kept was drawn
+    /// from the objects before the edit.
+    ///
+    /// [`Document::open`]: crate::Document::open
+    /// [`Document::cache_limits`]: crate::Document::cache_limits
+    pub document: crate::Document,
+    /// Why the reopen read the whole document again rather than the update
+    /// alone, when it did ([`FullOpen`]); `None` when it read only the
+    /// update.
+    pub full_open: Option<FullOpen>,
+    /// The numbers of the objects the update writes, ascending
+    /// ([`DocumentEditor::changed_numbers`]): what the reopen parses afresh.
+    pub changed: Vec<u32>,
+    /// What [`AppendOptions::stats`] asked to be counted: `None` unless it
+    /// asked.
+    pub stats: Option<Stats>,
+}
+
+impl core::fmt::Debug for Appended {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // The update's bytes are a document's, which is not what a caller
+        // printing this wants to read; their length is.
+        f.debug_struct("Appended")
+            .field("update", &self.update.len())
+            .field("document", &self.document)
+            .field("full_open", &self.full_open)
+            .field("changed", &self.changed)
+            .field("stats", &self.stats)
+            .finish()
+    }
+}
+
+/// Why [`append`] handed back no [`Appended`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AppendError {
+    /// The editor edits another document than the one handed in: an
+    /// update's offsets count from its own document's start, and its trailer
+    /// chains to that document's last section, so read after another
+    /// document's bytes it names nothing that is there. "The same" is the
+    /// same object layer — [`Document::editor`], or a [`DocumentEditor`] over
+    /// [`Document::cos`]'s own handle — and not equal bytes opened again.
+    ///
+    /// [`Document::editor`]: crate::Document::editor
+    /// [`Document::cos`]: crate::Document::cos
+    NotThisDocument,
+    /// The document and its update did not reopen: only a reopen that opens
+    /// the whole document again can fail, as [`crate::Document::open`] fails,
+    /// and a streamed document whose bytes cannot all be fetched for it is
+    /// [`crate::OpenError::SourceUnavailable`], naming the range.
+    Reopen(crate::OpenError),
+}
+
+impl core::fmt::Display for AppendError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            AppendError::NotThisDocument => {
+                f.write_str("the editor edits another document than the one handed in")
+            }
+            AppendError::Reopen(why) => write!(f, "the update did not reopen: {why}"),
+        }
+    }
+}
+
+impl std::error::Error for AppendError {}
+
+/// Writes an editor's edits as an incremental update and reopens the
+/// document over it (`docs/design/performance.md`, P-17).
+///
+/// `editor` must edit `document` itself ([`AppendError::NotThisDocument`]).
+/// The update is [`DocumentEditor::save_update`]'s section: what
+/// [`DocumentEditor::save`] appends under [`WriteMode::Incremental`], written
+/// from the document's length and its last byte, so none of its bytes is
+/// copied; on an encrypted document it is sealed with the document's own key
+/// (7.6.2), and [`DocumentEditor::check_save`] under that mode is the question
+/// of whether it writes anything in the clear. The document is then reopened
+/// over the section ([`CosDocument::reopen`](crate::CosDocument::reopen)),
+/// which reads the section's `startxref`, its cross-reference data and trailer
+/// and the header of each object it places, and keeps the document's entries,
+/// parsed objects, object streams and security for every number the section
+/// leaves alone. A document the reopen cannot keep that way — linearized and
+/// opened from its head, streamed, repaired, shifted, or reopened too deep —
+/// or an update that does not chain to it is read whole with the section, and
+/// [`Appended::full_open`] says why.
+///
+/// The update and the document it makes are handed back together with the
+/// numbers the update writes and, when [`AppendOptions::stats`] asked, what
+/// the reopen read: where it read the section alone, the section's rows and
+/// no others, and of whole objects only a cross-reference stream's own, which
+/// a classic section has none of. The editor is left as it was; an editor
+/// over [`Appended::document`] makes the update that follows this one, and
+/// its append reads that update alone in turn.
+///
+/// ```no_run
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use tinker_pdf::write::{append, AppendOptions};
+///
+/// let original = std::fs::read("in.pdf")?;
+/// let doc = tinker_pdf::Document::open(original.clone())?;
+/// let mut editor = doc.editor();
+/// if editor.rotate_page(0, 90) {
+///     let appended = append(&doc, &editor, &AppendOptions::default())?;
+///     std::fs::write("out.pdf", [&original[..], &appended.update[..]].concat())?;
+///     // The turned page, read without opening `out.pdf` again.
+///     assert_eq!(appended.document.page(0).map(|page| page.rotation()), Some(90));
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Errors
+///
+/// [`AppendError::NotThisDocument`] when `editor` edits another document, and
+/// [`AppendError::Reopen`] when a reopen that opens the whole document again
+/// fails.
+pub fn append(
+    document: &crate::Document,
+    editor: &DocumentEditor,
+    options: &AppendOptions,
+) -> Result<Appended, AppendError> {
+    if !std::ptr::eq(editor.document(), document.cos()) {
+        return Err(AppendError::NotThisDocument);
+    }
+    // The editor's tally when it is counting, as `save` takes it, and the
+    // call's own when it is not and the caller asked.
+    let work = editor
+        .work()
+        .cloned()
+        .or_else(|| stats::tally(options.stats));
+    let update: Arc<[u8]> = editor
+        .save_update(&WriteOptions {
+            mode: WriteMode::Incremental,
+            compress: options.compress,
+            parallelism: options.parallelism,
+            ..WriteOptions::default()
+        })
+        .into();
+    let reopened = stats::reopen(&document.inner, Arc::clone(&update), work.as_ref())
+        .map_err(|error| AppendError::Reopen(reopen_error(error)))?;
+    Ok(Appended {
+        update,
+        document: crate::Document {
+            inner: Arc::new(reopened.document),
+            // The document's own, already made effective: a `bundled-fonts`
+            // build's faces are chained behind a provider once, at open.
+            fonts: document.fonts.clone(),
+            archive: document.archive.clone(),
+            // A cache of its own under the document's budget: an entry the
+            // document kept may be of an object the update replaces.
+            cache: document
+                .cache_limits()
+                .map(|limits| Arc::new(crate::cache::DocumentCache::new(limits))),
+        },
+        full_open: reopened.full_open,
+        changed: editor.changed_numbers(),
+        stats: work.filter(|_| options.stats).map(|work| work.stats()),
+    })
+}
+
+/// The facade's reading of a reopen's refusal, as a streamed open reads one.
+fn reopen_error(error: tinker_pdf_cos::OpenError) -> crate::OpenError {
+    match error {
+        tinker_pdf_cos::OpenError::SourceUnavailable(miss) => {
+            crate::OpenError::SourceUnavailable(miss)
+        }
+        tinker_pdf_cos::OpenError::NoObjects => crate::OpenError::NotAPdf,
     }
 }
 
@@ -708,5 +945,23 @@ mod tests {
         );
         assert!(!SubsetOutcome::CutButTheOriginalsRemain(report).removed());
         assert!(!SubsetOutcome::Kept.removed());
+    }
+
+    /// A reopen's refusal reads as a streamed open's: a source that could not
+    /// supply the bytes names the range it was asked for, and bytes with no
+    /// objects are not a PDF.
+    #[test]
+    fn a_reopen_refusal_reads_as_an_open_refusal() {
+        let miss = tinker_pdf_cos::SourceMiss::at(3..9);
+        assert_eq!(
+            reopen_error(tinker_pdf_cos::OpenError::SourceUnavailable(miss.clone())),
+            crate::OpenError::SourceUnavailable(miss)
+        );
+        assert_eq!(
+            reopen_error(tinker_pdf_cos::OpenError::NoObjects),
+            crate::OpenError::NotAPdf
+        );
+        let error = AppendError::Reopen(crate::OpenError::NotAPdf);
+        assert!(error.to_string().contains("not a PDF"), "{error}");
     }
 }
