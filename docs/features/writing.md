@@ -461,6 +461,9 @@ neither pass `save` runs, since an update leaves every original program and
 image in the file (7.5.6). A reopen that reads the section alone reads its
 rows — one for each changed object and one for object zero's free head — and
 parses no object, where a full open reads every row the file has.
+`Appended::patch` re-renders a page of the reopened document over the bitmap
+of the page before the edit, by the rectangle the edit changed
+([rendering](rendering.md)).
 
 ## Refused by name
 

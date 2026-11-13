@@ -63,7 +63,11 @@
 //!   cache or the extraction makes; and a font's program by each validator
 //!   rule that reads it, each over a scope of its own. A stream the editor
 //!   holds unfiltered, an import's copy, is handed back as it is and runs no
-//!   chain.
+//!   chain;
+//! - a render counts the pixels of the canvas it draws the page onto: the
+//!   page's, at its scale, or the rectangle a form's or an annotation's door
+//!   draws over. A tiling pattern's cell is drawn by a renderer of its own,
+//!   which counts none.
 
 mod render_support;
 mod written_support;
@@ -125,6 +129,16 @@ fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
 
 fn object(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
+}
+
+/// The pixels of a fixture's page at 72 dpi: its 200 x 100 media box.
+const PAGE_PIXELS: u64 = 200 * 100;
+
+/// `expected` with a render's `pixels` on top: the canvas it drew the page
+/// onto.
+fn drew(mut expected: Stats, pixels: u64) -> Stats {
+    expected.pixels_rendered += pixels;
+    expected
 }
 
 /// `expected` with the streams an operation decoded on top: each
@@ -257,17 +271,21 @@ fn glyphs_and_an_image_content() -> String {
     content
 }
 
-/// What a render of [`glyphs_and_an_image_page`] costs: its decodes — the
-/// content, `F1`'s program read at its first outline, and the image's samples
-/// at its one decode — on top of [`glyphs_and_an_image_stats`].
+/// What a render of [`glyphs_and_an_image_page`] at 72 dpi costs: its
+/// decodes — the content, `F1`'s program read at its first outline, and the
+/// image's samples at its one decode — and its page's pixels, on top of
+/// [`glyphs_and_an_image_stats`].
 fn glyphs_and_an_image_render() -> Stats {
-    decoding(
-        glyphs_and_an_image_stats(),
-        &[
-            (4, 1, glyphs_and_an_image_content().len()),
-            (7, 1, program_len()),
-            (8, 1, SAMPLES.len()),
-        ],
+    drew(
+        decoding(
+            glyphs_and_an_image_stats(),
+            &[
+                (4, 1, glyphs_and_an_image_content().len()),
+                (7, 1, program_len()),
+                (8, 1, SAMPLES.len()),
+            ],
+        ),
+        PAGE_PIXELS,
     )
 }
 
@@ -454,6 +472,8 @@ fn render_stats_count_what_a_generated_page_draws() {
         })
         .stats;
     let mut at_three = expected;
+    // The canvas is the page's, three times as wide and as tall.
+    at_three.pixels_rendered = 600 * 300;
     if BUNDLED {
         at_three.glyph_masks_rasterised -= 1;
         at_three.glyph_mask_hits += 1;
@@ -500,7 +520,7 @@ fn a_form_shown_three_times_builds_its_scope_once() {
     expected.glyph_outline_hits = shown - distinct;
     expected.font_program_misses = 1;
     expected.font_program_hits = distinct - 1;
-    assert_eq!(counted(&page), expected);
+    assert_eq!(counted(&page), drew(expected, PAGE_PIXELS));
 }
 
 /// The text the form shows: four glyphs, three of them distinct.
@@ -570,7 +590,8 @@ fn render_form_counts_the_scope_it_reads_the_name_in() {
     expected.glyph_outline_hits = shown - distinct;
     expected.font_program_misses = 1;
     expected.font_program_hits = distinct - 1;
-    assert_eq!(stats, expected);
+    // The canvas is the form's `/BBox`, 80 x 20 at 72 dpi.
+    assert_eq!(stats, drew(expected, 80 * 20));
 }
 
 /// Two images in one ICC space compile its profile once. The profile here is
@@ -609,7 +630,7 @@ fn a_profile_two_images_share_is_compiled_once() {
     // Each decode reads its space once: the first compiles the profile.
     expected.icc_transform_misses = 1;
     expected.icc_transform_hits = 1;
-    assert_eq!(counted(&page), expected);
+    assert_eq!(counted(&page), drew(expected, PAGE_PIXELS));
 }
 
 /// An inline image is never cached, so each one is a decode. Its data is the
@@ -626,7 +647,7 @@ fn every_inline_image_is_decoded() {
     let page = document.page(index).expect("a page");
     let mut expected = decoding(Stats::default(), &[(4, 1, content.len())]);
     expected.images_decoded = 3;
-    assert_eq!(counted(&page), expected);
+    assert_eq!(counted(&page), drew(expected, PAGE_PIXELS));
 }
 
 /// A page that sets one soft-masked graphics state before each of `fills`
@@ -782,7 +803,8 @@ fn a_pattern_cell_counts_what_it_draws() {
     expected.glyph_outline_misses = 2;
     expected.font_program_misses = 1;
     expected.font_program_hits = 1;
-    assert_eq!(counted(&page), expected);
+    // The page's canvas; the cell's renderer counts no pixels of its own.
+    assert_eq!(counted(&page), drew(expected, PAGE_PIXELS));
 }
 
 /// An annotation's appearance is drawn over two scopes of its own, the
@@ -812,14 +834,19 @@ fn an_annotation_counts_both_scopes_its_appearance_builds() {
     let content = (4, 1, 0);
     assert_eq!(
         counted(&page),
-        decoding(drawn, &[content]),
+        drew(decoding(drawn, &[content]), PAGE_PIXELS),
         "the page, annotations drawn"
     );
     let part = page
         .render_annotation(0, &asking())
         .expect("the annotation draws")
         .stats;
-    assert_eq!(part, Some(drawn), "the annotation's own door");
+    // The annotation's door draws over its `/Rect`, 100 x 40 at 72 dpi.
+    assert_eq!(
+        part,
+        Some(drew(drawn, 100 * 40)),
+        "the annotation's own door"
+    );
 
     let without = page
         .render(&RenderOptions {
@@ -829,7 +856,7 @@ fn an_annotation_counts_both_scopes_its_appearance_builds() {
         .stats;
     assert_eq!(
         without,
-        Some(decoding(Stats::default(), &[content])),
+        Some(drew(decoding(Stats::default(), &[content]), PAGE_PIXELS)),
         "annotations not drawn"
     );
 }
@@ -874,7 +901,10 @@ fn a_display_list_counts_through_the_resources_it_keeps() {
     // The interpretation ran when the list was recorded, so the content is
     // not decoded again; `F1`'s program and the image are, at the first
     // outline and the first `Do` the replay meets.
-    let mut expected = decoding(direct, &[(7, 1, program_len()), (8, 1, SAMPLES.len())]);
+    let mut expected = drew(
+        decoding(direct, &[(7, 1, program_len()), (8, 1, SAMPLES.len())]),
+        PAGE_PIXELS,
+    );
     // Nor is a font read: the recording read the page's three, and a bundled
     // build's substitute requests, made at the first outline, read the
     // dictionaries it kept.
@@ -891,6 +921,8 @@ fn a_display_list_counts_through_the_resources_it_keeps() {
     // Every outline and the image are the list's now.
     expected.glyph_outline_hits = direct.glyphs_shown;
     expected.image_hits = 2;
+    // Each replay draws the page's canvas.
+    expected.pixels_rendered = PAGE_PIXELS;
     assert_eq!(second, expected, "the second replay");
 
     // A replay not asked counts nothing, and does not disturb what the next
@@ -925,7 +957,7 @@ fn a_display_list_counts_the_annotations_it_keeps() {
     expected.font_program_hits = shown - 1;
     assert_eq!(
         list.render(&asking()).stats,
-        Some(expected),
+        Some(drew(expected, PAGE_PIXELS)),
         "the first replay"
     );
 
@@ -934,6 +966,7 @@ fn a_display_list_counts_the_annotations_it_keeps() {
     expected.outlines_filled = shown;
     expected.glyph_masks_rasterised = shown;
     expected.glyph_outline_hits = shown;
+    expected.pixels_rendered = PAGE_PIXELS;
     assert_eq!(
         list.render(&asking()).stats,
         Some(expected),

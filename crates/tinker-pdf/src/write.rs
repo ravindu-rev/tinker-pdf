@@ -500,6 +500,58 @@ pub struct Appended {
     /// What [`AppendOptions::stats`] asked to be counted: `None` unless it
     /// asked.
     pub stats: Option<Stats>,
+    /// The document the update was written over, whose pages
+    /// [`Appended::patch`] compares with the reopened document's.
+    base: crate::Document,
+}
+
+impl Appended {
+    /// Re-renders page `index` of [`Appended::document`] over `previous`, the
+    /// bitmap [`crate::Page::render`] gave the same page of the document
+    /// before the update under the same `options`, rendering only the
+    /// rectangle the update changed (`docs/design/performance.md`, P-17).
+    ///
+    /// The page is patched when the update changed nothing it draws but its
+    /// annotations. The rectangle is each changed, added or removed
+    /// annotation's `/Rect`, before the edit and after it, where 12.5.5's fit
+    /// and its `/BBox` clip confine what it draws, carried through the
+    /// render's page transform, their hull rounded outward and widened by a
+    /// pixel; it is rendered through [`crate::RenderOptions::region`] and
+    /// written over `previous`, and ruling 5 makes that region the full
+    /// render's own pixels. The one decision a region cannot see past its
+    /// edge — whether an image joins an image run, ruling 5's named exception
+    /// — is reported by the region's render, and the rectangle grows around
+    /// it until the render sees it. Afterwards `previous` is the bitmap
+    /// [`crate::Page::render`] gives the page after the update, pixels and
+    /// warnings: an update that changed no pixel leaves it as it was, and a
+    /// page that cannot be patched is rendered whole into it, and
+    /// [`Patch::fallback`](crate::Patch::fallback) says why
+    /// ([`crate::PatchFallback`]). When `options` asks for counts,
+    /// `previous.stats` is what the patch counted — the renders of its
+    /// rectangle, or the whole page's — and nothing for a patch that rendered
+    /// nothing.
+    ///
+    /// `previous` must be clean: a bitmap with warnings is rendered over
+    /// whole, since a render of a rectangle raises only what that part of the
+    /// page raises. The fields of `self` are read as [`append`] made them.
+    ///
+    /// `None` when the reopened document has no page `index`, and then
+    /// `previous` is as it was.
+    pub fn patch(
+        &self,
+        index: u32,
+        previous: &mut crate::Bitmap,
+        options: &crate::RenderOptions,
+    ) -> Option<crate::Patch> {
+        crate::patch::patch(
+            &self.base,
+            &self.document,
+            &self.changed,
+            index,
+            previous,
+            options,
+        )
+    }
 }
 
 impl core::fmt::Debug for Appended {
@@ -640,6 +692,7 @@ pub fn append(
         full_open: reopened.full_open,
         changed: editor.changed_numbers(),
         stats: work.filter(|_| options.stats).map(|work| work.stats()),
+        base: document.clone(),
     })
 }
 

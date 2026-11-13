@@ -648,11 +648,48 @@ with what the run holds over the canvas only, so two images that overlap
 outside a tile and abut inside it are one run in the tile and two on the page
 (`render_regions.rs`'s
 `an_image_run_that_overlaps_only_outside_a_tile_is_ruling_5s_named_exception`;
-ROADMAP RC-21). A region reaching past the page is **intersected**, never
-slid back on, because a moved rectangle returns real pixels from coordinates
-the caller did not name; one that misses entirely comes back with no pixels.
-Both trims are reported as `RenderWarning::RegionClamped`. Ruling 5's
-byte-equality guard and its fixtures are in [rulings](../rulings.md).
+ROADMAP RC-21). A renderer reports what its canvas could not see of the runs
+(`Renderer::run_reach`, `RunReach`): where an image that could join a run
+meets the run's bounds in the page's frame outside the canvas, and every
+image a run could hold that the canvas does not hold whole — nothing, for a
+render of the whole page. A region reaching past the page is **intersected**,
+never slid back on, because a moved rectangle returns real pixels from
+coordinates the caller did not name; one that misses entirely comes back with
+no pixels. Both trims are reported as `RenderWarning::RegionClamped`. Ruling
+5's byte-equality guard and its fixtures are in [rulings](../rulings.md).
+
+**Patching an edited page.** `tinker_pdf::write::append` writes an editor's
+edits as an update and reopens the document over it
+([writing](writing.md)), and `Appended::patch(index, &mut previous, &options)`
+re-renders page `index` over `previous`, the bitmap of the same page before the
+edit at the same options, by the rectangle the update changed. A page whose
+update changed nothing it draws but annotations is the page before it
+everywhere outside the rectangles of the annotations it changed, added or
+removed, before the edit and after it: each one's `/Rect`, where 12.5.5's fit
+puts an appearance with a `/BBox` and the box clips it
+(`annots::drawn`), carried through the page's view transform, their hull
+rounded outward and widened by a pixel. That rectangle is rendered through
+`RenderOptions::region` and written over `previous`, and ruling 5 makes it the
+full render's own pixels — but for an image run, whose decision a region
+cannot see past its edge: a region's render that reports where an image met
+its run outside it grows the rectangle to hold that, and from the second round
+every image a run could hold, and renders it again, until nothing is unseen.
+Afterwards `previous` is the full render after the edit, pixels and warnings,
+and `Patch::region` is the rectangle rendered. The page is rendered whole
+instead, and `Patch::fallback` says why (`PatchFallback`), when the document
+before the update has another page there (`OtherPage`); when the update
+changed what the page draws besides its annotations — its dictionary but for
+`/Annots` and `/Parent`, what it inherits, an object its content, its `/Group`
+or its resources reach, or the optional-content configuration that shows its
+layers (`ContentChanged`); when annotations the update left alone change
+order (`Reordered`); when an annotation it changed, added or removed has an
+appearance with no `/BBox` (`Unbounded`); when `previous` is not the page's
+whole render at these options, or `options` names a region (`Mismatch`); and
+when `previous` carries warnings, since a region's render raises only what its
+part of the page raises (`PreviousWarned`). An update that changed no pixel of
+the page leaves `previous` as it was. The rectangle comes from the
+annotations' geometry, never from pixels: the bitmap is written into and never
+read for what changed.
 
 **Each stream once a render.** A render is one operation, and every resource
 scope it opens — the page's, each form's, a tiling pattern cell's, an
@@ -1047,7 +1084,11 @@ group or a soft mask's group allocated for its own pixels while it was open —
 its canvas, and nothing else — and `group_bound_pixels`, the pixels of the
 regions those groups opened over, once a group; and `soft_mask_pixels` and
 `soft_mask_bound_pixels`, the pixels of every soft mask installed and of the
-region of the group it was read from, once a mask;
+region of the group it was read from, once a mask; and a fifth,
+`pixels_rendered`, the pixels of the canvas a render drew the page onto: the
+page at its scale, a tile's region, the rectangle a form's or an annotation's
+door draws, summed over the renders an operation makes, a cell's renderer
+adding none;
 `font_dictionaries_resolved`, each font a resource scope reads — once for
 each name its content selects a font by, the first time the scope is asked
 about the name, and kept for every render over the scope: a font a scope
@@ -1521,6 +1562,18 @@ under it, so the copy holds every canvas the walk closes onto.
   `DisplayList::render` on 2, 3, 4 and 7 threads and through `Page::render`,
   at 0.5x to 4x, to the page drawn whole: pixels and warnings; `display.rs`'s
   band tests hold the planner's cuts, its runs and the merge.
+- Patching an edited page: `crates/tinker-pdf/tests/dirty_region.rs`'s
+  `a_patched_render_is_the_full_render_after_every_annotation_edit` holds an
+  annotation moved, resized, recoloured, removed and added — one whose
+  appearance warns among them — on pages upright, turned every way and
+  cropped, at 0.5x to 4x, and over ruling 5's image-run page, each patched
+  over the page before the edit, to the full render after it, pixels and
+  warnings; `a_patch_renders_only_its_rectangle` counts the rectangle's pixels
+  and the grown rectangle's; the rest hold an edit no pixel shows and every
+  `PatchFallback`. `tinker-pdf-render`'s
+  `a_tile_reports_where_an_image_meets_a_run_outside_it` holds `RunReach` over
+  the image-run page, and the tile grown to what it reports to the page's
+  pixels.
 - Counted work: `crates/tinker-pdf/tests/stats.rs`.
   `render_stats_are_none_unless_asked` over the page, a tile, a display list,
   a form and an annotation; `render_stats_count_what_a_generated_page_draws`,

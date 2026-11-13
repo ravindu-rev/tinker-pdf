@@ -47,10 +47,11 @@ fn lowest(one: Option<ObjRef>, other: Option<ObjRef>) -> Option<ObjRef> {
 ///
 /// Every field is public, and each but [`Stats::most_decoded_stream`] a `u64`:
 /// a count of steps of one kind, but for five maxima, the stream one was
-/// reached on, six quantities — the bytes decoded, the samples JPEG decodes
-/// transformed, and four counts of pixels the renderer's group buffers and
-/// soft masks held — and two counts of where a pooled operation's parts ran,
-/// which say so. **It is `#[non_exhaustive]`** so that a counter a
+/// reached on, seven quantities — the bytes decoded, the samples JPEG decodes
+/// transformed, four counts of pixels the renderer's group buffers and soft
+/// masks held, and the pixels its canvases drew — and two counts of where a
+/// pooled operation's parts ran, which say so. **It is `#[non_exhaustive]`**
+/// so that a counter a
 /// later row adds — masks rasterised, threads run — is an addition rather
 /// than a break: read a field by name, total the steps with [`Stats::work`],
 /// and sum two with `+`.
@@ -429,6 +430,17 @@ pub struct Stats {
     ///
     /// Counted with `group_buffer_pixels`.
     pub soft_mask_bound_pixels: u64,
+    /// Pixels of the canvas a render drew the page onto: the whole page, or
+    /// the region of it the render asked for — a form's or an annotation's
+    /// rectangle, for the doors that draw one — summed over every render an
+    /// operation makes. A tiling pattern's cell is drawn once, for the page
+    /// to repeat, and counts none. A quantity, as `bytes_decoded` is, rather
+    /// than a count of steps, so [`Stats::work`] leaves it out: what a render
+    /// of part of a page saves is the pixels it does not draw.
+    ///
+    /// Counted by `tinker-pdf-render`'s renderer and added to the
+    /// operation's tally by the facade.
+    pub pixels_rendered: u64,
 }
 
 /// One kind of step a [`Work`] counts: a [`Stats`] field, by name.
@@ -529,6 +541,8 @@ pub enum Counter {
     SoftMaskPixels,
     /// [`Stats::soft_mask_bound_pixels`].
     SoftMaskBoundPixels,
+    /// [`Stats::pixels_rendered`].
+    PixelsRendered,
 }
 
 impl Stats {
@@ -538,13 +552,14 @@ impl Stats {
     /// The maxima and the quantities are left out —
     /// `most_decodes_of_one_stream`, `bytes_decoded`, `png_image_scratch`,
     /// `png_peak`, `jpeg_held`, `jpeg_samples_transformed`, the four pixel
-    /// counts of group buffers and soft masks and `cache_bytes_held` —
-    /// because a byte, sample or pixel total grows with the page and would
-    /// hide a step count that grows with the document. `bytes_scanned` is
-    /// in: each of its bytes is a step the repair scan took, not output. The
-    /// two pool counts are out too: they say on which thread a part ran, and
-    /// the part's own steps are counted where they were taken, so a page
-    /// walked on a pool totals what the same page rendered alone does.
+    /// counts of group buffers and soft masks, `pixels_rendered` and
+    /// `cache_bytes_held` — because a byte, sample or pixel total grows with
+    /// the page and would hide a step count that grows with the document.
+    /// `bytes_scanned` is in: each of its bytes is a step the repair scan
+    /// took, not output. The two pool counts are out too: they say on which
+    /// thread a part ran, and the part's own steps are counted where they
+    /// were taken, so a page walked on a pool totals what the same page
+    /// rendered alone does.
     #[must_use]
     pub fn work(&self) -> u64 {
         [
@@ -643,6 +658,7 @@ impl Stats {
             Counter::GroupBoundPixels => &mut self.group_bound_pixels,
             Counter::SoftMaskPixels => &mut self.soft_mask_pixels,
             Counter::SoftMaskBoundPixels => &mut self.soft_mask_bound_pixels,
+            Counter::PixelsRendered => &mut self.pixels_rendered,
         }
     }
 }
@@ -770,6 +786,7 @@ impl Add for Stats {
             soft_mask_bound_pixels: self
                 .soft_mask_bound_pixels
                 .saturating_add(other.soft_mask_bound_pixels),
+            pixels_rendered: self.pixels_rendered.saturating_add(other.pixels_rendered),
         }
     }
 }
@@ -1149,6 +1166,27 @@ mod tests {
         let sum = stats + other.stats();
         assert_eq!((sum.png_image_scratch, sum.png_peak), (70, 900));
         assert_eq!(other.stats() + stats, sum, "in either order");
+    }
+
+    /// Pixels rendered are a quantity: they count into their own field and
+    /// sum, saturating, in a tally and across `+`, and are no step `work()`
+    /// totals.
+    #[test]
+    fn pixels_rendered_sum_and_count_no_step() {
+        let work = Work::new();
+        work.add(Counter::PixelsRendered, 6_000);
+        work.add(Counter::PixelsRendered, 400);
+        work.add(Counter::GlyphsShown, 2);
+        let stats = work.stats();
+        assert_eq!(stats.pixels_rendered, 6_400);
+        assert_eq!(stats.work(), 2, "the glyphs alone are steps");
+        let mut expected = Stats::default();
+        *expected.slot(Counter::PixelsRendered) = 6_400;
+        expected.glyphs_shown = 2;
+        assert_eq!(stats, expected, "counted nowhere else");
+        assert_eq!((stats + stats).pixels_rendered, 12_800);
+        work.add(Counter::PixelsRendered, u64::MAX);
+        assert_eq!(work.stats().pixels_rendered, u64::MAX, "saturating");
     }
 
     /// A JPEG decode's held bytes are a maximum: the larger is kept, in a

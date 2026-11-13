@@ -1013,6 +1013,10 @@ struct ImageRun {
     /// strips share one row; a picture laid over another shares its area, and
     /// only the second ends the run.
     covered: (i32, i32, i32, i32),
+    /// The bounds of the run's images within the frame, which a canvas
+    /// smaller than the frame does not cut: where a render of the whole page
+    /// would ask whether a new draw overlaps the run ([`RunReach`]).
+    framed: Bounds,
 }
 
 /// Whichever resource dictionary is in force: the caller's, or a form's own.
@@ -1086,11 +1090,44 @@ pub struct RenderCounts {
     /// Pixels of the regions of the soft-mask groups those masks were read
     /// from, once a mask installed. What `soft_mask_pixels` is held to.
     pub soft_mask_bound_pixels: u64,
+    /// Pixels of the canvas this renderer drew a page onto: the whole page,
+    /// or the region of it a render asked for. A renderer drawing a tiling
+    /// pattern's cell counts none, its cell drawn once for the page to
+    /// repeat. A quantity, the canvas's size, rather than a count of steps:
+    /// what a render of part of a page saves is the pixels it does not draw.
+    pub pixels_rendered: u64,
 }
 
 /// A canvas's pixels, counted as `RenderCounts` counts a buffer.
 fn pixels_of(canvas: &Canvas) -> u64 {
     u64::from(canvas.width) * u64::from(canvas.height)
+}
+
+/// What a render of part of a page could not see of the page's image runs,
+/// handed back by [`Renderer::run_reach`] (`docs/design/performance.md`,
+/// P-17).
+///
+/// Whether an image joins the run held back so that abutting images do not
+/// conflate is decided by whether it overlaps what the run holds, and a
+/// canvas holds the run's coverage only over itself — so where an image and
+/// the run it could join meet outside the canvas, a render of the whole page
+/// can end the run where this one kept it (ruling 5's named exception). Each
+/// rectangle is in the page's pixels, `(x, y, width, height)`, and lies
+/// inside the page; both are `None` on a render of the whole page, whose
+/// canvas holds everything.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RunReach {
+    /// The hull of every place, on a render of the whole page, where an
+    /// image met the run it could join outside this canvas: the bounds the
+    /// two share, the image's within its frame and the run's images'. A
+    /// render whose canvas holds all of them decides every run as the page
+    /// does.
+    pub unseen: Option<(i32, i32, u32, u32)>,
+    /// The hull of every image that could join a run whose bounds within its
+    /// frame this canvas does not hold whole, whether or not it met one. A
+    /// canvas that holds them all holds every place an image meets a run.
+    pub cut: Option<(i32, i32, u32, u32)>,
 }
 
 /// The device's own flattening tolerance, in device pixels: what a curve is
@@ -1160,6 +1197,15 @@ pub struct Renderer<'g, G: GlyphSource> {
     /// colour from — are taken against this and never against the canvas, so
     /// that a tile takes the decision the page under it took (ruling 5).
     frame: Bounds,
+    /// The pixels of the canvas this renderer was made with: the page, or
+    /// the region of it a tile draws. A group's or a soft mask's buffer stands
+    /// inside it, so it is what [`RunReach`] measures a render's reach by.
+    region: Bounds,
+    /// Where an image met the run it could join outside `region`, and every
+    /// image that could join a run whose bounds `region` does not hold whole:
+    /// [`Renderer::run_reach`].
+    unseen: Option<Bounds>,
+    cut: Option<Bounds>,
     clip: Option<Mask>,
     /// The clip's rectangle on a render of the whole page. See [`Bounds`].
     clip_bounds: Option<Bounds>,
@@ -1494,6 +1540,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             glyphs: Scope::Borrowed(glyphs),
             base,
             frame,
+            region: frame,
+            unseen: None,
+            cut: None,
             clip: None,
             clip_bounds: None,
             soft_bounds: None,
@@ -1879,6 +1928,20 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         );
     }
 
+    /// What this render could not see of the page's image runs so far
+    /// ([`RunReach`]): nothing, for a canvas that is the whole page.
+    ///
+    /// Asked when the content has been drawn: every question a run is asked
+    /// is asked when an image is drawn, and [`Renderer::finish`] only
+    /// composites the run it holds.
+    #[must_use]
+    pub fn run_reach(&self) -> RunReach {
+        RunReach {
+            unseen: self.unseen.map(Bounds::rect),
+            cut: self.cut.map(Bounds::rect),
+        }
+    }
+
     /// [`Renderer::finish`], and what the render counted: the glyphs it was
     /// shown and the outlines it painted, for a caller keeping a tally.
     #[must_use]
@@ -1913,7 +1976,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         RenderCounts,
         Option<DeviceParameters>,
     ) {
-        let counts = self.counts;
+        let mut counts = self.counts;
+        // The page's canvas, the region of it a tile draws; a cell's renderer
+        // draws its cell once, for the page to repeat.
+        if self.pattern_depth == 0 {
+            counts.pixels_rendered = self.region.area();
+        }
         let plane = self.plane.take();
         let sets = std::mem::take(&mut self.sets);
         let (x0, y0, width, height) = self.page_rect;
@@ -3831,6 +3899,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 || run.masks != masks
                 || run.ink != ink
         });
+        // The draw's bounds within the frame, which this canvas may cut: what
+        // a render of the whole page asks the run about (`RunReach`).
+        let framed = image_bounds_in(&unit_to_device, self.frame.rect()).map(Bounds::of_rect);
+        if !direct {
+            self.reach(framed, state_changed);
+        }
         // A different graphics state, or a picture laid *over* another rather
         // than beside it: both end the run. Fragments are added, so an overlap
         // added rather than composited would show both pictures at once.
@@ -3900,6 +3974,7 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             masks,
             ink,
             covered: (i32::MAX, i32::MAX, i32::MIN, i32::MIN),
+            framed: Bounds::NONE,
         });
         accumulate_image(
             &mut run.fragments,
@@ -3915,6 +3990,39 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                 run.covered.2.max(bx0.saturating_add(bw as i32)),
                 run.covered.3.max(by0.saturating_add(bh as i32)),
             );
+        }
+        if let Some(framed) = framed {
+            run.framed = run.framed.hull(framed);
+        }
+    }
+
+    /// Records what this canvas cannot see of the run an image could join
+    /// ([`RunReach`]), before the run is asked about it.
+    ///
+    /// `framed` is the image's bounds within the frame. Where the run is not
+    /// ended by a change of state, a render of the whole page asks whether the
+    /// image overlaps the run over the bounds the two share; this canvas asks
+    /// over its own pixels only, so where those bounds reach outside
+    /// `region` the two may answer apart, and they are recorded. Within
+    /// `region` they cannot: every pixel either would find covered is one
+    /// this canvas holds for both. The image is recorded whole too wherever
+    /// `region` does not hold it, met a run or not.
+    fn reach(&mut self, framed: Option<Bounds>, state_changed: bool) {
+        let Some(framed) = framed else {
+            return;
+        };
+        let region = self.region;
+        let record = |slot: &mut Option<Bounds>, bounds: Bounds| {
+            if !bounds.is_empty() && !region.holds(bounds) {
+                *slot = Some(slot.map_or(bounds, |held| held.hull(bounds)));
+            }
+        };
+        record(&mut self.cut, framed);
+        if state_changed {
+            return;
+        }
+        if let Some(run) = &self.run {
+            record(&mut self.unseen, framed.meet(run.framed));
         }
     }
 
@@ -4091,6 +4199,39 @@ struct Bounds {
 }
 
 impl Bounds {
+    /// No pixels at all.
+    const NONE: Bounds = Bounds {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+
+    /// The smallest rectangle holding both, an empty one holding nothing.
+    fn hull(self, other: Bounds) -> Bounds {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
+        Bounds {
+            left: self.left.min(other.left),
+            top: self.top.min(other.top),
+            right: self.right.max(other.right),
+            bottom: self.bottom.max(other.bottom),
+        }
+    }
+
+    /// Whether every pixel of `inner` is one of this rectangle's.
+    fn holds(self, inner: Bounds) -> bool {
+        inner.is_empty()
+            || (self.left <= inner.left
+                && self.top <= inner.top
+                && inner.right <= self.right
+                && inner.bottom <= self.bottom)
+    }
+
     /// A canvas's `(x, y, width, height)`.
     fn of_rect(rect: (i32, i32, u32, u32)) -> Bounds {
         let (x, y, width, height) = rect;
@@ -9033,6 +9174,134 @@ mod tests {
                 assert!(warnings.contains(&RenderWarning::Cancelled), "{steps:?}");
             }
         }
+    }
+
+    /// Every image a one-sample black picture, whatever it is called.
+    struct BlackSamples;
+
+    impl GlyphSource for BlackSamples {
+        fn outline(&self, _font_id: u64, _code: u32) -> Option<Outline> {
+            None
+        }
+
+        fn image(
+            &self,
+            _name: &[u8],
+            _request: &ImageRequest,
+        ) -> Result<Option<DecodedImage>, String> {
+            Ok(Some(DecodedImage {
+                stencil: false,
+                family: ColorFamily::Rgb,
+                soft_masked: false,
+                interpolate: false,
+                width: 1,
+                height: 1,
+                rgb: vec![0, 0, 0],
+                alpha: Vec::new(),
+                two_colour: None,
+                reduced: None,
+            }))
+        }
+    }
+
+    /// The three images of ruling 5's named exception on a 100 x 100 page:
+    /// the first and the third abut along `x = 40.5` in the top forty rows,
+    /// and the third overlaps the second in rows 60 to 69.
+    const THREE_IMAGES: &[u8] = b"q 40.5 0 0 40 0 60 cm /I Do Q \
+        q 40 0 0 40 40.5 0 cm /I Do Q \
+        q 40 0 0 70 40.5 30 cm /I Do Q";
+
+    /// The page of [`THREE_IMAGES`] drawn over `region`, or whole: its
+    /// canvas, its reach and what it counted.
+    fn three_images(region: Option<PixelRegion>) -> (Canvas, RunReach, RenderCounts) {
+        let base = page_transform(100.0, 1.0);
+        let canvas = match region {
+            Some(region) => region_canvas_in(region, PixelFormat::Rgb8),
+            None => Canvas::new(100, 100, PixelFormat::Rgb8, Color::WHITE),
+        };
+        let mut renderer = Renderer::new(canvas, base, &BlackSamples).with_page_size(100, 100);
+        interpret(THREE_IMAGES, Matrix::IDENTITY, &mut renderer, &NoFonts);
+        let reach = renderer.run_reach();
+        let (canvas, _, counts) = renderer.finish_counted();
+        (canvas, reach, counts)
+    }
+
+    /// **What a tile cannot see of an image run is reported** (`RunReach`).
+    /// The whole page sees everything and reports nothing. A tile over the
+    /// top half cannot see where the third image meets the run of the first
+    /// two — the bounds they share run to row 70 — and reports that, and
+    /// both images whose rows run past it; a tile grown to row 70 sees all of
+    /// it, reports only the second image as cut, and is the page's top
+    /// seventy rows pixel for pixel, the run ended where the page ends it.
+    #[test]
+    fn a_tile_reports_where_an_image_meets_a_run_outside_it() {
+        let (page, whole, _) = three_images(None);
+        assert_eq!(whole, RunReach::default(), "the page holds everything");
+
+        let (_, top, _) = three_images(Some(PixelRegion::new(0, 0, 100, 50)));
+        assert_eq!(
+            top.unseen,
+            Some((40, 0, 41, 70)),
+            "the third image and the run's bounds meet down to row 70"
+        );
+        assert_eq!(
+            top.cut,
+            Some((40, 0, 41, 100)),
+            "the second and the third image run past row 50"
+        );
+
+        let grown = PixelRegion::new(0, 0, 100, 70);
+        let (tile, reach, _) = three_images(Some(grown));
+        assert_eq!(reach.unseen, None, "every meeting is inside the tile");
+        assert_eq!(reach.cut, Some((40, 60, 41, 40)), "the second image alone");
+        for y in 0..70 {
+            for x in 0..100 {
+                assert_eq!(
+                    tile.pixel(x, y),
+                    page.pixel(x, y),
+                    "({x}, {y}): the grown tile is the page under it"
+                );
+            }
+        }
+    }
+
+    /// An image drawn under another clip than the run's ends the run whatever
+    /// the tile sees, so where it meets the run is no question the tile could
+    /// answer otherwise, and is not reported; the image is still cut. The same
+    /// two images under one clip meet outside the tile, and that is reported.
+    #[test]
+    fn a_change_of_state_ends_the_run_and_reports_no_meeting() {
+        let reach = |content: &[u8]| {
+            let base = page_transform(100.0, 1.0);
+            let canvas = region_canvas_in(PixelRegion::new(0, 0, 100, 50), PixelFormat::Rgb8);
+            let mut renderer = Renderer::new(canvas, base, &BlackSamples).with_page_size(100, 100);
+            interpret(content, Matrix::IDENTITY, &mut renderer, &NoFonts);
+            renderer.run_reach()
+        };
+        // The first image under a clip the `Q` takes away, which a run
+        // survives; the second, with no clip, cannot join it.
+        let apart = reach(
+            b"q 0 0 100 100 re W n q 40 0 0 70 0 30 cm /I Do Q Q \
+              q 40 0 0 70 0 30 cm /I Do Q",
+        );
+        assert_eq!(apart.unseen, None, "the clip ends the run on the page too");
+        assert_eq!(apart.cut, Some((0, 0, 40, 70)), "both images are cut");
+        let together = reach(b"q 40 0 0 70 0 30 cm /I Do Q q 40 0 0 70 0 30 cm /I Do Q");
+        assert_eq!(
+            together.unseen,
+            Some((0, 0, 40, 70)),
+            "one clip: the second meets the run down to row 70"
+        );
+        assert_eq!(together.cut, Some((0, 0, 40, 70)));
+    }
+
+    /// A renderer counts its canvas's pixels: the page's whole, a tile's own.
+    #[test]
+    fn a_renderer_counts_the_pixels_of_its_canvas() {
+        let (_, _, whole) = three_images(None);
+        assert_eq!(whole.pixels_rendered, 100 * 100);
+        let (_, _, tile) = three_images(Some(PixelRegion::new(5, 10, 30, 20)));
+        assert_eq!(tile.pixels_rendered, 30 * 20);
     }
 }
 

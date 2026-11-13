@@ -137,10 +137,10 @@ pub(crate) fn cache_held(work: Option<&Work>, bytes: u64) {
 
 /// Adds what a renderer counted — its glyphs shown, its outlines painted,
 /// its glyph masks rasterised and found in its cache, its shading functions
-/// evaluated, and the pixels its group buffers and soft masks held beside the
-/// regions they were held to — to the operation's tally, when it is
-/// counting. The renderer has no edge to the tally's crate and hands its
-/// counts back as a value instead.
+/// evaluated, the pixels its group buffers and soft masks held beside the
+/// regions they were held to, and the pixels of its canvas — to the
+/// operation's tally, when it is counting. The renderer has no edge to the
+/// tally's crate and hands its counts back as a value instead.
 pub(crate) fn add_render(work: Option<&Work>, counts: RenderCounts) {
     if let Some(work) = work {
         work.add(Counter::GlyphsShown, counts.glyphs_shown);
@@ -155,5 +155,6 @@ pub(crate) fn add_render(work: Option<&Work>, counts: RenderCounts) {
         work.add(Counter::GroupBoundPixels, counts.group_bound_pixels);
         work.add(Counter::SoftMaskPixels, counts.soft_mask_pixels);
         work.add(Counter::SoftMaskBoundPixels, counts.soft_mask_bound_pixels);
+        work.add(Counter::PixelsRendered, counts.pixels_rendered);
     }
 }

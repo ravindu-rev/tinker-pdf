@@ -4129,7 +4129,8 @@ there was one, the numbers the update changed (the editor's changed set,
 `DocumentEditor::changed_numbers`), and the reopen's counts when
 `AppendOptions::stats` asked — on an editor that counts, its whole tally, as a
 save hands it back. `Appended::patch`
-re-renders one of its pages over a bitmap of the page before the edit.
+re-renders one of its pages over a bitmap of the page before the edit, and
+keeps the document the update was written over for it.
 
 #### The counted quantities
 
@@ -4159,15 +4160,22 @@ only the windows that straddle a seam.
 
 #### The changed rectangle
 
-`Appended::patch(index, previous, options)` takes page `index` of the reopened
-document and `previous`, the bitmap `Page::render` gave the same page of the
-base under the same `options`. The page is patched only when the update
-changed nothing it draws but annotations; otherwise it is rendered whole and
-the patch says why (`PatchFallback`):
+`Appended::patch(index, &mut previous, options)` takes page `index` of the
+reopened document and `previous`, the bitmap `Page::render` gave the same page
+of the base under the same `options`, and writes the page after the update
+into `previous`; it hands back a `Patch` naming the rectangle it rendered, or
+`None` when the reopened document has no page `index`. The page is patched
+only when the update changed nothing it draws but annotations; otherwise it is
+rendered whole and the patch says why (`PatchFallback`):
 
-- **The page itself**: its dictionary changed in anything but `/Annots`, or the
-  update changed a number its `/Contents` or its resources, inherited or its
-  own, reach (`ContentChanged`).
+- **The page**: the base has another page at `index`, or none — pages
+  inserted, deleted or moved (`OtherPage`).
+- **The page itself**: its dictionary changed in anything but `/Annots` and
+  `/Parent`, the boxes, turn or resources it inherits changed, the update
+  changed a number its `/Contents`, its `/Group` or its resources, inherited or
+  its own, reach, or the catalog's `/OCProperties`, which shows and hides the
+  layers the page draws, changed or reaches a number the update changed
+  (`ContentChanged`).
 - **The annotations**: an annotation changed when the update changed its
   dictionary or a number its `/AP` reaches; one is added or removed when one
   page's `/Annots` holds it and the other's does not. Those neither changed,
@@ -4186,9 +4194,11 @@ transform — its scale, the page's `/Rotate` and its crop box — and the hull 
 all of them rounded outward to whole pixels, widened by one pixel on every side
 (the renderer's `SLACK`, which a fill's region keeps for the same reason) and
 clipped to the page. An edit that changes no drawn bounds changes no pixel, and
-the patch is `previous`. `previous` must be the whole page at these options —
-its width, height and format the page's (`Mismatch` otherwise) — and must carry
-no warnings (`PreviousWarned` otherwise), for the reason below.
+the patch is `previous`, as it is with `options.annotations` off. `previous`
+must be the whole page at these options — its width, height, format,
+premultiplication, stride and bytes the render's, and `options.region` none
+(`Mismatch` otherwise) — and must carry no warnings (`PreviousWarned`
+otherwise), for the reason below.
 
 #### The patch stays the full render
 
@@ -4203,12 +4213,20 @@ Two things a tile cannot see are taken care of:
 - **An image run** (ruling 5's named exception, RC-21's class). Whether an
   image joins the run held back from conflation is decided by its overlap with
   what the run holds over the canvas, so a tile can join what the page splits.
-  The region render reports each image it put in a run whose page-frame
-  rectangle the canvas does not hold whole, and the patch grows the rectangle
-  to cover every one reported and renders it again — at most four rounds, then
-  the whole page (`ImageRun`). A rectangle holding every image that meets it
-  sees every overlap the page sees, so the run decisions inside it are the
-  page's.
+  The renderer keeps each run's bounds in the page's frame beside the run, and
+  a region render reports (`tinker_pdf_render::RunReach`) where an image that
+  could join a run meets the run's bounds outside the region — `unseen`, the
+  only place the page could find an overlap the region does not — and every
+  image a run could hold that the region does not hold whole (`cut`). Where
+  the bounds an image and its run share lie inside the region, every pixel
+  either finds covered is one the region holds for both, so the region asks
+  what the page asks and answers alike. A render that reports nothing unseen
+  is the patch. One that does grows the rectangle to hold what it reported
+  and renders again; from the second round on it grows to hold every cut image
+  as well, after which every image meets every run inside it. Each round
+  reports only what lies outside its rectangle, so the rectangle grows every
+  round and stops growing at the page, and the patch never falls back for a
+  run.
 - **Warnings.** A region render raises a part of what a full render raises: a
   tiling cell is drawn only where it meets the canvas, and its warnings with
   it. With `previous` clean, the page's content and its unchanged annotations
@@ -4217,7 +4235,10 @@ Two things a tile cannot see are taken care of:
   warnings are the region render's. A `previous` with warnings is rendered
   whole.
 
-The patched bitmap is then the full render's, pixels and warnings.
+The patched bitmap is then the full render's, pixels and warnings. A patch
+asked to count hands back what its renders counted, `Stats::pixels_rendered`
+among them: the pixels of each canvas a render drew the page onto, every
+renderer's but a tiling cell's.
 `dirty_region.rs` holds it over moves, resizes, recolourings, removals and
 additions on turned and cropped pages at 0.5× to 4× and over RC-21's
 three-image page, and P-17.7's fingerprint holds one patched page on every
@@ -4285,7 +4306,7 @@ renders: the rectangle's pixels and one interpretation of the page, held to
 | A base the reopen should not keep is kept | Each `FullOpen` row is a test of the base or the section; `every_base_a_reopen_cannot_keep_says_why` builds one of each |
 | A chain of reopens grows without bound | Past 32 deep a reopen opens whole (`Deep`) and starts a chain of its own |
 | A patch misses a pixel the edit changed | The rectangle covers each changed annotation's `/Rect` before and after, rounded outward with a pixel of slack; changed content, an unbounded appearance and a reorder render whole; `a_patched_render_is_the_full_render_after_every_annotation_edit` |
-| An image run decided in the tile differs from the page's | The region render reports every run image the canvas does not hold whole, and the patch grows around it |
+| An image run decided in the tile differs from the page's | The region render reports where an image meets its run outside it, and the patch grows to hold that, then every image a run could hold |
 | A patch's warnings differ from the full render's | A `previous` with warnings is rendered whole, and a clean page's only warnings after the edit are the changed annotations', inside the rectangle |
 
 ## P-25 — Transparency groups and soft masks

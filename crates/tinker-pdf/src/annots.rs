@@ -262,6 +262,73 @@ pub(crate) fn prepare(
     })
 }
 
+/// Where an annotation draws on its page, as [`draw`] would draw it, read
+/// from its dictionary and its appearance's without decoding anything
+/// (`docs/design/performance.md`, P-17).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Drawn {
+    /// Nowhere: hidden or `NoView` by its `/F` (12.5.3), a pop-up, no
+    /// `/Rect` with an area, no normal appearance, an appearance that is not
+    /// a form, or one 12.5.5's fit cannot place — each a reason [`prepare`]
+    /// gives for drawing nothing.
+    Nothing,
+    /// Inside its `/Rect`, in default user space: an appearance with a
+    /// `/BBox` is fitted onto the rectangle, and the box clips what it draws
+    /// (8.10.2), so nothing it paints lands outside.
+    Within(Rect),
+    /// Wherever its content draws: an appearance with no `/BBox` is drawn
+    /// where its own `/Matrix` puts it, unclipped.
+    Unbounded,
+}
+
+/// [`Drawn`] for `annotation`: the decisions [`prepare`] takes, but for the
+/// decode, which a bounded appearance does not need — one whose content does
+/// not decode draws nothing, inside its rectangle as well.
+pub(crate) fn drawn(doc: &CosDocument, annotation: &Dict) -> Drawn {
+    let flags = annotation.get_int(doc.intern(b"F")).unwrap_or(0);
+    if flags & HIDDEN != 0 || flags & NO_VIEW != 0 {
+        return Drawn::Nothing;
+    }
+    let popup = annotation
+        .get_name(doc.intern(b"Subtype"))
+        .and_then(|n| doc.name_bytes(n))
+        .is_some_and(|subtype| subtype.as_ref() == b"Popup");
+    if popup {
+        return Drawn::Nothing;
+    }
+    let Some(rect) = doc
+        .resolve_key(annotation, doc.intern(b"Rect"))
+        .as_array()
+        .and_then(Rect::from_array)
+        .filter(|rect| !rect.is_empty())
+    else {
+        return Drawn::Nothing;
+    };
+    let Some(form) = normal_appearance(doc, annotation) else {
+        return Drawn::Nothing;
+    };
+    let Ok(object) = doc.get(form) else {
+        return Drawn::Nothing;
+    };
+    let Some(form_dict) = object.as_dict() else {
+        return Drawn::Nothing;
+    };
+    let matrix = matrix_of(doc, form_dict);
+    let bbox = doc
+        .resolve_key(form_dict, doc.intern(b"BBox"))
+        .as_array()
+        .and_then(Rect::from_array);
+    match bbox {
+        None => Drawn::Unbounded,
+        // `fit` places a box it can scale onto the rectangle, and then the box
+        // is non-empty and finite, which is when `prepare` clips to it.
+        Some(bbox) => match fit(Some(bbox), matrix, rect) {
+            Some(_) => Drawn::Within(rect),
+            None => Drawn::Nothing,
+        },
+    }
+}
+
 /// Draws a prepared appearance through `device`, its two scopes serving `op`,
 /// the render's operation: one decode between them of each stream they read,
 /// counted into its tally when the render is counting.
@@ -527,6 +594,119 @@ mod tests {
         let matrix = Matrix::translate(3.0, 4.0);
         let fitted = fit(None, matrix, rect(0.0, 0.0, 10.0, 10.0)).expect("it draws");
         assert_eq!(fitted.apply(0.0, 0.0), (3.0, 4.0));
+    }
+
+    /// **Where an annotation draws, read without drawing it** (`drawn`): its
+    /// `/Rect` for an appearance with a `/BBox`, which clips it there; no
+    /// bound for one without; and nothing for every reason `prepare` gives
+    /// for drawing nothing — hidden, `NoView`, a pop-up, no rectangle, an
+    /// empty one, no appearance, an `/AS` naming no state, and a box the fit
+    /// cannot place.
+    #[test]
+    fn an_annotation_draws_within_its_rectangle_or_says_why_not() {
+        use tinker_pdf_cos::{Name, ObjRef};
+
+        let body = |num: u32, dict: &str| {
+            format!("{num} 0 obj\n{dict}\nstream\n0 0 1 rg 0 0 10 10 re f\nendstream\nendobj\n")
+        };
+        // Each form draws `0 0 1 rg 0 0 10 10 re f`, twenty-three bytes.
+        let bytes = format!(
+            "%PDF-1.7\n\
+             1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+             2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+             {}{}{}\
+             trailer\n<< /Root 1 0 R >>\n%%EOF\n",
+            body(
+                5,
+                "<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] /Length 23 >>"
+            ),
+            body(6, "<< /Type /XObject /Subtype /Form /Length 23 >>"),
+            body(
+                7,
+                "<< /Type /XObject /Subtype /Form /BBox [3 3 3 3] /Length 23 >>"
+            ),
+        );
+        let doc = Arc::new(CosDocument::open(bytes.into_bytes()).expect("it opens"));
+        let annotation = |form: Option<u32>, edit: &dyn Fn(&mut Dict)| {
+            let mut dict = Dict::new();
+            dict.insert(Name::SUBTYPE, Object::Name(doc.intern(b"Square")));
+            dict.insert(
+                doc.intern(b"Rect"),
+                Object::Array(
+                    [20.0, 30.0, 60.0, 50.0]
+                        .into_iter()
+                        .map(Object::Real)
+                        .collect(),
+                ),
+            );
+            if let Some(form) = form {
+                let mut ap = Dict::new();
+                ap.insert(Name::N, Object::Ref(ObjRef::new(form, 0)));
+                dict.insert(doc.intern(b"AP"), Object::Dict(ap));
+            }
+            edit(&mut dict);
+            dict
+        };
+        let within = Drawn::Within(rect(20.0, 30.0, 60.0, 50.0));
+        assert_eq!(drawn(&doc, &annotation(Some(5), &|_| {})), within);
+        assert_eq!(
+            drawn(&doc, &annotation(Some(6), &|_| {})),
+            Drawn::Unbounded,
+            "no /BBox, so nothing clips it"
+        );
+        assert_eq!(
+            drawn(&doc, &annotation(Some(7), &|_| {})),
+            Drawn::Nothing,
+            "a box with no area is never placed"
+        );
+        assert_eq!(drawn(&doc, &annotation(None, &|_| {})), Drawn::Nothing);
+        for (what, flags) in [("hidden", HIDDEN), ("NoView", NO_VIEW)] {
+            let hidden = annotation(Some(5), &|dict| {
+                dict.insert(doc.intern(b"F"), Object::Int(flags | 4));
+            });
+            assert_eq!(drawn(&doc, &hidden), Drawn::Nothing, "{what}");
+        }
+        let popup = annotation(Some(5), &|dict| {
+            dict.insert(Name::SUBTYPE, Object::Name(doc.intern(b"Popup")));
+        });
+        assert_eq!(drawn(&doc, &popup), Drawn::Nothing, "a pop-up");
+        let flat = annotation(Some(5), &|dict| {
+            dict.insert(doc.intern(b"Rect"), Object::Array(vec![Object::Int(5); 4]));
+        });
+        assert_eq!(drawn(&doc, &flat), Drawn::Nothing, "a rectangle of no area");
+        let unplaced = annotation(Some(5), &|dict| {
+            dict.insert(doc.intern(b"Rect"), Object::Null);
+        });
+        assert_eq!(drawn(&doc, &unplaced), Drawn::Nothing, "no rectangle");
+        let stateless = annotation(None, &|dict| {
+            let mut states = Dict::new();
+            states.insert(doc.intern(b"On"), Object::Ref(ObjRef::new(5, 0)));
+            let mut ap = Dict::new();
+            ap.insert(Name::N, Object::Dict(states));
+            dict.insert(doc.intern(b"AP"), Object::Dict(ap));
+            dict.insert(doc.intern(b"AS"), Object::Name(doc.intern(b"Off")));
+        });
+        assert_eq!(
+            drawn(&doc, &stateless),
+            Drawn::Nothing,
+            "/AS names no state"
+        );
+
+        // The rectangle is the one `prepare` fits the appearance onto, and
+        // each annotation drawn nowhere is one `prepare` declines.
+        let prepared = prepare(&doc, &annotation(Some(5), &|_| {}), &Operation::none())
+            .expect("a bounded appearance is prepared");
+        assert_eq!(prepared.rect(), (20.0, 30.0, 60.0, 50.0));
+        for nowhere in [
+            annotation(Some(7), &|_| {}),
+            annotation(None, &|_| {}),
+            popup,
+            flat,
+            unplaced,
+            stateless,
+        ] {
+            assert!(prepare(&doc, &nowhere, &Operation::none()).is_err());
+        }
     }
 
     /// The whole chain in one test: an annotation added through the editor

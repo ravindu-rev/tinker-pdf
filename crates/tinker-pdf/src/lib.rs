@@ -44,6 +44,7 @@ pub mod ocr;
 mod optional;
 mod output_intents;
 mod parallel;
+mod patch;
 pub mod pdfa;
 pub mod pdfua;
 pub mod pdfx;
@@ -234,6 +235,9 @@ pub use images::{ImageMask, ImageSpace, PageImage, SampleCodec};
 /// What an operation counted, when it was asked to: [`Bitmap::stats`], for a
 /// render whose [`RenderOptions::stats`] was on.
 pub use parallel::Parallelism;
+/// What [`write::Appended::patch`] did to the bitmap it re-rendered, and why
+/// it rendered a page whole when it did.
+pub use patch::{Patch, PatchFallback};
 /// Why [`Bitmap::from_png`] would not read a file: the decoder's own reason,
 /// named rather than collapsed, because "not a PNG" and "a colour type Table
 /// 11.1 does not permit" are different answers to show a person.
@@ -2889,13 +2893,27 @@ impl Page {
         if matches!(options.parallelism, Parallelism::Threads(threads) if threads >= 2) {
             return self.display_list_for(options.usage).render(options);
         }
+        self.render_reaching(options).0
+    }
+
+    /// [`Page::render`] drawn directly on the caller's thread, whatever
+    /// [`RenderOptions::parallelism`] asks, and what its canvas could not see
+    /// of the page's image runs ([`tinker_pdf_render::RunReach`]): nothing,
+    /// for a render of the whole page. A patch grows the rectangle it renders
+    /// until it sees all of it ([`crate::patch`]); only a direct render's
+    /// renderer can say what it could not see.
+    pub(crate) fn render_reaching(
+        &self,
+        options: &RenderOptions,
+    ) -> (Bitmap, tinker_pdf_render::RunReach) {
         // The operation is made before the content is decoded, so the decode
         // counts too; it binds the optional-content states the render's usage
         // gives once, for every scope the render opens, and keeps what it
         // computes in the document's cache where the document has one.
         let op = self.render_operation(options, options.usage);
         let content = stats::content(&self.doc, &self.inner, op.work());
-        self.render_layer(options, None, op, |renderer, resources| {
+        let mut reach = tinker_pdf_render::RunReach::default();
+        let bitmap = self.render_layer(options, None, op, |renderer, resources| {
             interpret(&content, Matrix::IDENTITY, renderer, resources);
             if options.annotations {
                 // After the content, because an annotation sits on top of the
@@ -2908,7 +2926,9 @@ impl Page {
                     resources.operation(),
                 );
             }
-        })
+            reach = renderer.run_reach();
+        });
+        (bitmap, reach)
     }
 
     /// The operation one render of this page is, as `options` asks, for a
