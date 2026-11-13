@@ -394,6 +394,17 @@ form with no `/Group` when a profile forbids transparency (below), which is
 the same picture wherever the text's alpha is one, and a glyph that draws
 nothing is its width alone.
 
+**Where the form is named.** 9.6.5 has a reader find a procedure's names in
+its font's `/Resources`, and this engine's renderer runs a procedure in the
+scope that shows the text instead (`docs/design/icc.md`, the scopes). So a
+glyph's form takes a name of the document's own — the face's resource name,
+`.g` and the glyph's id, `C0.g12` — the first time a run draws the glyph,
+and is named under it in its font's `/Resources` and in those of every page,
+form and pattern registered after that run, the scopes a run can be shown
+in. A glyph's own form is written under the document's resources less the
+other glyphs' forms, which it never draws. A document with no colour face
+names no such form.
+
 ### Each paint's construct
 
 | Paint | Construct | Exact |

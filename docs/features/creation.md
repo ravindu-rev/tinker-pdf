@@ -92,7 +92,8 @@ a colour face, written as Type 3 fonts (9.6.4;
 its box and its drawing operators, all in the face's font units and naming
 resources already registered. Each procedure is `wx 0 d0` and the glyph's
 form — an isolated, non-knockout transparency group with no `/CS`, under the
-document's resources as they were when the glyph was added, so the text's
+document's resources as they were when the glyph was added, less the other
+glyphs' forms, so the text's
 alpha, blend mode and soft mask apply to the glyph as one object; a plain
 form under a profile that forbids transparency; and nothing past the width
 for a glyph that draws nothing. Every font is `/FontMatrix [0.001 0 0 0.001 0
@@ -106,7 +107,13 @@ non-empty one standing. A glyph's code is given the first time a run draws it
 — 0 to 31 and 33 to 255, never 32, which 9.3.3 word-spaces — and a run that
 needs a code when its face's fonts are full spills into a new font,
 registered then under the face's name, a full stop and the font's place
-(`C0.1`), selected with `Tf` where the run reaches it. At `finish` each font
+(`C0.1`), selected with `Tf` where the run reaches it. The glyph's form is
+named then too, for the document — the face's name, `.g` and the glyph's id
+(`C0.g12`) — in its font's `/Resources` and in those of every page, form and
+pattern registered after the run: 9.6.5 has a reader look in the font's, and
+this engine's renderer runs a procedure in the scope that shows the text
+([design](../design/colour-fonts.md), *Where the form is named*). At `finish`
+each font
 gets `/CharProcs` and `/Encoding` for its codes, `/Widths` (0 at 32), a
 `/FontBBox` around every glyph's box, a symbolic descriptor and a one-byte
 `/ToUnicode`, so the run extracts and is found as a composite run is

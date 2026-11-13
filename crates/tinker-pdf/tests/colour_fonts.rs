@@ -400,11 +400,39 @@ fn the_written_colour_font_is_structurally_clean() {
             "{glyph:?} begins with its width: {text}"
         );
         assert!(
-            text.contains(&format!("/{} Do", String::from_utf8_lossy(glyph))),
+            text.contains(&format!("/C0.{} Do", String::from_utf8_lossy(glyph))),
             "{glyph:?} draws its form: {text}"
         );
     }
     assert_eq!(font.forms.len(), 3);
+    // Each form is named document-wide, the face's name and the glyph's, and
+    // the page names it as the font does: 9.6.5 has a reader look for a
+    // procedure's names in its font's `/Resources`, and this engine runs a
+    // procedure in the scope that shows the text.
+    let page = &tinker_pdf_cos::pages::collect(&cos)[0];
+    let page = cos.get(page.reference).expect("the page resolves");
+    let page_resources = entry(&cos, page.as_dict().expect("a page"), b"Resources");
+    let page_xobjects = page_resources
+        .as_dict()
+        .map(|resources| entry(&cos, resources, b"XObject"))
+        .and_then(|xobjects| xobjects.as_dict().cloned())
+        .expect("the page names XObjects");
+    let font_dict = cos.get(fonts[0].1).expect("the font resolves");
+    let font_resources = entry(&cos, font_dict.as_dict().expect("a font"), b"Resources");
+    let font_xobjects = font_resources
+        .as_dict()
+        .map(|resources| entry(&cos, resources, b"XObject"))
+        .and_then(|xobjects| xobjects.as_dict().cloned())
+        .expect("the font names its forms");
+    for id in 1..=3 {
+        let key = cos.intern(format!("C0.g{id}").as_bytes());
+        let in_font = font_xobjects.get_ref(key).expect("the font names the form");
+        assert_eq!(
+            page_xobjects.get_ref(key),
+            Some(in_font),
+            "the page names glyph {id}'s form as its font does"
+        );
+    }
     for (glyph, form) in &font.forms {
         let group = entry(&cos, form, b"Group");
         let group = group.as_dict().expect("a transparency group");
@@ -1020,7 +1048,7 @@ fn a_colour_glyph_drawn_twice_is_one_form() {
     let a = font
         .forms
         .iter()
-        .find(|(name, _)| name == b"g1")
+        .find(|(name, _)| name == b"C0.g1")
         .expect("A's form");
     let states = entry(&cos, &a.1, b"Resources");
     let states = states

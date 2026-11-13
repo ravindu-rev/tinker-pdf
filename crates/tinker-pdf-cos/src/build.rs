@@ -1415,8 +1415,12 @@ struct ColourProcedure {
     /// nothing.
     bbox: Option<[f64; 4]>,
     content: Vec<u8>,
-    /// The document's resources when the glyph was added.
+    /// The document's resources when the glyph was added, less the other
+    /// glyphs' forms.
     resources: Dict,
+    /// Its form's document-wide name and object, given the first time a run
+    /// draws it; `None` until then, and for a glyph that draws nothing.
+    form: Option<(Vec<u8>, ObjRef)>,
 }
 
 /// One Type 3 font of a colour face.
@@ -1437,6 +1441,16 @@ struct ResourceSet {
     fonts: Vec<(Vec<u8>, ObjRef)>,
     images: Vec<(Vec<u8>, ObjRef)>,
     forms: Vec<(Vec<u8>, ObjRef)>,
+    /// The form of each colour glyph a run has drawn
+    /// ([`DocumentBuilder::colour_glyph_run`]), under the document-wide name
+    /// its procedure's `Do` gives it. The Type 3 font's own `/Resources` name
+    /// it, as 9.6.5 has a reader look there; and so does every scope a run
+    /// can be shown in, since this engine's renderer runs a glyph procedure
+    /// in the scope that shows the text (`docs/design/icc.md`, the scopes).
+    /// A colour glyph's own form leaves the others out
+    /// ([`ResourceSet::procedure_dict`]), so no form's resources grow with
+    /// the glyphs drawn before it.
+    glyph_forms: Vec<(Vec<u8>, ObjRef)>,
     ext_gstates: Vec<(Vec<u8>, ObjRef)>,
     shadings: Vec<(Vec<u8>, ObjRef)>,
     patterns: Vec<(Vec<u8>, ObjRef)>,
@@ -1475,8 +1489,21 @@ impl ResourceSet {
     /// replaces it — the same last-registration-wins rule two images under one
     /// name already follow.
     fn dict(&self, names: &NameTable) -> Dict {
+        self.assembled(names, true)
+    }
+
+    /// [`ResourceSet::dict`] less the colour glyphs' forms: the resources a
+    /// colour glyph's own form is written under, which draws no other glyph.
+    fn procedure_dict(&self, names: &NameTable) -> Dict {
+        self.assembled(names, false)
+    }
+
+    /// The `/Resources` dictionary, with the colour glyphs' forms in its
+    /// `/XObject` after every other form where `glyph_forms` says so.
+    fn assembled(&self, names: &NameTable, glyph_forms: bool) -> Dict {
         let mut xobjects = Dict::new();
-        for (resource, reference) in self.images.iter().chain(self.forms.iter()) {
+        let glyphs = self.glyph_forms.iter().filter(|_| glyph_forms);
+        for (resource, reference) in self.images.iter().chain(self.forms.iter()).chain(glyphs) {
             xobjects.insert(names.intern(resource), Object::Ref(*reference));
         }
 
@@ -6322,7 +6349,8 @@ impl DocumentBuilder {
     /// both its shape and its colour" — and then the glyph's form, an
     /// isolated, non-knockout transparency group (11.6.6) holding
     /// [`ColourGlyph::content`] under the document's resources as they are
-    /// now, so the text's alpha, blend mode and soft mask apply to the glyph
+    /// now, less the other glyphs' forms, which it never draws, so the text's
+    /// alpha, blend mode and soft mask apply to the glyph
     /// as one object. Under an [`ArchivalProfile`] that forbids transparency
     /// the form carries no `/Group`, which draws the same picture wherever
     /// the text's alpha is one; content needing transparency cannot be
@@ -6333,7 +6361,7 @@ impl DocumentBuilder {
     /// glyph has a procedure already, when the advance is not a number, and
     /// when the content is not empty and its box encloses no area.
     pub fn add_colour_glyph(&mut self, font: &[u8], glyph: &ColourGlyph<'_>) -> bool {
-        let resources = self.resources.dict(&self.names);
+        let resources = self.resources.procedure_dict(&self.names);
         let Some(face) = self.colour_fonts.iter_mut().find(|f| f.resource == font) else {
             return false;
         };
@@ -6356,6 +6384,7 @@ impl DocumentBuilder {
                 bbox,
                 content: glyph.content.to_vec(),
                 resources,
+                form: None,
             },
         );
         true
@@ -6383,7 +6412,11 @@ impl DocumentBuilder {
     /// font registered now under a name of its own — the face's name and the
     /// font's place after a full stop — so a run whose glyphs lie in several
     /// fonts selects each with `Tf` as it reaches it, and a page begun after
-    /// this call names every font it needs.
+    /// this call names every font it needs. A glyph's form is named then too,
+    /// the face's name and `.g` and the glyph's id, in its font's `/Resources`
+    /// and in every page, form and pattern registered after the call: 9.6.5
+    /// has a reader look for a procedure's names in its font's, and this
+    /// engine's renderer runs the procedure in the scope that shows the text.
     ///
     /// Returns false, having written nothing, when `font` is no colour face,
     /// when there are no glyphs, when a glyph has no procedure, or when the
@@ -6441,6 +6474,20 @@ impl DocumentBuilder {
             };
             face.parts[part].glyphs.push(id);
             face.codes.insert(id, (part, code));
+            // A glyph that draws something has its form named now, before
+            // any page that shows it is begun, in the document's resources
+            // as well as in its font's: this engine's renderer runs the
+            // procedure in the scope that shows the text, and 9.6.5 has a
+            // reader look in the font's own `/Resources`.
+            if face.glyphs.get(&id).is_some_and(|p| p.bbox.is_some()) {
+                let mut name = face.resource.clone();
+                name.extend_from_slice(format!(".g{id}").as_bytes());
+                let form_ref = self.allocate();
+                self.resources.glyph_forms.push((name.clone(), form_ref));
+                if let Some(procedure) = self.colour_fonts[at].glyphs.get_mut(&id) {
+                    procedure.form = Some((name, form_ref));
+                }
+            }
         }
 
         let face = &mut self.colour_fonts[at];
@@ -7936,10 +7983,10 @@ impl DocumentBuilder {
             let mut content = Vec::new();
             crate::write::write_real(&mut content, procedure.width);
             content.extend_from_slice(b" 0 d0\n");
-            if let Some(bbox) = procedure.bbox {
-                let form = self.write_colour_form(procedure, bbox, matrix);
-                forms.insert(self.names.intern(name.as_bytes()), Object::Ref(form));
-                crate::write::write_name(&mut content, name.as_bytes());
+            if let (Some(bbox), Some((form_name, form_ref))) = (procedure.bbox, &procedure.form) {
+                self.write_colour_form(procedure, bbox, matrix, *form_ref);
+                forms.insert(self.names.intern(form_name), Object::Ref(*form_ref));
+                crate::write::write_name(&mut content, form_name);
                 content.extend_from_slice(b" Do\n");
                 let marks = bbox.map(|v| v * scale);
                 font_box = Some(match font_box {
@@ -8062,17 +8109,19 @@ impl DocumentBuilder {
         self.objects.insert(part.font_ref.num, Object::Dict(dict));
     }
 
-    /// A colour glyph's form: its content in font units under the `/Matrix`
-    /// that takes them into the font's 1000-unit glyph space, clipped to its
-    /// box, as an isolated, non-knockout transparency group (11.6.6) with no
-    /// `/CS`, so it blends in the space of what it is painted into — or, under
-    /// a profile that forbids transparency, as a plain form.
+    /// A colour glyph's form, written as `reference`: its content in font
+    /// units under the `/Matrix` that takes them into the font's 1000-unit
+    /// glyph space, clipped to its box, as an isolated, non-knockout
+    /// transparency group (11.6.6) with no `/CS`, so it blends in the space of
+    /// what it is painted into — or, under a profile that forbids
+    /// transparency, as a plain form.
     fn write_colour_form(
         &mut self,
         procedure: &ColourProcedure,
         bbox: [f64; 4],
         matrix: Option<[f64; 6]>,
-    ) -> ObjRef {
+        reference: ObjRef,
+    ) {
         let mut dict = Dict::new();
         dict.insert(Name::TYPE, Object::Name(self.names.intern(b"XObject")));
         dict.insert(
@@ -8099,7 +8148,6 @@ impl DocumentBuilder {
             dict.insert(self.names.intern(b"Group"), Object::Dict(group));
         }
         dict.insert(Name::RESOURCES, Object::Dict(procedure.resources.clone()));
-        let reference = self.allocate();
         self.objects.insert_stream(
             reference.num,
             StreamData {
@@ -8107,7 +8155,6 @@ impl DocumentBuilder {
                 data: procedure.content.clone(),
             },
         );
-        reference
     }
 
     /// Registers an image under a resource name.

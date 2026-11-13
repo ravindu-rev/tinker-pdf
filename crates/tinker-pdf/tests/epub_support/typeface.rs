@@ -557,14 +557,23 @@ fn build(face: &Face) -> Vec<u8> {
 
     // ---- glyf and loca ------------------------------------------------------
     //
-    // Glyph 0 is `.notdef` and is **empty**: a glyph is empty precisely when
-    // its `loca` entry equals the next one, which is what a reader draws as
-    // nothing. Every covered character gets its own copy of the outline,
-    // because `loca` gives each glyph its own slice and offsets that merely
-    // repeat make every glyph empty.
+    // Every covered character gets its own copy of the outline, because
+    // `loca` gives each glyph its own slice and offsets that merely repeat
+    // make every glyph empty. A face with a colour description is laid out
+    // whole: `loca` an entry a glyph and one more, glyph 0, `.notdef`,
+    // **empty** — its entry equal to the next, which a reader draws as
+    // nothing — and each glyph after it its own outline, since its tests name
+    // each rectangle by its id. A face without one keeps the layout the
+    // render fingerprints over such faces were taken with (`epub_shaped.rs`):
+    // `loca` an entry short, so that each glyph reads the outline written
+    // after its own, `.notdef` the first box and the last glyph none.
     let outline = box_glyph(i16::try_from(face.units_per_em * 7 / 10).unwrap_or(700));
     let mut glyf = Vec::with_capacity(outline.len() * glyph_count);
-    let mut loca = vec![0u32];
+    let mut loca = if face.colour.is_some() {
+        vec![0u32, 0]
+    } else {
+        vec![0u32]
+    };
     for _ in 1..base_count {
         glyf.extend_from_slice(&outline);
         loca.push(u32::try_from(glyf.len()).unwrap_or(0));
