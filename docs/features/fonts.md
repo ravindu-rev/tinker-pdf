@@ -797,6 +797,41 @@ axis count to a design space's, refusing a mismatch by name. At the default
 location every scalar is zero, so a face whose regions all peak away from
 zero draws there exactly what `Cff2::outline` draws.
 
+**Static instances** (`instance::instantiate`; [design](../design/variable-fonts.md),
+'The static instancer'). A variable face at one `Instance` is written as a
+face with no variation tables. Each glyph's points are moved by `gvar` there
+and rounded to font units, a half rounding up, a composite's offsets
+likewise, and every box is recomputed from the points the glyph now holds —
+a matched component placed by its points, as the `glyf` chapter places it —
+with `loca` short where the new `glyf` fits it and long where it does not;
+instructions, contour order, on-curve flags, `OVERLAP_SIMPLE` and a
+composite's transforms and program are kept. The advances come from `HVAR`
+and `VVAR`, or from the phantom points without them, rounded; each left side
+bearing is the glyph's new `xMin` and each top side bearing its third
+phantom point less its new `yMax`, and `hhea` and `vhea` take the
+long-metric counts and extents these give. Every value `MVAR` varies in
+`OS/2`, `hhea`, `vhea`, `post` and `gasp` is rounded and held to its field,
+the last `gasp` range keeping 0xFFFF; `usWeightClass` is the `wght` value
+rounded into 1 to 1 000, `usWidthClass` the `wdth` value interpolated through
+the `OS/2` chapter's table and rounded into 1 to 9, as the `wdth`
+registration says, `italicAngle` the `slnt` value, and `xAvgCharWidth`, from
+version 3 on, the instance's mean non-zero advance. The `cvar` values are
+rounded into `cvt `, and where the face carries hinting — `fpgm`, `prep` or a
+glyph's program — an IDEF for `GETVARIATION` at the end of `prep` pushes the
+instance's normalised coordinates, `maxp`'s `maxInstructionDefs` and
+`maxStackElements` raised to cover it. `head` takes the glyphs' union and the
+new `loca`'s format, `VORG` the origins `VVAR` moves, and the directory every
+checksum. `fvar`, `avar`, `gvar`, `cvar`, `HVAR`, `VVAR`, `MVAR`, `STAT`,
+`DSIG`, `hdmx` and `VDMX` are dropped (`instance::DROPPED`); every other
+table — `cmap`, `name`, `fpgm`, `GSUB`, `GPOS` and `GDEF` with their
+variation data unapplied, and tables this reader does not know — is copied as
+it is. A face that does not vary is returned as it is. Refused by name
+(`InstanceError`): bytes that are no sfnt, a named instance the face does not
+have, a variation table or one glyph's variation data a reader refuses, a
+missing `head` or `maxp`, a point, a difference between two points, an
+offset or a box the instance would move past sixteen bits, and outlines in
+`CFF2`, which this instancer does not convert.
+
 **The committed variable faces.** `crates/tinker-pdf-font/tests/variable/`
 holds two faces this repository wrote and no outside program made, so that a
 test in any crate can embed, draw or set text in a variable face through
@@ -1964,6 +1999,24 @@ corpora already vendored here. So every name stays on the list.
   variation table read, and every glyph outlined and every `cvt `, `MVAR` and
   Private DICT value read at each named instance and at the default — with the
   `glyf` face's `HVAR` and `VVAR` advances equal to its phantom points' there.
+- `crates/tinker-pdf-font/tests/variations.rs`'s static instances: the
+  committed `glyf` face and `TestGPOSFour.ttf` at every named instance, at the
+  default and at coordinates no instance names — one past an axis's maximum,
+  one naming an axis neither face has — re-read through `Sfnt` and
+  `glyf::outline` to the variable face's points and offsets rounded in the
+  test, and to its advances, its `cvt ` and every `MVAR` metric there rounded
+  likewise; no variation table left, every other table kept and the untouched
+  ones byte for byte; the default instance drawing the default outlines;
+  `usWeightClass`, `usWidthClass` and `italicAngle` as the axis registrations
+  derive them, computed in the test; the `GETVARIATION` IDEF and the `maxp`
+  counts it raises, and none for a face without hinting; each box, side
+  bearing, extent, the average width and every checksum; `gasp`'s last range;
+  a face that does not vary returned as it is; the long `loca` when the
+  instance's `glyf` needs it; a glyph's program, `OVERLAP_SIMPLE`, a 2×2
+  transform, matched points and a composite's program kept, and an offset
+  moved past a byte written in words; unknown tables copied and the dropped
+  ones gone; every refusal by name; and every prefix and changed byte of the
+  committed face instanced or refused without a panic.
 - `crates/tinker-pdf-font/tests/colour_tables.rs` — the colour tables over
   bytes the test writes from the OpenType chapters' layouts: COLR version 0's
   layers bottom first with each palette's colours, a slice two glyphs share,

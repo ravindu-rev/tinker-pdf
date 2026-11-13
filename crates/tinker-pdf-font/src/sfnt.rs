@@ -191,6 +191,20 @@ impl<'a> Sfnt<'a> {
         self.table_with(tag, &mut 0)
     }
 
+    /// The tags the directory lists, in its order, each once: a tag listed
+    /// twice names the first record, as [`Sfnt::table`] reads it.
+    #[must_use]
+    pub fn tags(&self) -> Vec<[u8; 4]> {
+        let mut out: Vec<[u8; 4]> = Vec::with_capacity(self.tables.len());
+        for (tag, _, _) in &self.tables {
+            let tag = tag.to_be_bytes();
+            if !out.contains(&tag) {
+                out.push(tag);
+            }
+        }
+        out
+    }
+
     /// [`Sfnt::table`], counting each record compared.
     fn table_with(&self, tag: u32, steps: &mut u64) -> Option<&'a [u8]> {
         let mut compared = 0u64;

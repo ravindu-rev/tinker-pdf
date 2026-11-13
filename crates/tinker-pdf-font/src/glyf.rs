@@ -113,6 +113,44 @@ pub struct Bounds {
     pub y_max: i16,
 }
 
+/// A glyph's data in `glyf` as `loca` bounds it: empty for a glyph with no
+/// outline, `None` for a face with no `glyf`, `loca` or `head`, a glyph past
+/// the end of `loca`, or a range that runs past `glyf` or backwards.
+pub(crate) fn glyph_data<'a>(sfnt: &Sfnt<'a>, glyph: u16) -> Option<&'a [u8]> {
+    let glyf = sfnt.table(TAG_GLYF)?;
+    let (start, end) = glyph_slot(sfnt, glyph)?;
+    if end <= start {
+        return (end == start).then_some(&[]);
+    }
+    glyf.get(start..end)
+}
+
+/// A composite's records in order, as [`components`] reads them, and the
+/// instructions after the last where a record says `WE_HAVE_INSTRUCTIONS` —
+/// empty where none does or where the data ends before they do.
+pub(crate) fn composite_parts(data: &[u8]) -> (Vec<Component>, &[u8]) {
+    let mut records = Vec::new();
+    let mut at = 10usize;
+    while let Some((component, next)) = read_component(data, at) {
+        records.push(component);
+        at = next;
+        if component.flags & Component::MORE_COMPONENTS == 0 {
+            break;
+        }
+    }
+    let instructions = if records
+        .iter()
+        .any(|c| c.flags & Component::WE_HAVE_INSTRUCTIONS != 0)
+    {
+        be16(data, at)
+            .and_then(|length| data.get(at + 2..at + 2 + usize::from(length)))
+            .unwrap_or(&[])
+    } else {
+        &[]
+    };
+    (records, instructions)
+}
+
 /// A glyph's bounds from its `glyf` header.
 ///
 /// A glyph with no outline — a space, whose `loca` range is empty — has the

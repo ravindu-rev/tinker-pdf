@@ -20,6 +20,7 @@ pub mod encoding;
 pub mod facts;
 pub mod glyf;
 pub mod hint;
+pub mod instance;
 pub mod outline;
 mod predefined;
 pub mod sbix;
@@ -46,6 +47,7 @@ pub use encoding::{
     BuiltInEncoding,
 };
 pub use facts::{face_facts, FaceFacts};
+pub use instance::{instantiate, InstanceError};
 pub use outline::{Outline, Segment};
 pub use sbix::{Graphic, Sbix, SbixGlyph, SbixRefusal, SbixStrike, StrikeChoice};
 pub use sfnt::{Sfnt, VerticalOrigins};

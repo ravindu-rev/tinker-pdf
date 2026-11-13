@@ -531,7 +531,7 @@ fn subset_truetype(sfnt: &Sfnt<'_>, glyphs: &BTreeSet<u16>, reshape: &Reshape) -
 /// written. Two documents in the fetched corpora embed one, and the text they
 /// draw through it would have rendered as nothing at all. [`Sfnt::version`]
 /// is the directory's own, which is what every table here came from.
-fn assemble(version: u32, tables: &[(u32, Vec<u8>)]) -> Vec<u8> {
+pub(crate) fn assemble(version: u32, tables: &[(u32, Vec<u8>)]) -> Vec<u8> {
     let count = tables.len() as u16;
     let mut out = Vec::new();
 

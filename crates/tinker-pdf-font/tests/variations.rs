@@ -13,6 +13,7 @@ mod variable_support;
 use tinker_pdf_font::cff::Machine;
 use tinker_pdf_font::cff2::{Cff2, Cff2Error, Cff2Index};
 use tinker_pdf_font::glyf;
+use tinker_pdf_font::instance::{instantiate, InstanceError, DROPPED};
 use tinker_pdf_font::variation::cvar::{cvt_at, Cvar};
 use tinker_pdf_font::variation::gvar::{Gvar, MAX_GLYPH_DELTA_WORK};
 use tinker_pdf_font::variation::item_store::{DeltaSetIndex, DeltaSetIndexMap, ItemVariationStore};
@@ -27,10 +28,11 @@ use tinker_pdf_font::variation::{
 use tinker_pdf_font::{Outline, Segment, Sfnt};
 use variable_support::{
     avar, cff2_index, charstring, composite_glyph, cvar, cvt, dict_entry, f2dot14, fvar,
-    fvar_with_sizes, gasp, glyf_and_loca, head, hhea, hvar, identity_map, index_map, ints,
-    item_store, maxp, metrics, mvar, op, os2, pack_deltas, pack_points, post, spec, tuple_store,
-    vhea, vorg, vvar, AxisSpec, Cff2Spec, ComponentSpec, Cs, DataSpec, Face, FdSelectSpec,
-    GlyphPoint, GlyphVariation, InstanceSpec, Points, PrivateSpec, RegionSpec, TupleSpec,
+    fvar_with_sizes, gasp, glyf_and_loca, glyf_fixture, head, hhea, hvar, identity_map, index_map,
+    ints, item_store, maxp, metrics, mvar, op, os2, pack_deltas, pack_points, post, spec,
+    tuple_store, vhea, vorg, vvar, AxisSpec, Cff2Spec, ComponentSpec, Cs, DataSpec, Face,
+    FdSelectSpec, GlyphPoint, GlyphVariation, InstanceSpec, Points, PrivateSpec, RegionSpec,
+    TupleSpec,
 };
 
 // ---- The design space (FT-05.2) --------------------------------------------
@@ -4549,6 +4551,1334 @@ fn every_truncation_and_byte_change_of_a_gvar_is_read_or_refused_without_panicki
             let mut changed = table.clone();
             changed[at] = value;
             exercise(&changed);
+        }
+    }
+}
+
+// ---- The static instancer for glyf faces (FT-05.10) ---------------------------
+
+/// The committed `glyf` face (`tests/variable/`, FT-05.8).
+const GLYF_FACE: &[u8] = include_bytes!("variable/variable-glyf.ttf");
+
+/// A 16.16 value rounded to font units, a half rounding up: the numeric
+/// model's rule for every value a static instance writes.
+fn to_units(bits: i64) -> i64 {
+    spec::round_units(bits)
+}
+
+/// The two faces the instancer is held to, by name.
+fn instanced_faces() -> Vec<(&'static str, &'static [u8])> {
+    vec![
+        ("variable-glyf.ttf", GLYF_FACE),
+        ("TestGPOSFour.ttf", TEST_GPOS_FOUR),
+    ]
+}
+
+/// The instances a face is written at: every named instance, the default,
+/// and user coordinates no instance names — one past an axis's maximum, one
+/// naming an axis the face lacks.
+fn instancer_instances(face: &[u8]) -> Vec<Instance> {
+    let space = space_of(face);
+    let mut out: Vec<Instance> = (0..space.instances().len())
+        .map(|i| Instance::Named(u16::try_from(i).expect("few")))
+        .collect();
+    out.push(Instance::default());
+    out.push(Instance::User(vec![
+        UserCoordinate::new(*b"wght", 250.0),
+        UserCoordinate::new(*b"opsz", 30.0),
+    ]));
+    out.push(Instance::User(vec![
+        UserCoordinate::new(*b"wght", 813.5),
+        UserCoordinate::new(*b"wdth", 90.0),
+        UserCoordinate::new(*b"slnt", -7.25),
+    ]));
+    out.push(Instance::User(vec![
+        UserCoordinate::new(*b"wdth", 117.0),
+        UserCoordinate::new(*b"opsz", 9.0),
+        UserCoordinate::new(*b"wght", 1_200.0),
+    ]));
+    out.push(Instance::User(vec![UserCoordinate::new(*b"wdth", 73.0)]));
+    out
+}
+
+/// What the variable face gives one glyph at a location, rounded as a static
+/// instance stores it: a simple glyph's contour points moved by `gvar`, or a
+/// composite's records with their offsets moved — a matched component's
+/// offset drawn as zero, as the outline reader draws it.
+#[derive(Clone, Debug)]
+enum Varied {
+    Empty,
+    Simple {
+        points: Vec<(i64, i64)>,
+        on: Vec<bool>,
+        contours: Vec<(usize, usize)>,
+        instructions: Vec<u8>,
+    },
+    Composite(Vec<(glyf::Component, (i64, i64))>),
+}
+
+fn varied_at(sfnt: &Sfnt, gvar: &Gvar, location: &Location, glyph: u16) -> Varied {
+    if let Some(components) = glyf::components(sfnt, glyph) {
+        let deltas = gvar
+            .composite_deltas(glyph, components.len(), location)
+            .expect("the deltas");
+        return Varied::Composite(
+            components
+                .into_iter()
+                .zip(deltas)
+                .map(|(component, delta)| {
+                    let offset = if component.offset_is_xy() {
+                        (
+                            to_units(i64::from(component.arguments[0]) * 65_536 + delta[0].bits()),
+                            to_units(i64::from(component.arguments[1]) * 65_536 + delta[1].bits()),
+                        )
+                    } else {
+                        (0, 0)
+                    };
+                    (component, offset)
+                })
+                .collect(),
+        );
+    }
+    let Some(raw) = glyf::simple_glyph(sfnt, glyph) else {
+        return Varied::Empty;
+    };
+    if raw.contour_points() == 0 {
+        return Varied::Empty;
+    }
+    let deltas = gvar
+        .simple_deltas(glyph, &raw, location)
+        .expect("the deltas");
+    let points = (0..raw.contour_points())
+        .map(|i| {
+            (
+                to_units(i64::from(raw.points[i][0]) * 65_536 + deltas[i][0].bits()),
+                to_units(i64::from(raw.points[i][1]) * 65_536 + deltas[i][1].bits()),
+            )
+        })
+        .collect();
+    Varied::Simple {
+        points,
+        on: raw.flags.iter().map(|f| f & 1 != 0).collect(),
+        contours: raw.contours(),
+        instructions: raw.instructions.to_vec(),
+    }
+}
+
+/// The outline a face holding the varied glyphs draws: the contour reading
+/// over each simple glyph's rounded points, each component placed by its
+/// rounded offset and its own 2×2.
+fn varied_outline(
+    varied: &[Varied],
+    glyph: usize,
+    placement: Placement,
+    depth: u32,
+    out: &mut Vec<Segment>,
+) {
+    if depth > 8 {
+        return;
+    }
+    match &varied[glyph] {
+        Varied::Empty => {}
+        Varied::Simple {
+            points,
+            on,
+            contours,
+            ..
+        } => {
+            let positions: Vec<(f64, f64)> =
+                points.iter().map(|p| (p.0 as f64, p.1 as f64)).collect();
+            drawn(&positions, on, contours, &placed(placement), out);
+        }
+        Varied::Composite(records) => {
+            for (record, offset) in records {
+                let matrix = record.transform.map(|v| f64::from(v) / 16_384.0);
+                let child =
+                    component_placement(placement, matrix, (offset.0 as f64, offset.1 as f64));
+                varied_outline(varied, usize::from(record.glyph), child, depth + 1, out);
+            }
+        }
+    }
+}
+
+/// The points a varied glyph draws, placed — a composite's matched component
+/// moved so that its point lands on the composite's, as the `glyf` chapter
+/// places it, which is what a box measures.
+fn varied_points(
+    varied: &[Varied],
+    glyph: usize,
+    placement: Placement,
+    depth: u32,
+    out: &mut Vec<(f64, f64)>,
+) {
+    if depth > 8 {
+        return;
+    }
+    let place = placed(placement);
+    match &varied[glyph] {
+        Varied::Empty => {}
+        Varied::Simple { points, .. } => {
+            out.extend(points.iter().map(|p| place(p.0 as f64, p.1 as f64)));
+        }
+        Varied::Composite(records) => {
+            let base = out.len();
+            for (record, offset) in records {
+                let matrix = record.transform.map(|v| f64::from(v) / 16_384.0);
+                if record.offset_is_xy() {
+                    let child =
+                        component_placement(placement, matrix, (offset.0 as f64, offset.1 as f64));
+                    varied_points(varied, usize::from(record.glyph), child, depth + 1, out);
+                } else {
+                    let child = component_placement(placement, matrix, (0.0, 0.0));
+                    let mut own = Vec::new();
+                    varied_points(
+                        varied,
+                        usize::from(record.glyph),
+                        child,
+                        depth + 1,
+                        &mut own,
+                    );
+                    let target = usize::try_from(record.arguments[0])
+                        .ok()
+                        .and_then(|p| out.get(base + p).copied());
+                    let source = usize::try_from(record.arguments[1])
+                        .ok()
+                        .and_then(|p| own.get(p).copied());
+                    let shift = match (target, source) {
+                        (Some(t), Some(s)) => (t.0 - s.0, t.1 - s.1),
+                        _ => (0.0, 0.0),
+                    };
+                    out.extend(own.iter().map(|p| (p.0 + shift.0, p.1 + shift.1)));
+                }
+            }
+        }
+    }
+}
+
+/// A varied glyph's box: its placed points floored and ceiled.
+fn varied_box(varied: &[Varied], glyph: usize) -> Option<[i64; 4]> {
+    let mut points = Vec::new();
+    varied_points(varied, glyph, UNPLACED, 0, &mut points);
+    if points.is_empty() {
+        return None;
+    }
+    let min_x = points.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+    let min_y = points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+    let max_x = points.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
+    let max_y = points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+    Some([
+        min_x.floor() as i64,
+        min_y.floor() as i64,
+        max_x.ceil() as i64,
+        max_y.ceil() as i64,
+    ])
+}
+
+/// The advance the variable face gives a glyph at a location, rounded:
+/// `HVAR`'s where it has one, the phantom points' where it does not.
+fn varied_advance(sfnt: &Sfnt, gvar: &Gvar, location: &Location, glyph: u16) -> i64 {
+    let space = DesignSpace::read(sfnt).expect("a design space");
+    match Hvar::read(sfnt, &space).expect("HVAR reads") {
+        Some(hvar) => to_units(
+            hvar.advance_at(sfnt, glyph, location)
+                .expect("an advance")
+                .expect("hmtx states one")
+                .bits(),
+        ),
+        None => {
+            let p = glyf::phantom_points_at(sfnt, glyph, Some(gvar), location).expect("phantoms");
+            to_units(p[1][0].saturating_sub(p[0][0]).bits())
+        }
+    }
+}
+
+/// A rounded metric held to its field's width, as `MVAR` names it.
+fn held_to_field(tag: Tag, value: i64) -> i64 {
+    let field = METRIC_FIELDS
+        .iter()
+        .find(|field| field.tag == tag)
+        .expect("a tag MVAR defines");
+    if field.signed {
+        value.clamp(i64::from(i16::MIN), i64::from(i16::MAX))
+    } else {
+        value.clamp(0, i64::from(u16::MAX))
+    }
+}
+
+/// Whether a value tag names `gasp`'s last range, which always reads 0xFFFF.
+fn last_gasp_range(sfnt: &Sfnt, tag: Tag) -> bool {
+    let Some(rest) = tag.strip_prefix(b"gsp") else {
+        return false;
+    };
+    let range = usize::from(rest[0] - b'0');
+    let ranges = sfnt.table(u32::from_be_bytes(*b"gasp")).map_or(0, |gasp| {
+        usize::from(u16::from_be_bytes([gasp[2], gasp[3]]))
+    });
+    range + 1 >= ranges
+}
+
+/// The instance's bytes, or a panic naming the face and the instance.
+fn instance_of(name: &str, face: &[u8], instance: &Instance) -> Vec<u8> {
+    instantiate(face, instance).unwrap_or_else(|e| panic!("{name} at {instance:?}: {e}"))
+}
+
+#[test]
+fn a_static_instance_re_reads_to_the_instance() {
+    for (name, face) in instanced_faces() {
+        let sfnt = Sfnt::parse(face).expect("a face");
+        let space = DesignSpace::read(&sfnt).expect("a design space");
+        let gvar = Gvar::read(&sfnt, &space)
+            .expect("gvar reads")
+            .expect("the face varies its outlines");
+        let mvar = Mvar::read(&sfnt, &space).expect("MVAR reads");
+        let count = sfnt.glyph_count().expect("maxp");
+        for instance in instancer_instances(face) {
+            let what = format!("{name} at {instance:?}");
+            let location = space.location(&instance).expect("a location");
+            let bytes = instance_of(name, face, &instance);
+            let static_face = Sfnt::parse(&bytes).expect("the instance parses");
+            assert_eq!(static_face.glyph_count(), Some(count), "{what}: the glyphs");
+            let varied: Vec<Varied> = (0..count)
+                .map(|g| varied_at(&sfnt, &gvar, &location, g))
+                .collect();
+            for glyph in 0..count {
+                let mut expected = Vec::new();
+                varied_outline(&varied, usize::from(glyph), UNPLACED, 0, &mut expected);
+                let outline = glyf::outline(&static_face, glyph).expect("an outline");
+                assert_eq!(
+                    outline.segments, expected,
+                    "{what}: glyph {glyph}'s outline"
+                );
+                if let Varied::Simple {
+                    points,
+                    on,
+                    instructions,
+                    ..
+                } = &varied[usize::from(glyph)]
+                {
+                    let raw = glyf::simple_glyph(&static_face, glyph).expect("a simple glyph");
+                    assert_eq!(
+                        raw.instructions,
+                        instructions.as_slice(),
+                        "{what}: glyph {glyph}'s instructions"
+                    );
+                    let stored: Vec<(i64, i64)> = raw.points[..raw.contour_points()]
+                        .iter()
+                        .map(|p| (i64::from(p[0]), i64::from(p[1])))
+                        .collect();
+                    assert_eq!(&stored, points, "{what}: glyph {glyph}'s points");
+                    let flags: Vec<bool> = raw.flags.iter().map(|f| f & 1 != 0).collect();
+                    assert_eq!(&flags, on, "{what}: glyph {glyph}'s on-curve flags");
+                }
+                assert_eq!(
+                    static_face.advance(glyph).map(i64::from),
+                    Some(varied_advance(&sfnt, &gvar, &location, glyph)),
+                    "{what}: glyph {glyph}'s advance"
+                );
+            }
+            if let Some(stored) = static_face.table(u32::from_be_bytes(*b"cvt ")) {
+                let expected: Vec<i64> = cvt_at(&sfnt, &space, &location)
+                    .expect("cvar applies")
+                    .iter()
+                    .map(|v| to_units(v.bits()))
+                    .collect();
+                let read: Vec<i64> = stored
+                    .chunks(2)
+                    .map(|b| i64::from(i16::from_be_bytes([b[0], b[1]])))
+                    .collect();
+                assert_eq!(read, expected, "{what}: the cvt");
+            }
+            if let Some(mvar) = &mvar {
+                for tag in mvar.tags() {
+                    if last_gasp_range(&sfnt, tag) {
+                        continue;
+                    }
+                    let Some(value) = mvar.value_at(&sfnt, tag, &location).expect("an MVAR value")
+                    else {
+                        continue;
+                    };
+                    assert_eq!(
+                        metric_default(&static_face, tag).map(i64::from),
+                        Some(held_to_field(tag, to_units(value.bits()))),
+                        "{what}: {}",
+                        String::from_utf8_lossy(&tag)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_instance_carries_no_variation_table() {
+    for (name, face) in instanced_faces() {
+        let original = Sfnt::parse(face).expect("a face");
+        for instance in instancer_instances(face) {
+            let what = format!("{name} at {instance:?}");
+            let bytes = instance_of(name, face, &instance);
+            let static_face = Sfnt::parse(&bytes).expect("the instance parses");
+            for tag in DROPPED {
+                assert!(
+                    static_face.table(u32::from_be_bytes(*tag)).is_none(),
+                    "{what}: {} is gone",
+                    String::from_utf8_lossy(tag)
+                );
+            }
+            assert!(
+                !DesignSpace::read(&static_face)
+                    .expect("no fvar reads as no axes")
+                    .is_variable(),
+                "{what}: the instance does not vary"
+            );
+            // Every other table is there, and those nothing at an instance
+            // changes are there byte for byte.
+            let mut kept: Vec<[u8; 4]> = original
+                .tags()
+                .into_iter()
+                .filter(|tag| !DROPPED.contains(tag))
+                .collect();
+            kept.sort_unstable();
+            let mut written = static_face.tags();
+            written.sort_unstable();
+            assert_eq!(written, kept, "{what}: its tables");
+            for tag in [b"cmap", b"name", b"fpgm", b"GSUB", b"GPOS", b"GDEF"] {
+                let tag = u32::from_be_bytes(*tag);
+                assert_eq!(
+                    static_face.table(tag),
+                    original.table(tag),
+                    "{what}: a table copied as it is"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_default_instance_keeps_the_default_outlines() {
+    for (name, face) in instanced_faces() {
+        let original = Sfnt::parse(face).expect("a face");
+        let space = DesignSpace::read(&original).expect("a design space");
+        let mvar = Mvar::read(&original, &space).expect("MVAR reads");
+        let mut defaults = vec![Instance::default()];
+        // A named instance at the default, where the face has one.
+        if let Some(index) = space.instances().iter().position(|named| {
+            named
+                .coordinates
+                .iter()
+                .zip(space.axes())
+                .all(|(c, a)| *c == a.default)
+        }) {
+            defaults.push(Instance::Named(u16::try_from(index).expect("few")));
+        }
+        for instance in defaults {
+            let what = format!("{name} at {instance:?}");
+            let bytes = instance_of(name, face, &instance);
+            let static_face = Sfnt::parse(&bytes).expect("the instance parses");
+            for glyph in 0..original.glyph_count().expect("maxp") {
+                assert_eq!(
+                    glyf::outline(&static_face, glyph).map(|o| o.segments),
+                    glyf::outline(&original, glyph).map(|o| o.segments),
+                    "{what}: glyph {glyph}'s outline"
+                );
+                assert_eq!(
+                    static_face.advance(glyph),
+                    original.advance(glyph),
+                    "{what}: glyph {glyph}'s advance"
+                );
+                if let (Some(a), Some(b)) = (
+                    glyf::simple_glyph(&static_face, glyph),
+                    glyf::simple_glyph(&original, glyph),
+                ) {
+                    assert_eq!(
+                        a.instructions, b.instructions,
+                        "{what}: glyph {glyph}'s instructions"
+                    );
+                }
+            }
+            let cvt = u32::from_be_bytes(*b"cvt ");
+            assert_eq!(
+                static_face.table(cvt),
+                original.table(cvt),
+                "{what}: the cvt"
+            );
+            if let Some(mvar) = &mvar {
+                for tag in mvar.tags() {
+                    assert_eq!(
+                        metric_default(&static_face, tag),
+                        metric_default(&original, tag),
+                        "{what}: {}",
+                        String::from_utf8_lossy(&tag)
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The `wdth` registration's mapping to `usWidthClass`, in exact rationals:
+/// the `OS/2` chapter's percentages, interpolated between the classes
+/// either side, rounded half up and held to 1 to 9.
+fn expected_width_class(width: f64) -> u16 {
+    let percent = [50.0, 62.5, 75.0, 87.5, 100.0, 112.5, 125.0, 150.0, 200.0];
+    if width <= percent[0] {
+        return 1;
+    }
+    if width >= percent[8] {
+        return 9;
+    }
+    let k = (0..8)
+        .find(|k| width <= percent[k + 1])
+        .expect("inside the table");
+    let class = (k + 1) as f64 + (width - percent[k]) / (percent[k + 1] - percent[k]);
+    ((class + 0.5).floor() as u16).clamp(1, 9)
+}
+
+#[test]
+fn the_instance_writes_the_fields_mvar_leaves_to_the_axes() {
+    let fixture = glyf_fixture();
+    let (wght, wdth, slnt) = (fixture.axes[0], fixture.axes[1], fixture.axes[2]);
+    let mut cases: Vec<(Instance, [f64; 3])> = fixture
+        .instances
+        .iter()
+        .enumerate()
+        .map(|(i, named)| {
+            let c = &named.record.coordinates;
+            (
+                Instance::Named(u16::try_from(i).expect("few")),
+                [c[0], c[1], c[2]],
+            )
+        })
+        .collect();
+    cases.push((Instance::default(), [400.0, 100.0, 0.0]));
+    for (weight, width, slant) in [
+        (813.5, 90.0, -7.25),
+        (250.0, 106.25, -0.5),
+        (1_200.0, 81.25, -20.0),
+        (20.0, 130.0, 5.0),
+        (450.25, 93.75, -11.75),
+    ] {
+        cases.push((
+            Instance::User(vec![
+                UserCoordinate::new(*b"wght", weight),
+                UserCoordinate::new(*b"wdth", width),
+                UserCoordinate::new(*b"slnt", slant),
+            ]),
+            [weight, width, slant],
+        ));
+    }
+    for (instance, [weight, width, slant]) in cases {
+        let what = format!("{instance:?}");
+        let bytes = instance_of("variable-glyf.ttf", GLYF_FACE, &instance);
+        let static_face = Sfnt::parse(&bytes).expect("the instance parses");
+        let os2 = static_face
+            .table(u32::from_be_bytes(*b"OS/2"))
+            .expect("OS/2");
+        let post = static_face
+            .table(u32::from_be_bytes(*b"post"))
+            .expect("post");
+        // Each user value held to its axis, as the instance is.
+        let weight = weight.clamp(wght.min, wght.max);
+        let width = width.clamp(wdth.min, wdth.max);
+        let slant = slant.clamp(slnt.min, slnt.max);
+        assert_eq!(
+            u16::from_be_bytes([os2[4], os2[5]]),
+            ((weight + 0.5).floor() as u16).clamp(1, 1_000),
+            "{what}: usWeightClass"
+        );
+        assert_eq!(
+            u16::from_be_bytes([os2[6], os2[7]]),
+            expected_width_class(width),
+            "{what}: usWidthClass"
+        );
+        assert_eq!(
+            i32::from_be_bytes([post[4], post[5], post[6], post[7]]),
+            (slant * 65_536.0) as i32,
+            "{what}: italicAngle, counter-clockwise as slnt is"
+        );
+    }
+}
+
+#[test]
+fn a_hinted_face_gets_an_idef_for_getvariation_that_maxp_covers() {
+    let original = Sfnt::parse(GLYF_FACE).expect("a face");
+    let space = DesignSpace::read(&original).expect("a design space");
+    let prep = original
+        .table(u32::from_be_bytes(*b"prep"))
+        .expect("the face carries prep");
+    let maxp = original.table(u32::from_be_bytes(*b"maxp")).expect("maxp");
+    let be16 = |data: &[u8], at: usize| u16::from_be_bytes([data[at], data[at + 1]]);
+    for instance in instancer_instances(GLYF_FACE) {
+        let what = format!("{instance:?}");
+        let location = space.location(&instance).expect("a location");
+        let bytes = instance_of("variable-glyf.ttf", GLYF_FACE, &instance);
+        let static_face = Sfnt::parse(&bytes).expect("the instance parses");
+        // PUSHB[000] 145, IDEF[], NPUSHW[] 4 and the four coordinates, first
+        // axis first, ENDF[]: the instruction set's form, after the face's
+        // own program.
+        let mut expected = prep.to_vec();
+        expected.extend_from_slice(&[0xB0, 0x91, 0x89, 0x41, 4]);
+        for coordinate in location.coordinates() {
+            expected.extend_from_slice(&coordinate.to_be_bytes());
+        }
+        expected.push(0x2D);
+        assert_eq!(
+            static_face.table(u32::from_be_bytes(*b"prep")),
+            Some(expected.as_slice()),
+            "{what}: prep"
+        );
+        let written = static_face
+            .table(u32::from_be_bytes(*b"maxp"))
+            .expect("maxp");
+        assert_eq!(
+            be16(written, 22),
+            be16(maxp, 22) + 1,
+            "{what}: maxInstructionDefs"
+        );
+        assert_eq!(
+            be16(written, 24),
+            be16(maxp, 24) + 4,
+            "{what}: maxStackElements"
+        );
+        for at in (0..32).step_by(2).filter(|at| *at != 22 && *at != 24) {
+            assert_eq!(be16(written, at), be16(maxp, at), "{what}: maxp at {at}");
+        }
+    }
+    // A face that carries no hinting gets no program and no maxp change.
+    let gpos = Sfnt::parse(TEST_GPOS_FOUR).expect("a face");
+    for instance in instancer_instances(TEST_GPOS_FOUR) {
+        let bytes = instance_of("TestGPOSFour.ttf", TEST_GPOS_FOUR, &instance);
+        let static_face = Sfnt::parse(&bytes).expect("the instance parses");
+        assert!(static_face.table(u32::from_be_bytes(*b"prep")).is_none());
+        assert_eq!(
+            static_face.table(u32::from_be_bytes(*b"maxp")),
+            gpos.table(u32::from_be_bytes(*b"maxp")),
+            "{instance:?}: maxp"
+        );
+    }
+}
+
+/// Every directory checksum is its table's, `head`'s taken with its
+/// adjustment zero, and the whole face sums to 0xB1B0AFBA.
+fn checksums_hold(what: &str, face: &[u8]) {
+    let sum = |data: &[u8]| {
+        data.chunks(4).fold(0u32, |sum, chunk| {
+            let mut word = [0u8; 4];
+            word[..chunk.len()].copy_from_slice(chunk);
+            sum.wrapping_add(u32::from_be_bytes(word))
+        })
+    };
+    let count = usize::from(u16::from_be_bytes([face[4], face[5]]));
+    for i in 0..count {
+        let at = 12 + i * 16;
+        let tag = &face[at..at + 4];
+        let stated = u32::from_be_bytes(face[at + 4..at + 8].try_into().expect("four"));
+        let offset = u32::from_be_bytes(face[at + 8..at + 12].try_into().expect("four")) as usize;
+        let length = u32::from_be_bytes(face[at + 12..at + 16].try_into().expect("four")) as usize;
+        let mut table = face[offset..offset + length].to_vec();
+        if tag == b"head" {
+            table[8..12].copy_from_slice(&[0; 4]);
+        }
+        assert_eq!(
+            sum(&table),
+            stated,
+            "{what}: {}'s checksum",
+            String::from_utf8_lossy(tag)
+        );
+    }
+    assert_eq!(sum(face), 0xB1B0_AFBA, "{what}: the whole-font checksum");
+}
+
+#[test]
+fn the_instances_metrics_tables_describe_its_glyphs() {
+    let sfnt = Sfnt::parse(GLYF_FACE).expect("a face");
+    let space = DesignSpace::read(&sfnt).expect("a design space");
+    let gvar = Gvar::read(&sfnt, &space).expect("gvar").expect("gvar");
+    let vvar = Vvar::read(&sfnt, &space).expect("VVAR").expect("VVAR");
+    let count = sfnt.glyph_count().expect("maxp");
+    let be16 = |data: &[u8], at: usize| u16::from_be_bytes([data[at], data[at + 1]]);
+    let s16 = |data: &[u8], at: usize| i64::from(i16::from_be_bytes([data[at], data[at + 1]]));
+    for instance in instancer_instances(GLYF_FACE) {
+        let what = format!("{instance:?}");
+        let location = space.location(&instance).expect("a location");
+        let bytes = instance_of("variable-glyf.ttf", GLYF_FACE, &instance);
+        checksums_hold(&what, &bytes);
+        let static_face = Sfnt::parse(&bytes).expect("the instance parses");
+        let varied: Vec<Varied> = (0..count)
+            .map(|g| varied_at(&sfnt, &gvar, &location, g))
+            .collect();
+        let hmtx_count = usize::from(be16(
+            static_face
+                .table(u32::from_be_bytes(*b"hhea"))
+                .expect("hhea"),
+            34,
+        ));
+        let mut drawn_glyphs = Vec::new();
+        let mut union: Option<[i64; 4]> = None;
+        let mut advances = Vec::new();
+        for glyph in 0..count {
+            let expected = varied_box(&varied, usize::from(glyph));
+            let header = glyf::bounds(&static_face, glyph).expect("a glyph header");
+            let advance = i64::from(static_face.advance(glyph).expect("an advance"));
+            let lsb = i64::from(static_face.left_side_bearing(glyph).expect("a bearing"));
+            advances.push(advance);
+            match expected {
+                Some(bounds) => {
+                    assert_eq!(
+                        [
+                            i64::from(header.x_min),
+                            i64::from(header.y_min),
+                            i64::from(header.x_max),
+                            i64::from(header.y_max)
+                        ],
+                        bounds,
+                        "{what}: glyph {glyph}'s box"
+                    );
+                    assert_eq!(
+                        lsb, bounds[0],
+                        "{what}: glyph {glyph}'s bearing is its xMin"
+                    );
+                    drawn_glyphs.push((glyph, bounds, advance, lsb));
+                    union = Some(match union {
+                        None => bounds,
+                        Some(u) => [
+                            u[0].min(bounds[0]),
+                            u[1].min(bounds[1]),
+                            u[2].max(bounds[2]),
+                            u[3].max(bounds[3]),
+                        ],
+                    });
+                }
+                None => assert_eq!(
+                    lsb,
+                    i64::from(sfnt.left_side_bearing(glyph).expect("a bearing")),
+                    "{what}: an empty glyph keeps its bearing"
+                ),
+            }
+            // The vertical metrics: VVAR's advance height, and the top side
+            // bearing from the third phantom point to the glyph's top.
+            let height = to_units(
+                vvar.advance_at(&sfnt, glyph, &location)
+                    .expect("a height")
+                    .expect("vmtx states one")
+                    .bits(),
+            );
+            assert_eq!(
+                static_face.vertical_advance(glyph).map(i64::from),
+                Some(height),
+                "{what}: glyph {glyph}'s advance height"
+            );
+            let phantom =
+                glyf::phantom_points_at(&sfnt, glyph, Some(&gvar), &location).expect("phantoms");
+            let top = expected.map_or(0, |b| b[3]);
+            assert_eq!(
+                static_face.top_side_bearing(glyph).map(i64::from),
+                Some(to_units(phantom[2][1].bits()) - top),
+                "{what}: glyph {glyph}'s top side bearing"
+            );
+        }
+        assert!(
+            hmtx_count >= 1 && hmtx_count <= usize::from(count),
+            "{what}: hmtx's count"
+        );
+        let hhea = static_face
+            .table(u32::from_be_bytes(*b"hhea"))
+            .expect("hhea");
+        assert_eq!(
+            i64::from(be16(hhea, 10)),
+            advances.iter().copied().max().expect("glyphs"),
+            "{what}: advanceWidthMax"
+        );
+        assert_eq!(
+            s16(hhea, 12),
+            drawn_glyphs
+                .iter()
+                .map(|g| g.3)
+                .min()
+                .expect("drawn glyphs"),
+            "{what}: minLeftSideBearing"
+        );
+        assert_eq!(
+            s16(hhea, 14),
+            drawn_glyphs
+                .iter()
+                .map(|(_, b, advance, lsb)| advance - lsb - (b[2] - b[0]))
+                .min()
+                .expect("drawn glyphs"),
+            "{what}: minRightSideBearing"
+        );
+        assert_eq!(
+            s16(hhea, 16),
+            drawn_glyphs
+                .iter()
+                .map(|(_, b, _, lsb)| lsb + (b[2] - b[0]))
+                .max()
+                .expect("drawn glyphs"),
+            "{what}: xMaxExtent"
+        );
+        let head = static_face
+            .table(u32::from_be_bytes(*b"head"))
+            .expect("head");
+        assert_eq!(
+            Some([s16(head, 36), s16(head, 38), s16(head, 40), s16(head, 42)]),
+            union,
+            "{what}: the font box is the glyphs' union"
+        );
+        assert_eq!(
+            s16(head, 50),
+            0,
+            "{what}: the instance's glyf takes the short loca"
+        );
+        let nonzero: Vec<i64> = advances.iter().copied().filter(|a| *a != 0).collect();
+        let n = nonzero.len() as i64;
+        let average = (2 * nonzero.iter().sum::<i64>() + n).div_euclid(2 * n);
+        let os2 = static_face
+            .table(u32::from_be_bytes(*b"OS/2"))
+            .expect("OS/2");
+        assert_eq!(s16(os2, 2), average, "{what}: xAvgCharWidth");
+    }
+}
+
+/// A face of one axis whose tables the gasp and refusal tests vary: `fvar`,
+/// `head` and `maxp`, and whatever tables are given.
+fn one_axis_face(tables: Vec<(Tag, Vec<u8>)>) -> Vec<u8> {
+    let mut face = Face::truetype()
+        .with(
+            *b"fvar",
+            fvar(
+                &[AxisSpec::new(*b"wght", 100.0, 400.0, 900.0, 256)],
+                &[InstanceSpec::new(257, &[900.0], 258)],
+            ),
+        )
+        .with(*b"head", head(1_000))
+        .with(*b"maxp", maxp(0));
+    for (tag, bytes) in tables {
+        face = face.with(tag, bytes);
+    }
+    face.build()
+}
+
+#[test]
+fn gasp_keeps_its_last_range_whatever_mvar_says() {
+    let store = item_store(
+        1,
+        &[vec![(0, 16_384, 16_384)]],
+        &[Some(DataSpec {
+            regions: vec![0],
+            word_count: 0,
+            long_words: false,
+            rows: vec![vec![6], vec![-9]],
+        })],
+    );
+    let face = one_axis_face(vec![
+        (*b"gasp", gasp(&[(8, 0x0002), (0xFFFF, 0x000F)])),
+        (
+            *b"MVAR",
+            mvar(&store, &[(*b"gsp0", 0, 0), (*b"gsp1", 0, 1)]),
+        ),
+    ]);
+    let bytes = instantiate(&face, &Instance::Named(0)).expect("an instance");
+    let static_face = Sfnt::parse(&bytes).expect("the instance parses");
+    let gasp = static_face
+        .table(u32::from_be_bytes(*b"gasp"))
+        .expect("gasp");
+    assert_eq!(
+        u16::from_be_bytes([gasp[4], gasp[5]]),
+        14,
+        "the first range moves"
+    );
+    assert_eq!(
+        u16::from_be_bytes([gasp[8], gasp[9]]),
+        0xFFFF,
+        "the last range always reads 0xFFFF"
+    );
+    assert_eq!(&gasp[6..8], &[0x00, 0x02], "the behaviours are kept");
+}
+
+#[test]
+fn a_face_that_does_not_vary_is_its_own_instance() {
+    let (glyf_table, loca) = glyf_and_loca(&[variable_support::simple_glyph(&[vec![
+        (0, 0, true),
+        (0, 500, true),
+        (300, 0, true),
+    ]])]);
+    let face = Face::truetype()
+        .with(*b"head", head(1_000))
+        .with(*b"maxp", maxp(1))
+        .with(*b"glyf", glyf_table)
+        .with(*b"loca", loca)
+        .build();
+    assert_eq!(
+        instantiate(&face, &Instance::default()),
+        Ok(face.clone()),
+        "no fvar"
+    );
+    assert_eq!(
+        instantiate(
+            &face,
+            &Instance::User(vec![UserCoordinate::new(*b"wght", 700.0)])
+        ),
+        Ok(face.clone()),
+        "an axis it does not have is ignored"
+    );
+    assert_eq!(
+        instantiate(&face, &Instance::Named(0)),
+        Err(InstanceError::Variation(VariationError::NoSuchInstance {
+            index: 0,
+            count: 0
+        }))
+    );
+    // An fvar of no axes is a face that does not vary too.
+    let zero = Face::truetype()
+        .with(*b"fvar", with_field(fvar(&[], &[]), 8, 0))
+        .with(*b"head", head(1_000))
+        .with(*b"maxp", maxp(0))
+        .build();
+    assert_eq!(instantiate(&zero, &Instance::default()), Ok(zero.clone()));
+}
+
+/// A copy of a face with one table's bytes replaced in place.
+fn with_table_bytes(face: &[u8], tag: &[u8; 4], edit: impl Fn(&mut [u8])) -> Vec<u8> {
+    let mut out = face.to_vec();
+    let count = usize::from(u16::from_be_bytes([face[4], face[5]]));
+    for i in 0..count {
+        let at = 12 + i * 16;
+        if &face[at..at + 4] == tag {
+            let offset =
+                u32::from_be_bytes(face[at + 8..at + 12].try_into().expect("four")) as usize;
+            let length =
+                u32::from_be_bytes(face[at + 12..at + 16].try_into().expect("four")) as usize;
+            edit(&mut out[offset..offset + length]);
+            return out;
+        }
+    }
+    panic!("no {} table", String::from_utf8_lossy(tag));
+}
+
+#[test]
+fn an_instance_the_face_cannot_give_is_refused_by_name() {
+    assert_eq!(
+        instantiate(b"not a font at all", &Instance::default()),
+        Err(InstanceError::NotAFont)
+    );
+    assert_eq!(
+        instantiate(GLYF_FACE, &Instance::Named(7)),
+        Err(InstanceError::Variation(VariationError::NoSuchInstance {
+            index: 7,
+            count: 7
+        }))
+    );
+    // A gvar of a version its chapter does not define.
+    let bad_gvar = with_table_bytes(GLYF_FACE, b"gvar", |table| table[1] = 2);
+    assert_eq!(
+        instantiate(&bad_gvar, &Instance::Named(2)),
+        Err(InstanceError::Variation(VariationError::UnknownVersion {
+            table: *b"gvar",
+            major: 2,
+            minor: 0
+        }))
+    );
+    // A glyph whose deltas end before its points do.
+    let square = vec![
+        (0, 0, true),
+        (0, 500, true),
+        (500, 500, true),
+        (500, 0, true),
+    ];
+    let (glyf_table, loca) = glyf_and_loca(&[
+        Vec::new(),
+        variable_support::simple_glyph(&[square.clone()]),
+    ]);
+    let short = GlyphVariation {
+        shared_points: None,
+        tuples: vec![TupleSpec::new(&[16_384], Some(Points::All), &[5, 5])],
+    };
+    let cut = one_axis_face(vec![
+        (*b"glyf", glyf_table.clone()),
+        (*b"loca", loca.clone()),
+        (*b"maxp", maxp(2)),
+        (
+            *b"gvar",
+            variable_support::gvar(1, &[], &[None, Some(short)], true),
+        ),
+    ]);
+    assert_eq!(
+        instantiate(&cut, &Instance::Named(0)),
+        Err(InstanceError::Glyph {
+            glyph: 1,
+            error: VariationError::DeltasPastEnd
+        })
+    );
+    // A point the instance would move past sixteen bits.
+    let (far_glyf, far_loca) = glyf_and_loca(&[
+        Vec::new(),
+        variable_support::simple_glyph(&[vec![
+            (0, 0, true),
+            (32_000, 0, true),
+            (32_000, 100, true),
+        ]]),
+    ]);
+    let push = GlyphVariation {
+        shared_points: None,
+        tuples: vec![TupleSpec::new(
+            &[16_384],
+            Some(Points::Listed(vec![1])),
+            &[1_000, 0],
+        )],
+    };
+    let far = one_axis_face(vec![
+        (*b"glyf", far_glyf),
+        (*b"loca", far_loca),
+        (*b"maxp", maxp(2)),
+        (
+            *b"gvar",
+            variable_support::gvar(1, &[], &[None, Some(push)], true),
+        ),
+    ]);
+    assert_eq!(
+        instantiate(&far, &Instance::Named(0)),
+        Err(InstanceError::CoordinateRange { glyph: 1 })
+    );
+    assert!(
+        instantiate(&far, &Instance::default()).is_ok(),
+        "at the default nothing moves past the range"
+    );
+    // A face with no head, and one with no maxp.
+    let headless = Face::truetype()
+        .with(
+            *b"fvar",
+            fvar(&[AxisSpec::new(*b"wght", 100.0, 400.0, 900.0, 256)], &[]),
+        )
+        .with(*b"maxp", maxp(0))
+        .build();
+    assert_eq!(
+        instantiate(&headless, &Instance::default()),
+        Err(InstanceError::MissingTable { table: *b"head" })
+    );
+    let countless = Face::truetype()
+        .with(
+            *b"fvar",
+            fvar(&[AxisSpec::new(*b"wght", 100.0, 400.0, 900.0, 256)], &[]),
+        )
+        .with(*b"head", head(1_000))
+        .build();
+    assert_eq!(
+        instantiate(&countless, &Instance::default()),
+        Err(InstanceError::MissingTable { table: *b"maxp" })
+    );
+}
+
+#[test]
+fn loca_takes_the_long_form_when_the_instances_glyf_needs_it() {
+    // Six hundred glyphs of sixty points, every step between them too long
+    // for a byte on both axes, so even compactly written the glyf passes
+    // 128 KiB.
+    let zigzag: Vec<GlyphPoint> = (0..60)
+        .map(|i| (1_000 * (i % 2), 1_000 * ((i + 1) % 2), true))
+        .collect();
+    let mut glyphs = vec![Vec::new()];
+    glyphs.extend((0..599).map(|_| variable_support::simple_glyph(&[zigzag.clone()])));
+    let (glyf_table, loca) = glyf_and_loca(&glyphs);
+    let count = u16::try_from(glyphs.len()).expect("few");
+    let face = one_axis_face(vec![
+        (*b"glyf", glyf_table),
+        (*b"loca", loca),
+        (*b"maxp", maxp(count)),
+        (
+            *b"gvar",
+            variable_support::gvar(1, &[], &vec![None; glyphs.len()], true),
+        ),
+    ]);
+    let original = Sfnt::parse(&face).expect("a face");
+    let bytes = instantiate(&face, &Instance::Named(0)).expect("an instance");
+    let static_face = Sfnt::parse(&bytes).expect("the instance parses");
+    let head = static_face
+        .table(u32::from_be_bytes(*b"head"))
+        .expect("head");
+    assert_eq!(i16::from_be_bytes([head[50], head[51]]), 1, "the long loca");
+    assert!(
+        static_face
+            .table(u32::from_be_bytes(*b"glyf"))
+            .expect("glyf")
+            .len()
+            > 0x1_FFFE,
+        "a glyf the short form cannot reach"
+    );
+    for glyph in [1u16, 300, 599] {
+        assert_eq!(
+            glyf::outline(&static_face, glyph).map(|o| o.segments),
+            glyf::outline(&original, glyph).map(|o| o.segments),
+            "glyph {glyph} re-reads through the long loca"
+        );
+    }
+}
+
+/// A simple glyph's data with instructions and `OVERLAP_SIMPLE` written into
+/// it: the program after the contour ends, and the flag on the first point.
+fn with_program(glyph: Vec<u8>, contours: usize, program: &[u8]) -> Vec<u8> {
+    let at = 10 + contours * 2;
+    let mut out = glyph[..at].to_vec();
+    out.extend_from_slice(&u16::try_from(program.len()).expect("short").to_be_bytes());
+    out.extend_from_slice(program);
+    let flags = out.len();
+    out.extend_from_slice(&glyph[at + 2..]);
+    out[flags] |= 0x40;
+    out
+}
+
+/// A composite's instructions, read off its records by their flags.
+fn composite_program(face: &Sfnt, glyph: u16) -> Vec<u8> {
+    let head = face.table(u32::from_be_bytes(*b"head")).expect("head");
+    let loca = face.table(u32::from_be_bytes(*b"loca")).expect("loca");
+    let glyf_table = face.table(u32::from_be_bytes(*b"glyf")).expect("glyf");
+    let long = i16::from_be_bytes([head[50], head[51]]) != 0;
+    let g = usize::from(glyph);
+    let start = if long {
+        u32::from_be_bytes(loca[g * 4..g * 4 + 4].try_into().expect("four")) as usize
+    } else {
+        usize::from(u16::from_be_bytes([loca[g * 2], loca[g * 2 + 1]])) * 2
+    };
+    let data = &glyf_table[start..];
+    let mut at = 10;
+    let mut instructed = false;
+    loop {
+        let flags = u16::from_be_bytes([data[at], data[at + 1]]);
+        at += 4 + if flags & 0x0001 != 0 { 4 } else { 2 };
+        at += if flags & 0x0008 != 0 {
+            2
+        } else if flags & 0x0040 != 0 {
+            4
+        } else if flags & 0x0080 != 0 {
+            8
+        } else {
+            0
+        };
+        instructed |= flags & 0x0100 != 0;
+        if flags & 0x0020 == 0 {
+            break;
+        }
+    }
+    if !instructed {
+        return Vec::new();
+    }
+    let length = usize::from(u16::from_be_bytes([data[at], data[at + 1]]));
+    data[at + 2..at + 2 + length].to_vec()
+}
+
+#[test]
+fn a_glyphs_program_flags_and_components_survive_the_instance() {
+    let triangle = vec![(10, 10, true), (60, 200, false), (110, 10, true)];
+    let program = [0xB0, 0x01, 0x21];
+    let instructed = with_program(
+        variable_support::simple_glyph(&[triangle.clone()]),
+        1,
+        &program,
+    );
+    let target =
+        variable_support::simple_glyph(&[vec![(0, 0, true), (0, 50, true), (50, 50, true)]]);
+    let mut turned = ComponentSpec::at(1, 10, 20);
+    turned.flags |= 0x0080; // WE_HAVE_A_TWO_BY_TWO
+    turned.transform = vec![16_384, 4_096, -4_096, 16_384];
+    let matched = ComponentSpec {
+        flags: 0x0000, // byte point numbers
+        glyph: 2,
+        arguments: (1, 0),
+        transform: Vec::new(),
+    };
+    let mut composite = composite_glyph([0, 0, 0, 0], &[turned.clone(), matched.clone()]);
+    // WE_HAVE_INSTRUCTIONS on the last record, and its program after it.
+    let last_flags = 10 + 4 + 4 + 8;
+    composite[last_flags] |= 0x01;
+    composite.extend_from_slice(&2u16.to_be_bytes());
+    composite.extend_from_slice(&[0xB0, 0x02]);
+    let small = ComponentSpec {
+        flags: 0x0002, // byte offsets
+        glyph: 1,
+        arguments: (100, -100),
+        transform: Vec::new(),
+    };
+    let byte_offsets = composite_glyph([0, 0, 0, 0], &[small]);
+    let (glyf_table, loca) =
+        glyf_and_loca(&[Vec::new(), instructed, target, composite, byte_offsets]);
+    let variations = vec![
+        None,
+        Some(GlyphVariation {
+            shared_points: None,
+            tuples: vec![TupleSpec::new(
+                &[16_384],
+                Some(Points::All),
+                &[3, 3, 3, 0, 0, 0, 0, 2, 2, 2, 0, 0, 0, 0],
+            )],
+        }),
+        None,
+        Some(GlyphVariation {
+            shared_points: None,
+            tuples: vec![TupleSpec::new(
+                &[16_384],
+                Some(Points::Listed(vec![0, 1])),
+                &[5, 400, -5, 400],
+            )],
+        }),
+        Some(GlyphVariation {
+            shared_points: None,
+            tuples: vec![TupleSpec::new(
+                &[16_384],
+                Some(Points::Listed(vec![0])),
+                &[50, -50],
+            )],
+        }),
+    ];
+    let face = one_axis_face(vec![
+        (*b"glyf", glyf_table),
+        (*b"loca", loca),
+        (*b"maxp", maxp(5)),
+        (*b"gvar", variable_support::gvar(1, &[], &variations, true)),
+    ]);
+    let original = Sfnt::parse(&face).expect("a face");
+    let space = DesignSpace::read(&original).expect("a design space");
+    let gvar = Gvar::read(&original, &space).expect("gvar").expect("gvar");
+    let location = space.location(&Instance::Named(0)).expect("a location");
+    let bytes = instantiate(&face, &Instance::Named(0)).expect("an instance");
+    let static_face = Sfnt::parse(&bytes).expect("the instance parses");
+
+    // The simple glyph keeps its program and OVERLAP_SIMPLE.
+    let raw = glyf::simple_glyph(&static_face, 1).expect("a simple glyph");
+    assert_eq!(raw.instructions, &program, "the glyph's program");
+    assert_eq!(
+        raw.flags[0] & 0x40,
+        0x40,
+        "OVERLAP_SIMPLE on the first point"
+    );
+    assert_eq!(
+        raw.flags.iter().map(|f| f & 1).collect::<Vec<_>>(),
+        vec![1, 0, 1]
+    );
+    // The composite keeps its transform, its matched record's point numbers
+    // — whose delta is ignored — and its program.
+    let records = glyf::components(&static_face, 3).expect("a composite");
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].transform, [16_384, 4_096, -4_096, 16_384]);
+    assert_eq!(
+        records[0].arguments,
+        [15, 15],
+        "the offset moved by its delta"
+    );
+    assert!(records[0].flags & 0x0080 != 0);
+    assert!(!records[1].offset_is_xy());
+    assert_eq!(
+        records[1].arguments,
+        [1, 0],
+        "matched points are kept as they are"
+    );
+    assert_eq!(
+        composite_program(&static_face, 3),
+        vec![0xB0, 0x02],
+        "the composite's program"
+    );
+    // Its box: the turned triangle at its offset, and the matched glyph
+    // moved so that its point 0 lands on the composite's point 1.
+    let varied: Vec<Varied> = (0..5)
+        .map(|g| varied_at(&original, &gvar, &location, g))
+        .collect();
+    let header = glyf::bounds(&static_face, 3).expect("a header");
+    assert_eq!(
+        Some([
+            i64::from(header.x_min),
+            i64::from(header.y_min),
+            i64::from(header.x_max),
+            i64::from(header.y_max)
+        ]),
+        varied_box(&varied, 3),
+        "the composite's box measured by the matched placement"
+    );
+    // An offset written in bytes that the instance moves past a byte is
+    // written in words.
+    let wide = glyf::components(&static_face, 4).expect("a composite");
+    assert_eq!(wide[0].arguments, [150, -150]);
+    assert!(wide[0].flags & 0x0001 != 0, "ARG_1_AND_2_ARE_WORDS");
+    // Every glyph re-reads as the variable face draws it, rounded.
+    for glyph in 0..5u16 {
+        let mut expected = Vec::new();
+        varied_outline(&varied, usize::from(glyph), UNPLACED, 0, &mut expected);
+        assert_eq!(
+            glyf::outline(&static_face, glyph)
+                .expect("an outline")
+                .segments,
+            expected,
+            "glyph {glyph}"
+        );
+    }
+    // A small instance takes the short loca though its face had the long.
+    let head = static_face
+        .table(u32::from_be_bytes(*b"head"))
+        .expect("head");
+    assert_eq!(i16::from_be_bytes([head[50], head[51]]), 0);
+}
+
+#[test]
+fn tables_the_instancer_does_not_know_are_copied_and_its_drops_are_gone() {
+    let mut face = Face {
+        version: 0x0001_0000,
+        tables: Vec::new(),
+    };
+    let original = Sfnt::parse(GLYF_FACE).expect("a face");
+    for tag in original.tags() {
+        face = face.with(
+            tag,
+            original
+                .table(u32::from_be_bytes(tag))
+                .expect("a table")
+                .to_vec(),
+        );
+    }
+    let unknown: Vec<u8> = (0u8..=37).collect();
+    let layout: Vec<u8> = vec![0, 1, 0, 0, 0, 10, 0, 12, 0, 14];
+    let bytes = face
+        .with(*b"ZZZZ", unknown.clone())
+        .with(*b"GSUB", layout.clone())
+        .with(*b"DSIG", vec![0, 0, 0, 1, 0, 0, 0, 0])
+        .with(*b"hdmx", vec![0; 8])
+        .with(*b"VDMX", vec![0; 6])
+        .build();
+    let instance = instantiate(&bytes, &Instance::Named(3)).expect("an instance");
+    let static_face = Sfnt::parse(&instance).expect("the instance parses");
+    assert_eq!(
+        static_face.table(u32::from_be_bytes(*b"ZZZZ")),
+        Some(unknown.as_slice())
+    );
+    assert_eq!(
+        static_face.table(u32::from_be_bytes(*b"GSUB")),
+        Some(layout.as_slice())
+    );
+    for tag in [b"DSIG", b"hdmx", b"VDMX", b"STAT", b"fvar"] {
+        assert!(
+            static_face.table(u32::from_be_bytes(*tag)).is_none(),
+            "{} is dropped",
+            String::from_utf8_lossy(tag)
+        );
+    }
+}
+
+#[test]
+fn every_truncation_and_byte_change_of_the_face_is_instanced_or_refused() {
+    let instances = [
+        Instance::Named(5),
+        Instance::User(vec![
+            UserCoordinate::new(*b"wght", 650.0),
+            UserCoordinate::new(*b"wdth", 80.0),
+        ]),
+    ];
+    for instance in &instances {
+        for end in 0..GLYF_FACE.len() {
+            if let Ok(bytes) = instantiate(&GLYF_FACE[..end], instance) {
+                assert!(Sfnt::parse(&bytes).is_some(), "a prefix of {end} bytes");
+            }
+        }
+    }
+    for at in 0..GLYF_FACE.len() {
+        let mut changed = GLYF_FACE.to_vec();
+        changed[at] ^= 0xFF;
+        if let Ok(bytes) = instantiate(&changed, &instances[0]) {
+            assert!(Sfnt::parse(&bytes).is_some(), "byte {at} changed");
         }
     }
 }

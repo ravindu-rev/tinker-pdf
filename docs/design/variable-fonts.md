@@ -363,11 +363,11 @@ Static Instance Fonts').
 | `fvar`, `avar`, `gvar`, `cvar`, `HVAR`, `VVAR`, `MVAR`, `STAT` | dropped |
 | `DSIG` | dropped: it signs bytes that changed |
 | `hdmx`, `VDMX` | dropped: variable fonts do not use them, and they describe no instance |
-| `glyf`, `loca` | each glyph's varied points rounded to font units (the model's 9), composite offsets varied, each bounding box recomputed; `loca`'s format chosen by the new size |
-| `hmtx`, `vmtx` | the varied advances (`HVAR`/`VVAR`, else the phantom points) rounded; each left side bearing the glyph's new `xMin` |
-| `OS/2`, `hhea`, `vhea`, `post`, `gasp` | each `MVAR` value rounded; and the three fields `MVAR` leaves to the axes ('Value Tags', note): `usWeightClass` the `wght` value rounded into 1 to 1 000, `usWidthClass` the class whose percentage in the `OS/2` chapter's table is nearest the `wdth` value, and `italicAngle` the `slnt` value, both measured counter-clockwise |
+| `glyf`, `loca` | each glyph's varied points rounded to font units (the model's 9), composite offsets varied, each bounding box recomputed from the points the glyph holds, a matched component placed by its points as the `glyf` chapter places it; instructions, on-curve flags, `OVERLAP_SIMPLE` and transforms kept; `loca`'s format chosen by the new size |
+| `hmtx`, `vmtx` | the varied advances (`HVAR`/`VVAR`, else the phantom points) rounded; each left side bearing the glyph's new `xMin`, and each top side bearing its vertical origin, the third phantom point, less its new `yMax`; `hhea` and `vhea` the long-metric counts and the extents these give |
+| `OS/2`, `hhea`, `vhea`, `post`, `gasp` | each `MVAR` value rounded and held to its field, `gasp`'s last range keeping 0xFFFF; the three fields `MVAR` leaves to the axes ('Value Tags', note): `usWeightClass` the `wght` value rounded into 1 to 1 000, `usWidthClass` the `wdth` value interpolated between the classes of the `OS/2` chapter's table and rounded into 1 to 9, as the `wdth` registration says, and `italicAngle` the `slnt` value, both measured counter-clockwise; and `xAvgCharWidth`, from `OS/2` version 3 on, the instance's mean non-zero advance |
 | `cvt ` | the `cvar` values rounded |
-| `prep`, `maxp` | where the face carries hinting, an IDEF for `GETVARIATION` (0x91) appended to `prep` that pushes the instance's normalised coordinates, and `maxp`'s `maxInstructionDefs` and `maxStackElements` raised to cover it, as the *TrueType Instruction Set*'s `GETVARIATION` notes recommend for an instance font |
+| `prep`, `maxp` | where the face carries hinting — `fpgm`, `prep` or a glyph's program — an IDEF for `GETVARIATION` (0x91) appended to `prep` that pushes the instance's normalised coordinates, and `maxp`'s `maxInstructionDefs` and `maxStackElements` raised to cover it, as the *TrueType Instruction Set*'s `GETVARIATION` notes recommend for an instance font |
 | `head` | the font bounding box the glyphs' union, `checkSumAdjustment` rewritten |
 | `VORG` | the `VVAR` origins rounded |
 | `CFF2` | replaced by `CFF ` (FT-05.11, below) |
@@ -375,7 +375,10 @@ Static Instance Fonts').
 
 The table directory's checksums are rewritten. The instance at the default
 location keeps every default outline and metric: a face with no region whose
-peak is zero everywhere instances to its own default values.
+peak is zero everywhere instances to its own default values. A face that does
+not vary is its own instance and is returned as it is; a table a reader
+refuses refuses the instance by name, since a writer has no default to fall
+back to that is not a different face.
 
 **CFF2 to CFF** (FT-05.11). Each glyph's charstring is re-encoded as Type 2:
 its blends resolved, its subroutines inlined — a CFF2 subroutine blends under
