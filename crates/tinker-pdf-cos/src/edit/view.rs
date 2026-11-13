@@ -20,8 +20,9 @@ impl DocumentEditor {
     ///
     /// # How
     ///
-    /// The incremental update [`DocumentEditor::save`] would write is built in
-    /// memory and opened. So object numbers are the editor's own — a
+    /// The update section [`DocumentEditor::save_update`] would write is
+    /// built in memory and the document reopened over it
+    /// ([`CosDocument::reopen`]). So object numbers are the editor's own — a
     /// reference the editor handed out means the same object here — and
     /// everything the view reads, it reads through the ordinary reader,
     /// filters and all. An untouched editor answers with the document it was
@@ -36,25 +37,30 @@ impl DocumentEditor {
     ///
     /// # Cost
     ///
-    /// A copy of the file and a parse of its cross-reference tables, every
-    /// call. A view is a snapshot: edits made after it are not in it, so a
-    /// caller that edits and then reads again takes another.
+    /// The section and a read of it, every call: the document's bytes are
+    /// neither copied nor walked again, and every object the edits leave
+    /// alone is the document's own, parsed once between them. A document the
+    /// reopen cannot keep — streamed, linearized, repaired, shifted — is read
+    /// whole with the section, as [`CosDocument::reopen`] says. A view is a
+    /// snapshot: edits made after it are not in it, so a caller that edits
+    /// and then reads again takes another.
     ///
     /// # Errors
     ///
     /// [`OpenError`] when the bytes do not reopen — which for a document
     /// this reader opened, with an update this writer wrote, is a defect in
-    /// one of the two rather than a property of the input.
+    /// one of the two rather than a property of the input — and
+    /// [`OpenError::SourceUnavailable`] for a streamed document whose bytes
+    /// cannot all be fetched.
     pub fn view(&self) -> Result<Arc<CosDocument>, OpenError> {
         if !self.is_dirty() {
             return Ok(Arc::clone(&self.doc));
         }
-        let bytes = self.save(&WriteOptions {
+        let update = self.save_update(&WriteOptions {
             mode: WriteMode::Incremental,
             ..WriteOptions::default()
         });
-        let view = CosDocument::open(bytes)?;
-        view.inherit_security(&self.doc);
-        Ok(Arc::new(view))
+        let reopened = CosDocument::reopen(&self.doc, update)?;
+        Ok(Arc::new(reopened.document))
     }
 }

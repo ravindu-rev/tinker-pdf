@@ -4066,7 +4066,7 @@ security as `DocumentEditor::view` gives a view, and says why, as
 | `Repaired` | the base's ladder is `Patch` or `Rescan` | a full open of the joined bytes repairs from a scan of all of them, and a rescanned base has no section to chain to |
 | `Shifted` | the base's header is not at byte zero (7.5.2) | every offset the section states is read through the shift's candidates |
 | `Deep` | the base is itself 32 reopens deep | every read of a number the chain leaves alone walks it to the bottom |
-| `Unchained` | the section's `startxref`, cross-reference data or trailer does not read, its `/Prev` is not the base's last section, `/Encrypt` or an encrypted base's first `/ID` string moved, it redefines the `/Encrypt` dictionary, or an entry's header is not the object it names | a full open would walk, warn and repair what the section alone cannot say |
+| `Unchained` | the section's `startxref`, cross-reference data or trailer does not read, its `/Prev` is not the base's last section, `/Encrypt` or an encrypted base's first `/ID` string moved, it redefines the `/Encrypt` dictionary, an entry's header is not the object it names, the base's last revision has no `%%EOF` of its own, or the base's chain is already as long as a full open walks | a full open would walk, warn and repair what the section alone cannot say, and stop its chain where the section alone cannot see |
 
 Nothing else sends a reopen to a full open, and a full open is never a guess:
 each row is a test of the base or of the section the reopen has just read.

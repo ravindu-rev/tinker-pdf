@@ -709,6 +709,7 @@ impl Walker<'_> {
             };
             sink.read_entry();
             if let Ok(num) = u32::try_from(first.saturating_add(i)) {
+                crate::doc::count::touched(num);
                 entries.push((num, entry));
             }
         }
@@ -857,6 +858,7 @@ impl Walker<'_> {
                 };
                 sink.read_entry();
                 if let Ok(num) = u32::try_from(first.saturating_add(i)) {
+                    crate::doc::count::touched(num);
                     self.table.insert_new(num, entry);
                 }
             }

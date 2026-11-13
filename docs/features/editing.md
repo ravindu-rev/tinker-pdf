@@ -72,15 +72,19 @@ everything the editor has done resolves — objects put or allocated, streams
 written, deletions as null, the page order, the trailer entries — for a
 caller that has to hand something built over a `CosDocument` (a page's
 `PageResources`, an interpreter) a reference the editor has only just
-allocated. It is the incremental update `save` would write, built in memory
-and reopened, so object numbers are the editor's own and every read goes
-through the ordinary reader, filters included. An encrypted document is
-viewed decrypted: the update is sealed with the file's key as a save seals
-it, and the view inherits the security handler the document was
-authenticated with; a document never authenticated gives a view that was not
-either. A view is a snapshot costing a copy of the file and a parse of its
-tables; an untouched editor answers with its own document and copies
-nothing. `editor_view.rs` resolves an allocated form XObject through the page
+allocated. It is the update section `save_update` writes, built in memory
+and reopened over the document (`CosDocument::reopen`), so object numbers
+are the editor's own and every read goes through the ordinary reader,
+filters included. An encrypted document is viewed decrypted: the update is
+sealed with the file's key as a save seals it, and the view inherits the
+security handler the document was authenticated with; a document never
+authenticated gives a view that was not either. A view is a snapshot costing
+the section and a read of it: the document's bytes are neither copied nor
+walked again, and every object the edits leave alone is the document's own,
+parsed once between them, its names the document's. A document the reopen
+cannot keep — streamed, linearized, repaired, shifted — is read whole with
+the section, under a name table of its own. An untouched editor answers with
+its own document and copies nothing. `editor_view.rs` resolves an allocated form XObject through the page
 that names it, at the same number, plain and encrypted, and the facade's
 `resources_over_an_editors_view_resolve_what_it_allocated` does the same
 through `PageResources`.

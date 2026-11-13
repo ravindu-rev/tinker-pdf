@@ -102,6 +102,16 @@ pub const MAX_LOAD_DEPTH: usize = 64;
 /// 4 432 406 248 440 bytes, thirty-three thousand times this cap.
 pub const MAX_DECODED_STREAM: usize = 128 << 20;
 
+/// How many reopens deep a document may be read through its bases
+/// (`CosDocument::reopen`, P-17).
+///
+/// Every read of a number a chain of updates leaves alone goes through each
+/// base to the one that holds it, so a chain past this is opened whole and
+/// starts a chain of its own (`FullOpen::Deep`). An edit, a save and a reopen
+/// in a loop over one document reaches it after this many rounds and costs one
+/// full open then.
+pub const MAX_REOPEN_DEPTH: u32 = 32;
+
 /// Bytes at the end of the buffer searched for `startxref` first (7.5.5).
 pub const STARTXREF_SCAN: usize = 1024;
 

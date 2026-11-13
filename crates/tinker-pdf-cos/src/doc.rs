@@ -124,8 +124,14 @@ impl std::error::Error for CosError {}
 
 /// The names this layer needs beyond the pre-interned set, plus the table
 /// itself, interned once per document.
+///
+/// The table is shared, so a document reopened over its base (P-17.4) reads
+/// the base's objects and its own with one set of symbols: an object the base
+/// parsed and the reopened document hands out names what the reopened
+/// document's own `intern` names.
+#[derive(Clone)]
 pub(crate) struct DocNames {
-    pub table: NameTable,
+    pub table: Arc<NameTable>,
     pub xref: Name,
     pub obj_stm: Name,
     pub catalog: Name,
@@ -241,7 +247,7 @@ impl DocNames {
                 n(b"Title"),
                 n(b"Author"),
             ],
-            table,
+            table: Arc::new(table),
         }
     }
 
@@ -355,6 +361,81 @@ pub struct CosDocument {
     /// bytes cannot change under it, and only once known: a verdict a missed
     /// read cut short is no verdict.
     verdict: OnceLock<LadderLevel>,
+    /// The document this one was reopened over, when it was
+    /// ([`CosDocument::reopen`]): `xref` is then the update's own entries,
+    /// and every number they leave alone is read through it.
+    base: Option<Reopen>,
+    /// How many times security has been installed on this document. A
+    /// reopened document reads through its base only while neither its own
+    /// count nor its base's has moved since the reopen.
+    security_epoch: AtomicU64,
+}
+
+/// What a reopened document keeps of its base (`docs/design/performance.md`,
+/// P-17).
+struct Reopen {
+    /// The base.
+    doc: Arc<CosDocument>,
+    /// The base's security count at the reopen.
+    base_epoch: u64,
+    /// This document's, once the base's security was given it.
+    own_epoch: u64,
+    /// How many reopens deep this document is, counting its own.
+    depth: u32,
+}
+
+impl Reopen {
+    /// Whether `doc`, which was reopened over this base, still reads through
+    /// it: neither document's security has been installed since.
+    fn current(&self, doc: &CosDocument) -> bool {
+        self.doc.security_epoch.load(Ordering::Acquire) == self.base_epoch
+            && doc.security_epoch.load(Ordering::Acquire) == self.own_epoch
+    }
+}
+
+/// Why [`CosDocument::reopen`] opened the whole document again rather than
+/// reading only the update (`docs/design/performance.md`, P-17).
+///
+/// Each is a test of the base or of the update the reopen has just read, and
+/// nothing else sends a reopen to a full open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FullOpen {
+    /// The base opened on Annex F's head-only path: its table is the first
+    /// page's until a read fetches the main one, and its one revision is the
+    /// whole file.
+    Linearized,
+    /// The base's bytes come from a source: they are fetched whole first,
+    /// which the fetch declares (ruling 10).
+    Streamed,
+    /// The base's ladder is `Patch` or `Rescan`: a full open of the joined
+    /// bytes repairs from a scan of all of them.
+    Repaired,
+    /// The base's header is not at byte zero (7.5.2), so every offset the
+    /// update states is read through the shift's candidates.
+    Shifted,
+    /// The base is itself [`limits::MAX_REOPEN_DEPTH`] reopens deep; the full
+    /// open starts a chain of its own.
+    Deep,
+    /// The update does not chain to the base: its `startxref`,
+    /// cross-reference data or trailer does not read cleanly, its `/Prev` is
+    /// not the base's last section, its `/Encrypt` or an encrypted base's first
+    /// `/ID` string is not the base's, it redefines the `/Encrypt` dictionary,
+    /// an entry's header is not the object it names, the base's last
+    /// revision has no `%%EOF` of its own to end at, or the base's chain is
+    /// already as long as a full open walks.
+    Unchained,
+}
+
+/// A document [`CosDocument::reopen`] opened over a base and an update
+/// appended to it.
+#[derive(Debug)]
+pub struct Reopened {
+    /// The document: the base's bytes followed by the update.
+    pub document: CosDocument,
+    /// Why the whole document was opened again, when it was; `None` when
+    /// only the update was read.
+    pub full_open: Option<FullOpen>,
 }
 
 /// The state a successful authentication installs.
@@ -452,6 +533,281 @@ impl CosDocument {
             Backing::segments(vec![original.into(), update.into()]),
             None,
         )
+    }
+
+    /// Reopens `base` with `update`, an incremental section written after its
+    /// bytes, appended to them — reading only the update, and keeping the
+    /// base's state for everything the update leaves alone
+    /// (`docs/design/performance.md`, P-17).
+    ///
+    /// Of all the bytes it reads the update's `startxref`, its one
+    /// cross-reference section and its trailer, and the header of each object
+    /// the section places. Every number the section does not define is the
+    /// base's: its entry, its parsed object and its decoded object stream,
+    /// read through the base rather than again. A number the section defines
+    /// is parsed afresh from the section, and so is an object whose parse in
+    /// the base read a number the section redefines — a stream's indirect
+    /// `/Length`, or an object stream's container and its `/Length`, `/N` and
+    /// `/First`. The document reads as [`CosDocument::open`] reads the joined
+    /// bytes holding the base's security, as [`crate::DocumentEditor::view`]
+    /// gives a view its document's: its warnings are the base's, as they
+    /// stand, and then its own, and its ladder level is the base's. Its page
+    /// index is its own, since an update can change the page tree.
+    ///
+    /// A base the reopen cannot keep, or an update that does not chain to it,
+    /// is opened whole instead, over segments as
+    /// [`CosDocument::open_appended`] opens them and with the base's
+    /// security, and [`Reopened::full_open`] says why ([`FullOpen`]).
+    ///
+    /// # Errors
+    /// As [`CosDocument::open`], for a reopen that opens whole, and
+    /// [`OpenError::SourceUnavailable`] for a streamed base whose bytes
+    /// cannot all be fetched.
+    pub fn reopen(
+        base: &Arc<CosDocument>,
+        update: impl Into<Arc<[u8]>>,
+    ) -> Result<Reopened, OpenError> {
+        CosDocument::reopen_with(base, update.into(), None)
+    }
+
+    /// [`CosDocument::reopen`], counting what it read into `work` as
+    /// [`CosDocument::open_counted`] counts an open: the update's tokens and
+    /// rows, and all a full open reads when the reopen opens whole.
+    ///
+    /// # Errors
+    /// As [`CosDocument::reopen`].
+    pub fn reopen_counted(
+        base: &Arc<CosDocument>,
+        update: impl Into<Arc<[u8]>>,
+        work: &Work,
+    ) -> Result<Reopened, OpenError> {
+        CosDocument::reopen_with(base, update.into(), Some(work))
+    }
+
+    fn reopen_with(
+        base: &Arc<CosDocument>,
+        update: Arc<[u8]>,
+        work: Option<&Work>,
+    ) -> Result<Reopened, OpenError> {
+        let refused = if base.linearized.is_some() {
+            Some(FullOpen::Linearized)
+        } else if base.buffer.is_streamed() {
+            Some(FullOpen::Streamed)
+        } else if base.ladder != LadderLevel::Trust {
+            Some(FullOpen::Repaired)
+        } else if base.shift > 0 {
+            Some(FullOpen::Shifted)
+        } else if base.reopen_depth() >= limits::MAX_REOPEN_DEPTH {
+            Some(FullOpen::Deep)
+        } else {
+            None
+        };
+        if let Some(reason) = refused {
+            return CosDocument::open_whole(base, update, work, reason);
+        }
+        let mut parts = base.buffer.parts().unwrap_or_default();
+        parts.push(Arc::clone(&update));
+        match CosDocument::read_update(base, Backing::segments(parts), work) {
+            Some(document) => Ok(Reopened {
+                document,
+                full_open: None,
+            }),
+            None => CosDocument::open_whole(base, update, work, FullOpen::Unchained),
+        }
+    }
+
+    /// `base`'s bytes and `update` opened whole over segments, with `base`'s
+    /// security, for `reason`. A streamed base is fetched whole first and
+    /// says so, as every whole-file fetch does (ruling 10).
+    fn open_whole(
+        base: &Arc<CosDocument>,
+        update: Arc<[u8]>,
+        work: Option<&Work>,
+        reason: FullOpen,
+    ) -> Result<Reopened, OpenError> {
+        let mut parts = match base.buffer.parts() {
+            Some(parts) => parts,
+            None => {
+                let declare = !base.buffer.whole_fetched();
+                let bytes = base
+                    .buffer
+                    .materialise()
+                    .map_err(OpenError::SourceUnavailable)?;
+                if declare {
+                    base.warn(WarningKind::WholeFileFetched);
+                }
+                vec![bytes]
+            }
+        };
+        parts.push(update);
+        let document = CosDocument::open_backing(Backing::segments(parts), work)?;
+        document.inherit_security(base);
+        Ok(Reopened {
+            document,
+            full_open: Some(reason),
+        })
+    }
+
+    /// The reopen proper: `backing`, `base`'s segments and the update, read
+    /// through the update alone — or `None` when the update does not chain to
+    /// the base ([`FullOpen::Unchained`]).
+    fn read_update(
+        base: &Arc<CosDocument>,
+        backing: Backing,
+        work: Option<&Work>,
+    ) -> Option<CosDocument> {
+        let mut sink = WarningSink::new();
+        let read = CosDocument::read_section(base, &backing, &mut sink);
+        if let Some(work) = work {
+            sink.steps().tally(work);
+        }
+        let (table, trailer, revision) = read?;
+        let mut revisions = Vec::with_capacity(base.revisions.len().saturating_add(1));
+        revisions.push(revision);
+        revisions.extend(base.revisions.iter().cloned());
+        let mut doc = CosDocument {
+            buffer: backing,
+            names: base.names.clone(),
+            xref: table,
+            trailer,
+            revisions,
+            linearized: None,
+            page_hints: Mutex::new(HintState::Untried),
+            page_index: Mutex::new(crate::pages::IndexSlot::default()),
+            misses: AtomicU64::new(0),
+            hinted: RwLock::new(HashMap::new()),
+            completed: OnceLock::new(),
+            store: SlotStore::new(),
+            objstm: ObjStmCache::new(),
+            scan: RwLock::new(None),
+            warnings: Mutex::new(WarningSink::new()),
+            stream_ranges: RwLock::new(HashMap::new()),
+            security: RwLock::new(Security {
+                decryptor: Arc::new(IdentityDecryptor),
+                has_decryptor: false,
+                auth_level: AuthLevel::None,
+                key: None,
+            }),
+            encrypt: None,
+            ladder: base.ladder,
+            shift: 0,
+            verdict: OnceLock::new(),
+            base: Some(Reopen {
+                doc: Arc::clone(base),
+                base_epoch: base.security_epoch.load(Ordering::Acquire),
+                own_epoch: 0,
+                depth: base.reopen_depth().saturating_add(1),
+            }),
+            security_epoch: AtomicU64::new(0),
+        };
+        doc.inherit_security(base);
+        let own = doc.security_epoch.load(Ordering::Acquire);
+        if let Some(reopen) = doc.base.as_mut() {
+            reopen.own_epoch = own;
+        }
+        doc.extract_encrypt(work);
+        Some(doc)
+    }
+
+    /// The update's cross-reference section, read alone and checked to chain
+    /// to `base`: its table, with every type-1 entry probed against its header
+    /// and given the header's generation as a full open's validation gives
+    /// it; the trailer, the section's entries over the base's; and the
+    /// section's revision. `None` for anything [`FullOpen::Unchained`] names,
+    /// a warning while reading the section among them.
+    fn read_section(
+        base: &CosDocument,
+        backing: &Backing,
+        sink: &mut WarningSink,
+    ) -> Option<(XrefTable, Dict, Revision)> {
+        let Backing::Segments(segments) = backing else {
+            return None;
+        };
+        let view = backing.view();
+        let start = xref::startxref(&view, sink)?;
+        if start < base.buffer.len() {
+            return None;
+        }
+        let built = xref::build_limited(view, start, 0, &base.names, sink, 1);
+        if built.sections != 1 || !sink.is_empty() {
+            return None;
+        }
+        let revision = built.revisions.into_iter().next()?;
+        let prev = revision
+            .trailer
+            .get_int(Name::PREV)
+            .and_then(|prev| u64::try_from(prev).ok());
+        if base.last_startxref() == 0 || prev != Some(base.last_startxref()) {
+            return None;
+        }
+        // A full open walks the update and every section of the base's chain
+        // under one cap; a chain the cap would cut is read whole, as it cuts.
+        if base.revisions.len() >= limits::MAX_XREF_CHAIN as usize {
+            return None;
+        }
+        // A full open of the joined bytes looks for the base's last `%%EOF`
+        // past its trailer and stops at the first; a base whose last revision
+        // found none would find the update's there.
+        if !base.ends_at_its_eof() {
+            return None;
+        }
+        let mut trailer = revision.trailer.clone();
+        for (key, value) in base.trailer().iter() {
+            if !trailer.contains_key(*key) {
+                trailer.insert(*key, value.clone());
+            }
+        }
+        if trailer.get(Name::ENCRYPT) != base.trailer().get(Name::ENCRYPT)
+            || (base.encrypt.is_some() && first_id(&trailer) != first_id(base.trailer()))
+        {
+            return None;
+        }
+        let mut table = built.table;
+        if base
+            .encrypt_num()
+            .is_some_and(|num| table.get(num).is_some())
+        {
+            return None;
+        }
+        let locatable = match trailer.get(Name::ROOT) {
+            Some(Object::Dict(_)) => true,
+            Some(Object::Ref(r)) => table
+                .get(r.num)
+                .or_else(|| base.entry(r.num))
+                .is_some_and(|entry| !matches!(entry, XrefEntry::Free { .. })),
+            _ => false,
+        };
+        if !locatable {
+            return None;
+        }
+        let validation = validate_with(backing.len(), &mut table, 0, |at| segments.header_at(at));
+        if !validation.failures.is_empty() {
+            return None;
+        }
+        Some((table, trailer, revision))
+    }
+
+    /// Whether this document's newest revision ends at an `%%EOF` of its own,
+    /// rather than at the end of its bytes for want of one.
+    fn ends_at_its_eof(&self) -> bool {
+        let Some(end) = self
+            .revisions
+            .first()
+            .map(|revision| revision.byte_range.end)
+        else {
+            return false;
+        };
+        let Some(from) = end.checked_sub(b"%%EOF".len() as u64) else {
+            return false;
+        };
+        self.buffer
+            .window(from..end)
+            .is_ok_and(|bytes| &*bytes == b"%%EOF")
+    }
+
+    /// How many reopens deep this document is: none for one opened whole.
+    fn reopen_depth(&self) -> u32 {
+        self.base.as_ref().map_or(0, |reopen| reopen.depth)
     }
 
     fn open_backing(backing: Backing, work: Option<&Work>) -> Result<CosDocument, OpenError> {
@@ -660,6 +1016,8 @@ impl CosDocument {
             ladder,
             shift,
             verdict: OnceLock::new(),
+            base: None,
+            security_epoch: AtomicU64::new(0),
         };
         if let Some(work) = work {
             sink.steps().tally(work);
@@ -691,6 +1049,18 @@ impl CosDocument {
     pub fn xref(&self) -> &XrefTable {
         if self.linearized.is_some() {
             return self.merged_xref();
+        }
+        // A reopened document reads its base's entries where they lie, and
+        // builds the merged table only for a caller that asks for all of it:
+        // the update's entries over the base's, newest first.
+        if let Some(reopen) = &self.base {
+            return self.completed.get_or_init(|| {
+                let mut merged = self.xref.clone();
+                for (num, entry) in reopen.doc.xref().iter() {
+                    merged.insert_new(num, entry);
+                }
+                merged
+            });
         }
         &self.xref
     }
@@ -1005,8 +1375,21 @@ impl CosDocument {
     /// A copy rather than a slice: objects load lazily behind `&self`, so
     /// warnings keep arriving after `open` returns and no borrow of the
     /// document could stay valid across the next read.
+    ///
+    /// A document [`CosDocument::reopen`] read through its base carries the
+    /// base's warnings, as they stand, and then its own: the base's open, and
+    /// every read of a number the base parsed, besides what the update and
+    /// this document's own parses raised.
     pub fn warnings(&self) -> Vec<Warning> {
-        self.warnings.lock_safe().warnings().to_vec()
+        let own = self.warnings.lock_safe().warnings().to_vec();
+        match &self.base {
+            Some(reopen) => {
+                let mut all = reopen.doc.warnings();
+                all.extend(own);
+                all
+            }
+            None => own,
+        }
     }
 
     /// The `/Encrypt` scalars and the first `/ID` element, if the file is
@@ -1073,6 +1456,10 @@ impl CosDocument {
             security.has_decryptor = true;
             security.key = key;
         }
+        // Counted, so that a document reopened over this one, or this one
+        // over its base, stops reading through the other once what was read
+        // there was read under another security.
+        self.security_epoch.fetch_add(1, Ordering::AcqRel);
         // Everything already loaded was read as plaintext out of ciphertext.
         // Both caches are dropped so the next read goes back to the buffer;
         // outstanding `Arc`s keep the values they were given.
@@ -1182,7 +1569,11 @@ impl CosDocument {
     /// New objects start above it, so an edit cannot collide with something
     /// the document already uses.
     pub fn max_object_number(&self) -> u32 {
-        self.xref.max_number()
+        let own = self.xref.max_number();
+        match &self.base {
+            Some(reopen) => own.max(reopen.doc.max_object_number()),
+            None => own,
+        }
     }
 
     /// The offset of the most recent cross-reference section, which an
@@ -1406,6 +1797,11 @@ impl CosDocument {
     fn entry(&self, num: u32) -> Option<XrefEntry> {
         if let Some(entry) = self.xref.get(num) {
             return Some(entry);
+        }
+        // A reopened document's own table is its update's; every other
+        // number's entry is its base's, where it lies.
+        if let Some(reopen) = &self.base {
+            return reopen.doc.entry(num);
         }
         self.linearized.as_ref()?;
         // Annex F's hint tables, when a page other than the first has already
@@ -1830,6 +2226,9 @@ impl CosDocument {
         if let Some(object) = self.store.get(num) {
             return object;
         }
+        if let Some(object) = self.through_base(num, sink) {
+            return self.store.publish(num, object);
+        }
         if ctx.contains(num) {
             sink.warn_at(
                 self.entry_offset(num),
@@ -1859,6 +2258,100 @@ impl CosDocument {
             return Arc::new(object);
         }
         self.store.publish(num, Arc::new(object))
+    }
+
+    /// Object `num` as the base this document was reopened over has it, when
+    /// the update leaves `num` alone, both documents keep the security the
+    /// reopen found, and the base's parse of it read nothing the update
+    /// redefines (P-17.4).
+    ///
+    /// The base parses it once, into its own store, counting its steps into
+    /// `sink` and its warnings into its own list, which this document's
+    /// warnings carry. Anything else — and every number once a document's
+    /// security has moved — is this document's own to load.
+    fn through_base(&self, num: u32, sink: &mut WarningSink) -> Option<Arc<Object>> {
+        let reopen = self.base.as_ref()?;
+        if self.xref.get(num).is_some() || !reopen.current(self) {
+            return None;
+        }
+        let object = reopen.doc.load_alone(num, sink);
+        let depends = self.reads_the_update(&reopen.doc, num, &object, 0);
+        (!depends).then_some(object)
+    }
+
+    /// Object `num`, loaded as a read of it alone would load it: a resolve of
+    /// its own, its steps added to `sink` and its warnings to this document's
+    /// list.
+    fn load_alone(&self, num: u32, sink: &mut WarningSink) -> Arc<Object> {
+        let mut own = WarningSink::new();
+        let mut ctx = ResolveCtx::new();
+        let object = self.load(num, &mut ctx, &mut own);
+        sink.add_steps(own.steps());
+        self.absorb(own);
+        object
+    }
+
+    /// Whether `base`'s parse of `num`, which gave `object`, read a number
+    /// this document's update defines: a stream's indirect `/Length`, along
+    /// its chain of references; for a member of an object stream, the
+    /// container, what the container's own parse read, and the container's
+    /// indirect `/N` and `/First`. Anything the base no longer holds to look
+    /// at is taken as read, and the object is loaded afresh.
+    fn reads_the_update(
+        &self,
+        base: &CosDocument,
+        num: u32,
+        object: &Object,
+        depth: usize,
+    ) -> bool {
+        if depth > limits::MAX_LOAD_DEPTH {
+            return true;
+        }
+        match base.entry(num) {
+            Some(XrefEntry::InStream { stream_num, .. }) => {
+                if self.xref.get(stream_num).is_some() {
+                    return true;
+                }
+                let Some(container) = base.store.get(stream_num) else {
+                    return true;
+                };
+                let Object::Stream(stream) = container.as_ref() else {
+                    return true;
+                };
+                self.reads_the_update(base, stream_num, &container, depth + 1)
+                    || [Name::N, Name::FIRST]
+                        .iter()
+                        .any(|key| self.chain_reads_the_update(base, stream.dict.get(*key)))
+            }
+            _ => match object {
+                Object::Stream(stream) => {
+                    self.chain_reads_the_update(base, stream.dict.get(Name::LENGTH))
+                }
+                _ => false,
+            },
+        }
+    }
+
+    /// Whether resolving `value` in `base` reads a number this document's
+    /// update defines: each hop of its chain of references, as `base` holds
+    /// it, until something that is not one.
+    fn chain_reads_the_update(&self, base: &CosDocument, value: Option<&Object>) -> bool {
+        let Some(mut at) = value.and_then(Object::as_objref) else {
+            return false;
+        };
+        for _ in 0..limits::MAX_RESOLVE_DEPTH {
+            if self.xref.get(at.num).is_some() {
+                return true;
+            }
+            let Some(object) = base.store.get(at.num) else {
+                return true;
+            };
+            match object.as_objref() {
+                Some(next) => at = next,
+                None => return false,
+            }
+        }
+        true
     }
 
     fn load_uncached(&self, num: u32, ctx: &mut ResolveCtx, sink: &mut WarningSink) -> Object {
@@ -2063,6 +2556,7 @@ impl CosDocument {
         ctx: &mut ResolveCtx,
         sink: &mut WarningSink,
     ) -> Option<Object> {
+        count::touched(num);
         let (parsed, warnings) = self.parse_windowed(offset, ctx, sink)?;
         if parsed.reference.num != num {
             return None;
@@ -2114,6 +2608,7 @@ impl CosDocument {
         ctx: &mut ResolveCtx,
         sink: &mut WarningSink,
     ) -> Object {
+        count::touched(num);
         let Some(stm) = self.object_stream(stream_num, ctx, sink) else {
             sink.warn_at(
                 self.entry_offset(stream_num),
@@ -2510,6 +3005,7 @@ fn validate_with(
             continue;
         };
         offsets += 1;
+        count::touched(num);
         let found = xref::offset_candidates(len, offset, shift)
             .into_iter()
             .find_map(|at| header_at(at).filter(|h| h.num == num).map(|h| (at, h.gen)));
@@ -2524,6 +3020,48 @@ fn validate_with(
         table.replace(num, entry);
     }
     Validation { failures, offsets }
+}
+
+/// The first string of a trailer's `/ID` (14.4), from which an encrypted
+/// document's key is computed (7.6.4.3).
+fn first_id(trailer: &Dict) -> Option<&[u8]> {
+    trailer
+        .get_array(Name::ID)
+        .and_then(<[Object]>::first)
+        .and_then(Object::as_string)
+        .map(|id| id.bytes.as_slice())
+}
+
+/// The object numbers an open touches — whose cross-reference row it reads,
+/// whose header it probes, whose body it parses — counted for the reopen's
+/// guard: compiled only under `cfg(test)` and kept per thread.
+#[cfg(test)]
+pub(crate) mod count {
+    use std::cell::RefCell;
+    use std::collections::BTreeSet;
+
+    std::thread_local! {
+        static TOUCHED: RefCell<BTreeSet<u32>> = const { RefCell::new(BTreeSet::new()) };
+    }
+
+    /// Object `num` touched.
+    pub(crate) fn touched(num: u32) {
+        TOUCHED.with(|touched| {
+            touched.borrow_mut().insert(num);
+        });
+    }
+
+    /// The numbers touched on this thread since the last call, which starts
+    /// the count again from nothing.
+    pub(crate) fn take() -> BTreeSet<u32> {
+        TOUCHED.with(|touched| core::mem::take(&mut *touched.borrow_mut()))
+    }
+}
+
+/// The counter outside tests: nothing.
+#[cfg(not(test))]
+pub(crate) mod count {
+    pub(crate) fn touched(_num: u32) {}
 }
 
 fn root_locatable(table: &XrefTable, trailer: &Dict) -> bool {
@@ -3261,5 +3799,130 @@ mod tests {
             }
             assert_eq!(doc.buffer.retained(), held, "{how}: and nothing kept");
         }
+    }
+
+    // ---- the reopen (P-17.4) ------------------------------------------------
+
+    /// **A reopen parses only what changed** (`docs/design/performance.md`,
+    /// P-17). One 100 by 100 pt square annotation added to page 501 of a
+    /// generated 1 000-page file, saved as an update section and reopened
+    /// over the document it was edited from: the reopen touches — reads the
+    /// row of, probes the header of, or parses — only the numbers the
+    /// section defines (the page, the annotation and its appearance) and the
+    /// free head its table starts with, and parses no object's body, where a
+    /// full open of the same bytes touches every number in the file. Reading
+    /// the reopened document's whole page tree afterwards parses only what
+    /// the update redefined, the page among it: every other node is the
+    /// base's parse, kept.
+    #[test]
+    fn a_reopen_parses_only_what_changed() {
+        let mut builder = crate::DocumentBuilder::new();
+        builder.add_base_font(b"F0", b"Helvetica");
+        for i in 0..1000 {
+            builder.add_page(612.0, 792.0, |page| {
+                page.text(b"F0", 12.0, 72.0, 720.0, &format!("page {i}"));
+            });
+        }
+        let bytes = builder.finish();
+        let base = Arc::new(CosDocument::open(bytes.clone()).expect("it opens"));
+        let before = crate::pages::collect(&base);
+        assert_eq!(before.len(), 1000, "the premise: a thousand pages");
+        let highest = base.max_object_number();
+
+        let mut editor = crate::DocumentEditor::new(Arc::clone(&base));
+        let square = crate::annot::square(
+            &base,
+            crate::Rect {
+                x0: 100.0,
+                y0: 100.0,
+                x1: 200.0,
+                y1: 200.0,
+            },
+            crate::annot::Color {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+            },
+            1.0,
+        );
+        let added = editor
+            .add_annotation(500, square)
+            .expect("page 501 is there");
+        let update = editor.save_update(&crate::WriteOptions {
+            mode: crate::WriteMode::Incremental,
+            ..crate::WriteOptions::default()
+        });
+        let page = before[500].reference;
+        // The page, and every number the edit allocated: the annotation, and
+        // the appearance synthesized for it.
+        let mut changed: std::collections::BTreeSet<u32> = (highest + 1..=added.num).collect();
+        changed.insert(page.num);
+        let mut allowed = changed.clone();
+        allowed.insert(0);
+
+        let _ = count::take();
+        let work = Work::new();
+        let reopened =
+            CosDocument::reopen_counted(&base, update.clone(), &work).expect("it reopens");
+        let touched = count::take();
+        assert_eq!(reopened.full_open, None, "only the update was read");
+        assert!(
+            touched.is_subset(&allowed),
+            "the reopen touched {touched:?}; the section defines {allowed:?}"
+        );
+        assert!(
+            changed.is_subset(&touched),
+            "every changed number's row is read: {touched:?}"
+        );
+        let stats = work.stats();
+        assert_eq!(stats.objects_parsed, 0, "no object's body: {stats:?}");
+        assert!(
+            stats.xref_entries_read > 0 && stats.xref_entries_read <= allowed.len() as u64,
+            "the section's rows and no others: {stats:?}"
+        );
+
+        // A full open of the same bytes touches every number in the file.
+        let joined = [&bytes[..], &update[..]].concat();
+        let whole = CosDocument::open(joined).expect("it opens");
+        let all = count::take();
+        assert!(
+            all.len() > 1000 && all.is_superset(&allowed),
+            "a full open reads every row: {} numbers",
+            all.len()
+        );
+
+        // The page tree read again: what the update redefined is parsed, from
+        // the section, and every other node is the base's.
+        let document = reopened.document;
+        let after = crate::pages::collect(&document);
+        let parsed = count::take();
+        assert!(
+            parsed.contains(&page.num) && parsed.is_subset(&changed),
+            "reading every page parsed {parsed:?}"
+        );
+        let fresh = crate::pages::collect(&whole);
+        assert_eq!(after.len(), fresh.len());
+        for (got, want) in after.iter().zip(&fresh) {
+            assert_eq!(
+                (got.reference, got.index, got.media_box, got.rotation),
+                (want.reference, want.index, want.media_box, want.rotation),
+                "page {} reads as a full open reads it",
+                want.index
+            );
+        }
+        let annots = document
+            .get(page)
+            .expect("the page loads")
+            .as_dict()
+            .and_then(|dict| dict.get_array(document.intern(b"Annots")))
+            .map(<[Object]>::to_vec)
+            .unwrap_or_default();
+        assert_eq!(
+            annots,
+            vec![Object::Ref(added)],
+            "the page names its annotation"
+        );
+        assert_eq!(document.ladder_level(), LadderLevel::Trust);
+        assert_eq!(document.revisions().len(), 2, "the update, then the base");
     }
 }

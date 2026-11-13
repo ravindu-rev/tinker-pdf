@@ -254,6 +254,28 @@ and the operations that need every byte as one slice — `bytes()`, a
 signature's byte range, `stream_raw_encrypted`, the repair scanner — join the
 two once and keep the join.
 
+**Reopening over the update.** `CosDocument::reopen(base, update)` opens a
+document already open, `base`, with an update section written after it, and
+reads only the section: its `startxref`, its one cross-reference section and
+trailer, and the header of each object the section places. Every number the
+section leaves alone is the base's — its entry, its parsed object, its
+decoded object stream and its security — read through the base, which parses
+it once into its own store. A number the section defines is parsed afresh
+from the section, and so is an object whose parse in the base read a number
+the section redefines: a stream's indirect `/Length`, along its chain of
+references, or an object stream's container and the container's `/Length`,
+`/N` and `/First`. The document reads as `CosDocument::open` reads the joined
+bytes holding the base's security: its warnings are the base's, as they
+stand, and then its own; its ladder level is the base's; its page index is
+its own, since an update can change the page tree. Once either document's
+security is installed again, the reopened one parses every number itself. A
+base the reopen cannot keep — opened on Annex F's head-only path, streamed
+from a source, repaired, shifted, or itself `limits::MAX_REOPEN_DEPTH` (32)
+reopens deep — and an update that does not chain to its base are opened
+whole over segments, as `open_appended` opens them, with the base's
+security, and `Reopened::full_open` says why (`FullOpen`): nothing else sends
+a reopen there. See [design/performance.md](../design/performance.md), P-17.
+
 **Annex F, from the head.** A linearized file whose `/L` is the length of the
 file opens from its head alone: the first-page cross-reference section is
 parsed where it sits, `/O` names page one's page object so the page tree — whose
@@ -301,8 +323,11 @@ second dependency. On `CosDocument`: `get`, `resolve`, `trailer`,
 `revisions`, `xref`, and the tiers `stream_raw_encrypted` / `stream_raw` /
 `stream_decoded` (plus `stream_image_input`, decoded up to but not through an
 image codec); `open_appended(original, update)`, the open over an original
-and its update section; and `prefix()`, the length and last line ending an
-update written after the document needs.
+and its update section; `reopen(base, update)` and `reopen_counted(base,
+update, &Work)`, the reopen over an update section, which hand back
+`Reopened` — the document, and the `FullOpen` reason when it opened whole;
+and `prefix()`, the length and last line ending an update written after the
+document needs.
 
 `CosDocument::open_counted(bytes, &Work)` and `CosDocument::get_counted(r,
 &Work)` are `open` and `get` counting what the parser read into MS-01's tally
@@ -428,6 +453,7 @@ exceed it routinely — declared in one place,
 | Unknown `/Filter` name | `WarningKind::FilterUnknown` | The chain stops there; bytes decoded so far come back still encoded | [filters](filters.md) |
 | Container nesting past 256 | `WarningKind::DepthCapHit` | The container is skipped and reads as null; parser recursion stays bounded | `limits.rs` |
 | `/Prev` chains past 64 links | `WarningKind::XrefChainCapHit` | Cycles are caught by the visited set; this bounds the acyclic-but-absurd chain | `limits.rs` |
+| A reopen over a document already 32 reopens deep | `FullOpen::Deep`, the document opened whole | Every read of a number a chain of updates leaves alone goes through each base to the one that holds it; the full open starts a chain of its own | `limits.rs` (`MAX_REOPEN_DEPTH`) |
 | `Ref → Ref` chains past 32 hops | `WarningKind::ResolveDepthCapHit` | Legal but never deep; the chain reads as null | `limits.rs` |
 | Self-referential loads | `WarningKind::ObjectCycle` | A `/Length` into its own stream reads as null rather than hanging | `crates/tinker-pdf-cos/src/store.rs` |
 | Warning floods past 10 000 | `WarningKind::WarningCapReached` | A pathological file cannot flood memory with its own diagnostics; the cap warns exactly once | `limits.rs` |
@@ -475,7 +501,20 @@ The tests that cover opening ([verification](../verification.md)):
   `source.rs` holds every window, transient read and header of segments cut
   every way to the joined bytes, and counts what opening and reading over two
   segments copies: nothing joined before a whole-file read, and only the reads
-  across the seam gathered (`opening_over_two_segments_copies_neither`).
+  across the seam gathered (`opening_over_two_segments_copies_neither`). A
+  reopen over random edit sequences — objects added, replaced and deleted,
+  pages turned, annotated and given new content, a trailer entry, lengths
+  and object-stream containers changed — on a classic table, object streams,
+  an encrypted base, a hybrid-reference file and indirect lengths, each
+  update reopened over the last, reads the update alone and is held to a
+  fresh open of the joined bytes, its warnings those of the fresh open and of
+  its base (`a_reopen_reads_as_a_fresh_open_does`); every `FullOpen` reason,
+  met by the base or the update that has it, is the reason a reopen gives,
+  its full open held to a fresh one (`every_base_a_reopen_cannot_keep_says_why`);
+  and `doc.rs` counts what a reopen touches: for a one-annotation update to a
+  1 000-page file, the section's rows and headers and no object's body, where
+  a full open touches every number, and a read of the page tree after it
+  parses only what the update changed (`a_reopen_parses_only_what_changed`).
 - **`crates/tinker-pdf/tests/hostile_input.rs`** — real fixtures put through
   seeded deterministic damage on every `cargo test`, asserting only that
   nothing panics and nothing hangs (ruling 1, on stable, so it cannot be

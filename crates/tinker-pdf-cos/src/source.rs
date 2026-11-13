@@ -522,6 +522,23 @@ impl Backing {
         Backing::Segments(Segments::new(parts))
     }
 
+    /// The bytes as segments, for a document over these bytes and an update
+    /// appended to them: the buffer, or each segment, shared; `None` for a
+    /// chunk cache, whose bytes are not all in hand.
+    pub(crate) fn parts(&self) -> Option<Vec<Arc<[u8]>>> {
+        match self {
+            Backing::Whole(bytes) => Some(vec![Arc::clone(bytes)]),
+            Backing::Chunked(_) => None,
+            Backing::Segments(segments) => Some(
+                segments
+                    .parts
+                    .iter()
+                    .map(|(_, part)| Arc::clone(part))
+                    .collect(),
+            ),
+        }
+    }
+
     /// How many bytes the document has.
     pub(crate) fn len(&self) -> u64 {
         match self {

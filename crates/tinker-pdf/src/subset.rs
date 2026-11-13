@@ -502,8 +502,10 @@ pub(crate) fn apply_counting(
 ) -> SubsetReport {
     let op = Operation::new(work.cloned());
     // Everything the walk reads, it reads from the view and nothing else: the
-    // view's names are its own table's, and a name from it looked up in a
-    // dictionary the editor holds would find nothing (or the wrong thing).
+    // view's names are the document's table's only while the reopen keeps the
+    // document, and a table of its own when it opens whole, so a name from it
+    // looked up in a dictionary the editor holds could find nothing (or the
+    // wrong thing).
     // What crosses back is object numbers and glyph ids, which the view
     // shares with the editor by construction — and so are the streams the
     // walk decoded, which the view keys by the editor's numbers.
