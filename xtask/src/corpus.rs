@@ -497,7 +497,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     if carried != asked {
         return Err(if carried {
             format!(
-                "the child was built with `bundled-fonts`, so every file was measured with the bundled faces, and this run is recorded as `{}`. Rebuild `tpdf` without the feature, or run with `--fonts bundled`.",
+                "the child was built with `bundled-fonts` or `cjk-fonts`, so every file was measured with the faces it carries, and this run is recorded as `{}`. Rebuild `tpdf` without either feature, or with `bundled-fonts` and run with `--fonts bundled`.",
                 run.settings.fonts
             )
         } else {

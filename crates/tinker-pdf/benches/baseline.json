@@ -243,7 +243,11 @@
         { "name": "8 quarter-size pages to PNG at 150 dpi, 1 job, CLI", "unit": "pages",
           "per_iteration": 8, "calls": 1, "gate": { "floor": 1 } },
         { "name": "8 quarter-size pages to PNG at 150 dpi, 4 jobs, CLI", "unit": "pages",
-          "per_iteration": 8, "calls": 1, "gate": { "floor": 1 } }
+          "per_iteration": 8, "calls": 1, "gate": { "floor": 1 } },
+        { "name": "the CJK page at 150 dpi, bundled face, first render, CLI", "unit": "pixels",
+          "per_iteration": 2176200, "calls": 1, "gate": { "floor": 1 } },
+        { "name": "the CJK page at 150 dpi, bundled face, second render", "unit": "pixels",
+          "per_iteration": 2176200, "calls": 1, "gate": { "floor": 1 } }
       ]
     },
     {
@@ -635,6 +639,8 @@
         "render/the quarter-size text page to PNG at 300 dpi, CLI",
         "render/8 quarter-size pages to PNG at 150 dpi, 1 job, CLI",
         "render/8 quarter-size pages to PNG at 150 dpi, 4 jobs, CLI",
+        "render/the CJK page at 150 dpi, bundled face, first render, CLI",
+        "render/the CJK page at 150 dpi, bundled face, second render",
         "write/rewrite 100 pages",
         "write/rewrite 1000 pages",
         "write/rewrite 3000 pages",

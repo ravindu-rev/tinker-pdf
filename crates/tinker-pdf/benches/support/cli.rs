@@ -35,9 +35,16 @@ pub fn tpdf() -> PathBuf {
     assert!(
         tpdf.is_file(),
         "{} is not built; the CLI operations run it, so build it first with \
-         `cargo build{} -p tpdf`",
+         `cargo build{} -p tpdf{}`",
         tpdf.display(),
-        if release { " --release" } else { "" }
+        if release { " --release" } else { "" },
+        // The CJK page's first render needs a child that carries the faces
+        // a bench built with them draws through.
+        if cfg!(feature = "cjk-fonts") {
+            " --features cjk-fonts"
+        } else {
+            ""
+        }
     );
     tpdf
 }

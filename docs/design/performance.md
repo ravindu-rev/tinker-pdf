@@ -1309,6 +1309,13 @@ no run has timed them, so their window is *untimed*.
 | `render/the quarter-size text page to PNG at 300 dpi, CLI` | pixels · 620×878 | `tpdf render` | 73.8 → 12.5, rescaled from A4's 1 180 → 200; 5.9× | in | built |
 | `render/8 quarter-size pages to PNG at 150 dpi, 1 job, CLI` | pages · 8 | `tpdf render --jobs 1` | 171 → 32.5, rescaled from 20 A4 pages' 6 847 → 1 300; 5.26× | in | built |
 | `render/8 quarter-size pages to PNG at 150 dpi, 4 jobs, CLI` | pages · 8 | `tpdf render --jobs 4` | 43.6 → 10, rescaled from 20 A4 pages' 1 743 → 400; 4.35× | in | built |
+| `render/the CJK page at 150 dpi, bundled face, first render, CLI` | pixels · 1240×1755 | `cjk_page()`: an A4 page of unembedded Adobe-Japan1 text under `UniJIS-UTF16-H`, drawn through Source Han Sans JP; `tpdf render` built with `cjk-fonts`, a process a call, so each call makes the face ready — its WOFF2 file unpacked — and inverts the collection's CMaps before it draws; held after its runs to one PNG of the page and no warning | not in tier P's table; floor 1; the planning baseline has no CJK face and no side; a target is the owner's (H-77) | untimed | built |
+| `render/the CJK page at 150 dpi, bundled face, second render` | pixels · 1240×1755 | the same page, opened once and drawn once untimed, so the face is ready and the collection inverted; held before it is timed to draw through the face, reporting nothing and inking its glyphs | the same | untimed | built |
+
+The two CJK operations (FT-01.11) are declared with `cjk-fonts`, which the
+set is built with (`docs/verification.md`, "The benches"); no run has timed
+them, so the named machine's entry names both unmeasured and their window is
+*untimed*.
 
 The bitmap toolbox's two scales and the forced-colour render (RC-09.7a,
 `docs/design/bitmap-toolbox.md`) are the toolbox's operations with real cost;

@@ -19,3 +19,9 @@ tinker-pdf = { workspace = true }
 # is what `corpus-run` spawns, and the third corpus bar is measured by building
 # this with the feature on.
 bundled-fonts = ["tinker-pdf/bundled-fonts"]
+# The CJK fallback faces alone, passed through for the benchmark set: the
+# render group's CLI operation over a CJK page times this binary as its child,
+# so the child carries the faces the set is built with (`docs/verification.md`,
+# "The benches"). The faces answer CJK requests only, so no other operation's
+# child draws differently.
+cjk-fonts = ["tinker-pdf/cjk-fonts"]

@@ -1909,6 +1909,88 @@ pub fn intents_page() -> Vec<u8> {
     out
 }
 
+/// The characters [`cjk_page`] sets, in turn: the hiragana and katakana
+/// syllables and the commonest kanji, each a character JIS X 0208 holds, so
+/// Adobe-Japan1 reaches it through `UniJIS-UTF16-H` and Source Han Sans JP
+/// draws it.
+const CJK_TEXT: &str = "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん\
+     アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン\
+     日本語文字中国人大小山川田上下左右月火水木金土年時分前後東西南北学校先生名今何見行来出入言話読書食飲";
+
+/// The lines [`cjk_page`] sets, and the characters a line.
+const CJK_LINES: usize = 50;
+/// See [`CJK_LINES`].
+const CJK_COLUMNS: usize = 38;
+
+/// An A4 page of unembedded CJK text, for the render group's two
+/// bundled-face operations (FT-01.11): [`CJK_LINES`] lines of
+/// [`CJK_COLUMNS`] characters of [`CJK_TEXT`] at 12 pt, in an Adobe-Japan1
+/// Type 0 font under `UniJIS-UTF16-H` whose descendant embeds no program and
+/// whose descriptor is symbolic — the shape of a CJK document that leaves its
+/// font to the reader — so a `bundled-fonts` build draws every glyph through
+/// Source Han Sans JP, read by character. Written as the bytes of the file,
+/// which every revision reads alike.
+pub fn cjk_page() -> Vec<u8> {
+    let characters: Vec<char> = CJK_TEXT.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut content = String::from("BT /F0 12 Tf 14.4 TL 70 792 Td\n");
+    for line in 0..CJK_LINES {
+        content.push('<');
+        for column in 0..CJK_COLUMNS {
+            let c = characters[(line * CJK_COLUMNS + column) % characters.len()];
+            content.push_str(&format!("{:04X}", u32::from(c)));
+        }
+        content.push_str("> Tj T*\n");
+    }
+    content.push_str("ET\n");
+    let objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]\n   \
+          /Resources << /Font << /F0 5 0 R >> >> /Contents 4 0 R >>"
+            .to_vec(),
+        {
+            let mut stream = format!("<< /Length {} >>\nstream\n", content.len()).into_bytes();
+            stream.extend_from_slice(content.as_bytes());
+            stream.extend_from_slice(b"\nendstream");
+            stream
+        },
+        b"<< /Type /Font /Subtype /Type0 /BaseFont /KozGoPr6N-Regular\n   \
+          /Encoding /UniJIS-UTF16-H /DescendantFonts [6 0 R] >>"
+            .to_vec(),
+        b"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /KozGoPr6N-Regular\n   \
+          /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >>\n   \
+          /FontDescriptor 7 0 R /DW 1000 >>"
+            .to_vec(),
+        b"<< /Type /FontDescriptor /FontName /KozGoPr6N-Regular /Flags 4\n   \
+          /FontBBox [0 -120 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120\n   \
+          /CapHeight 740 /StemV 80 >>"
+            .to_vec(),
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(object);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
 /// A page a quarter of A4 each way covered by the committed 620 × 877
 /// irreversible JPEG 2000 codestream.
 pub fn jpx_page_part() -> Vec<u8> {

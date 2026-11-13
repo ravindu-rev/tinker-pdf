@@ -881,8 +881,11 @@ pub fn parse_record(text: &str) -> Option<FileResult> {
                     });
                 }
             }
+            // A child that carries the CJK faces alone carries faces a run
+            // without them would record as the no-faces bar, so it is read as
+            // one that carries faces, and the run refuses it unless it asked.
             "build" => {
-                if rest.trim() == "bundled-fonts" {
+                if matches!(rest.trim(), "bundled-fonts" | "cjk-fonts") {
                     bundled_faces = true;
                 }
             }
@@ -1778,6 +1781,37 @@ mod tests {
         let result = parse_record(text).expect("a record");
         assert!(!result.metamorphic["rotate"].held());
         assert!(!result.metamorphic["rotate"].compared());
+    }
+
+    /// A child that carries faces says so on a `build` line — the bundled
+    /// set, or the CJK faces alone, which the benchmark set's child carries —
+    /// and either is read as carrying faces, so a run that did not ask for
+    /// them refuses its record; a record with neither line carries none.
+    #[test]
+    fn a_child_that_carries_faces_is_read_as_carrying_them() {
+        for line in ["build bundled-fonts", "build cjk-fonts"] {
+            let text = GOOD.replace(
+                "ms 40",
+                &format!(
+                    "{line}
+ms 40"
+                ),
+            );
+            let result = parse_record(&text).expect("it is complete");
+            assert!(result.bundled_faces, "{line}");
+        }
+        let result = parse_record(GOOD).expect("it is complete");
+        assert!(
+            !result.bundled_faces,
+            "a child that says nothing carries none"
+        );
+        let text = GOOD.replace(
+            "ms 40",
+            "build hyphenation
+ms 40",
+        );
+        let result = parse_record(&text).expect("it is complete");
+        assert!(!result.bundled_faces, "another feature is no face");
     }
 
     #[test]

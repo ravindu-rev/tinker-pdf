@@ -511,13 +511,20 @@ fn lists(dir: &Path, side: &str) -> Result<Vec<Group>, String> {
 
 /// The features the benchmark set is built with where a side's facade
 /// manifest declares them (`docs/verification.md`, "The set is built with
-/// `--features hyphenation`"): `hyphenation`, whose dictionaries the layout
-/// group's hyphenated book needs. A side from before a feature was declared
+/// `--features hyphenation,cjk-fonts`"): `hyphenation`, whose dictionaries
+/// the layout group's hyphenated book needs, and `cjk-fonts`, whose faces the
+/// render group's two CJK operations draw through and which no other
+/// operation's input asks for. A side from before a feature was declared
 /// builds without it, and its lists hold no operation that needs it.
-pub const BENCH_FEATURES: &[&str] = &["hyphenation"];
+pub const BENCH_FEATURES: &[&str] = &["hyphenation", "cjk-fonts"];
 
 /// The facade's manifest, from a checkout's root.
 const FACADE_MANIFEST: &str = "crates/tinker-pdf/Cargo.toml";
+
+/// `tpdf`'s manifest, from a checkout's root: the CLI operations' child is
+/// built with each of [`BENCH_FEATURES`] it declares, so a CJK operation's
+/// child carries the faces its bench does.
+const TPDF_MANIFEST: &str = "tools/tpdf/Cargo.toml";
 
 /// Of [`BENCH_FEATURES`], each that `manifest`, a `Cargo.toml`, declares as a
 /// key of its `[features]` table, in [`BENCH_FEATURES`]' order. A name met
@@ -545,7 +552,8 @@ pub fn declared_bench_features(manifest: &str) -> Vec<&'static str> {
 /// The release `tpdf` and the group's release bench binary, built in the
 /// checkout at `dir` into its own target directory, so the CLI operations
 /// run the `tpdf` beside the bench, the bench with the [`BENCH_FEATURES`] the
-/// checkout's facade declares: the bench binary's path.
+/// checkout's facade declares and `tpdf` with those its own manifest
+/// declares: the bench binary's path.
 fn build(dir: &Path, group: &str) -> Result<PathBuf, String> {
     let target = dir.join("target");
     let cargo = |args: &[&str]| {
@@ -557,7 +565,13 @@ fn build(dir: &Path, group: &str) -> Result<PathBuf, String> {
             .stdin(Stdio::null());
         command
     };
-    let tpdf = ["build", "--release", "-p", "tpdf"];
+    let tpdf_manifest = std::fs::read_to_string(dir.join(TPDF_MANIFEST))
+        .map_err(|error| format!("{}: {error}", dir.join(TPDF_MANIFEST).display()))?;
+    let tpdf_features = declared_bench_features(&tpdf_manifest).join(",");
+    let mut tpdf = vec!["build", "--release", "-p", "tpdf"];
+    if !tpdf_features.is_empty() {
+        tpdf.extend(["--features", tpdf_features.as_str()]);
+    }
     let status = cargo(&tpdf)
         .status()
         .map_err(|error| format!("cargo did not start: {error}"))?;
@@ -1065,8 +1079,22 @@ mod tests {
         );
         assert!(declared_bench_features(before).is_empty());
         assert!(declared_bench_features("").is_empty());
+        let both = "[features]
+cjk-fonts = []
+hyphenation = []
+";
+        assert_eq!(
+            declared_bench_features(both),
+            ["hyphenation", "cjk-fonts"],
+            "in BENCH_FEATURES' order, whatever the manifest's"
+        );
         let committed = std::fs::read_to_string(crate::repo_root().join(FACADE_MANIFEST))
             .expect("the facade's manifest");
         assert_eq!(declared_bench_features(&committed), BENCH_FEATURES);
+        // `tpdf` declares the faces and no dictionaries: the child the CLI
+        // operations run carries what the CJK operation's child must.
+        let child = std::fs::read_to_string(crate::repo_root().join(TPDF_MANIFEST))
+            .expect("tpdf's manifest");
+        assert_eq!(declared_bench_features(&child), ["cjk-fonts"]);
     }
 }

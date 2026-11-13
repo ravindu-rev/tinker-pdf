@@ -34,6 +34,7 @@
     { "id": "render/the quarter-size text page to PNG at 300 dpi, CLI", "why": "a child process" },
     { "id": "render/8 quarter-size pages to PNG at 150 dpi, 1 job, CLI", "why": "a child process" },
     { "id": "render/8 quarter-size pages to PNG at 150 dpi, 4 jobs, CLI", "why": "a child process" },
+    { "id": "render/the CJK page at 150 dpi, bundled face, first render, CLI", "why": "a child process" },
     { "id": "write/rewrite 100 pages, CLI", "why": "a child process" },
     { "id": "write/rewrite 1000 pages, CLI", "why": "a child process" },
     { "id": "write/subset-on-save of 4 pages, CLI", "why": "a child process" },

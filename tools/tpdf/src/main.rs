@@ -2721,6 +2721,14 @@ const BUNDLED: &str = "bundled";
 /// than a flag anybody can pass.
 const BUNDLED_FACES: bool = cfg!(feature = "bundled-fonts");
 
+/// Whether this build carries the four CJK faces without the Liberation
+/// set, which no corpus bar measures: the benchmark set's child is built so
+/// (`tools/tpdf/Cargo.toml`), and its record says it, so the corpus runner
+/// refuses it as it refuses any child that carries faces a run did not ask
+/// for. A `bundled-fonts` build carries the CJK faces too and says that
+/// instead.
+const CJK_FACES: bool = cfg!(feature = "cjk-fonts");
+
 /// This process's peak resident set in bytes, or `None` where the platform
 /// will not say.
 ///
@@ -3066,6 +3074,8 @@ fn probe_to(
     say!(out, "opened yes");
     if BUNDLED_FACES {
         say!(out, "build bundled-fonts");
+    } else if CJK_FACES {
+        say!(out, "build cjk-fonts");
     }
     say!(out, "ladder {:?}", doc.ladder_level());
 

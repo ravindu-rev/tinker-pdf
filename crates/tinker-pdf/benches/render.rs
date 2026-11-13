@@ -25,6 +25,17 @@
 //! place that arm draws the text page at 150 dpi; and so is the page of
 //! colour glyphs, the write group's page (`support::colour`), which the
 //! planning baseline's arm sets in the face's outlines.
+//!
+//! The two CJK operations draw a page of unembedded CJK text through the
+//! bundled face (FT-01.11), which a process makes ready on its first request
+//! for it: its first render through the CLI, a process a call, and a second
+//! in-process after an untimed first. They need the face, so they are
+//! declared with `cjk-fonts`, which the set is built with as it is with
+//! `hyphenation` (`docs/verification.md`, "The benches") and which
+//! `bundled-fonts` turns on; a build without it leaves them out, and the
+//! planning baseline, which has no such feature, has no side on them. No run
+//! has timed them yet, so the design's render table gives their window as
+//! untimed.
 
 mod support;
 
@@ -429,6 +440,24 @@ fn four_intents(page: &Page) {
 #[cfg(tinker_planning_baseline)]
 fn four_intents(_page: &Page) {}
 
+/// Before its runs, the CJK page is held to what its operations time: drawn
+/// at 150 dpi it reports nothing and inks its glyphs, so a build whose face
+/// did not answer cannot time a page of `.notdef`s, or of nothing.
+#[cfg(feature = "cjk-fonts")]
+fn drawn_through_the_bundled_face(page: &Page) {
+    let drawn = page.render(&RenderOptions::at_dpi(150.0));
+    assert!(
+        drawn.warnings.is_empty(),
+        "the CJK page draws through the bundled face: {:?}",
+        drawn.warnings
+    );
+    assert!(
+        inked(&drawn) > 50_000,
+        "the CJK page inks its glyphs: {} pixels",
+        inked(&drawn)
+    );
+}
+
 /// The version 5 image page (`inputs::v5_page`), its one image decoded whole,
 /// held before it is timed to draw its picture through its profile: unlike
 /// the same samples as `/DeviceRGB`, which is how a picture whose profile the
@@ -766,6 +795,10 @@ fn render(c: &mut Criterion) {
         LazyCell::new(|| inputs::store().file("dense-quarter-1.pdf", || quarter_text.clone()));
     let eight_pdf =
         LazyCell::new(|| inputs::store().file("dense-quarter-8.pdf", || quarter_eight.clone()));
+    #[cfg(feature = "cjk-fonts")]
+    let cjk_bytes = LazyCell::new(|| stored("cjk.pdf", inputs::cjk_page));
+    #[cfg(feature = "cjk-fonts")]
+    let cjk_pdf = LazyCell::new(|| inputs::store().file("cjk.pdf", || cjk_bytes.clone()));
 
     let mut group = Group::new(c, "render");
 
@@ -1405,6 +1438,56 @@ fn render(c: &mut Criterion) {
                 ])
             });
             op.after(move || assert_eight_pngs(&ran, &written, quarter_eight));
+        },
+    );
+
+    // ---- a page of unembedded CJK text through the bundled face ----------
+
+    // FT-01.11: `inputs::cjk_page`, its Adobe-Japan1 text drawn through
+    // Source Han Sans JP, which a process makes ready — the face's WOFF2 file
+    // unpacked and the collection's CMaps inverted — on its first request.
+    // The first render is a `tpdf` child a call, so every call is a process's
+    // first; the child must carry the face, and one that does not reports the
+    // font, which the check after the runs refuses.
+    #[cfg(feature = "cjk-fonts")]
+    group.operation(
+        "the CJK page at 150 dpi, bundled face, first render, CLI",
+        |op| {
+            let (width, height) = rendered_size(&cjk_bytes, 150.0);
+            let cjk_pdf: &Path = &cjk_pdf;
+            let first = Cli::new("render-cjk-first");
+            let out = first.out("png");
+            let (ran, written) = (first.clone(), out.clone());
+            op.per(Per::Pixels(u64::from(width) * u64::from(height)));
+            op.iter(move || first.run(&[&"render", &cjk_pdf, &"--out", &out, &"--dpi", &"150"]));
+            op.after(move || {
+                assert_eq!(
+                    ran.pngs(&written),
+                    [("cjk-0001.png".to_string(), width, height)],
+                    "one PNG, the page at 150 dpi"
+                );
+                let said = ran.stdout();
+                assert!(
+                    !said.lines().any(|line| line.starts_with("  ")),
+                    "the child drew the page through the bundled face and reported nothing; \
+                     a child built without `cjk-fonts` reports the font: {said}"
+                );
+            });
+        },
+    );
+    // The second: the page opened once and drawn once, untimed, so the face
+    // is ready and the collection inverted before the first timed render.
+    #[cfg(feature = "cjk-fonts")]
+    group.operation(
+        "the CJK page at 150 dpi, bundled face, second render",
+        |op| {
+            let cjk = Document::open(cjk_bytes.clone())
+                .expect("the CJK page opens")
+                .page(0)
+                .expect("a page");
+            drawn_through_the_bundled_face(&cjk);
+            op.per(renders(&cjk, 150.0, 1));
+            op.iter(move || black_box(cjk.render(&RenderOptions::at_dpi(150.0))));
         },
     );
 
