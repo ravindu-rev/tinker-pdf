@@ -1311,3 +1311,292 @@ fn painted_with(resources: &str, content: &str, image: Vec<u8>) -> Document {
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02X}")).collect()
 }
+
+// ---- shadings on plates (RC-04.13) ------------------------------------------
+
+/// One shading case: its dictionary — its function object 5 where it is
+/// function-based, a `/DeviceN`'s tint transform object 6 — the program of
+/// object 5 and how many outputs it has, the plan's uses, and the tint each
+/// plate it names takes at a point of the page, from the shading's own
+/// function there; every other plate none.
+struct ShadeCase {
+    what: &'static str,
+    dict: String,
+    program: &'static str,
+    outputs: usize,
+    plates: &'static [(&'static str, PlateUse)],
+    tints: fn(f64, f64) -> Vec<(&'static str, f64)>,
+}
+
+/// An axial shading's parameter along `[0 0 40 0]`, extended.
+fn along(x: f64, _y: f64) -> f64 {
+    (x / 40.0).clamp(0.0, 1.0)
+}
+
+/// A radial shading's parameter between a point at `(20, 10)` and the circle
+/// of radius 15 about it, extended.
+fn outward(x: f64, y: f64) -> f64 {
+    (((x - 20.0).powi(2) + (y - 10.0).powi(2)).sqrt() / 15.0).clamp(0.0, 1.0)
+}
+
+/// The cases: types 1, 2 and 3 in a `/Separation`, a two-colorant
+/// `/DeviceN` and DeviceCMYK, and a `/DeviceN` naming a spot the plan
+/// composites, which reverts to its alternate.
+fn shade_cases() -> Vec<ShadeCase> {
+    let gold = "[/Separation /Gold /DeviceCMYK << /FunctionType 2 /Domain [0 1] \
+                /C0 [0 0 0 0] /C1 [1 0 0 0] /N 1 >>]";
+    let gold_silver = "[/DeviceN [/Gold /Silver] /DeviceCMYK 6 0 R]";
+    let gold_teal = "[/DeviceN [/Gold /Teal] /DeviceCMYK 6 0 R]";
+    let axial = |space: &str, c0: &str, c1: &str| {
+        format!(
+            "/ShadingType 2 /ColorSpace {space} /Coords [0 0 40 0] /Extend [true true] \
+             /Function << /FunctionType 2 /Domain [0 1] /C0 [{c0}] /C1 [{c1}] /N 1 >>"
+        )
+    };
+    let radial = |space: &str, c0: &str, c1: &str| {
+        format!(
+            "/ShadingType 3 /ColorSpace {space} /Coords [20 10 0 20 10 15] /Extend [true true] \
+             /Function << /FunctionType 2 /Domain [0 1] /C0 [{c0}] /C1 [{c1}] /N 1 >>"
+        )
+    };
+    let function_based = |space: &str| {
+        format!(
+            "/ShadingType 1 /ColorSpace {space} /Domain [0 1 0 1] /Matrix [40 0 0 20 0 0] \
+             /Function 5 0 R"
+        )
+    };
+    vec![
+        ShadeCase {
+            what: "an axial /Separation",
+            dict: axial(gold, "0", "1"),
+            program: "",
+            outputs: 1,
+            plates: &[],
+            tints: |x, y| vec![("Gold", along(x, y))],
+        },
+        ShadeCase {
+            what: "an axial /DeviceN",
+            dict: axial(gold_silver, "0.2 0.8", "0.9 0.1"),
+            program: "",
+            outputs: 1,
+            plates: &[],
+            tints: |x, y| {
+                let t = along(x, y);
+                vec![("Gold", 0.2 + 0.7 * t), ("Silver", 0.8 - 0.7 * t)]
+            },
+        },
+        ShadeCase {
+            what: "an axial DeviceCMYK",
+            dict: axial("/DeviceCMYK", "0 0.2 0.4 0", "1 0.2 0 0.6"),
+            program: "",
+            outputs: 1,
+            plates: &[],
+            tints: |x, y| {
+                let t = along(x, y);
+                vec![
+                    ("Cyan", t),
+                    ("Magenta", 0.2),
+                    ("Yellow", 0.4 - 0.4 * t),
+                    ("Black", 0.6 * t),
+                ]
+            },
+        },
+        ShadeCase {
+            what: "a radial /Separation",
+            dict: radial(gold, "0", "1"),
+            program: "",
+            outputs: 1,
+            plates: &[],
+            tints: |x, y| vec![("Gold", outward(x, y))],
+        },
+        ShadeCase {
+            what: "a radial /DeviceN",
+            dict: radial(gold_silver, "0 1", "1 0"),
+            program: "",
+            outputs: 1,
+            plates: &[],
+            tints: |x, y| {
+                let t = outward(x, y);
+                vec![("Gold", t), ("Silver", 1.0 - t)]
+            },
+        },
+        ShadeCase {
+            what: "a radial DeviceCMYK",
+            dict: radial("/DeviceCMYK", "0 0 0 0", "1 1 0 0.5"),
+            program: "",
+            outputs: 1,
+            plates: &[],
+            tints: |x, y| {
+                let t = outward(x, y);
+                vec![
+                    ("Cyan", t),
+                    ("Magenta", t),
+                    ("Yellow", 0.0),
+                    ("Black", 0.5 * t),
+                ]
+            },
+        },
+        ShadeCase {
+            what: "a function-based /Separation",
+            dict: function_based(gold),
+            program: "{ add 2 div }",
+            outputs: 1,
+            plates: &[],
+            tints: |x, y| vec![("Gold", (x / 40.0 + y / 20.0) / 2.0)],
+        },
+        ShadeCase {
+            what: "a function-based /DeviceN",
+            dict: function_based(gold_silver),
+            program: "{ 0 add }",
+            outputs: 2,
+            plates: &[],
+            tints: |x, y| vec![("Gold", x / 40.0), ("Silver", y / 20.0)],
+        },
+        ShadeCase {
+            what: "a function-based DeviceCMYK",
+            dict: function_based("/DeviceCMYK"),
+            program: "{ 2 copy add 2 div 0 }",
+            outputs: 4,
+            plates: &[],
+            tints: |x, y| {
+                let (u, v) = (x / 40.0, y / 20.0);
+                vec![
+                    ("Cyan", u),
+                    ("Magenta", v),
+                    ("Yellow", (u + v) / 2.0),
+                    ("Black", 0.0),
+                ]
+            },
+        },
+        ShadeCase {
+            what: "an axial /DeviceN of a composited spot",
+            dict: axial(gold_teal, "0.2 0.8", "0.9 0.1"),
+            program: "",
+            outputs: 1,
+            plates: &[("Teal", PlateUse::Composite)],
+            tints: |x, y| {
+                let t = along(x, y);
+                vec![("Cyan", 0.2 + 0.7 * t), ("Magenta", 0.8 - 0.7 * t)]
+            },
+        },
+    ]
+}
+
+/// A page of 40 by 20 points over a process backdrop painting `case`'s
+/// shading with `sh` over the whole page, or, `as_pattern`, as a shading
+/// pattern filling the page; object 5 is the function-based shading's own
+/// type 4 function and object 6 the `/DeviceN`s' tint transform, `{ 0 0 }`,
+/// onto cyan and magenta.
+fn shade_page(case: &ShadeCase, as_pattern: bool) -> Document {
+    let dict = &case.dict;
+    let (resources, draw) = if as_pattern {
+        (
+            format!("/Pattern << /P << /PatternType 2 /Shading << {dict} >> >> >>"),
+            "/Pattern cs /P scn 0 0 40 20 re f",
+        )
+    } else {
+        (format!("/Shading << /Sh << {dict} >> >>"), "/Sh sh")
+    };
+    let content = format!("0.1 0.2 0.3 0.4 k 0 0 40 20 re f {draw}");
+    let range = vec!["0 1"; case.outputs].join(" ");
+    let objects = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 20] /Resources << {resources} >> \
+             /Contents 4 0 R >>"
+        )
+        .into_bytes(),
+        render_support::raw_stream("", content.as_bytes()),
+        render_support::raw_stream(
+            &format!("/FunctionType 4 /Domain [0 1 0 1] /Range [{range}]"),
+            case.program.as_bytes(),
+        ),
+        render_support::raw_stream(
+            "/FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1]",
+            b"{ 0 0 }",
+        ),
+    ];
+    Document::open(render_support::raw_pdf(&objects)).expect("it opens")
+}
+
+/// **A shading in each ink space lands on its plates** (RC-04.13; the
+/// design's "Shadings on plates").
+///
+/// Function-based, axial and radial shadings in a `/Separation`, a
+/// two-colorant `/DeviceN` and DeviceCMYK, and an axial one in a `/DeviceN`
+/// naming a spot the plan composites, painted by `sh` and as a shading
+/// pattern over a backdrop of process ink: at every pixel each plate the
+/// shading names holds the tint its own function gives at the pixel's
+/// centre, `round(255 × f)`, within the one level of 255 ruling 22 allows a
+/// stepped parameter, and every other plate no ink; a spot with no plate
+/// reverts the whole colour to its alternate on the process plates.
+#[test]
+fn a_shading_in_each_ink_space_lands_on_its_plates() {
+    for case in shade_cases() {
+        for as_pattern in [false, true] {
+            let doc = shade_page(&case, as_pattern);
+            let page = doc.page(0).expect("a page");
+            let plates = separations(&page, &RenderOptions::default(), case.plates);
+            let what = format!(
+                "{} {}",
+                case.what,
+                if as_pattern { "as a pattern" } else { "by sh" }
+            );
+            assert!(plates.warnings.is_empty(), "{what}: {:?}", plates.warnings);
+            assert_eq!((plates.width, plates.height), (40, 20), "{what}");
+            let names = plate_names(&plates);
+            for py in 0..20u32 {
+                for px in 0..40u32 {
+                    let (x, y) = (f64::from(px) + 0.5, 20.0 - (f64::from(py) + 0.5));
+                    let named = (case.tints)(x, y);
+                    for name in &names {
+                        let expected = named
+                            .iter()
+                            .find(|(plate, _)| plate == name)
+                            .map_or(0, |(_, tint)| byte(*tint));
+                        let got = tint_at(&plates, name, px, py);
+                        assert!(
+                            got.abs_diff(expected) <= 1,
+                            "{what}: {name} at ({px}, {py}) is {got}, its function's {expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// **A shading in `/None` has no effect on the page** (RC-04.13; 8.6.6.4):
+/// by `sh` and as a pattern, every plate is the backdrop's.
+#[test]
+fn a_shading_in_none_paints_nothing() {
+    let none = ShadeCase {
+        what: "an axial /None",
+        dict: "/ShadingType 2 /ColorSpace [/Separation /None /DeviceCMYK \
+               << /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [1 1 1 1] /N 1 >>] \
+               /Coords [0 0 40 0] /Extend [true true] \
+               /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >>"
+            .to_string(),
+        program: "",
+        outputs: 1,
+        plates: &[],
+        tints: |_, _| Vec::new(),
+    };
+    for as_pattern in [false, true] {
+        let doc = shade_page(&none, as_pattern);
+        let page = doc.page(0).expect("a page");
+        let plates = separations(&page, &RenderOptions::default(), &[]);
+        assert_eq!(plate_names(&plates), PROCESS);
+        for (name, tint) in PROCESS.iter().zip([0.1, 0.2, 0.3, 0.4]) {
+            assert!(
+                plate(&plates, name)
+                    .expect("a process plate")
+                    .tints
+                    .iter()
+                    .all(|got| *got == byte(tint)),
+                "pattern {as_pattern}: {name} is the backdrop's"
+            );
+        }
+    }
+}

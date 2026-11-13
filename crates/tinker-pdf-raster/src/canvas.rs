@@ -1022,6 +1022,20 @@ impl Canvas {
         self.blend_pixel_level(x, y, color, ink, level, mode);
     }
 
+    /// As [`Canvas::blend_pixel_inked`], in a tint per colour channel rather
+    /// than a colour: on a [`PixelFormat::Plates`] canvas each channel takes
+    /// the tint of the same index, a channel past `tints` taking no ink, at
+    /// `alpha` — a shading's or a mesh's colour on plates; on a canvas of any
+    /// other format the first four are painted as the DeviceCMYK colour they
+    /// are.
+    pub fn blend_tints(&mut self, x: u32, y: u32, tints: &[u8], alpha: f64, mode: BlendMode) {
+        if !alpha.is_finite() {
+            return;
+        }
+        let level = nearest_level(alpha.clamp(0.0, 1.0) * 255.0);
+        self.blend_tints_level(x, y, tints, 255, level, mode);
+    }
+
     /// As [`Canvas::blend_pixel_inked`], with the opacity already a level,
     /// 0..=255: how an image pixel reaches the canvas, its level made by
     /// [`Opacity`] from the draw's alpha and the pixel's own factors.
@@ -5790,6 +5804,52 @@ mod tests {
         rgb.fill_mask_plates(&full, &ink, 1.0, BlendMode::Normal);
         let (r, g, b) = cmyk_to_rgb(30, 0, 60, 0);
         assert_eq!(&rgb.data[..3], &[r, g, b]);
+    }
+
+    /// **A pixel of tints paints as a plate ink does** (RC-04.13): on a
+    /// plates canvas `blend_tints` composites each channel the tint of its
+    /// index, a channel past the tints taking no ink, as `fill_mask_plates`
+    /// composites the same tints through a whole pixel — at alphas 1 and 0.6,
+    /// under `Normal` and `Multiply`, over a backdrop in every channel; on
+    /// `CmykA8` the first four paint as the DeviceCMYK colour they are; a
+    /// non-finite or zero alpha and a pixel off the canvas paint nothing.
+    #[test]
+    fn a_pixel_of_tints_paints_as_a_plate_ink_does() {
+        let full = solid(0, 0, 2, 2, 255);
+        let tints = [10, 20, 30, 40, 50];
+        let ink = PlateInk::named(spots(2), &[(0, 10), (1, 20), (2, 30), (3, 40), (4, 50)]);
+        let mut backdrop = Canvas::plates(2, 2, 2, Color::WHITE).expect("under the cap");
+        backdrop.fill_mask_plates(
+            &full,
+            &PlateInk::named(
+                spots(2),
+                &[(0, 40), (1, 80), (2, 120), (3, 160), (4, 200), (5, 240)],
+            ),
+            1.0,
+            BlendMode::Normal,
+        );
+        for mode in [BlendMode::Normal, BlendMode::Multiply] {
+            for alpha in [1.0, 0.6] {
+                let mut filled = backdrop.clone();
+                filled.fill_mask_plates(&full, &ink, alpha, mode);
+                let mut blended = backdrop.clone();
+                for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    blended.blend_tints(x, y, &tints, alpha, mode);
+                }
+                assert_eq!(blended.data, filled.data, "{mode:?} at {alpha}");
+            }
+        }
+
+        let mut cmyk = Canvas::new(2, 2, PixelFormat::CmykA8, Color::WHITE);
+        cmyk.blend_tints(0, 0, &tints, 1.0, BlendMode::Normal);
+        assert_eq!(&cmyk.data[..5], &[10, 20, 30, 40, 255], "its process ink");
+
+        let mut untouched = backdrop.clone();
+        untouched.blend_tints(0, 0, &tints, f64::NAN, BlendMode::Normal);
+        untouched.blend_tints(1, 0, &tints, 0.0, BlendMode::Normal);
+        untouched.blend_tints(2, 0, &tints, 1.0, BlendMode::Normal);
+        untouched.blend_tints(0, 7, &tints, 1.0, BlendMode::Normal);
+        assert_eq!(untouched.data, backdrop.data, "nothing painted");
     }
 
     /// Ruling 5: a plates canvas standing at a device pixel takes a mask in

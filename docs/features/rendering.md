@@ -986,6 +986,30 @@ stored and inline, and
 `an_image_of_none_or_of_light_reaches_plates_as_a_light_page_has_it`). A light
 render decodes as it did.
 
+**Shadings on plates** (the design's "Shadings on plates"). The colorant
+answer is the render crate's `colorant_tints`, with `tint_byte` its tint's
+byte, which a page's resources give the interpreter for a flat colour and the
+renderer reads a shading's colours by. On plates by a plan an axial, radial
+or function-based shading, painted by `sh` or as a shading pattern, takes its
+road to the plates once a paint, from its space (`Shading::space`):
+DeviceCMYK each component onto its process plate; a `/Separation` or plain
+`/DeviceN` every name of which has a plate each component onto its
+colorant's; any other space naming colorants — a separation with a spot the
+plan composites, an `NChannel` space, `/All` — through `colorant_tints` and
+`PlatePlan::sample_tints` colour by colour, as a flat colour of the space and
+components paints. Each pixel's tints are read off the function outputs the
+same evaluation converts to light (`ShadingScratch::outputs`), so a sweep on
+plates keeps no colour table and evaluates its function at every pixel it
+paints, and they composite through `Canvas::blend_tints` at the pixel's
+coverage and the paint's alpha; under `Normal` a shading knocks out every
+plate it does not name. A shading in `/None` has no effect on the page, and
+one in a space naming no colorant reaches the process plates as its light
+turned into ink (`a_shading_in_each_ink_space_lands_on_its_plates`, types 1, 2
+and 3 by `sh` and as a pattern, each plate the tint the test reads off the
+shading's function at every pixel centre, within ruling 22's level, and
+`a_shading_in_none_paints_nothing`). A light sweep tabulates and converts as
+it did.
+
 **`/Lab` composites in Lab too.** Its components are not in the unit
 interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`
 encodes them into bytes (`L/100`, `(a + 128)/255`, `(b + 128)/255`) and

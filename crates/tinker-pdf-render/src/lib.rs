@@ -13,6 +13,7 @@
 use core::mem;
 use tinker_pdf_raster::blend::BlendMode as RasterBlend;
 
+mod colorants;
 pub mod display;
 mod glyph;
 mod glyph_cache;
@@ -27,9 +28,10 @@ use std::sync::Arc;
 
 use tinker_pdf_color::icc::Conversion;
 
+pub use colorants::{colorant_tints, tint_byte};
 pub use display::{Admission, DisplayRecorder, MAX_DISPLAY_LIST_BYTES};
 pub use mesh::{Mesh, MeshParams};
-use plates::spotless;
+use plates::{spotless, SpaceTints};
 pub use plates::{PlatePaint, PlatePlan, PlateUse};
 pub use shading::{ColorTable, Shading, ShadingScratch, TABLE_ENTRIES};
 use tinker_pdf_color::{ColorSpace, Function};
@@ -2498,6 +2500,17 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         }
     }
 
+    /// How colours of `space` reach the canvas drawn on now by plate
+    /// (RC-04.13, RC-04.14): on plates by a plan, the space's road to its
+    /// tints ([`SpaceTints`]); `None` on every other canvas, and for a space
+    /// naming no colorant, whose colours are their light turned into ink.
+    fn shading_plates(&self, space: &ColorSpace) -> Option<SpaceTints> {
+        let (PixelFormat::Plates { spots }, Some(plan)) = (self.canvas.format, &self.plan) else {
+            return None;
+        };
+        SpaceTints::of(space, plan, spots)
+    }
+
     /// The state a paint is made with: `state` itself, or under forced
     /// colours a copy whose paint is opaque black and `Normal`, with no ink,
     /// no colorants and no pattern ([`Renderer::with_forced_colours`]).
@@ -3777,6 +3790,12 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
         let Some(inverse) = invert(&to_device) else {
             return true;
         };
+        // On plates by a plan, the colours' tints (RC-04.13); a space naming
+        // only `/None` has no effect on the page.
+        let mut plates = self.shading_plates(shading.space());
+        if plates.as_ref().is_some_and(SpaceTints::paints_nothing) {
+            return true;
+        }
         self.record_shading(
             shading,
             &inverse,
@@ -3795,8 +3814,9 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
             area.overlap_at((ox, oy), self.canvas.width, self.canvas.height);
         let mut scratch = ShadingScratch::converting(conversion);
         // P-14.5: through a table, where the shape's rectangle on the whole
-        // page asks for more colours than the table holds.
-        if let Some((space, function)) = shading.parametric() {
+        // page asks for more colours than the table holds — but not on plates,
+        // whose tints are read off each colour's own evaluation.
+        if let (Some((space, function)), None) = (shading.parametric(), &plates) {
             scratch.tabulate(space, function, 0.0, 1.0, self.page_region(shape).area());
         }
         for row in y_start..y_end {
@@ -3820,8 +3840,24 @@ impl<'g, G: GlyphSource> Renderer<'g, G> {
                     continue;
                 };
                 let weight = alpha * f64::from(coverage) / 255.0;
-                self.canvas
-                    .blend_pixel_with(col, row, Color { r, g, b, a: 0xFF }, weight, mode);
+                match plates.as_mut() {
+                    Some(plates) => {
+                        if let Some(tints) =
+                            plates.tints(shading.space(), scratch.outputs(), (r, g, b))
+                        {
+                            self.canvas.blend_tints(col, row, tints, weight, mode);
+                        }
+                    }
+                    None => {
+                        self.canvas.blend_pixel_with(
+                            col,
+                            row,
+                            Color { r, g, b, a: 0xFF },
+                            weight,
+                            mode,
+                        );
+                    }
+                }
             }
         }
         self.release_removal(held);
@@ -6342,6 +6378,12 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             return;
         };
         tally(&mut self.counts.drawn_shadings);
+        // On plates by a plan, the colours' tints (RC-04.13); a space naming
+        // only `/None` has no effect on the page.
+        let mut plates = self.shading_plates(shading.space());
+        if plates.as_ref().is_some_and(SpaceTints::paints_nothing) {
+            return;
+        }
         self.record_shading(&shading, &inverse, shape_area.as_ref(), set.entry);
         let (ox, oy, width, height) = self.device();
         let (x_start, y_start, x_end, y_end) =
@@ -6357,8 +6399,9 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
             self.knockout_restore(&restore);
         }
         let mut scratch = ShadingScratch::converting(conversion);
-        // P-14.5, decided on the clip's rectangle on the whole page.
-        if let Some((space, function)) = shading.parametric() {
+        // P-14.5, decided on the clip's rectangle on the whole page, and not
+        // on plates, as `fill_with_shading` says.
+        if let (Some((space, function)), None) = (shading.parametric(), &plates) {
             scratch.tabulate(space, function, 0.0, 1.0, self.page_limit().area());
         }
         let held = self.hold_removal(&set.removal);
@@ -6383,8 +6426,24 @@ impl<G: GlyphSource> Device for Renderer<'_, G> {
                     continue;
                 };
                 let effective = alpha * f64::from(clip) / 255.0;
-                self.canvas
-                    .blend_pixel_with(col, row, Color::rgb(r, g, b), effective, mode);
+                match plates.as_mut() {
+                    Some(plates) => {
+                        if let Some(tints) =
+                            plates.tints(shading.space(), scratch.outputs(), (r, g, b))
+                        {
+                            self.canvas.blend_tints(col, row, tints, effective, mode);
+                        }
+                    }
+                    None => {
+                        self.canvas.blend_pixel_with(
+                            col,
+                            row,
+                            Color::rgb(r, g, b),
+                            effective,
+                            mode,
+                        );
+                    }
+                }
             }
         }
         self.release_removal(held);

@@ -1381,13 +1381,66 @@ fn separation_tiles_are_the_page(
     whole
 }
 
+/// A page of eight spots in `spaces` with shadings over it (RC-04.13): a
+/// radial shading painted by `sh` inside a clip and an axial one filling a
+/// rectangle as a shading pattern, each in a `/Separation` of one of the
+/// page's spots on a `/Separation` page and in a `/DeviceN` of two of them on
+/// a `/DeviceN` page, its tint transform the page's first extra object.
+fn spot_page_shaded(spaces: render_support::SpotSpaces) -> render_support::SpotPage {
+    let next = render_support::spot_page_next_object(8, spaces);
+    let separation = |name: &str, inks: &str| {
+        format!(
+            "[/Separation /{name} /DeviceCMYK << /FunctionType 2 /Domain [0 1] \
+             /C0 [0 0 0 0] /C1 [{inks}] /N 1 >>]"
+        )
+    };
+    let (radial, radial_ends, axial, axial_ends) = match spaces {
+        render_support::SpotSpaces::Separation => (
+            separation("Gold", "1 0 0 0"),
+            ("0.9", "0.1"),
+            separation("Silver", "0 1 0 0"),
+            ("0.2", "1"),
+        ),
+        render_support::SpotSpaces::DeviceN => (
+            format!("[/DeviceN [/Gold /Silver] /DeviceCMYK {next} 0 R]"),
+            ("0.9 0.2", "0.1 0.7"),
+            format!("[/DeviceN [/Teal /Gold] /DeviceCMYK {next} 0 R]"),
+            ("0.2 1", "1 0.3"),
+        ),
+    };
+    let function = |(c0, c1): (&str, &str)| {
+        format!("<< /FunctionType 2 /Domain [0 1] /C0 [{c0}] /C1 [{c1}] /N 1 >>")
+    };
+    let resources = format!(
+        "/Shading << /Sh0 << /ShadingType 3 /ColorSpace {radial} \
+         /Coords [46 33 0 46 33 9] /Extend [true false] /Function {} >> >> \
+         /Pattern << /P0 << /PatternType 2 /Shading << /ShadingType 2 /ColorSpace {axial} \
+         /Coords [2 0 28 0] /Function {} >> >> >>",
+        function(radial_ends),
+        function(axial_ends)
+    );
+    render_support::spot_page_with(
+        8,
+        spaces,
+        "q 34 28 24 10 re W n /Sh0 sh Q\n/Pattern cs /P0 scn 2 30 26 8 re f\n",
+        &resources,
+        &[render_support::raw_stream(
+            "/FunctionType 4 /Domain [0 1 0 1] /Range [0 1 0 1 0 1 0 1]",
+            b"{ 0 0 }",
+        )],
+    )
+}
+
 /// **Separation tiles are the page's plates** (RC-04.10; ruling 5): a page of
 /// eight spots, in `/Separation` spaces and in `/DeviceN` ones, beside process
 /// fills and text in an embedded face, drawn with its edges anti-aliased,
-/// upright, a quarter turned, and three quarters turned under a crop box
-/// offset from its media box, at 1x and 2x: at tile sizes none of which
-/// divides the page, every tile's plates are the whole page's plates under
-/// it, through the one pipeline `Page::render` tiles through.
+/// alone and with shadings in the spots' spaces over it by `sh` and as a
+/// shading pattern ([`spot_page_shaded`]; RC-04.13), upright, a quarter
+/// turned, and three quarters turned under a crop box offset from its media
+/// box, at 1x and 2x: at tile sizes none of which divides the page, every
+/// tile's plates are the whole page's plates under it, through the one
+/// pipeline `Page::render` tiles through, and what each page adds changes
+/// its plates.
 #[test]
 fn separation_tiles_are_the_page_s_plates() {
     let cropped = Shape {
@@ -1398,27 +1451,43 @@ fn separation_tiles_are_the_page_s_plates() {
         render_support::SpotSpaces::Separation,
         render_support::SpotSpaces::DeviceN,
     ] {
-        let fixture = render_support::spot_page(8, spaces);
+        let fixtures = [
+            ("spots", render_support::spot_page(8, spaces)),
+            ("spots and shadings", spot_page_shaded(spaces)),
+        ];
         for (shape, name) in [
             (Shape::PLAIN, "upright"),
             (Shape::turned(90), "turned"),
             (cropped, "turned and cropped"),
         ] {
-            let document = Document::open(shaped(fixture.bytes.clone(), shape)).expect("it opens");
-            let page = document.page(0).expect("a page");
             for (scale, tiles) in [(1.0, &[37u32, 23, 7][..]), (2.0, &[37, 23][..])] {
                 let options = RenderOptions {
                     scale,
                     ..RenderOptions::default()
                 };
-                let what = format!("{spaces:?} spots, {name}, at {scale}x");
-                for &tile in tiles {
-                    let whole = separation_tiles_are_the_page(&page, &options, tile, &what);
-                    assert!(
-                        whole.plates[4..]
-                            .iter()
-                            .all(|plate| plate.tints.iter().any(|tint| *tint != 0)),
-                        "{what}: every spot drew on its plate"
+                let mut drawn = Vec::new();
+                for (kind, fixture) in &fixtures {
+                    let document =
+                        Document::open(shaped(fixture.bytes.clone(), shape)).expect("it opens");
+                    let page = document.page(0).expect("a page");
+                    let what = format!("{spaces:?} {kind}, {name}, at {scale}x");
+                    let mut plates = Vec::new();
+                    for &tile in tiles {
+                        let whole = separation_tiles_are_the_page(&page, &options, tile, &what);
+                        assert!(
+                            whole.plates[4..]
+                                .iter()
+                                .all(|plate| plate.tints.iter().any(|tint| *tint != 0)),
+                            "{what}: every spot drew on its plate"
+                        );
+                        plates = whole.plates;
+                    }
+                    drawn.push(plates);
+                }
+                for ((kind, _), plates) in fixtures.iter().zip(&drawn).skip(1) {
+                    assert_ne!(
+                        plates, &drawn[0],
+                        "{spaces:?} {kind}, {name}, at {scale}x: what the page adds drew"
                     );
                 }
             }

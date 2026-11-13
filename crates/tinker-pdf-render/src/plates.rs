@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use tinker_pdf_color::{ColorSpace, Colorant};
 use tinker_pdf_content::{ColorantKind, ColorantTints};
 use tinker_pdf_raster::{PlateInk, Spots, MAX_SPOT_PLATES};
 
@@ -302,6 +303,114 @@ impl PlatePlan {
     }
 }
 
+/// How the colours of one shading's or mesh's space reach the plates of a
+/// render by a plan (`docs/design/overprint-separations.md`, "Shadings on
+/// plates"), chosen once a paint: each colour's tints are the ones a flat
+/// colour of the same space and components puts on them
+/// ([`crate::colorant_tints`], [`PlatePlan::sample_tints`]), read without
+/// asking the answer for every pixel where the space allows.
+pub(crate) struct SpaceTints {
+    /// The plates canvas's spot channels.
+    spots: Spots,
+    road: Road,
+    /// One colour's tints, a channel each, kept between pixels.
+    out: Vec<u8>,
+}
+
+/// The road a [`SpaceTints`] reads a colour's tints by.
+enum Road {
+    /// DeviceCMYK: each component onto its process plate.
+    Cmyk,
+    /// A `/Separation` or plain `/DeviceN` every name of which has a plate:
+    /// each component onto its colorant's plate, `/None`'s onto none.
+    Direct(Vec<Option<usize>>),
+    /// Every other space naming colorants: the colorants' answer and the
+    /// plan, colour by colour.
+    General(Arc<PlatePlan>),
+    /// A space naming only `/None`: no effect on the page (8.6.6.4).
+    Nothing,
+}
+
+impl SpaceTints {
+    /// How colours of `space` reach a plates canvas of `spots` spot channels
+    /// by `plan`, or `None` where the space names no colorant and its colours
+    /// are their light, which the canvas turns into ink.
+    pub(crate) fn of(
+        space: &ColorSpace,
+        plan: &Arc<PlatePlan>,
+        spots: Spots,
+    ) -> Option<SpaceTints> {
+        let initial = space.initial();
+        let tints = crate::colorant_tints(space, &initial, (255, 255, 255))?;
+        let width = 4 + spots.count();
+        let road = match (tints.kind, space) {
+            (ColorantKind::None, _) => Road::Nothing,
+            (ColorantKind::DirectCmyk, ColorSpace::DeviceCmyk) => Road::Cmyk,
+            (ColorantKind::Colorants, ColorSpace::Separation { colorants, .. }) => {
+                let channels: Option<Vec<Option<usize>>> = colorants
+                    .names
+                    .iter()
+                    .map(|name| match name {
+                        Colorant::Named(name) => plan
+                            .channel(name)
+                            .filter(|&channel| channel < width)
+                            .map(Some),
+                        Colorant::None => Some(None),
+                        Colorant::All => None,
+                    })
+                    .collect();
+                channels.map_or_else(|| Road::General(Arc::clone(plan)), Road::Direct)
+            }
+            _ => Road::General(Arc::clone(plan)),
+        };
+        Some(SpaceTints {
+            spots,
+            road,
+            out: vec![0; width],
+        })
+    }
+
+    /// Whether colours of the space paint nothing at all.
+    pub(crate) fn paints_nothing(&self) -> bool {
+        matches!(self.road, Road::Nothing)
+    }
+
+    /// The tints a colour of `space` with `components` and light `light`
+    /// puts on each plate, or `None` where it paints nothing.
+    pub(crate) fn tints(
+        &mut self,
+        space: &ColorSpace,
+        components: &[f64],
+        light: (u8, u8, u8),
+    ) -> Option<&[u8]> {
+        let at = |i: usize| crate::tint_byte(components.get(i).copied().unwrap_or(0.0));
+        match &self.road {
+            Road::Nothing => return None,
+            Road::Cmyk => {
+                self.out.fill(0);
+                for (channel, slot) in self.out.iter_mut().enumerate().take(4) {
+                    *slot = at(channel);
+                }
+            }
+            Road::Direct(channels) => {
+                self.out.fill(0);
+                for (component, channel) in channels.iter().enumerate() {
+                    if let Some(slot) = channel.and_then(|channel| self.out.get_mut(channel)) {
+                        *slot = at(component);
+                    }
+                }
+            }
+            Road::General(plan) => {
+                let colorants = crate::colorant_tints(space, components, light);
+                if !plan.sample_tints(colorants.as_ref(), light, self.spots, &mut self.out) {
+                    return None;
+                }
+            }
+        }
+        Some(&self.out)
+    }
+}
+
 /// What a colour puts on a plates canvas ([`PlatePlan::paint`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlatePaint {
@@ -557,5 +666,97 @@ mod tests {
             Some([9, 0, 0, 0])
         );
         assert_eq!(spotless(&PlateInk::named(spots(2), &[(5, 1)])), None);
+    }
+
+    /// A `/Separation` of the one name in `names`, or a plain `/DeviceN` of
+    /// them, `None` and `All` the reserved names, onto DeviceCMYK through the
+    /// PostScript `program`.
+    fn separation(names: &[&[u8]], program: &[u8]) -> ColorSpace {
+        let names: Vec<Colorant> = names
+            .iter()
+            .map(|name| match *name {
+                b"None" => Colorant::None,
+                b"All" => Colorant::All,
+                name => Colorant::Named(name.to_vec()),
+            })
+            .collect();
+        ColorSpace::Separation {
+            components: names.len(),
+            alternate: Box::new(ColorSpace::DeviceCmyk),
+            tint: Box::new(tinker_pdf_color::Function::PostScript {
+                domain: vec![(0.0, 1.0); names.len()],
+                range: vec![(0.0, 1.0); 4],
+                program: tinker_pdf_color::function::parse_postscript(program),
+            }),
+            colorants: tinker_pdf_color::Colorants {
+                names,
+                ..tinker_pdf_color::Colorants::default()
+            },
+        }
+    }
+
+    /// **A space's road paints as a flat colour of it does** (RC-04.13):
+    /// DeviceCMYK, a `/Separation` of a spot and of a process colorant, a
+    /// `/DeviceN` of spots, a process name and `/None` every name of which
+    /// has a plate, `/All`, and a `/DeviceN` naming a spot the plan
+    /// composites and one naming a spot the plan does not name — at every
+    /// colour of a lattice, the tints a shading's colour of the space takes
+    /// are the ones `PlatePlan::sample_tints` puts for the colorants' answer
+    /// on the same components; a space of `/None` alone paints nothing, and
+    /// one naming no colorant has no road, its colours being their light.
+    #[test]
+    fn a_space_s_road_paints_as_a_flat_colour_of_it_does() {
+        let plan = Arc::new(plan());
+        let spots = spots(3);
+        let light = (90, 120, 200);
+        let spaces = [
+            ("DeviceCMYK", ColorSpace::DeviceCmyk),
+            ("a spot", separation(&[b"Gold"], b"{ 0 0 0 }")),
+            (
+                "a process colorant",
+                separation(&[b"Magenta"], b"{ 0 exch 0 0 }"),
+            ),
+            (
+                "spots, a process name and /None",
+                separation(
+                    &[b"Orange", b"Cyan", b"None", b"Silver"],
+                    b"{ pop pop pop 0 0 0 }",
+                ),
+            ),
+            ("/All", separation(&[b"All"], b"{ dup dup dup }")),
+            (
+                "a composited spot",
+                separation(&[b"Gold", b"Violet"], b"{ 0 0 }"),
+            ),
+            (
+                "a spot of no plate",
+                separation(&[b"Teal", b"Gold"], b"{ 0 0 }"),
+            ),
+        ];
+        let levels = [0.0, 0.3, 0.7, 1.0];
+        for (what, space) in &spaces {
+            let mut road = SpaceTints::of(space, &plan, spots).expect("a space naming colorants");
+            assert!(!road.paints_nothing(), "{what}");
+            let count = space.components();
+            for index in 0..levels.len().pow(count as u32) {
+                let components: Vec<f64> = (0..count)
+                    .map(|c| levels[index / levels.len().pow(c as u32) % levels.len()])
+                    .collect();
+                let mut expected = vec![0; 4 + spots.count()];
+                let colorants = crate::colorant_tints(space, &components, light);
+                let paints = plan.sample_tints(colorants.as_ref(), light, spots, &mut expected);
+                assert_eq!(
+                    road.tints(space, &components, light).map(<[u8]>::to_vec),
+                    paints.then_some(expected),
+                    "{what} at {components:?}"
+                );
+            }
+        }
+
+        let none = separation(&[b"None"], b"{ 0 0 0 }");
+        let mut road = SpaceTints::of(&none, &plan, spots).expect("a space naming /None");
+        assert!(road.paints_nothing());
+        assert_eq!(road.tints(&none, &[0.5], light), None);
+        assert!(SpaceTints::of(&ColorSpace::DeviceRgb, &plan, spots).is_none());
     }
 }

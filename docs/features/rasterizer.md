@@ -434,6 +434,10 @@ colour handed to plates through `fill_mask_inked` or `blend_pixel_inked` is
 its ink on the process channels, as on `CmykA8` — its own components, or its
 light turned into ink — with every spot knocked out, and a `PlateInk` handed
 to another format paints its process tints as the DeviceCMYK colour they are.
+`Canvas::blend_tints` composites one pixel of a tint per channel at an
+opacity — a shading's colour on plates, painted pixel by pixel — by the
+arithmetic `fill_mask_plates` composites a `PlateInk` by, a channel past the
+tints handed taking no ink.
 `Canvas::channel` reads one channel out as `width × height` bytes, a plate's
 tints; `pixel` reads a plates pixel as its process channels' light, a spot's
 colour being its caller's to know; and `extract` copies plates as tints, into

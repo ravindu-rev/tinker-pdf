@@ -312,6 +312,16 @@ impl ShadingScratch {
     pub(crate) fn convert(&mut self, space: &ColorSpace, components: &[f64]) -> (u8, u8, u8) {
         space.to_rgb_with_in(components, &mut self.converted, self.conversion)
     }
+
+    /// The function's outputs at the colour last evaluated through this
+    /// scratch: the components in the shading's space its light was
+    /// converted from, which a sweep on plates reads its tints from
+    /// (RC-04.13). A colour read through the table evaluates nothing, so a
+    /// sweep that reads them keeps no table.
+    #[must_use]
+    pub fn outputs(&self) -> &[f64] {
+        &self.outputs
+    }
 }
 
 /// How many entries a [`ColorTable`] holds: the function's colours at 1 025
@@ -479,6 +489,17 @@ impl Shading {
                 space, function, ..
             } => Some((space, function)),
             _ => None,
+        }
+    }
+
+    /// The colour space the shading's colours are in.
+    #[must_use]
+    pub fn space(&self) -> &ColorSpace {
+        match self {
+            Shading::FunctionBased { space, .. }
+            | Shading::Axial { space, .. }
+            | Shading::Radial { space, .. } => space,
+            Shading::Mesh(mesh) => &mesh.space,
         }
     }
 
