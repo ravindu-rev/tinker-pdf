@@ -5,8 +5,8 @@
 //!
 //! The design doc's requirement is not "run these rules first", it is that a
 //! sweep of these rules over the 2 907-file corpus **never builds the
-//! machinery the other groups need** — no font program parsed, no ICC profile
-//! read. That is what [`super::Machinery`] counts and what the unit tests in
+//! machinery the other groups need** — not one font program parsed, not one
+//! ICC profile read. That is what [`super::Machinery`] counts and what the unit tests in
 //! [`super`] assert. This module names neither `tinker_pdf_font` nor
 //! `tinker_pdf_color`, and a test greps this file to keep it that way, because
 //! a counter proves what ran and a grep proves what *could* run.

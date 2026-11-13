@@ -871,9 +871,10 @@ What would lift the refusal is the conversion table for the encoding the
 language field names, and this repository does not carry one: Apple's published
 mapping files disclaim warranty and grant no redistribution rights, so they
 have no SPDX identifier `deny.toml` allows and `cargo xtask vendor` would
-refuse them. That is the same limit as the bundled sRGB profile, and it is
-recorded in the [roadmap](../ROADMAP.md)'s named non-goals rather than left as
-owed work.
+refuse them. That is the limit the ICC's own profile files meet too (NG-03,
+where the engine's sRGB profile is computed from IEC 61966-2-1 instead), and
+it is recorded in the [roadmap](../ROADMAP.md)'s named non-goals rather than
+left as owed work.
 
 **A `cmap` of format 2 is read**, the high-byte mapping the legacy CJK
 encodings use: a 256-entry key array says, for each first byte, which subheader

@@ -127,9 +127,7 @@ const DECLINED: &[(&str, &str)] = &[
          section still needs the mapping itself. Apple's TURKISH.TXT carries a \
          warranty disclaimer and no redistribution grant, so it has no SPDX \
          identifier `deny.toml` allows and `cargo xtask vendor` would refuse \
-         it; `docs/features/fonts.md` records that as a limit beside the \
-         bundled sRGB profile, which this repository declines for the same \
-         reason",
+         it; `docs/features/fonts.md` records that as a limit",
     ),
     (
         "GPOS-5",

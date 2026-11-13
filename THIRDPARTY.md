@@ -1308,11 +1308,13 @@ answer. Nothing reads a font directory either: that is an operating-system
 dependency, and `wasm32-unknown-unknown` has no filesystem at all. A host with
 faces of its own still supplies them through `FontProvider`, which remains the
 seam whether the feature is on or off.
-**No ICC profile**, and this is the second decision this file made rather than
-recorded. `docs/design/pdfa.md`'s writer profile needs an output intent, an
-output intent needs an ICC destination profile, and the obvious convenience is
-to vendor sRGB and default to it. The gate at the top of this file decides
-otherwise, on the licence and on nothing else:
+**No ICC profile file is vendored: the ICC's own stay out (NG-03), and the
+engine's sRGB profile (RC-19) is computed instead.** This is the second
+decision this file made rather than recorded. `docs/design/pdfa.md`'s writer
+profile needs an output intent, an output intent needs an ICC destination
+profile, and the obvious convenience is to vendor sRGB and default to it. The
+gate at the top of this file decides the vendoring, on the licence and on
+nothing else:
 
 - **the ICC's own sRGB profiles**, the ones every other producer embeds, carry
   the International Color Consortium's bespoke permission notice. It is
@@ -1330,8 +1332,17 @@ otherwise, on the licence and on nothing else:
   which device an archival document's colours are *for* is a statement about
   the caller's document.
 
-So `ArchivalProfile::destination_profile` is a mandatory `Vec<u8>` with no
-`Option` around it, and the type's own documentation says why. It is the same
-answer, for the same kind of reason, that the paragraph above gives about
-typefaces: this engine does not decide on a caller's behalf what their file is
-made of.
+What the engine carries instead is computed, not vendored:
+`crates/tinker-pdf-color/build.rs` writes an sRGB profile of its own from IEC
+61966-2-1's published primaries, white point and transfer function and the
+adaptation ICC.1 publishes, when the engine is built
+(`docs/design/icc.md`, RC-19), and the facade hands it out as
+`tinker_pdf::SRGB_PROFILE`. No file of anyone else's is read to make it, so
+there is nothing here to list: the numbers are a standard's published facts,
+as the CMap resources are a format's. It is still not a default, for the
+second bullet's reason. So `ArchivalProfile::destination_profile` is a
+mandatory `Vec<u8>` with no `Option` around it, and the type's own
+documentation says why; a caller who wants sRGB states `SRGB_PROFILE` there.
+It is the same answer, for the same kind of reason, that the paragraph above
+gives about typefaces: this engine does not decide on a caller's behalf what
+their file is made of.

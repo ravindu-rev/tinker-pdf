@@ -2170,9 +2170,9 @@ impl Coverage {
 
     /// The syntax group alone.
     ///
-    /// The sweep the design doc requires to be cheap: no font program parsed,
-    /// no ICC profile read, nothing but the COS document and the rules that
-    /// need only it.
+    /// The sweep the design doc requires to be cheap: not one font program
+    /// parsed, not one ICC profile read, nothing but the COS document and the
+    /// rules that need only it.
     ///
     /// The **flavour claim is still read**, and that is not an exception to
     /// the rule so much as a statement of what the rule is about. Which part

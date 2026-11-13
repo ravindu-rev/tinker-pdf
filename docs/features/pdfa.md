@@ -137,7 +137,7 @@ if verdict.findings.is_empty() && verdict.coverage.is_complete() {
     // Both halves, always: an empty list from a partial validation means
     // "nothing that ran was broken".
 }
-// The cheap sweep, which parses no font program and no ICC profile.
+// The cheap sweep, which parses neither a font program nor an ICC profile.
 let syntax = document.validate_pdfa_with(PdfACoverage::SYNTAX);
 // The same verdict, and what reaching it did.
 let (verdict, stats) = document.validate_pdfa_counted(PdfACoverage::IMPLEMENTED);
@@ -146,9 +146,11 @@ let (verdict, stats) = document.validate_pdfa_counted(PdfACoverage::IMPLEMENTED)
 let mut builder = DocumentBuilder::archival(ArchivalProfile {
     part: ArchivalPart::Two,
     level: Some(ArchivalLevel::B),
-    destination_profile: my_icc_bytes,     // mandatory: see THIRDPARTY.md
+    // Mandatory, and the caller's statement: here the engine's own sRGB
+    // profile, computed from IEC 61966-2-1 (docs/design/icc.md, RC-19).
+    destination_profile: tinker_pdf::SRGB_PROFILE.to_vec(),
     destination_space: DeviceSpace::Rgb,
-    output_condition: "sRGB IEC61966-2.1".to_string(),
+    output_condition: "sRGB IEC 61966-2-1".to_string(),
     language: None,                        // required at level A
 });
 assert!(builder.add_embedded_font(b"F1", b"Face", &program));
@@ -185,7 +187,7 @@ parse; and the output intents' and the colour spaces' ICC profiles.
 | An `/Info` date this crate's own parser cannot read | `ArchivalRefusal::InfoEntry` | 6.7.3 requires the dictionary and the packet to agree, and a date nobody can parse has nothing to agree with | 6.7.3 |
 | A conformance level the part does not define, or none where the part requires one | `ArchivalRefusal::LevelNotInPart`, `LevelMissing` | part 4 is the only part where declaring no level is correct | 6.7.11 |
 | Level A with an untagged page or no natural language | `ArchivalRefusal::UntaggedPage`, `LanguageMissing` | level A *is* a tagged structure tree with a stated language; claiming it without one would be the claim this profile exists to make honest | 6.8.2, 6.8.4 |
-| A profile with no destination profile bytes | `ArchivalRefusal::DestinationProfileMissing` | there is no vendored default and no `Option`; the licence decision is in [THIRDPARTY.md](../../THIRDPARTY.md) | 6.2.2 |
+| A profile with no destination profile bytes | `ArchivalRefusal::DestinationProfileMissing` | the device a document is for is the caller's statement, with no default and no `Option`; `tinker_pdf::SRGB_PROFILE`, computed from IEC 61966-2-1 ([icc](../design/icc.md), RC-19), is the one to state for sRGB, and the ICC's own files stay out ([THIRDPARTY.md](../../THIRDPARTY.md), NG-03) | 6.2.2 |
 | `add_layer` under part 1 | `ArchivalRefusal::OptionalContent` | part 1 forbids `/OCProperties` outright; parts 2 to 4 admit layers, and the builder writes the `/Name` on the default configuration ISO 19005-2 6.9 asks of every configuration | 6.1.13 |
 | A `/DeviceN` naming a spot colour its `/Colorants` does not describe, under parts 2 to 4 | `ArchivalRefusal::UndescribedColorant` | ISO 19005-2 6.2.4.4 asks an entry of every spot colour — every colorant but `/None` and DeviceCMYK's four process names — so a reader rendering one ink alone knows what it looks like | 6.2.4.4 (parts 2 to 4; part 1 has none) |
 | An associated file (`associate_file`, `Tag::associated_file`) under parts 1, 2 or 4 | `ArchivalRefusal::AssociatedFile` | part 1 forbids embedded files; part 2, and part 4 without level F, require the embedded file itself to conform (veraPDF's rules 6.8-5, 6.9-3), which nothing here checks of a caller's bytes; part 4 level F asks for an `/EmbeddedFiles` tree (6.9-5) this writer does not keep. Part 3 admits them, and they are written | 6.1.11 (part 3 admits them) |

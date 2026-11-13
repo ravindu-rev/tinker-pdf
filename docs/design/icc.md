@@ -1998,15 +1998,14 @@ A document's intent whose profile is refused is the `Refused` warning above;
 ## A first-party sRGB profile (RC-19)
 
 *For [ROADMAP](../ROADMAP.md) row RC-19.* The engine converts every colour to
-sRGB and carries no ICC profile of its own: the CMM's destination is the
-matrix `XYZ_D50_TO_SRGB` and IEC 61966-2-1's encode function, not a profile a
-caller could embed. So the two places a document wants an RGB profile to
-name are a profile the caller states, today:
+sRGB through the matrix `XYZ_D50_TO_SRGB` and IEC 61966-2-1's encode
+function, which are not a profile a caller could embed. The two places a
+document wants an RGB profile to name are each a profile the caller states:
 
 - **The default RGB space.** `DeviceRGB` is drawn as sRGB, and a scope's
   `/DefaultRGB` (8.6.5.6) is the document's own `ICCBased` or CIE space
   ([Default colour spaces](#default-colour-spaces-8656)); a caller writing a
-  document whose RGB it wants characterised supplies the profile.
+  document whose RGB it wants characterised names a profile there.
 - **PDF/A conversion's default output intent.** No conversion exists yet.
   The writer's archival profile (`ArchivalProfile::destination_profile`,
   [pdfa](pdfa.md)) takes the destination profile as a mandatory statement of

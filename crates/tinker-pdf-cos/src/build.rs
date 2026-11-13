@@ -4942,21 +4942,20 @@ const ARCHIVAL_REVISION: u16 = 2020;
 
 /// What a document built under an ISO 19005 profile promises.
 ///
-/// # The destination profile is mandatory, and that is a licence decision
+/// # The destination profile is mandatory
 ///
-/// There is no `Option` here and no default. The obvious default would be a
-/// vendored sRGB profile, and the gate in [THIRDPARTY.md] decides that before
-/// the API does: a vendored tree must declare an SPDX identifier `deny.toml`
-/// already allows, and the ICC's own sRGB profiles carry the ICC's bespoke
-/// permission notice, which has no SPDX identifier at all. It cannot declare
-/// one, so it cannot clear `cargo xtask vendor`.
-///
-/// The design doc named this outcome in advance — *"if no profile clears
-/// `cargo xtask vendor`, the parameter is mandatory and documented"* — and it
-/// is the same answer the no-bundled-faces policy gives for the same reason.
-/// It is also the better API on the merits: an output intent is a statement
+/// There is no `Option` here and no default. An output intent is a statement
 /// about the device a document's colours are *for*, which is the caller's to
-/// make and not this crate's to assume.
+/// make and not this crate's to assume, and it is the same answer the
+/// no-bundled-faces policy gives about a typeface.
+///
+/// A caller who wants sRGB states the engine's own profile,
+/// `tinker_pdf::SRGB_PROFILE`, which `tinker-pdf-color` computes from IEC
+/// 61966-2-1's published numbers when the engine is built
+/// (`docs/design/icc.md`, RC-19). The ICC's own sRGB profiles are not
+/// vendored: they carry the ICC's bespoke permission notice, which has no
+/// SPDX identifier `deny.toml` allows, so they cannot clear `cargo xtask
+/// vendor` ([THIRDPARTY.md], the roadmap's NG-03).
 ///
 /// [THIRDPARTY.md]: https://github.com/tinker-pdf/tinker-pdf/blob/main/THIRDPARTY.md
 #[derive(Clone, Debug, PartialEq, Eq)]

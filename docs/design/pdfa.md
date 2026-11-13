@@ -179,18 +179,22 @@ construction. Under it:
   subsetter the builder runs at `finish` serves unchanged.
 - **Output intent**: the builder writes `/OutputIntents` with a
   caller-supplied ICC profile. **The parameter is mandatory and there is no
-  vendored default.**
+  default.** A caller who wants sRGB states the engine's own profile,
+  `tinker_pdf::SRGB_PROFILE`, computed from IEC 61966-2-1's published
+  numbers when the engine is built ([icc](icc.md), RC-19).
 
-  The reasoning is the licence and nothing else. `cargo xtask vendor`
-  requires every vendored tree to declare an SPDX identifier `deny.toml`
-  allows. The ICC's own sRGB profiles — the ones every other producer
-  embeds — carry the ICC's bespoke permission notice, which is permissive in
-  substance and **has no SPDX identifier at all**, so it cannot declare one
-  and cannot clear the gate. A third party's CC0 rebuild would clear it, and
-  is not the canonical profile: it is one person's regeneration, and a file
-  saying "these colours are for *this* device" is a claim about the caller's
-  document that this crate has no standing to make on their behalf. That is
-  the same argument the no-bundled-faces policy makes about a typeface.
+  That profile is computed rather than vendored, and the reason is the
+  licence and nothing else. `cargo xtask vendor` requires every vendored
+  tree to declare an SPDX identifier `deny.toml` allows. The ICC's own sRGB
+  profiles — the ones every other producer embeds — carry the ICC's bespoke
+  permission notice, which is permissive in substance and **has no SPDX
+  identifier at all**, so it cannot declare one and cannot clear the gate
+  (NG-03). A third party's CC0 rebuild would clear it, and is not the
+  canonical profile: it is one person's regeneration. And no profile is a
+  default: a file saying "these colours are for *this* device" is a claim
+  about the caller's document that this crate has no standing to make on
+  their behalf. That is the same argument the no-bundled-faces policy makes
+  about a typeface.
 
   `ArchivalProfile::destination_profile` is therefore a `Vec<u8>` with no
   `Option` around it and no default, and `destination_space` beside it says
@@ -654,5 +658,5 @@ correctly even though `WriteOptions` cannot be *asked* for one.
 | ISO 19005 has hundreds of sub-clauses; "validates PDF/A" overclaims what any rule engine checks | Coverage is stated, not implied: `PdfACoverage` says which groups ran, staged rules are named refusals in `PDFA_STAGED` with tests, the census prints agreement per clause group, and every disagreement is a ledger row with a reason |
 | **Nothing outside this repository ever validates a file this engine wrote** (ruling 13), so the writer is checked by the rule table that would also accept its mistakes | Every built fixture has a near-miss twin that must fail. Twins show the rules *discriminate*; they do not show they discriminate on the right axis, because a twin fails against the same table its fixture passed. [The limit the twins narrow and do not close](#the-limit-the-twins-narrow-and-do-not-close) says so at length. **Not closed** |
 | XMP is a graph serialisation; a pull parser yields tokens, not the graph (the `xmp_metadata` doc comment's own warning) | Parse only the property shapes 19005 checks, in the facade, behind fixtures taken from real producers' packets; a packet the subset cannot read is a finding (`MetadataUnreadable`), not a pass |
-| No shippable ICC profile licence for the writer's default output intent | The ICC's own sRGB profiles carry a permission notice with no SPDX identifier, so no vendored profile can declare one `deny.toml` allows. `ArchivalProfile::destination_profile` is mandatory with no default and the type's own documentation says why, matching the no-bundled-faces precedent |
+| No shippable licence for the ICC's own profile files (NG-03) | They carry a permission notice with no SPDX identifier, so none is vendored; the engine computes its own sRGB profile from IEC 61966-2-1's published numbers ([icc](icc.md), RC-19), `tinker_pdf::SRGB_PROFILE`, which a caller states as the destination. `ArchivalProfile::destination_profile` stays mandatory with no default and the type's own documentation says why, matching the no-bundled-faces precedent |
 | Writer profile refusals drift from validator rules, so the builder emits what the validator rejects | Builder refusals cite their ISO 19005 clause (`ArchivalRefusal::clause`), and `pdfa_writer.rs` validates every built fixture with the full validator in the same suite |
