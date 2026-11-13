@@ -294,6 +294,45 @@ pub fn blend_grid_page() -> Vec<u8> {
     builder.finish()
 }
 
+/// The pen's whole range on one 91 x 131 page: the `strokes` fingerprint's
+/// page in `determinism.rs`, and a fixture `render_regions.rs` tiles at its own
+/// page size.
+///
+/// The three caps of 8.4.3.3 on lines 6.2 points wide; the three joins of
+/// 8.4.3.4 on zigzags; a corner sharp enough that a miter limit of 2 bevels it
+/// (its miter is 5.2 times the width) beside a blunter one that a limit of 10
+/// lets through (3.8 times) (8.4.3.5); two dash patterns at two phases along
+/// two S-shaped curves, one under round caps and joins and one under butt caps
+/// and miters (8.4.3.6); and a five-pointed star filled under the even-odd
+/// rule, so its middle stays empty (8.5.3.3.3), and stroked with mitred
+/// points. Every coordinate is fractional, so partial coverage is everywhere
+/// and the outlines overlap wherever a pen turns.
+pub fn pen_page() -> Vec<u8> {
+    const CONTENT: &str = "\
+0.12 0.31 0.78 RG 6.2 w 0 j
+0 J 9.3 119.4 m 39.7 123.1 l S
+1 J 9.3 107.6 m 39.7 111.3 l S
+2 J 9.3 95.8 m 39.7 99.5 l S
+0.78 0.24 0.09 RG 4.6 w 0 J
+0 j 49.2 110.3 m 58.9 124.6 l 69.4 108.1 l 81.7 121.9 l S
+1 j 49.2 95.1 m 58.9 109.4 l 69.4 92.9 l 81.7 106.7 l S
+2 j 49.2 79.9 m 58.9 94.2 l 69.4 77.7 l 81.7 91.5 l S
+0.09 0.55 0.27 RG 3.4 w 0 j 2 M
+6.6 72.3 m 38.2 77.9 l 6.6 84.7 l S
+10 M 6.6 53.2 m 33.5 60.6 l 6.6 68.0 l S
+0.46 0.12 0.62 RG 2.3 w 1 J 1 j [6 3] 0 d
+5.4 38.7 m 27.9 58.3 58.6 19.4 85.2 43.6 c S
+0 J 0 j [5 2 1.5 2] 3.7 d
+5.4 27.1 m 29.3 46.9 57.2 9.8 85.2 31.2 c S
+[] 0 d
+0.93 0.71 0.08 rg 0.35 0.2 0.05 RG 0.8 w
+45.5 24.5 m 38.74 3.7 l 56.44 16.55 l 34.56 16.55 l 52.26 3.7 l h B*
+";
+    let mut builder = DocumentBuilder::new();
+    builder.add_page(91.0, 131.0, |page| page.raw(CONTENT.as_bytes()));
+    builder.finish()
+}
+
 // ---- the face this repository writes for itself -----------------------------
 //
 // Moved here from `determinism.rs` when the goldens arrived: the text family's

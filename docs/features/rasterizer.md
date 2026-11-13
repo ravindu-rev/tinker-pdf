@@ -325,9 +325,11 @@ tiny pattern over a long line cannot generate millions of pieces.
   and bounded compositing.
 - **Determinism fingerprints** (`crates/tinker-pdf/tests/determinism.rs`):
   the render fingerprints `text`, `curves`, `shading`, `blend`, `pattern`,
-  `image`, `transparency`, `tiling` and `mesh` exercise this crate directly,
-  each a pixel hash plus dimensions and an ink floor, reproduced
-  byte-for-byte across targets ([determinism](determinism.md)).
+  `image`, `transparency`, `tiling`, `mesh` and `strokes` exercise this crate
+  directly, each a pixel hash plus dimensions and an ink floor, reproduced
+  byte-for-byte across targets ([determinism](determinism.md)). `strokes` is
+  the pen: every cap and join, a miter past its limit, dashes at two phases
+  and an even-odd star.
 - **Analytic coverage** (`tinker-pdf-raster/tests/analytic_coverage.rs`):
   every expectation a closed form of the sampling grid, evaluated in the test
   from the path's own equation and compared byte for byte — both fill rules, a

@@ -8,6 +8,8 @@
 pub mod blend;
 pub mod canvas;
 pub mod fill;
+#[cfg(test)]
+mod fill_reference;
 pub mod fragments;
 pub mod geom;
 pub mod image;

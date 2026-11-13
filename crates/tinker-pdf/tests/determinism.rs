@@ -65,7 +65,8 @@ use tinker_pdf::{
 
 mod render_support;
 use render_support::{
-    axial_page, blend_grid_page, curvy_font, image_page as analytic_image_page, ink, radial_page,
+    axial_page, blend_grid_page, curvy_font, image_page as analytic_image_page, ink, pen_page,
+    radial_page,
 };
 
 /// How a fixture's document is opened, and which of its pages is hashed.
@@ -2238,6 +2239,15 @@ const GOLDEN: &[Fixture] = &[
         open: Open::Closed,
         least_ink: 4800,
     },
+    // The stroker's whole pen: every cap and join, a miter past its limit,
+    // dashes at two phases along a curve, and an even-odd star. The page
+    // paints about 3 000 of its 11 921 pixels; the floor is half.
+    Fixture {
+        name: "strokes",
+        build: pen_page,
+        open: Open::Closed,
+        least_ink: 1500,
+    },
 ];
 
 /// The committed render fingerprint of every page in [`GOLDEN`], by name.
@@ -2445,6 +2455,12 @@ const FINGERPRINTS: &[(&str, &str)] = &[
     (
         "gs_text",
         "82510bb48a364a4bc92729cfcdcd1e14aa99fe817a323a78e48cfb51f76a181d",
+    ),
+    // The pen: no other page here dashes a stroke or draws a miter, a bevel or
+    // a square cap, so this is the one that pins them.
+    (
+        "strokes",
+        "2fb79647b749afcb45cb9bd4aa78d84101b88ab4fb1bacfd98351a185b0e9771",
     ),
 ];
 
@@ -2732,6 +2748,10 @@ fn svg_output_is_stable_across_targets() {
         (
             "default_spaces",
             "25633d01d2416d190d121513c742c7e4ba02034096fbe9146639bd7473b93ee3",
+        ),
+        (
+            "strokes",
+            "36c441354931cc517d46b3d87070e3075d3664eeb05124ecb189d126180633a9",
         ),
     ];
     assert_eq!(

@@ -55,8 +55,13 @@ enforced by the suite below.
 each page of its table — `text`, `curves`, `shading`, `pattern`, `optional`,
 `image`, `jbig2`, `jpx`, `blend`, `transparency`, `tiling`, `mesh`, `cbz`,
 `xps`, `epub`, `analytic_axial`, `analytic_radial`, `analytic_blend`,
-`analytic_image`, `default_spaces`, `gs_text` — each a hash of rendered pixels
-plus the page dimensions and ink counts it is computed from. `gs_text` is the
+`analytic_image`, `default_spaces`, `gs_text`, `strokes` — each a hash of
+rendered pixels plus the page dimensions and ink counts it is computed from.
+`strokes` is the stroker's whole pen: the three caps and the three joins
+(8.4.3.3, 8.4.3.4), a corner a miter limit bevels beside one it lets through
+(8.4.3.5), two dash patterns at two phases along two curves (8.4.3.6) and a
+star filled under the even-odd rule; `crates/tinker-pdf/tests/render_regions.rs`
+tiles the same page, built by the same function. `gs_text` is the
 `text` page with its font selected by graphics states (8.4.5's `/Font`) and
 its `/Font` taken away, so it holds the `text` page's own fingerprint: a font a
 state selects draws as its `Tf` twin on every target. `default_spaces` is the

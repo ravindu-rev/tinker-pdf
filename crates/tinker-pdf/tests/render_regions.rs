@@ -43,6 +43,10 @@
 //!   pattern's cell; a Gouraud mesh's own buffer. Each is a buffer the size of
 //!   a rectangle of the page rather than of the page, so each is a second place
 //!   a tile's arithmetic could part from the page's — and two of them did.
+//! - **The stroker's whole pen**, the page of the `strokes` fingerprint: every
+//!   cap and join, a miter past its limit, dashes and an even-odd star. Their
+//!   outlines overlap by construction, so the filler's windings pass one
+//!   wherever a pen turns.
 //! - **Scales other than 1.0**, because a region that is silently ignored
 //!   whenever the scale is not 1 is a defect no unscaled fixture can see.
 //!
@@ -131,7 +135,7 @@ use tinker_pdf::{
 };
 
 mod render_support;
-use render_support::{curvy_font, ink};
+use render_support::{curvy_font, ink, pen_page};
 
 /// The fixture page, in points. Not round, and coprime with every tile size
 /// below, so no lattice in this file ever divides it evenly.
@@ -514,6 +518,10 @@ fn fixtures() -> Vec<Fixture> {
     add("tiling rotated 270", tiling_page(Shape::turned(270)), 6_500);
     add("mesh", mesh_page(Shape::PLAIN), 6_000);
     add("mesh cropped", mesh_page(Shape::cropped(0)), 4_300);
+    // The `strokes` fingerprint's page in `determinism.rs`: every cap and
+    // join, a miter past its limit, dashes at two phases along a curve and an
+    // even-odd star, the outlines the stroker overlaps by construction.
+    add("pen", pen_page(), 1_500);
     out
 }
 
