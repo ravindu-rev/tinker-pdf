@@ -557,6 +557,28 @@ pub use tinker_pdf_crypto::Permissions;
 /// disagree with itself.
 pub use tinker_pdf_filters::CcittParams;
 pub use tinker_pdf_filters::PngError;
+/// One instance of a variable face, by its index among the face's named
+/// instances or by user coordinates, behind
+/// [`DocumentBuilder::add_embedded_font_at`] and
+/// [`DocumentBuilder::add_cid_font_at`] (`docs/design/variable-fonts.md`,
+/// 'Who asks for an instance').
+///
+/// Here for the reason `ExtGState` is: `FontInstance` is both methods'
+/// argument, and an argument type that cannot be named is a method that
+/// cannot be called (ruling 11). `FontCoordinate` comes with it because it
+/// is the payload of its `User` arm, one axis's tag and value, and an arm
+/// whose payload cannot be named cannot be built.
+///
+/// ```
+/// use tinker_pdf::{DocumentBuilder, FontCoordinate, FontInstance};
+///
+/// let mut builder = DocumentBuilder::new();
+/// let bold = FontInstance::User(vec![FontCoordinate::new(*b"wght", 700.0)]);
+/// // Bytes that are no font are refused at any instance.
+/// assert!(!builder.add_embedded_font_at(b"F0", b"Face-Bold", b"not a font", &bold));
+/// assert!(!builder.add_cid_font_at(b"F1", b"Face", b"not a font", &FontInstance::Named(0)));
+/// ```
+pub use tinker_pdf_font::variation::{Instance as FontInstance, UserCoordinate as FontCoordinate};
 pub use tinker_pdf_raster::canvas::{Color, PixelFormat, Spots, TooManySpots, MAX_SPOT_PLATES};
 pub use tinker_pdf_raster::HardEdge;
 pub use tinker_pdf_render::{CancelToken, PixelRegion, PlateUse, RenderWarning, MAX_PLATE_BYTES};

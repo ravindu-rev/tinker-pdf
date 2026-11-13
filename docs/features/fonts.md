@@ -825,7 +825,8 @@ checksum. `fvar`, `avar`, `gvar`, `cvar`, `HVAR`, `VVAR`, `MVAR`, `STAT`,
 `DSIG`, `hdmx` and `VDMX` are dropped (`instance::DROPPED`); every other
 table — `cmap`, `name`, `fpgm`, `GSUB`, `GPOS` and `GDEF` with their
 variation data unapplied, and tables this reader does not know — is copied as
-it is. A face that does not vary is returned as it is.
+it is. A face that does not vary is returned as it is, unless its outlines are
+in `CFF2`, which is written with a `CFF ` table all the same.
 
 A face whose outlines are in `CFF2` becomes a face with a `CFF ` table. Each
 glyph's charstring is re-encoded as Type 2 at the instance
@@ -903,6 +904,13 @@ font a page names and never uses raises none of them there. Writing:
 `DocumentBuilder::add_base_font`, `add_named_font`, `add_embedded_font`,
 `add_cid_font`, `set_subset_fonts`, and `PageBuilder::text` or
 `PageBuilder::glyphs` (glyphs addressed by index, for a composite font).
+`add_embedded_font_at` and `add_cid_font_at` embed a variable face's static
+instance at a `FontInstance` — a named instance's index, or
+`FontCoordinate`s by axis tag — written by `instance::instantiate`, which is
+then the program subset and measured ([creation](creation.md), *Variable
+faces*). The registrations without an instance embed a `glyf` face as it is
+and a face whose outlines are only in `CFF2` as its default instance, a
+`CFF ` face, since no `/FontFile` stream carries a `CFF2` table.
 
 `tinker-pdf-font`'s parsers each have a counted sibling that returns its
 uncounted sibling's answer and the steps it took
@@ -2059,9 +2067,15 @@ corpora already vendored here. So every name stays on the list.
   name-keyed and one whose `post` names none or names two alike CID-keyed;
   no operator past 48 operands, over the committed face and a glyph of every
   operator that can pass them, each still drawing what the CFF2 draws; the
-  default instance drawing the default outlines; `subset_cff` and `subset`
-  cutting the instance like any CFF; every refusal by name; and every prefix
-  and changed byte of the face instanced or refused without a panic.
+  default instance drawing the default outlines; a CFF2 face with no `fvar`
+  written as CFF all the same, drawing and measuring what it did;
+  `subset_cff` and `subset` cutting the instance like any CFF; every refusal
+  by name; and every prefix and changed byte of the face instanced or
+  refused without a panic.
+- `crates/tinker-pdf-cos/tests/variable_embedding.rs` — the committed faces
+  embedded by `add_embedded_font_at` and `add_cid_font_at` and read back out
+  of the document to the instance's outlines and widths
+  ([creation](creation.md), *Verified*).
 - `crates/tinker-pdf-font/tests/colour_tables.rs` — the colour tables over
   bytes the test writes from the OpenType chapters' layouts: COLR version 0's
   layers bottom first with each palette's colours, a slice two glyphs share,

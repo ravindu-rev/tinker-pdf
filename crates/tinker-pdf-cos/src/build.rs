@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use tinker_pdf_filters::CcittParams;
+use tinker_pdf_font::variation::Instance;
 
 use crate::dest::DestKind;
 use crate::name::{Name, NameTable};
@@ -1817,6 +1818,46 @@ fn width_array(program: &FontProgram<'_>, ids: impl Iterator<Item = u16>) -> Opt
         out.push(Object::Array(widths));
     }
     Some(out)
+}
+
+/// The program a font is embedded as when its caller names no instance.
+///
+/// The program itself, a variable `glyf` face included, which every reader
+/// draws at its default instance — except an sfnt whose outlines are only in
+/// `CFF2`: 9.9 Table 126 gives `/FontFile2` `glyf` outlines and `/FontFile3`
+/// `CFF ` ones, and no stream a `CFF2` table, so that face is embedded as its
+/// default instance, which [`tinker_pdf_font::instantiate`] writes with a
+/// `CFF ` table. `None` for a `CFF2` face the instancer refuses.
+fn without_instance(program: &[u8]) -> Option<Vec<u8>> {
+    // 0x43464632 `CFF2`; 0x676C7966 `glyf` and 0x43464620 `CFF `, either of
+    // which `FontProgram::parse` reads first.
+    let cff2_only = tinker_pdf_font::Sfnt::parse(program).is_some_and(|sfnt| {
+        sfnt.table(0x4346_4632).is_some()
+            && sfnt.table(0x676C_7966).is_none()
+            && sfnt.table(0x4346_4620).is_none()
+    });
+    if cff2_only {
+        return tinker_pdf_font::instantiate(program, &Instance::default()).ok();
+    }
+    Some(program.to_vec())
+}
+
+/// The program a font is embedded as at `instance`: the face's static
+/// instance, which [`tinker_pdf_font::instantiate`] writes with no variation
+/// table and with `CFF2` outlines as `CFF `.
+///
+/// A bare CFF program does not vary, so it is its own instance at any user
+/// coordinates — a tag it has no axis for is ignored, as the face's own are
+/// — and has no named instance. `None` for a named instance the program does
+/// not have and for an instance the instancer refuses.
+fn at_instance(program: &[u8], instance: &Instance) -> Option<Vec<u8>> {
+    if tinker_pdf_font::Sfnt::parse(program).is_none() {
+        return match instance {
+            Instance::User(_) => Some(program.to_vec()),
+            Instance::Named(_) => None,
+        };
+    }
+    tinker_pdf_font::instantiate(program, instance).ok()
 }
 
 /// A font program, and the metrics and dictionary entries it decides.
@@ -5892,8 +5933,57 @@ impl DocumentBuilder {
     /// The whole program is embedded. Subsetting needs a glyph-set analysis
     /// and a table rewriter, and shipping the entire face is correct — merely
     /// larger — where a broken subset is neither.
+    ///
+    /// A variable face is embedded as it is, and every reader draws it at its
+    /// default instance, except one whose outlines are only in `CFF2`, which
+    /// no `/FontFile` stream carries (9.9 Table 126 names `glyf` and `CFF `
+    /// outlines): that face is embedded as its default instance, written with
+    /// a `CFF ` table. [`DocumentBuilder::add_embedded_font_at`] embeds
+    /// another instance.
     pub fn add_embedded_font(&mut self, resource: &[u8], base_font: &[u8], program: &[u8]) -> bool {
-        if FontProgram::parse(program).is_none() {
+        match without_instance(program) {
+            Some(program) => self.register_embedded_font(resource, base_font, program),
+            None => false,
+        }
+    }
+
+    /// Registers a TrueType or CFF font at one instance of a variable face,
+    /// embedding the instance (9.6.6, 9.9).
+    ///
+    /// [`DocumentBuilder::add_embedded_font`] for the face's static instance
+    /// at `instance` — a named instance, or user coordinates by axis tag —
+    /// which `tinker_pdf_font::instantiate` writes with no variation table,
+    /// its outlines, metrics and `OS/2`, `hhea` and `post` values those of the
+    /// instance and `CFF2` outlines written as `CFF `. That instance is what
+    /// the document embeds, and subsets, and what `/Widths` measures, so a
+    /// reader draws the instance whether or not it reads variations at all. A
+    /// face that does not vary is its own instance; a bare CFF program is one
+    /// at any user coordinates and has no named instance.
+    ///
+    /// Returns false, registering nothing, where `add_embedded_font` does, for
+    /// a named instance the face does not have, and for a face the instancer
+    /// refuses.
+    pub fn add_embedded_font_at(
+        &mut self,
+        resource: &[u8],
+        base_font: &[u8],
+        program: &[u8],
+        instance: &Instance,
+    ) -> bool {
+        match at_instance(program, instance) {
+            Some(program) => self.register_embedded_font(resource, base_font, program),
+            None => false,
+        }
+    }
+
+    /// [`DocumentBuilder::add_embedded_font`] over the program to embed.
+    fn register_embedded_font(
+        &mut self,
+        resource: &[u8],
+        base_font: &[u8],
+        program: Vec<u8>,
+    ) -> bool {
+        if FontProgram::parse(&program).is_none() {
             return false;
         }
 
@@ -5907,7 +5997,7 @@ impl DocumentBuilder {
         self.embedded.push(Embedded {
             resource: resource.to_vec(),
             base_font: base_font.to_vec(),
-            program: program.to_vec(),
+            program,
             file_ref,
             descriptor_ref,
             font_ref,
@@ -5941,12 +6031,52 @@ impl DocumentBuilder {
     /// [`DocumentBuilder::add_embedded_font`]'s reason, and for a CID-keyed
     /// CFF whose charset is not one-to-one: a glyph whose CID another glyph
     /// also claims is one no code reaches.
+    ///
+    /// A variable face is embedded as `add_embedded_font` embeds it: as it
+    /// is, or as its default instance where its outlines are only in `CFF2`.
+    /// [`DocumentBuilder::add_cid_font_at`] embeds another instance.
     pub fn add_cid_font(&mut self, resource: &[u8], base_font: &[u8], program: &[u8]) -> bool {
+        match without_instance(program) {
+            Some(program) => self.register_cid_font(resource, base_font, program),
+            None => false,
+        }
+    }
+
+    /// Registers a composite font at one instance of a variable face,
+    /// embedding the instance (9.7).
+    ///
+    /// [`DocumentBuilder::add_cid_font`] for the face's static instance at
+    /// `instance`, as [`DocumentBuilder::add_embedded_font_at`] makes it:
+    /// `/W` measures the instance's advances, [`PageBuilder::glyphs`] and
+    /// [`DocumentBuilder::glyph_run`] place glyphs by them, and the program
+    /// embedded and subset is the instance. A `CFF2` face's instance is a
+    /// CID-keyed CFF where the face has more than one Font DICT or `post`
+    /// names no glyphs, each glyph's CID its index, and name-keyed otherwise,
+    /// so either way a code is the glyph's index.
+    ///
+    /// Returns false, registering nothing, where `add_cid_font` does, for a
+    /// named instance the face does not have, and for a face the instancer
+    /// refuses.
+    pub fn add_cid_font_at(
+        &mut self,
+        resource: &[u8],
+        base_font: &[u8],
+        program: &[u8],
+        instance: &Instance,
+    ) -> bool {
+        match at_instance(program, instance) {
+            Some(program) => self.register_cid_font(resource, base_font, program),
+            None => false,
+        }
+    }
+
+    /// [`DocumentBuilder::add_cid_font`] over the program to embed.
+    fn register_cid_font(&mut self, resource: &[u8], base_font: &[u8], program: Vec<u8>) -> bool {
         // The codes are worked out now, from the charset, so that a page —
         // which never sees the program — writes the CID a glyph answers to
         // rather than its index. Until October 2026 a CID-keyed CFF was
         // refused here instead, because the index was all a page could write.
-        let Some(codes) = FontProgram::parse(program).and_then(|kind| kind.codes()) else {
+        let Some(codes) = FontProgram::parse(&program).and_then(|kind| kind.codes()) else {
             return false;
         };
 
@@ -5959,7 +6089,7 @@ impl DocumentBuilder {
         self.cid_fonts.push(CidFont {
             resource: resource.to_vec(),
             base_font: base_font.to_vec(),
-            program: program.to_vec(),
+            program,
             file_ref,
             descriptor_ref,
             descendant_ref,

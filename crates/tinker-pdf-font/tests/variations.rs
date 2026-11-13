@@ -6675,6 +6675,81 @@ fn the_cff2_default_instance_keeps_the_default_outlines() {
     }
 }
 
+/// A CFF2 face with no `fvar` and no store: two boxes, nothing that varies.
+fn static_cff2_face() -> Vec<u8> {
+    let square = |left: i32, width: i32| {
+        let mut items = ints(&[left, 0]);
+        items.push(Cs::Op(op::RMOVETO));
+        items.extend(ints(&[width, 0, 0, 600, -width, 0]));
+        items.push(Cs::Op(op::RLINETO));
+        charstring(&items)
+    };
+    let table = Cff2Spec {
+        charstrings: vec![square(50, 400), square(100, 300)],
+        global_subrs: Vec::new(),
+        privates: vec![PrivateSpec::default()],
+        fd_select: None,
+        store: None,
+    }
+    .build();
+    Face::opentype()
+        .with(*b"CFF2", table)
+        .with(*b"head", head(1_000))
+        .with(*b"hhea", hhea(2, (1, 0, 0)))
+        .with(*b"hmtx", metrics(&[(500, 50), (450, 100)], &[]))
+        .with(*b"maxp", maxp(2))
+        .with(*b"post", post_table(0, (-100, 50), None))
+        .build()
+}
+
+#[test]
+fn a_cff2_face_that_does_not_vary_is_written_as_cff_all_the_same() {
+    let face = static_cff2_face();
+    let sfnt = Sfnt::parse(&face).expect("a face");
+    let cff2 = Cff2::parse(sfnt.table(u32::from_be_bytes(*b"CFF2")).expect("CFF2")).expect("CFF2");
+    for instance in [
+        Instance::default(),
+        Instance::User(vec![UserCoordinate::new(*b"wght", 700.0)]),
+    ] {
+        let what = format!("{instance:?}");
+        let bytes = instantiate(&face, &instance).expect("the face's one instance");
+        assert_ne!(bytes, face, "{what}: the face is rewritten");
+        checksums_hold(&what, &bytes);
+        let static_face = Sfnt::parse(&bytes).expect("the instance parses");
+        assert!(
+            static_face.table(u32::from_be_bytes(*b"CFF2")).is_none(),
+            "{what}: no CFF2 table"
+        );
+        let cff = Cff::parse(instance_cff(&bytes)).expect("the CFF parses");
+        assert_eq!(cff.glyph_count(), 2, "{what}: the glyphs");
+        for glyph in 0..2u16 {
+            assert_eq!(
+                cff.outline(glyph).expect("an outline").segments,
+                cff2.outline(glyph).expect("the CFF2 outline").segments,
+                "{what}: glyph {glyph}"
+            );
+            assert_eq!(
+                static_face.advance(glyph),
+                sfnt.advance(glyph),
+                "{what}: glyph {glyph}'s advance"
+            );
+            assert_eq!(
+                cff.advance(glyph),
+                sfnt.advance(glyph).map(f64::from),
+                "{what}: glyph {glyph}'s charstring width"
+            );
+        }
+    }
+    assert_eq!(
+        instantiate(&face, &Instance::Named(0)),
+        Err(InstanceError::Variation(VariationError::NoSuchInstance {
+            index: 0,
+            count: 0
+        })),
+        "a face with no fvar names no instance"
+    );
+}
+
 #[test]
 fn subset_cff_cuts_the_instance_like_any_cff() {
     let bytes = instance_of("variable-cff2.otf", CFF2_FACE, &Instance::Named(2));

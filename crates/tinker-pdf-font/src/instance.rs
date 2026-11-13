@@ -57,8 +57,9 @@
 //!   `GPOS` and `GDEF` with their variation data unapplied (FT-07a's), `kern`,
 //!   and tables this reader does not know.
 //!
-//! A face that does not vary is its own instance and is returned as it is.
-//! At the default location every delta is zero for a face whose regions all
+//! A face that does not vary is its own instance and is returned as it is,
+//! unless its outlines are in `CFF2`: that one is written with a `CFF ` table
+//! all the same, at the only instance it has. At the default location every delta is zero for a face whose regions all
 //! peak away from it, so the instance keeps every default outline and metric.
 //! A table a reader refuses refuses the instance, by name ([`InstanceError`]):
 //! a writer has no default to fall back to that is not a different face.
@@ -262,17 +263,26 @@ fn clamp_u16(value: i64) -> u16 {
 
 /// Writes the static instance of `program` at `instance`.
 ///
+/// A face with no axes is its own instance and comes back as it is, unless
+/// its outlines are in `CFF2`: that face is written with a `CFF ` table at
+/// the only instance it has, so the instance of every face is one a CFF
+/// reader reads.
+///
 /// # Errors
 ///
 /// [`InstanceError`]: bytes that are no sfnt, a variation table or a
 /// glyph's variation data a reader refuses, a named instance the face does
 /// not have, a table the instance needs that is missing, a coordinate the
-/// instance would move past sixteen bits, and outlines in `CFF2`.
+/// instance would move past sixteen bits; and for a CFF2 face a table or a
+/// charstring `Cff2` refuses, an operand no Type 2 charstring carries, more
+/// Font DICTs or glyphs than a CFF names, and a CFF that does not read back.
 pub fn instantiate(program: &[u8], instance: &Instance) -> Result<Vec<u8>, InstanceError> {
     let sfnt = Sfnt::parse(program).ok_or(InstanceError::NotAFont)?;
     let space = DesignSpace::read(&sfnt)?;
     let location = space.location(instance)?;
-    if !space.is_variable() {
+    let cff2_outlines =
+        sfnt.table(tag_value(TAG_GLYF)).is_none() && sfnt.table(tag_value(TAG_CFF2)).is_some();
+    if !space.is_variable() && !cff2_outlines {
         // No axes: every coordinate is the default, and the face is its own
         // instance.
         return Ok(program.to_vec());

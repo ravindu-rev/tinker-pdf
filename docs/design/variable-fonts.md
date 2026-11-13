@@ -376,7 +376,9 @@ Static Instance Fonts').
 The table directory's checksums are rewritten. The instance at the default
 location keeps every default outline and metric: a face with no region whose
 peak is zero everywhere instances to its own default values. A face that does
-not vary is its own instance and is returned as it is; a table a reader
+not vary is its own instance and is returned as it is, unless its outlines are
+in `CFF2`: that face is written with a `CFF ` table all the same, so the
+instance of every face is one a CFF reader reads; a table a reader
 refuses refuses the instance by name, since a writer has no default to fall
 back to that is not a different face.
 
@@ -414,12 +416,14 @@ refused by name.
 - **The builder** (FT-05.12). `DocumentBuilder::add_cid_font_at` and
   `add_embedded_font_at` take the program and an `&Instance`, re-exported on
   the facade as `FontInstance` (ruling 11: an argument type that cannot be
-  named is a method that cannot be called), and embed the static instance
-  before subsetting. The methods without an instance keep today's path for a
-  `glyf` face, byte for byte — the XPS packages' variable face, the
-  synthesised fixed document's bytes and the `xps` fingerprint do not move —
-  and embed a CFF2 face at its default instance, as a CFF, where today they
-  refuse it.
+  named is a method that cannot be called), with `UserCoordinate` as
+  `FontCoordinate`, and embed the static instance before subsetting. The
+  methods without an instance embed a `glyf` face as it is, byte for byte —
+  the XPS packages' variable face, the synthesised fixed document's bytes and
+  the `xps` fingerprint rest on it — and a face whose outlines are only in
+  `CFF2`, which no `/FontFile` stream carries, as its default instance, a
+  CFF. A bare CFF is its own instance at any user coordinates and has no
+  named one.
 - **EPUB and HTML** (FT-05.14, FT-05.15). The CSS crate reads
   `font-variation-settings` (`normal`, or comma-separated pairs of a
   four-character tag of U+0020 to U+007E and a number; a tag given twice

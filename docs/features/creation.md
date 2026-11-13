@@ -117,6 +117,24 @@ refused having written nothing. The procedures of a face's colour tables are
 `shaping::write_run` writes a run whose `Run::colour` names one through
 `colour_glyph_run`, each glyph's procedure added first.
 
+**Variable faces.** `add_embedded_font_at` and `add_cid_font_at` take a
+variable face and a `FontInstance` — a named instance by its index in
+`fvar`, or `FontCoordinate`s, an axis tag and a user-scale value each — and
+embed the face's static instance, which `tinker_pdf_font::instantiate`
+writes ([fonts](fonts.md), *Static instances*): no variation table, the
+outlines, advances and `OS/2`, `hhea` and `post` values the instance's, and
+`CFF2` outlines written as a `CFF ` table. That instance is the program the
+document embeds and subsets and the one `/Widths`, `/W` and `glyph_run`'s
+adjustments measure, so a reader draws the instance whether or not it reads
+variations. Two instances of one face are two fonts with two programs. A
+face that does not vary is its own instance, and so is a bare CFF at any
+user coordinates; a named instance the face does not have, and a face the
+instancer refuses, register nothing and return false. The registrations
+that name no instance embed a `glyf` face as it is, variations and all,
+which every reader draws at its default; a face whose outlines are only in
+`CFF2`, which 9.9 Table 126 gives no `/FontFile` stream for, is embedded as
+its default instance, a CFF under `/FontFile3 /Subtype /OpenType`.
+
 **Images.** `add_image(resource, &ImageData)` with four shapes: `Jpeg`
 (bytes placed verbatim, never re-encoded — recompression is generational
 loss the caller cannot undo), `Rgb8` and `Gray8` (raw samples, deflated by
@@ -311,7 +329,9 @@ let pdf: Vec<u8> = b.finish();
 `DeviceNAttributes`, `LayerId`, `Shading`, `ShadingPattern`,
 `TilingPattern`, `TilingType`, `Glyph`, `PlacedGlyph`, `ColourGlyph`, `BlendMode`, `MaskKind`,
 `StateMask`,
-`Target`, `OutlineEntry` and `WriteOptions` are re-exported from the facade.
+`Target`, `OutlineEntry` and `WriteOptions` are re-exported from the facade,
+and so are `FontInstance` and `FontCoordinate`, the font crate's `Instance`
+and `UserCoordinate` under the names a document's caller reads them by.
 The HTML half is `FromHtml` (`from_html`, `from_html_with`, `from_markdown`), `PageBox`
 (`new`, `with_margin`, `with_font_size`; `#[non_exhaustive]`), `HtmlReport`
 (`warnings`, `pages`, `layout`, `margin`, `cost`) and `HtmlError`, all on the
@@ -478,6 +498,21 @@ outside any `/AF` sequence, and the call answers `false`
   (`a_subset_font_name_carries_its_tag`), by `/Length1` describing the
   subset rather than the original, and by the same document subsetting to
   the same bytes.
+- `crates/tinker-pdf-cos/tests/variable_embedding.rs` registers the font
+  crate's two committed variable faces at every named instance, the default
+  and user coordinates no instance names, as simple and composite fonts,
+  subset and whole, and reads each document back: the embedded program is
+  `/FontFile2` or `/FontFile3 /OpenType` as its outlines say, the instance
+  itself where nothing is cut, with no variation table and no `CFF2`; every
+  glyph drawn has the instance's outline, `/Widths` and `/W` its advances
+  and a composite font's codes the glyph indices, and a glyph run placed by
+  those advances writes no adjustment. Beside them: the CFF2 face embedded
+  at its default by the registrations that name no instance, the `glyf`
+  face embedded as it is by them, its own `prep` in a subset; two instances
+  of one face as two programs; a static face and a bare CFF their own
+  instances, byte for byte the documents that name none; a named instance
+  past a face's, a face cut short and bytes that are no font registering
+  nothing; and one document written twice to the same bytes.
 - Determinism byte-hashes pin builder output: a synthesised PDF, a
   synthesised fixed document and a synthesised book hash as *bytes*
   ([determinism](determinism.md)), so object numbering, key order and
