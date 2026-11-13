@@ -247,6 +247,10 @@ const UNSIGNED: &[(&str, &str)] = &[
         "a structured generator: the body chooses a page, its document's sections and their spellings",
     ),
     (
+        "render_tile",
+        "a structured generator: the body chooses a page, its render and the regions it is drawn in",
+    ),
+    (
         "shape",
         "the face sits after a glyph run whose length is a knob",
     ),

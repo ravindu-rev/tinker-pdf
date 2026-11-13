@@ -361,15 +361,21 @@ warning that differs.
 
 ### Tile against page: `render_tile`
 
-The generator's page is rendered whole at a generated scale, and then at
-generated regions at that scale (ruling 5). Each region's bitmap must be the
-whole render's rectangle there, trimmed by the page, byte for byte.
+`content::tiled` writes `content_stream`'s page as `content::page` writes it
+and generates one to four regions at the render's scale, from inside the page
+to past its far edges. The page is rendered whole, and then in each region
+(ruling 5). Each region's bitmap must be the whole render's rectangle there,
+clamped to the page (`PixelRegion::clamped_to`), in its format and alpha
+convention, byte for byte.
 
 One shape is not compared: ruling 5's named exception, RC-21's image run,
 which H-15's default keeps — two images that overlap outside a tile and abut
 inside it are one run in the tile and two on the page. The target leaves out
-every page on which the device bounding boxes of two drawn images meet, at any
-depth of forms, groups, patterns and annotations: a superset of the class,
+every page that may draw two images: the content generator counts, where it
+writes them, the operators that may draw one (`content::Drawn`) — `BI`, and
+`Do` naming anything but a form — and a page is left out with two of them in
+its own content, or one in a form, a pattern, a glyph procedure or an
+appearance, which may run more than once. It is a superset of the class,
 decided from the generator's model before anything is rendered, which errs
 toward comparing less and never toward passing a mismatch outside the class.
 RC-21's fix deletes the predicate in its own commit.

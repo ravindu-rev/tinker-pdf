@@ -409,3 +409,9 @@ name = "render_rewrite"
 path = "fuzz_targets/render_rewrite.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "render_tile"
+path = "fuzz_targets/render_tile.rs"
+test = false
+doc = false

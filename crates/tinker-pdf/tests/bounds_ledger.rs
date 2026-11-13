@@ -4224,6 +4224,50 @@ fn fuzz_paths() -> Vec<FuzzPath> {
                 (RENDER, "const MAX_PATTERN_DEPTH: u32 = 4;"),
             ],
         ),
+        written(
+            "render_tile",
+            vec![
+                buffer(
+                    Value(1 << 20),
+                    1,
+                    1,
+                    "the generated document, under 1 MiB at its generator's caps: 192 \
+                     operators in all, images of eight samples a side, and one page's \
+                     resources (estimate)",
+                ),
+                buffer(Value(1 << 20), PARSED, 1, "the objects parsed"),
+                buffer(
+                    Value(generated_page),
+                    4,
+                    1 + 16,
+                    "the RGBA canvas, and a group buffer for each of the sixteen levels \
+                     MAX_GROUP_DEPTH lets groups nest",
+                ),
+                buffer(
+                    Value(generated_page),
+                    5,
+                    2,
+                    "the whole render and one region's, at most five bytes a pixel; the \
+                     regions are drawn one after another",
+                ),
+                buffer(
+                    Value(1 << 24),
+                    4,
+                    4,
+                    "a tiling pattern's cell at MAX_TILE_AREA, for each of the four levels \
+                     MAX_PATTERN_DEPTH lets patterns nest",
+                ),
+            ],
+            vec![
+                (FUZZ_GEN_CONTENT, "pub const MAX_TOTAL_OPS: usize = 192;"),
+                (FUZZ_GEN_CONTENT, "pub const MAX_IMAGE: usize = 8;"),
+                (FUZZ_GEN_CONTENT, "pub const MAX_PAGE: i64 = 72;"),
+                (FUZZ_GEN_CONTENT, "[1.0, 0.5, 2.0, 1.5, 0.25, 3.0]"),
+                (RENDER, "const MAX_GROUP_DEPTH: usize = 16;"),
+                (RENDER, "const MAX_TILE_AREA: u64 = 1 << 24;"),
+                (RENDER, "const MAX_PATTERN_DEPTH: u32 = 4;"),
+            ],
+        ),
         path(
             "sevenz",
             vec![buffer(

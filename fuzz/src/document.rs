@@ -33,7 +33,7 @@ pub struct Document {
 
 /// A document built from `c`.
 pub fn document(c: &mut Choices) -> Document {
-    let (objects, options) = content::model(c);
+    let (objects, options, _) = content::model(c);
     let count = 1 + c.below(cos::MAX_SECTIONS);
     // Cross-reference and object streams are PDF 1.5's (7.5.8).
     let version = *c.pick(&[(1, 7), (1, 5), (2, 0), (1, 6)]);

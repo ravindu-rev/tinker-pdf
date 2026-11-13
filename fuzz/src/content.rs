@@ -95,6 +95,31 @@ struct Gen<'c, 'a> {
     budget: usize,
     width: i64,
     height: i64,
+    /// Whether the content being written is the page's own.
+    in_page: bool,
+    /// What draws an image, counted where it is written.
+    drawn: Drawn,
+}
+
+/// The operators that may draw an image, counted by where they are: `BI`,
+/// and `Do` naming anything but a form. Over every stream a page's drawing
+/// reaches, so a superset of the images it draws.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Drawn {
+    /// In the page's own content, where each operator runs once.
+    pub page: usize,
+    /// In a form, a pattern, a glyph procedure or an appearance, which may
+    /// run any number of times.
+    pub nested: usize,
+}
+
+/// Whether an operator with these operands may draw an image: `Do` naming
+/// anything but one of the forms, the only XObjects that are not images.
+fn draws_image(op: &[u8], operands: &[Value]) -> bool {
+    op == b"Do"
+        && operands
+            .iter()
+            .any(|v| matches!(v, Value::Name(name) if !FORMS.contains(&name.as_slice())))
 }
 
 /// Writes `value` after whatever separates it from what is already there.
@@ -361,11 +386,22 @@ impl Gen<'_, '_> {
                         _ => operands.clear(),
                     }
                 }
+                if draws_image(op, &operands) {
+                    self.count_image();
+                }
                 for value in &operands {
                     put(out, value);
                 }
                 operator(out, op);
             }
+        }
+    }
+
+    fn count_image(&mut self) {
+        if self.in_page {
+            self.drawn.page += 1;
+        } else {
+            self.drawn.nested += 1;
         }
     }
 
@@ -420,6 +456,7 @@ impl Gen<'_, '_> {
             }
         };
         let (width, height, bits, len) = self.geometry(components, depths);
+        self.count_image();
         operator(out, b"BI");
         let mut entries: Vec<(&[u8], Value)> = vec![
             (key(b"Width", b"W"), Value::Int(width)),
@@ -455,6 +492,13 @@ impl Gen<'_, '_> {
 
     /// A content stream's bytes: for a glyph procedure, `d0` or `d1` first.
     fn content(&mut self, depth: u32, glyph: bool, page: bool) -> Vec<u8> {
+        let outer = std::mem::replace(&mut self.in_page, page);
+        let out = self.content_of(depth, glyph, page);
+        self.in_page = outer;
+        out
+    }
+
+    fn content_of(&mut self, depth: u32, glyph: bool, page: bool) -> Vec<u8> {
         let mut out = Vec::new();
         if page {
             // A filled rectangle first, so the page draws something unless
@@ -946,7 +990,15 @@ impl Gen<'_, '_> {
 /// A generated page, its document written clean, and render options chosen
 /// with it.
 pub fn page(c: &mut Choices) -> Page {
-    let (objects, options) = model(c);
+    let (objects, options, _) = model(c);
+    Page {
+        bytes: plainly(objects),
+        options,
+    }
+}
+
+/// A page's objects in one table, every token in its plainest spelling.
+fn plainly(objects: Vec<Indirect>) -> Vec<u8> {
     let file = File {
         version: (1, 7),
         sections: vec![Section {
@@ -956,18 +1008,53 @@ pub fn page(c: &mut Choices) -> Page {
             trailer: vec![(b"Root".to_vec(), Value::reference(1))],
         }],
     };
-    let written = cos::write(&file, &mut Choices::new(&[]));
-    Page {
-        bytes: written.bytes,
+    cos::write(&file, &mut Choices::new(&[])).bytes
+}
+
+/// A generated page to draw whole and in regions (ruling 5).
+pub struct Tiled {
+    /// The file, as [`page`] writes it.
+    pub bytes: Vec<u8>,
+    /// The whole render's options, generated with the page, with no region.
+    pub options: RenderOptions,
+    /// The regions to render at the same options, each anywhere from inside
+    /// the page to past its far edges.
+    pub regions: Vec<PixelRegion>,
+    /// What may draw an image, and where.
+    pub drawn: Drawn,
+}
+
+/// A page and the regions to draw it in, built from `c`: [`model`]'s page,
+/// its options' own region set aside, then one to four regions at its scale.
+pub fn tiled(c: &mut Choices) -> Tiled {
+    let (objects, mut options, drawn) = model(c);
+    options.region = None;
+    // Past the widest page this scale draws, rotated or not, by a margin, so
+    // a region can run off the far edges as the lattice's last tiles do.
+    let reach = (MAX_PAGE as f64 * options.scale).ceil() as usize + 8;
+    let regions = (0..1 + c.below(4))
+        .map(|_| {
+            let x = c.below(reach) as u32;
+            let y = c.below(reach) as u32;
+            let w = 1 + c.below(reach) as u32;
+            let h = 1 + c.below(reach) as u32;
+            PixelRegion::new(x, y, w, h)
+        })
+        .collect();
+    Tiled {
+        bytes: plainly(objects),
         options,
+        regions,
+        drawn,
     }
 }
 
 /// A generated page's objects — 1 the catalog, 2 the page tree, 3 the page,
-/// 4 its resources, then every object they name, by number — and render
-/// options chosen with it: what [`page`] writes, for a writer that lays the
-/// objects out otherwise.
-pub fn model(c: &mut Choices) -> (Vec<Indirect>, RenderOptions) {
+/// 4 its resources, then every object they name, by number — render options
+/// chosen with it, and the operators that may draw an image, counted where
+/// they are written: what [`page`] writes, for a writer that lays the objects
+/// out otherwise or draws the page otherwise.
+pub fn model(c: &mut Choices) -> (Vec<Indirect>, RenderOptions, Drawn) {
     let width = 8 + c.range(0, MAX_PAGE - 8);
     let height = 8 + c.range(0, MAX_PAGE - 8);
     let mut generator = Gen {
@@ -977,6 +1064,8 @@ pub fn model(c: &mut Choices) -> (Vec<Indirect>, RenderOptions) {
         budget: MAX_TOTAL_OPS,
         width,
         height,
+        in_page: false,
+        drawn: Drawn::default(),
     };
     // 1 the catalog, 2 the page tree, 3 the page, 4 the shared resources.
     let resources = 4;
@@ -1091,7 +1180,7 @@ pub fn model(c: &mut Choices) -> (Vec<Indirect>, RenderOptions) {
     let mut rest = std::mem::take(&mut generator.objects);
     rest.sort_by_key(|object| object.num);
     objects.extend(rest);
-    (objects, options)
+    (objects, options, generator.drawn)
 }
 
 /// Render options for a page of `width` by `height` points.
@@ -1231,5 +1320,167 @@ mod tests {
             bitmap.data.iter().any(|b| *b != 255),
             "the opening rectangle drew nothing"
         );
+    }
+
+    fn inputs(count: usize, longest: usize) -> impl Iterator<Item = Vec<u8>> {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        (0..count).map(move |n| {
+            let len = (n * 101) % longest;
+            (0..len)
+                .map(|_| {
+                    state ^= state >> 12;
+                    state ^= state << 25;
+                    state ^= state >> 27;
+                    (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 56) as u8
+                })
+                .collect()
+        })
+    }
+
+    /// `Do` may draw an image unless what it names is one of the forms, and
+    /// no other operator draws one through its operands.
+    #[test]
+    fn an_operator_may_draw_an_image_only_as_do_naming_no_form() {
+        assert!(draws_image(b"Do", &[Value::name(b"I0")]));
+        assert!(
+            draws_image(b"Do", &[Value::name(b"Foo")]),
+            "unknown names count"
+        );
+        assert!(draws_image(
+            b"Do",
+            &[Value::name(b"X0"), Value::name(b"I3")]
+        ));
+        assert!(!draws_image(b"Do", &[Value::name(b"X2")]));
+        assert!(!draws_image(b"Do", &[Value::Int(1)]));
+        assert!(!draws_image(b"Do", &[]));
+        assert!(!draws_image(b"Tj", &[Value::name(b"I0")]));
+    }
+
+    /// The plainest input tiles the plainest page, in one region of one pixel
+    /// at its corner, and draws no image.
+    #[test]
+    fn the_empty_input_tiles_its_plainest_page() {
+        let tiled = tiled(&mut Choices::new(&[]));
+        assert_eq!(tiled.bytes, page(&mut Choices::new(&[])).bytes);
+        assert!(tiled.options.region.is_none());
+        assert_eq!(tiled.regions, vec![PixelRegion::new(0, 0, 1, 1)]);
+        assert_eq!(tiled.drawn, Drawn::default());
+    }
+
+    /// Images are counted in the page's own content and in what it reaches,
+    /// and enough pages draw at most one, in the page, to tile.
+    #[test]
+    fn image_draws_are_counted_where_they_are_written() {
+        let all: Vec<Drawn> = inputs(800, 2000)
+            .map(|input| tiled(&mut Choices::new(&input)).drawn)
+            .collect();
+        assert!(all.iter().any(|d| d.page > 1));
+        assert!(all.iter().any(|d| d.nested > 0));
+        let tiling = all.iter().filter(|d| d.page <= 1 && d.nested == 0).count();
+        assert!(tiling >= 80, "only {tiling} of 800 pages tile");
+    }
+
+    /// `render_tile`'s relation, on stable: every region of a page that draws
+    /// no image run is the whole render's rectangle there, byte for byte.
+    #[test]
+    fn every_region_is_the_page_under_it() {
+        let mut compared = 0;
+        for (n, input) in inputs(200, 2000).enumerate() {
+            let tiled = tiled(&mut Choices::new(&input));
+            if tiled.drawn.page > 1 || tiled.drawn.nested > 0 {
+                continue;
+            }
+            let doc = tinker_pdf::Document::open(tiled.bytes).expect("it opens");
+            let page = doc.page(0).expect("one page");
+            let whole = page.render(&tiled.options);
+            let (width, height) = page.pixel_size(&tiled.options);
+            assert_eq!((whole.width, whole.height), (width, height), "input {n}");
+            let components = whole.components();
+            for region in &tiled.regions {
+                let tile = page.render(&RenderOptions {
+                    region: Some(*region),
+                    ..tiled.options.clone()
+                });
+                let at = region.clamped_to(width, height);
+                assert_eq!(
+                    (tile.width, tile.height),
+                    (at.width, at.height),
+                    "input {n}"
+                );
+                let span = tile.width as usize * components;
+                for y in 0..tile.height as usize {
+                    let mine = &tile.data[y * tile.stride..y * tile.stride + span];
+                    let from = (at.y as usize + y) * whole.stride + at.x as usize * components;
+                    assert!(mine == &whole.data[from..from + span], "input {n}, row {y}");
+                }
+            }
+            compared += 1;
+        }
+        assert!(compared >= 20, "only {compared} pages were compared");
+    }
+
+    /// `render_tile`'s seeds, beside `content_stream`'s, under the writers'
+    /// one name.
+    mod render_tile {
+        use super::*;
+
+        /// Rewrites `fuzz/corpus/render_tile/`: one seed per feature, each the
+        /// first input of `first_input`'s sequence whose page has it and tiles.
+        #[test]
+        #[ignore = "writes fuzz/corpus/render_tile"]
+        fn write_the_fuzz_seeds() {
+            type Feature = fn(&Tiled) -> bool;
+            let features: &[(&str, Feature)] = &[
+                ("four-regions", |t| t.regions.len() == 4),
+                ("one-image", |t| t.drawn.page == 1),
+                ("rotated", |t| holds(&t.bytes, b"/Rotate")),
+                ("transparency-group", |t| holds(&t.bytes, b"/Transparency")),
+                ("annotations", |t| {
+                    holds(&t.bytes, b"/Annots") && t.options.annotations
+                }),
+                ("type3-text", |t| {
+                    holds(&t.bytes, b"/Type3") && holds(&t.bytes, b"Tj")
+                }),
+                ("patterns-and-shadings", |t| {
+                    holds(&t.bytes, b"/PatternType") && holds(&t.bytes, b"/ShadingType")
+                }),
+                ("quarter-scale", |t| t.options.scale < 0.5),
+                ("triple-scale", |t| t.options.scale > 2.5),
+                ("cmyk-ink", |t| t.options.allow_cmyk),
+                ("no-anti-aliasing", |t| !t.options.antialias),
+                ("transparent-premultiplied", |t| {
+                    t.options.transparent && t.options.premultiplied
+                }),
+            ];
+            let tiles = |t: &Tiled| t.drawn.page <= 1 && t.drawn.nested == 0;
+            let read = |data: &[u8]| {
+                let mut choices = Choices::new(data);
+                let _ = tiled(&mut choices);
+                choices.consumed()
+            };
+            let mut seeds: Vec<(&str, Vec<u8>)> = vec![("plain", Vec::new())];
+            for (name, has) in features {
+                let seed = crate::first_input(
+                    2000,
+                    200_000,
+                    |data| {
+                        let t = tiled(&mut Choices::new(data));
+                        has(&t) && tiles(&t)
+                    },
+                    read,
+                    &seeds
+                        .iter()
+                        .map(|(_, seed)| seed.clone())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or_else(|| panic!("no input has {name}"));
+                assert!(
+                    has(&tiled(&mut Choices::new(&seed))),
+                    "{name} lost its feature when cut"
+                );
+                seeds.push((name, seed));
+            }
+            crate::write_seeds("render_tile", &seeds);
+        }
     }
 }
