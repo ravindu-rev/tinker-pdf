@@ -132,7 +132,17 @@ Unicode value the Adobe Glyph List — or, for ZapfDingbats' `a` names, the ITC
 Zapf Dingbats Glyph List — gives the name, and the fourteen names that list
 holds and Table D.6 does not encode
 ([design](../design/symbol-faces.md); the sources are in
-[THIRDPARTY.md](../../THIRDPARTY.md)).
+[THIRDPARTY.md](../../THIRDPARTY.md)). `substitute_glyph` is the route from
+one of their codes to a substitute face's glyph: the face's own glyph names
+first — `Sfnt::glyph_for_name`, which reads every version of `post` over the
+258 standard Macintosh names in the order Apple's TrueType Reference Manual
+gives, or a CFF charset — then the name's Unicode value through the face's
+Unicode subtable (`Sfnt::glyph_for_unicode`), then the code through a (3,0)
+subtable at `0xF000` (`Sfnt::glyph_for_symbol_code`), glyph 0 being no answer
+at any step. The facade does not ask it: a substituted Symbol or ZapfDingbats
+face is read by its `cmap` alone (*The host seam*, below).
+`crates/tinker-pdf-font/tests/symbol_census.rs` counts, for H-94, what each
+candidate face the design names reaches by it.
 
 **The host seam.** `FontRequest::read` distils a font dictionary and its
 descriptor (9.8.2 Table 123 flags, the 9.6.4 subset tag stripped, weight and

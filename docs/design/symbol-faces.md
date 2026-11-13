@@ -138,8 +138,8 @@ A code with no name skips the first two steps. Glyph 0 is `.notdef` in every
 face, so it is not an answer at any step, and a name that reaches it falls to
 the next step.
 
-The font half lives in `tinker-pdf-font` and lands with the census
-(FT-03.3), which counts with it, so the census's figures are the drawing's:
+The font half lives in `tinker-pdf-font`, beside the census (FT-03.3) that
+counts with it, so the census's figures are the drawing's:
 
 ```rust
 impl Sfnt<'_> {
@@ -158,11 +158,11 @@ pub fn substitute_glyph(
 ) -> Option<(u16, SymbolRoute)>;
 ```
 
-`Sfnt::glyph_for_name` reads only the table's own strings today, so a name in
-the standard order — `space`, `Delta`, `summation` — reaches nothing; the
-standard order is Apple's, from the TrueType Reference Manual's `post`
-chapter, and every caller of the function gains those names. FT-03.4 calls
-`substitute_glyph` from the facade's substitute addressing in `resources.rs`.
+`Sfnt::glyph_for_name` reads every version of `post` over the standard
+order, Apple's, from the TrueType Reference Manual's `post` chapter, so a
+name a face stores by its index — `space`, `Delta`, `summation` — reaches
+its glyph as one the table spells out does. FT-03.4 calls `substitute_glyph`
+from the facade's substitute addressing in `resources.rs`.
 
 ### Precedence: the document's program and the document's names
 
@@ -213,7 +213,7 @@ bundled answer could pair two faces.
 | File | Face | Upstream | Licence the upstream declares | SPDX |
 | --- | --- | --- | --- | --- |
 | `StandardSymbolsPS.ttf`, `StandardSymbolsPS.otf` | URW++ Standard Symbols PS | <https://github.com/ArtifexSoftware/urw-base35-fonts>, tag `20200910`, `fonts/` | GNU Affero GPL version 3, with an exception for including the fonts in a PostScript or PDF document | `AGPL-3.0-only`; the exception has no identifier |
-| `D050000L.ttf`, `D050000L.otf` | URW++ D050000L | the same | the same | the same |
+| `D050000L.ttf`, `D050000L.otf` | URW++ D050000L | <https://github.com/ArtifexSoftware/urw-base35-fonts>, tag `20200910`, `fonts/` | GNU Affero GPL version 3, with an exception for including the fonts in a PostScript or PDF document | `AGPL-3.0-only`; the exception has no identifier |
 | `NotoSansSymbols-Regular.ttf` | Noto Sans Symbols | <https://github.com/notofonts/symbols>, release `NotoSansSymbols-v2.003`, its unhinted TrueType | SIL Open Font License 1.1 | `OFL-1.1` |
 | `NotoSansSymbols2-Regular.ttf` | Noto Sans Symbols 2 | the same repository, release `NotoSansSymbols2-v2.008`, its unhinted TrueType | SIL Open Font License 1.1 | `OFL-1.1` |
 | `NotoSansMath-Regular.ttf` | Noto Sans Math | <https://github.com/notofonts/math>, release `NotoSansMath-v3.000`, its unhinted TrueType | SIL Open Font License 1.1 | `OFL-1.1` |

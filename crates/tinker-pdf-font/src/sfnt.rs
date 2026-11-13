@@ -4,6 +4,11 @@
 //! directory, `head`, `hhea`, `hmtx`, `cmap` and `post`. Glyph outlines are
 //! wave 2; nothing here touches `glyf` or `CFF `.
 //!
+//! Beside the one `cmap` subtable text is looked up in, two more are read on
+//! their own for the route `docs/design/symbol-faces.md` settles: a Unicode
+//! subtable, asked for a glyph name's value, and a (3,0) symbol subtable, asked
+//! for a code.
+//!
 //! Every read is bounds-checked against the buffer the caller supplied,
 //! because a font program is document-controlled data like any other.
 
@@ -15,6 +20,12 @@ pub struct Sfnt<'a> {
     /// The `cmap` subtable characters are looked up in, chosen at the first
     /// lookup and kept, so a run of lookups chooses once.
     cmap: OnceLock<Option<CmapChoice>>,
+    /// The Unicode subtable [`Sfnt::glyph_for_unicode`] reads, chosen at its
+    /// first lookup and kept.
+    unicode_cmap: OnceLock<Option<CmapChoice>>,
+    /// The (3,0) symbol subtable [`Sfnt::glyph_for_symbol_code`] reads, chosen
+    /// at its first lookup and kept.
+    symbol_cmap: OnceLock<Option<CmapChoice>>,
     data: &'a [u8],
     tables: Vec<(u32, u32, u32)>,
     /// The `sfntVersion` of the directory these tables came from.
@@ -44,6 +55,8 @@ fn be32(data: &[u8], at: usize) -> Option<u32> {
 const TAG_CMAP: u32 = 0x636D_6170;
 const TAG_HEAD: u32 = 0x6865_6164;
 const TAG_HHEA: u32 = 0x6868_6561;
+const TAG_MAXP: u32 = 0x6D61_7870;
+const TAG_POST: u32 = 0x706F_7374;
 
 /// The `cmap` subtable a face's characters are looked up in (9.6.6.4).
 #[derive(Clone, Copy, Debug)]
@@ -108,6 +121,8 @@ impl<'a> Sfnt<'a> {
 
         let mut sfnt = Sfnt {
             cmap: OnceLock::new(),
+            unicode_cmap: OnceLock::new(),
+            symbol_cmap: OnceLock::new(),
             data,
             tables,
             version: tag,
@@ -267,40 +282,422 @@ impl<'a> Sfnt<'a> {
         })
     }
 
-    /// The glyph named `name`, through the `post` table's version 2 names.
+    /// The glyph named `name`, through the `post` table's names.
+    ///
+    /// Version 1.0 is the 258 standard Macintosh names in their order, one a
+    /// glyph; version 2.0 gives each glyph an index, one of those 258 below 258
+    /// and the table's own strings from 258 on; version 2.5 gives each glyph an
+    /// offset into the standard order; version 3.0 and any other name nothing.
+    /// The first glyph with the name is the answer, `.notdef` included, which
+    /// is how 2.0 marks a glyph it does not name.
     #[must_use]
     pub fn glyph_for_name(&self, name: &str) -> Option<u16> {
-        let post = self.table(0x706F_7374)?;
-        if be32(post, 0)? != 0x0002_0000 {
-            return None;
+        let post = self.table(TAG_POST)?;
+        let standard = MAC_STANDARD_NAMES.iter().position(|listed| *listed == name);
+        match be32(post, 0)? {
+            0x0001_0000 => {
+                let index = standard?;
+                // Version 1.0 says the face holds exactly the standard order,
+                // so a name past the face's own glyphs is no glyph of it.
+                let glyphs = self
+                    .table(TAG_MAXP)
+                    .and_then(|maxp| be16(maxp, 4))
+                    .map_or(MAC_STANDARD_NAMES.len(), usize::from);
+                if index >= glyphs {
+                    return None;
+                }
+                u16::try_from(index).ok()
+            }
+            0x0002_0000 => {
+                let count = usize::from(be16(post, 32)?);
+                let strings = 34usize.checked_add(count.checked_mul(2)?)?;
+                // Whether each of the table's own strings is `name`, read once,
+                // so each glyph's index is answered in one step however often
+                // a hostile table repeats the string.
+                let mut spells = Vec::new();
+                let mut at = strings;
+                while let Some(&len) = post.get(at) {
+                    let start = at + 1;
+                    let Some(text) = post.get(start..start + usize::from(len)) else {
+                        break;
+                    };
+                    spells.push(text == name.as_bytes());
+                    at = start + usize::from(len);
+                }
+                (0..count).find_map(|glyph| {
+                    let index = usize::from(be16(post, 34 + glyph * 2)?);
+                    let named = match index.checked_sub(MAC_STANDARD_NAMES.len()) {
+                        None => standard == Some(index),
+                        Some(ordinal) => spells.get(ordinal).copied().unwrap_or(false),
+                    };
+                    if !named {
+                        return None;
+                    }
+                    u16::try_from(glyph).ok()
+                })
+            }
+            0x0002_5000 => {
+                let index = i64::try_from(standard?).ok()?;
+                let count = usize::from(be16(post, 32)?);
+                (0..count).find_map(|glyph| {
+                    // An offset is a signed byte: the glyph's place in the
+                    // standard order less its own index.
+                    let offset = i64::from(i8::from_be_bytes([*post.get(34 + glyph)?]));
+                    let glyph = i64::try_from(glyph).ok()?;
+                    if glyph + offset != index {
+                        return None;
+                    }
+                    u16::try_from(glyph).ok()
+                })
+            }
+            _ => None,
         }
-        let count = be16(post, 32)? as usize;
+    }
 
-        let indices: Vec<u16> = (0..count).filter_map(|i| be16(post, 34 + i * 2)).collect();
+    /// A character's glyph through the face's Unicode subtable alone: (3,10),
+    /// else (3,1), else a platform 0 subtable of encoding 0 to 4 or 6, chosen
+    /// once and kept. Encoding 5 maps variation sequences rather than
+    /// characters, and the (3,0) and Macintosh subtables are not keyed by
+    /// Unicode, so none of them is asked here.
+    ///
+    /// `None` where the face has no such subtable or it maps the character to
+    /// glyph 0, which is `.notdef` and no answer
+    /// (`docs/design/symbol-faces.md`, "The route").
+    #[must_use]
+    pub fn glyph_for_unicode(&self, c: char) -> Option<u16> {
+        let choice = (*self
+            .unicode_cmap
+            .get_or_init(|| self.choose_subtable(unicode_score)))?;
+        let sub = self.table(TAG_CMAP)?.get(choice.offset..)?;
+        lookup_cmap(sub, u32::from(c), choice.ordered, &mut 0).filter(|glyph| *glyph != 0)
+    }
 
-        // Names past the 258 standard Macintosh ones are Pascal strings
-        // packed after the index array.
-        let mut names: Vec<&[u8]> = Vec::new();
-        let mut at = 34 + count * 2;
-        while at < post.len() && names.len() < count {
-            let len = *post.get(at)? as usize;
-            let start = at + 1;
-            let Some(text) = post.get(start..start + len) else {
+    /// A code's glyph through the face's (3,0) symbol subtable alone, at
+    /// `0xF000` plus the code (9.6.6.4), chosen once and kept: the reading a
+    /// substituted symbolic face gets today, which the route keeps last.
+    ///
+    /// `None` where the face has no (3,0) subtable or it maps the code to
+    /// glyph 0.
+    #[must_use]
+    pub fn glyph_for_symbol_code(&self, code: u8) -> Option<u16> {
+        let choice = (*self
+            .symbol_cmap
+            .get_or_init(|| self.choose_subtable(symbol_score)))?;
+        let sub = self.table(TAG_CMAP)?.get(choice.offset..)?;
+        lookup_cmap(sub, 0xF000 | u32::from(code), choice.ordered, &mut 0)
+            .filter(|glyph| *glyph != 0)
+    }
+
+    /// The best-scored subtable among the face's first 64 encoding records,
+    /// where `score` gives each pair of platform and encoding a score and zero
+    /// to one it does not take; the first of equal scores wins.
+    fn choose_subtable(&self, score: fn(u16, u16) -> u32) -> Option<CmapChoice> {
+        let cmap = self.table(TAG_CMAP)?;
+        let count = usize::from(be16(cmap, 2)?);
+        let mut best: Option<(u32, u16, usize)> = None;
+        for i in 0..count.min(64) {
+            let at = 4 + i * 8;
+            let (Some(platform), Some(encoding), Some(offset)) =
+                (be16(cmap, at), be16(cmap, at + 2), be32(cmap, at + 4))
+            else {
                 break;
             };
-            names.push(text);
-            at = start + len;
-        }
-
-        indices.iter().enumerate().find_map(|(glyph, &index)| {
-            if index < 258 {
-                return None;
+            let scored = score(platform, encoding);
+            if scored > 0 && best.is_none_or(|(b, _, _)| scored > b) {
+                best = Some((scored, platform, offset as usize));
             }
-            let custom = names.get(usize::from(index) - 258)?;
-            (*custom == name.as_bytes()).then_some(glyph as u16)
+        }
+        let (score, platform, offset) = best?;
+        let ordered = cmap.get(offset..).is_some_and(|sub| in_order(sub, &mut 0));
+        Some(CmapChoice {
+            score,
+            platform,
+            offset,
+            ordered,
         })
     }
 }
+
+/// How [`Sfnt::glyph_for_unicode`] scores a subtable: (3,10) over (3,1) over a
+/// platform 0 subtable that maps characters, and nothing else.
+fn unicode_score(platform: u16, encoding: u16) -> u32 {
+    match (platform, encoding) {
+        (3, 10) => 3,
+        (3, 1) => 2,
+        (0, 0..=4 | 6) => 1,
+        _ => 0,
+    }
+}
+
+/// How [`Sfnt::glyph_for_symbol_code`] scores a subtable: (3,0) alone.
+fn symbol_score(platform: u16, encoding: u16) -> u32 {
+    u32::from(platform == 3 && encoding == 0)
+}
+
+/// The 258 glyph names of the standard Macintosh order, by index, as Apple's
+/// TrueType Reference Manual gives them in its `post` chapter: what a version
+/// 1.0 table means by each glyph and a version 2.0 or 2.5 table by an index
+/// below 258.
+const MAC_STANDARD_NAMES: [&str; 258] = [
+    ".notdef",
+    ".null",
+    "nonmarkingreturn",
+    "space",
+    "exclam",
+    "quotedbl",
+    "numbersign",
+    "dollar",
+    "percent",
+    "ampersand",
+    "quotesingle",
+    "parenleft",
+    "parenright",
+    "asterisk",
+    "plus",
+    "comma",
+    "hyphen",
+    "period",
+    "slash",
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "colon",
+    "semicolon",
+    "less",
+    "equal",
+    "greater",
+    "question",
+    "at",
+    "A",
+    "B",
+    "C",
+    "D",
+    "E",
+    "F",
+    "G",
+    "H",
+    "I",
+    "J",
+    "K",
+    "L",
+    "M",
+    "N",
+    "O",
+    "P",
+    "Q",
+    "R",
+    "S",
+    "T",
+    "U",
+    "V",
+    "W",
+    "X",
+    "Y",
+    "Z",
+    "bracketleft",
+    "backslash",
+    "bracketright",
+    "asciicircum",
+    "underscore",
+    "grave",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g",
+    "h",
+    "i",
+    "j",
+    "k",
+    "l",
+    "m",
+    "n",
+    "o",
+    "p",
+    "q",
+    "r",
+    "s",
+    "t",
+    "u",
+    "v",
+    "w",
+    "x",
+    "y",
+    "z",
+    "braceleft",
+    "bar",
+    "braceright",
+    "asciitilde",
+    "Adieresis",
+    "Aring",
+    "Ccedilla",
+    "Eacute",
+    "Ntilde",
+    "Odieresis",
+    "Udieresis",
+    "aacute",
+    "agrave",
+    "acircumflex",
+    "adieresis",
+    "atilde",
+    "aring",
+    "ccedilla",
+    "eacute",
+    "egrave",
+    "ecircumflex",
+    "edieresis",
+    "iacute",
+    "igrave",
+    "icircumflex",
+    "idieresis",
+    "ntilde",
+    "oacute",
+    "ograve",
+    "ocircumflex",
+    "odieresis",
+    "otilde",
+    "uacute",
+    "ugrave",
+    "ucircumflex",
+    "udieresis",
+    "dagger",
+    "degree",
+    "cent",
+    "sterling",
+    "section",
+    "bullet",
+    "paragraph",
+    "germandbls",
+    "registered",
+    "copyright",
+    "trademark",
+    "acute",
+    "dieresis",
+    "notequal",
+    "AE",
+    "Oslash",
+    "infinity",
+    "plusminus",
+    "lessequal",
+    "greaterequal",
+    "yen",
+    "mu",
+    "partialdiff",
+    "summation",
+    "product",
+    "pi",
+    "integral",
+    "ordfeminine",
+    "ordmasculine",
+    "Omega",
+    "ae",
+    "oslash",
+    "questiondown",
+    "exclamdown",
+    "logicalnot",
+    "radical",
+    "florin",
+    "approxequal",
+    "Delta",
+    "guillemotleft",
+    "guillemotright",
+    "ellipsis",
+    "nonbreakingspace",
+    "Agrave",
+    "Atilde",
+    "Otilde",
+    "OE",
+    "oe",
+    "endash",
+    "emdash",
+    "quotedblleft",
+    "quotedblright",
+    "quoteleft",
+    "quoteright",
+    "divide",
+    "lozenge",
+    "ydieresis",
+    "Ydieresis",
+    "fraction",
+    "currency",
+    "guilsinglleft",
+    "guilsinglright",
+    "fi",
+    "fl",
+    "daggerdbl",
+    "periodcentered",
+    "quotesinglbase",
+    "quotedblbase",
+    "perthousand",
+    "Acircumflex",
+    "Ecircumflex",
+    "Aacute",
+    "Edieresis",
+    "Egrave",
+    "Iacute",
+    "Icircumflex",
+    "Idieresis",
+    "Igrave",
+    "Oacute",
+    "Ocircumflex",
+    "apple",
+    "Ograve",
+    "Uacute",
+    "Ucircumflex",
+    "Ugrave",
+    "dotlessi",
+    "circumflex",
+    "tilde",
+    "macron",
+    "breve",
+    "dotaccent",
+    "ring",
+    "cedilla",
+    "hungarumlaut",
+    "ogonek",
+    "caron",
+    "Lslash",
+    "lslash",
+    "Scaron",
+    "scaron",
+    "Zcaron",
+    "zcaron",
+    "brokenbar",
+    "Eth",
+    "eth",
+    "Yacute",
+    "yacute",
+    "Thorn",
+    "thorn",
+    "minus",
+    "multiply",
+    "onesuperior",
+    "twosuperior",
+    "threesuperior",
+    "onehalf",
+    "onequarter",
+    "threequarters",
+    "franc",
+    "Gbreve",
+    "gbreve",
+    "Idotaccent",
+    "Scedilla",
+    "scedilla",
+    "Cacute",
+    "cacute",
+    "Ccaron",
+    "ccaron",
+    "dcroat",
+];
 
 /// Whether a format 4, 12 or 13 subtable's entries are in the order its
 /// format requires, every one readable, counting each entry read.
@@ -781,5 +1178,313 @@ mod tests {
         data[4..6].copy_from_slice(&500u16.to_be_bytes());
         let sfnt = Sfnt::parse(&data).expect("the header is valid");
         assert!(sfnt.table(0x6865_6164).is_none());
+    }
+
+    /// Builds an sfnt holding every table given, in that order.
+    fn sfnt_with_tables(tables: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+        out.extend_from_slice(&[0; 6]);
+        let mut offset = 12 + 16 * tables.len();
+        for (tag, table) in tables {
+            out.extend_from_slice(*tag);
+            out.extend_from_slice(&0u32.to_be_bytes());
+            out.extend_from_slice(&(offset as u32).to_be_bytes());
+            out.extend_from_slice(&(table.len() as u32).to_be_bytes());
+            offset += table.len();
+        }
+        for (_, table) in tables {
+            out.extend_from_slice(table);
+        }
+        out
+    }
+
+    /// A `post` table: its version, the rest of the 32-byte header, and the
+    /// body that version carries.
+    fn post(version: u32, body: &[u8]) -> Vec<u8> {
+        let mut out = version.to_be_bytes().to_vec();
+        out.extend_from_slice(&[0; 28]);
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// A version 2.0 body: each glyph's index, then the table's own strings.
+    fn post_2_body(indices: &[u16], strings: &[&str]) -> Vec<u8> {
+        let mut out = (indices.len() as u16).to_be_bytes().to_vec();
+        for index in indices {
+            out.extend_from_slice(&index.to_be_bytes());
+        }
+        for string in strings {
+            out.push(string.len() as u8);
+            out.extend_from_slice(string.as_bytes());
+        }
+        out
+    }
+
+    /// A format 4 subtable mapping each code to its glyph, a segment each,
+    /// and the closing segment at 0xFFFF.
+    fn format_4(pairs: &[(u16, u16)]) -> Vec<u8> {
+        let mut pairs = pairs.to_vec();
+        pairs.sort_unstable();
+        let segments = pairs.len() + 1;
+        let mut out = Vec::new();
+        out.extend_from_slice(&4u16.to_be_bytes()); // format
+        out.extend_from_slice(&0u16.to_be_bytes()); // length, unread
+        out.extend_from_slice(&0u16.to_be_bytes()); // language
+        out.extend_from_slice(&((segments * 2) as u16).to_be_bytes());
+        out.extend_from_slice(&[0; 6]); // search hints
+        for (code, _) in &pairs {
+            out.extend_from_slice(&code.to_be_bytes()); // endCode
+        }
+        out.extend_from_slice(&0xFFFFu16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes()); // reservedPad
+        for (code, _) in &pairs {
+            out.extend_from_slice(&code.to_be_bytes()); // startCode
+        }
+        out.extend_from_slice(&0xFFFFu16.to_be_bytes());
+        for (code, glyph) in &pairs {
+            out.extend_from_slice(&glyph.wrapping_sub(*code).to_be_bytes()); // idDelta
+        }
+        out.extend_from_slice(&1u16.to_be_bytes());
+        for _ in 0..segments {
+            out.extend_from_slice(&0u16.to_be_bytes()); // idRangeOffset
+        }
+        out
+    }
+
+    /// A `cmap` table of one subtable per record, in the order given.
+    fn cmap_of(records: &[(u16, u16, Vec<u8>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&0u16.to_be_bytes()); // version
+        out.extend_from_slice(&(records.len() as u16).to_be_bytes());
+        let mut offset = 4 + 8 * records.len();
+        for (platform, encoding, sub) in records {
+            out.extend_from_slice(&platform.to_be_bytes());
+            out.extend_from_slice(&encoding.to_be_bytes());
+            out.extend_from_slice(&(offset as u32).to_be_bytes());
+            offset += sub.len();
+        }
+        for (_, _, sub) in records {
+            out.extend_from_slice(sub);
+        }
+        out
+    }
+
+    /// FT-03.3: a version 2.0 `post` names a glyph by its place in the
+    /// standard Macintosh order as well as by the table's own strings, so
+    /// `space`, `Delta` and `summation`, which a face stores by index, reach
+    /// their glyphs (`docs/design/symbol-faces.md`, "The route").
+    #[test]
+    fn a_post_name_in_the_standard_order_reaches_its_glyph() {
+        // .notdef, space, Delta, summation, "alpha", unnamed, "uni2665", space.
+        let body = post_2_body(&[0, 3, 168, 153, 258, 0, 259, 3], &["alpha", "uni2665"]);
+        let data = sfnt_with_tables(&[(b"post", post(0x0002_0000, &body))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(
+            face.glyph_for_name("space"),
+            Some(1),
+            "the first glyph so named"
+        );
+        assert_eq!(face.glyph_for_name("Delta"), Some(2));
+        assert_eq!(face.glyph_for_name("summation"), Some(3));
+        assert_eq!(
+            face.glyph_for_name("alpha"),
+            Some(4),
+            "the table's own string"
+        );
+        assert_eq!(face.glyph_for_name("uni2665"), Some(6));
+        assert_eq!(
+            face.glyph_for_name(".notdef"),
+            Some(0),
+            "an unnamed glyph is .notdef, and glyph 0 comes first"
+        );
+        assert_eq!(
+            face.glyph_for_name("Omega"),
+            None,
+            "in the standard order, but no glyph has its index"
+        );
+        assert_eq!(face.glyph_for_name("beta"), None);
+        assert_eq!(face.glyph_for_name(""), None);
+
+        // The order is Apple's: its first, its last, and the names between.
+        assert_eq!(MAC_STANDARD_NAMES[0], ".notdef");
+        assert_eq!(MAC_STANDARD_NAMES[3], "space");
+        assert_eq!(MAC_STANDARD_NAMES[36], "A");
+        assert_eq!(MAC_STANDARD_NAMES[153], "summation");
+        assert_eq!(MAC_STANDARD_NAMES[168], "Delta");
+        assert_eq!(MAC_STANDARD_NAMES[210], "apple");
+        assert_eq!(MAC_STANDARD_NAMES[257], "dcroat");
+        let distinct: std::collections::BTreeSet<&str> =
+            MAC_STANDARD_NAMES.iter().copied().collect();
+        assert_eq!(distinct.len(), 258, "no name twice in the order");
+    }
+
+    /// FT-03.3: each version of `post` names as it states. 1.0 is the
+    /// standard order glyph for glyph, as far as `maxp`'s count reaches; 2.5
+    /// is a signed offset into it; 3.0 and a version no specification gives
+    /// name nothing; a 2.0 table cut short names what it holds and no more.
+    #[test]
+    fn each_post_version_names_as_it_states() {
+        let mut maxp = vec![0u8; 6];
+        maxp[..4].copy_from_slice(&0x0000_5000u32.to_be_bytes());
+        maxp[4..6].copy_from_slice(&40u16.to_be_bytes());
+        let data = sfnt_with_tables(&[(b"maxp", maxp), (b"post", post(0x0001_0000, &[]))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_for_name("A"), Some(36));
+        assert_eq!(face.glyph_for_name("space"), Some(3));
+        assert_eq!(
+            face.glyph_for_name("Delta"),
+            None,
+            "index 168 is past the face's 40 glyphs"
+        );
+        assert_eq!(face.glyph_for_name("alpha"), None, "not in the order");
+        let data = sfnt_with_tables(&[(b"post", post(0x0001_0000, &[]))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(
+            face.glyph_for_name("dcroat"),
+            Some(257),
+            "with no maxp, the order whole"
+        );
+
+        // 2.5: A, space and Adieresis by positive offsets, nonmarkingreturn by
+        // a negative one.
+        let mut body = 5u16.to_be_bytes().to_vec();
+        for offset in [0i8, 35, 1, 95, -2] {
+            body.extend_from_slice(&offset.to_be_bytes());
+        }
+        let data = sfnt_with_tables(&[(b"post", post(0x0002_5000, &body))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_for_name("A"), Some(1));
+        assert_eq!(face.glyph_for_name("space"), Some(2));
+        assert_eq!(face.glyph_for_name("Adieresis"), Some(3));
+        assert_eq!(face.glyph_for_name("nonmarkingreturn"), Some(4));
+        assert_eq!(face.glyph_for_name("B"), None);
+        assert_eq!(face.glyph_for_name("alpha"), None, "2.5 has no strings");
+
+        for version in [0x0003_0000u32, 0x0004_0000, 0, 0xFFFF_FFFF] {
+            let data =
+                sfnt_with_tables(&[(b"post", post(version, &post_2_body(&[0, 3], &["alpha"])))]);
+            let face = Sfnt::parse(&data).expect("a directory");
+            assert_eq!(face.glyph_for_name("space"), None, "{version:#x}");
+            assert_eq!(face.glyph_for_name("alpha"), None, "{version:#x}");
+        }
+
+        // A 2.0 table whose second string is cut short.
+        let mut body = post_2_body(&[0, 3, 258, 259], &["alpha", "beta"]);
+        body.truncate(body.len() - 2);
+        let data = sfnt_with_tables(&[(b"post", post(0x0002_0000, &body))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_for_name("space"), Some(1));
+        assert_eq!(face.glyph_for_name("alpha"), Some(2));
+        assert_eq!(
+            face.glyph_for_name("beta"),
+            None,
+            "a string cut short is no name"
+        );
+        // An index array that claims more glyphs than the table holds.
+        let mut body = 9u16.to_be_bytes().to_vec();
+        body.extend_from_slice(&3u16.to_be_bytes());
+        let data = sfnt_with_tables(&[(b"post", post(0x0002_0000, &body))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_for_name("space"), Some(0));
+        assert_eq!(face.glyph_for_name("A"), None);
+        // A header with no body, an empty table, and no table at all.
+        for table in [post(0x0002_0000, &[]), Vec::new(), vec![0, 2]] {
+            let data = sfnt_with_tables(&[(b"post", table)]);
+            let face = Sfnt::parse(&data).expect("a directory");
+            assert_eq!(face.glyph_for_name("space"), None);
+        }
+        let data = sfnt_with(b"head", &[0u8; 54]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_for_name("space"), None, "no post table");
+    }
+
+    /// FT-03.3: the Unicode subtable and the (3,0) symbol subtable are asked
+    /// apart, each only for what it is keyed by, whichever the text lookup
+    /// chose; (3,10) is preferred to (3,1), a platform 0 subtable is taken
+    /// where neither is but never encoding 5's, and glyph 0 is no answer.
+    #[test]
+    fn the_unicode_and_symbol_subtables_are_asked_apart() {
+        let both = cmap_of(&[
+            (3, 0, format_4(&[(0xF061, 7), (0xF020, 9)])),
+            (3, 1, format_4(&[(0x03B1, 5), (0x0020, 3)])),
+        ]);
+        let data = sfnt_with_tables(&[(b"cmap", both)]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_for_unicode('\u{03B1}'), Some(5));
+        assert_eq!(face.glyph_for_unicode(' '), Some(3));
+        assert_eq!(
+            face.glyph_for_unicode('\u{F061}'),
+            None,
+            "the Unicode subtable maps nothing there"
+        );
+        assert_eq!(face.glyph_for_unicode('\u{1F600}'), None, "past a format 4");
+        assert_eq!(face.glyph_for_symbol_code(0x61), Some(7));
+        assert_eq!(face.glyph_for_symbol_code(0x20), Some(9));
+        assert_eq!(
+            face.glyph_for_symbol_code(0x62),
+            None,
+            "glyph 0 is no answer"
+        );
+        assert_eq!(
+            face.glyph_for_char('\u{03B1}'),
+            Some(5),
+            "the text lookup took (3,1)"
+        );
+
+        let data = sfnt_with_tables(&[(
+            b"cmap",
+            cmap_of(&[
+                (3, 1, format_4(&[(0x03B1, 5)])),
+                (3, 10, format_4(&[(0x03B1, 6)])),
+            ]),
+        )]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_for_unicode('\u{03B1}'), Some(6), "(3,10) first");
+
+        let data = sfnt_with_tables(&[(b"cmap", cmap_of(&[(0, 3, format_4(&[(0x03B1, 8)]))]))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_for_unicode('\u{03B1}'), Some(8), "platform 0");
+        assert_eq!(face.glyph_for_symbol_code(0x61), None, "no (3,0) subtable");
+
+        let data = sfnt_with_tables(&[(
+            b"cmap",
+            cmap_of(&[
+                (0, 5, format_4(&[(0x03B1, 8)])),
+                (1, 0, format_4(&[(0x61, 4)])),
+            ]),
+        )]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(
+            face.glyph_for_unicode('\u{03B1}'),
+            None,
+            "encoding 5 maps sequences"
+        );
+        assert_eq!(
+            face.glyph_for_unicode('a'),
+            None,
+            "a Macintosh subtable is not keyed by Unicode"
+        );
+
+        // A face with only a (3,0) subtable: the text lookup reads it at
+        // 0xF000 too, and reaches the same glyph.
+        let data = sfnt_with_tables(&[(b"cmap", cmap_of(&[(3, 0, format_4(&[(0xF061, 7)]))]))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_for_symbol_code(0x61), Some(7));
+        assert_eq!(face.glyph_for_unicode('a'), None);
+        assert_eq!(face.glyph_for_char('a'), Some(7));
+
+        // A subtable that maps a code to glyph 0 answers nothing, and neither
+        // does a face with no cmap, or one whose cmap is cut short.
+        let data = sfnt_with_tables(&[(b"cmap", cmap_of(&[(3, 1, format_4(&[(0x03B1, 0)]))]))]);
+        let face = Sfnt::parse(&data).expect("a directory");
+        assert_eq!(face.glyph_for_unicode('\u{03B1}'), None);
+        for table in [Vec::new(), vec![0, 0, 0, 9], cmap_of(&[(3, 1, vec![0, 4])])] {
+            let data = sfnt_with_tables(&[(b"cmap", table)]);
+            let face = Sfnt::parse(&data).expect("a directory");
+            assert_eq!(face.glyph_for_unicode('a'), None);
+            assert_eq!(face.glyph_for_symbol_code(0x61), None);
+        }
     }
 }

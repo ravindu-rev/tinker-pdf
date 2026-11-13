@@ -1152,6 +1152,21 @@ OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+### The `post` table's standard Macintosh order
+
+Transcribed into `crates/tinker-pdf-font/src/sfnt.rs` (`MAC_STANDARD_NAMES`):
+the 258 glyph names a `post` table of version 1.0 means by its glyphs and one
+of version 2.0 or 2.5 by an index below 258, in their order. Nothing is
+vendored; what was taken is the order's facts, an index and a name each.
+
+| Table | Source | Revision | Bytes | SHA-256 |
+| --- | --- | --- | ---: | --- |
+| `MAC_STANDARD_NAMES` | Apple's *TrueType Reference Manual*, chapter 6, "The `'post'` table", <https://developer.apple.com/fonts/TrueType-Reference-Manual/RM06/Chap6post.html>: its table of the standard order, read from the page's own HTML cells | as served on 2026-11-13 | 132 332 | `66261b47e2857758e2b585605c351146024e4be2ab59a100a33015ae79a5d69d` |
+
+The rows were read as the page's index and name cells, the run from index 0,
+`.notdef`, to index 257, `dcroat`, unbroken; no name appears twice in it, and
+`sfnt.rs`'s tests hold the order's first and last names and several between.
+
 ## Test fixtures
 
 `testdata/` holds PDFs written by mutool, copied from Tinker; see

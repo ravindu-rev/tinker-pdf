@@ -37,7 +37,7 @@
 
 use std::path::{Path, PathBuf};
 
-use tinker_pdf_font::{cmap, Cff, Sfnt, Type1};
+use tinker_pdf_font::{cmap, substitute_glyph, BuiltInEncoding, Cff, Sfnt, Type1};
 
 /// One corpus directory, or `None` when the fuzz tree is not in this checkout.
 fn seeds(name: &str) -> Option<Vec<(String, Vec<u8>)>> {
@@ -135,6 +135,11 @@ fn the_sfnt_seeds_reach_the_directory_walk() {
                 for tag in [b"head", b"hhea", b"maxp", b"cmap"] {
                     let _ = font.table(u32::from_be_bytes(*tag));
                 }
+                // The route a substituted symbolic font is drawn by.
+                let _ = font.glyph_for_name("alpha");
+                let _ = font.glyph_for_unicode('\u{03B1}');
+                let _ = font.glyph_for_symbol_code(0x61);
+                let _ = substitute_glyph(data, BuiltInEncoding::Symbol, Some("alpha"), 0x61);
             }
             None => missed.push(label.clone()),
         }

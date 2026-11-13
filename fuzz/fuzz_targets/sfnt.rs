@@ -7,8 +7,8 @@
 //!
 //! # What this target checks, and what it does not
 //!
-//! **Only that the code did not panic, hang, or exhaust memory.** Eight
-//! calls, every one discarded — including the subsetter's, so a subset font
+//! **Only that the code did not panic, hang, or exhaust memory.** Every
+//! call is discarded — including the subsetter's, so a subset font
 //! that rebuilt its directory *wrongly* passes. So a run that returned the
 //! *wrong* answer passes this target exactly as a correct one does, and a
 //! green `cargo fuzz` here is evidence about ruling 1 and about nothing else.
@@ -24,7 +24,7 @@
 use libfuzzer_sys::fuzz_target;
 
 use std::collections::BTreeSet;
-use tinker_pdf_font::{glyphs_for, subset, Sfnt};
+use tinker_pdf_font::{glyphs_for, subset, substitute_glyph, BuiltInEncoding, Sfnt};
 
 fuzz_target!(|data: &[u8]| {
     let Some(font) = Sfnt::parse(data) else {
@@ -56,6 +56,22 @@ fuzz_target!(|data: &[u8]| {
     // `post` 2.0 names, including the two spellings a lookup has to reject.
     for name in ["A", ".notdef", "uni20AC", "", "\u{FFFD}"] {
         let _ = font.glyph_for_name(name);
+    }
+    // The route a substituted Symbol or ZapfDingbats font is drawn by: the
+    // face's names, its Unicode subtable and its (3,0) subtable, each read on
+    // its own (`docs/design/symbol-faces.md`).
+    for c in ['\u{03B1}', '\u{2701}', '\u{F8E5}', '\u{1F600}'] {
+        let _ = font.glyph_for_unicode(c);
+    }
+    for code in [0x20u8, 0x61, 0xFE] {
+        let _ = font.glyph_for_symbol_code(code);
+    }
+    for (encoding, name, code) in [
+        (BuiltInEncoding::Symbol, Some("alpha"), 0x61u8),
+        (BuiltInEncoding::ZapfDingbats, Some("a1"), 0x21),
+        (BuiltInEncoding::Symbol, None, 0x20),
+    ] {
+        let _ = substitute_glyph(data, encoding, name, code);
     }
     // `hmtx` past `numberOfHMetrics`, where the last advance repeats.
     for glyph in 0..64u16 {

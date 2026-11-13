@@ -18,6 +18,7 @@ pub mod outline;
 mod predefined;
 pub mod sfnt;
 pub mod subset;
+pub mod symbolic;
 pub mod type1;
 pub mod woff;
 
@@ -32,5 +33,6 @@ pub use encoding::{
 pub use outline::{Outline, Segment};
 pub use sfnt::Sfnt;
 pub use subset::{glyphs_for, subset};
+pub use symbolic::{substitute_glyph, SymbolRoute};
 pub use type1::Type1;
 pub use woff::{packaging, Packaging, WoffError};

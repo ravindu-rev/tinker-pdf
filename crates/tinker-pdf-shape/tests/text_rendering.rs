@@ -372,17 +372,16 @@ fn scale(units: i32, upem: u16) -> i32 {
 ///    the index outright;
 /// 2. a CFF face carries its names in the charset, which
 ///    `tinker_pdf_font::Cff::gid_for_name` reads;
-/// 3. a `post` version 2.0 face carries the names it invented — `a.alt`,
-///    `uni1373.init`, `Aogonek` — which `Sfnt::glyph_for_name` reads;
-/// 4. and the rest are the standard Macintosh names a `post` table stores by
-///    *index* rather than by string — `u`, `J`, `period`, `aacute`. Those are
-///    resolved by turning the name back into a character and the character
-///    through the face's own `cmap`, using the Adobe Glyph List and then
-///    ISO 32000-1 Annex D's four base encodings, both of which
-///    `tinker-pdf-font` already carries. The 258-entry Macintosh glyph order
-///    is deliberately **not** written out here: a name list transcribed from
-///    memory is exactly the kind of evidence ruling 13 exists to keep out, and
-///    Annex D is a published table this repository already reads.
+/// 3. a `post` table names a face's glyphs, and `Sfnt::glyph_for_name` reads
+///    every version of it: the names a version 2.0 face invented — `a.alt`,
+///    `uni1373.init`, `Aogonek` — as the table's own strings, and the
+///    standard Macintosh names — `u`, `J`, `period`, `aacute` — by their index
+///    in the 258-entry order Apple's TrueType Reference Manual gives, which
+///    `tinker-pdf-font` transcribes rather than this file;
+/// 4. and a name the face's `post` table does not give is turned back into a
+///    character and the character looked up in the face's own `cmap`, using
+///    the Adobe Glyph List and then ISO 32000-1 Annex D's four base encodings,
+///    both of which `tinker-pdf-font` already carries.
 ///
 /// A name none of these resolves is a failure and not a skip; see
 /// [`every_expected_glyph_name_resolves`].
