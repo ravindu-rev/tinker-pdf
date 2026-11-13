@@ -94,18 +94,6 @@ K-08 extends the mechanism to every new rendered surface.
 | --- | --- | --- | --- | --- | --- |
 | K-06.2 | test | Close the row on local sessions: no scheduled run's `crash-jbig2` artifact survives, so the nightly's input cannot be shown; every fuzz target runs clean in seven local sessions of 600 seconds each (`cargo fuzz run <target> fuzz/corpus/<target> -- -max_total_time=600`, a scratch directory first so no new input lands in the committed seeds), and `verification.md`'s `jbig2` row says what the sessions show. *Note:* A session that finds an input is a `fix` before this step closes, its input committed as a seed pinned by its refusal. | `docs/verification.md`, `docs/roadmap/K.md` | Every target's seven sessions finish clean, recorded here, and K-06 leaves the roadmap. | — |
 
-## K-07 — Determinism for every subsystem the roadmap adds
-
-**Determinism for every subsystem the roadmap adds** — deterministic signatures (RFC 6979 nonces, PKCS#1 v1.5), the script engine under a host clock and seeded random, XFA layout, OCR inference, parallel and banded rendering, every cache
-
-**Exit criterion.** each subsystem adds a fingerprint to K-07's roster in the commit that lands it, held under `cargo test` on Linux and Windows (CI runs it on every pull request) and under `--target wasm32-wasip1` locally, its cost counted in that subsystem's row
-
-**Doc:** — · **Depends on:** —
-
-| Step | Kind | What | Where | Exit | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| K-07.3 | test | Fingerprint banded rendering on every target: every fingerprinted page rendered as four horizontal bands through `RenderOptions::region` and reassembled must hash to its committed render fingerprint. *Note:* `render_regions.rs` holds tiles to the page on the native targets only; this adds `wasm32-wasip1`. Thread-parallel rendering has no facade API before P-15, which brings its fingerprint with MS-01's A9 guard. | `crates/tinker-pdf/tests/determinism.rs`, `xtask/src/determinism.rs` (new), `docs/features/determinism.md` | `determinism.rs` `banded_rendering_reproduces_every_fingerprint` (new) passes in the default and `bundled-fonts` builds under `cargo test` on Linux and Windows (CI runs it on every pull request) and under `--target wasm32-wasip1` locally, recorded here. | K-07.1 |
-
 ## K-08 — Reviewed-golden families for every new rendered surface
 
 **Reviewed-golden families for every new rendered surface** — the mechanism of `render_goldens.rs` extended: synthesised annotation appearances, visible signature appearances, fields under formatting scripts, OCR text-layer alignment, sample EPUB/HTML/Markdown/FB2 pages, SVG and XPS pages, `to_svg` output; each family's header names its clause and enters `UNREVIEWED`

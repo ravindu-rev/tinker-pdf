@@ -107,7 +107,8 @@ a choice inside a step; so is anything a change would cost that works today.
   closes. An outside program may host the code, fetch bytes for it or
   generate a fixture once, and never says whether an output is right.
 - A new capability brings its speed row into the benchmark set (MS-04) and
-  its determinism fingerprint (K-07).
+  its determinism fingerprint, entered in the determinism roster
+  (`xtask/src/determinism.rs`) in the commit that lands it.
 
 ## Order of work
 

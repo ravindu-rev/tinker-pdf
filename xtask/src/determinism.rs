@@ -46,6 +46,11 @@ pub const ROSTER: &[Fingerprint] = &[
         file: "crates/tinker-pdf/tests/determinism.rs",
         test: "a_display_list_replays_every_fingerprinted_page_byte_for_byte",
     },
+    // Every fingerprinted page drawn in four bands, held to its fingerprint.
+    Fingerprint {
+        file: "crates/tinker-pdf/tests/determinism.rs",
+        test: "banded_rendering_reproduces_every_fingerprint",
+    },
     // The SVG writer's output for every fingerprinted page.
     Fingerprint {
         file: "crates/tinker-pdf/tests/determinism.rs",

@@ -87,6 +87,14 @@ same file holds that the defaults did not move: the blend grid's default render
 there is this table's `analytic_blend`, copied. The local `wasm32-wasip1` run
 takes that file as well.
 
+**A page drawn in bands is the page.**
+`banded_rendering_reproduces_every_fingerprint` renders every page of the
+table as four horizontal bands through `RenderOptions::region`, stacks them
+in order and holds the result to the page's own committed fingerprint, so it
+adds no hash. `render_regions.rs` holds ruling 5's tiles to the whole page
+they come from; this holds the bands to the committed value itself, on every
+target the roster runs on, `wasm32-wasip1` among them.
+
 **The SVG writer's output** is pinned beside the render fingerprints:
 `svg_output_is_stable_across_targets` writes every page of the table with the
 default `SvgOptions` and holds the SHA-256 of its markup to a committed value.
@@ -139,9 +147,9 @@ file. That is
 not green".
 
 **The determinism roster** (`xtask/src/determinism.rs`) names them:
-`determinism.rs`'s render fingerprints, its SVG output's hashes, its three
-synthesised documents' byte hashes and its display list's replay of every
-fingerprinted page;
+`determinism.rs`'s render fingerprints and the same pages drawn in bands, its
+SVG output's hashes, its three synthesised documents' byte hashes and its
+display list's replay of every fingerprinted page;
 `pdfa_writer.rs`'s archival hash; `epub_shaped.rs`'s shaped page;
 `render_options.rs`'s pinned ink, transparent and premultiplied, and
 hard-edged output; the shaper's two fingerprints; and the guard suite's

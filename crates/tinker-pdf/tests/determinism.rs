@@ -59,8 +59,8 @@
 use std::sync::Arc;
 
 use tinker_pdf::{
-    Document, DocumentBuilder, OpenOptions, RenderOptions, RenderWarning, SimpleFontProvider,
-    SvgOptions, SvgWarning,
+    Bitmap, Document, DocumentBuilder, OpenOptions, PixelRegion, RenderOptions, RenderWarning,
+    SimpleFontProvider, SvgOptions, SvgWarning,
 };
 
 mod render_support;
@@ -150,8 +150,13 @@ fn fingerprint(fixture: &Fixture) -> String {
         .page(at)
         .expect("a page")
         .render(&RenderOptions::default());
+    hashed(fixture, &bitmap)
+}
 
-    let drawn = ink(&bitmap);
+/// A fixture's page as one bitmap, checked for ink and faces and hashed with
+/// its dimensions.
+fn hashed(fixture: &Fixture, bitmap: &Bitmap) -> String {
+    let drawn = ink(bitmap);
     assert!(
         drawn >= fixture.least_ink,
         "the {} fixture painted {drawn} pixels, fewer than the {} it is \
@@ -2235,215 +2240,221 @@ const GOLDEN: &[Fixture] = &[
     },
 ];
 
+/// The committed render fingerprint of every page in [`GOLDEN`], by name.
+///
+/// `rendering_is_stable_across_targets` holds each page's render to it, and
+/// `banded_rendering_reproduces_every_fingerprint` holds the same page drawn
+/// in four bands to the same value.
+const FINGERPRINTS: &[(&str, &str)] = &[
+    // Moved twice in August 2026. First because the old value was the hash
+    // of a blank page, the fixture having named a standard-14 font and
+    // embedded no outlines for the engine to draw.
+    //
+    // Then with gap 13, which made the quadratic a path verb of its own:
+    // four of this face's six shapes carry off-curve points, and every one
+    // of them used to be raised to a cubic before it was flattened. The
+    // curve is the same curve either way, so the move is small and it is
+    // arithmetic only — 7 of 20 000 pixels, each by exactly one level of
+    // 255 on all three channels, with the ink count and the ink bounding
+    // box unchanged. wasm32 and x86_64 agreed on the new value, which is
+    // what says this is a rendering change and not a determinism bug.
+    (
+        "text",
+        "82510bb48a364a4bc92729cfcdcd1e14aa99fe817a323a78e48cfb51f76a181d",
+    ),
+    // Moved September 2026, deliberately, and not because two targets
+    // disagreed. The fixture's red triangle is `20 20 m 60 75 l 100 25 l
+    // f` -- an **open** subpath, filled -- and until then the filler built
+    // only the two edges the path states, so the third side of the
+    // triangle was missing and the old hash had that defect baked in.
+    // ISO 32000-1 8.5.3.1 closes every open subpath before a fill (8.5.4
+    // before a clip); `an_open_subpath_is_closed_before_it_is_filled_or_clipped`
+    // in `tinker-pdf-render` holds the new behaviour by half-plane
+    // arithmetic, and the new value agreed on x86_64 and wasm32-wasip1.
+    // No other fingerprint here moved, and instrumenting the filler over
+    // all nineteen pages -- tiling cells included -- found this triangle
+    // the only open subpath any of them fills or clips.
+    (
+        "curves",
+        "414e3f05ee05718fc243993506458dcb0f8aca243cdff7bf21bd059a6f1e9f55",
+    ),
+    (
+        "shading",
+        "813a28f7b119418e76ae52f96f69047b5dec5100a26375294e9de41ed9cc90b5",
+    ),
+    (
+        "blend",
+        "759840c7df7bad4fc49a2d94f763e8b5eca6d9edb64f3af1cdfcd635b2512258",
+    ),
+    // Added August 2026 with gap 07; no existing fixture reached
+    // `fill_with_pattern` at all.
+    (
+        "pattern",
+        "e02ff91587f4a82c2273f7980e42d953878eead57026dd863de757241217cd5c",
+    ),
+    // Added August 2026 with gap 06. No existing fixture has an
+    // `/OCProperties`, so none of them would move if 8.11 stopped working.
+    (
+        "optional",
+        "e2e801543a390458985e5f42aa3e7526ef8af413e24234dfbd0252904e65a6a8",
+    ),
+    // Added August 2026 with gap 12. No existing fixture drew an image,
+    // so the whole of image sampling — every row of the policy matrix,
+    // the bilinear weights and the pyramid — was outside what this file
+    // measured.
+    //
+    // Re-recorded August 2026 when minification stopped interpolating and
+    // started averaging: 0.77 % of this page's pixels moved, mean 0.001,
+    // worst 0.24, all of it the one minified placement. The new value is
+    // the *correct* one and the old was not, which this file could never
+    // have said on its own — a fingerprint pins the engine against itself,
+    // so it reports that an answer changed and never that it was wrong.
+    // `tinker-pdf-raster/tests/analytic_sampling.rs` is what says which.
+    //
+    // Re-recorded again when the box-filter pyramid stopped engaging below
+    // 128:1 and the destination pixel's true source rectangle began to be
+    // integrated instead. `pdfcmp` between the two renders of this page:
+    // **0.0833 % of pixels differ at all, worst 1 level of 255, none by
+    // more than twelve** — the minified placement again, and only it. The
+    // same caveat as above applies and the same file answers it, now with
+    // `a_downscale_agrees_with_itself_at_twice_the_scale`, which fails by
+    // eight levels if the pyramid is put back.
+    (
+        "image",
+        "33c71f2d05f951f3bf604eab03d9968c6f7245a8f8f86209410ded99670574db",
+    ),
+    // Added August 2026 with gap 11. Groups, isolation, knockout and an
+    // ExtGState soft mask reach no other fixture here at all.
+    (
+        "transparency",
+        "c120574918fcfadb0b33f3f9faa4f0c10a10cc760cd9e9830bedf31463e3f059",
+    ),
+    // Added August 2026 with gap 09. The `pattern` fixture above is a
+    // shading pattern, evaluated per pixel; nothing here reached a
+    // rasterised cell, a lattice, or `PaintType 2`.
+    (
+        "tiling",
+        "274c17e359636faacafe251c7f71ca3b48d85f98a7b2251642048ea8897b5bd6",
+    ),
+    // Added August 2026 with gap 17. Nothing above decodes a JBIG2
+    // stream, and the MQ arithmetic coder underneath it is shared with
+    // whatever gap 18 decides about JPEG 2000 -- so a change made for one
+    // codec that shifted a row of the Qe table would, until now, have had
+    // only the filter crate's own tests standing in front of it.
+    (
+        "jbig2",
+        "2b430170b06618741ae1c6051f3fce687f716bc2655488a8cdf0956d173127c7",
+    ),
+    // Added August 2026 with gap 10. Nothing above draws a mesh, so the
+    // whole of 8.7.4.5.5 to 8.7.4.5.8 -- the packed vertex stream, the
+    // edge-flag continuation, patch subdivision and the Gouraud
+    // rasteriser -- was outside what this file measured. The patch
+    // subdivision is the part that most needs a cross-target claim: it
+    // picks a *count* from a device-space measure, and a count that comes
+    // out one different on another target is a different mesh rather than
+    // a rounding difference.
+    (
+        "mesh",
+        "7faa166696c1283b6fb7556185d6e2f2a73bc49365a19bcf6797ad60e47c8c27",
+    ),
+    // Added August 2026 with gap 18a. Nothing above decodes a JPEG 2000
+    // stream, so the whole of T.800 -- the container, tier-2's packets,
+    // tier-1's contexts over the MQ coder, dequantisation, both inverse
+    // wavelets and Annex G's two colour transforms -- was outside what
+    // this file measured. The 9/7 and the ICT are the reason it needs to
+    // be: both are specified as decimal lifting constants and both are
+    // computed here in `i32` planes at Q12 with `i64` constants at Q24,
+    // a decision the plan made before any decoder code existed and
+    // justified entirely by this property. A float on that path would
+    // show up here and nowhere else.
+    (
+        "jpx",
+        "4da27b74f85dbec9e9891499c2d082009cec5e838efeefc371d77e1bf0659de8",
+    ),
+    // Added August 2026 with gap 29 milestone 6, and the first entry here
+    // whose document is *synthesised* rather than parsed -- so it is the
+    // first that pins a producer and a consumer to each other rather than
+    // only a renderer. Read `cbz_page`'s doc comment before treating a
+    // move in this one as a rendering change: its blast radius is the ZIP
+    // reader, the natural sort, the PNG routing table, the pass-through's
+    // `/DecodeParms`, `DocumentBuilder` and `CosDocument`'s parse of what
+    // it wrote, as well as the renderer every other row here covers.
+    (
+        "cbz",
+        "9e92c73984cff79feef04dcc984c52f04beda91bf3087a50ce9c17b3fc275aea",
+    ),
+    // Added August 2026 with gap 30 milestone 9, and **the first entry here
+    // whose input this repository did not author**: Microsoft's own XPS
+    // serialiser wrote the package, and every other fixture above is bytes
+    // assembled a few lines from its own entry. Read `xps_package`'s doc
+    // comment before treating a move in this one as a rendering change --
+    // its blast radius is the ZIP reader, the XML parser, the OPC layer,
+    // the spine, the markup walk, the brush grammar, the ODTTF key
+    // arithmetic, `DocumentBuilder` and `CosDocument`'s parse of what it
+    // wrote, as well as the renderer every other row here covers.
+    (
+        "xps",
+        "5dd016599f8b550f523f7faa189b0d2c9edfcaf35860ac286caec4d71da56b11",
+    ),
+    // Added August 2026 with gap 31 milestone 13, and **the first entry
+    // here whose page number is not a property of the file**: this is page
+    // 3 of the seven a 432 x 648 box paginates
+    // `pandoc-book-cover.epub` into, and a caller who passed 600 x 800
+    // would get six pages and a different page 3. Read `epub_book`'s doc
+    // comment before treating a move in this one as a rendering change --
+    // its blast radius is the ZIP reader, the XML parser with milestone 2's
+    // doctype mode, the OCF layer, the package document, the cascade, the
+    // box tree, UAX #14's line breaker, fragmentation,
+    // `DocumentBuilder`'s links and outline, and `CosDocument`'s parse of
+    // what it wrote, as well as the renderer every other row here covers.
+    (
+        "epub",
+        "a0cc8fd3b519745300b0b3eba14cfc5c2fb516b6af9c692801b8031f5585fbd6",
+    ),
+    // Enrolled with the analytic tier's own pages (milestone 2). Their
+    // right answer is an equation `render_analytic.rs` evaluates per pixel;
+    // what a hash adds is that the equation comes out the same on every
+    // target.
+    (
+        "analytic_axial",
+        "487f59336860e7edeb1854aa566de4a5964f14d2ba67c464b990dee393e1f8a1",
+    ),
+    (
+        "analytic_radial",
+        "8966418e8e900c6aca4de8682702e615d5e68ea066cb3bc2c25352a535943204",
+    ),
+    (
+        "analytic_blend",
+        "e1d056a15ae8cb7f18fd1524dfcc419893f4a5283c2f56b3f7307380aee43560",
+    ),
+    (
+        "analytic_image",
+        "37360b0c61ca919d525b75922112580518965e5f4ad12d52ce75953f46061872",
+    ),
+    // Added October 2026 with K-02.2: the one page here that names a
+    // default colour space (8.6.5.6), each of the three through its own
+    // arithmetic — CalGray's `pow`, CalRGB's matrix and an ICC lookup
+    // table. No other entry moved when it was added.
+    (
+        "default_spaces",
+        "cfe787612cba9228dd2a089986d409a34f599f2000ea708f96b6278036967374",
+    ),
+    // The `text` page with its font selected by graphics states (8.4.5's
+    // `/Font`): the same face, lines and pixels, so the `text` page's
+    // fingerprint.
+    (
+        "gs_text",
+        "82510bb48a364a4bc92729cfcdcd1e14aa99fe817a323a78e48cfb51f76a181d",
+    ),
+];
+
 #[test]
 fn rendering_is_stable_across_targets() {
     // A mismatch prints the replacement lines ready to paste. The length
     // check below is there because an empty table would make this test pass
     // by not looking at anything.
-    let expected: &[(&str, &str)] = &[
-        // Moved twice in August 2026. First because the old value was the hash
-        // of a blank page, the fixture having named a standard-14 font and
-        // embedded no outlines for the engine to draw.
-        //
-        // Then with gap 13, which made the quadratic a path verb of its own:
-        // four of this face's six shapes carry off-curve points, and every one
-        // of them used to be raised to a cubic before it was flattened. The
-        // curve is the same curve either way, so the move is small and it is
-        // arithmetic only — 7 of 20 000 pixels, each by exactly one level of
-        // 255 on all three channels, with the ink count and the ink bounding
-        // box unchanged. wasm32 and x86_64 agreed on the new value, which is
-        // what says this is a rendering change and not a determinism bug.
-        (
-            "text",
-            "82510bb48a364a4bc92729cfcdcd1e14aa99fe817a323a78e48cfb51f76a181d",
-        ),
-        // Moved September 2026, deliberately, and not because two targets
-        // disagreed. The fixture's red triangle is `20 20 m 60 75 l 100 25 l
-        // f` -- an **open** subpath, filled -- and until then the filler built
-        // only the two edges the path states, so the third side of the
-        // triangle was missing and the old hash had that defect baked in.
-        // ISO 32000-1 8.5.3.1 closes every open subpath before a fill (8.5.4
-        // before a clip); `an_open_subpath_is_closed_before_it_is_filled_or_clipped`
-        // in `tinker-pdf-render` holds the new behaviour by half-plane
-        // arithmetic, and the new value agreed on x86_64 and wasm32-wasip1.
-        // No other fingerprint here moved, and instrumenting the filler over
-        // all nineteen pages -- tiling cells included -- found this triangle
-        // the only open subpath any of them fills or clips.
-        (
-            "curves",
-            "414e3f05ee05718fc243993506458dcb0f8aca243cdff7bf21bd059a6f1e9f55",
-        ),
-        (
-            "shading",
-            "813a28f7b119418e76ae52f96f69047b5dec5100a26375294e9de41ed9cc90b5",
-        ),
-        (
-            "blend",
-            "759840c7df7bad4fc49a2d94f763e8b5eca6d9edb64f3af1cdfcd635b2512258",
-        ),
-        // Added August 2026 with gap 07; no existing fixture reached
-        // `fill_with_pattern` at all.
-        (
-            "pattern",
-            "e02ff91587f4a82c2273f7980e42d953878eead57026dd863de757241217cd5c",
-        ),
-        // Added August 2026 with gap 06. No existing fixture has an
-        // `/OCProperties`, so none of them would move if 8.11 stopped working.
-        (
-            "optional",
-            "e2e801543a390458985e5f42aa3e7526ef8af413e24234dfbd0252904e65a6a8",
-        ),
-        // Added August 2026 with gap 12. No existing fixture drew an image,
-        // so the whole of image sampling — every row of the policy matrix,
-        // the bilinear weights and the pyramid — was outside what this file
-        // measured.
-        //
-        // Re-recorded August 2026 when minification stopped interpolating and
-        // started averaging: 0.77 % of this page's pixels moved, mean 0.001,
-        // worst 0.24, all of it the one minified placement. The new value is
-        // the *correct* one and the old was not, which this file could never
-        // have said on its own — a fingerprint pins the engine against itself,
-        // so it reports that an answer changed and never that it was wrong.
-        // `tinker-pdf-raster/tests/analytic_sampling.rs` is what says which.
-        //
-        // Re-recorded again when the box-filter pyramid stopped engaging below
-        // 128:1 and the destination pixel's true source rectangle began to be
-        // integrated instead. `pdfcmp` between the two renders of this page:
-        // **0.0833 % of pixels differ at all, worst 1 level of 255, none by
-        // more than twelve** — the minified placement again, and only it. The
-        // same caveat as above applies and the same file answers it, now with
-        // `a_downscale_agrees_with_itself_at_twice_the_scale`, which fails by
-        // eight levels if the pyramid is put back.
-        (
-            "image",
-            "33c71f2d05f951f3bf604eab03d9968c6f7245a8f8f86209410ded99670574db",
-        ),
-        // Added August 2026 with gap 11. Groups, isolation, knockout and an
-        // ExtGState soft mask reach no other fixture here at all.
-        (
-            "transparency",
-            "c120574918fcfadb0b33f3f9faa4f0c10a10cc760cd9e9830bedf31463e3f059",
-        ),
-        // Added August 2026 with gap 09. The `pattern` fixture above is a
-        // shading pattern, evaluated per pixel; nothing here reached a
-        // rasterised cell, a lattice, or `PaintType 2`.
-        (
-            "tiling",
-            "274c17e359636faacafe251c7f71ca3b48d85f98a7b2251642048ea8897b5bd6",
-        ),
-        // Added August 2026 with gap 17. Nothing above decodes a JBIG2
-        // stream, and the MQ arithmetic coder underneath it is shared with
-        // whatever gap 18 decides about JPEG 2000 -- so a change made for one
-        // codec that shifted a row of the Qe table would, until now, have had
-        // only the filter crate's own tests standing in front of it.
-        (
-            "jbig2",
-            "2b430170b06618741ae1c6051f3fce687f716bc2655488a8cdf0956d173127c7",
-        ),
-        // Added August 2026 with gap 10. Nothing above draws a mesh, so the
-        // whole of 8.7.4.5.5 to 8.7.4.5.8 -- the packed vertex stream, the
-        // edge-flag continuation, patch subdivision and the Gouraud
-        // rasteriser -- was outside what this file measured. The patch
-        // subdivision is the part that most needs a cross-target claim: it
-        // picks a *count* from a device-space measure, and a count that comes
-        // out one different on another target is a different mesh rather than
-        // a rounding difference.
-        (
-            "mesh",
-            "7faa166696c1283b6fb7556185d6e2f2a73bc49365a19bcf6797ad60e47c8c27",
-        ),
-        // Added August 2026 with gap 18a. Nothing above decodes a JPEG 2000
-        // stream, so the whole of T.800 -- the container, tier-2's packets,
-        // tier-1's contexts over the MQ coder, dequantisation, both inverse
-        // wavelets and Annex G's two colour transforms -- was outside what
-        // this file measured. The 9/7 and the ICT are the reason it needs to
-        // be: both are specified as decimal lifting constants and both are
-        // computed here in `i32` planes at Q12 with `i64` constants at Q24,
-        // a decision the plan made before any decoder code existed and
-        // justified entirely by this property. A float on that path would
-        // show up here and nowhere else.
-        (
-            "jpx",
-            "4da27b74f85dbec9e9891499c2d082009cec5e838efeefc371d77e1bf0659de8",
-        ),
-        // Added August 2026 with gap 29 milestone 6, and the first entry here
-        // whose document is *synthesised* rather than parsed -- so it is the
-        // first that pins a producer and a consumer to each other rather than
-        // only a renderer. Read `cbz_page`'s doc comment before treating a
-        // move in this one as a rendering change: its blast radius is the ZIP
-        // reader, the natural sort, the PNG routing table, the pass-through's
-        // `/DecodeParms`, `DocumentBuilder` and `CosDocument`'s parse of what
-        // it wrote, as well as the renderer every other row here covers.
-        (
-            "cbz",
-            "9e92c73984cff79feef04dcc984c52f04beda91bf3087a50ce9c17b3fc275aea",
-        ),
-        // Added August 2026 with gap 30 milestone 9, and **the first entry here
-        // whose input this repository did not author**: Microsoft's own XPS
-        // serialiser wrote the package, and every other fixture above is bytes
-        // assembled a few lines from its own entry. Read `xps_package`'s doc
-        // comment before treating a move in this one as a rendering change --
-        // its blast radius is the ZIP reader, the XML parser, the OPC layer,
-        // the spine, the markup walk, the brush grammar, the ODTTF key
-        // arithmetic, `DocumentBuilder` and `CosDocument`'s parse of what it
-        // wrote, as well as the renderer every other row here covers.
-        (
-            "xps",
-            "5dd016599f8b550f523f7faa189b0d2c9edfcaf35860ac286caec4d71da56b11",
-        ),
-        // Added August 2026 with gap 31 milestone 13, and **the first entry
-        // here whose page number is not a property of the file**: this is page
-        // 3 of the seven a 432 x 648 box paginates
-        // `pandoc-book-cover.epub` into, and a caller who passed 600 x 800
-        // would get six pages and a different page 3. Read `epub_book`'s doc
-        // comment before treating a move in this one as a rendering change --
-        // its blast radius is the ZIP reader, the XML parser with milestone 2's
-        // doctype mode, the OCF layer, the package document, the cascade, the
-        // box tree, UAX #14's line breaker, fragmentation,
-        // `DocumentBuilder`'s links and outline, and `CosDocument`'s parse of
-        // what it wrote, as well as the renderer every other row here covers.
-        (
-            "epub",
-            "a0cc8fd3b519745300b0b3eba14cfc5c2fb516b6af9c692801b8031f5585fbd6",
-        ),
-        // Enrolled with the analytic tier's own pages (milestone 2). Their
-        // right answer is an equation `render_analytic.rs` evaluates per pixel;
-        // what a hash adds is that the equation comes out the same on every
-        // target.
-        (
-            "analytic_axial",
-            "487f59336860e7edeb1854aa566de4a5964f14d2ba67c464b990dee393e1f8a1",
-        ),
-        (
-            "analytic_radial",
-            "8966418e8e900c6aca4de8682702e615d5e68ea066cb3bc2c25352a535943204",
-        ),
-        (
-            "analytic_blend",
-            "e1d056a15ae8cb7f18fd1524dfcc419893f4a5283c2f56b3f7307380aee43560",
-        ),
-        (
-            "analytic_image",
-            "37360b0c61ca919d525b75922112580518965e5f4ad12d52ce75953f46061872",
-        ),
-        // Added October 2026 with K-02.2: the one page here that names a
-        // default colour space (8.6.5.6), each of the three through its own
-        // arithmetic — CalGray's `pow`, CalRGB's matrix and an ICC lookup
-        // table. No other entry moved when it was added.
-        (
-            "default_spaces",
-            "cfe787612cba9228dd2a089986d409a34f599f2000ea708f96b6278036967374",
-        ),
-        // The `text` page with its font selected by graphics states (8.4.5's
-        // `/Font`): the same face, lines and pixels, so the `text` page's
-        // fingerprint.
-        (
-            "gs_text",
-            "82510bb48a364a4bc92729cfcdcd1e14aa99fe817a323a78e48cfb51f76a181d",
-        ),
-    ];
     assert_eq!(
-        expected.len(),
+        FINGERPRINTS.len(),
         GOLDEN.len(),
         "every page has a fingerprint, or the test passes by not looking"
     );
@@ -2451,7 +2462,7 @@ fn rendering_is_stable_across_targets() {
     let mut wrong = Vec::new();
     for fixture in GOLDEN {
         let actual = fingerprint(fixture);
-        let want = expected
+        let want = FINGERPRINTS
             .iter()
             .find(|(n, _)| *n == fixture.name)
             .map(|(_, h)| *h)
@@ -2469,6 +2480,110 @@ fn rendering_is_stable_across_targets() {
          arithmetic that is not target-stable, do not update the table.\n\
          If this is a deliberate rendering change, render the page and \
          compare it with `pdfcmp` first, then paste these in:\n\n{}\n",
+        wrong.join("\n")
+    );
+}
+
+/// The four horizontal bands a page `height` rows tall is cut into, each as
+/// its first row and its number of rows: band `i` starts at row
+/// `height * i / 4`, so the bands are as even as the rows allow and none is
+/// empty on any page here.
+fn bands(height: u32) -> [(u32, u32); 4] {
+    let edge = |i: u32| u32::try_from(u64::from(height) * u64::from(i) / 4).expect("within height");
+    [0, 1, 2, 3].map(|i| (edge(i), edge(i + 1) - edge(i)))
+}
+
+/// One fingerprinted page rendered as [`bands`] through
+/// [`RenderOptions::region`], the bands stacked back into one bitmap, and that
+/// bitmap hashed as [`fingerprint`] hashes a page.
+fn banded_fingerprint(fixture: &Fixture) -> String {
+    let (document, at) = opened(fixture);
+    let page = document.page(at).expect("a page");
+    let options = RenderOptions::default();
+    let (width, height) = page.pixel_size(&options);
+
+    let mut data = Vec::new();
+    let mut warnings: Vec<RenderWarning> = Vec::new();
+    let mut shape = None;
+    for (top, rows) in bands(height) {
+        let band = page.render(&RenderOptions {
+            region: Some(PixelRegion::new(0, top, width, rows)),
+            ..options.clone()
+        });
+        assert_eq!(
+            (band.width, band.height),
+            (width, rows),
+            "{}: the band of {rows} rows at row {top} came back the wrong size",
+            fixture.name,
+        );
+        let this = (band.format, band.premultiplied);
+        assert_eq!(
+            *shape.get_or_insert(this),
+            this,
+            "{}: the band at row {top} changed the pixel format",
+            fixture.name,
+        );
+        let row = band.width as usize * band.components();
+        for y in 0..band.height as usize {
+            let start = y * band.stride;
+            data.extend_from_slice(band.data.get(start..start + row).expect("a whole row"));
+        }
+        for warning in band.warnings {
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+    }
+    let (format, premultiplied) = shape.expect("four bands");
+    let stride = data.len() / height as usize;
+    hashed(
+        fixture,
+        &Bitmap {
+            width,
+            height,
+            format,
+            stride,
+            data,
+            warnings,
+            premultiplied,
+            stats: None,
+        },
+    )
+}
+
+/// **A page drawn in four bands is the page**: every fingerprinted page
+/// rendered as four horizontal bands through [`RenderOptions::region`], the
+/// bands stacked in order, hashes to the page's committed fingerprint.
+///
+/// Ruling 5's guard, `render_regions.rs`, holds tiles to the page they come
+/// from on the targets that run it; this holds the bands to the committed
+/// value itself, so the same pixels come out on every target the roster's
+/// tests run on, `wasm32-wasip1` among them, whichever way the page is cut.
+/// It adds no hash: a band that disagrees with [`FINGERPRINTS`] is a finding
+/// about the region path or about the target, never a new value.
+#[test]
+fn banded_rendering_reproduces_every_fingerprint() {
+    let mut wrong = Vec::new();
+    for fixture in GOLDEN {
+        let actual = banded_fingerprint(fixture);
+        let want = FINGERPRINTS
+            .iter()
+            .find(|(n, _)| *n == fixture.name)
+            .map(|(_, h)| *h)
+            .expect("every page has a fingerprint");
+        if actual != want {
+            wrong.push(format!(
+                "{}: banded {actual}, committed {want}",
+                fixture.name
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "a page drawn in four bands is not the page its fingerprint pins. \
+         Ruling 5 makes a band byte-equal to its rows of the whole render, so \
+         this is a finding about the region path, or, where only one target \
+         disagrees, a determinism bug -- never a reason to edit the table:\n{}",
         wrong.join("\n")
     );
 }
