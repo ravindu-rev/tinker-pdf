@@ -1873,11 +1873,12 @@ fn ledger() -> Vec<Bound> {
             name: "MAX_ICC_TAGS",
             cap: MAX_ICC_TAGS as u128,
             published: "1 024",
-            // The busiest of the ten `.icc` seeds `fuzz/corpus/icc_profile/`
-            // commits, which the `icc_profile` target hands straight to
-            // `Profile::parse`. No `.pdf` or `.xps` fixture in this repository
-            // embeds a profile at all — measured, not assumed.
-            fixtures: 7,
+            // `srgb-first-party.icc`, the busiest of the twelve `.icc` seeds
+            // `fuzz/corpus/icc_profile/` commits, which the `icc_profile`
+            // target hands straight to `Profile::parse`. No `.pdf` or `.xps`
+            // fixture in this repository embeds a profile at all — measured,
+            // not assumed.
+            fixtures: 10,
             // **Zero, and it is a fact about the format rather than an
             // absence.** Nothing in this engine reads a PNG `iCCP` chunk or a
             // JPEG `APP2` profile — there is no such code in
@@ -1910,9 +1911,10 @@ fn ledger() -> Vec<Bound> {
             name: "MAX_ICC_BYTES",
             cap: MAX_ICC_BYTES as u128,
             published: "2 MiB",
-            // `lut-three-intents.icc`, the largest of the ten committed
-            // seeds: three lookup tables, one an intent.
-            fixtures: 882,
+            // `srgb-first-party.icc`, the largest of the twelve committed
+            // seeds: the engine's own sRGB profile, which `tinker-pdf-color`'s
+            // `build.rs` computes.
+            fixtures: 2_624,
             comic: 0,
             // **718 672 bytes**, the largest profile in the corpus — a printer
             // profile carrying a full set of lookup tables — measured over the

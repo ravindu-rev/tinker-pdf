@@ -2,6 +2,17 @@
 //! profile's transform from the connection space to its device components,
 //! compiled for a rendering intent.
 //!
+//! The transform comes from the first source ICC.1 8.10.2's rows name for the
+//! intent with `B` for `A` ([`Intent::order`]): the intent's own `B2A*` table,
+//! then `B2A0`, then the matrix/TRC or grey model inverted, then the other
+//! `B2A*` tables, each passed over where it does not read.
+//!
+//! A `B2A*` table — `mft1` or `mft2` — takes the connection space as its
+//! input: the value is encoded on the way in as the table's type defines it
+//! (`u1Fixed15` XYZ through the table's matrix, or Lab in the table's own
+//! scale), then runs through the input curves, the grid and the output
+//! curves, out to the data space's channels.
+//!
 //! A matrix/TRC model is inverted when the transform is built: the inverse of
 //! its colorant columns, computed in `f64` and held in s15.16, and each tone
 //! curve inverted by bisection over its compiled table into
@@ -11,18 +22,24 @@
 //! reads, so nothing on the path rounds differently on another target
 //! (ruling 4). ICC-absolute colorimetry divides the value by the profile's
 //! media white over the PCS white before it enters (ICC.1 6.2.3), the
-//! division folded into the inverse matrix, or into the grey curve's scale.
+//! division folded into the inverse matrix, or into the grey curve's scale,
+//! and made in XYZ before a table.
 //!
 //! A matrix whose determinant is below one s15.16 step, or a curve that
 //! decreases anywhere or never rises, has no inverse, and the transform is
 //! refused as [`IccError::NoInverse`] (ruling 1).
 
+use std::sync::Arc;
+
 use super::{
-    compile_curve, fixed, round_shift, Curve, IccError, Intent, Model, Profile, CURVE_ENTRIES, ONE,
+    compile_curve, fixed, round_shift, Curve, IccError, Intent, Lut, Model, Profile, Step,
+    CURVE_ENTRIES, ONE,
 };
 
 /// The most device channels a transform out of the connection space gives:
 /// ICC.1 7.2.6's `FCLR`, fifteen, the most channels a data colour space has.
+/// A `B2A*` table's output count, a byte, is held to it before any of its
+/// curves is read.
 pub const MAX_DEVICE_CHANNELS: usize = 15;
 
 /// The largest magnitude a connection-space component is taken at on the way
@@ -90,10 +107,17 @@ enum Inverse {
         factor: i64,
         curve: Box<[u16]>,
     },
+    /// A `B2A*` table, the connection-space value divided by `media` in XYZ
+    /// first where that is given: ICC-absolute colorimetry's scale.
+    Table {
+        lut: Arc<Lut>,
+        media: Option<[f64; 3]>,
+    },
 }
 
-/// The model and its matrix, and not the 4 096 entries of each inverted
-/// curve, which say nothing a reader needs.
+/// The model and its matrix, or the table's shape, and not the 4 096 entries
+/// of each inverted curve or a table's grid, which say nothing a reader
+/// needs.
 impl std::fmt::Debug for Inverse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -106,6 +130,12 @@ impl std::fmt::Debug for Inverse {
                 .field("lab", lab)
                 .field("media", media)
                 .finish_non_exhaustive(),
+            Inverse::Table { lut, media } => f
+                .debug_struct("Table")
+                .field("outputs", &lut.outputs())
+                .field("lab", &lut.lab)
+                .field("media", media)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -113,53 +143,70 @@ impl std::fmt::Debug for Inverse {
 impl Output {
     /// The profile's transform out of the connection space for `intent`,
     /// taken by ICC.1 8.10.2's rows with `B` for `A`
-    /// (`docs/design/icc.md`, "The output transform"): the matrix/TRC or grey
-    /// model inverted, which serves every intent, ICC-absolute colorimetric's
-    /// with the media white divided out (6.2.3).
+    /// (`docs/design/icc.md`, "The output transform"): the first of the
+    /// intent's own `B2A*` table, `B2A0`, the matrix/TRC or grey model
+    /// inverted, and the other `B2A*` tables that the profile carries and
+    /// that reads — `B2A1`, `B2A0`, the model and `B2A2` for relative
+    /// colorimetric, which absolute colorimetric takes too with the media
+    /// white divided out (6.2.3). A table that does not read, or a model with
+    /// no inverse, is passed over to the next.
     ///
     /// # Errors
     ///
-    /// [`IccError::MissingTags`] for a profile that carries no model, and
-    /// [`IccError::NoInverse`] for one whose matrix's determinant is below
+    /// Where nothing reads, the first reason one did not: among them
+    /// [`IccError::NoInverse`] for a model whose matrix's determinant is below
     /// one s15.16 step or one of whose curves decreases anywhere or never
-    /// rises.
+    /// rises, [`IccError::TooLarge`] for a table giving more than
+    /// [`MAX_DEVICE_CHANNELS`] channels and [`IccError::UnsupportedSpace`] for
+    /// one giving another count than the data space has; and
+    /// [`IccError::MissingTags`] for a profile carrying neither a `B2A*`
+    /// table nor a model.
     pub fn compile(profile: &Profile, intent: Intent) -> Result<Output, IccError> {
-        let model = profile.model.as_ref().ok_or(IccError::MissingTags)?;
         let media = (intent == Intent::AbsoluteColorimetric)
             .then(|| profile.media_scale())
             .filter(|scale| *scale != [1.0; 3]);
-        let inverse = match model {
-            Model::MatrixTrc { columns, curves } => {
-                let inverse = invert_columns(columns, media.unwrap_or([1.0; 3]))?;
-                Inverse::Matrix {
-                    inverse,
-                    curves: [
-                        invert_curve(&curves[0])?,
-                        invert_curve(&curves[1])?,
-                        invert_curve(&curves[2])?,
-                    ],
+        let mut passed_over = None;
+        for step in intent.order() {
+            let built = match step {
+                // ICC.1 8.10.2 a)'s `BToD*` tags are not read, so a profile
+                // carrying one converts through its `B2A*` tables and model.
+                Step::Pipeline(_) => continue,
+                Step::Table(tag) => {
+                    let Some((_, element)) = profile.tables.output_at(tag) else {
+                        continue;
+                    };
+                    match profile.channels() {
+                        Some(channels) => profile
+                            .tables
+                            .read_output(element, usize::from(channels))
+                            .map(|lut| Inverse::Table { lut, media }),
+                        None => Err(IccError::UnsupportedSpace),
+                    }
+                }
+                Step::Model => match &profile.model {
+                    Some(model) => invert_model(model, media),
+                    None => continue,
+                },
+            };
+            match built {
+                Ok(inverse) => return Ok(Output { inverse }),
+                Err(error) => {
+                    passed_over.get_or_insert(error);
                 }
             }
-            Model::Grey { lab, curve } => {
-                let luminance = media.map(|scale| scale[1]);
-                Inverse::Grey {
-                    lab: *lab,
-                    media: luminance,
-                    factor: i64::from(fixed(1.0 / luminance.unwrap_or(1.0))),
-                    curve: invert_curve(curve)?,
-                }
-            }
-        };
-        Ok(Output { inverse })
+        }
+        Err(passed_over.unwrap_or(IccError::MissingTags))
     }
 
     /// How many device channels the transform gives: three for a matrix/TRC
-    /// profile, one for a grey one.
+    /// profile, one for a grey one, and a `B2A*` table's own count, the data
+    /// space's.
     #[must_use]
     pub fn channels(&self) -> usize {
         match &self.inverse {
             Inverse::Matrix { .. } => 3,
             Inverse::Grey { .. } => 1,
+            Inverse::Table { lut, .. } => lut.outputs(),
         }
     }
 
@@ -167,7 +214,8 @@ impl Output {
     /// own connection space as real numbers: D50 XYZ with the PCS white's `Y`
     /// at one, or `L*`, `a*` and `b*` as they stand. A component that is not
     /// a number is taken as zero, and one past four as four; light the
-    /// inverse matrix takes below zero or past one is held there.
+    /// inverse matrix takes below zero or past one is held there, and a
+    /// table's encoded input within its currency.
     #[must_use]
     pub fn apply(&self, pcs: [f64; 3]) -> DeviceColour {
         match &self.inverse {
@@ -207,7 +255,55 @@ impl Output {
                 };
                 DeviceColour::of(&[through(curve, light)])
             }
+            Inverse::Table { lut, media } => {
+                let pcs = match media {
+                    Some(scale) => scale_connection(pcs, lut.lab, scale.map(|s| 1.0 / s)),
+                    None => pcs,
+                };
+                let values = lut.evaluate(&lut.encode_connection(pcs));
+                let mut out = [0u16; MAX_DEVICE_CHANNELS];
+                for (slot, value) in out.iter_mut().zip(values) {
+                    *slot = (value.clamp(0.0, 1.0) * 65535.0).round() as u16;
+                }
+                DeviceColour::of(out.get(..lut.outputs()).unwrap_or(&[]))
+            }
         }
+    }
+}
+
+/// A matrix/TRC or grey model inverted, its connection-space value divided
+/// by `media` first where that is given.
+fn invert_model(model: &Model, media: Option<[f64; 3]>) -> Result<Inverse, IccError> {
+    Ok(match model {
+        Model::MatrixTrc { columns, curves } => Inverse::Matrix {
+            inverse: invert_columns(columns, media.unwrap_or([1.0; 3]))?,
+            curves: [
+                invert_curve(&curves[0])?,
+                invert_curve(&curves[1])?,
+                invert_curve(&curves[2])?,
+            ],
+        },
+        Model::Grey { lab, curve } => {
+            let luminance = media.map(|scale| scale[1]);
+            Inverse::Grey {
+                lab: *lab,
+                media: luminance,
+                factor: i64::from(fixed(1.0 / luminance.unwrap_or(1.0))),
+                curve: invert_curve(curve)?,
+            }
+        }
+    })
+}
+
+/// `pcs`, a connection-space value in its own units, scaled channel by
+/// channel in XYZ by `scale` — ICC-absolute colorimetry's media white, or its
+/// inverse (6.2.3) — under Lab through XYZ and back (6.4).
+pub(super) fn scale_connection(pcs: [f64; 3], lab: bool, scale: [f64; 3]) -> [f64; 3] {
+    if lab {
+        let xyz = lab_to_xyz(pcs);
+        xyz_to_lab([xyz[0] * scale[0], xyz[1] * scale[1], xyz[2] * scale[2]])
+    } else {
+        [pcs[0] * scale[0], pcs[1] * scale[1], pcs[2] * scale[2]]
     }
 }
 

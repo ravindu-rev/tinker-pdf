@@ -29,7 +29,10 @@ fixed-point tables, and each colour is a lookup plus an integer matrix
 multiply, so nothing on the pixel path evaluates a transcendental and ruling 4
 holds. Grey profiles are the same with one curve. A printer profile carries a
 multi-dimensional lookup table instead — `mft1` or `mft2` at an `A2B*` tag,
-three stages of curve with an interpolated grid between them. **v4's `mAB `
+three stages of curve with an interpolated grid between them, each reading a
+Lab connection space in its own encoding (ICC.1 6.3.4.2): an `mft2` in
+version 2's legacy one, `L*` 100 at `FF00h`, an `mft1` in its 8-bit one,
+`L*` 100 at `FFh`. **v4's `mAB `
 reads too**, which is five optional stages where v2 has three fixed ones — A
 curves, a grid whose axes may each carry their own point count, M curves, a
 matrix and B curves, run in that order although the header lists their
@@ -123,18 +126,28 @@ alternate-space reading 8.6.5.5 permits.
 is `tinker_pdf_color::icc::Output::compile(profile, intent)`: a value in the
 profile's own connection space — D50 XYZ with the PCS white's `Y` at one, or
 `L*a*b*` — to its device channels, each from 0 to 65 535, at most fifteen
-(`DeviceColour`). A matrix/TRC profile's columns are inverted when it is
-built, by their cofactors in `f64`, and held in s15.16, and each tone curve
-is inverted by bisection over its compiled table into 4 096 entries read
-between them in fixed point; a grey profile takes `Y`, or `L*` over 100
-under Lab, through its inverted `grayTRC`. Every intent reaches the model,
-and absolute colorimetric first divides the value by the media white over
-the PCS white, which a grey Lab profile does through `Y`
-(`icc::lab_to_xyz`, `icc::xyz_to_lab`). Per colour it is integer, the value
-quantized once on the way in. A matrix whose determinant is below one s15.16
-step, or a curve that decreases anywhere or never rises, is refused as
-`IccError::NoInverse`, and a profile carrying no model as `MissingTags`. No
-render converts through it; it is the colour crate's transform toward a
+(`DeviceColour`). It converts through the first source ICC.1 8.10.2's rows
+name for the intent with `B` for `A` — the intent's own `B2A*` table, then
+`B2A0`, then the model inverted, then the other `B2A*` tables — passing over
+one that does not read. A `B2A*` table, `mft1` or `mft2`, takes the value
+encoded as its type defines it — XYZ in `u1Fixed15` through the table's
+matrix (10.8), Lab in the table's own encoding — through its input curves,
+grid and output curves to as many channels as the data space has; one
+declaring more than fifteen is refused before its curves are read, and one
+of another count than the data space passed over. A matrix/TRC profile's
+columns are inverted when it is built, by their cofactors in `f64`, and held
+in s15.16, and each tone curve is inverted by bisection over its compiled
+table into 4 096 entries read between them in fixed point; a grey profile
+takes `Y`, or `L*` over 100 under Lab, through its inverted `grayTRC`.
+Absolute colorimetric first divides the value by the media white over the
+PCS white, in XYZ — under Lab through `icc::lab_to_xyz` and
+`icc::xyz_to_lab`. A matrix whose determinant is below one s15.16 step, or
+a curve that decreases anywhere or never rises, is refused as
+`IccError::NoInverse`, and a profile carrying neither a `B2A*` table nor a
+model as `MissingTags`. `Profile::connection_value(intent, components)` is
+the forward half a transform out of another profile takes: the value the
+intent's source gives, in the profile's own connection space. No render
+converts through either; they are the colour crate's transforms toward a
 device.
 
 **`CalGray` and `CalRGB` convert through their own parameters** (8.6.5.2,

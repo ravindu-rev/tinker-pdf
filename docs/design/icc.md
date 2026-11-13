@@ -1046,15 +1046,16 @@ and the encoding is the tag type's, not the profile's:
 | `mpet` (`multiProcessElementsType`) | float32, the value itself | float32, the value itself | ICC.1 6.3.4.2, 10.14 |
 
 So only `lut16Type` and `namedColor2Type` keep version 2's legacy scale, as
-ICC.1 6.3.4.2's note 3 says. `Lut::to_rgb` decodes every table's Lab as
-legacy: right for `mft2`, and for `mft1` and `mAB ` a factor of
-65 535/65 280 off — `L*` 100 reads 100.39 and `a*` 0 reads 0.5. RC-20.5
-corrects `mft1`'s forward reading and RC-20.6 `mAB `'s, beside the output
-tables each adds; no committed fingerprint or golden paints through a Lab
-table of either type, so none moves. `mft1` under PCSXYZ stays read as its
-16-bit widening in `u1Fixed15`, the reading ICC.1 leaves to the
-implementation. A curve or grid value outside `0..1` is clipped there, as
-10.10.5 clips `mAB `'s matrix output.
+ICC.1 6.3.4.2's note 3 says. A table carries its scale (`Lut::lab_scale`):
+an `mft2` decodes and encodes its Lab as legacy and an `mft1` in its own
+8-bit encoding, in both directions. An `mAB `'s is read as legacy, a factor
+of 65 535/65 280 off — `L*` 100 reads 100.39 and `a*` 0 reads 0.5 — which
+RC-20.6 corrects beside the output tables it adds; no committed fingerprint
+or golden paints through a Lab table of `mft1` or `mAB `, so the correction
+moves none. `mft1` under PCSXYZ is read as its 16-bit widening in
+`u1Fixed15`, the reading ICC.1 leaves to the implementation. A curve or grid
+value outside `0..1` is clipped there, as 10.10.5 clips `mAB `'s matrix
+output.
 
 ##### The output transform
 
@@ -1072,7 +1073,20 @@ implementation. A curve or grid value outside `0..1` is clipped there, as
   compiles](#the-table-each-intent-compiles), with `B` for `A`: the
   intent's `B2D*` (RC-20.10), its `B2A*`, `B2A0`, the model inverted, then
   the other `B2A*` tables; absolute colorimetric's value divided by the
-  media scale before it enters, except through `B2D3`.
+  media scale before it enters, except through `B2D3`. A source that does
+  not read — a table refused, a model with no inverse — is passed over, and
+  where none reads the transform is refused for the first reason one did
+  not, `MissingTags` where the profile carries none. `Profile::parse` keeps
+  a copy of each `B2A*` element's bytes, as it keeps each `A2B*` table no
+  intent has read yet, and a transform out of the connection space reads one
+  when it first selects it, once for every transform after; a set of
+  transforms' bound (`Transforms::bytes_bound`) counts them, read or not, as
+  it counts the `A2B*` tables.
+- **The forward value** a transform out of another profile takes is
+  `Profile::connection_value(intent, components)`: the source the intent's
+  forward transform converts through, evaluated with no grid between, in
+  the profile's own PCS, absolute colorimetric's scaled by the media white
+  except through `D2B3`.
 - **Matrix/TRC inverted** (RC-20.4): the inverse of the columns, by their
   cofactors over their determinant, computed in `f64` when built and held in
   s15.16, absolute colorimetric's division by the media scale folded into
@@ -1091,9 +1105,18 @@ implementation. A curve or grid value outside `0..1` is clipped there, as
   media scale's, and under Lab the lightness found again from that `Y`.
 - **`mft1` and `mft2`** (RC-20.5): `B2A1`, `B2A0`, `B2A2` read into the
   table evaluator with its output count generalised from three to the data
-  space's; the PCS encoded on the way in as the table above says, and
-  `mft2`'s matrix applied, since 10.8 makes it the identity unless the input
-  is PCSXYZ and a `B2A*` tag's input is the PCS.
+  space's, held to `MAX_DEVICE_CHANNELS` before any of its curves is read
+  (`TooLarge`) and then to the data space's count (`UnsupportedSpace`), its
+  input count the connection space's three (`MalformedTag`); an `mAB ` at a
+  `B2A*` tag is `NeedsLut`, as an `mBA ` at an `A2B*` one is. The PCS is
+  encoded on the way in as the table above says, and the table's matrix
+  applied, since 10.8 and 10.9 make it the identity unless the input is
+  PCSXYZ and a `B2A*` tag's input is the PCS: kept where the input is XYZ
+  and the matrix is not the identity, and not read over Lab. The table step
+  the known answers hold a channel to is the most a 256th of a grid cell
+  along every axis moves the grid's value there, the grid being interpolated
+  in 256ths of a cell, carried through the output curve's steepest stretch,
+  and four units for the roundings.
 - **`mBA `** (RC-20.6): 10.11's order, `B` curves, the matrix with offsets
   (its outputs clipped to `0..1`, and present only with three outputs), `M`
   curves, the grid, `A` curves, each stage present where its offset is not
@@ -1198,7 +1221,7 @@ and `n × (38 + 2m)` within the tag's own size, both being file fields.
 
 | Cap | Value | Bounds | Row's step |
 | --- | ---: | --- | --- |
-| `MAX_DEVICE_CHANNELS` | 15 | a table's output channels, a link's, a named colour's device coordinates | RC-20.5 |
+| `MAX_DEVICE_CHANNELS` | 15 | a table's output channels, a link's, a named colour's device coordinates | RC-20.16, its document figure the census's most channels a `B2A*` table gives |
 | `MAX_NAMED_COLOURS` | 65 536 | an `ncl2` tag's count | RC-20.9 |
 | `MAX_MPE_ELEMENTS` | 64 | a multi-process tag's elements (RC-01.4's constant) | RC-20.10 |
 | `MAX_CALC_OPERATIONS` | 65 536 | a calculator's operations, its sub-elements' among them | RC-20.11 |

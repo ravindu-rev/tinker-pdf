@@ -13,9 +13,13 @@
 //! evaluates the table's pipeline at each node the colours reach
 //! (`docs/design/icc.md`, P-22), so a hostile table builds its grid here too.
 //! The other direction is compiled for every intent as well: a profile's
-//! transform out of the connection space inverts its matrix and its curves
-//! when it is built, where a singular matrix or a falling curve is a typed
-//! refusal (`docs/design/icc.md`, "The output transform").
+//! transform out of the connection space reads its `B2A*` table into as many
+//! channels as its data space has, or inverts its matrix and its curves when
+//! it is built, where a table declaring more than fifteen outputs, a singular
+//! matrix or a falling curve is a typed refusal (`docs/design/icc.md`, "The
+//! output transform"); and the connection-space value each intent's source
+//! gives, which that transform takes from another profile, is read for
+//! components of every count.
 //!
 //! # What this target checks, and what it does not
 //!
@@ -49,11 +53,13 @@ fuzz_target!(|data: &[u8]| {
         if let Some(transform) = Transform::compile(&profile, intent) {
             apply_all(&transform);
         }
-        // And the other direction: a model inverted when it is built, where
-        // a hostile matrix or curve is a refusal and never a panic.
+        // And the other direction: a `B2A*` table read, or a model inverted
+        // when it is built, where a hostile table, matrix or curve is a
+        // refusal and never a panic.
         if let Ok(output) = Output::compile(&profile, intent) {
             output_all(&output);
         }
+        connection_all(&profile, intent);
     }
     let Some(transforms) = Transforms::compile(profile) else {
         return;
@@ -62,6 +68,24 @@ fuzz_target!(|data: &[u8]| {
         apply_all(transforms.get(intent));
     }
 });
+
+/// The connection-space value an intent's source gives, which a transform
+/// out of another profile takes, must answer for any components: in range,
+/// past either end, not numbers, and too few or too many of them.
+fn connection_all(profile: &Profile, intent: Intent) {
+    let sets: [&[f64]; 7] = [
+        &[0.0, 0.0, 0.0],
+        &[1.0, 1.0, 1.0, 1.0],
+        &[0.5, 0.25, 0.75],
+        &[-1.0, 2.0, f64::NAN],
+        &[f64::INFINITY, f64::NEG_INFINITY, 0.0],
+        &[0.5],
+        &[],
+    ];
+    for components in sets {
+        let _ = profile.connection_value(intent, components);
+    }
+}
 
 /// A transform out of the connection space must answer for any value a
 /// caller hands it: black, the PCS white, a Lab white, values past either end

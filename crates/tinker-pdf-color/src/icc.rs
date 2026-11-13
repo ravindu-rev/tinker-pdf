@@ -228,7 +228,7 @@ pub enum IccError {
 ///
 /// | | Tags |
 /// | --- | --- |
-/// | The most any fixture in this repository spends | 7 |
+/// | The most any fixture in this repository spends | 10 |
 /// | A 200-page comic archive | 0 |
 /// | The busiest profile in the corpus, reached as an XPS `ContextColor` part | 18 |
 /// | A 300-page reflowable book | 0 |
@@ -252,7 +252,7 @@ pub const MAX_ICC_TAGS: u32 = 1024;
 ///
 /// | | Bytes |
 /// | --- | --- |
-/// | The most any fixture in this repository spends | 882 |
+/// | The most any fixture in this repository spends | 2 624 |
 /// | A 200-page comic archive | 0 |
 /// | The largest profile in the corpus: a printer profile carrying a full set of lookup tables | 718 672 |
 /// | A 300-page reflowable book | 0 |
@@ -573,6 +573,36 @@ pub enum Model {
     },
 }
 
+impl Model {
+    /// The connection-space value the model gives `components`, in its own
+    /// connection space: a matrix/TRC model's columns over its curves'
+    /// outputs (8.10.2 d)), a grey model's curve on the PCS white — `Y` times
+    /// the white's XYZ, or `L*` with `a*` and `b*` nought (F.2).
+    fn connection(&self, components: &[f64]) -> [f64; 3] {
+        let at = |index: usize| components.get(index).copied().unwrap_or(0.0);
+        match self {
+            Model::MatrixTrc { columns, curves } => {
+                let linear = [0, 1, 2].map(|channel| curves[channel].eval(at(channel)));
+                [0, 1, 2].map(|row| {
+                    columns
+                        .iter()
+                        .zip(linear)
+                        .map(|(column, value)| column[row] * value)
+                        .sum()
+                })
+            }
+            Model::Grey { lab, curve } => {
+                let value = curve.eval(at(0));
+                if *lab {
+                    [value * 100.0, 0.0, 0.0]
+                } else {
+                    PCS_WHITE.map(|white| white * value)
+                }
+            }
+        }
+    }
+}
+
 /// The `A2B*` tables a profile carries — sampled lookup tables, `mft1`,
 /// `mft2` or v4's `mAB ` — and its `D2B*` multi-process pipelines, each read
 /// when an intent first converts through it.
@@ -588,6 +618,11 @@ pub enum Model {
 /// that names no intent reads no table it does not convert through. Tags
 /// that name one element — the same offset and size, which ICC.1 8.2 lets
 /// every intent share — are one table, read once.
+///
+/// Beside them the `B2A*` tables, the other direction's (ICC.1 9.2.1 to
+/// 9.2.3): from the connection space to the profile's device channels, kept
+/// unread, as an intent's own `A2B*` table is, until a transform out of the
+/// connection space first selects one ([`Output::compile`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tables {
     /// For `A2B0`, `A2B1` and `A2B2`, which of `tables` the tag names, or
@@ -600,6 +635,11 @@ pub struct Tables {
     pipeline_slots: [Option<usize>; 4],
     /// One a distinct `D2B*` element, in the order the tags first name them.
     pipelines: Vec<Element<mpe::Pipeline>>,
+    /// For `B2A0`, `B2A1` and `B2A2`, which of `outputs` the tag names, or
+    /// `None` where the profile does not carry it.
+    output_slots: [Option<usize>; 3],
+    /// One a distinct `B2A*` element, in the order the tags first name them.
+    outputs: Vec<Element<Lut>>,
     /// Whether the connection space is `Lab` rather than `XYZ`.
     lab: bool,
 }
@@ -607,21 +647,26 @@ pub struct Tables {
 impl Tables {
     /// The tables at the elements `places` names — `A2B0`, `A2B1` and
     /// `A2B2`'s offset and size in `bytes`, where the profile carries them —
-    /// and the pipelines at the elements `pipeline_places` names, `D2B0` to
-    /// `D2B3`'s, none of them read yet.
+    /// the pipelines at the elements `pipeline_places` names, `D2B0` to
+    /// `D2B3`'s, and the other direction's tables at the elements
+    /// `output_places` names, `B2A0` to `B2A2`'s, none of them read yet.
     fn locate(
         places: [Option<(usize, usize)>; 3],
         pipeline_places: [Option<(usize, usize)>; 4],
+        output_places: [Option<(usize, usize)>; 3],
         bytes: &[u8],
         lab: bool,
     ) -> Result<Tables, IccError> {
         let (slots, tables) = Element::locate(places, bytes)?;
         let (pipeline_slots, pipelines) = Element::locate(pipeline_places, bytes)?;
+        let (output_slots, outputs) = Element::locate(output_places, bytes)?;
         Ok(Tables {
             slots,
             tables,
             pipeline_slots,
             pipelines,
+            output_slots,
+            outputs,
             lab,
         })
     }
@@ -634,6 +679,8 @@ impl Tables {
             tables: Vec::new(),
             pipeline_slots: [None; 4],
             pipelines: Vec::new(),
+            output_slots: [None; 3],
+            outputs: Vec::new(),
             lab,
         }
     }
@@ -650,9 +697,21 @@ impl Tables {
         Some((index, self.pipelines.get(index)?))
     }
 
+    /// The table `B2A*` tag `tag` names, where the profile carries it.
+    fn output_at(&self, tag: usize) -> Option<(usize, &Element<Lut>)> {
+        let index = (*self.output_slots.get(tag)?)?;
+        Some((index, self.outputs.get(index)?))
+    }
+
     /// The `A2B*` table at `element`, read now if nothing has read it yet.
     fn read_table(&self, element: &Element<Lut>) -> Result<Arc<Lut>, IccError> {
-        element.read(|bytes| read_lut(bytes, self.lab))
+        element.read(|bytes| read_lut(bytes, self.lab, Direction::Forward))
+    }
+
+    /// The `B2A*` table at `element`, from the connection space to
+    /// `channels` device channels, read now if nothing has read it yet.
+    fn read_output(&self, element: &Element<Lut>, channels: usize) -> Result<Arc<Lut>, IccError> {
+        element.read(|bytes| read_lut(bytes, self.lab, Direction::Output { channels }))
     }
 
     /// The `D2B*` pipeline at `element`, read now if nothing has read it yet.
@@ -790,6 +849,29 @@ enum SourceId {
 }
 
 impl Profile {
+    /// The connection-space value `components` convert to in `intent`, in
+    /// the profile's own connection space — D50 XYZ with the PCS white's `Y`
+    /// at one, or `L*`, `a*` and `b*` as they stand: through the source the
+    /// intent's transform converts through ([`Intent::order`]), its pipeline
+    /// evaluated with no grid between, and ICC-absolute colorimetric's scaled
+    /// channel by channel in XYZ by the media white over the PCS white
+    /// except through `D2B3` (6.2.3). What a transform out of another
+    /// profile's connection space takes ([`Output::apply`]); `None` where
+    /// the intent has nothing to convert through.
+    #[must_use]
+    pub fn connection_value(&self, intent: Intent, components: &[f64]) -> Option<[f64; 3]> {
+        let source = self.source(intent)?;
+        let pcs = match &source {
+            Source::Table(_, lut) => lut.connection(components),
+            Source::Pipeline { pipeline, .. } => pipeline.evaluate(components),
+            Source::Model(model) => model.connection(components),
+        };
+        Some(match self.scale_for(intent, &source) {
+            Some(scale) => output::scale_connection(pcs, &self.pcs == b"Lab ", scale),
+            None => pcs,
+        })
+    }
+
     /// Where `intent`'s transform comes from: the first of
     /// [`Intent::order`]'s sources the profile carries that reads, a table or
     /// pipeline read now if no intent has read it yet. One that does not read
@@ -831,8 +913,12 @@ impl Profile {
 /// Each input channel goes through its own curve, the result indexes a
 /// multi-dimensional grid by interpolation, and each output channel comes back
 /// through another curve. The matrix ICC.1 puts in front is only applied when
-/// the *input* is the connection space, which for an `A2B*` tag it never is,
-/// so it is read and ignored rather than left unread.
+/// the *input* is the connection space in XYZ (10.8, 10.9): never for an
+/// `A2B*` tag, whose input is the device's, and for a `B2A*` tag over XYZ,
+/// whose input is the connection space.
+///
+/// An `A2B*` table gives the connection space's three channels; a `B2A*`
+/// table, the data space's, up to [`MAX_DEVICE_CHANNELS`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lut {
     inputs: usize,
@@ -858,10 +944,56 @@ pub struct Lut {
     ///
     /// Not `mft2`'s matrix, which sits at a fixed offset and applies only when
     /// the *input* is the connection space — at an `A2B*` tag it is not, which
-    /// is why the v2 reader steps over it.
+    /// is why the v2 reader steps over it there.
     matrix: Option<[f64; 12]>,
+    /// `mft1`'s and `mft2`'s 3×3 matrix, row by row, where the table's input
+    /// is the connection space in XYZ — a `B2A*` table's — and the matrix is
+    /// not the identity: applied to the XYZ before the input curves (10.8).
+    input_matrix: Option<[f64; 9]>,
     /// Whether the connection space is `Lab` rather than `XYZ`.
     lab: bool,
+    /// How the table encodes a Lab connection space in its currency.
+    lab_scale: LabScale,
+}
+
+/// How a table encodes `L*a*b*` in its 16-bit currency (ICC.1 6.3.4.2,
+/// `docs/design/icc.md`, "The connection space each table type encodes").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LabScale {
+    /// `lut16Type`'s, version 2's legacy encoding: `L*` 100 at `FF00h`, and
+    /// `a*` and `b*` 0 at `8000h` and 127 at `FF00h`, the currency reaching a
+    /// little past the space (note 3).
+    Legacy,
+    /// Each component's range over the whole currency: `L*` 100 at `FFFFh`,
+    /// `a*` and `b*` from −128 at 0 to 127 at `FFFFh` — `lut8Type`'s 8-bit
+    /// encoding, `L*` 100 at `FFh` and 0 at `80h`, widened.
+    Full,
+}
+
+impl LabScale {
+    /// What the full currency is worth on this scale, over what it is on the
+    /// whole range: 65 535 over 65 280 for the legacy encoding, one for the
+    /// full.
+    fn reach(self) -> f64 {
+        match self {
+            LabScale::Legacy => 65535.0 / 65280.0,
+            LabScale::Full => 1.0,
+        }
+    }
+}
+
+/// Which way a table converts, which fixes what each of its sides is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Direction {
+    /// An `A2B*` table: the device's channels in, the connection space's
+    /// three out.
+    Forward,
+    /// A `B2A*` table: the connection space's three in, the data space's
+    /// `channels` out.
+    Output {
+        /// How many channels the profile's data space has.
+        channels: usize,
+    },
 }
 
 /// The most input channels a lookup table may declare, and the most channels
@@ -895,12 +1027,15 @@ const EXACT_INPUTS: usize = 6;
 pub const MAX_CLUT_ENTRIES: usize = 1 << 22;
 
 impl Lut {
-    /// The connection-space value for `components`, each in `0..=1`.
+    /// The table's output channels for `components`, each in `0..=1`, each
+    /// output in `0..=1` of the table's currency: the connection space's
+    /// three for an `A2B*` table, the device's for a `B2A*` one, in the first
+    /// [`Lut::outputs`] places.
     ///
     /// Integer throughout, like the rest of the pixel path: the input curves
     /// and the grid interpolation are u32 arithmetic on 16-bit samples, and the
     /// only floats are the caller's own components on the way in.
-    fn evaluate(&self, components: &[f64]) -> [f64; 3] {
+    fn evaluate(&self, components: &[f64]) -> [f64; MAX_DEVICE_CHANNELS] {
         // Stage one: each channel through its own curve.
         let mut coords = Vec::with_capacity(self.inputs);
         for channel in 0..self.inputs {
@@ -916,7 +1051,7 @@ impl Lut {
         // Stage two: the grid. Multilinear over `inputs` axes, which is
         // sixteen corners for the four-channel case the corpus is made of, and
         // each axis carries its own grid count because `mAB ` may say so.
-        let mut mid = [0u16; 3];
+        let mut mid = [0u16; MAX_DEVICE_CHANNELS];
         if self.clut.is_empty() {
             // A v4 tag with no CLUT passes each channel straight through, which
             // `read_mab` has already checked means as many outputs as inputs.
@@ -939,7 +1074,7 @@ impl Lut {
                 }
             } else {
                 let corners = 1usize << self.inputs;
-                let mut mixed = [0u64; 3];
+                let mut mixed = [0u64; MAX_DEVICE_CHANNELS];
                 let mut total = 0u64;
                 for corner in 0..corners {
                     let mut weight = 1u64;
@@ -970,8 +1105,9 @@ impl Lut {
         }
 
         // Stage three, v4 only: the M curves and then the matrix. Both are
-        // absent from every `mft1` and `mft2`, so this is a no-op there.
-        let mut values = [0.0f64; 3];
+        // absent from every `mft1` and `mft2`, so this is a no-op there; and
+        // the matrix is three channels', which a tag carrying one has.
+        let mut values = [0.0f64; MAX_DEVICE_CHANNELS];
         for (channel, slot) in values.iter_mut().enumerate().take(self.outputs) {
             let raw = f64::from(mid[channel]) / 65535.0;
             *slot = match &self.m_tables {
@@ -984,15 +1120,13 @@ impl Lut {
         }
         if let Some(m) = &self.matrix {
             let (x, y, z) = (values[0], values[1], values[2]);
-            values = [
-                m[0] * x + m[1] * y + m[2] * z + m[9],
-                m[3] * x + m[4] * y + m[5] * z + m[10],
-                m[6] * x + m[7] * y + m[8] * z + m[11],
-            ];
+            values[0] = m[0] * x + m[1] * y + m[2] * z + m[9];
+            values[1] = m[3] * x + m[4] * y + m[5] * z + m[10];
+            values[2] = m[6] * x + m[7] * y + m[8] * z + m[11];
         }
 
         // Stage four: each output channel back through its own curve.
-        let mut out = [0.0f64; 3];
+        let mut out = [0.0f64; MAX_DEVICE_CHANNELS];
         for (channel, slot) in out.iter_mut().enumerate().take(self.outputs) {
             let value = values[channel].clamp(0.0, 1.0);
             let table = &self.output_tables[channel];
@@ -1056,31 +1190,77 @@ impl Lut {
     fn to_linear(&self, components: &[f64], media: Option<[f64; 3]>) -> [f64; 3] {
         #[cfg(test)]
         tests::PIPELINE_EVALUATIONS.with(|count| count.set(count.get() + 1));
-        let pcs = self.evaluate(components);
+        let encoded = self.evaluate(components);
+        pcs_to_linear(
+            self.decode_connection([encoded[0], encoded[1], encoded[2]]),
+            self.lab,
+            media,
+        )
+    }
+
+    /// The connection-space value an `A2B*` table's three outputs encode, in
+    /// its own units: D50 XYZ with the PCS white's `Y` at one, or `L*`, `a*`
+    /// and `b*` as they stand.
+    ///
+    /// XYZ in `u1Fixed15`, 1.0 at `8000h` of the currency, so its full scale
+    /// is just under two (10.8, 10.9: `mft1`'s XYZ is the implementation's
+    /// own, and read as its widening). Lab by the table's own scale: an
+    /// `mft2`'s version 2 legacy encoding, whose full scale is `FF00h` so that
+    /// an eight-bit `FFh` doubles to it exactly, or an `mft1`'s 8-bit one,
+    /// `L*` 100 at `FFh`. Getting the scale wrong shifts every hue by a little
+    /// under half a percent of the range — a plausible picture in slightly
+    /// wrong colours, which is the failure this module's refusals exist to
+    /// avoid.
+    fn decode_connection(&self, encoded: [f64; 3]) -> [f64; 3] {
         if self.lab {
-            // ICC v2's *legacy* 16-bit Lab encoding, which is not v4's: full
-            // scale is 0xFF00 rather than 0xFFFF, so that an eight-bit 0xFF
-            // doubles to it exactly. Getting this wrong shifts every hue by a
-            // little under half a percent of the range — a plausible picture in
-            // slightly wrong colours, which is the failure this module's
-            // refusals exist to avoid, so it is written out rather than
-            // folded into a constant.
-            const FULL: f64 = 65535.0 / 65280.0;
-            let l = pcs[0] * FULL * 100.0;
-            let a = pcs[1] * FULL * 255.0 - 128.0;
-            let b = pcs[2] * FULL * 255.0 - 128.0;
-            pcs_to_linear([l, a, b], true, media)
+            let reach = self.lab_scale.reach();
+            [
+                encoded[0] * reach * 100.0,
+                encoded[1] * reach * 255.0 - 128.0,
+                encoded[2] * reach * 255.0 - 128.0,
+            ]
         } else {
-            // XYZ, in the s15Fixed16 convention the connection space uses:
-            // 1.0 is 0x8000 of the 16-bit range, so full scale is just under
-            // two.
             let scale = 65535.0 / 32768.0;
-            pcs_to_linear(
-                [pcs[0] * scale, pcs[1] * scale, pcs[2] * scale],
-                false,
-                media,
-            )
+            encoded.map(|value| value * scale)
         }
+    }
+
+    /// A connection-space value in its own units, as a `B2A*` table's three
+    /// inputs take it, each in `0..=1` of the currency: [`Lut::decode_connection`]
+    /// run backwards, XYZ first through the table's matrix where it carries
+    /// one (10.8). A component that is not a number is zero.
+    fn encode_connection(&self, pcs: [f64; 3]) -> [f64; 3] {
+        let finite = pcs.map(|value| if value.is_nan() { 0.0 } else { value });
+        let encoded = if self.lab {
+            let reach = self.lab_scale.reach();
+            [
+                finite[0] / 100.0 / reach,
+                (finite[1] + 128.0) / 255.0 / reach,
+                (finite[2] + 128.0) / 255.0 / reach,
+            ]
+        } else {
+            let xyz = match &self.input_matrix {
+                Some(e) => [0, 1, 2].map(|row| {
+                    e[3 * row] * finite[0] + e[3 * row + 1] * finite[1] + e[3 * row + 2] * finite[2]
+                }),
+                None => finite,
+            };
+            let scale = 32768.0 / 65535.0;
+            xyz.map(|value| value * scale)
+        };
+        encoded.map(|value| value.clamp(0.0, 1.0))
+    }
+
+    /// How many channels the table gives.
+    const fn outputs(&self) -> usize {
+        self.outputs
+    }
+
+    /// The connection-space value an `A2B*` table gives `components`: its
+    /// pipeline and its encoding read back, no grid between.
+    fn connection(&self, components: &[f64]) -> [f64; 3] {
+        let encoded = self.evaluate(components);
+        self.decode_connection([encoded[0], encoded[1], encoded[2]])
     }
 
     /// How this table's light is encoded: as `lab_to_rgb` encodes it under a
@@ -1760,6 +1940,7 @@ impl Profile {
                     place(b"D2B2"),
                     place(b"D2B3"),
                 ],
+                [place(b"B2A0"), place(b"B2A1"), place(b"B2A2")],
                 bytes,
                 lab,
             )?
@@ -1882,24 +2063,29 @@ fn read_model<'a>(
     }
 }
 
-/// An `mft1` or `mft2` tag: ICC.1's two v2 lookup tables.
+/// An `mft1` or `mft2` tag: ICC.1's two v2 lookup tables, read as the tag
+/// that names it converts — an `A2B*` tag forward, a `B2A*` tag out of the
+/// connection space ([`Direction`]).
 ///
 /// They differ in exactly two ways — the sample width, and whether the two
 /// curve stages carry their own entry counts or are fixed at 256 — so they are
-/// read by one function with a flag rather than two that drift apart.
-fn read_lut(data: &[u8], lab: bool) -> Result<Lut, IccError> {
+/// read by one function with a flag rather than two that drift apart. And in
+/// how each encodes a Lab connection space: an `mft2` in version 2's legacy
+/// 16-bit encoding, an `mft1` in its own 8-bit one (6.3.4.2).
+fn read_lut(data: &[u8], lab: bool, direction: Direction) -> Result<Lut, IccError> {
     #[cfg(test)]
     tests::TABLE_READS.with(|reads| reads.set(reads.get() + 1));
     let reader = Reader { bytes: data };
-    let wide = match reader.sig(0).ok_or(IccError::MalformedTag)? {
-        s if &s == b"mft2" => true,
-        s if &s == b"mft1" => false,
+    let wide = match (reader.sig(0).ok_or(IccError::MalformedTag)?, direction) {
+        (s, _) if &s == b"mft2" => true,
+        (s, _) if &s == b"mft1" => false,
         // `mAB ` is v4's, and a different structure: five optional stages
         // where v2 has three fixed ones, each carrying its own offset.
-        s if &s == b"mAB " => return read_mab(data, lab),
+        (s, Direction::Forward) if &s == b"mAB " => return read_mab(data, lab),
         // `mBA ` is the *inverse* direction, and an `A2B*` tag never holds one:
         // it would be a profile saying "here is how to get out of the
-        // connection space" at the entry that asks how to get in.
+        // connection space" at the entry that asks how to get in — and an
+        // `mAB ` at a `B2A*` tag the same the other way round.
         _ => return Err(IccError::NeedsLut),
     };
 
@@ -1913,9 +2099,22 @@ fn read_lut(data: &[u8], lab: bool) -> Result<Lut, IccError> {
     if inputs == 0 || outputs == 0 || grid < 2 || inputs > MAX_LUT_INPUTS {
         return Err(IccError::MalformedTag);
     }
-    // Three is what the connection space is, and what `to_rgb` reads.
-    if outputs != 3 {
-        return Err(IccError::UnsupportedSpace);
+    match direction {
+        // Three is what the connection space is, and what `to_rgb` reads.
+        Direction::Forward if outputs != 3 => return Err(IccError::UnsupportedSpace),
+        Direction::Forward => {}
+        // The output count is a byte, held to the most channels a data
+        // space has before a curve is read for any of them; then to the
+        // profile's own data space, which is what the channels are. The
+        // input is the connection space's three.
+        Direction::Output { .. } if outputs > MAX_DEVICE_CHANNELS => {
+            return Err(IccError::TooLarge)
+        }
+        Direction::Output { channels } if outputs != channels => {
+            return Err(IccError::UnsupportedSpace)
+        }
+        Direction::Output { .. } if inputs != 3 => return Err(IccError::MalformedTag),
+        Direction::Output { .. } => {}
     }
     // `grid.pow(inputs)` is the branch this format hides in two bytes.
     let points = grid
@@ -1927,7 +2126,22 @@ fn read_lut(data: &[u8], lab: bool) -> Result<Lut, IccError> {
     }
 
     // The 3x3 matrix at offset 12 applies only when the input is the connection
-    // space, which at an `A2B*` tag it is not. Read past rather than read.
+    // space in XYZ (10.8, 10.9): at an `A2B*` tag it is not, and the matrix is
+    // read past; at a `B2A*` tag over XYZ it is, and a matrix other than the
+    // identity is kept. Over Lab the clause has it the identity.
+    let input_matrix = match direction {
+        Direction::Output { .. } if !lab => {
+            let mut e = [0.0f64; 9];
+            for (index, slot) in e.iter_mut().enumerate() {
+                *slot = reader
+                    .s15fixed16(12 + 4 * index)
+                    .ok_or(IccError::MalformedTag)?;
+            }
+            let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+            (e != identity).then_some(e)
+        }
+        _ => None,
+    };
     let mut at = 12 + 9 * 4;
     let (input_entries, output_entries) = if wide {
         let i = reader.u16(at).ok_or(IccError::MalformedTag)? as usize;
@@ -1981,7 +2195,15 @@ fn read_lut(data: &[u8], lab: bool) -> Result<Lut, IccError> {
         // v2 has neither stage; `mAB ` is where they come from.
         m_tables: None,
         matrix: None,
+        input_matrix,
         lab,
+        // 6.3.4.2, note 3: only `lut16Type` keeps version 2's legacy
+        // encoding; `lut8Type`'s is its own 8-bit one, `L*` 100 at `FFh`.
+        lab_scale: if wide {
+            LabScale::Legacy
+        } else {
+            LabScale::Full
+        },
     })
 }
 
@@ -2151,7 +2373,9 @@ fn read_mab(data: &[u8], lab: bool) -> Result<Lut, IccError> {
         output_tables,
         m_tables,
         matrix,
+        input_matrix: None,
         lab,
+        lab_scale: LabScale::Legacy,
     })
 }
 
@@ -3110,13 +3334,16 @@ impl<T> Element<T> {
 impl Tables {
     /// The most bytes the tables and pipelines can come to hold: their
     /// lists, and each element's bytes kept until it is read and what reading
-    /// it gave or, for one not read yet, the most reading it can give.
+    /// it gave or, for one not read yet, the most reading it can give — the
+    /// `B2A*` tables among them, which a transform out of the connection
+    /// space reads ([`Output::compile`]).
     fn held_bound(&self) -> usize {
-        let lists = self.tables.capacity() * size_of::<Element<Lut>>()
+        let lists = (self.tables.capacity() + self.outputs.capacity()) * size_of::<Element<Lut>>()
             + self.pipelines.capacity() * size_of::<Element<mpe::Pipeline>>();
         let tables = self
             .tables
             .iter()
+            .chain(&self.outputs)
             .map(|table| table.held_bound(Lut::held_bytes, |raw| lut_bound(raw.len())));
         let pipelines = self
             .pipelines
@@ -3146,14 +3373,16 @@ impl Tables {
     }
 
     /// The bytes the tables and pipelines hold now: their lists, and each
-    /// element's kept bytes and what reading it gave, where it has been read.
+    /// element's kept bytes and what reading it gave, where it has been read,
+    /// the `B2A*` tables among them.
     #[cfg(test)]
     fn held(&self) -> usize {
-        let lists = self.tables.capacity() * size_of::<Element<Lut>>()
+        let lists = (self.tables.capacity() + self.outputs.capacity()) * size_of::<Element<Lut>>()
             + self.pipelines.capacity() * size_of::<Element<mpe::Pipeline>>();
         let tables: usize = self
             .tables
             .iter()
+            .chain(&self.outputs)
             .map(|table| table.held(Lut::held_bytes))
             .sum();
         let pipelines: usize = self
@@ -3389,11 +3618,18 @@ pub(crate) mod tests {
         enum Reaches {
             /// Parses, so the target also drives `Transform`.
             Transform,
+            /// Parses, and every intent's transform out of the connection
+            /// space compiles too, so the target drives `Output` as well.
+            Output,
             /// Refused by name, after the tag table was walked.
             Refusal(IccError),
         }
 
-        let seeds: [(&str, Vec<u8>, Reaches); 11] = [
+        let seeds: [(&str, Vec<u8>, Reaches); 12] = [
+            // A CMYK printer profile carrying both directions over Lab: an
+            // `A2B0` of four inks to the connection space and a `B2A0` back,
+            // each an `mft2`, the seed that reaches the output tables.
+            ("b2a-lut16-cmyk", b2a_seed(), Reaches::Output),
             // `D2B0` and `D2B1` naming one multi-process element, a curve
             // set with every segment kind, a matrix and a grid: the seed
             // that reaches the `mpet` reader and its stages.
@@ -3498,13 +3734,19 @@ pub(crate) mod tests {
         for (name, bytes, reaches) in &seeds {
             let got = Profile::parse(bytes);
             match reaches {
-                Reaches::Transform => {
+                Reaches::Transform | Reaches::Output => {
                     let profile = got.unwrap_or_else(|e| panic!("{name}: {e:?}"));
                     for intent in Intent::ALL {
                         assert!(
                             Transform::compile(&profile, intent).is_some(),
                             "{name}: no {intent:?} transform"
                         );
+                        if matches!(reaches, Reaches::Output) {
+                            assert!(
+                                Output::compile(&profile, intent).is_ok(),
+                                "{name}: no {intent:?} transform out of the connection space"
+                            );
+                        }
                     }
                 }
                 Reaches::Refusal(expected) => {
@@ -3520,6 +3762,65 @@ pub(crate) mod tests {
             std::fs::write(base.join(format!("{name}.icc")), bytes)
                 .unwrap_or_else(|error| panic!("writing {name}: {error}"));
         }
+    }
+
+    /// An `mft2` of `inputs` and `outputs` over a two-point grid, its matrix
+    /// and curves the identity, node `n`'s channel `c` the value
+    /// `value(n, c)`, the first input's axis slowest.
+    fn graded_mft2(inputs: usize, outputs: usize, value: impl Fn(usize, usize) -> u16) -> Vec<u8> {
+        let mut out = b"mft2".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&[inputs as u8, outputs as u8, 2, 0]);
+        for row in 0..3 {
+            for column in 0..3 {
+                let entry: u32 = if row == column { 0x0001_0000 } else { 0 };
+                out.extend_from_slice(&entry.to_be_bytes());
+            }
+        }
+        out.extend_from_slice(&2u16.to_be_bytes());
+        out.extend_from_slice(&2u16.to_be_bytes());
+        for _ in 0..inputs {
+            out.extend_from_slice(&0u16.to_be_bytes());
+            out.extend_from_slice(&u16::MAX.to_be_bytes());
+        }
+        for node in 0..1usize << inputs {
+            for channel in 0..outputs {
+                out.extend_from_slice(&value(node, channel).to_be_bytes());
+            }
+        }
+        for _ in 0..outputs {
+            out.extend_from_slice(&0u16.to_be_bytes());
+            out.extend_from_slice(&u16::MAX.to_be_bytes());
+        }
+        out
+    }
+
+    /// The `b2a-lut16-cmyk` seed: a CMYK profile over Lab whose `A2B0` takes
+    /// each corner of the ink cube to a grey that darkens with every ink it
+    /// holds — `L*` from `FF00h` down `3000h` an ink, `a*` and `b*` at
+    /// `8000h` — and whose `B2A0` gives each corner of the connection
+    /// space's cube four inks spread over the range, `((5n + 3c) mod 17) ×
+    /// 3 855` for node `n`'s channel `c`.
+    fn b2a_seed() -> Vec<u8> {
+        build(
+            b"CMYK",
+            b"Lab ",
+            &[
+                (
+                    *b"A2B0",
+                    graded_mft2(4, 3, |node, channel| match channel {
+                        0 => 0xFF00 - node.count_ones() as u16 * 0x3000,
+                        _ => 0x8000,
+                    }),
+                ),
+                (
+                    *b"B2A0",
+                    graded_mft2(3, 4, |node, channel| {
+                        (((node * 5 + channel * 3) % 17) * 3855) as u16
+                    }),
+                ),
+            ],
+        )
     }
 
     fn matrix_profile() -> Vec<u8> {
@@ -4389,7 +4690,8 @@ pub(crate) mod tests {
     /// [`pcs_of`], for any number of components.
     fn pcs_at(transform: &Transform, x: &[f64]) -> [u32; 3] {
         let lut = transform.lut.as_ref().expect("a lookup-table transform");
-        lut.evaluate(x).map(|v| (v * 65535.0).round() as u32)
+        let values = lut.evaluate(x);
+        [values[0], values[1], values[2]].map(|v| (v * 65535.0).round() as u32)
     }
 
     /// Every component a quarter: nodes and the points halfway between them.
@@ -5223,7 +5525,7 @@ pub(crate) mod tests {
                     pcs[2] * full * 255.0 - 128.0,
                 )
             } else {
-                pcs.map(|v| v * 65535.0 / 32768.0)
+                [pcs[0], pcs[1], pcs[2]].map(|v| v * 65535.0 / 32768.0)
             };
         }
         match profile.model.as_ref().expect("a model") {
@@ -7101,12 +7403,15 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
     /// matrix/TRC, a grey, a three-intent lookup-table and a v4 profile, a
     /// CMYK table, an RGB profile whose perceptual table takes four inputs —
     /// so perceptual's and saturation's grids are larger than relative
-    /// colorimetric's — and one carrying a matrix, three `A2B*` tables and
-    /// four `D2B*` pipelines beside a media white that is not D50, so every
-    /// intent compiles its own, the bound read as the set is compiled is at
-    /// least what the set holds once every intent has compiled and converted
-    /// a colour and a row, its grids' nodes allocated and its row tables
-    /// built, and the bound only falls as tables are read, staying a bound.
+    /// colorimetric's — one carrying a matrix, three `A2B*` tables and four
+    /// `D2B*` pipelines beside a media white that is not D50, so every intent
+    /// compiles its own, and a CMYK profile carrying a `B2A0` beside its
+    /// `A2B0`, the bound read as the set is compiled is at least what the set
+    /// holds once every intent has compiled and converted a colour and a row,
+    /// its grids' nodes allocated and its row tables built, and its transform
+    /// out of the connection space compiled, reading the `B2A*` table into
+    /// the profile the set holds; and the bound only falls as tables are
+    /// read, staying a bound.
     #[test]
     fn transforms_hold_no_more_than_their_bound() {
         let wider = build(
@@ -7129,7 +7434,7 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
             tags.push((signature, constant_table(3, fallback_value(t))));
         }
         let everything = build(b"RGB ", b"XYZ ", &tags);
-        let profiles: [(&str, Vec<u8>); 7] = [
+        let profiles: [(&str, Vec<u8>); 8] = [
             ("matrix/TRC", matrix_trc(2.2)),
             ("grey", grey(b"XYZ ", 1.8)),
             ("three intents", three_intents_profile()),
@@ -7140,6 +7445,7 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
             ("mft2 CMYK to Lab", cmyk_table(true)),
             ("a wider perceptual table", wider),
             ("a model, tables and pipelines", everything),
+            ("a B2A table beside an A2B one", b2a_seed()),
         ];
         for (what, bytes) in &profiles {
             let profile = Profile::parse(bytes).unwrap_or_else(|e| panic!("{what}: {e:?}"));
@@ -7163,6 +7469,9 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
                 let _ = transform.apply(&vec![0.4; inputs]);
                 let mut rgb = Vec::new();
                 transform.convert_row(&samples, &mut rgb);
+                // And the other direction, which reads a `B2A*` table into
+                // the profile the set holds.
+                let _ = Output::compile(transforms.profile(), intent);
             }
             let held = transforms.held_bytes();
             assert!(
@@ -7329,5 +7638,269 @@ profile\tinputs\tpoints\tinterpolation\tnodes\tbytes\tevaluations\tworst\tmean
                 narrow.len()
             );
         }
+    }
+
+    /// An `mft2` or, `wide` false, `mft1` tag of `inputs` and `outputs` over
+    /// a two-point grid, its curves the identity and its matrix `matrix`
+    /// row by row, each grid entry `entry` of the 16-bit currency (an
+    /// `mft1`'s its top byte). Only the header when `bare`, so a reader that
+    /// gets past it finds no curve.
+    fn v2_table(
+        wide: bool,
+        inputs: u8,
+        outputs: u8,
+        matrix: [f64; 9],
+        entry: u16,
+        bare: bool,
+    ) -> Vec<u8> {
+        let mut out = if wide {
+            b"mft2".to_vec()
+        } else {
+            b"mft1".to_vec()
+        };
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&[inputs, outputs, 2, 0]);
+        for value in matrix {
+            out.extend_from_slice(&(((value * 65536.0).round() as i32) as u32).to_be_bytes());
+        }
+        if bare {
+            return out;
+        }
+        let curve = |out: &mut Vec<u8>| {
+            if wide {
+                out.extend_from_slice(&0u16.to_be_bytes());
+                out.extend_from_slice(&u16::MAX.to_be_bytes());
+            } else {
+                out.extend((0..=255u8).collect::<Vec<u8>>());
+            }
+        };
+        if wide {
+            out.extend_from_slice(&2u16.to_be_bytes());
+            out.extend_from_slice(&2u16.to_be_bytes());
+        }
+        for _ in 0..inputs {
+            curve(&mut out);
+        }
+        let nodes = 1usize << inputs;
+        for _ in 0..nodes * usize::from(outputs) {
+            if wide {
+                out.extend_from_slice(&entry.to_be_bytes());
+            } else {
+                out.push((entry >> 8) as u8);
+            }
+        }
+        for _ in 0..outputs {
+            curve(&mut out);
+        }
+        out
+    }
+
+    /// The identity, row by row.
+    const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+    /// **A `B2A*` table is read as the connection space in and the data
+    /// space out.** Its output count is held to [`MAX_DEVICE_CHANNELS`]
+    /// before any curve is read — a header of sixteen outputs and nothing
+    /// after it is too large, not short — then to the data space's channels;
+    /// its input count is the connection space's three; an `mAB ` at a
+    /// `B2A*` tag is refused as an `mBA ` is at an `A2B*` one. Over XYZ the
+    /// table keeps a matrix that is not the identity (10.8), and over Lab,
+    /// where the clause has it the identity, keeps none. Forward, a table of
+    /// four outputs is still no `A2B*` table.
+    #[test]
+    fn a_b2a_table_is_read_as_the_connection_space_in() {
+        let output = |channels| Direction::Output { channels };
+        // Every entry a whole number of s15.16 steps, so it reads back as
+        // itself.
+        let skewed = [0.875, 0.125, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        assert_eq!(
+            read_lut(&v2_table(true, 3, 16, IDENTITY, 0, true), false, output(4)),
+            Err(IccError::TooLarge),
+            "sixteen outputs, refused before a curve is looked for"
+        );
+        assert_eq!(
+            read_lut(&v2_table(true, 3, 4, IDENTITY, 0, false), false, output(3)),
+            Err(IccError::UnsupportedSpace),
+            "four outputs for a three-channel space"
+        );
+        assert_eq!(
+            read_lut(&v2_table(true, 4, 4, IDENTITY, 0, false), false, output(4)),
+            Err(IccError::MalformedTag),
+            "four inputs where the connection space is three"
+        );
+        assert_eq!(
+            read_lut(&mab_b_curves_only(), false, output(3)),
+            Err(IccError::NeedsLut),
+            "an mAB at a B2A tag"
+        );
+        assert_eq!(
+            read_lut(
+                &v2_table(true, 3, 4, IDENTITY, 0, false),
+                false,
+                Direction::Forward
+            ),
+            Err(IccError::UnsupportedSpace),
+            "an A2B table gives the connection space's three"
+        );
+
+        let xyz = read_lut(&v2_table(true, 3, 4, skewed, 0, false), false, output(4))
+            .expect("a CMYK B2A table over XYZ");
+        assert_eq!(xyz.input_matrix, Some(skewed));
+        assert_eq!(xyz.outputs(), 4);
+        let plain = read_lut(&v2_table(true, 3, 4, IDENTITY, 0, false), false, output(4))
+            .expect("the identity matrix");
+        assert_eq!(plain.input_matrix, None, "the identity is not kept");
+        let lab = read_lut(&v2_table(false, 3, 1, skewed, 0, false), true, output(1))
+            .expect("a grey B2A table over Lab");
+        assert_eq!(
+            lab.input_matrix, None,
+            "over Lab the matrix is the identity"
+        );
+        let forward = read_lut(
+            &v2_table(true, 3, 3, skewed, 0, false),
+            false,
+            Direction::Forward,
+        )
+        .expect("an A2B table");
+        assert_eq!(forward.input_matrix, None, "an A2B table's input is no PCS");
+    }
+
+    /// **Each table type reads Lab in its own scale** (6.3.4.2): an `mft2`
+    /// in version 2's legacy encoding, `L*` 100 at `FF00h` and `a*`, `b*` 0
+    /// at `8000h`; an `mft1` in its own 8-bit one, `L*` 100 at `FFh` and 0 at
+    /// `80h`, widened. Each decodes its full scale to `L*` 100 and `a*`, `b*`
+    /// 0, and each encodes them back to its own; under XYZ both take
+    /// `u1Fixed15`, 1.0 at `8000h`, through the matrix where one is kept.
+    #[test]
+    fn each_table_type_reads_lab_in_its_own_scale() {
+        let legacy = read_lut(
+            &v2_table(true, 3, 3, IDENTITY, 0, false),
+            true,
+            Direction::Forward,
+        )
+        .expect("an mft2");
+        let full = read_lut(
+            &v2_table(false, 3, 3, IDENTITY, 0, false),
+            true,
+            Direction::Forward,
+        )
+        .expect("an mft1");
+        assert_eq!(legacy.lab_scale, LabScale::Legacy);
+        assert_eq!(full.lab_scale, LabScale::Full);
+        let close = |got: [f64; 3], want: [f64; 3], what: &str| {
+            for (g, w) in got.iter().zip(want) {
+                assert!((g - w).abs() < 1e-9, "{what}: {got:?} against {want:?}");
+            }
+        };
+        let white = [100.0, 0.0, 0.0];
+        close(
+            legacy.decode_connection([65280.0 / 65535.0, 32768.0 / 65535.0, 32768.0 / 65535.0]),
+            white,
+            "mft2 decodes FF00h and 8000h",
+        );
+        close(
+            full.decode_connection([1.0, 32896.0 / 65535.0, 32896.0 / 65535.0]),
+            white,
+            "mft1 decodes FFh and 80h, widened",
+        );
+        close(
+            legacy.encode_connection(white),
+            [65280.0 / 65535.0, 32768.0 / 65535.0, 32768.0 / 65535.0],
+            "mft2 encodes white",
+        );
+        close(
+            full.encode_connection(white),
+            [1.0, 128.0 / 255.0, 128.0 / 255.0],
+            "mft1 encodes white",
+        );
+
+        let skewed = [0.5, 0.25, 0.0, 0.0, 1.0, 0.0, 0.25, 0.0, 0.5];
+        let xyz = read_lut(
+            &v2_table(true, 3, 3, skewed, 0, false),
+            false,
+            Direction::Output { channels: 3 },
+        )
+        .expect("an XYZ B2A table");
+        let scale = 32768.0 / 65535.0;
+        close(
+            xyz.encode_connection([0.8, 0.4, 0.2]),
+            [0.5 * 0.8 + 0.25 * 0.4, 0.4, 0.25 * 0.8 + 0.5 * 0.2].map(|v| v * scale),
+            "XYZ through the matrix, in u1Fixed15",
+        );
+        // NaN is zero; the matrix makes 2.25, 9 and -0.5 of the rest, and
+        // the currency holds its ends.
+        close(
+            xyz.encode_connection([f64::NAN, 9.0, -1.0]),
+            [1.0, 1.0, 0.0],
+            "NaN is zero, and the currency holds its ends",
+        );
+    }
+
+    /// **A profile's connection value is its source's**: a matrix/TRC
+    /// model's columns over its curves, a grey model's curve on the PCS
+    /// white under XYZ and as `L*` under Lab, and a table's decoded
+    /// evaluation; absolute colorimetric's scaled by the media white in XYZ,
+    /// relative colorimetric's not.
+    #[test]
+    fn a_profiles_connection_value_is_its_sources() {
+        let matrix = Profile::parse(&build(
+            b"RGB ",
+            b"XYZ ",
+            &[
+                (*b"rXYZ", xyz(0.5, 0.25, 0.0)),
+                (*b"gXYZ", xyz(0.25, 0.5, 0.25)),
+                (*b"bXYZ", xyz(0.125, 0.25, 0.5)),
+                (*b"rTRC", gamma(1.0)),
+                (*b"gTRC", gamma(2.0)),
+                (*b"bTRC", gamma(1.0)),
+                (*b"wtpt", xyz(0.8, 0.9, 0.7)),
+            ],
+        ))
+        .expect("a matrix profile");
+        let value = matrix
+            .connection_value(Intent::RelativeColorimetric, &[0.5, 0.5, 1.0])
+            .expect("a value");
+        let want = [
+            0.5 * 0.5 + 0.25 * 0.25 + 0.125,
+            0.25 * 0.5 + 0.5 * 0.25 + 0.25,
+            0.25 * 0.25 + 0.5,
+        ];
+        for (got, w) in value.iter().zip(want) {
+            assert!((got - w).abs() < 1e-4, "{value:?} against {want:?}");
+        }
+        let absolute = matrix
+            .connection_value(Intent::AbsoluteColorimetric, &[0.5, 0.5, 1.0])
+            .expect("a value");
+        let scale = matrix.media_scale();
+        for channel in 0..3 {
+            assert!((absolute[channel] - value[channel] * scale[channel]).abs() < 1e-12);
+        }
+
+        let grey_xyz = Profile::parse(&build(b"GRAY", b"XYZ ", &[(*b"kTRC", gamma(1.0))]))
+            .expect("a grey profile");
+        assert_eq!(
+            grey_xyz.connection_value(Intent::Perceptual, &[0.5]),
+            Some(PCS_WHITE.map(|white| white * 0.5))
+        );
+        let grey_lab = Profile::parse(&build(b"GRAY", b"Lab ", &[(*b"kTRC", gamma(1.0))]))
+            .expect("a grey Lab profile");
+        assert_eq!(
+            grey_lab.connection_value(Intent::Saturation, &[0.5]),
+            Some([50.0, 0.0, 0.0])
+        );
+
+        let table = Profile::parse(&lut_profile(
+            b"RGB ",
+            b"Lab ",
+            v2_table(false, 3, 3, IDENTITY, 0xFF00, false),
+        ))
+        .expect("an mft1 profile");
+        let value = table
+            .connection_value(Intent::RelativeColorimetric, &[0.2, 0.4, 0.6])
+            .expect("a value");
+        assert!(
+            (value[0] - 100.0).abs() < 1e-9,
+            "every node's L* is 100: {value:?}"
+        );
     }
 }
