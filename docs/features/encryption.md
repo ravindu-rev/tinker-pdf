@@ -315,7 +315,12 @@ padding check to the check byte by byte at every last byte. `handler.rs` pins
 constant-time comparison, Algorithm 2.B termination and one expansion of an
 `/AESV3` file key a file (`the_aesv3_key_is_expanded_once_per_file`), and
 `lib.rs` the `/P -2056` fixture that reads "printing denied, copying
-permitted" correctly.
+permitted" correctly. `bignum.rs` holds the constant-time path signing stands
+on (`docs/design/signing.md`) to the public path's answers and to repeated
+multiplication in `u128`, and its operation counts — Montgomery products,
+limb products, window-table reads, masked selections and loop iterations —
+equal over exponents of every shape and bases of every size under one
+modulus (`the_private_path_counts_alike_over_every_exponent`).
 
 `crates/tinker-pdf-cos/tests/encryption.rs` decrypts real encrypted
 fixtures: user and owner passwords told apart, a wrong password refused,

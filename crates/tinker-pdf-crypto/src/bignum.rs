@@ -2,7 +2,8 @@
 //!
 //! Signature verification needs three things this crate did not have: numbers
 //! wider than `u128`, multiplication modulo a 4096-bit modulus, and
-//! exponentiation built from it. That is all this module is. There is no
+//! exponentiation built from it. Signing needs the same three on secret
+//! operands, without leaking them. That is all this module is. There is no
 //! signed type, no general division, no allocation and no parsing — the
 //! callers ([`crate::rsa`], [`crate::ecdsa`]) hand it limbs and get limbs
 //! back.
@@ -27,18 +28,39 @@
 //! reciprocal and a correction step that is easy to write subtly wrong. An
 //! even modulus is refused by [`Modulus::new`] rather than handled.
 //!
-//! # This is not constant-time, and that is a scope decision
+//! # Two paths: the public one, and the constant-time one
 //!
 //! Verification touches no secret. The modulus, the exponent, the signature
 //! and the digest are all published in the document being checked, so the
 //! usual reason for a constant-time modular exponentiation — a private
-//! exponent leaking through timing — does not exist here. Accordingly
-//! [`Modulus::pow`] branches on exponent bits and skips leading zeros. The
-//! crate performs no private-key operation, and if it ever does, this module
-//! is not ready for it and this paragraph is the reason. RSAES-PKCS1-v1_5
-//! encryption is the one caller with a secret *operand* — the content key it
-//! seals, under a public exponent — and the crate's own note says what that
-//! costs.
+//! exponent leaking through timing — does not exist there, and
+//! [`Modulus::pow`] branches on exponent bits and skips leading zeros. That
+//! is the **public path**, and it touches no secret. RSAES-PKCS1-v1_5
+//! encryption is the one caller with a secret *operand* on it — the content
+//! key it seals, under a public exponent — and the crate's own note says what
+//! that costs.
+//!
+//! Signing does have secrets — a private exponent, the primes, a blinding
+//! factor (`docs/design/signing.md`, *Secret operands*) — and those take the
+//! **constant-time path** ([`Modulus::pow_secret`]), on which four rules hold:
+//!
+//! 1. No branch on a secret: a choice between two values is a mask, passed
+//!    through `core::hint::black_box` so the optimiser has no bit to branch on.
+//! 2. No memory access indexed by a secret: a table entry is read by reading
+//!    every entry and keeping the wanted one by mask.
+//! 3. Fixed lengths: every loop runs over the modulus's own limb count, and an
+//!    exponentiation over the modulus's bit length, never the secret's.
+//! 4. Branch-free reduction: a Montgomery product's final subtraction is
+//!    computed every time, with its borrow, and kept or not by mask.
+//!
+//! The path's working memory — the window table, the accumulator and the
+//! Montgomery scratch — is wiped before an operation returns. Under
+//! `cfg(test)` the path counts what it does, and
+//! `the_private_path_counts_alike_over_every_exponent` holds those counts equal
+//! over exponents of every shape: a count that moved with the exponent would
+//! be a branch or a lookup that depends on it. The counts show the shape of
+//! the source; they cannot show what a target's machine code does, which is
+//! the independent review the roadmap owes (H-67).
 //!
 //! # Never panics
 //!
@@ -500,6 +522,363 @@ impl<const N: usize> Modulus<N> {
     }
 }
 
+// ---- The constant-time path ------------------------------------------------
+//
+// Everything below this line is for operands that are secret
+// (`docs/design/signing.md`, *The constant-time path*). The public path above
+// stays as it is: it is what verification runs, and it touches no secret.
+
+/// The constant-time path's working memory: the sixteen-entry window table,
+/// the accumulator, the entry a window selected and CIOS's scratch.
+///
+/// It lives in the frame of the operation that made it and is never moved,
+/// and its `Drop` wipes every limb, so nothing a secret exponentiation
+/// computed is left behind in it when the operation returns — including when
+/// it returns early.
+struct Workspace<const N: usize> {
+    table: [Uint<N>; 16],
+    accumulator: Uint<N>,
+    entry: Uint<N>,
+    scratch: [u64; MAX_LIMBS + 2],
+}
+
+impl<const N: usize> Workspace<N> {
+    fn new() -> Self {
+        Self {
+            table: [Uint::zero(); 16],
+            accumulator: Uint::zero(),
+            entry: Uint::zero(),
+            scratch: [0; MAX_LIMBS + 2],
+        }
+    }
+}
+
+impl<const N: usize> Drop for Workspace<N> {
+    fn drop(&mut self) {
+        for value in &mut self.table {
+            wipe(&mut value.limbs);
+        }
+        wipe(&mut self.accumulator.limbs);
+        wipe(&mut self.entry.limbs);
+        wipe(&mut self.scratch);
+    }
+}
+
+/// Writes zero over `limbs` so that the stores are not elided as writes to
+/// memory about to be freed or reused.
+///
+/// The crates forbid `unsafe`, so there is no volatile write: the zeros go
+/// through `core::hint::black_box`, which the optimiser must assume reads
+/// them, and a sequentially consistent compiler fence keeps them ahead of
+/// whatever follows. What a target's code generation keeps anyway is the
+/// review's to say (`docs/design/signing.md`, *Risks*).
+pub(crate) fn wipe(limbs: &mut [u64]) {
+    for limb in limbs.iter_mut() {
+        *limb = 0;
+    }
+    let _ = core::hint::black_box(&mut *limbs);
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+}
+
+/// All ones when `bit` is 1 and all zeros when it is 0: the one way the
+/// constant-time path chooses (rule 1). The mask goes through `black_box`, so
+/// the optimiser cannot see the bit it came from and turn the choice back
+/// into a branch.
+#[inline]
+fn mask(bit: u64) -> u64 {
+    core::hint::black_box(0u64.wrapping_sub(bit & 1))
+}
+
+/// One when `value` is nonzero and zero when it is zero, without comparing:
+/// the top bit of `value | -value` is set exactly when `value` is not zero.
+#[inline]
+fn nonzero(value: u64) -> u64 {
+    (value | value.wrapping_neg()) >> 63
+}
+
+/// All ones when `a == b`, all zeros otherwise.
+#[inline]
+fn equal_mask(a: u64, b: u64) -> u64 {
+    mask(nonzero(a ^ b) ^ 1)
+}
+
+/// `a` where `choose` is all ones, `b` where it is all zeros.
+#[inline]
+fn select(choose: u64, a: u64, b: u64) -> u64 {
+    (a & choose) | (b & !choose)
+}
+
+/// The borrow out of `a - b - borrow`, as 0 or 1, and the difference's low
+/// limb. The `u128` difference's top half is all zeros or all ones, so its
+/// low bit is the borrow: no comparison is made.
+#[inline]
+fn subtract_limb(a: u64, b: u64, borrow: u64) -> (u64, u64) {
+    let difference = u128::from(a)
+        .wrapping_sub(u128::from(b))
+        .wrapping_sub(u128::from(borrow));
+    (difference as u64, ((difference >> 64) as u64) & 1)
+}
+
+/// Adds `$n` to the constant-time path's count `$field`. Outside the crate's
+/// own tests it is nothing at all, not even the evaluation of `$n`.
+macro_rules! tally {
+    ($field:ident, $n:expr) => {
+        #[cfg(test)]
+        counts::add(|c| c.$field += $n);
+    };
+}
+
+/// What the constant-time path did, counted under `cfg(test)` only.
+///
+/// Every count is of work the source performs — loop iterations, limb
+/// products, table entries read — rather than a formula for it, so an early
+/// exit or a skipped multiplication that depended on a secret would move one.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Counts {
+    /// Montgomery products, squarings among them.
+    pub(crate) products: u64,
+    /// 64-by-64-bit limb products inside those.
+    pub(crate) limb_products: u64,
+    /// Window-table entries read.
+    pub(crate) table_reads: u64,
+    /// Values kept by mask rather than chosen by a branch: a limb of a
+    /// product's final subtraction, a table entry's contribution.
+    pub(crate) selects: u64,
+    /// Iterations of the exponentiation's own loops: each window, each
+    /// squaring, each step of a table scan and of the table's construction.
+    pub(crate) branches: u64,
+}
+
+/// The counts themselves, per thread, so tests running side by side do not
+/// add into each other's.
+#[cfg(test)]
+pub(crate) mod counts {
+    use super::Counts;
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNTS: Cell<Counts> = Cell::new(Counts::default());
+    }
+
+    /// Applies `update` to this thread's counts.
+    pub(crate) fn add(update: impl FnOnce(&mut Counts)) {
+        COUNTS.with(|cell| {
+            let mut counts = cell.get();
+            update(&mut counts);
+            cell.set(counts);
+        });
+    }
+
+    /// This thread's counts since the last call, which start again at zero.
+    pub(crate) fn take() -> Counts {
+        COUNTS.with(|cell| cell.replace(Counts::default()))
+    }
+}
+
+impl<const N: usize> Modulus<N> {
+    /// CIOS on the constant-time path: `t = a · b · R^-1`, below `2m`, in
+    /// `t[..=used]`.
+    ///
+    /// The loops are [`Modulus::mul`]'s, whose bounds are the modulus's limb
+    /// count and nothing else; the difference is that the scratch belongs to
+    /// the caller, who wipes it, and that the final subtraction is left to
+    /// [`Modulus::finish_secret`]. `a` may be any value below `R`, `b` any
+    /// value below `m`: `(a·b + q·m) / R` is then below `2m`.
+    fn core_secret(&self, a: &Uint<N>, b: &Uint<N>, t: &mut [u64; MAX_LIMBS + 2]) {
+        let s = self.used;
+        for slot in t.iter_mut() {
+            *slot = 0;
+        }
+        #[cfg(test)]
+        let mut limb_products = 0u64;
+
+        for i in 0..s {
+            let bi = u128::from(b.limb(i));
+            let mut carry = 0u64;
+            for j in 0..s {
+                let product =
+                    u128::from(read(t, j)) + u128::from(a.limb(j)) * bi + u128::from(carry);
+                write(t, j, product as u64);
+                carry = (product >> 64) as u64;
+                #[cfg(test)]
+                {
+                    limb_products += 1;
+                }
+            }
+            let sum = u128::from(read(t, s)) + u128::from(carry);
+            write(t, s, sum as u64);
+            write(t, s + 1, (sum >> 64) as u64);
+
+            let factor = read(t, 0).wrapping_mul(self.n0inv);
+            let first = u128::from(read(t, 0)) + u128::from(factor) * u128::from(self.m.limb(0));
+            #[cfg(test)]
+            {
+                limb_products += 1;
+            }
+            let mut carry = (first >> 64) as u64;
+            for j in 1..s {
+                let product = u128::from(read(t, j))
+                    + u128::from(factor) * u128::from(self.m.limb(j))
+                    + u128::from(carry);
+                write(t, j - 1, product as u64);
+                carry = (product >> 64) as u64;
+                #[cfg(test)]
+                {
+                    limb_products += 1;
+                }
+            }
+            let sum = u128::from(read(t, s)) + u128::from(carry);
+            write(t, s.saturating_sub(1), sum as u64);
+            let top = read(t, s + 1).wrapping_add((sum >> 64) as u64);
+            write(t, s, top);
+        }
+        tally!(limb_products, limb_products);
+    }
+
+    /// The product's last step, branch-free (rule 4): `t - m` is computed
+    /// every time, and `t` or `t - m` is kept by mask.
+    ///
+    /// CIOS leaves `t` below `2m` over `used + 1` limbs. It needs reducing
+    /// when its carry limb is set, or when the low limbs are at least `m` —
+    /// which is when `t - m` does not borrow. The borrow is only known once
+    /// the whole difference is, so the difference is taken twice: once for
+    /// the borrow, and once to keep its limbs or not. Limbs above the modulus
+    /// are cleared, which is [`Modulus::narrow`]'s job on the public path.
+    fn finish_secret(&self, t: &[u64; MAX_LIMBS + 2], out: &mut Uint<N>) {
+        let s = self.used;
+        let mut borrow = 0u64;
+        for j in 0..s {
+            borrow = subtract_limb(read(t, j), self.m.limb(j), borrow).1;
+        }
+        let take = mask(nonzero(read(t, s)) | (borrow ^ 1));
+
+        let mut borrow = 0u64;
+        for j in 0..s {
+            let limb = read(t, j);
+            let (difference, next) = subtract_limb(limb, self.m.limb(j), borrow);
+            borrow = next;
+            out.set_limb(j, select(take, difference, limb));
+        }
+        for j in s..N {
+            out.set_limb(j, 0);
+        }
+        tally!(selects, s as u64);
+        tally!(products, 1);
+    }
+
+    /// `out = a · b · R^-1 mod m`, on the constant-time path.
+    fn product_secret(
+        &self,
+        a: &Uint<N>,
+        b: &Uint<N>,
+        out: &mut Uint<N>,
+        t: &mut [u64; MAX_LIMBS + 2],
+    ) {
+        self.core_secret(a, b, t);
+        self.finish_secret(t, out);
+    }
+
+    /// `x = x · b · R^-1 mod m`, on the constant-time path. CIOS has read
+    /// every limb of `x` before the first is written back.
+    fn product_assign_secret(&self, x: &mut Uint<N>, b: &Uint<N>, t: &mut [u64; MAX_LIMBS + 2]) {
+        self.core_secret(x, b, t);
+        self.finish_secret(t, x);
+    }
+
+    /// `x = x² · R^-1 mod m`, on the constant-time path.
+    fn square_assign_secret(&self, x: &mut Uint<N>, t: &mut [u64; MAX_LIMBS + 2]) {
+        self.core_secret(x, x, t);
+        self.finish_secret(t, x);
+    }
+
+    /// The sixteen powers `base^0` to `base^15` in Montgomery form: entry 0
+    /// is `R mod m`, Montgomery's one, and entry `k` is entry `k - 1` times
+    /// `base · R`, which `work.entry` holds while the table is built.
+    fn build_table(&self, base: &Uint<N>, work: &mut Workspace<N>) {
+        let Workspace {
+            table,
+            entry,
+            scratch,
+            ..
+        } = work;
+        self.product_secret(base, &self.r2, entry, scratch);
+        if let Some(first) = table.first_mut() {
+            self.product_secret(&Uint::from_u64(1), &self.r2, first, scratch);
+        }
+        for k in 1..table.len() {
+            let (done, rest) = table.split_at_mut(k);
+            if let (Some(previous), Some(next)) = (done.last(), rest.first_mut()) {
+                self.product_secret(previous, entry, next, scratch);
+            }
+            tally!(branches, 1);
+        }
+    }
+
+    /// `base^exponent mod m`, with the base, the exponent or both secret: the
+    /// constant-time path's exponentiation, by fixed windows.
+    ///
+    /// The exponent is consumed four bits at a time from the top, over
+    /// `⌈bits(m) / 4⌉` windows whatever its own length, so its leading zeros
+    /// take exactly as long as leading ones would (rule 3). Each window
+    /// squares four times and multiplies by the table entry the window names,
+    /// read by scanning the whole table (rule 2) — the multiplication made
+    /// even for a window of zero, by `base^0`. Every product's final
+    /// subtraction is the branch-free one (rule 4).
+    ///
+    /// `base` must fit in the modulus's limbs — below `2^(64·used)`, which
+    /// Montgomery's conversion reduces whatever it is below that — and the
+    /// exponent's bits above the last window are not read: every exponent the
+    /// callers use is below the modulus it works under. The result is written
+    /// into `out`, so that a caller holding it on the heap never has it
+    /// returned by value; the workspace is wiped before this returns.
+    pub fn pow_secret(&self, base: &Uint<N>, exponent: &Uint<N>, out: &mut Uint<N>) {
+        let mut work = Workspace::<N>::new();
+        self.build_table(base, &mut work);
+
+        let Workspace {
+            table,
+            accumulator,
+            entry,
+            scratch,
+        } = &mut work;
+        if let Some(one) = table.first() {
+            accumulator.limbs = one.limbs;
+        }
+        let windows = self.bits.div_ceil(4);
+        for window in (0..windows).rev() {
+            for _ in 0..4 {
+                self.square_assign_secret(accumulator, scratch);
+                tally!(branches, 1);
+            }
+            let bit = window * 4;
+            let nibble = (exponent.limb(bit / 64) >> (bit % 64)) & 0xf;
+            select_entry(table, nibble, self.used, entry);
+            self.product_assign_secret(accumulator, entry, scratch);
+            tally!(branches, 1);
+        }
+        self.product_secret(accumulator, &Uint::from_u64(1), out, scratch);
+    }
+}
+
+/// Copies `table[index]` into `out` by reading every entry and keeping the
+/// wanted one by mask (rule 2): the memory a selection touches is the whole
+/// table whichever entry the secret names.
+fn select_entry<const N: usize>(table: &[Uint<N>; 16], index: u64, used: usize, out: &mut Uint<N>) {
+    for j in 0..N {
+        out.set_limb(j, 0);
+    }
+    for (position, entry) in (0u64..).zip(table.iter()) {
+        let keep = equal_mask(position, index);
+        for j in 0..used {
+            out.set_limb(j, out.limb(j) | (entry.limb(j) & keep));
+        }
+        tally!(table_reads, 1);
+        tally!(selects, 1);
+        tally!(branches, 1);
+    }
+}
+
 /// `(a + b) mod m` for operands already below `m`.
 ///
 /// A carry out of the top limb is not an error: `a + b < 2m`, so the true sum
@@ -863,5 +1242,264 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- The constant-time path ----------------------------------------
+
+    /// SplitMix64: a fixed stream of test values, so that a failure names a
+    /// seed and a draw anybody can repeat.
+    struct Draws(u64);
+
+    impl Draws {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        }
+    }
+
+    /// Every bit below `bits` set to `limb`'s pattern, the rest clear.
+    fn pattern<const N: usize>(bits: usize, limb: u64) -> Uint<N> {
+        let mut value = Uint::<N>::zero();
+        for i in 0..bits.div_ceil(64) {
+            value.set_limb(i, limb);
+        }
+        clear_above(&mut value, bits);
+        value
+    }
+
+    fn clear_above<const N: usize>(value: &mut Uint<N>, bits: usize) {
+        for i in 0..N {
+            let low = i * 64;
+            if low >= bits {
+                value.set_limb(i, 0);
+            } else if bits - low < 64 {
+                value.set_limb(i, value.limb(i) & ((1u64 << (bits - low)) - 1));
+            }
+        }
+    }
+
+    /// A draw of at most `bits` bits.
+    fn drawn<const N: usize>(draws: &mut Draws, bits: usize) -> Uint<N> {
+        let mut value = Uint::<N>::zero();
+        for i in 0..bits.div_ceil(64) {
+            value.set_limb(i, draws.next());
+        }
+        clear_above(&mut value, bits);
+        value
+    }
+
+    /// An odd modulus of exactly `bits` bits.
+    fn odd_modulus<const N: usize>(draws: &mut Draws, bits: usize) -> Uint<N> {
+        let mut m = drawn::<N>(draws, bits);
+        let top = bits - 1;
+        m.set_limb(top / 64, m.limb(top / 64) | (1u64 << (top % 64)));
+        m.set_limb(0, m.limb(0) | 1);
+        m
+    }
+
+    fn secret_power<const N: usize>(
+        modulus: &Modulus<N>,
+        base: &Uint<N>,
+        exponent: &Uint<N>,
+    ) -> Uint<N> {
+        let mut out = Uint::<N>::zero();
+        modulus.pow_secret(base, exponent, &mut out);
+        out
+    }
+
+    /// SG-01.2's exit: the constant-time exponentiation's operation counts —
+    /// Montgomery products, limb products, table reads, masked selections and
+    /// loop iterations — are the same for every exponent and every base under
+    /// one modulus, and the answer is the public path's.
+    ///
+    /// The exponents are every shape a leak would show on: zero, one, every
+    /// bit set, the two alternating patterns, the top bit alone, `m - 2` (the
+    /// Fermat exponent the inverse takes) and random draws; the bases zero,
+    /// one, two, `m - 1` and random. The moduli are a full limb, a partial top
+    /// limb, four limbs with the top one short a bit, and 521 bits inside a
+    /// nine-limb type — the shape in which every limb above the modulus has
+    /// to come back clear. Each count is also held to what the source should
+    /// do, so a count that agreed with itself by doing nothing would fail too.
+    #[test]
+    fn the_private_path_counts_alike_over_every_exponent() {
+        let mut draws = Draws(0x5347_2d30_312e_3220);
+        for bits in [64usize, 100, 255, 521] {
+            let m = odd_modulus::<9>(&mut draws, bits);
+            let modulus = Modulus::new(m).expect("odd and wide");
+            let (m_minus_two, _) = m.sub_borrow(&Uint::from_u64(2));
+            let (m_minus_one, _) = m.sub_borrow(&Uint::from_u64(1));
+            let mut top_bit = Uint::<9>::zero();
+            top_bit.set_limb((bits - 1) / 64, 1u64 << ((bits - 1) % 64));
+
+            let mut exponents = vec![
+                Uint::<9>::zero(),
+                Uint::from_u64(1),
+                pattern(bits, u64::MAX),
+                pattern(bits, 0x5555_5555_5555_5555),
+                pattern(bits, 0xaaaa_aaaa_aaaa_aaaa),
+                top_bit,
+                m_minus_two,
+            ];
+            let mut bases = vec![
+                Uint::<9>::zero(),
+                Uint::from_u64(1),
+                Uint::from_u64(2),
+                m_minus_one,
+            ];
+            for _ in 0..4 {
+                exponents.push(drawn(&mut draws, bits));
+                bases.push(drawn(&mut draws, bits - 1));
+            }
+
+            let mut first: Option<Counts> = None;
+            for base in &bases {
+                for exponent in &exponents {
+                    let _ = counts::take();
+                    let got = secret_power(&modulus, base, exponent);
+                    let counted = counts::take();
+                    assert_eq!(
+                        got,
+                        modulus.pow(base, exponent),
+                        "{bits}-bit modulus, base {base:?}, exponent {exponent:?}"
+                    );
+                    match first {
+                        None => first = Some(counted),
+                        Some(expected) => assert_eq!(
+                            counted, expected,
+                            "{bits}-bit modulus: the counts moved with base {base:?}, exponent {exponent:?}"
+                        ),
+                    }
+                }
+            }
+
+            let counted = first.expect("at least one run");
+            let windows = bits.div_ceil(4) as u64;
+            let s = bits.div_ceil(64) as u64;
+            assert_eq!(
+                counted.products,
+                5 * windows + 18,
+                "two conversions, fifteen table steps, five products a window and one back"
+            );
+            assert_eq!(counted.limb_products, counted.products * 2 * s * s);
+            assert_eq!(
+                counted.table_reads,
+                16 * windows,
+                "the whole table, every window"
+            );
+            assert_eq!(counted.selects, 16 * windows + counted.products * s);
+            assert_eq!(counted.branches, 21 * windows + 15);
+        }
+    }
+
+    /// The constant-time path against repeated multiplication in `u128`, which
+    /// shares no code with either path.
+    #[test]
+    fn the_private_exponentiation_agrees_with_repeated_multiplication() {
+        let m = 0xffff_ffff_ffff_fffbu128;
+        let modulus = Modulus::new(from_u128(m)).expect("odd");
+        for base in [0u128, 1, 2, 3, 0x1234_5678_9abc_def0, m - 1] {
+            let mut expected = 1u128;
+            for exponent in 0u64..40 {
+                let got = secret_power(&modulus, &from_u128(base), &Uint::<2>::from_u64(exponent));
+                assert_eq!(as_u128(&got), expected, "{base:x}^{exponent}");
+                expected = expected * base % m;
+            }
+        }
+    }
+
+    /// The branch-free product against the public one, which the tests above
+    /// hold to `u128`, on both sides of the final subtraction — and with a
+    /// one-limb modulus in a four-limb type, where the public path's borrow
+    /// once leaked into the limbs above the modulus.
+    #[test]
+    fn a_constant_time_product_agrees_with_the_public_one() {
+        let moduli: [u128; 4] = [
+            0xffff_ffff_ffff_fffb,
+            0x1_0000_0000_0000_0001,
+            0x0123_4567_89ab_cdef_fedc_ba98_7654_3211,
+            0x7fff_ffff_ffff_ffff_ffff_ffff_ffff_ffff,
+        ];
+        let mut scratch = [0u64; MAX_LIMBS + 2];
+        for m in moduli {
+            let modulus = Modulus::new(from_u128(m)).expect("odd and above 2");
+            for a in SAMPLES {
+                for b in SAMPLES {
+                    let (a, b) = (from_u128(a % m), from_u128(b % m));
+                    let mut out = Uint::<2>::zero();
+                    modulus.product_secret(&a, &b, &mut out, &mut scratch);
+                    assert_eq!(out, modulus.mul(&a, &b), "{a:?} * {b:?} mod {m:x}");
+                }
+            }
+        }
+
+        let m = 0xffff_ffff_ffff_fffbu128;
+        let mut wide_m = Uint::<4>::zero();
+        wide_m.set_limb(0, m as u64);
+        let wide = Modulus::new(wide_m).expect("odd");
+        for offset in 0..32u64 {
+            for value in [offset, (m as u64) - 1 - offset, (m as u64) / 2 + offset] {
+                let x = Uint::<4>::from_u64(value);
+                let mut out = Uint::<4>::from_u64(u64::MAX);
+                out.set_limb(3, u64::MAX);
+                wide.product_secret(&x, &x, &mut out, &mut scratch);
+                assert_eq!(out, wide.mul(&x, &x), "{value:x} squared");
+                assert_eq!((out.limb(1), out.limb(2), out.limb(3)), (0, 0, 0));
+            }
+        }
+    }
+
+    /// A selection reads all sixteen entries whichever one it keeps, and
+    /// keeps exactly that one. An index past the table matches nothing,
+    /// which no window — four bits — can produce.
+    #[test]
+    fn a_window_is_read_by_scanning_the_whole_table() {
+        let mut table = [Uint::<3>::zero(); 16];
+        for (k, entry) in (0u64..).zip(table.iter_mut()) {
+            for i in 0..3 {
+                entry.set_limb(i, (k + 1) * 0x0101_0101_0101_0101 + i as u64);
+            }
+        }
+        for index in 0..16u64 {
+            let mut out = Uint::<3>::from_u64(u64::MAX);
+            let _ = counts::take();
+            select_entry(&table, index, 3, &mut out);
+            let counted = counts::take();
+            assert_eq!(Some(&out), table.get(index as usize), "entry {index}");
+            assert_eq!(counted.table_reads, 16, "entry {index}");
+        }
+        let mut out = Uint::<3>::from_u64(7);
+        select_entry(&table, 16, 3, &mut out);
+        assert!(out.is_zero());
+    }
+
+    #[test]
+    fn the_masks_choose_without_comparing() {
+        assert_eq!(mask(0), 0);
+        assert_eq!(mask(1), u64::MAX);
+        assert_eq!(mask(2), 0, "only the low bit is a choice");
+        assert_eq!(nonzero(0), 0);
+        for value in [1u64, 2, 0x8000_0000_0000_0000, u64::MAX] {
+            assert_eq!(nonzero(value), 1, "{value:x}");
+        }
+        assert_eq!(equal_mask(5, 5), u64::MAX);
+        assert_eq!(equal_mask(5, 6), 0);
+        assert_eq!(equal_mask(0, u64::MAX), 0);
+        assert_eq!(select(u64::MAX, 3, 4), 3);
+        assert_eq!(select(0, 3, 4), 4);
+        assert_eq!(subtract_limb(5, 3, 1), (1, 0));
+        assert_eq!(subtract_limb(0, 1, 0), (u64::MAX, 1));
+        assert_eq!(subtract_limb(0, 0, 1), (u64::MAX, 1));
+        assert_eq!(subtract_limb(u64::MAX, u64::MAX, 1), (u64::MAX, 1));
+        assert_eq!(subtract_limb(u64::MAX, 0, 1), (u64::MAX - 1, 0));
+    }
+
+    #[test]
+    fn a_wipe_leaves_zeros() {
+        let mut limbs = [u64::MAX, 1, 0x0123_4567_89ab_cdef];
+        wipe(&mut limbs);
+        assert_eq!(limbs, [0, 0, 0]);
     }
 }

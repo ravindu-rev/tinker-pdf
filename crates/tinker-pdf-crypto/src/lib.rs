@@ -28,8 +28,8 @@
 //! [`rsa`] and [`ecdsa`] verify, and [`rsa`] also encrypts to a public key
 //! (RSAES-PKCS1-v1_5, for a public-key encrypted save); neither does anything
 //! with a private key. There is no signing, no decryption, no key generation
-//! and no key-file parsing, which is what lets [`bignum`] skip the
-//! constant-time obligations a private-key implementation could not skip:
+//! and no key-file parsing, which is what lets [`bignum`]'s public path skip
+//! the constant-time obligations a private-key implementation could not skip:
 //! every key those two modules touch is published, in the document being
 //! checked or in a recipient's certificate. **Encryption carries one secret
 //! through that arithmetic**, the content key it seals: the exponent is
@@ -37,8 +37,10 @@
 //! so the time a seal takes is not independent of the key it seals. Each
 //! seal is one operation on a fresh key under fresh padding, which is not
 //! the repeated-operation shape timing attacks on RSA need; a host for whom
-//! that is not enough should seal elsewhere. A signing feature would not
-//! extend this code, it would replace it.
+//! that is not enough should seal elsewhere. Signing does not extend the
+//! public path: [`bignum`] has a second, constant-time path for secret
+//! operands ([`bignum::Modulus::pow_secret`]), which is what signing stands
+//! on (`docs/design/signing.md`).
 
 #![forbid(unsafe_code)]
 

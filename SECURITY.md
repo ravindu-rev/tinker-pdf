@@ -52,10 +52,13 @@ scrutiny, so here is the honest framing:
 - **No private-key operation exists.** The signature code verifies; a
   signature written on save is the CMS blob a caller-supplied `Signer`
   returns over the digest. There is no key generation and no PKCS#8 or
-  PKCS#12 parsing. That is what lets `bignum` skip constant-time discipline —
-  every value it handles is published in the document being checked. Signing
-  with a private key in the engine is [ROADMAP](docs/ROADMAP.md) rows SG-01
-  to SG-09.
+  PKCS#12 parsing. That is what lets `bignum`'s public path skip constant-time
+  discipline — every value it handles is published in the document being
+  checked. Its second path, for secret operands, is constant-time: a
+  fixed-window exponentiation that reads the whole window table every window
+  and reduces without a branch, its operation counts held equal over every
+  exponent shape by a test. Signing with a private key in the engine is
+  [ROADMAP](docs/ROADMAP.md) rows SG-01 to SG-09, and stands on that path.
 - **Correctness is checked against published vectors** — RFC 1321 for MD5,
   RFC 6229 for RC4, worked examples for SHA-256, SHA-384 and SHA-512, NIST
   CAVP's SHAVS files for SHA-224, SHA-512/224 and SHA-512/256, and
