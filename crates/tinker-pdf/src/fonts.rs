@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use tinker_pdf_cos::{CosDocument, Dict, Font, Name, ObjRef, Object, Resolve};
+use tinker_pdf_cos::{CharacterCollection, CosDocument, Dict, Font, Name, ObjRef, Object, Resolve};
 
 /// What is known about a font that needs substituting.
 ///
@@ -44,6 +44,14 @@ pub struct FontRequest {
     pub bold: bool,
     /// Whether it is italic or oblique, from `/Flags` bit 7 or the name.
     pub italic: bool,
+    /// The character collection a composite font's descendant names (9.7.3,
+    /// `/CIDSystemInfo`): `Adobe`, `Japan1` and its supplement, say. A
+    /// composite font's codes select CIDs in this collection, so it is what a
+    /// provider chooses a face by for one (`docs/design/fallback-faces.md`).
+    /// Read leniently, as [`tinker_pdf_cos::Font::character_collection`]
+    /// reads it; `None` for a simple font, and for a descendant that names
+    /// none readably.
+    pub character_collection: Option<CharacterCollection>,
 }
 
 /// 9.8.2 table 123.
@@ -57,12 +65,15 @@ impl FontRequest {
     /// Reads what a font dictionary says about itself.
     #[must_use]
     pub fn read(doc: &CosDocument, font: &Dict) -> FontRequest {
-        // A composite font keeps its descriptor on the descendant.
+        // A composite font keeps its descriptor on the descendant, and its
+        // character collection.
         let mut font = font.clone();
+        let mut character_collection = None;
         let descendants = doc.resolve_key(&font, Name::DESCENDANT_FONTS);
         if let Some(first) = descendants.as_array().and_then(<[Object]>::first) {
             if let Some(dict) = doc.resolve(first).as_dict() {
                 font = dict.clone();
+                character_collection = tinker_pdf_cos::font::character_collection(doc, &font);
             }
         }
 
@@ -108,6 +119,7 @@ impl FontRequest {
             bold: flags & FORCE_BOLD != 0 || named_bold || weight.is_some_and(|v| v >= 120.0),
             italic: flags & ITALIC != 0 || named_italic,
             base_font,
+            character_collection,
         }
     }
 }

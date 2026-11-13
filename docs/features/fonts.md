@@ -151,7 +151,17 @@ request a `FontProvider` answers with a TrueType or bare CFF program — or
 declines. `SimpleFontProvider` covers the common case: up to four faces
 chosen by weight and slope, falling back to whatever is set, and declining
 symbolic fonts unless `substituting_symbolic()` was called, because a text
-face standing in for a symbol font draws confidently wrong glyphs.
+face standing in for a symbol font draws confidently wrong glyphs. A
+composite font's request also carries its **character collection**,
+`FontRequest::character_collection` — the descendant's `/CIDSystemInfo`
+(9.7.3) as `tinker-pdf-cos`'s `Font::character_collection` reads it,
+leniently as rendering reads a font rather than as PDF/A judges one: a
+registry and an ordering each a string or a name, and a supplement where it
+is an integer from zero up — so a provider can choose a face by the
+characters the font's CIDs stand for (`docs/design/fallback-faces.md`). A
+simple font's request, and one whose descendant names no collection
+readably, carries `None`; `SimpleFontProvider` ignores the field.
+`CharacterCollection` is re-exported from the facade.
 
 **Writing** (9.9). `DocumentBuilder::add_embedded_font` and `add_cid_font`
 embed a TrueType, an `OpenType/CFF` face or a bare CFF program, with widths
@@ -1062,7 +1072,11 @@ corpora already vendored here. So every name stays on the list.
 - `crates/tinker-pdf/tests/type3_fonts.rs` — glyph procedures run as content
   under `/FontMatrix`; `vertical_metrics.rs` — `/W2` both forms, the `/DW2`
   default, and the position vector; `substitute_fonts.rs` — the
-  `FontProvider` seam, including declining symbolic fonts.
+  `FontProvider` seam, including declining symbolic fonts, and a composite
+  font's request carrying its character collection
+  (`the_provider_is_told_the_character_collection`), which
+  `crates/tinker-pdf-cos/tests/fonts.rs`'s
+  `a_composite_fonts_character_collection_is_read` reads leniently.
 - Fuzzing: the `cff`, `cff_subset`, `cmap`, `sfnt`, `truetype`, `type1` and
   `woff` targets exercise this feature (ruling 1).
 - Determinism: the `text` render fingerprint in

@@ -135,7 +135,7 @@ pub use fill::{text_appearance, TextLayout};
 pub use flight::{fill_open, Filled, Flights, OpenFill};
 // The pool's one knob, so a caller of this crate alone can ask the writer for
 // threads (`WriteOptions::parallelism`).
-pub use font::{DecodedCode, EmbeddedProgram, Font, FontKind, ProgramKey};
+pub use font::{CharacterCollection, DecodedCode, EmbeddedProgram, Font, FontKind, ProgramKey};
 pub use form::{
     acro_form, calculation_order, catalog_scripts, catalog_scripts_within, document_scripts,
     document_scripts_within, field_value, fields, fields_within, script_summary, DocumentScript,

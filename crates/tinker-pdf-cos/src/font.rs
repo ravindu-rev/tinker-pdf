@@ -106,6 +106,24 @@ pub struct DecodedCode {
     pub width_is_exact: bool,
 }
 
+/// The character collection a CIDFont numbers its glyphs in (9.7.3): who
+/// registered it, which ordering, and which supplement — Table 114's
+/// `/CIDSystemInfo`, as `Adobe`, `Japan1` and `7`.
+///
+/// What a substituted face is chosen and addressed by
+/// (`docs/design/fallback-faces.md`): a CID is a number in this collection,
+/// and the registry's CMaps say which character it stands for.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct CharacterCollection {
+    /// `/Registry`.
+    pub registry: String,
+    /// `/Ordering`.
+    pub ordering: String,
+    /// `/Supplement`; `None` where it is missing, or is not an integer from
+    /// zero up.
+    pub supplement: Option<u32>,
+}
+
 /// A font dictionary, read.
 pub struct Font {
     kind: FontKind,
@@ -163,6 +181,9 @@ pub struct Font {
     standard: Option<Standard14>,
     /// Vertical writing, from the encoding CMap (9.7.4.3).
     vertical: bool,
+    /// Composite fonts: the descendant's `/CIDSystemInfo`, where it reads
+    /// ([`Font::character_collection`]).
+    collection: Option<CharacterCollection>,
     /// True when the font is symbolic, which changes how codes are read.
     symbolic: bool,
     /// 9.7.5.2: the encoding CMap's code-to-CID mapping is assumed rather
@@ -199,6 +220,20 @@ impl Font {
     #[must_use]
     pub fn is_vertical(&self) -> bool {
         self.vertical
+    }
+
+    /// The character collection a composite font's descendant names
+    /// (9.7.3), read as rendering reads it: `/Registry` and `/Ordering` each
+    /// a string, or a name where a producer wrote one, and `/Supplement` an
+    /// integer from zero up or none. `None` for a simple font, and for a
+    /// descendant with no readable dictionary, registry or ordering.
+    ///
+    /// Lenient where PDF/A's check is strict (`pdfa/fonts.rs` judges the
+    /// same entries as written): a collection named by a name rather than a
+    /// string still says which characters the CIDs are.
+    #[must_use]
+    pub fn character_collection(&self) -> Option<&CharacterCollection> {
+        self.collection.as_ref()
     }
 
     /// Whether this font's codes reach their CIDs through a mapping that is
@@ -736,6 +771,7 @@ pub fn read_in<R: Resolve + ?Sized>(doc: &R, dict: &Dict) -> Font {
         gid_to_cid: OnceLock::new(),
         standard: None,
         vertical: false,
+        collection: None,
         symbolic: false,
         encoding_approximate: false,
         program: None,
@@ -921,6 +957,8 @@ fn read_composite<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font) {
         return;
     };
 
+    font.collection = character_collection(doc, cid_font);
+
     font.default_width = doc
         .resolve_key(cid_font, Name::DW)
         .as_number()
@@ -1072,6 +1110,42 @@ fn read_composite<R: Resolve + ?Sized>(doc: &R, dict: &Dict, font: &mut Font) {
         // answers for either kind without the caller knowing which.
         font.program = embedded_program(&desc);
     }
+}
+
+/// A CIDFont's `/CIDSystemInfo` (9.7.3, Table 114): `/Registry` and
+/// `/Ordering`, each a string or a name, and `/Supplement` where it is an
+/// integer from zero up. A dictionary missing either of the first two, or
+/// holding something else there, is no collection.
+///
+/// `cid_font` is the descendant dictionary, which is where 9.7.3 puts the
+/// entry; [`Font::character_collection`] is this, read once with the font.
+#[must_use]
+pub fn character_collection<R: Resolve + ?Sized>(
+    doc: &R,
+    cid_font: &Dict,
+) -> Option<CharacterCollection> {
+    let info = doc.resolve_key(cid_font, doc.intern(b"CIDSystemInfo"));
+    let info = info.as_dict()?;
+    let text = |key: &[u8]| -> Option<String> {
+        let value = doc.resolve_key(info, doc.intern(key));
+        let bytes = match value.as_ref() {
+            Object::String(string) => string.bytes.clone(),
+            Object::Name(name) => doc.name_bytes(*name)?.to_vec(),
+            _ => return None,
+        };
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    };
+    let registry = text(b"Registry")?;
+    let ordering = text(b"Ordering")?;
+    let supplement = doc
+        .resolve_key(info, doc.intern(b"Supplement"))
+        .as_int()
+        .and_then(|value| u32::try_from(value).ok());
+    Some(CharacterCollection {
+        registry,
+        ordering,
+        supplement,
+    })
 }
 
 fn descriptor<R: Resolve + ?Sized>(doc: &R, dict: &Dict) -> Option<Arc<Dict>> {

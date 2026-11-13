@@ -643,3 +643,136 @@ fn built(label: &str, builder: tinker_pdf::DocumentBuilder) -> Vec<u8> {
     written_support::authored(label, &bytes);
     bytes
 }
+
+/// A page showing two CIDs in `font`, a Type 0 font of `encoding` over a
+/// CIDFontType0 descendant whose `/CIDSystemInfo` is `info` and which embeds
+/// no program: the shape of an unembedded CJK font. Written by hand, because
+/// the builder embeds every font it writes.
+fn composite_page(encoding: &str, info: &str, content: &str) -> Vec<u8> {
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100]\n\
+         /Resources << /Font << /F0 5 0 R >> >> /Contents 4 0 R >>"
+            .to_string(),
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        ),
+        format!(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /KozMinPr6N-Regular \
+             /Encoding {encoding} /DescendantFonts [6 0 R] >>"
+        ),
+        format!(
+            "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /KozMinPr6N-Regular \
+             {info} /FontDescriptor 7 0 R /DW 1000 >>"
+        ),
+        "<< /Type /FontDescriptor /FontName /KozMinPr6N-Regular /Flags 4 \
+         /FontBBox [0 -120 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 \
+         /CapHeight 740 /StemV 80 >>"
+            .to_string(),
+    ];
+    let mut out = String::from("%PDF-1.7\n");
+    for (index, object) in objects.iter().enumerate() {
+        out.push_str(&format!("{} 0 obj\n{object}\nendobj\n", index + 1));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+        objects.len() + 1
+    ));
+    out.into_bytes()
+}
+
+/// **The provider is told the character collection** (FT-01.2): an
+/// unembedded Adobe-Japan1 font's request carries the registry, the
+/// ordering and the supplement its descendant names, so a provider can
+/// choose a face by the characters its CIDs stand for. A recording provider
+/// is the host's, asked before any bundled face, so the same holds in the
+/// default and the `bundled-fonts` builds.
+#[test]
+fn the_provider_is_told_the_character_collection() {
+    use std::sync::Mutex;
+    use tinker_pdf::CharacterCollection;
+
+    struct Records(Mutex<Vec<FontRequest>>);
+    impl FontProvider for Records {
+        fn substitute(&self, request: &FontRequest) -> Option<Arc<Vec<u8>>> {
+            if let Ok(mut seen) = self.0.lock() {
+                seen.push(request.clone());
+            }
+            None
+        }
+    }
+
+    let asked = |info: &str| {
+        let records = Arc::new(Records(Mutex::new(Vec::new())));
+        let doc = Document::open(composite_page(
+            "/Identity-H",
+            info,
+            "BT /F0 24 Tf 20 40 Td <00410042> Tj ET",
+        ))
+        .expect("it opens")
+        .with_fonts(records.clone());
+        let _ = doc
+            .page(0)
+            .expect("a page")
+            .render(&RenderOptions::default());
+        let seen = records.0.lock().expect("not poisoned").clone();
+        assert_eq!(seen.len(), 1, "asked once for the font, got: {seen:?}");
+        seen.into_iter().next().expect("one request")
+    };
+
+    let request = asked("/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >>");
+    assert_eq!(request.base_font, "KozMinPr6N-Regular");
+    assert_eq!(
+        request.character_collection,
+        Some(CharacterCollection {
+            registry: "Adobe".to_string(),
+            ordering: "Japan1".to_string(),
+            supplement: Some(6),
+        })
+    );
+
+    // Leniently, as rendering reads it: names for strings, no supplement.
+    let request = asked("/CIDSystemInfo << /Registry /Adobe /Ordering /Japan1 >>");
+    assert_eq!(
+        request.character_collection,
+        Some(CharacterCollection {
+            registry: "Adobe".to_string(),
+            ordering: "Japan1".to_string(),
+            supplement: None,
+        })
+    );
+
+    // A descendant that names no collection carries none.
+    assert_eq!(asked("").character_collection, None);
+}
+
+/// A simple font's request carries no character collection.
+#[test]
+fn a_simple_fonts_request_names_no_character_collection() {
+    use std::sync::Mutex;
+
+    struct Records(Mutex<Vec<FontRequest>>);
+    impl FontProvider for Records {
+        fn substitute(&self, request: &FontRequest) -> Option<Arc<Vec<u8>>> {
+            if let Ok(mut seen) = self.0.lock() {
+                seen.push(request.clone());
+            }
+            None
+        }
+    }
+    let records = Arc::new(Records(Mutex::new(Vec::new())));
+    let doc = Document::open(document())
+        .expect("it opens")
+        .with_fonts(records.clone());
+    let _ = doc
+        .page(0)
+        .expect("a page")
+        .render(&RenderOptions::default());
+    let seen = records.0.lock().expect("not poisoned").clone();
+    assert!(!seen.is_empty(), "the base-14 font is asked for");
+    assert!(seen
+        .iter()
+        .all(|request| request.character_collection.is_none()));
+}

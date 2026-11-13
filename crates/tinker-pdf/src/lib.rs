@@ -175,6 +175,10 @@ pub use tinker_pdf_content::{
 /// Structured text serialisation — JSON, XML and HTML with fonts, sizes and
 /// boxes — behind [`Page::text_frame`] and [`TextPage::serialize`].
 pub use tinker_pdf_content::{PageFrame, TextFormat, TextWriter, TEXT_FORMAT_VERSION};
+/// The character collection a composite font's descendant names (9.7.3), as
+/// [`FontRequest::character_collection`] carries it to a [`FontProvider`].
+/// Re-exported for [`FontKind`]'s reason: a caller names what it is handed.
+pub use tinker_pdf_cos::CharacterCollection;
 /// The strict validator's verdict (ruling 13), behind [`Document::validate`].
 ///
 /// `kind_counts` and `tier_counts` are how a report says *which* rules a file

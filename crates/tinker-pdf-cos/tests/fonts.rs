@@ -1067,3 +1067,131 @@ fn an_unknown_predefined_name_is_warned_about_by_name() {
     // plausible CIDs.
     assert_eq!(font.decode(&[0x41, 0x81, 0x40]).len(), 3);
 }
+
+/// A Type 0 font, `3 0 R`, over a CIDFontType2 descendant whose
+/// `/CIDSystemInfo` is `info` written verbatim, and the further objects
+/// `rest` from `5 0 R`.
+fn with_system_info(info: &str, rest: &[Vec<u8>]) -> font::Font {
+    let mut objects = vec![
+        b"<< /Type /Font /Subtype /Type0 /BaseFont /Fixture /Encoding /Identity-H\n\
+           /DescendantFonts [4 0 R] >>"
+            .to_vec(),
+        format!(
+            "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Fixture {info}\n\
+             /CIDToGIDMap /Identity >>"
+        )
+        .into_bytes(),
+    ];
+    objects.extend_from_slice(rest);
+    let doc = document(&objects);
+    font_at(&doc, 3)
+}
+
+/// **A composite font's character collection is read** (9.7.3, Table 114),
+/// leniently, as rendering reads a font: the three entries from the
+/// descendant; a name where a string is due, and a hex string; the
+/// dictionary behind a reference; a supplement that is missing, negative,
+/// real or a string, each none while the collection stands; and no
+/// collection for a dictionary without a registry or an ordering, for a
+/// descendant with no `/CIDSystemInfo` or none that is a dictionary, or one
+/// that is no dictionary, and for a simple font.
+#[test]
+fn a_composite_fonts_character_collection_is_read() {
+    use tinker_pdf_cos::CharacterCollection;
+
+    let collection = |registry: &str, ordering: &str, supplement: Option<u32>| {
+        Some(CharacterCollection {
+            registry: registry.to_string(),
+            ordering: ordering.to_string(),
+            supplement,
+        })
+    };
+    let read = |info: &str| with_system_info(info, &[]).character_collection().cloned();
+
+    assert_eq!(
+        read("/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >>"),
+        collection("Adobe", "Japan1", Some(6)),
+        "the three entries"
+    );
+    assert_eq!(
+        read("/CIDSystemInfo << /Registry /Adobe /Ordering /GB1 /Supplement 5 >>"),
+        collection("Adobe", "GB1", Some(5)),
+        "names where strings are due"
+    );
+    assert_eq!(
+        read("/CIDSystemInfo << /Registry <41646F6265> /Ordering (Korea1) /Supplement 2 >>"),
+        collection("Adobe", "Korea1", Some(2)),
+        "a hex string"
+    );
+    assert_eq!(
+        with_system_info(
+            "/CIDSystemInfo 5 0 R",
+            &[b"<< /Registry (Adobe) /Ordering (CNS1) /Supplement 7 >>".to_vec()]
+        )
+        .character_collection()
+        .cloned(),
+        collection("Adobe", "CNS1", Some(7)),
+        "the dictionary behind a reference"
+    );
+    assert_eq!(
+        read("/CIDSystemInfo << /Registry (Adobe) /Ordering (KR) >>"),
+        collection("Adobe", "KR", None),
+        "a missing supplement"
+    );
+    for supplement in ["-1", "2.5", "(6)", "/Six", "4294967296"] {
+        assert_eq!(
+            read(&format!(
+                "/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement {supplement} >>"
+            )),
+            collection("Adobe", "Japan1", None),
+            "a supplement of {supplement}"
+        );
+    }
+    assert_eq!(
+        read("/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>"),
+        collection("Adobe", "Identity", Some(0)),
+        "an Identity ordering is a collection as written"
+    );
+    for (info, why) in [
+        (
+            "/CIDSystemInfo << /Ordering (Japan1) /Supplement 6 >>",
+            "no registry",
+        ),
+        (
+            "/CIDSystemInfo << /Registry (Adobe) /Supplement 6 >>",
+            "no ordering",
+        ),
+        (
+            "/CIDSystemInfo << /Registry 7 /Ordering (Japan1) >>",
+            "a registry that is a number",
+        ),
+        (
+            "/CIDSystemInfo (Adobe-Japan1-6)",
+            "an entry that is a string",
+        ),
+        ("", "no entry"),
+    ] {
+        assert_eq!(read(info), None, "{why}");
+    }
+
+    let doc = document(&[
+        b"<< /Type /Font /Subtype /Type0 /BaseFont /Fixture \
+          /Encoding /Identity-H /DescendantFonts [4 0 R] >>"
+            .to_vec(),
+        b"(not a dictionary)".to_vec(),
+    ]);
+    assert_eq!(
+        font_at(&doc, 3).character_collection(),
+        None,
+        "a descendant that is no dictionary"
+    );
+
+    let simple = document(&[b"<< /Type /Font /Subtype /TrueType /BaseFont /Fixture \
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 6 >> >>"
+        .to_vec()]);
+    assert_eq!(
+        font_at(&simple, 3).character_collection(),
+        None,
+        "a simple font has none, whatever its dictionary holds"
+    );
+}
