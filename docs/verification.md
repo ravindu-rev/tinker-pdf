@@ -907,7 +907,8 @@ so the caps are properties of inputs, not of machines.
 - **`cargo xtask`**: `dag` (crate-graph enforcement), `libm`
   (transcendental ban on pixel paths), `oracles` (ruling 13's boundary: every
   program this repository spawns is written down with a reason), `vendor`
-  (data-file provenance gate), `versions`, `check`, `corpus-fetch` /
+  (data-file provenance gate), `versions`, `names` (the roadmap names no
+  engine, viewer, validator or document tool), `check`, `corpus-fetch` /
   `corpus-run` / `corpus-licences`, `release`, `nuget-stage`.
 
 ## Clocks: outside the suite, and not nowhere

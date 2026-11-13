@@ -22,6 +22,7 @@ pub mod footprint;
 pub mod fuzzaudit;
 pub mod json;
 pub mod lock;
+pub mod names;
 pub mod parity;
 pub mod passwords;
 pub mod peaks;

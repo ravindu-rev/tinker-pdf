@@ -9,8 +9,8 @@ use std::process::ExitCode;
 
 use xtask::version::{internal_dependencies, package_name};
 use xtask::{
-    bench, corpus, count, determinism, diff, fetch, footprint, fuzzaudit, parity, peaks, release,
-    repo_root, version,
+    bench, corpus, count, determinism, diff, fetch, footprint, fuzzaudit, names, parity, peaks,
+    release, repo_root, version,
 };
 
 const USAGE: &str = "\
@@ -34,7 +34,10 @@ usage:
   cargo xtask determinism
                         check that every cross-target fingerprint test in
                         the roster is a test and runs un-ignored
-  cargo xtask check     all ten of the above
+  cargo xtask names     check that the roadmap names no engine, viewer,
+                        validator or document tool: each of its words and
+                        word pairs hashed against xtask/never-named.sha256
+  cargo xtask check     all eleven of the above
 
   cargo xtask release [options]  publish to crates.io, PyPI, npm and NuGet
 
@@ -231,6 +234,7 @@ fn main() -> ExitCode {
         "versions" => report("versions", version::check(&repo_root())),
         "baseline" => report("baseline", bench::check(&repo_root())),
         "determinism" => report("determinism", determinism::check(&repo_root())),
+        "names" => report("names", names::check(&repo_root())),
         "footprint" if rest.is_empty() => report("footprint", footprint::check(&repo_root())),
         "footprint" => one("footprint", footprint::run(&repo_root(), rest)),
         "check" => {
@@ -244,6 +248,7 @@ fn main() -> ExitCode {
             let baseline = bench::check(&repo_root());
             let figures = footprint::check(&repo_root());
             let roster = determinism::check(&repo_root());
+            let named = names::check(&repo_root());
             let mut problems = dag.err().unwrap_or_default();
             problems.extend(libm.err().unwrap_or_default());
             problems.extend(oracles.err().unwrap_or_default());
@@ -254,6 +259,7 @@ fn main() -> ExitCode {
             problems.extend(baseline.err().unwrap_or_default());
             problems.extend(figures.err().unwrap_or_default());
             problems.extend(roster.err().unwrap_or_default());
+            problems.extend(named.err().unwrap_or_default());
             report(
                 "check",
                 if problems.is_empty() {
