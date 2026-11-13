@@ -139,7 +139,6 @@ pub const PENDING: &[&str] = &[
     "crates/tinker-pdf/tests/ext_gstate.rs",
     "crates/tinker-pdf/tests/facade_read.rs",
     "crates/tinker-pdf/tests/guards.rs",
-    "crates/tinker-pdf/tests/hostile_input.rs",
     "crates/tinker-pdf/tests/image_recode.rs",
     "crates/tinker-pdf/tests/images.rs",
     "crates/tinker-pdf/tests/level_six_counts.rs",

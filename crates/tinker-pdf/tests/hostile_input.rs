@@ -20,6 +20,9 @@ use std::sync::Arc;
 
 use tinker_pdf::{Document, RenderOptions, ShreddedSource, SliceSource};
 
+mod written_support;
+use written_support::{authored, synthesised};
+
 /// A hand-rolled xorshift, so the corpus is identical everywhere.
 ///
 /// A random-number crate would be a dependency for the sake of one function,
@@ -163,6 +166,14 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn exercise(bytes: Vec<u8>) {
     let Ok(doc) = Document::open(bytes) else {
         return;
+    };
+    // What `open` synthesised from bytes that are not a PDF is this engine's
+    // own writing, and hostile input must never make it write a file the
+    // validator refuses. A mutated PDF is only read, and is not held.
+    let doc = if doc.archive().is_some() {
+        synthesised("a document synthesised from hostile input", doc)
+    } else {
+        doc
     };
 
     let _ = doc.ladder_level();
@@ -886,7 +897,9 @@ fn mutated_standalone_documents_never_panic() {
                     "p { margin: 1em } h1 { font-size: 2em } @import url(x.css);",
                     PageBox::new(300.0, 200.0),
                 ) {
-                    exercise(builder.finish());
+                    let bytes = builder.finish();
+                    authored(&format!("{label}, built from HTML"), &bytes);
+                    exercise(bytes);
                 }
             }
             if case % 4 == 0 {
@@ -1233,6 +1246,7 @@ fn markdown_never_panics_hangs_or_hands_the_reader_bad_xml() {
         check(name, text);
         if let Ok(doc) = Document::open_markdown(text.clone().into_bytes(), &OpenOptions::default())
         {
+            let doc = synthesised(name, doc);
             let _ = doc.page_count();
             if let Some(page) = doc.page(0) {
                 let _ = page.text();
@@ -1252,6 +1266,7 @@ fn markdown_never_panics_hangs_or_hands_the_reader_bad_xml() {
         check(&label, &text);
         if case % 8 == 0 {
             if let Ok(doc) = Document::open_markdown(mutated, &OpenOptions::default()) {
+                let doc = synthesised(&label, doc);
                 let _ = doc.page_count();
                 if let Some(page) = doc.page(0) {
                     let _ = page.text();
