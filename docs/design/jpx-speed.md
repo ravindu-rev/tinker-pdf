@@ -76,20 +76,30 @@ adds paths and holds each to that one.
 
 ### Tier-1: packed per-stripe state (P-10.5)
 
-`Block` (`tier1.rs`) keeps six per-coefficient arrays — σ, the sign, the
-refinement flag, the known plane, π and the magnitude — and every pass
-collects a stripe list and forms each context from eight neighbours read out
-of `Vec<bool>`. The packed state is one `u32` word per stripe column: four
-coefficients, each with its σ, sign, π and refined bits, beside the σ of the
-column's neighbours above, below and on either side, so a context of
-Table D.1, D.3 or D.4 is a mask and a lookup on one word. When a coefficient
-becomes significant the pass sets its bit in its own word and the neighbour
-bits in the up to eight words around it. Magnitudes and the known plane stay
-per coefficient, since they are values, not flags. The vertically causal mode
-clears the below-neighbour bits a stripe's last row would read, so causal
-and not are one table. The test-only encoder keeps the transcribed `Block`,
-so a round trip pits the packed decoder against an independent state rather
-than against itself (gap 17's lesson, `tier1.rs`'s header).
+The transcribed `Block` (`tier1.rs`) keeps a flag a coefficient — σ, the
+sign, the refinement flag and π — and forms each context from eight
+neighbours read out of `Vec<bool>`, over a stripe list every pass collects.
+The decoder's `Packed` state is one `u64` word per stripe column instead:
+σ over a window three columns wide and six rows tall — the column and its
+neighbours on either side, from the row above the stripe to the row below
+it — the signs of the window's coefficients that D.3 reads, the column's own
+six and its neighbours' four, and the four coefficients' π and refined bits.
+So a context of Table D.1, D.3 or D.4 is a shift, a mask and a lookup on one
+word: a row's nine σ bits index a 512-entry Table D.1 for the block's
+orientation, the four across the coefficient with their signs index a
+256-entry Tables D.2 and D.3, and Table D.4 reads whether any of the nine is
+set beside the refined bit. The tables are `zero_coding_context`,
+`sign_coding_context` and `magnitude_refinement_context` evaluated at every
+index when the crate is compiled. When a coefficient becomes significant the
+pass sets its bits in its own word and in the up to eight words around it,
+the code-block's words bordered by one on every side so an edge needs no
+check. Magnitudes and the known plane stay per coefficient, since they are
+values, not flags. Under the vertically causal mode a stripe's first row sets
+nothing in the words of the stripe above, whose row below then reads
+insignificant, so causal and not are one table. The test-only encoder keeps
+the transcribed `Block`, so a round trip pits the packed decoder against an
+independent state rather than against itself (gap 17's lesson, `tier1.rs`'s
+header).
 
 ### The MQ decoder in registers (P-10.6)
 

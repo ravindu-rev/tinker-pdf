@@ -21,6 +21,12 @@
 //! a picture rather than an error.
 //!
 //! So every row below is the standard's own number.
+//!
+//! The decoder forms its contexts from a packed word a stripe column, read
+//! through lookup tables built from the functions those rows assert; the last
+//! three tests hold the packed state to the transcribed one it replaced
+//! (P-10.5), at every coefficient of noise code-blocks and at every
+//! neighbourhood a word can hold.
 
 use crate::jpx::tier1::{
     initial_contexts, magnitude_refinement_context, pass_at, sign_coding_context,
@@ -765,4 +771,310 @@ fn predictable_termination_is_accepted_and_decodes_identically() {
     )
     .expect("a well-formed code-block");
     assert_eq!(got.coefficients, values);
+}
+
+// --- the packed state against the transcribed one (P-10.5) --------------
+
+/// SplitMix64, so the noise is the same on every target.
+fn next(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// A code-block of seeded noise: its size, its magnitude bit-planes and its
+/// signed coefficients.
+#[derive(Debug)]
+struct Noise {
+    w: usize,
+    h: usize,
+    planes: u32,
+    values: Vec<i32>,
+}
+
+/// Noise code-blocks at the shapes the stripes have edges at — one
+/// coefficient, one row, one column, heights either side of a multiple of
+/// four, the largest block T.800 allows and its two thinnest — each dense,
+/// half empty and sparse, so the run-length mode and the stripes' borders
+/// both see work.
+fn noise_blocks() -> Vec<Noise> {
+    let mut seed = 0x5031_3035;
+    let mut out = Vec::new();
+    for (w, h) in [
+        (1, 1),
+        (1, 9),
+        (9, 1),
+        (2, 4),
+        (3, 5),
+        (5, 8),
+        (8, 9),
+        (13, 11),
+        (16, 16),
+        (31, 6),
+        (64, 4),
+        (4, 64),
+        (64, 64),
+    ] {
+        for one_in in [1, 2, 9] {
+            let planes = 1 + (next(&mut seed) % 6) as u32;
+            let top = (1u64 << planes) - 1;
+            let values = (0..w * h)
+                .map(|_| {
+                    if next(&mut seed) % one_in != 0 {
+                        return 0;
+                    }
+                    let magnitude = 1 + (next(&mut seed) % top) as i32;
+                    if next(&mut seed) % 2 == 0 {
+                        magnitude
+                    } else {
+                        -magnitude
+                    }
+                })
+                .collect();
+            out.push(Noise {
+                w,
+                h,
+                planes,
+                values,
+            });
+        }
+    }
+    out
+}
+
+/// The four orientations, which choose Table D.1's column.
+const ORIENTATIONS: [Orientation; 4] = [
+    Orientation::Ll,
+    Orientation::Hl,
+    Orientation::Lh,
+    Orientation::Hh,
+];
+
+/// A state's flags and three contexts at one coefficient: `(σ, χ, π,
+/// refined)`, and Table D.1's, Table D.3's with its XOR bit and Table D.4's.
+type AtCoefficient = ((bool, bool, bool, bool), (usize, (usize, u8), usize));
+
+/// The style a case is coded in: vertically causal or not, with segmentation
+/// symbols and `RESET` turned on in turn, which move no context but are read
+/// by the passes the contexts are compared across.
+fn style_for(case: usize, causal: bool) -> CodingStyle {
+    CodingStyle {
+        vertically_causal: causal,
+        segmentation_symbols: case % 2 == 1,
+        reset_contexts: case % 3 == 2,
+        ..CodingStyle::default()
+    }
+}
+
+/// **The packed state forms every context the transcribed one does**, at
+/// every coefficient, after every pass.
+///
+/// The test encoder codes each noise block from the transcribed `Block`, a
+/// flag a coefficient and eight neighbours read flag by flag, and hands its
+/// state over after each pass; the decoder hands over its packed one after
+/// the same pass. At every coefficient the two hold the same σ, sign, π and
+/// refined flags and form the same Table D.1 context in the block's
+/// orientation, the same Table D.3 context and XOR bit and the same Table D.4
+/// context — the coded ones and the ones no pass asked for alike, so a word
+/// whose window has drifted from its neighbours' bits is caught where it
+/// drifted. And the decode gives the noise back, which the encoder's state
+/// being an independent one is what makes evidence (gap 17).
+#[test]
+fn the_packed_contexts_are_the_transcribed_ones_at_every_coefficient() {
+    use crate::jpx::tier1::{decode_code_block_observed, encoder::encode_code_block_observed};
+
+    let mut compared = 0u64;
+    for (case, noise) in noise_blocks().iter().enumerate() {
+        let (w, h, planes, values) = (noise.w, noise.h, noise.planes, &noise.values);
+        for orientation in ORIENTATIONS {
+            for causal in [false, true] {
+                let style = style_for(case, causal);
+                let label = format!("{w}x{h}, {planes} planes, {orientation:?}, {style:?}");
+
+                let mut transcribed: Vec<Vec<AtCoefficient>> = Vec::new();
+                let (data, passes) = encode_code_block_observed(
+                    values,
+                    w,
+                    h,
+                    planes,
+                    orientation,
+                    style,
+                    |_, block| {
+                        let mut at = Vec::with_capacity(w * h);
+                        for y in 0..h {
+                            for x in 0..w {
+                                at.push((block.flags_at(x, y), block.contexts_at(x, y)));
+                            }
+                        }
+                        transcribed.push(at);
+                    },
+                );
+
+                let mut packed: Vec<Vec<AtCoefficient>> = Vec::new();
+                let mut contexts = initial_contexts();
+                let mut work = u64::MAX;
+                let decoded = decode_code_block_observed(
+                    &Segment::single(&data, passes),
+                    w as u32,
+                    h as u32,
+                    passes,
+                    orientation,
+                    style,
+                    &mut contexts,
+                    &mut work,
+                    |_, state| {
+                        let mut at = Vec::with_capacity(w * h);
+                        for y in 0..h {
+                            for x in 0..w {
+                                at.push((state.flags_at(x, y), state.contexts_at(x, y)));
+                            }
+                        }
+                        packed.push(at);
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{label}: {e:?}"));
+
+                assert_eq!(decoded.coefficients, *values, "{label}: the round trip");
+                assert_eq!(
+                    packed.len(),
+                    passes as usize,
+                    "{label}: a state after every pass"
+                );
+                assert_eq!(packed.len(), transcribed.len(), "{label}");
+                for (pass, (got, want)) in packed.iter().zip(&transcribed).enumerate() {
+                    for (k, (got, want)) in got.iter().zip(want).enumerate() {
+                        assert_eq!(
+                            got,
+                            want,
+                            "{label}: after pass {pass}, at ({}, {})",
+                            k % w,
+                            k / w
+                        );
+                        compared += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(compared > 100_000, "only {compared} coefficients compared");
+}
+
+/// Every neighbourhood a word's window can hold forms the transcribed
+/// contexts: each of the eight neighbours significant or not, each of the
+/// four across the coefficient positive or negative, the coefficient refined
+/// or not, in every orientation, causal and not, at a row inside a stripe, at
+/// a stripe's last row and at the next stripe's first — the two rows whose
+/// neighbours are bits another stripe's words set.
+#[test]
+fn every_neighbourhood_a_word_holds_forms_the_transcribed_contexts() {
+    use crate::jpx::tier1::{Block, Packed};
+
+    // The eight neighbours, the four across the coefficient first: above,
+    // left, right, below, then the four corners.
+    const AROUND: [(isize, isize); 8] = [
+        (0, -1),
+        (-1, 0),
+        (1, 0),
+        (0, 1),
+        (-1, -1),
+        (1, -1),
+        (-1, 1),
+        (1, 1),
+    ];
+    let mut compared = 0u64;
+    for orientation in ORIENTATIONS {
+        for causal in [false, true] {
+            for y in [1usize, 3, 4] {
+                for significant in 0u32..256 {
+                    for negative in 0u32..16 {
+                        for refine in [false, true] {
+                            let mut packed = Packed::new(3, 8, orientation, causal);
+                            let mut block = Block::new(3, 8, orientation);
+                            block.set_causal(causal);
+                            for (k, &(dx, dy)) in AROUND.iter().enumerate() {
+                                if (significant >> k) & 1 == 0 {
+                                    continue;
+                                }
+                                let x = (1 + dx) as usize;
+                                let around = (y as isize + dy) as usize;
+                                let sign = k < 4 && (negative >> k) & 1 == 1;
+                                packed.set_significant(x, around, sign);
+                                block.set_significant(x, around, sign);
+                            }
+                            if refine {
+                                packed.set_refined(1, y);
+                                block.set_refined(1, y);
+                            }
+                            assert_eq!(
+                                packed.contexts_at(1, y),
+                                block.contexts_at(1, y),
+                                "{orientation:?}, causal {causal}, row {y}, neighbours \
+                                 {significant:08b}, signs {negative:04b}, refined {refine}"
+                            );
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(compared, 4 * 2 * 3 * 256 * 16 * 2);
+}
+
+/// **A context costs one state word.** Over every noise block decoded in
+/// every orientation, causal and not, each context the passes form — Table
+/// D.1's, D.3's and D.4's alike — reads exactly one word of the packed
+/// state, where the transcribed state reads a flag for each of eight
+/// neighbours, and their signs for D.3.
+#[test]
+fn a_context_costs_one_state_word() {
+    use crate::jpx::tier1::{decode_code_block_observed, encoder::encode_code_block, Tally};
+
+    let mut total = Tally::default();
+    for (case, noise) in noise_blocks().iter().enumerate() {
+        for orientation in ORIENTATIONS {
+            for causal in [false, true] {
+                let style = style_for(case, causal);
+                let (data, passes) = encode_code_block(
+                    &noise.values,
+                    noise.w,
+                    noise.h,
+                    noise.planes,
+                    orientation,
+                    style,
+                );
+                let mut tally = Tally::default();
+                let mut contexts = initial_contexts();
+                let mut work = u64::MAX;
+                let decoded = decode_code_block_observed(
+                    &Segment::single(&data, passes),
+                    noise.w as u32,
+                    noise.h as u32,
+                    passes,
+                    orientation,
+                    style,
+                    &mut contexts,
+                    &mut work,
+                    |_, state| tally = state.tally(),
+                )
+                .expect("a well-formed code-block");
+                assert_eq!(decoded.coefficients, noise.values);
+                assert_eq!(
+                    tally.words_read, tally.contexts,
+                    "{}x{}, {orientation:?}, {style:?}: {} contexts read {} words",
+                    noise.w, noise.h, tally.contexts, tally.words_read
+                );
+                total.contexts += tally.contexts;
+                total.words_read += tally.words_read;
+            }
+        }
+    }
+    assert!(
+        total.contexts > 100_000,
+        "only {} contexts formed",
+        total.contexts
+    );
+    assert_eq!(total.words_read, total.contexts);
 }

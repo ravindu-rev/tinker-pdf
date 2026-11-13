@@ -111,7 +111,12 @@ pub(crate) const MAX_PASSES: u32 = 3 * MAX_BIT_PLANES - 2;
 /// fidelity on a *truncated* stream and nothing at all on a complete one,
 /// which is the worst possible failure signature. Hence
 /// `super::tests::tier1`'s exhaustive assertion against the table.
-pub(crate) fn zero_coding_context(orientation: Orientation, h: u32, v: u32, d: u32) -> usize {
+///
+/// A `const fn`, because the decoder's lookup tables ([`ZERO_CODING_LL_LH`]
+/// and its two siblings) are this function evaluated at every neighbourhood
+/// when the crate is compiled, so the tables the tests assert and the tables
+/// the passes read are one transcription.
+pub(crate) const fn zero_coding_context(orientation: Orientation, h: u32, v: u32, d: u32) -> usize {
     // Table D.1's HL column is the LL/LH column with ΣH and ΣV interchanged.
     // Writing it as a swap rather than as a second nine-row table is the one
     // place this transcription is not literal, and it is exactly how the
@@ -121,7 +126,7 @@ pub(crate) fn zero_coding_context(orientation: Orientation, h: u32, v: u32, d: u
         Orientation::Hl => (v, h),
         Orientation::Ll | Orientation::Lh | Orientation::Hh => (h, v),
     };
-    if orientation == Orientation::Hh {
+    if matches!(orientation, Orientation::Hh) {
         // The HH column is keyed on ΣD first and then on ΣH + ΣV.
         let hv = h + v;
         return if d >= 3 {
@@ -285,7 +290,409 @@ pub(crate) const fn pass_at(i: u32, planes: u32) -> (Pass, u32) {
     (pass, plane)
 }
 
-/// One code-block's state while the passes run over it.
+// --- the packed state (`docs/design/jpx-speed.md`, "Tier-1: packed per-stripe state") ---
+
+// One word holds one column of one stripe — four coefficients, one above the
+// next — and everything forming a context of Table D.1, D.3 or D.4 for any of
+// the four reads, so a context costs that one word: a shift, a mask and a
+// lookup.
+//
+// - **σ over a window three columns wide and six rows tall**, bits 0 to 17:
+//   the column and its neighbours on either side, from the row above the
+//   stripe to the row below it. `(column, row)` is bit `3 * row + column`:
+//   `column` 0 the left neighbour, 1 the column itself and 2 the right; `row`
+//   0 the row above the stripe, 1 to 4 the stripe's own and 5 the row below.
+//   So the 3 × 3 neighbourhood of the stripe's row `r` is the nine bits from
+//   `3 * r`, its own σ the fifth of them.
+// - **χ, set where the coefficient is negative**, at the same places
+//   [`CHI`] bits up. D.3 reads the signs of the four neighbours across a
+//   coefficient, so only the column's own six rows and its neighbours' four
+//   are ever set.
+// - **π**, bits 36 to 39, one for each of the stripe's rows: coded by this
+//   bit-plane's significance propagation pass.
+// - **Refined**, bits 40 to 43: Table D.4's first-refinement distinction.
+//
+// A coefficient that becomes significant sets its bits in its own word and the
+// neighbour bits in the up to eight words around it, so every word always
+// holds its window. The magnitudes and the plane each coefficient is known to
+// stay one a coefficient beside the words: they are values, not flags.
+
+/// σ at `(column, row)` of a word's window.
+const fn sigma(column: usize, row: usize) -> u64 {
+    1 << (3 * row + column)
+}
+
+/// How far a word's χ bits sit above its σ bits.
+const CHI: usize = 18;
+
+/// χ at `(column, row)` of a word's window.
+const fn chi(column: usize, row: usize) -> u64 {
+    sigma(column, row) << CHI
+}
+
+/// π of the stripe's row `r`.
+const fn pi(r: usize) -> u64 {
+    1 << (36 + r)
+}
+
+/// The refined flag of the stripe's row `r`.
+const fn refined(r: usize) -> u64 {
+    1 << (40 + r)
+}
+
+/// Every σ bit of a word's window.
+const WINDOW: u64 = (1 << 18) - 1;
+
+/// σ of the column's own four rows.
+const OWN: u64 = sigma(1, 1) | sigma(1, 2) | sigma(1, 3) | sigma(1, 4);
+
+/// Every π bit of a word.
+const VISITED: u64 = pi(0) | pi(1) | pi(2) | pi(3);
+
+/// A row's eight neighbours among its nine window bits: all but its own, the
+/// fifth.
+const NEIGHBOURS: u64 = 0x1EF;
+
+/// The four neighbours across a row's coefficient among its nine window bits
+/// — above, left, right and below — whose signs D.3 reads.
+const CROSS: u64 = 0xAA;
+
+/// Bit `at` of `bits`, as a count.
+const fn flag(bits: usize, at: usize) -> u32 {
+    ((bits >> at) & 1) as u32
+}
+
+/// Table D.1 in `orientation`'s column at every neighbourhood a row's nine
+/// window bits can hold: [`zero_coding_context`] itself, evaluated when the
+/// crate is compiled.
+const fn zero_coding_table(orientation: Orientation) -> [u8; 512] {
+    let mut table = [0; 512];
+    let mut bits = 0;
+    while bits < 512 {
+        // Bits 3 and 5 are the row's left and right neighbours, 1 and 7 the
+        // ones above and below, and 0, 2, 6 and 8 the four corners.
+        let h = flag(bits, 3) + flag(bits, 5);
+        let v = flag(bits, 1) + flag(bits, 7);
+        let d = flag(bits, 0) + flag(bits, 2) + flag(bits, 6) + flag(bits, 8);
+        // A zero-coding context is at most 8, so the cast keeps every bit.
+        table[bits] = zero_coding_context(orientation, h, v, d) as u8;
+        bits += 1;
+    }
+    table
+}
+
+/// Table D.1's LL and LH column, by neighbourhood.
+pub(crate) static ZERO_CODING_LL_LH: [u8; 512] = zero_coding_table(Orientation::Ll);
+
+/// Table D.1's HL column, by neighbourhood.
+pub(crate) static ZERO_CODING_HL: [u8; 512] = zero_coding_table(Orientation::Hl);
+
+/// Table D.1's HH column, by neighbourhood.
+pub(crate) static ZERO_CODING_HH: [u8; 512] = zero_coding_table(Orientation::Hh);
+
+/// Neighbour `k`'s state in a [`SIGN_TABLE`] index, as Table D.2 reads it: 0
+/// insignificant, 1 significant and positive, −1 significant and negative.
+const fn signed(index: usize, k: usize) -> i32 {
+    if (index >> (2 * k)) & 1 == 0 {
+        0
+    } else if (index >> (2 * k + 1)) & 1 == 1 {
+        -1
+    } else {
+        1
+    }
+}
+
+/// Tables D.2 and D.3 at every state the four neighbours across a coefficient
+/// can be in, the context with its XOR bit at bit 7.
+///
+/// Index bit `2k` is neighbour `k`'s σ and bit `2k + 1` its χ, `k` 0 to 3 for
+/// above, left, right and below, which is how [`Packed::sign_at`]
+/// interleaves a row's [`CROSS`] bits of σ and χ.
+const fn sign_table() -> [u8; 256] {
+    let mut table = [0; 256];
+    let mut index = 0;
+    while index < 256 {
+        let h = sign_contribution(signed(index, 1), signed(index, 2));
+        let v = sign_contribution(signed(index, 0), signed(index, 3));
+        let (context, xor) = sign_coding_context(h, v);
+        // A sign context is at most 13, which leaves bit 7 to the XOR bit.
+        table[index] = context as u8 | (xor << 7);
+        index += 1;
+    }
+    table
+}
+
+/// [`sign_table`], evaluated when the crate is compiled.
+pub(crate) static SIGN_TABLE: [u8; 256] = sign_table();
+
+/// Row `r`'s eight neighbours in `word`, as an index of a zero-coding table.
+const fn neighbourhood(word: u64, r: usize) -> usize {
+    ((word >> (3 * r)) & NEIGHBOURS) as usize
+}
+
+/// One code-block's state while the passes run over it: a word to each
+/// column of each stripe, laid out as the comment above [`sigma`] says, and
+/// each coefficient's magnitude and the plane it is known to.
+pub(crate) struct Packed {
+    w: usize,
+    h: usize,
+    stripes: usize,
+    /// Words to a row of stripes: the code-block's columns and one on either
+    /// side of them. No coefficient is in the outer two, which no context
+    /// reads, so a coefficient at either edge tells its neighbours' words
+    /// with no bounds to check.
+    stride: usize,
+    /// `(stripes + 2) * stride` words, a row above the first stripe and one
+    /// below the last for the same reason.
+    words: Vec<u64>,
+    magnitude: Vec<u32>,
+    /// The **lowest bit-plane whose magnitude bit was actually decoded** for
+    /// each coefficient, which is not the same as the lowest plane the
+    /// code-block reached.
+    ///
+    /// It exists because E.1.1.2's reconstruction point is defined on the
+    /// interval a decoder *knows* a coefficient lies in, and on a truncated
+    /// stream that interval differs per coefficient. One that became
+    /// significant in a cleanup pass and never met a refinement pass is known
+    /// only to `[2^p, 2^(p+1))`, and reconstructing it at the midpoint of the
+    /// bottom plane instead puts it a quarter of its own magnitude low. A
+    /// block carries at most [`MAX_BIT_PLANES`] planes, so a plane fits a
+    /// byte.
+    known: Vec<u8>,
+    /// Table A.19 bit 3. Vertically causal context formation treats the next
+    /// stripe as insignificant, so a stripe can be decoded knowing nothing
+    /// below it, and only a stripe's last row has a neighbour there. So under
+    /// it a coefficient of a stripe's first row sets nothing in the words of
+    /// the stripe above, whose window row below stays clear, and causal and
+    /// not read the same tables.
+    causal: bool,
+    /// Table D.1 in this block's orientation.
+    zero_coding: &'static [u8; 512],
+    /// What forming the contexts has read, for `a_context_costs_one_state_word`.
+    #[cfg(test)]
+    tally: std::cell::Cell<Tally>,
+}
+
+/// What a code-block's context formation did, counted: the contexts formed
+/// and the state words read to form them.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Tally {
+    pub(crate) contexts: u64,
+    pub(crate) words_read: u64,
+}
+
+impl Packed {
+    pub(crate) fn new(w: usize, h: usize, orientation: Orientation, causal: bool) -> Packed {
+        let stripes = h.div_ceil(4);
+        let stride = w + 2;
+        Packed {
+            w,
+            h,
+            stripes,
+            stride,
+            words: vec![0; (stripes + 2) * stride],
+            magnitude: vec![0; w * h],
+            known: vec![0; w * h],
+            causal,
+            zero_coding: match orientation {
+                Orientation::Ll | Orientation::Lh => &ZERO_CODING_LL_LH,
+                Orientation::Hl => &ZERO_CODING_HL,
+                Orientation::Hh => &ZERO_CODING_HH,
+            },
+            #[cfg(test)]
+            tally: std::cell::Cell::new(Tally::default()),
+        }
+    }
+
+    /// The word of column `x` of stripe `stripe`.
+    const fn index(&self, x: usize, stripe: usize) -> usize {
+        (stripe + 1) * self.stride + x + 1
+    }
+
+    /// The rows stripe `stripe` holds: four, or what is left of the block in
+    /// its last. A stripe is four rows whatever the last one holds, and a row
+    /// past the block's bottom holds no coefficient, so nothing ever sets its
+    /// bits.
+    fn rows(&self, stripe: usize) -> usize {
+        (self.h - 4 * stripe).min(4)
+    }
+
+    /// The word at `i`, read to form a context: the one state read a context
+    /// costs.
+    fn word(&self, i: usize) -> u64 {
+        #[cfg(test)]
+        self.count(|tally| tally.words_read += 1);
+        self.words[i]
+    }
+
+    /// Table D.1's context for row `r` of the column whose word is at `i`, in
+    /// this block's orientation.
+    fn zero_coding_at(&self, i: usize, r: usize) -> usize {
+        #[cfg(test)]
+        self.count(|tally| tally.contexts += 1);
+        usize::from(self.zero_coding[neighbourhood(self.word(i), r)])
+    }
+
+    /// Tables D.2 and D.3 for row `r` of the column at `i`: the sign context
+    /// and its XOR bit.
+    fn sign_at(&self, i: usize, r: usize) -> (usize, u8) {
+        #[cfg(test)]
+        self.count(|tally| tally.contexts += 1);
+        let word = self.word(i);
+        let across = (word >> (3 * r)) & CROSS;
+        let signs = (word >> (CHI + 3 * r)) & CROSS;
+        let entry = SIGN_TABLE[((across >> 1) | signs) as usize];
+        (usize::from(entry & 0x7F), entry >> 7)
+    }
+
+    /// Table D.4's context for row `r` of the column at `i`.
+    fn refinement_at(&self, i: usize, r: usize) -> usize {
+        #[cfg(test)]
+        self.count(|tally| tally.contexts += 1);
+        let word = self.word(i);
+        magnitude_refinement_context(
+            u32::from(neighbourhood(word, r) != 0),
+            word & refined(r) == 0,
+        )
+    }
+
+    /// Marks row `r` of the column at `i` significant — the coefficient at
+    /// `at` — with its sign and the bit of the plane being coded, and sets its
+    /// bits in the windows of the words around it.
+    fn make_significant(&mut self, i: usize, at: usize, r: usize, negative: bool, plane: u32) {
+        let sign = |column: usize, row: usize| if negative { chi(column, row) } else { 0 };
+        let row = r + 1;
+        self.words[i] |= sigma(1, row) | sign(1, row);
+        self.words[i - 1] |= sigma(2, row) | sign(2, row);
+        self.words[i + 1] |= sigma(0, row) | sign(0, row);
+        if r == 0 && !self.causal {
+            // The stripe above reads this row as the one below its own.
+            let above = i - self.stride;
+            self.words[above - 1] |= sigma(2, 5);
+            self.words[above] |= sigma(1, 5) | sign(1, 5);
+            self.words[above + 1] |= sigma(0, 5);
+        }
+        if r == 3 {
+            // And the stripe below reads it as the one above its own.
+            let below = i + self.stride;
+            self.words[below - 1] |= sigma(2, 0);
+            self.words[below] |= sigma(1, 0) | sign(1, 0);
+            self.words[below + 1] |= sigma(0, 0);
+        }
+        self.magnitude[at] |= 1 << plane;
+        // At most 30, below `MAX_BIT_PLANES`, so the cast keeps every bit.
+        self.known[at] = plane as u8;
+    }
+
+    /// π is per bit-plane: cleared where a cleanup pass ends one.
+    fn clear_visited(&mut self) {
+        self.words.iter_mut().for_each(|word| *word &= !VISITED);
+    }
+
+    /// The signed coefficients, with the magnitude as `planes` bits.
+    fn coefficients(&self) -> Vec<i32> {
+        let mut out = Vec::with_capacity(self.w * self.h);
+        // A block is at least one coefficient wide, `decode_code_block` having
+        // returned before any state exists for one that is not; the `max`
+        // keeps `chunks_exact` from ever being handed a zero.
+        for (y, magnitudes) in self.magnitude.chunks_exact(self.w.max(1)).enumerate() {
+            let (first, row) = (self.index(0, y / 4), y % 4 + 1);
+            for (x, &m) in magnitudes.iter().enumerate() {
+                // The magnitude is at most `MAX_BIT_PLANES` bits, so it fits
+                // an `i32` beside its sign; the cast is not a truncation and
+                // `MAX_BIT_PLANES` is what makes that true.
+                let m = m as i32;
+                out.push(if self.words[first + x] & chi(1, row) != 0 {
+                    -m
+                } else {
+                    m
+                });
+            }
+        }
+        out
+    }
+
+    /// The decode's yield: the coefficients and, per coefficient, the plane
+    /// whose *half* E.1.1.2 reconstructs at — zero for anything insignificant,
+    /// which the dequantiser never reads because a coefficient that never
+    /// became significant stays at zero rather than at half a step.
+    fn into_decoded(self, planes: u32) -> Decoded {
+        Decoded {
+            coefficients: self.coefficients(),
+            half_planes: self.known,
+            planes,
+        }
+    }
+
+    #[cfg(test)]
+    fn count(&self, add: impl FnOnce(&mut Tally)) {
+        let mut tally = self.tally.get();
+        add(&mut tally);
+        self.tally.set(tally);
+    }
+}
+
+/// The packed state read coefficient by coefficient, for the tests that hold
+/// it to the transcribed [`Block`].
+#[cfg(test)]
+impl Packed {
+    /// The word and stripe row of `(x, y)`.
+    const fn place(&self, x: usize, y: usize) -> (usize, usize) {
+        (self.index(x, y / 4), y % 4)
+    }
+
+    /// `(σ, χ, π, refined)` at `(x, y)`, as [`Block::flags_at`] gives them.
+    pub(crate) fn flags_at(&self, x: usize, y: usize) -> (bool, bool, bool, bool) {
+        let (i, r) = self.place(x, y);
+        let word = self.words[i];
+        (
+            word & sigma(1, r + 1) != 0,
+            word & chi(1, r + 1) != 0,
+            word & pi(r) != 0,
+            word & refined(r) != 0,
+        )
+    }
+
+    /// The three contexts at `(x, y)` — Table D.1's, Tables D.2 and D.3's
+    /// with the XOR bit, and Table D.4's — each formed as the passes form it.
+    pub(crate) fn contexts_at(&self, x: usize, y: usize) -> (usize, (usize, u8), usize) {
+        let (i, r) = self.place(x, y);
+        (
+            self.zero_coding_at(i, r),
+            self.sign_at(i, r),
+            self.refinement_at(i, r),
+        )
+    }
+
+    /// What forming the contexts has read so far.
+    pub(crate) fn tally(&self) -> Tally {
+        self.tally.get()
+    }
+
+    /// Marks `(x, y)` significant with the given sign, as a pass does.
+    pub(crate) fn set_significant(&mut self, x: usize, y: usize, negative: bool) {
+        let (i, r) = self.place(x, y);
+        self.make_significant(i, y * self.w + x, r, negative, 0);
+    }
+
+    /// Marks `(x, y)` refined, as a refinement pass does.
+    pub(crate) fn set_refined(&mut self, x: usize, y: usize) {
+        let (i, r) = self.place(x, y);
+        self.words[i] |= refined(r);
+    }
+}
+
+/// One code-block's state as D.2 describes it, a flag a coefficient and a
+/// neighbourhood of eight read flag by flag: the transcription the decoder's
+/// [`Packed`] state replaced, kept for tests only.
+///
+/// The test encoder forms its contexts from it, so a round trip pits the
+/// packed decoder against an independent state rather than against itself
+/// (gap 17's lesson, this module's header), and
+/// `the_packed_contexts_are_the_transcribed_ones_at_every_coefficient` holds
+/// every context the packed state forms to this one's.
+#[cfg(test)]
 pub(crate) struct Block {
     w: usize,
     h: usize,
@@ -298,22 +705,10 @@ pub(crate) struct Block {
     /// Whether this coefficient has been magnitude-refined already, which is
     /// Table D.4's first-refinement distinction and is *not* σ.
     refined: Vec<bool>,
-    /// The **lowest bit-plane whose magnitude bit was actually decoded** for
-    /// this coefficient, which is not the same as the lowest plane the
-    /// code-block reached.
-    ///
-    /// It exists because E.1.1.2's reconstruction point is defined on the
-    /// interval a decoder *knows* a coefficient lies in, and on a truncated
-    /// stream that interval differs per coefficient. One that became
-    /// significant in a cleanup pass and never met a refinement pass is known
-    /// only to `[2^p, 2^(p+1))`, and reconstructing it at the midpoint of the
-    /// bottom plane instead puts it a quarter of its own magnitude low.
-    known: Vec<u32>,
     /// π: coded in the significance propagation pass of the current
     /// bit-plane, and therefore skipped by this plane's cleanup pass. Cleared
     /// at the end of every cleanup pass.
     visited: Vec<bool>,
-    magnitude: Vec<u32>,
     /// Table A.19 bit 3, and the row the current stripe stops at.
     ///
     /// Vertically causal context formation treats everything in the *next*
@@ -326,6 +721,7 @@ pub(crate) struct Block {
     stripe_end: usize,
 }
 
+#[cfg(test)]
 impl Block {
     pub(crate) fn new(w: usize, h: usize, orientation: Orientation) -> Block {
         let n = w * h;
@@ -336,16 +732,14 @@ impl Block {
             sigma: vec![false; n],
             negative: vec![false; n],
             refined: vec![false; n],
-            known: vec![0; n],
             visited: vec![false; n],
-            magnitude: vec![0; n],
             causal: false,
             stripe_end: usize::MAX,
         }
     }
 
     /// Turns on vertically causal context formation (Table A.19 bit 3).
-    fn set_causal(&mut self, causal: bool) {
+    pub(crate) fn set_causal(&mut self, causal: bool) {
         self.causal = causal;
     }
 
@@ -427,45 +821,41 @@ impl Block {
         magnitude_refinement_context(h + v + d, !self.refined[self.at(x, y)])
     }
 
-    /// Marks `(x, y)` significant with the given sign, setting the bit of the
-    /// plane being coded.
-    fn make_significant(&mut self, x: usize, y: usize, negative: bool, plane: u32) {
+    /// Marks `(x, y)` significant with the given sign, as a pass does.
+    pub(crate) fn set_significant(&mut self, x: usize, y: usize, negative: bool) {
         let i = self.at(x, y);
         self.sigma[i] = true;
         self.negative[i] = negative;
-        self.magnitude[i] |= 1 << plane;
-        self.known[i] = plane;
     }
 
-    /// The signed coefficients, with the magnitude as `planes` bits.
-    pub(crate) fn coefficients(&self) -> Vec<i32> {
-        self.magnitude
-            .iter()
-            .zip(&self.negative)
-            .map(|(&m, &neg)| {
-                // The magnitude is at most `MAX_BIT_PLANES` bits, so it fits
-                // an `i32` beside its sign; the cast is not a truncation and
-                // `MAX_BIT_PLANES` is what makes that true.
-                let m = m as i32;
-                if neg {
-                    -m
-                } else {
-                    m
-                }
-            })
-            .collect()
+    /// Marks `(x, y)` refined, as a refinement pass does.
+    pub(crate) fn set_refined(&mut self, x: usize, y: usize) {
+        let i = self.at(x, y);
+        self.refined[i] = true;
     }
 
-    /// Per coefficient, the plane whose *half* E.1.1.2 reconstructs at.
-    ///
-    /// Zero for anything insignificant, which the dequantiser never reads
-    /// because a coefficient that never became significant stays at zero
-    /// rather than at half a step.
-    pub(crate) fn half_planes(&self) -> Vec<u8> {
-        self.known
-            .iter()
-            .map(|&p| u8::try_from(p).unwrap_or(u8::MAX))
-            .collect()
+    /// `(σ, χ, π, refined)` at `(x, y)`, χ being the sign flag, true for
+    /// negative and set only beside σ.
+    pub(crate) fn flags_at(&self, x: usize, y: usize) -> (bool, bool, bool, bool) {
+        let i = self.at(x, y);
+        (
+            self.sigma[i],
+            self.negative[i],
+            self.visited[i],
+            self.refined[i],
+        )
+    }
+
+    /// The three contexts at `(x, y)` as a pass coding `(x, y)`'s stripe
+    /// forms them: Table D.1's, Tables D.2 and D.3's with the XOR bit, and
+    /// Table D.4's.
+    pub(crate) fn contexts_at(&mut self, x: usize, y: usize) -> (usize, (usize, u8), usize) {
+        self.enter_stripe(y - y % 4);
+        (
+            self.zero_coding(x, y),
+            self.sign_coding(x, y),
+            self.refinement(x, y),
+        )
     }
 
     /// Every `(x, y)` in D.2's scan order: stripes of four rows, column by
@@ -600,46 +990,54 @@ impl Coder<'_, '_> {
         }
     }
 
-    /// D.2.2: the sign of a coefficient that has just become significant.
+    /// D.2.2: the sign of row `r` of the column at `i`, which has just
+    /// become significant.
     ///
     /// In a raw pass this is **not** D.2.2's context-and-XOR decode. Equation
     /// (D-2) replaces the whole of it: "signbit = raw_value, where raw_value
     /// = 1 is a negative sign bit and raw_value = 0 is a positive sign bit".
     /// Running the XOR bit over a raw sign inverts roughly half the signs of
     /// every bypassed pass, which is a picture rather than an error.
-    fn sign(&mut self, block: &Block, x: usize, y: usize) -> bool {
+    fn sign(&mut self, block: &Packed, i: usize, r: usize) -> bool {
         if let Source::Raw(raw) = &mut self.source {
             return raw.bit() == 1;
         }
-        let (context, xorbit) = block.sign_coding(x, y);
+        let (context, xorbit) = block.sign_at(i, r);
         (self.decode(context) ^ xorbit) == 1
     }
 
     /// D.2.1: every insignificant coefficient with at least one significant
-    /// neighbour.
-    fn significance_pass(&mut self, block: &mut Block, plane: u32) {
-        for (top, rows, x) in block.stripes().collect::<Vec<_>>() {
-            block.enter_stripe(top);
-            for y in top..top + rows {
-                let i = block.at(x, y);
-                if block.sigma[i] {
+    /// neighbour, in D.2's scan order: stripes of four rows, column by column
+    /// within a stripe, top to bottom within a column.
+    fn significance_pass(&mut self, block: &mut Packed, plane: u32) {
+        for stripe in 0..block.stripes {
+            let (first, rows) = (block.index(0, stripe), block.rows(stripe));
+            for x in 0..block.w {
+                let i = first + x;
+                // Nothing significant in the column's window, so none of its
+                // coefficients has a significant neighbour.
+                if block.words[i] & WINDOW == 0 {
                     continue;
                 }
-                let (h, v, d) = block.neighbours(x, y);
-                // The "preferred neighbourhood": at least one of the eight.
-                // Equivalently a non-zero Table D.1 context, since all three
-                // of its mappings send the all-insignificant neighbourhood
-                // and only that one to context 0 — but the condition is D.2.1's
-                // and is written as D.2.1 words it rather than inferred from
-                // the table, so a change to one cannot silently move the other.
-                if h + v + d == 0 {
-                    continue;
-                }
-                block.visited[i] = true;
-                let context = zero_coding_context(block.orientation, h, v, d);
-                if self.decode(context) == 1 {
-                    let negative = self.sign(block, x, y);
-                    block.make_significant(x, y, negative, plane);
+                for r in 0..rows {
+                    let word = block.words[i];
+                    // The "preferred neighbourhood": at least one of the
+                    // eight. Equivalently a non-zero Table D.1 context, since
+                    // all three of its mappings send the all-insignificant
+                    // neighbourhood and only that one to context 0 — but the
+                    // condition is D.2.1's and is written as D.2.1 words it
+                    // rather than inferred from the table, so a change to one
+                    // cannot silently move the other.
+                    if word & sigma(1, r + 1) != 0 || neighbourhood(word, r) == 0 {
+                        continue;
+                    }
+                    block.words[i] |= pi(r);
+                    let context = block.zero_coding_at(i, r);
+                    if self.decode(context) == 1 {
+                        let negative = self.sign(block, i, r);
+                        let at = (4 * stripe + r) * block.w + x;
+                        block.make_significant(i, at, r, negative, plane);
+                    }
                 }
             }
         }
@@ -647,27 +1045,36 @@ impl Coder<'_, '_> {
 
     /// D.2.3: every coefficient that was already significant before this
     /// bit-plane's significance propagation pass.
-    fn refinement_pass(&mut self, block: &mut Block, plane: u32) {
-        for (top, rows, x) in block.stripes().collect::<Vec<_>>() {
-            block.enter_stripe(top);
-            for y in top..top + rows {
-                let i = block.at(x, y);
-                // π excludes the coefficients this plane's significance pass
-                // just took, which is the whole reason π exists: a
-                // coefficient that became significant a moment ago has no
-                // magnitude bit left in this plane to refine.
-                if !block.sigma[i] || block.visited[i] {
+    fn refinement_pass(&mut self, block: &mut Packed, plane: u32) {
+        for stripe in 0..block.stripes {
+            let (first, rows) = (block.index(0, stripe), block.rows(stripe));
+            for x in 0..block.w {
+                let i = first + x;
+                if block.words[i] & OWN == 0 {
                     continue;
                 }
-                let context = block.refinement(x, y);
-                let bit = self.decode(context);
-                block.refined[i] = true;
-                // The plane is now known whichever way the bit went: a zero
-                // narrows the interval exactly as a one does, and it is the
-                // interval E.1.1.2 reconstructs the midpoint of.
-                block.known[i] = plane;
-                if bit == 1 {
-                    block.magnitude[i] |= 1 << plane;
+                for r in 0..rows {
+                    let word = block.words[i];
+                    // π excludes the coefficients this plane's significance
+                    // pass just took, which is the whole reason π exists: a
+                    // coefficient that became significant a moment ago has no
+                    // magnitude bit left in this plane to refine.
+                    if word & sigma(1, r + 1) == 0 || word & pi(r) != 0 {
+                        continue;
+                    }
+                    let context = block.refinement_at(i, r);
+                    let bit = self.decode(context);
+                    block.words[i] |= refined(r);
+                    // The plane is now known whichever way the bit went: a
+                    // zero narrows the interval exactly as a one does, and it
+                    // is the interval E.1.1.2 reconstructs the midpoint of.
+                    let at = (4 * stripe + r) * block.w + x;
+                    // At most 30, below `MAX_BIT_PLANES`, so the cast keeps
+                    // every bit.
+                    block.known[at] = plane as u8;
+                    if bit == 1 {
+                        block.magnitude[at] |= 1 << plane;
+                    }
                 }
             }
         }
@@ -675,49 +1082,48 @@ impl Coder<'_, '_> {
 
     /// D.2.4: everything the other two passes did not code, with the
     /// run-length mode for a column of four that is entirely quiet.
-    fn cleanup_pass(&mut self, block: &mut Block, plane: u32) -> Result<(), Refusal> {
-        for (top, rows, x) in block.stripes().collect::<Vec<_>>() {
-            block.enter_stripe(top);
-            let mut y = top;
-            // The run-length mode. Four rows, none significant, none coded by
-            // this plane's significance pass, and every one of the four with
-            // an entirely insignificant neighbourhood — which is one decision
-            // instead of four, and is why a flat region costs almost nothing.
-            if rows == 4
-                && (top..top + 4).all(|y| {
-                    let i = block.at(x, y);
-                    let (h, v, d) = block.neighbours(x, y);
-                    !block.sigma[i] && !block.visited[i] && h + v + d == 0
-                })
-            {
-                if self.decode(RUN_LENGTH) == 0 {
-                    // All four stay insignificant, and not one of them cost a
-                    // decision of its own.
-                    continue;
+    fn cleanup_pass(&mut self, block: &mut Packed, plane: u32) -> Result<(), Refusal> {
+        let width = block.w;
+        for stripe in 0..block.stripes {
+            let (first, rows) = (block.index(0, stripe), block.rows(stripe));
+            for x in 0..width {
+                let i = first + x;
+                let at = |r: usize| (4 * stripe + r) * width + x;
+                let mut from = 0;
+                // The run-length mode. Four rows, none significant, none coded
+                // by this plane's significance pass, and every one of the four
+                // with an entirely insignificant neighbourhood — which is one
+                // decision instead of four, and is why a flat region costs
+                // almost nothing. The four neighbourhoods and the four
+                // coefficients together are the whole window.
+                if rows == 4 && block.words[i] & (WINDOW | VISITED) == 0 {
+                    if self.decode(RUN_LENGTH) == 0 {
+                        // All four stay insignificant, and not one of them
+                        // cost a decision of its own.
+                        continue;
+                    }
+                    // Two UNIFORM bits, most significant first, locating the
+                    // first significant coefficient of the four.
+                    let r =
+                        usize::from(self.decode(UNIFORM)) * 2 + usize::from(self.decode(UNIFORM));
+                    let negative = self.sign(block, i, r);
+                    block.make_significant(i, at(r), r, negative, plane);
+                    from = r + 1;
                 }
-                // Two UNIFORM bits, most significant first, locating the
-                // first significant coefficient of the four.
-                let first =
-                    usize::from(self.decode(UNIFORM)) * 2 + usize::from(self.decode(UNIFORM));
-                y = top + first;
-                let negative = self.sign(block, x, y);
-                block.make_significant(x, y, negative, plane);
-                y += 1;
-            }
-            for y in y..top + rows {
-                let i = block.at(x, y);
-                if block.sigma[i] || block.visited[i] {
-                    continue;
-                }
-                let context = block.zero_coding(x, y);
-                if self.decode(context) == 1 {
-                    let negative = self.sign(block, x, y);
-                    block.make_significant(x, y, negative, plane);
+                for r in from..rows {
+                    if block.words[i] & (sigma(1, r + 1) | pi(r)) != 0 {
+                        continue;
+                    }
+                    let context = block.zero_coding_at(i, r);
+                    if self.decode(context) == 1 {
+                        let negative = self.sign(block, i, r);
+                        block.make_significant(i, at(r), r, negative, plane);
+                    }
                 }
             }
         }
         // π is per bit-plane, and this is where the plane ends.
-        block.visited.iter_mut().for_each(|v| *v = false);
+        block.clear_visited();
 
         if self.segmentation_symbols {
             // D.5, and the only free integrity check in the format. Four
@@ -759,6 +1165,35 @@ pub(crate) fn decode_code_block(
     style: CodingStyle,
     contexts: &mut MqContexts,
     work: &mut u64,
+) -> Result<Decoded, Refusal> {
+    decode_code_block_observed(
+        segments,
+        width,
+        height,
+        passes,
+        orientation,
+        style,
+        contexts,
+        work,
+        |_, _| {},
+    )
+}
+
+/// [`decode_code_block`], handing `after_pass` the block's state after each
+/// coding pass it runs, with the pass's index: how the tests watch the
+/// passes, and a closure that does nothing on every other path.
+// [`decode_code_block`]'s eight, and the observer.
+#[allow(clippy::too_many_arguments, reason = "T.800 D.4's own parameter list")]
+pub(crate) fn decode_code_block_observed(
+    segments: &[Segment],
+    width: u32,
+    height: u32,
+    passes: u32,
+    orientation: Orientation,
+    style: CodingStyle,
+    contexts: &mut MqContexts,
+    work: &mut u64,
+    mut after_pass: impl FnMut(u32, &Packed),
 ) -> Result<Decoded, Refusal> {
     if width == 0 || height == 0 || passes == 0 {
         return Ok(Decoded::default());
@@ -810,8 +1245,12 @@ pub(crate) fn decode_code_block(
     // returns to Table D.7's states rather than to T.88's zero, which is the
     // half of `set_state` that had to exist for this line to be right.
     contexts.reset();
-    let mut block = Block::new(width as usize, height as usize, orientation);
-    block.set_causal(style.vertically_causal);
+    let mut block = Packed::new(
+        width as usize,
+        height as usize,
+        orientation,
+        style.vertically_causal,
+    );
 
     // One reader per codeword segment (B.10.7). With neither Table A.19 bit
     // set there is exactly one, holding every byte, and this loop is the loop
@@ -859,14 +1298,11 @@ pub(crate) fn decode_code_block(
                 // every block as noise.
                 coder.contexts.reset();
             }
+            after_pass(i, &block);
             i += 1;
         }
     }
-    Ok(Decoded {
-        coefficients: block.coefficients(),
-        half_planes: block.half_planes(),
-        planes,
-    })
+    Ok(block.into_decoded(planes))
 }
 
 /// The Table A.19 code-block style bits that change how decisions are read.
@@ -1040,8 +1476,6 @@ pub(crate) mod encoder {
     };
     use crate::mq::encoder::MqEncoder;
 
-    /// Encodes `values` — signed coefficients whose magnitudes fit `planes`
-    /// bits — as `3 * planes - 2` coding passes.
     /// Table D.7's initial states, which the coder starts from and which
     /// `RESET` returns to at every coding pass boundary.
     fn initial_states(mq: &mut MqEncoder) {
@@ -1053,6 +1487,8 @@ pub(crate) mod encoder {
         }
     }
 
+    /// Encodes `values` — signed coefficients whose magnitudes fit `planes`
+    /// bits — as `3 * planes - 2` coding passes.
     pub(crate) fn encode_code_block(
         values: &[i32],
         w: usize,
@@ -1060,6 +1496,21 @@ pub(crate) mod encoder {
         planes: u32,
         orientation: Orientation,
         style: super::CodingStyle,
+    ) -> (Vec<u8>, u32) {
+        encode_code_block_observed(values, w, h, planes, orientation, style, |_, _| {})
+    }
+
+    /// [`encode_code_block`], handing `after_pass` the transcribed state
+    /// after each coding pass it codes, with the pass's index: the state the
+    /// decoder's must be in after the same pass.
+    pub(crate) fn encode_code_block_observed(
+        values: &[i32],
+        w: usize,
+        h: usize,
+        planes: u32,
+        orientation: Orientation,
+        style: super::CodingStyle,
+        mut after_pass: impl FnMut(u32, &mut super::Block),
     ) -> (Vec<u8>, u32) {
         let segmentation_symbols = style.segmentation_symbols;
         let mut state = super::Block::new(w, h, orientation);
@@ -1178,6 +1629,7 @@ pub(crate) mod encoder {
             if style.reset_contexts {
                 initial_states(&mut mq);
             }
+            after_pass(i, &mut state);
         }
         (mq.flush(), passes)
     }

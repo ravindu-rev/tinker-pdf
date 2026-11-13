@@ -342,6 +342,18 @@ coefficients into a plausible image — so everything not implemented is refused
 by name, and two integrity checks (packet lengths, the D.5 segmentation
 symbol) catch a mis-parse before any pixel exists.
 
+**Tier-1 forms a context from one word.** A code-block's state is a `u64`
+word to each column of each four-row stripe: σ over a window three columns
+wide and six rows tall around the column's four coefficients, the signs D.3
+reads, and the four coefficients' π and refined flags. So each context of
+Tables D.1, D.3 and D.4 is a mask and a lookup, in tables the crate builds
+from its transcriptions of those tables when it compiles, and a coefficient
+that becomes significant sets its bits in the words around it; magnitudes
+and the plane each coefficient is known to stay one a coefficient. The test
+encoder keeps the transcribed state, a flag a coefficient, and the packed one
+is held to it at every coefficient after every pass and at every
+neighbourhood a word can hold ([design](../design/jpx-speed.md)).
+
 **A decode can drop resolution levels.** `jpx_decode_request` takes a
 `JpxRequest` whose `discard` drops the top levels of every tile-component:
 tier-1 decodes no code-block of a dropped resolution, the inverse wavelet
