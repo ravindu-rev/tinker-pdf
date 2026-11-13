@@ -516,6 +516,35 @@ so a light render draws as it did; two spaces differing only in a name convert
 alike and compare unequal, and no comparison in the engine compares two
 separations.
 
+**The resources answer what a colour paints by colorant.** A page's
+resources answer `FontSource::colorants` — asked only for a device that
+composites colorants — from the space as selected, as `resolve_ink` asks it,
+and the colour's light as painted in the intent in force (the design's
+"Names on plates"):
+DeviceCMYK is its four process colorants at its own components, a `k` under
+a `/DefaultCMYK` among them (H-135); a `/Separation` names its colorant at its
+tint, and a plain `/DeviceN` each of its colorants, `/None` discarded and a
+process colorant under its own name, beside the process ink the whole colour
+paints through its alternate — a DeviceCMYK alternate's own components, any
+other alternate's light turned into ink with maximum undercolour removal;
+`/All` is one tint for every colorant and never reverts, and a space naming
+only `/None` paints nothing. An `NChannel` space answers component by
+component: a reserved process name, or a component a CMYK `/Process` names,
+under its process colorant's name; each spot with its own process ink, through
+its `/Colorants` space or, without one, the space's tint transform at its tint
+alone; and the components of any other process space converted together
+through it, those its names leave out at the space's initial values, to light
+and to ink. An `/Indexed` colour answers as its palette entry in the base, an
+uncoloured pattern's components as its underlying space, and every space that
+names no colorant — and a separation whose names cannot all be read — answers
+none, its light being what a device turns into ink
+(`the_seam_answers_each_spaces_colorants`). A recorded event counts its
+state's colorants — their record, their tints and every colorant's name — in
+`Event::kept_bytes`, with each state that carries them as a colour's source
+is counted, so `MAX_DISPLAY_LIST_BYTES` and a kept form's
+`form_recording_bytes` bound what a recording holds with them
+(`a_recorded_state_counts_its_colorants`).
+
 **`/Lab` composites in Lab too.** Its components are not in the unit
 interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`
 encodes them into bytes (`L/100`, `(a + 128)/255`, `(b + 128)/255`) and

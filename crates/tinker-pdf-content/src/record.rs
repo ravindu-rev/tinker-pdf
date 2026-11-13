@@ -475,7 +475,8 @@ impl Event {
 
     /// What this event holds, in bytes: its own size, and everything it
     /// copied to the heap — the state it carries with that state's heap
-    /// parts, its path at `size_of::<PathSegment>()` a segment, and every
+    /// parts, its colours' sources and colorants among them, its path at
+    /// `size_of::<PathSegment>()` a segment, and every
     /// name, string, inline image and mask-group stream it copies. The
     /// stored parameters a state shares are not its own, and are not
     /// counted.
@@ -496,6 +497,24 @@ impl Event {
                     .saturating_add(source.components.len().saturating_mul(size_of::<f64>()))
             })
         };
+        // A colour's colorants likewise: their record, their list of tints and
+        // each colorant's name.
+        let colorants = |c: &Option<std::sync::Arc<crate::ColorantTints>>| {
+            c.as_deref().map_or(0, |c| {
+                let names = c
+                    .tints
+                    .iter()
+                    .map(|tint| tint.name.len())
+                    .fold(0usize, usize::saturating_add);
+                size_of::<crate::ColorantTints>()
+                    .saturating_add(
+                        c.tints
+                            .capacity()
+                            .saturating_mul(size_of::<crate::ColorantTint>()),
+                    )
+                    .saturating_add(names)
+            })
+        };
         let state = |s: &Option<Box<GraphicsState>>| {
             s.as_deref().map_or(0, |s| {
                 size_of::<GraphicsState>()
@@ -507,6 +526,8 @@ impl Event {
                     .saturating_add(bytes(&s.text.font))
                     .saturating_add(source(&s.fill_source))
                     .saturating_add(source(&s.stroke_source))
+                    .saturating_add(colorants(&s.fill_colorants))
+                    .saturating_add(colorants(&s.stroke_colorants))
             })
         };
         let path = |p: &[PathSegment]| p.len().saturating_mul(size_of::<PathSegment>());

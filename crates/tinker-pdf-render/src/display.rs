@@ -103,8 +103,9 @@ pub const MAX_DISPLAY_LIST_BYTES: usize = 64 << 20;
 /// What one recorded event holds, in bytes, as [`MAX_DISPLAY_LIST_BYTES`]
 /// counts it: its own size, and everything it copied to the heap
 /// ([`Event::kept_bytes`], the one count a kept form's recording is bounded
-/// by too). The stored parameters its state shares are the recorder's to
-/// count, once per change.
+/// by too), its colours' colorants with each state that carries them. The
+/// stored parameters its state shares are the recorder's to count, once per
+/// change.
 #[must_use]
 pub fn kept_bytes(event: &Event) -> usize {
     event.kept_bytes()
@@ -662,7 +663,7 @@ impl Device for DisplayRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tinker_pdf_content::Matrix;
+    use tinker_pdf_content::{ColorantKind, ColorantTint, ColorantTints, Matrix};
 
     /// A fill of `segments` segments, and what one recording of it holds.
     fn fill(segments: usize) -> (Vec<PathSegment>, usize) {
@@ -760,6 +761,81 @@ mod tests {
 
         recorder.fill_path(&path, &GraphicsState::new(Matrix::IDENTITY), false);
         assert_eq!(recorder.kept(), 6 * each + 2 * stored);
+    }
+
+    /// **A recorded state counts its colorants** (RC-04.7), with each event
+    /// that carries them, as a colour's source is: each fill carrying one
+    /// colour's colorants counts their record, their list of tints and every
+    /// colorant's name; a stroke colour's are counted beside the fill's, the
+    /// same colorants shared by both counted with each; a spot's name by its
+    /// own length; a state with none counts nothing; and colorants that pass
+    /// the budget overflow the recording as any other bytes do, so
+    /// `MAX_DISPLAY_LIST_BYTES` bounds what a recording holds with them.
+    #[test]
+    fn a_recorded_state_counts_its_colorants() {
+        use core::mem::size_of;
+        let (path, each) = fill(10);
+        let process = Arc::new(ColorantTints::device_cmyk([1, 2, 3, 4]));
+        let process_bytes = size_of::<ColorantTints>()
+            + process.tints.capacity() * size_of::<ColorantTint>()
+            + b"CyanMagentaYellowBlack".len();
+        let mut state = GraphicsState::new(Matrix::IDENTITY);
+        state.fill_colorants = Some(Arc::clone(&process));
+        let mut recorder = DisplayRecorder::new();
+        for _ in 0..3 {
+            recorder.fill_path(&path, &state, false);
+        }
+        assert_eq!(
+            recorder.kept(),
+            3 * (each + process_bytes),
+            "each fill counts the colorants it carries"
+        );
+
+        state.stroke_colorants = Some(Arc::clone(&process));
+        recorder.stroke_path(&path, &state);
+        assert_eq!(
+            recorder.kept(),
+            4 * each + 5 * process_bytes,
+            "the stroke colour's beside the fill's"
+        );
+
+        let spot = Arc::new(ColorantTints {
+            kind: ColorantKind::Colorants,
+            tints: vec![ColorantTint {
+                name: Arc::from(&b"PANTONE 131"[..]),
+                tint: 200,
+                alone: None,
+            }],
+            alternate: Some([0, 100, 200, 0]),
+            process: None,
+        });
+        let spot_bytes = size_of::<ColorantTints>()
+            + spot.tints.capacity() * size_of::<ColorantTint>()
+            + b"PANTONE 131".len();
+        state.fill_colorants = Some(spot);
+        state.stroke_colorants = None;
+        recorder.fill_path(&path, &state, false);
+        recorder.fill_path(&path, &state, false);
+        assert_eq!(
+            recorder.kept(),
+            6 * each + 5 * process_bytes + 2 * spot_bytes,
+            "a spot's name counted by its length"
+        );
+
+        recorder.fill_path(&path, &GraphicsState::new(Matrix::IDENTITY), false);
+        assert_eq!(
+            recorder.kept(),
+            7 * each + 5 * process_bytes + 2 * spot_bytes,
+            "a state with none counts nothing"
+        );
+
+        // A budget the fill's bytes fit and its colorants do not.
+        let mut tight = DisplayRecorder::new().with_budget(each + process_bytes - 1);
+        let mut coloured = GraphicsState::new(Matrix::IDENTITY);
+        coloured.fill_colorants = Some(Arc::new(ColorantTints::device_cmyk([9, 9, 9, 9])));
+        tight.fill_path(&path, &coloured, false);
+        assert!(tight.overflowed(), "the colorants pass the budget");
+        assert!(tight.take().is_empty(), "and nothing is kept");
     }
 
     /// What an event holds counts what it copied: an inline image's data, a

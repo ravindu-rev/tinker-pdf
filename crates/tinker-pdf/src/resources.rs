@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use tinker_pdf_color::{ColorSpace, Colorant, Colorants, Function, Process};
 use tinker_pdf_content::{
-    Device, DeviceDefaults, FontSource, Layer, MarkedProps, Matrix, PathSegment, Rgb,
+    ColorantKind, ColorantTint, ColorantTints, Device, DeviceDefaults, FontSource, Layer,
+    MarkedProps, Matrix, PathSegment, Rgb,
 };
 use tinker_pdf_cos::{
     decode_text_string, font as cos_font, limits, pages as cos_pages, Cached, CosDocument,
@@ -3332,6 +3333,25 @@ impl FontSource for PageResources {
                 .named_space(space, Answer::Painted, tinker_pdf_render::color_family)
                 .unwrap_or(tinker_pdf_content::ColorFamily::Other),
         }
+    }
+
+    fn colorants(
+        &self,
+        space: &[u8],
+        components: &[f64],
+        intent: tinker_pdf_content::RenderingIntent,
+    ) -> Option<Arc<ColorantTints>> {
+        // The colour's light as painted, in the intent in force: what a
+        // space reverting as a whole through an alternate other than
+        // DeviceCMYK paints, turned into ink.
+        let light = self.resolve_color(space, components, intent)?;
+        // The space as selected, as `resolve_ink` asks: a DeviceCMYK colour
+        // under a `/DefaultCMYK` keeps its own components on the process
+        // colorants, H-135's default, which the process plates inherit.
+        self.named_space(space, Answer::Selected, |selected| {
+            colorant_tints(selected, components, (light.r, light.g, light.b), 0)
+        })?
+        .map(Arc::new)
     }
 
     fn initial_color(&self, space: &[u8]) -> Option<Vec<f64>> {
@@ -7026,6 +7046,244 @@ pub(crate) fn device_n_names(doc: &CosDocument, items: &[Object]) -> Vec<Vec<u8>
         .collect()
 }
 
+/// The four process colorants of a CMYK device, by the names 8.6.6.4 reserves
+/// for them, in DeviceCMYK's order.
+const PROCESS_NAMES: [&[u8]; 4] = [b"Cyan", b"Magenta", b"Yellow", b"Black"];
+
+/// A tint as a byte, `round(255 × clamp(tint, 0, 1))` as the interpreter
+/// makes `k`'s, and 0 for one that is not finite.
+fn tint_byte(tint: f64) -> u8 {
+    if tint.is_finite() {
+        (tint.clamp(0.0, 1.0) * 255.0).round() as u8
+    } else {
+        0
+    }
+}
+
+/// `values`' first four as bytes: a DeviceCMYK colour's ink.
+fn ink_bytes(values: &[f64]) -> [u8; 4] {
+    let at = |i: usize| tint_byte(values.get(i).copied().unwrap_or(0.0));
+    [at(0), at(1), at(2), at(3)]
+}
+
+/// The process ink `alternate` paints for `values` of its own: a DeviceCMYK
+/// alternate's own components (an ink render keeps them, H-135), and any
+/// other's light — `light` — turned into ink as an ink canvas turns light,
+/// with maximum undercolour removal.
+fn process_ink(alternate: &ColorSpace, values: &[f64], light: (u8, u8, u8)) -> [u8; 4] {
+    if *alternate == ColorSpace::DeviceCmyk {
+        return ink_bytes(values);
+    }
+    let (c, m, y, k) = tinker_pdf_raster::canvas::rgb_to_cmyk(light.0, light.1, light.2);
+    [c, m, y, k]
+}
+
+/// Whether a process space is a CMYK one, whose components paint the
+/// process colorants themselves (8.6.6.5): DeviceCMYK, or a four-component
+/// space — a CMYK `ICCBased` profile, read or approximated.
+fn is_cmyk_process(space: &ColorSpace) -> bool {
+    matches!(
+        space,
+        ColorSpace::DeviceCmyk
+            | ColorSpace::Icc { components: 4, .. }
+            | ColorSpace::Approximated { components: 4 }
+    )
+}
+
+/// What a colour of `space`, as selected, at `components` paints by colorant
+/// (8.6.6.4, 8.6.6.5; `docs/design/overprint-separations.md`, "Names on
+/// plates"), `light` the colour as painted; `None` for a space that names no
+/// colorant of its own — a device space but DeviceCMYK, a CIE-based or ICC
+/// one, a coloured pattern's — and for a separation whose names could not
+/// all be read, both painting their light.
+///
+/// DeviceCMYK is its own four process colorants. An `/Indexed` colour is
+/// its palette entry in the base (8.6.6.3), and an uncoloured pattern's
+/// components are its underlying space's (8.7.3.2), each answered as that
+/// space answers. A `/Separation` or plain `/DeviceN` names its colorants,
+/// `/None` discarded, each at its tint, beside the process ink its alternate
+/// paints for the whole colour; `/All` is one tint for every colorant, and a
+/// space naming only `/None` paints nothing and never reverts. An `NChannel`
+/// space is read component by component: a reserved process name, or a
+/// component a CMYK `/Process` names, paints its process colorant; a spot
+/// carries its own process ink, through its `/Colorants` space or, without
+/// one, the space's tint transform at its tint alone; and the components of
+/// any other process space convert together through it, those the names
+/// leave out at its initial values, to light and the light to ink.
+fn colorant_tints(
+    space: &ColorSpace,
+    components: &[f64],
+    light: (u8, u8, u8),
+    depth: u32,
+) -> Option<ColorantTints> {
+    if depth > 8 {
+        return None;
+    }
+    match space {
+        ColorSpace::DeviceCmyk => Some(ColorantTints::device_cmyk(ink_bytes(components))),
+        ColorSpace::Indexed { base, lookup, high } => {
+            // 8.6.6.3, as `to_rgb` reads the palette.
+            let index = components
+                .first()
+                .copied()
+                .unwrap_or(0.0)
+                .clamp(0.0, f64::from(*high))
+                .round() as usize;
+            let n = base.components();
+            let start = index.saturating_mul(n);
+            let entry: Vec<f64> = (0..n)
+                .map(|i| lookup.get(start + i).map_or(0.0, |b| f64::from(*b) / 255.0))
+                .collect();
+            colorant_tints(base, &entry, light, depth + 1)
+        }
+        ColorSpace::Pattern { base: Some(base) } => {
+            colorant_tints(base, components, light, depth + 1)
+        }
+        ColorSpace::Separation {
+            components: count,
+            alternate,
+            tint,
+            colorants,
+        } => separation_tints(*count, alternate, tint, colorants, components, light),
+        _ => None,
+    }
+}
+
+/// [`colorant_tints`] for a `/Separation` or `/DeviceN` space.
+fn separation_tints(
+    count: usize,
+    alternate: &ColorSpace,
+    tint: &Function,
+    colorants: &Colorants,
+    components: &[f64],
+    light: (u8, u8, u8),
+) -> Option<ColorantTints> {
+    let names = &colorants.names;
+    if names.len() != count {
+        return None;
+    }
+    let at = |i: usize| components.get(i).copied().unwrap_or(0.0);
+    let named = |name: &[u8], tint: f64, alone: Option<[u8; 4]>| ColorantTint {
+        name: Arc::from(name),
+        tint: tint_byte(tint),
+        alone,
+    };
+    let none = || ColorantTints {
+        kind: ColorantKind::None,
+        tints: Vec::new(),
+        alternate: None,
+        process: None,
+    };
+    match names.as_slice() {
+        // 8.6.6.4: every colorant of the device at the one tint.
+        [Colorant::All] => {
+            return Some(ColorantTints {
+                kind: ColorantKind::All,
+                tints: vec![named(b"All", at(0), None)],
+                alternate: None,
+                process: None,
+            })
+        }
+        // 8.6.6.4 and 8.6.6.5: nothing, and never the alternate.
+        _ if names.iter().all(|name| *name == Colorant::None) => return Some(none()),
+        _ => {}
+    }
+    if !colorants.n_channel {
+        let tints = names
+            .iter()
+            .enumerate()
+            .filter_map(|(i, name)| match name {
+                Colorant::Named(name) => Some(named(name, at(i), None)),
+                Colorant::All | Colorant::None => None,
+            })
+            .collect();
+        return Some(ColorantTints {
+            kind: ColorantKind::Colorants,
+            tints,
+            alternate: Some(process_ink(alternate, &tint.eval(components), light)),
+            process: None,
+        });
+    }
+
+    // NChannel: each component by itself (8.6.6.5).
+    let mut tints = Vec::new();
+    let process = colorants.process.as_ref();
+    let cmyk = process.is_none_or(|process| is_cmyk_process(&process.space));
+    let mut process_values = match process {
+        Some(process) if !cmyk => Some(process.space.initial()),
+        _ => None,
+    };
+    let mut converts = false;
+    for (i, name) in names.iter().enumerate() {
+        let Colorant::Named(name) = name else {
+            continue;
+        };
+        if let Some(reserved) = PROCESS_NAMES
+            .iter()
+            .find(|reserved| **reserved == name.as_slice())
+        {
+            tints.push(named(reserved, at(i), None));
+            continue;
+        }
+        if let Some(index) = colorants.process_component(name) {
+            match process_values.as_mut() {
+                // A component of another process space, converted with the
+                // rest through it.
+                Some(values) => {
+                    if let Some(slot) = values.get_mut(index) {
+                        *slot = at(i);
+                        converts = true;
+                    }
+                }
+                // A CMYK process space's component paints its process
+                // colorant.
+                None => {
+                    if let Some(process_name) = PROCESS_NAMES.get(index) {
+                        tints.push(named(process_name, at(i), None));
+                    }
+                }
+            }
+            continue;
+        }
+        // A spot: the colorant alone, through its own `/Colorants` space, or
+        // the space's tint transform at its tint with every other component
+        // at zero.
+        let alone = match colorants.separation(name) {
+            Some(ColorSpace::Separation {
+                alternate: own,
+                tint: own_tint,
+                ..
+            }) => {
+                let values = own_tint.eval(&[at(i)]);
+                process_ink(own, &values, own.to_rgb(&values))
+            }
+            _ => {
+                let mut only = vec![0.0; count];
+                if let Some(slot) = only.get_mut(i) {
+                    *slot = at(i);
+                }
+                let values = tint.eval(&only);
+                process_ink(alternate, &values, alternate.to_rgb(&values))
+            }
+        };
+        tints.push(named(name, at(i), Some(alone)));
+    }
+    let process = match (process, process_values) {
+        (Some(process), Some(values)) if converts => {
+            let (r, g, b) = process.space.to_rgb(&values);
+            let (c, m, y, k) = tinker_pdf_raster::canvas::rgb_to_cmyk(r, g, b);
+            Some([c, m, y, k])
+        }
+        _ => None,
+    };
+    Some(ColorantTints {
+        kind: ColorantKind::NChannel,
+        tints,
+        alternate: None,
+        process,
+    })
+}
+
 /// A `/Separation` (`separation`) or `/DeviceN` space array's colorants as
 /// the colour model keeps them (8.6.6.4, 8.6.6.5): [`separation_name`]'s one
 /// or [`device_n_names`]' each, `/None` told apart in both and a
@@ -7479,7 +7737,7 @@ fn scale(outline: &Outline, factor: f64) -> Outline {
 mod tests {
     use super::{expand_inline_abbreviations, Answer, Contents, PageResources, Remembered};
     use tinker_pdf_color::{ColorSpace, Colorant};
-    use tinker_pdf_content::FontSource;
+    use tinker_pdf_content::{ColorantKind, FontSource};
     use tinker_pdf_cos::{Name, ObjRef, Object};
 
     /// An image's colour is converted once however many pixels repeat it, and
@@ -8326,6 +8584,213 @@ trailer\n<< /Size 8 /Root 1 0 R >>\n%%EOF\n"
             res.parse_space(&own_alternate, 0, b"Own").is_none(),
             "no reader finishes a space that is its own alternate"
         );
+    }
+
+    /// The tints a colorants answer holds, by name.
+    fn tints_by_name(answer: &tinker_pdf_content::ColorantTints) -> Vec<(Vec<u8>, u8)> {
+        answer
+            .tints
+            .iter()
+            .map(|tint| (tint.name.to_vec(), tint.tint))
+            .collect()
+    }
+
+    /// Light turned into ink, as an ink canvas turns it.
+    fn ink_of(r: u8, g: u8, b: u8) -> [u8; 4] {
+        let (c, m, y, k) = tinker_pdf_raster::canvas::rgb_to_cmyk(r, g, b);
+        [c, m, y, k]
+    }
+
+    /// **The seam answers each space's colorants** (RC-04.7) as the design's
+    /// "Names on plates" reads 8.6.6.4 and 8.6.6.5: DeviceCMYK is its own
+    /// four process colorants, a `k` under a `/DefaultCMYK` among them (H-135);
+    /// a `/Separation` names its colorant at its tint, beside the process ink
+    /// its alternate paints for the whole colour — a DeviceCMYK alternate's
+    /// own components, another's light turned into ink; a `/DeviceN` naming a
+    /// process colorant names it, `/None` discarded; `/All` is one tint for
+    /// everything and `/None` nothing; an `NChannel` space paints a CMYK
+    /// `/Process`'s components as process colorants and converts an RGB
+    /// one's together, each spot carrying its own ink alone; an `/Indexed`
+    /// colour answers as its palette entry in the base, an uncoloured
+    /// pattern's as its underlying space; and a space naming no colorant, or
+    /// one whose names cannot all be read, answers none.
+    #[test]
+    fn the_seam_answers_each_spaces_colorants() {
+        let ramp =
+            |c1: &str| format!("<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0 0] /C1 [{c1}] /N 1 >>");
+        let rgb_ramp =
+            |c1: &str| format!("<< /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [{c1}] /N 1 >>");
+        let spaces = format!(
+            "/DefaultCMYK [/ICCBased 5 0 R] \
+             /Sep [/Separation /Gold /DeviceCMYK {gold}] \
+             /SepRgb [/Separation /Teal /DeviceRGB {teal}] \
+             /DNp [/DeviceN [/Cyan /Spot1 /None] /DeviceCMYK {first}] \
+             /All [/Separation /All /DeviceCMYK {gold}] \
+             /None [/Separation /None /DeviceCMYK {gold}] \
+             /NoneN [/DeviceN [/None /None] /DeviceCMYK {gold}] \
+             /NCmyk [/DeviceN [/PCyan /Spot2 /Black] /DeviceCMYK {first} \
+                << /Subtype /NChannel \
+                   /Process << /ColorSpace /DeviceCMYK /Components [/PCyan /PMag /PYel /PBlk] >> \
+                   /Colorants << /Spot2 [/Separation /Spot2 /DeviceCMYK {yellow}] >> >>] \
+             /NRgb [/DeviceN [/PR /PG /PB /Red] /DeviceRGB {white} \
+                << /Subtype /NChannel \
+                   /Process << /ColorSpace /DeviceRGB /Components [/PR /PG /PB] >> \
+                   /Colorants << /Red [/Separation /Red /DeviceRGB {red}] >> >>] \
+             /NRgbPart [/DeviceN [/PR /Red] /DeviceRGB {white} \
+                << /Subtype /NChannel \
+                   /Process << /ColorSpace /DeviceRGB /Components [/PR /PG /PB] >> \
+                   /Colorants << /Red [/Separation /Red /DeviceRGB {red}] >> >>] \
+             /Idx [/Indexed [/DeviceN [/Gold /Silver] /DeviceCMYK {first}] 1 <00FF8040>] \
+             /Pat [/Pattern [/Separation /Gold /DeviceCMYK {gold}]] \
+             /Cal [/CalRGB << >>] \
+             /Bad [/DeviceN [/A 5] /DeviceCMYK {first}]",
+            gold = ramp("0 0.5 1 0"),
+            teal = rgb_ramp("0 0.5 0.5"),
+            first = ramp("1 0 0 0.5"),
+            yellow = ramp("0 0 1 0"),
+            red = rgb_ramp("1 0 0"),
+            white = rgb_ramp("1 1 1"),
+        );
+        let content = "0 0 1 1 re f";
+        let bytes = format!(
+            "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10]\n\
+   /Resources << /ColorSpace << {spaces} >> >> /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
+5 0 obj\n<< /N 4 /Length 0 >>\nstream\n\nendstream\nendobj\n\
+trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
+            content.len() + 1
+        );
+        let doc = crate::Document::open(bytes.into_bytes()).expect("it opens");
+        let page = doc.page(0).expect("a page");
+        let res = PageResources::new(&page.doc, &page.inner, None);
+        let answer = |space: &[u8], components: &[f64]| {
+            res.colorants(
+                space,
+                components,
+                tinker_pdf_content::RenderingIntent::RelativeColorimetric,
+            )
+        };
+        let names = |pairs: &[(&[u8], u8)]| -> Vec<(Vec<u8>, u8)> {
+            pairs
+                .iter()
+                .map(|(name, tint)| (name.to_vec(), *tint))
+                .collect()
+        };
+        let cmyk = |c: u8, m: u8, y: u8, k: u8| {
+            names(&[(b"Cyan", c), (b"Magenta", m), (b"Yellow", y), (b"Black", k)])
+        };
+
+        // DeviceCMYK, under the scope's `/DefaultCMYK`: its own components.
+        assert!(res.device_defaults().cmyk, "the default is in force");
+        let device = answer(b"DeviceCMYK", &[0.1, 0.2, 0.3, 0.4]).expect("DeviceCMYK's");
+        assert_eq!(device.kind, ColorantKind::DirectCmyk);
+        assert_eq!(tints_by_name(&device), cmyk(26, 51, 77, 102));
+        assert_eq!(device.alternate, None, "its own ink, not an alternate's");
+
+        // A `/Separation`, into DeviceCMYK and into DeviceRGB.
+        let gold = answer(b"Sep", &[0.6]).expect("a separation's");
+        assert_eq!(gold.kind, ColorantKind::Colorants);
+        assert_eq!(tints_by_name(&gold), names(&[(b"Gold", 153)]));
+        assert_eq!(
+            gold.alternate,
+            Some([0, 77, 153, 0]),
+            "the alternate's own components"
+        );
+        let teal = answer(b"SepRgb", &[1.0]).expect("a separation's");
+        assert_eq!(tints_by_name(&teal), names(&[(b"Teal", 255)]));
+        assert_eq!(
+            teal.alternate,
+            Some(ink_of(0, 128, 128)),
+            "the alternate's light as ink"
+        );
+
+        // A `/DeviceN` naming a process colorant, `/None` discarded.
+        let device_n = answer(b"DNp", &[0.4, 0.8, 0.3]).expect("a DeviceN's");
+        assert_eq!(device_n.kind, ColorantKind::Colorants);
+        assert_eq!(
+            tints_by_name(&device_n),
+            names(&[(b"Cyan", 102), (b"Spot1", 204)])
+        );
+        assert_eq!(device_n.alternate, Some([102, 0, 0, 51]));
+
+        // `/All`, `/None` and a `/DeviceN` of `/None` only.
+        let all = answer(b"All", &[0.25]).expect("/All's");
+        assert_eq!(all.kind, ColorantKind::All);
+        assert_eq!(tints_by_name(&all), names(&[(b"All", 64)]));
+        assert_eq!(all.alternate, None, "/All never reverts");
+        for none in [b"None".as_slice(), b"NoneN".as_slice()] {
+            let answered = answer(none, &[1.0, 1.0]).expect("/None's");
+            assert_eq!(answered.kind, ColorantKind::None);
+            assert!(answered.tints.is_empty());
+            assert_eq!(answered.alternate, None);
+        }
+
+        // An `NChannel` space over a CMYK `/Process`.
+        let n_cmyk = answer(b"NCmyk", &[0.2, 0.4, 0.6]).expect("an NChannel's");
+        assert_eq!(n_cmyk.kind, ColorantKind::NChannel);
+        assert_eq!(
+            tints_by_name(&n_cmyk),
+            names(&[(b"Cyan", 51), (b"Spot2", 102), (b"Black", 153)]),
+            "the process components under their colorants' names"
+        );
+        let alone: Vec<Option<[u8; 4]>> = n_cmyk.tints.iter().map(|tint| tint.alone).collect();
+        assert_eq!(
+            alone,
+            vec![None, Some([0, 0, 102, 0]), None],
+            "the spot alone"
+        );
+        assert_eq!(n_cmyk.alternate, None);
+        assert_eq!(
+            n_cmyk.process, None,
+            "a CMYK process space converts nothing"
+        );
+
+        // An `NChannel` space over an RGB `/Process`, whole and in part.
+        let n_rgb = answer(b"NRgb", &[1.0, 0.5, 0.0, 0.8]).expect("an NChannel's");
+        assert_eq!(tints_by_name(&n_rgb), names(&[(b"Red", 204)]));
+        assert_eq!(n_rgb.tints[0].alone, Some(ink_of(255, 51, 51)), "Red alone");
+        assert_eq!(
+            n_rgb.process,
+            Some(ink_of(255, 128, 0)),
+            "the RGB components together"
+        );
+        let part = answer(b"NRgbPart", &[0.6, 0.0]).expect("an NChannel's");
+        assert_eq!(
+            part.process,
+            Some(ink_of(153, 0, 0)),
+            "the components left out at zero"
+        );
+        assert_eq!(
+            part.tints[0].alone,
+            Some(ink_of(255, 255, 255)),
+            "no red at all"
+        );
+
+        // An `/Indexed` colour is its palette entry in the base.
+        let indexed = answer(b"Idx", &[1.0]).expect("its base's");
+        assert_eq!(
+            tints_by_name(&indexed),
+            names(&[(b"Gold", 128), (b"Silver", 64)])
+        );
+        let first = answer(b"Idx", &[0.0]).expect("its base's");
+        assert_eq!(
+            tints_by_name(&first),
+            names(&[(b"Gold", 0), (b"Silver", 255)])
+        );
+
+        // An uncoloured pattern's components, in its underlying space.
+        let patterned = answer(b"Pat", &[0.6]).expect("its base's");
+        assert_eq!(tints_by_name(&patterned), names(&[(b"Gold", 153)]));
+
+        // A space naming no colorant, and one whose names cannot be read.
+        assert_eq!(answer(b"DeviceRGB", &[1.0, 0.0, 0.0]), None);
+        assert_eq!(answer(b"DeviceGray", &[0.5]), None);
+        assert_eq!(answer(b"Cal", &[0.1, 0.2, 0.3]), None);
+        assert_eq!(answer(b"Bad", &[0.5, 0.5]), None);
+        assert_eq!(answer(b"Missing", &[0.5]), None);
     }
 
     /// 8.7.3.2: `[/Pattern base]` is the uncoloured pattern space, and `base`
