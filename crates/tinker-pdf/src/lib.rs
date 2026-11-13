@@ -810,6 +810,45 @@ pub struct RenderOptions {
     /// a pixel of rich black is a quarter of white over ink and half of it
     /// over light.
     pub allow_cmyk: bool,
+    /// Whether the page is drawn as the inks a press would put down and that
+    /// composite turned into the format asked for: overprint simulation
+    /// (`docs/design/overprint-separations.md`). Off by default, and with it
+    /// off nothing here runs: no render pays its time or its memory.
+    ///
+    /// On, the page is drawn on a canvas of plates — cyan, magenta, yellow,
+    /// black, and a plate for each spot colorant its resources name
+    /// ([`Page::spot_colorants`]), the plates [`Page::separations`] draws —
+    /// and each pixel of the composite is worked out from its own plates
+    /// alone, so a tile is the page under it (ruling 5):
+    ///
+    /// - **Light** (`Gray8`, `GrayA8`, `Rgb8`, `Rgba8` and their blue-first
+    ///   orders): the process plates' light by 8.6.4.4's relation, multiplied
+    ///   channel by channel by each spot's colour alone at its tint — the
+    ///   light its `/Separation` space's alternate gives its tint transform's
+    ///   output there; for a spot only a `/DeviceN` names, the `/Colorants`
+    ///   entry describing it, or else that space's tint transform with every
+    ///   other component at zero. A spot at no tint is white.
+    /// - **Ink** (`CmykA8` with [`RenderOptions::allow_cmyk`]): the process
+    ///   plates, each spot's ink alone folded in as `255 − (255 − x)(255 − s)
+    ///   / 255` — the same multiply in additive terms — its ink alone being
+    ///   its tint transform's output where its alternate is DeviceCMYK, and
+    ///   its light turned into ink with maximum undercolour removal where it
+    ///   is not.
+    /// - **Alpha** is the canvas's, with [`RenderOptions::transparent`].
+    ///
+    /// Where a page's spots are more than [`MAX_SPOT_PLATES`], or than keep
+    /// its plates inside [`MAX_PLATE_BYTES`] at its size, those past the cap,
+    /// in inventory order, are drawn through their alternates on the process
+    /// plates, and the render says so ([`RenderWarning::PlatesCapped`]). A
+    /// page whose transparency group declares a space other than a
+    /// four-component subtractive one composites in that space, every spot
+    /// through its alternate (11.7.3), as with the switch off.
+    ///
+    /// Read by [`Page::render`], [`Page::render_form`],
+    /// [`Page::render_annotation`] and [`DisplayList::render`] alike.
+    /// [`ForcedColours`] draw coverage and no colour, so under them it changes
+    /// nothing; a [`CommandStream`] carries no plates and does not read it.
+    pub simulate_overprint: bool,
     /// Whether edges are anti-aliased. On by default.
     ///
     /// Off, **every pixel of every shape is either wholly covered or not
@@ -1046,6 +1085,7 @@ impl Default for RenderOptions {
             other_annotations: true,
             region: None,
             allow_cmyk: false,
+            simulate_overprint: false,
             antialias: true,
             graphics_bits: 8,
             text_bits: 8,
@@ -3037,6 +3077,9 @@ pub(crate) struct Met {
     /// once, labelled as `RenderWarning::LockedLayer` names them, in the
     /// order the overrides met them.
     pub(crate) locked: Vec<String>,
+    /// How many spots a render simulating overprint asked a plate for and
+    /// how many kept one, where its caps drew the rest as composites.
+    pub(crate) plates_capped: Option<(usize, usize)>,
 }
 
 impl Met {
@@ -3044,7 +3087,9 @@ impl Met {
     /// renderer's, then `UnreadableFont` for a font the resources could not
     /// resolve, each damaged image, each repaired space and each image drawn
     /// reduced once, an optional-content configuration that could not be
-    /// read, the page scaled down and the region clamped.
+    /// read, the page scaled down, the region clamped, and the spots a render
+    /// simulating overprint drew as composites past its caps — last, where a
+    /// separations render reports them.
     pub(crate) fn warnings(&self) -> Vec<RenderWarning> {
         let mut warnings = self.renderer.clone();
         // A glyph a font could not name is reported here rather than by the
@@ -3105,6 +3150,12 @@ impl Met {
         if let Some((requested, applied)) = self.clamped {
             warnings.push(RenderWarning::RegionClamped { requested, applied });
         }
+        if let Some((named, kept)) = self.plates_capped {
+            let capped = RenderWarning::PlatesCapped { named, kept };
+            if !warnings.contains(&capped) {
+                warnings.push(capped);
+            }
+        }
         warnings
     }
 }
@@ -3125,6 +3176,13 @@ impl Layer {
         bitmap.warnings = self.met.warnings();
         bitmap
     }
+}
+
+/// Whether a render of `options` simulates overprint
+/// ([`RenderOptions::simulate_overprint`]): the switch is on, and forced
+/// colours, which draw coverage and no colour, are off.
+pub(crate) fn simulates_overprint(options: &RenderOptions) -> bool {
+    options.simulate_overprint && options.forced_colours.is_none()
 }
 
 /// The format a render of `options` hands its bitmap back in: `CmykA8` where
@@ -3278,8 +3336,16 @@ impl Page {
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
         if matches!(options.parallelism, Parallelism::Threads(threads) if threads >= 2) {
+            // Recorded with its colours' colorants where the render simulates
+            // overprint, which draws by them.
+            let colorants = simulates_overprint(options);
             return self
-                .display_list_at(options.usage, &options.layers, options.magnification)
+                .display_list_at(
+                    options.usage,
+                    &options.layers,
+                    options.magnification,
+                    colorants,
+                )
                 .render(options);
         }
         self.render_reaching(options).0
@@ -3463,20 +3529,42 @@ impl Page {
             &resources::PageResources,
         ),
     ) -> Bitmap {
-        self.draw_layer(options, frame, resources, stats::Draws::Counted, paint)
-            .into_bitmap()
+        let simulation = self.simulation_for(options);
+        self.draw_layer(
+            options,
+            frame,
+            resources,
+            stats::Draws::Counted,
+            simulation,
+            paint,
+        )
+        .into_bitmap()
+    }
+
+    /// What a render at `options` simulates overprint by
+    /// ([`RenderOptions::simulate_overprint`]), or `None` where it does not:
+    /// the switch is off, or forced colours, which draw coverage and no
+    /// colour, are on.
+    pub(crate) fn simulation_for(
+        &self,
+        options: &RenderOptions,
+    ) -> Option<separations::Simulation> {
+        simulates_overprint(options).then(|| self.simulation(options))
     }
 
     /// [`Page::render_layer_with`]'s render, its pixels in the format handed
     /// back and what it met kept in the parts its warnings are assembled from
     /// ([`Met`]), which the bands of one page merge: [`draw_sheet`] over this
-    /// page's sheet and the space its own group composites in.
+    /// page's sheet and the space its own group composites in, simulating
+    /// overprint by `simulation` where there is one
+    /// ([`Page::simulation_for`]), which the bands of one render share.
     pub(crate) fn draw_layer(
         &self,
         options: &RenderOptions,
         frame: Option<(f64, f64, f64, f64)>,
         resources: &resources::PageResources,
         draws: stats::Draws,
+        simulation: Option<separations::Simulation>,
         paint: impl FnOnce(
             &mut tinker_pdf_render::Renderer<'_, resources::PageResources>,
             &resources::PageResources,
@@ -3491,6 +3579,7 @@ impl Page {
             draws,
             self.unreadable_configuration(options),
             self.locked_layers(options, resources),
+            simulation,
             paint,
         )
     }
@@ -3517,7 +3606,7 @@ impl Page {
             stats::Draws::Counted,
             self.unreadable_configuration(options),
             self.locked_layers(options, resources),
-            Some(plan),
+            Inks::Separations(plan),
             paint,
         )
     }
@@ -3899,6 +3988,12 @@ impl Drawn for resources::PageResources {
 /// `unreadable` is the optional-content configuration the render named where
 /// the document has none such, so `/D`'s states were drawn, and `locked` the
 /// locked groups the render's overrides would have changed.
+///
+/// With `simulation`, a render simulating overprint
+/// ([`RenderOptions::simulate_overprint`]): the page is drawn on plates by its
+/// plan, and the plates are converted to the format handed back by the
+/// composite (`docs/design/overprint-separations.md`, "The composite"), pixel
+/// by pixel, each spot multiplied in by its colour alone.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_sheet<S: Drawn>(
     sheet: Sheet,
@@ -3909,17 +4004,27 @@ pub(crate) fn draw_sheet<S: Drawn>(
     draws: stats::Draws,
     unreadable: Option<usize>,
     locked: Vec<String>,
+    simulation: Option<separations::Simulation>,
     paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_, S>, &S),
 ) -> Layer {
     let forced = options.forced_colours;
     let wanted = handed_back(options);
+    let (inks, colours, capped) = match simulation {
+        Some(simulation) => (
+            Inks::Simulated(simulation.plan),
+            simulation.colours,
+            simulation.capped,
+        ),
+        None => (Inks::Asked, Arc::from(Vec::new()), None),
+    };
     let Sheeted {
         canvas,
-        met,
+        mut met,
         parameters,
     } = draw_canvas(
-        sheet, group, options, frame, source, draws, unreadable, locked, None, paint,
+        sheet, group, options, frame, source, draws, unreadable, locked, inks, paint,
     );
+    met.plates_capped = capped;
 
     // Back to something a caller can read. A page group composited over
     // ink comes back as light, which is 11.4.7's own last step — unless
@@ -3957,6 +4062,10 @@ pub(crate) fn draw_sheet<S: Drawn>(
         None => {
             let mut canvas = if canvas.format == wanted {
                 canvas
+            } else if matches!(canvas.format, PixelFormat::Plates { .. }) {
+                // Overprint simulated: the composite of the plates, each
+                // pixel from its own channels alone (ruling 5).
+                canvas.composite_plates_into(wanted, &colours)
             } else {
                 canvas.extract(canvas.origin(), width, height, wanted)
             };
@@ -3999,18 +4108,44 @@ pub(crate) struct Sheeted {
     pub(crate) parameters: Option<tinker_pdf_render::DeviceParameters>,
 }
 
+/// What a render draws a page's inks on ([`draw_canvas`];
+/// `docs/design/overprint-separations.md`).
+#[derive(Clone, Debug)]
+pub(crate) enum Inks {
+    /// The canvas the options' format composites in: light, or ink where the
+    /// caller asked for ink.
+    Asked,
+    /// A separations render's plates by its plan, handed back as they
+    /// composited.
+    Separations(Arc<tinker_pdf_render::PlatePlan>),
+    /// A render simulating overprint: plates by its plan, turned into the
+    /// format asked for at the end by the composite.
+    Simulated(Arc<tinker_pdf_render::PlatePlan>),
+}
+
+impl Inks {
+    /// The plate plan the page is drawn by, where it is drawn on plates.
+    fn plan(&self) -> Option<&Arc<tinker_pdf_render::PlatePlan>> {
+        match self {
+            Inks::Asked => None,
+            Inks::Separations(plan) | Inks::Simulated(plan) => Some(plan),
+        }
+    }
+}
+
 /// The drawing half of [`draw_sheet`], the one pipeline: `sheet`'s view at
 /// `options`, a canvas in the format `group`, the page group's space
 /// (11.4.7), composites in, a renderer over `source`, `paint`'s calls, and
 /// the canvas with what the render met.
 ///
-/// With `plates`, a separations render's plate plan
-/// (`docs/design/overprint-separations.md`, "Plates handed out"): a page of
-/// no transparency group, or of one whose `/CS` is a four-component
-/// subtractive space, is drawn on plates carrying the plan's spots, the
-/// renderer handed the plan; a page group of another space composites in
-/// that space, its spots through their alternates (11.7.3), and the caller
-/// turns it into plates. Forced colours draw the page's own colours there,
+/// With `inks` of a plate plan — a separations render's
+/// (`docs/design/overprint-separations.md`, "Plates handed out"), or a render
+/// simulating overprint's ("The switch") — a page of no transparency group,
+/// or of one whose `/CS` is a four-component subtractive space, is drawn on
+/// plates carrying the plan's spots, the renderer handed the plan; a page
+/// group of another space composites in that space, its spots through their
+/// alternates (11.7.3), and the caller turns it into plates or light. Forced
+/// colours draw the page's own colours on a separations render's plates,
 /// which they replace only in light.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_canvas<S: Drawn>(
@@ -4022,9 +4157,10 @@ pub(crate) fn draw_canvas<S: Drawn>(
     draws: stats::Draws,
     unreadable: Option<usize>,
     locked: Vec<String>,
-    plates: Option<Arc<tinker_pdf_render::PlatePlan>>,
+    inks: Inks,
     paint: impl FnOnce(&mut tinker_pdf_render::Renderer<'_, S>, &S),
 ) -> Sheeted {
+    let plates = inks.plan().cloned();
     let View {
         scale,
         applied,
@@ -4080,13 +4216,14 @@ pub(crate) fn draw_canvas<S: Drawn>(
     // What the caller is handed, decided before the canvas exists: a page
     // may start with nothing on it only if the format it comes back in can
     // say so. A transparent canvas converted to `Rgb8` at the end would
-    // drop an alpha of zero and keep the black stored under it. Plates carry
-    // an alpha.
-    let wanted = match &plates {
-        Some(plan) => PixelFormat::Plates {
+    // drop an alpha of zero and keep the black stored under it. Plates
+    // handed back carry an alpha; a simulated composite is handed back in
+    // the format asked for.
+    let wanted = match &inks {
+        Inks::Separations(plan) => PixelFormat::Plates {
             spots: plan.spots(),
         },
-        None => handed_back(options),
+        Inks::Asked | Inks::Simulated(_) => handed_back(options),
     };
     let canvas = if options.transparent && wanted.has_alpha() && canvas_format.has_alpha() {
         tinker_pdf_render::region_canvas_clear(view, canvas_format)
@@ -4128,6 +4265,8 @@ pub(crate) fn draw_canvas<S: Drawn>(
             .map(|requested| (requested, view)),
         unreadable_configuration: unreadable,
         locked,
+        // The caller's, which knows the plan it drew by.
+        plates_capped: None,
     };
     Sheeted {
         canvas,

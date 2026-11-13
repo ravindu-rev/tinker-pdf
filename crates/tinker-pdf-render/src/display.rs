@@ -340,6 +340,9 @@ pub struct DisplayRecorder {
     /// every event after a `gs` shares is counted once, when the recording
     /// first holds it, and again when an event holds another.
     stored: Option<Arc<StoredParameters>>,
+    /// Whether the states recorded carry what each colour paints by colorant
+    /// ([`DisplayRecorder::recording_colorants`]).
+    colorants: bool,
 }
 
 impl Default for DisplayRecorder {
@@ -365,7 +368,22 @@ impl DisplayRecorder {
             budget: MAX_DISPLAY_LIST_BYTES,
             overflowed: false,
             stored: None,
+            colorants: false,
         }
+    }
+
+    /// The same recorder, telling the interpreter it composites colorants
+    /// when `colorants` is true (`Device::composites_colorants`): every state
+    /// it records then carries what each colour paints by colorant, for a
+    /// replay onto plates — a render simulating overprint — and counts it in
+    /// [`kept_bytes`], so [`MAX_DISPLAY_LIST_BYTES`] still bounds the
+    /// recording. False, the default, records the light a page draws and
+    /// asks the resources nothing of the kind.
+    #[must_use]
+    pub fn recording_colorants(mut self, colorants: bool) -> DisplayRecorder {
+        self.colorants = colorants;
+        self.events = std::mem::take(&mut self.events).recording_colorants(colorants);
+        self
     }
 
     /// The same recorder under a smaller budget than
@@ -385,7 +403,10 @@ impl DisplayRecorder {
     pub fn take(&mut self) -> Vec<Event> {
         let answers = self.events.answers();
         self.counted = 0;
-        std::mem::replace(&mut self.events, RecordingDevice::new().answering(answers)).into_events()
+        let next = RecordingDevice::new()
+            .answering(answers)
+            .recording_colorants(self.colorants);
+        std::mem::replace(&mut self.events, next).into_events()
     }
 
     /// The answers' state, for a caller that wants to know what was spent.
@@ -441,12 +462,14 @@ impl DisplayRecorder {
         self.counted = events.len();
         if self.kept.saturating_add(added) > self.budget {
             self.overflowed = true;
-            self.events = RecordingDevice::new().answering(Answers {
-                forms: false,
-                groups: false,
-                soft_masks: false,
-                cancelled: true,
-            });
+            self.events = RecordingDevice::new()
+                .answering(Answers {
+                    forms: false,
+                    groups: false,
+                    soft_masks: false,
+                    cancelled: true,
+                })
+                .recording_colorants(self.colorants);
             self.counted = 0;
         } else {
             self.kept = self.kept.saturating_add(added);
@@ -658,6 +681,12 @@ impl Device for DisplayRecorder {
     fn answers_alike(&self, events: &[Event]) -> bool {
         !self.overflowed && self.admission.answers_alike(events)
     }
+
+    /// Whether the states recorded carry each colour's colorants
+    /// ([`DisplayRecorder::recording_colorants`]).
+    fn composites_colorants(&self) -> bool {
+        self.colorants
+    }
 }
 
 #[cfg(test)]
@@ -836,6 +865,59 @@ mod tests {
         tight.fill_path(&path, &coloured, false);
         assert!(tight.overflowed(), "the colorants pass the budget");
         assert!(tight.take().is_empty(), "and nothing is kept");
+    }
+
+    /// **A recorder records colorants only when asked** (RC-03.3): by
+    /// default it tells the interpreter it composites none and a DeviceCMYK
+    /// fill's state carries none; asked, the same fill's carries the
+    /// colour's own components on the process colorants, and so does every
+    /// stream recorded after a take, until the recorder is asked otherwise.
+    #[test]
+    fn a_recorder_records_colorants_only_when_asked() {
+        struct NoFonts;
+        impl tinker_pdf_content::FontSource for NoFonts {
+            fn decode(&self, _font: &[u8], _bytes: &[u8]) -> Vec<(u32, String, f64)> {
+                Vec::new()
+            }
+            fn vertical_metrics(&self, _font: &[u8], _code: u32) -> (f64, f64, f64) {
+                (0.0, 0.0, 0.0)
+            }
+        }
+        let fill_colorants = |events: &[Event]| -> Vec<Option<ColorantTints>> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::FillPath { state, .. } => Some(
+                        state
+                            .as_ref()
+                            .and_then(|state| state.fill_colorants.as_deref().cloned()),
+                    ),
+                    _ => None,
+                })
+                .collect()
+        };
+        let content = b"1 0 0 0 k 0 0 1 1 re f";
+
+        let mut light = DisplayRecorder::new();
+        assert!(!light.composites_colorants());
+        tinker_pdf_content::interpret(content, Matrix::IDENTITY, &mut light, &NoFonts);
+        assert_eq!(fill_colorants(&light.take()), vec![None]);
+
+        let mut inked = DisplayRecorder::new().recording_colorants(true);
+        assert!(inked.composites_colorants());
+        let cyan = Some(ColorantTints::device_cmyk([255, 0, 0, 0]));
+        tinker_pdf_content::interpret(content, Matrix::IDENTITY, &mut inked, &NoFonts);
+        assert_eq!(fill_colorants(&inked.take()), vec![cyan.clone()]);
+        assert!(inked.composites_colorants(), "a take keeps the answer");
+        tinker_pdf_content::interpret(content, Matrix::IDENTITY, &mut inked, &NoFonts);
+        assert_eq!(fill_colorants(&inked.take()), vec![cyan]);
+
+        let mut again = DisplayRecorder::new()
+            .recording_colorants(true)
+            .recording_colorants(false);
+        assert!(!again.composites_colorants());
+        tinker_pdf_content::interpret(content, Matrix::IDENTITY, &mut again, &NoFonts);
+        assert_eq!(fill_colorants(&again.take()), vec![None]);
     }
 
     /// What an event holds counts what it copied: an inline image's data, a

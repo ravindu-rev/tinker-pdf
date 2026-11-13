@@ -140,7 +140,7 @@ impl Page {
     /// answer.
     #[must_use]
     pub fn analysis(&self, options: &RenderOptions) -> PageAnalysis {
-        self.display_list_at(options.usage, &options.layers, options.magnification)
+        self.display_list_at(options.usage, &options.layers, options.magnification, false)
             .analysis(options)
     }
 }
@@ -160,7 +160,7 @@ pub(crate) fn analyse(list: &DisplayList, options: &RenderOptions) -> PageAnalys
     {
         return list
             .page()
-            .display_list_at(options.usage, &options.layers, options.magnification)
+            .display_list_at(options.usage, &options.layers, options.magnification, false)
             .analysis(options);
     }
     let page = list.page();

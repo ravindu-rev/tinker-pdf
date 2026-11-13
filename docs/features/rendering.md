@@ -1073,6 +1073,53 @@ and a composited spot, by `sh` and as a pattern, each plate the tint the test
 interpolates at every pixel centre, and `a_mesh_in_none_paints_nothing`). A
 light mesh draws and tabulates as it did.
 
+**Overprint simulation** (the design's "The switch" and "The composite").
+`RenderOptions::simulate_overprint`, off by default, draws the page as its
+inks and hands back their composite in the format asked for. On,
+`Page::render`, `Page::render_form`, `Page::render_annotation` and
+`DisplayList::render` draw through `draw_sheet` on plates by a plan
+(`Page::simulation`): the plan `Page::separations` lays out with every
+colorant `PlateUse::Spot`, at the page's size whatever region is asked, so a
+tile keeps the page's plates; the spots past `MAX_SPOT_PLATES`, or past what
+keeps the plates inside `MAX_PLATE_BYTES`, are drawn through their
+alternates on the process plates and the render carries
+`RenderWarning::PlatesCapped { named, kept }`, last among its warnings. The
+canvas is then converted pixel by pixel from that pixel's own plates
+(`Canvas::composite_plates_into`, ruling 5): into light, the process plates'
+light by 8.6.4.4's relation in bytes, each of red, green and blue multiplied
+(`mul255`) by that channel of each spot's colour alone at its tint, and the
+colour encoded in the format asked for, a grey by its luma; into ink —
+`CmykA8` with `allow_cmyk` — the process tints, each spot's ink alone folded
+in as `255 − mul255(255 − x, 255 − s)`; the alpha the canvas's. A spot's
+colour alone (`tinker_pdf_render::spot_colour`, a `SpotColour` a tint) is
+read where the inventory finds it best described (`SpotDefinition`): the
+first `/Separation` space naming it, else the first `/DeviceN` `/Colorants`
+entry for it, else the first `/DeviceN` naming it, its tint transform with
+every other component at zero; its light is the alternate's at the
+transform's output and its ink that output on a DeviceCMYK alternate, any
+other's light turned into ink with maximum undercolour removal; tint 0 is
+white and no ink, and a space that cannot be read is white at every tint. The
+colours are read through resources of their own, which count nothing and
+report nothing, once a render, so every band of a render in bands converts by
+the same. A page whose transparency group's `/CS` is not a four-component
+subtractive space composites in it as with the switch off, its spots through
+their alternates (11.7.3); forced colours draw coverage and leave the switch
+unread, and a `CommandStream`, which carries no inventory of the page's
+spots, does not read it. A display list a caller asks for records light only:
+rendered with the switch on, it records the page once more with its colours'
+colorants (`DisplayRecorder::recording_colorants`), keeps that recording and
+replays it, and `Page::render` in bands records with them from the start
+(`overprint.rs`: `the_switch_converts_the_composite_by_the_model`, which
+works the composite out from the page's plates in `Rgb8`, `CmykA8`, `Gray8`,
+`Bgra8` and a transparent `Rgba8`, and holds the switch off to the render
+without it; `a_spot_composites_its_colour_alone_at_its_tint`;
+`a_display_list_and_bands_draw_the_simulated_page_alike`;
+`spots_past_the_cap_composite_through_their_alternates`;
+`where_the_switch_has_nothing_to_draw_by_it_changes_nothing`; and
+`render_regions.rs`'s `an_overprint_simulated_page_tiles_as_the_page`, direct
+and replayed, turned, cropped and at 2x). Every paint there knocks out the
+plates it names no ink for, as 8.6.7 has a paint do with overprint off.
+
 **`/Lab` composites in Lab too.** Its components are not in the unit
 interval — `L*` runs 0..100 and `a`/`b` roughly −128..127 — so `LabA8`
 encodes them into bytes (`L/100`, `(a + 128)/255`, `(b + 128)/255`) and

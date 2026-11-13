@@ -46,10 +46,11 @@
 //! — the cycle guard — the walk stops at its depth bound, and the listing at
 //! [`MAX_LISTED_SPOTS`], each with what it had read (ruling 1).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use tinker_pdf_cos::{pages as cos_pages, CosDocument, Dict, Name, ObjRef, Object};
+use tinker_pdf_raster::SpotColour;
 use tinker_pdf_render::{PlatePlan, PlateUse};
 
 use crate::fontlist::{self, ScopeVisitor};
@@ -225,6 +226,69 @@ impl crate::Page {
     }
 }
 
+/// What a render simulating overprint draws by
+/// ([`RenderOptions::simulate_overprint`];
+/// `docs/design/overprint-separations.md`, "The switch"): the plate plan its
+/// page is drawn on, every spot of the inventory a plate of its own while
+/// the caps allow, and the colour of each spot plate alone, in its channel's
+/// order, which the composite multiplies in at the end. Made once a render,
+/// so every band of one draws by the same.
+#[derive(Clone)]
+pub(crate) struct Simulation {
+    /// The plan: the process plates, then each spot of the inventory that
+    /// keeps a plate.
+    pub(crate) plan: Arc<PlatePlan>,
+    /// Each spot plate's colour alone, spot channel `i` at `i`.
+    pub(crate) colours: Arc<[SpotColour]>,
+    /// How many spots asked for a plate and how many kept one, where the caps
+    /// drew some as composites.
+    pub(crate) capped: Option<(usize, usize)>,
+}
+
+impl crate::Page {
+    /// What a render of this page at `options` simulating overprint draws by
+    /// ([`Simulation`]): the plan [`crate::Page::separations`] lays out with
+    /// every colorant [`PlateUse::Spot`] — the page's plates whatever region is
+    /// asked for, so a tile keeps the page's plates (ruling 5) — and each spot
+    /// plate's colour alone, read from where the inventory found it defined
+    /// ([`SpotDefinition`]). Read through resources of its own, which count
+    /// nothing and report nothing: a colour a render reads to composite is
+    /// not one it met painting.
+    pub(crate) fn simulation(&self, options: &RenderOptions) -> Simulation {
+        let (width, height) = self.pixel_size(options);
+        let defined = defined_on_page(&self.doc, &self.inner);
+        let inventory: Vec<SpotColorant> = defined.iter().map(|(spot, _)| spot.clone()).collect();
+        let planned = plan(&inventory, &[], u64::from(width) * u64::from(height));
+        let definitions: BTreeMap<&[u8], &SpotDefinition> = defined
+            .iter()
+            .map(|(spot, definition)| (spot.name.as_slice(), definition))
+            .collect();
+        let resources = crate::resources::PageResources::new_in(
+            &self.doc,
+            &self.inner,
+            None,
+            self.operation(None, None, &crate::LayerOptions::default(), 1.0),
+        );
+        let colours: Vec<SpotColour> = planned
+            .plan
+            .channels()
+            .skip(4)
+            .map(|(name, _)| {
+                definitions
+                    .get(name)
+                    .map_or_else(SpotColour::white, |definition| {
+                        resources.spot_colour(name, definition)
+                    })
+            })
+            .collect();
+        Simulation {
+            plan: planned.plan,
+            colours: colours.into(),
+            capped: (planned.kept < planned.named).then_some((planned.named, planned.kept)),
+        }
+    }
+}
+
 /// How [`Page::separations`](crate::Page::separations) draws a page's
 /// plates.
 #[derive(Clone, Debug, Default)]
@@ -346,10 +410,60 @@ fn plan(inventory: &[SpotColorant], asked: &[(Vec<u8>, PlateUse)], pixels: u64) 
 /// The spot colorants `page`'s scopes name, each once, in the order the walk
 /// first meets it (the module comment).
 pub(crate) fn of_page(doc: &Arc<CosDocument>, page: &cos_pages::Page) -> Vec<SpotColorant> {
+    defined_on_page(doc, page)
+        .into_iter()
+        .map(|(spot, _)| spot)
+        .collect()
+}
+
+/// [`of_page`]'s spots, each with where its colour alone is defined
+/// ([`SpotDefinition`]).
+pub(crate) fn defined_on_page(
+    doc: &Arc<CosDocument>,
+    page: &cos_pages::Page,
+) -> Vec<(SpotColorant, SpotDefinition)> {
     let mut inventory = Inventory::default();
     let mut scopes = BTreeSet::new();
     fontlist::walk_page(doc, page, &mut scopes, &mut inventory);
-    inventory.spots
+    inventory.spots.into_iter().zip(inventory.defined).collect()
+}
+
+/// Where a spot's colour alone is read from, for the composite of a render
+/// simulating overprint (`docs/design/overprint-separations.md`, "The
+/// composite"): the first `/Separation` space the walk meets naming it; for a
+/// spot only a `/DeviceN` names, the first `/Colorants` entry describing it
+/// (8.6.6.5: a `/Separation` describing the colorant alone); and with neither,
+/// the first `/DeviceN` naming it, whose tint transform is read at the spot's
+/// tint with every other component at zero. Each is the space as written,
+/// read by the render's resources when the render asks.
+#[derive(Clone, Debug)]
+pub(crate) enum SpotDefinition {
+    /// A `/Separation` space naming the spot.
+    Separation(Object),
+    /// A `/DeviceN` `/Colorants` entry for the spot, itself a `/Separation`.
+    Colorants(Object),
+    /// A `/DeviceN` space naming the spot, and the spot's component in it.
+    DeviceN(Object, usize),
+}
+
+impl SpotDefinition {
+    /// How much the definition is preferred, the least first: a
+    /// `/Separation`, then a `/Colorants` entry, then a `/DeviceN`.
+    fn rank(&self) -> u8 {
+        match self {
+            SpotDefinition::Separation(_) => 0,
+            SpotDefinition::Colorants(_) => 1,
+            SpotDefinition::DeviceN(..) => 2,
+        }
+    }
+
+    /// The space the definition is read from, and the spot's component in it.
+    pub(crate) fn space(&self) -> (&Object, usize) {
+        match self {
+            SpotDefinition::Separation(space) | SpotDefinition::Colorants(space) => (space, 0),
+            SpotDefinition::DeviceN(space, component) => (space, *component),
+        }
+    }
 }
 
 /// The inventory's side of the walk.
@@ -357,8 +471,12 @@ pub(crate) fn of_page(doc: &Arc<CosDocument>, page: &cos_pages::Page) -> Vec<Spo
 struct Inventory {
     /// What has been listed, in order.
     spots: Vec<SpotColorant>,
-    /// The names in `spots`, so a name is listed once.
-    names: BTreeSet<Vec<u8>>,
+    /// Where each of `spots` is defined, at the same place: the most
+    /// preferred definition met for its name, the first of its rank.
+    defined: Vec<SpotDefinition>,
+    /// The names in `spots`, each with its place there, so a name is listed
+    /// once.
+    names: BTreeMap<Vec<u8>, usize>,
     /// Every colour space object already read, so a space a hundred scopes
     /// name is read once.
     spaces: BTreeSet<ObjRef>,
@@ -540,7 +658,7 @@ impl Inventory {
             }
             b"Separation" => {
                 if let Some(name) = separation_name(doc, items) {
-                    self.name(name);
+                    self.name(name, SpotDefinition::Separation(space.clone()));
                 }
             }
             b"DeviceN" => {
@@ -550,27 +668,21 @@ impl Inventory {
                         .as_ref()
                         .is_some_and(|attributes| attributes.is_process_component(name))
                 };
-                for name in device_n_names(doc, items) {
+                for (component, name) in device_n_names(doc, items).into_iter().enumerate() {
                     if !process(&name) {
-                        self.name(name);
+                        self.name(name, SpotDefinition::DeviceN(space.clone(), component));
                     }
                 }
                 // 8.6.6.5: `/Colorants` describes each colorant alone, and may
                 // name colorants this space does not use; a definition of a
                 // process component is ignored.
-                let keys: Vec<Vec<u8>> = attributes
+                let entries: Vec<(Vec<u8>, Object)> = attributes
                     .as_ref()
-                    .map(|attributes| {
-                        attributes
-                            .colorants
-                            .iter()
-                            .map(|(name, _)| name.clone())
-                            .collect()
-                    })
+                    .map(|attributes| attributes.colorants.clone())
                     .unwrap_or_default();
-                for name in keys {
+                for (name, entry) in entries {
                     if !process(&name) {
-                        self.name(name);
+                        self.name(name, SpotDefinition::Colorants(entry));
                     }
                 }
             }
@@ -578,17 +690,29 @@ impl Inventory {
         }
     }
 
-    /// Lists `name` if it is a spot not yet listed.
-    fn name(&mut self, name: Vec<u8>) {
-        if self.full()
-            || PROCESS_COLORANTS.contains(&name.as_slice())
+    /// Lists `name` if it is a spot not yet listed, defined by `definition`;
+    /// a spot already listed takes `definition` where it is preferred to the
+    /// one it has.
+    fn name(&mut self, name: Vec<u8>, definition: SpotDefinition) {
+        if PROCESS_COLORANTS.contains(&name.as_slice())
             || matches!(name.as_slice(), b"All" | b"None")
         {
             return;
         }
-        if self.names.insert(name.clone()) {
-            self.spots.push(SpotColorant { name });
+        if let Some(&at) = self.names.get(&name) {
+            if let Some(held) = self.defined.get_mut(at) {
+                if definition.rank() < held.rank() {
+                    *held = definition;
+                }
+            }
+            return;
         }
+        if self.full() {
+            return;
+        }
+        self.names.insert(name.clone(), self.spots.len());
+        self.spots.push(SpotColorant { name });
+        self.defined.push(definition);
     }
 }
 
@@ -750,6 +874,75 @@ trailer\n<< /Size 60 /Root 1 0 R >>\n%%EOF\n"
         );
         let expected: Vec<String> = (0..=depth).map(|level| format!("L{level}")).collect();
         assert_eq!(names(&page), expected);
+    }
+
+    /// Each spot's name and where its colour alone is defined, as the object
+    /// number of the space it is read from and its component there, and the
+    /// definition's kind.
+    fn definitions(page: &crate::Page) -> Vec<(String, &'static str, Option<u32>, usize)> {
+        defined_on_page(&page.doc, &page.inner)
+            .into_iter()
+            .map(|(spot, definition)| {
+                let kind = match definition {
+                    SpotDefinition::Separation(_) => "Separation",
+                    SpotDefinition::Colorants(_) => "Colorants",
+                    SpotDefinition::DeviceN(..) => "DeviceN",
+                };
+                let (space, component) = definition.space();
+                (
+                    String::from_utf8_lossy(&spot.name).into_owned(),
+                    kind,
+                    space.as_objref().map(|reference| reference.num),
+                    component,
+                )
+            })
+            .collect()
+    }
+
+    /// **A spot's colour alone is read where it is best described**
+    /// (RC-03.3; `docs/design/overprint-separations.md`, "The composite"): a
+    /// `/Separation` naming it wherever the walk meets one, before a
+    /// `/DeviceN`'s `/Colorants` entry for it, before a `/DeviceN` naming it,
+    /// whose component it is; the first of each kind met; a spot met only
+    /// in a form's scope defined there; and the inventory's order and names
+    /// as before.
+    #[test]
+    fn a_spot_is_defined_where_it_is_best_described() {
+        let ramp = "<< /FunctionType 2 /Domain [0 1] /N 1 >>";
+        let extra = format!(
+            "6 0 obj\n[/DeviceN [/Gold /Teal /Plum] /DeviceCMYK {ramp} \
+             << /Colorants << /Teal 9 0 R /Plum 10 0 R >> >>]\nendobj\n\
+             7 0 obj\n[/Separation /Gold /DeviceCMYK {ramp}]\nendobj\n\
+             8 0 obj\n[/Separation /Gold /DeviceRGB {ramp}]\nendobj\n\
+             9 0 obj\n[/Separation /Teal /DeviceGray {ramp}]\nendobj\n\
+             10 0 obj\n[/Separation /Plum /DeviceGray {ramp}]\nendobj\n\
+             11 0 obj\n[/DeviceN [/Sage /Rust] /DeviceGray {ramp}]\nendobj\n\
+             12 0 obj\n[/DeviceN [/Rust] /DeviceGray {ramp}]\nendobj\n\
+             13 0 obj\n<< /Subtype /Form /BBox [0 0 1 1] /Resources << /ColorSpace << \
+             /F 14 0 R >> >> /Length 0 >>\nstream\n\nendstream\nendobj\n\
+             14 0 obj\n[/Separation /Navy /DeviceGray {ramp}]\nendobj\n\
+             15 0 obj\n[/Separation /Plum /DeviceCMYK {ramp}]\nendobj\n"
+        );
+        let page = page(
+            &extra,
+            "/ColorSpace << /D 6 0 R /G1 7 0 R /G2 8 0 R /N 11 0 R /N2 12 0 R /P 15 0 R >> \
+             /XObject << /X 13 0 R >>",
+        );
+        assert_eq!(
+            names(&page),
+            vec!["Gold", "Teal", "Plum", "Sage", "Rust", "Navy"]
+        );
+        assert_eq!(
+            definitions(&page),
+            vec![
+                ("Gold".to_string(), "Separation", Some(7), 0),
+                ("Teal".to_string(), "Colorants", Some(9), 0),
+                ("Plum".to_string(), "Separation", Some(15), 0),
+                ("Sage".to_string(), "DeviceN", Some(11), 0),
+                ("Rust".to_string(), "DeviceN", Some(11), 1),
+                ("Navy".to_string(), "Separation", Some(14), 0),
+            ]
+        );
     }
 
     /// An inventory of `count` spots, `Spot0` onward.

@@ -154,8 +154,8 @@ mod written_support;
 use std::sync::Barrier;
 
 use tinker_pdf::{
-    Color, Document, DocumentBuilder, ForcedColours, HardEdge, Page, PixelRegion, RenderOptions,
-    RenderWarning,
+    Color, Document, DocumentBuilder, ForcedColours, HardEdge, Page, PixelFormat, PixelRegion,
+    RenderOptions, RenderWarning,
 };
 
 mod region_support;
@@ -1591,6 +1591,71 @@ fn separation_tiles_are_the_page_s_plates() {
                         plates, &drawn[0],
                         "{spaces:?} {kind}, {name}, at {scale}x: what the page adds drew"
                     );
+                }
+            }
+        }
+    }
+}
+
+/// **An overprint-simulated page tiles as the page** (RC-03.3; ruling 5):
+/// the separations pages of eight spots, in `/Separation` and `/DeviceN`
+/// spaces, alone and with shadings and meshes in the spots' spaces over them,
+/// rendered with `RenderOptions::simulate_overprint` — drawn on their plates
+/// and composited into light, and into ink with `allow_cmyk` — upright, a
+/// quarter turned, and three quarters turned under a cropped box, at 1x and
+/// 2x: every tile, drawn directly and replayed from the page's display list,
+/// is the page under it byte for byte, since the composite reads each pixel's
+/// own plates alone.
+#[test]
+fn an_overprint_simulated_page_tiles_as_the_page() {
+    let cropped = Shape {
+        rotation: 270,
+        crop: Some((5.0, 3.0, 52.0, 37.0)),
+    };
+    for spaces in [
+        render_support::SpotSpaces::Separation,
+        render_support::SpotSpaces::DeviceN,
+    ] {
+        let fixtures = [
+            ("spots", render_support::spot_page(8, spaces)),
+            ("spots and shadings", spot_page_shaded(spaces)),
+            ("spots and meshes", spot_page_meshed(spaces)),
+        ];
+        for (shape, name) in [
+            (Shape::PLAIN, "upright"),
+            (Shape::turned(90), "turned"),
+            (cropped, "turned and cropped"),
+        ] {
+            for (scale, tiles) in [(1.0, &[37u32, 23, 7][..]), (2.0, &[37, 23][..])] {
+                for format in [PixelFormat::Rgb8, PixelFormat::CmykA8] {
+                    let options = RenderOptions {
+                        scale,
+                        format,
+                        allow_cmyk: true,
+                        simulate_overprint: true,
+                        ..RenderOptions::default()
+                    };
+                    for (kind, fixture) in &fixtures {
+                        let document =
+                            Document::open(shaped(fixture.bytes.clone(), shape)).expect("it opens");
+                        let page = document.page(0).expect("a page");
+                        let list = page.display_list();
+                        let what = format!(
+                            "{spaces:?} {kind}, {name}, at {scale}x as {format:?}, simulated"
+                        );
+                        for &tile in tiles {
+                            tiles_are_the_page(&page, &options, tile, &what);
+                            if let Some(message) = tile_divergence_through(
+                                &page,
+                                &options,
+                                tile,
+                                &format!("{what}, replayed"),
+                                &|asked| list.render(asked),
+                            ) {
+                                panic!("{message}");
+                            }
+                        }
+                    }
                 }
             }
         }

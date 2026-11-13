@@ -442,7 +442,21 @@ tints handed taking no ink.
 tints; `pixel` reads a plates pixel as its process channels' light, a spot's
 colour being its caller's to know; and `extract` copies plates as tints, into
 `CmykA8` as process ink, into light as that light, and ink or light into
-plates on the process channels.
+plates on the process channels. `Canvas::composite_plates_into` is the
+composite with the spots' colours handed in: a `SpotColour` for each spot
+channel — the light and the ink of its colorant alone at each of the 256
+tints, the caller's to know (ruling 8) — and each pixel converted from its
+own channels alone, so a region converts as the canvas under it does: into
+light, `cmyk_to_rgb` of the process tints, each of red, green and blue
+multiplied (`mul255`) by that channel of each spot's light at its tint, the
+colour encoded as `extract` encodes one; into `CmykA8`, the process tints
+with each spot's ink at its tint folded in as `255 − mul255(255 − x, 255 −
+s)`; the alpha carried, the copy standing at the canvas's origin. A spot
+channel given no colour, and `SpotColour::white`, change no pixel, so with
+white spots the composite is `extract`'s
+(`the_composite_of_plates_is_the_designs_closed_form`,
+`a_spot_with_no_colour_composites_as_white`,
+`a_region_of_plates_composites_as_the_page_under_it`).
 
 *The opaque composite.* Under `Normal`, with the colour's alpha and the
 state's both whole, onto a canvas that holds no initial backdrop and is not

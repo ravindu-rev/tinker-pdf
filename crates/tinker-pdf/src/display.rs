@@ -174,6 +174,17 @@ pub struct DisplayList {
     /// in bands and the one [`Page::analysis`] reads. A render at another
     /// magnification is held to the states where they read a `/Zoom` entry.
     magnification: f64,
+    /// Whether the recorded states carry what each colour paints by colorant
+    /// (`GraphicsState::fill_colorants`), which a render simulating overprint
+    /// draws by ([`RenderOptions::simulate_overprint`]): so for the recording
+    /// [`Page::render`] draws such a render in bands from, and for
+    /// [`DisplayList::inked`]'s; not for the recordings a caller asks for,
+    /// which pay nothing for a switch they may never set.
+    colorants: bool,
+    /// The page recorded again with its colours' colorants, for a render of
+    /// this list simulating overprint where the list carries none: made the
+    /// first time one asks, and kept for the next.
+    inked: OnceLock<Box<DisplayList>>,
 }
 
 impl Page {
@@ -227,17 +238,20 @@ impl Page {
     /// interpreting the page again.
     #[must_use]
     pub fn display_list_with(&self, usage: Option<Usage>, layers: &LayerOptions) -> DisplayList {
-        self.display_list_at(usage, layers, 1.0)
+        self.display_list_at(usage, layers, 1.0, false)
     }
 
     /// [`Page::display_list_with`], its states bound at `magnification`, which
     /// a `/Zoom` auto-state reads (8.11.4.4): the recording a render at that
-    /// magnification draws in bands, and the one its analysis reads.
+    /// magnification draws in bands, and the one its analysis reads. With
+    /// `colorants`, each recorded state carries what its colours paint by
+    /// colorant, as a render simulating overprint draws by.
     pub(crate) fn display_list_at(
         &self,
         usage: Option<Usage>,
         layers: &LayerOptions,
         magnification: f64,
+        colorants: bool,
     ) -> DisplayList {
         let content = cos_pages::content_bytes(&self.doc, &self.inner);
         // The recording is an operation of its own, binding the usage's
@@ -250,7 +264,7 @@ impl Page {
             self.fonts.as_ref(),
             self.operation(None, usage, layers, magnification),
         );
-        let mut recorder = DisplayRecorder::new();
+        let mut recorder = DisplayRecorder::new().recording_colorants(colorants);
         interpret(&content, Matrix::IDENTITY, &mut recorder, &resources);
         // Nothing has been drawn through these resources yet, so everything
         // they list is the interpretation's.
@@ -289,6 +303,8 @@ impl Page {
                 layers: layers.clone(),
                 states,
                 magnification: crate::optional::magnification(magnification),
+                colorants,
+                inked: OnceLock::new(),
             };
         }
         DisplayList {
@@ -304,6 +320,8 @@ impl Page {
             layers: layers.clone(),
             states,
             magnification: crate::optional::magnification(magnification),
+            colorants,
+            inked: OnceLock::new(),
         }
     }
 }
@@ -343,6 +361,8 @@ pub(crate) fn not_retained(page: &Page) -> DisplayList {
         layers,
         states,
         magnification: 1.0,
+        colorants: false,
+        inked: OnceLock::new(),
     }
 }
 
@@ -390,6 +410,12 @@ impl DisplayList {
     /// out a part recorded before a part it draws, on a page whose recording
     /// spent its group budget: what the left-out part spent shaped the
     /// answers the later one was recorded with.
+    ///
+    /// A render simulating overprint ([`RenderOptions::simulate_overprint`])
+    /// draws by what each colour paints by colorant, which a list a caller
+    /// asks for does not record: the list records the page again with them
+    /// the first time such a render asks, keeps that recording, and replays
+    /// it — so only a list rendered with the switch on pays for it.
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
         let serial = RenderOptions {
@@ -401,6 +427,9 @@ impl DisplayList {
             // them, and a list that keeps nothing, or another usage's
             // states, draws it the direct way.
             return self.page.render(&serial);
+        }
+        if crate::simulates_overprint(options) && !self.colorants {
+            return self.inked().render(options);
         }
         // Another configuration, or another magnification where the list's
         // states read a `/Zoom` entry, replays the list where its states are
@@ -446,6 +475,19 @@ impl DisplayList {
             .render_layer_with(options, None, &resources, |renderer, resources| {
                 self.replay_onto(options, renderer, resources);
             })
+    }
+
+    /// The page recorded with its colours' colorants, the usage, layers and
+    /// magnification this list was recorded for: what a render of the list
+    /// simulating overprint replays ([`DisplayList::render`]), made the first
+    /// time one asks and kept.
+    fn inked(&self) -> &DisplayList {
+        self.inked.get_or_init(|| {
+            Box::new(
+                self.page
+                    .display_list_at(self.usage, &self.layers, self.magnification, true),
+            )
+        })
     }
 
     /// The list's calls onto `target`: the content, what its interpretation
@@ -616,6 +658,9 @@ impl DisplayList {
         }
         let parts: Vec<Mutex<Option<BandMet>>> = bands.iter().map(|_| Mutex::new(None)).collect();
         let premultiplied = Mutex::new(false);
+        // One simulation of overprint for every band, made once: the page's
+        // plates and its spots' colours, whatever rows a band draws.
+        let simulation = page.simulation_for(options);
         options.parallelism.run(bands.len(), &|index| {
             let (Some(band), Some(slot), Some(part)) =
                 (bands.get(index), slots.get(index), parts.get(index))
@@ -660,6 +705,7 @@ impl DisplayList {
                 None,
                 &resources,
                 draws,
+                simulation.clone(),
                 |renderer, resources| {
                     let mut stamping = Stamping {
                         renderer,
@@ -1088,6 +1134,8 @@ fn merged(
             .first()
             .map(|part| part.met.locked.clone())
             .unwrap_or_default(),
+        // Every band draws by the render's one simulation.
+        plates_capped: parts.iter().find_map(|part| part.met.plates_capped),
     }
     .warnings()
 }
@@ -2070,6 +2118,7 @@ trailer\n<< /Size 6 /Root 1 0 R >>\n%%EOF\n",
                 clamped: None,
                 unreadable_configuration: None,
                 locked: Vec::new(),
+                plates_capped: None,
             },
             stamps: Stamps {
                 met,

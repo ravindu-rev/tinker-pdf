@@ -86,6 +86,15 @@ fuzz_target!(|data: &[u8]| {
         render: RenderOptions::at_dpi(12.0),
         ..tinker_pdf::SeparationOptions::default()
     });
+    // Overprint simulated: the same plates, each spot's colour alone read
+    // from the space the input defines it in — a `/Separation`, a
+    // `/Colorants` entry or a `/DeviceN` — and the composite into ink.
+    let _ = page.render(&RenderOptions {
+        format: tinker_pdf::PixelFormat::CmykA8,
+        allow_cmyk: true,
+        simulate_overprint: true,
+        ..RenderOptions::at_dpi(12.0)
+    });
     // Every optional-content configuration the input lists (8.11.4.3), and
     // the first index past them, which renders as `/D`: each entry's
     // `/BaseState`, `/ON`, `/OFF`, `/AS` and `/Intent` the input shapes.

@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use tinker_pdf_color::icc::Conversion;
 
-pub use colorants::{colorant_tints, tint_byte};
+pub use colorants::{colorant_tints, spot_colour, tint_byte};
 pub use display::{Admission, DisplayRecorder, MAX_DISPLAY_LIST_BYTES};
 pub use mesh::{Mesh, MeshParams};
 use plates::{spotless, SpaceTints};

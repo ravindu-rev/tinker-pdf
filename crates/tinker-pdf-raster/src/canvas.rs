@@ -231,6 +231,37 @@ impl PlateInk {
     }
 }
 
+/// One spot channel's colour by itself, as the composite of a
+/// [`PixelFormat::Plates`] canvas reads it ([`Canvas::composite_plates_into`]):
+/// at each tint `t`, entry `t`, the light the channel's colorant alone shows
+/// at `t/255`, and the ink it is alone on the four process channels, cyan,
+/// magenta, yellow and black.
+///
+/// The colours are the caller's, which knows what each channel's colorant is
+/// (ruling 8); this crate reads them by tint and nothing else. Entry 0 is the
+/// colorant's absence wherever a caller fills it: [`SpotColour::white`]
+/// holds white and no ink at every tint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpotColour {
+    /// The light at each tint: red, green and blue, 255 the most light.
+    pub light: [[u8; 3]; 256],
+    /// The ink at each tint: cyan, magenta, yellow and black, 255 solid.
+    pub ink: [[u8; 4]; 256],
+}
+
+impl SpotColour {
+    /// A channel that shows nothing at any tint: white light and no ink. What
+    /// a channel whose colour cannot be read composites as, so a tint on it
+    /// changes no pixel of the composite.
+    #[must_use]
+    pub fn white() -> SpotColour {
+        SpotColour {
+            light: [[255; 3]; 256],
+            ink: [[0; 4]; 256],
+        }
+    }
+}
+
 impl PixelFormat {
     /// Bytes per pixel.
     #[must_use]
@@ -1627,6 +1658,90 @@ impl Canvas {
                 }
             }
         }
+    }
+
+    /// The composite of this [`PixelFormat::Plates`] canvas in `format`
+    /// (overprint simulation's, `docs/design/overprint-separations.md`, "The
+    /// composite"): a canvas of the same size standing at the same origin,
+    /// each pixel converted from nothing but its own channels, so a region
+    /// converts as the page under it does (ruling 5). For process tints
+    /// `C, M, Y, K` and spot tints `t₁ … tₙ`, `spots[i]` the colour of spot
+    /// channel `i` alone:
+    ///
+    /// - **Light** — every format but `CmykA8` and plates: [`cmyk_to_rgb`] of
+    ///   the process tints, each of red, green and blue then multiplied
+    ///   ([`mul255`]) by that channel of each spot's light at its tint,
+    ///   [`SpotColour::light`]; the colour encoded in `format` as
+    ///   [`Canvas::extract`] encodes one — a grey its luma, blue first where
+    ///   the format stores it so.
+    /// - **Ink** — `CmykA8`: the process tints, each spot's ink at its tint,
+    ///   [`SpotColour::ink`], folded into each of them as
+    ///   `x ← 255 − mul255(255 − x, 255 − s)`, the multiply in additive
+    ///   terms.
+    /// - **Alpha** is the canvas's.
+    ///
+    /// A spot channel `spots` gives no colour for is read as
+    /// [`SpotColour::white`], and changes no pixel. A plates `format` is the
+    /// canvas as it stands, and a canvas of any other format is
+    /// [`Canvas::extract`]'s copy.
+    #[must_use]
+    pub fn composite_plates_into(&self, format: PixelFormat, spots: &[SpotColour]) -> Canvas {
+        let PixelFormat::Plates { spots: carried } = self.format else {
+            return self.extract(self.origin, self.width, self.height, format);
+        };
+        if matches!(format, PixelFormat::Plates { .. }) {
+            return self.extract(self.origin, self.width, self.height, format);
+        }
+        let mut out = Canvas::new(self.width, self.height, format, Color::TRANSPARENT)
+            .at_origin(self.origin.0, self.origin.1);
+        let count = carried.count();
+        let from = self.format.components();
+        let to = format.components();
+        for row in 0..self.height as usize {
+            for col in 0..self.width as usize {
+                let base = row * self.stride + col * from;
+                let Some(pixel) = self.data.get(base..base + from) else {
+                    continue;
+                };
+                let at = |i: usize| pixel.get(i).copied().unwrap_or(0);
+                let alpha = at(4 + count);
+                let tint = |i: usize| usize::from(at(4 + i));
+                let word = if format == PixelFormat::CmykA8 {
+                    let mut ink = [at(0), at(1), at(2), at(3)];
+                    for (i, spot) in spots.iter().enumerate().take(count) {
+                        let alone = spot.ink[tint(i)];
+                        for (slot, s) in ink.iter_mut().zip(alone) {
+                            *slot = (255 - mul255(255 - u32::from(*slot), 255 - u32::from(s)))
+                                .min(255) as u8;
+                        }
+                    }
+                    [ink[0], ink[1], ink[2], ink[3], alpha]
+                } else {
+                    let (r, g, b) = cmyk_to_rgb(at(0), at(1), at(2), at(3));
+                    let mut light = [r, g, b];
+                    for (i, spot) in spots.iter().enumerate().take(count) {
+                        let alone = spot.light[tint(i)];
+                        for (slot, s) in light.iter_mut().zip(alone) {
+                            *slot = mul255(u32::from(*slot), u32::from(s)).min(255) as u8;
+                        }
+                    }
+                    let color = Color {
+                        r: light[0],
+                        g: light[1],
+                        b: light[2],
+                        a: alpha,
+                    };
+                    encode_in(format, color, None)
+                };
+                let target = row * out.stride + col * to;
+                if let (Some(slot), Some(word)) =
+                    (out.data.get_mut(target..target + to), word.get(..to))
+                {
+                    slot.copy_from_slice(word);
+                }
+            }
+        }
+        out
     }
 
     /// Starts this group's buffer from its parent, the canvas it will be
@@ -5943,6 +6058,194 @@ mod tests {
             vec![255, 0, 0, 0, 0, 0, 255],
             "light turned into ink"
         );
+    }
+
+    /// The test's own `a × b / 255`, rounded half up — never a tie, 255
+    /// being odd.
+    fn times(a: u8, b: u8) -> u8 {
+        ((2 * u32::from(a) * u32::from(b) + 255) / 510) as u8
+    }
+
+    /// A spot colour of the test's own, by tint: light falling at three
+    /// rates and ink rising at three, entry 0 white and no ink.
+    fn ramp_colour(rates: [u32; 3], inks: [u32; 4]) -> SpotColour {
+        let mut colour = SpotColour::white();
+        for t in 0..256u32 {
+            colour.light[t as usize] = rates.map(|rate| (255 - t * rate / 4).min(255) as u8);
+            colour.ink[t as usize] = inks.map(|ink| (t * ink / 4).min(255) as u8);
+        }
+        colour
+    }
+
+    /// The pixels the composite tests convert, two spots each: no ink, process
+    /// ink alone, each spot alone, both spots over process ink, solid
+    /// everywhere at half alpha, and a transparent pixel of ink.
+    fn plate_pixels() -> Canvas {
+        let pixels: [[u8; 7]; 6] = [
+            [0, 0, 0, 0, 0, 0, 255],
+            [30, 60, 90, 20, 0, 0, 255],
+            [0, 0, 0, 0, 255, 0, 255],
+            [10, 200, 0, 40, 128, 77, 255],
+            [255, 255, 255, 255, 255, 255, 128],
+            [5, 0, 250, 0, 1, 254, 0],
+        ];
+        let mut canvas = Canvas::plates(3, 2, 2, Color::WHITE).expect("under the cap");
+        canvas.data = pixels.concat();
+        canvas.at_origin(7, -3)
+    }
+
+    /// **The composite of plates is the design's closed form** (RC-03.3;
+    /// `docs/design/overprint-separations.md`, "The composite"): into light,
+    /// 8.6.4.4's relation of the process tints, each of red, green and blue
+    /// multiplied by that channel of each spot's light at its tint, then
+    /// encoded in every light format — grey by its luma, blue first where the
+    /// format is; into ink, the process tints with each spot's ink folded in
+    /// as `255 − (255 − x)(255 − s)/255`; the alpha carried; the canvas standing
+    /// where the plates stood. Every expectation is worked out here from the
+    /// pixel and the spot colours.
+    #[test]
+    fn the_composite_of_plates_is_the_designs_closed_form() {
+        let canvas = plate_pixels();
+        let spots = [
+            ramp_colour([1, 2, 3], [0, 4, 1, 2]),
+            ramp_colour([3, 0, 1], [2, 0, 3, 1]),
+        ];
+        for format in [
+            PixelFormat::Gray8,
+            PixelFormat::GrayA8,
+            PixelFormat::Rgb8,
+            PixelFormat::Rgba8,
+            PixelFormat::Bgr8,
+            PixelFormat::Bgra8,
+            PixelFormat::CmykA8,
+        ] {
+            let out = canvas.composite_plates_into(format, &spots);
+            assert_eq!(out.format, format);
+            assert_eq!((out.width, out.height), (3, 2));
+            assert_eq!(out.origin(), (7, -3), "{format:?}: where the plates stood");
+            let n = format.components();
+            for (index, pixel) in canvas.data.chunks_exact(7).enumerate() {
+                let [c, m, y, k, t0, t1, alpha] = [
+                    pixel[0], pixel[1], pixel[2], pixel[3], pixel[4], pixel[5], pixel[6],
+                ];
+                let want: Vec<u8> = if format == PixelFormat::CmykA8 {
+                    let mut ink = [c, m, y, k];
+                    for (spot, t) in spots.iter().zip([t0, t1]) {
+                        for (x, s) in ink.iter_mut().zip(spot.ink[usize::from(t)]) {
+                            *x = 255 - times(255 - *x, 255 - s);
+                        }
+                    }
+                    vec![ink[0], ink[1], ink[2], ink[3], alpha]
+                } else {
+                    let mut light = [c, m, y].map(|v| times(255 - v, 255 - k));
+                    for (spot, t) in spots.iter().zip([t0, t1]) {
+                        for (x, s) in light.iter_mut().zip(spot.light[usize::from(t)]) {
+                            *x = times(*x, s);
+                        }
+                    }
+                    let [r, g, b] = light;
+                    let luma =
+                        ((u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114 + 500)
+                            / 1000) as u8;
+                    match format {
+                        PixelFormat::Gray8 => vec![luma],
+                        PixelFormat::GrayA8 => vec![luma, alpha],
+                        PixelFormat::Rgb8 => vec![r, g, b],
+                        PixelFormat::Rgba8 => vec![r, g, b, alpha],
+                        PixelFormat::Bgr8 => vec![b, g, r],
+                        _ => vec![b, g, r, alpha],
+                    }
+                };
+                assert_eq!(
+                    &out.data[index * n..(index + 1) * n],
+                    want.as_slice(),
+                    "{format:?} pixel {index}"
+                );
+            }
+        }
+        // Lab is encoded as `lab_bytes` encodes the composite's light.
+        let lab = canvas.composite_plates_into(PixelFormat::LabA8, &spots);
+        let light = canvas.composite_plates_into(PixelFormat::Rgba8, &spots);
+        for (index, rgba) in light.data.chunks_exact(4).enumerate() {
+            let (l, a, b) = lab_bytes(Color {
+                r: rgba[0],
+                g: rgba[1],
+                b: rgba[2],
+                a: rgba[3],
+            });
+            assert_eq!(&lab.data[index * 4..index * 4 + 4], &[l, a, b, rgba[3]]);
+        }
+    }
+
+    /// **A spot with no colour, or a white one, changes nothing**: the
+    /// composite with every spot white, and with the colours given for fewer
+    /// spots than the canvas carries, the rest read as white, is the process
+    /// tints' own light and ink — what `extract` reads out of plates; a
+    /// plates format is the canvas as it stands, and a canvas of another
+    /// format is `extract`'s copy.
+    #[test]
+    fn a_spot_with_no_colour_composites_as_white() {
+        let canvas = plate_pixels();
+        for format in [PixelFormat::Rgb8, PixelFormat::Rgba8, PixelFormat::CmykA8] {
+            let process = canvas.extract(canvas.origin(), 3, 2, format);
+            let white = [SpotColour::white(), SpotColour::white()];
+            assert_eq!(
+                canvas.composite_plates_into(format, &white).data,
+                process.data,
+                "{format:?}, white spots"
+            );
+            assert_eq!(
+                canvas.composite_plates_into(format, &[]).data,
+                process.data,
+                "{format:?}, no spot colours"
+            );
+            let one = [ramp_colour([1, 2, 3], [0, 4, 1, 2])];
+            let both = [one[0].clone(), SpotColour::white()];
+            assert_eq!(
+                canvas.composite_plates_into(format, &one).data,
+                canvas.composite_plates_into(format, &both).data,
+                "{format:?}, the second spot read as white"
+            );
+        }
+        let same = canvas.composite_plates_into(canvas.format, &[]);
+        assert_eq!(same.data, canvas.data);
+        assert_eq!(same.origin(), canvas.origin());
+
+        let light = Canvas::new(2, 2, PixelFormat::Rgb8, Color::rgb(10, 20, 30)).at_origin(4, 5);
+        let converted = light.composite_plates_into(PixelFormat::Rgba8, &[]);
+        let extracted = light.extract((4, 5), 2, 2, PixelFormat::Rgba8);
+        assert_eq!(converted.data, extracted.data);
+        assert_eq!(converted.origin(), (4, 5));
+    }
+
+    /// Ruling 5: **a region of plates composites as the page under it** —
+    /// each rectangle of the canvas, copied out as plates and converted, is
+    /// that rectangle of the whole canvas converted, byte for byte.
+    #[test]
+    fn a_region_of_plates_composites_as_the_page_under_it() {
+        let canvas = plate_pixels();
+        let spots = [
+            ramp_colour([1, 2, 3], [0, 4, 1, 2]),
+            ramp_colour([3, 0, 1], [2, 0, 3, 1]),
+        ];
+        for format in [PixelFormat::Rgb8, PixelFormat::CmykA8] {
+            let whole = canvas.composite_plates_into(format, &spots);
+            let n = format.components();
+            for (left, top, width, height) in [(0, 0, 1, 1), (1, 0, 2, 2), (2, 1, 1, 1)] {
+                let at = (7 + left as i32, -3 + top as i32);
+                let region = canvas
+                    .extract(at, width, height, canvas.format)
+                    .composite_plates_into(format, &spots);
+                for row in 0..height as usize {
+                    let from = ((top as usize + row) * 3 + left as usize) * n;
+                    assert_eq!(
+                        &region.data[row * width as usize * n..(row + 1) * width as usize * n],
+                        &whole.data[from..from + width as usize * n],
+                        "{format:?} region {left},{top} row {row}"
+                    );
+                }
+            }
+        }
     }
 
     /// Recolouring plates paints the colour as process ink on every colour

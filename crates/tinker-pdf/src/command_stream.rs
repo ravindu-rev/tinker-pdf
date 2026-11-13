@@ -186,7 +186,9 @@ impl CommandStream {
     /// the usage and the optional-content configuration it was written for
     /// ([`CommandStream::usage`]), its appearances placed as a render at
     /// magnification 1 places them, and there is no document to interpret
-    /// for another.
+    /// for another. Nor is `options.simulate_overprint`: a stream holds no
+    /// inventory of the page's spots nor where their colours are defined, so
+    /// it draws as a render with the switch off.
     #[must_use]
     pub fn render(&self, options: &RenderOptions) -> Bitmap {
         let source =
@@ -202,6 +204,7 @@ impl CommandStream {
             // A stream is drawn in the states it was written in, and a
             // render of it overrides no group.
             Vec::new(),
+            None,
             |renderer, source| self.replay_onto(options, renderer, source),
         )
         .into_bitmap()

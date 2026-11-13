@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use tinker_pdf_color::{ColorSpace, Colorant, Colorants, Function};
 use tinker_pdf_content::{ColorantKind, ColorantTint, ColorantTints};
+use tinker_pdf_raster::SpotColour;
 
 /// The four process colorants of a CMYK device, by the names 8.6.6.4 reserves
 /// for them, in DeviceCMYK's order.
@@ -41,6 +42,49 @@ fn process_ink(alternate: &ColorSpace, values: &[f64], light: (u8, u8, u8)) -> [
     }
     let (c, m, y, k) = tinker_pdf_raster::canvas::rgb_to_cmyk(light.0, light.1, light.2);
     [c, m, y, k]
+}
+
+/// The colour of component `component` of a `/Separation` or `/DeviceN`
+/// space alone, at every tint (`docs/design/overprint-separations.md`, "The
+/// composite"): at tint `t`, the light the space's alternate gives its tint
+/// transform's output at `t/255`, every other component at zero, and the ink
+/// that output is on the process plates — a DeviceCMYK alternate's own
+/// components (H-135), any other alternate's light turned into ink with
+/// maximum undercolour removal. A `/Separation`'s one colorant is its
+/// component 0, and so is a `/DeviceN` `/Colorants` entry's, which is a
+/// `/Separation` describing the colorant alone (8.6.6.5).
+///
+/// Tint 0 is the colorant's absence, white and no ink, whatever the transform
+/// gives there; a space of another family, and a component past the space's,
+/// are white at every tint, so a plate of them changes no pixel of a
+/// composite. Each tint's transform is evaluated once, never per pixel.
+#[must_use]
+pub fn spot_colour(space: &ColorSpace, component: usize) -> SpotColour {
+    let mut colour = SpotColour::white();
+    let ColorSpace::Separation {
+        components: count,
+        alternate,
+        tint,
+        ..
+    } = space
+    else {
+        return colour;
+    };
+    if component >= *count {
+        return colour;
+    }
+    let mut inputs = vec![0.0; *count];
+    let mut values = Vec::new();
+    for t in 1..=255u8 {
+        if let Some(slot) = inputs.get_mut(component) {
+            *slot = f64::from(t) / 255.0;
+        }
+        tint.eval_into(&inputs, &mut values);
+        let light = alternate.to_rgb(&values);
+        colour.light[usize::from(t)] = [light.0, light.1, light.2];
+        colour.ink[usize::from(t)] = process_ink(alternate, &values, light);
+    }
+    colour
 }
 
 /// Whether a process space is a CMYK one, whose components paint the
@@ -256,4 +300,113 @@ fn separation_tints(
         alternate: None,
         process,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The test's own byte of a value in `0..=1`, rounded half away from zero.
+    fn byte(value: f64) -> u8 {
+        (value.clamp(0.0, 1.0) * 255.0).round() as u8
+    }
+
+    /// A `/Separation` of `Gold` onto `alternate`, its tint transform type
+    /// 2 from `c0` to `c1`.
+    fn separation(alternate: ColorSpace, c0: &[f64], c1: &[f64]) -> ColorSpace {
+        ColorSpace::Separation {
+            components: 1,
+            alternate: Box::new(alternate),
+            tint: Box::new(Function::Exponential {
+                domain: (0.0, 1.0),
+                c0: c0.to_vec(),
+                c1: c1.to_vec(),
+                n: 1.0,
+            }),
+            colorants: Colorants {
+                names: vec![Colorant::Named(b"Gold".to_vec())],
+                ..Colorants::default()
+            },
+        }
+    }
+
+    /// **A spot's colour alone is its alternate at each tint** (RC-03.3):
+    /// onto DeviceCMYK, the transform's output is the ink and 8.6.4.4 its
+    /// light, worked out here at every tint; onto DeviceRGB, the output is
+    /// the light and its ink the light turned into ink with maximum
+    /// undercolour removal; tint 0 is white and no ink even where the
+    /// transform gives ink there.
+    #[test]
+    fn a_spots_colour_alone_is_its_alternate_at_each_tint() {
+        let cmyk = separation(ColorSpace::DeviceCmyk, &[0.0; 4], &[0.0, 0.6, 1.0, 0.2]);
+        let colour = spot_colour(&cmyk, 0);
+        for t in 1..=255u8 {
+            let x = f64::from(t) / 255.0;
+            let ink = [0.0, 0.6 * x, x, 0.2 * x];
+            assert_eq!(colour.ink[usize::from(t)], ink.map(byte), "ink at {t}");
+            let light = [ink[0], ink[1], ink[2]].map(|v| byte((1.0 - v) * (1.0 - ink[3])));
+            assert_eq!(colour.light[usize::from(t)], light, "light at {t}");
+        }
+        assert_eq!(colour.light[0], [255; 3]);
+        assert_eq!(colour.ink[0], [0; 4]);
+
+        let rgb = separation(ColorSpace::DeviceRgb, &[1.0; 3], &[0.2, 0.5, 0.9]);
+        let colour = spot_colour(&rgb, 0);
+        for t in 1..=255u8 {
+            let x = f64::from(t) / 255.0;
+            // 7.10.3: `c0 + x^N × (c1 − c0)`, N being 1.
+            let light = [0.2, 0.5, 0.9].map(|c1: f64| byte(1.0 + x * (c1 - 1.0)));
+            assert_eq!(colour.light[usize::from(t)], light, "light at {t}");
+            let (c, m, y, k) = tinker_pdf_raster::canvas::rgb_to_cmyk(light[0], light[1], light[2]);
+            assert_eq!(colour.ink[usize::from(t)], [c, m, y, k], "ink at {t}");
+        }
+
+        // A transform that gives ink at no tint: the colorant's absence is
+        // still white.
+        let inked = separation(ColorSpace::DeviceCmyk, &[0.5; 4], &[1.0; 4]);
+        let colour = spot_colour(&inked, 0);
+        assert_eq!((colour.light[0], colour.ink[0]), ([255; 3], [0; 4]));
+        assert_eq!(colour.ink[255], [255; 4]);
+    }
+
+    /// **A `/DeviceN` component alone is the transform with every other
+    /// component at zero**: each component of a space whose transform adds
+    /// its components into cyan and puts each into its own process ink comes
+    /// out as that ink alone; a component past the space's, and a space that
+    /// names no colorant, are white at every tint.
+    #[test]
+    fn a_device_n_component_alone_has_every_other_at_zero() {
+        // { c0 c1 } -> { c0+c1  c0  c1  0 }
+        let program = tinker_pdf_color::function::parse_postscript(b"{ 2 copy add 3 1 roll 0 }");
+        let space = ColorSpace::Separation {
+            components: 2,
+            alternate: Box::new(ColorSpace::DeviceCmyk),
+            tint: Box::new(Function::PostScript {
+                domain: vec![(0.0, 1.0); 2],
+                range: vec![(0.0, 1.0); 4],
+                program,
+            }),
+            colorants: Colorants {
+                names: vec![
+                    Colorant::Named(b"Gold".to_vec()),
+                    Colorant::Named(b"Teal".to_vec()),
+                ],
+                ..Colorants::default()
+            },
+        };
+        let first = spot_colour(&space, 0);
+        let second = spot_colour(&space, 1);
+        for t in [1u8, 64, 200, 255] {
+            let x = byte(f64::from(t) / 255.0);
+            assert_eq!(first.ink[usize::from(t)], [x, x, 0, 0], "the first at {t}");
+            assert_eq!(
+                second.ink[usize::from(t)],
+                [x, 0, x, 0],
+                "the second at {t}"
+            );
+        }
+        assert_eq!(spot_colour(&space, 2), SpotColour::white());
+        assert_eq!(spot_colour(&ColorSpace::DeviceCmyk, 0), SpotColour::white());
+        assert_eq!(spot_colour(&ColorSpace::DeviceRgb, 0), SpotColour::white());
+    }
 }

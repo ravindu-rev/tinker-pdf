@@ -3765,6 +3765,24 @@ impl PageResources {
         self.read_space(object, depth, name, self.painted())
     }
 
+    /// The colour alone of the spot `name`, which `definition` defines
+    /// (RC-03.3; `docs/design/overprint-separations.md`, "The composite"):
+    /// its space read as every painting path reads one, and the spot's
+    /// component of it evaluated at every tint
+    /// ([`tinker_pdf_render::spot_colour`]); white at every tint where the
+    /// space cannot be read.
+    pub(crate) fn spot_colour(
+        &self,
+        name: &[u8],
+        definition: &crate::separations::SpotDefinition,
+    ) -> tinker_pdf_raster::SpotColour {
+        let (object, component) = definition.space();
+        self.parse_space(object, 0, name)
+            .map_or_else(tinker_pdf_raster::SpotColour::white, |space| {
+                tinker_pdf_render::spot_colour(&space, component)
+            })
+    }
+
     fn read_space(
         &self,
         object: &Object,
