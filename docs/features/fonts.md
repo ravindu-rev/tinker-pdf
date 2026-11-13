@@ -138,6 +138,26 @@ that large, else the largest), `Multiple(ppem)` (the smallest whole multiple,
 else `AtLeast`'s) and `Nearest(ppem)` (the larger on a tie), strikes of one
 size taken in table order.
 
+Colour bitmap strikes in `CBLC` and `CBDT` (their chapters, over EBLC's
+layout). `ColourBitmaps::parse` takes both tables, each at major version 3,
+and reads every `BitmapSize` record: `ppemX`, `ppemY`, the bit depth, the
+flags and the glyph range. `ColourBitmaps::glyph` finds the index subtable
+whose range holds a glyph and reads it in whichever of the five index formats
+it is — four- and two-byte offsets per glyph (1, 3), one size and one set of
+metrics for a range (2), sparse offsets (4), and sparse glyphs of one size
+(5) — then the glyph's data in `CBDT`'s format 17, 18 or 19: the PNG,
+undecoded, with its strike's pixels per em and its `BitmapMetrics` in pixels —
+small metrics for the direction the strike's flags name, big metrics for
+both, format 19's from the index subtable. Every index entry is held to its
+list's `indexSubtableListSize` and to `CBLC`, and every glyph's data to its
+slot and to `CBDT`; what does not fit, offsets that run backwards and format
+19 under an index format with no metrics are `CbdtRefusal::Malformed`, an
+index format the chapter does not define is `IndexFormat`, and the formats
+CBDT inherits from EBDT — 1 to 9, uncompressed and component bitmaps — are
+`DataFormat`, refused by name (the table below).
+`ColourBitmaps::choose_strike` takes the same `StrikeChoice` as `sbix`,
+comparing `ppemY`.
+
 **Type 1** (9.9, `/FontFile`). `Type1::parse` reads PFB, PFA and the bare
 bytes a PDF embeds: eexec decryption, the second decryption layer around each
 charstring with the font's own `/lenIV`, and Type 1 charstrings — `hsbw`'s
@@ -1243,6 +1263,8 @@ corpora already vendored here. So every name stays on the list.
 | A `usecmap` parent that cannot be resolved | `WarningKind::CMap(cmap::Warning::ParentUnresolved)` | The child keeps what it declared itself rather than inheriting from nothing | 9.7.5.3 |
 | A `usecmap` chain past 4 links, or one that revisits a source | `cmap::Warning::ParentChainCapped`, `cmap::Warning::ParentCycle` | The names come out of the document; being finite is the property that matters (ruling 1) | [rulings](../rulings.md) |
 | A truncated CMap mapping section | `cmap::Warning::SectionUnterminated(Section)` | What parsed is kept and the section is named, so partial coverage is visible | [rulings](../rulings.md) ruling 10 |
+| An `sbix` graphic of type `mask` or `pdf `, or of any type but `png `, `jpg ` and `tiff` | `SbixRefusal::GraphicType` | The sbix chapter's *Glyph data* names `mask` and `pdf ` as not supported in OpenType, and defines no other | [design](../design/colour-fonts.md) |
+| CBDT's uncompressed and component glyph data, the EBDT formats 1 to 9 it inherits | `CbdtRefusal::DataFormat(n)` | Read and drawn by their own step; the PNG formats 17 to 19 are what colour fonts carry | [ROADMAP](../ROADMAP.md) FT-06.21 |
 | TrueType and Type 2 hinting | none — outlines are unhinted, not degraded | The bytecode interpreter makes small text differently wrong; subset output keeps `cvt `/`fpgm`/`prep` for readers that disagree. Stem darkening, the bytecode interpreter, CFF hints and an autohinter are roadmap rows, the small-text judgement a person's | [ROADMAP](../ROADMAP.md) FT-04a…FT-04d |
 
 ## Verified
@@ -1395,9 +1417,13 @@ corpora already vendored here. So every name stays on the list.
   `sbix`'s strikes and every graphic type, a `dupe` resolved and its chains
   and bad targets refused, no data, refused types and short, backward and
   overrunning data, and each `StrikeChoice` over strikes of repeated sizes;
-  and every prefix and flipped byte of the tables answering without a panic.
-  The `sfnt` fuzz target's `colr-v0.ttf`, `colr-v1.ttf` and `sbix.ttf` seeds
-  are written by the same builders, and read back through their directories.
+  `CBLC`/`CBDT` through all five index formats and the three PNG formats,
+  small metrics in each direction the flags name, the inherited and unknown
+  formats refused, and ranges, lists, subtables and data that overrun or run
+  backwards; and every prefix and flipped byte of the tables answering
+  without a panic. The `sfnt` fuzz target's `colr-v0.ttf`, `colr-v1.ttf`,
+  `sbix.ttf` and `cbdt.ttf` seeds are written by the same builders, and read
+  back through their directories.
 - `crates/tinker-pdf/tests/cff_fonts.rs` — CFF glyph selection: charset over
   code, string INDEX, built-in encodings, CID-keyed `ROS`/FDArray/FDSelect,
   and a CID-keyed program this engine's writer embedded drawing the glyph it

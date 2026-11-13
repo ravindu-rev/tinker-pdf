@@ -13,8 +13,9 @@ use tinker_pdf_font::colr::{
     PaintId, FOREGROUND, MAX_PAINT_DEPTH, MAX_PAINT_NODES,
 };
 use tinker_pdf_font::{
-    ColourIndex, Colr, Cpal, Graphic, Layer, LayerColour, PaletteChoice, PaletteType, Rgba, Sbix,
-    SbixGlyph, SbixRefusal, SbixStrike, Sfnt, StrikeChoice,
+    Bearings, BitmapMetrics, BitmapStrike, CbdtRefusal, ColourBitmaps, ColourIndex, Colr, Cpal,
+    Graphic, Layer, LayerColour, PaletteChoice, PaletteType, Rgba, Sbix, SbixGlyph, SbixRefusal,
+    SbixStrike, Sfnt, StrikeChoice,
 };
 
 /// A colour, written as the reader hands it back.
@@ -2255,6 +2256,651 @@ fn sbix_seed() -> Vec<u8> {
     ])
 }
 
+/// `SmallGlyphMetrics`: height, width, bearing x and y, advance.
+fn small_metrics(height: u8, width: u8, x: i8, y: i8, advance: u8) -> Vec<u8> {
+    vec![height, width, x as u8, y as u8, advance]
+}
+
+/// `BigGlyphMetrics`: height, width, the horizontal bearings and advance, the
+/// vertical ones.
+fn big_metrics(values: [i16; 8]) -> [u8; 8] {
+    values.map(|v| v as u8)
+}
+
+/// One glyph's data in format 17, 18 or 19: the metrics the format carries
+/// (none for 19), the PNG's length and the PNG.
+fn png_data(metrics: &[u8], png: &[u8]) -> Vec<u8> {
+    let mut out = metrics.to_vec();
+    out.extend_from_slice(&(png.len() as u32).to_be_bytes());
+    out.extend_from_slice(png);
+    out
+}
+
+/// An index subtable to write (*IndexSubtable formats*), its glyphs' data
+/// written to `CBDT` in glyph order.
+#[derive(Clone)]
+enum Index {
+    /// Format 1 (four-byte offsets) or 3 (two-byte): the glyphs from `first`,
+    /// each's data or none.
+    Offsets {
+        format: u16,
+        image_format: u16,
+        first: u16,
+        glyphs: Vec<Option<Vec<u8>>>,
+    },
+    /// Format 2: the glyphs from `first`, each of one size, and their metrics.
+    Constant {
+        image_format: u16,
+        first: u16,
+        metrics: [u8; 8],
+        glyphs: Vec<Vec<u8>>,
+    },
+    /// Format 4: sparse glyphs and their data.
+    Sparse {
+        image_format: u16,
+        glyphs: Vec<(u16, Vec<u8>)>,
+    },
+    /// Format 5: sparse glyphs of one size, and their metrics.
+    SparseConstant {
+        image_format: u16,
+        metrics: [u8; 8],
+        glyphs: Vec<(u16, Vec<u8>)>,
+    },
+    /// A subtable's bytes as they are, and the range its record claims.
+    Raw {
+        first: u16,
+        last: u16,
+        bytes: Vec<u8>,
+    },
+}
+
+/// A strike to write: its pixels per em, both axes, its flags and its index
+/// subtables.
+#[derive(Clone)]
+struct StrikeSpec {
+    ppem: u8,
+    flags: u8,
+    indices: Vec<Index>,
+}
+
+/// One index subtable and its record's range, its glyphs' data appended to
+/// `cbdt`.
+fn index_subtable(index: &Index, cbdt: &mut Vec<u8>) -> (u16, u16, Vec<u8>) {
+    let header = |format: u16, image_format: u16, image_at: usize| {
+        let mut out = Vec::new();
+        out.extend_from_slice(&format.to_be_bytes());
+        out.extend_from_slice(&image_format.to_be_bytes());
+        out.extend_from_slice(&(image_at as u32).to_be_bytes());
+        out
+    };
+    let image_at = cbdt.len();
+    match index {
+        Index::Offsets {
+            format,
+            image_format,
+            first,
+            glyphs,
+        } => {
+            let mut out = header(*format, *image_format, image_at);
+            let mut offset = 0usize;
+            let entry = |out: &mut Vec<u8>, offset: usize| {
+                if *format == 1 {
+                    out.extend_from_slice(&(offset as u32).to_be_bytes());
+                } else {
+                    out.extend_from_slice(&(offset as u16).to_be_bytes());
+                }
+            };
+            for glyph in glyphs {
+                entry(&mut out, offset);
+                if let Some(bytes) = glyph {
+                    cbdt.extend_from_slice(bytes);
+                    offset += bytes.len();
+                }
+            }
+            entry(&mut out, offset);
+            // Format 3's two-byte array is padded to four bytes.
+            if *format == 3 && (glyphs.len() + 1) % 2 == 1 {
+                out.extend_from_slice(&[0, 0]);
+            }
+            (*first, *first + glyphs.len() as u16 - 1, out)
+        }
+        Index::Constant {
+            image_format,
+            first,
+            metrics,
+            glyphs,
+        } => {
+            let mut out = header(2, *image_format, image_at);
+            let size = glyphs.first().map_or(0, Vec::len);
+            out.extend_from_slice(&(size as u32).to_be_bytes());
+            out.extend_from_slice(metrics);
+            for bytes in glyphs {
+                cbdt.extend_from_slice(bytes);
+            }
+            (*first, *first + glyphs.len() as u16 - 1, out)
+        }
+        Index::Sparse {
+            image_format,
+            glyphs,
+        } => {
+            let mut out = header(4, *image_format, image_at);
+            out.extend_from_slice(&(glyphs.len() as u32).to_be_bytes());
+            let mut offset = 0usize;
+            for (glyph, bytes) in glyphs {
+                out.extend_from_slice(&glyph.to_be_bytes());
+                out.extend_from_slice(&(offset as u16).to_be_bytes());
+                cbdt.extend_from_slice(bytes);
+                offset += bytes.len();
+            }
+            out.extend_from_slice(&0u16.to_be_bytes());
+            out.extend_from_slice(&(offset as u16).to_be_bytes());
+            let ids = glyphs.iter().map(|(glyph, _)| *glyph);
+            (ids.clone().min().unwrap_or(0), ids.max().unwrap_or(0), out)
+        }
+        Index::SparseConstant {
+            image_format,
+            metrics,
+            glyphs,
+        } => {
+            let mut out = header(5, *image_format, image_at);
+            let size = glyphs.first().map_or(0, |(_, bytes)| bytes.len());
+            out.extend_from_slice(&(size as u32).to_be_bytes());
+            out.extend_from_slice(metrics);
+            out.extend_from_slice(&(glyphs.len() as u32).to_be_bytes());
+            for (glyph, bytes) in glyphs {
+                out.extend_from_slice(&glyph.to_be_bytes());
+                cbdt.extend_from_slice(bytes);
+            }
+            if glyphs.len() % 2 == 1 {
+                out.extend_from_slice(&[0, 0]);
+            }
+            let ids = glyphs.iter().map(|(glyph, _)| *glyph);
+            (ids.clone().min().unwrap_or(0), ids.max().unwrap_or(0), out)
+        }
+        Index::Raw { first, last, bytes } => (*first, *last, bytes.clone()),
+    }
+}
+
+/// A `CBLC` and its `CBDT` (*CblcHeader*, *BitmapSize record*,
+/// *IndexSubtableList*): a record a strike, then each strike's list of
+/// records and subtables; the line metrics, which nothing here reads, zeros.
+fn colour_bitmaps(strikes: &[StrikeSpec]) -> (Vec<u8>, Vec<u8>) {
+    let mut cbdt = vec![0, 3, 0, 0];
+    let mut lists: Vec<(Vec<u8>, u32, u16, u16)> = Vec::new();
+    for strike in strikes {
+        let subtables: Vec<(u16, u16, Vec<u8>)> = strike
+            .indices
+            .iter()
+            .map(|index| index_subtable(index, &mut cbdt))
+            .collect();
+        let mut list = Vec::new();
+        let mut at = 8 * subtables.len();
+        let mut bodies = Vec::new();
+        for (first, last, bytes) in &subtables {
+            list.extend_from_slice(&first.to_be_bytes());
+            list.extend_from_slice(&last.to_be_bytes());
+            list.extend_from_slice(&(at as u32).to_be_bytes());
+            at += bytes.len();
+            bodies.extend_from_slice(bytes);
+        }
+        list.extend_from_slice(&bodies);
+        let start = subtables.iter().map(|s| s.0).min().unwrap_or(0);
+        let end = subtables.iter().map(|s| s.1).max().unwrap_or(0);
+        lists.push((list, subtables.len() as u32, start, end));
+    }
+    let mut cblc = vec![0, 3, 0, 0];
+    cblc.extend_from_slice(&(strikes.len() as u32).to_be_bytes());
+    let mut list_at = 8 + 48 * strikes.len();
+    for (strike, (list, count, start, end)) in strikes.iter().zip(&lists) {
+        cblc.extend_from_slice(&(list_at as u32).to_be_bytes());
+        cblc.extend_from_slice(&(list.len() as u32).to_be_bytes());
+        cblc.extend_from_slice(&count.to_be_bytes());
+        cblc.extend_from_slice(&[0; 4 + 12 + 12]);
+        cblc.extend_from_slice(&start.to_be_bytes());
+        cblc.extend_from_slice(&end.to_be_bytes());
+        cblc.extend_from_slice(&[strike.ppem, strike.ppem, 32, strike.flags]);
+        list_at += list.len();
+    }
+    for (list, ..) in &lists {
+        cblc.extend_from_slice(list);
+    }
+    (cblc, cbdt)
+}
+
+/// A PNG's signature and a byte to tell the bitmaps apart; never decoded.
+fn png(tag: u8) -> Vec<u8> {
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    out.push(tag);
+    out
+}
+
+#[test]
+fn cbdt_glyphs_read_through_every_index_format() {
+    let m = big_metrics([20, 18, -1, 17, 19, -9, 2, 21]);
+    let n = big_metrics([10, 12, 0, 9, 11, -6, 1, 11]);
+    let strike = StrikeSpec {
+        ppem: 109,
+        flags: 1,
+        indices: vec![
+            Index::Offsets {
+                format: 1,
+                image_format: 17,
+                first: 10,
+                glyphs: vec![
+                    Some(png_data(&small_metrics(30, 28, -2, 26, 30), &png(1))),
+                    None,
+                    Some(png_data(&small_metrics(31, 29, 3, -4, 32), &png(2))),
+                ],
+            },
+            Index::Constant {
+                image_format: 19,
+                first: 20,
+                metrics: m,
+                glyphs: vec![png_data(&[], &png(3)), png_data(&[], &png(4))],
+            },
+            Index::Offsets {
+                format: 3,
+                image_format: 18,
+                first: 30,
+                glyphs: vec![
+                    Some(png_data(&big_metrics([1, 2, 3, 4, 5, 6, 7, 8]), &png(5))),
+                    Some(png_data(
+                        &big_metrics([8, 7, -6, -5, 4, -3, -2, 1]),
+                        &png(6),
+                    )),
+                ],
+            },
+            Index::Sparse {
+                image_format: 17,
+                glyphs: vec![
+                    (40, png_data(&small_metrics(5, 6, 7, 8, 9), &png(7))),
+                    (45, png_data(&small_metrics(9, 8, -7, -6, 5), &png(8))),
+                ],
+            },
+            Index::SparseConstant {
+                image_format: 19,
+                metrics: n,
+                glyphs: vec![(50, png_data(&[], &png(9))), (55, png_data(&[], &png(10)))],
+            },
+        ],
+    };
+    let (cblc, cbdt) = colour_bitmaps(&[strike]);
+    let bitmaps = ColourBitmaps::parse(&cblc, &cbdt).expect("a CBLC and its CBDT");
+    assert_eq!(
+        bitmaps.strikes(),
+        vec![BitmapStrike {
+            ppem_x: 109,
+            ppem_y: 109,
+            bit_depth: 32,
+            flags: 1,
+            start_glyph: 10,
+            end_glyph: 55,
+        }]
+    );
+    let horizontal = |height, width, x, y, advance| BitmapMetrics {
+        height,
+        width,
+        horizontal: Some(Bearings {
+            bearing_x: x,
+            bearing_y: y,
+            advance,
+        }),
+        vertical: None,
+    };
+    let big = |v: [i8; 8]| BitmapMetrics {
+        height: v[0] as u8,
+        width: v[1] as u8,
+        horizontal: Some(Bearings {
+            bearing_x: v[2],
+            bearing_y: v[3],
+            advance: v[4] as u8,
+        }),
+        vertical: Some(Bearings {
+            bearing_x: v[5],
+            bearing_y: v[6],
+            advance: v[7] as u8,
+        }),
+    };
+    let expect = |glyph: u16, format: u16, metrics: BitmapMetrics, tag: u8| {
+        let read = bitmaps.glyph(0, glyph);
+        let Ok(Some(found)) = read else {
+            panic!("glyph {glyph}: {read:?}");
+        };
+        assert_eq!(found.format, format, "glyph {glyph}");
+        assert_eq!(found.metrics, metrics, "glyph {glyph}");
+        assert_eq!(found.png, png(tag).as_slice(), "glyph {glyph}");
+        assert_eq!((found.ppem_x, found.ppem_y), (109, 109));
+    };
+    expect(10, 17, horizontal(30, 28, -2, 26, 30), 1);
+    expect(12, 17, horizontal(31, 29, 3, -4, 32), 2);
+    expect(20, 19, big([20, 18, -1, 17, 19, -9, 2, 21]), 3);
+    expect(21, 19, big([20, 18, -1, 17, 19, -9, 2, 21]), 4);
+    expect(30, 18, big([1, 2, 3, 4, 5, 6, 7, 8]), 5);
+    expect(31, 18, big([8, 7, -6, -5, 4, -3, -2, 1]), 6);
+    expect(40, 17, horizontal(5, 6, 7, 8, 9), 7);
+    expect(45, 17, horizontal(9, 8, -7, -6, 5), 8);
+    expect(50, 19, big([10, 12, 0, 9, 11, -6, 1, 11]), 9);
+    expect(55, 19, big([10, 12, 0, 9, 11, -6, 1, 11]), 10);
+    for none in [11, 41, 51, 15, 9, 56] {
+        assert_eq!(bitmaps.glyph(0, none), Ok(None), "glyph {none}");
+    }
+    assert_eq!(bitmaps.glyph(1, 10), Ok(None), "a strike past the count");
+}
+
+#[test]
+fn every_png_data_format_reads_its_metrics() {
+    let small = |flags: u8| StrikeSpec {
+        ppem: 20,
+        flags,
+        indices: vec![Index::Offsets {
+            format: 1,
+            image_format: 17,
+            first: 1,
+            glyphs: vec![Some(png_data(&small_metrics(4, 5, -1, 3, 6), &png(1)))],
+        }],
+    };
+    let bearings = Some(Bearings {
+        bearing_x: -1,
+        bearing_y: 3,
+        advance: 6,
+    });
+    // *Bitmap flags*: small metrics are vertical only where the strike says
+    // vertical and not horizontal.
+    for (flags, vertical) in [(0x01, false), (0x02, true), (0x03, false), (0x00, false)] {
+        let (cblc, cbdt) = colour_bitmaps(&[small(flags)]);
+        let bitmaps = ColourBitmaps::parse(&cblc, &cbdt).expect("a table pair");
+        let glyph = bitmaps.glyph(0, 1).expect("it reads").expect("a bitmap");
+        assert_eq!(
+            glyph.metrics,
+            BitmapMetrics {
+                height: 4,
+                width: 5,
+                horizontal: if vertical { None } else { bearings },
+                vertical: if vertical { bearings } else { None },
+            },
+            "flags {flags:#04x}"
+        );
+    }
+
+    // Format 19 takes the subtable's metrics, so under a format with none it
+    // is refused; so are the formats CBDT inherits from EBDT, and data whose
+    // length runs past its slot.
+    let mut long = png_data(&small_metrics(1, 1, 0, 0, 1), &png(2));
+    long[5..9].copy_from_slice(&500u32.to_be_bytes());
+    let mut indices = vec![
+        Index::Offsets {
+            format: 1,
+            image_format: 19,
+            first: 1,
+            glyphs: vec![Some(png_data(&[], &png(1)))],
+        },
+        Index::Offsets {
+            format: 1,
+            image_format: 17,
+            first: 2,
+            glyphs: vec![Some(long)],
+        },
+    ];
+    for (i, format) in (1..=9).chain([20, 0xFFFF]).enumerate() {
+        indices.push(Index::Offsets {
+            format: 1,
+            image_format: format,
+            first: 10 + i as u16,
+            glyphs: vec![Some(vec![1, 1, 0, 0, 1, 0x80])],
+        });
+    }
+    let (cblc, cbdt) = colour_bitmaps(&[StrikeSpec {
+        ppem: 20,
+        flags: 1,
+        indices,
+    }]);
+    let bitmaps = ColourBitmaps::parse(&cblc, &cbdt).expect("a table pair");
+    assert_eq!(bitmaps.glyph(0, 1), Err(CbdtRefusal::Malformed));
+    assert_eq!(bitmaps.glyph(0, 2), Err(CbdtRefusal::Malformed));
+    for (i, format) in (1..=9).chain([20, 0xFFFF]).enumerate() {
+        assert_eq!(
+            bitmaps.glyph(0, 10 + i as u16),
+            Err(CbdtRefusal::DataFormat(format)),
+            "format {format}"
+        );
+    }
+}
+
+#[test]
+fn a_glyph_range_overrunning_its_subtable_answers_none() {
+    // A format 1 subtable whose record claims glyphs 10 to 200 and which holds
+    // offsets for three.
+    let mut short = vec![0, 1, 0, 17, 0, 0, 0, 4];
+    for offset in [0u32, 4, 8] {
+        short.extend_from_slice(&offset.to_be_bytes());
+    }
+    let (cblc, cbdt) = colour_bitmaps(&[StrikeSpec {
+        ppem: 20,
+        flags: 1,
+        indices: vec![
+            Index::Raw {
+                first: 10,
+                last: 200,
+                bytes: short,
+            },
+            Index::Raw {
+                first: 300,
+                last: 300,
+                bytes: vec![0, 6, 0, 17, 0, 0, 0, 4],
+            },
+        ],
+    }]);
+    let bitmaps = ColourBitmaps::parse(&cblc, &cbdt).expect("a table pair");
+    assert_eq!(bitmaps.glyph(0, 10), Err(CbdtRefusal::Malformed));
+    assert_eq!(bitmaps.glyph(0, 200), Err(CbdtRefusal::Malformed));
+    assert!(!bitmaps.holds(0, 10));
+    assert_eq!(bitmaps.choose_strike(10, StrikeChoice::Largest), None);
+    assert_eq!(bitmaps.glyph(0, 300), Err(CbdtRefusal::IndexFormat(6)));
+    assert_eq!(bitmaps.glyph(0, 250), Ok(None), "in no range");
+
+    let good = || StrikeSpec {
+        ppem: 20,
+        flags: 1,
+        indices: vec![Index::Offsets {
+            format: 1,
+            image_format: 17,
+            first: 1,
+            glyphs: vec![
+                Some(png_data(&small_metrics(1, 1, 0, 0, 1), &png(1))),
+                Some(png_data(&small_metrics(1, 1, 0, 0, 1), &png(2))),
+            ],
+        }],
+    };
+    let (cblc, cbdt) = colour_bitmaps(&[good()]);
+    let list_at = 8 + 48;
+    let sub = list_at + 8;
+
+    // A list size too small for its own records.
+    let mut tight = cblc.clone();
+    tight[12..16].copy_from_slice(&4u32.to_be_bytes());
+    let bitmaps = ColourBitmaps::parse(&tight, &cbdt).expect("a table pair");
+    assert_eq!(bitmaps.glyph(0, 1), Err(CbdtRefusal::Malformed));
+
+    // A subtable past its list.
+    let mut away = cblc.clone();
+    away[list_at + 4..list_at + 8].copy_from_slice(&0x0FFF_FFFFu32.to_be_bytes());
+    let bitmaps = ColourBitmaps::parse(&away, &cbdt).expect("a table pair");
+    assert_eq!(bitmaps.glyph(0, 1), Err(CbdtRefusal::Malformed));
+
+    // Offsets that run backwards, and image data past CBDT.
+    let mut backwards = cblc.clone();
+    backwards[sub + 16..sub + 20].copy_from_slice(&0u32.to_be_bytes());
+    let bitmaps = ColourBitmaps::parse(&backwards, &cbdt).expect("a table pair");
+    assert_eq!(bitmaps.glyph(0, 2), Err(CbdtRefusal::Malformed));
+    let mut beyond = cblc.clone();
+    beyond[sub + 4..sub + 8].copy_from_slice(&0x00FF_0000u32.to_be_bytes());
+    let bitmaps = ColourBitmaps::parse(&beyond, &cbdt).expect("a table pair");
+    assert_eq!(bitmaps.glyph(0, 1), Err(CbdtRefusal::Malformed));
+    let cut = &cbdt[..cbdt.len() - 3];
+    let bitmaps = ColourBitmaps::parse(&cblc, cut).expect("a table pair");
+    assert_eq!(bitmaps.glyph(0, 2), Err(CbdtRefusal::Malformed));
+    assert!(bitmaps.holds(0, 1), "the glyph before it reads");
+
+    // What is no table pair: another major version of either, and a
+    // BitmapSize array past CBLC.
+    let mut old = cblc.clone();
+    old[1] = 2;
+    assert!(ColourBitmaps::parse(&old, &cbdt).is_none());
+    let mut other = cbdt.clone();
+    other[1] = 2;
+    assert!(ColourBitmaps::parse(&cblc, &other).is_none());
+    assert!(ColourBitmaps::parse(&cblc[..40], &cbdt).is_none());
+}
+
+#[test]
+fn each_cbdt_strike_option_picks_its_strike() {
+    let holding = |ppem: u8, glyph: u16| StrikeSpec {
+        ppem,
+        flags: 1,
+        indices: vec![Index::Offsets {
+            format: 1,
+            image_format: 17,
+            first: glyph,
+            glyphs: vec![Some(png_data(&small_metrics(1, 1, 0, 0, 1), &png(ppem)))],
+        }],
+    };
+    let strikes = vec![
+        holding(20, 1),
+        holding(40, 1),
+        holding(40, 1),
+        holding(109, 2),
+        holding(136, 1),
+    ];
+    let (cblc, cbdt) = colour_bitmaps(&strikes);
+    let bitmaps = ColourBitmaps::parse(&cblc, &cbdt).expect("a table pair");
+    for (choice, strike) in [
+        (StrikeChoice::Largest, 4),
+        (StrikeChoice::AtLeast(64), 4),
+        (StrikeChoice::AtLeast(40), 1),
+        (StrikeChoice::AtLeast(200), 4),
+        (StrikeChoice::Multiple(20), 0),
+        (StrikeChoice::Multiple(68), 4),
+        (StrikeChoice::Multiple(30), 1),
+        (StrikeChoice::Nearest(100), 4),
+        (StrikeChoice::Nearest(30), 1),
+    ] {
+        assert_eq!(bitmaps.choose_strike(1, choice), Some(strike), "{choice:?}");
+    }
+    assert_eq!(bitmaps.choose_strike(2, StrikeChoice::Largest), Some(3));
+    assert_eq!(bitmaps.choose_strike(2, StrikeChoice::Nearest(20)), Some(3));
+    assert_eq!(bitmaps.choose_strike(3, StrikeChoice::Largest), None);
+}
+
+/// The `CBLC` and `CBDT` the `cbdt` seed carries: two strikes, every index
+/// format, every PNG format, and a glyph in a format CBDT inherits.
+fn cbdt_seed_tables() -> (Vec<u8>, Vec<u8>) {
+    let m = big_metrics([16, 16, 0, 14, 18, -8, 1, 18]);
+    colour_bitmaps(&[
+        StrikeSpec {
+            ppem: 20,
+            flags: 1,
+            indices: vec![
+                Index::Offsets {
+                    format: 1,
+                    image_format: 17,
+                    first: 1,
+                    glyphs: vec![
+                        Some(png_data(&small_metrics(16, 16, 0, 14, 18), &png(1))),
+                        None,
+                        Some(png_data(&small_metrics(16, 14, 1, 14, 18), &png(3))),
+                    ],
+                },
+                Index::Constant {
+                    image_format: 19,
+                    first: 4,
+                    metrics: m,
+                    glyphs: vec![png_data(&[], &png(4)), png_data(&[], &png(5))],
+                },
+                Index::Offsets {
+                    format: 3,
+                    image_format: 18,
+                    first: 6,
+                    glyphs: vec![Some(png_data(&m, &png(6))), Some(png_data(&m, &png(7)))],
+                },
+                Index::Offsets {
+                    format: 1,
+                    image_format: 1,
+                    first: 13,
+                    glyphs: vec![Some(vec![1, 1, 0, 0, 1, 0x80])],
+                },
+            ],
+        },
+        StrikeSpec {
+            ppem: 40,
+            flags: 2,
+            indices: vec![
+                Index::Sparse {
+                    image_format: 17,
+                    glyphs: vec![
+                        (1, png_data(&small_metrics(32, 32, 0, 28, 36), &png(11))),
+                        (9, png_data(&small_metrics(32, 30, 2, 28, 36), &png(19))),
+                    ],
+                },
+                Index::SparseConstant {
+                    image_format: 19,
+                    metrics: m,
+                    glyphs: vec![(10, png_data(&[], &png(20))), (12, png_data(&[], &png(22)))],
+                },
+            ],
+        },
+    ])
+}
+
+#[test]
+fn every_prefix_and_flip_of_cblc_and_cbdt_answers_without_panicking() {
+    let (cblc, cbdt) = cbdt_seed_tables();
+    let walk = |cblc: &[u8], cbdt: &[u8]| {
+        if let Some(bitmaps) = ColourBitmaps::parse(cblc, cbdt) {
+            let strikes = bitmaps.strikes().len();
+            for glyph in 0..16 {
+                for strike in 0..strikes + 1 {
+                    let _ = bitmaps.glyph(strike, glyph);
+                }
+                if let Some(strike) = bitmaps.choose_strike(glyph, StrikeChoice::AtLeast(30)) {
+                    assert!(bitmaps.holds(strike, glyph));
+                }
+            }
+        }
+    };
+    walk(&cblc, &cbdt);
+    for end in 0..=cblc.len() {
+        walk(&cblc[..end], &cbdt);
+    }
+    for end in 0..=cbdt.len() {
+        walk(&cblc, &cbdt[..end]);
+    }
+    for at in 0..cblc.len() {
+        for flip in [0x01u8, 0x80, 0xFF] {
+            let mut bytes = cblc.clone();
+            bytes[at] ^= flip;
+            walk(&bytes, &cbdt);
+        }
+    }
+    for at in 0..cbdt.len() {
+        for flip in [0x01u8, 0x80, 0xFF] {
+            let mut bytes = cbdt.clone();
+            bytes[at] ^= flip;
+            walk(&cblc, &bytes);
+        }
+    }
+}
+
+/// `fuzz/corpus/sfnt/cbdt.ttf`: [`cbdt_seed_tables`] in a face of 64 glyphs.
+fn cbdt_seed() -> Vec<u8> {
+    let (cblc, cbdt) = cbdt_seed_tables();
+    face(&[
+        (b"CBDT", cbdt),
+        (b"CBLC", cblc),
+        (b"head", head(1000)),
+        (b"maxp", maxp(64)),
+    ])
+}
+
 /// The colour tables a seed carries, read through its directory, as the
 /// `sfnt` target reads them.
 fn colour_tables_of(face: &[u8]) -> (Option<Colr<'_>>, Option<Cpal<'_>>) {
@@ -2269,7 +2915,7 @@ fn colour_tables_of(face: &[u8]) -> (Option<Colr<'_>>, Option<Cpal<'_>>) {
 }
 
 /// The `fuzz/corpus/sfnt` seeds the builders here write.
-const SEEDS: [&str; 3] = ["colr-v0.ttf", "colr-v1.ttf", "sbix.ttf"];
+const SEEDS: [&str; 4] = ["colr-v0.ttf", "colr-v1.ttf", "sbix.ttf", "cbdt.ttf"];
 
 /// A seed's bytes, as the builders write it.
 fn seed_bytes(name: &str) -> Vec<u8> {
@@ -2277,6 +2923,7 @@ fn seed_bytes(name: &str) -> Vec<u8> {
         "colr-v0.ttf" => colr_v0_seed(),
         "colr-v1.ttf" => colr_v1_seed(),
         "sbix.ttf" => sbix_seed(),
+        "cbdt.ttf" => cbdt_seed(),
         _ => Vec::new(),
     }
 }
@@ -2318,6 +2965,26 @@ fn reaches(name: &str, face: &[u8]) -> bool {
                     && sbix.choose_strike(1, StrikeChoice::Largest) == Some(1)
                     && sbix.glyph(0, 4).is_ok_and(|glyph| glyph.is_some())
                     && sbix.glyph(0, 5) == Err(SbixRefusal::GraphicType(*b"mask"))
+            })
+        }
+        "cbdt.ttf" => {
+            let font = Sfnt::parse(face).expect("the seed's directory reads");
+            let (Some(cblc), Some(cbdt)) = (
+                font.table(u32::from_be_bytes(*b"CBLC")),
+                font.table(u32::from_be_bytes(*b"CBDT")),
+            ) else {
+                return false;
+            };
+            ColourBitmaps::parse(cblc, cbdt).is_some_and(|bitmaps| {
+                bitmaps.strikes().len() == 2
+                    && bitmaps
+                        .glyph(0, 1)
+                        .is_ok_and(|glyph| glyph.is_some_and(|glyph| glyph.format == 17))
+                    && bitmaps.glyph(0, 13) == Err(CbdtRefusal::DataFormat(1))
+                    && bitmaps.choose_strike(1, StrikeChoice::Largest) == Some(1)
+                    && bitmaps
+                        .glyph(1, 10)
+                        .is_ok_and(|glyph| glyph.is_some_and(|glyph| glyph.format == 19))
             })
         }
         _ => false,

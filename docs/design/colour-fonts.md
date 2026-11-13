@@ -280,7 +280,8 @@ the record's range, the list's `indexSubtableListSize`, the table's end, and
 *Glyph bitmap data formats*: format 17 is `SmallGlyphMetrics`, a `dataLen` and
 PNG bytes; 18 is `BigGlyphMetrics` and the same; 19 is the length and bytes
 alone, its metrics the index subtable's `bigMetrics` — so format 19 under an
-index format that carries none (1, 3, 4) answers `None`. Small metrics carry
+index format that carries none (1, 3, 4) is refused, `CbdtRefusal::Malformed`,
+as data whose length runs past its glyph's slot is. Small metrics carry
 one direction, which the strike's `flags` names (*Bitmap flags*); a glyph comes
 back with its strike's `ppemX` and `ppemY`, its `height`, `width`, bearings and
 advance in pixels, and for big metrics the vertical three as well.

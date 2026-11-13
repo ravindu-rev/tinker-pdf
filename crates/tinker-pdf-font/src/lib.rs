@@ -9,6 +9,7 @@ pub mod base14;
 /// less the two symbolic ones).
 #[cfg(feature = "bundled-fonts")]
 pub mod bundled;
+pub mod cbdt;
 pub mod cff;
 pub mod cff2;
 pub mod cff_subset;
@@ -28,6 +29,7 @@ pub mod variation;
 pub mod woff;
 
 pub use base14::Standard14;
+pub use cbdt::{Bearings, BitmapMetrics, BitmapStrike, CbdtGlyph, CbdtRefusal, ColourBitmaps};
 pub use cff::Cff;
 pub use cff2::Cff2;
 pub use cff_subset::subset_cff;

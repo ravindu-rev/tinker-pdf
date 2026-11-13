@@ -27,8 +27,8 @@ use libfuzzer_sys::fuzz_target;
 
 use std::collections::BTreeSet;
 use tinker_pdf_font::{
-    glyf, glyphs_for, subset, substitute_glyph, BuiltInEncoding, Colr, Cpal, PaletteChoice, Sbix,
-    Sfnt, StrikeChoice,
+    glyf, glyphs_for, subset, substitute_glyph, BuiltInEncoding, ColourBitmaps, Colr, Cpal,
+    PaletteChoice, Sbix, Sfnt, StrikeChoice,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -162,6 +162,25 @@ fuzz_target!(|data: &[u8]| {
                     StrikeChoice::Nearest(48),
                 ] {
                     let _ = sbix.choose_strike(glyph, choice);
+                }
+            }
+        }
+    }
+
+    // `CBLC` and `CBDT`: every glyph's PNG in the first strikes, through
+    // whichever index subtable holds it, and each strike option's choice.
+    if let (Some(cblc), Some(cbdt)) = (
+        font.table(u32::from_be_bytes(*b"CBLC")),
+        font.table(u32::from_be_bytes(*b"CBDT")),
+    ) {
+        if let Some(bitmaps) = ColourBitmaps::parse(cblc, cbdt) {
+            let strikes = bitmaps.strikes().len().min(8);
+            for glyph in 0..64u16 {
+                for strike in 0..strikes {
+                    let _ = bitmaps.glyph(strike, glyph);
+                }
+                for choice in [StrikeChoice::Largest, StrikeChoice::Nearest(48)] {
+                    let _ = bitmaps.choose_strike(glyph, choice);
                 }
             }
         }
