@@ -177,8 +177,9 @@ RC-16.4, RC-16.5, RC-17.1, RC-17.2, RC-17.3, RC-17.4, RC-17.5, RC-17.6a,
 SU-12.1, SU-12.2, RC-18.1, RC-18.2, RC-18.3, RC-18.4, RC-18.5, RC-18.6,
 RC-18.7, RC-18.8, RC-18.9, RC-18.10a, RC-19.1, RC-19.2, RC-19.3, RC-19.4,
 RC-19.5, RC-20.15a, RC-21.1, RC-21.2, RC-21.3, FT-01.1, FT-01.2, FT-01.3,
-FT-01.4, FT-01.5, FT-01.6, FT-15.1, FT-15.2, FT-15.3,
-FT-15.4, FT-15.5, FT-15.6, FT-15.7, FT-03.1,
+FT-01.4, FT-01.5, FT-01.6, FT-01.8, FT-01.9, FT-01.10, FT-01.11, FT-02.1,
+FT-02.2, FT-02.3, FT-02.4, FT-02.6, FT-02.8, FT-15.1, FT-15.2, FT-15.3,
+FT-15.4, FT-15.5, FT-15.6, FT-15.7, FT-02.5, FT-02.7, FT-02.9, FT-03.1,
 FT-03.2, FT-03.3, FT-03.4, FT-04b.1, FT-04a.1.
 
 401–500: FT-04a.2, FT-04a.3, FT-04a.4, FT-04a.5, FT-04b.2, FT-04b.3,
@@ -271,10 +272,7 @@ AN-10b.4.
 **The end phase.** First the full test and gate run on every target, each
 failure traced to the step that wrote it and each moved pin reviewed by the
 owner; K-03.8c lands from that run, its exact defect lists read off it. Then
-the fallback faces, whose faces and storage forms a census chooses: FT-01.4's
-census is run and read, then FT-01.8, FT-01.9, FT-01.10, FT-01.11, FT-02.1,
-FT-02.3, FT-02.2 and its census, FT-02.4, FT-02.6, FT-02.8, FT-02.5, FT-02.7,
-FT-02.9. Then the long proofs, several lanes at once:
+the long proofs, several lanes at once:
 
 MS-18.2, K-06.2, K-02.5, MS-13.2, MS-13.3, MS-13.4, MS-13.5, K-04.12,
 RC-16.6a, RC-20.16, FT-01.7, FT-01.12, FT-11.10, FT-14.9, FT-30.7, FT-30.9,
