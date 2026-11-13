@@ -10,7 +10,11 @@
 //! at a sixty-fourth, and the shorter decodes repeated inside an iteration,
 //! their unit counting every call. The quarter-scale JPEG decode counts the
 //! stream's pixels, as the full-size decode the planning baseline runs in its
-//! place does.
+//! place does. The JPEG 2000 decodes with two levels discarded take four and
+//! eight calls, which bring tier P's targets for them above the window's
+//! 20 ms, and the decodes of each codestream's centre quarter one call each;
+//! no run has timed those four yet, so the design's decode table gives their
+//! window as untimed.
 
 mod support;
 
@@ -23,7 +27,7 @@ use support::{inputs, Group, Per};
 use tinker_pdf::Document;
 use tinker_pdf_filters::{
     ccitt_decode, deflate, inflate_raw, jbig2_decode, jpeg_decode, jpx_decode, lzw_decode,
-    CcittParams, Jbig2Params, Limits,
+    CcittParams, FilterError, Jbig2Params, JpxImage, Limits,
 };
 #[cfg(not(tinker_planning_baseline))]
 use tinker_pdf_filters::{jpeg_decode_strips, JpegError, JpegLayout, JpegScale, JpegSink};
@@ -32,10 +36,132 @@ use tinker_pdf_filters::{jpeg_decode_strips, JpegError, JpegLayout, JpegScale, J
 /// an RGB page at 300 dpi.
 const CEILING: usize = 1 << 28;
 
+/// The decodes an iteration of the 9/7 codestream with two levels discarded
+/// makes: tier P's 6.3 ms target a call, four times, is above 20 ms.
+const IRREVERSIBLE_REDUCED_CALLS: u64 = 4;
+
+/// The decodes an iteration of the 5/3 codestream with two levels discarded
+/// makes: tier P's 2.8 ms target a call, eight times, is above 20 ms.
+const REVERSIBLE_REDUCED_CALLS: u64 = 8;
+
 /// Width times height.
 fn area((width, height): (u32, u32)) -> u64 {
     u64::from(width) * u64::from(height)
 }
+
+/// An image of `size` with its top two resolution levels discarded: on the
+/// reference grid reduced by four, each dimension `ceil(x / 4)` (T.800 B.5),
+/// the committed codestreams' images standing at the grid's origin.
+fn two_levels_fewer((width, height): (u32, u32)) -> (u32, u32) {
+    (width.div_ceil(4), height.div_ceil(4))
+}
+
+/// The centre quarter of an image of `size`, as `(x, y, width, height)` from
+/// its top-left corner: half its width and half its height, a quarter of
+/// each dimension in.
+fn centre((width, height): (u32, u32)) -> (u32, u32, u32, u32) {
+    (width / 4, height / 4, width / 2, height / 2)
+}
+
+/// The rectangle `(x, y, width, height)` of an image `width` pixels wide,
+/// three 8-bit samples a pixel.
+#[cfg(not(tinker_planning_baseline))]
+fn crop(samples: &[u8], width: u32, (x, y, w, h): (u32, u32, u32, u32)) -> Vec<u8> {
+    let stride = 3 * width as usize;
+    let (left, right) = (3 * x as usize, 3 * (x + w) as usize);
+    (y..y + h)
+        .flat_map(|row| {
+            let start = row as usize * stride;
+            samples[start + left..start + right].iter().copied()
+        })
+        .collect()
+}
+
+/// `input` decoded with its top two resolution levels discarded.
+#[cfg(not(tinker_planning_baseline))]
+fn jpx_reduced(input: &[u8], limits: &Limits) -> Result<JpxImage, FilterError> {
+    let request = tinker_pdf_filters::JpxRequest {
+        discard: 2,
+        window: None,
+    };
+    tinker_pdf_filters::jpx_decode_request(input, limits, &request, &mut Vec::new())
+        .map(|(image, _)| image)
+}
+
+/// The planning baseline has no decode request: its arm runs the full
+/// decode, the operation the gate pairs this one with (`baseline.json`'s
+/// `paired_with`).
+#[cfg(tinker_planning_baseline)]
+fn jpx_reduced(input: &[u8], limits: &Limits) -> Result<JpxImage, FilterError> {
+    jpx_decode(input, limits, &mut Vec::new())
+}
+
+/// The rectangle `(x, y, width, height)` of `input`'s image decoded at the
+/// full size, and nothing outside it.
+#[cfg(not(tinker_planning_baseline))]
+fn jpx_window(
+    input: &[u8],
+    limits: &Limits,
+    (x, y, width, height): (u32, u32, u32, u32),
+) -> Result<JpxImage, FilterError> {
+    let request = tinker_pdf_filters::JpxRequest {
+        discard: 0,
+        window: Some(tinker_pdf_filters::JpxWindow {
+            x,
+            y,
+            width,
+            height,
+        }),
+    };
+    tinker_pdf_filters::jpx_decode_request(input, limits, &request, &mut Vec::new())
+        .map(|(image, _)| image)
+}
+
+/// The planning baseline has no window: its arm runs the full decode, the
+/// operation the gate pairs this one with (`baseline.json`'s `paired_with`).
+#[cfg(tinker_planning_baseline)]
+fn jpx_window(
+    input: &[u8],
+    limits: &Limits,
+    _window: (u32, u32, u32, u32),
+) -> Result<JpxImage, FilterError> {
+    jpx_decode(input, limits, &mut Vec::new())
+}
+
+/// What a decode of an image of `size` with two levels discarded gives: the
+/// discard asked for, applied, at [`two_levels_fewer`]'s size, every tile of
+/// it decoded.
+#[cfg(not(tinker_planning_baseline))]
+fn check_reduced(image: &JpxImage, size: (u32, u32)) {
+    let reduced = two_levels_fewer(size);
+    assert_eq!(image.discard, 2, "both levels are discarded");
+    assert_eq!((image.width, image.height), reduced);
+    assert_eq!(image.samples.len(), 3 * area(reduced) as usize);
+    assert!(!image.truncated, "every tile of the reduced image decodes");
+}
+
+/// The planning baseline's arm decodes the whole image, which the full
+/// decode's own operation checks.
+#[cfg(tinker_planning_baseline)]
+fn check_reduced(_image: &JpxImage, _size: (u32, u32)) {}
+
+/// What a window decode gives: exactly the same rectangle of `whole`, the
+/// samples of the full decode of an image `width` pixels wide (P-10.3's
+/// property, `jpx/tests/window.rs`).
+#[cfg(not(tinker_planning_baseline))]
+fn check_window(image: &JpxImage, whole: &[u8], width: u32, window: (u32, u32, u32, u32)) {
+    let (_, _, w, h) = window;
+    assert_eq!((image.width, image.height), (w, h), "the window's size");
+    assert!(
+        image.samples == crop(whole, width, window),
+        "the window decode is its rectangle of the full decode, sample for sample"
+    );
+}
+
+/// The planning baseline's arm decodes the whole image, which the full
+/// decode's own operation checks.
+#[cfg(tinker_planning_baseline)]
+fn check_window(_image: &JpxImage, _whole: &[u8], _width: u32, _window: (u32, u32, u32, u32)) {}
 
 /// The generic page's parameters: no globals, and the work its decode may
 /// do measured against its output ceiling.
@@ -289,6 +415,62 @@ fn decode(c: &mut Criterion) {
     group.operation("reversible JPEG 2000 310x438", |op| {
         op.per(Per::Pixels(area(reversible_size)));
         op.iter(|| black_box(jpx_decode(&reversible, &limits, &mut Vec::new())));
+    });
+    // The same two codestreams asked for less: two levels discarded, and the
+    // centre quarter at the full size. The planning baseline can express
+    // neither, so its arm of each runs the full decode it pairs with.
+    group.operation(
+        "irreversible JPEG 2000 620x877, two levels discarded",
+        |op| {
+            let irreversible: &[u8] = &irreversible;
+            let limits = &limits;
+            let checked = jpx_reduced(irreversible, limits).expect("it decodes");
+            check_reduced(&checked, irreversible_size);
+            op.per(Per::Pixels(
+                IRREVERSIBLE_REDUCED_CALLS * area(two_levels_fewer(irreversible_size)),
+            ));
+            op.iter(move || {
+                for _ in 0..IRREVERSIBLE_REDUCED_CALLS {
+                    let _ = black_box(jpx_reduced(irreversible, limits));
+                }
+            });
+        },
+    );
+    group.operation("reversible JPEG 2000 310x438, two levels discarded", |op| {
+        let reversible: &[u8] = &reversible;
+        let limits = &limits;
+        let checked = jpx_reduced(reversible, limits).expect("it decodes");
+        check_reduced(&checked, reversible_size);
+        op.per(Per::Pixels(
+            REVERSIBLE_REDUCED_CALLS * area(two_levels_fewer(reversible_size)),
+        ));
+        op.iter(move || {
+            for _ in 0..REVERSIBLE_REDUCED_CALLS {
+                let _ = black_box(jpx_reduced(reversible, limits));
+            }
+        });
+    });
+    group.operation("irreversible JPEG 2000 620x877, its 310x438 centre", |op| {
+        let irreversible: &[u8] = &irreversible;
+        let limits = &limits;
+        let window = centre(irreversible_size);
+        let whole = jpx_decode(irreversible, limits, &mut Vec::new()).expect("it decodes");
+        let checked = jpx_window(irreversible, limits, window).expect("it decodes");
+        check_window(&checked, &whole.samples, irreversible_size.0, window);
+        op.per(Per::Pixels(area((window.2, window.3))));
+        op.iter(move || black_box(jpx_window(irreversible, limits, window)));
+    });
+    // The lossless codestream's full decode is the generator's picture, so
+    // its window is held to the picture's own rectangle.
+    group.operation("reversible JPEG 2000 310x438, its 155x219 centre", |op| {
+        let reversible: &[u8] = &reversible;
+        let limits = &limits;
+        let window = centre(reversible_size);
+        let (width, height) = reversible_size;
+        let checked = jpx_window(reversible, limits, window).expect("it decodes");
+        check_window(&checked, &inputs::photo(width, height, 0), width, window);
+        op.per(Per::Pixels(area((window.2, window.3))));
+        op.iter(move || black_box(jpx_window(reversible, limits, window)));
     });
 
     group.operation("decode the JBIG2 generic page", |op| {
