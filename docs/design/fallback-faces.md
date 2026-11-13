@@ -245,13 +245,21 @@ request in one of the five collections with it, so no linker drops it.
   feature forwarded, and gzipped as it gzips it, `gzip -9 -c
   bindings/js/pkg/tinker_pdf_js_bg.wasm`, against the default profile's.
 
-**Where the figures go** (ruling 16): the release run's rows and the debug
-run's `inversion` and `storage` rows are committed, when the census runs, as
-`crates/tinker-pdf-font/tests/cjk_coverage.tsv` beside it, and the three
-sizes as `crates/tinker-pdf-font/tests/cjk_sizes.tsv`, with the columns
-`file`, `form`, `tpdf_release_bytes`, `crate_bytes` and `wasm_gzip_bytes`, a
-row for each candidate and form and one, `none`, for the builds without a
-candidate. The runs' revision, machine and day go in that commit's message.
+**Where the figures go** (ruling 16). The census's counts and sizes are
+`crates/tinker-pdf-font/tests/cjk_coverage.tsv`, beside it: every row it
+prints, in its order, less the columns that hold a time and the profile a
+time was taken in, since a count or a size is the same in a release and a
+debug build. Its head names the command, and `the_committed_census_is_whole`
+holds the record whole and adding up: every candidate's faces, collections
+and supplements, each writing mode's counts summing to the row's CIDs and
+each `all` row to its supplements. A time is the named machine's (ruling
+15): the release and debug runs there give the `inversion` and `storage` rows
+their times. The three sizes go to
+`crates/tinker-pdf-font/tests/cjk_sizes.tsv`, with the columns `file`,
+`form`, `tpdf_release_bytes`, `crate_bytes` and `wasm_gzip_bytes`, a row for
+each candidate and form and one, `none`, for the builds without a candidate.
+Each run's revision, machine and day go in the message of the commit that
+records it.
 
 **The `cjk` capability.** `tpdf probe`'s object scan prints `cap cjk` for a
 file holding a composite font whose descendant's `/CIDSystemInfo` reads, as
@@ -292,8 +300,9 @@ FT-01's exit falls from.
    `each_storage_form_is_measured_as_it_is_made_ready`,
    `a_faces_name_is_read_windows_english_first` and
    `every_candidate_is_the_designs`, and without the tables by
-   `without_the_tables_no_supplement_is_read`. Its rows are committed as
-   `cjk_coverage.tsv` and the three sizes as `cjk_sizes.tsv` when it runs.
+   `without_the_tables_no_supplement_is_read`. Its counts and sizes are
+   `cjk_coverage.tsv`, held by `the_committed_census_is_whole`; the three
+   sizes go to `cjk_sizes.tsv`.
 4. **FT-01.5: the capability.** Exit: `tools/tpdf/src/main.rs`
    `an_unembedded_cjk_font_is_the_cjk_capability`.
 5. **FT-01.6: counts per capability.** Exit: `xtask/src/report.rs`

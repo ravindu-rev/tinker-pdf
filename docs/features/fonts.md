@@ -376,7 +376,8 @@ Subsetting asks about embedded programs only.
 `crates/tinker-pdf-font/tests/cjk_coverage.rs` counts, for H-116 and H-04,
 the CIDs of each collection and supplement that each candidate face the
 design names reaches by the first two routes, in either writing mode, and
-what each candidate costs to store and to make ready.
+what each candidate costs to store and to make ready; its counts and sizes
+are `crates/tinker-pdf-font/tests/cjk_coverage.tsv`.
 
 **Writing** (9.9). `DocumentBuilder::add_embedded_font` and `add_cid_font`
 embed a TrueType, an `OpenType/CFF` face or a bare CFF program, with widths
@@ -1936,8 +1937,9 @@ corpora already vendored here. So every name stays on the list.
   `cargo test`: each collection's supplements against the `/CIDCount`s the
   vendored CMap files state, the routes and their tallies over faces built in
   the test, a collection file's faces read one by one, the storage forms over
-  the committed WOFF fixtures, the `name` reading, and the candidate list
-  against the design's table.
+  the committed WOFF fixtures, the `name` reading, the candidate list
+  against the design's table, and the committed record, `cjk_coverage.tsv`,
+  whole and adding up (`the_committed_census_is_whole`).
 - Fuzzing: the `cff`, `cff_subset`, `cmap`, `sfnt`, `truetype`, `type1`,
   `type42` and `woff` targets exercise this feature (ruling 1).
 - Determinism: the `text` render fingerprint in

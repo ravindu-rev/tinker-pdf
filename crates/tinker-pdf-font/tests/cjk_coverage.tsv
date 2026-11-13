@@ -1,0 +1,1448 @@
+# The CJK census's counts and sizes (docs/design/fallback-faces.md): the rows
+# cjk_face_coverage_census in crates/tinker-pdf-font/tests/cjk_coverage.rs
+# prints over the sixteen candidates of the design's table, each fetched from
+# the upstream the table names, with its WOFF2 form beside it:
+#
+#   TINKER_CJK_FACES=<directory> cargo test -p tinker-pdf-font --release --test cjk_coverage -- --ignored --nocapture
+#
+# The census's three tables in its order, each row led by its table's name and
+# each table headed by the row the census prints for it, less the columns that
+# hold a time and the build profile the time was taken in: a count or a size
+# is the same in a release and a debug build, and a time is the named
+# machine's (ruling 15). the_committed_census_is_whole, beside the census,
+# holds this record whole and adding up.
+#
+#   inversion  each collection's table in each writing mode, and the CIDs it
+#              reaches
+#   coverage   a row for each face of each candidate file, collection and
+#              supplement, then the collection's `all` row: the CIDs the
+#              supplement adds, and in each writing mode the CIDs the face's
+#              own charset, its characters through its cmap and the index
+#              reading reach, and the CIDs none reaches
+#   storage    a row for each candidate file: its bytes as published,
+#              deflated at tinker-pdf-filters' ratio level and as WOFF2, its
+#              upstream and its SPDX expression
+#
+inversion	collection	writing_mode	cids_reached
+inversion	Adobe-Japan1	horizontal	15978
+inversion	Adobe-Japan1	vertical	15978
+inversion	Adobe-GB1	horizontal	30178
+inversion	Adobe-GB1	vertical	30178
+inversion	Adobe-CNS1	horizontal	18681
+inversion	Adobe-CNS1	vertical	18681
+inversion	Adobe-Korea1	horizontal	17097
+inversion	Adobe-Korea1	vertical	17097
+inversion	Adobe-KR	horizontal	21145
+inversion	Adobe-KR	vertical	21145
+coverage	file	face	name	collection	supplement	cids	horizontal_by_charset	horizontal_by_character	horizontal_by_index	horizontal_unreached	vertical_by_charset	vertical_by_character	vertical_by_index	vertical_unreached
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-Japan1	0	8283	0	7728	0	555	0	7728	0	555
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-Japan1	5	4873	0	3605	0	1268	0	3605	0	1268
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-Japan1	all	23059	0	15608	0	7451	0	15608	0	7451
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-GB1	0	7716	0	5369	0	2347	0	5370	0	2346
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-GB1	1	2180	0	2071	0	109	0	2071	0	109
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-GB1	2	12230	0	6327	0	5903	0	6327	0	5903
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-GB1	4	6711	0	346	0	6365	0	346	0	6365
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-GB1	6	288	0	10	0	278	0	10	0	278
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-GB1	all	30571	0	14123	0	16448	0	14124	0	16447
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-CNS1	0	14098	0	10340	0	3758	0	10340	0	3758
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-CNS1	1	3309	0	1032	0	2277	0	1032	0	2277
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-CNS1	3	1245	0	359	0	886	0	359	0	886
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-CNS1	4	119	0	34	0	85	0	34	0	85
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-CNS1	5	123	0	17	0	106	0	17	0	106
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-CNS1	6	68	0	18	0	50	0	18	0	50
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-CNS1	7	23	0	10	0	13	0	10	0	13
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-CNS1	all	19178	0	11810	0	7368	0	11810	0	7368
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-Korea1	0	9332	0	5786	0	3546	0	5786	0	3546
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-Korea1	1	8822	0	0	0	8822	0	0	0	8822
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-Korea1	all	18351	0	5786	0	12565	0	5786	0	12565
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-KR	0	3058	0	217	0	2841	0	217	0	2841
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-KR	1	1578	0	0	0	1578	0	0	0	1578
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-KR	2	6814	0	0	0	6814	0	0	0	6814
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-KR	5	357	0	324	0	33	0	324	0	33
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-KR	6	2003	0	2	0	2001	0	2	0	2001
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-KR	7	4620	0	4563	0	57	0	4563	0	57
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-KR	8	3622	0	2932	0	690	0	2932	0	690
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSansJP-Regular.otf	0	Source Han Sans JP	Adobe-KR	all	22896	0	8831	0	14065	0	8831	0	14065
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-Japan1	0	8283	0	6792	0	1491	0	6792	0	1491
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-Japan1	2	361	0	191	0	170	0	191	0	170
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-Japan1	4	6090	0	1263	0	4827	0	1263	0	4827
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-Japan1	5	4873	0	1232	0	3641	0	1232	0	3641
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-Japan1	6	2741	0	334	0	2407	0	334	0	2407
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-Japan1	all	23059	0	9862	0	13197	0	9862	0	13197
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-GB1	0	7716	0	4643	0	3073	0	4644	0	3072
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-GB1	1	2180	0	1777	0	403	0	1777	0	403
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-GB1	2	12230	0	2732	0	9498	0	2732	0	9498
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-GB1	4	6711	0	237	0	6474	0	237	0	6474
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-GB1	6	288	0	0	0	288	0	0	0	288
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-GB1	all	30571	0	9389	0	21182	0	9390	0	21181
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-CNS1	0	14098	0	7942	0	6156	0	7942	0	6156
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-CNS1	1	3309	0	481	0	2828	0	481	0	2828
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-CNS1	3	1245	0	218	0	1027	0	218	0	1027
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-CNS1	4	119	0	18	0	101	0	18	0	101
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-CNS1	5	123	0	7	0	116	0	7	0	116
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-CNS1	6	68	0	5	0	63	0	5	0	63
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-CNS1	7	23	0	2	0	21	0	2	0	21
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-CNS1	all	19178	0	8673	0	10505	0	8673	0	10505
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-Korea1	0	9332	0	8193	0	1139	0	8193	0	1139
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-Korea1	all	18351	0	17015	0	1336	0	17015	0	1336
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-KR	5	357	0	325	0	32	0	325	0	32
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-KR	8	3622	0	3524	0	98	0	3524	0	98
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSansKR-Regular.otf	0	Source Han Sans KR	Adobe-KR	all	22896	0	21010	0	1886	0	21010	0	1886
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-Japan1	0	8283	0	7708	0	575	0	7708	0	575
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-Japan1	2	361	0	330	0	31	0	330	0	31
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-Japan1	4	6090	0	1784	0	4306	0	1784	0	4306
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-Japan1	5	4873	0	3274	0	1599	0	3274	0	1599
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-Japan1	6	2741	0	1974	0	767	0	1974	0	767
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-Japan1	all	23059	0	15120	0	7939	0	15120	0	7939
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-GB1	2	12230	0	12230	0	0	0	12230	0	0
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-GB1	6	288	0	288	0	0	0	288	0	0
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-GB1	all	30571	0	28957	0	1614	0	28958	0	1613
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-CNS1	0	14098	0	13908	0	190	0	13908	0	190
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-CNS1	1	3309	0	1961	0	1348	0	1961	0	1348
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-CNS1	3	1245	0	774	0	471	0	774	0	471
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-CNS1	4	119	0	90	0	29	0	90	0	29
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-CNS1	5	123	0	82	0	41	0	82	0	41
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-CNS1	6	68	0	48	0	20	0	48	0	20
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-CNS1	all	19178	0	16886	0	2292	0	16886	0	2292
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-Korea1	0	9332	0	5843	0	3489	0	5843	0	3489
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-Korea1	1	8822	0	0	0	8822	0	0	0	8822
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-Korea1	all	18351	0	5843	0	12508	0	5843	0	12508
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-KR	0	3058	0	217	0	2841	0	217	0	2841
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-KR	1	1578	0	0	0	1578	0	0	0	1578
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-KR	2	6814	0	0	0	6814	0	0	0	6814
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-KR	5	357	0	324	0	33	0	324	0	33
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-KR	6	2003	0	2	0	2001	0	2	0	2001
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-KR	8	3622	0	3545	0	77	0	3545	0	77
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSansCN-Regular.otf	0	Source Han Sans CN	Adobe-KR	all	22896	0	9501	0	13395	0	9501	0	13395
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-Japan1	0	8283	0	7136	0	1147	0	7136	0	1147
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-Japan1	2	361	0	248	0	113	0	248	0	113
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-Japan1	4	6090	0	1606	0	4484	0	1606	0	4484
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-Japan1	5	4873	0	2697	0	2176	0	2697	0	2176
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-Japan1	6	2741	0	1291	0	1450	0	1291	0	1450
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-Japan1	all	23059	0	13028	0	10031	0	13028	0	10031
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-GB1	0	7716	0	5687	0	2029	0	5688	0	2028
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-GB1	1	2180	0	2164	0	16	0	2164	0	16
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-GB1	2	12230	0	8531	0	3699	0	8531	0	3699
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-GB1	4	6711	0	716	0	5995	0	716	0	5995
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-GB1	6	288	0	28	0	260	0	28	0	260
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-GB1	all	30571	0	17126	0	13445	0	17127	0	13444
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-CNS1	0	14098	0	13910	0	188	0	13910	0	188
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-CNS1	1	3309	0	3100	0	209	0	3100	0	209
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-CNS1	all	19178	0	18571	0	607	0	18571	0	607
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-Korea1	0	9332	0	5768	0	3564	0	5768	0	3564
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-Korea1	1	8822	0	0	0	8822	0	0	0	8822
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-Korea1	all	18351	0	5768	0	12583	0	5768	0	12583
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-KR	0	3058	0	217	0	2841	0	217	0	2841
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-KR	1	1578	0	0	0	1578	0	0	0	1578
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-KR	2	6814	0	0	0	6814	0	0	0	6814
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-KR	5	357	0	324	0	33	0	324	0	33
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-KR	6	2003	0	2	0	2001	0	2	0	2001
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-KR	7	4620	0	4545	0	75	0	4545	0	75
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-KR	8	3622	0	3101	0	521	0	3101	0	521
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSansTW-Regular.otf	0	Source Han Sans TW	Adobe-KR	all	22896	0	8982	0	13914	0	8982	0	13914
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-Japan1	0	8283	0	7136	0	1147	0	7136	0	1147
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-Japan1	2	361	0	248	0	113	0	248	0	113
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-Japan1	4	6090	0	1607	0	4483	0	1607	0	4483
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-Japan1	5	4873	0	2697	0	2176	0	2697	0	2176
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-Japan1	6	2741	0	1291	0	1450	0	1291	0	1450
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-Japan1	all	23059	0	13029	0	10030	0	13029	0	10030
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-GB1	0	7716	0	5687	0	2029	0	5688	0	2028
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-GB1	1	2180	0	2164	0	16	0	2164	0	16
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-GB1	2	12230	0	8531	0	3699	0	8531	0	3699
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-GB1	4	6711	0	715	0	5996	0	715	0	5996
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-GB1	6	288	0	28	0	260	0	28	0	260
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-GB1	all	30571	0	17125	0	13446	0	17126	0	13445
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-CNS1	0	14098	0	13910	0	188	0	13910	0	188
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-CNS1	1	3309	0	3100	0	209	0	3100	0	209
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-CNS1	all	19178	0	18571	0	607	0	18571	0	607
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-Korea1	0	9332	0	5768	0	3564	0	5768	0	3564
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-Korea1	1	8822	0	0	0	8822	0	0	0	8822
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-Korea1	all	18351	0	5768	0	12583	0	5768	0	12583
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-KR	0	3058	0	217	0	2841	0	217	0	2841
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-KR	1	1578	0	0	0	1578	0	0	0	1578
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-KR	2	6814	0	0	0	6814	0	0	0	6814
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-KR	5	357	0	324	0	33	0	324	0	33
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-KR	6	2003	0	2	0	2001	0	2	0	2001
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-KR	7	4620	0	4545	0	75	0	4545	0	75
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-KR	8	3622	0	3101	0	521	0	3101	0	521
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSansHK-Regular.otf	0	Source Han Sans HK	Adobe-KR	all	22896	0	8982	0	13914	0	8982	0	13914
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-Japan1	0	8283	0	7729	0	554	0	7729	0	554
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-Japan1	5	4873	0	3605	0	1268	0	3605	0	1268
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-Japan1	all	23059	0	15609	0	7450	0	15609	0	7450
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-GB1	2	12230	0	12230	0	0	0	12230	0	0
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-GB1	6	288	0	288	0	0	0	288	0	0
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-GB1	all	30571	0	28957	0	1614	0	28958	0	1613
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-CNS1	0	14098	0	13910	0	188	0	13910	0	188
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-CNS1	all	19178	0	18590	0	588	0	18590	0	588
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-Korea1	0	9332	0	8193	0	1139	0	8193	0	1139
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-Korea1	all	18351	0	17015	0	1336	0	17015	0	1336
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-KR	5	357	0	325	0	32	0	325	0	32
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSans-Regular.ttc	0	Source Han Sans	Adobe-KR	all	22896	0	21090	0	1806	0	21090	0	1806
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-Japan1	0	8283	0	7729	0	554	0	7729	0	554
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-Japan1	5	4873	0	3605	0	1268	0	3605	0	1268
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-Japan1	all	23059	0	15609	0	7450	0	15609	0	7450
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-GB1	2	12230	0	12230	0	0	0	12230	0	0
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-GB1	6	288	0	288	0	0	0	288	0	0
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-GB1	all	30571	0	28957	0	1614	0	28958	0	1613
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-CNS1	0	14098	0	13910	0	188	0	13910	0	188
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-CNS1	all	19178	0	18590	0	588	0	18590	0	588
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-Korea1	0	9332	0	8193	0	1139	0	8193	0	1139
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-Korea1	all	18351	0	17015	0	1336	0	17015	0	1336
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-KR	5	357	0	325	0	32	0	325	0	32
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSans-Regular.ttc	1	Source Han Sans K	Adobe-KR	all	22896	0	21090	0	1806	0	21090	0	1806
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-Japan1	0	8283	0	7729	0	554	0	7729	0	554
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-Japan1	5	4873	0	3605	0	1268	0	3605	0	1268
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-Japan1	all	23059	0	15609	0	7450	0	15609	0	7450
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-GB1	2	12230	0	12230	0	0	0	12230	0	0
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-GB1	6	288	0	288	0	0	0	288	0	0
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-GB1	all	30571	0	28957	0	1614	0	28958	0	1613
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-CNS1	0	14098	0	13910	0	188	0	13910	0	188
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-CNS1	all	19178	0	18590	0	588	0	18590	0	588
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-Korea1	0	9332	0	8193	0	1139	0	8193	0	1139
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-Korea1	all	18351	0	17015	0	1336	0	17015	0	1336
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-KR	5	357	0	325	0	32	0	325	0	32
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSans-Regular.ttc	2	Source Han Sans SC	Adobe-KR	all	22896	0	21090	0	1806	0	21090	0	1806
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-Japan1	0	8283	0	7729	0	554	0	7729	0	554
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-Japan1	5	4873	0	3605	0	1268	0	3605	0	1268
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-Japan1	all	23059	0	15609	0	7450	0	15609	0	7450
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-GB1	2	12230	0	12230	0	0	0	12230	0	0
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-GB1	6	288	0	288	0	0	0	288	0	0
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-GB1	all	30571	0	28957	0	1614	0	28958	0	1613
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-CNS1	0	14098	0	13910	0	188	0	13910	0	188
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-CNS1	all	19178	0	18590	0	588	0	18590	0	588
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-Korea1	0	9332	0	8193	0	1139	0	8193	0	1139
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-Korea1	all	18351	0	17015	0	1336	0	17015	0	1336
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-KR	5	357	0	325	0	32	0	325	0	32
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSans-Regular.ttc	3	Source Han Sans TC	Adobe-KR	all	22896	0	21090	0	1806	0	21090	0	1806
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-Japan1	0	8283	0	7729	0	554	0	7729	0	554
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-Japan1	5	4873	0	3605	0	1268	0	3605	0	1268
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-Japan1	all	23059	0	15609	0	7450	0	15609	0	7450
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-GB1	2	12230	0	12230	0	0	0	12230	0	0
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-GB1	6	288	0	288	0	0	0	288	0	0
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-GB1	all	30571	0	28957	0	1614	0	28958	0	1613
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-CNS1	0	14098	0	13910	0	188	0	13910	0	188
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-CNS1	all	19178	0	18590	0	588	0	18590	0	588
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-Korea1	0	9332	0	8193	0	1139	0	8193	0	1139
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-Korea1	all	18351	0	17015	0	1336	0	17015	0	1336
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-KR	5	357	0	325	0	32	0	325	0	32
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSans-Regular.ttc	4	Source Han Sans HC	Adobe-KR	all	22896	0	21090	0	1806	0	21090	0	1806
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-Japan1	0	8283	0	7729	0	554	0	7729	0	554
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-Japan1	5	4873	0	3605	0	1268	0	3605	0	1268
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-Japan1	all	23059	0	15609	0	7450	0	15609	0	7450
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-GB1	2	12230	0	12230	0	0	0	12230	0	0
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-GB1	6	288	0	288	0	0	0	288	0	0
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-GB1	all	30571	0	28957	0	1614	0	28958	0	1613
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-CNS1	0	14098	0	13910	0	188	0	13910	0	188
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-CNS1	all	19178	0	18590	0	588	0	18590	0	588
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-Korea1	0	9332	0	8193	0	1139	0	8193	0	1139
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-Korea1	all	18351	0	17015	0	1336	0	17015	0	1336
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-KR	5	357	0	325	0	32	0	325	0	32
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSans-Regular.ttc	5	Source Han Sans HW	Adobe-KR	all	22896	0	21090	0	1806	0	21090	0	1806
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-Japan1	0	8283	0	7729	0	554	0	7729	0	554
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-Japan1	5	4873	0	3605	0	1268	0	3605	0	1268
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-Japan1	all	23059	0	15609	0	7450	0	15609	0	7450
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-GB1	2	12230	0	12230	0	0	0	12230	0	0
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-GB1	6	288	0	288	0	0	0	288	0	0
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-GB1	all	30571	0	28957	0	1614	0	28958	0	1613
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-CNS1	0	14098	0	13910	0	188	0	13910	0	188
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-CNS1	all	19178	0	18590	0	588	0	18590	0	588
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-Korea1	0	9332	0	8193	0	1139	0	8193	0	1139
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-Korea1	all	18351	0	17015	0	1336	0	17015	0	1336
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-KR	5	357	0	325	0	32	0	325	0	32
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSans-Regular.ttc	6	Source Han Sans HW K	Adobe-KR	all	22896	0	21090	0	1806	0	21090	0	1806
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-Japan1	0	8283	0	7729	0	554	0	7729	0	554
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-Japan1	5	4873	0	3605	0	1268	0	3605	0	1268
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-Japan1	all	23059	0	15609	0	7450	0	15609	0	7450
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-GB1	2	12230	0	12230	0	0	0	12230	0	0
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-GB1	6	288	0	288	0	0	0	288	0	0
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-GB1	all	30571	0	28957	0	1614	0	28958	0	1613
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-CNS1	0	14098	0	13910	0	188	0	13910	0	188
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-CNS1	all	19178	0	18590	0	588	0	18590	0	588
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-Korea1	0	9332	0	8193	0	1139	0	8193	0	1139
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-Korea1	all	18351	0	17015	0	1336	0	17015	0	1336
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-KR	5	357	0	325	0	32	0	325	0	32
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSans-Regular.ttc	7	Source Han Sans HW SC	Adobe-KR	all	22896	0	21090	0	1806	0	21090	0	1806
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-Japan1	0	8283	0	7729	0	554	0	7729	0	554
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-Japan1	5	4873	0	3605	0	1268	0	3605	0	1268
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-Japan1	all	23059	0	15609	0	7450	0	15609	0	7450
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-GB1	2	12230	0	12230	0	0	0	12230	0	0
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-GB1	6	288	0	288	0	0	0	288	0	0
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-GB1	all	30571	0	28957	0	1614	0	28958	0	1613
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-CNS1	0	14098	0	13910	0	188	0	13910	0	188
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-CNS1	all	19178	0	18590	0	588	0	18590	0	588
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-Korea1	0	9332	0	8193	0	1139	0	8193	0	1139
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-Korea1	all	18351	0	17015	0	1336	0	17015	0	1336
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-KR	5	357	0	325	0	32	0	325	0	32
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSans-Regular.ttc	8	Source Han Sans HW TC	Adobe-KR	all	22896	0	21090	0	1806	0	21090	0	1806
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-Japan1	0	8283	0	7729	0	554	0	7729	0	554
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-Japan1	5	4873	0	3605	0	1268	0	3605	0	1268
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-Japan1	all	23059	0	15609	0	7450	0	15609	0	7450
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-GB1	2	12230	0	12230	0	0	0	12230	0	0
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-GB1	6	288	0	288	0	0	0	288	0	0
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-GB1	all	30571	0	28957	0	1614	0	28958	0	1613
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-CNS1	0	14098	0	13910	0	188	0	13910	0	188
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-CNS1	all	19178	0	18590	0	588	0	18590	0	588
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-Korea1	0	9332	0	8193	0	1139	0	8193	0	1139
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-Korea1	all	18351	0	17015	0	1336	0	17015	0	1336
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-KR	5	357	0	325	0	32	0	325	0	32
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	SourceHanSans-Regular.ttc	9	Source Han Sans HW HC	Adobe-KR	all	22896	0	21090	0	1806	0	21090	0	1806
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-Japan1	0	8283	0	7728	0	555	0	7728	0	555
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-Japan1	5	4873	0	3604	0	1269	0	3604	0	1269
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-Japan1	all	23059	0	15607	0	7452	0	15607	0	7452
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-GB1	0	7716	0	5370	0	2346	0	5371	0	2345
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-GB1	1	2180	0	2071	0	109	0	2071	0	109
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-GB1	2	12230	0	6326	0	5904	0	6326	0	5904
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-GB1	4	6711	0	346	0	6365	0	346	0	6365
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-GB1	6	288	0	10	0	278	0	10	0	278
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-GB1	all	30571	0	14123	0	16448	0	14124	0	16447
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-CNS1	0	14098	0	10340	0	3758	0	10340	0	3758
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-CNS1	1	3309	0	1032	0	2277	0	1032	0	2277
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-CNS1	3	1245	0	359	0	886	0	359	0	886
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-CNS1	4	119	0	34	0	85	0	34	0	85
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-CNS1	5	123	0	17	0	106	0	17	0	106
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-CNS1	6	68	0	18	0	50	0	18	0	50
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-CNS1	7	23	0	10	0	13	0	10	0	13
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-CNS1	all	19178	0	11810	0	7368	0	11810	0	7368
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-Korea1	0	9332	0	5785	0	3547	0	5785	0	3547
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-Korea1	1	8822	0	0	0	8822	0	0	0	8822
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-Korea1	all	18351	0	5785	0	12566	0	5785	0	12566
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-KR	0	3058	0	217	0	2841	0	217	0	2841
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-KR	1	1578	0	0	0	1578	0	0	0	1578
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-KR	2	6814	0	0	0	6814	0	0	0	6814
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-KR	5	357	0	322	0	35	0	322	0	35
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-KR	6	2003	0	2	0	2001	0	2	0	2001
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-KR	7	4620	0	4564	0	56	0	4564	0	56
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-KR	8	3622	0	2932	0	690	0	2932	0	690
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansJP-Regular.otf	0	Noto Sans JP	Adobe-KR	all	22896	0	8830	0	14066	0	8830	0	14066
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-Japan1	0	8283	0	6791	0	1492	0	6791	0	1492
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-Japan1	2	361	0	191	0	170	0	191	0	170
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-Japan1	4	6090	0	1263	0	4827	0	1263	0	4827
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-Japan1	5	4873	0	1230	0	3643	0	1230	0	3643
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-Japan1	6	2741	0	334	0	2407	0	334	0	2407
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-Japan1	all	23059	0	9859	0	13200	0	9859	0	13200
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-GB1	0	7716	0	4642	0	3074	0	4643	0	3073
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-GB1	1	2180	0	1777	0	403	0	1777	0	403
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-GB1	2	12230	0	2731	0	9499	0	2731	0	9499
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-GB1	4	6711	0	237	0	6474	0	237	0	6474
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-GB1	6	288	0	0	0	288	0	0	0	288
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-GB1	all	30571	0	9387	0	21184	0	9388	0	21183
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-CNS1	0	14098	0	7940	0	6158	0	7940	0	6158
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-CNS1	1	3309	0	481	0	2828	0	481	0	2828
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-CNS1	3	1245	0	218	0	1027	0	218	0	1027
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-CNS1	4	119	0	18	0	101	0	18	0	101
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-CNS1	5	123	0	7	0	116	0	7	0	116
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-CNS1	6	68	0	5	0	63	0	5	0	63
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-CNS1	7	23	0	2	0	21	0	2	0	21
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-CNS1	all	19178	0	8671	0	10507	0	8671	0	10507
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-Korea1	0	9332	0	8190	0	1142	0	8190	0	1142
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-Korea1	all	18351	0	17012	0	1339	0	17012	0	1339
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-KR	5	357	0	323	0	34	0	323	0	34
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-KR	7	4620	0	4619	0	1	0	4619	0	1
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-KR	8	3622	0	3525	0	97	0	3525	0	97
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansKR-Regular.otf	0	Noto Sans KR	Adobe-KR	all	22896	0	21008	0	1888	0	21008	0	1888
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-Japan1	0	8283	0	7707	0	576	0	7707	0	576
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-Japan1	2	361	0	330	0	31	0	330	0	31
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-Japan1	4	6090	0	1784	0	4306	0	1784	0	4306
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-Japan1	5	4873	0	3273	0	1600	0	3273	0	1600
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-Japan1	6	2741	0	1974	0	767	0	1974	0	767
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-Japan1	all	23059	0	15118	0	7941	0	15118	0	7941
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-GB1	2	12230	0	12229	0	1	0	12229	0	1
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-GB1	6	288	0	262	0	26	0	262	0	26
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-GB1	all	30571	0	28930	0	1641	0	28931	0	1640
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-CNS1	0	14098	0	13907	0	191	0	13907	0	191
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-CNS1	1	3309	0	1961	0	1348	0	1961	0	1348
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-CNS1	3	1245	0	774	0	471	0	774	0	471
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-CNS1	4	119	0	90	0	29	0	90	0	29
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-CNS1	5	123	0	82	0	41	0	82	0	41
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-CNS1	6	68	0	48	0	20	0	48	0	20
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-CNS1	all	19178	0	16885	0	2293	0	16885	0	2293
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-Korea1	0	9332	0	5841	0	3491	0	5841	0	3491
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-Korea1	1	8822	0	0	0	8822	0	0	0	8822
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-Korea1	all	18351	0	5841	0	12510	0	5841	0	12510
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-KR	0	3058	0	217	0	2841	0	217	0	2841
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-KR	1	1578	0	0	0	1578	0	0	0	1578
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-KR	2	6814	0	0	0	6814	0	0	0	6814
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-KR	5	357	0	322	0	35	0	322	0	35
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-KR	6	2003	0	2	0	2001	0	2	0	2001
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-KR	8	3622	0	3545	0	77	0	3545	0	77
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansSC-Regular.otf	0	Noto Sans SC	Adobe-KR	all	22896	0	9499	0	13397	0	9499	0	13397
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-Japan1	0	8283	0	7135	0	1148	0	7135	0	1148
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-Japan1	2	361	0	248	0	113	0	248	0	113
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-Japan1	4	6090	0	1606	0	4484	0	1606	0	4484
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-Japan1	5	4873	0	2696	0	2177	0	2696	0	2177
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-Japan1	6	2741	0	1291	0	1450	0	1291	0	1450
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-Japan1	all	23059	0	13026	0	10033	0	13026	0	10033
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-GB1	0	7716	0	5687	0	2029	0	5688	0	2028
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-GB1	1	2180	0	2164	0	16	0	2164	0	16
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-GB1	2	12230	0	8529	0	3701	0	8529	0	3701
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-GB1	4	6711	0	715	0	5996	0	715	0	5996
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-GB1	6	288	0	27	0	261	0	27	0	261
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-GB1	all	30571	0	17122	0	13449	0	17123	0	13448
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-CNS1	0	14098	0	13909	0	189	0	13909	0	189
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-CNS1	1	3309	0	3100	0	209	0	3100	0	209
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-CNS1	all	19178	0	18570	0	608	0	18570	0	608
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-Korea1	0	9332	0	5766	0	3566	0	5766	0	3566
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-Korea1	1	8822	0	0	0	8822	0	0	0	8822
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-Korea1	all	18351	0	5766	0	12585	0	5766	0	12585
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-KR	0	3058	0	217	0	2841	0	217	0	2841
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-KR	1	1578	0	0	0	1578	0	0	0	1578
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-KR	2	6814	0	0	0	6814	0	0	0	6814
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-KR	5	357	0	322	0	35	0	322	0	35
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-KR	6	2003	0	2	0	2001	0	2	0	2001
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-KR	7	4620	0	4545	0	75	0	4545	0	75
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-KR	8	3622	0	3101	0	521	0	3101	0	521
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansTC-Regular.otf	0	Noto Sans TC	Adobe-KR	all	22896	0	8980	0	13916	0	8980	0	13916
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-Japan1	0	8283	0	7135	0	1148	0	7135	0	1148
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-Japan1	2	361	0	248	0	113	0	248	0	113
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-Japan1	4	6090	0	1607	0	4483	0	1607	0	4483
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-Japan1	5	4873	0	2696	0	2177	0	2696	0	2177
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-Japan1	6	2741	0	1291	0	1450	0	1291	0	1450
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-Japan1	all	23059	0	13027	0	10032	0	13027	0	10032
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-GB1	0	7716	0	5687	0	2029	0	5688	0	2028
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-GB1	1	2180	0	2164	0	16	0	2164	0	16
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-GB1	2	12230	0	8530	0	3700	0	8530	0	3700
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-GB1	4	6711	0	714	0	5997	0	714	0	5997
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-GB1	6	288	0	27	0	261	0	27	0	261
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-GB1	all	30571	0	17122	0	13449	0	17123	0	13448
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-CNS1	0	14098	0	13909	0	189	0	13909	0	189
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-CNS1	1	3309	0	3100	0	209	0	3100	0	209
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-CNS1	all	19178	0	18570	0	608	0	18570	0	608
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-Korea1	0	9332	0	5766	0	3566	0	5766	0	3566
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-Korea1	1	8822	0	0	0	8822	0	0	0	8822
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-Korea1	all	18351	0	5766	0	12585	0	5766	0	12585
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-KR	0	3058	0	217	0	2841	0	217	0	2841
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-KR	1	1578	0	0	0	1578	0	0	0	1578
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-KR	2	6814	0	0	0	6814	0	0	0	6814
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-KR	5	357	0	322	0	35	0	322	0	35
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-KR	6	2003	0	2	0	2001	0	2	0	2001
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-KR	7	4620	0	4545	0	75	0	4545	0	75
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-KR	8	3622	0	3101	0	521	0	3101	0	521
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansHK-Regular.otf	0	Noto Sans HK	Adobe-KR	all	22896	0	8980	0	13916	0	8980	0	13916
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-Japan1	0	8283	0	7728	0	555	0	7728	0	555
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-Japan1	5	4873	0	3604	0	1269	0	3604	0	1269
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-Japan1	all	23059	0	15607	0	7452	0	15607	0	7452
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-GB1	2	12230	0	12229	0	1	0	12229	0	1
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-GB1	6	288	0	262	0	26	0	262	0	26
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-GB1	all	30571	0	28930	0	1641	0	28931	0	1640
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-CNS1	0	14098	0	13909	0	189	0	13909	0	189
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-CNS1	all	19178	0	18589	0	589	0	18589	0	589
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-Korea1	0	9332	0	8191	0	1141	0	8191	0	1141
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-Korea1	all	18351	0	17013	0	1338	0	17013	0	1338
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-KR	5	357	0	323	0	34	0	323	0	34
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansCJK-Regular.ttc	0	Noto Sans CJK JP	Adobe-KR	all	22896	0	21088	0	1808	0	21088	0	1808
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-Japan1	0	8283	0	7728	0	555	0	7728	0	555
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-Japan1	5	4873	0	3604	0	1269	0	3604	0	1269
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-Japan1	all	23059	0	15607	0	7452	0	15607	0	7452
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-GB1	2	12230	0	12229	0	1	0	12229	0	1
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-GB1	6	288	0	262	0	26	0	262	0	26
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-GB1	all	30571	0	28930	0	1641	0	28931	0	1640
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-CNS1	0	14098	0	13909	0	189	0	13909	0	189
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-CNS1	all	19178	0	18589	0	589	0	18589	0	589
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-Korea1	0	9332	0	8191	0	1141	0	8191	0	1141
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-Korea1	all	18351	0	17013	0	1338	0	17013	0	1338
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-KR	5	357	0	323	0	34	0	323	0	34
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansCJK-Regular.ttc	1	Noto Sans CJK KR	Adobe-KR	all	22896	0	21088	0	1808	0	21088	0	1808
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-Japan1	0	8283	0	7728	0	555	0	7728	0	555
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-Japan1	5	4873	0	3604	0	1269	0	3604	0	1269
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-Japan1	all	23059	0	15607	0	7452	0	15607	0	7452
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-GB1	2	12230	0	12229	0	1	0	12229	0	1
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-GB1	6	288	0	262	0	26	0	262	0	26
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-GB1	all	30571	0	28930	0	1641	0	28931	0	1640
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-CNS1	0	14098	0	13909	0	189	0	13909	0	189
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-CNS1	all	19178	0	18589	0	589	0	18589	0	589
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-Korea1	0	9332	0	8191	0	1141	0	8191	0	1141
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-Korea1	all	18351	0	17013	0	1338	0	17013	0	1338
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-KR	5	357	0	323	0	34	0	323	0	34
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansCJK-Regular.ttc	2	Noto Sans CJK SC	Adobe-KR	all	22896	0	21088	0	1808	0	21088	0	1808
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-Japan1	0	8283	0	7728	0	555	0	7728	0	555
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-Japan1	5	4873	0	3604	0	1269	0	3604	0	1269
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-Japan1	all	23059	0	15607	0	7452	0	15607	0	7452
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-GB1	2	12230	0	12229	0	1	0	12229	0	1
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-GB1	6	288	0	262	0	26	0	262	0	26
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-GB1	all	30571	0	28930	0	1641	0	28931	0	1640
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-CNS1	0	14098	0	13909	0	189	0	13909	0	189
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-CNS1	all	19178	0	18589	0	589	0	18589	0	589
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-Korea1	0	9332	0	8191	0	1141	0	8191	0	1141
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-Korea1	all	18351	0	17013	0	1338	0	17013	0	1338
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-KR	5	357	0	323	0	34	0	323	0	34
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansCJK-Regular.ttc	3	Noto Sans CJK TC	Adobe-KR	all	22896	0	21088	0	1808	0	21088	0	1808
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-Japan1	0	8283	0	7728	0	555	0	7728	0	555
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-Japan1	5	4873	0	3604	0	1269	0	3604	0	1269
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-Japan1	all	23059	0	15607	0	7452	0	15607	0	7452
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-GB1	2	12230	0	12229	0	1	0	12229	0	1
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-GB1	6	288	0	262	0	26	0	262	0	26
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-GB1	all	30571	0	28930	0	1641	0	28931	0	1640
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-CNS1	0	14098	0	13909	0	189	0	13909	0	189
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-CNS1	all	19178	0	18589	0	589	0	18589	0	589
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-Korea1	0	9332	0	8191	0	1141	0	8191	0	1141
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-Korea1	all	18351	0	17013	0	1338	0	17013	0	1338
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-KR	5	357	0	323	0	34	0	323	0	34
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansCJK-Regular.ttc	4	Noto Sans CJK HK	Adobe-KR	all	22896	0	21088	0	1808	0	21088	0	1808
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-Japan1	0	8283	0	7728	0	555	0	7728	0	555
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-Japan1	5	4873	0	3604	0	1269	0	3604	0	1269
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-Japan1	all	23059	0	15607	0	7452	0	15607	0	7452
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-GB1	2	12230	0	12229	0	1	0	12229	0	1
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-GB1	6	288	0	262	0	26	0	262	0	26
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-GB1	all	30571	0	28930	0	1641	0	28931	0	1640
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-CNS1	0	14098	0	13909	0	189	0	13909	0	189
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-CNS1	all	19178	0	18589	0	589	0	18589	0	589
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-Korea1	0	9332	0	8191	0	1141	0	8191	0	1141
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-Korea1	all	18351	0	17013	0	1338	0	17013	0	1338
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-KR	5	357	0	323	0	34	0	323	0	34
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansCJK-Regular.ttc	5	Noto Sans Mono CJK JP	Adobe-KR	all	22896	0	21088	0	1808	0	21088	0	1808
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-Japan1	0	8283	0	7728	0	555	0	7728	0	555
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-Japan1	5	4873	0	3604	0	1269	0	3604	0	1269
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-Japan1	all	23059	0	15607	0	7452	0	15607	0	7452
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-GB1	2	12230	0	12229	0	1	0	12229	0	1
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-GB1	6	288	0	262	0	26	0	262	0	26
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-GB1	all	30571	0	28930	0	1641	0	28931	0	1640
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-CNS1	0	14098	0	13909	0	189	0	13909	0	189
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-CNS1	all	19178	0	18589	0	589	0	18589	0	589
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-Korea1	0	9332	0	8191	0	1141	0	8191	0	1141
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-Korea1	all	18351	0	17013	0	1338	0	17013	0	1338
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-KR	5	357	0	323	0	34	0	323	0	34
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansCJK-Regular.ttc	6	Noto Sans Mono CJK KR	Adobe-KR	all	22896	0	21088	0	1808	0	21088	0	1808
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-Japan1	0	8283	0	7728	0	555	0	7728	0	555
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-Japan1	5	4873	0	3604	0	1269	0	3604	0	1269
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-Japan1	all	23059	0	15607	0	7452	0	15607	0	7452
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-GB1	2	12230	0	12229	0	1	0	12229	0	1
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-GB1	6	288	0	262	0	26	0	262	0	26
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-GB1	all	30571	0	28930	0	1641	0	28931	0	1640
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-CNS1	0	14098	0	13909	0	189	0	13909	0	189
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-CNS1	all	19178	0	18589	0	589	0	18589	0	589
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-Korea1	0	9332	0	8191	0	1141	0	8191	0	1141
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-Korea1	all	18351	0	17013	0	1338	0	17013	0	1338
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-KR	5	357	0	323	0	34	0	323	0	34
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansCJK-Regular.ttc	7	Noto Sans Mono CJK SC	Adobe-KR	all	22896	0	21088	0	1808	0	21088	0	1808
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-Japan1	0	8283	0	7728	0	555	0	7728	0	555
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-Japan1	5	4873	0	3604	0	1269	0	3604	0	1269
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-Japan1	all	23059	0	15607	0	7452	0	15607	0	7452
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-GB1	2	12230	0	12229	0	1	0	12229	0	1
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-GB1	6	288	0	262	0	26	0	262	0	26
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-GB1	all	30571	0	28930	0	1641	0	28931	0	1640
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-CNS1	0	14098	0	13909	0	189	0	13909	0	189
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-CNS1	all	19178	0	18589	0	589	0	18589	0	589
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-Korea1	0	9332	0	8191	0	1141	0	8191	0	1141
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-Korea1	all	18351	0	17013	0	1338	0	17013	0	1338
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-KR	5	357	0	323	0	34	0	323	0	34
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansCJK-Regular.ttc	8	Noto Sans Mono CJK TC	Adobe-KR	all	22896	0	21088	0	1808	0	21088	0	1808
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-Japan1	0	8283	0	7728	0	555	0	7728	0	555
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-Japan1	1	75	0	48	0	27	0	48	0	27
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-Japan1	4	6090	0	1904	0	4186	0	1904	0	4186
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-Japan1	5	4873	0	3604	0	1269	0	3604	0	1269
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-Japan1	6	2741	0	1975	0	766	0	1975	0	766
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-Japan1	all	23059	0	15607	0	7452	0	15607	0	7452
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-GB1	0	7716	0	7585	0	131	0	7586	0	130
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-GB1	2	12230	0	12229	0	1	0	12229	0	1
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-GB1	4	6711	0	6674	0	37	0	6674	0	37
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-GB1	6	288	0	262	0	26	0	262	0	26
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-GB1	all	30571	0	28930	0	1641	0	28931	0	1640
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-CNS1	0	14098	0	13909	0	189	0	13909	0	189
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-CNS1	1	3309	0	3119	0	190	0	3119	0	190
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-CNS1	3	1245	0	1228	0	17	0	1228	0	17
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-CNS1	4	119	0	119	0	0	0	119	0	0
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-CNS1	5	123	0	123	0	0	0	123	0	0
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-CNS1	6	68	0	68	0	0	0	68	0	0
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-CNS1	all	19178	0	18589	0	589	0	18589	0	589
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-Korea1	0	9332	0	8191	0	1141	0	8191	0	1141
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-Korea1	all	18351	0	17013	0	1338	0	17013	0	1338
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-KR	0	3058	0	2997	0	61	0	2997	0	61
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-KR	3	280	0	280	0	0	0	280	0	0
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-KR	4	147	0	136	0	11	0	136	0	11
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-KR	5	357	0	323	0	34	0	323	0	34
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-KR	6	2003	0	359	0	1644	0	359	0	1644
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-KR	8	3622	0	3604	0	18	0	3604	0	18
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-KR	9	417	0	377	0	40	0	377	0	40
+coverage	NotoSansCJK-Regular.ttc	9	Noto Sans Mono CJK HK	Adobe-KR	all	22896	0	21088	0	1808	0	21088	0	1808
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-Japan1	0	8283	0	7636	0	647	0	7662	0	621
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-Japan1	1	75	0	37	0	38	0	38	0	37
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-Japan1	4	6090	0	1205	0	4885	0	1205	0	4885
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-Japan1	5	4873	0	2709	0	2164	0	2711	0	2162
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-Japan1	6	2741	0	97	0	2644	0	97	0	2644
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-Japan1	7	2	0	2	0	0	0	2	0	0
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-Japan1	all	23059	0	12032	0	11027	0	12061	0	10998
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-GB1	0	7716	0	4832	0	2884	0	4855	0	2861
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-GB1	1	2180	0	1885	0	295	0	1885	0	295
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-GB1	2	12230	0	3609	0	8621	0	3609	0	8621
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-GB1	4	6711	0	176	0	6535	0	176	0	6535
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-GB1	6	288	0	0	0	288	0	0	0	288
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-GB1	all	30571	0	10502	0	20069	0	10525	0	20046
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-CNS1	0	14098	0	8308	0	5790	0	8326	0	5772
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-CNS1	1	3309	0	676	0	2633	0	676	0	2633
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-CNS1	3	1245	0	209	0	1036	0	209	0	1036
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-CNS1	4	119	0	21	0	98	0	21	0	98
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-CNS1	5	123	0	12	0	111	0	12	0	111
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-CNS1	6	68	0	9	0	59	0	9	0	59
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-CNS1	7	23	0	8	0	15	0	8	0	15
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-CNS1	all	19178	0	9243	0	9935	0	9261	0	9917
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-Korea1	0	9332	0	5414	0	3918	0	5414	0	3918
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-Korea1	1	8822	0	0	0	8822	0	0	0	8822
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-Korea1	all	18351	0	5414	0	12937	0	5414	0	12937
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-KR	0	3058	0	155	0	2903	0	155	0	2903
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-KR	1	1578	0	0	0	1578	0	0	0	1578
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-KR	2	6814	0	0	0	6814	0	0	0	6814
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-KR	3	280	0	153	0	127	0	153	0	127
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-KR	4	147	0	101	0	46	0	101	0	46
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-KR	5	357	0	187	0	170	0	187	0	170
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-KR	6	2003	0	0	0	2003	0	0	0	2003
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-KR	7	4620	0	4484	0	136	0	4484	0	136
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-KR	8	3622	0	2337	0	1285	0	2337	0	1285
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-KR	9	417	0	392	0	25	0	392	0	25
+coverage	BIZUDGothic-Regular.ttf	0	BIZ UDGothic	Adobe-KR	all	22896	0	7809	0	15087	0	7809	0	15087
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-Japan1	0	8283	0	439	0	7844	0	464	0	7819
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-Japan1	1	75	0	2	0	73	0	2	0	73
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-Japan1	2	361	0	0	0	361	0	0	0	361
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-Japan1	4	6090	0	34	0	6056	0	34	0	6056
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-Japan1	5	4873	0	65	0	4808	0	67	0	4806
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-Japan1	6	2741	0	14	0	2727	0	14	0	2727
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-Japan1	7	2	0	0	0	2	0	0	0	2
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-Japan1	all	23059	0	554	0	22505	0	581	0	22478
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-GB1	0	7716	0	351	0	7365	0	374	0	7342
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-GB1	1	2180	0	0	0	2180	0	0	0	2180
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-GB1	2	12230	0	18	0	12212	0	18	0	12212
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-GB1	4	6711	0	2	0	6709	0	2	0	6709
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-GB1	6	288	0	0	0	288	0	0	0	288
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-GB1	all	30571	0	371	0	30200	0	394	0	30177
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-CNS1	0	14098	0	283	0	13815	0	301	0	13797
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-CNS1	1	3309	0	0	0	3309	0	0	0	3309
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-CNS1	3	1245	0	4	0	1241	0	4	0	1241
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-CNS1	4	119	0	0	0	119	0	0	0	119
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-CNS1	5	123	0	0	0	123	0	0	0	123
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-CNS1	6	68	0	0	0	68	0	0	0	68
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-CNS1	7	23	0	0	0	23	0	0	0	23
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-CNS1	all	19178	0	287	0	18891	0	305	0	18873
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-Korea1	0	9332	0	3032	0	6300	0	3032	0	6300
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-Korea1	all	18351	0	11854	0	6497	0	11854	0	6497
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-KR	0	3058	0	2983	0	75	0	2983	0	75
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-KR	3	280	0	1	0	279	0	1	0	279
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-KR	4	147	0	102	0	45	0	102	0	45
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-KR	5	357	0	210	0	147	0	210	0	147
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-KR	6	2003	0	0	0	2003	0	0	0	2003
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-KR	7	4620	0	0	0	4620	0	0	0	4620
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-KR	8	3622	0	0	0	3622	0	0	0	3622
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-KR	9	417	0	32	0	385	0	32	0	385
+coverage	NanumGothic-Regular.ttf	0	NanumGothic	Adobe-KR	all	22896	0	11720	0	11176	0	11720	0	11176
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-Japan1	0	8283	0	6984	0	1299	0	6984	0	1299
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-Japan1	1	75	0	9	0	66	0	9	0	66
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-Japan1	4	6090	0	1252	0	4838	0	1252	0	4838
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-Japan1	5	4873	0	2893	0	1980	0	2893	0	1980
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-Japan1	6	2741	0	1960	0	781	0	1960	0	781
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-Japan1	7	2	0	0	0	2	0	0	0	2
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-Japan1	all	23059	0	13444	0	9615	0	13444	0	9615
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-GB1	0	7716	0	7132	0	584	0	7132	0	584
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-GB1	2	12230	0	12043	0	187	0	12043	0	187
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-GB1	4	6711	0	3	0	6708	0	3	0	6708
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-GB1	6	288	0	0	0	288	0	0	0	288
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-GB1	all	30571	0	21358	0	9213	0	21358	0	9213
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-CNS1	0	14098	0	13501	0	597	0	13501	0	597
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-CNS1	1	3309	0	1613	0	1696	0	1613	0	1696
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-CNS1	3	1245	0	520	0	725	0	520	0	725
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-CNS1	4	119	0	65	0	54	0	65	0	54
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-CNS1	5	123	0	29	0	94	0	29	0	94
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-CNS1	6	68	0	31	0	37	0	31	0	37
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-CNS1	all	19178	0	15782	0	3396	0	15782	0	3396
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-Korea1	0	9332	0	7530	0	1802	0	7530	0	1802
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-Korea1	1	8822	0	8822	0	0	0	8822	0	0
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-Korea1	all	18351	0	16352	0	1999	0	16352	0	1999
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-KR	0	3058	0	2842	0	216	0	2842	0	216
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-KR	1	1578	0	1578	0	0	0	1578	0	0
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-KR	2	6814	0	6814	0	0	0	6814	0	0
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-KR	3	280	0	58	0	222	0	58	0	222
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-KR	4	147	0	131	0	16	0	131	0	16
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-KR	5	357	0	130	0	227	0	130	0	227
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-KR	6	2003	0	127	0	1876	0	127	0	1876
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-KR	8	3622	0	3451	0	171	0	3451	0	171
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-KR	9	417	0	176	0	241	0	176	0	241
+coverage	DroidSansFallback.ttf	0	Droid Sans Fallback	Adobe-KR	all	22896	0	19927	0	2969	0	19927	0	2969
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-Japan1	0	8283	0	6985	0	1298	0	6985	0	1298
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-Japan1	1	75	0	9	0	66	0	9	0	66
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-Japan1	2	361	0	346	0	15	0	346	0	15
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-Japan1	3	634	0	0	0	634	0	0	0	634
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-Japan1	4	6090	0	1283	0	4807	0	1283	0	4807
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-Japan1	5	4873	0	3063	0	1810	0	3063	0	1810
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-Japan1	6	2741	0	1960	0	781	0	1960	0	781
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-Japan1	7	2	0	0	0	2	0	0	0	2
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-Japan1	all	23059	0	13646	0	9413	0	13646	0	9413
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-GB1	0	7716	0	7132	0	584	0	7132	0	584
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-GB1	1	2180	0	2180	0	0	0	2180	0	0
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-GB1	2	12230	0	12095	0	135	0	12095	0	135
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-GB1	3	226	0	0	0	226	0	0	0	226
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-GB1	4	6711	0	6531	0	180	0	6531	0	180
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-GB1	5	1220	0	0	0	1220	0	0	0	1220
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-GB1	6	288	0	0	0	288	0	0	0	288
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-GB1	all	30571	0	27938	0	2633	0	27938	0	2633
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-CNS1	0	14098	0	13503	0	595	0	13503	0	595
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-CNS1	1	3309	0	1959	0	1350	0	1959	0	1350
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-CNS1	2	193	0	0	0	193	0	0	0	193
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-CNS1	3	1245	0	676	0	569	0	676	0	569
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-CNS1	4	119	0	77	0	42	0	77	0	42
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-CNS1	5	123	0	80	0	43	0	80	0	43
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-CNS1	6	68	0	43	0	25	0	43	0	25
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-CNS1	7	23	0	23	0	0	0	23	0	0
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-CNS1	all	19178	0	16361	0	2817	0	16361	0	2817
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-Korea1	0	9332	0	5124	0	4208	0	5124	0	4208
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-Korea1	1	8822	0	2	0	8820	0	2	0	8820
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-Korea1	2	197	0	0	0	197	0	0	0	197
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-Korea1	all	18351	0	5126	0	13225	0	5126	0	13225
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-KR	0	3058	0	64	0	2994	0	64	0	2994
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-KR	1	1578	0	0	0	1578	0	0	0	1578
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-KR	2	6814	0	1	0	6813	0	1	0	6813
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-KR	3	280	0	1	0	279	0	1	0	279
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-KR	4	147	0	131	0	16	0	131	0	16
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-KR	5	357	0	130	0	227	0	130	0	227
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-KR	6	2003	0	127	0	1876	0	127	0	1876
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-KR	7	4620	0	4620	0	0	0	4620	0	0
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-KR	8	3622	0	3544	0	78	0	3544	0	78
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-KR	9	417	0	176	0	241	0	176	0	241
+coverage	DroidSansFallbackFull.ttf	0	Droid Sans Fallback	Adobe-KR	all	22896	0	8794	0	14102	0	8794	0	14102
+storage	file	bytes	deflated_bytes	woff2_bytes	upstream	spdx
+storage	SourceHanSansJP-Regular.otf	4562224	3931675	3399196	https://github.com/adobe-fonts/source-han-sans release 2.005R SubsetOTF/	OFL-1.1
+storage	SourceHanSansKR-Regular.otf	4632304	3735702	3182156	https://github.com/adobe-fonts/source-han-sans release 2.005R SubsetOTF/	OFL-1.1
+storage	SourceHanSansCN-Regular.otf	8429224	7327033	6200108	https://github.com/adobe-fonts/source-han-sans release 2.005R SubsetOTF/	OFL-1.1
+storage	SourceHanSansTW-Regular.otf	5730540	4964139	4236308	https://github.com/adobe-fonts/source-han-sans release 2.005R SubsetOTF/	OFL-1.1
+storage	SourceHanSansHK-Regular.otf	5737056	4972790	4245560	https://github.com/adobe-fonts/source-han-sans release 2.005R SubsetOTF/	OFL-1.1
+storage	SourceHanSans-Regular.ttc	19573856	15658766	11693704	https://github.com/adobe-fonts/source-han-sans release 2.005R OTC/	OFL-1.1
+storage	NotoSansJP-Regular.otf	4533028	3884292	3351692	https://github.com/notofonts/noto-cjk release Sans2.004 Sans/SubsetOTF/	OFL-1.1
+storage	NotoSansKR-Regular.otf	4644748	3729720	3175316	https://github.com/notofonts/noto-cjk release Sans2.004 Sans/SubsetOTF/	OFL-1.1
+storage	NotoSansSC-Regular.otf	8331336	7205021	6093444	https://github.com/notofonts/noto-cjk release Sans2.004 Sans/SubsetOTF/	OFL-1.1
+storage	NotoSansTC-Regular.otf	5683368	4896542	4175172	https://github.com/notofonts/noto-cjk release Sans2.004 Sans/SubsetOTF/	OFL-1.1
+storage	NotoSansHK-Regular.otf	5688384	4905789	4189224	https://github.com/notofonts/noto-cjk release Sans2.004 Sans/SubsetOTF/	OFL-1.1
+storage	NotoSansCJK-Regular.ttc	19484784	15512061	11574180	https://github.com/notofonts/noto-cjk release Sans2.004 Sans/OTC/	OFL-1.1
+storage	BIZUDGothic-Regular.ttf	4667380	3019560	2199848	https://github.com/googlefonts/morisawa-biz-ud-gothic release v1.051 fonts/ttf/	OFL-1.1
+storage	NanumGothic-Regular.ttf	2054744	689937	363844	https://github.com/google/fonts ofl/nanumgothic/	OFL-1.1
+storage	DroidSansFallback.ttf	3451900	1661500	1135548	https://android.googlesource.com/platform/frameworks/base data/fonts/	Apache-2.0
+storage	DroidSansFallbackFull.ttf	4033576	2144454	1481544	https://android.googlesource.com/platform/frameworks/base data/fonts/	Apache-2.0

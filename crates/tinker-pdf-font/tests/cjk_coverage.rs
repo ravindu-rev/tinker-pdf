@@ -36,18 +36,23 @@
 //! counts are the same in both, and the times are each build's own. The census
 //! is this file's one ignored test, so `--ignored` runs it alone, and a
 //! collection is inverted by its first use in the process, which the census
-//! times before any face asks for it. The rows it prints are committed, when it
-//! runs, as `cjk_coverage.tsv` beside this file — the release run's rows and
-//! the debug run's `inversion` and `storage` rows — and the runs' revision,
-//! machine and day go in that commit's message (ruling 16).
+//! times before any face asks for it.
+//!
+//! Its counts and sizes are committed as `cjk_coverage.tsv` beside this file:
+//! every row it prints, less the columns that hold a time and the profile a
+//! time was taken in ([`TIMED`]), since a count or a size is the same in
+//! either build and a time is the named machine's (ruling 15). The run's
+//! revision, machine and day go in the message of the commit that records it
+//! (ruling 16).
 //!
 //! The tests below the census hold its instruments — the supplements read from
 //! the registry, the routes, a collection's faces, the storage forms, the
 //! `name` table reading and the candidate list — to what they state, over
-//! inputs built here or committed, and run in every `cargo test`.
+//! inputs built here or committed, and the committed record whole and adding
+//! up, and run in every `cargo test`.
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -62,6 +67,28 @@ const RAN: &str = "cjk-coverage: RAN";
 
 /// Printed when there was nothing to measure.
 const SKIPPED: &str = "cjk-coverage: SKIPPED";
+
+/// The head of the census's `inversion` table, as it prints it.
+const INVERSION_HEAD: &str = "inversion\tcollection\twriting_mode\tcids_reached\tmicros\tprofile";
+
+/// The head of the census's `coverage` table, as it prints it.
+const COVERAGE_HEAD: &str = "coverage\tfile\tface\tname\tcollection\tsupplement\tcids\t\
+     horizontal_by_charset\thorizontal_by_character\thorizontal_by_index\thorizontal_unreached\t\
+     vertical_by_charset\tvertical_by_character\tvertical_by_index\tvertical_unreached";
+
+/// The head of the census's `storage` table, as it prints it.
+const STORAGE_HEAD: &str = "storage\tfile\tbytes\tdeflated_bytes\twoff2_bytes\tready_raw_micros\t\
+     ready_deflated_micros\tready_woff2_micros\tprofile\tupstream\tspdx";
+
+/// The columns of the census's tables that hold a time, or the build profile
+/// a time was taken in, which the committed record leaves out.
+const TIMED: [&str; 5] = [
+    "micros",
+    "ready_raw_micros",
+    "ready_deflated_micros",
+    "ready_woff2_micros",
+    "profile",
+];
 
 /// One candidate file, as `fallback-faces.md`'s candidate table names it.
 struct Candidate {
@@ -693,17 +720,13 @@ fn cjk_face_coverage_census() {
         dir.display()
     );
 
-    println!("inversion\tcollection\twriting_mode\tcids_reached\tmicros\tprofile");
+    println!("{INVERSION_HEAD}");
     for (ordering, vertical, reached, micros) in &inversions {
         let mode = if *vertical { "vertical" } else { "horizontal" };
         println!("inversion\tAdobe-{ordering}\t{mode}\t{reached}\t{micros}\t{profile}");
     }
 
-    println!(
-        "coverage\tfile\tface\tname\tcollection\tsupplement\tcids\t\
-         horizontal_by_charset\thorizontal_by_character\thorizontal_by_index\thorizontal_unreached\t\
-         vertical_by_charset\tvertical_by_character\tvertical_by_index\tvertical_unreached"
-    );
+    println!("{COVERAGE_HEAD}");
     for candidate in &CANDIDATES {
         let Ok(program) = std::fs::read(dir.join(candidate.file)) else {
             println!(
@@ -729,10 +752,7 @@ fn cjk_face_coverage_census() {
         }
     }
 
-    println!(
-        "storage\tfile\tbytes\tdeflated_bytes\twoff2_bytes\tready_raw_micros\t\
-         ready_deflated_micros\tready_woff2_micros\tprofile\tupstream\tspdx"
-    );
+    println!("{STORAGE_HEAD}");
     for candidate in &CANDIDATES {
         let Ok(program) = std::fs::read(dir.join(candidate.file)) else {
             println!(
@@ -1359,4 +1379,165 @@ fn every_candidate_is_the_designs() {
         .map(|candidate| candidate.file.to_string())
         .collect();
     assert_eq!(named, read, "the design's files and the census's");
+}
+
+// --- the committed record -----------------------------------------------------
+
+/// The committed record, `cjk_coverage.tsv` beside this file, as its rows'
+/// cells: its `#` head and blank lines left out.
+fn record() -> Vec<Vec<String>> {
+    let path = repo_file("crates/tinker-pdf-font/tests/cjk_coverage.tsv");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    text.lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| line.split('\t').map(str::to_string).collect())
+        .collect()
+}
+
+/// A table's head as the record carries it: the census's, less [`TIMED`].
+fn committed_head(head: &str) -> Vec<String> {
+    head.split('\t')
+        .filter(|column| !TIMED.contains(column))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A count cell of the record, as a number.
+fn count(cell: &str, row: &[String]) -> usize {
+    cell.parse()
+        .unwrap_or_else(|_| panic!("{cell:?} is no count: {row:?}"))
+}
+
+/// **The committed record is whole and adds up.** `cjk_coverage.tsv` holds
+/// the census's three tables in its order and nothing else, each headed by the
+/// census's own head less [`TIMED`]: an `inversion` row for each collection in
+/// each writing mode; then, for each candidate in turn, its faces in order —
+/// one for a file that is not a collection, more for one that is — each with
+/// every collection's supplements from 0 and then its `all` row, every face
+/// giving a collection the same supplements and a supplement the same CIDs,
+/// each writing mode's four counts adding up to the row's CIDs, each `all` row
+/// the sum of its supplements, and no face reaching more of a collection by
+/// its characters than that collection's table in that writing mode reaches;
+/// then a `storage` row for each candidate, with its bytes in all three forms
+/// and the upstream and SPDX expression the candidate list gives it. A
+/// candidate the census found absent or unreadable has no such rows, so the
+/// record is no whole census.
+#[test]
+fn the_committed_census_is_whole() {
+    let rows = record();
+    let ranks: Vec<u8> = rows
+        .iter()
+        .map(|row| match row[0].as_str() {
+            "inversion" => 0,
+            "coverage" => 1,
+            "storage" => 2,
+            other => panic!("a row of no census table, {other:?}: {row:?}"),
+        })
+        .collect();
+    assert!(
+        ranks.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the three tables, in the census's order"
+    );
+    let table =
+        |name: &str| -> Vec<&Vec<String>> { rows.iter().filter(|row| row[0] == name).collect() };
+
+    // The inversion: each collection's two tables, horizontal first.
+    let inversion = table("inversion");
+    assert_eq!(*inversion[0], committed_head(INVERSION_HEAD));
+    let mut reached = BTreeMap::new();
+    let mut rows_of = inversion[1..].iter();
+    for ordering in ORDERINGS {
+        for mode in ["horizontal", "vertical"] {
+            let row = rows_of.next().expect("an inversion row for each table");
+            assert_eq!(row.len(), 4, "{row:?}");
+            assert_eq!(row[1], format!("Adobe-{ordering}"), "{row:?}");
+            assert_eq!(row[2], mode, "{row:?}");
+            reached.insert((ordering, mode), count(&row[3], row));
+        }
+    }
+    assert!(rows_of.next().is_none(), "an inversion row of no table");
+
+    // The coverage: every face of every candidate, in order.
+    let coverage = table("coverage");
+    assert_eq!(*coverage[0], committed_head(COVERAGE_HEAD));
+    let mut data = coverage[1..].iter().peekable();
+    let mut supplement_cids: BTreeMap<(&str, usize), usize> = BTreeMap::new();
+    let mut supplement_count: BTreeMap<&str, usize> = BTreeMap::new();
+    for candidate in &CANDIDATES {
+        let mut faces = 0usize;
+        while data.peek().is_some_and(|row| row[1] == candidate.file) {
+            for ordering in ORDERINGS {
+                let mut sums = [0usize; 9];
+                let mut supplement = 0usize;
+                loop {
+                    let row = data
+                        .next()
+                        .unwrap_or_else(|| panic!("{} stops short", candidate.file));
+                    assert_eq!(row.len(), 15, "{row:?}");
+                    assert_eq!(row[1], candidate.file, "{row:?}");
+                    assert_eq!(row[2], faces.to_string(), "{row:?}");
+                    assert!(!row[3].is_empty(), "every face names itself: {row:?}");
+                    assert_eq!(row[4], format!("Adobe-{ordering}"), "{row:?}");
+                    let numbers: Vec<usize> =
+                        row[6..].iter().map(|value| count(value, row)).collect();
+                    assert_eq!(
+                        numbers[1..5].iter().sum::<usize>(),
+                        numbers[0],
+                        "the horizontal counts add up to the CIDs: {row:?}"
+                    );
+                    assert_eq!(
+                        numbers[5..9].iter().sum::<usize>(),
+                        numbers[0],
+                        "the vertical counts add up to the CIDs: {row:?}"
+                    );
+                    if row[5] == "all" {
+                        assert!(supplement > 0, "a collection with no supplement: {row:?}");
+                        assert_eq!(numbers, sums, "the all row sums its supplements: {row:?}");
+                        assert!(
+                            numbers[2] <= reached[&(ordering, "horizontal")]
+                                && numbers[6] <= reached[&(ordering, "vertical")],
+                            "no face reaches by character a CID its table does not: {row:?}"
+                        );
+                        break;
+                    }
+                    assert_eq!(row[5], supplement.to_string(), "{row:?}");
+                    let held = supplement_cids
+                        .entry((ordering, supplement))
+                        .or_insert(numbers[0]);
+                    assert_eq!(*held, numbers[0], "every face's supplement: {row:?}");
+                    for (sum, number) in sums.iter_mut().zip(&numbers) {
+                        *sum += number;
+                    }
+                    supplement += 1;
+                }
+                let held = supplement_count.entry(ordering).or_insert(supplement);
+                assert_eq!(*held, supplement, "{ordering}'s supplements, face {faces}");
+            }
+            faces += 1;
+        }
+        if candidate.file.ends_with(".ttc") {
+            assert!(faces > 1, "{} is a collection of faces", candidate.file);
+        } else {
+            assert_eq!(faces, 1, "{} is one face", candidate.file);
+        }
+    }
+    assert!(
+        data.next().is_none(),
+        "a coverage row of no candidate, or out of order"
+    );
+
+    // The storage: each candidate's three forms.
+    let storage = table("storage");
+    assert_eq!(*storage[0], committed_head(STORAGE_HEAD));
+    assert_eq!(storage.len(), CANDIDATES.len() + 1, "a storage row each");
+    for (row, candidate) in storage[1..].iter().zip(&CANDIDATES) {
+        assert_eq!(row.len(), 7, "{row:?}");
+        assert_eq!(row[1], candidate.file, "{row:?}");
+        for bytes in &row[2..5] {
+            assert!(count(bytes, row) > 0, "every form has bytes: {row:?}");
+        }
+        assert_eq!(row[5], cell(candidate.upstream), "{row:?}");
+        assert_eq!(row[6], candidate.spdx, "{row:?}");
+    }
 }
