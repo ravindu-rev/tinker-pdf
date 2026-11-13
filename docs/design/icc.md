@@ -52,7 +52,8 @@ open of this design — the refused profiles — is listed in the
 - **N-channel output, overprint and spot-ink simulation.** `Separation` /
   `DeviceN` keep flowing through their tint transforms (8.6.6.4, 8.6.6.5);
   simulating ink interaction is a different renderer. Overprint simulation and
-  separations are [ROADMAP](../ROADMAP.md) rows RC-03 and RC-04.
+  separations are [ROADMAP](../ROADMAP.md) rows RC-03 and RC-04, designed in
+  [overprint-separations.md](overprint-separations.md).
 - **Black point compensation, gamut mapping beyond intent selection,
   iccMAX/v5 profiles, named-colour tags.** Refused by name, per ruling 2;
   [ROADMAP](../ROADMAP.md) rows RC-02 and RC-20.
