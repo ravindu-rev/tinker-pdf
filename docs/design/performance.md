@@ -939,7 +939,7 @@ column, before MS-02.6 builds the run.
 
 In this design, `cargo bench` times every operation of tier P's target
 table that the tree can run, and the row's own, in twelve groups of one file
-each, MS-09's `threads` among them: 171 operations over inputs the benches
+each, MS-09's `threads` among them: 173 operations over inputs the benches
 generate or the tree holds, each
 held by `cargo xtask bench-check --machine` to the band its machine's entry in
 `baseline.json` records, from a local `cargo bench -p tinker-pdf` on that
@@ -1279,6 +1279,7 @@ text of the document the operation reads, so all six stay inside the group.
 | `render/re-render a changed 100x100 pt annotation` | pixels · 1240×1755 | the same, its appearance replaced and appended through `write::append` untimed beside a copy of the full render's bitmap; the patch of that bitmap (`Appended::patch`) is timed; the planning baseline saves the change under `WriteMode::Incremental`, reopens the bytes and draws the changed page whole in its place | relation ≤ 10 % of the full-page render | in | built |
 | `render/replay the half-size Flate RGB image page at 150 dpi` | pixels · 620×878 | `flate_page(2)`'s display list, recorded once; its renders share the decoded image (`resources.rs:532-546`) | 87.5 → 10, rescaled from A4's 350 → 40; 8.75× | in | built |
 | `render/a quarter-size ICC-based CMYK image to sRGB at 300 dpi` | pixels · 620×877, the image's | `cmyk_page(4)`, drawn at the image's own resolution so each sample is converted once | not measured → ≥ 100 Mpixel/s (≤ 5.4); calibrated | in | built |
+| `render/render an ICC page under each rendering intent at 150 dpi` | pixels · 1240×1755 | `intents_page()`: in each of four columns, under one of Table 69's intents by `ri`, a fill, `photo(310, 438, 0)` and an axial shading in an `ICCBased` space over a profile carrying a table for each intent on a media white other than D50 (RC-01); held before it is timed to paint each column's fill, image and shading in four colours; the planning baseline, which reads no intent, draws the same page | not in tier P's table; floor 1 | untimed | built |
 | `render/the half-size JPEG page at 72 dpi` | pixels · 298×421 | `jpeg_page_part(2)` | 163 → 8.75, rescaled from A4's 652 → 35; 18.6× | in | built |
 | `render/the quarter-size JPEG page at 300 dpi` | pixels · 620×878 | `jpeg_page_part(4)` | 99.1 → 9.4, rescaled from A4's 1 585 → 150; 10.5× | in | built |
 | `render/a second render of the quarter-size JPEG page at 300 dpi` | pixels · 620×878 | `jpeg_page_part(4)`, after the same `Page` rendered at 72 dpi, untimed | not measured; relation ≤ 30 % of the first (`the quarter-size JPEG page at 300 dpi`) | in | built |

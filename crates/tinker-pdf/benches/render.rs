@@ -216,6 +216,44 @@ fn image_page(bytes: Vec<u8>, codec: SampleCodec) -> Page {
     page
 }
 
+/// The intents page draws each column in its own intent: its four columns'
+/// fills, images and shadings are four colours each, and nothing is reported
+/// unsupported, damaged or repaired, so the operation times four intents'
+/// work and not one intent's four times.
+#[cfg(not(tinker_planning_baseline))]
+fn four_intents(page: &Page) {
+    let drawn = page.render(&RenderOptions::at_dpi(72.0));
+    assert!(
+        drawn.warnings.is_empty(),
+        "the intents page draws cleanly: {:?}",
+        drawn.warnings
+    );
+    let n = drawn.components();
+    let colour = |x: u32, y: u32| {
+        let at = y as usize * drawn.stride + x as usize * n;
+        drawn.data[at..at + 3].to_vec()
+    };
+    // The fill's, the image's and the shading's rows at 72 dpi, the page 842
+    // points tall and each column 148.75 wide.
+    for (row, what) in [(141u32, "fill"), (421, "image"), (701, "shading")] {
+        let colours: Vec<Vec<u8>> = (0..4u32)
+            .map(|column| colour((148.75 * f64::from(column) + 74.0) as u32, row))
+            .collect();
+        for first in 0..4 {
+            for second in first + 1..4 {
+                assert_ne!(
+                    colours[first], colours[second],
+                    "the {what}s of columns {first} and {second} are one colour"
+                );
+            }
+        }
+    }
+}
+
+/// The planning baseline reads no intent and draws every column alike.
+#[cfg(tinker_planning_baseline)]
+fn four_intents(_page: &Page) {}
+
 /// What the four-band operation draws from: the page's display list, kept,
 /// which the facade draws in bands on the engine's pool — the retained list
 /// tier P times bands over (`docs/design/parallelism.md`).
@@ -830,6 +868,23 @@ fn render(c: &mut Criterion) {
             let (width, height) = inputs::scan_part(4);
             op.per(Per::Pixels(u64::from(width) * u64::from(height)));
             op.iter(move || black_box(cmyk_page.render(&RenderOptions::at_dpi(300.0))));
+        },
+    );
+    // RC-01's page at A4 (`inputs::intents_page`): under each of Table 69's
+    // intents a fill, an image and an axial shading in one ICC space, so each
+    // intent's transform is compiled, the image decoded once in each and each
+    // shading's pixels converted through its own. The planning baseline,
+    // which reads no intent, draws the same page.
+    group.operation(
+        "render an ICC page under each rendering intent at 150 dpi",
+        |op| {
+            let intents = Document::open(stored("icc-intents.pdf", inputs::intents_page))
+                .expect("the intents page opens")
+                .page(0)
+                .expect("a page");
+            four_intents(&intents);
+            op.per(renders(&intents, 150.0, 1));
+            op.iter(move || black_box(intents.render(&RenderOptions::at_dpi(150.0))));
         },
     );
     group.operation("the half-size JPEG page at 72 dpi", |op| {

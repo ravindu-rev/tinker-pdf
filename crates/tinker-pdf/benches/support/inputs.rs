@@ -1690,6 +1690,165 @@ pub fn cmyk_page(divisor: u32) -> Vec<u8> {
     builder.finish()
 }
 
+/// The rendering intents Table 69 names, in [`intents_page`]'s column order.
+pub const INTENTS: [&str; 4] = [
+    "Perceptual",
+    "RelativeColorimetric",
+    "Saturation",
+    "AbsoluteColorimetric",
+];
+
+/// [`intents_page`]'s profile: RGB into Lab, carrying a two-point `mft2`
+/// table for each intent — `A2B0`, `A2B1` and `A2B2`, three different grids
+/// (ICC.1 8.10.2) — and a media white other than D50, so ICC-absolute
+/// colorimetry is a transform of its own (6.2.3) and each of the four intents
+/// converts through its own. In integers throughout: each node's `L*` is a
+/// whole number, encoded in v2's legacy 16-bit Lab as `L* × 652.8` rounded,
+/// and its `a*` and `b*` as `(v + 128) × 256` exactly.
+fn intents_profile() -> Vec<u8> {
+    let identity = |out: &mut Vec<u8>| {
+        for _ in 0..3 {
+            out.extend_from_slice(&0u16.to_be_bytes());
+            out.extend_from_slice(&u16::MAX.to_be_bytes());
+        }
+    };
+    let table = |intent: i32| {
+        let mut out = b"mft2".to_vec();
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&[3, 3, 2, 0]);
+        for row in 0..3 {
+            for column in 0..3 {
+                let value: u32 = if row == column { 0x0001_0000 } else { 0 };
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        out.extend_from_slice(&2u16.to_be_bytes());
+        out.extend_from_slice(&2u16.to_be_bytes());
+        identity(&mut out);
+        for node in 0..8i32 {
+            let (i, j, k) = ((node >> 2) & 1, (node >> 1) & 1, node & 1);
+            let l = 18 + 30 * i + 25 * j + 15 * k + 4 * intent;
+            let a = -40 + 70 * j + 10 * k - 30 * intent;
+            let b = -10 + 50 * k - 30 * i + 35 * intent;
+            for value in [(l * 6528 + 5) / 10, (a + 128) * 256, (b + 128) * 256] {
+                let value = u16::try_from(value).expect("a node within the encoding");
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+        }
+        identity(&mut out);
+        out
+    };
+    // 0.88, 0.91 and 0.72 in s15Fixed16: a warm paper, darker than D50.
+    let mut white = b"XYZ ".to_vec();
+    white.extend_from_slice(&[0; 4]);
+    for value in [57_672u32, 59_638, 47_186] {
+        white.extend_from_slice(&value.to_be_bytes());
+    }
+    let tags = [
+        (*b"A2B0", table(0)),
+        (*b"A2B1", table(1)),
+        (*b"A2B2", table(2)),
+        (*b"wtpt", white),
+    ];
+    let mut out = vec![0u8; 128];
+    out[8..12].copy_from_slice(&0x0200_0000u32.to_be_bytes());
+    out[12..16].copy_from_slice(b"mntr");
+    out[16..20].copy_from_slice(b"RGB ");
+    out[20..24].copy_from_slice(b"Lab ");
+    out[36..40].copy_from_slice(b"acsp");
+    out.extend_from_slice(&(tags.len() as u32).to_be_bytes());
+    let start = 132 + 12 * tags.len();
+    let mut body = Vec::new();
+    for (signature, data) in &tags {
+        out.extend_from_slice(signature);
+        out.extend_from_slice(&((start + body.len()) as u32).to_be_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        body.extend_from_slice(data);
+        while body.len() % 4 != 0 {
+            body.push(0);
+        }
+    }
+    out.extend_from_slice(&body);
+    let size = out.len() as u32;
+    out[0..4].copy_from_slice(&size.to_be_bytes());
+    out
+}
+
+/// RC-01's page at A4, for `render an ICC page under each rendering intent
+/// at 150 dpi`: in each of four columns, under one of [`INTENTS`] by `ri`, a
+/// fill along the top third, [`photo`] at [`scan_part`]`(8)`'s size along the
+/// middle and an axial shading `sh` paints across the column along the
+/// bottom, all in an `ICCBased` space over [`intents_profile`]. Each intent's
+/// transform is compiled, the image decoded once in each, and every pixel of
+/// each shading converted through its column's. Written as the bytes of the
+/// file, which every revision reads alike.
+pub fn intents_page() -> Vec<u8> {
+    let (width, height) = scan_part(8);
+    let samples = tinker_pdf_filters::zlib_compress(&photo(width, height, 0));
+    let mut content = String::new();
+    for (column, intent) in INTENTS.iter().enumerate() {
+        let x = 148.75 * column as f64;
+        content.push_str(&format!(
+            "q /{intent} ri\n\
+             /L cs 0.25 0.5 0.75 scn {x} 561 148.75 281 re f\n\
+             q 148.75 0 0 281 {x} 280 cm /Im0 Do Q\n\
+             q {x} 0 148.75 280 re W n 1 0 0 1 {x} 0 cm /Sh0 sh Q\n\
+             Q\n"
+        ));
+    }
+    let stream = |entries: &str, data: &[u8]| {
+        let mut out = format!("<< {entries} /Length {} >>\nstream\n", data.len()).into_bytes();
+        out.extend_from_slice(data);
+        out.extend_from_slice(b"\nendstream");
+        out
+    };
+    let objects: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]\n   \
+          /Resources << /ColorSpace << /L [/ICCBased 5 0 R] >>\n     \
+          /XObject << /Im0 6 0 R >> /Shading << /Sh0 7 0 R >> >>\n   \
+          /Contents 4 0 R >>"
+            .to_vec(),
+        stream("", content.as_bytes()),
+        stream("/N 3", &intents_profile()),
+        stream(
+            &format!(
+                "/Type /XObject /Subtype /Image /Width {width} /Height {height} \
+                 /ColorSpace [/ICCBased 5 0 R] /BitsPerComponent 8 /Filter /FlateDecode"
+            ),
+            &samples,
+        ),
+        b"<< /ShadingType 2 /ColorSpace [/ICCBased 5 0 R] /Coords [0 0 148.75 0]\n   \
+          /Function << /FunctionType 2 /Domain [0 1] /C0 [0 1 0] /C1 [1 0 1] /N 1 >>\n   \
+          /Extend [true true] >>"
+            .to_vec(),
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::with_capacity(objects.len());
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", index + 1).as_bytes());
+        out.extend_from_slice(object);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
 /// A page a quarter of A4 each way covered by the committed 620 × 877
 /// irreversible JPEG 2000 codestream.
 pub fn jpx_page_part() -> Vec<u8> {
