@@ -1667,6 +1667,96 @@ fn a_hostile_page_never_panics_the_writer() {
     );
 }
 
+/// A 120 x 40 page of nothing but `/Annots`: each of `annotations` its own
+/// entries over a 20 x 20 `/Rect` along the page, sharing one appearance
+/// that fills a square. Group `9 0 R` "Notes" is off in `/D`, `10 0 R`
+/// "Shown" on.
+fn annotated(annotations: &[&str]) -> Vec<u8> {
+    let appearance = "0 0 1 rg 0 0 20 20 re f";
+    let mut out = format!(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [9 0 R 10 0 R] \
+/D << /OFF [9 0 R] >> >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 120 40] /Annots [{}] /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 0 >>\nstream\n\nendstream\nendobj\n\
+5 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 20 20] /Length {} >>\nstream\n{appearance}\nendstream\nendobj\n\
+9 0 obj\n<< /Type /OCG /Name (Notes) >>\nendobj\n\
+10 0 obj\n<< /Type /OCG /Name (Shown) >>\nendobj\n",
+        (0..annotations.len())
+            .map(|at| format!("{} 0 R", 20 + at))
+            .collect::<Vec<_>>()
+            .join(" "),
+        appearance.len(),
+    );
+    for (at, entries) in annotations.iter().enumerate() {
+        let x = 4 + 22 * at;
+        out.push_str(&format!(
+            "{} 0 obj\n<< /Type /Annot {entries} /Rect [{x} 10 {} 30] /AP << /N 5 0 R >> >>\nendobj\n",
+            20 + at,
+            x + 20
+        ));
+    }
+    out.push_str(&format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\n%%EOF\n",
+        20 + annotations.len()
+    ));
+    out.into_bytes()
+}
+
+/// **`to_svg` writes the annotations a render naming no usage draws**
+/// (RC-13.3): of an `/Invisible` annotation of an unknown subtype, one of a
+/// known subtype, one whose `/OC` is off, one whose `/OC` is on, one set
+/// `/NoView` and one whose `/Print` is clear, the markup holds exactly what
+/// the page holding only the three that draw — the known subtype, the layer
+/// that is on and the one `/Print` does not reach on the screen — writes,
+/// whether written from the page's list or the direct way from a list
+/// recorded for print; and the layer that hid one is named.
+#[test]
+fn to_svg_writes_the_annotations_the_screen_draws() {
+    let all = [
+        "/Subtype /Gizmo /F 5",
+        "/Subtype /Square /F 5",
+        "/Subtype /Square /F 4 /OC 9 0 R",
+        "/Subtype /Square /F 4 /OC 10 0 R",
+        "/Subtype /Square /F 36",
+        "/Subtype /Square",
+    ];
+    // Placed where they stand on the original, so each draws at its own
+    // place: the three that draw, and three that draw nothing anywhere.
+    let twin = [
+        "/Subtype /Square /F 2",
+        "/Subtype /Square /F 5",
+        "/Subtype /Square /F 2",
+        "/Subtype /Square /F 4",
+        "/Subtype /Square /F 2",
+        "/Subtype /Square",
+    ];
+    let options = SvgOptions::default();
+    let document = Document::open(annotated(&all)).expect("it opens");
+    let page = document.page(0).expect("a page");
+    let written = page.to_svg(&options);
+    let direct = page
+        .display_list_for(Some(tinker_pdf::Usage::Print))
+        .to_svg(&options);
+    let wanted = svg_of(annotated(&twin));
+    assert_eq!(written.markup, wanted.markup, "from the page's list");
+    assert_eq!(direct.markup, wanted.markup, "the direct way");
+    let notes = SvgWarning::Render(RenderWarning::HiddenOptionalContent {
+        layer: "Notes".to_string(),
+    });
+    for svg in [&written, &direct] {
+        assert!(svg.warnings.contains(&notes), "{:?}", svg.warnings);
+    }
+    assert!(!wanted.warnings.contains(&notes), "{:?}", wanted.warnings);
+    let _ = read_back(&written);
+    let nothing = svg_of(annotated(&["/Subtype /Square /F 2"; 6]));
+    assert_ne!(
+        written.markup, nothing.markup,
+        "the three squares are written"
+    );
+}
+
 /// What `builder` writes, held to the validate-on-save helper as a document
 /// this engine wrote from nothing it did not write.
 #[track_caller]

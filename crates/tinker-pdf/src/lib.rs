@@ -608,6 +608,16 @@ pub struct RenderOptions {
     /// On by default, because that is what a reader sees: a page rendered
     /// without its annotations is missing its highlights, its stamps and its
     /// filled-in form fields, and looks convincingly complete without them.
+    ///
+    /// Which annotations draw is their flags' and their `/OC`'s to say, for
+    /// [`RenderOptions::usage`] (12.5.3, `docs/design/render-usage.md`):
+    /// `/Hidden` never; `/Invisible` on a subtype ISO 32000 does not define,
+    /// or none, never; in a print render only those whose `/Print` is set,
+    /// `/NoView` or not; in every other render — view, export or none —
+    /// every one but those whose `/NoView` is set. An annotation whose `/OC`
+    /// the render's optional-content states turn off is not drawn either,
+    /// and is reported as [`RenderWarning::HiddenOptionalContent`] as content
+    /// in that layer is.
     pub annotations: bool,
     /// Which part of the page to render, or `None` for all of it.
     ///
@@ -848,7 +858,13 @@ pub struct RenderOptions {
     /// state the configuration gives it — the render every page has always
     /// drawn. Either way the states are bound once a render, and every scope
     /// it opens reads them: its forms, its tiling cells, its annotations'
-    /// appearances. `docs/design/render-usage.md` reads the clauses.
+    /// appearances, and its annotations' own `/OC`.
+    ///
+    /// It decides which annotations draw by their flags too
+    /// ([`RenderOptions::annotations`]): a print render draws those whose
+    /// `/Print` is set, and every other — a view, an export, or a render
+    /// naming none — those whose `/NoView` is clear. `docs/design/render-usage.md`
+    /// reads the clauses.
     pub usage: Option<Usage>,
     /// The threads a render may spend. [`Parallelism::Serial`] by default.
     ///

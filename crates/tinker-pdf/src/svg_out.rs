@@ -161,6 +161,12 @@ pub struct SvgOptions {
     /// Whether annotations' appearances are written after the content, as
     /// [`crate::RenderOptions::annotations`] decides for a render. On by
     /// default.
+    ///
+    /// The annotations written are those a render naming no usage draws, for
+    /// the screen (12.5.3): not `/Hidden`, not `/NoView`, not `/Invisible` on a
+    /// subtype ISO 32000 does not define, and not one whose `/OC` the
+    /// default configuration's initial states turn off, which is named as
+    /// `SvgWarning::Render` of `RenderWarning::HiddenOptionalContent`.
     pub annotations: bool,
     /// Pixels per point for what is rasterised — a shading no gradient can
     /// state exactly, a tiling pattern. 2 by default, which is 144 dpi;

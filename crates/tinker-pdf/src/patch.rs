@@ -20,7 +20,7 @@ use tinker_pdf_cos::{CosDocument, Dict, Name, ObjRef, Object, Rect};
 use tinker_pdf_render::{PixelRegion, RunReach};
 
 use crate::annots::{self, Drawn};
-use crate::{frame_region, handed_back, Bitmap, Document, Page, RenderOptions, Stats};
+use crate::{frame_region, handed_back, Bitmap, Document, Page, RenderOptions, Stats, Usage};
 
 /// Why [`crate::write::Appended::patch`] rendered the page whole rather than
 /// the rectangle its update changed. Each is a test of the page, the update
@@ -125,7 +125,7 @@ fn plan(
     }
     let mut drawn = Vec::new();
     if options.annotations {
-        changed_annotations(&old, page, changed, &mut drawn)?;
+        changed_annotations(&old, page, changed, options.usage, &mut drawn)?;
     }
     fits(page, previous, options)?;
     Ok(rectangle(page, &drawn, options))
@@ -295,8 +295,8 @@ fn entries(doc: &CosDocument, page: ObjRef) -> (Vec<Entry>, Option<ObjRef>) {
 }
 
 /// The annotations the update changed, added or removed, each one's drawn
-/// rectangle on the side it is drawn on pushed onto `drawn` — or why the page
-/// must be rendered whole.
+/// rectangle on the side it is drawn on, in a render naming `usage`, pushed
+/// onto `drawn` — or why the page must be rendered whole.
 ///
 /// An annotation the array names by reference changed when the update wrote
 /// its dictionary or an object its `/AP` reaches; one written into the array
@@ -307,6 +307,7 @@ fn changed_annotations(
     before: &Page,
     after: &Page,
     changed: &BTreeSet<u32>,
+    usage: Option<Usage>,
     drawn: &mut Vec<Rect>,
 ) -> Result<(), PatchFallback> {
     let (old_doc, new_doc) = (&*before.doc, &*after.doc);
@@ -359,7 +360,11 @@ fn changed_annotations(
             if !differs {
                 continue;
             }
-            match entry.dict.as_ref().map(|dict| annots::drawn(doc, dict)) {
+            match entry
+                .dict
+                .as_ref()
+                .map(|dict| annots::drawn(doc, dict, usage))
+            {
                 Some(Drawn::Within(rect)) => drawn.push(rect),
                 Some(Drawn::Unbounded) => return Err(PatchFallback::Unbounded),
                 Some(Drawn::Nothing) | None => {}

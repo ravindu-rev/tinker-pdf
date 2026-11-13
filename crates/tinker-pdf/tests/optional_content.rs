@@ -916,7 +916,8 @@ trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n",
 /// it each hide in a print render where the group's print state is off, as
 /// on the page whose `/D` turns the group off — the one binding of the
 /// render read by the page's scope, each form's, the cell's and the
-/// appearance's.
+/// appearance's. The annotation's `/F` sets Print, so a print render draws
+/// it (12.5.3) and its appearance's scope is read.
 #[test]
 fn a_usages_states_reach_every_scope_a_render_opens() {
     let properties = "/Properties << /MC0 5 0 R >>";
@@ -943,7 +944,7 @@ fn a_usages_states_reach_every_scope_a_render_opens() {
             "6 0 obj\n{}\nendobj\n\
              7 0 obj\n{}\nendobj\n\
              8 0 obj\n{cell}\nendobj\n\
-             9 0 obj\n<< /Type /Annot /Subtype /Square /Rect [30 12 40 22] /AP << /N 10 0 R >> >>\nendobj\n\
+             9 0 obj\n<< /Type /Annot /Subtype /Square /F 4 /Rect [30 12 40 22] /AP << /N 10 0 R >> >>\nendobj\n\
              10 0 obj\n{}\nendobj\n",
             form(""),
             format!(

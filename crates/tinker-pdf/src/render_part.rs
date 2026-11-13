@@ -87,13 +87,31 @@ pub enum RenderPartError {
 
 /// Why an annotation that exists draws nothing — each a reason `Page::render`
 /// skips one silently, named here because a caller asked for this one.
+///
+/// The flags and an annotation's `/OC` are read for the render's usage
+/// ([`crate::RenderOptions::usage`], `docs/design/render-usage.md`): `Hidden`
+/// in every usage, `Invisible` on a subtype ISO 32000 does not define in every
+/// usage, `NotPrinted` in a print render, `NoView` in any other, and
+/// `OptionalContentOff` under the states the render's usage gives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum NotDrawn {
     /// The `/Annots` entry is not a dictionary.
     NotADictionary,
-    /// `/F` sets Hidden or NoView (12.5.3).
+    /// `/F` sets Hidden (12.5.3): never drawn, in any usage.
     Hidden,
+    /// `/F` sets Invisible on an annotation whose `/Subtype` is none ISO
+    /// 32000 defines, or that has none (12.5.3): an unknown annotation,
+    /// drawn in no usage.
+    Invisible,
+    /// `/F` sets NoView in a render for the screen — no usage, view or
+    /// export (12.5.3); a print render draws it where `/F` sets Print.
+    NoView,
+    /// `/F` does not set Print, in a print render (12.5.3).
+    NotPrinted,
+    /// The annotation's `/OC` is off under the render's optional-content
+    /// states (12.5.2 Table 166, 8.11.3.3).
+    OptionalContentOff,
     /// A `/Popup`: the window its parent opens, not a mark on the page.
     Popup,
     /// No `/Rect` that is four finite numbers enclosing some area.
@@ -112,7 +130,11 @@ impl core::fmt::Display for NotDrawn {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(match self {
             NotDrawn::NotADictionary => "the entry is not a dictionary",
-            NotDrawn::Hidden => "its flags hide it",
+            NotDrawn::Hidden => "its Hidden flag hides it",
+            NotDrawn::Invisible => "its Invisible flag hides an annotation of an unknown type",
+            NotDrawn::NoView => "its NoView flag keeps it off the screen",
+            NotDrawn::NotPrinted => "its Print flag is clear and the render is for print",
+            NotDrawn::OptionalContentOff => "its optional content is off",
             NotDrawn::Popup => "it is a pop-up window",
             NotDrawn::NoRect => "it has no usable /Rect",
             NotDrawn::NoAppearance => "it has no normal appearance",
@@ -223,11 +245,13 @@ impl Page {
     ///
     /// `index` is its position in `/Annots`, which is its position in
     /// [`Page::annotations`]. It is drawn by the code [`Page::render`] draws
-    /// every annotation with — 12.5.5's fit of the normal appearance onto
-    /// `/Rect`, the `/BBox` clip, the appearance's own resources — and the
-    /// bitmap is `/Rect` in the page's pixels, rounded outward and trimmed to
-    /// the page, unless `options.region` names a rectangle. `options.annotations`
-    /// is not consulted: asking for one annotation is asking for it drawn.
+    /// every annotation with — its flags and `/OC` read for `options.usage`
+    /// (12.5.3), 12.5.5's fit of the normal appearance onto `/Rect`, the
+    /// `/BBox` clip, the appearance's own resources — and the bitmap is
+    /// `/Rect` in the page's pixels, rounded outward and trimmed to the page,
+    /// unless `options.region` names a rectangle. `options.annotations` is not
+    /// consulted: asking for one annotation is asking for it drawn, where the
+    /// usage draws it.
     ///
     /// **It is byte-equal to the same rectangle of the page rendered with
     /// annotations on**, where the page draws nothing else there.

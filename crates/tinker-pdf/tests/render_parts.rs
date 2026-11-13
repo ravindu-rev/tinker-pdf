@@ -30,7 +30,7 @@ mod written_support;
 use render_support::curvy_font;
 use tinker_pdf::{
     Bitmap, Document, DocumentBuilder, FormXObject, ImageData, NotDrawn, PixelFormat, PixelRegion,
-    RenderOptions, RenderPartError,
+    RenderOptions, RenderPartError, Usage,
 };
 
 /// Non-white pixels.
@@ -548,6 +548,134 @@ fn a_part_takes_every_option_a_page_does() {
         ..options.clone()
     });
     same(&part, &framed, "Fm0 in grey with hard edges");
+}
+
+/// A 150 x 100 page whose `/Annots` holds eight squares sharing the
+/// [`FRAME`] appearance, each 30 x 20 at its own place along two rows, with
+/// the flags and `/OC` each case names: 0 `/Hidden`; 1 `/Invisible` on the
+/// unknown subtype `/Gizmo`, with `/Print`; 2 `/NoView`; 3 `/NoView` with
+/// `/Print`; 4 no flags; 5 `/Print` with an `/OC` the default configuration
+/// turns off; 6 `/Print` with an `/OC` it leaves on; and 7 `/Invisible` with
+/// `/Print` on the known `/Square`.
+fn usage_page() -> Vec<u8> {
+    let entries = [
+        "/Subtype /Square /F 2",
+        "/Subtype /Gizmo /F 5",
+        "/Subtype /Square /F 32",
+        "/Subtype /Square /F 36",
+        "/Subtype /Square",
+        "/Subtype /Square /F 4 /OC 20 0 R",
+        "/Subtype /Square /F 4 /OC 21 0 R",
+        "/Subtype /Square /F 5",
+    ];
+    let mut out = String::from(
+        "%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [20 0 R 21 0 R] \
+/D << /OFF [20 0 R] >> >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 1 /Kids [3 0 R] >>\nendobj\n\
+3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 150 100]\n\
+   /Annots [10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R] /Contents 4 0 R >>\nendobj\n\
+4 0 obj\n<< /Length 0 >>\nstream\n\nendstream\nendobj\n",
+    );
+    out.push_str(&format!(
+        "6 0 obj\n<< /Type /XObject /Subtype /Form /BBox [0 0 60 40] /Length {} >>\nstream\n{FRAME}\nendstream\nendobj\n",
+        FRAME.len() + 1
+    ));
+    for (index, entry) in entries.iter().enumerate() {
+        let (x, y) = ((index % 4) as u32 * 36 + 4, (index / 4) as u32 * 50 + 10);
+        out.push_str(&format!(
+            "{} 0 obj\n<< /Type /Annot {entry} /Rect [{x} {y} {} {}] /AP << /N 6 0 R >> >>\nendobj\n",
+            10 + index,
+            x + 30,
+            y + 20
+        ));
+    }
+    out.push_str(
+        "20 0 obj\n<< /Type /OCG /Name (Off layer) >>\nendobj\n\
+21 0 obj\n<< /Type /OCG /Name (On layer) >>\nendobj\n\
+trailer\n<< /Size 22 /Root 1 0 R >>\n%%EOF\n",
+    );
+    out.into_bytes()
+}
+
+/// **A part the usage hides is refused by name** (RC-13.3): each annotation
+/// of [`usage_page`] rendered alone under no usage, view, print and export
+/// either draws — byte-equal to its rectangle of the page rendered in the
+/// same usage — or is refused with the reason 12.5.3 or its `/OC` gives:
+/// `Hidden` in every usage, `Invisible` for an unknown subtype in every usage,
+/// `NoView` on the screen, `NotPrinted` in print where `/Print` is clear, and
+/// `OptionalContentOff` where its layer is off.
+#[test]
+fn a_part_the_usage_hides_is_refused_by_name() {
+    let doc = Document::open(usage_page()).expect("it opens");
+    let page = doc.page(0).expect("a page");
+    assert_eq!(page.annotations().len(), 8);
+    let usages = [
+        None,
+        Some(Usage::View),
+        Some(Usage::Print),
+        Some(Usage::Export),
+    ];
+    for usage in usages {
+        let print = usage == Some(Usage::Print);
+        let options = RenderOptions {
+            usage,
+            ..RenderOptions::default()
+        };
+        // What each index answers in this usage: `None` where it draws.
+        let expected = [
+            Some(NotDrawn::Hidden),
+            Some(NotDrawn::Invisible),
+            Some(if print {
+                NotDrawn::NotPrinted
+            } else {
+                NotDrawn::NoView
+            }),
+            (!print).then_some(NotDrawn::NoView),
+            print.then_some(NotDrawn::NotPrinted),
+            Some(NotDrawn::OptionalContentOff),
+            None,
+            None,
+        ];
+        let whole = page.render(&options);
+        for (index, want) in expected.into_iter().enumerate() {
+            let what = format!("annotation {index}, {usage:?}");
+            match (page.render_annotation(index, &options), want) {
+                (Err(RenderPartError::AnnotationNotDrawn { index: at, why }), Some(want)) => {
+                    assert_eq!((at, why), (index, want), "{what}");
+                }
+                (Ok(part), None) => {
+                    let (x, y) = (
+                        (index % 4) as f64 * 36.0 + 4.0,
+                        (index / 4) as f64 * 50.0 + 10.0,
+                    );
+                    let region = annotation_region((x, y, x + 30.0, y + 20.0), 1.0);
+                    assert!(ink(&part) >= 100, "{what}: drew {} pixels", ink(&part));
+                    assert_eq!(
+                        part.data,
+                        crop(&whole, region),
+                        "{what}: its rectangle of the page"
+                    );
+                }
+                (got, want) => panic!("{what}: {:?}, where {want:?} was due", got.err()),
+            }
+        }
+    }
+    // Every reason reads as a sentence.
+    for why in [
+        NotDrawn::Hidden,
+        NotDrawn::Invisible,
+        NotDrawn::NoView,
+        NotDrawn::NotPrinted,
+        NotDrawn::OptionalContentOff,
+    ] {
+        let said = RenderPartError::AnnotationNotDrawn { index: 3, why }.to_string();
+        assert!(said.starts_with("annotation 3 draws nothing: "), "{said}");
+        assert!(
+            said.len() > "annotation 3 draws nothing: ".len() + 10,
+            "{said}"
+        );
+    }
 }
 
 /// A small fixed-seed generator, so a failure reproduces.

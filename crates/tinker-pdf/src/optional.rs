@@ -1059,7 +1059,8 @@ trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n"
     /// A page whose content, a form's, a tiling cell's and an annotation's
     /// appearance each mark content with group 10, which the default
     /// configuration's print entry turns off: every scope a render opens asks
-    /// about optional content.
+    /// about optional content. The annotation's `/F` sets Print, so a print
+    /// render draws it too (12.5.3).
     fn every_scope_page() -> Vec<u8> {
         let marked = "/OC /L BDC 0 0 2 2 re f EMC";
         let props = "/Properties << /L 10 0 R >>";
@@ -1080,7 +1081,7 @@ trailer\n<< /Size 20 /Root 1 0 R >>\n%%EOF\n"
 4 0 obj\n<< /Length {} >>\nstream\n{content}\nendstream\nendobj\n\
 6 0 obj\n{}\nendobj\n\
 7 0 obj\n{}\nendobj\n\
-8 0 obj\n<< /Type /Annot /Subtype /Square /Rect [20 20 30 30] /AP << /N 9 0 R >> >>\nendobj\n\
+8 0 obj\n<< /Type /Annot /Subtype /Square /F 4 /Rect [20 20 30 30] /AP << /N 9 0 R >> >>\nendobj\n\
 9 0 obj\n{}\nendobj\n\
 10 0 obj\n<< /Type /OCG /Name (Alpha) /Usage << /Print << /PrintState /OFF >> >> >>\nendobj\n\
 trailer\n<< /Size 11 /Root 1 0 R >>\n%%EOF\n",

@@ -17,13 +17,11 @@ use tinker_pdf_content::{interpret, Device, Event, Matrix};
 use tinker_pdf_cos::{pages as cos_pages, CosDocument, Dict, Object, Rect};
 use tinker_pdf_render::{DisplayRecorder, Renderer};
 
+use crate::annotations::{AnnotationFlags, AnnotationKind};
 use crate::fonts::FontProvider;
 use crate::render_part::NotDrawn;
 use crate::resources::{Operation, PageResources};
-
-/// 12.5.3: the flags that keep an annotation off the page.
-const HIDDEN: i64 = 1 << 1;
-const NO_VIEW: i64 = 1 << 5;
+use crate::Usage;
 
 /// A device an appearance can be drawn through: one that resolves images,
 /// shadings and patterns by name in a scope it is handed, because an
@@ -50,10 +48,13 @@ impl AppearanceDevice for Renderer<'_, PageResources> {
     }
 }
 
-/// Draws every visible annotation of a page in `op`, the render's operation:
-/// each appearance's scopes read through its decoded streams, so an
-/// appearance two annotations share and a font two appearances draw are
-/// decoded once, and count into its tally when the render is counting.
+/// Draws every annotation of a page that `op`, the render's operation, draws
+/// — by its flags and its `/OC` under the operation's usage and states
+/// ([`prepare`]) — each appearance's scopes read through its decoded streams,
+/// so an appearance two annotations share and a font two appearances draw are
+/// decoded once, and count into its tally when the render is counting. One
+/// whose `/OC` hides it is reported as content in that layer is
+/// ([`note_hidden`]).
 pub(crate) fn draw(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
@@ -61,9 +62,20 @@ pub(crate) fn draw(
     device: &mut impl AppearanceDevice,
     op: &Operation,
 ) {
-    each_appearance(doc, page, op, |appearance| {
-        draw_prepared(doc, appearance, provider, device, op);
+    each_appearance(doc, page, op, |entry| match entry {
+        Entry::Draws(appearance) => draw_prepared(doc, appearance, provider, device, op),
+        Entry::Hidden(layer) => note_hidden(device, layer),
     });
+}
+
+/// An annotation its `/OC` hides, told to `device` as the interpreter tells
+/// it of content in a layer that is off: an `/OC` scope that hides, holding
+/// nothing — so the renderer and the SVG writer report the layer by its label
+/// as `RenderWarning::HiddenOptionalContent` (ruling 10), a recorder records
+/// the two calls for every replay to report it, and nothing is drawn.
+fn note_hidden(device: &mut impl Device, layer: &str) {
+    device.begin_marked_content(b"OC", false, Some(layer), None);
+    device.end_marked_content();
 }
 
 /// One annotation's appearance as a retained page keeps it: the scope the
@@ -73,14 +85,16 @@ pub(crate) struct Recorded {
     pub(crate) events: Vec<Event>,
 }
 
-/// Every visible annotation of a page, recorded rather than drawn.
+/// Every annotation of a page that `op` draws, recorded rather than drawn.
 ///
 /// The same appearances [`draw`] draws, in the same order, through the same
 /// [`prepare`] and the same interpretation — only the device differs, and it
 /// is the `recorder` the page's content was recorded through, so the answers
 /// it gives carry on from where the content left them exactly as a renderer's
 /// do when it draws the annotations after the content. The recording is `op`,
-/// the operation the page's content was recorded in.
+/// the operation the page's content was recorded in, so what its usage and
+/// states hide is not recorded; one its `/OC` hides is recorded as the two
+/// calls that report its layer ([`note_hidden`]) and nothing else.
 pub(crate) fn record(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
@@ -89,7 +103,23 @@ pub(crate) fn record(
     op: &Operation,
 ) -> Vec<Recorded> {
     let mut out = Vec::new();
-    each_appearance(doc, page, op, |appearance| {
+    each_appearance(doc, page, op, |entry| {
+        let appearance = match entry {
+            Entry::Draws(appearance) => appearance,
+            Entry::Hidden(layer) => {
+                note_hidden(recorder, layer);
+                out.push(Recorded {
+                    scope: Arc::new(PageResources::from_dict_in(
+                        doc,
+                        Dict::new(),
+                        provider,
+                        Operation::none(),
+                    )),
+                    events: recorder.take(),
+                });
+                return;
+            }
+        };
         // Two resource objects over one dictionary, as `draw_prepared` makes
         // them: the interpreter's, used up here in the recording, and the
         // renderer's, kept past it and handed to each replay bound to the
@@ -116,13 +146,23 @@ pub(crate) fn record(
     out
 }
 
-/// Every annotation of a page that draws, prepared, in `/Annots` order, each
-/// appearance decoded once `op`, the render's operation.
+/// One annotation of a page, as [`each_appearance`] hands it on.
+enum Entry<'a> {
+    /// It draws: its appearance, prepared.
+    Draws(&'a Appearance),
+    /// Its `/OC` hides it under the operation's states: the layer's label,
+    /// reported as content in the layer is ([`note_hidden`]).
+    Hidden(&'a str),
+}
+
+/// Every annotation of a page that `op` draws, prepared, in `/Annots` order,
+/// each appearance decoded once `op`, the render's operation — and every one
+/// its `/OC` hides, by its layer's label.
 fn each_appearance(
     doc: &Arc<CosDocument>,
     page: &cos_pages::Page,
     op: &Operation,
-    mut each: impl FnMut(&Appearance),
+    mut each: impl FnMut(Entry<'_>),
 ) {
     let Ok(object) = doc.get(page.reference) else {
         return;
@@ -144,13 +184,81 @@ fn each_appearance(
             Object::Dict(d) => Some(d.clone()),
             _ => None,
         };
-        // Every reason `prepare` gives for drawing nothing is a reason a page
-        // draws nothing there and says nothing: ruling 2, a page renders what
-        // it can. `Page::render_annotation` is the caller that names them.
-        if let Some(Ok(appearance)) = annotation.map(|a| prepare(doc, &a, op)) {
-            each(&appearance);
+        let Some(annotation) = annotation else {
+            continue;
+        };
+        match prepare(doc, &annotation, op) {
+            Ok(appearance) => each(Entry::Draws(&appearance)),
+            // Content in a layer that is off is reported, and so is an
+            // annotation its layer hides (ruling 10).
+            Err(NotDrawn::OptionalContentOff) => {
+                if let Some(layer) = hidden_by(doc, &annotation, op) {
+                    each(Entry::Hidden(&layer));
+                }
+            }
+            // Every other reason `prepare` gives for drawing nothing is a
+            // reason a page draws nothing there and says nothing: ruling 2, a
+            // page renders what it can. `Page::render_annotation` is the
+            // caller that names them.
+            Err(_) => {}
         }
     }
+}
+
+/// Why the flags keep `annotation` off a render naming `usage`, read from
+/// `/F` and `/Subtype` alone (12.5.3 Table 167,
+/// `docs/design/render-usage.md`), or `None` where they let it draw:
+///
+/// - `Hidden` draws in no usage;
+/// - `Invisible` on a subtype ISO 32000 does not define, or none, draws in no
+///   usage either: the flag "applies only to annotations which do not belong
+///   to one of the standard annotation types and for which no annotation
+///   handler is available", and this engine draws every annotation by its
+///   appearance and has a handler for none;
+/// - a print render draws only an annotation whose `Print` is set, `NoView`
+///   or not — "The annotation may be printed (depending on the setting of the
+///   Print flag)";
+/// - every other render — a view, an export, and one naming no usage — hides
+///   one whose `NoView` is set, and draws one whose `Print` is clear.
+fn flag_refusal(doc: &CosDocument, annotation: &Dict, usage: Option<Usage>) -> Option<NotDrawn> {
+    let flags = AnnotationFlags::from_raw(annotation.get_int(doc.intern(b"F")).unwrap_or(0));
+    if flags.hidden() {
+        return Some(NotDrawn::Hidden);
+    }
+    if flags.invisible()
+        && !subtype(doc, annotation).is_some_and(|name| AnnotationKind::is_standard(&name))
+    {
+        return Some(NotDrawn::Invisible);
+    }
+    match usage {
+        Some(Usage::Print) => (!flags.print()).then_some(NotDrawn::NotPrinted),
+        Some(Usage::View | Usage::Export) | None => flags.no_view().then_some(NotDrawn::NoView),
+    }
+}
+
+/// The annotation's `/Subtype`, as the name's bytes.
+fn subtype(doc: &CosDocument, annotation: &Dict) -> Option<Arc<[u8]>> {
+    annotation
+        .get_name(doc.intern(b"Subtype"))
+        .and_then(|name| doc.name_bytes(name))
+}
+
+/// The label of the layer `annotation`'s `/OC` hides it by under `op`'s
+/// optional-content states — "Before the annotation is drawn, its visibility
+/// shall be determined based on this entry as well as the annotation flags"
+/// (Table 166) — or `None` where it has no `/OC` or its `/OC` shows it. Read
+/// by the code that reads a content stream's `/OC`
+/// ([`crate::optional::OptionalContent::layer_of`]), its fallbacks visible: a
+/// group or a membership dictionary, labelled by its `/Name` or, for want of a
+/// resource name, by its reference. Bound only for an annotation that has an
+/// `/OC`, so a page whose annotations carry none binds nothing for them.
+fn hidden_by(doc: &CosDocument, annotation: &Dict, op: &Operation) -> Option<String> {
+    let object = annotation.get(doc.intern(b"OC"))?;
+    let fallback = object
+        .as_objref()
+        .map_or_else(|| "OC".to_string(), |r| format!("{} {} R", r.num, r.gen));
+    let layer = op.optional(doc).layer_of(doc, object, &fallback);
+    (!layer.visible).then_some(layer.label)
 }
 
 /// An annotation's normal appearance, ready to draw: the content with its
@@ -176,27 +284,32 @@ impl Appearance {
 }
 
 /// Everything `draw_one` decided before drawing, with each reason it had for
-/// drawing nothing named. The appearance is decoded once `op`, the render's
-/// operation, and counted into its tally when the render is counting.
+/// drawing nothing named: one decision for a direct render, a display list's
+/// recording and `Page::render_annotation`. The flags are read for `op`'s
+/// usage ([`flag_refusal`]) and an `/OC` under `op`'s states
+/// ([`hidden_by`]) before anything is decoded; the appearance is decoded once
+/// `op`, the render's operation, and counted into its tally when the render
+/// is counting.
 pub(crate) fn prepare(
     doc: &Arc<CosDocument>,
     annotation: &Dict,
     op: &Operation,
 ) -> Result<Appearance, NotDrawn> {
-    let flags = annotation.get_int(doc.intern(b"F")).unwrap_or(0);
-    if flags & HIDDEN != 0 || flags & NO_VIEW != 0 {
-        return Err(NotDrawn::Hidden);
+    if let Some(why) = flag_refusal(doc, annotation, op.usage()) {
+        return Err(why);
     }
 
     // A pop-up is the window that opens when its parent is clicked, not
     // something drawn on the page.
-    if let Some(subtype) = annotation
-        .get_name(doc.intern(b"Subtype"))
-        .and_then(|n| doc.name_bytes(n))
-    {
-        if subtype.as_ref() == b"Popup" {
-            return Err(NotDrawn::Popup);
-        }
+    if subtype(doc, annotation).is_some_and(|name| name.as_ref() == b"Popup") {
+        return Err(NotDrawn::Popup);
+    }
+
+    // 8.11.3.3: "it shall be visible for screen or print only if the flags
+    // have the appropriate settings and the group or membership dictionary
+    // indicates it shall be visible".
+    if hidden_by(doc, annotation, op).is_some() {
+        return Err(NotDrawn::OptionalContentOff);
     }
 
     let rect = doc
@@ -267,10 +380,10 @@ pub(crate) fn prepare(
 /// (`docs/design/performance.md`, P-17).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Drawn {
-    /// Nowhere: hidden or `NoView` by its `/F` (12.5.3), a pop-up, no
-    /// `/Rect` with an area, no normal appearance, an appearance that is not
-    /// a form, or one 12.5.5's fit cannot place — each a reason [`prepare`]
-    /// gives for drawing nothing.
+    /// Nowhere: kept off the render's usage by its `/F` (12.5.3,
+    /// [`flag_refusal`]), a pop-up, no `/Rect` with an area, no normal
+    /// appearance, an appearance that is not a form, or one 12.5.5's fit
+    /// cannot place — each a reason [`prepare`] gives for drawing nothing.
     Nothing,
     /// Inside its `/Rect`, in default user space: an appearance with a
     /// `/BBox` is fitted onto the rectangle, and the box clips what it draws
@@ -281,19 +394,17 @@ pub(crate) enum Drawn {
     Unbounded,
 }
 
-/// [`Drawn`] for `annotation`: the decisions [`prepare`] takes, but for the
-/// decode, which a bounded appearance does not need — one whose content does
-/// not decode draws nothing, inside its rectangle as well.
-pub(crate) fn drawn(doc: &CosDocument, annotation: &Dict) -> Drawn {
-    let flags = annotation.get_int(doc.intern(b"F")).unwrap_or(0);
-    if flags & HIDDEN != 0 || flags & NO_VIEW != 0 {
+/// [`Drawn`] for `annotation` in a render naming `usage`: the decisions
+/// [`prepare`] takes, but for the decode, which a bounded appearance does not
+/// need — one whose content does not decode draws nothing, inside its
+/// rectangle as well — and for an `/OC`, which is not read: under states that
+/// hide the annotation, its rectangle is drawn again with nothing new in it,
+/// which costs pixels and changes none.
+pub(crate) fn drawn(doc: &CosDocument, annotation: &Dict, usage: Option<Usage>) -> Drawn {
+    if flag_refusal(doc, annotation, usage).is_some() {
         return Drawn::Nothing;
     }
-    let popup = annotation
-        .get_name(doc.intern(b"Subtype"))
-        .and_then(|n| doc.name_bytes(n))
-        .is_some_and(|subtype| subtype.as_ref() == b"Popup");
-    if popup {
+    if subtype(doc, annotation).is_some_and(|name| name.as_ref() == b"Popup") {
         return Drawn::Nothing;
     }
     let Some(rect) = doc
@@ -493,8 +604,152 @@ fn fit(bbox: Option<Rect>, matrix: Matrix, rect: Rect) -> Option<Matrix> {
 mod tests {
     use super::*;
 
+    /// 12.5.3 Table 167's flags, as `/F` bits.
+    const INVISIBLE: i64 = 1;
+    const HIDDEN: i64 = 1 << 1;
+    const PRINT: i64 = 1 << 2;
+    const NO_VIEW: i64 = 1 << 5;
+
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Rect {
         Rect { x0, y0, x1, y1 }
+    }
+
+    /// **The flags, by usage** (12.5.3 as `docs/design/render-usage.md` reads
+    /// it): every combination of the four flags that decide, on a known
+    /// subtype, an unknown one and none, under no usage and each of the
+    /// three — each refusal the reason it names, and `drawn` agreeing.
+    #[test]
+    fn the_flags_decide_by_usage() {
+        let bytes = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+trailer\n<< /Root 1 0 R >>\n%%EOF\n";
+        let doc = CosDocument::open(bytes.to_vec()).expect("it opens");
+        let usages = [
+            None,
+            Some(Usage::View),
+            Some(Usage::Print),
+            Some(Usage::Export),
+        ];
+        for subtype in [Some(b"Square".as_slice()), Some(b"Gizmo"), None] {
+            for flags in 0..16i64 {
+                // Bits 1, 2, 3 and 6 from the four bits of `flags`.
+                let f = (flags & 1) * INVISIBLE
+                    | ((flags >> 1) & 1) * HIDDEN
+                    | ((flags >> 2) & 1) * PRINT
+                    | ((flags >> 3) & 1) * NO_VIEW;
+                let mut dict = Dict::new();
+                if let Some(name) = subtype {
+                    dict.insert(doc.intern(b"Subtype"), Object::Name(doc.intern(name)));
+                }
+                dict.insert(doc.intern(b"F"), Object::Int(f));
+                for usage in usages {
+                    let unknown = subtype != Some(b"Square".as_slice());
+                    let want = if f & HIDDEN != 0 {
+                        Some(NotDrawn::Hidden)
+                    } else if f & INVISIBLE != 0 && unknown {
+                        Some(NotDrawn::Invisible)
+                    } else if usage == Some(Usage::Print) {
+                        (f & PRINT == 0).then_some(NotDrawn::NotPrinted)
+                    } else {
+                        (f & NO_VIEW != 0).then_some(NotDrawn::NoView)
+                    };
+                    let what = format!("{subtype:?}, /F {f}, {usage:?}");
+                    assert_eq!(flag_refusal(&doc, &dict, usage), want, "{what}");
+                    if want.is_some() {
+                        assert_eq!(drawn(&doc, &dict, usage), Drawn::Nothing, "{what}");
+                    }
+                }
+            }
+        }
+        // No `/F` is every flag clear: drawn on the screen, not printed.
+        let mut plain = Dict::new();
+        plain.insert(doc.intern(b"Subtype"), Object::Name(doc.intern(b"Square")));
+        assert_eq!(flag_refusal(&doc, &plain, None), None);
+        assert_eq!(
+            flag_refusal(&doc, &plain, Some(Usage::Print)),
+            Some(NotDrawn::NotPrinted)
+        );
+        // Every subtype ISO 32000 defines is known to the Invisible rule.
+        for known in [
+            "Text",
+            "Link",
+            "FreeText",
+            "Line",
+            "Square",
+            "Circle",
+            "Polygon",
+            "PolyLine",
+            "Highlight",
+            "Underline",
+            "Squiggly",
+            "StrikeOut",
+            "Caret",
+            "Stamp",
+            "Ink",
+            "Popup",
+            "FileAttachment",
+            "Sound",
+            "Movie",
+            "Screen",
+            "Widget",
+            "PrinterMark",
+            "TrapNet",
+            "Watermark",
+            "3D",
+            "Redact",
+            "Projection",
+            "RichMedia",
+        ] {
+            assert!(AnnotationKind::is_standard(known.as_bytes()), "{known}");
+        }
+        for unknown in ["widget", "", "Gizmo", "3d"] {
+            assert!(
+                !AnnotationKind::is_standard(unknown.as_bytes()),
+                "{unknown}"
+            );
+        }
+    }
+
+    /// **An annotation's `/OC`** is read under the operation's states: a
+    /// group off hides it and is named by its `/Name`, or by its reference
+    /// where it has none; a group on, a membership dictionary that shows,
+    /// something that is no group and a group the configuration never listed
+    /// all show it; and an annotation with no `/OC` binds no states at all.
+    #[test]
+    fn an_annotation_s_optional_content_is_read_under_the_render_s_states() {
+        let bytes = b"%PDF-1.7\n\
+1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [10 0 R 11 0 R 12 0 R] \
+/D << /OFF [10 0 R 12 0 R] >> >> >>\nendobj\n\
+2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\
+10 0 obj\n<< /Type /OCG /Name (Notes) >>\nendobj\n\
+11 0 obj\n<< /Type /OCG /Name (Shown) >>\nendobj\n\
+12 0 obj\n<< /Type /OCG >>\nendobj\n\
+13 0 obj\n<< /Type /OCMD /OCGs [10 0 R 11 0 R] /P /AnyOn >>\nendobj\n\
+trailer\n<< /Root 1 0 R >>\n%%EOF\n";
+        let doc = CosDocument::open(bytes.to_vec()).expect("it opens");
+        let with_oc = |oc: Option<Object>| {
+            let mut dict = Dict::new();
+            if let Some(oc) = oc {
+                dict.insert(doc.intern(b"OC"), oc);
+            }
+            dict
+        };
+        let reference = |num| Object::Ref(tinker_pdf_cos::ObjRef::new(num, 0));
+        for (oc, want) in [
+            (Some(reference(10)), Some("Notes".to_string())),
+            (Some(reference(12)), Some("12 0 R".to_string())),
+            (Some(reference(11)), None),
+            (Some(reference(13)), None),
+            (Some(reference(99)), None),
+            (Some(Object::Int(4)), None),
+            (None, None),
+        ] {
+            let op = Operation::none();
+            assert_eq!(hidden_by(&doc, &with_oc(oc.clone()), &op), want, "{oc:?}");
+        }
+        crate::optional::binds::take();
+        let _ = hidden_by(&doc, &with_oc(None), &Operation::none());
+        assert_eq!(crate::optional::binds::take(), 0, "no /OC, no states bound");
     }
 
     /// The ordinary case: a form whose box already matches its rectangle is
@@ -648,36 +903,53 @@ mod tests {
             dict
         };
         let within = Drawn::Within(rect(20.0, 30.0, 60.0, 50.0));
-        assert_eq!(drawn(&doc, &annotation(Some(5), &|_| {})), within);
+        assert_eq!(drawn(&doc, &annotation(Some(5), &|_| {}), None), within);
         assert_eq!(
-            drawn(&doc, &annotation(Some(6), &|_| {})),
+            drawn(&doc, &annotation(Some(6), &|_| {}), None),
             Drawn::Unbounded,
             "no /BBox, so nothing clips it"
         );
         assert_eq!(
-            drawn(&doc, &annotation(Some(7), &|_| {})),
+            drawn(&doc, &annotation(Some(7), &|_| {}), None),
             Drawn::Nothing,
             "a box with no area is never placed"
         );
-        assert_eq!(drawn(&doc, &annotation(None, &|_| {})), Drawn::Nothing);
+        assert_eq!(
+            drawn(&doc, &annotation(None, &|_| {}), None),
+            Drawn::Nothing
+        );
         for (what, flags) in [("hidden", HIDDEN), ("NoView", NO_VIEW)] {
             let hidden = annotation(Some(5), &|dict| {
                 dict.insert(doc.intern(b"F"), Object::Int(flags | 4));
             });
-            assert_eq!(drawn(&doc, &hidden), Drawn::Nothing, "{what}");
+            assert_eq!(drawn(&doc, &hidden, None), Drawn::Nothing, "{what}");
         }
+        // In print, NoView with Print set draws; Print clear does not.
+        let printed = annotation(Some(5), &|dict| {
+            dict.insert(doc.intern(b"F"), Object::Int(NO_VIEW | PRINT));
+        });
+        assert_eq!(drawn(&doc, &printed, Some(Usage::Print)), within);
+        assert_eq!(
+            drawn(&doc, &annotation(Some(5), &|_| {}), Some(Usage::Print)),
+            Drawn::Nothing,
+            "no Print flag"
+        );
         let popup = annotation(Some(5), &|dict| {
             dict.insert(Name::SUBTYPE, Object::Name(doc.intern(b"Popup")));
         });
-        assert_eq!(drawn(&doc, &popup), Drawn::Nothing, "a pop-up");
+        assert_eq!(drawn(&doc, &popup, None), Drawn::Nothing, "a pop-up");
         let flat = annotation(Some(5), &|dict| {
             dict.insert(doc.intern(b"Rect"), Object::Array(vec![Object::Int(5); 4]));
         });
-        assert_eq!(drawn(&doc, &flat), Drawn::Nothing, "a rectangle of no area");
+        assert_eq!(
+            drawn(&doc, &flat, None),
+            Drawn::Nothing,
+            "a rectangle of no area"
+        );
         let unplaced = annotation(Some(5), &|dict| {
             dict.insert(doc.intern(b"Rect"), Object::Null);
         });
-        assert_eq!(drawn(&doc, &unplaced), Drawn::Nothing, "no rectangle");
+        assert_eq!(drawn(&doc, &unplaced, None), Drawn::Nothing, "no rectangle");
         let stateless = annotation(None, &|dict| {
             let mut states = Dict::new();
             states.insert(doc.intern(b"On"), Object::Ref(ObjRef::new(5, 0)));
@@ -687,7 +959,7 @@ mod tests {
             dict.insert(doc.intern(b"AS"), Object::Name(doc.intern(b"Off")));
         });
         assert_eq!(
-            drawn(&doc, &stateless),
+            drawn(&doc, &stateless, None),
             Drawn::Nothing,
             "/AS names no state"
         );

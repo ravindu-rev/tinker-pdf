@@ -299,6 +299,13 @@ impl AnnotationKind {
             other => AnnotationKind::Other(String::from_utf8_lossy(other).into_owned()),
         }
     }
+
+    /// Whether `name` is one of the subtypes ISO 32000 defines — [`Self::from_name`]'s
+    /// table, so the renderer's `/Invisible` rule (12.5.3) and the listing
+    /// read one list.
+    pub(crate) fn is_standard(name: &[u8]) -> bool {
+        !matches!(AnnotationKind::from_name(name), AnnotationKind::Other(_))
+    }
 }
 
 /// `/F`, the annotation flags (12.5.3, Table 165).

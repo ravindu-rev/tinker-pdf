@@ -35,7 +35,10 @@
 //!
 //! Annotations are recorded too, each with the resource scope its appearance
 //! resolves in, and replayed only when [`RenderOptions::annotations`] asks —
-//! after the content, as `Page::render` draws them.
+//! after the content, as `Page::render` draws them. What is recorded is what
+//! the list's usage draws (12.5.3, `annots::prepare`): an annotation its flags
+//! or its `/OC` keep off that usage is not, but for the two calls that report
+//! the layer an `/OC` hid it by, which every replay reports again.
 //!
 //! # A list draws its own usage
 //!
