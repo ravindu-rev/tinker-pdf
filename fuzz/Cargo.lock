@@ -95,6 +95,7 @@ dependencies = [
  "tinker-pdf-font",
  "tinker-pdf-layout",
  "tinker-pdf-pki",
+ "tinker-pdf-pool",
  "tinker-pdf-raster",
  "tinker-pdf-render",
  "tinker-pdf-shape",
@@ -134,6 +135,7 @@ dependencies = [
  "tinker-pdf-filters",
  "tinker-pdf-font",
  "tinker-pdf-pki",
+ "tinker-pdf-pool",
  "tinker-pdf-shape",
 ]
 
@@ -195,6 +197,10 @@ version = "0.0.1"
 dependencies = [
  "tinker-pdf-crypto",
 ]
+
+[[package]]
+name = "tinker-pdf-pool"
+version = "0.0.1"
 
 [[package]]
 name = "tinker-pdf-raster"

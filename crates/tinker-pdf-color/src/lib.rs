@@ -471,7 +471,8 @@ pub fn lab_to_srgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
     lab_to_rgb(l, a, b)
 }
 
-/// than the alternative, which was rendering the whole space black.
+/// A CIE L*a*b* triple, relative to D50, as sRGB: [`lab_to_linear_srgb`],
+/// encoded.
 pub(crate) fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
     let [r, g, bl] = lab_to_linear_srgb(l, a, b);
     (srgb_encode(r), srgb_encode(g), srgb_encode(bl))
@@ -480,8 +481,15 @@ pub(crate) fn lab_to_rgb(l: f64, a: f64, b: f64) -> (u8, u8, u8) {
 /// A CIE L*a*b* triple, relative to D50, as linear sRGB before it is
 /// encoded and unclamped: [`lab_to_rgb`]'s light, which an ICC transform's
 /// grid holds at its nodes (`docs/design/icc.md`, P-22, "What a node
-/// holds").
+/// holds"): [`lab_to_xyz`], then [`XYZ_D50_TO_SRGB`].
 pub(crate) fn lab_to_linear_srgb(l: f64, a: f64, b: f64) -> [f64; 3] {
+    let [x, y, z] = lab_to_xyz(l, a, b);
+    xyz_d50_to_linear_srgb(x, y, z)
+}
+
+/// A CIE L*a*b* triple as the XYZ it is relative to D50: 8.6.5.4's relation
+/// run backwards.
+pub(crate) fn lab_to_xyz(l: f64, a: f64, b: f64) -> [f64; 3] {
     // D50, normalized so Y is 1.
     const WHITE: [f64; 3] = [0.964_212, 1.0, 0.825_188];
 
@@ -500,11 +508,11 @@ pub(crate) fn lab_to_linear_srgb(l: f64, a: f64, b: f64) -> [f64; 3] {
         }
     };
 
-    let x = WHITE[0] * finv(fx);
-    let y = WHITE[1] * finv(fy);
-    let z = WHITE[2] * finv(fz);
-
-    xyz_d50_to_linear_srgb(x, y, z)
+    [
+        WHITE[0] * finv(fx),
+        WHITE[1] * finv(fy),
+        WHITE[2] * finv(fz),
+    ]
 }
 
 #[cfg(test)]

@@ -50,9 +50,15 @@ first time an intent selects it, by ICC.1 8.10.2's precedence
 (`docs/design/icc.md`). A profile may carry tables and a matrix/TRC or grey
 model both, and 8.10.2 puts the tables first: an intent converts through the
 model only where the profile carries neither the `A2B*` tag designated for
-it nor `A2B0`. Every conversion the renderer makes takes relative
-colorimetric, 8.6.5.8's initial intent, through the first of `A2B1`,
-`A2B0`, the model and `A2B2` the profile carries.
+it nor `A2B0`. Every conversion the renderer makes takes relative colorimetric,
+8.6.5.8's initial intent, through the first of `A2B1`, `A2B0`, the model and
+`A2B2` the profile carries. Absolute colorimetric is relative colorimetric's
+transform with the connection-space value scaled by the profile's media white
+(`wtpt`) over the PCS white, channel by channel (ICC.1 6.2.3): folded into the
+matrix for a matrix/TRC or grey profile, so a grey on a tinted medium draws in
+its tint, and applied in XYZ to a table's value, a stage its grid's nodes
+evaluate. A media white of D50, or none, makes it relative colorimetric's
+transform itself.
 
 A table that does not read is passed over to the next of those, and so is a
 model that contradicts its profile — a monitor profile whose data space is

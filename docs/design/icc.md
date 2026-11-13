@@ -409,23 +409,31 @@ the intent is the source's scaling. With `s = (Xmw / Xi, Ymw / Yi, Zmw / Zi)`:
   `XYZ_D50_TO_SRGB × diag(s) × columns` — so a pixel costs what a relative
   one does.
 - **Grey**: F.2's PCS value, the curve's `Y` on the PCS white (under Lab,
-  `L*` with `a* = b* = 0`, the same white), scaled, is `Y × wtpt`. A grey
-  profile whose media white is not D50 draws its greys in the medium's tint
-  under this intent, through `XYZ_D50_TO_SRGB`; under the others it stays
-  achromatic, as today.
+  `L*` with `a* = b* = 0`, the same white), scaled, is `Y × wtpt`, and the
+  scaling is folded into the transform's matrix as one column,
+  `XYZ_D50_TO_SRGB × wtpt`. A grey profile whose media white is not D50 draws
+  its greys in the medium's tint under this intent; under the others it stays
+  achromatic, its three channels one luminance.
 - **A table** (`mft1`, `mft2`, `mAB `, and a `D2B*` other than `D2B3`): the
   PCS value it gives — XYZ, or legacy 16-bit Lab taken to XYZ by the
-  conversion `lab_to_rgb` already makes — scaled per channel, then to sRGB as
-  the relative path does.
+  relation `lab_to_rgb` runs (`lab_to_xyz`) — scaled per channel, then to
+  sRGB as the relative path does. The table is the relative intent's own,
+  shared, and only the scaling after it is absolute colorimetric's: a stage
+  the nodes of the transform's grid evaluate (P-22), so the absolute
+  transform reads a grid of its own.
 - **The PCS white is 6.3.4.3's**, taken as the s15Fixed16 numbers a
-  profile's `XYZType` tags carry (`0x0000F6D6`, `0x00010000`, `0x0000D32D`),
-  so a `wtpt` of D50 scales by exactly one and absolute colorimetric is
-  relative colorimetric bit for bit.
-- **A profile with no `wtpt`, or one with a component that is not positive**,
-  is taken to have the PCS white for its media white: 8.2 requires the tag,
-  an `ICCBased` space's profile cannot be a DeviceLink (Table 67's classes),
-  and taking the PCS white adds no colour the profile does not state. Its
-  absolute colorimetric is its relative colorimetric.
+  profile's `XYZType` tags carry (`0x0000F6D6`, `0x00010000`, `0x0000D32D`,
+  `icc::PCS_WHITE`), so a `wtpt` of D50 scales by exactly one and absolute
+  colorimetric is relative colorimetric bit for bit: the two intents are one
+  transform (`Profile::media_scale` is one in every channel).
+- **A profile with no `wtpt`, one with a component that is not positive, or
+  one whose `wtpt` does not read as an `XYZType`**, is taken to have the PCS
+  white for its media white: 8.2 requires the tag, an `ICCBased` space's
+  profile cannot be a DeviceLink (Table 67's classes), and taking the PCS
+  white adds no colour the profile does not state. Its absolute colorimetric
+  is its relative colorimetric. The media white is read for every model and
+  refuses nothing: a grey profile with no `wtpt` compiles, its relative
+  transform being achromatic without it.
 
 #### Where each conversion takes its intent
 
@@ -1207,8 +1215,10 @@ P-16.1's compiled-ICC kind, re-keyed by P-22.7:
 - **The charge**, taken when the entry is inserted: the parsed profile's
   tables — its `A2B*` elements as `Profile::parse` holds them, or a
   matrix/TRC transform's three 4 096-entry curves — and, for each distinct
-  table its conversions can select, a grid's whole node array at eight bytes a
-  node, with P-16.1's 64-byte floor. That is the most the entry can come to
+  gridded transform its conversions can compile — a table, and absolute
+  colorimetric's scaling of it where the media white is not the PCS white —
+  a grid's whole node array at eight bytes a node, with P-16.1's 64-byte
+  floor. That is the most the entry can come to
   hold, charged before any node is filled, so filling never passes the
   budget. An entry the budget cannot hold is used by the request that made it
   and not kept, so past the budget a transform compiles per use, as today.

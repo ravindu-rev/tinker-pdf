@@ -352,6 +352,53 @@ pub struct Profile {
     /// The `A2B*` tables the profile carries, 8.10.2's b) and c); empty
     /// where it carries none.
     pub tables: Tables,
+    /// The media white, `mediaWhitePointTag` (`wtpt`), as `[X, Y, Z]`, where
+    /// the profile carries one that reads. ICC-absolute colorimetry scales
+    /// by it ([`Profile::media_scale`]); no other intent reads it.
+    pub white: Option<[f64; 3]>,
+}
+
+/// The PCS white, 6.3.4.3's D50, as the s15Fixed16Numbers an `XYZType` tag
+/// carries it in (`0x0000F6D6`, `0x00010000`, `0x0000D32D`): a `wtpt` of D50
+/// reads back as exactly these, so its absolute colorimetry scales by exactly
+/// one.
+pub const PCS_WHITE: [f64; 3] = [63_190.0 / 65_536.0, 1.0, 54_061.0 / 65_536.0];
+
+impl Profile {
+    /// The factors ICC-absolute colorimetry scales a connection-space value
+    /// by, channel by channel: the media white over the PCS white, 6.2.3's
+    /// `Xmw / Xi`, `Ymw / Yi` and `Zmw / Zi` (equations 4 to 6). The engine's
+    /// destination is sRGB, whose media white is the PCS white, so the
+    /// destination's own ratio (equations 1 to 3) is one
+    /// (`docs/design/icc.md`, "Absolute colorimetric against the engine's
+    /// output").
+    ///
+    /// One in every channel where the profile carries no media white, or one
+    /// with a component that is not positive: such a profile is taken to have
+    /// the PCS white for its media white, which 8.2 requires of it and which
+    /// adds no colour the profile does not state, so its absolute
+    /// colorimetry is its relative colorimetry.
+    #[must_use]
+    pub fn media_scale(&self) -> [f64; 3] {
+        match self.white {
+            Some(white) if white.iter().all(|&component| component > 0.0) => [
+                white[0] / PCS_WHITE[0],
+                white[1] / PCS_WHITE[1],
+                white[2] / PCS_WHITE[2],
+            ],
+            _ => [1.0; 3],
+        }
+    }
+
+    /// The scaling `intent`'s transform applies to the connection-space
+    /// value: [`Profile::media_scale`] for absolute colorimetric where it is
+    /// not one, and none otherwise.
+    fn scale_for(&self, intent: Intent) -> Option<[f64; 3]> {
+        if intent != Intent::AbsoluteColorimetric {
+            return None;
+        }
+        Some(self.media_scale()).filter(|scale| *scale != [1.0; 3])
+    }
 }
 
 /// The data colour space signature of a profile, read from the **header** and
@@ -436,7 +483,7 @@ pub enum Model {
         /// `rTRC`, `gTRC`, `bTRC`.
         curves: [Curve; 3],
     },
-    /// One curve and a white point: a grey profile.
+    /// One curve: a grey profile.
     Grey {
         /// Whether the curve's output is `L*` rather than `Y` — that is,
         /// whether the connection space is `Lab` rather than `XYZ`.
@@ -449,8 +496,6 @@ pub enum Model {
         lab: bool,
         /// `kTRC`.
         curve: Curve,
-        /// `wtpt`, as `[X, Y, Z]`.
-        white: [f64; 3],
     },
 }
 
@@ -785,17 +830,20 @@ impl Lut {
         out
     }
 
-    /// The sRGB this table's connection-space value is.
-    fn to_rgb(&self, components: &[f64]) -> (u8, u8, u8) {
-        let [r, g, b] = self.to_linear(components);
+    /// The sRGB this table's connection-space value is, that value first
+    /// scaled channel by channel in XYZ where `media` says so — ICC-absolute
+    /// colorimetry's media white (6.2.3).
+    fn to_rgb(&self, components: &[f64], media: Option<[f64; 3]>) -> (u8, u8, u8) {
+        let [r, g, b] = self.to_linear(components, media);
         let encoding = self.encoding();
         (encoding.encode(r), encoding.encode(g), encoding.encode(b))
     }
 
-    /// The linear sRGB this table's connection-space value is, before it is
-    /// encoded and unclamped: the light [`Lut::to_rgb`] encodes, and what a
-    /// grid's node holds (`docs/design/icc.md`, P-22, "What a node holds").
-    fn to_linear(&self, components: &[f64]) -> [f64; 3] {
+    /// The linear sRGB this table's connection-space value is, scaled by
+    /// `media` as [`Lut::to_rgb`] scales it, before it is encoded and
+    /// unclamped: the light [`Lut::to_rgb`] encodes, and what a grid's node
+    /// holds (`docs/design/icc.md`, P-22, "What a node holds").
+    fn to_linear(&self, components: &[f64], media: Option<[f64; 3]>) -> [f64; 3] {
         #[cfg(test)]
         tests::PIPELINE_EVALUATIONS.with(|count| count.set(count.get() + 1));
         let pcs = self.evaluate(components);
@@ -811,13 +859,30 @@ impl Lut {
             let l = pcs[0] * FULL * 100.0;
             let a = pcs[1] * FULL * 255.0 - 128.0;
             let b = pcs[2] * FULL * 255.0 - 128.0;
-            crate::lab_to_linear_srgb(l, a, b)
+            match media {
+                None => crate::lab_to_linear_srgb(l, a, b),
+                // The scaling is of XYZ (equations 4 to 6), so a Lab value
+                // goes to XYZ first, by the relation `lab_to_linear_srgb`
+                // runs.
+                Some(scale) => {
+                    let [x, y, z] = crate::lab_to_xyz(l, a, b);
+                    crate::xyz_d50_to_linear_srgb(x * scale[0], y * scale[1], z * scale[2])
+                }
+            }
         } else {
             // XYZ, in the s15Fixed16 convention the connection space uses:
             // 1.0 is 0x8000 of the 16-bit range, so full scale is just under
             // two.
             let scale = 65535.0 / 32768.0;
-            crate::xyz_d50_to_linear_srgb(pcs[0] * scale, pcs[1] * scale, pcs[2] * scale)
+            let [x, y, z] = match media {
+                None => [pcs[0] * scale, pcs[1] * scale, pcs[2] * scale],
+                Some(media) => [
+                    pcs[0] * scale * media[0],
+                    pcs[1] * scale * media[1],
+                    pcs[2] * scale * media[2],
+                ],
+            };
+            crate::xyz_d50_to_linear_srgb(x, y, z)
         }
     }
 
@@ -933,9 +998,9 @@ const FILLED: u64 = 1 << 63;
 /// Each node holds the pipeline's linear sRGB at the node — three signed
 /// channels of [`CHANNEL_BITS`], unclamped, beside [`FILLED`] — in one atomic
 /// word, evaluated the first time a read reaches it and kept for every read
-/// after. A node is a function of the table and its position alone, so two
-/// threads that fill one at once store one value, and no read depends on
-/// which nodes were filled before it.
+/// after. A node is a function of the table, the conversion and its position
+/// alone, so two threads that fill one at once store one value, and no read
+/// depends on which nodes were filled before it.
 struct Grid {
     /// One, three or four.
     inputs: usize,
@@ -943,19 +1008,25 @@ struct Grid {
     points: usize,
     /// The pipeline's last stage, which the read runs after interpolating.
     encoding: Encoding,
+    /// The media scale the pipeline applies to its connection-space value,
+    /// where the transform is ICC-absolute colorimetry's (6.2.3): a stage the
+    /// nodes evaluate, as [`Transform`]'s `media` is.
+    media: Option<[f64; 3]>,
     /// `points.pow(inputs)` nodes, the last axis varying fastest, allocated
     /// at the first read.
     nodes: OnceLock<Box<[AtomicU64]>>,
 }
 
 impl Grid {
-    /// The grid `lut` converts through, or `None` for an input count no grid
-    /// is built over.
-    fn over(lut: &Lut) -> Option<Grid> {
+    /// The grid `lut` converts through, its connection-space value scaled by
+    /// `media` where that is given, or `None` for an input count no grid is
+    /// built over.
+    fn over(lut: &Lut, media: Option<[f64; 3]>) -> Option<Grid> {
         Some(Grid {
             inputs: lut.inputs,
             points: grid_points(lut.inputs)?,
             encoding: lut.encoding(),
+            media,
             nodes: OnceLock::new(),
         })
     }
@@ -1011,7 +1082,7 @@ impl Grid {
     /// pipeline's own byte, so a read at the node is the pipeline exactly.
     fn evaluate(&self, lut: &Lut, index: usize) -> u64 {
         let x = self.node_input(index);
-        let light = lut.to_linear(&x[..self.inputs]);
+        let light = lut.to_linear(&x[..self.inputs], self.media);
         let table = self.encoding.table();
         let mut word = FILLED;
         for (channel, light) in light.into_iter().enumerate() {
@@ -1130,6 +1201,7 @@ impl Clone for Grid {
             inputs: self.inputs,
             points: self.points,
             encoding: self.encoding,
+            media: self.media,
             nodes: OnceLock::new(),
         }
     }
@@ -1142,6 +1214,7 @@ impl std::fmt::Debug for Grid {
             .field("inputs", &self.inputs)
             .field("points", &self.points)
             .field("encoding", &self.encoding)
+            .field("media", &self.media)
             .field("allocated", &self.nodes.get().is_some())
             .finish()
     }
@@ -1396,6 +1469,12 @@ impl Profile {
         }
         tables.release_read();
 
+        // The media white, which only ICC-absolute colorimetry reads
+        // (6.2.3): one that is absent or does not read leaves the profile
+        // with the PCS white for it (`Profile::media_scale`), and refuses
+        // nothing a relative transform could be built from.
+        let white = find(b"wtpt").and_then(|data| read_xyz(data).ok());
+
         Ok(Profile {
             space,
             pcs,
@@ -1403,6 +1482,7 @@ impl Profile {
             version,
             model: model.and_then(Result::ok),
             tables,
+            white,
         })
     }
 }
@@ -1447,7 +1527,6 @@ fn read_model<'a>(
         Ok(Model::Grey {
             lab: &pcs == b"Lab ",
             curve: read_curve(find(b"kTRC").ok_or(IccError::MissingTags)?)?,
-            white: read_xyz(find(b"wtpt").ok_or(IccError::MissingTags)?)?,
         })
     }
 }
@@ -1866,6 +1945,11 @@ pub struct Transform {
     /// shared with the profile's [`Tables`] and with every other intent that
     /// converts through it.
     lut: Option<Arc<Lut>>,
+    /// The table's connection-space value scaled channel by channel in XYZ
+    /// before it becomes sRGB, where this is ICC-absolute colorimetry's
+    /// transform through a table (6.2.3): the media white over the PCS
+    /// white. A model's scaling is folded into its matrix instead.
+    media: Option<[f64; 3]>,
     /// The grid `lut` is read through, where it takes one, three or four
     /// inputs.
     grid: Option<Grid>,
@@ -1883,6 +1967,7 @@ impl Clone for Transform {
             matrix: self.matrix,
             inputs: self.inputs,
             lut: self.lut.clone(),
+            media: self.media,
             grid: self.grid.clone(),
             row: OnceLock::new(),
         }
@@ -1926,6 +2011,7 @@ impl PartialEq for Transform {
             && self.matrix == other.matrix
             && self.inputs == other.inputs
             && self.lut == other.lut
+            && self.media == other.media
     }
 }
 
@@ -1949,13 +2035,21 @@ impl Transform {
     /// ICC.1 8.10.2 names for the intent, the matrix/TRC or grey model, one
     /// transform, which ICC.1's Table 25 calls colorimetric, compiled alike
     /// for every intent that reaches it.
+    ///
+    /// Absolute colorimetric's is relative colorimetric's source with the
+    /// connection-space value scaled by [`Profile::media_scale`] (6.2.3):
+    /// folded into the s15.16 matrix for a model, applied to a table's value
+    /// in XYZ. Where the scale is one in every channel — a `wtpt` of D50, or
+    /// none — it is relative colorimetric's transform bit for bit.
     #[must_use]
     pub fn compile(profile: &Profile, intent: Intent) -> Option<Transform> {
-        profile.source(intent).map(Transform::of_source)
+        let source = profile.source(intent)?;
+        Some(Transform::of_source(source, profile.scale_for(intent)))
     }
 
-    /// The transform `source` converts through.
-    fn of_source(source: Source<'_>) -> Transform {
+    /// The transform `source` converts through, its connection-space value
+    /// scaled by `media` where that is given.
+    fn of_source(source: Source<'_>, media: Option<[f64; 3]>) -> Transform {
         match source {
             // A table is already the transform: its curves arrived sampled and
             // its grid is the matrix's replacement rather than a factor of it.
@@ -1965,27 +2059,36 @@ impl Transform {
                 curves: Vec::new(),
                 matrix: [[0; 3]; 3],
                 inputs: lut.inputs,
-                grid: Grid::over(&lut),
+                grid: Grid::over(&lut, media),
                 lut: Some(lut),
                 row: OnceLock::new(),
+                media,
             },
-            Source::Model(model) => Transform::of_model(model),
+            Source::Model(model) => Transform::of_model(model, media),
         }
     }
 
-    /// A matrix/TRC or grey model's transform.
-    fn of_model(model: &Model) -> Transform {
+    /// A matrix/TRC or grey model's transform, its connection-space value
+    /// scaled by `media` where that is given.
+    fn of_model(model: &Model, media: Option<[f64; 3]>) -> Transform {
         match model {
             Model::MatrixTrc { columns, curves } => {
                 // The profile's columns are the device primaries in XYZ, so
                 // the product with XYZ-to-sRGB is device-linear to sRGB-linear
-                // — one matrix rather than two, computed once here.
+                // — one matrix rather than two, computed once here. The
+                // absolute intent's scaling sits between the two, on the XYZ
+                // the columns give: `XYZ_D50_TO_SRGB x diag(s) x columns`.
                 let mut matrix = [[0i32; 3]; 3];
                 for (row, out) in matrix.iter_mut().enumerate() {
                     for (column, slot) in out.iter_mut().enumerate() {
                         let mut sum = 0.0;
                         for k in 0..3 {
-                            sum += XYZ_D50_TO_SRGB[row][k] * columns[column][k];
+                            sum += match media {
+                                None => XYZ_D50_TO_SRGB[row][k] * columns[column][k],
+                                Some(scale) => {
+                                    XYZ_D50_TO_SRGB[row][k] * scale[k] * columns[column][k]
+                                }
+                            };
                         }
                         *slot = fixed(sum);
                     }
@@ -1997,12 +2100,14 @@ impl Transform {
                     lut: None,
                     grid: None,
                     row: OnceLock::new(),
+                    media: None,
                 }
             }
-            Model::Grey { lab, curve, .. } => {
+            Model::Grey { lab, curve } => {
                 // A grey profile's single curve makes a luminance, and the
                 // three sRGB channels are that luminance: the white point does
-                // not enter, because the answer is achromatic by construction.
+                // not enter a relative transform, because the answer is
+                // achromatic by construction.
                 let mut table = compile_curve(curve);
                 if *lab {
                     // Under a Lab connection space the curve gives `L*` rather
@@ -2022,14 +2127,34 @@ impl Transform {
                         *slot = (y.clamp(0.0, 1.0) * 65535.0).round() as u16;
                     }
                 }
-                let identity = [[fixed(1.0), 0, 0], [0, fixed(1.0), 0], [0, 0, fixed(1.0)]];
+                let matrix = match media {
+                    None => [[fixed(1.0), 0, 0], [0, fixed(1.0), 0], [0, 0, fixed(1.0)]],
+                    // ICC-absolute: F.2's connection-space value, the curve's
+                    // `Y` on the PCS white, scaled channel by channel, is `Y`
+                    // on the media white, and that XYZ goes to sRGB through
+                    // `XYZ_D50_TO_SRGB` — a grey in the medium's tint. The
+                    // three channels all read the one curve, so the first
+                    // column carries it.
+                    Some(scale) => {
+                        let mut matrix = [[0i32; 3]; 3];
+                        for (row, out) in matrix.iter_mut().enumerate() {
+                            let mut sum = 0.0;
+                            for k in 0..3 {
+                                sum += XYZ_D50_TO_SRGB[row][k] * PCS_WHITE[k] * scale[k];
+                            }
+                            out[0] = fixed(sum);
+                        }
+                        matrix
+                    }
+                };
                 Transform {
                     curves: vec![table],
-                    matrix: identity,
+                    matrix,
                     inputs: 1,
                     lut: None,
                     grid: None,
                     row: OnceLock::new(),
+                    media: None,
                 }
             }
         }
@@ -2203,7 +2328,7 @@ impl Transform {
     /// grid's node is evaluated as, and what the tests hold a grid to.
     pub(crate) fn evaluate(&self, components: &[f64]) -> (u8, u8, u8) {
         if let Some(lut) = &self.lut {
-            return lut.to_rgb(components);
+            return lut.to_rgb(components, self.media);
         }
         let mut linear = [0i64; 3];
         for (channel, slot) in linear.iter_mut().enumerate() {
@@ -2242,9 +2367,10 @@ impl Transform {
 /// Relative colorimetric's is compiled with the set: it is 8.6.5.8's initial
 /// intent, the one every conversion that names none takes, so a profile used
 /// in no other intent compiles one transform. The others compile one
-/// transform a distinct source: perceptual and saturation
-/// share the transform of an intent that converts through the same table or
-/// the same model.
+/// transform a distinct source and scaling: an intent shares the transform of
+/// one that converts through the same table or the same model unscaled, so
+/// absolute colorimetric compiles one of its own only where its media white
+/// is not the PCS white.
 #[derive(Debug)]
 pub struct Transforms {
     profile: Profile,
@@ -2262,7 +2388,7 @@ impl Transforms {
     pub fn compile(profile: Profile) -> Option<Transforms> {
         let source = profile.source(Intent::RelativeColorimetric)?;
         let relative_source = source.id();
-        let relative = Arc::new(Transform::of_source(source));
+        let relative = Arc::new(Transform::of_source(source, None));
         Some(Transforms {
             profile,
             relative,
@@ -2289,7 +2415,8 @@ impl Transforms {
             let Some(source) = self.profile.source(intent) else {
                 return Arc::clone(&self.relative);
             };
-            if intent != Intent::AbsoluteColorimetric {
+            let media = self.profile.scale_for(intent);
+            if media.is_none() {
                 let id = source.id();
                 if id == self.relative_source {
                     return Arc::clone(&self.relative);
@@ -2306,7 +2433,7 @@ impl Transforms {
                     }
                 }
             }
-            Arc::new(Transform::of_source(source))
+            Arc::new(Transform::of_source(source, media))
         })
     }
 
@@ -2888,7 +3015,8 @@ pub(crate) mod tests {
             &[(*b"kTRC", gamma(1.8)), (*b"wtpt", xyz(0.9642, 1.0, 0.8249))],
         );
         let parsed = Profile::parse(&profile).expect("a grey profile");
-        let Some(Model::Grey { curve, white, .. }) = parsed.model else {
+        let white = parsed.white.expect("the media white");
+        let Some(Model::Grey { curve, .. }) = parsed.model else {
             panic!("expected a grey model");
         };
         let Curve::Gamma(g) = curve else {
@@ -4146,6 +4274,310 @@ pub(crate) mod tests {
             "absolute colorimetric"
         );
         assert_eq!(table_of(transforms.get(Intent::RelativeColorimetric)), 0);
+    }
+
+    // ---- absolute colorimetric ----------------------------------------------
+
+    /// A media white other than D50, every channel its own ratio to the PCS
+    /// white: a warm paper, darker than the reference.
+    const PAPER: [f64; 3] = [0.88, 0.91, 0.72];
+
+    /// What an `XYZType` tag holding `value` reads back as: the
+    /// s15Fixed16Number it is stored in.
+    fn stored(value: f64) -> f64 {
+        (value * 65536.0).round() / 65536.0
+    }
+
+    /// Linear sRGB as the byte IEC 61966-2-1's encode makes of it.
+    fn encoded(linear: f64) -> i32 {
+        let v = linear.clamp(0.0, 1.0);
+        let s = if v <= 0.003_130_8 {
+            12.92 * v
+        } else {
+            1.055 * tinker_pdf_math::pow(v, 1.0 / 2.4) - 0.055
+        };
+        (s.clamp(0.0, 1.0) * 255.0).round() as i32
+    }
+
+    /// A D50 XYZ value as sRGB, converted in the test: the destination's own
+    /// matrix, then the clause's encode.
+    fn srgb_of(xyz: [f64; 3]) -> [i32; 3] {
+        crate::xyz_d50_to_linear_srgb(xyz[0], xyz[1], xyz[2]).map(encoded)
+    }
+
+    /// `got` is `want` within the level of 255 the integer path rounds by.
+    fn within_a_level(got: (u8, u8, u8), want: [i32; 3], what: &str) {
+        let got = [i32::from(got.0), i32::from(got.1), i32::from(got.2)];
+        for (channel, (g, w)) in got.iter().zip(want).enumerate() {
+            assert!(
+                (g - w).abs() <= 1,
+                "{what}: channel {channel} is {g}, not {w}"
+            );
+        }
+    }
+
+    /// `x` scaled channel by channel by `scale`.
+    fn scaled(x: [f64; 3], scale: [f64; 3]) -> [f64; 3] {
+        [x[0] * scale[0], x[1] * scale[1], x[2] * scale[2]]
+    }
+
+    /// The scale absolute colorimetry applies for a stored media white of
+    /// `white`, in closed form: 6.2.3's media white over the PCS white.
+    fn closed_scale(white: [f64; 3]) -> [f64; 3] {
+        [
+            stored(white[0]) / stored(0.9642),
+            stored(white[1]) / stored(1.0),
+            stored(white[2]) / stored(0.8249),
+        ]
+    }
+
+    /// CIE L*a*b* as D50 XYZ, 8.6.5.4's relation run backwards, written out in
+    /// the test.
+    fn xyz_from_lab(l: f64, a: f64, b: f64) -> [f64; 3] {
+        const WHITE: [f64; 3] = [0.964_212, 1.0, 0.825_188];
+        const DELTA: f64 = 6.0 / 29.0;
+        let finv = |t: f64| {
+            if t > DELTA {
+                t * t * t
+            } else {
+                3.0 * DELTA * DELTA * (t - 4.0 / 29.0)
+            }
+        };
+        let fy = (l + 16.0) / 116.0;
+        [
+            WHITE[0] * finv(fy + a / 500.0),
+            WHITE[1] * finv(fy),
+            WHITE[2] * finv(fy - b / 200.0),
+        ]
+    }
+
+    /// The profiles absolute colorimetry is held on, each carrying the
+    /// `wtpt` `white` gives, or none: a matrix/TRC profile on sRGB's
+    /// primaries with linear curves, a linear grey profile under XYZ and
+    /// under Lab, and a three-input `mft2` whose two-point grid holds the
+    /// D50 XYZ of linear sRGB's corners, under XYZ and, in v2's legacy
+    /// 16-bit Lab, under Lab.
+    fn media_profiles(white: Option<Vec<u8>>) -> Vec<(&'static str, Vec<u8>)> {
+        let with = |space: &[u8; 4], pcs: &[u8; 4], mut tags: Vec<([u8; 4], Vec<u8>)>| {
+            if let Some(white) = &white {
+                tags.push((*b"wtpt", white.clone()));
+            }
+            build(space, pcs, &tags)
+        };
+        let corner_table = |lab: bool| {
+            let clut: Vec<[u16; 3]> = (0..8usize)
+                .map(|node| {
+                    let rgb = [(node >> 2) & 1, (node >> 1) & 1, node & 1].map(|bit| bit as f64);
+                    let xyz = xyz_of(rgb);
+                    let encode = |v: f64| v.round().clamp(0.0, 65535.0) as u16;
+                    if lab {
+                        let [l, a, b] = lab_of(xyz);
+                        [
+                            encode(l / 100.0 * 65280.0),
+                            encode((a + 128.0) / 255.0 * 65280.0),
+                            encode((b + 128.0) / 255.0 * 65280.0),
+                        ]
+                    } else {
+                        xyz.map(|v| encode(v * 32768.0))
+                    }
+                })
+                .collect();
+            mft2(3, 2, &clut)
+        };
+        vec![
+            (
+                "matrix/TRC",
+                with(
+                    b"RGB ",
+                    b"XYZ ",
+                    vec![
+                        (*b"rXYZ", xyz(SRGB_R[0], SRGB_R[1], SRGB_R[2])),
+                        (*b"gXYZ", xyz(SRGB_G[0], SRGB_G[1], SRGB_G[2])),
+                        (*b"bXYZ", xyz(SRGB_B[0], SRGB_B[1], SRGB_B[2])),
+                        (*b"rTRC", gamma(1.0)),
+                        (*b"gTRC", gamma(1.0)),
+                        (*b"bTRC", gamma(1.0)),
+                    ],
+                ),
+            ),
+            (
+                "grey under XYZ",
+                with(b"GRAY", b"XYZ ", vec![(*b"kTRC", gamma(1.0))]),
+            ),
+            (
+                "grey under Lab",
+                with(b"GRAY", b"Lab ", vec![(*b"kTRC", gamma(1.0))]),
+            ),
+            (
+                "mft2 under XYZ",
+                with(b"RGB ", b"XYZ ", vec![(*b"A2B0", corner_table(false))]),
+            ),
+            (
+                "mft2 under Lab",
+                with(b"RGB ", b"Lab ", vec![(*b"A2B0", corner_table(true))]),
+            ),
+        ]
+    }
+
+    /// The inputs absolute colorimetry is checked at: every component a
+    /// fifth to all but all of the range, clear of the dark end where the
+    /// encode's straight segment magnifies a rounding.
+    fn mid_tones(inputs: usize) -> Vec<Vec<f64>> {
+        let steps = [0.2, 0.45, 0.7, 0.95];
+        (0..steps.len().pow(inputs as u32))
+            .map(|index| {
+                let mut x = vec![0.0; inputs];
+                let mut rest = index;
+                for slot in x.iter_mut().rev() {
+                    *slot = steps[rest % steps.len()];
+                    rest /= steps.len();
+                }
+                x
+            })
+            .collect()
+    }
+
+    /// The connection-space value, as D50 XYZ, `profile`'s relative
+    /// colorimetric transform gives `x`: the model's closed form for a
+    /// matrix/TRC or grey profile — the columns over the linear device
+    /// values, the curve's `Y` on the PCS white (F.2) — and the table's own
+    /// evaluation decoded from its 16-bit encoding for a table.
+    fn relative_pcs(profile: &Profile, x: &[f64]) -> [f64; 3] {
+        let transform =
+            Transform::compile(profile, Intent::RelativeColorimetric).expect("a transform");
+        if let Some(lut) = &transform.lut {
+            let pcs = lut.evaluate(x);
+            return if lut.lab {
+                let full = 65535.0 / 65280.0;
+                xyz_from_lab(
+                    pcs[0] * full * 100.0,
+                    pcs[1] * full * 255.0 - 128.0,
+                    pcs[2] * full * 255.0 - 128.0,
+                )
+            } else {
+                pcs.map(|v| v * 65535.0 / 32768.0)
+            };
+        }
+        match profile.model.as_ref().expect("a model") {
+            Model::MatrixTrc { columns, .. } => {
+                let mut xyz = [0.0; 3];
+                for (column, &linear) in columns.iter().zip(x) {
+                    for (slot, value) in xyz.iter_mut().zip(column) {
+                        *slot += value * linear;
+                    }
+                }
+                xyz
+            }
+            Model::Grey { lab, .. } => {
+                let y = if *lab {
+                    xyz_from_lab(x[0] * 100.0, 0.0, 0.0)[1]
+                } else {
+                    x[0]
+                };
+                PCS_WHITE.map(|white| white * y)
+            }
+        }
+    }
+
+    /// **Absolute colorimetric scales by the media white.** For a matrix/TRC
+    /// profile, a grey one under XYZ and under Lab, and an `mft2` one under
+    /// XYZ and under Lab, each with a `wtpt` other than D50, the absolute
+    /// transform's pipeline gives the relative transform's connection-space
+    /// value scaled in closed form — the media white over the PCS white,
+    /// channel by channel (6.2.3) — and converted in the test, on its own and
+    /// through the set a colour space carries; and it is not the relative
+    /// transform's. A table's grid holds the scaled pipeline: at its nodes a
+    /// conversion is that pipeline exactly, and between them within P-22's
+    /// two levels. A `wtpt` of D50 makes the two intents one transform, byte
+    /// for byte; so do no `wtpt`, one with a component that is not positive,
+    /// and one that does not read, each taken to be the PCS white. A grey
+    /// profile with no `wtpt`, or one that does not read, compiles.
+    #[test]
+    fn absolute_colorimetric_scales_by_the_media_white() {
+        let scale = closed_scale(PAPER);
+        for (name, bytes) in media_profiles(Some(xyz(PAPER[0], PAPER[1], PAPER[2]))) {
+            let profile =
+                Profile::parse(&bytes).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            assert_eq!(profile.media_scale(), scale, "{name}: the scale");
+            let absolute =
+                Transform::compile(&profile, Intent::AbsoluteColorimetric).expect("a transform");
+            let relative =
+                Transform::compile(&profile, Intent::RelativeColorimetric).expect("a transform");
+            let transforms = Transforms::compile(profile.clone()).expect("a transform");
+            let spaces = transforms.get(Intent::AbsoluteColorimetric);
+            let mut parted = false;
+            for x in mid_tones(absolute.inputs()) {
+                let want = srgb_of(scaled(relative_pcs(&profile, &x), scale));
+                let what = format!("{name} at {x:?}");
+                within_a_level(absolute.evaluate(&x), want, &what);
+                within_a_level(spaces.evaluate(&x), want, &format!("{what}, the space's"));
+                for (transform, whose) in [(&absolute, "its own"), (spaces, "the space's")] {
+                    let read = apart(transform.apply(&x), transform.evaluate(&x));
+                    assert!(read <= 2, "{what}, {whose}: the read is {read} levels off");
+                }
+                let (a, r) = (absolute.apply(&x), relative.apply(&x));
+                parted |= [a.0.abs_diff(r.0), a.1.abs_diff(r.1), a.2.abs_diff(r.2)]
+                    .into_iter()
+                    .any(|difference| difference > 2);
+            }
+            assert!(parted, "{name}: absolute colorimetric is relative's");
+            if let (Some(a), Some(r)) = (&absolute.lut, &relative.lut) {
+                assert!(Arc::ptr_eq(a, r), "{name}: one table, scaled after it");
+            }
+            // At a node of the grid the read is the scaled pipeline itself: the
+            // media white is a stage the nodes evaluate.
+            if let Some(grid) = &absolute.grid {
+                assert_eq!(grid.media, Some(scale), "{name}: the grid's scale");
+                for index in [0, grid.count() / 3, grid.count() / 2, grid.count() - 1] {
+                    let node = grid.node_input(index);
+                    let x = &node[..grid.inputs];
+                    assert_eq!(
+                        absolute.apply(x),
+                        absolute.evaluate(x),
+                        "{name} at node {index}"
+                    );
+                }
+            }
+        }
+
+        // A grey in the medium's tint: the paper is warm, so its greys are.
+        let grey = Profile::parse(&media_profiles(Some(xyz(PAPER[0], PAPER[1], PAPER[2])))[1].1)
+            .expect("a grey profile");
+        let (r, _, b) = Transform::compile(&grey, Intent::AbsoluteColorimetric)
+            .expect("a transform")
+            .apply(&[0.95]);
+        assert!(r > b + 2, "a warm paper's grey is ({r}, _, {b})");
+
+        // The PCS white, none, a component that is not positive and a tag
+        // that does not read: one transform for both intents.
+        let mut unread = xyz(0.9642, 1.0, 0.8249);
+        unread[0..4].copy_from_slice(b"text");
+        for (white, what) in [
+            (Some(xyz(0.9642, 1.0, 0.8249)), "a wtpt of D50"),
+            (None, "no wtpt"),
+            (Some(xyz(0.0, 1.0, 0.8249)), "a wtpt with a zero"),
+            (Some(xyz(0.9642, -1.0, 0.8249)), "a wtpt with a negative"),
+            (Some(unread), "a wtpt that does not read"),
+        ] {
+            for (name, bytes) in media_profiles(white.clone()) {
+                let profile = Profile::parse(&bytes)
+                    .unwrap_or_else(|error| panic!("{name}, {what}: {error:?}"));
+                assert_eq!(profile.media_scale(), [1.0; 3], "{name}, {what}");
+                assert_eq!(
+                    Transform::compile(&profile, Intent::AbsoluteColorimetric),
+                    Transform::compile(&profile, Intent::RelativeColorimetric),
+                    "{name}, {what}"
+                );
+                let transforms = Transforms::compile(profile).expect("a transform");
+                assert!(
+                    std::ptr::eq(
+                        transforms.get(Intent::AbsoluteColorimetric),
+                        transforms.get(Intent::RelativeColorimetric)
+                    ),
+                    "{name}, {what}: absolute compiled a transform of its own"
+                );
+            }
+        }
     }
 
     // ---- the price of an integer grid --------------------------------------
