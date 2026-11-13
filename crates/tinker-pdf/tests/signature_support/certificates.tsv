@@ -3,9 +3,10 @@
 #
 # WHERE THESE NUMBERS COME FROM, AND WHY THAT MATTERS
 #
-# Milestone 2 of docs/design/signatures.md asks for "the subject/issuer/
-# validity/SPKI values committed in its sidecar, transcribed once from the
-# certificate's own DER and reviewed". Transcribing by hand from a hex dump is
+# docs/design/signatures.md has the CMS census run the certificate parser
+# over every certificate in the corpora, and this sidecar holds what each
+# should read: its subject, issuer, validity and SPKI, transcribed once from
+# the certificate's own DER. Transcribing by hand from a hex dump is
 # how the RFC 5280 appendix certificates were done and it does not scale to
 # twenty-four; producing them with `tinker-pdf-pki` would be the parser
 # agreeing with itself, which is the one thing a sidecar must not be.

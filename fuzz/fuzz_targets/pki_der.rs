@@ -2,11 +2,10 @@
 //!
 //! This is the target `docs/design/signatures.md` names as the mitigation for
 //! its own largest risk — *"ASN.1 parser panics or overreads on malformed DER
-//! (largest new untrusted surface)"* — and the design requires it to land in
-//! the same commit as the parser rather than after it. Every byte a signature
-//! is checked against arrives through here: a certificate embedded in a CMS
-//! blob inside a PDF's `/Contents` is attacker-supplied twice over, once by
-//! whoever wrote the document and once by whoever edited it afterwards.
+//! (largest new untrusted surface)"*. Every byte a signature is checked
+//! against arrives through here: a certificate embedded in a CMS blob inside
+//! a PDF's `/Contents` is attacker-supplied twice over, once by whoever wrote
+//! the document and once by whoever edited it afterwards.
 //!
 //! ## What the input is
 //!

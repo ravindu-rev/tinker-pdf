@@ -12,12 +12,11 @@
 //! # The private key does not come in here
 //!
 //! Unwrapping a `KeyTransRecipientInfo` needs the recipient's RSA *private*
-//! key. `docs/design/signatures.md` makes "no key material in the engine" a
-//! non-goal-by-design for signing, and the same rule holds here for exactly
-//! the same reason: a library that holds a private key has to be trusted with
-//! key storage, passphrase handling and PKCS#8 parsing, none of which is PDF
-//! work. So this module hands the caller the encrypted key and the identifier
-//! saying whose it is, and the caller does the one operation only it can do.
+//! key, and this module takes none: it hands the caller the encrypted key and
+//! the identifier saying whose it is, and the caller does the one operation
+//! only the holder of the key can do. `docs/design/signatures.md` keeps
+//! private keys out of its verify-only design the same way, and ruling 20
+//! governs the engine's private-key operations.
 //!
 //! # What is deliberately not decoded
 //!

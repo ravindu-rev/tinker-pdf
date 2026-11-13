@@ -410,8 +410,8 @@ const REFUSED_SHAPES: [&str; 3] = [
     "UnsupportedSpace: prtr CMYK -> Lab",
 ];
 
-/// **What the LUT profiles are made of.** The scoping question for the
-/// milestone `design/icc.md` sizes at L on its own.
+/// **What the LUT profiles are made of.** The scoping question for
+/// `design/icc.md`'s milestone 5, LUT profiles.
 ///
 /// `A2B0` is a *tag name*; what sits at it is one of four different structures.
 /// `mft1` and `mft2` are v2's, a matrix and three stages of table; `mAB ` and

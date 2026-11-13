@@ -443,15 +443,13 @@ pub fn fill(
         // Each sub-scanline contributes at most 256 units of a pixel's width,
         // over SAMPLES rows: scale to 0..=255.
         //
-        // **One bounds check for the row rather than one per pixel.** The
-        // arithmetic is unchanged -- `SAMPLES` is 16, so this is a shift, and
-        // the accumulator is `u16` whose largest value is 256 * 16 = 4 096,
-        // which divides and clamps identically in `u16` and in the `u32` this
-        // used to widen to. What changes is that the compiler can see a slice
+        // **One bounds check for the row rather than one per pixel.**
+        // `SAMPLES` is 16, so this is a shift, and the accumulator is `u16`
+        // whose largest value is 256 * 16 = 4 096, which divides and clamps
+        // in `u16` as it would in any wider type. The compiler sees a slice
         // as long as the accumulator instead of an indexed `get_mut`, and a
         // shift-and-saturate over a known trip count is a loop it will
-        // vectorise. Measured on a real document rather than assumed: see
-        // `docs/verification.md`.
+        // vectorise.
         let base = (row as usize) * (width as usize);
         if let Some(out) = mask.data.get_mut(base..base + accumulator.len()) {
             for (slot, total) in out.iter_mut().zip(accumulator.iter()) {

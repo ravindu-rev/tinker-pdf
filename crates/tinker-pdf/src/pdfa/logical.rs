@@ -431,7 +431,7 @@ mod tests {
 
     /// `/Lang ()` is permitted by ISO 19005 and refused by ISO 14289, with
     /// one function deciding both and a test on each side of the flag
-    /// (`docs/design/pdfua.md`, milestone 2's exit criterion).
+    /// (`docs/design/pdfua.md`, milestone 2).
     #[test]
     fn the_empty_language_is_pdfa_conforming_and_pdfua_not() {
         for part in [Part::One, Part::Two, Part::Three] {

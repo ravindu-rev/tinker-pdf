@@ -195,15 +195,15 @@
 //! [`SCAN_SYMBOL_PAGE_MULTIPLE`].
 //!
 //! **And it is not `MAX_JBIG2_SYMBOL_PIXELS` wearing a second name**, which is
-//! the objection this header raises twice already and which kept the `jbig2`
-//! fuzz row open rather than closing it under a number nobody could argue for.
-//! That cap bounds the pixels **one dictionary** decodes in total; this one
-//! bounds **one symbol** against a quantity that cap never reads. The
+//! the objection this header raises twice already. That cap bounds the
+//! pixels **one dictionary** decodes in total; this one bounds **one
+//! symbol** against a quantity that cap never reads. The
 //! distinction is the one `MAX_JBIG2_SYMBOL_PIXELS`'s own ledger draws in its
 //! first sentence — *"a per-symbol bound is not a work bound once the count
 //! branches"* — taken in the other direction: a total is not a per-item bound
 //! either, and 105 bytes spending the whole 67 108 864 on a page of one pixel
-//! is what that gap looked like from the outside (`docs/verification.md`).
+//! is what that gap looked like from the outside
+//! (`fuzz/corpus/jbig2/symbol-dictionary-spends-the-pixel-budget`).
 //!
 //! *Amended, 5 September 2026, tier 0's memory row.* **Two more rows, and the
 //! first amendment to what a [`Bound`] is allowed to be.**
@@ -273,16 +273,14 @@
 //!
 //! The other three are the interesting half, and they are why
 //! [`every_bound_publishes_the_number_it_is`] learned a fourth suffix.
-//! `docs/design/jbig2-symbol-text.md` took the measurement its milestone 7
-//! asked for — every `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` in all
-//! 102 JBIG2-bearing corpus files — and found **8**, **11** and **9**. Nothing
-//! in a hundred files exceeds twenty of anything, because every one of them is
-//! a synthetic fixture built to exercise one placement variant: **the corpus
-//! holds no real OCR JBIG2 at all**, and a cap calibrated against it would
-//! admit anything. So those three rows' yardsticks are arithmetic, they say
-//! `(estimate)` in the number they publish, and the measurement milestone 7
-//! wanted is now a dependency of tier 0's production-corpus row rather than a
-//! row of its own claiming to be blocked.
+//! A census of every `SDNUMNEWSYMS`, `SDNUMEXSYMS` and `SBNUMINSTANCES` in the
+//! 102 JBIG2-bearing corpus files of the time found **8**, **11** and **9**.
+//! Nothing in a hundred files exceeds twenty of anything, because every one of
+//! them is a synthetic fixture built to exercise one placement variant: **the
+//! corpus held no real OCR JBIG2 at all**, and a cap calibrated against it
+//! would admit anything. So those three rows' yardsticks are arithmetic, they
+//! say `(estimate)` in the number they publish, and the measurement against
+//! real scans is the amendment below.
 //!
 //! Saying `estimate` out loud costs one line in the parser and buys the thing
 //! this file exists for: a stated estimate that reads like a measurement is
@@ -793,18 +791,18 @@ const BOOK_PATH_LEN: u128 = 90;
 /// It is **arithmetic rather than a measurement**, and that is not a lowered
 /// bar: gap 29's comic and gap 30's fixed document are estimates too, and this
 /// file's header says why that is the honest kind of number to write down.
-/// What it replaces is worse. `docs/design/jbig2-symbol-text.md` took the
-/// measurement milestone 7 asked for — `SDNUMNEWSYMS`, `SDNUMEXSYMS` and
-/// `SBNUMINSTANCES` off the segment headers of all 102 JBIG2-bearing corpus
-/// files — and found **8**, **11** and **9**. Every one of those files is a
-/// synthetic fixture built to exercise one placement variant, so a cap
+/// What it replaces is worse. A census of `SDNUMNEWSYMS`, `SDNUMEXSYMS` and
+/// `SBNUMINSTANCES` off the segment headers of the 102 JBIG2-bearing corpus
+/// files of the time found **8**, **11** and **9**. Every one of those files
+/// is a synthetic fixture built to exercise one placement variant, so a cap
 /// calibrated on them would admit anything; the three `published` strings say
 /// **estimate** out loud for exactly that reason.
 ///
-/// The arithmetic, from that document: a 300 dpi A4 text page reduces to a few
-/// hundred distinct glyph bitmaps and a few thousand placements, so 200 pages
-/// against one shared dictionary reach the low tens of thousands of symbols
-/// and the low thousands of instances per region.
+/// The arithmetic, as `docs/design/jbig2-symbol-text.md`'s *Bounds* states it:
+/// a 300 dpi A4 text page reduces to a few hundred distinct glyph bitmaps and
+/// a few thousand placements, so 200 pages against one shared dictionary
+/// reach the low tens of thousands of symbols and the low thousands of
+/// instances per region.
 ///
 /// **Corroborated 6 September 2026 and left where it is.** The largest real
 /// dictionary in the five fetched corpora exports 2 478 symbols, so this

@@ -1102,8 +1102,7 @@ pub enum Warning {
     /// draws it anyway rather than dropping it. Slicing a row's cells at a line
     /// boundary — every cell cut at the same height, each continuing on the
     /// next page — is `css-break-3`'s and is not here. See the refusal table
-    /// in `docs/features/epub.md` and gap 31's milestone 11 row, amended in
-    /// place.
+    /// in `docs/features/epub.md`.
     TableRowTallerThanPage,
     /// A table cell whose `rowspan` reaches past the last row of its row group,
     /// clamped to it. CSS 2.2 §17.5: *"the cell is clamped so that it does not

@@ -16,7 +16,6 @@
 //!
 //! # The half that has to use the decoder, and why it is not a retreat
 //!
-//! *Added 26 September 2026, for `docs/verification.md`'s `jbig2` fuzz row.*
 //! One figure this census is asked for cannot be reached from a header at all:
 //! **how large a dictionary's symbols are.** 6.5.5 accumulates a symbol's
 //! height from `IADH` deltas and its width from `IADW` deltas *inside the
@@ -38,7 +37,9 @@
 //! rather than guessed at, so an image whose decode refused is counted in
 //! `images_refused` and its figures read as a floor.
 //!
-//! Run it, and record what it says in `docs/design/jbig2-symbol-text.md`:
+//! Run it locally, with the other corpus censuses; what it prints is the
+//! *most any file in the corpus spends* row of each cap it names in
+//! `crates/tinker-pdf-filters/src/jbig2.rs`:
 //!
 //! ```sh
 //! cargo test -p tinker-pdf --test jbig2_census -- --ignored --nocapture
@@ -982,7 +983,7 @@ fn census_of_the_corpus_jbig2() {
     //
     // [`measure`] is that measurement. It is the decoder's own tally rather than
     // a header walk, because nothing else can reach a symbol's size, and the
-    // figures below are what `docs/verification.md`'s jbig2 row was waiting on.
+    // figures below are the corpus rows of the caps' tables in `jbig2.rs`.
     println!(
         "largest dictionary pixels {:>10}   <- MAX_JBIG2_SYMBOL_PIXELS's own yardstick",
         total.max_symbol_pixels

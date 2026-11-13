@@ -25,12 +25,6 @@
 //!   stream (`6-3-3-t02-pass-a`), and the `/FT` that says so may be inherited
 //!   from the parent field (`6-4-1-t01-pass-b`, which this build reported
 //!   until it followed `/Parent`).
-//!
-//! # Injection, counted
-//!
-//! Recorded in `docs/design/pdfa.md` under "What the annotation group
-//! measured", with the bar as the unit for the two that move a number rather
-//! than a verdict.
 
 use tinker_pdf::{Document, FindingKind, PdfACoverage};
 

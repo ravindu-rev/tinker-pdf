@@ -111,11 +111,10 @@
 //! What none of these four rows measures is a *second producer*. All three
 //! `.cb7`s were written by 7-Zip 26.02, so a misreading of the format shared
 //! between that writer and this reader would survive every one of them.
-//! `docs/design/comic-archives.md` recorded that as unmet rather than closed,
-//! and it stayed unmet until tier 4's coder rows brought py7zr: its archives
-//! are a second implementation of the container, and the first thing one of
-//! them showed is that it lists a folder's coders in the opposite order from
-//! 7-Zip (`the_bcj_fixture_is_a_filter_chain_that_rewrote_operands`).
+//! py7zr is the second producer `docs/design/comic-archives.md` names: its
+//! archives are a second implementation of the container, and one of them
+//! lists a folder's coders in the opposite order from 7-Zip
+//! (`the_bcj_fixture_is_a_filter_chain_that_rewrote_operands`).
 
 use super::*;
 

@@ -1,32 +1,33 @@
-//! JBIG2 (ITU-T T.88): the generic-region lineage.
+//! JBIG2 (ITU-T T.88): the generic-region, symbol and halftone lineages.
 //!
-//! Feature documentation: `docs/features/filters.md`. The reasoning behind
-//! the scope is gap 17's.
+//! Feature documentation: `docs/features/filters.md`; the symbol and text
+//! lineage's design is `docs/design/jbig2-symbol-text.md`.
 //!
-//! JBIG2 is two largely separate codecs sharing one container. The **generic
+//! JBIG2 is largely separate codecs sharing one container. The **generic
 //! region** lineage codes a bilevel bitmap pixel by pixel, either with the MQ
 //! arithmetic coder against a template of already-decoded neighbours (6.2.5)
 //! or with the same MMR coding a G4 fax uses (6.2.6). That is what a scanner
 //! emits. The **symbol dictionary plus text region** lineage builds a
 //! dictionary of glyph bitmaps and then places them, and that is what
 //! `jbig2enc` and OCRmyPDF emit — most PDFs that have been through an OCR
-//! pipeline. This module decodes the first and **refuses the second by name**.
+//! pipeline. The **halftone** lineage stamps the patterns of a pattern
+//! dictionary over a grid. This module decodes all three, with clause 6.3's
+//! refinement beside them, and **refuses by name** what it does not decode:
+//! the colour palette segment, the random-access organisation, and every
+//! reference that does not resolve ([`Jbig2Refusal`]).
 //!
 //! # The refusal is the feature
 //!
 //! The tempting shape is to skip segments this build does not understand and
-//! return whatever page came out. A file that is symbol dictionary plus text
-//! region would then decode its page information segment, find no generic
-//! region, and hand back a **blank white page reported as success** —
-//! indistinguishable from a correct decode of a blank scan, and strictly
-//! worse than the grey placeholder it replaced, which at least says something
-//! is missing.
+//! return whatever page came out. A file whose only region refused would then
+//! decode its page information segment, find no region, and hand back a
+//! **blank white page reported as success** — indistinguishable from a
+//! correct decode of a blank scan, and strictly worse than the grey
+//! placeholder, which at least says something is missing.
 //!
 //! So [`decode`] returns [`FilterError::Unsupported`] when no region was
 //! composited onto the page, and the caller draws the placeholder. Ruling 2
-//! degrades; it does not invent content. The corpus makes this the *common*
-//! path rather than a corner: of the 103 JBIG2 files gap 23 measured, the OCR
-//! lineage is the bulk.
+//! degrades; it does not invent content.
 //!
 //! # Polarity
 //!
@@ -329,10 +330,10 @@ pub enum Jbig2Refusal {
     /// another file looks like.
     PageSizeDisagrees,
 
-    // --- coding variants, named apart from a lineage nobody has started ---
-    /// 7.4.3.1.1: the `SDHUFFDH` selector chose clause 7.4.13's custom table.
+    // --- coding variants, named apart from a segment this build does not decode ---
+    /// 7.4.3.1.1: the `SDHUFFDH` selector chose its reserved value, 2.
     HuffmanDhSelector,
-    /// 7.4.3.1.1: the `SDHUFFDW` selector chose a custom table.
+    /// 7.4.3.1.1: the `SDHUFFDW` selector chose its reserved value, 2.
     HuffmanDwSelector,
     /// 7.4.3.1.1 bits 6 and 7: `SDHUFFBMSIZE` or `SDHUFFAGGINST` chose one.
     HuffmanBmSizeOrAggInstSelector,
@@ -354,8 +355,10 @@ pub enum Jbig2Refusal {
     /// a template 2 dictionary's contexts is reading 65 536 states out of
     /// 1 024, which is a file contradicting itself rather than a capability.
     RetainedContextMismatch,
-    /// 7.4.4.1.2: a text region's `SBHUFFFS`, `SBHUFFDS`, `SBHUFFDT` or
-    /// `SBHUFFRSIZE` selector chose a custom table.
+    /// 7.4.4.1.2: a text region's `SBHUFFFS` selector, or one of a refining
+    /// region's `SBHUFFRDW` to `SBHUFFRDY` selectors, chose its reserved value,
+    /// 2, or a refinement selector's custom table was not there to take
+    /// ([`Jbig2Refusal::CustomTableMissing`] is recorded before it).
     TextTableSelector,
     /// 6.4.11 over the Huffman road with no refinement tables selected.
     RefinementTablesAbsent,
@@ -741,14 +744,13 @@ fn unknown_length_extent(data: &[u8]) -> Option<usize> {
     None
 }
 
-/// # Annex A, ahead of its caller
+/// # Annex A
 ///
-/// The three items below are read only by this module's tests until the
-/// symbol dictionary that drives them lands (milestone 3 of
-/// `docs/design/jbig2-symbol-text.md`). They arrive first deliberately: their
-/// round trips are what says they are right, and a decoder whose arithmetic is
-/// only exercised through the thing that consumes it cannot be told apart from
-/// a consumer that compensates for it.
+/// The items below are the integer decoders the symbol dictionary and the
+/// text region read their fields through, and the tests round-trip each of
+/// them on its own as well: a decoder whose arithmetic is only exercised
+/// through the thing that consumes it cannot be told apart from a consumer
+/// that compensates for it.
 ///
 /// How many contexts A.2's integer decoder keeps.
 ///
@@ -756,7 +758,6 @@ fn unknown_length_extent(data: &[u8]) -> Option<usize> {
 /// [`decode_int`] rather than by the array's length — the array is sized to
 /// match it so the fold is the only thing deciding, and an index can never be
 /// the thing that is wrong.
-#[allow(dead_code)]
 const INT_CONTEXTS: usize = 512;
 
 /// **A.2: the integer arithmetic decoding procedure.**
@@ -775,7 +776,6 @@ const INT_CONTEXTS: usize = 512;
 /// keeps its place in the tree. A build that let it grow would index out of
 /// the array on the tenth bit of a 32-bit magnitude — which is every large
 /// coordinate in a real text region, not an edge case.
-#[allow(dead_code)]
 fn decode_int(coder: &mut MqDecoder<'_>, cx: &mut MqContexts) -> Option<i32> {
     let mut prev = 1usize;
     let bit = |coder: &mut MqDecoder<'_>, cx: &mut MqContexts, prev: &mut usize| -> u32 {
@@ -828,7 +828,6 @@ fn decode_int(coder: &mut MqDecoder<'_>, cx: &mut MqContexts) -> Option<i32> {
 /// contexts are the prefix decoded so far, so the array is twice as wide as
 /// the code length and `PREV` never needs folding. `code_len` is
 /// `SBSYMCODELEN`, and it is the caller's to derive from the symbol count.
-#[allow(dead_code)]
 fn decode_iaid(coder: &mut MqDecoder<'_>, cx: &mut MqContexts, code_len: u32) -> u32 {
     let mut prev = 1usize;
     for _ in 0..code_len.min(31) {
@@ -839,7 +838,6 @@ fn decode_iaid(coder: &mut MqDecoder<'_>, cx: &mut MqContexts, code_len: u32) ->
 }
 
 /// How many contexts [`decode_iaid`] needs for a given code length.
-#[allow(dead_code)]
 fn iaid_contexts(code_len: u32) -> usize {
     1usize << (code_len.min(31) + 1)
 }
@@ -1449,13 +1447,10 @@ impl ArithContexts {
 /// | A 300-page reflowable book | 0 |
 /// | **This cap** | **100 000 (estimate)** |
 ///
-/// **The third figure is arithmetic and the ledger says so.** Milestone 7 of
-/// `docs/design/jbig2-symbol-text.md` asked for a measurement against a real
-/// `jbig2enc`/OCRmyPDF file and the census taken to make it found the corpus's
-/// largest `SDNUMEXSYMS` was **11** across 102 JBIG2-bearing files — every one
-/// of them a synthetic fixture built to exercise one placement variant. A cap
-/// calibrated on that would let anything through, so the number here is
-/// argued instead: a 300 dpi A4 text page reduces to a few hundred distinct
+/// **The third figure is arithmetic and the ledger says so.** A corpus holds
+/// the documents it happens to hold, and a cap calibrated on its worst would
+/// refuse the next longer scan, so the number here is argued instead: a
+/// 300 dpi A4 text page reduces to a few hundred distinct
 /// glyph bitmaps, and 200 pages of them saturate a shared dictionary in the
 /// low tens of thousands. That is the same currency
 /// `crates/tinker-pdf/tests/bounds_ledger.rs`'s comic and fixed-document
@@ -1511,11 +1506,12 @@ pub const MAX_JBIG2_SYMBOLS: u32 = 100_000;
 /// fortieth of it, exactly as [`MAX_JBIG2_SYMBOLS`]'s does.
 ///
 /// It is also why this cap is **not** lowered to bound the time a dictionary
-/// spends, which `docs/verification.md`'s `jbig2` fuzz row records at length:
-/// the 25 000 000 is what a plausible 200-page scan sharing one dictionary
-/// asks for, the corpus's own worst is a 46-page one, and a cap set below the
-/// estimate on the strength of a smaller document is the failure
-/// `no_bound_refuses_a_real_book` exists to catch.
+/// spends, which [`MAX_JBIG2_WORK_MULTIPLE`] and
+/// [`MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`] bound instead: the 25 000 000 is what a
+/// plausible 200-page scan sharing one dictionary asks for, the corpus's own
+/// worst is a 46-page one, and a cap set below the estimate on the strength
+/// of a smaller document is the failure `no_bound_refuses_a_real_book` exists
+/// to catch.
 ///
 /// Reachable: a symbol's width and height each accumulate from Annex B deltas
 /// whose tables carry 32-bit ranges, and each is refused only above
@@ -2697,8 +2693,10 @@ struct TextTables {
 }
 
 impl TextTables {
-    /// Picks them from the selector field, refusing the custom-table settings
-    /// clause 7.4.13 defines and nothing here reads yet.
+    /// Picks them from the selector field: a standard table by its number, or
+    /// the next of clause 7.4.13's custom tables the region refers to. A
+    /// selector's reserved value, and a custom table the region does not
+    /// refer to, refuse by name.
     fn select(
         selectors: u16,
         refine: bool,
@@ -4025,16 +4023,15 @@ fn understood(kind: u8) -> bool {
 ///
 /// Distinguished from [`understood`] because the two answer different
 /// questions. An extension segment is skippable by design (7.4.14 makes them
-/// optional unless a necessity bit says otherwise); a text region is a
-/// picture that will be missing from the page. Only the second kind is worth
-/// a warning naming a lineage.
+/// optional unless a necessity bit says otherwise); a colour palette is part
+/// of the picture, and a page drawn without it is missing what it says. Only
+/// the second kind is worth a warning naming the segment.
 ///
 /// Intermediate regions (types 4, 36 and 40) are in [`understood`] rather
 /// than here: 7.4.6.1 sends an intermediate result to an auxiliary buffer for
 /// a later segment to refer to, and a refinement region that refers to one
 /// reads it from that buffer instead of from the page. What is listed here is
-/// what no path reproduces — the halftone lineage, custom tables and colour
-/// palettes.
+/// what no path reproduces, which is the colour palette alone.
 fn carries_content(kind: u8) -> bool {
     matches!(kind, kind::COLOUR_PALETTE)
 }
@@ -4290,11 +4287,12 @@ const fn tpgdon_context(template: u8) -> usize {
 /// [`REFINE_1_HERE`]'s four and its right group is [`REFINE_1_THERE`]'s six
 /// in a plus shape, ten in all, and it has no adaptive pixels.
 ///
-/// That is worth stating because `docs/design/jbig2-symbol-text.md` records
-/// **five** distinct templates that decoded Annex H page 3 into legible text
-/// and were all wrong, and because until the standard arrived the only thing
-/// holding these was the corpus coding one picture ten ways. The corpus was
-/// right.
+/// That is worth stating because Annex H page 3 cannot hold them on its own:
+/// its dictionary refines one 6 by 6 symbol, thirty-six coded decisions, which
+/// is not enough to separate candidate templates
+/// (`docs/design/jbig2-symbol-text.md`, *What the evidence can adjudicate*).
+/// The corpus coding one picture ten ways is what can, and it agrees with the
+/// figures.
 const REFINE_0_HERE: [(i8, i8); 3] = [(0, -1), (1, -1), (-1, 0)];
 
 /// The reference layer's fixed positions for template 0: its whole
@@ -5721,10 +5719,10 @@ impl Page {
                 && (self.refused.contains(number) || !self.seen.contains(number))
         };
         if segment.referred.iter().any(dangling) {
-            // T.88 Annex H.1's own page 2 is this case: its arithmetic text
+            // T.88 Annex H.1's own page 2 shows why: its arithmetic text
             // region refers to page 1's *Huffman* dictionary as well as its
-            // own, so until the Huffman variant lands the numbering is short by
-            // that dictionary's exports and every instance would draw the wrong
+            // own, so without that dictionary the numbering is short by its
+            // exports and every instance after them would draw the wrong
             // symbol. Named rather than attempted.
             note(warnings, Jbig2Refusal::DanglingReference);
             return;
@@ -7222,25 +7220,23 @@ mod tests {
         );
     }
 
-    /// **Every variant this milestone does not decode refuses by its own
-    /// name**, rather than as the segment type nobody has started.
+    /// **A dictionary whose reference does not resolve refuses by its own
+    /// name**, rather than as a segment this build does not decode.
     ///
-    /// `Jbig2SegmentSkipped` means a lineage with no work behind it;
-    /// `Jbig2VariantSkipped` means a file one scheduled milestone away. The
-    /// corpus census counted how many files each of those is, and folding them
-    /// together is how the residual after a capability lands comes to look
-    /// like the refusal it replaced.
+    /// `Jbig2SegmentSkipped` means a segment this build does not decode;
+    /// `Jbig2VariantSkipped` means a reference that does not resolve, in a
+    /// segment it does. Folding the two together would make a broken
+    /// reference look like a capability nobody built.
     #[test]
     fn the_variants_this_build_does_not_decode_refuse_by_their_own_name() {
-        // **Both rows are now a reference that does not resolve rather than a
-        // capability nobody built.** What has left this list is the whole of
-        // the symbol lineage: SDHUFF, SDREFAGG, both refinement templates,
-        // SDHUFF together with SDREFAGG, clause 7.4.13's custom tables and now
-        // 7.4.2's retained bitmap-coding contexts. So `0x0100` refuses here
-        // because this segment refers to nothing that retained a context, and
-        // `0x000D` because it refers to no Tables segment while 7.4.3.1.6
-        // hands them out by position -- one short renumbers every selector
-        // after the gap. Neither is a road this build has not walked.
+        // Both rows are a reference that does not resolve. Every coding
+        // variant of the symbol lineage decodes: SDHUFF, SDREFAGG, both
+        // refinement templates, SDHUFF together with SDREFAGG, clause 7.4.13's
+        // custom tables and 7.4.2's retained bitmap-coding contexts. So
+        // `0x0100` refuses here because this segment refers to nothing that
+        // retained a context, and `0x000D` because it refers to no Tables
+        // segment while 7.4.3.1.6 hands them out by position -- one short
+        // renumbers every selector after the gap.
         for (flags, expected) in [
             (0x0100u16, Jbig2Refusal::RetainedContextMissing),
             (0x000D, Jbig2Refusal::CustomTableMissing),
@@ -7533,9 +7529,10 @@ mod tests {
     /// there. The absence of `Jbig2SymbolLimitHit` is what says so.
     ///
     /// No clock. The assertion is the named warning — which matters more here
-    /// than anywhere else in this file, because the finding this cap closes was
-    /// found *by* a clock: `docs/verification.md`'s `jbig2` fuzz row, a
-    /// twenty-second libFuzzer timeout on 105 bytes.
+    /// than anywhere else in this file, because what this cap stops is a
+    /// decode that spends its time rather than its memory: the seed
+    /// `fuzz/corpus/jbig2/symbol-dictionary-spends-the-pixel-budget`, 105
+    /// bytes whose first symbol is 69 pixels wide on a page one pixel wide.
     #[test]
     fn a_symbol_larger_than_its_page_is_refused_at_the_first_symbol() {
         // A Huffman dictionary: DH over B.4, DW over B.2, no refinement, no
@@ -8711,7 +8708,8 @@ mod tests {
         assert_eq!(warnings, vec![Jbig2Refusal::UnknownDataLength]);
     }
 
-    /// The lineage this plan does not build, named rather than absorbed.
+    /// A file whose only dictionary is too short to read refuses, and says so,
+    /// rather than drawing the page its text region could not place.
     #[test]
     fn a_symbol_dictionary_file_refuses_and_says_so() {
         let mut stream = header(0, kind::PAGE_INFORMATION, 1, &page_info(64, 56, 0));
@@ -10462,8 +10460,10 @@ mod tests {
     /// One refined symbol per dictionary rather than several, because 6.5.8.2's
     /// Huffman road gives each symbol its own byte-aligned sub-stream over
     /// shared 6.3 states, and [`MqEncoder`] cannot carry states from one
-    /// sub-stream to the next. That rule is held by the corpus instead — see
-    /// the injection table in `docs/design/jbig2-symbol-text.md`.
+    /// sub-stream to the next. That rule is held by the corpus instead:
+    /// `crates/tinker-pdf/tests/jbig2_refinement.rs` holds
+    /// `bitmap-symbol-symhuffrefine-textrefine.pdf`, whose dictionary refines
+    /// several symbols over one set of 6.3 states, to the unrefined picture.
     #[test]
     fn a_huffman_dictionary_refines_at_every_non_zero_line_of_b15() {
         let class: [&[&str]; 1] = [&HUFF_SYMBOL];
@@ -10531,10 +10531,11 @@ mod tests {
     ///
     /// Lifting a guard is only safe if the cases it happened to cover are
     /// still covered by something narrower. Two are asserted here: a selector
-    /// of 3 is clause 7.4.13's custom table, which this build does not read and
-    /// which is refused by name; and a delta that sizes the refined instance
-    /// to nothing is refused rather than allocated, because `RDW` and `RDH` are
-    /// attacker-controlled and 7.4.4.1.2 does not bound them.
+    /// of 3 asks for clause 7.4.13's custom table, and a region that refers to
+    /// no Tables segment to take it from is refused by name; and a delta that
+    /// sizes the refined instance to nothing is refused rather than allocated,
+    /// because `RDW` and `RDH` are attacker-controlled and 7.4.4.1.2 does not
+    /// bound them.
     #[test]
     fn a_refining_huffman_region_still_refuses_what_it_cannot_read() {
         let symbol = bitmap_from(&HUFF_SYMBOL);
@@ -10566,8 +10567,9 @@ mod tests {
             warnings
         };
 
-        // 7.4.4.1.2: a selector of 3 for RDW is clause 7.4.13's custom table.
-        // The selector field starts 19 bytes into the segment, after the region
+        // 7.4.4.1.2: a selector of 3 for RDW asks for clause 7.4.13's custom
+        // table, and this region refers to the dictionary alone. The selector
+        // field starts 19 bytes into the segment, after the region
         // information and the flags; its low byte carries bits 0 to 7, and
         // RDW's are 6 and 7.
         let mut region = huffman_text_region(
@@ -10583,9 +10585,12 @@ mod tests {
         if let Some(byte) = region.get_mut(20) {
             *byte |= 0xC0;
         }
+        let refused = refuse(&region);
         assert!(
-            refuse(&region).contains(&Jbig2Refusal::TextTableSelector),
-            "a custom table is refused by name"
+            refused.contains(&Jbig2Refusal::CustomTableMissing)
+                && refused.contains(&Jbig2Refusal::TextTableSelector),
+            "a custom table the region does not refer to is refused by name: \
+             {refused:?}"
         );
 
         // And `RDH` of −8 against a six-high symbol, which sizes the instance

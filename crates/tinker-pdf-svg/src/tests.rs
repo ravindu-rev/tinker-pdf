@@ -393,11 +393,11 @@ fn an_outline_of_moves_alone_is_empty() {
 
 /// **Every committed fuzz seed still exercises what it was committed for.**
 ///
-/// `docs/verification.md` records why this test exists: `icc_profile` was the
-/// one target whose corpus had no seeds, so its budget went on random bytes
-/// against a format gated on a signature — and nothing said so. A seed that
-/// quietly stopped parsing sits in the corpus looking like the coverage it no
-/// longer is, and only a test that reads it can tell.
+/// A target whose seeds reach nothing spends its budget on random bytes, and
+/// nothing says so: a seed that quietly stopped parsing sits in the corpus
+/// looking like the coverage it no longer is, and only a test that reads it
+/// can tell (`docs/verification.md`, *The roster, and whether the seeds reach
+/// the code*).
 ///
 /// The assertions are the target's own, minus the ones that need libFuzzer:
 /// the first byte is the control byte, the rest is the text, nothing escapes

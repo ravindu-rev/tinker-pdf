@@ -12,9 +12,9 @@
 //!
 //! # Why an `#[ignore]`d test rather than a script
 //!
-//! The same reason `docs/verification.md` gives for the six fuzz seed corpora
-//! *"written by an `#[ignore]`d test in the crate that owns the fixtures, so
-//! the seeds and the fixtures cannot drift"*: the writer that produces a
+//! The same reason `docs/verification.md` gives for a seed corpus written by
+//! an `#[ignore]`d test in the crate that owns the fixtures, which cannot
+//! drift from those fixtures: the writer that produces a
 //! fixture and the writer the suite tests have to be one writer. A PowerShell
 //! script that assembled these PDFs by hand would be a second implementation of
 //! `DocumentBuilder`, kept in step by nobody.

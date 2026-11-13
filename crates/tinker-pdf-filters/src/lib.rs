@@ -253,16 +253,18 @@ pub enum Warning {
     /// [`Warning::JpxBudgetSpent`]'s shape and wants its own name for the same
     /// reason.
     Jbig2BudgetSpent,
-    /// JBIG2: a *variant* of a segment this build decodes — the Huffman or the
-    /// refinement coding of a symbol dictionary or text region, or a retained
-    /// context from another segment.
+    /// JBIG2: a segment this build decodes, refused for a reference that does
+    /// not resolve — a missing or wrong-shaped retained context, a custom
+    /// table the segment does not refer to, a text region whose dictionary is
+    /// absent or refused — or for a reserved table selector or a refinement
+    /// with no refinement tables.
     ///
     /// Distinct from [`Warning::Jbig2SegmentSkipped`] on purpose. That one
-    /// means a lineage nobody has started; this one means a file that is one
-    /// scheduled milestone away, and the corpus census in
-    /// `docs/design/jbig2-symbol-text.md` counted how many files each is.
-    /// Folding the two together is how the residual after a capability lands
-    /// comes to look like the refusal it replaced.
+    /// means a segment this build does not decode; this one means a file that
+    /// contradicts itself inside one it does
+    /// (`docs/design/jbig2-symbol-text.md`, *Refusals*). Folding the two
+    /// together would make a broken reference look like a capability nobody
+    /// built.
     Jbig2VariantSkipped,
     /// JBIG2: a symbol dictionary asked for more symbols, or more pixels of
     /// them, than the bounds allow — or promised a count its own data did not

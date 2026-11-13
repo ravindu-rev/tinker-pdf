@@ -59,7 +59,7 @@ fuzz_target!(|data: &[u8]| {
     // page the same call was given, so a small page here is a small symbol
     // budget rather than only a small output — which is what stopped the seed
     // `symbol-dictionary-spends-the-pixel-budget` spending 67 million decoded
-    // pixels on a page of one (`docs/verification.md`, the `jbig2` fuzz row).
+    // pixels on a page of one.
     // A knob that grew the page would relax that bound as well as the buffer.
     //
     // **And the ceiling is the whole decode's budget since October 2026**:

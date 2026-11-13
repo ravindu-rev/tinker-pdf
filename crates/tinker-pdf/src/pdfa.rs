@@ -30,12 +30,12 @@
 //! very nearly the 516 part-4 files. So a level on a part-4 file and a missing
 //! level on a part-1-to-3 file are both findings, in opposite directions.
 //!
-//! # What this module does not do yet
+//! # What a clean verdict means
 //!
 //! Milestone 1 of `docs/design/pdfa.md`: the verdict types, the flavour, and
 //! the rule table's shape. The rule *groups* — syntax, font, colour, XMP — are
-//! milestones 2 to 5, and until they land a clean verdict means "nothing this
-//! build checks was broken" rather than "this file conforms".
+//! milestones 2 to 5, and a clean verdict means "nothing this build checks
+//! was broken" rather than "this file conforms".
 //! [`Verdict::coverage`] is what says which, and it is not decoration: a
 //! validator that cannot say what it did not check is a validator whose empty
 //! answer cannot be read.

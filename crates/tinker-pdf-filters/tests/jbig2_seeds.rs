@@ -27,7 +27,8 @@
 //! [`the_pixel_budget_seed_is_refused_at_its_first_symbol`] pins that by its
 //! cause rather than by its duration, which is the whole discipline here — a
 //! budget proved by a clock passes on a fast machine with the budget removed.
-//! `docs/verification.md` records why the total budget is not lowered instead.
+//! `MAX_JBIG2_SYMBOL_PIXELS`'s own documentation says why the total budget is
+//! not lowered instead.
 //!
 //! *Amended, October 2026.* **And the shape that bound left open came back**,
 //! as `symbol-dictionary-spun-past-its-marker`: a page of 37 by 56 is large
@@ -171,7 +172,7 @@ fn every_committed_seed_decodes_or_refuses_by_name() {
 /// **The seed the 20 September 2026 fuzz run timed out on, refused at its
 /// first symbol.**
 ///
-/// The regression guard for `docs/verification.md`'s `jbig2` row, and it is
+/// The regression guard for `MAX_JBIG2_SYMBOL_PAGE_MULTIPLE`, and it is
 /// deliberately not a timing assertion. What made that input twenty seconds
 /// under instrumentation was 67 219 222 decoded pixels across 546 symbols, and
 /// what makes it a millisecond now is that the **first** of those symbols is

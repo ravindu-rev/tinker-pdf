@@ -30,7 +30,8 @@
 //!   dictionary reset each, two of them mid-stream; `7z-nonsolid.cb7`
 //!   (`-ms=off`) is five folders, so the front end is entered five times.
 //!   What none of the three buys is a second *writer* — all are 7-Zip 26.02 —
-//!   which `docs/design/comic-archives.md` records as unmet.
+//!   and that is `py7zr-bcj.cb7`'s, which `docs/design/comic-archives.md`
+//!   names for it.
 //!
 //! The LZMA2 *framing* is a third case and is fully checkable here: an
 //! uncompressed chunk needs no range coder at all, so the control-byte

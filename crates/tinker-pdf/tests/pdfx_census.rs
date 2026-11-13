@@ -1,5 +1,5 @@
 //! Every PDF/X claim in the fetched corpora, read through
-//! `Document::validate_pdfx` (`docs/design/pdfx.md`, milestone 1's census).
+//! `Document::validate_pdfx` (`docs/design/pdfx.md`'s census).
 //!
 //! ```text
 //! cargo xtask corpus-fetch

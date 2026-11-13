@@ -18,11 +18,10 @@
 //!
 //! # Where ICC staging actually falls, which is not where it was expected
 //!
-//! `docs/design/pdfa.md` staged "colour rules that need to look inside a
-//! profile" behind `docs/design/icc.md`. That design has since landed
-//! `icc::Profile::parse`, so the header fields these rules need — the data
-//! colour space signature, and through it the channel count — are available
-//! and are read. What is **not** available is a profile *validator*:
+//! The rules that need to look inside a profile read it through
+//! `icc::Profile::parse` (`docs/design/icc.md`), so the header fields they
+//! need — the data colour space signature, and through it the channel
+//! count — are available and are read. What is **not** available is a profile *validator*:
 //! `Profile::parse` exists to build a colour transform and refuses a profile
 //! it cannot build one from, including v4 profiles whose only route to the
 //! connection space is an `mAB ` tag. Refusing to render is right; refusing to
@@ -1262,8 +1261,8 @@ fn annotation_colours(doc: &CosDocument, destination: &Destination, out: &mut Ve
 /// the space has, and it shall agree with the profile.
 ///
 /// The second half is the one that needs the profile's own header, and it is
-/// the clearest example of what `docs/design/icc.md` landing bought this
-/// group: the channel count follows from the data colour space signature, so a
+/// the clearest example of what reading the profile (`docs/design/icc.md`)
+/// buys this group: the channel count follows from the data colour space signature, so a
 /// three-component profile declared `/N 4` is a finding rather than a guess. A
 /// profile this build cannot read leaves the second half unasked; the first —
 /// `/N` present and one of the three values ISO 32000-1 8.6.5.5 admits — is

@@ -1845,8 +1845,8 @@ impl Walk<'_> {
                     // spaces, runs of space collapse to one, and the leading
                     // and trailing space of the *element* goes. Applied per
                     // run rather than across the element, which is where this
-                    // build differs from a full implementation — named in
-                    // `docs/design/svg.md` rather than hidden.
+                    // build differs from the clause's element-wide rule —
+                    // named here rather than hidden.
                     let text = collapse(&text);
                     if text.is_empty() {
                         continue;

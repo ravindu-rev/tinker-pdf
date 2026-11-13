@@ -393,9 +393,8 @@ fn the_archival_fixture_hashes_the_same_on_every_target() {
 
 /// Level A is reachable, because `PageBuilder::tagged` exists.
 ///
-/// `docs/design/pdfa.md` used to stage level A behind the tagged-PDF design.
-/// That design landed, so the writer claims A by tagging — and the two ways of
-/// getting it wrong are refused rather than written.
+/// The writer claims A by tagging (`docs/design/pdfa.md`, *Level A*) — and
+/// the two ways of getting it wrong are refused rather than written.
 #[test]
 fn level_a_is_written_when_the_pages_are_tagged_and_refused_when_they_are_not() {
     let mut profile = rgb_profile(ArchivalPart::Two, Some(ArchivalLevel::A));

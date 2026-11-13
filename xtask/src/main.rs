@@ -582,8 +582,9 @@ fn quiet(task: &str, outcome: Result<(), String>) -> ExitCode {
 /// certificate could be fuzzed only by first constructing a plausible
 /// `HandlerParams` around it. Apart, it is the twenty-fifth fuzz target and
 /// `fuzz/fuzz_targets/pki_der.rs` points straight at raw DER, which
-/// `docs/design/signatures.md:75-92` argues for and its risk table names as the
-/// mitigation for the largest risk it records.
+/// `docs/design/signatures.md`'s risk table names, with the crate a leaf of
+/// its own, as the mitigation for the largest new untrusted surface it
+/// records.
 ///
 /// **It is a leaf on ruling 8's definition, which is about public APIs.** X.509
 /// and CMS are not PDF concepts: bytes and plain parameters in, values out, no

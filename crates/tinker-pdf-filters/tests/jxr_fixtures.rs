@@ -390,7 +390,7 @@ fn manifest_text() -> String {
 /// `#[ignore]`d because it writes into the source tree, which an ordinary
 /// `cargo test` must not do. It is the *only* definition of what the encoder
 /// is handed, which is what keeps the fixtures and the expectations from
-/// drifting apart — the discipline `docs/verification.md` records for the six
+/// drifting apart — the discipline `docs/verification.md` records for the
 /// seed corpora that are written the same way.
 #[test]
 #[ignore = "writes fixture sources into the source tree; see the module docs"]
@@ -411,10 +411,11 @@ fn write_source_rasters() {
 
 /// Copies the committed fixtures into the fuzz seed corpus.
 ///
-/// `docs/verification.md` records why this exists and why it is a test rather
-/// than a script: a target with no seeds spends its whole budget on random
-/// bytes, and for a format gated on a four-byte magic that means it reaches
-/// the parser essentially never.
+/// A target with no seeds spends its whole budget on random bytes, and for a
+/// format gated on a four-byte magic that means it reaches the parser
+/// essentially never. It is a test rather than a script for the reason
+/// `docs/verification.md` gives for a seed corpus written by the crate that
+/// owns the fixtures: the two cannot drift.
 #[test]
 #[ignore = "writes into fuzz/corpus/jxr; see docs/verification.md"]
 fn write_fuzz_seeds() {

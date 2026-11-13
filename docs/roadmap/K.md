@@ -109,18 +109,6 @@ K-08 extends the mechanism to every new rendered surface.
 | K-08.5 | test | A golden family for fields under formatting scripts: a page of text fields whose appearances show the values `AFNumber_Format`, `AFPercent_Format`, `AFDate_Format` and `AFSpecial_Format` produce, its header naming its clause, entering `UNREVIEWED`, once a formatted value reaches a field's appearance. *Note:* No appearance draws a formatted value today: `formatted_value` returns a `DisplayString` no writer takes (`docs/features/forms.md`). FJ-07's formatting after a committed change is taken as the row that adds the surface. | `crates/tinker-pdf/tests/surface_goldens.rs` (new), `crates/tinker-pdf/tests/goldens/surfaces/formatted-fields.ppm` (new) | `every_surface_golden_is_what_this_build_draws` holds `formatted-fields` byte for byte above its ink floor, `unreviewed` and listed in `UNREVIEWED`, in the default and `bundled-fonts` builds. | K-08.1, FJ-07 |
 | K-08.6 | test | A golden family for OCR text-layer alignment: a scanned-page fixture with its imported invisible text layer drawn visibly over it (each word's box and baseline), so a reviewer sees the layer sit on the words; its header naming its clause, entering `UNREVIEWED`. *Note:* The layer is OC-01's import seam's; the recogniser's own layer (OC-02) joins the family in that row. | `crates/tinker-pdf/tests/surface_goldens.rs` (new), `crates/tinker-pdf/tests/goldens/surfaces/ocr-layer-alignment.ppm` (new) | `every_surface_golden_is_what_this_build_draws` holds `ocr-layer-alignment` byte for byte above its ink floor, `unreviewed` and listed in `UNREVIEWED`, in the default and `bundled-fonts` builds. | K-08.1, OC-01.3 |
 
-## K-16 — Code comments that cite docs the docs no longer carry
-
-**Code comments that cite docs the docs no longer carry, or contradict the code**: comments that point at sections of `docs/verification.md` and the design docs that describe history (its `jbig2` fuzz row, what a census or campaign found), the comment in `crates/tinker-pdf-raster/src/image.rs` that says `fill` truncates crossings where `fill.rs` rounds, and the `jbig2.rs` comments that call the symbol lineage and custom tables unsupported
-
-**Exit criterion.** no comment names a doc section that does not exist, and the comments above say what the code does
-
-**Doc:** — · **Depends on:** —
-
-| Step | Kind | What | Where | Exit | Depends on |
-| --- | --- | --- | --- | --- | --- |
-| K-16.1 | doc | Reword every comment that cites a section of `docs/verification.md` or a design doc that is gone, and the `image.rs` and `jbig2.rs` comments that contradict the code. | `crates/`, `xtask/src/bench.rs` | `git grep` finds no comment naming a missing doc section; the gates are green. | — |
-
 ## K-18 — A JBIG2 refusal nothing raises
 
 **A JBIG2 refusal nothing raises**: `Jbig2Refusal::HuffmanBmSizeOrAggInstSelector` is matched but never constructed

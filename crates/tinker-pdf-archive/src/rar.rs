@@ -15,21 +15,21 @@
 //! ([`EntryError::Compressed`]), so an archive that mixes them pages its stored
 //! entries and puts a placeholder where the others are (ruling 2).
 //!
-//! **The line is where the work stopped, not where the format's is**, and the
-//! committed fixture says so rather than the other way round.
+//! **The line is where the published format note stops**, and the committed
+//! fixture shows it.
 //! `winrar-rar5.cbr` holds four stored PNGs, **one JPEG compressed with method
 //! 3**, and a `QO` quick-open service record. So the four PNGs come back as
 //! the ZIP's own pictures with their recorded CRC-32s matching, and
 //! `page3.jpg` is a placeholder page naming its method.
 //!
-//! Two consequences, and both are worth having in front of a reader of this
-//! module. The algorithm **has** a first-party fixture — 169 bytes with its
-//! own CRC-32, and the same picture in five ZIPs beside it — so writing the
-//! decompressor is adjudicable work rather than work blocked on a corpus
-//! nobody can produce. And until it is written, a `.cbr` is *four fifths of a
-//! comic*, which is ruling 2 doing its job and is not the same claim as the
-//! container being finished. `docs/design/comic-archives.md`'s milestone 5 is
-//! the piece that closes it.
+//! The fixture is not what stops a decompressor: `page3.jpg` is 169 bytes
+//! with its own CRC-32, and the same picture is in five ZIPs beside it. What
+//! stops one is that RAR's compression has no published specification and
+//! its one implementation's licence bars deriving from it, so there is
+//! nothing rule 1 permits writing it from (`docs/design/comic-archives.md`,
+//! and the roadmap's non-goal NG-01). A `.cbr` with compressed entries is
+//! therefore *part of a comic*, which is ruling 2 doing its job and is not
+//! the same claim as the container being finished.
 //!
 //! # What adjudicates this reader
 //!

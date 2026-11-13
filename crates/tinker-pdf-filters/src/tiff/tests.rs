@@ -2677,8 +2677,9 @@ fn mutated_fixtures_never_panic() {
 /// on 20 September 2026, kept byte for byte because a generated input is
 /// evidence about what the mutator reached and a transcription of it is not.
 /// `the_seed_that_found_the_unread_sample_multiplier_is_refused` reads it, and
-/// `docs/verification.md` records what it found: a sample cap charged on the
-/// output raster while the decode read `SamplesPerPixel` samples per pixel.
+/// what it found is the multiplier that test names: a sample cap charged on
+/// the output raster while the decode read `SamplesPerPixel` samples per
+/// pixel.
 #[test]
 #[ignore = "writes into fuzz/corpus/tiff, which is committed"]
 fn write_the_fuzz_seeds() {

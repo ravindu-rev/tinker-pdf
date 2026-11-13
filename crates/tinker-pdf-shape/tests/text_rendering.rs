@@ -612,7 +612,7 @@ const MAX_DELTA: i32 = 1;
 ///
 /// The sixteen Brahmic ones do not, and this is where that is said. They are
 /// milestone 5's, whose exit criterion in `docs/design/shaping.md` is *"every
-/// text-rendering-tests USE section passes"* — and it is **not met**. Two of
+/// text-rendering-tests USE section, counted"* — and it is **not met**. Two of
 /// the sixteen pass whole; the rest do not. Running them anyway, with the
 /// number pinned, is deliberate and is the alternative to two worse options:
 /// declining them, which would hide that most of their cases already pass, and
@@ -822,9 +822,7 @@ fn verdict(ours: &[(u16, i32, i32)], expected: &[(Option<u16>, i32, i32)]) -> Wr
 ///   and no Unicode property this crate reads separates the two. The
 ///   measurement is in `universal::reorder`; the six stay unclaimed.
 /// - **`Order` is the rarest verdict in the whole corpus — two rows**, both in
-///   Tai Tham. By this measure `universal::reorder` is very nearly finished,
-///   which is the opposite of where `docs/design/shaping.md` pointed for two
-///   milestones.
+///   Tai Tham. By this measure `universal::reorder` is very nearly finished.
 /// - **Four `advance` and one `offset`** are all in Tai Tham, and each is a
 ///   single case in a section whose other failures are `set` — so none of them
 ///   is a cause worth a commit on its own.

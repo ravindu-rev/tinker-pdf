@@ -1,12 +1,12 @@
 //! OpenType Layout: face bytes and glyph indices in, substituted glyphs and
 //! integer positions out.
 //!
-//! Design documentation: `docs/design/shaping.md`. This is its **first
-//! milestone**: the `GDEF`, `GSUB` and `GPOS` tables of ISO/IEC 14496-22, and
-//! the machinery that executes a lookup list against a [`Buffer`]. It is not
-//! yet a shaper — nothing here maps text to glyphs, itemizes a paragraph or
-//! knows what script anything is in. A caller supplies the glyphs and the
-//! feature tags; milestones 2 to 5 grow the code that decides both.
+//! Design documentation: `docs/design/shaping.md`. Its first milestone is
+//! here: the `GDEF`, `GSUB` and `GPOS` tables of ISO/IEC 14496-22, and the
+//! machinery that executes a lookup list against a [`Buffer`]. Its second to
+//! fifth are built on it: the default, Arabic and USE shapers ([`Shaper`]),
+//! which map text to glyphs and decide which features run, and UAX #9
+//! ([`bidi`]).
 //!
 //! **The eleventh leaf.** Ruling 8's August 2026 amendment makes the test of
 //! a leaf the definition rather than the list: *a leaf is any crate that takes

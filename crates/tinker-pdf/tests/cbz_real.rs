@@ -65,7 +65,7 @@ fn corpus() -> PathBuf {
 /// `#[ignore]`d because it writes into the tree: it is how `source/` was
 /// obtained, not something a test run should do. It lives here rather than in
 /// the PowerShell script for the reason `docs/verification.md` gives for the
-/// twelve fuzz seed corpora written the same way — the fixtures and the code
+/// fuzz seed corpora written the same way — the fixtures and the code
 /// that makes them cannot drift when they are the same code. A PNG encoder
 /// transcribed a second time into PowerShell would be a second implementation
 /// of `cbz_support::rgb_png`, and the two would disagree eventually.

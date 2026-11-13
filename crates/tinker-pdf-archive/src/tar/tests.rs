@@ -641,8 +641,8 @@ fn hostile_headers_produce_answers_rather_than_panics() {
 /// generated input is evidence about what the mutator reached and a
 /// transcription of it is not. It is the seed
 /// `the_seed_that_found_the_expanding_name_stays_inside_its_cap` reads, and
-/// `docs/verification.md` records what it found: a name cut to the cap as a
-/// *field* and then expanded past it by the ISO-8859-1 fallback.
+/// what it found is in that test's name: a name cut to the cap as a *field*
+/// and then expanded past it by the ISO-8859-1 fallback.
 #[test]
 #[ignore = "writes into fuzz/corpus/tar, which is committed"]
 fn write_the_fuzz_seeds() {

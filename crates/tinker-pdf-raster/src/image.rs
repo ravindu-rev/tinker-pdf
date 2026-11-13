@@ -802,16 +802,18 @@ fn unit_quad(
     /// Unused: the quad has no curves.
     const TOLERANCE: f64 = 0.2;
 
-    // Snapped to the sweep's own horizontal grid. `fill` takes a crossing as
-    // `(x * 256) as i64`, which truncates, and an image rectangle placed by a
+    // Snapped to the sweep's own 1/256 grid. An image rectangle placed by a
     // translation lands on a 1/256 boundary far more often than not — every
     // strip of every scan does. The translation is exact but the arithmetic
     // that applies it need not be: `a + (e - t)` and `(a + e) - t` differ by
-    // an ulp, and an ulp below a grid line truncates to the unit beneath it.
-    // Rounding here makes the two spellings the same coverage. `round` is one
-    // of the operations IEEE 754 pins exactly, so this costs no determinism
-    // (ruling 4). Found by the `crop` relation, which requires a cropped page
-    // to be the sub-rectangle of the whole one *exactly*, on `pclm-in.pdf`.
+    // an ulp, and an ulp either side of a grid line falls on the wrong side
+    // of it. `fill` takes a crossing to the nearest 1/256 unit and an edge's
+    // rows from `ceil(y × 16)`, and neither rule can reconcile two corners
+    // that already differ, so the corners are made one value here instead
+    // (`docs/design/image-edges.md`). `round` is one of the operations
+    // IEEE 754 pins exactly, so this costs no determinism (ruling 4). The
+    // `crop` relation requires a cropped page to be the sub-rectangle of
+    // the whole one *exactly*, and `pclm-in.pdf` is where it showed.
     let snap = |value: f64| (value * 256.0).round() / 256.0;
 
     let mut quad = Path::new();

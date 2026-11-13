@@ -183,13 +183,13 @@ fn exercise(bytes: Vec<u8>) {
     // PDF/UA's validator reads the same packet through its own identification
     // reader and walks the structure tree and the fonts again, so it is a
     // second set of readers over the same hostile bytes (docs/design/pdfua.md
-    // milestone 1 puts the call here before the rules grow).
+    // puts the call here).
     let _ = doc.validate_pdfua();
     let _ = doc.validate_pdfua_with(tinker_pdf::PdfUaCoverage::STRUCTURE);
     // PDF/X's reads `/Info`, the page tree's boxes and every annotation's
-    // rectangle on its own (docs/design/pdfx.md milestone 1 puts the call
-    // here). A hostile file rarely claims a PDF/X level, so the rules behind
-    // the claim run here only when it does; `pdfx_rules.rs` holds them.
+    // rectangle on its own (docs/design/pdfx.md puts the call here). A
+    // hostile file rarely claims a PDF/X level, so the rules behind the
+    // claim run here only when it does; `pdfx_rules.rs` holds them.
     let _ = doc.validate_pdfx();
     let _ = doc.validate_pdfx_with(tinker_pdf::PdfXCoverage::SYNTAX);
     let _ = doc.metadata();

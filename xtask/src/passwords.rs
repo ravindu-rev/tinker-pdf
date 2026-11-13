@@ -7,8 +7,8 @@
 //! and wrong for a census. Thirty-six corpus files are *encryption tests* —
 //! that is what they were written to be — so a run that supplies no password
 //! records them as failures and the pass rate carries thirty-six files nobody
-//! measured. [`docs/verification.md`] called them "the runner's limitation,
-//! not the engine's" and left the decision open; this is the decision.
+//! measured. So the runner hands each the password its upstream states, from
+//! a sidecar `docs/verification.md` describes beside the corpus run.
 //!
 //! # Why a sidecar rather than a guess
 //!

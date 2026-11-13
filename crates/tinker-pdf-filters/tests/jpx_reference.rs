@@ -8,12 +8,10 @@
 //! were produced once, on a named day, by the commands recorded below, and
 //! they are read from disk like any other fixture.
 //!
-//! The old name said otherwise, `docs/verification.md` repeated it, and a CI
-//! job grepped this file's output for a `jpx-oracle: RAN` banner that no line
-//! of it has ever printed — so that job could not pass, and the claim it was
-//! guarding was not the claim this file makes. All three are corrected here.
-//! What this file actually is: **a dated measurement**, which ruling 13
-//! admits as an input and never as a check that re-runs.
+//! What this file is: **a dated measurement**, which ruling 13 admits as an
+//! input and never as a check that re-runs, so it prints no `RAN` banner of
+//! an oracle's, and `docs/verification.md` lists the committed reference
+//! decodes beside the standard's own numbers as what stands in for one.
 //!
 //! This is the strongest check the JPEG 2000 decoder has, and until milestone
 //! 4 it could not be run at all: tier-1 emits coefficients, and until the

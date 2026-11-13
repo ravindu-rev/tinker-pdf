@@ -13,8 +13,7 @@
 //! `tinker_pdf_cos::validate` has not. It reads the file again with the
 //! leniency ladder **off**, walks the cross-reference *sections* out of the
 //! bytes one `/Prev` link at a time, and holds every entry to the byte it
-//! names. Joining the two is what closes that family, and it is the join
-//! `docs/features/pdfa.md` already called "the honest way".
+//! names. Joining the two is what closes that family.
 //!
 //! # What is mapped, and what deliberately is not
 //!

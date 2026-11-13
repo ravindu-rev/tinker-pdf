@@ -640,9 +640,9 @@ pub enum PageDefect {
     /// reads RAR 5's method 0 and not its methods 1 to 5, so an archive that
     /// mixes them pages the stored entries and puts a placeholder where the
     /// others are (ruling 2). `docs/design/comic-archives.md` argues why the
-    /// algorithm is not written: the fixture this repository can produce
-    /// stores every entry, so a decoder for it would have nothing first-party
-    /// to be held to.
+    /// algorithm is not written: RAR's compression has no published
+    /// specification, and its one implementation's licence bars deriving
+    /// from it.
     RarEntryRefused(RarEntryError),
     /// The bytes are a JPEG, a PNG, a TIFF or a JPEG 2000 file and could not
     /// be made into an image — an unreadable header, a colour type outside

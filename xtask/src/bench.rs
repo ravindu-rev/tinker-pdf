@@ -14,33 +14,26 @@
 //!
 //! # Why a band, and why the band is measured
 //!
-//! A benchmark is a wall clock, and a wall clock on a shared machine swings.
-//! `docs/verification.md` said for as long as the job had existed that a
-//! hosted runner swings 20 % between two runs of identical code, *"and a
-//! benchmark that fails a pull request on that teaches people to ignore it"*.
-//! That sentence was the argument for a band; it was not a measurement of one,
-//! and when the measurement was finally taken — fifteen runs of one revision
-//! on `ubuntu-latest`, 19 September 2026 — the worst operation swung 88.36 %.
-//! A band set on the guess would have failed on the machine four times over.
-//!
-//! So a baseline entry carries the swing that machine actually showed, over a
-//! stated number of runs, and the band is set above it. A band chosen without
+//! A benchmark is a wall clock, and a wall clock swings between two runs of
+//! identical code (`docs/verification.md`, *Clocks: outside the suite, and
+//! not nowhere*). A band set on a guess at that swing either fails on the
+//! machine or passes a regression, so a baseline entry carries the swing that
+//! machine actually showed, over a stated number of runs, and the band is set
+//! above it by the rule `docs/verification.md` states. A band chosen without
 //! that measurement is a guess, and this file refuses one: an entry with no
-//! `runs` and no `swing_percent` is rejected by [`Baseline::parse`] rather than
-//! defaulted, for the reason `pdfa_ledger.tsv` refuses a row with no reason.
+//! `runs` and no `swing_percent` is rejected by [`Baseline::parse`] rather
+//! than defaulted, for the reason `pdfa_ledger.tsv` refuses a row with no
+//! reason.
 //!
 //! # Why the band is per operation and not per machine
 //!
-//! Because the measurement said so. Fifteen dispatches of `bench.yml` on
-//! `ubuntu-latest`, 19 September 2026, gave seven very different spreads over
-//! one unchanged revision: 22.61 % for "extract a page of text" and 88.36 %
-//! for "render text at 150 dpi", with the rest between. One band has to clear
-//! the worst of them, so a single machine-wide band would hold the tightest
-//! operation to the noisiest one's slack — it would admit a doubling of the
-//! text extractor without a word. That is the mistake `BandBelowSwing` refuses,
-//! in the other direction, and the memory ratchet already avoids it the same
-//! way: `ratchet.json` bands each corpus's peak separately rather than banding
-//! all five on the worst.
+//! Because operations of one unchanged revision swing by very different
+//! amounts. One band has to clear the worst of them, so a single machine-wide
+//! band would hold the tightest operation to the noisiest one's slack — it
+//! would admit a doubling of the steadiest operation without a word. That is
+//! the mistake `BandBelowSwing` refuses, in the other direction, and the
+//! memory ratchet already avoids it the same way: `ratchet.json` bands each
+//! corpus's peak separately rather than banding all of them on the worst.
 //!
 //! So every operation carries its own measured swing and its own band, and the
 //! machine's pair is the summary: its `swing_percent` is the widest any of its
